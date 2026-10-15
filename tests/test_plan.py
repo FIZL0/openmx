@@ -410,6 +410,84 @@ def test_runner_union():
        'comments and blank lines survive the join (a note belongs to the line under it)')
 
 
+def test_runner_master():
+    """The queue the run hands unmergeable branches down, with tmux faked out.
+
+    Worth a test and not a try: this is the one part of a run that only ever executes at 4am, and the
+    failure it guards against is silent — a report nobody is handed, or two handed at once, leaves
+    branches standing and the critical path stopped, which is the whole thing the master exists to
+    prevent. What is faked is only the typing: `panes` says a master is up, `enter` records what would
+    have gone into it.
+    """
+    print('run: the master\'s queue — one report at a time, oldest first')
+    import time
+    from ps2kit import runner as R
+
+    with tempfile.TemporaryDirectory() as tmp:
+        notes = Path(tmp) / 'notes'
+        notes.mkdir()
+
+        class Stub:            # just enough config: the master only ever asks for context/notes/*
+            def ctx(self, rel):
+                return Path(tmp) / rel
+
+        typed: list[tuple[str, str]] = []
+        real = R.cfg, R.panes, R.enter, R.master, R._idle_since
+        R.cfg = lambda *a, **k: Stub()
+        R.panes = lambda: {'master': ('%9', 1234)}
+        R.enter = lambda pid, text: (typed.append((pid, text)), True)[1]
+        R.master = lambda *a: None          # it is already up
+        R._idle_since = None
+        try:
+            def stamps(idle: bool):
+                """Its hooks' two files: a prompt went in, and a turn ended with nothing left running."""
+                (notes / 'master.busy').write_text('')
+                if idle:
+                    (notes / 'master.idle').write_text('')
+                    os.utime(notes / 'master.busy', (time.time() - 60, time.time() - 60))
+                else:
+                    (notes / 'master.idle').unlink(missing_ok=True)
+
+            stamps(True)
+            check(R.master_idle(), 'a turn that ended after the last prompt reads idle')
+            stamps(False)
+            check(not R.master_idle(), 'a prompt with no turn end after it reads busy')
+
+            for tid in ('F3', 'F4', 'S1'):  # the shape of the night that made this necessary
+                R.report(f'REPORT {tid} slot 1: session x ended; 2 commits: a / b')
+            eq(len(R.queued()), 3, 'reports queue on disk, so a restarted run still delivers them')
+
+            stamps(True)
+            R.flush('main', 3)
+            eq([x[1] for x in typed][:1], ['/clear'], 'the context is cleared before each report')
+            check('REPORT F3' in typed[1][1], 'the oldest report goes first')
+            eq(R.lock_holder(), 'F3', 'the lock names the branch the master holds')
+            eq(len(R.queued()), 2, 'and a handed report leaves the queue')
+
+            stamps(False)
+            R.flush('main', 3)
+            eq(len(typed), 2, 'a working master is never interrupted with the next one')
+
+            stamps(True)
+            (notes / 'master.lock').unlink()
+            R.flush('main', 3)
+            check('REPORT F4' in typed[-1][1], 'the next goes in once it is idle again')
+
+            prompt = typed[-1][1]
+            check('{' not in prompt and '}' not in prompt, 'the prompt has no unfilled placeholder left')
+            check('main' in prompt and 'Do not push' in prompt,
+                  'the branch is substituted, and it is still told not to publish it')
+
+            R.report('RUN DONE')
+            eq(R.queued()[-1], 'RUN DONE', 'RUN DONE queues behind the night, not ahead of it')
+
+            (notes / 'master.lock').write_text(f'S1 0 {time.time() - 100 * 60}')
+            check(not R.master_busy(),
+                  'a lock older than 90 minutes is freed: a dead master must not hold the run all night')
+        finally:
+            R.cfg, R.panes, R.enter, R.master, R._idle_since = real
+
+
 def test_stop_hook_never_crashes():
     print('run: the Stop hook that ends an idle session')
     for payload in ('{}', 'garbage', '{"transcript_path": "/nonexistent"}', '{"transcript_path": null}'):
@@ -432,7 +510,8 @@ def test_cli_help():
 def main() -> int:
     for t in (test_plan_roundtrip, test_plan_index_and_sections, test_brief, test_shipped_backlog,
               test_journal, test_check_summary, test_audit, test_guard, test_inbox, test_runner_picking,
-              test_runner_union, test_stop_hook_never_crashes, test_cli_help):
+              test_runner_union, test_runner_master, test_stop_hook_never_crashes,
+              test_cli_help):
         t()
     print()
     if FAILED:

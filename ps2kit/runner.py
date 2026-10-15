@@ -491,7 +491,8 @@ def master_busy() -> bool:
     if not done and time.time() - float(since) < 90 * 60:
         return True
     if not done:
-        log(f'{tid}: the master has held {ROOT.name} for 90 min with no master.md line; freeing it')
+        log(f'{tid}: the master has held the {ROOT.name} checkout for 90 min with no master.md line; '
+            f'freeing it')
     lock.unlink(missing_ok=True)
     return False
 
