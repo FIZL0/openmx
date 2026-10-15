@@ -19,3 +19,6 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 3 — the frame, and your first capture
 - [x] **C1** (after D1) Get PCSX2 running the game under the kit: `./kit pcsx2 start`, `./kit pcsx2 status`, `./kit shot` for a screenshot, each on a kit-managed copy with its own config. Confirm `KIT_PCSX2=2` gives a second, independent copy → kit.toml `[emu]` · docs/PCSX2.md | t: `./kit shot` writes a non-black PNG of the title screen | j: c1-emulator
+
+### Phase 4 — the arithmetic, before any ported math
+- [x] **F1** The EE FPU in `crates/ps2-float`: add, sub, mul, div, sqrt with the PS2's rules — round toward zero, no denormals (flushed), no NaN or infinity (clamped to the largest magnitude), and the smaller addend masked to the exponent difference minus one guard bit. Port physics before this and you will not know which of the two is wrong → crates/ps2-float/src/fpu.rs | t: crates/ps2-float/tests/fpu.rs | j: f1-ee-fpu
