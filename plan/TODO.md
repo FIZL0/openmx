@@ -35,7 +35,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 
 ### Phase 3 — the frame, and your first capture
 
-- [ ] **C2** (after C1) The vsync counter: `./kit probe vsync` finds a word in RAM that goes up by one per frame; confirm it stalls when the game pauses and put it in `[emu] vsync_addr`. Every capture and every timing comparison is counted in this one number → kit.toml `[emu]` | t: `./kit pine watch <addr>` shows +1 per frame for 300 frames | j: c1-emulator
 - [ ] **C5** (after C1) The pad: `./kit pad` presses a button on the running game and the game reacts. Then find where the game reads the pad in RAM (the bitmask per pad, and whether it keeps "pressed this frame" separately) → kit.toml `[symbols]` · docs/PCSX2.md | t: a scripted button press changes the menu selection in a capture | j: c5-pad
 
 ### Phase 4 — the arithmetic, before any ported math
