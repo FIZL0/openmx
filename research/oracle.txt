@@ -10,3 +10,104 @@
 # This file is research, not product: addresses live here and in journal entries, never in the port.
 #
 # walk_ramp            gameplay  0x001000a0 speed ramp: (speed, stick) -> speed, args in f12/f13
+
+# ---------------------------------------------------------------------------------------------------
+# R2 — the SDK and library functions. Also in kit.toml's [symbols], which is git-ignored: this file is
+# the committed copy, so a fresh checkout can get the names back. `./kit fn @printf`, `./kit xref
+# @snprintf`. How each one was identified is in research/journal/2026-10-15-r2-symbols.
+#
+# Output. printf first, because its call sites carry strings that say what the code around them is.
+printf                      boot 0x003fe080 SDK printf(fmt,...): installs the TTY hook, then vprintf_core
+printf_nohook               boot 0x003fe048 the same without swapping the hook; used inside the SDK
+vprintf_core                boot 0x003fda58 (fmt, va) -> chars through the hook at 0x4223e4
+tty_putchar                 boot 0x003fd778 printf's hook: buffer a char, flush the line at '\n'
+tty_write                   boot 0x003fd1f8 the line flush behind tty_putchar
+snprintf                    boot 0x001e6eb0 (buf, size, fmt, ...) — the game's own, 1850 call sites
+vsnprintf                   boot 0x001e6f60 (buf, size, fmt, va)
+vsnprintf_core              boot 0x001e5e80 the formatter behind both: (overflow_cb, state, fmt, va)
+debug_printf                boot 0x00356580 DebugBuffer::Printf(obj, fmt, ...) -> snprintf 0x104 + append
+debug_buffer_append         boot 0x00356680 appends a string to the growing DebugBuffer log
+#
+# Strings and memory: libc, hand-written with the R5900's MMI quadword ops. Oracle candidates, all of
+# them: pure functions of their arguments and RAM.
+memcpy                      boot 0x0040dfd8 (dst, src, n) -> dst; 32-byte, then 8-byte, then bytes
+memset                      boot 0x0040e190 (dst, c, n) -> dst
+memcmp                      boot 0x0040df40 (a, b, n) -> int
+strlen                      boot 0x004112c8 (s) -> int
+strcpy                      boot 0x00411130 (dst, src)
+strncpy                     boot 0x00411890 (dst, src, n) -> dst, NUL-padded
+strcat                      boot 0x00410d28 (dst, src) -> dst; finds the end, then tail-calls strcpy
+strcmp                      boot 0x00410fe8 (a, b) -> int
+strncmp                     boot 0x004116d8 (a, b, n) -> int
+stricmp                     boot 0x00410c50 case-folds through the ctype table at 0x44aaa9
+strnicmp                    boot 0x00411450 (a, b, n), same ctype table
+strchr                      boot 0x00410e58 (s, c) -> char*
+strstr                      boot 0x00411b28 (haystack, needle) -> char*
+rand                        boot 0x0040fd40 newlib LCG: seed*0x5851f42d4c957f2d+1 >> 32 & 0x7fffffff
+#
+# The heap. Every public entry takes (…, __FILE__, __LINE__); the file names are strings in the image.
+operator_new                boot 0x001e50b0 (size, file, line)
+operator_new_array          boot 0x001e51a0 (size, file, line)
+operator_delete             boot 0x001e5130 (ptr)
+operator_delete_array       boot 0x001e5220 (ptr)
+malloc                      boot 0x001e4e90 (size, file, line)
+memalign                    boot 0x001e4ef0 (align, size, file, line)
+realloc                     boot 0x001e4f60 (ptr, size, file, line)
+free                        boot 0x001e5060 (ptr) — the pool index is the u16 at ptr-0xe
+heap_alloc                  boot 0x001e3ec0 pool method behind malloc/new
+heap_free                   boot 0x001e43d0 pool method behind free/delete
+heap_realloc                boot 0x001e44f0 pool method behind realloc
+libc_malloc                 boot 0x0040d408 the fallback used while the pools are not up yet
+libc_free                   boot 0x0040d460
+#
+# SIF: the EE's side of every IOP service.
+sceSifInitRpc               boot 0x003fe828 one-shot; sets the RPC queue up at 0x4e6180
+sceSifBindRpc               boot 0x003fef68 (client, serve_id, mode)
+sceSifCallRpc               boot 0x003ff138 (client, fno, mode, send, ssize, recv, rsize, end, arg)
+SyncDCache                  boot 0x003fc8d8 (start, end), rounded to 64-byte lines, interrupts off
+sceSifInitIopHeap           boot 0x00402f38 binds 0x80000003
+sceSifAllocIopHeap          boot 0x00402fc0 (size) -> IOP address
+sceSifFreeIopHeap           boot 0x00403128
+sceSifLoadFileInit          boot 0x00403488 binds 0x80000006
+sceSifLoadModuleBuffer      boot 0x00403c20 (iop_addr, arglen, args)
+sceSifLoadStartModuleBuffer boot 0x00403c40 (iop_addr, arglen, args, &result)
+sif_load_module_buffer      boot 0x00403650 the body both share: LOADFILE call 6
+sif_fileio_init             boot 0x003ffeb0 binds 0x80000001 and the two fileio handlers
+load_iop_module             boot 0x001f1cd0 PSXModuleUtils.cpp: read the IRX, alloc IOP RAM, DMA, load
+#
+# libpad. The per-port state lives at 0x4e9390, stride 0x70 per port and 0x1c per slot.
+scePadInit                  boot 0x0041a758 binds padman 0x80000100 / 0x80000101, checks the version
+scePadPortOpen              boot 0x0041a9b8 (port, slot, dma_buf) — dma_buf must be 64-byte aligned
+scePadRead                  boot 0x0041ad08 (port, slot, data) -> length
+scePadGetState              boot 0x0041ad88 (port, slot)
+scePadGetReqState           boot 0x0041aea0 (port, slot)
+scePadSetReqState           boot 0x0041ae38 (port, slot, state)
+scePadInfoAct               boot 0x0041af28 (port, slot, actuator, cmd)
+scePadInfoMode              boot 0x0041b168 (port, slot, term, offs)
+scePadSetMainMode           boot 0x0041b2a0 (port, slot, mode, lock)
+scePadSetActDirect          boot 0x0041b358 6 bytes straight into the pad's DMA buffer
+scePadSetActAlign           boot 0x0041b418 (port, slot, align[6])
+scePadSetButtonInfo         boot 0x0041b5a8 (port, slot, mask)
+scePadInfoPressMode         boot 0x0041b658 true when the button mask is 0x3ffff
+scePadEnterPressMode        boot 0x0041b6b8 = scePadSetButtonInfo(port, slot, 0xfff)
+pad_button_info             boot 0x0041b4f0 the 32-bit button-capability word
+pad_dma_buf                 boot 0x0041ac58 the newer of the two 0x80-byte buffers, dcache synced
+pad_send_cmd                boot 0x0041a640 pushes the pad request over the SIF DMA
+#
+# libcdvd and libmc.
+sceCdStRead                 boot 0x0041a260
+sceCdStPause                boot 0x0041a3e8
+sceCdStResume               boot 0x0041a438
+sceCdStStat                 boot 0x0041a490
+cd_stream_cmd               boot 0x0041a4d8 (…, cmd, buf): the stream commands all go through here
+sceMcInit                   boot 0x0041b9d8
+mcUdCheckNewCard            boot 0x0041c6b8
+#
+# libgraph and libdma.
+sceGsResetGraph             boot 0x003f1360 the only GsPutIMR + SetGsCrt caller
+sceDmaSync                  boot 0x003f1600 spins on CHCR.STR, then "libdma: sync timeout"
+sceDmaReset                 boot 0x003f1780 zeroes CHCR/MADR/QWC on all ten channels
+dma_addr_fixup              boot 0x003f16f8 0x7……… (scratchpad) -> 0x8………
+#
+# Not a library function, but R1 proved it and everything later hangs off it.
+main                        boot 0x0016c720 the entry point's sole callee; installs the INTC handlers
