@@ -214,6 +214,12 @@ pub mod hash;
 /// original's arithmetic and its instruction order, because that order is what fixes the last bit.
 pub mod math;
 
+/// Movement on the ground: the step that turns the throttle, the brake and the rider's lean into forces
+/// on the chassis — the centre of gravity moving with the stick, the steering fading out with speed, the
+/// gearbox and the clutch's launch ramp, the drag that sets the top speed — and, because every one of
+/// them reads what the last wrote, the order the whole ground frame runs in.
+pub mod r#move;
+
 /// The input layer: the pad read once a frame, before the simulation, and mapped into the game's own
 /// bitmask. Sixteen controls per pad with "held", their press and release timers, and the one-frame
 /// event queue the front end reacts to — the original keeps no "pressed this frame" mask, so the module

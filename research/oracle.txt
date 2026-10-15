@@ -894,3 +894,45 @@ node_box_centre             boot 0x001b4560 (node, out_centre*, out_extent*): th
 #                                           hooked rather than ported in S2
 player_manager_remove_all   boot 0x00245d00 the player manager's teardown: destroys the players it
 #                                           holds, which the actor manager never does to actors
+
+# S3 — movement on the ground. The one step the bike's update runs while a wheel is down, the five
+# pieces of it that are small enough to port on their own, and the callees it drives in order. The
+# port is crates/game-sim/src/move.rs and the proofs are crates/game-sim/tests/move.rs; how each one
+# was found is in research/journal/2026-10-15-s3-s3-movement.
+bike_ground_step boot 0x00257a00 (dt in f12, bike) -> the whole ground frame: the pose (centre of
+#                                gravity, steering, chassis flags), the donut scale, both spring
+#                                rates, the gearbox, the clutch, and then (int)(dt*55)+1 substeps of
+#                                gravity, drag, the reverse push and twenty-one calls each
+bike_clutch boot 0x002572f0 (dt in f12, bike) -> the clutch's launch ramp: engine+0x88's torque
+#                           multiplier and the centre-of-gravity travel that goes with it
+bike_set_gear boot 0x00246f70 (engine, gear) -> engine+0x68/+0x80/+0x84: the gear, its overall ratio
+#                             (final drive * the gear's own) and the reciprocal. Out of 1..gears it
+#                             does nothing at all
+engine_rev_limit boot 0x00247260 (engine) -> with the clutch locked, slows the driven wheel back to
+#                                the rev limit. Runs after the wheel has been integrated
+wheel_clear boot 0x0025b200 (wheel) -> empties the eight scalars and three quadwords the suspension
+#                           and the tire forces fill in, at the top of every substep
+chassis_set_flags boot 0x0015c3a0 (chassis, a, b, c) -> chassis+0x2ac/+0x2b0/+0x2b4
+# The callees the ground step drives and S3 does not port: the proof hooks all of these, records the
+# order and the dt each one is handed, and compares that with the list the port returns.
+bike_stand_upright boot 0x002574e0 (dt in f12, bike) the low-speed upright controller
+bike_balance boot 0x002561f0 (dt in f12, bike) the balance-on-one-wheel controller
+bike_roll_pitch boot 0x00256470 (dt in f12, bike) the roll and pitch control: the rider's lean
+bike_wheel_contacts boot 0x00257820 (dt in f12, bike) distributes the frame's collision contacts onto
+#                                   the two wheels. Handed the frame's dt, not the substep's
+wheel_suspension boot 0x0025b280 (dt in f12, wheel) the suspension ray and its spring force
+wheel_tire_forces boot 0x0025bc70 (dt in f12, wheel) the tire's drive, brake and side forces
+wheel_integrate boot 0x0025bbf0 (dt in f12, wheel) the wheel's own spin and steering integration
+bike_no_hander boot 0x00255d20 (dt in f12, bike) the no-hander, after its four accumulators are zeroed
+engine_update boot 0x00246fd0 (dt in f12, engine) the torque curve, the clutch's slip and the torque
+#                             that reaches the driven wheel. Reads f20 without setting it, so it gets
+#                             whatever the caller left there — which in the ground step is 0.0
+transform_rotate boot 0x001b2ff0 (out, transform, v) -> out.xyz = the transform's three rows times
+#                                v's three lanes; the reverse push's only use of the chassis' frame
+transform_unrotate boot 0x001b30e0 (out, transform, v) -> the same through the transpose, which is
+#                                  how the measured acceleration comes back into the bike's frame
+actor_search_reset boot 0x00119be0 (search) empties the nearby-actor search the step refills
+actor_search_gather boot 0x00218b80 (list, search, radius) refills it, with a radius of 3
+bike_phy_load boot 0x002539e0 (bike, file) the bike's .phy tuning file: every parameter in
+#                             crates/game-sim/src/move.rs's Params comes from here, and the journal
+#                             entry has the full key -> offset map
