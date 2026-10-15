@@ -128,3 +128,47 @@ random_list_pick            boot 0x001fed20 (list, out_index|0) -> list->items[i
 random_time_step            boot 0x00375810 (t, this) -> t + 7.0 * max(0.1, rand()*2^-31): the next time
 #                                           in the chain of event times its one caller builds. Used as
 #                                           the exact view of the random float in the R5 proof.
+
+# ---------------------------------------------------------------------------------------------------
+# R6 — the live-object registry. There is no actor array: live objects hang off one singleton in
+# linked lists whose nodes are {item, prev, next}, 12 bytes. The chain to the Nth actor, in full:
+# [game_manager] -> +0x34 -> +0x34 (head) -> +0x8 xN (next) -> +0x0 (item). watch/actor-table.toml
+# walks exactly that every frame; how it was proved is in research/journal/2026-10-15-r6-r6-actor-table.
+#
+# RAM addresses, not functions — the three that watch/actor-table.toml names. Also in kit.toml's
+# [symbols]; this is the committed copy. frame_counter/frame_dt are R3's, repeated here because R6 is
+# what put them in [symbols].
+game_manager                boot 0x004e1e98 GameManager* singleton, null outside a level. +0x30 player
+#                                           manager, +0x34 actor manager, +0x38 a third of the same
+#                                           shape; each has {count, head, tail} at +0x30 and a second
+#                                           list of per-type groups at +0x3c
+frame_counter               boot 0x00479d04 the app object's own tick counter (app+0x374), +1 per tick
+frame_dt                    boot 0x00479cd4 the dt handed to the simulation (app+0x344); 1/30 in play.
+#                                           NB the vehicle's position does not advance by vel*dt — it
+#                                           advances by the post-update velocity times a fixed 1/24 s
+#
+# The container, one template instantiated per manager (ContainerLinkedList.h).
+actor_manager_ctor          boot 0x0021a780 GameActorManager::GameActorManager; vtable 0x00452ae0 at +8
+actor_manager_dtor          boot 0x0021a7d0
+actor_manager_add           boot 0x0021a8d0 Add(actor): append to the master list, append to the group
+#                                           keyed on the u32 at actor+0x00 (1, 2 or 4), then store the
+#                                           manager into actor+0x1c
+list_append                 boot 0x0021b120 new node on the tail; 0x0021b2c0 is the second half
+list_find                   boot 0x0021afe0 linear search of a list for an item
+player_manager_add          boot 0x002459b0 the same machine for players: groups on player+0x34, stores
+#                                           the manager at player+0x58, and also links the player into
+#                                           the scene node tree via 0x00132f50
+game_manager_ctor           boot 0x002462d0 builds the five sub-managers; its last store is the one to
+#                                           game_manager above
+#
+# The three actor classes in a level. The actor record is a sub-object at +0x400 of its owner, so these
+# constructors take the owner, and actor-0x400 is the object. Sizes are the operator new argument.
+actor_class_monstertruck    boot 0x003deca0 type id 1, 0x1080 bytes, MXWorld.cpp:5272, vtable 0x0045ed50;
+#                                           ctor takes the string at 0x0042ecb8, "MXMonsterTruck"
+actor_class_type2           boot 0x00279ed0 type id 2, 0x14e0 bytes, MXWorld.cpp:4738, vtable 0x00454ef0
+actor_class_vehicle         boot 0x00318c30 type id 4, 0x0c60 bytes, MXWorld.cpp:4885, vtable 0x00458f68;
+#                                           the rideable one. Fields, relative to the actor record:
+#                                           +0x00 type, +0x04 flags, +0x1c manager, +0x20 player,
+#                                           +0x48 class vtable, +0xd0/+0xe0/+0xf0/+0x100 four rigid-body
+#                                           points (x,y,z,1), +0x130 velocity, +0x180 4x4 world
+#                                           transform with the position in row 3 (+0x1b0)

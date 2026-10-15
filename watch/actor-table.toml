@@ -1,0 +1,89 @@
+# actor-table.toml — the live actor registry, walked from the GameManager singleton every frame.
+#
+#   ./kit record --dry-run watch/actor-table.toml      # check the spec
+#   ./kit record watch/actor-table.toml --frames 120   # with a level running
+#
+# This spec *is* the R6 write-up in executable form. Every arrow is one of the links the journal
+# entry claims exists, so a capture that produces sane numbers proves the chain, and a capture full
+# of empty cells says the chain is wrong — which is the point of recording it rather than describing
+# it. Read research/journal/*-r6-actor-table alongside it.
+#
+# The chain, one arrow at a time:
+#   @game_manager            the singleton pointer (null outside a level)
+#   -> 0x34                  GameManager +0x34 = the actor manager
+#   -> 0x34                  manager +0x30 is {count, head, tail}; +0x34 is `head`
+#   -> 0x8 (x5)              node {item, prev, next}: +8 is `next`, five hops along the list
+#   -> 0x0                   the sixth node's `item`
+#   -> …                     a field of the actor itself
+#
+# Item 5 is the first of the four vehicle actors (type 4) in a one-player Freestyle session: items
+# 0..4 are the one type-1 and four type-2 actors, which are registered first. It is owned by an AI
+# player, so it moves with no pad input — that is why this spec needs no [setup] pad script.
+
+[watch]
+name        = "actor-table"
+description = "the actor manager's list, and the first vehicle actor in it, per frame"
+every       = 1
+frames      = 120
+
+[setup]
+warmup = 2
+
+# --- the frame, so a row can be placed in time -----------------------------------------------
+[[field]]
+name = "tick"                     # the engine's own frame counter (app+0x374)
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"                       # the dt the simulation was given this frame (app+0x344)
+addr = "@frame_dt"
+type = "f32"
+
+# --- the table's own header ------------------------------------------------------------------
+[[field]]
+name     = "actors"               # how many actors are registered right now
+addr     = "@game_manager -> 0x34 -> 0x30"
+type     = "u32"
+required = true                   # null = no level loaded; end the capture rather than log zeros
+
+[[field]]
+name = "groups"                   # how many by-type sub-lists the manager keeps
+addr = "@game_manager -> 0x34 -> 0x3c"
+type = "u32"
+
+# --- one actor, walked to down the list -------------------------------------------------------
+[[field]]
+name = "a5_type"                  # +0x00: 1, 2 or 4 — the key the by-type sub-lists group on
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "a5_flags"                 # +0x04
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "a5_manager"               # +0x1c: back-pointer to the manager that owns the entry
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x1c"
+type = "u32"
+
+[[field]]
+name = "a5_player"                # +0x20: the player this actor belongs to
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "a5_body0"                 # +0xd0: first of the four rigid-body points
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xd0"
+type = "f32x4"
+
+[[field]]
+name = "a5_vel"                   # +0x130: velocity, world units per second
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x4"
+
+[[field]]
+name = "a5_xform"                 # +0x180: 4x4 world transform; row 3 (+0x1b0) is the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"

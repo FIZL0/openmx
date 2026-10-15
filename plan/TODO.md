@@ -31,7 +31,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 ### Phase 2 — a decompilation you can read
 
 - [ ] **R4** (after R3) The game's state machine: the mode variable the main loop switches on (title, menu, loading, in-game, replay, results) and the function per mode. Name them in `[symbols]`. This is the map you will navigate by for the rest of the port → kit.toml `[symbols]` | t: `./kit xref @main_loop` lists one handler per mode | j: r3-main-loop
-- [ ] **R6** (after C3) The actor/entity table: where live objects are kept in RAM (base address, stride, how many), and the first few fields of one — position, velocity, state, type. Dump the same table across a handful of frames from a save state so the stride and the fields are not guesses → research/oracle.txt · docs/CONTEXT.md | t: a dumped table from a state parses with the documented stride | j: r6-actor-table
 
 ### Phase 3 — the frame, and your first capture
 
