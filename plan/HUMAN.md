@@ -11,24 +11,10 @@ constant is far more expensive than a blocked task: it looks like work and it is
 Write each item so it can be done without re-reading the whole project: the slot or file name to save to,
 how long it takes, and what to do if it goes wrong.
 
-## Right now, there is exactly one thing
+## Right now, nothing is waiting on you
 
-- [ ] **A PS2 BIOS from your own console**, as a `.bin` in `~/.config/PCSX2/bios/`. Drop in the `.nvm`,
-      `.mec` and `.rom1`/`.rom2` siblings too if your dumper produced them. Then `./kit doctor` to confirm
-      — it is the only `[FIX]` left.
-
-      This is the last `[FIX]` in `./kit doctor` and the only blocker on anything live. It unblocks, in
-      order of how much they matter: `./kit probe vsync` (every recorder needs the frame counter as its
-      clock), `./kit record` and the replay acceptance test (A2, S8), save states (C3), screen captures
-      (C4, V1–V3), and `./kit pcsx2` at all.
-
-      It does **not** block the work in progress. Reverse engineering runs against the program image in
-      the kit's own R5900 interpreter, not in an emulator, so R1–R6, F1–F5, O1–O2 and the first cut of
-      S1–S4 all proceed without it. Nothing is waiting on you to keep going — this is what stops the
-      results being *proved* against the real console, which is the point of the whole exercise.
-
-      If dumping is not practical soon, say so: there is a lot of static work ahead of the first thing
-      that needs a running game, and it is worth knowing whether to plan around it.
+The save states and the recording below are the next things that will be, and they need the game booting
+first (C1). Nothing is blocked today.
 
 ## Before anything works
 
@@ -37,7 +23,12 @@ how long it takes, and what to do if it goes wrong.
       serial `SLUS-20767`, US, version 1.00. Recorded in
       `research/journal/2026-10-15-d1-the-disc/`. **Every address in this repo is only true of that dump**
       — a PAL or 1.01 disc is a different game.
-- [ ] **A PS2 BIOS** — see above.
+- [x] **A PS2 BIOS.** Done: three dumps supplied in `PS2_bios/`, copied to `~/.config/PCSX2/bios/`.
+      `SCPH-70012.bin` (slim, US) is the region match for this NTSC-U disc and is the one in use;
+      `SCPH-77008` and `SCPH-90006` are PAL. A PAL BIOS with an NTSC disc gives the wrong refresh rate,
+      which would quietly poison every frame-timing measurement in the port. BIOS dumps are copyrighted
+      and `.gitignore`'s `*.bin` keeps them out of git — the repo-root copies are redundant now and can
+      be deleted.
 - [x] **PCSX2 installed.** `pcsx2-latest-bin` 2.9.34, `/usr/bin/pcsx2-qt`, in `kit.toml` `[emu] pcsx2`.
       Still to do once the BIOS is in: **boot the ISO by hand once** and confirm it reaches the title
       screen, before any agent drives it.
@@ -56,7 +47,7 @@ Agents can load states and replay recordings, but only a person can play the gam
 moment. Save states go in PCSX2's slots; by convention slots 3, 4 and 5 are the human's and are never
 overwritten, 8 and 9 are scratch for agents.
 
-All of this needs the BIOS first. Listed now so it can be done in one sitting later.
+The BIOS is in, so this is doable as soon as the game boots under the kit (C1).
 
 - [ ] **The title screen** (slot 3).
 - [ ] **On a supercross track, on the start gate** (slot 4), on `sx01` if the track select lets you pick
