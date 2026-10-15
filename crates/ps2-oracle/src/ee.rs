@@ -527,6 +527,8 @@ impl Ee {
             4..=7 => lanes(&|i| vu::sub(a[i], bc[i])),
             8..=11 => lanes(&|i| vu::madd(acc[i], a[i], bc[i])),
             12..=15 => lanes(&|i| vu::msub(acc[i], a[i], bc[i])),
+            0x10..=0x13 => lanes(&|i| vu_pick(a[i], bc[i], true)),
+            0x14..=0x17 => lanes(&|i| vu_pick(a[i], bc[i], false)),
             0x18..=0x1b => lanes(&|i| vu::mul(a[i], bc[i])),
             0x1c => lanes(&|i| vu::mul(a[i], q)),
             0x20 => lanes(&|i| vu::add(a[i], q)),
@@ -534,9 +536,11 @@ impl Ee {
             0x28 => lanes(&|i| vu::add(a[i], b[i])),
             0x29 => lanes(&|i| vu::madd(acc[i], a[i], b[i])),
             0x2a => lanes(&|i| vu::mul(a[i], b[i])),
+            0x2b => lanes(&|i| vu_pick(a[i], b[i], true)),
             0x2c => lanes(&|i| vu::sub(a[i], b[i])),
             0x2d => lanes(&|i| vu::msub(acc[i], a[i], b[i])),
             0x2e => lanes(&|i| vu::msub(acc[i], a[cy[i]], b[cz[i]])), // vopmsub
+            0x2f => lanes(&|i| vu_pick(a[i], b[i], false)),
             0x3c..=0x3f => {
                 // the "special" group: accumulator targets, moves, and the Q unit
                 let op = (w >> 6 & 31) << 2 | (w & 3);
@@ -618,6 +622,13 @@ impl Ee {
             }
             (0x1a, _) => (self.lo1, self.hi1) = idiv(s as u32, t as u32),
             (0x1b, _) => (self.lo1, self.hi1) = udiv(s as u32, t as u32),
+            (0x08, 0x12) => {
+                // pextlw: interleave the two low halves word by word, rt first. The idiom it turns up
+                // in is building a quadword constant out of one 32-bit value (`lui`/`ori`, pextlw with
+                // itself, pcpyld) — a vector sign mask, for instance.
+                let w = |v: u128, k: u32| v >> (32 * k) & 0xffff_ffff;
+                q(self, w(qt, 0) | w(qs, 0) << 32 | w(qt, 1) << 64 | w(qs, 1) << 96);
+            }
             (0x09, 0x0e) => q(self, (qt & lo64) | (qs & lo64) << 64), // pcpyld
             (0x09, 0x12) => q(self, qs & qt),                         // pand
             (0x09, 0x13) => q(self, qs ^ qt),                         // pxor
@@ -641,6 +652,21 @@ impl std::fmt::Debug for Ee {
 
 fn sx32(v: u32) -> u64 {
     v as i32 as i64 as u64
+}
+
+/// `vmax` / `vmini`: pick one of the two operands, never compute a third value.
+///
+/// The VU compares the two as *sign-magnitude integers* rather than as floats, which agrees with `f32`'s
+/// own ordering everywhere except at zero: `0.0` sorts above `-0.0`, so `vmax(0.0, -0.0)` is `+0.0` from
+/// either side. Operands go through [`vu::operand`] first, like every other VU input, so a denormal is a
+/// zero here too.
+fn vu_pick(a: f32, b: f32, want_max: bool) -> f32 {
+    let (a, b) = (vu::operand(a.to_bits()), vu::operand(b.to_bits()));
+    let key = |x: f32| {
+        let i = x.to_bits() as i32;
+        i ^ (i >> 31 & 0x7fff_ffff) // sign-magnitude, as a total order
+    };
+    if (key(a) > key(b)) == want_max { a } else { b }
 }
 
 /// `div`: the R5900 does not trap, it defines the degenerate cases.
