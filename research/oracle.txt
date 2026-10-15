@@ -652,3 +652,46 @@ kiosk_mode                  boot 0x004e2240 a build/kiosk switch in .bss: 0 on r
 #                                           D7 read), and all 38 references in the dump are compares,
 #                                           none a store. 2 forces the 250 class; 2 and 3 also pick
 #                                           alternate front-end and loader paths
+
+# ---------------------------------------------------------------------------------------------------
+# F5 — the matrix and quaternion helpers for bones and cameras. The port is
+# crates/game-sim/src/math.rs and the proofs are crates/game-sim/tests/math.rs; how each one was read
+# is in research/journal/2026-10-15-f5-f5-matrix. Two of them are already listed above under their
+# F1-F3 names and are not repeated here: `vu_quat_to_mat3` (0x0013ebd0) is the quaternion-and-position
+# to 4x4 builder — it writes *four* rows, the position with w = 1 into row 3 — and
+# `quat_two_matrix_rows` (0x0013f380) is the scalar pair of rows, a1 the forward axis (matrix row 2)
+# and a2 the up axis (row 1).
+#
+# The 4x4 product is inlined everywhere and has no function of its own, so the carrier is the smallest
+# call-free function that contains one. Note it overwrites two lanes of its right-hand matrix before
+# loading it -- obj+0x68 and obj+0x78 are obj+0x40's lanes [2][2] and [3][2], and they get
+# 1/(1 - f12/f13) and its negative times f12 -- so a test must read the matrix back out of RAM after
+# the call and give *that* to the port. Generating f12 and f13 keeps those two lanes varying.
+mat4_mul_carrier       boot 0x001131d0 (obj, f12, f13): obj+0xc0 = obj+0x80 * obj+0x40, four
+#                                      vmulax/vmadday/vmaddaz/vmaddw chains, one per row of the left
+#                                      matrix. Also writes obj+0x68, +0x78, +0x19c and +0x1a0
+mat4_transform_points  boot 0x0013e3f0 (out, src, mat, n, out_stride, in_stride): n points through
+#                                      mat, all four lanes out, the input's w lane replaced by 1.0
+#                                      first (vaddx.w off vf0). in_stride 0 means "same as out_stride";
+#                                      n <= 0 does nothing
+mat4_basis             boot 0x0013e330 (out, pos, forward, up, orthogonalise, keep_forward): the
+#                                      look-at. row1 = normalised up, row2 = normalised forward, row0
+#                                      their cross, row3 = pos with w = 1, the other three w = 0. With
+#                                      orthogonalise set, right = up x forward first and then either
+#                                      up = forward x right (keep_forward) or forward = right x up.
+#                                      Both normalisations are vrsqrt, the approximate one
+quat_deriv             boot 0x0013ec40 (out, q, omega): 0.5*(q (x) omega) for a pure omega, as
+#                                      vopmula/vmaddaw/vopmsub for the vector part and three
+#                                      separately-halved products for the scalar. The half comes from
+#                                      a constant quadword (0.5, 0.5, 0.5, -0.5), so the w lane is not
+#                                      a dot product halved
+quat_slerp             boot 0x0013ee10 (out, a, b, t in f12, shortest): spherical interpolation.
+#                                      Returns a unchanged when |dot4(a, b)| >= 1 — it branches over
+#                                      its own store. The angle is the shared acos table
+#                                      (acos_table_ptr/-_scale above) read as lo - w*lo + w*hi through
+#                                      the FPU accumulator, which is a different order from the
+#                                      crossup's lookup; the three sines are a 7th-order Taylor
+#                                      polynomial on VU0, three lanes at once, constants at 0x00426e10
+mat4_to_quat           boot 0x0013f7b0 (out, mat): the rotation back to a quaternion by largest of the
+#                                      four 0.25*(1 +- m00 +- m11 +- m22) candidates, each compared
+#                                      with <= so a tie loses. Scalar FPU: sqrt.s then 0.25/it
