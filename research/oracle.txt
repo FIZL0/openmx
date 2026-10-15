@@ -611,3 +611,65 @@ hit_freeride_attach         boot 0x00330630 the vtable's per-actor attach (vtabl
 # The race activities (S13, stretch). Moved here out of plan/TODO.md, which is committed and must not
 # carry addresses; kit.toml's [symbols] is untracked, so this file is the only committed record.
 activity_supercross         boot 0x002f9b70 the "Supercross" / "Nationals" activity class, 0x4e0 bytes
+
+# S5 — the main actor's state machine: riding, down, waiting, put back. The port is
+# crates/game-sim/src/state.rs and the proofs are crates/game-sim/tests/state.rs. The player bike is
+# type 2 (ctor 0x00279ed0, 0x14e0 bytes, vtable 0x00454ef0); the base vehicle's vtable is 0x00454560.
+# Slots on it: +0xe0 update (base 0x002520d0, player 0x0027c890), +0xe8 the hand-reset chord, +0xf8 the
+# ride state machine, +0xfc the wreck entry, +0x100 the unwreck, +0x248 the respawn.
+ride_state_machine          boot 0x0027bc90 (dt in f12, bike) the player bike's slot +0xf8: the whole
+#                                           ride state machine, run last in the vehicle update. Fields
+#                                           on the bike: +0x748 reason (0 = riding), +0x74c the reset
+#                                           latch, +0x794 the clock, +0x798 MaxWreckTime, +0x79c
+#                                           CannonballWreckTime, +0xd3c the settle gate, +0x10d0 the AI
+#                                           route (+0xd4 = following), +0x20 the player record (+0x34
+#                                           control source, 1 = local human; +0x50 its screen), +0xf9c
+#                                           the race record (bit 0x80000 of the long at +8), +0x12d8
+#                                           wrecks per stats period, +0x12f8 entries per restart,
+#                                           +0x14b4 the shown flag, +0x14d0 the chord latch, +0x14d4
+#                                           the put-back kind
+bike_vehicle_update         boot 0x002520d0 (dt in f12, bike) the base vehicle update: runs the physics
+#                                           step 0x00257a00 only while +0x748 is 0, so a down rider's
+#                                           bike is not simulated at all, and ends with slot +0xf8
+bike_wreck_entry            boot 0x00252ca0 (bike, reason) slot +0xfc on the base vehicle: +0x748 =
+#                                           reason, +0x794 = 0, +0x74c = 0 and then the rider is placed
+#                                           — a running trick stopped, three rand() draws for the drop
+#                                           when the reason is 13, the wheel loads zeroed
+player_wreck_entry          boot 0x0027b810 (bike, reason) the player's override: the jump record is
+#                                           ended, the base entry runs, the camera/rumble/announcer are
+#                                           told, then +0x14b4 = (reason != 0) and +0x12f8 += 1
+bike_unwreck                boot 0x00252ee0 (bike, kind) slot +0x100: +0x748 = 0, the attitude vector
+#                                           at +0x550 cleared, a cannonball's damping at +0x6a8
+#                                           doubled back, the action ids at +0xa78/+0xa7c = 0x1c (the
+#                                           grounded idle), +0x750 = 1 (fresh), +0xaf8 = +0xa0c = 0 and
+#                                           the trick queue emptied. Leaves +0x74c and +0x794 alone
+player_respawn              boot 0x0027bb20 (bike) slot +0x248: the unwreck with the stored kind, a
+#                                           sound, the race record's bit 0x80000 back on, +0x14b4 = 0
+ride_reset_request          boot 0x0027b9f0 (bike, kind, page) stores the kind at +0x14d4 and either
+#                                           respawns on the spot (no screen, or page = 0, closing the
+#                                           page first through the screen's own vtable +0xa0) or raises
+#                                           the wreck page and waits. A bike with no player record at
+#                                           +0x20 returns before any of it. Callers pass kind 0 (placed
+#                                           again: lap, bounds, restart) or 1 (after a wreck)
+player_hand_reset           boot 0x0027bef0 (bike, pad) slot +0xe8: the pad's reset chord. Gated on no
+#                                           AI route, +0x14d0 clear, the mode, and the reason not being
+#                                           13, then two pad bindings (0x4c, 0x4d) and the owner's pad
+#                                           index; takes +0x14d0 and asks for kind 1 with no page
+jump_record_end             boot 0x0027b6e0 (bike) ends the player's current jump record; called by both
+#                                           the wreck entry and the reset request before anything else
+wreck_page_raise            boot 0x001c84b0 (page handle, which screen, node) pushes the wreck page onto
+#                                           a screen's page list
+wreck_page_show             boot 0x001ffe80 (screen, which) the second half of raising it
+wreck_page_query            boot 0x001c8450 (page handle, which screen) -> group[which]->+0x54, one of
+#                                           the two things the machine asks before raising a page. The
+#                                           groups are an array of pointers at handle+0x40
+wreck_page_query_back       boot 0x001c8480 (page handle, which screen) -> group[which]->+0x48, the
+#                                           other one
+network_session             boot 0x004e2778 the network session pointer; null offline, and every notify
+#                                           in this area is gated on it
+trick_queue_clear           boot 0x0025a4b0 (list) empties the rider's trick queue, freeing each node
+orientation_transform_point boot 0x001b3060 (out, orientation, point) a VU0 transform; the first call
+#                                           the base wreck entry makes after its three state writes,
+#                                           which is where a proof of those writes can stop
+camera_wreck_cut            boot 0x003dcb90 (camera, 0) what the player's wreck entry tells the camera
+screen_wreck_notice         boot 0x001ffcb0 (screen, reason) what it tells the front end
