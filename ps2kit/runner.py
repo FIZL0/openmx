@@ -50,8 +50,10 @@ them, so a few unmergeable branches can hold up the whole critical path until a 
 may not touch the worktrees, do task work, or publish the shared branch — that last one stays a decision a
 person makes. Its ledger is `context/notes/master.md`, which is also where the runner's own merges go.
 
-Without tmux it degrades to a single sequential session and says so (and then there is no master: a merge
-that needs one is logged for the human, as it was before). Linux/macOS only — the Windows edition of the kit
+Without tmux it degrades to a single sequential session and says so — and then there is no master because
+there is nothing for one to do: `sequential` runs in this checkout on the current branch, so a task commits
+straight onto it and no merge happens at all. (`finish`'s `has_master=False` branch is the vestige of an
+earlier shape where it could; nothing calls it — see K2.) Linux/macOS only — the Windows edition of the kit
 does this differently.
 
 Internal modes (used by the sessions it starts, not by you):
