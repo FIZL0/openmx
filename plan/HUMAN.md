@@ -130,8 +130,17 @@ Two things that bite:
 
       125cc is the engine class, and it is one of four: the disc ships all sixteen `bike\*.phy` sets
       (Race/Pro x 50/125/250/500 x A/P), plus non-bike vehicles (baja, buggy, biplane, monstertruck,
-      kiowa). `OPPONENT_ENABLED` and `OPPONENT_DIFFICULTY` are real settings keys, so freeride opponents
-      are switchable — worth noting which way they were set if another recording is made.
+      kiowa). `OPPONENT_ENABLED` and `OPPONENT_DIFFICULTY` turned out **not** to be settings keys (S14):
+      they are front-end identifiers, and nothing on the simulation side reads either name. Freeride
+      opponents are not switchable — a one-player freeride is always four racers, so any recording made
+      on a freeride area has three AI riders in it whether you want them or not.
+
+      **Still open from S14, and only you can do it:** which frame the NPC contact lands on. PCSX2 plays
+      a `.p2m2` from its GUI only — no command-line flag, no ini key — so no unattended session can
+      measure it. The recipe is in S14's journal entry: play the recording from the GUI with a recorder
+      attached to the bike's wreck flag, and the first frame it reads 1 is the contact. Until then the
+      number in use is an inference from the tape's idle window (video frame ~1019, simulation tick
+      ~510), good to a few frames at best.
 
 ## Decisions only you can make
 

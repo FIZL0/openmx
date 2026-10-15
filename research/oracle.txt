@@ -605,8 +605,12 @@ hit_freeride_attach         boot 0x00330630 the vtable's per-actor attach (vtabl
 #                                           player vehicle, MXVehicleAIInterface (0x0043d880), then
 #                                           compares the loaded track name (*(activity_manager+0x50) +
 #                                           0x140) with "Free10" and "Free06" — bit 0x40 of the AI
-#                                           interface's flags at +0x30 is cleared on those two areas
-#                                           and set on every other track
+#                                           interface's flags at +0x30 is SET on those two areas and
+#                                           cleared on every other track. (This line said the opposite
+#                                           until S14; the MIPS at 0x003307b0..0x00330818 has
+#                                           `ori $2,$2,64` on the match path and an `and` against -65
+#                                           on the else path.) The bit is read with the per-tick bit
+#                                           0x80 by the two AI update paths below.
 
 # The race activities (S13, stretch). Moved here out of plan/TODO.md, which is committed and must not
 # carry addresses; kit.toml's [symbols] is untracked, so this file is the only committed record.
@@ -695,3 +699,58 @@ quat_slerp             boot 0x0013ee10 (out, a, b, t in f12, shortest): spherica
 mat4_to_quat           boot 0x0013f7b0 (out, mat): the rotation back to a quaternion by largest of the
 #                                      four 0.25*(1 +- m00 +- m11 +- m22) candidates, each compared
 #                                      with <= so a tie loses. Scalar FPU: sqrt.s then 0.25/it
+
+# ---------------------------------------------------------------------------------------------------
+# S14 — the freeride opponents, and the end of the tick-exact acceptance window. Measured from the
+# recording's save state (4 racers on Free09) and a 300-sample idle capture. What was reasoned rather
+# than measured is in research/journal/2026-10-15-s14-s14-freeride-opponent.
+freeride_racer_count        boot 0x002b0a20 the league-2 / activity-type-5 (freeride) start: sets the
+#                                           activity type to 5, then NumberOfRacers = 4 when the
+#                                           player count is 1, else the player count, and seeds srand
+#                                           from the wall clock. So a one-player freeride is always
+#                                           four racers, with no setting involved
+spawn_racers                boot 0x00207b20 spawns the humans first, then NumberOfRacers - humans AI
+#                                           riders with rand()-chosen identities, and takes the AI
+#                                           skill range from the event's +0x117 (90, the MXEvent
+#                                           constructor default, maps to [4, 4]). Humans first is why
+#                                           the player manager's list head is the human
+ai_update_mx                boot 0x00386d30 MXVehicleAI.cpp per-tick update, and
+ai_update_vehicle           boot 0x002858d0 VehicleAI.cpp's: both build the look-ahead feeler fan and
+#                                           run the per-rider avoidance scan when
+#                                           (flags&0x80) == 0 || (flags&0x40) == 0 — i.e. the probing
+#                                           is skipped only when BOTH bits are set, so Free10/Free06
+#                                           (0x40 set, hit_freeride_attach above) are the only areas
+#                                           that suppress it. A third test, (flags&0xc0) == 0, admits
+#                                           the type-3 scenery objects
+ai_tick_flag                boot 0x00383580 sets and clears the per-tick bit 0x80 of the same flags
+vehicle_wreck               boot 0x00252ca0 Wreck(reason), vtable slot +0xfc: sets vehicle+0xb7c = 1
+#                                           and hands the body to the ragdoll subsystem at +0x7a8,
+#                                           which is integrating Wreckbike.phy from the build. The
+#                                           bike's own parameter pointers (+0x7a0, +0x7a4) are NOT
+#                                           rewritten. On reason 0xd it draws three rand() into the
+#                                           ragdoll's +0x1b0/+0x1b4/+0x1b8; the wreck test at
+#                                           0x002522c0 draws two more (0x00252534, 0x00252568)
+vehicle_wreck_name          boot 0x0024fca0 (from 0x0027aa70) snprintfs "%sWreck%s.phy" into
+#                                           vehicle+0x188 at build time, 0x104 bytes, "Bike\\" from
+#                                           0x004e2000 — "Bike\Wreckbike.phy". The .phy loader
+#                                           0x002539e0 opens it at the end of the build and passes it
+#                                           to *(vehicle+0x7a8)'s vtable slot 0xe8
+opponent_difficulty_widget  boot 0x002ccd10 the front-end screen loader that binds widget names,
+#                                           "OpponentDifficulty" among them. OPPONENT_ENABLED and
+#                                           OPPONENT_DIFFICULTY are front-end identifiers, not .cfg
+#                                           keys: nothing on the simulation side reads either name
+#
+# Object links, from the save state (every one of the five players resolved the same way):
+#   player+0x34       kind: 1 human, 2 AI
+#   player+0x48 -> +0x0   the MotocrossVehicle (actor type 2): +0x84 this bike's physics name
+#                         (P for the human, A for the AI riders), +0x188 "Bike\Wreckbike.phy" for all
+#                         of them, +0xb7c the wrecked flag
+#   player+0x4c -> +0x0   the type-4 bike actor the acceptance capture watches (+0x130 velocity,
+#                         +0x180 transform)
+# The human is the player manager's list head, so @game_manager -> 0x30 -> 0x34 -> 0x0 is the human
+# player and reaches its bike without counting actor-list hops. watch/acceptance.toml's five -> 0x8
+# hops land on actor index 5, which in this session is an AI rider; the human is index 8.
+#
+# With the state loaded and nothing pressed, rand_state still advances 2..19+ draws per simulation
+# tick (median ~8) — the opponents and the effects. A port without them cannot match the LCG past
+# tick 0, which is where the tick-exact window has to end: at the first wreck or contact.
