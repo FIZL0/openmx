@@ -170,9 +170,15 @@ What to expect from a long run:
 - Each agent works on `task/<ID>` in its own worktree, with its own build directory, so three can run
   tests at once. The run merges each branch itself when the session ends, so by morning the shared
   branch holds the night's work and the finished branches are gone.
-- A conflict in anything but append-only text goes to the **master**: one more session, long-lived, in
-  the main checkout and in its own tmux window, handed those branches one at a time with its context
-  cleared in between. This matters more than it sounds: a run skips tasks whose branch is waiting to be
+- The conflicts that do happen are mostly two agents appending to the same list, so the run joins those
+  itself and says which files it joined: the task list and its archive, the journal, and the oracle's
+  address list — files where a line is a whole record and both sides' records belong. Prose is not on
+  that list on purpose, `PLAN.md`'s code map included: joining two reflowed paragraphs line by line
+  produces something that reads like a sentence and is not one. Nor is the address list when the two
+  sides give one name different addresses — the point of joining is that both sides belong, and there
+  exactly one of them is wrong.
+- Everything else goes to the **master**: one more session, long-lived, in the main checkout and in its
+  own tmux window, handed those branches one at a time with its context cleared in between. This matters more than it sounds: a run skips tasks whose branch is waiting to be
   merged, and anything `(after X)` on one of them, so a handful of unmergeable branches can hold up the
   critical path for the rest of the night. The master reads both sides, resolves, runs `./kit check`,
   ticks the task and deletes the branch — and writes down what it decided. It does not touch the

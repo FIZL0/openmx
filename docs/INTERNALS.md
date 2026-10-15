@@ -104,7 +104,7 @@ and no `kit.toml`.
 
 | Script | Covers |
 |---|---|
-| `python3 tests/test_plan.py` | the task list and the runner's task picker |
+| `python3 tests/test_plan.py` | the task list, the runner's task picker, and which merge conflicts it resolves itself |
 | `python3 tests/test_static.py` | the static layer against inputs it builds itself: a disc image, a MIPS blob, a Ghidra dump |
 | `python3 tests/test_live.py` | the live layer against a fake emulator it builds itself: PINE framing, the pad language, RAM search, launch |
 | `python3 tests/test_record.py` | the watch-spec parser, region coalescing, torn-frame handling |
