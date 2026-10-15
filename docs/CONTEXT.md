@@ -101,6 +101,13 @@ The same logic applies to the journal (`./kit journal` fetches the entry you wan
 Each session starts fresh. The journal is how the project remembers anything: what the original does, in
 plain words; which addresses, in which overlay; what was measured; and what could not be checked.
 
+Some things are worth writing down *because* they were expensive to find. The frame structure is the
+clearest case: working out what the game does per frame, and in what order, means walking a call graph
+through a dozen functions and several tables of function pointers, and the answer is a numbered list that
+fits on one screen. Written down once — in the R3 entry, `r3-main-loop` — it is a screenful every later
+session reads instead of a dozen `./kit fn` calls each. When a trace costs you an hour, the write-up is
+not paperwork; it is the only part of the hour that survives.
+
 The mandatory last section — `## Not verified / not 1:1`, with a reason per item or the word `none` — is
 the highest-value line of process here. It exists because the failure mode of a long port is not bad
 code, it is *silent* code: forty small unverified corners that nobody wrote down, each invisible, which
