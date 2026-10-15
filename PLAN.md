@@ -152,6 +152,11 @@ added beside them:
     counts, and the trick's own half of the landing test. Includes the engine's shared arc-cosine
     table, which the stick classifier reads. Proved against the disc and the oracle in
     `tests/trick.rs` (S11).
+  - `collide.rs` — collision against the world: the triangle test the original sweeps a bundle of probe
+    segments through a collision mesh's tree with, the box rejections that keep a probe out of a branch,
+    how a hit resolves into the blocked travel a caller takes off the motion, and the two limits the
+    sweep allows itself (16 probes, 256 levels). Proved against the original's sweep over 10,000
+    generated scenes in `tests/collide.rs` (S4).
 - `game-render` — the drawing side: the disc's own models and textures, on screen. Host `f32`, no
   bit-exactness, nothing the simulation depends on.
   - `disc.rs` ISO 9660 → `MX.PSR` → a `.res` member, read from the user's disc at runtime ·

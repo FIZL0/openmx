@@ -187,6 +187,11 @@ pub mod air;
 /// it hands back offsets instead of reading files.
 pub mod archive;
 
+/// Collision against the world: the shape test the original sweeps a bundle of probe segments
+/// through a collision mesh's tree with, how a hit resolves into a push-out, and the limits the
+/// sweep allows itself. The question every wheel, bale and rider asks once a substep.
+pub mod collide;
+
 /// The worked example from `docs/EXAMPLE.md`: three functions of the synthetic program that `./kit demo`
 /// generates, ported, with `tests/demo.rs` proving them bit-exact against the original's instructions.
 /// Delete it once your own port has something real in it.

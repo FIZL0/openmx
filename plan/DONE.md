@@ -50,6 +50,7 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 7 — one subsystem, end to end
 - [x] **S1** (after R3) The fixed update: the tick order from R3, as the top-level step of the simulation — what updates before what, where input is read, where the RNG is drawn from, what happens on the frames the game is loading or paused → crates/game-sim/src/lib.rs | t: crates/game-sim/tests/tick.rs | j: s1-fixed-update
+- [x] **S4** (after S1) Collision against the world: the original's shape test and its sweep, including how it resolves a hit and how many iterations it allows. Port the test it uses, not a better one — a more accurate collision is a different game → crates/game-sim/src/collide.rs | t: crates/game-sim/tests/collide.rs | j: s4-collision
 
 ### Phase 7 — one subsystem, end to end
 - [x] **S10** The bike in the air: where the sim decides the wheels left the ground, the rotation the stick commands while airborne, the lean and preload carried off the lip, and the landing test — the angle it tolerates, what counts as a clean landing and what throws the rider. Half of how riding around feels is this task, so it is priority-1 work, not polish → crates/game-sim/src/air.rs | t: crates/game-sim/tests/air.rs | j: s10-air

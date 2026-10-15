@@ -611,3 +611,65 @@ hit_freeride_attach         boot 0x00330630 the vtable's per-actor attach (vtabl
 # The race activities (S13, stretch). Moved here out of plan/TODO.md, which is committed and must not
 # carry addresses; kit.toml's [symbols] is untracked, so this file is the only committed record.
 activity_supercross         boot 0x002f9b70 the "Supercross" / "Nationals" activity class, 0x4e0 bytes
+
+# ---------------------------------------------------------------------------------------------------
+# S4 — collision against the world. The sweep and the shape test, as the sphere/probe-bundle class
+# runs them against a collision mesh. crates/game-sim/src/collide.rs is the port and
+# crates/game-sim/tests/collide.rs the proof; research/journal/2026-10-15-s4-s4-collision has the
+# reconnaissance, including the classes and the call chain that reaches this.
+mesh_sweep                  boot 0x0010f460 the entry the mesh classes call: stashes the vertex
+#                                           descriptor in the global at 0x00468a78, shifts the
+#                                           remaining arguments down and tail-calls the sweep below.
+#                                           (bundle, child word, &{nodes, triangles}, descriptor,
+#                                           record, 1) with the parent's live-probe mask in t1 — 0 at
+#                                           the top call
+mesh_sweep_level            boot 0x0010cfa0 one level of the descent, and the leaf test. Recursive:
+#                                           bumps PTR 0x0041daa0 (the scratchpad cursor, 0x70000000)
+#                                           by 0x40, copies the parent's sixteen live-probe words into
+#                                           its own block (0x0041dab0 = all ones for the top level),
+#                                           then either tests the node's box or the leaf triangle.
+#                                           Node: whole bundle first (|centre - bundle centre| <= half
+#                                           + radius per axis), then the first live probe that reaches
+#                                           the box descends *both* children and the probes before it
+#                                           are switched off for the subtree. Leaf: cross product of
+#                                           the two edges, vec3_normalize, backface cull (normal.dir
+#                                           must be < 0), t = normal.(v0 - origin)/normal.dir inside
+#                                           0..length, then the containment test — flatten onto the two
+#                                           axes the normal is weakest on, s = cross ratio to the edge
+#                                           v1->v2, inside is s >= 1 and 0 <= u <= 1. Always 16 probes
+#                                           and 256 levels, both because of where the mask lives
+mesh_triangle_vertices      boot 0x001080d0 (out0, out1, out2, triangle, descriptor): the three
+#                                           vertices by index, w = 1.0. Descriptor is {array, per-
+#                                           vertex normals or 0, packed}; wide is three floats at
+#                                           index*0xc, packed three shorts at index*6 scaled by
+#                                           0x38000100 (a rounded 1/32767) and then by 32767.0
+#                                           (0x004206d8) — in that order, which is not what the
+#                                           decompilation prints
+#
+# In memory (not on the disc): a tree node is 0x24 bytes — key at +0, |half| at +4, child words at +8
+# and +0xa (top bit = leaf), centre at +0xc, half extents at +0x18; a triangle is 0x14 with its three
+# u16 vertex indices at +0. The collision record, as the sweep uses it: +0x20 nearest normal, +0x30
+# nearest point, +0x40 the push-out, +0x8c the hit tally, +0x94/+0x98/+0xa0/+0xa4/+0xa8 the per-probe
+# normal/point/owner/flag/fraction arrays, +0xb0 the nearest fraction (cleared to 1.0). A probe bundle:
+# +0x120 count, +0x12c/+0x130/+0x134 the origin/direction/length arrays, +0x140 centre, +0x160 radius.
+#
+# The rest of the subsystem, read but not ported here:
+sphere_collide_pair         boot 0x001e9540 the sphere/probe class's per-pair test: rejects on the
+#                                           bundle's sphere, dispatches on the other object's class at
+#                                           +0x68 (0 mesh, 1 hierarchy, 2 rays, 3 spheres, 8 finite
+#                                           plane), transforms the probes into mesh space, calls
+#                                           mesh_sweep, transforms the results back
+ray_collide_pair            boot 0x001ebe70 the ray class's per-pair test, which is what a bike's
+#                                           wheels use: a *tree against a tree*, set up by 0x00109130
+#                                           and descended by 0x00108980 (node/node 0x00106000,
+#                                           node/leaf 0x001079d0, leaf/leaf 0x00108340, segment vs
+#                                           triangle 0x0010b980). Its record form keeps a contact list
+#                                           (capacity at +0x88, count at +0x8c) and resolves a hit as
+#                                           min + max of the per-contact push-outs (+0x50 and +0x60
+#                                           into +0x40)
+collide_against_search      boot 0x0011a9d0 (object, search): vtable +0x90 clears the record, then
+#                                           +0x94 per candidate the broad phase gathered; sets bit
+#                                           0x20 of the object's flags on a hit and fires listeners
+collision_search_gather     boot 0x00218b80 the broad phase: up to 0x100 candidates (the count the
+#                                           bike's own search is built with at 0x00252ff0), each with
+#                                           its distance, re-sorted only when the object has moved
