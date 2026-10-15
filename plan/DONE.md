@@ -13,3 +13,4 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 2 — a decompilation you can read
 - [x] **R1** (after D4) Ghidra: `./kit ghidra` on the boot ELF and each overlay, with the EmotionEngine extension, producing `context/decomp/<program>.c`. Check the dumps are at the right addresses (a function in the overlay dump should sit inside the overlay's load range) and note how long a full analysis takes on this machine → kit.toml `[ghidra]` · ghidra_scripts/ | t: `./kit fn <addr>` prints one function from each program | j: r1-decompile
+- [x] **R3** (after R1) Find the main loop: the function that runs forever, waits for vsync and calls a handful of per-frame things. Work out its structure — what runs before the sim, what runs after, where rendering is kicked off — and write it down as a numbered tick order. Everything in the port hangs off this order → research/journal/ · docs/CONTEXT.md | t: none (notes) | j: r3-main-loop
