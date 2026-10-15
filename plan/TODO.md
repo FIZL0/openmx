@@ -46,7 +46,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 
 ### Phase 6 — input, the game's own way
 
-- [ ] **I1** (after C5) The input layer: pads mapped to the game's own bitmask, with "held", "pressed this frame" and "released" exactly as the original keeps them (including the frame it latches them, which decides whether a press on the frame of a state change counts) → crates/game-sim/src/input.rs | t: crates/game-sim/tests/input.rs | j: i1-input
 - [ ] **I2** (after I1) Analogue sticks: the original's dead zone, clamping and any curve, in its arithmetic. An approximated stick curve quietly changes every movement in the game → crates/game-sim/src/input.rs | t: crates/game-sim/tests/input.rs (oracle) | j: i1-input
 - [ ] **I3** (after I1) Input recording and playback in the port: a fixture of pad frames drives a run, so a human-played sequence from the real game can be replayed against the port (this is what A2's fixtures are made of) → crates/game-sim/src/replay.rs | t: crates/game-sim/tests/replay.rs | j: i3-input-fixtures
 

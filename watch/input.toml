@@ -1,0 +1,153 @@
+# input.toml — every word the game's input layer keeps, per frame, so a port can be replayed against it.
+#
+#   ./kit record --dry-run watch/input.toml
+#   ./kit record watch/input.toml --state 9 --pad watch/pads/two-at-once.pad -n 220 \
+#       -o context/captures/i1-input.csv
+#
+# C5's `watch/pad.toml` watches the same chain down to the menu selection and is the one to read first;
+# this spec drops the menu and adds the three things a 1:1 port of the input layer needs instead:
+#
+#   dt                  the engine's own dt for the frame (the 30-frame mean, clamped by the 30 fps cap).
+#                       The poll is handed exactly this value, and the ms timers accumulate `dt * 1000`
+#                       in float, so a port replayed without it cannot reproduce the timers at all.
+#   ctlN.prev_*         the previous frame's copy of each timer, which the game keeps beside the live
+#                       one. pad.toml watches the live pair only.
+#   ev0 / ev1           two slots of the one-frame event queue, not one: this capture is clocked against
+#                       a pad script that moves two controls in the same frame, which is what says
+#                       whether the queue is filled in control order or in some other order.
+#
+# Read a row as: libpad's older buffer half is what the poll saw (pad_a / pad_b, the older of the two
+# stamps), the 16 controls are what it made of it, and `events` is the edge — zeroed at the top of every
+# update, so a non-zero count *is* a transition frame.
+
+[watch]
+name        = "input"
+description = "dt, libpad's buffer, all six words of each of the 16 controls, and the event queue"
+every       = 1
+frames      = 220
+
+[setup]
+state  = 9
+warmup = 10
+pad    = "watch/pads/two-at-once.pad"
+
+# --- the frame, and the dt the poll was handed ------------------------------------------------------
+[[field]]
+name = "engine_frame"    # the engine's own frame counter, bumped once per simulated frame
+addr = "@app + 0x374"
+type = "u32"
+
+[[field]]
+name = "dt"              # the simulation's dt for this frame, in seconds
+addr = "@app + 0x344"
+type = "f32"
+
+[[field]]
+name = "raw_dt"          # before the ring average and the cap — diagnosis only, not an input
+addr = "@app + 0x358"
+type = "f32"
+
+# --- what libpad left in RAM ------------------------------------------------------------------------
+# Two 0x80-byte halves, refreshed per field; the poll reads the half whose stamp is the larger, and a
+# PINE row sampled after the tick sees the *other* one refreshed, so both halves and both stamps are
+# here and the reader picks the older. [0] status, [1] mode (0x79 = DualShock 2 with pressures),
+# [2..3] the button word big-endian and active low, [4..7] the sticks, [8..19] the twelve pressures.
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+# --- the one-frame event queue ----------------------------------------------------------------------
+[[field]]
+name = "events"
+addr = "@input_event_count"
+type = "u32"
+
+[[array]]
+name   = "ev"
+addr   = "@input_events"
+count  = 2
+stride = 0x18
+
+[[array.field]]
+name = "control"
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "kind"            # 2 = a pad control
+off  = 4
+type = "u32"
+
+[[array.field]]
+name = "device"          # the device's own id, as the dispatcher reads it
+off  = 8
+type = "s32"
+
+[[array.field]]
+name = "index"           # which entry of the manager's device list raised it
+off  = 0xc
+type = "u32"
+
+[[array.field]]
+name = "pressed"         # 1 = press, 0 = release
+off  = 0x10
+type = "u32"
+
+[[array.field]]
+name = "stamp"           # 0x3f when queued; the dispatcher overwrites it before handing it over
+off  = 0x14
+type = "u32"
+
+# --- all six words of each of the sixteen controls of pad 0 -----------------------------------------
+# Order: triangle circle cross square L1 R1 L2 R2 select start R3 L3 up right down left.
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"            # 1 while down
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "value"           # 1.0 for a digital control, (pressure + 1) / 256 for an analogue one
+off  = 4
+type = "f32"
+
+[[array.field]]
+name = "rel_ms"          # ms since the release; never initialised, so garbage until the first release
+off  = 8
+type = "u32"
+
+[[array.field]]
+name = "held_ms"         # ms held; 0 on the frame of the press
+off  = 0xc
+type = "u32"
+
+[[array.field]]
+name = "prev_rel_ms"     # last frame's rel_ms
+off  = 0x10
+type = "u32"
+
+[[array.field]]
+name = "prev_held_ms"    # last frame's held_ms
+off  = 0x14
+type = "u32"

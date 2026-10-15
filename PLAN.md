@@ -119,6 +119,10 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
   - `hash.rs` — the state hash: one walk over the whole state, folded into 64 bits for a per-tick
     comparison or dumped field by field to name the first field that differs (A1). Every state type
     describes itself once, with `impl hash::State`.
+  - `input.rs` — the input layer: the pad read once a frame before the simulation, mapped into the
+    game's own bitmask and kept as sixteen controls a pad — held, strength, the press and release
+    timers — plus the one-frame event queue the front end reacts to. The original keeps no "pressed
+    this frame" mask, so the edge is the event and "held with the timer at 0" (I1).
   - `rng.rs` — the C library's 64-bit LCG the whole game calls, plus the random float and the uniform
     list index its call sites wrap it in. Proved bit-exact in `tests/rng.rs` (R5).
   - `track.rs` — one track as the disc stores it: the `.scn` scene (spawn, terrain layout, every model and
