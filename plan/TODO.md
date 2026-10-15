@@ -29,7 +29,6 @@ port that converges and one that is 90 % done forever: every task after them is 
 build. Do them in order; inside a later phase, tasks that touch different files can go in any order.
 
 - [~] **D1** Fill in `kit.toml` for this game and make `./kit doctor` pass: serial, region and version from the disc's `SYSTEM.CNF` (`./kit extract --only SYSTEM.CNF`), the ISO path, the PCSX2 command, the BIOS it finds. Record in the journal which dump you are working from (serial, build date, size, hash) — every address in this repo is only true of that one disc → kit.toml · docs/CONTEXT.md | t: `./kit doctor` clean | j: d1-the-disc BLOCKED: no PS2 BIOS in ~/.config/PCSX2/bios — doctor's last [FIX]. Unblocked by the human dumping their console's BIOS; see research/journal/2026-10-15-d1-the-disc/2-the-bios-READY.md
-- [ ] **D5** The archive format, if D2 found containers: the header layout (count, offsets, sizes, names or hashes), enough to list and extract members. Write it up with a hexdump in the journal before writing any code; formats are usually obvious once you can see three entries side by side → crates/game-sim/src/ (new `archive.rs`) · docs/CONTEXT.md | t: every member of one archive extracts and the sizes add up to the file | j: d5-archives
 
 ### Phase 2 — a decompilation you can read
 
