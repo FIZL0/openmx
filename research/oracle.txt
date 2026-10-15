@@ -209,3 +209,33 @@ keyframe_index_stride2      boot 0x001361e0 (t in f12, table, n) -> how many key
 #                                           +0, strictly increasing. Returns 0 below the first key and
 #                                           n at or past the last. 0x00137550 is the same search over
 #                                           0x28-byte entries
+float_to_double boot 0x00417b48
+double_to_float boot 0x00418700
+double_acos boot 0x0040aba8
+double_cos boot 0x00409a50
+double_sin boot 0x0040a298
+
+# S10, the bike in the air. The five steps the bike's update runs for a jump, in the order it runs
+# them, plus the globals and the one dependency they reach outside themselves.
+bike_air_state boot 0x00251d20 (dt in f12, bike) -> which wheels touch, how long since they left the
+#                              ground, and the crossup angle between the heading and the velocity
+bike_preload boot 0x00256940 (dt in f12, bike) -> the stick-down-then-up preload: arms, fires, and
+#                            adds its force to the chassis for PreloadTime
+bike_backflip boot 0x00256b50 (dt in f12, bike) -> the stick-up-then-down backflip torque, its decay
+#                             and the control-authority ramp it starts when it ends
+bike_airborne_control boot 0x00256e50 (dt in f12, bike) -> the moment the stick commands while
+#                                     airborne, the damping or auto-levelling, and the lean force
+bike_wreck_test boot 0x002522c0 (bike, other) -> the whole wreck decision: g loads, pitch and roll
+#                               limits, the landing crossup test, no-hander and joust
+orientation_axes boot 0x001b24d0 (orientation, which, out_axis, out_angles) -> samples a chassis
+#                                orientation into two vec4s; hook it to choose a heading
+acos_table_build boot 0x0012e150 () -> fills the 30000-entry acos table from the double routine
+curve_table_build boot 0x0012e260 () -> fills the 6000-entry {cos, sin} table, 8 bytes each,
+#                              indexed from -pi in steps of 2pi/5999
+acos_table_ptr boot 0x0046a688 the 30000-entry acos table (a pointer, gp-relative in the code)
+acos_table_scale boot 0x0046a6a0 14999.5: the acos table's index scale
+curve_table_ptr boot 0x0046a7f0 the 6000-entry {cos, sin} table (a pointer)
+curve_table_invstep boot 0x0046a698 954.77045 (= 5999/2pi): the curve table's index scale
+wreck_enabled_flag boot 0x00420bc0 zero disables the whole wreck test
+mem_alloc boot 0x001e4e90 (size, file, line) -> the game's malloc; hook it to hand the table
+#                         builders a buffer, because the heap an oracle run starts with is empty

@@ -125,6 +125,11 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
     collision placement), the `.col` shapes the simulation tests against in their own bounding-volume tree,
     and the `.trn` quantised heightfield with the game's own height and surface query. Proved against
     free06 in `tests/track.rs` (D6).
+  - `air.rs` — the bike in the air: where the sim decides the wheels left the ground, the hang time and
+    the crossup angle, the preload and the backflip taken off a lip, what the stick still commands while
+    airborne, and the test a landing has to pass for the rider to stay on. Carries the game's own
+    double-precision arc cosine and the startup table built from it. Proved against the original over
+    20,000 generated substeps in `tests/air.rs` (S10).
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the
