@@ -20,14 +20,26 @@
 //!   ([`operand`]).
 //! * **No denormals.** A denormal operand reads as `±0` and a denormal result is flushed to `±0`
 //!   (sign preserved).
-//! * **Divide and square root round to nearest**, unlike everything else: in the reference emulator the
-//!   divider has its own rounding, and `x / 0` yields `±max` rather than a trap or an infinity.
+//! * **Divide and square root round to nearest**, unlike everything else: they come out of their own
+//!   unit with its own rounding, and `x / 0` yields `±max` (the sign being the two operands' signs
+//!   xored) rather than a trap or an infinity.
+//! * **`rsqrt.s` chops both of its steps**, even though `sqrt.s` on its own rounds to nearest — the
+//!   square root and the divide inside it run in the adder's rounding mode, not the root's. With a zero
+//!   divisor it is `±max` with the sign of the *dividend* alone, not the xor of the two signs
+//!   ([`rsqrt`]).
 //! * **`madd.s` is not fused.** The product is rounded (chopped) to `f32` first and then goes through the
 //!   same badly-aligning adder. `madd(acc, a, b)` is therefore *exactly* `add(acc, mul(a, b))` — it is a
 //!   single instruction, not a single rounding.
 //!
 //! Everything here is total: no operation panics, and no operation can produce a NaN or an infinity, just
 //! as the hardware cannot.
+//!
+//! What exactly is being reproduced: the reference emulator's EE recompiler at its default settings —
+//! denormals-are-zero and flush-to-zero on, add/sub/mul/`madd` rounding toward zero, the divider's
+//! rounding mode to nearest, `sqrt.s` switching the mode to nearest for itself, and results clamped to
+//! `±max` on the way out. Its *interpreter* is a looser model (no alignment masking at all, and a few
+//! sign-of-zero cases decided differently); where the two disagree this module follows the recompiler,
+//! because that is what runs the game.
 //!
 //! The model is written in `f64` host arithmetic on purpose. Both operands of an aligned add are exact in
 //! `f64`, and a 24×24-bit product is exact in `f64`, so the `f64` intermediate is the *exact* real result
@@ -135,19 +147,57 @@ pub fn div(a: f32, b: f32) -> f32 {
     if r.is_finite() { daz(r) } else if r.is_sign_negative() { NEG_MAX } else { MAX }
 }
 
-/// `sqrt.s` of `|x|` (the instruction ignores the sign), round to nearest.
+/// `sqrt.s` of `|x|` (the instruction ignores the sign, so `-0` roots to `+0`), round to nearest: it
+/// is the one operation that switches the rounding mode for itself, which is why [`rsqrt`]'s own
+/// square root — the same hardware, no mode switch — chops instead.
 pub fn sqrt(x: f32) -> f32 {
     daz(sqrtf(abs(ee(x))))
 }
 
-/// `rsqrt.s`: `a / sqrt(b)`, a divide and a square root, both round-to-nearest. `b == 0` gives `±max`
-/// with the sign of `a / b`.
+/// The square root of a non-negative `x` truncated toward zero, which is the root [`rsqrt`] takes
+/// internally: `sqrt.s` switches the rounding mode to nearest for itself, and `rsqrt.s` does not, so its
+/// root is chopped like an add.
+///
+/// `sqrtf` is correctly rounded, so the truncated root is either it or the value one ulp inward, and
+/// squaring a 24-bit significand is exact in `f64` — which decides which, with no rounding of its own.
+#[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
+fn sqrt_chop(x: f32) -> f32 {
+    let r = sqrtf(x);
+    if (r as f64) * (r as f64) > x as f64 { f32::from_bits(r.to_bits().wrapping_sub(1)) } else { r }
+}
+
+/// `a / b` truncated toward zero: the divide inside [`rsqrt`], which (unlike `div.s`) runs in the
+/// adder's rounding mode. `b` is non-zero and both are finite.
+///
+/// The correctly-rounded quotient is either the truncated one or one ulp outward, and `q·b` is exact in
+/// `f64` (two 24-bit significands), so comparing it against `a` says which without rounding anything.
+#[allow(clippy::float_arithmetic)] // the model itself; f32 division is exact per IEEE
+fn div_chop(a: f32, b: f32) -> f32 {
+    let q = a / b;
+    if !q.is_finite() {
+        // the exact quotient is past ±max, where truncation leaves the largest magnitude
+        return if q.is_sign_negative() { NEG_MAX } else { MAX };
+    }
+    let q = if (q as f64 * b as f64).abs() > (a as f64).abs() {
+        f32::from_bits(q.to_bits().wrapping_sub(1))
+    } else {
+        q
+    };
+    daz(q)
+}
+
+/// `rsqrt.s`: `a / sqrt(|b|)`, a square root and a divide — both of them *chopped*, because the
+/// instruction keeps the FPU's own rounding mode for both steps where `sqrt.s` switches to nearest.
+///
+/// `b == 0` gives `±max` with the sign of `a` alone: the instruction takes the absolute value of its
+/// divisor before it looks for zero, so the divisor's sign cannot reach the result (where in [`div`] it
+/// can).
 pub fn rsqrt(a: f32, b: f32) -> f32 {
     let (a, b) = (ee(a), ee(b));
     if b == 0.0 {
-        return if a.is_sign_negative() != b.is_sign_negative() { NEG_MAX } else { MAX };
+        return if a.is_sign_negative() { NEG_MAX } else { MAX };
     }
-    div(a, sqrt(b))
+    div_chop(a, sqrt_chop(abs(b)))
 }
 
 /// `madd.s`: `acc + a·b`, the product chopped to `f32` first and then put through the aligning adder.
@@ -189,16 +239,19 @@ pub fn neg(x: f32) -> f32 {
     f32::from_bits(x.to_bits() ^ 0x8000_0000)
 }
 
-/// `max.s`: a compare and a select, no rounding.
+/// `max.s`: a compare and a select, no rounding. The reference emulator compares the two *bit patterns*
+/// as signed integers, which is the same order as the floats for everything the FPU can hold — except
+/// that it settles `+0` against `-0` for `+0` whichever way round they come, where a float compare would
+/// return whichever operand it was handed first.
 pub fn max(a: f32, b: f32) -> f32 {
-    let (a, b) = (ee(a), ee(b));
-    if a >= b { a } else { b }
+    let (a, b) = (ee(a).to_bits() as i32, ee(b).to_bits() as i32);
+    f32::from_bits((if a < 0 && b < 0 { a.min(b) } else { a.max(b) }) as u32)
 }
 
-/// `min.s`: a compare and a select, no rounding.
+/// `min.s`: [`max`]'s compare the other way round; `±0` resolves to `-0`.
 pub fn min(a: f32, b: f32) -> f32 {
-    let (a, b) = (ee(a), ee(b));
-    if a <= b { a } else { b }
+    let (a, b) = (ee(a).to_bits() as i32, ee(b).to_bits() as i32);
+    f32::from_bits((if a < 0 && b < 0 { a.max(b) } else { a.min(b) }) as u32)
 }
 
 /// `cvt.w.s`: float to 32-bit int, truncating, saturating at `i32::MIN` / `i32::MAX` the way the EE does

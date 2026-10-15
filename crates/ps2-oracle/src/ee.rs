@@ -456,14 +456,9 @@ impl Ee {
                     5 => self.fpr[fdn] = sb & 0x7fff_ffff, // abs.s
                     6 => self.fpr[fdn] = sb,               // mov.s
                     7 => self.fpr[fdn] = sb ^ 0x8000_0000, // neg.s
-                    0x16 => {
-                        // rsqrt.s: a / sqrt(b), and a zero divisor gives ±max rather than a trap
-                        if tb & 0x7f80_0000 == 0 {
-                            self.fpr[fdn] = ((sb ^ tb) & 0x8000_0000) | 0x7f7f_ffff;
-                        } else {
-                            put(self, fpu::rsqrt(a, b));
-                        }
-                    }
+                    // rsqrt.s: a / sqrt(|b|), both steps chopped, and a zero divisor gives ±max with
+                    // the sign of the dividend rather than a trap — all of that is `fpu::rsqrt`'s
+                    0x16 => put(self, fpu::rsqrt(a, b)),
                     0x18 => self.acc = fpu::add(a, b).to_bits(),
                     0x19 => self.acc = fpu::sub(a, b).to_bits(),
                     0x1a => self.acc = fpu::mul(a, b).to_bits(),

@@ -13,3 +13,6 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 2 — a decompilation you can read
 - [x] **R1** (after D4) Ghidra: `./kit ghidra` on the boot ELF and each overlay, with the EmotionEngine extension, producing `context/decomp/<program>.c`. Check the dumps are at the right addresses (a function in the overlay dump should sit inside the overlay's load range) and note how long a full analysis takes on this machine → kit.toml `[ghidra]` · ghidra_scripts/ | t: `./kit fn <addr>` prints one function from each program | j: r1-decompile
+
+### Phase 4 — the arithmetic, before any ported math
+- [x] **F1** The EE FPU in `crates/ps2-float`: add, sub, mul, div, sqrt with the PS2's rules — round toward zero, no denormals (flushed), no NaN or infinity (clamped to the largest magnitude), and the smaller addend masked to the exponent difference minus one guard bit. Port physics before this and you will not know which of the two is wrong → crates/ps2-float/src/fpu.rs | t: crates/ps2-float/tests/fpu.rs | j: f1-ee-fpu
