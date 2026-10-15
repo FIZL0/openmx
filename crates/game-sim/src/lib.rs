@@ -244,6 +244,11 @@ pub mod hash;
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.
 pub mod rng;
 
+/// One track as the disc stores it: the scene that lists what is on it, the collision shapes the
+/// simulation tests against, and the terrain the wheels run on. Pure parsing over borrowed bytes — the
+/// app layer reads them out of the archives and hands them over.
+pub mod track;
+
 #[cfg(test)]
 mod tests {
     use super::*;
