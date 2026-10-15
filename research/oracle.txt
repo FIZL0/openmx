@@ -607,3 +607,7 @@ hit_freeride_attach         boot 0x00330630 the vtable's per-actor attach (vtabl
 #                                           0x140) with "Free10" and "Free06" — bit 0x40 of the AI
 #                                           interface's flags at +0x30 is cleared on those two areas
 #                                           and set on every other track
+
+# The race activities (S13, stretch). Moved here out of plan/TODO.md, which is committed and must not
+# carry addresses; kit.toml's [symbols] is untracked, so this file is the only committed record.
+activity_supercross         boot 0x002f9b70 the "Supercross" / "Nationals" activity class, 0x4e0 bytes

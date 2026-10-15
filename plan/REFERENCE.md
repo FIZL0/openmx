@@ -64,6 +64,28 @@ task that needs one blocks on that item rather than inventing a substitute. Slot
 main-menu state (C3, `Career` highlighted, no profile loaded, pad in port 1): a convenience, not a
 reference, and the next agent that needs a scratch slot will overwrite it.
 
+### Recordings
+
+A recording is a PCSX2 input movie (`.p2m2`) plus the save state it starts from, both under
+`context/recordings/` and both git-ignored. The pair is the unit: a recording whose state is lost
+replays against nothing.
+
+| File | What it is |
+|---|---|
+| `first_recording.p2m2` | 60.4 s (3621 frames at 59.94 Hz) of free riding on **Free09**, both pads recorded, PCSX2 2.9.127. Contains tricks and a collision with an NPC rider. The acceptance fixture for S8. |
+| `first_recording.p2m2_SaveState.p2s` | the state it starts from — 32 MiB of EE RAM, unpacked with `./kit state ram <path>` |
+
+What the state's RAM says, so nobody has to guess it again: the bike is a **125cc, Race tier**
+(`Bike\Race125A.phy` and `Bike\Race125P.phy` are the only bike physics pair resolved in RAM; the `%s`-
+prefixed names at ~0x42E000 are the ELF's format strings, not loads). `Bike\Wreckbike.phy` — the crash
+bike — is loaded alongside. The engine class is one of four, and all sixteen `bike\*.phy` sets ship on
+the disc, so the class is a real variable and not a constant of the mode: see **D7**, which exists
+because `FREERIDE_ENGINE` in `crates/game-sim/src/track.rs` says `Cc250`.
+
+Header layout, for whoever writes the reader (**I4**): `fileVersion` u8, `emulator` char[50], `author`
+char[255], `game` char[255], `totalFrames` u32, `undoCount` u32, `savestate` u8 — 570 bytes — then 18
+bytes per frame per pad, two pads.
+
 ### Where the files are, and why yours may not have them
 
 A state is `<SERIAL> (<crc>).NN.p2s` in PCSX2's savestates folder, and *which* folder depends on who is

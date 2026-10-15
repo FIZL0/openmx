@@ -103,7 +103,7 @@ Two things that bite:
       state you will make, because a capture that needs a person playing cannot be repeated exactly, and
       a port can only be proved against something repeatable. Save it a few seconds *before* the
       interesting part starts, put the pad down, and note here how long it runs for and what ends it.
-- [ ] **One longer recording of free riding** for the acceptance test (S8): start from the slot-4 state
+- [x] **One longer recording of free riding** for the acceptance test (S8): start from the slot-4 state
       and just ride — no laps, no objectives. Include the awkward things, because they are what the port
       will get wrong: a jump taken too slow and one taken too fast, a trick landed clean, a trick landed
       sideways, a crash, a wall, a slow scrape along a slope, and a few seconds of sitting still. Save
@@ -112,6 +112,26 @@ Two things that bite:
 
       What this proves: the same button presses fed to the port produce the same bike position, frame by
       frame. It is the only test that can show the physics really match rather than merely look right.
+
+      **Done — `context/recordings/first_recording.p2m2`** (+ `first_recording.p2m2_SaveState.p2s`, which
+      is the state it starts from; the recording is anchored to it, so keep the pair together). Measured
+      from the files, not reported: PCSX2 2.9.127, author `rycs`, 3621 frames — about 60.4 s at 59.94 Hz —
+      and both controller ports recorded (570-byte header, then 18 bytes per frame per pad).
+
+      What the human says is in it: some tricks, and **a collision with an NPC rider** at some point. The
+      save state's RAM says the rest: the area is **Free09** (`Tracks\Free09\Free09.ps2.trn`) and the bike
+      is a **125cc, Race tier** — `Bike\Race125A.phy` and `Bike\Race125P.phy` are the only bike physics
+      pair resolved in RAM. `Bike\Wreckbike.phy` is loaded too, which is the crash bike.
+
+      Two consequences, both now tasks. The port assumes a 250 (`FREERIDE_ENGINE` in `track.rs`) and is
+      therefore comparing against the wrong parameter set — **D7**. And opponents are not ported, so the
+      tick-exact window cannot run past the NPC contact — **S14** finds that frame. **I4** reads the file
+      into the port's pad tape.
+
+      125cc is the engine class, and it is one of four: the disc ships all sixteen `bike\*.phy` sets
+      (Race/Pro x 50/125/250/500 x A/P), plus non-bike vehicles (baja, buggy, biplane, monstertruck,
+      kiowa). `OPPONENT_ENABLED` and `OPPONENT_DIFFICULTY` are real settings keys, so freeride opponents
+      are switchable — worth noting which way they were set if another recording is made.
 
 ## Decisions only you can make
 
