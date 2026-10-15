@@ -13,3 +13,6 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 2 — a decompilation you can read
 - [x] **R1** (after D4) Ghidra: `./kit ghidra` on the boot ELF and each overlay, with the EmotionEngine extension, producing `context/decomp/<program>.c`. Check the dumps are at the right addresses (a function in the overlay dump should sit inside the overlay's load range) and note how long a full analysis takes on this machine → kit.toml `[ghidra]` · ghidra_scripts/ | t: `./kit fn <addr>` prints one function from each program | j: r1-decompile
+
+### Phase 8 — showing it
+- [x] **V1** (after D5) Load the game's models and textures well enough to draw one actor and the world it stands in, from the user's disc at runtime. Rendering only has to look right, so stop at "recognisably the same scene" and move on → crates/game-sim/src/ (new render crate) | t: a screenshot comparison by eye against `./kit shot` | j: v1-first-draw

@@ -85,7 +85,6 @@ half-ported ones, and it is the first time the port is worth running.
 
 ### Phase 8 — showing it
 
-- [ ] **V1** (after D5) Load the game's models and textures well enough to draw one actor and the world it stands in, from the user's disc at runtime. Rendering only has to look right, so stop at "recognisably the same scene" and move on → crates/game-sim/src/ (new render crate) | t: a screenshot comparison by eye against `./kit shot` | j: v1-first-draw
 - [ ] **V2** (after V1) Side-by-side screenshots: the same moment in the original and in the port, from the same save state, in `context/shots/`, with the differences listed. Do this once a subsystem lands, not once at the end → context/shots/ | t: none (by eye) | j: v2-side-by-side
 
 ### Stretch
