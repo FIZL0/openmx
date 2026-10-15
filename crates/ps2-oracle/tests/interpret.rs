@@ -333,3 +333,36 @@ fn a_bad_pointer_argument_is_caught_rather_than_read_as_rubbish() {
         .expect_err("a wild pointer must not silently return zero");
     assert!(msg.downcast_ref::<String>().unwrap().contains("0xdeadbeef"));
 }
+
+#[test]
+fn the_byte_subtract_wraps_each_byte_on_its_own() {
+    // psubb is how the SDK's string functions scan sixteen bytes at a time: subtract a quadword of
+    // `0x01`s, and a byte that was zero becomes 0xff while no byte borrows into its neighbour. That
+    // independence is the whole point, so it is pinned here.
+    let mut ee = prog(&[
+        i(0x1e, 4, 8, 0),          // lq    t0, 0(a0)
+        i(0x1e, 5, 9, 0),          // lq    t1, 0(a1)
+        mmi(8, 9, 10, 0x09, 0x08), // psubb t2, t0, t1
+        i(0x1f, 6, 10, 0),         // sq    t2, 0(a2)
+        mmi(8, 9, 11, 0x01, 0x08), // psubw t3, t0, t1
+        i(0x1f, 6, 11, 16),        // sq    t3, 16(a2)
+        JR_RA,
+        NOP,
+    ]);
+    let (a, b, out) = (ee.scratch(0), ee.scratch(1), ee.scratch(2));
+    for k in 0..16u32 {
+        ee.write(a + k, 1, (k * 0x11) as u128);
+        ee.write(b + k, 1, 0x01);
+    }
+    ee.call(CODE, &[a as u64, b as u64, out as u64], &[], 100);
+    let got: Vec<u8> = (0..16).map(|k| ee.u8_at(out + k)).collect();
+    let want: Vec<u8> = (0..16u32).map(|k| ((k * 0x11) as u8).wrapping_sub(1)).collect();
+    assert_eq!(got, want, "each byte subtracts on its own, and 0x00 - 0x01 is 0xff, not a borrow");
+
+    // psubw is the same instruction a word at a time, and it borrows no further either.
+    let words: Vec<u32> = (0..4).map(|k| ee.u32_at(out + 16 + 4 * k)).collect();
+    let want: Vec<u32> = (0..4)
+        .map(|k| ee.u32_at(a + 4 * k).wrapping_sub(ee.u32_at(b + 4 * k)))
+        .collect();
+    assert_eq!(words, want);
+}

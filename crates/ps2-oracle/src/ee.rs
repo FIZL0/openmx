@@ -629,6 +629,23 @@ impl Ee {
                 let w = |v: u128, k: u32| v >> (32 * k) & 0xffff_ffff;
                 q(self, w(qt, 0) | w(qs, 0) << 32 | w(qt, 1) << 64 | w(qs, 1) << 96);
             }
+            (0x08, 0x01) => {
+                // psubw: four independent 32-bit subtractions, each wrapping on its own — the same
+                // zero-byte scan a word at a time, where the string functions handle the tail.
+                let word = |v: u128, k: u32| (v >> (32 * k)) as u32;
+                q(self, (0..4).fold(0u128, |a, k| {
+                    a | (word(qs, k).wrapping_sub(word(qt, k)) as u128) << (32 * k)
+                }));
+            }
+            (0x08, 0x09) => {
+                // psubb: sixteen independent byte subtractions, each wrapping on its own. The SDK's
+                // bounded string copy and compare use it against a quadword of `0x01` bytes to find a
+                // zero byte sixteen at a time, so every string function in the game reaches it.
+                let byte = |v: u128, k: u32| (v >> (8 * k)) as u8;
+                q(self, (0..16).fold(0u128, |a, k| {
+                    a | (byte(qs, k).wrapping_sub(byte(qt, k)) as u128) << (8 * k)
+                }));
+            }
             (0x09, 0x0e) => q(self, (qt & lo64) | (qs & lo64) << 64), // pcpyld
             (0x09, 0x12) => q(self, qs & qt),                         // pand
             (0x09, 0x13) => q(self, qs ^ qt),                         // pxor

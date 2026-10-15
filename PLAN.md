@@ -142,6 +142,11 @@ added beside them:
     clock, the thirty-entry `dt` average with its 30 fps clamp, the pad latch, the markers around the
     simulation, and the three different ways a frame can not simulate. `Engine::step` is the top-level
     step everything else hangs off. Proved against `engine_tick` itself in `tests/tick.rs` (S1).
+  - `actor.rs` — actor lifetime: the two intrusive lists a level's live objects hang in, the interned
+    name an actor's "kind" actually is, the three steps of creating, registering and freeing one, and
+    the master list's order — which is registration order, and so is the order the per-frame dispatches
+    and the two "nearest actor" searches resolve in. Proved against the manager, the record's
+    constructor and both destructors in `tests/actor.rs` (S2).
   - `air.rs` — the bike in the air: where the sim decides the wheels left the ground, the hang time and
     the crossup angle, the preload and the backflip taken off a lip, what the stick still commands while
     airborne, and the test a landing has to pass for the rider to stay on. Carries the game's own
