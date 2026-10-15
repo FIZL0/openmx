@@ -209,3 +209,90 @@ keyframe_index_stride2      boot 0x001361e0 (t in f12, table, n) -> how many key
 #                                           +0, strictly increasing. Returns 0 below the first key and
 #                                           n at or past the last. 0x00137550 is the same search over
 #                                           0x28-byte entries
+
+# ---------------------------------------------------------------------------------------------------
+# S11 — tricks: the stunt table, the gesture that names one, the clocks, the landing. The port is
+# crates/game-sim/src/trick.rs and the proofs are crates/game-sim/tests/trick.rs. How each one was
+# found is in research/journal/2026-10-15-s11-s11-tricks.
+#
+# The shared arc-cosine table. Built once at start-up and read by ~70 places in the image; the trick
+# direction is only one caller, which is why the port keeps the table and not just the decoder.
+angle_table_build           boot 0x0012e150 () -> 1: allocates 30001 floats, fills them with
+#                                           acos(i*step - 1) in double precision rounded to single,
+#                                           and copies the last entry once more. Sets the two globals
+#                                           below. Needs the heap, so a test builds the table itself
+angle_table_ptr             boot 0x0046a688 the global the table is allocated into: a float*
+angle_table_scale           boot 0x0046a6a0 the global 14999.5 the builder stores, read by the lookup
+float_to_double             boot 0x00417b48 (f12) -> double in v0; the EE has no hardware doubles
+acos_double                 boot 0x0040aba8 (double in a0) -> acos in v0, software, ~9000 instructions
+double_to_float             boot 0x00418700 (double in a0) -> f0
+#
+# The gesture.
+stick_direction             boot 0x00251830 (x in f12, y in f13, obj in a0) -> direction 0..4 in v0,
+#                                           writing the angle to obj+0x634 and the deflection to
+#                                           obj+0x638. Reads the table through angle_table_ptr
+pad_to_gesture              boot 0x00250fb0 (obj) the whole controller read: the three trick buttons
+#                                           into the group at +0x9fc, the d-pad into the stick at
+#                                           +0x628/+0x62c, then stick_direction into +0xa00. Reads the
+#                                           input layer's control strengths, so not a pure function
+stunt_request               boot 0x002589c0 (obj in a0, fallback id in a1) -> 1 if a trick is wanted
+#                                           or running. The gate, the group/direction switch that
+#                                           names one of the 24 slots, and the overlap test that lets
+#                                           a queued trick take over the end of the running one
+stunt_queue_push            boot 0x0025a5e0 (queue = obj+0xa38) push the named slot; heap nodes
+stunt_queue_pop             boot 0x0025a570 (queue) -> the oldest slot; frees its node
+stunt_ai_choice             boot 0x00280df0 (airtime in f12, obj in a0, out in a1) -> whether the AI
+#                                           found a trick that fits: every slot whose duration fits
+#                                           and whose name is not "throwaway", picked with rand()
+ai_gesture_gate             boot 0x00280f30 (obj) the AI's wrapper: read the pad only when no trick is
+#                                           being restarted and none is in progress
+#
+# The clocks and the landing. Both call the motion library through the rider's vtable, so neither is a
+# pure function of RAM; both are proved anyway, by aiming the vtable at a table of hooked addresses. The
+# clocks also need the call stopped at the end of the clock section (0x00259b00, the join every case of
+# its switch reaches, where the animation selection begins), and the landing needs the attitude limits
+# in front of the trick's clause put where nothing reaches them. See the journal.
+stunt_clocks                boot 0x002593e0 (obj in a0, run the motion prologue in a1, dt in f12) the
+#                                           per-frame machine:
+#                                           restart test, the hold/ease/normal branches over elapsed
+#                                           at +0xa1c and progress at +0xa2c, the no-hander test, and
+#                                           the safe flag at +0xa10 against SafeTime and HoldTime
+smooth_noise                boot 0x0013e810 (t in f12) -> the engine's shared 1-D smooth noise, from
+#                                           tables built at start-up. Only perturbs the hold's phase
+stunt_landing               boot 0x002522c0 (obj in a0, the thing it hit in a1, or 0) the wreck test: the attitude limits first, then the
+#                                           trick's clause (reason 12 mid-trick, 7 for a throw-away
+#                                           taken past 95%, 12 for a no-hander landed too slowly)
+stunt_idle                  boot 0x00258cc0 (obj) what is requested when nothing was asked for:
+#                                           airborne -> 25 (the stick-driven lean), grounded -> 28
+stunt_state_pack            boot 0x00258d50 (obj) latches the requested id into +0x864 and the request
+#                                           count into +0x8a0 — what a networked rider sends
+#
+# The table on the disc.
+stunts_ini_load             boot 0x0037d820 (obj, dir) reads <dir>Anim\stunts.ini: 57 [Stunt<n>]
+#                                           sections of Name, DisplayName, SafeTime, HoldTime,
+#                                           Duration, UsedForBike into 0x54-byte records, then writes
+#                                           both players' identity maps at +0x12b4, stride 0x60
+stunt_selection             boot 0x0037da60 (obj, player, out) fills out[0..23] with the records the
+#                                           player's map names; the rider memcpys the result
+stunt_specials              boot 0x00258790 (obj) finds "nohandedlander" and "throwaway" in the
+#                                           rider's 24 by a case-insensitive name search, storing 24
+#                                           when a name is absent
+stunt_display_name          boot 0x0037dc90 (obj, player, id) -> the HUD name: 26 "Stoppie", 25
+#                                           "Wheelie", 24 "BackFlip", else the mapped DisplayName
+anim_rewind                 boot 0x001461e0 (anim in a0, 0, 0) restart the rider's animation at the
+#                                           start; called when a trick restarts. Hooked in the tests
+clock_section_end           boot 0x00259b00 the join inside stunt_clocks where the clock section is
+#                                           over and the animation selection begins: a test hooks it
+#                                           to end the call before the tail's VU0 skinning work
+wrecks_enabled              boot 0x00420bc0 the global stunt_landing returns immediately on when it is
+#                                           zero: wrecks are switched off
+#
+# The rider's vtable, by the slots the trick code calls. The object's vtable pointer is at +0x48, and a
+# test can point it at a table of hooked addresses.
+#   +0xfc  wreck(reason)          4 pitched forward, 2/3 rolled over, 0xb landed at a bad attitude,
+#                                 0xd thrown into something, 0xc the trick's own reason, 7 thrown off
+#                                 a throw-away on purpose
+#   +0x10c start the animation a trick id names
+#   +0x110 stop the animation
+#   +0x118 the hand-hold pose, on or off
+#   +0x120 whether an animation is playing, which is what gates stunt_idle

@@ -852,3 +852,141 @@ pub fn powf(x: f32, y: f32) -> f32 {
     let z = 1.0 - (r - z);
     fpu::mul(sign, ldexp_bits(z.0, n))
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The one double-precision function here
+// ---------------------------------------------------------------------------------------------------
+
+/// `sqrt` in **double** precision, correctly rounded, by the same bit-by-bit method as [`sqrtf`] —
+/// integer arithmetic only, so it is identical on every host and needs no host libm (this crate is
+/// `no_std`).
+///
+/// Only [`acos`] below needs it. Negative inputs give the square root of the magnitude, as the EE's
+/// `sqrt.s` does, because the EE has no NaN to return and nothing here has one to carry.
+pub fn sqrt(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let (e, mantissa) = (((bits >> 52) & 0x7ff) as i64, bits & 0x000f_ffff_ffff_ffff);
+    if e == 0 {
+        return 0.0; // zero, or a denormal the EE would have flushed to one
+    }
+    if e == 0x7ff {
+        return x; // an infinity or a NaN the EE cannot produce; pass it through
+    }
+    // x = m · 2^exp with m a 53-bit integer. An even exponent lets the root halve it exactly.
+    let mut m = (mantissa | 1 << 52) as u128;
+    let mut exp = e - 1075;
+    if exp & 1 != 0 {
+        m <<= 1;
+        exp -= 1;
+    }
+    // 54 bits of root: one more than a double holds, so the last one can be rounded.
+    let n = m << 54;
+    let (root, exact) = isqrt(n);
+    let (mut q, mut k) = (root >> 1, exp / 2 - 26);
+    // Round to nearest, ties to even: the dropped bit, and whether anything is left under it.
+    if root & 1 != 0 && (!exact || q & 1 != 0) {
+        q += 1;
+        if q >> 53 != 0 {
+            q >>= 1;
+            k += 1;
+        }
+    }
+    let biased = (k + 52 + 1023) as u64;
+    f64::from_bits(biased << 52 | (q as u64 & 0x000f_ffff_ffff_ffff))
+}
+
+/// The integer square root of `n`, and whether it was exact.
+fn isqrt(mut n: u128) -> (u128, bool) {
+    let (mut root, mut bit) = (0u128, 1u128 << 126);
+    while bit > n {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if n >= root + bit {
+            n -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    (root, n == 0)
+}
+
+/// The arc cosine in **double** precision, as the game's C library computes it.
+///
+/// The EE has no hardware doubles, so a `double acos` on the PS2 is library code: a few thousand
+/// instructions of soft-float implementing fdlibm's `__ieee754_acos`. The engine calls it once per
+/// entry while it builds its shared 30,001-entry angle table at start-up, and then *chops* each
+/// result to a single with [`crate::fpu::chop`] — which is the step that decides the table's last
+/// bits, and the reason the single-precision [`acosf`] is the wrong function for that table.
+///
+/// `f64` here is exact for the purpose. Every operation below is one IEEE double add, subtract,
+/// multiply, divide or square root, all of which a host performs identically to the soft-float
+/// library — and a last-bit difference in the polynomial could not survive the chop to a single
+/// anyway, which throws 29 bits away. `game-sim`'s `tests/trick.rs` proves all 30,001 entries of the
+/// resulting table against the game's own code.
+#[allow(clippy::float_arithmetic)] // double precision on purpose, and host-identical: see above
+pub fn acos(x: f64) -> f64 {
+    /// fdlibm's constants, as bit patterns: a decimal literal is one compiler's rounding of them.
+    const PIO2_HI: f64 = f64::from_bits(0x3ff9_21fb_5444_2d18);
+    const PIO2_LO: f64 = f64::from_bits(0x3c91_a626_3314_5c07);
+    const PI: f64 = f64::from_bits(0x4009_21fb_5444_2d18);
+    const PS: [f64; 6] = [
+        f64::from_bits(0x3fc5_5555_5555_5555),
+        f64::from_bits(0xbfd4_d612_03eb_6f7d),
+        f64::from_bits(0x3fc9_c155_0e88_4455),
+        f64::from_bits(0xbfa4_8228_b568_8f3b),
+        f64::from_bits(0x3f49_efe0_7501_b288),
+        f64::from_bits(0x3f02_3de1_0dfd_f709),
+    ];
+    const QS: [f64; 4] = [
+        f64::from_bits(0xc003_3a27_1c8a_2d4b),
+        f64::from_bits(0x4000_2ae5_9c59_8ac8),
+        f64::from_bits(0xbfe6_066c_1b8d_0159),
+        f64::from_bits(0x3fb3_b8c5_b12e_9282),
+    ];
+
+    /// The rational approximation both halves of the function share.
+    #[allow(clippy::float_arithmetic)]
+    fn pq(z: f64) -> f64 {
+        let p = z * (PS[0] + z * (PS[1] + z * (PS[2] + z * (PS[3] + z * (PS[4] + z * PS[5])))));
+        let q = 1.0 + z * (QS[0] + z * (QS[1] + z * (QS[2] + z * QS[3])));
+        p / q
+    }
+
+    let hx = (x.to_bits() >> 32) as u32 as i32;
+    let ix = hx & 0x7fff_ffff;
+    if ix >= 0x3ff0_0000 {
+        // |x| >= 1
+        if ((ix - 0x3ff0_0000) as u32 | (x.to_bits() as u32)) == 0 {
+            return if hx > 0 { 0.0 } else { PI + 2.0 * PIO2_LO };
+        }
+        return (x - x) / (x - x); // |x| > 1: NaN
+    }
+    if ix < 0x3fe0_0000 {
+        // |x| < 0.5
+        if ix <= 0x3c60_0000 {
+            return PIO2_HI + PIO2_LO; // |x| < 2^-57
+        }
+        let r = pq(x * x);
+        return PIO2_HI - (x - (PIO2_LO - x * r));
+    }
+    if hx < 0 {
+        // x < -0.5
+        let z = (1.0 + x) * 0.5;
+        let s = sqrt(z);
+        let r = pq(z);
+        let w = r * s - PIO2_LO;
+        return PI - 2.0 * (s + w);
+    }
+    // x > 0.5. The split of the square root into a head with a clear low half and a correction is
+    // fdlibm's, and it is what keeps the result accurate right up against 1.
+    let z = (1.0 - x) * 0.5;
+    let s = sqrt(z);
+    let df = f64::from_bits(s.to_bits() & 0xffff_ffff_0000_0000);
+    let c = (z - df * df) / (s + df);
+    let r = pq(z);
+    let w = r * s + c;
+    2.0 * (df + w)
+}
