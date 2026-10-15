@@ -28,8 +28,6 @@ The first four phases are tooling and feel like a detour from the port. They are
 port that converges and one that is 90 % done forever: every task after them is proved with what they
 build. Do them in order; inside a later phase, tasks that touch different files can go in any order.
 
-- [~] **D1** Fill in `kit.toml` for this game and make `./kit doctor` pass: serial, region and version from the disc's `SYSTEM.CNF` (`./kit extract --only SYSTEM.CNF`), the ISO path, the PCSX2 command, the BIOS it finds. Record in the journal which dump you are working from (serial, build date, size, hash) — every address in this repo is only true of that one disc → kit.toml · docs/CONTEXT.md | t: `./kit doctor` clean | j: d1-the-disc BLOCKED: no PS2 BIOS in ~/.config/PCSX2/bios — doctor's last [FIX]. Unblocked by the human dumping their console's BIOS; see research/journal/2026-10-15-d1-the-disc/2-the-bios-READY.md
-
 ### Phase 2 — a decompilation you can read
 
 - [ ] **R2** (after R1) The PS2 library functions Ghidra cannot name: `printf`/`sprintf`, `memcpy`, `malloc`, the SIF/IOP calls, `scePad*`, `sceGs*`. Name them in `[symbols]` so every later dump reads in terms of them instead of `FUN_…`. Finding `printf` first is worth hours: its call sites are labelled strings that say what the surrounding code is → kit.toml `[symbols]` · research/oracle.txt | t: `./kit fn @printf` resolves | j: r2-symbols
