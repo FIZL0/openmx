@@ -49,19 +49,70 @@ not up" is a missing `./kit pcsx2 start`, not a reason to stop.
 
 ## What each save state holds
 
-Fill this in as the states are made (`plan/HUMAN.md` asks for them) — a state nobody can describe gets
-reloaded by three different agents who each work out what it is.
+The slots, and who owns them. **Nothing in the kit enforces this** — `./kit pine save 3` would overwrite
+the human's slot without a word — so the convention is the only guard there is:
 
 | Slot | What it holds | Whose |
 |---|---|---|
-| 3 | title screen | the human's: load only, never overwrite |
-| 4 | first frame of play | the human's: load only, never overwrite |
-| 5 | mid-action | the human's: load only, never overwrite |
-| 8, 9 | scratch | anyone's; assume they will be overwritten |
+| 3 | the main menu, nothing chosen | the human's: load only, never overwrite |
+| 4 | on the `sx01` start gate, the first frame of play | the human's: load only, never overwrite |
+| 5 | something that runs itself: attract loop, or a race left to the AI | the human's: load only, never overwrite |
+| 8, 9 | scratch | anyone's; assume they are overwritten between one command and the next |
 
-Note per state: the characters/options chosen, which controller ports are in use, and the frame of the
-vsync counter it was saved on. A recording is only usable with the state it was recorded from, so keep them
-named in pairs under `context/recordings/`.
+Status on 2026-10-15: **3, 4 and 5 do not exist yet** — `plan/HUMAN.md` has the recipe for each, and a
+task that needs one blocks on that item rather than inventing a substitute. Slot 9 holds an agent-made
+main-menu state (C3, `Career` highlighted, no profile loaded, pad in port 1): a convenience, not a
+reference, and the next agent that needs a scratch slot will overwrite it.
+
+### Where the files are, and why yours may not have them
+
+A state is `<SERIAL> (<crc>).NN.p2s` in PCSX2's savestates folder, and *which* folder depends on who is
+running the emulator:
+
+| Who | Folder |
+|---|---|
+| the human's own PCSX2 | `~/.config/PCSX2/savestates/` |
+| kit copy N of a worktree | `<worktree>-slots/pcsx2/sN/PCSX2/savestates/` |
+
+The copies are made from the human's config and never shared afterwards, so:
+
+- A state the human makes **does not appear in a copy that already exists.** `./kit pcsx2 copy N` is what
+  pulls it in — re-running it on an existing copy copies new state files in and overwrites same-named
+  ones. Verified in C3 both ways, on a fresh copy and on an existing one.
+- A state an agent saves lives **only in that worktree's copy**, which is deleted with the worktree. If
+  a state is worth keeping, copy the `.p2s` into `~/.config/PCSX2/savestates/` — that is the only
+  directory every future copy inherits from. (That is how slot 9 above survives this task.)
+
+`./kit pcsx2 state` lists the slots the current copy can see with their `kit.toml` `[states]` note;
+`kit.toml` is git-ignored, so this table is the copy that survives.
+
+### What to write down about a state
+
+A state nobody can describe gets reloaded by three different agents who each work out what it is. For
+each one, record here: the screen or track it sits on, the bike and difficulty (`bike\race250a.phy` and
+`bike\race250p.phy` are different parameter sets — a capture is worthless if you do not know which one it
+is being compared against), which controller ports are in use, whether a profile is loaded, and the
+vsync counter's value at the moment it was saved (once C2 has found the counter; `[emu] vsync_addr` is
+still `auto` today, so no state here has a frame number yet).
+
+A recording is only usable with the state it was recorded from: keep the pair named together under
+`context/recordings/` and name the state in the line that announces the recording.
+
+### Using one
+
+```sh
+./kit pine save 9      ·      ./kit pine load 9          # the running game (slots 8/9 only)
+./kit pcsx2 state                                        # what this copy has, with its note
+./kit state list 4                                       # the parts inside the file
+./kit state ram 4 --out context/states/ram4.bin          # the 32 MiB EE RAM image, no emulator needed
+./kit state extract 4 --addr @table --len 0x400 --as f32
+```
+
+`docs/PCSX2.md` has the detail. Two things C3 measured that are worth knowing before you plan around
+them: a state file is 6–12 MB (it compresses the 32 MiB EE image plus IOP RAM, the VU memories, the
+scratchpad, the hardware registers and SPU2), and `./kit pine load` restores the game's own state but
+the kit has no way to tell you *whether* it did — the cheapest check is a screenshot of something you
+changed just before loading.
 
 ## Which proof for which code
 

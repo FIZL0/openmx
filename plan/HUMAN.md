@@ -11,10 +11,12 @@ constant is far more expensive than a blocked task: it looks like work and it is
 Write each item so it can be done without re-reading the whole project: the slot or file name to save to,
 how long it takes, and what to do if it goes wrong.
 
-## Right now, nothing is waiting on you
+## Right now: three save states and a recording
 
-The save states and the recording below are the next things that will be, and they need the game booting
-first (C1). Nothing is blocked today.
+The game boots under the kit (C1 is done), so the four items under *Save states and recordings* below are
+now waiting on you, with a recipe each. Nothing else is blocked. The two that matter most are what the
+port needs soonest: slot 4, which every physics comparison starts from, and slot 5, the only thing that
+can be replayed exactly.
 
 ## Before anything works
 
@@ -47,23 +49,49 @@ first (C1). Nothing is blocked today.
 ## Save states and recordings
 
 Agents can load states and replay recordings, but only a person can play the game to the interesting
-moment. Save states go in PCSX2's slots; by convention slots 3, 4 and 5 are the human's and are never
-overwritten, 8 and 9 are scratch for agents.
+moment. **These are the things waiting on you right now.** The slot convention is in `plan/REFERENCE.md`:
+3, 4 and 5 are yours and no tool ever writes them; 8 and 9 are scratch and agents overwrite them without
+asking.
 
-The game boots under the kit now (C1 is done), so these are doable today. Note that an agent can reach
-the main menu by itself — `KIT_PCSX2=6 ./kit pad send "press start 300"` and so on — so what is actually
-wanted from you is only the part that needs judgement and a controller: being *on* the right track, on
-the gate, and riding well enough to be worth matching.
+How to make any of them, the same four steps every time:
 
-- [ ] **The title screen** (slot 3).
+1. Boot the game in **your own** PCSX2, not a kit copy — a copy is muted, runs on its own config and is
+   thrown away with the agent's worktree. From the repo root, `./kit pcsx2 start` with `KIT_PCSX2` unset
+   launches your own PCSX2 on the right ISO; starting PCSX2 by hand and opening
+   `MX Unleashed (USA).iso` does the same job.
+2. Play to the moment described below.
+3. Save into the slot: PCSX2's `System → Save State → Slot N`, or `F1` after picking the slot with `F2`
+   if your hotkeys are still the defaults. The file lands in `~/.config/PCSX2/savestates/` as
+   `SLUS-20767 (9866FE54).0N.p2s` — about 6–12 MB.
+4. Fill in the state's row in `plan/REFERENCE.md` → *What each save state holds*, and tick the box here.
+   What an agent cannot work out for itself, and must not guess: the bike, the difficulty, which
+   controller ports were plugged in, and whether a profile was loaded.
+
+Two things that bite:
+
+- **Agents do not see a new state until someone re-runs `./kit pcsx2 copy N`.** Each copy got a snapshot
+  of your savestates folder when it was made. Re-running the copy command pulls new states in; that is
+  the agents' job, not yours, but it is why "I saved it an hour ago" and "the agent cannot find it" are
+  both true at once.
+- **A state belongs to the PCSX2 version that wrote it** (2.9.127 today) and to this ISO. After a PCSX2
+  upgrade an old state may refuse to load, and the fix is to make it again — which is the other reason
+  each one has a written recipe.
+
+- [ ] **The main menu** (slot 3). Boot, press Start past the attract video, the warning screen and the
+      controls diagram, and save on the menu with nothing selected. About two minutes. Agents can reach
+      this screen by themselves (C3 did: six Start presses, three seconds apart, from a cold boot) and
+      scratch slot 9 already holds one — so this slot is only worth making as the stable copy that no
+      tool will ever overwrite.
 - [ ] **On a supercross track, on the start gate** (slot 4), on `sx01` if the track select lets you pick
       it by name — that is the track the port is being built against (`Tracks\sx01.res`), and its archive
-      is already extracted and understood. Note here which bike and which difficulty, because
-      `bike\race250a.phy` and `bike\race250p.phy` are different parameter sets and the port has to know
-      which one it is being compared against.
+      is already extracted and understood. Save on the gate, before the gate drops, with the race about
+      to start rather than counting down if the game lets you tell the difference. Note here which bike
+      and which difficulty, because `bike\race250a.phy` and `bike\race250p.phy` are different parameter
+      sets and the port has to know which one it is being compared against. About five minutes.
 - [ ] **Something that runs itself** (slot 5): attract mode, or a race left to the AI. The most valuable
       state you will make, because a capture that needs a person playing cannot be repeated exactly, and
-      a port can only be proved against something repeatable.
+      a port can only be proved against something repeatable. Save it a few seconds *before* the
+      interesting part starts, put the pad down, and note here how long it runs for and what ends it.
 - [ ] **One longer recording of real play** for the acceptance test: start from the slot-4 state, ride a
       couple of laps normally, and include the awkward things — a crash, a whip, a landing from height, a
       wall. Save under `context/recordings/` with a line here saying which state it starts from and which
