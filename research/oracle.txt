@@ -611,3 +611,77 @@ hit_freeride_attach         boot 0x00330630 the vtable's per-actor attach (vtabl
 # The race activities (S13, stretch). Moved here out of plan/TODO.md, which is committed and must not
 # carry addresses; kit.toml's [symbols] is untracked, so this file is the only committed record.
 activity_supercross         boot 0x002f9b70 the "Supercross" / "Nationals" activity class, 0x4e0 bytes
+
+# ---------------------------------------------------------------------------------------------------
+# S2 — actor lifetime: the rest of the manager R6 found, the record's own constructor, and the two
+# global name registries the "kind" and "is-a" bits come out of. How each was read is in
+# research/journal/2026-10-15-s2-s2-actors. The manager's object: +0x30 master list, +0x3c group list,
+# both {count, head, tail}; a list node is {item, prev, next}. An actor record: +0x00 kind bit, +0x04
+# class mask, +0x0c the constructor's third argument, +0x10 the word both searches gate on, +0x18 scene
+# node, +0x1c manager, +0x20 player, +0x24/+0x30/+0x3c three sub-lists, +0x48 vtable.
+#
+# The manager's vtable (0x00452ae0) past the base class: +0x74 Add, +0x78 Remove, +0x7c and +0x8c the
+# two per-frame dispatch passes, +0x80 nearest, +0x84 nearest-of-kinds, +0x88 the two-actor exchange.
+actor_manager_remove        boot 0x0021a9d0 Remove(actor): find in the master list, unlink it there,
+#                                           clear actor+0x1c, then unlink it from the group whose head
+#                                           member's kind equals the actor's. Leaves an emptied group
+#                                           in the list, which the next lookup reads through
+actor_manager_each_early    boot 0x0021aa80 walk the master list head->tail calling vtable +0x28 on
+#                                           each actor
+actor_manager_each_late     boot 0x0021aef0 the same walk calling vtable +0x58
+actor_manager_nearest       boot 0x0021aad0 (manager, point*, out_f32|0, exclude) -> actor|0: master
+#                                           list order; gates on actor+0x18 then +0x10; distance from
+#                                           node_box_centre through vsub.xyz/mula.s/madda.s/madd.s/
+#                                           sqrt.s; keeps strictly nearer (c.olt.s) and rejects
+#                                           <= 1e-6 (c.ole.s, 0x358637bd); out gets FLT_MAX when
+#                                           nothing matched
+actor_manager_nearest_kinds boot 0x0021ac00 (manager, mask_ptr, point*, out_f32|0, exclude) -> actor|0:
+#                                           the same, with actor+0x00 & *mask_ptr tested first. The
+#                                           mask is read through a pointer, once per actor
+actor_pair_exchange         boot 0x0021ad50 (manager, a, b): not a list walk — walks a's sub-list
+#                                           through its own vtable (+0x2c count, +0x30 at, +0x34 take)
+#                                           offering each entry to b (+0x40 accept, +0x44 notify), then
+#                                           the same with a and b swapped
+actor_list_ctor             boot 0x0021afc0 zero the count, head and tail. 0x0021af40 is the group
+#                                           list's instantiation of the same
+actor_list_count            boot 0x0021af60 the count word
+actor_list_at               boot 0x0021af70 (list, i) -> item i steps from the head, or 0 past the end;
+#                                           i <= 0 gives the head
+actor_list_remove           boot 0x0021b020 (list, item) -> item|0: find, then unlink
+actor_list_unlink           boot 0x0021b080 (list, node): mend head/tail/prev/next, operator delete the
+#                                           node, count -= 1
+actor_list_clear            boot 0x0021b1d0 zero each node's item word, free the nodes head first,
+#                                           then zero the three words. 0x0021b370 is the group list's
+actor_list_dtor             boot 0x0021b230 (list, free_object): clear, and operator delete the list
+#                                           object itself when the second argument is > 0 — which is
+#                                           how a group object goes. 0x0021b3d0 is the group list's
+group_list_append           boot 0x0021b2c0 list_append for the group list (R6's note calls this the
+#                                           "second half" of 0x0021b120; they are two instantiations of
+#                                           one template, not two halves)
+actor_record_ctor           boot 0x00245120 (record, type_name, arg3): vtable at +0x48, three empty
+#                                           sub-lists, +0x00 = name_bit(actor_kind_names, type_name),
+#                                           +0x04/+0x08/+0x18/+0x1c/+0x20 = 0, +0x0c = arg3,
+#                                           +0x10 = +0x14 = 1. Registers nothing with the manager
+actor_record_dtor           boot 0x002451c0 frees the items of the sub-list at +0x24 and then all three
+#                                           sub-lists. Does not tell the manager
+actor_class_descriptor_ctor boot 0x002450c0 (descriptor, class_name, record_classes_ptr, arg4): one per
+#                                           level of an actor's hierarchy. descriptor+0x00 = arg4,
+#                                           +0x04 = name_bit(actor_class_names, class_name), and that
+#                                           bit is ORed into the record's +0x04
+name_bit                    boot 0x00281cb0 (registry, name) -> bit: walk the registry's list from the
+#                                           head comparing the first 0x80 bytes, shifting a running 1
+#                                           left once per entry walked past; on a miss, 0x80 bytes are
+#                                           allocated, strncpy'd and appended, and the shifted value is
+#                                           returned. So slot 31 gets 0x80000000 and every slot from 32
+#                                           on gets 0
+name_registry_clear         boot 0x00281df0 operator delete[] each name in index order, then free the
+#                                           nodes
+actor_kind_names            boot 0x004e1e88 the type-name registry: {count, head, tail}. An actor's
+#                                           kind is its type name's bit in here
+actor_class_names           boot 0x004e1e68 the class-name registry, same shape
+node_box_centre             boot 0x001b4560 (node, out_centre*, out_extent*): the scene node's world
+#                                           bounding box, refreshed through the node's own vtable if
+#                                           stale. Both out quadwords get w = 1.0f. Scene-graph work,
+#                                           hooked rather than ported in S2
+player_manager_remove_all   boot 0x00245d00 the player manager's teardown: destroys the players it
+#                                           holds, which the actor manager never does to actors

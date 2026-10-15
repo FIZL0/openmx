@@ -177,6 +177,12 @@ pub mod physics {
     }
 }
 
+/// Actor lifetime: the two linked lists a level's live objects hang in, how the world build puts an
+/// actor in them and takes it out again, and the order everything afterwards walks them in — which is
+/// the order random draws and collision tie-breaks resolve in. Also the interned name that an actor's
+/// "kind" actually is.
+pub mod actor;
+
 /// The bike in the air: where the sim decides the wheels have left the ground, what the stick may still
 /// do up there, the preload and backflip carried off the lip, and the test a landing has to pass for the
 /// rider to stay on. Half of how riding around feels is in here.
