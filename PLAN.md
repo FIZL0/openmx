@@ -128,7 +128,6 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
     this frame" mask, so the edge is the event and "held with the timer at 0" (I1). The same poll's
     six analogue axes: the report byte each one reads, the inversion one of them gets, and the dead
     zone of ±0.2 that is the only shaping there is — no clamp and no curve (I2).
-    this frame" mask, so the edge is the event and "held with the timer at 0" (I1).
   - `replay.rs` — the replay harness: a fixture of inputs and expectations replayed tick by tick (A2),
     plus the pad tape — a recorded session as the report bytes and measured `dt` of each frame, which
     `Playback` plays back through the input layer so a human-played sequence drives the port (I3).
