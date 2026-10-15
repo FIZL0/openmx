@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 
 use game_sim::demo;
 use ps2_float::F;
-use ps2_oracle::{skip, Ee, Kit};
+use ps2_oracle::{Ee, Kit, skip};
 
 /// Point `ps2-oracle` at the generated demo, building it first if it is missing.
 ///
@@ -31,41 +31,53 @@ use ps2_oracle::{skip, Ee, Kit};
 /// same problem the other way, by having a single test; either is fine, neither is optional.)
 fn demo_kit() -> Result<&'static PathBuf, &'static String> {
     static SETUP: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    SETUP.get_or_init(|| {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
-        let dir = root.join("context/demo");
-        if !dir.join("kit.toml").exists() || !dir.join("elf/boot.elf").exists() {
-            // `./kit demo` is deterministic and takes well under a second, so building it here is
-            // cheaper than explaining to a reader why their checkout has a skipping test in it.
-            let out = std::process::Command::new("python3")
-                .arg(root.join("kit"))
-                .args(["demo", "--out"])
-                .arg(&dir)
-                .output()
-                .map_err(|e| format!("could not run `./kit demo`: {e} — run it yourself, then retry"))?;
-            if !out.status.success() {
-                return Err(format!("`./kit demo` failed:\n{}", String::from_utf8_lossy(&out.stderr)));
-            }
-            // The ELFs are what the oracle actually loads; `./kit extract` + `./kit elf` make them.
-            for step in [["extract"].as_slice(), ["elf"].as_slice()] {
+    SETUP
+        .get_or_init(|| {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .unwrap();
+            let dir = root.join("context/demo");
+            if !dir.join("kit.toml").exists() || !dir.join("elf/boot.elf").exists() {
+                // `./kit demo` is deterministic and takes well under a second, so building it here is
+                // cheaper than explaining to a reader why their checkout has a skipping test in it.
                 let out = std::process::Command::new("python3")
                     .arg(root.join("kit"))
-                    .args(step)
-                    .env("KIT_ROOT", &dir)
+                    .args(["demo", "--out"])
+                    .arg(&dir)
                     .output()
-                    .map_err(|e| format!("could not run `./kit {}`: {e}", step[0]))?;
+                    .map_err(|e| {
+                        format!("could not run `./kit demo`: {e} — run it yourself, then retry")
+                    })?;
                 if !out.status.success() {
-                    return Err(format!("`./kit {}` failed:\n{}", step[0],
-                                       String::from_utf8_lossy(&out.stderr)));
+                    return Err(format!(
+                        "`./kit demo` failed:\n{}",
+                        String::from_utf8_lossy(&out.stderr)
+                    ));
+                }
+                // The ELFs are what the oracle actually loads; `./kit extract` + `./kit elf` make them.
+                for step in [["extract"].as_slice(), ["elf"].as_slice()] {
+                    let out = std::process::Command::new("python3")
+                        .arg(root.join("kit"))
+                        .args(step)
+                        .env("KIT_ROOT", &dir)
+                        .output()
+                        .map_err(|e| format!("could not run `./kit {}`: {e}", step[0]))?;
+                    if !out.status.success() {
+                        return Err(format!(
+                            "`./kit {}` failed:\n{}",
+                            step[0],
+                            String::from_utf8_lossy(&out.stderr)
+                        ));
+                    }
                 }
             }
-        }
-        // SAFETY-adjacent note: this is the one place the environment is touched, before any test has
-        // read it, and it is never changed afterwards.
-        unsafe { std::env::set_var("KIT_ROOT", &dir) };
-        Ok(dir)
-    })
-    .as_ref()
+            // SAFETY-adjacent note: this is the one place the environment is touched, before any test has
+            // read it, and it is never changed afterwards.
+            unsafe { std::env::set_var("KIT_ROOT", &dir) };
+            Ok(dir)
+        })
+        .as_ref()
 }
 
 /// A tiny xorshift, so the inputs are identical on every machine and any failure is reproducible from
@@ -126,38 +138,75 @@ fn load() -> Option<(Kit, Ee)> {
 fn the_generated_game_is_really_there() {
     let Some((kit, ee)) = load() else { return };
     assert_eq!(kit.serial, "SLUS-90001", "the demo's own made-up serial");
-    for name in ["clamp_index", "step_for_gear", "blend_weights", "demo_main", "overlay_mix"] {
+    for name in [
+        "clamp_index",
+        "step_for_gear",
+        "blend_weights",
+        "demo_main",
+        "overlay_mix",
+    ] {
         let at = kit.addr(name).unwrap_or_else(|why| panic!("{why}"));
-        assert_ne!(ee.u32_at(at), 0, "{name} at {at:#x} is zeroes, not instructions");
+        assert_ne!(
+            ee.u32_at(at),
+            0,
+            "{name} at {at:#x} is zeroes, not instructions"
+        );
     }
     // `Ee::game()` reads the programs straight out of the disc image: the boot file named by
     // SYSTEM.CNF, then each overlay copied to its `load` address with its header skipped.
-    println!("{}: boot + {} overlay(s), {} MB of RAM, 5 named functions",
-             kit.serial, kit.overlays.len(), ee.ram.len() >> 20);
+    println!(
+        "{}: boot + {} overlay(s), {} MB of RAM, 5 named functions",
+        kit.serial,
+        kit.overlays.len(),
+        ee.ram.len() >> 20
+    );
 }
 
 #[test]
 fn the_integer_functions_match() {
     let Some((kit, mut ee)) = load() else { return };
-    let (clamp, step) = (kit.addr("clamp_index").unwrap(), kit.addr("step_for_gear").unwrap());
+    let (clamp, step) = (
+        kit.addr("clamp_index").unwrap(),
+        kit.addr("step_for_gear").unwrap(),
+    );
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
 
     for k in 0..10_000u32 {
         // Interesting values first: the table's own bounds, then arbitrary ones.
         let (x, lo, hi) = match k {
             0..=10 => (k as i32 - 2, 0, 7),
-            _ => (rng.next() as i32 >> (k % 24), -(rng.next() as i32 >> 20), rng.next() as i32 >> 20),
+            _ => (
+                rng.next() as i32 >> (k % 24),
+                -(rng.next() as i32 >> 20),
+                rng.next() as i32 >> 20,
+            ),
         };
         // `slt` compares 64-bit registers, so arguments go in sign-extended, exactly as a real caller's
         // `addiu`/`lw` would leave them. Passing `x as u64` instead is the classic way to get a port that
         // "matches" for positive numbers only.
-        ee.call(clamp, &[x as i64 as u64, lo as i64 as u64, hi as i64 as u64], &[], 10_000);
-        assert_eq!(ee.v0() as i32, demo::clamp_index(x, lo, hi),
-                   "clamp_index({x}, {lo}, {hi}) after {k} inputs");
+        ee.call(
+            clamp,
+            &[x as i64 as u64, lo as i64 as u64, hi as i64 as u64],
+            &[],
+            10_000,
+        );
+        assert_eq!(
+            ee.v0() as i32,
+            demo::clamp_index(x, lo, hi),
+            "clamp_index({x}, {lo}, {hi}) after {k} inputs"
+        );
 
-        let gear = if k < 12 { k as i32 - 2 } else { rng.next() as i32 >> (k % 28) };
+        let gear = if k < 12 {
+            k as i32 - 2
+        } else {
+            rng.next() as i32 >> (k % 28)
+        };
         ee.call(step, &[gear as i64 as u64], &[], 10_000);
-        assert_eq!(ee.v0() as i32, demo::step_for_gear(gear), "step_for_gear({gear}) after {k} inputs");
+        assert_eq!(
+            ee.v0() as i32,
+            demo::step_for_gear(gear),
+            "step_for_gear({gear}) after {k} inputs"
+        );
     }
     println!("clamp_index, step_for_gear: 10000 inputs each, exact");
 }
@@ -181,10 +230,14 @@ fn the_float_function_is_bit_exact_over_ten_thousand_inputs() {
         // `assert!` rather than `assert_eq!` on purpose: the message below is the whole bug report —
         // the input, both answers, and both bit patterns — and `assert_eq!` would bury it under the two
         // bit patterns printed as decimal integers.
-        assert!(got.to_bits() == want.to_bits(),
-                "blend_weights({x} = {:#010x}) differs at input {k} of {N}\n  \
+        assert!(
+            got.to_bits() == want.to_bits(),
+            "blend_weights({x} = {:#010x}) differs at input {k} of {N}\n  \
                  the game gives {got} ({:#010x})\n  the port gives  {want} ({:#010x})",
-                x.to_bits(), got.to_bits(), want.to_bits());
+            x.to_bits(),
+            got.to_bits(),
+            want.to_bits()
+        );
     }
     println!("blend_weights: {N} inputs, bit-exact");
 }
@@ -223,12 +276,23 @@ fn the_same_function_in_host_f32_is_a_different_function() {
         "host f32 agreed on all 10000 inputs — if this ever happens, the demo's weights have stopped \
          exercising the EE's chopping and the example no longer proves anything",
     );
-    println!("host f32 first differs at input {k}: blend_weights({x} = {:#010x})\n  \
+    println!(
+        "host f32 first differs at input {k}: blend_weights({x} = {:#010x})\n  \
               the game gives {game} ({:#010x})\n  host f32 gives {host} ({:#010x})\n  \
               {differed} of 10000 inputs differ ({:.0}%)",
-             x.to_bits(), game.to_bits(), host.to_bits(), differed as f64 / 100.0);
-    assert!(k < 64, "host f32 first differed only at input {k}; the example wants it obvious");
-    assert!(differed > 1_000, "only {differed} of 10000 inputs differ — expected most of them");
+        x.to_bits(),
+        game.to_bits(),
+        host.to_bits(),
+        differed as f64 / 100.0
+    );
+    assert!(
+        k < 64,
+        "host f32 first differed only at input {k}; the example wants it obvious"
+    );
+    assert!(
+        differed > 1_000,
+        "only {differed} of 10000 inputs differ — expected most of them"
+    );
 }
 
 /// The overlay's function, for the same reason the demo has an overlay at all: a port has to prove code
@@ -247,8 +311,12 @@ fn an_overlays_function_can_be_proved_too() {
         ee.call(at, &[], &[x, y], 10_000);
         // mula.s $f12, c0  →  ACC = chop(x * 0.6);  madd.s $f0, $f13, c1  →  ACC + chop(y * 0.4)
         let want = (F(x) * 0.6f32).madd(F(y), 0.4f32);
-        assert_eq!(ee.f0().to_bits(), want.to_bits(),
-                   "overlay_mix({x}, {y}) after {k} inputs: {} vs {want}", ee.f0());
+        assert_eq!(
+            ee.f0().to_bits(),
+            want.to_bits(),
+            "overlay_mix({x}, {y}) after {k} inputs: {} vs {want}",
+            ee.f0()
+        );
     }
     println!("overlay_mix: 10000 inputs, bit-exact");
 }

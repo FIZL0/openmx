@@ -142,12 +142,15 @@ def main(argv: list[str]) -> int:
         else:
             try:
                 from ps2kit.disc import Disc, system_cnf
-                serial, boot = system_cnf(Disc(chosen))
+                b = system_cnf(Disc(chosen))
                 c = cfg()
-                c.set('game', 'serial', serial)
-                if boot:
-                    c.set('boot', 'elf', boot)
-                _say(OK, f'read the disc: serial {serial}, boot ELF {boot}')
+                if b.serial:
+                    c.set('game', 'serial', b.serial)
+                if b.elf:
+                    c.set('boot', 'elf', b.elf)
+                if b.version:
+                    c.set('game', 'version', b.version)
+                _say(OK, f'read the disc: {b}')
             except Exception as e:
                 _say(WARN, f'could not read SYSTEM.CNF off the image ({e})',
                      'Set [game] serial by hand — PCSX2 shows it in the title bar while the game runs.')

@@ -11,7 +11,7 @@
 //! has something real in it.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
-use ps2_float::{f, F};
+use ps2_float::{F, f};
 
 /// The weight table the original reads, as eight floats in its `.data`.
 ///
@@ -19,7 +19,9 @@ use ps2_float::{f, F};
 /// decompiler's guess at the literals — a table copied by hand is a table with a typo in it. The order
 /// matters: the original accumulates them front to back, and chopped addition is not associative, so
 /// summing them in any other order gives a different answer.
-pub const WEIGHTS: [f32; 8] = [1.0, 0.25, 0.3333333, 7.5e-4, 1024.5, 0.0078125, 3.0e-5, 12.345679];
+pub const WEIGHTS: [f32; 8] = [
+    1.0, 0.25, 0.3333333, 7.5e-4, 1024.5, 0.0078125, 3.0e-5, 12.345679,
+];
 
 /// The step table, eight signed ints immediately after the weights.
 pub const STEPS: [i32; 8] = [0, 3, 7, 12, 18, 25, 33, 42];

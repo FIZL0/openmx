@@ -85,7 +85,11 @@ impl Sim {
         Sim {
             ticks: 0,
             rng: seed,
-            ball: physics::Ball { vel: Vf([0.5, 3.0, 0.0, 0.0]), spin: F(1.0), ..Default::default() },
+            ball: physics::Ball {
+                vel: Vf([0.5, 3.0, 0.0, 0.0]),
+                spin: F(1.0),
+                ..Default::default()
+            },
         }
     }
 
@@ -113,7 +117,11 @@ impl Sim {
 /// drifted to `-0.0` has drifted. Equally, never hash a `f64`, a `HashMap`'s iteration order, or a
 /// pointer; all three vary between runs of the same binary.
 pub fn state_hash(bytes: &[u8], seed: u64) -> u64 {
-    let mut h = if seed == 0 { 0xcbf2_9ce4_8422_2325 } else { seed };
+    let mut h = if seed == 0 {
+        0xcbf2_9ce4_8422_2325
+    } else {
+        seed
+    };
     for &b in bytes {
         h ^= b as u64;
         h = h.wrapping_mul(0x1000_0000_01b3);
@@ -216,6 +224,11 @@ pub mod replay {
     }
 }
 
+/// The disc's two archive formats: the one container holding the game, and the compressed containers
+/// holding each track, bike and menu. Pure parsing over byte slices — see the module's own docs for why
+/// it hands back offsets instead of reading files.
+pub mod archive;
+
 /// The worked example from `docs/EXAMPLE.md`: three functions of the synthetic program that `./kit demo`
 /// generates, ported, with `tests/demo.rs` proving them bit-exact against the original's instructions.
 /// Delete it once your own port has something real in it.
@@ -242,11 +255,18 @@ mod tests {
     fn a_replay_reports_the_first_frame_that_differs() {
         let mut sim = Sim::new(7);
         let inputs = vec![Input::default(); 10];
-        let hashes: Vec<u64> = inputs.iter().map(|&i| {
-            sim.tick(i);
-            sim.hash()
-        }).collect();
-        let good = replay::Fixture { seed: 7, inputs: inputs.clone(), hashes: hashes.clone() };
+        let hashes: Vec<u64> = inputs
+            .iter()
+            .map(|&i| {
+                sim.tick(i);
+                sim.hash()
+            })
+            .collect();
+        let good = replay::Fixture {
+            seed: 7,
+            inputs: inputs.clone(),
+            hashes: hashes.clone(),
+        };
         assert!(replay::verify(&good).is_ok());
 
         let mut bad = good.clone();
