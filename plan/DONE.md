@@ -42,3 +42,6 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 ### Phase 6 — input, the game's own way
 - [x] **I1** (after C5) The input layer: pads mapped to the game's own bitmask, with "held", "pressed this frame" and "released" exactly as the original keeps them (including the frame it latches them, which decides whether a press on the frame of a state change counts) → crates/game-sim/src/input.rs | t: crates/game-sim/tests/input.rs | j: i1-input
 - [x] **I2** (after I1) Analogue sticks: the original's dead zone, clamping and any curve, in its arithmetic. An approximated stick curve quietly changes every movement in the game → crates/game-sim/src/input.rs | t: crates/game-sim/tests/input.rs (oracle) | j: i1-input
+
+### Phase 4 — the arithmetic, before any ported math
+- [x] **F3** VU0 macro mode: the ops the game actually uses (`vmul`, `vadd`, `vmadd`, `vmula`, `vdiv`, `vsqrt`, `vrsqrt`, the clipping and min/max ones), with VU0's own rounding and its flag behaviour. Take the list from the disassembly rather than implementing the whole ISA → crates/ps2-float/src/vu.rs | t: crates/ps2-float/tests/vu.rs | j: f3-vu0
