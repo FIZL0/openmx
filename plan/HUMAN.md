@@ -11,12 +11,22 @@ constant is far more expensive than a blocked task: it looks like work and it is
 Write each item so it can be done without re-reading the whole project: the slot or file name to save to,
 how long it takes, and what to do if it goes wrong.
 
-## Right now: three save states and a recording
+## Right now: a freeride state and a freeride recording
 
-The game boots under the kit (C1 is done), so the four items under *Save states and recordings* below are
-now waiting on you, with a recipe each. Nothing else is blocked. The two that matter most are what the
-port needs soonest: slot 4, which every physics comparison starts from, and slot 5, the only thing that
-can be replayed exactly.
+**Priority 1 is freeroam**: riding a dirt bike around a freeride area and doing tricks, with the
+original's physics. Racing, opponents and the front end are stretch goals (backlog S12 and S9), so the
+asks below changed shape — slot 4 is now a freeride area rather than a supercross start gate, and the
+acceptance recording is free riding rather than laps.
+
+The game boots under the kit (C1 is done), so the items under *Save states and recordings* below are
+waiting on you, with a recipe each. The two that matter most are slot 4, which every physics comparison
+starts from, and the recording, which is the only thing a port can be proved against exactly.
+
+One thing may shrink this list: backlog **R7** drives the original straight into a freeride area by
+writing StartMode (`app+0x408`) and the event kind, with no menus and nobody playing. If that lands, the
+agents can make their own freeride starting point and slot 4 becomes a convenience rather than a blocker.
+Slot 3 (the main menu) is now only worth making if you want a stable copy — nothing on the critical path
+goes through a menu.
 
 ## Before anything works
 
@@ -82,29 +92,35 @@ Two things that bite:
       this screen by themselves (C3 did: six Start presses, three seconds apart, from a cold boot) and
       scratch slot 9 already holds one — so this slot is only worth making as the stable copy that no
       tool will ever overwrite.
-- [ ] **On a supercross track, on the start gate** (slot 4), on `sx01` if the track select lets you pick
-      it by name — that is the track the port is being built against (`Tracks\sx01.res`), and its archive
-      is already extracted and understood. Save on the gate, before the gate drops, with the race about
-      to start rather than counting down if the game lets you tell the difference. Note here which bike
-      and which difficulty, because `bike\race250a.phy` and `bike\race250p.phy` are different parameter
-      sets and the port has to know which one it is being compared against. About five minutes.
+- [ ] **In a freeride area, stopped on open ground** (slot 4) — whichever freeride area the game lets you
+      into soonest. This is the state every physics comparison starts from, so make it boring on purpose:
+      bike upright, stationary, engine running, pad down, nothing in the air and no jump in the next
+      second. Somewhere with a lip or a table within riding distance is ideal, since the same state has to
+      serve S3 (ground), S10 (air and landing) and S11 (tricks). Note here which bike you were on —
+      `bike\*.phy` parameter sets differ, and the port has to know which one it is being compared
+      against — and which freeride area it is. About five minutes.
 - [ ] **Something that runs itself** (slot 5): attract mode, or a race left to the AI. The most valuable
       state you will make, because a capture that needs a person playing cannot be repeated exactly, and
       a port can only be proved against something repeatable. Save it a few seconds *before* the
       interesting part starts, put the pad down, and note here how long it runs for and what ends it.
-- [ ] **One longer recording of real play** for the acceptance test: start from the slot-4 state, ride a
-      couple of laps normally, and include the awkward things — a crash, a whip, a landing from height, a
-      wall. Save under `context/recordings/` with a line here saying which state it starts from and which
-      controller port. A recording whose save state is lost is worthless.
+- [ ] **One longer recording of free riding** for the acceptance test (S8): start from the slot-4 state
+      and just ride — no laps, no objectives. Include the awkward things, because they are what the port
+      will get wrong: a jump taken too slow and one taken too fast, a trick landed clean, a trick landed
+      sideways, a crash, a wall, a slow scrape along a slope, and a few seconds of sitting still. Save
+      under `context/recordings/` with a line here saying which state it starts from and which controller
+      port. A recording whose save state is lost is worthless.
 
       What this proves: the same button presses fed to the port produce the same bike position, frame by
       frame. It is the only test that can show the physics really match rather than merely look right.
 
 ## Decisions only you can make
 
-- [x] **What this port is for, first.** Decided: the map and the player controller, riding the dirt bike
-      with the original's physics. That is backlog S3 (movement) and S4 (collision) with V1 (first draw)
-      behind it, and it sets the order everything before them is done in.
+- [x] **What this port is for, first.** Decided: **freeroam** — riding the dirt bike around a freeride
+      area and doing tricks, with the original's physics. That is backlog S3 (ground), S4 (collision),
+      S10 (air and landing) and S11 (tricks), with D6 (the freeride area's data), V1 (first draw) and P1
+      (the playable shell — a window and a real pad) behind them. It sets the order everything before
+      them is done in, and it puts two things out of the way until it is done: opponent AI and the race
+      activities (S12) and the front end (S9), both stretch.
 - [ ] **What has to be exact, and what only has to look right.** The default in `AGENT.md` is: simulation
       exact, rendering by eye, front end free. That fits the goal above, so it stands unless you say
       otherwise — the thing worth confirming is whether you want the *bike's* arithmetic bit-exact (which
