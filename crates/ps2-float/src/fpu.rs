@@ -29,7 +29,10 @@
 //!   ([`rsqrt`]).
 //! * **`madd.s` is not fused.** The product is rounded (chopped) to `f32` first and then goes through the
 //!   same badly-aligning adder. `madd(acc, a, b)` is therefore *exactly* `add(acc, mul(a, b))` — it is a
-//!   single instruction, not a single rounding.
+//!   single instruction, not a single rounding. The accumulate forms (`mula.s`, `madda.s`, …) are the
+//!   same arithmetic written into the FPU's one accumulator register; [`Acc`] is that register, so the
+//!   `mula.s`/`madda.s`/`madd.s` chain a compiler emits for a dot product ([`dot`]) can be ported
+//!   instruction for instruction.
 //!
 //! Everything here is total: no operation panics, and no operation can produce a NaN or an infinity, just
 //! as the hardware cannot.
@@ -202,6 +205,27 @@ pub fn rsqrt(a: f32, b: f32) -> f32 {
 
 /// `madd.s`: `acc + a·b`, the product chopped to `f32` first and then put through the aligning adder.
 /// Not a fused multiply-add: two roundings, in this order.
+///
+/// The order is the whole point, and it costs bits twice. The 48-bit product loses its low 24 bits to
+/// the chop *before* the adder has seen the accumulator, so those bits can never carry into the sum —
+/// and then the adder's one-guard-bit alignment throws away most of what is left whenever the
+/// accumulator is the larger term, which in a dot product or an integrator it almost always is. An FMA
+/// (`f32::mul_add`) rounds once, from the exact product, and a `mul` in `f64` followed by an `f64` add
+/// rounds late; both are systematically closer to the real answer than the EE is. The error is one-signed
+/// (always toward zero), so in a loop it accumulates rather than cancelling: this is the single operation
+/// most likely to be the reason a port drifts.
+///
+/// ```
+/// # use ps2_float::fpu;
+/// let (acc, a, b) = (1.0f32, 1.0 / 3.0, 3.000_001);
+/// assert_eq!(fpu::madd(acc, a, b), fpu::add(acc, fpu::mul(a, b)));   // two roundings, this order
+///
+/// // a product of three quarters of the accumulator's last bit: the adder keeps the one guard bit it
+/// // has, the rest of the product is gone, and the chop takes the sum back down to 1.0
+/// let p = f32::from_bits(0x33c0_0000);                               // 1.5 · 2^-24
+/// assert_eq!(fpu::madd(1.0, p, 1.0), 1.0);
+/// assert_eq!(p.mul_add(1.0, 1.0).to_bits(), 1.0f32.to_bits() + 1);   // an FMA rounds once, and up
+/// ```
 pub fn madd(acc: f32, a: f32, b: f32) -> f32 {
     add(acc, mul(a, b))
 }
@@ -222,11 +246,24 @@ pub fn msuba(acc: f32, a: f32, b: f32) -> f32 {
     msub(acc, a, b)
 }
 
-/// `adda.s` / `suba.s` / `mula.s`: the same arithmetic as [`add`] / [`sub`] / [`mul`], into the
-/// accumulator. A very common idiom is `adda.s $f0, x` (accumulator = 0 + x) followed by `madd.s`, which
-/// is why [`lerp`] below reads the way it does.
+/// `adda.s`: [`add`] into the accumulator. A very common idiom is `adda.s $f0, x` (accumulator = 0 + x)
+/// followed by `madd.s`, which is why [`lerp`] below reads the way it does.
 pub fn adda(a: f32, b: f32) -> f32 {
     add(a, b)
+}
+
+/// `suba.s`: [`sub`] into the accumulator.
+pub fn suba(a: f32, b: f32) -> f32 {
+    sub(a, b)
+}
+
+/// `mula.s`: [`mul`] into the accumulator — the instruction that *starts* a dot product, where
+/// `adda.s $f0, x` starts a sum. Opening with it is not the same as zeroing the accumulator and taking
+/// the first term with `madd.s`: `mula.s` of `-1` by `0` leaves `-0`, where going through the adder
+/// (`0 + (-0)`) gives `+0`. A sign of zero reaches a port's `copysign`, its `min`/`max` and its
+/// divisions, so [`dot`] opens with this one, as the compiler does.
+pub fn mula(a: f32, b: f32) -> f32 {
+    mul(a, b)
 }
 
 /// `abs.s`: clears the sign bit, nothing rounds.
@@ -283,6 +320,22 @@ pub fn from_u32(v: u32) -> f32 {
 /// Spelled out so a port can call it where the original has those three instructions.
 pub fn lerp(from: f32, to: f32, w: f32) -> f32 {
     madd(adda(0.0, from), w, sub(to, from))
+}
+
+/// The `mula.s` / `madda.s` / `madd.s` chain a compiler emits for a dot product: `a[0]·b[0]` into the
+/// accumulator, then one accumulate per further term, in index order.
+///
+/// Order and grouping are part of the answer, not an implementation detail — each term is chopped and
+/// then badly aligned against the running total, so summing the same products in another order, or
+/// pairing them up, gives a different `f32`. A port must keep the original's order; this is that order
+/// for the usual compiler output, which is why it is spelled out once here rather than at every call.
+pub fn dot<const N: usize>(a: [f32; N], b: [f32; N]) -> f32 {
+    let Some((&a0, rest)) = a.split_first() else { return 0.0 };
+    let mut acc = mula(a0, b[0]); // mula.s, not `adda.s $f0` then madd.s: see [`mula`]
+    for (i, &ai) in rest.iter().enumerate() {
+        acc = madda(acc, ai, b[i + 1]);
+    }
+    acc
 }
 
 /// An EE FPU single.
@@ -380,6 +433,102 @@ impl F {
     /// The three-instruction lerp idiom: `self + w·(to − self)` (see [`lerp`]).
     pub fn lerp(self, to: impl Into<F>, w: impl Into<F>) -> F {
         F(lerp(self.0, to.into().0, w.into().0))
+    }
+    /// The `mula.s` / `madda.s` chain for a dot product, in index order (see [`dot`]).
+    pub fn dot<const N: usize>(a: [F; N], b: [F; N]) -> F {
+        F(dot(f32s(a), f32s(b)))
+    }
+}
+
+/// `ACC`, the FPU's accumulator register.
+///
+/// The accumulate instructions come in pairs: the `a` forms (`mula.s`, `adda.s`, `madda.s` …) write the
+/// FPU's one accumulator register, and `madd.s`/`msub.s` read it and write an `f`-register. A compiler
+/// emits them as a chain — `mula.s` to open, a `madda.s` per further term, a `madd.s` to land the total —
+/// and most of a PS2 game's vector math is that chain: dot products, matrix rows, a physics integrator's
+/// `pos += vel·dt`.
+///
+/// ```
+/// use ps2_float::{F, fpu::Acc};
+///
+/// // mula.s f1, f4 ; madda.s f2, f5 ; madd.s f0, f3, f6   — a three-term dot product
+/// let d = Acc::mula(0.5, 0.25).madda(1.0 / 3.0, 3.000_001).madd(1.0e-9, 1.0);
+/// assert_eq!(d, F::dot([0.5, 1.0 / 3.0, 1.0e-9].map(F), [0.25, 3.000_001, 1.0].map(F)));
+/// ```
+///
+/// Nothing here rounds differently from the free functions — `madda` *is* [`madd`], and the accumulator
+/// holds an ordinary single, not a wide intermediate. The type exists so that a ported chain can be read
+/// against the instructions it came from, and so that the accumulator cannot be passed where an
+/// `f`-register is meant. `Acc(F(x))` is the register with `x` in it; the value should be one an FPU
+/// operation produced.
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub struct Acc(pub F);
+
+impl Acc {
+    pub const ZERO: Acc = Acc(F::ZERO);
+
+    /// `mula.s`: `ACC = a·b`. What opens a dot product (see [`mula`] for why not `adda.s $f0`).
+    pub fn mula(a: impl Into<F>, b: impl Into<F>) -> Acc {
+        Acc(F(mula(a.into().0, b.into().0)))
+    }
+    /// `adda.s`: `ACC = a + b`. `Acc::adda(0.0, x)` is the "load the accumulator" idiom.
+    pub fn adda(a: impl Into<F>, b: impl Into<F>) -> Acc {
+        Acc(F(adda(a.into().0, b.into().0)))
+    }
+    /// `suba.s`: `ACC = a − b`.
+    pub fn suba(a: impl Into<F>, b: impl Into<F>) -> Acc {
+        Acc(F(suba(a.into().0, b.into().0)))
+    }
+    /// `madda.s`: `ACC = ACC + a·b`, the chopped product through the aligning adder ([`madd`]).
+    pub fn madda(self, a: impl Into<F>, b: impl Into<F>) -> Acc {
+        Acc(F(madda(self.0.0, a.into().0, b.into().0)))
+    }
+    /// `msuba.s`: `ACC = ACC − a·b`.
+    pub fn msuba(self, a: impl Into<F>, b: impl Into<F>) -> Acc {
+        Acc(F(msuba(self.0.0, a.into().0, b.into().0)))
+    }
+    /// `madd.s`: `ACC + a·b` into an `f`-register, leaving the accumulator alone.
+    pub fn madd(self, a: impl Into<F>, b: impl Into<F>) -> F {
+        self.0.madd(a, b)
+    }
+    /// `msub.s`: `ACC − a·b` into an `f`-register, leaving the accumulator alone.
+    pub fn msub(self, a: impl Into<F>, b: impl Into<F>) -> F {
+        self.0.msub(a, b)
+    }
+    /// The accumulator's value, as it would be moved to an `f`-register.
+    pub fn to_f(self) -> F {
+        self.0
+    }
+    /// The accumulator's raw 32-bit pattern — what a test compares.
+    pub fn to_bits(self) -> u32 {
+        self.0.to_bits()
+    }
+}
+
+impl From<Acc> for F {
+    fn from(a: Acc) -> F {
+        a.0
+    }
+}
+impl From<Acc> for f32 {
+    fn from(a: Acc) -> f32 {
+        a.0.0
+    }
+}
+impl PartialEq<F> for Acc {
+    fn eq(&self, o: &F) -> bool {
+        self.0 == *o
+    }
+}
+impl PartialEq<f32> for Acc {
+    fn eq(&self, o: &f32) -> bool {
+        self.0.0 == *o
+    }
+}
+impl core::fmt::Display for Acc {
+    fn fmt(&self, w: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(w)
     }
 }
 

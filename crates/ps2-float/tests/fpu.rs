@@ -71,8 +71,13 @@ fn the_adder_keeps_one_guard_bit_and_gives_up_at_25() {
 fn madd_is_a_chopped_product_then_an_aligned_add() {
     let (acc, a, b) = (1.0f32, 1.0 / 3.0, 3.000_001);
     assert_eq!(fpu::madd(acc, a, b), fpu::add(acc, fpu::mul(a, b)), "madd must not fuse");
-    assert_ne!(fpu::madd(acc, a, b).to_bits(), acc.mul_add(a, b).to_bits(),
-               "and it is not the host's FMA either");
+    // and it is not the host's FMA either: a product of three quarters of the accumulator's last bit
+    // survives one rounding and not two. (F2's tests below take the two roundings apart; this
+    // assertion used to pass `acc.mul_add(a, b)`, which is `acc·a + b` — a comparison that could not
+    // fail and proved nothing.)
+    let p = f32::from_bits(0x33c0_0000); // 1.5 · 2^-24
+    assert_eq!(fpu::madd(1.0, p, 1.0), 1.0);
+    assert_eq!(p.mul_add(1.0, 1.0).to_bits(), 1.0f32.to_bits() + 1);
     // the accumulate form keeps the same two steps
     assert_eq!(fpu::msub(acc, a, b), fpu::sub(acc, fpu::mul(a, b)));
     assert_eq!(f(acc).madd(a, b), fpu::madd(acc, a, b));
@@ -514,4 +519,244 @@ fn div_and_sqrt_round_to_nearest_over_the_whole_range() {
     assert!(saturated > 100 && flushed > 100, "{saturated} saturated, {flushed} flushed — too few");
     assert_eq!(fpu::sqrt(-0.0).to_bits(), 0, "the sign goes before the root, so -0 roots to +0");
     assert_eq!(fpu::div(f32::MAX, f32::from_bits(0x0040_0000)), fpu::MAX, "a denormal divisor is zero");
+}
+
+// --- F2: the accumulator, and the chop inside `madd.s` ----------------------------------------------
+
+/// `madd.s` / `msub.s` on bit patterns: the 48-bit product truncated to a single, and *then* the
+/// aligning adder — the two roundings the reference emulator's recompiler performs, in its order
+/// (`MULSS` into a register, then its correct add/sub). Built from [`int_model`]'s integer `mul` and
+/// `add`, so no host float operation and no code from `fpu.rs` is involved in either step.
+///
+/// The composition is the hypothesis, taken from the reference; what the tests below establish is that
+/// `fpu::madd` performs exactly these two roundings in this order over the whole input space, and that
+/// the obvious alternatives (one rounding, or the same rounding applied late) are measurably different
+/// values rather than a matter of taste.
+mod int_acc {
+    use super::int_model;
+
+    pub fn madd(acc: u32, a: u32, b: u32) -> u32 {
+        int_model::add(acc, int_model::mul(a, b))
+    }
+
+    pub fn msub(acc: u32, a: u32, b: u32) -> u32 {
+        int_model::sub(acc, int_model::mul(a, b))
+    }
+}
+
+/// Accumulator values worth hitting on purpose: the edge patterns, plus the ones that make the adder's
+/// alignment interesting against a product near 1.0.
+fn acc_patterns() -> Vec<u32> {
+    let mut v = edge_patterns();
+    v.extend([0x3f80_0001, 0xbf80_0002, 0x3380_0000, 0x4b80_0000, 0xcb80_0000]);
+    v
+}
+
+#[test]
+fn madd_and_msub_match_an_integer_model() {
+    let mut rng = Rng(0x2468_ace0);
+    let mut triples: Vec<(u32, u32, u32)> = Vec::new();
+    // every edge pattern as an operand of the product, against a handful of accumulators that put the
+    // adder's cliff in reach of it
+    for &acc in &acc_patterns() {
+        for &a in &edge_patterns() {
+            for b in [0x3f80_0000, 0x3f80_0001, 0xbf80_0000, 0x3380_0000, 0x7f7f_ffff] {
+                triples.push((acc, a, b));
+            }
+        }
+    }
+    for _ in 0..30_000 {
+        triples.push((rng.next(), rng.next(), rng.next())); // anywhere, infinities and NaNs included
+        // a product landing a chosen number of exponents away from the accumulator, which is where the
+        // alignment mask decides the answer and where uniform random triples never land
+        let e = (rng.next() % 256) as i32;
+        let d = (rng.next() % 55) as i32 - 27;
+        let (a, b) = (rng.near(e / 2), rng.near(e - e / 2));
+        triples.push((rng.near(e + d), a, b));
+    }
+
+    assert!(triples.len() >= 77_000, "{} inputs: fewer than the journal quotes", triples.len());
+
+    // the two ways of getting it wrong, counted so that the test can insist they are reachable
+    let (mut vs_fma, mut vs_late, mut chopped_product) = (0, 0, 0);
+    for (acc, a, b) in triples {
+        let (x, p, q) = (f32::from_bits(acc), f32::from_bits(a), f32::from_bits(b));
+        for (name, got, want) in [
+            ("madd", fpu::madd(x, p, q).to_bits(), int_acc::madd(acc, a, b)),
+            ("msub", fpu::msub(x, p, q).to_bits(), int_acc::msub(acc, a, b)),
+            ("madda", fpu::madda(x, p, q).to_bits(), int_acc::madd(acc, a, b)),
+            ("msuba", fpu::msuba(x, p, q).to_bits(), int_acc::msub(acc, a, b)),
+        ] {
+            assert_eq!(got, want, "{name}({acc:#010x}, {a:#010x}, {b:#010x}): {got:#010x} vs {want:#010x}");
+        }
+        // operands the FPU reads as something else (denormals, exponent 255) would make the host's own
+        // arithmetic answer a different question, so the comparisons below use the fixed-up values
+        let (x, p, q) = (fpu::operand(acc), fpu::operand(a), fpu::operand(b));
+        let got = fpu::madd(x, p, q).to_bits();
+        if got != p.mul_add(q, x).to_bits() {
+            vs_fma += 1; // one rounding instead of two
+        }
+        if got != fpu::chop(x as f64 + p as f64 * q as f64).to_bits() {
+            // the same rounding, applied once at the end instead of to the product as well. A counter,
+            // not a model: the product is exact in `f64` but adding the accumulator to it rounds, so
+            // this says "these two are not the same function", which is all it is asked.
+            vs_late += 1;
+        }
+        if fpu::mul(p, q).to_bits() != (p as f64 * q as f64) as f32 as u32 {
+            chopped_product += 1; // the product's own chop actually did something
+        }
+    }
+    assert!(vs_fma > 10_000, "only {vs_fma} inputs tell madd.s apart from an FMA");
+    assert!(vs_late > 1_000, "only {vs_late} inputs show the product being rounded before the add");
+    assert!(chopped_product > 10_000, "only {chopped_product} products needed rounding at all");
+}
+
+#[test]
+fn the_product_is_truncated_before_the_add() {
+    // (1 + 2^-23)² is 1 + 2^-22 + 2^-46: the last term is past a single's 24 bits, so the product that
+    // reaches the adder is exactly 1 + 2^-22 — and an accumulator of -(1 + 2^-22) then cancels it to
+    // nothing. The real answer is 2^-46, which is a perfectly representable single; the PS2 returns
+    // zero, and a port that rounds late returns 2^-46 and never cancels.
+    let a = f32::from_bits(0x3f80_0001); // 1 + 2^-23
+    let acc = f32::from_bits(0xbf80_0002); // -(1 + 2^-22)
+    assert_eq!(fpu::mul(a, a).to_bits(), 0x3f80_0002, "the product is chopped on its way out");
+    assert_eq!(fpu::madd(acc, a, a).to_bits(), 0, "so the add cancels exactly");
+    assert_eq!(fpu::chop(acc as f64 + a as f64 * a as f64).to_bits(), 0x2880_0000, "where 2^-46 is right");
+    assert_eq!(a.mul_add(a, acc).to_bits(), 0x2880_0000, "as does an FMA: one rounding, from the real product");
+
+    // the second rounding, on its own: this product is exact (one factor is a power of two), so what
+    // the adder loses here is the alignment, not the chop. 1 − 2^-23·(1 + 2^-23) is just under
+    // 1 − 2^-23; the EE drops the operand's low bit before subtracting and lands *on* 1 − 2^-23, where
+    // rounding late truncates to the single below it.
+    let b = f32::from_bits(0x3400_0000); // 2^-23
+    assert_eq!(fpu::mul(a, b).to_bits(), 0x3400_0001, "exact: 2^-23 + 2^-46");
+    assert_eq!(fpu::msub(1.0, a, b).to_bits(), 0x3f7f_fffe, "1 − 2^-23, the low bit aligned away");
+    assert_eq!(fpu::chop(1.0 - a as f64 * b as f64).to_bits(), 0x3f7f_fffd, "one ulp lower if rounded late");
+
+    // the roundings are the *only* difference: where neither of them has anything to do, rounding late
+    // gives the same value
+    assert_eq!(fpu::madd(1.0, 1.0, 1.0), fpu::chop(2.0));
+
+    // a product too small to reach the accumulator vanishes, exactly as a plain add would
+    assert_eq!(fpu::madd(1.0, 1.0e-4, 1.0e-5), 1.0);
+    assert_eq!(fpu::msub(1.0, 1.0e-4, 1.0e-5), 1.0);
+
+    // the product saturates on its way to the adder — rounding toward zero turns an overflow into
+    // ±max, with no infinity to carry — so an accumulator of −max can cancel it back to nothing
+    assert_eq!(fpu::madd(1.0, fpu::MAX, fpu::MAX), fpu::MAX);
+    assert_eq!(fpu::madd(fpu::NEG_MAX, fpu::MAX, fpu::MAX).to_bits(), 0);
+    // and a product that underflows is gone before the add, sign and all
+    assert_eq!(fpu::madd(0.0, 1.0e-30, 1.0e-20).to_bits(), 0);
+    assert_eq!(fpu::mula(-1.0e-30, 1.0e-20).to_bits(), 0x8000_0000);
+}
+
+#[test]
+fn the_accumulator_forms_are_the_same_arithmetic() {
+    use ps2_float::fpu::Acc;
+
+    // the `a` forms differ from the others only in where the instruction writes
+    let mut rng = Rng(0x1357_9bdf);
+    for _ in 0..20_000 {
+        let (acc, a, b) = (rng.next(), rng.next(), rng.next());
+        let (x, p, q) = (f32::from_bits(acc), f32::from_bits(a), f32::from_bits(b));
+        assert_eq!(fpu::madda(x, p, q).to_bits(), fpu::madd(x, p, q).to_bits());
+        assert_eq!(fpu::msuba(x, p, q).to_bits(), fpu::msub(x, p, q).to_bits());
+        assert_eq!(fpu::adda(p, q).to_bits(), fpu::add(p, q).to_bits());
+        assert_eq!(fpu::suba(p, q).to_bits(), fpu::sub(p, q).to_bits());
+        assert_eq!(fpu::mula(p, q).to_bits(), fpu::mul(p, q).to_bits());
+
+        // the register wrapper is the same chain, instruction for instruction
+        assert_eq!(Acc::mula(p, q).to_bits(), fpu::mul(p, q).to_bits());
+        assert_eq!(Acc::adda(p, q).to_bits(), fpu::add(p, q).to_bits());
+        assert_eq!(Acc::suba(p, q).to_bits(), fpu::sub(p, q).to_bits());
+        assert_eq!(Acc(f(x)).madda(p, q).to_bits(), fpu::madda(x, p, q).to_bits());
+        assert_eq!(Acc(f(x)).msuba(p, q).to_bits(), fpu::msuba(x, p, q).to_bits());
+        assert_eq!(Acc(f(x)).madd(p, q).to_bits(), fpu::madd(x, p, q).to_bits());
+        assert_eq!(Acc(f(x)).msub(p, q).to_bits(), fpu::msub(x, p, q).to_bits());
+        // reading the accumulator back is a move, not an operation
+        assert_eq!(Acc(f(x)).to_f().to_bits(), x.to_bits());
+    }
+
+    // `madd.s` reads the accumulator and writes an `f`-register, so the same accumulator can feed one
+    // after another; `madda.s` is the one that replaces it
+    let acc = Acc::mula(1.0 / 3.0, 3.000_001);
+    let once = acc.madd(1.0e-9, 1.0);
+    assert_eq!(acc.madd(1.0e-9, 1.0).to_bits(), once.to_bits(), "madd.s does not write the accumulator");
+    assert_eq!(acc.to_bits(), fpu::mul(1.0 / 3.0, 3.000_001).to_bits(), "so the chain can go on from it");
+    assert_eq!(acc.madda(1.0e-9, 1.0).to_bits(), acc.to_bits(), "a product past the cliff changes nothing");
+
+    // `mula.s` is not `adda.s $f0` then `madd.s`: a negative zero in the accumulator survives the one
+    // and not the other
+    assert_eq!(fpu::mula(-1.0, 0.0).to_bits(), 0x8000_0000);
+    assert_eq!(fpu::madd(fpu::adda(0.0, 0.0), -1.0, 0.0).to_bits(), 0, "the adder loses the sign");
+}
+
+#[test]
+fn a_dot_product_is_the_accumulator_chain_in_order() {
+    use ps2_float::fpu::Acc;
+
+    let mut rng = Rng(0x0bad_f00d);
+    let (mut vs_host, mut vs_fma, mut vs_reversed) = (0, 0, 0);
+    for _ in 0..20_000 {
+        // four terms within a few exponents of each other — a normal against a direction, a matrix
+        // row against a vertex: the case the game's vector math is made of
+        let e = 100 + (rng.next() % 56) as i32;
+        let a = [rng.near(e), rng.near(e - 3), rng.near(e + 2), rng.near(e)];
+        let b = [rng.near(e), rng.near(e + 1), rng.near(e - 4), rng.near(e)];
+        let (af, bf) = (a.map(f32::from_bits), b.map(f32::from_bits));
+
+        // the chain, written out: mula.s, two madda.s, a madd.s
+        let want = fpu::madda(fpu::mula(af[0], bf[0]), af[1], bf[1]);
+        let want = fpu::madd(fpu::madda(want, af[2], bf[2]), af[3], bf[3]);
+        assert_eq!(fpu::dot(af, bf).to_bits(), want.to_bits());
+        assert_eq!(F::dot(af.map(F), bf.map(F)).to_bits(), want.to_bits());
+
+        // the host's own arithmetic, the host's FMA, and the same terms summed backwards are each a
+        // different answer — order and rounding are part of the value, not an implementation detail
+        let host = af[0] * bf[0] + af[1] * bf[1] + af[2] * bf[2] + af[3] * bf[3];
+        let fma = af[3].mul_add(bf[3], af[2].mul_add(bf[2], af[1].mul_add(bf[1], af[0] * bf[0])));
+        let revd = fpu::dot([af[3], af[2], af[1], af[0]], [bf[3], bf[2], bf[1], bf[0]]);
+        vs_host += (want.to_bits() != host.to_bits()) as u32;
+        vs_fma += (want.to_bits() != fma.to_bits()) as u32;
+        vs_reversed += (want.to_bits() != revd.to_bits()) as u32;
+    }
+    assert!(vs_host > 10_000, "only {vs_host} dot products differ from the host's");
+    assert!(vs_fma > 10_000, "only {vs_fma} differ from an FMA chain");
+    assert!(vs_reversed > 8_000, "only {vs_reversed} differ when the terms are summed backwards");
+
+    // the shapes a port actually writes
+    assert_eq!(fpu::dot([], []), 0.0);
+    assert_eq!(fpu::dot([2.0], [0.5]), 1.0);
+    assert_eq!(fpu::dot([-1.0], [0.0]).to_bits(), 0x8000_0000, "mula.s keeps the sign of the zero");
+    assert_eq!(Acc::mula(1.0, 2.0).madda(3.0, 4.0).to_f(), fpu::dot([1.0, 3.0], [2.0, 4.0]));
+}
+
+#[test]
+fn the_accumulator_drifts_one_way() {
+    // a thousand `madd.s` steps of an integrator: every chop is toward zero, so the error does not
+    // cancel — the EE's running total stays at or below the host's and below the exact sum, and the gap
+    // grows with the number of steps. This is the drift a wrong madd hides inside.
+    let (dt, v) = (1.0f32 / 60.0, 0.1f32);
+    let (mut ee, mut host, mut exact) = (0.0f32, 0.0f32, 0.0f64);
+    let mut gap_at_500 = 0.0f64;
+    for i in 1..=1000 {
+        ee = fpu::madd(ee, v, dt);
+        host += v * dt;
+        exact += v as f64 * dt as f64;
+        assert!(ee <= host, "step {i}: the chop can only lose magnitude");
+        assert!(ee as f64 <= exact, "step {i}: and it cannot overshoot the real sum");
+        if i == 500 {
+            gap_at_500 = exact - ee as f64;
+        }
+    }
+    let gap_at_1000 = exact - ee as f64;
+    assert!(gap_at_1000 > gap_at_500 * 1.5, "{gap_at_500} then {gap_at_1000}: the drift is not growing");
+    assert!(gap_at_1000 > 1.0e-6, "a thousand steps and a gap of only {gap_at_1000}");
+
+    // the accumulator form of the same loop, to be sure the register wrapper drifts identically
+    let mut acc = ps2_float::fpu::Acc::ZERO;
+    for _ in 0..1000 {
+        acc = acc.madda(v, dt);
+    }
+    assert_eq!(acc.to_f(), ee);
 }

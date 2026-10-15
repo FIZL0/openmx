@@ -22,3 +22,4 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 4 — the arithmetic, before any ported math
 - [x] **F1** The EE FPU in `crates/ps2-float`: add, sub, mul, div, sqrt with the PS2's rules — round toward zero, no denormals (flushed), no NaN or infinity (clamped to the largest magnitude), and the smaller addend masked to the exponent difference minus one guard bit. Port physics before this and you will not know which of the two is wrong → crates/ps2-float/src/fpu.rs | t: crates/ps2-float/tests/fpu.rs | j: f1-ee-fpu
+- [x] **F2** `madd.s`/`msub.s` and the accumulator: the product is truncated before the add, so a multiply-add is *not* a multiply then an add. Most of a PS2 game's vector math goes through these, so a wrong one shows up as a tiny drift that takes days to find → crates/ps2-float/src/fpu.rs | t: crates/ps2-float/tests/fpu.rs | j: f1-ee-fpu
