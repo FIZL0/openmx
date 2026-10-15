@@ -143,6 +143,11 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
     airborne, and the test a landing has to pass for the rider to stay on. Carries the game's own
     double-precision arc cosine and the startup table built from it. Proved against the original over
     20,000 generated substeps in `tests/air.rs` (S10).
+  - `trick.rs` — tricks: the 57-stunt table the disc ships and each player's 24-slot gesture map, the
+    stick-and-button gesture that names one, the hold/safe/duration clocks that decide whether a trick
+    counts, and the trick's own half of the landing test. Includes the engine's shared arc-cosine
+    table, which the stick classifier reads. Proved against the disc and the oracle in
+    `tests/trick.rs` (S11).
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the

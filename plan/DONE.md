@@ -52,3 +52,6 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 7 — one subsystem, end to end
 - [x] **S10** The bike in the air: where the sim decides the wheels left the ground, the rotation the stick commands while airborne, the lean and preload carried off the lip, and the landing test — the angle it tolerates, what counts as a clean landing and what throws the rider. Half of how riding around feels is this task, so it is priority-1 work, not polish → crates/game-sim/src/air.rs | t: crates/game-sim/tests/air.rs | j: s10-air
+
+### Phase 7 — one subsystem, end to end
+- [x] **S11** Tricks: the trick table — which stick-and-button gesture starts which trick, the frame windows that decide whether it counts, the rotation each one applies, and what makes a landing a crash instead. Tricks are the point of freeroam, so they are ported and proved like the rest of the simulation, not approximated by eye → crates/game-sim/src/trick.rs | t: crates/game-sim/tests/trick.rs | j: s11-tricks

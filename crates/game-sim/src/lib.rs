@@ -225,6 +225,10 @@ pub mod tick;
 /// app layer reads them out of the archives and hands them over.
 pub mod track;
 
+/// Tricks: the table of stunts the disc ships, the stick-and-button gesture that names one, the clocks
+/// that decide whether it counts, and the trick's own half of what makes a landing a crash.
+pub mod trick;
+
 #[cfg(test)]
 mod tests {
     use super::*;
