@@ -53,7 +53,7 @@
 //! | Module | Model |
 //! |---|---|
 //! | [`fpu`] | EE COP1 scalar single precision, and the [`F`] wrapper type |
-//! | [`vu`] | VU0 macro mode: [`Vf`] 4-lane vectors, field masks, clamping |
+//! | [`vu`] | VU0 macro mode: [`Vf`] 4-lane vectors, field masks, clamping, the MAC and clip flags |
 //! | [`libm`] | `sinf`/`powf`/… the way the game's own C library computes them |
 //!
 //! # Using it in a port
@@ -110,4 +110,4 @@ pub mod libm;
 pub mod vu;
 
 pub use fpu::{F, f, f32s, fs};
-pub use vu::{Dest, Field, Lane, Lanes, V4, Vf, lanes, v4};
+pub use vu::{Clip, Dest, Field, Lane, Lanes, Mac, Status, V4, Vf, Vu0, lanes, v4};

@@ -20,15 +20,18 @@
 //! ## What is modelled, and what is not
 //!
 //! Modelled: the arithmetic of the macro-mode ops below, the destination field mask (`.xyzw` subsets),
-//! the broadcast forms (`vaddx`, `vmulw`, …), the accumulator, `Q`, and `vftoi`/`vitof` fixed-point
-//! conversions.
+//! the broadcast forms (`vaddx`, `vmulw`, …), the accumulator, `Q`, `vftoi`/`vitof` fixed-point
+//! conversions, and — because this game branches on them — the MAC, status and clipping flags
+//! ([`Mac`], [`Status`], [`Clip`], all of them on [`Vu0`]).
 //!
-//! **Not** modelled: the status, MAC and clipping flags; the integer register file (`vi0`..`vi15`) and its
-//! branches; VU1 and its EFU ops (`esum`, `erleng`, `esin`, …); micro-program control flow; and all
-//! pipeline timing — in particular `Q` is available immediately here, whereas the hardware makes a
-//! program wait seven cycles (`vwaitq`). A micro program whose results you need cannot be reproduced by
-//! this module alone: either port it by hand on top of these ops, or hook it out (see `ps2-oracle`'s
-//! `hooks`) and compare against a capture.
+//! **Not** modelled: the I and R registers (this game uses neither); the integer register file
+//! (`vi0`..`vi15`) and its branches; VU1 and its EFU ops (`esum`, `erleng`, `esin`, …); micro-program
+//! control flow — this game has exactly one `vcallmsr`, in an SDK leaf routine, so some micro program
+//! does run on VU0 even though every arithmetic op is macro mode; and all pipeline timing — in
+//! particular `Q` is available immediately here, whereas the hardware makes a program wait seven cycles
+//! (`vwaitq`). A micro program whose results you need cannot be reproduced by this module alone: either
+//! port it by hand on top of these ops, or hook it out (see `ps2-oracle`'s `hooks`) and compare against
+//! a capture.
 #![deny(clippy::float_arithmetic)]
 
 /// The largest magnitude a VU float can hold; results clamp here rather than going infinite.
@@ -496,4 +499,519 @@ pub fn lerp(a: V4, b: V4, t: f32) -> V4 {
     let (a, b, t) = (lanes(a), lanes(b), Lane(t));
     let u = Lane::ZERO + 1.0 - t;
     v4(core::array::from_fn(|k| (a[k] * t).madd(b[k], u)))
+}
+
+// --- the ops this game actually uses, and VU0's flags ----------------------------------------------
+//
+// Everything above is the arithmetic; everything below is the rest of macro mode — the field-masked
+// write, the accumulator, `Q`, and the three flag registers the EE reads back with `cfc2`.
+//
+// The op list is not the ISA's, it is this game's: every COP2 word in the boot ELF that lies inside a
+// decompiled function, decoded and counted. 8,406 of them, of which 724 are the `qmtc2`/`qmfc2`/`cfc2`/
+// `ctc2` transfers in and out and **7,682 are VU0 arithmetic**. The counts are instructions, not call
+// sites, and the broadcast forms are folded into their base op. In descending order:
+//
+// | op | n | | op | n |
+// |---|---|---|---|---|
+// | `vmadda`/`vmaddax..w` | 1 441 | | `vmul`/`vmulx..w` | 1 057 |
+// | `vmadd`/`vmaddx..w` | 717 | | `vadd`/`vaddx..w` | 695 |
+// | `vsub`/`vsubx..w` | 645 | | `vopmula` + `vopmsub` | 932 |
+// | `vadda`/`vaddax..w` | 432 | | `vmula`/`vmulax..w` | 316 |
+// | `vwaitq` | 300 | | `vmulq` | 293 |
+// | `vrsqrt` | 247 | | `vmax`/`vmaxx..w` | 238 |
+// | `vmsuba`/`vmsubax..w` | 68 | | `vmove` | 63 |
+// | `vdiv` | 48 | | `vnop` | 47 |
+// | `vmsub`/`vmsubx..w` | 42 | | `vabs` | 22 |
+// | `vclipw` | 21 | | `vmr32` | 18 |
+// | `vsuba`/`vsubax..w` | 11 | | `vmini`/`vminix..w` | 7 |
+// | `vaddq` | 7 | | `vitof0` | 6 |
+// | `vsqrt` | 6 | | `vcallmsr`/`vlqi`/`vsqi` | 1 each |
+//
+// "Inside a function" is what makes that list trustworthy: the image's string and constant data holds a
+// few hundred words whose top six bits happen to say COP2, and decoding those as instructions is how a
+// histogram acquires ops the game does not have. Restricted to code, **every** COP2 word decodes, which
+// is the check that the list is complete rather than merely long.
+//
+// What that list says about the port:
+//
+// * The I register (`vaddi`, `vmuli`, `vmaxi`, `vminii`) is **never used**, so there is no `I` here.
+//   `R` (`vrnext`, `vrxor`) is unused, and so is the integer unit — no `viadd`, no `visub`. `vftoi` in
+//   any form is absent too; only `vitof0` appears, unpacking small integers.
+// * The three singletons are SDK leaf routines, not maths: `ctc2 $vi27` + `vcallmsr` is "start the
+//   micro-program at this address", and the `vlqi`/`vsqi` pair is one quadword in and out of VU0's data
+//   memory. Micro mode is therefore *reachable* in this game even though macro mode is all the maths —
+//   see "What is modelled, and what is not" above.
+// * `vmadd`, `vmadda` and the broadcast forms carry the bulk of the maths: matrix transforms and dot
+//   products. Their accumulate order is the first thing to get right in a port, which is why
+//   [`Vu0::madda`] and friends take the destination mask rather than assuming `xyzw`.
+// * `vclipw` plus `cfc2 $vi18` is how the game culls: four points, six bits each, ANDed and ORed.
+// * `cfc2 $vi17` — the **MAC flag** — is read for real control flow, not for diagnostics: after a
+//   `.w`-masked dot product the game tests bit 4 (`Sw`) to ask "is this behind the plane?", and after a
+//   four-lane transform it tests `& 0xf0 == 0xf0` for "all four negative". A port that does not model
+//   these flags cannot reproduce those branches, which is why they are here rather than in the "not
+//   modelled" list.
+// * Nothing reads the status flag outside VU0's context-save library routine, but it is cheap to keep
+//   and it is where `vdiv`'s divide-by-zero and invalid bits live.
+
+/// 2^128: the first magnitude that does not fit the VU's 8-bit exponent, so the overflow flag's
+/// threshold. Chopping cannot lower an exponent, so a result is clamped exactly when it reaches this.
+const OVERFLOW_AT: f64 = f64::from_bits(0x47f0_0000_0000_0000);
+/// 2^-126, the smallest VU normal: a nonzero result below this underflows to zero.
+const UNDERFLOW_AT: f64 = f64::from_bits(0x3810_0000_0000_0000);
+
+/// The MAC flags of one lane, as the hardware derives them — from the result, not from the operands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LaneFlags {
+    z: bool,
+    s: bool,
+    u: bool,
+    o: bool,
+}
+
+/// Judge one lane's result. `exact` is the unrounded, unclamped value; `r` is what was written.
+fn classify(exact: f64, r: f32) -> LaneFlags {
+    LaneFlags {
+        z: r == 0.0,
+        s: r.is_sign_negative(),
+        u: exact != 0.0 && exact.abs() < UNDERFLOW_AT,
+        o: exact.abs() >= OVERFLOW_AT,
+    }
+}
+
+/// The MAC flag register, read with `cfc2 $vi17`: the Zero, Sign, Underflow and Overflow of each lane
+/// of the last arithmetic op. Its layout is the hardware's, so a ported `andi` mask reads unchanged:
+///
+/// ```text
+///   bit  15 14 13 12 | 11 10  9  8 |  7  6  5  4 |  3  2  1  0
+///        Ox Oy Oz Ow | Ux Uy Uz Uw | Sx Sy Sz Sw | Zx Zy Zz Zw
+/// ```
+///
+/// Lanes the destination mask leaves alone have their four flags **cleared**, not kept — so after a
+/// `.w` op only `Zw`/`Sw`/`Uw`/`Ow` can be set, which is what makes the game's `andi $t, 0x10` test for
+/// "the `w` lane came out negative" work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mac(pub u16);
+
+impl Mac {
+    /// The result was zero (either sign).
+    pub fn zero(self, f: Field) -> bool {
+        self.bit(3, f)
+    }
+    /// The result's sign bit was set — which includes the `-0.0` an underflow leaves behind.
+    pub fn sign(self, f: Field) -> bool {
+        self.bit(7, f)
+    }
+    /// The result was too small to be a VU normal and became zero.
+    pub fn underflow(self, f: Field) -> bool {
+        self.bit(11, f)
+    }
+    /// The result was clamped to `±max`.
+    pub fn overflow(self, f: Field) -> bool {
+        self.bit(15, f)
+    }
+    /// The four sign bits, in place: the game reads them as `cfc2 $t, $vi17` then `andi $t, 0xf0`.
+    pub fn signs(self) -> u16 {
+        self.0 & 0x00f0
+    }
+    /// The four zero bits, in place (`andi $t, 0x0f`).
+    pub fn zeros(self) -> u16 {
+        self.0 & 0x000f
+    }
+
+    fn bit(self, top: u32, f: Field) -> bool {
+        self.0 >> (top - f as u32) & 1 == 1
+    }
+    fn set(&mut self, i: usize, l: LaneFlags) {
+        let b = 3 - i as u32;
+        self.0 |= u16::from(l.z) << b | u16::from(l.s) << (b + 4) | u16::from(l.u) << (b + 8)
+            | u16::from(l.o) << (b + 12);
+    }
+}
+
+/// The status flag register, read with `cfc2 $vi16`: the OR of the MAC flags for the last op, the two
+/// divider flags, and a sticky copy of each that stays set until the register is written.
+///
+/// ```text
+///   bit  11 10  9  8  7  6 |  5  4 |  3  2  1  0
+///        DS IS OS US SS ZS |  D  I |  O  U  S  Z
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Status(pub u16);
+
+impl Status {
+    /// Some lane of the last arithmetic op came out zero.
+    pub fn zero(self) -> bool {
+        self.0 & 1 != 0
+    }
+    /// Some lane came out negative.
+    pub fn sign(self) -> bool {
+        self.0 & 2 != 0
+    }
+    /// Some lane underflowed to zero.
+    pub fn underflow(self) -> bool {
+        self.0 & 4 != 0
+    }
+    /// Some lane was clamped to `±max`.
+    pub fn overflow(self) -> bool {
+        self.0 & 8 != 0
+    }
+    /// The last divider op was invalid: `0/0`, or a square root of a negative.
+    pub fn invalid(self) -> bool {
+        self.0 & 0x10 != 0
+    }
+    /// The last divider op divided a nonzero value by zero.
+    pub fn div_by_zero(self) -> bool {
+        self.0 & 0x20 != 0
+    }
+    /// The six sticky bits (11..6), which only a write to the register clears.
+    pub fn sticky(self) -> u16 {
+        self.0 & 0x0fc0
+    }
+
+    /// An arithmetic op: bits 3..0 are the OR of this op's MAC lanes, and stick into 9..6.
+    fn update(&mut self, mac: Mac) {
+        let f = |m: u16| u16::from(mac.0 & m != 0);
+        let now = f(0x000f) | f(0x00f0) << 1 | f(0x0f00) << 2 | f(0xf000) << 3;
+        self.0 = (self.0 & 0x0ff0) | now | now << 6;
+    }
+    /// A divider op: it rewrites bits 5..4 every time (and sticks them into 11..10), and leaves the
+    /// arithmetic bits alone.
+    fn divider(&mut self, invalid: bool, dz: bool) {
+        let now = u16::from(invalid) << 4 | u16::from(dz) << 5;
+        self.0 = (self.0 & 0x0fcf) | now | now << 6;
+    }
+}
+
+/// The clipping flag register, read with `cfc2 $vi18`: a 24-bit shift register of the last four
+/// `vclipw` judgements, six bits each, newest in bits 5..0.
+///
+/// The six bits of one judgement compare `fs`'s `x`, `y`, `z` against `±|ft.w|` — the frustum test a
+/// perspective divide would otherwise need:
+///
+/// ```text
+///   bit 0: x > +w   bit 2: y > +w   bit 4: z > +w
+///   bit 1: x < -w   bit 3: y < -w   bit 5: z < -w
+/// ```
+///
+/// The game clips four points per primitive, masks each judgement with `andi 0x3f`, and then ANDs the
+/// four together (all four outside the same plane ⇒ cull the primitive) and ORs them (nothing set ⇒
+/// wholly inside, no clipping needed).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Clip(pub u32);
+
+impl Clip {
+    /// The newest judgement's six bits (`andi $t, 0x3f`).
+    pub fn last(self) -> u8 {
+        (self.0 & 0x3f) as u8
+    }
+    /// Was any of `x y z` outside `±|w|` in the newest judgement?
+    pub fn outside(self) -> bool {
+        self.last() != 0
+    }
+    /// `lane > +|w|` in the newest judgement. `w` itself is not judged.
+    pub fn above(self, f: Field) -> bool {
+        f != Field::W && self.0 >> (2 * f as u32) & 1 == 1
+    }
+    /// `lane < -|w|` in the newest judgement.
+    pub fn below(self, f: Field) -> bool {
+        f != Field::W && self.0 >> (2 * f as u32 + 1) & 1 == 1
+    }
+}
+
+/// One `vclipw` judgement: the six bits for `fs.xyz` against `±|w|`, in the register's own bit order.
+pub fn clip_bits(fs: Vf, w: f32) -> u8 {
+    let w = f32::from_bits(vu(w).to_bits() & 0x7fff_ffff);
+    let neg = f32::from_bits(w.to_bits() | 0x8000_0000);
+    let mut b = 0;
+    for i in 0..3 {
+        let v = vu(fs.0[i]);
+        b |= u8::from(v > w) << (2 * i) | u8::from(v < neg) << (2 * i + 1);
+    }
+    b
+}
+
+/// VU0 in macro mode: the state an instruction sequence carries between its instructions — the
+/// accumulator, the `Q` register, and the three flag registers.
+///
+/// One method per instruction, named after it and taking the destination mask first, so a ported
+/// routine lines up with its listing. The broadcast forms are the plain op with [`Vf::bc`] on `ft`:
+///
+/// ```
+/// use ps2_float::{Dest, Field, Vf, vu::Vu0};
+/// let (mut vu, mut vf1, mut vf2) = (Vu0::default(), Vf::new(3.0, 4.0, 0.0, 1.0), Vf::ZERO);
+/// // the game's normalise, instruction for instruction:
+/// vf2 = vu.mul(Dest::XYZ, vf2, vf1, vf1);                     // vmul.xyz   vf2, vf1, vf1
+/// let vf3 = vu.max(Dest::XYZW, Vf::ZERO, Vf::VF0, Vf::VF0.bc(Field::W)); // vmaxw.xyzw vf3, vf0, vf0w
+/// vu.adda(Dest::X, vf2, vf2.bc(Field::Y));                    // vadday.x   ACC, vf2, vf2y
+/// vf2 = vu.madd(Dest::X, vf2, vf3, vf2.bc(Field::Z));         // vmaddz.x   vf2, vf3, vf2z
+/// vu.rsqrt(Vf::VF0, Field::W, vf2, Field::X);                 // vrsqrt     Q, vf0w, vf2x
+/// vf1 = vu.mulq(Dest::XYZ, vf1, vf1);                         // vmulq.xyz  vf1, vf1, Q
+/// assert_eq!(vf1.0, [0.59999996, 0.79999995, 0.0, 1.0]);
+/// ```
+///
+/// `vnop` and `vwaitq` have no method: this model has no pipeline, so they do nothing. Where the
+/// original has them (the game puts four `vnop`s before every `cfc2`, and a `vwaitq` before every use
+/// of `Q`) a comment is enough. `vftoi`/`vitof` are on [`Vf`] rather than here, because they set no
+/// flags; so do `vmax`, `vmini`, `vabs`, `vmove` and `vmr32`, which are kept here only so that a
+/// transcribed listing can stay one method per instruction.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Vu0 {
+    /// The accumulator `ACC`, written by the `vmula`/`vadda`/`vmadda`/`vopmula` family.
+    pub acc: Vf,
+    /// The `Q` register, written by `vdiv`/`vsqrt`/`vrsqrt` and read by the `.q` forms.
+    pub q: f32,
+    /// `cfc2 $vi17`.
+    pub mac: Mac,
+    /// `cfc2 $vi16`.
+    pub status: Status,
+    /// `cfc2 $vi18`.
+    pub clip: Clip,
+}
+
+/// One lane plus the exact, unrounded result its MAC flags are judged from.
+type Lane2 = (f32, f64);
+
+/// `vadd` on one lane, with the exact sum. Two `f32`s always add exactly in `f64` *when the sum is
+/// near a flag boundary* — at that point the operands' exponents are within one of each other — which
+/// is all the overflow and underflow tests need.
+#[allow(clippy::float_arithmetic)] // the model itself, in host arithmetic
+fn add_e(a: f32, b: f32) -> Lane2 {
+    (add(a, b), vu(a) as f64 + vu(b) as f64)
+}
+
+/// `vsub` on one lane, with the exact difference.
+fn sub_e(a: f32, b: f32) -> Lane2 {
+    add_e(a, f32::from_bits(b.to_bits() ^ 0x8000_0000))
+}
+
+/// `vmul` on one lane, with the exact product (24×24 bits, always exact in `f64`).
+#[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
+fn mul_e(a: f32, b: f32) -> Lane2 {
+    (mul(a, b), vu(a) as f64 * vu(b) as f64)
+}
+
+/// `vmadd` on one lane: the product is chopped into a VU float first, so the flags describe the add.
+fn madd_e(acc: f32, a: f32, b: f32) -> Lane2 {
+    add_e(acc, mul(a, b))
+}
+
+/// `vmsub` on one lane.
+fn msub_e(acc: f32, a: f32, b: f32) -> Lane2 {
+    sub_e(acc, mul(a, b))
+}
+
+impl Vu0 {
+    /// Write a lane-wise result under the destination mask and set the flags: the lanes outside the
+    /// mask keep their value and lose their flags. Every arithmetic op goes through here.
+    fn write(&mut self, dest: Dest, fd: Vf, r: [Lane2; 4]) -> Vf {
+        let mut mac = Mac(0);
+        let mut out = fd;
+        for (i, &(v, exact)) in r.iter().enumerate() {
+            if dest.has(i) {
+                out.0[i] = v;
+                mac.set(i, classify(exact, v));
+            }
+        }
+        self.mac = mac;
+        self.status.update(mac);
+        out
+    }
+
+    /// `vadd.d fd, fs, ft` — and with [`Vf::bc`] on `ft`, `vaddx`/`vaddy`/`vaddz`/`vaddw`.
+    pub fn add(&mut self, dest: Dest, fd: Vf, fs: Vf, ft: Vf) -> Vf {
+        self.write(dest, fd, core::array::from_fn(|i| add_e(fs.0[i], ft.0[i])))
+    }
+    /// `vsub.d fd, fs, ft`.
+    pub fn sub(&mut self, dest: Dest, fd: Vf, fs: Vf, ft: Vf) -> Vf {
+        self.write(dest, fd, core::array::from_fn(|i| sub_e(fs.0[i], ft.0[i])))
+    }
+    /// `vmul.d fd, fs, ft`.
+    pub fn mul(&mut self, dest: Dest, fd: Vf, fs: Vf, ft: Vf) -> Vf {
+        self.write(dest, fd, core::array::from_fn(|i| mul_e(fs.0[i], ft.0[i])))
+    }
+    /// `vmadd.d fd, fs, ft`: `ACC + fs·ft`, the accumulator unchanged.
+    pub fn madd(&mut self, dest: Dest, fd: Vf, fs: Vf, ft: Vf) -> Vf {
+        let acc = self.acc;
+        self.write(dest, fd, core::array::from_fn(|i| madd_e(acc.0[i], fs.0[i], ft.0[i])))
+    }
+    /// `vmsub.d fd, fs, ft`: `ACC − fs·ft`.
+    pub fn msub(&mut self, dest: Dest, fd: Vf, fs: Vf, ft: Vf) -> Vf {
+        let acc = self.acc;
+        self.write(dest, fd, core::array::from_fn(|i| msub_e(acc.0[i], fs.0[i], ft.0[i])))
+    }
+
+    /// `vaddq.d fd, fs, Q`.
+    pub fn addq(&mut self, dest: Dest, fd: Vf, fs: Vf) -> Vf {
+        let q = self.q;
+        self.write(dest, fd, core::array::from_fn(|i| add_e(fs.0[i], q)))
+    }
+    /// `vsubq.d fd, fs, Q`.
+    pub fn subq(&mut self, dest: Dest, fd: Vf, fs: Vf) -> Vf {
+        let q = self.q;
+        self.write(dest, fd, core::array::from_fn(|i| sub_e(fs.0[i], q)))
+    }
+    /// `vmulq.d fd, fs, Q` — 307 of them in this game, one per normalise.
+    pub fn mulq(&mut self, dest: Dest, fd: Vf, fs: Vf) -> Vf {
+        let q = self.q;
+        self.write(dest, fd, core::array::from_fn(|i| mul_e(fs.0[i], q)))
+    }
+    /// `vmaddq.d fd, fs, Q`.
+    pub fn maddq(&mut self, dest: Dest, fd: Vf, fs: Vf) -> Vf {
+        let (acc, q) = (self.acc, self.q);
+        self.write(dest, fd, core::array::from_fn(|i| madd_e(acc.0[i], fs.0[i], q)))
+    }
+    /// `vmsubq.d fd, fs, Q`.
+    pub fn msubq(&mut self, dest: Dest, fd: Vf, fs: Vf) -> Vf {
+        let (acc, q) = (self.acc, self.q);
+        self.write(dest, fd, core::array::from_fn(|i| msub_e(acc.0[i], fs.0[i], q)))
+    }
+
+    /// The accumulator forms write `ACC` instead of a register and set the same flags. `vadda.d`.
+    pub fn adda(&mut self, dest: Dest, fs: Vf, ft: Vf) -> Vf {
+        let acc = self.acc;
+        self.acc = self.write(dest, acc, core::array::from_fn(|i| add_e(fs.0[i], ft.0[i])));
+        self.acc
+    }
+    /// `vsuba.d`.
+    pub fn suba(&mut self, dest: Dest, fs: Vf, ft: Vf) -> Vf {
+        let acc = self.acc;
+        self.acc = self.write(dest, acc, core::array::from_fn(|i| sub_e(fs.0[i], ft.0[i])));
+        self.acc
+    }
+    /// `vmula.d` — the first row of a matrix transform, as `vmulax` with [`Vf::bc`].
+    pub fn mula(&mut self, dest: Dest, fs: Vf, ft: Vf) -> Vf {
+        let acc = self.acc;
+        self.acc = self.write(dest, acc, core::array::from_fn(|i| mul_e(fs.0[i], ft.0[i])));
+        self.acc
+    }
+    /// `vmadda.d`: `ACC += fs·ft`, the rows in between.
+    pub fn madda(&mut self, dest: Dest, fs: Vf, ft: Vf) -> Vf {
+        let acc = self.acc;
+        self.acc = self.write(dest, acc, core::array::from_fn(|i| madd_e(acc.0[i], fs.0[i], ft.0[i])));
+        self.acc
+    }
+    /// `vmsuba.d`: `ACC −= fs·ft`.
+    pub fn msuba(&mut self, dest: Dest, fs: Vf, ft: Vf) -> Vf {
+        let acc = self.acc;
+        self.acc = self.write(dest, acc, core::array::from_fn(|i| msub_e(acc.0[i], fs.0[i], ft.0[i])));
+        self.acc
+    }
+
+    /// `vopmula.xyz ACC, fs, ft`: the first half of a cross product (`w` is outside the mask, so it
+    /// keeps the accumulator's old `w` — and loses its flags).
+    pub fn opmula(&mut self, fs: Vf, ft: Vf) -> Vf {
+        let acc = self.acc;
+        let r = [mul_e(fs.0[1], ft.0[2]), mul_e(fs.0[2], ft.0[0]), mul_e(fs.0[0], ft.0[1]), (0.0, 0.0)];
+        self.acc = self.write(Dest::XYZ, acc, r);
+        self.acc
+    }
+    /// `vopmsub.xyz fd, fs, ft`: the second half. The game emits the pair with the operands swapped
+    /// between the two instructions — see [`Vf::opmsub`] — so port it as the listing has it.
+    pub fn opmsub(&mut self, dest: Dest, fd: Vf, fs: Vf, ft: Vf) -> Vf {
+        let acc = self.acc;
+        let r = [
+            msub_e(acc.0[0], fs.0[1], ft.0[2]),
+            msub_e(acc.0[1], fs.0[2], ft.0[0]),
+            msub_e(acc.0[2], fs.0[0], ft.0[1]),
+            (acc.0[3], acc.0[3] as f64),
+        ];
+        self.write(dest, fd, r)
+    }
+
+    /// `vmax.d fd, fs, ft` (and `vmaxx`…`vmaxw` with [`Vf::bc`]): a compare and a select, so nothing
+    /// rounds and **the MAC flags are left alone**. The game's way of materialising a constant 1.0 in
+    /// all four lanes is `vmaxw.xyzw fd, vf0, vf0w`.
+    pub fn max(&mut self, dest: Dest, fd: Vf, fs: Vf, ft: Vf) -> Vf {
+        fd.merge(dest, Vf(core::array::from_fn(|i| max(fs.0[i], ft.0[i]))))
+    }
+    /// `vmini.d fd, fs, ft`: the same, taking the smaller.
+    pub fn mini(&mut self, dest: Dest, fd: Vf, fs: Vf, ft: Vf) -> Vf {
+        fd.merge(dest, Vf(core::array::from_fn(|i| mini(fs.0[i], ft.0[i]))))
+    }
+    /// `vabs.d fd, fs`: clears the sign bit; no flags.
+    pub fn abs(&mut self, dest: Dest, fd: Vf, fs: Vf) -> Vf {
+        fd.merge(dest, fs.abs())
+    }
+    /// `vmove.d fd, fs`: a masked copy; no flags.
+    pub fn mov(&mut self, dest: Dest, fd: Vf, fs: Vf) -> Vf {
+        fd.merge(dest, fs)
+    }
+    /// `vmr32.d fd, fs`: a masked copy of `fs` rotated one lane left; no flags.
+    pub fn mr32(&mut self, dest: Dest, fd: Vf, fs: Vf) -> Vf {
+        fd.merge(dest, fs.mr32())
+    }
+
+    /// `vclipw fs, ftw`: shifts six fresh judgement bits into the clipping flag. No other flag moves,
+    /// and no register is written.
+    pub fn clipw(&mut self, fs: Vf, ft: Vf) {
+        self.clip = Clip((self.clip.0 << 6 | u32::from(clip_bits(fs, ft.0[3]))) & 0x00ff_ffff);
+    }
+
+    /// `vdiv Q, fs[fsf], ft[ftf]`. Dividing a nonzero value by zero sets `D`; `0/0` sets `I`; either
+    /// way `Q` is `±max` with the sign of the two operands XORed.
+    pub fn div(&mut self, fs: Vf, fsf: Field, ft: Vf, ftf: Field) -> f32 {
+        let (a, b) = (vu(fs.lane(fsf)), vu(ft.lane(ftf)));
+        self.status.divider(b == 0.0 && a == 0.0, b == 0.0 && a != 0.0);
+        self.q = div(a, b);
+        self.q
+    }
+    /// `vsqrt Q, ft[ftf]`: the root of `|ft|`, and `I` when `ft` was negative.
+    pub fn sqrt(&mut self, ft: Vf, ftf: Field) -> f32 {
+        let b = vu(ft.lane(ftf));
+        self.status.divider(b < 0.0, false);
+        self.q = sqrt(b);
+        self.q
+    }
+    /// `vrsqrt Q, fs[fsf], ft[ftf]`: `fs / sqrt(|ft|)`, the 256-times-over idiom of this game. `ft` of
+    /// zero sets `D`, `ft` negative sets `I`.
+    pub fn rsqrt(&mut self, fs: Vf, fsf: Field, ft: Vf, ftf: Field) -> f32 {
+        let (a, b) = (vu(fs.lane(fsf)), vu(ft.lane(ftf)));
+        self.status.divider(b < 0.0, b == 0.0);
+        self.q = if b == 0.0 { div(a, b) } else { rsqrt(a, b) }; // ±max, by the two signs XORed
+        self.q
+    }
+}
+
+/// `vmax` on one lane: a compare and a select — no rounding, no flags, and the operands are read the
+/// way a VU reads them ([`operand`]), so an `Inf` pattern compares as `±max` and a denormal as zero.
+pub fn max(a: f32, b: f32) -> f32 {
+    let (a, b) = (vu(a), vu(b));
+    if a >= b { a } else { b }
+}
+
+/// `vmini` on one lane.
+pub fn mini(a: f32, b: f32) -> f32 {
+    let (a, b) = (vu(a), vu(b));
+    if a <= b { a } else { b }
+}
+
+/// `vabs` on one lane: the sign bit cleared, nothing else touched.
+pub fn abs(x: f32) -> f32 {
+    f32::from_bits(vu(x).to_bits() & 0x7fff_ffff)
+}
+
+impl Vf {
+    /// `vmax`, lane by lane. Pair with [`Vf::bc`] for `vmaxx`…`vmaxw`.
+    pub fn max(self, o: Vf) -> Vf {
+        Vf(core::array::from_fn(|i| max(self.0[i], o.0[i])))
+    }
+    /// `vmini`, lane by lane.
+    pub fn mini(self, o: Vf) -> Vf {
+        Vf(core::array::from_fn(|i| mini(self.0[i], o.0[i])))
+    }
+    /// `vabs`, lane by lane.
+    pub fn abs(self) -> Vf {
+        Vf(self.0.map(abs))
+    }
+    /// `vmr32`: every lane one place to the left, `x` wrapping into `w` (`fd.x = fs.y`, `fd.w = fs.x`).
+    pub fn mr32(self) -> Vf {
+        Vf([self.0[1], self.0[2], self.0[3], self.0[0]])
+    }
+}
+
+/// `vabs.xyz` then `vmaxy.x` then `vmaxz.x`: the longest of `|x|`, `|y|`, `|z|` — the cheap "how far
+/// away is this" the game uses where a real length would need a square root.
+pub fn max_abs3(v: V4) -> f32 {
+    let a = Vf(v).abs();
+    max(max(a.0[0], a.0[1]), a.0[2])
 }

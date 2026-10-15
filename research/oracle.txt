@@ -10,3 +10,12 @@
 # This file is research, not product: addresses live here and in journal entries, never in the port.
 #
 # walk_ramp            gameplay  0x001000a0 speed ramp: (speed, stick) -> speed, args in f12/f13
+
+# --- F3: VU0 macro mode ------------------------------------------------------
+# Call sites that exercise the vu.rs model. The first two are small and pure and are the cheapest way
+# to prove VU0's divider and its chop against the real code; the last two need the MAC flag, which
+# ps2-oracle's interpreter does not keep yet (it has no cfc2/$vi17).
+vu_scale3_recip        boot  0x001088f0 9 insns: Q = 1.0/f12 (vdiv), then the xyz of the vec4 at a0 *= Q (vmulq.xyz), stored back; returns a0. Proves vdiv + vmulq.
+vu_unpack_s8_to_vec3   boot  0x001008e0 4 signed bytes at a0 -> vitof0.xyz -> vmulx.xyz by a scale looked up at (byte0 * 8) in a table; result stored at a1.
+vu_quat_to_mat3        boot  0x0013ebd0 quaternion at a1 -> three matrix rows; vadd/vmul broadcasts and vmr32.w row, vf0 to put 0 in each row's w.
+vu_plane_side_w        boot  0x003dc320 a dot product accumulated into .w, then cfc2 $vi17 and andi 0x10 (the MAC Sw bit) to branch on "behind the plane".
