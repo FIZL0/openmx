@@ -1,0 +1,105 @@
+# timing.toml — the engine tick's own timing state, one row per frame.
+#
+#   ./kit record --dry-run watch/timing.toml
+#   ./kit record watch/timing.toml --state 8 --frames 600 -o context/captures/timing.csv
+#
+# What this watches is R3's finding about the frame: the simulation is not handed 1/60, it is handed the
+# **mean of a 30-entry ring** of wall-clock deltas taken from EE Timer 0. Everything needed to check that
+# claim from the outside is here, so the capture is self-checking:
+#
+#   mean(ring*.dt)        == dt          the sim's dt really is the mean of the ring
+#   inv_dt                == 1 / dt      the pair the engine stores next to it
+#   frame_counter         += 1 per row   the game's own counter, independent of @vsync
+#   frame_counter         == the CSV's `frame` column (which came from the poll, not the sample)
+#   field_counter         += 2 per row while fps30_cap is set (the game draws every other field)
+#   clock_ms              ~= wall_ticks * 100 + sub-tick    Timer 0 is the clock, not vsync
+#
+# A row where any of those breaks is a torn read the recorder did not catch, not a discovery.
+#
+# Every address here is static on purpose, and that is the whole difference between a capture with one
+# row per frame and one with every other frame missing. PCSX2 services PINE once per emulated frame, so
+# a sample costs one frame per round trip: `@app_ptr -> 0x374` would need a pointer read and then a data
+# read, two round trips, and the counter would advance twice between rows — 600 clean-looking rows over
+# 1199 frames. The app object is a static (R3: the pointer to it is in .data, read 2,800 times and never
+# written), so @app addresses it directly, the planner coalesces all 40 fields into one batched read, and
+# one row costs one frame. Slowing the emulator does not help: the recorder's rate scales with it.
+
+[watch]
+name        = "timing"
+description = "the engine tick's timing state: dt, its 30-entry ring, and the two frame counters"
+every       = 1          # every frame; a gap in the `frame` column is then a real dropped frame
+frames      = 600        # ~10 s at 60 fps; --frames overrides
+
+[setup]
+state  = 8               # scratch: main menu, Career highlighted, made by C4 (see its journal)
+warmup = 30              # let the ring refill after the state load before sampling
+
+# --- the 59.94 Hz field counter: not the game's frame -------------------------------------------
+# `./kit probe vsync` picks this word, because it is the thing in RAM that goes up 59.17 times a second.
+# It is a *field* counter, and with the 30 fps cap set the engine ticks once every two of them, so a
+# capture clocked off it has a +2 step in every row and the recorder calls that 600 "counter gaps".
+# The frame clock for this game is the engine's own counter below ([emu] vsync_addr), and this column is
+# kept so the ratio between the two is visible in every row.
+[[field]]
+name = "field_counter"
+addr = "@field_counter"
+type = "u32"
+
+# --- the wall clock the engine actually derives dt from ------------------------------------------
+[[field]]
+name = "wall_ticks"      # INTC handler 9 bumps this every 100 ms (Timer 0 compare)
+addr = "@wall_ticks"
+type = "u32"
+
+[[field]]
+name = "fps30_cap"       # when set, dt is clamped to 0.03333
+addr = "@fps30_cap"
+type = "u32"
+
+[[field]]
+name = "dt_ring_index"   # where the next dt goes in the ring below
+addr = "@dt_ring_index"
+type = "u32"
+
+# --- the app object, through the one global pointer to it ----------------------------------------
+[[field]]
+name = "frame_counter"   # the engine's own frame number, wrapped at 0x7fffffff
+addr = "@app + 0x374"
+type = "u32"
+
+[[field]]
+name = "phase"           # 2 while the simulation runs, 0 outside it
+addr = "@app + 0x32c"
+type = "u32"
+
+[[field]]
+name = "clock_ms"        # the Timer 0 clock in ms, as the tick sampled it
+addr = "@app + 0x338"
+type = "u32"
+
+[[field]]
+name = "dt"              # what the simulation was handed: the mean of the ring
+addr = "@app + 0x344"
+type = "f32"
+
+[[field]]
+name = "inv_dt"
+addr = "@app + 0x348"
+type = "f32"
+
+[[field]]
+name = "dt_raw"          # this frame's raw (now - prev) / 1000, before the averaging
+addr = "@app + 0x358"
+type = "f32"
+
+# --- the whole 30-entry dt ring, so the mean can be recomputed from the row itself ---------------
+[[array]]
+name   = "ring"
+addr   = "@dt_ring"
+count  = 30
+stride = 4
+
+[[array.field]]
+name = "dt"
+off  = 0
+type = "f32"
