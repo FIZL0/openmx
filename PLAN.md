@@ -109,6 +109,8 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
   compare your port against it over thousands of inputs.
 - `game-sim` — where your port goes. Starts nearly empty, with the replay harness and the state hash,
   because those two are what keep everything after this honest.
+  - `rng.rs` — the C library's 64-bit LCG the whole game calls, plus the random float and the uniform
+    list index its call sites wrap it in. Proved bit-exact in `tests/rng.rs` (R5).
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the

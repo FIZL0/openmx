@@ -111,3 +111,20 @@ dma_addr_fixup              boot 0x003f16f8 0x7……… (scratchpad) -> 0x8…�
 #
 # Not a library function, but R1 proved it and everything later hangs off it.
 main                        boot 0x0016c720 the entry point's sole callee; installs the INTC handlers
+
+# ---------------------------------------------------------------------------------------------------
+# R5 — the RNG. The game has no generator of its own: it calls the C library's `rand` from ~224 sites,
+# and 199 of those scale the result by 2^-31 (0x30000000) to get a float in [0,1). How it was found is
+# in research/journal/2026-10-15-r5-rng.
+srand                       boot 0x0040fd28 (seed) -> void: the 64-bit state = seed, zero-extended
+rand_state                  boot 0x00423b30 the LCG's 64-bit state word, inside the library's static
+#                                           per-thread block (the pointer at 0x423d78 + 0xa8); the image
+#                                           links it holding 1
+random_list_pick            boot 0x001fed20 (list, out_index|0) -> list->items[i] where
+#                                           i = (int)((float)list->count * (float)rand() * 2^-31);
+#                                           list = {i32 count, i32 _, void *items}, i stored to out_index
+#                                           if non-null. Two more instruction-identical instantiations
+#                                           live at 0x003aaa30 and 0x003aaab0.
+random_time_step            boot 0x00375810 (t, this) -> t + 7.0 * max(0.1, rand()*2^-31): the next time
+#                                           in the chain of event times its one caller builds. Used as
+#                                           the exact view of the random float in the R5 proof.
