@@ -234,6 +234,11 @@ pub mod archive;
 /// Delete it once your own port has something real in it.
 pub mod demo;
 
+/// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
+/// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
+/// later that involves chance reads this sequence, so it is ported before anything that uses it.
+pub mod rng;
+
 #[cfg(test)]
 mod tests {
     use super::*;
