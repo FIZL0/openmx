@@ -137,8 +137,12 @@ about which parts were checked.
 ./kit done T12 "port the walk speed ramp"
 ```
 
-`done` runs the tests, ticks the task, and commits. If the tests fail it refuses, and says whether the
-build broke or a test failed.
+`done` runs the tests, ticks the task, commits, and pushes the branch it committed on when that branch
+is a task's own — your `task/<ID>` in a worktree, a topic branch here. The **shared** branch it leaves
+alone, and says so with the one-line `git push` to run when you want that merge to be everyone's. If the
+tests fail it refuses, and says whether the build broke or a test failed. A push that cannot be made is
+one line of output and nothing worse: the commit is already safe here, and the next wrap-up pushes it.
+`[git] push = false` turns it off.
 
 It also runs `./kit audit` before it commits: every file about to go in is checked for the addresses in
 your address file and for Ghidra's `FUN_…`/`DAT_…` placeholder names. Those belong in `research/` and in
@@ -170,6 +174,12 @@ What to expect from a long run:
   cleans the oldest when the total passes its cap, and the cap is in `kit.toml`.
 - Afterwards: `./kit plan` to see what moved, `git log --oneline` per branch, then merge. Read the
   journal entries before the diffs — they tell you which commits to trust.
+- No merge is pushed: a run moves work onto the shared branch locally and stops there, because whether
+  that becomes the project's public history is yours to decide when you read it. What the run does push
+  is the branch of any task whose merge it had to leave for a human — that branch is the one copy of
+  that work, and losing it costs a whole session. A merged `task/<ID>` is dropped from the remote only
+  once the remote holds the merge, so `git ls-remote --heads origin` is the list of work the shared
+  branch has not published yet, never a list with something missing from it.
 
 If you run more than one emulator copy, each agent needs its own: `KIT_PCSX2=2` gives it its own config
 directory, its own PINE slot, its own pad and its own lock, so two agents cannot drive the same window.
