@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "game-render"
+version = "1.0.0"
+dependencies = [
+ "game-sim",
+]
+
+[[package]]
 name = "game-sim"
 version = "1.0.0"
 dependencies = [

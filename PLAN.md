@@ -111,7 +111,8 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
 
 ### The port
 
-`crates/` by default, but this is yours to shape. The three that come with the kit:
+`crates/` by default, but this is yours to shape. The three that come with the kit, and what this port has
+added beside them:
 
 - `ps2-float` — the PS2's arithmetic: EE FPU add/sub/mul/div/sqrt/madd, VU0 macro ops, the game's own
   transcendentals. Everything in the simulation goes through this.
@@ -151,6 +152,18 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
     counts, and the trick's own half of the landing test. Includes the engine's shared arc-cosine
     table, which the stick classifier reads. Proved against the disc and the oracle in
     `tests/trick.rs` (S11).
+- `game-render` — the drawing side: the disc's own models and textures, on screen. Host `f32`, no
+  bit-exactness, nothing the simulation depends on.
+  - `disc.rs` ISO 9660 → `MX.PSR` → a `.res` member, read from the user's disc at runtime ·
+    `psg.rs` `.psg` geometry: nodes, materials, LOD groups, VIF streams → triangle strips ·
+    `pst.rs` `.pst` textures: a 256-colour palette in the GS's order, plus its mip chain ·
+    `terrain.rs` `.trn` ground: a patched height field, its palette and its ground texture
+  - `ini.rs` the plain-text format the disc's data files share · `scene.rs` `.scn` scenes, `.psm`
+    materials, `.sub` bike builds and the `cpresets.ini` follow cameras · `world.rs` a track in
+    memory: models, materials and textures matched by name, and drawn
+  - `raster.rs` a depth-buffered, perspective-correct, textured triangle rasteriser · `png.rs` a PNG
+    writer · `mat.rs` vectors and 4x4 transforms in the files' own convention ·
+    `bin/first-draw.rs` the whole chain: disc in, one frame of a track out
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the

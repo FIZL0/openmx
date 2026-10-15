@@ -1,0 +1,10 @@
+[package]
+name = "game-render"
+description = "Draws the game's own models: disc -> meshes and textures -> pixels, with no engine and no dependencies"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The disc's two archive formats live in the sim, which has no IO; this crate does the IO.
+game-sim = { path = "../game-sim" }
