@@ -104,6 +104,52 @@ PCSX2's own input recording, or better, find a state that needs no input at all.
 keeps copy *N* from grabbing copy *M*'s controller. `./kit pcsx2 start` with `KIT_PCSX2` set does this
 for you.
 
+### Where a press lands in RAM (MX Unleashed, C5)
+
+A press goes through three places, and knowing all three is what makes an input capture readable. The
+`[symbols]` names are in `kit.toml`; `watch/pad.toml` records the lot, one row per frame.
+
+**1. libpad's buffer — the pad as the hardware reported it.** The game opens all eight port/slot pairs
+(`@input_create_pads`) with buffers 0x100 apart from `@pad_buffers`, port 0 slot 0 first. Each buffer is
+two 0x80-byte halves and `@scePadRead` copies the half whose stamp at +0x58 is the larger. In a half:
+
+| offset | |
+|---|---|
+| 0 | status (0 = ok) |
+| 1 | 0x79 — DualShock 2, analogue sticks and pressures |
+| 2–3 | the button word, big-endian and **active low**: a bit is 0 while its button is down |
+| 4–7 | RX RY LX LY, 0x7f centred |
+| 8–19 | the twelve button pressures: right left up down triangle circle cross square L1 R1 L2 R2 |
+
+The button word, measured one button at a time against the virtual pad: `0x0001` L2, `0x0002` R2,
+`0x0004` L1, `0x0008` R1, `0x0010` triangle, `0x0020` circle, `0x0040` cross, `0x0080` square, `0x0100`
+select, `0x0200` L3, `0x0400` R3, `0x0800` start, `0x1000` up, `0x2000` right, `0x4000` down, `0x8000`
+left. (Select is the one the kit's pad refuses to send; its bit is from the game's own control map.)
+
+The two stamps are `@pad0_stamp_a` and `@pad0_stamp_b` — the second is the word `./kit probe vsync`
+mistakes for the frame counter. **A PINE sample sees half A one stamp ahead of half B**, and the state
+the engine acted on is the *older* half: the IOP refreshes the newer one after the tick has already read
+its own. A capture that compares the raw word against the game's state must use the older half: C5's
+300-frame capture then agrees in all 300 rows, and in three fewer if it picks the newer one.
+
+**2. The game's per-control state — what the engine believes.** `PSXControl.cpp`: one `PSXControl` per
+pad (`@pad0_control`, `@pad1_control`) under one manager (`@input_manager`, which is `app+0x104`). Each
+has 16 *controls*, not a bitmask. `@pad0_control_map` says where each comes from — flags bit 1 means
+"analogue": take pressure byte `[4]` and call it down above 0x19, strength `(pressure + 1) / 256`;
+otherwise test the u16 mask at `[8]` against the button word, strength 1.0. The order is
+triangle circle cross square L1 R1 L2 R2 select start R3 L3 up right down left.
+
+`@pad0_control_state` is 16 entries of 0x18: held (0/1), strength, then **ms since the release and ms
+held**, each with the previous frame's value beside it. Those timers are the only record of *when* a
+button changed: the game keeps no "pressed this frame" bitmask at all. On the frame of a press the held
+timer is 0; after that it grows by one `dt` (33 ms at 30 fps) a frame.
+
+**3. The per-frame event queue — what the front end reacts to.** The transition itself is pushed onto a
+queue in the manager: `@input_event_count` (zeroed at the top of every `@input_tick`, so a frame where it
+is non-zero *is* an edge frame) and `@input_events`, 0x18 bytes each — control, type 2, device, slot,
+and 1 for a press or 0 for a release. `@input_dispatch` hands them to app slots 0x50 (press) and 0x4c
+(release) at the end of the same tick, which is why a menu selection moves on the press frame itself.
+
 ---
 
 ## Screenshots

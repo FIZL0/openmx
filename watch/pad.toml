@@ -1,0 +1,131 @@
+# pad.toml — one frame of input, from the wire to the menu: what libpad put in RAM, what the game made
+# of it, and what the front end did about it.
+#
+#   ./kit record --dry-run watch/pad.toml
+#   ./kit record watch/pad.toml --state 3 --pad watch/pads/menu-down-up.pad -n 300 \
+#       -o context/captures/pad-menu.csv
+#
+# The row is the whole chain, so the capture checks itself (C5's checker does exactly this):
+#
+#   pad_a / pad_b             the two halves of libpad's port-0 buffer; bytes [2..3] are the button word,
+#                             active low — a button is *down* where its bit is 0
+#   ctlN.held                 1 while the game thinks control N is down. The map in pad0_control_map
+#                             says which bit (or which pressure byte) each N comes from; C5's journal
+#                             has the table. 12 = up, 14 = down.
+#   ctlN.held_ms              ms held, reset to 0 on the frame of the press — the frame it reads 0 is
+#                             the "pressed this frame" the game never stores as a bitmask
+#   events                    how many press/release transitions this frame raised. The manager clears
+#                             it at the top of every Update, so a row showing 1 *is* the edge frame
+#   ev0.control / ev0.pressed which control, and 1 for a press, 0 for a release
+#   yes_item / no_item        the two entries of the dialog in save state 3: exactly one is 1, and the
+#                             pair swaps on the frame after an up/down event
+#
+# Every address is static or heap-but-deterministic (C5 checked the heap ones against a RAM image from
+# a different boot), so the planner coalesces the lot into one batched read and a row costs one frame.
+
+[watch]
+name        = "pad"
+description = "libpad's buffer, the game's per-control state, and the menu selection it moves"
+every       = 1
+frames      = 300        # 10 s of game time at 30 Hz; --frames overrides
+
+[setup]
+state  = 3               # the Training dialog: two entries, so every press flips the selection
+warmup = 10
+pad    = "watch/pads/menu-down-up.pad"
+
+# --- the frame, so a row can be placed in time -----------------------------------------------------
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+# --- what libpad left in RAM ------------------------------------------------------------------------
+# The first 20 bytes of each half: [0] status, [1] 0x79 = DualShock 2 with pressures, [2..3] the button
+# word, [4..7] RX RY LX LY, [8..19] the twelve pressures. scePadRead copies the half whose stamp is the
+# larger of the two, so both halves and both stamps are here and the reader decides.
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+# --- the per-frame event queue ----------------------------------------------------------------------
+[[field]]
+name = "events"          # transitions raised this frame (zeroed at the top of every Update)
+addr = "@input_event_count"
+type = "u32"
+
+[[field]]
+name = "ev0_control"
+addr = "@input_events"
+type = "u32"
+
+[[field]]
+name = "ev0_device"      # the PSXControl this came from (manager+0xc + 4*slot)
+addr = "@input_events + 8"
+type = "u32"
+
+[[field]]
+name = "ev0_slot"
+addr = "@input_events + 0xc"
+type = "u32"
+
+[[field]]
+name = "ev0_pressed"     # 1 = press (app slot 0x50), 0 = release (app slot 0x4c)
+addr = "@input_events + 0x10"
+type = "u32"
+
+# --- the sixteen controls of pad 0 ------------------------------------------------------------------
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"            # 1 while down
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "value"           # 1.0 for a digital control, (pressure + 1) / 256 for an analogue one
+off  = 4
+type = "f32"
+
+[[array.field]]
+name = "rel_ms"          # ms since the release (never initialised, so garbage until the first press)
+off  = 8
+type = "u32"
+
+[[array.field]]
+name = "held_ms"         # ms held; 0 on the frame of the press
+off  = 0xc
+type = "u32"
+
+# --- what the front end did with it -----------------------------------------------------------------
+# Both entries of the dialog in save state 3. Heap addresses belonging to that state and no other: they
+# are here to prove the press reached the menu, not as a general symbol.
+[[field]]
+name = "no_item"
+addr = "0xc20358"
+type = "u32"
+
+[[field]]
+name = "yes_item"
+addr = "0xc20438"
+type = "u32"

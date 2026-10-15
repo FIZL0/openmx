@@ -35,8 +35,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 
 ### Phase 3 — the frame, and your first capture
 
-- [ ] **C5** (after C1) The pad: `./kit pad` presses a button on the running game and the game reacts. Then find where the game reads the pad in RAM (the bitmask per pad, and whether it keeps "pressed this frame" separately) → kit.toml `[symbols]` · docs/PCSX2.md | t: a scripted button press changes the menu selection in a capture | j: c5-pad
-
 ### Phase 4 — the arithmetic, before any ported math
 
 - [ ] **F3** VU0 macro mode: the ops the game actually uses (`vmul`, `vadd`, `vmadd`, `vmula`, `vdiv`, `vsqrt`, `vrsqrt`, the clipping and min/max ones), with VU0's own rounding and its flag behaviour. Take the list from the disassembly rather than implementing the whole ISA → crates/ps2-float/src/vu.rs | t: crates/ps2-float/tests/vu.rs | j: f3-vu0
