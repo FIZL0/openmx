@@ -1,0 +1,479 @@
+//! A window to ride in: the X11 protocol over its own socket, and nothing else.
+//!
+//! The whole workspace has no dependency outside itself — the archives, the geometry, the textures and
+//! the rasteriser are all written out — so the shell opens its window the same way: it speaks the X11
+//! wire protocol down the display's unix socket. That is about three hundred lines for what this needs
+//! (one window, one graphics context, a key state and an image per frame) and it keeps `cargo run -p
+//! openmx` buildable with nothing installed but a Rust toolchain.
+//!
+//! What it does *not* do, deliberately: no `MIT-SHM` (that needs shared memory, which needs unsafe
+//! code), no `BIG-REQUESTS` (the image is split into bands that fit the server's own maximum request
+//! instead), no reply-bearing requests at all — so the only thing that ever comes back down the socket
+//! is an event or an error, both 32 bytes, and the event reader never has to know a request's shape.
+//!
+//! Authority for the format: the X Window System Protocol, version 11. Field orders below are that
+//! document's, in its own order, which is why the request builders read as a list of pushes.
+
+use std::io::{ErrorKind, Read, Write};
+use std::os::unix::net::UnixStream;
+
+/// Request opcodes, by the names the protocol gives them.
+const CREATE_WINDOW: u8 = 1;
+const MAP_WINDOW: u8 = 8;
+const CHANGE_PROPERTY: u8 = 18;
+const CREATE_GC: u8 = 55;
+const PUT_IMAGE: u8 = 72;
+
+/// The two predefined atoms the shell needs, so that it never has to ask for one (an `InternAtom` is a
+/// request with a *reply*, and this module's whole simplification is that it makes none).
+const ATOM_WM_NAME: u32 = 39;
+const ATOM_STRING: u32 = 31;
+
+/// Event codes. The window selects three of these.
+const KEY_PRESS: u8 = 2;
+const KEY_RELEASE: u8 = 3;
+const DESTROY_NOTIFY: u8 = 17;
+const UNMAP_NOTIFY: u8 = 18;
+
+/// `CreateWindow`'s value mask: the background pixel, then the event mask. Values go in the request in
+/// increasing bit order, which is the order they are listed here.
+const CW_BACK_PIXEL: u32 = 0x0000_0002;
+const CW_EVENT_MASK: u32 = 0x0000_0800;
+/// What the window asks to hear about: keys down, keys up, and being taken away.
+const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0002_0000;
+
+/// `PutImage`'s format: one byte per pixel channel in the server's own layout.
+const ZPIXMAP: u8 = 2;
+
+/// How many X11 keycodes there are. An event's `detail` is one byte, so the held-key table is one byte
+/// wide and complete.
+pub const KEYCODES: usize = 256;
+
+/// The X11 keycodes the shell binds, by the name of the key as a Linux keyboard reports it. These are
+/// the evdev keycodes every X server on Linux has used since XKB's evdev rules became the default
+/// (the kernel's own code plus eight), so they do not depend on the user's layout — `Z` is the key
+/// where `Z` is on a US keyboard whatever the layout calls it, which is what a game wants.
+pub mod key {
+    pub const ESCAPE: u8 = 9;
+    pub const TAB: u8 = 23;
+    pub const Q: u8 = 24;
+    pub const E: u8 = 26;
+    pub const RETURN: u8 = 36;
+    pub const A: u8 = 38;
+    pub const S: u8 = 39;
+    pub const D: u8 = 40;
+    pub const F: u8 = 41;
+    pub const Z: u8 = 52;
+    pub const X: u8 = 53;
+    pub const C: u8 = 54;
+    pub const V: u8 = 55;
+    pub const SPACE: u8 = 65;
+    pub const UP: u8 = 111;
+    pub const LEFT: u8 = 113;
+    pub const RIGHT: u8 = 114;
+    pub const DOWN: u8 = 116;
+    pub const I: u8 = 31;
+    pub const J: u8 = 44;
+    pub const K: u8 = 45;
+    pub const L: u8 = 46;
+}
+
+/// An open window on an X display.
+pub struct Window {
+    stream: UnixStream,
+    window: u32,
+    gc: u32,
+    /// The window's size in pixels, which is the frame's size times [`Window::scale`].
+    pub width: usize,
+    pub height: usize,
+    /// How many window pixels one frame pixel becomes, in both directions.
+    pub scale: usize,
+    depth: u8,
+    /// The largest request the server will take, in bytes — the image is banded to fit it.
+    max_request: usize,
+    /// Which keys are down, by keycode.
+    keys: [bool; KEYCODES],
+    /// The server took the window away, or the connection went.
+    closed: bool,
+    /// Requests being assembled, likewise.
+    out: Vec<u8>,
+}
+
+impl Window {
+    /// Open a window of `width x height` frame pixels, each drawn `scale` times across and down.
+    ///
+    /// `display` is the usual `DISPLAY`, of which only the display number is used: this talks to the
+    /// unix socket, never to TCP, and sends no authorisation — which is what a local X server (or the
+    /// Xwayland a Wayland session runs) accepts from a client of the same user.
+    pub fn open(
+        display: &str,
+        width: usize,
+        height: usize,
+        scale: usize,
+        title: &str,
+    ) -> Result<Window, String> {
+        let number = display_number(display)?;
+        let path = format!("/tmp/.X11-unix/X{number}");
+        let stream = UnixStream::connect(&path).map_err(|e| format!("{path}: {e}"))?;
+        let mut w = Window {
+            stream,
+            window: 0,
+            gc: 0,
+            width: width * scale,
+            height: height * scale,
+            scale,
+            depth: 24,
+            max_request: 0,
+            keys: [false; KEYCODES],
+            closed: false,
+            out: Vec::new(),
+        };
+        let setup = w.handshake()?;
+        w.depth = setup.root_depth;
+        w.max_request = setup.max_request_bytes;
+        // One pixel per 32 bits is what every modern server uses for depth 24, and it is the layout
+        // the frame is converted into below. Anything else would need a different conversion, so say
+        // so rather than draw a smear.
+        if setup.bits_per_pixel != 32 {
+            return Err(format!(
+                "this display wants {} bits per pixel at depth {}; the shell writes 32",
+                setup.bits_per_pixel, setup.root_depth
+            ));
+        }
+        if setup.image_byte_order != 0 {
+            return Err("this display is big-endian; the shell writes little-endian pixels".into());
+        }
+        w.window = setup.id_base | 1;
+        w.gc = setup.id_base | 2;
+        w.create_window(&setup, title)?;
+        w.stream
+            .set_nonblocking(true)
+            .map_err(|e| format!("the display socket will not go non-blocking: {e}"))?;
+        Ok(w)
+    }
+
+    /// The connection setup: the only exchange in this module that has a reply.
+    fn handshake(&mut self) -> Result<Setup, String> {
+        let mut request = Vec::new();
+        request.push(b'l'); // little-endian
+        request.push(0);
+        request.extend_from_slice(&11u16.to_le_bytes()); // protocol major
+        request.extend_from_slice(&0u16.to_le_bytes()); // protocol minor
+        request.extend_from_slice(&0u16.to_le_bytes()); // no authorisation name
+        request.extend_from_slice(&0u16.to_le_bytes()); // no authorisation data
+        request.extend_from_slice(&0u16.to_le_bytes()); // pad
+        self.stream
+            .write_all(&request)
+            .map_err(|e| format!("the display will not take a setup: {e}"))?;
+
+        let mut head = [0u8; 8];
+        self.stream
+            .read_exact(&mut head)
+            .map_err(|e| format!("the display sent no setup reply: {e}"))?;
+        let extra = u16::from_le_bytes([head[6], head[7]]) as usize * 4;
+        let mut body = vec![0u8; extra];
+        self.stream
+            .read_exact(&mut body)
+            .map_err(|e| format!("the display's setup reply is short: {e}"))?;
+        match head[0] {
+            1 => {}
+            0 => {
+                let reason = head[1] as usize;
+                let text = String::from_utf8_lossy(&body[..reason.min(body.len())]).into_owned();
+                return Err(format!("the display refused the connection: {text}"));
+            }
+            2 => return Err("the display wants authorisation this shell cannot give".into()),
+            other => return Err(format!("the display answered a setup with {other}")),
+        }
+        parse_setup(&body)
+    }
+
+    /// Create the window, name it, give it a graphics context and put it on screen.
+    fn create_window(&mut self, setup: &Setup, title: &str) -> Result<(), String> {
+        let mut r = Vec::new();
+        r.push(CREATE_WINDOW);
+        r.push(0); // depth: copy the parent's
+        r.extend_from_slice(&(8u16 + 2).to_le_bytes()); // request length, in words
+        r.extend_from_slice(&self.window.to_le_bytes());
+        r.extend_from_slice(&setup.root.to_le_bytes());
+        r.extend_from_slice(&0i16.to_le_bytes()); // x, left to the window manager
+        r.extend_from_slice(&0i16.to_le_bytes()); // y
+        r.extend_from_slice(&(self.width as u16).to_le_bytes());
+        r.extend_from_slice(&(self.height as u16).to_le_bytes());
+        r.extend_from_slice(&0u16.to_le_bytes()); // border width
+        r.extend_from_slice(&1u16.to_le_bytes()); // class: InputOutput
+        r.extend_from_slice(&setup.root_visual.to_le_bytes());
+        r.extend_from_slice(&(CW_BACK_PIXEL | CW_EVENT_MASK).to_le_bytes());
+        r.extend_from_slice(&setup.black_pixel.to_le_bytes());
+        r.extend_from_slice(&EVENT_MASK.to_le_bytes());
+
+        // The title, as a plain string property on the window.
+        let name = title.as_bytes();
+        let pad = (4 - name.len() % 4) % 4;
+        r.push(CHANGE_PROPERTY);
+        r.push(0); // Replace
+        r.extend_from_slice(&(6u16 + ((name.len() + pad) / 4) as u16).to_le_bytes());
+        r.extend_from_slice(&self.window.to_le_bytes());
+        r.extend_from_slice(&ATOM_WM_NAME.to_le_bytes());
+        r.extend_from_slice(&ATOM_STRING.to_le_bytes());
+        r.push(8); // one byte per character
+        r.extend_from_slice(&[0, 0, 0]);
+        r.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        r.extend_from_slice(name);
+        r.extend_from_slice(&vec![0u8; pad]);
+
+        r.push(CREATE_GC);
+        r.push(0);
+        r.extend_from_slice(&4u16.to_le_bytes());
+        r.extend_from_slice(&self.gc.to_le_bytes());
+        r.extend_from_slice(&self.window.to_le_bytes());
+        r.extend_from_slice(&0u32.to_le_bytes()); // no values: the defaults draw an image fine
+
+        r.push(MAP_WINDOW);
+        r.push(0);
+        r.extend_from_slice(&2u16.to_le_bytes());
+        r.extend_from_slice(&self.window.to_le_bytes());
+
+        self.stream
+            .write_all(&r)
+            .map_err(|e| format!("the display will not take the window: {e}"))
+    }
+
+    /// Whether the window has gone — closed by its manager, or the connection dropped.
+    pub fn closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Whether a key is down now.
+    pub fn held(&self, code: u8) -> bool {
+        self.keys[code as usize]
+    }
+
+    /// Read everything the server has said since the last call: keys, and whether the window is gone.
+    ///
+    /// Never blocks, so a frame that nobody touches costs one `read` that returns `WouldBlock`.
+    pub fn poll(&mut self) {
+        let mut event = [0u8; 32];
+        loop {
+            match read_exact_nb(&mut self.stream, &mut event) {
+                Ok(true) => self.handle(&event),
+                Ok(false) => return,
+                Err(_) => {
+                    self.closed = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// One 32-byte event or error.
+    fn handle(&mut self, event: &[u8; 32]) {
+        match event[0] & 0x7f {
+            0 => {
+                // An error. Nothing the shell sends should produce one, so it is worth a line on
+                // stderr — but not worth dying for, because the window is usually still usable.
+                eprintln!(
+                    "openmx: the display reported error {} for request {}.{}",
+                    event[1], event[10], event[9]
+                );
+            }
+            KEY_PRESS => self.keys[event[1] as usize] = true,
+            KEY_RELEASE => self.keys[event[1] as usize] = false,
+            DESTROY_NOTIFY | UNMAP_NOTIFY => self.closed = true,
+            _ => {}
+        }
+    }
+
+    /// Put one frame on the window: RGB triples, row by row from the top, scaled up by
+    /// [`Window::scale`] and sent as however many bands the server's maximum request allows.
+    pub fn present(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<(), String> {
+        if rgb.len() < width * height * 3 {
+            return Err("the frame is smaller than its own size".into());
+        }
+        let row_bytes = self.width * 4;
+        // The 24-byte header has to fit too, and a band of no rows would never finish.
+        let rows_per_band = ((self.max_request - 24) / row_bytes).max(1);
+        let mut band: Vec<u8> = Vec::with_capacity(row_bytes * rows_per_band);
+
+        let mut y = 0;
+        while y < self.height {
+            let rows = rows_per_band.min(self.height - y);
+            band.clear();
+            for line in y..y + rows {
+                let source = line / self.scale;
+                for x in 0..width {
+                    let p = (source * width + x) * 3;
+                    // The server's little-endian depth-24 pixel is blue, green, red, unused.
+                    let pixel = [rgb[p + 2], rgb[p + 1], rgb[p], 0];
+                    for _ in 0..self.scale {
+                        band.extend_from_slice(&pixel);
+                    }
+                }
+            }
+            self.out.clear();
+            self.out.push(PUT_IMAGE);
+            self.out.push(ZPIXMAP);
+            self.out
+                .extend_from_slice(&(6u16 + (band.len() / 4) as u16).to_le_bytes());
+            self.out.extend_from_slice(&self.window.to_le_bytes());
+            self.out.extend_from_slice(&self.gc.to_le_bytes());
+            self.out
+                .extend_from_slice(&(self.width as u16).to_le_bytes());
+            self.out.extend_from_slice(&(rows as u16).to_le_bytes());
+            self.out.extend_from_slice(&0i16.to_le_bytes()); // destination x
+            self.out.extend_from_slice(&(y as i16).to_le_bytes());
+            self.out.push(0); // left pad
+            self.out.push(self.depth);
+            self.out.extend_from_slice(&0u16.to_le_bytes());
+            self.out.extend_from_slice(&band);
+            let bytes = std::mem::take(&mut self.out);
+            let sent = self.write_all_nb(&bytes);
+            self.out = bytes;
+            sent?;
+            y += rows;
+        }
+        Ok(())
+    }
+
+    /// Write a whole request to a non-blocking socket.
+    ///
+    /// A frame is about a megabyte and the socket's buffer is not, so this waits — and while it waits
+    /// it keeps reading events, because a server blocked on sending us events while we are blocked on
+    /// sending it an image is a deadlock, and draining is all it takes to avoid one.
+    fn write_all_nb(&mut self, mut bytes: &[u8]) -> Result<(), String> {
+        while !bytes.is_empty() {
+            match self.stream.write(bytes) {
+                Ok(0) => return Err("the display stopped reading".into()),
+                Ok(n) => bytes = &bytes[n..],
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    self.poll();
+                    if self.closed {
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(format!("the display will not take a frame: {e}")),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Read exactly `buf.len()` bytes if that many are there: `Ok(false)` means nothing was waiting.
+///
+/// Once the first byte of an event has arrived the rest is on its way, so a partial read spins rather
+/// than giving up — an event is 32 bytes and a unix socket does not split them for long.
+fn read_exact_nb(stream: &mut UnixStream, buf: &mut [u8]) -> Result<bool, std::io::Error> {
+    let mut got = 0;
+    while got < buf.len() {
+        match stream.read(&mut buf[got..]) {
+            Ok(0) => return Err(std::io::Error::from(ErrorKind::UnexpectedEof)),
+            Ok(n) => got += n,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                if got == 0 {
+                    return Ok(false);
+                }
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// What the shell keeps out of the connection setup.
+struct Setup {
+    id_base: u32,
+    max_request_bytes: usize,
+    image_byte_order: u8,
+    root: u32,
+    root_visual: u32,
+    root_depth: u8,
+    black_pixel: u32,
+    bits_per_pixel: u8,
+}
+
+/// Pick the fields the shell needs out of the setup reply's body.
+///
+/// The body is fixed fields, then the vendor's name, then one eight-byte format per pixel format, then
+/// the screens — each of which is a fixed part followed by its depths and their visuals. Only the first
+/// screen is read, and of the formats only the one matching the root's depth.
+fn parse_setup(body: &[u8]) -> Result<Setup, String> {
+    let short = || "the display's setup reply is too short".to_string();
+    if body.len() < 32 {
+        return Err(short());
+    }
+    let id_base = le32(body, 4);
+    let vendor_len = le16(body, 16) as usize;
+    let max_request_words = le16(body, 18) as usize;
+    let formats = body[21] as usize;
+    let image_byte_order = body[22];
+
+    let mut at = 32 + vendor_len + (4 - vendor_len % 4) % 4;
+    let format_table = at;
+    at += formats * 8;
+    if body.len() < at + 40 {
+        return Err(short());
+    }
+    let root = le32(body, at);
+    let black_pixel = le32(body, at + 12);
+    let root_visual = le32(body, at + 32);
+    let root_depth = body[at + 38];
+
+    let bits_per_pixel = (0..formats)
+        .map(|i| format_table + i * 8)
+        .find(|&f| body[f] == root_depth)
+        .map(|f| body[f + 1])
+        .ok_or_else(|| format!("the display has no pixel format for depth {root_depth}"))?;
+
+    Ok(Setup {
+        id_base,
+        // Zero would mean the server said nothing useful; 256 KiB is the protocol's own floor.
+        max_request_bytes: if max_request_words == 0 {
+            0x10000 * 4
+        } else {
+            max_request_words * 4
+        },
+        image_byte_order,
+        root,
+        root_visual,
+        root_depth,
+        black_pixel,
+        bits_per_pixel,
+    })
+}
+
+fn le16(b: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([b[at], b[at + 1]])
+}
+
+fn le32(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+}
+
+/// The display number out of a `DISPLAY` like `:0`, `:0.1` or `unix:0`.
+fn display_number(display: &str) -> Result<u32, String> {
+    let after_colon = display
+        .rsplit_once(':')
+        .map(|(_, n)| n)
+        .ok_or_else(|| format!("DISPLAY={display} has no display number"))?;
+    let number = after_colon.split('.').next().unwrap_or("");
+    number
+        .parse()
+        .map_err(|_| format!("DISPLAY={display}: {number} is not a display number"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_display_name_gives_its_socket_number() {
+        assert_eq!(display_number(":0"), Ok(0));
+        assert_eq!(display_number(":1.0"), Ok(1));
+        assert_eq!(display_number("unix:3"), Ok(3));
+        assert!(display_number("0").is_err());
+    }
+}

@@ -8,7 +8,7 @@
 # with a message naming what is missing.
 [workspace]
 resolver = "3"
-members = ["crates/ps2-float", "crates/ps2-oracle", "crates/game-sim", "crates/game-render"]
+members = ["crates/ps2-float", "crates/ps2-oracle", "crates/game-sim", "crates/game-render", "crates/openmx"]
 
 [workspace.package]
 edition = "2024"

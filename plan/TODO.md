@@ -53,7 +53,6 @@ half-ported ones, and it is the first time the port is worth running.
 
 ### Phase 8 — showing it
 
-- [ ] **P1** (after V1) The playable shell: a binary that opens a window, reads a real pad through I1s mapping, runs the ported simulation at the games own 60Hz and draws it with V1s renderer, dropping you into the freeride area from D6. No emulator, no fixture, no menu — press start and ride. This is the one task that turns a pile of proved functions into something a person can play, and it is the measure of priority 1 → crates/openmx/src/main.rs (new bin crate) | t: `cargo run -p openmx` rides for 60 s with no panic and `./kit check` stays green | j: p1-playable-shell
 - [ ] **V2** (after V1) Side-by-side screenshots: the same moment in the original and in the port, from the same save state, in `context/shots/`, with the differences listed. Do this once a subsystem lands, not once at the end → context/shots/ | t: none (by eye) | j: v2-side-by-side
 
 ### Stretch
