@@ -8,7 +8,10 @@
 //!    interpreter, appends its own `jr $ra` where the poll's branch went, and compares
 //!    [`game_sim::input::add_ms`] against them over values the game itself never reaches: the far side
 //!    of 2³¹, where the unsigned conversion needs its bias.
-//! 3. **The whole poll**, against a 220-frame recording of the real game: every control's six words and
+//! 3. **The axis arithmetic** — the dead zone and the two segments either side of it — against the
+//!    game's own `pad_axis_curve` through the oracle, over every byte a report can hold and forty-three
+//!    ranges, including degenerate ones the game never configures (I2).
+//! 4. **The whole poll**, against a 220-frame recording of the real game: every control's six words and
 //!    every event's six words, row for row, from pad reports taken out of the same recording. That is
 //!    the test that covers the parts no amount of reading proves — which frame latches a press, whether
 //!    the timers accumulate, and the order two presses in one frame come out in.
@@ -21,8 +24,8 @@ use std::path::{Path, PathBuf};
 
 use game_sim::hash;
 use game_sim::input::{
-    CONTROLS, Control, ControlState, EventQueue, Manager, PADS, PRESSURE_THRESHOLD, REPORT_BYTES,
-    Report, add_ms,
+    AXES, AXIS_CENTRE, AXIS_CENTRE_RAW, AXIS_CENTRE_RAW_INVERTED, AXIS_FULL, Axis, AxisRange, CONTROLS,
+    Control, ControlState, EventQueue, Manager, PADS, PRESSURE_THRESHOLD, REPORT_BYTES, Report, add_ms,
 };
 use game_sim::replay::Capture;
 use ps2_float::F;
@@ -533,6 +536,265 @@ fn the_timer_update_is_the_games_own_arithmetic() {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// The analogue axes
+// ---------------------------------------------------------------------------------------------------
+
+/// Which report byte each axis reads, measured off the game's own map in RAM, and which one it inverts.
+/// The port's [`AXIS_MAP`] is compared against this rather than being the same line of source.
+const MEASURED_AXES: [(Axis, Option<u8>, bool); AXES] = [
+    (Axis::LeftX, Some(6), false),
+    (Axis::LeftY, Some(7), false),
+    (Axis::RightX, Some(4), true),
+    (Axis::Unbound3, None, false),
+    (Axis::Unbound4, None, false),
+    (Axis::RightY, Some(5), false),
+];
+
+/// One frame with the four stick bytes in the report's own order (right X, right Y, left X, left Y) and
+/// nothing pressed, on pad 0.
+fn sticks(m: &mut Manager, dt: F, bytes: [u8; 4]) {
+    let mut r = Report::idle();
+    for (i, b) in bytes.into_iter().enumerate() {
+        r.set_axis(i, b);
+    }
+    m.tick(dt, &[r, Report::missing()]);
+}
+
+#[test]
+fn each_axis_reads_the_byte_the_games_map_gives_it() {
+    for (axis, byte, inverted) in MEASURED_AXES {
+        assert_eq!(axis.report_byte(), byte, "{}", axis.name());
+        assert_eq!(axis.is_inverted(), inverted, "{}", axis.name());
+        assert_eq!(Axis::from_index(axis.index()), Some(axis));
+    }
+    assert_eq!(Axis::from_index(AXES), None);
+}
+
+/// Each stick byte moves its own axis and nothing else: the proof the map is wired the way it is read.
+#[test]
+fn one_stick_byte_moves_one_axis() {
+    let mut m = manager();
+    for (i, axis) in [(0usize, Axis::RightX), (1, Axis::RightY), (2, Axis::LeftX), (3, Axis::LeftY)] {
+        let mut bytes = [AXIS_CENTRE; 4];
+        bytes[i] = 0xff;
+        sticks(&mut m, DT, bytes);
+        for other in Axis::ALL {
+            let v = m.pad(0).axis(other);
+            if other == axis {
+                assert_ne!(v, F::ZERO, "byte {i} should move {}", other.name());
+            } else {
+                assert_eq!(v, F::ZERO, "byte {i} moved {} as well", other.name());
+            }
+        }
+    }
+}
+
+/// A centred stick is exactly zero, not nearly zero: 127 and 128 both map inside the dead zone, which
+/// is why the original can get away with centring an axis at either of them.
+#[test]
+fn a_centred_stick_is_exactly_zero() {
+    let mut m = manager();
+    sticks(&mut m, DT, [AXIS_CENTRE; 4]);
+    for axis in Axis::ALL {
+        assert_eq!(m.pad(0).axis(axis), F::ZERO, "{}", axis.name());
+    }
+    assert_eq!(
+        AxisRange::STICK.apply(AXIS_CENTRE_RAW, AXIS_FULL),
+        AxisRange::STICK.apply(AXIS_CENTRE_RAW_INVERTED, AXIS_FULL),
+        "127 and 128 are both the centre"
+    );
+}
+
+/// The dead zone is a fifth of the travel either side of centre, and the first byte outside it comes
+/// out just above zero rather than jumping: the segments are stretched, not offset.
+#[test]
+fn the_dead_zone_is_a_fifth_of_the_travel_either_side() {
+    let at = |byte: u8| AxisRange::STICK.apply(F::from(byte as i32), AXIS_FULL);
+
+    // Where the stick starts to answer, in bytes, found rather than asserted from the formula: 0.2 of
+    // the mapped range is 0.6 of the way from the centre byte to each end.
+    let up = (128..=255u8).find(|&b| at(b) != F::ZERO).expect("something above centre answers");
+    let down = (0..=127u8).rev().find(|&b| at(b) != F::ZERO).expect("something below centre answers");
+    assert_eq!((down, up), (101, 153), "the dead zone is the bytes between {down} and {up}");
+
+    // And it starts from nothing rather than jumping: the segments are stretched, not offset.
+    assert!(at(up) > F::ZERO && at(up) < F(0.01), "{}", at(up));
+    assert!(at(down) < F::ZERO && at(down) > F(-0.01), "{}", at(down));
+
+    // The ends are still the full range, so the dead zone costs travel and not reach.
+    assert_eq!(at(255), F::ONE);
+    assert_eq!(at(0), -F::ONE);
+}
+
+/// Outside the dead zone the stick is 1.25× steeper than the byte, which is the half of this an
+/// approximated curve gets wrong even when it has the dead zone right: half travel is not half output.
+#[test]
+fn outside_the_dead_zone_the_stick_is_steeper_than_the_byte() {
+    let v = AxisRange::STICK.apply(F(191.0), AXIS_FULL); // 0.498 of the way up, by the byte
+    assert!(v > F(0.372) && v < F(0.373), "{v}");
+}
+
+/// The right stick's X is inverted on its way out of the poll, so the byte and the axis move opposite
+/// ways. Measured on the game's own map, where axis 2 is the one the poll hands out as `255 - raw`.
+#[test]
+fn the_right_sticks_x_comes_out_inverted() {
+    let mut m = manager();
+    sticks(&mut m, DT, [0xff, AXIS_CENTRE, 0xff, AXIS_CENTRE]);
+    assert_eq!(m.pad(0).raw_axis(Axis::RightX), F(255.0));
+    assert_eq!(m.pad(0).axis(Axis::RightX), -F::ONE, "inverted");
+    assert_eq!(m.pad(0).raw_axis(Axis::LeftX), F(255.0));
+    assert_eq!(m.pad(0).axis(Axis::LeftX), F::ONE, "not inverted");
+}
+
+/// The two axes with no report byte are stored centred every frame, whatever the report says.
+#[test]
+fn an_unbound_axis_is_centred_every_frame() {
+    let mut m = manager();
+    sticks(&mut m, DT, [0xff, 0x00, 0xff, 0x00]);
+    for axis in [Axis::Unbound3, Axis::Unbound4] {
+        assert_eq!(m.pad(0).raw_axis(axis), AXIS_CENTRE_RAW, "{}", axis.name());
+        assert_eq!(m.pad(0).axis(axis), F::ZERO, "{}", axis.name());
+    }
+}
+
+/// A pad the library says is gone has every axis stored centred as well as every control released.
+#[test]
+fn a_pad_that_vanishes_centres_every_axis() {
+    let mut m = manager();
+    sticks(&mut m, DT, [0xff, 0x00, 0xff, 0x00]);
+    m.pad_mut(0).connected = false;
+    m.tick(DT, &[Report::idle(), Report::missing()]);
+    for axis in Axis::ALL {
+        assert_eq!(m.pad(0).raw_axis(axis), AXIS_CENTRE_RAW, "{}", axis.name());
+        assert_eq!(m.pad(0).axis(axis), F::ZERO, "{}", axis.name());
+    }
+}
+
+/// A bad status byte centres what the consumers see but leaves the stored bytes stale — the one place
+/// the two disagree, and it is the original's own branch that makes them.
+#[test]
+fn a_bad_status_byte_centres_the_axes_but_leaves_the_bytes_stale() {
+    let mut m = manager();
+    sticks(&mut m, DT, [0xff, 0x00, 0xff, 0x00]);
+    assert_eq!(m.pad(0).raw_axis(Axis::LeftX), F(255.0));
+
+    m.tick(DT, &[Report::missing(), Report::missing()]); // connected, but the read says no pad
+    assert_eq!(m.pad(0).raw_axis(Axis::LeftX), F(255.0), "the byte is left where it was");
+    for axis in Axis::ALL {
+        assert_eq!(m.pad(0).axis(axis), F::ZERO, "{} is handed out centred", axis.name());
+    }
+}
+
+/// The axes are part of the state hash, so a port that drops the sticks on the floor cannot pass a
+/// replay by matching the buttons alone.
+#[test]
+fn the_hash_moves_when_a_stick_does() {
+    let mut a = manager();
+    let mut b = manager();
+    sticks(&mut a, DT, [AXIS_CENTRE; 4]);
+    sticks(&mut b, DT, [AXIS_CENTRE, AXIS_CENTRE, 0xff, AXIS_CENTRE]);
+    assert_ne!(a.hash(), b.hash(), "a stick off centre is a different state");
+
+    let mut c = manager();
+    sticks(&mut c, DT, [AXIS_CENTRE, AXIS_CENTRE, 0xff, AXIS_CENTRE]);
+    assert_eq!(b.hash(), c.hash(), "the same frames, the same state");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The axis arithmetic, against the game's own function
+// ---------------------------------------------------------------------------------------------------
+
+/// Where the test puts the consumer record the curve writes into, inside the interpreter's scratch.
+const CONSUMER_VALUE: u32 = 0x24;
+const CONSUMER_CENTRE: u32 = 0x28;
+const CONSUMER_LO: u32 = 0x2c;
+const CONSUMER_HI: u32 = 0x30;
+const CONSUMER_DEAD_HI: u32 = 0x34;
+const CONSUMER_DEAD_LO: u32 = 0x38;
+
+/// [`AxisRange::apply`] against the game's own `pad_axis_curve`, over every byte a report can hold and
+/// forty ranges — the game's own and thirty-nine generated ones, including degenerate ones the game
+/// never configures (a dead zone of zero width, a segment of zero width, a range the wrong way round),
+/// because a divide by zero is a number on this hardware and the port has to get that number too.
+#[test]
+fn the_axis_curve_is_the_games_own_arithmetic() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let at = match addr("pad_axis_curve") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let consumer = ee.scratch(0);
+
+    // Every byte a report can hold, the two centring constants, and values outside the byte range: the
+    // function has no clamp, so what it does out there is part of what the port has to match.
+    let mut raws: Vec<F> = (0..=255u32).map(|b| F::from(b as i32)).collect();
+    raws.extend([
+        AXIS_CENTRE_RAW,
+        AXIS_CENTRE_RAW_INVERTED,
+        F(-1.0),
+        F(256.0),
+        F(1000.0),
+        F(-1000.0),
+        F(0.5),
+        F(127.5),
+        F(1e20),
+        F(-1e20),
+        F(1e-30),
+        F(0.0),
+    ]);
+
+    let mut ranges = vec![AxisRange::STICK];
+    let mut seed = 0x1234_5678u32;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    // A float in −8..8, so the generated ranges span a few exponents either side of the game's own.
+    let spread = move |r: u32| F(f32::from(((r >> 8) & 0xffff) as i16) / 4096.0);
+    while ranges.len() < 40 {
+        ranges.push(AxisRange {
+            centre: spread(rnd()),
+            lo: spread(rnd()),
+            hi: spread(rnd()),
+            dead_hi: spread(rnd()),
+            dead_lo: spread(rnd()),
+        });
+    }
+    // The degenerate ones, on purpose: each divisor in the function, zero.
+    ranges.push(AxisRange { centre: F::ZERO, lo: -F::ONE, hi: F::ONE, dead_hi: F::ZERO, dead_lo: F::ZERO });
+    ranges.push(AxisRange { centre: F::ZERO, lo: -F::ONE, hi: F::ONE, dead_hi: F::ONE, dead_lo: -F::ONE });
+    ranges.push(AxisRange { centre: F::ZERO, lo: F::ZERO, hi: F::ZERO, dead_hi: F::ZERO, dead_lo: F::ZERO });
+
+    let mut calls = 0usize;
+    for range in &ranges {
+        ee.set_f32(consumer + CONSUMER_CENTRE, range.centre.to_f32());
+        ee.set_f32(consumer + CONSUMER_LO, range.lo.to_f32());
+        ee.set_f32(consumer + CONSUMER_HI, range.hi.to_f32());
+        ee.set_f32(consumer + CONSUMER_DEAD_HI, range.dead_hi.to_f32());
+        ee.set_f32(consumer + CONSUMER_DEAD_LO, range.dead_lo.to_f32());
+        for &raw in &raws {
+            ee.set_f32(consumer + CONSUMER_VALUE, f32::from_bits(0xdead_beef));
+            ee.call(at, &[u64::from(consumer)], &[raw.to_f32(), AXIS_FULL.to_f32()], 10_000);
+            let want = ee.f32_at(consumer + CONSUMER_VALUE);
+            let got = range.apply(raw, AXIS_FULL);
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "raw {raw} through {range:?}: the original stores {want} ({:#010x}), the port {got} \
+                 ({:#010x})",
+                want.to_bits(),
+                got.to_bits()
+            );
+            calls += 1;
+        }
+    }
+    assert!(calls >= 10_000, "only {calls} cases");
+    println!("{calls} calls over {} ranges", ranges.len());
+}
+
+// ---------------------------------------------------------------------------------------------------
 // The whole poll, against a recording of the real game
 // ---------------------------------------------------------------------------------------------------
 
@@ -747,4 +1009,159 @@ fn files_in(dir: &PathBuf, extension: &str) -> Vec<PathBuf> {
         .collect();
     out.sort();
     out
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The whole axis chain, against a recording of the real game
+// ---------------------------------------------------------------------------------------------------
+
+/// How many consumer slots on axis 2 the watch spec follows. The menu registers five; a recording with
+/// more live than this is compared on the ones it recorded.
+const WATCHED_CONSUMERS: usize = 5;
+
+/// Every capture that has the axis columns replays row for row: the six raw slots the poll stores, and
+/// the value every consumer registered on the inverted axis was handed, against the pad bytes from the
+/// same row.
+///
+/// This is the half of the proof the oracle cannot give. The oracle proves the curve's arithmetic for
+/// arguments the test chooses; this proves the port chooses the same arguments as the game — the right
+/// report byte per axis, `255 - raw` on the one axis the dispatch inverts, `127.0` on the two nothing is
+/// bound to, and the configuration (centre 0, ±1, a dead zone of ±0.2) actually in the running game
+/// rather than in a save state's heap.
+#[test]
+fn a_recording_of_the_real_sticks_replays_row_for_row() {
+    let dir = private_dir("capture");
+    let mut proved = 0;
+    for path in files_in(&dir, "csv") {
+        let text = std::fs::read_to_string(&path).expect("read the capture");
+        let capture = match Capture::parse(&text) {
+            Ok(c) => c,
+            Err(e) => panic!("{}: {e}", path.display()),
+        };
+        if !capture.columns.iter().any(|c| c == "ax_raw0.v") {
+            continue; // some other task's capture, watching something else
+        }
+        replay_axes(&path, &capture);
+        proved += 1;
+    }
+    if proved == 0 {
+        skip(&format!(
+            "no axis capture in {} — record one with `./kit record watch/axes.toml --state 9 -n 220 \
+             --pad watch/pads/stick-sweep.pad -o context/capture/i2-axes.csv`",
+            dir.display()
+        ));
+    }
+}
+
+fn replay_axes(path: &Path, capture: &Capture) {
+    let rows = Rows::new(capture);
+    let mut m = Manager::new();
+    m.pad_mut(0).connected = true;
+
+    // What the capture is worth. A sweep that never left the dead zone, or never reached an end, would
+    // pass while proving only that zero is zero.
+    let (mut compared, mut consumers, mut dead, mut below, mut above) = (0, 0, 0, 0, 0);
+    let (mut ends, mut inverted_off_centre) = (0, 0);
+
+    for row in 0..capture.rows.len() {
+        if row > 0 && capture.frames[row] != capture.frames[row - 1] + 1 {
+            continue; // a gap in the recording: nothing here depends on the previous row anyway
+        }
+        let report = rows.report(row);
+        m.tick(rows.dt(row), &[report, Report::missing()]);
+        compared += 1;
+
+        let frame = capture.frames[row];
+        let at = |what: &str| format!("{}: row {row}, frame {frame}, {what}", path.display());
+
+        // The map the game built when it bound the pad is the map the port has compiled in.
+        for axis in Axis::ALL {
+            let i = axis.index();
+            assert_eq!(
+                rows.uint(row, &format!("ax_map{i}.byte")),
+                u64::from(axis.report_byte().unwrap_or(0)),
+                "{}",
+                at(&format!("the game maps {} elsewhere", axis.name()))
+            );
+        }
+
+        // The raw slots: the report byte for a bound axis, the centre for an unbound one.
+        for axis in Axis::ALL {
+            let i = axis.index();
+            let want = rows.float(row, &format!("ax_raw{i}.v"));
+            let got = m.pads[0].raw_axis(axis);
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "{}",
+                at(&format!("{} raw {got} vs {want}", axis.name()))
+            );
+            if axis.report_byte().is_none() {
+                assert_eq!(got.to_bits(), AXIS_CENTRE_RAW.to_bits(), "{}", at("an unbound axis moved"));
+            }
+            if want == F::ZERO || want == AXIS_FULL {
+                ends += 1;
+            }
+        }
+
+        // The consumers on axis 2 — the one the dispatch hands out inverted. Each one's range comes out
+        // of the same row, so the comparison is against the configuration the game was running with and
+        // not against the port's copy of it; that the two agree is asserted separately, below.
+        let live = (rows.uint(row, "ax2_consumers") as usize).min(WATCHED_CONSUMERS);
+        assert!(live > 0, "{}", at("no consumer registered on the inverted axis"));
+        let raw = m.pads[0].raw_axis(Axis::RightX);
+        if raw != AXIS_CENTRE_RAW {
+            inverted_off_centre += 1;
+        }
+        for k in 0..live {
+            let p = |f: &str| format!("ax2{k}.{f}");
+            let range = AxisRange {
+                centre: rows.float(row, &p("centre")),
+                lo: rows.float(row, &p("lo")),
+                hi: rows.float(row, &p("hi")),
+                dead_hi: rows.float(row, &p("dead_hi")),
+                dead_lo: rows.float(row, &p("dead_lo")),
+            };
+            assert_eq!(
+                format!("{range:?}"),
+                format!("{:?}", AxisRange::STICK),
+                "{}",
+                at(&format!("consumer {k} is configured differently from AxisRange::STICK"))
+            );
+            let want = rows.float(row, &p("value"));
+            let got = range.apply(AXIS_FULL - raw, AXIS_FULL);
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "{}",
+                at(&format!("consumer {k} got {want} from raw {raw}, the port makes it {got}"))
+            );
+            // And the port's own stored value, which is the same arithmetic with the same range.
+            assert_eq!(
+                m.pads[0].axis(Axis::RightX).to_bits(),
+                want.to_bits(),
+                "{}",
+                at("the port's axis value")
+            );
+            if want == F::ZERO {
+                dead += 1;
+            } else if want > F::ZERO {
+                above += 1;
+            } else {
+                below += 1;
+            }
+            consumers += 1;
+        }
+    }
+
+    assert!(compared >= 50, "{}: only {compared} rows replayed", path.display());
+    assert!(ends >= 2, "{}: the sweep never reached an end of the travel", path.display());
+    assert!(dead >= 2, "{}: the sweep never sat in the dead zone", path.display());
+    assert!(above >= 2 && below >= 2, "{}: the sweep only went one way ({above}/{below})", path.display());
+    assert!(inverted_off_centre >= 10, "{}: the inverted axis never moved", path.display());
+    println!(
+        "{}: {compared} frames, {consumers} consumer values, {dead} in the dead zone, {above} above, \
+         {below} below, {ends} at an end",
+        path.display()
+    );
 }

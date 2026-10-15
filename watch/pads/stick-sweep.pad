@@ -1,0 +1,53 @@
+# stick-sweep.pad — walk both sticks across their travel so a capture sees every part of the axis
+# curve: the centre, inside the dead zone, the first value outside it, and both ends.
+#
+# Each position is held for a few frames so that whichever libpad buffer half the poll reads, the row
+# is unambiguous — one row mid-move would still be consistent (the capture records the half it read),
+# but a held position makes a failing row easy to read by eye.
+#
+# The values are the virtual pad's own -1..1, which PCSX2 scales to a report byte; the capture records
+# the bytes, so the exact scaling does not have to be known here. The point is coverage, not a
+# particular byte. Timing is wall-clock, not frame-exact.
+#
+# The main menu times out into the attract loop after ~20 s; this script finishes well inside that, so
+# unlike menu-alive.pad it does not have to nudge anything. It presses no buttons at all — the menu
+# ignores the sticks here, so the capture's starting state is still the state it ends in.
+
+stick l 0 0
+sleep 10f
+stick l -1 -1
+sleep 12f
+stick l -0.5 -0.5
+sleep 12f
+stick l -0.2 -0.2
+sleep 12f
+stick l -0.1 0.1
+sleep 12f
+stick l 0 0
+sleep 12f
+stick l 0.1 -0.1
+sleep 12f
+stick l 0.2 0.2
+sleep 12f
+stick l 0.5 0.5
+sleep 12f
+stick l 1 1
+sleep 12f
+stick l 0 0
+sleep 8f
+stick r -1 -1
+sleep 12f
+stick r -0.5 0.5
+sleep 12f
+stick r -0.2 0.2
+sleep 12f
+stick r 0 0
+sleep 12f
+stick r 0.2 -0.2
+sleep 12f
+stick r 0.5 -0.5
+sleep 12f
+stick r 1 1
+sleep 12f
+release
+sleep 10f
