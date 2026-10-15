@@ -9,3 +9,9 @@ publish.workspace = true
 # so it may not reach for the host's libm (whose accuracy differs per platform) or for a crate that
 # might. Everything here is integer ops plus the four basic IEEE operations, which are exact by spec.
 [dependencies]
+
+# Test-only, and a deliberate cycle: `tests/oracle.rs` checks these models against the game's own code,
+# which means running it, which is what the oracle crate does. Cargo allows a dev-dependency cycle
+# precisely for this case — the models themselves still have no dependencies at all.
+[dev-dependencies]
+ps2-oracle = { path = "../ps2-oracle" }

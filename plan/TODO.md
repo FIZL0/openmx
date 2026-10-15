@@ -42,8 +42,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 
 ### Phase 5 — the first proven function, and the harness
 
-- [ ] **O2** (after O1) Oracle coverage for the arithmetic of F1–F4: run each ported op against the real code over ≥10k generated inputs, including the awkward ones (zero, denormals, the largest magnitudes, equal exponents, exponent differences of 24 and over) → crates/ps2-float/tests/ · research/oracle.txt | t: crates/ps2-float/tests/oracle.rs | j: o2-float-oracle
-
 ### Phase 6 — input, the game's own way
 
 - [ ] **I3** (after I1) Input recording and playback in the port: a fixture of pad frames drives a run, so a human-played sequence from the real game can be replayed against the port (this is what A2's fixtures are made of) → crates/game-sim/src/replay.rs | t: crates/game-sim/tests/replay.rs | j: i3-input-fixtures

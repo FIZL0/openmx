@@ -13,6 +13,9 @@ dependencies = [
 [[package]]
 name = "ps2-float"
 version = "1.0.0"
+dependencies = [
+ "ps2-oracle",
+]
 
 [[package]]
 name = "ps2-oracle"

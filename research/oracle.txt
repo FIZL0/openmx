@@ -238,3 +238,54 @@ pad_axis_read_one           boot 0x0011d3d0 the single-axis reader: its own sceP
 #                                           the same arithmetic inline. Not an oracle candidate — it
 #                                           reads the pad through libpad
 pad_poll_axes_centre        boot 0x0016aa40 centre every axis and release every control (pad closed)
+
+# ---------------------------------------------------------------------------------------------------
+# O2 — the arithmetic carriers. No shipped game has a function that is one `div.s` and a `jr`, so the
+# oracle coverage of F1-F3 runs each op through the smallest *call-free* function in the image that
+# contains it: one or two operations wide, every input an argument or a field the test writes, every
+# result still readable when the function returns. They were found by disassembling every call-free
+# function and looking for the ops the O1 set never reaches. crates/ps2-float/tests/oracle.rs calls
+# each one over 10k generated inputs from the awkward classes — zero and minus zero, both ends of the
+# denormal range, the smallest normal, the largest magnitudes, the Inf and NaN patterns the EE has not
+# got, powers of two, and *pairs* with a chosen exponent difference (0, 24, 25, 26 and more). How it
+# was done, and what it cannot prove, is in research/journal/2026-10-15-o2-float-oracle.
+#
+# The scalar FPU. Offsets are into the object the carrier is a method of; the test writes the fields it
+# reads, so no RAM image is needed.
+float_mul_add_into          boot 0x0025d180 (obj, a in f12, b in f13): *(obj+0x6c) += b*a as a mul.s and
+#                                           then a separate add.s, with the sum also left in f0. Both
+#                                           factors are arguments, so this is the full-domain mul.s
+float_recip_32767           boot 0x00388a50 (obj, x): obj+0x94 = x, obj+0x90 = 32767.0 / x. div.s with
+#                                           a free divisor, zero and the denormals included
+float_span_rate             boot 0x002f9ab0 (obj, a, b): obj+0x64 = max(a, obj+0x64); obj+0x6c = 0.5 *
+#                                           that; obj+0x68 = (b - obj+0x5c) / obj+0x6c. div.s with a
+#                                           free numerator, plus max.s, mul.s and sub.s in that order
+float_inv_sqrt              boot 0x00284b80 (x) -> 1.0 / sqrt(x): one rsqrt.s against a lui-built one.
+#                                           The only root carrier that takes its argument whole, so the
+#                                           only one that can be given a negative or a denormal
+quat_two_matrix_rows        boot 0x0013f380 (q, row_a, row_b): two rows of the rotation matrix of the
+#                                           quaternion at q, as eleven mul.s, two add.s, three sub.s and
+#                                           the accumulator pairs mula.s/msub.s (-> row_b+0) and
+#                                           mula.s/madd.s (-> row_a+0). The only call-free msub.s in the
+#                                           image whose result is not overwritten before the return
+float_to_i16_pair           boot 0x00302ce0 (out, &a, &b): out[0] = (short)(int)a, out[1] the same for
+#                                           b, as cvt.w.s + mfc1 + sh. Either half is skipped on a null
+i16_pair_to_float           boot 0x00302d70 (src, &a, &b): a = (float)src[0], b = (float)src[1] from the
+#                                           two shorts, as lh + mtc1 + cvt.s.w
+#
+# VU0 macro mode.
+vec3_sub_vu                 boot 0x00107fb0 (out, a, b): vsub.xyz, bounced through the stack; out's w
+#                                           lane comes back from a untouched
+vec3_mul_vu                 boot 0x00108050 (out, a, b): vmul.xyz, lane by lane; w likewise from a
+mat4_row3_add               boot 0x003f2e98 (out, m, v): copies m's first three rows as quadwords, then
+#                                           out+0x30 = m+0x30 + v with vadd.xyz. The vadd carrier
+vec3_div_scalar             boot 0x001088f0 (v, s in f12) -> v: v.xyz *= 1/s in place, as a vdiv of
+#                                           vf0's w lane (the constant one) by s, vwaitq, then the
+#                                           broadcast vmulq.xyz. NB `./kit dis` prints vdiv's two field
+#                                           selectors the wrong way round — the encoding is fsf in bits
+#                                           22:21 and ftf in 24:23, which is what the oracle reads
+#
+# Rejected carriers, written down so the next person does not look twice: 0x001346f0 builds a 2-D
+# determinant with mula.s/msub.s and stores it to *a0, but overwrites it on the non-degenerate path;
+# 0x0034ee10 reaches sqrt.s with a nearly free argument, but only through a pointer chain and two
+# multiplies by its own constants. Nothing in the image feeds sqrt.s an argument of either sign.
