@@ -253,8 +253,12 @@ const LOGF_OUT: &[u32] = &[
     0x00000000, 0xbf317217, 0x3f317217, 0x40135d8d, 0xc23834f1, 0x423834f1,
     0x42b17217, 0xc2aeac4f,
 ];
+// sqrtf(-0.0) is +0.0, not -0.0: `sqrt.s` takes |x| first, so the game's one-instruction `sqrtf`
+// cannot return a sign. A3 pinned the port's old -0.0 here before F4 ported the disc's own version and
+// corrected it — see the F4 journal's table, and its note that this one value rests on the model rather
+// than on a measurement of the hardware.
 const SQRTF_OUT: &[u32] = &[
-    0x00000000, 0x80000000, 0x2edbe6ff, 0x3f3504f3, 0x3f800000, 0x3fb504f3,
+    0x00000000, 0x00000000, 0x2edbe6ff, 0x3f3504f3, 0x3f800000, 0x3fb504f3,
     0x3fddb3d7, 0x41200000, 0x501502f9, 0x5f7fffff,
 ];
 const ATAN2F_OUT: &[u32] = &[
