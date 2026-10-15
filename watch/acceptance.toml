@@ -1,0 +1,122 @@
+# acceptance.toml — the acceptance run: a sequence of real play, recorded so the port can be replayed
+# against it frame by frame. This is the spec S8's test reads; `crates/game-sim/tests/replay.rs` turns
+# a capture of it into a fixture (inputs from the control columns, watches from the bike columns).
+#
+#   ./kit record --dry-run watch/acceptance.toml                      # check the spec, no emulator
+#   ./kit record watch/acceptance.toml --state 4 -n 9000 \
+#       -o context/capture/acceptance-freeride.csv                    # ~5 minutes at the game's 30 Hz
+#
+# A row has to carry **both halves of a frame** or it cannot be replayed:
+#
+#   the input  the sixteen controls the game itself believes are held this frame, plus the raw libpad
+#              buffer they were derived from. A fixture needs one input per frame, so this spec is
+#              `every = 1` and must stay that way: a capture with a gap in it is not an acceptance
+#              recording, and the test refuses one.
+#   the state  the player's vehicle actor — velocity and the 4x4 world transform whose row 3 is the
+#              position. These are the columns the port is judged on.
+#
+# Three things to check in the capture before trusting it, all of which the test also checks:
+#
+#   1. `bike_type` reads 4 (a vehicle) and `bike_player` is non-zero (a human's, not an AI's) in every
+#      row. The hop count below is R6's — it is the *sixth* list entry, which was the first type-4
+#      actor in a one-player Freestyle session. A different mode or a second player moves it, so if
+#      `bike_type` is not 4, change the number of `-> 0x8` hops until it is.
+#   2. No empty cells in the bike columns. An empty cell is a pointer chain that went null — no level
+#      loaded, or the actor was freed — and a fixture cannot be built across one.
+#   3. `dt` is 1/30 (0.033333335) throughout. A frame the emulator ran long is a frame the original
+#      integrated differently from the port, and the replay will diverge there for no reason.
+#
+# The `@symbols` come from C5 (the pad) and R6 (the actors); `./kit sym` lists what this worktree has.
+# If a name is missing, paste the block at the end of C5's journal entry into `kit.toml`.
+
+[watch]
+name        = "acceptance"
+description = "one frame of real play: every control the game read, and the bike it moved"
+every       = 1          # one row per frame, always: the fixture needs every frame's input
+frames      = 9000       # ~5 minutes at 30 Hz; --frames overrides
+
+[setup]
+state  = 4               # a freeride area, stopped on open ground (plan/HUMAN.md)
+warmup = 10              # let the state settle before the first row
+
+# --- when the frame was, and how long the game thought it was ---------------------------------------
+[[field]]
+name = "frame_counter"            # the app object's own tick counter, +1 per tick
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"                       # the dt the simulation was given; 1/30 in play
+addr = "@frame_dt"
+type = "f32"
+
+# The C library's 64-bit LCG state (R5): the number a replay has to start from, because the game draws
+# from it and the port must draw the same. `Fixture::seed` is 32 bits wide, so only the low half of it
+# survives into a fixture file today — see S8's journal entry.
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+# --- the input, as the game's own input manager holds it ---------------------------------------------
+# Sixteen controls, 0x18 bytes each; `held` is 1 while down. This is the input the simulation reads, so
+# it is the one a fixture is built from: no bit permutation to guess, unlike the wire word below.
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+# --- the input, as libpad left it on the wire -------------------------------------------------------
+# Both 0x80-byte halves of port 0's buffer and both stamps, because `scePadRead` takes the half with
+# the larger stamp and a PINE row is sampled *after* the tick — by which time the IOP has refreshed the
+# other half, so the half the game actually read is the one with the *smaller* stamp (C5 measured this
+# on 300 of 300 rows). Bytes [2..3] are the button word, active low; [4..7] are RX RY LX LY, centre
+# 0x7f. The sticks come from here because the control state has no axes.
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+# --- the bike: what the port is judged on -----------------------------------------------------------
+# R6's chain, one arrow at a time: the GameManager singleton -> the actor manager (+0x34) -> its list
+# head (+0x34) -> five `next` hops (+0x8) -> that node's item (+0x0) -> a field of the actor.
+[[field]]
+name = "bike_type"                # +0x00: must read 4 (a vehicle) or the hop count is wrong
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "bike_player"              # +0x20: the player it belongs to; 0 means nobody is riding it
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "bike_vel"                 # +0x130: velocity, world units per second
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x4"
+
+[[field]]
+name = "bike_xform"               # +0x180: 4x4 world transform; row 3 (+0x1b0) is the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"

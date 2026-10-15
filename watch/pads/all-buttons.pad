@@ -1,0 +1,30 @@
+# all-buttons.pad — every button one at a time, then the left stick to each extreme.
+#
+# For proving an input decode rather than for playing the game: the six buttons here are the ones the
+# front end ignores, so the capture stays on one screen and nothing loads mid-run (a load stalls the
+# game's tick counter, and a capture with a stalled tick is not replayable). Start and cross are
+# deliberately absent for that reason, and select cannot be sent at all.
+#
+#   ./kit record watch/acceptance.toml --state 9 --pad watch/pads/all-buttons.pad -n 300
+press l1 400
+sleep 100
+press r1 400
+sleep 100
+press l2 400
+sleep 100
+press r2 400
+sleep 100
+press triangle 400
+sleep 100
+press square 400
+sleep 200
+stick l -1 0
+sleep 400
+stick l 1 0
+sleep 400
+stick l 0 -1
+sleep 400
+stick l 0 1
+sleep 400
+stick l 0 0
+release
