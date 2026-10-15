@@ -197,6 +197,12 @@ pub mod demo;
 /// checked with it.
 pub mod hash;
 
+/// The matrix and quaternion helpers everything with a bone or a camera is built out of: the 4x4
+/// product, the point transform, the look-at frame, a quaternion to a matrix and back, the angular
+/// velocity derivative, and the spherical interpolation a blended bone goes through. All of them in the
+/// original's arithmetic and its instruction order, because that order is what fixes the last bit.
+pub mod math;
+
 /// The input layer: the pad read once a frame, before the simulation, and mapped into the game's own
 /// bitmask. Sixteen controls per pad with "held", their press and release timers, and the one-frame
 /// event queue the front end reacts to — the original keeps no "pressed this frame" mask, so the module

@@ -35,8 +35,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 
 ### Phase 4 — the arithmetic, before any ported math
 
-- [ ] **F5** (after F3) The matrix and quaternion helpers the game uses for bones and cameras, built on F1–F3 with the same op order as the original (the order changes the last bits) → crates/game-sim/src/math.rs | t: crates/game-sim/tests/math.rs | j: f5-matrix
-
 ### Phase 5 — the first proven function, and the harness
 
 ### Phase 6 — input, the game's own way
