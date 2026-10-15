@@ -30,3 +30,6 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 5 — the first proven function, and the harness
 - [x] **A1** (after F1) The state hash: one function that walks the whole simulation state and hashes it, per tick, with a dump mode that says which field first differed. On an almost empty simulation this feels pointless; it is the highest-leverage task in the project, because from here on every port either keeps the hashes matching or does not, and you find out in seconds → crates/game-sim/src/hash.rs | t: crates/game-sim/tests/hash.rs | j: a1-state-hash
+
+### Phase 7 — one subsystem, end to end
+- [x] **S1** (after R3) The fixed update: the tick order from R3, as the top-level step of the simulation — what updates before what, where input is read, where the RNG is drawn from, what happens on the frames the game is loading or paused → crates/game-sim/src/lib.rs | t: crates/game-sim/tests/tick.rs | j: s1-fixed-update

@@ -62,7 +62,6 @@ Pick the subsystem this game is *about* (the thing the player does every second)
 ported, oracle-checked, replay-proved. One finished subsystem teaches more about the codebase than five
 half-ported ones, and it is the first time the port is worth running.
 
-- [ ] **S1** (after R3) The fixed update: the tick order from R3, as the top-level step of the simulation — what updates before what, where input is read, where the RNG is drawn from, what happens on the frames the game is loading or paused → crates/game-sim/src/lib.rs | t: crates/game-sim/tests/tick.rs | j: s1-fixed-update
 - [ ] **S2** (after S1) Actor lifetime: how actors are created, freed and iterated (order matters: it decides RNG draw order and collision resolution order) → crates/game-sim/src/actor.rs | t: crates/game-sim/tests/actor.rs | j: s2-actors
 - [ ] **S3** (after S2) Movement: the player's (or main actor's) acceleration, friction, maximum speed and turning, in the original's arithmetic and its update order. Prove each piece with the oracle, then the whole with a short replay fixture → crates/game-sim/src/move.rs | t: crates/game-sim/tests/move.rs | j: s3-movement
 - [ ] **S4** (after S1) Collision against the world: the original's shape test and its sweep, including how it resolves a hit and how many iterations it allows. Port the test it uses, not a better one — a more accurate collision is a different game → crates/game-sim/src/collide.rs | t: crates/game-sim/tests/collide.rs | j: s4-collision

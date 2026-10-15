@@ -244,6 +244,11 @@ pub mod hash;
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.
 pub mod rng;
 
+/// The fixed update: one frame of the game as the original runs it — one mode request serviced, the
+/// wall clock sampled and averaged into `dt`, the pads read, and then the simulation. The top-level
+/// step everything else in this crate hangs off, and the place to look for what runs before what.
+pub mod tick;
+
 #[cfg(test)]
 mod tests {
     use super::*;

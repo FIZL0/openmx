@@ -114,6 +114,10 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
     describes itself once, with `impl hash::State`.
   - `rng.rs` — the C library's 64-bit LCG the whole game calls, plus the random float and the uniform
     list index its call sites wrap it in. Proved bit-exact in `tests/rng.rs` (R5).
+  - `tick.rs` — the fixed update: one frame as the original runs it. The mode mailbox, the Timer 0
+    clock, the thirty-entry `dt` average with its 30 fps clamp, the pad latch, the markers around the
+    simulation, and the three different ways a frame can not simulate. `Engine::step` is the top-level
+    step everything else hangs off. Proved against `engine_tick` itself in `tests/tick.rs` (S1).
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the
