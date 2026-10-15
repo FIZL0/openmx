@@ -221,3 +221,91 @@ pad_timer_add_ms            boot 0x0016aef0 30 instructions, not a function: ($s
 #                                           set the sign bit by hand). Falls through to the span's end,
 #                                           so the test's `jr $ra` sits where the poll's `b` went.
 #                                           The identical sequence at 0x0016ae68 does +0x334 (held ms)
+
+# ---------------------------------------------------------------------------------------------------
+# R7 — the scripted freeride boot. Two words put the game into a loaded world with no front end:
+# app+0x408 (StartMode) = 2 and the event's activity type = 5, with the event's league = 2. The event
+# is `*( *(app+0x3d4) + 0xc )`; app is 0x00479990. `StartMode = FreeRide` sets type 0 instead, which
+# loads nothing on a free* area (see activity_set_for_event below). How it was driven and what it
+# proved is in research/journal/2026-10-15-r7-r7-freeride-boot.
+#
+# RAM addresses, not functions. Also in kit.toml's [symbols]; this is the committed copy.
+start_mode                  boot 0x00479d98 app+0x408: 0 front end, 1 waypoint editor, 2 straight into
+#                                           a loaded world. Written by the StartMode .cfg key and by
+#                                           the TrackName autodetect; read by the boot state machine
+mode_request                boot 0x00479d94 app+0x404: the front end's request to the main loop; 6 is
+#                                           "tear the menus down and enter the world" (R4)
+settings                    boot 0x00479d64 app+0x3d4: MXSettings*. +0x00 NumberOfRacers, +0x04 the
+#                                           career/attract flag, +0x08 the viewport-mode object,
+#                                           +0x0c the event
+cfg_track_name              boot 0x00479d9c app+0x40c: the TrackName .cfg key, 0x40 bytes, copied into
+#                                           event+8. "NONE" on retail — the disc ships no .cfg
+scene                       boot 0x00479d5c app+0x3cc: null until a world is loaded; the cheapest
+#                                           "is there a level yet" flag for a boot script
+activity_manager            boot 0x004e1df8 MXActivityManager*; +0x50 the loaded world (track name at
+#                                           +0x140), +0x58 the array of live activity objects
+in_game                     boot 0x004e2650 1 once the world is running
+all_ai                      boot 0x004e06b8 the AllAI knob: non-zero makes every rider AI. 0 on retail
+#                                           and nothing in the xref index reads it — gp-relative
+#
+# The event, at *(settings+0xc): +0x00 league (0 supercross, 1 nationals, 2 free), +0x04 activity type
+# (0 FreeRide, 1 Practice, 2 SingleRace, 3 GhostRace, 4 FastLapAttack, 5 Freestyle), +0x08 track name,
+# +0x10c bike class (0..3 = 50/125/250/500), +0x110 tier (0 Race, 1 Pro), +0x114 players, +0x115 laps,
+# +0x117 AI difficulty, +0x11c/+0x120/+0x124 the freestyle course record fields.
+#
+# The boot path.
+game_configure              boot 0x00203260 MXGame::Configure(app, cfg): reads every .cfg key, each one
+#                                           gated on a section the retail disc does not ship, so on
+#                                           retail they all keep their defaults. Keys at 0x0042da10
+#                                           TrackName, 0x0042da70 StartMode, 0x0042da28 NumberOfRacers
+#                                           (-> settings+0), 0x0042daf8 AllAI (-> all_ai), 0x0042da38
+#                                           NumberOfLaps (-> event+0x115), 0x0042da90 BikeNumber,
+#                                           0x0042db00 EnableAIBowling
+start_mode_from_name        boot 0x00203a70 (app, name) -> start_mode and the event's activity type.
+#                                           FrontEndUI 0 · WaypointEditor 1 · Freestyle 2+league 2+
+#                                           type 5 · None/Practice 2+type 1 · SingleRace 2+type 2 ·
+#                                           FastLapAttack/fastlap 2+type 4 · GhostRace 2+type 3 ·
+#                                           FreeRide 2+type 0
+track_name_autodetect       boot 0x00203c70 (app): lowercases app+0x40c and derives the event from it —
+#                                           "UI" -> start_mode 0; contains "free" -> start_mode 2,
+#                                           league 2, type 5, and the freestyle course record's +0x24
+#                                           into event+0x11c with +0x120 = 1, +0x124 = 0; "nat" ->
+#                                           league 1 type 1; "sx" -> league 0 type 1. Always ends with
+#                                           NumberOfRacers = 1. This is the authority on which fields a
+#                                           freeride boot needs
+activity_set_for_event      boot 0x00207580 kills the live activities, then picks the activity-set
+#                                           resource from the event: type 0/1/2 -> "Nationals" if
+#                                           league 1, "Supercross" if league 0, *nothing if league 2*;
+#                                           3 "Ghost", 4 "FastLap", 5 "Freestyle". Loads
+#                                           <prefix><name>, a runtime prefix first then "Tracks\"
+#                                           (0x0041dc70). An empty name returns 0 and the load fails —
+#                                           this is why league 2 only boots with type 5
+track_res_load              boot 0x00205c40 builds the track resources with "%s%s.res" (0x0042def8) and
+#                                           "Tracks\": Tracks\<TrackName>.res and
+#                                           Tracks\<TrackName>_2.res ("_2.res" 0x0042df48), and for
+#                                           split-screen freestyle the "%s_SS" form (0x0042def0)
+#                                           first. The disc's archive has free06/free07/free09/free10/
+#                                           free11 as .res, _2.res, _ss.res and _ss_2.res, each with a
+#                                           UI\free<nn>.lsi loading screen; the ELF names only
+#                                           "Free10" (0x0043d898) and "Free06" (0x0043d8a0)
+#
+# The hit/stunt activity — the class R4 left unnamed. One class behind two names.
+activity_factory            boot 0x0021b880 MXActivityManager's create-by-name (vtable 0x00452bf4): a
+#                                           chain of strcmps over the names in the activity-set
+#                                           resource. "HitMaker" (0x0042f710) or "HitFreeride"
+#                                           (0x0042f720) -> operator new(0x1a0, MXActivityManager.cpp,
+#                                           line 203) -> hit_freeride_ctor, stored at
+#                                           *(activity_manager+0x58) + 0xc
+hit_freeride_ctor           boot 0x00330460 HitFreeride::HitFreeride(obj, 0): names itself from
+#                                           0x0043d850 "HitFreeride", vtables 0x00459da0 at +0x44,
+#                                           0x00459dec at +0x58, 0x00459e60 at +0x17c; zeroes +0x160..
+#                                           +0x17c, +0xb4 = 3, +0xb0 = 1, +0x144 = 0.5f, flags at +0xac
+#                                           |= 0x14000. 0x1a0 bytes
+hit_freeride_init           boot 0x00330620 the 8-byte init the factory calls after the constructor
+hit_freeride_attach         boot 0x00330630 the vtable's per-actor attach (vtable slot at 0x00459db4):
+#                                           binds RaceStatusVehicleInterface (0x0043d860) and, for a
+#                                           player vehicle, MXVehicleAIInterface (0x0043d880), then
+#                                           compares the loaded track name (*(activity_manager+0x50) +
+#                                           0x140) with "Free10" and "Free06" — bit 0x40 of the AI
+#                                           interface's flags at +0x30 is cleared on those two areas
+#                                           and set on every other track

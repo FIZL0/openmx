@@ -28,7 +28,6 @@ The first four phases are tooling and feel like a detour from the port. They are
 port that converges and one that is 90 % done forever: every task after them is proved with what they
 build. Do them in order; inside a later phase, tasks that touch different files can go in any order.
 
-- [ ] **R7** The FreeRide boot path: StartMode `FreeRide` sets app+0x408=2 and event+4=0 and goes straight into a loaded world with no front end at all (R4), so drive the original into a rideable freeride area from a cold boot by writing those two words — no menus, no human save state. Name the freeride track `.res` files, the `HitMaker`/`HitFreeride` activity class R4 left unnamed (0x00330460), and the `NumberOfRacers`/`AllAI` knobs that keep opponents out. This is what makes every later gameplay capture repeatable without a person playing → kit.toml `[symbols]` · research/oracle.txt | t: a scripted boot reaches a freeride area and `./kit shot` shows the bike on the ground | j: r7-freeride-boot
 ### Phase 2 — a decompilation you can read
 
 
