@@ -177,53 +177,6 @@ pub mod physics {
     }
 }
 
-/// The acceptance test for the whole port: same input, same state, frame by frame.
-///
-/// **Stub — this is where a real port's hours go, and it is worth them.** The idea, which has caught more
-/// bugs in practice than any unit test:
-///
-/// 1. Record a session on the real game: the input every frame (`./kit record`), plus whatever state you
-///    can read per frame (positions, scores, an RNG word) and the frame it was read on.
-/// 2. Write it to a fixture file next to the test — *not* into git if it contains game data.
-/// 3. Feed the same inputs to [`Sim`] and compare at every tick, not just at the end. The first
-///    disagreement is the bug; everything after it is noise.
-/// 4. Keep one fixture that is quick (a few seconds of play, run on every `./kit check`) and the long
-///    ones behind `#[ignore]`, with a line in the doc comment saying how to run them.
-///
-/// Once it passes, it is also a regression test for every refactor afterwards, and — if the hash is in
-/// it — a cross-platform test for free: run the same fixture on wasm32 and aarch64 and the hashes must
-/// match exactly.
-pub mod replay {
-    use super::{Input, Sim};
-
-    /// One recorded session.
-    #[derive(Clone, Debug, Default)]
-    pub struct Fixture {
-        /// What the original was seeded with.
-        pub seed: u32,
-        /// One entry per frame.
-        pub inputs: Vec<Input>,
-        /// Optional: the expected [`Sim::hash`] per frame. Empty means "only the end state is checked",
-        /// which is how a fixture starts life before the hashes are trustworthy.
-        pub hashes: Vec<u64>,
-    }
-
-    /// Replay a fixture and return the first tick whose hash disagrees, if any.
-    pub fn verify(f: &Fixture) -> Result<Sim, (u64, u64, u64)> {
-        let mut sim = Sim::new(f.seed);
-        for (k, &input) in f.inputs.iter().enumerate() {
-            sim.tick(input);
-            if let Some(&want) = f.hashes.get(k) {
-                let got = sim.hash();
-                if got != want {
-                    return Err((sim.ticks, got, want));
-                }
-            }
-        }
-        Ok(sim)
-    }
-}
-
 /// The disc's two archive formats: the one container holding the game, and the compressed containers
 /// holding each track, bike and menu. Pure parsing over byte slices — see the module's own docs for why
 /// it hands back offsets instead of reading files.
@@ -238,6 +191,12 @@ pub mod demo;
 /// comparison, or dumped field by field to say which field first differed. Every port after this one is
 /// checked with it.
 pub mod hash;
+
+/// The acceptance test for the whole port: a fixture of recorded inputs plus the state it starts from,
+/// replayed through the simulation and compared tick by tick against the recording's hashes or its
+/// watched fields. A failure is one line — `tick 413: ball.vel[1] -58.94952 vs -58.949516` — not a diff of two
+/// files. The module's own docs say how a fixture is made and where one lives.
+pub mod replay;
 
 /// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
@@ -276,12 +235,13 @@ mod tests {
             seed: 7,
             inputs: inputs.clone(),
             hashes: hashes.clone(),
+            ..Default::default()
         };
         assert!(replay::verify(&good).is_ok());
 
         let mut bad = good.clone();
         bad.hashes[4] ^= 1;
-        let (tick, _, _) = replay::verify(&bad).expect_err("a changed hash must be noticed");
-        assert_eq!(tick, 5, "the fifth tick is the one that differs");
+        let d = replay::verify(&bad).expect_err("a changed hash must be noticed");
+        assert_eq!(d.tick, 5, "the fifth tick is the one that differs");
     }
 }
