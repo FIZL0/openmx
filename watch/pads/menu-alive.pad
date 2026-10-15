@@ -1,0 +1,26 @@
+# menu-alive.pad — nudge the main menu often enough that it does not time out into the attract loop.
+#
+# Left idle, the main menu hands over to the attract movie after about 20 seconds, and the engine's
+# frame counter stops advancing while the movie plays — a capture clocked off that counter simply ends
+# there ("emulator stopped ticking"). Down-then-up keeps the highlighted entry where it started, so the
+# game is awake and the menu is unchanged. Timing is wall-clock, not frame-exact; that is fine here,
+# because nothing in the capture is being asked to line up with these presses.
+press down 100
+sleep 4000
+press up 100
+sleep 4000
+press down 100
+sleep 4000
+press up 100
+sleep 4000
+press down 100
+sleep 4000
+press up 100
+sleep 4000
+press down 100
+sleep 4000
+press up 100
+sleep 4000
+press down 100
+sleep 4000
+press up 100
