@@ -611,3 +611,44 @@ hit_freeride_attach         boot 0x00330630 the vtable's per-actor attach (vtabl
 # The race activities (S13, stretch). Moved here out of plan/TODO.md, which is committed and must not
 # carry addresses; kit.toml's [symbols] is untracked, so this file is the only committed record.
 activity_supercross         boot 0x002f9b70 the "Supercross" / "Nationals" activity class, 0x4e0 bytes
+
+# ---------------------------------------------------------------------------------------------------
+# D7 — which bike a freeride area loads. The vehicle build loader names two physics files from the
+# event's own two fields, and nothing on the freeride path writes them, so a freeride bike is the
+# event constructor's default: class 1 (125), tier 0 (Race). What was measured is in
+# research/journal/2026-10-15-d7-d7-freeride-bike-class.
+vehicle_build_load          boot 0x00208c50 builds a vehicle from the event: reads tier (event+0x110,
+#                                           0 Race else Pro) and class (event+0x10c, 0..3 =
+#                                           50/125/250/500) and snprintfs the pair of physics names
+#                                           into two 0x104-byte buffers — the P name first, then the A
+#                                           name — from the sixteen formats at 0x0042e0d8..0x0042e1c8
+#                                           ("%sRace50P.phy" … "%sPro500A.phy", P before A inside each
+#                                           class, the eight Race before the eight Pro), with %s =
+#                                           path_prefix_bike. Activity type 5 also loads
+#                                           "machine.res" (0x0042e0c8) here; no mode changes the pair
+path_prefix_bike            boot 0x004e2000 the 0x104-byte prefix every bike file name is built on;
+#                                           "Bike\" (0x0042d838), so the loader asks for
+#                                           "Bike\Race125P.phy". The archives spell their members
+#                                           lowercased, so the lookup folds case somewhere
+path_prefix_init            boot 0x00200df0 fills the four vehicle path prefixes once at startup:
+#                                           0x004e2000 "Bike\", 0x004e1eb0 "Rider\", 0x004e2540
+#                                           "Biplane\", 0x004e2670 "helicopter\"
+settings_make_event         boot 0x002b20c0 MXSettings' init: operator new(0x148, MXSettings.cpp) ->
+#                                           event_ctor, stored at settings+0xc, then league = 0,
+#                                           type = 2 and the first track record's name into event+8
+event_ctor                  boot 0x002b0780 MXEvent::MXEvent, 0x148 bytes — the defaults a boot that
+#                                           configures nothing rides on: +0x10c = 1 (125cc),
+#                                           +0x110 = 0 (Race), +0x114 = 1 player, +0x115 = 5 laps,
+#                                           +0x117 = 0x5a AI, +0x11c/+0x120/+0x124 = 6/0/4, league 0,
+#                                           type 1 (the init above overwrites those two)
+#
+# The only two things that write the bike fields, and why neither fires on a retail freeride boot:
+#   game_configure (0x00203260) reads the .cfg keys "BikeClass" (0x0042db88; "50"/"125"/"250"/"500" ->
+#   0/1/2/3, default "250" = 2) and "PhysicsModel" (0x0042db70; "Race" -> 0, "Pro" -> 1, default
+#   "Race"), both gated on a section the retail disc does not ship — those defaults are where the
+#   port's old 250 guess came from. settings_create (0x00203dc0) forces class 2 right after building
+#   the settings object, but only when the word at 0x004e2240 is 2.
+kiosk_mode                  boot 0x004e2240 a build/kiosk switch in .bss: 0 on retail (both RAM images
+#                                           D7 read), and all 38 references in the dump are compares,
+#                                           none a store. 2 forces the 250 class; 2 and 3 also pick
+#                                           alternate front-end and loader paths

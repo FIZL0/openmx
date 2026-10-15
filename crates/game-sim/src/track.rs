@@ -912,8 +912,16 @@ pub enum Tuning {
 /// The name of a bike's physics parameter file, the way the game builds it: one of sixteen names from an
 /// engine class, a tier and which of the pair is wanted.
 ///
-/// The freeride archive ships only the 250 pair of each tier, so a freeride bike is a 250; `pro` is the
-/// career's upgraded tier.
+/// The loader formats `<prefix><tier><cc><A|P>.phy` and the prefix is a global the engine fills in once
+/// at startup with `Bike\`, so the name it asks the resource system for is spelled exactly like this.
+/// The archives store those members lowercased (`bike\race125a.phy`), so a lookup against them has to
+/// fold case.
+///
+/// All sixteen names exist on the disc, so the archive is no evidence about which pair a mode loads:
+/// the `.phy` pairs ship inside the bike *model* archives — a 125 model carries `race125*`/`pro125*`,
+/// a 250 model its own — while a track's own second archive carries the 250 pair and the wreck bike.
+/// Which pair is asked for comes from the event's own two fields and nothing else; `pro` is the career's
+/// upgraded tier.
 pub fn physics_file(engine: Engine, pro: bool, tuning: Tuning) -> String {
     let tier = if pro { "Pro" } else { "Race" };
     let cc = match engine {
@@ -926,14 +934,22 @@ pub fn physics_file(engine: Engine, pro: bool, tuning: Tuning) -> String {
         Tuning::A => 'A',
         Tuning::P => 'P',
     };
-    format!("bike\\{tier}{cc}{which}.phy")
+    format!("Bike\\{tier}{cc}{which}.phy")
 }
 
-/// What a freeride track's bike is, absent a career profile saying otherwise: the 250 of the lower tier.
+/// What a freeride track's bike is, absent a career profile saying otherwise: the 125 of the lower tier,
+/// i.e. `Bike\Race125P.phy` and `Bike\Race125A.phy`.
 ///
-/// Which tier the mode actually starts on is not proved yet — see the journal — so this is the pair the
-/// archive and the loader's defaults point at, not a measured one.
-pub const FREERIDE_ENGINE: Engine = Engine::Cc250;
+/// Both come from the event the loader reads, whose constructor defaults the class to 125 and the tier to
+/// Race and which nothing on the freeride path writes — measured in a world the original had loaded, and
+/// in a scripted boot that set the mode but deliberately left the two fields alone (D7). The 250 the port
+/// used to assume is what the `.cfg` keys default to, and those keys are gated on a section the retail
+/// disc does not ship.
+pub const FREERIDE_ENGINE: Engine = Engine::Cc125;
+
+/// Which tier a freeride track's bike is, same source as [`FREERIDE_ENGINE`]: the Race files, not the Pro
+/// ones.
+pub const FREERIDE_PRO: bool = false;
 
 #[cfg(test)]
 mod tests {
@@ -1012,8 +1028,11 @@ mod tests {
 
     #[test]
     fn the_sixteen_physics_names_are_a_class_and_a_tier() {
-        assert_eq!(physics_file(Engine::Cc250, false, Tuning::P), "bike\\Race250P.phy");
-        assert_eq!(physics_file(Engine::Cc250, true, Tuning::A), "bike\\Pro250A.phy");
-        assert_eq!(physics_file(Engine::Cc50, false, Tuning::A), "bike\\Race50A.phy");
+        assert_eq!(physics_file(Engine::Cc250, false, Tuning::P), "Bike\\Race250P.phy");
+        assert_eq!(physics_file(Engine::Cc250, true, Tuning::A), "Bike\\Pro250A.phy");
+        assert_eq!(physics_file(Engine::Cc50, false, Tuning::A), "Bike\\Race50A.phy");
+        // The freeride pair, the one the physics proofs are compared against.
+        assert_eq!(physics_file(FREERIDE_ENGINE, FREERIDE_PRO, Tuning::P), "Bike\\Race125P.phy");
+        assert_eq!(physics_file(FREERIDE_ENGINE, FREERIDE_PRO, Tuning::A), "Bike\\Race125A.phy");
     }
 }

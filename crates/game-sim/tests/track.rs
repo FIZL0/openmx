@@ -6,7 +6,8 @@
 
 use game_sim::archive::{Entry, Psr, Res};
 use game_sim::track::{
-    BLOCK_SAMPLES, Child, Collision, Mesh, Points, Rays, Scene, Terrain, TerrainNode,
+    BLOCK_SAMPLES, Child, Collision, Engine, FREERIDE_ENGINE, FREERIDE_PRO, Mesh, Points, Rays, Scene,
+    Terrain, TerrainNode, Tuning, physics_file,
 };
 use ps2_float::F;
 use ps2_oracle::{Kit, skip};
@@ -387,3 +388,77 @@ fn the_shapes_the_scene_places_sit_on_the_ground() {
     );
 }
 
+/// Which bike a freeride area starts on is the loader's business, not the archive's.
+///
+/// The track's own second archive carries the 250 pair of each tier, which is the directory listing that
+/// used to make the port call a freeride bike a 250 — but the loader asks for the pair the event names,
+/// and on a freeride boot that is the 125 Race pair (D7). All sixteen names it can build are on the disc,
+/// inside the bike *model* archives, so nothing about the disc narrows the choice.
+#[test]
+fn every_physics_name_the_loader_can_build_is_on_the_disc() {
+    let Some(mut f) = container() else { return };
+    let psr = directory(&mut f);
+
+    // The bike's share of the track's own physics files — it carries every other vehicle's too.
+    let part = Part::open(&mut f, &psr, TRACK_PART_2);
+    let mut here: Vec<String> = part
+        .res
+        .entries
+        .iter()
+        .map(|e| e.name.to_ascii_lowercase())
+        .filter(|n| n.starts_with("bike\\") && n.ends_with(".phy"))
+        .collect();
+    here.sort();
+    assert_eq!(
+        here,
+        [
+            "bike\\pro250a.phy",
+            "bike\\pro250p.phy",
+            "bike\\race250a.phy",
+            "bike\\race250p.phy",
+            "bike\\wreckbike.phy",
+        ],
+        "{TRACK_PART_2}"
+    );
+
+    // Every bike model the disc ships, and the physics files each one carries.
+    let models: Vec<String> = psr
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("bike\\") && n.ends_with(".res")
+        })
+        .collect();
+    assert!(models.len() > 40, "only {} bike archives", models.len());
+    let mut on_disc: Vec<String> = Vec::new();
+    for name in &models {
+        let part = Part::open(&mut f, &psr, name);
+        for e in &part.res.entries {
+            let member = e.name.to_ascii_lowercase();
+            if member.ends_with(".phy") {
+                on_disc.push(member);
+            }
+        }
+    }
+    on_disc.sort();
+    on_disc.dedup();
+
+    for engine in [Engine::Cc50, Engine::Cc125, Engine::Cc250, Engine::Cc500] {
+        for pro in [false, true] {
+            for tuning in [Tuning::P, Tuning::A] {
+                let want = physics_file(engine, pro, tuning).to_ascii_lowercase();
+                assert!(on_disc.contains(&want), "no bike archive carries {want}: {on_disc:?}");
+            }
+        }
+    }
+
+    // The pair a freeride boot loads, by name, in the order the loader builds them.
+    assert_eq!(physics_file(FREERIDE_ENGINE, FREERIDE_PRO, Tuning::P), "Bike\\Race125P.phy");
+    assert_eq!(physics_file(FREERIDE_ENGINE, FREERIDE_PRO, Tuning::A), "Bike\\Race125A.phy");
+    for tuning in [Tuning::P, Tuning::A] {
+        let want = physics_file(FREERIDE_ENGINE, FREERIDE_PRO, tuning).to_ascii_lowercase();
+        assert!(on_disc.contains(&want), "the freeride pair is not on the disc: {want}");
+    }
+}
