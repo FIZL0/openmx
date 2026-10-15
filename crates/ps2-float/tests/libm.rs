@@ -51,6 +51,28 @@ fn sweep(name: &str, n: u32, lo: f64, hi: f64, ours: impl Fn(f32) -> f32, exact:
     println!("{name:8} {:>5.2} ulp over {n} inputs in [{lo}, {hi})", worst.0);
 }
 
+/// The same, but on the *absolute* error. Above `2^7·π/2` the reduced angle comes out of
+/// `__kernel_rem_pio2f`, which keeps ~24 bits of `x mod π/2` and no more; near a multiple of π/2 the
+/// result is then tiny and almost all of it has cancelled, so a relative bound of a few ulps is simply
+/// not true of the game — and this module's job is to be wrong in exactly the game's way. What is still
+/// worth asserting is that the angle itself is right to a few ulps of 1.0, which a transcription slip in
+/// a table or a polynomial would break immediately.
+fn sweep_abs(name: &str, n: u32, lo: f64, hi: f64, ours: impl Fn(f32) -> f32, exact: impl Fn(f64) -> f64,
+             limit: f64) {
+    let mut rng = Rng(0x1234_5678);
+    let mut worst = (0.0f64, 0.0f32);
+    for _ in 0..n {
+        let x = rng.range(lo, hi);
+        let e = ((ours(x) as f64) - exact(x as f64)).abs();
+        if e > worst.0 {
+            worst = (e, x);
+        }
+    }
+    assert!(worst.0 <= limit, "{name}: {:e} absolute at x = {:?} ({:#010x}): got {:?}, want {:?}",
+            worst.0, worst.1, worst.1.to_bits(), ours(worst.1), exact(worst.1 as f64));
+    println!("{name:8} {:>8.1e} absolute over {n} inputs in [{lo:e}, {hi:e})", worst.0);
+}
+
 #[test]
 fn sqrt_is_correctly_rounded() {
     // sqrt is specified exactly by IEEE, so our integer algorithm must agree with the host's bit for bit.
@@ -63,7 +85,7 @@ fn sqrt_is_correctly_rounded() {
         assert_eq!(sqrtf(x).to_bits(), x.sqrt().to_bits(), "sqrtf({x:?})");
     }
     assert_eq!(sqrtf(0.0), 0.0);
-    assert_eq!(sqrtf(-0.0).to_bits(), (-0.0f32).to_bits());
+    assert_eq!(sqrtf(-0.0).to_bits(), 0.0f32.to_bits(), "sqrt.s takes |x| first, so -0 roots to +0");
     assert_eq!(sqrtf(-4.0), 2.0, "sqrt.s ignores the sign, and so does a PS2 sqrtf()");
 }
 
@@ -75,10 +97,13 @@ fn trig_is_accurate() {
     sweep("cosf", 20_000, -100.0, 100.0, cosf, f64::cos, 4.0);
     sweep("tanf", 20_000, -0.7, 0.7, tanf, f64::tan, 4.0);
     sweep("tanf", 20_000, -100.0, 100.0, tanf, f64::tan, 8.0);
-    // the fdlibm reduction tops out at 2^7·π/2; above that we take our own exact path
-    sweep("sinf+", 20_000, 200.0, 1.0e7, sinf, f64::sin, 4.0);
-    sweep("cosf+", 20_000, 200.0, 1.0e7, cosf, f64::cos, 4.0);
-    sweep("sinf+", 5_000, 1.0e20, 1.0e30, sinf, f64::sin, 4.0);
+    // Above 2^7·π/2 the three-step reduction gives up and `__kernel_rem_pio2f` takes over, so the
+    // error is the reduction's and is measured absolutely. 4e-7 is about three ulps of 1.0; the worst
+    // this module does over these three ranges is 1.9e-7, and it is the game's own 1.9e-7.
+    sweep_abs("sinf+", 20_000, 200.0, 1.0e7, sinf, f64::sin, 4.0e-7);
+    sweep_abs("cosf+", 20_000, 200.0, 1.0e7, cosf, f64::cos, 4.0e-7);
+    sweep_abs("sinf+", 5_000, 1.0e20, 1.0e30, sinf, f64::sin, 4.0e-7);
+    sweep_abs("cosf+", 5_000, 1.0e20, 1.0e30, cosf, f64::cos, 4.0e-7);
     assert_eq!(sinf(0.0), 0.0);
     assert_eq!(cosf(0.0), 1.0);
     assert_eq!(sinf(-0.0).to_bits(), (-0.0f32).to_bits());
@@ -157,7 +182,37 @@ fn saturates_where_the_ee_cannot_hold_the_answer() {
     assert_eq!(powf(10.0, 60.0), f32::MAX);
     assert_eq!(powf(10.0, -60.0), 0.0);
     assert_eq!(logf(0.0), -f32::MAX);
-    assert_eq!(sinf(f32::MAX), sinf(f32::from_bits(0x7f80_0000)), "an Inf pattern reads as ±max");
+    // ...but `sinf` never puts its argument through the FPU: the reduction reads the bit pattern and
+    // splits it into 8-bit digits by integer arithmetic. So an Inf pattern is reduced as the number
+    // 2^128 and comes back with a different angle from `max`'s, which is what the disc does — both are
+    // in the oracle's sweep (crates/ps2-oracle/tests/libm.rs).
+    assert_ne!(sinf(f32::MAX), sinf(f32::from_bits(0x7f80_0000)));
+}
+
+/// `fmodf` is exact: no rounding happens anywhere in it, so it must agree with the remainder computed in
+/// double precision, every time, and the sign must be the dividend's.
+#[test]
+fn fmod_is_exact() {
+    let mut rng = Rng(0x0fab_cdef);
+    for _ in 0..100_000 {
+        let (x, y) = (rng.range(-1.0e6, 1.0e6), rng.range(-1.0e3, 1.0e3));
+        if y == 0.0 {
+            continue;
+        }
+        let want = (x as f64) % (y as f64);
+        assert_eq!(fmodf(x, y), want as f32, "fmodf({x:?}, {y:?})");
+    }
+    assert_eq!(fmodf(5.5, 2.0), 1.5);
+    assert_eq!(fmodf(-5.5, 2.0), -1.5, "the remainder keeps the dividend's sign");
+    assert_eq!(fmodf(5.5, -2.0), 1.5, "and ignores the divisor's");
+    assert_eq!(fmodf(4.0, 2.0).to_bits(), 0.0f32.to_bits(), "an exact multiple leaves +0");
+    assert_eq!(fmodf(-4.0, 2.0).to_bits(), (-0.0f32).to_bits(), "…or -0, with the sign");
+    assert_eq!(fmodf(1.0, 3.0), 1.0, "|x| < |y| is already the remainder");
+    assert_eq!(fmodf(f32::MIN_POSITIVE, f32::MAX), f32::MIN_POSITIVE);
+    // a zero divisor is 0/0 on the EE's divider, which is max and not a NaN
+    assert_eq!(fmodf(1.0, 0.0), f32::MAX);
+    assert_eq!(fmodf(-1.0, 0.0), f32::MAX, "0/0 is +max whatever the signs were");
+    assert_eq!(fmodf(1.0, f32::from_bits(0x0040_0000)), f32::MAX, "a denormal divisor is zero too");
 }
 
 /// A digest over a fixed input set. If this changes, *some* result changed — which is either a bug or a
@@ -172,7 +227,8 @@ fn results_are_identical_on_every_platform() {
     let mut rng = Rng(0xdead_beef);
     for _ in 0..2000 {
         let x = rng.range(-20.0, 20.0);
-        for v in [sinf(x), cosf(x), tanf(x), atanf(x), expf(x), logf(x.abs() + 1.0e-6), sqrtf(x.abs())] {
+        for v in [sinf(x), cosf(x), tanf(x), atanf(x), expf(x), logf(x.abs() + 1.0e-6), sqrtf(x.abs()),
+                  fmodf(x * 1000.0, x + 20.001), sinf(x * 1.0e6)] {
             feed(v);
         }
         let u = rng.range(-1.0, 1.0);
@@ -182,4 +238,4 @@ fn results_are_identical_on_every_platform() {
     }
     assert_eq!(h, DIGEST, "libm results changed (or differ on this platform): {h:#018x}");
 }
-const DIGEST: u64 = 0x9da9_a6e5_3818_e896;
+const DIGEST: u64 = 0xea36_78cb_fb2d_49cd;

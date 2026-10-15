@@ -37,8 +37,8 @@
 //! So: run these against the game's own code before relying on them —
 //!
 //! ```text
-//! ./kit oracle atan2f --floats 0.3,-0.7     # one value, by hand
-//! cargo test -p ps2-oracle libm             # 10k random inputs, bit for bit
+//! ./kit oracle sinf --floats 20284.223      # one value, by hand
+//! cargo test -p ps2-oracle libm             # every exponent, bit for bit
 //! ```
 //!
 //! and when a function disagrees, fix *this* file to match the game (the constants are written as hex bit
@@ -47,11 +47,25 @@
 //!
 //! # What is here
 //!
-//! `sinf cosf tanf asinf acosf atanf atan2f expf logf powf sqrtf`, all on [`crate::F`] arithmetic.
-//! Argument reduction for `sin`/`cos`/`tan` is exact (fdlibm's own three-step reduction) up to
-//! `2^7·π/2 ≈ 201`; above that this module uses its own exact fixed-point reduction rather than
-//! fdlibm's `__kernel_rem_pio2f`, which can leave the last bit of the result different from the game's.
-//! If your game feeds angles above 201 radians into `sinf`, check that range with the oracle.
+//! `sinf cosf tanf asinf acosf atanf atan2f expf logf powf sqrtf fmodf`, all on [`crate::F`]
+//! arithmetic.
+//!
+//! Six of them have been proved against this disc over every exponent an `f32` has, and they are the
+//! six the disc links: `sinf`, `cosf`, `atanf`, `powf`, `fmodf` and `sqrtf`. The rest — `tanf`,
+//! `asinf`, `acosf`, `atan2f`, `expf`, `logf` — are not in the image at all, so nothing here proves
+//! them for *this* game; they are fdlibm as this disc's compiler would have rounded it (the constants
+//! are the toward-zero ones, which is what every verified function in the image uses), and the first
+//! game that does link them needs the oracle run again.
+//!
+//! One thing the disc's libm does differently from fdlibm's source throughout: **a denormal is zero**.
+//! `powf` returns 1 for `|y| < 2^-126`, `fmodf` divides by zero for such a divisor, `powf`'s underflow
+//! limit is `2^-126` rather than `2^-150`, and `scalbnf` has no gradual-underflow path. That is the SDK
+//! adapting fdlibm to an FPU with no denormals, and it changes results well inside the ordinary range.
+//! Argument reduction for `sin`/`cos`/`tan` is fdlibm's own: the three-step subtraction of pieces of
+//! `π/2` up to `2^7·π/2 ≈ 201`, and above that `__kernel_rem_pio2f`, the 8-bit fixed-point product with
+//! `2/π`. Both are ported from this disc's code rather than from fdlibm's source, which matters: a
+//! reduction that is *more* accurate than `__kernel_rem_pio2f` still disagrees with the game in the last
+//! bit, and does so for about one angle in a thousand above 201.
 #![deny(clippy::float_arithmetic)]
 
 use crate::fpu::{self, F};
@@ -72,7 +86,10 @@ const fn b(bits: u32) -> f32 {
 pub fn sqrtf(x: f32) -> f32 {
     let bits = fpu::operand(x.to_bits()).to_bits();
     if bits & 0x7fff_ffff == 0 {
-        return f32::from_bits(bits); // ±0
+        // ±0, and the sign goes with it: `sqrt.s` takes the magnitude of its operand before it does
+        // anything else, so it answers +0 for -0 where IEEE 754 answers -0. Proved against the disc's
+        // own one-instruction `sqrtf` over every exponent (crates/ps2-oracle/tests/libm.rs).
+        return 0.0;
     }
     // x = 1.m · 2^e, normalised (denormals were flushed above)
     let mut ix = (bits & 0x7fff_ffff) as i64;
@@ -265,66 +282,291 @@ fn rem_pio2(x: f32) -> (i32, f32, f32) {
     if hx < 0 { (-n, (-y0).0, (-y1).0) } else { (n, y0.0, y1.0) }
 }
 
-/// Successive 32-bit words of the binary fraction of `2/π`: `2/π = Σ W[i]·2^(-32(i+1))`.
-/// 320 bits, enough for any `f32` (the largest has exponent 127, and we want 64 good bits after the
-/// binary point even when almost everything cancels).
-const TWO_OVER_PI: [u32; 10] = [
-    0xa2f9836e, 0x4e441529, 0xfc2757d1, 0xf534ddc0, 0xdb629599, 0x3c439041, 0xfe5163ab, 0xdebbc561, 0xb7246e3a,
-    0x424dd2e0,
+/// `2/π` as 198 eight-bit digits, most significant first: `2/π = Σ W[i]·2^(-8(i+1))`. 1584 bits, which
+/// is what the worst cancellation an `f32` can produce needs.
+const TWO_OVER_PI: [i32; 198] = [
+    0xa2, 0xf9, 0x83, 0x6e, 0x4e, 0x44, 0x15, 0x29, 0xfc, 0x27, 0x57, 0xd1, 0xf5, 0x34, 0xdd, 0xc0, 0xdb, 0x62,
+    0x95, 0x99, 0x3c, 0x43, 0x90, 0x41, 0xfe, 0x51, 0x63, 0xab, 0xde, 0xbb, 0xc5, 0x61, 0xb7, 0x24, 0x6e, 0x3a,
+    0x42, 0x4d, 0xd2, 0xe0, 0x06, 0x49, 0x2e, 0xea, 0x09, 0xd1, 0x92, 0x1c, 0xfe, 0x1d, 0xeb, 0x1c, 0xb1, 0x29,
+    0xa7, 0x3e, 0xe8, 0x82, 0x35, 0xf5, 0x2e, 0xbb, 0x44, 0x84, 0xe9, 0x9c, 0x70, 0x26, 0xb4, 0x5f, 0x7e, 0x41,
+    0x39, 0x91, 0xd6, 0x39, 0x83, 0x53, 0x39, 0xf4, 0x9c, 0x84, 0x5f, 0x8b, 0xbd, 0xf9, 0x28, 0x3b, 0x1f, 0xf8,
+    0x97, 0xff, 0xde, 0x05, 0x98, 0x0f, 0xef, 0x2f, 0x11, 0x8b, 0x5a, 0x0a, 0x6d, 0x1f, 0x6d, 0x36, 0x7e, 0xcf,
+    0x27, 0xcb, 0x09, 0xb7, 0x4f, 0x46, 0x3f, 0x66, 0x9e, 0x5f, 0xea, 0x2d, 0x75, 0x27, 0xba, 0xc7, 0xeb, 0xe5,
+    0xf1, 0x7b, 0x3d, 0x07, 0x39, 0xf7, 0x8a, 0x52, 0x92, 0xea, 0x6b, 0xfb, 0x5f, 0xb1, 0x1f, 0x8d, 0x5d, 0x08,
+    0x56, 0x03, 0x30, 0x46, 0xfc, 0x7b, 0x6b, 0xab, 0xf0, 0xcf, 0xbc, 0x20, 0x9a, 0xf4, 0x36, 0x1d, 0xa9, 0xe3,
+    0x91, 0x61, 0x5e, 0xe6, 0x1b, 0x08, 0x65, 0x99, 0x85, 0x5f, 0x14, 0xa0, 0x68, 0x40, 0x8d, 0xff, 0xd8, 0x80,
+    0x4d, 0x73, 0x27, 0x31, 0x06, 0x06, 0x15, 0x56, 0xca, 0x73, 0xa8, 0xc9, 0x60, 0xe2, 0x7b, 0xc0, 0x8c, 0x6b,
 ];
 
-/// Argument reduction for `|x| > 2^7·π/2`, by exact fixed-point multiplication by `2/π`.
+/// The eleven pieces of `π/2` the kernel reassembles its answer from, 8 bits of exponent apart.
 ///
-/// fdlibm uses `__kernel_rem_pio2f` here; this computes the same quantity a different way (the product
-/// `x·2/π` is formed exactly in 344-bit fixed point, so the reduced argument is good to ~100 bits),
-/// which means the reduced argument is right but its last bit may not be *fdlibm's* last bit. Only
-/// `sin`/`cos`/`tan` of arguments above 201 radians are affected; check them with the oracle if the game
-/// goes there.
-#[allow(clippy::float_arithmetic)] // exact integer product, then f64 to split the result in two
-fn rem_pio2_large(x: f32) -> (i32, f32, f32) {
+/// Six of the eleven are one ulp **below** the value fdlibm's source names, because the compiler that
+/// built this disc converted decimal literals toward zero. These are the image's own words, read from
+/// the table the kernel indexes.
+const PIO2_PIECES: [u32; 11] = [
+    0x3fc9_0000, 0x39f0_0000, 0x37d9_ffff, 0x33a2_0000, 0x2e83_ffff, 0x2b4f_ffff, 0x27c1_ffff,
+    0x22cf_ffff, 0x1fc4_0000, 0x1bc5_ffff, 0x1744_0000,
+];
+
+/// `init_jk[prec]`: how many 8-bit digits of `2/π` the first pass multiplies by.
+const INIT_JK: [i32; 3] = [4, 7, 9];
+
+const TWO8: f32 = 256.0;
+const TWON8: f32 = 0.003_906_25; // 2^-8, exact
+
+/// `floorf`, fdlibm's: mask the fraction bits off, and add `1e30` to the argument first so the hardware
+/// raises inexact. That add is kept because it is a real branch — `x + 1e30 > 0` is false for `x` around
+/// `-1e30`, and then `floorf` returns its argument untouched.
+fn floorf(x: f32) -> f32 {
     let bits = x.to_bits();
-    let neg = bits & 0x8000_0000 != 0;
-    let m = ((bits & 0x007f_ffff) | 0x0080_0000) as u64; // 24-bit mantissa
-    let e = ((bits >> 23) & 0xff) as i32 - 127 - 23; // |x| = m·2^e
-    // p = m · (2/π as a 320-bit fraction), as 11 32-bit limbs, least significant first
-    let mut p = [0u32; 11];
-    let mut carry = 0u64;
-    for (i, &w) in TWO_OVER_PI.iter().rev().enumerate() {
-        let v = m * w as u64 + carry;
-        p[i] = v as u32;
-        carry = v >> 32;
+    let j = ((fpu::abs(x).to_bits() >> 23) as i32) - 0x7f; // the exponent of |x|
+    if j >= 23 {
+        return x; // already whole (or ±max)
     }
-    p[10] = carry as u32;
-    // value = p · 2^(e - 320): bit k of p has weight 2^(k + e - 320)
-    let shift = 320 - e; // where the binary point sits, in bits above p's bit 0
-    let bit = |k: i32| -> u64 {
-        if !(0..352).contains(&k) { 0 } else { (p[(k / 32) as usize] >> (k % 32)) as u64 & 1 }
-    };
-    let window = |top: i32| -> u128 {
-        // the 128 bits of p ending just below bit `top`
-        (0..128).fold(0u128, |a, i| a | (bit(top - 1 - i) as u128) << (127 - i))
-    };
-    let n_low = (0..2).fold(0i32, |a, i| a | (bit(shift + i) as i32) << i); // the quotient mod 4
-    let frac = window(shift);
-    // round to nearest: a fraction >= 1/2 belongs to the next multiple of π/2
-    let (n, frac) = if frac >> 127 != 0 {
-        // reading the fraction as i128 *is* frac - 1 in units of 2^-128, which is what we want
-        ((n_low + 1) & 3, frac as i128)
-    } else {
-        (n_low, frac as i128)
-    };
-    // frac is an exact 128-bit fraction in (-1/2, 1/2]; f64 keeps 53 of its bits, which leaves the
-    // result good to ~2^-100 — far below the last bit of the y1 tail below.
-    let f = frac as f64 * f64::from_bits(0x37f0_0000_0000_0000); // × 2^-128
-    let y = f * core::f64::consts::FRAC_PI_2; // × π/2 (to f64's 53 bits)
-    let y0 = y as f32;
-    let y1 = (y - y0 as f64) as f32;
-    if neg { (-n, -y0, -y1) } else { (n, y0, y1) }
+    if j < 0 {
+        // |x| < 1: ±0, or -1 for a negative normal
+        if fpu::add(x, HUGE) > 0.0 {
+            if (bits as i32) >= 0 {
+                return 0.0;
+            } else if fpu::abs(x).to_bits() > 0x007f_ffff {
+                return -1.0;
+            }
+        }
+        return x;
+    }
+    let frac = 0x007f_ffff >> j;
+    if bits & frac != 0 && fpu::add(x, HUGE) > 0.0 {
+        // round toward -inf: a negative number carries into the integer part first
+        let bits = if (bits as i32) < 0 { bits.wrapping_add(0x0080_0000 >> j) } else { bits };
+        return f32::from_bits(bits & !frac);
+    }
+    x
 }
 
-/// `sinf`.
+/// `copysignf`.
+fn copysignf(x: f32, y: f32) -> f32 {
+    f32::from_bits((x.to_bits() & 0x7fff_ffff) | (y.to_bits() & 0x8000_0000))
+}
+
+/// `scalbnf(x, n)`: `x·2^n` by editing the exponent field.
+///
+/// The disc's version is shorter than the one in fdlibm's source: it has no gradual-underflow path, so a
+/// result below the smallest normal saturates to `±0` through `copysign(1e-30, x)·1e-30` instead of
+/// coming back as a denormal, and a denormal or zero argument is returned untouched.
+fn scalbnf(x: f32, n: i32) -> f32 {
+    let ax = fpu::abs(x).to_bits();
+    if ax <= 0x007f_ffff {
+        return x; // zero or denormal: nothing to scale
+    }
+    let k = ((ax >> 23) as i32) + n;
+    let s = if k >= 0x100 {
+        HUGE
+    } else if k > 0 {
+        return f32::from_bits((x.to_bits() & 0x807f_ffff) | ((k as u32) << 23));
+    } else if n > 50000 {
+        HUGE // the 50000 guards against n + k having overflowed
+    } else {
+        TINY
+    };
+    fpu::mul(copysignf(s, x), s)
+}
+
+/// `__kernel_rem_pio2f(x, y, e0, nx, prec, 2/π)`: the exact argument reduction, in fixed point.
+///
+/// `x` is `|arg|` split into `nx` eight-bit digits, each held as a whole float, with `arg = Σ x[i]·2^(e0
+/// - 8i)`. The product with `2/π` is accumulated digit by digit — every partial product is an exact
+/// float, which is the point of the 8-bit split — the integer part gives the quadrant, and the fraction
+/// is multiplied back up by [`PIO2_PIECES`] to make `y0 + y1`. Returns `(n mod 8, y0, y1)`.
+///
+/// `prec` is 2 for `sinf`/`cosf`/`tanf`, which is the only value the disc ever passes.
+fn kernel_rem_pio2(x: &[f32], e0: i32, nx: i32, prec: usize) -> (i32, f32, f32) {
+    let (jk, jp) = (INIT_JK[prec], INIT_JK[prec]);
+    let jx = nx - 1;
+    let jv = ((e0 - 3) / 8).max(0);
+    let mut q0 = e0 - 8 * (jv + 1);
+    let digit = |j: i32| F(fpu::from_i32(TWO_OVER_PI[j as usize]));
+
+    // f[] = the digits of 2/pi this argument's exponent lines up with, zero-padded on the left
+    let mut f = [F::ZERO; 20];
+    let mut j = jv - jx;
+    for i in 0..=jx + jk {
+        f[i as usize] = if j < 0 { F::ZERO } else { digit(j) };
+        j += 1;
+    }
+    // q[] = the convolution x * f, one 8-bit column at a time
+    let mut q = [F::ZERO; 20];
+    let column = |f: &[F; 20], i: i32| {
+        let mut fw = F::ZERO;
+        for j in 0..=jx {
+            fw = fw + F(x[j as usize]) * f[(jx + i - j) as usize];
+        }
+        fw
+    };
+    for i in 0..=jk {
+        q[i as usize] = column(&f, i);
+    }
+
+    let mut jz = jk;
+    let mut iq = [0i32; 20];
+    let (mut z, mut n, mut ih);
+    loop {
+        // distill q[] into the 8-bit digits iq[], most significant last, carrying upward
+        z = q[jz as usize];
+        let mut j = jz;
+        let mut i = 0;
+        while j > 0 {
+            let fw = F(fpu::from_i32(fpu::to_i32((z * TWON8).0)));
+            iq[i] = fpu::to_i32((z - fw * TWO8).0);
+            z = q[(j - 1) as usize] + fw;
+            i += 1;
+            j -= 1;
+        }
+        // the quadrant: the integer part of z, modulo 8
+        z = F(scalbnf(z.0, q0));
+        z = z - F(floorf((z * 0.125).0)) * 8.0;
+        n = fpu::to_i32(z.0);
+        z = z - F(fpu::from_i32(n));
+        ih = 0;
+        if q0 > 0 {
+            // the top digit holds bits of the integer part too
+            let i = iq[(jz - 1) as usize] >> (8 - q0);
+            n += i;
+            iq[(jz - 1) as usize] -= i << (8 - q0);
+            ih = iq[(jz - 1) as usize] >> (7 - q0);
+        } else if q0 == 0 {
+            ih = iq[(jz - 1) as usize] >> 8;
+        } else if z.0 >= 0.5 {
+            ih = 2;
+        }
+        if ih > 0 {
+            // the fraction is above 1/2: take 1 - q and the next quadrant, so |y| stays below pi/4
+            n += 1;
+            let mut carry = 0;
+            for i in 0..jz as usize {
+                let d = iq[i];
+                if carry == 0 {
+                    if d != 0 {
+                        carry = 1;
+                        iq[i] = 0x100 - d;
+                    }
+                } else {
+                    iq[i] = 0xff - d;
+                }
+            }
+            match q0 {
+                1 => iq[(jz - 1) as usize] &= 0x7f,
+                2 => iq[(jz - 1) as usize] &= 0x3f,
+                _ => {}
+            }
+            if ih == 2 {
+                z = F::ONE - z;
+                if carry != 0 {
+                    z = z - F(scalbnf(1.0, q0));
+                }
+            }
+        }
+        // everything cancelled: grind out more digits of 2/pi and start again
+        if z.0 == 0.0 {
+            let mut acc = 0;
+            for i in jk..jz {
+                acc |= iq[i as usize];
+            }
+            if acc == 0 {
+                let mut k = 1;
+                while iq[(jk - k) as usize] == 0 {
+                    k += 1;
+                }
+                for i in jz + 1..=jz + k {
+                    f[(jx + i) as usize] = digit(jv + i);
+                    q[i as usize] = column(&f, i);
+                }
+                jz += k;
+                continue;
+            }
+        }
+        break;
+    }
+
+    // trim the digits that contribute nothing, or make one more out of what is left of z
+    if z.0 == 0.0 {
+        jz -= 1;
+        q0 -= 8;
+        while iq[jz as usize] == 0 {
+            jz -= 1;
+            q0 -= 8;
+        }
+    } else {
+        z = F(scalbnf(z.0, -q0));
+        if z.0 >= TWO8 {
+            let fw = F(fpu::from_i32(fpu::to_i32((z * TWON8).0)));
+            iq[jz as usize] = fpu::to_i32((z - fw * TWO8).0);
+            jz += 1;
+            q0 += 8;
+            iq[jz as usize] = fpu::to_i32(fw.0);
+        } else {
+            iq[jz as usize] = fpu::to_i32(z.0);
+        }
+    }
+
+    // the digits back to floats, each one 2^-8 of the one above it
+    let mut fw = F(scalbnf(1.0, q0));
+    for i in (0..=jz).rev() {
+        q[i as usize] = fw * F(fpu::from_i32(iq[i as usize]));
+        fw = fw * TWON8;
+    }
+    // and multiplied by pi/2, piece by piece
+    let mut fq = [F::ZERO; 20];
+    for i in (0..=jz).rev() {
+        let mut fw = F::ZERO;
+        let mut k = 0;
+        while k <= jp && k <= jz - i {
+            fw = fw + F(b(PIO2_PIECES[k as usize])) * q[(i + k) as usize];
+            k += 1;
+        }
+        fq[(jz - i) as usize] = fw;
+    }
+    // prec 2: the sum, and then the sum of what the sum lost
+    let mut fw = F::ZERO;
+    for i in (0..=jz).rev() {
+        fw = fw + fq[i as usize];
+    }
+    let y0 = if ih == 0 { fw } else { -fw };
+    let mut tail = fq[0] - fw;
+    for i in 1..=jz {
+        tail = tail + fq[i as usize];
+    }
+    let y1 = if ih == 0 { tail } else { -tail };
+    (n & 7, y0.0, y1.0)
+}
+
+/// Argument reduction for `|x| > 2^7·π/2 ≈ 201`, where subtracting pieces of `π/2` has stopped working.
+///
+/// `|x|` is split into three exact 8-bit digits and handed to [`kernel_rem_pio2`], which is what the
+/// disc does. (An earlier version of this file reduced with its own 320-bit fixed-point product
+/// instead — more bits than an `f32` can use, and still one ulp away from *this* answer often enough
+/// that the oracle found it on the first sweep above 201. Being more accurate than the game is a bug.)
+fn rem_pio2_large(x: f32) -> (i32, f32, f32) {
+    let (hx, ix) = (x.to_bits() as i32, x.to_bits() & 0x7fff_ffff);
+    let e0 = ((ix >> 23) as i32) - 134; // = ilogb(|x|) - 7, so each digit below is 8 bits
+    let mut z = F(f32::from_bits(ix - ((e0 as u32) << 23)));
+    let mut tx = [0.0f32; 3];
+    for k in 0..2 {
+        tx[k] = fpu::from_i32(fpu::to_i32(z.0));
+        z = (z - F(tx[k])) * TWO8;
+    }
+    tx[2] = z.0;
+    let mut nx = 3;
+    while tx[nx - 1] == 0.0 {
+        nx -= 1; // a digit of zero would only add a zero column
+    }
+    let (n, y0, y1) = kernel_rem_pio2(&tx[..nx], e0, nx as i32, 2);
+    if hx < 0 { (-n, -y0, -y1) } else { (n, y0, y1) }
+}
+
+/// The disc's `sinf` has no Inf/NaN early-out — the SDK's libm was built for a machine with neither —
+/// and it does not touch its argument with the FPU before the branch, so a denormal argument comes back
+/// unchanged instead of flushed. Both of those are proved over every exponent against the disc.
 pub fn sinf(x: f32) -> f32 {
-    let x = fpu::operand(x.to_bits()); // the EE has no Inf/NaN: such a pattern is ±max
     if x.to_bits() & 0x7fff_ffff <= 0x3f49_0fd8 {
         return k_sin(x, 0.0, false).0; // |x| <= π/4
     }
@@ -340,7 +582,6 @@ pub fn sinf(x: f32) -> f32 {
 
 /// `cosf`.
 pub fn cosf(x: f32) -> f32 {
-    let x = fpu::operand(x.to_bits());
     if x.to_bits() & 0x7fff_ffff <= 0x3f49_0fd8 {
         return k_cos(x, 0.0).0;
     }
@@ -373,9 +614,12 @@ const AT: [u32; 11] = [
     0xbd15a221, 0x3c8569d7,
 ];
 
-/// `atanf`.
+/// `atanf`: `atan(x) = atan(hi) + atan((x-hi)/(1+x·hi))` on four reduction intervals, then one odd
+/// polynomial in `x²`.
+///
+/// Like `sinf`, it tests its argument with integer compares only, so a denormal below `2^-29` comes back
+/// unchanged rather than flushed — proved over every exponent against the disc.
 pub fn atanf(x0: f32) -> f32 {
-    let x0 = fpu::operand(x0.to_bits());
     let hx = x0.to_bits() as i32;
     let ix = hx & 0x7fff_ffff;
     if ix > 0x507f_ffff {
@@ -384,7 +628,7 @@ pub fn atanf(x0: f32) -> f32 {
         return if hx > 0 { (hi + lo).0 } else { (-hi - lo).0 };
     }
     let (x, id) = if ix <= 0x3edf_ffff {
-        if ix <= 0x30ff_ffff && 1.0 < F(x0) + b(0x7149_f2c9) {
+        if ix <= 0x30ff_ffff && 1.0 < F(x0) + HUGE {
             return x0; // |x| < 2^-29: atan(x) = x
         }
         (F(x0), -1)
@@ -550,14 +794,17 @@ pub fn acosf(x: f32) -> f32 {
 
 const LN2_HI: f32 = b(0x3f31_7180);
 const LN2_LO: f32 = b(0x3717_f7d1);
-const HUGE: f32 = b(0x7149_f2ca); // 1e30
-const TINY: f32 = b(0x0da2_4260); // 1e-30
+// `1e30` and `1e-30`, as *this* disc holds them: both are one ulp below the nearest float to the
+// decimal literal, because the compiler that built it converted toward zero. They are the same words in
+// `powf`, `floorf`, `scalbnf` and `atanf`, so there is one pair here.
+const HUGE: f32 = b(0x7149_f2c9); // 9.9999994e29
+const TINY: f32 = b(0x0da2_425f); // 9.999999e-31
 const TWOM100: f32 = b(0x0d80_0000); // 2^-100
-const P1: f32 = b(0x3e2a_aaab);
-const P2: f32 = b(0xbb36_0b61);
-const P3: f32 = b(0x388a_b355);
+const P1: f32 = b(0x3e2a_aaaa);
+const P2: f32 = b(0xbb36_0b60);
+const P3: f32 = b(0x388a_b354);
 const P4: f32 = b(0xb5dd_ea0e);
-const P5: f32 = b(0x3331_bb4c);
+const P5: f32 = b(0x3331_bb4b);
 
 /// Scale by `2^k` by adding to the exponent field, saturating at `±max` and flushing to `±0` the way the
 /// EE does (where fdlibm would produce an infinity or a denormal).
@@ -598,7 +845,7 @@ pub fn expf(x: f32) -> f32 {
             lo = ll;
             k = 1 - 2 * xsb as i32;
         } else {
-            k = fpu::to_i32((F(b(0x3fb8_aa3b)) * x + if xsb == 0 { 0.5 } else { -0.5 }).0);
+            k = fpu::to_i32((F(b(0x3fb8_aa3a)) * x + if xsb == 0 { 0.5 } else { -0.5 }).0);
             let t = F(fpu::from_i32(k));
             hi = x - t * LN2_HI; // exact: t·ln2_hi has no low bits
             lo = t * LN2_LO;
@@ -688,12 +935,10 @@ fn hi12(x: F) -> F {
 /// Two known variants of the `t_h` seed exist; if the oracle says your game disagrees here, try the older
 /// one noted at that line.
 pub fn powf(x: f32, y: f32) -> f32 {
-    let x = fpu::operand(x.to_bits());
-    let y = fpu::operand(y.to_bits());
     let (hx, hy) = (x.to_bits() as i32, y.to_bits() as i32);
     let (ix, iy) = (hx & 0x7fff_ffff, hy & 0x7fff_ffff);
-    if iy == 0 {
-        return 1.0; // x^0 = 1, for every x
+    if iy < 0x0080_0000 {
+        return 1.0; // x^0 = 1, for every x — and a denormal y *is* zero to this FPU
     }
     // is y an integer, and is it odd? (only matters for x < 0)
     let mut yisint = 0;
@@ -717,8 +962,8 @@ pub fn powf(x: f32, y: f32) -> f32 {
     if hy == 0x3f00_0000 && hx >= 0 {
         return sqrtf(x); // y = 0.5
     }
-    let mut ax = fpu::abs(x);
-    if ix == 0 || ix == 0x3f80_0000 {
+    let ax = fpu::abs(x);
+    if ix < 0x0080_0000 || ix == 0x3f80_0000 {
         // x = ±0 or ±1
         let mut z = ax;
         if hy < 0 {
@@ -741,29 +986,26 @@ pub fn powf(x: f32, y: f32) -> f32 {
     let (t1, t2);
     if iy > 0x4d00_0000 {
         // |y| > 2^27: either over/underflow, or x is so close to 1 that log(x) needs only four terms
+        // |y| that large makes y an even integer, so `sign` is +1 and these need no sign at all —
+        // which is how the disc has them, `huge*huge` and `tiny*tiny` already folded to max and zero
         if ix < 0x3f7f_fff8 {
-            return fpu::mul(sign, if hy < 0 { fpu::mul(HUGE, HUGE) } else { fpu::mul(TINY, TINY) });
+            return if hy >= 0 { 0.0 } else { fpu::MAX };
         }
         if ix > 0x3f80_0007 {
-            return fpu::mul(sign, if hy > 0 { fpu::mul(HUGE, HUGE) } else { fpu::mul(TINY, TINY) });
+            return if hy <= 0 { 0.0 } else { fpu::MAX };
         }
         let t = F(x) - 1.0;
-        let w = (t * t) * (F(0.5) - t * (F(b(0x3eaa_aaab)) - t * 0.25));
+        let w = (t * t) * (F(0.5) - t * (F(b(0x3eaa_aaaa)) - t * 0.25));
         let u = F(b(0x3fb8_aa00)) * t; // ivln2_h, 16 significant bits
-        let v = t * b(0x36ec_a570) - w * b(0x3fb8_aa3b); // ivln2_l, ivln2
+        let v = t * b(0x36ec_a56f) - w * b(0x3fb8_aa3a); // ivln2_l, ivln2
         let a = u + v;
         t1 = hi12(a);
         t2 = v - (t1 - u);
     } else {
-        let mut n = 0i32;
+        // no renormalising step: a denormal base left through the `ix < 0x0080_0000` branch above,
+        // which is why the disc's `powf` has no `2^24` scaling where fdlibm's source does
         let mut ixn = ix;
-        if ix < 0x0080_0000 {
-            // a denormal base is zero on the EE, so this cannot be reached; kept for shape
-            ax = fpu::mul(ax, b(0x4b80_0000));
-            n -= 24;
-            ixn = ax.to_bits() as i32;
-        }
-        n += (ixn >> 23) - 0x7f;
+        let mut n = (ixn >> 23) - 0x7f;
         let j = ixn & 0x007f_ffff;
         ixn = j | 0x3f80_0000; // ax normalised into [1, 2)
         let k = if j <= 0x1c_c471 {
@@ -782,18 +1024,20 @@ pub fn powf(x: f32, y: f32) -> f32 {
         let v = 1.0 / (ax + bp);
         let s = u * v;
         let s_h = hi12(s);
-        // t_h = (ax + bp) rounded to 12 bits, built straight out of the exponent field.
-        // Older fdlibm: ((ixn >> 1) | 0x2000_0000) + 0x4_0000 + (k << 21), unmasked.
-        let t_h = F(b((((ixn >> 1) as u32 & 0xffff_f000) | 0x2000_0000) + 0x0040_0000 + ((k as u32) << 21)));
+        // t_h ≈ ax + bp, built straight out of the exponent field: halve the exponent, set the bias
+        // back, then nudge. fdlibm's float `pow` nudges by 0x0004_0000 where the scaling of the double
+        // one says 0x0040_0000, and leaves the result unmasked where the double one masks to 12 bits —
+        // both are in the disc's instructions, and either one changed costs an ulp in `powf`.
+        let t_h = F(b((((ixn >> 1) as u32) | 0x2000_0000) + 0x0004_0000 + ((k as u32) << 21)));
         let t_l = ax - (t_h - bp);
         let s_l = v * ((u - s_h * t_h) - s_h * t_l);
         // log(ax) = 2s + 2s^3/3 + …, as (s_h + s_l)·(3 + s^2 + r)
         let s2 = s * s;
         let r = s2
             * s2
-            * (b(0x3f19_999a)
+            * (b(0x3f19_9999)
                 + s2 * (b(0x3edb_6db7)
-                    + s2 * (b(0x3eaa_aaab) + s2 * (b(0x3e8b_a305) + s2 * (b(0x3e6c_3255) + s2 * b(0x3e53_f142))))));
+                    + s2 * (b(0x3eaa_aaab) + s2 * (b(0x3e8b_a304) + s2 * (b(0x3e6c_3254) + s2 * b(0x3e53_f142))))));
         let r = r + s_l * (s_h + s);
         let s2 = s_h * s_h;
         let t_h = hi12(F(3.0) + s2 + r);
@@ -804,7 +1048,7 @@ pub fn powf(x: f32, y: f32) -> f32 {
         let p_h = hi12(u + v);
         let p_l = v - (p_h - u);
         let z_h = F(b(0x3f76_3800)) * p_h; // cp_h
-        let z_l = F(b(0x369d_c3a0)) * p_h + p_l * b(0x3f76_384f) + if k == 1 { b(0x35d1_cfdc) } else { 0.0 };
+        let z_l = F(b(0x369d_c39f)) * p_h + p_l * b(0x3f76_384e) + if k == 1 { b(0x35d1_cfdc) } else { 0.0 };
         let t = F(fpu::from_i32(n));
         t1 = hi12(((z_h + z_l) + if k == 1 { b(0x3f15_c000) } else { 0.0 }) + t);
         t2 = z_l - (((t1 - t) - if k == 1 { b(0x3f15_c000) } else { 0.0 }) - z_h);
@@ -815,19 +1059,18 @@ pub fn powf(x: f32, y: f32) -> f32 {
     let mut p_h = y1 * t1;
     let z = p_l + p_h;
     let j = z.0.to_bits() as i32;
-    if j > 0x4300_0000 {
-        return fpu::mul(sign, fpu::mul(HUGE, HUGE)); // > 128: overflow
-    }
-    if j == 0x4300_0000 && p_l + b(0x3338_aa3c) > z - p_h {
-        return fpu::mul(sign, fpu::mul(HUGE, HUGE));
-    }
-    if (j & 0x7fff_ffff) > 0x4316_0000 && j < 0 {
-        return fpu::mul(sign, fpu::mul(TINY, TINY)); // < -150: underflow
-    }
-    if j as u32 == 0xc316_0000 && p_l <= z - p_h {
-        return fpu::mul(sign, fpu::mul(TINY, TINY));
-    }
     let i = j & 0x7fff_ffff;
+    // The limits are the EE's, not IEEE's: no denormals, so anything below 2^-126 is zero and the
+    // underflow test is `z <= -126` where fdlibm's source says -150. Overflow is tested at 129 and the
+    // last exponent is left to saturate on its own.
+    if j < 1 {
+        // z is zero or negative: the answer is below 1
+        if i > 0x42fc_0000 || (i == 0x42fc_0000 && (z - p_h).0 >= p_l.0) {
+            return fpu::mul(fpu::mul(sign, TINY), TINY); // ±0
+        }
+    } else if i > 0x4301_0000 || (i == 0x4301_0000 && p_l.0 + b(0x3338_aa3b) > (z - p_h).0) {
+        return fpu::mul(fpu::mul(sign, HUGE), HUGE); // ±max
+    }
     let mut k = (i >> 23) - 0x7f;
     let mut n = 0i32;
     if i > 0x3f00_0000 {
@@ -843,12 +1086,86 @@ pub fn powf(x: f32, y: f32) -> f32 {
     }
     let t = hi12(p_l + p_h);
     let u = t * b(0x3f31_7200); // lg2_h
-    let v = (p_l - (t - p_h)) * b(0x3f31_7218) + t * b(0x35bf_be8c); // lg2, lg2_l
+    let v = (p_l - (t - p_h)) * b(0x3f31_7217) + t * b(0x35bf_be8c); // lg2, lg2_l
     let z = u + v;
     let w = v - (z - u);
     let t = z * z;
     let t1 = z - t * (P1 + t * (P2 + t * (P3 + t * (P4 + t * P5))));
     let r = (z * t1) / (t1 - 2.0) - (w + z * w);
     let z = 1.0 - (r - z);
-    fpu::mul(sign, ldexp_bits(z.0, n))
+    // 2^n by adding to the exponent field; if that carried out of it (either way), `scalbnf` saturates
+    let j = (z.0.to_bits() as i32).wrapping_add(n << 23);
+    let z = if (j >> 23) < 1 { scalbnf(z.0, n) } else { b(j as u32) };
+    fpu::mul(sign, z)
+}
+
+// --- fmodf -----------------------------------------------------------------------------------------
+
+/// `fmodf(x, y)`: `x - n·y` for the whole `n` that leaves a remainder with `x`'s sign and a magnitude
+/// below `|y|`.
+///
+/// fdlibm computes this in fixed point — shift and subtract on the mantissas, no floating-point
+/// operation anywhere — so the answer is *exact*, and it is the same on any machine. The only arithmetic
+/// is the `(x·y)/(x·y)` an IEEE library returns for a zero divisor; on the EE that divide is `0/0`, which
+/// is [`fpu::MAX`], not a NaN.
+///
+/// A denormal divisor takes the same path as zero, which is right for the EE: the FPU reads denormals as
+/// zero, so no code upstream can produce one, and the game's own `fmodf` tests the whole exponent field.
+pub fn fmodf(x: f32, y: f32) -> f32 {
+    let sx = x.to_bits() & 0x8000_0000;
+    let (hx, hy) = ((x.to_bits() ^ sx) as i32, (y.to_bits() & 0x7fff_ffff) as i32);
+    // y zero or denormal: 0/0 on the EE's divider
+    if (hy as u32) < 0x0080_0000 {
+        let p = fpu::mul(x, y);
+        return fpu::div(p, p);
+    }
+    let zero = || f32::from_bits(sx); // ±0, keeping x's sign
+    if hx < hy {
+        return x; // |x| < |y|: x is already the remainder
+    }
+    if hx == hy {
+        return zero();
+    }
+    // ix, iy = the unbiased exponents; the mantissas with their implicit 1, aligned to bit 23
+    let (mut ix, mut iy) = ((hx >> 23) - 127, (hy >> 23) - 127);
+    let mut mx = if ix < -126 { hx << (-ix - 126) } else { (hx & 0x007f_ffff) | 0x0080_0000 };
+    let my = if iy < -126 { hy << (-iy - 126) } else { (hy & 0x007f_ffff) | 0x0080_0000 };
+    let mut sub = iy < -126;
+    // long division: ix - iy steps of shift-and-subtract, stopping early on an exact multiple
+    let mut n = ix - iy;
+    let mut mz;
+    loop {
+        n -= 1;
+        mz = mx - my;
+        if n == -1 {
+            break;
+        }
+        mx <<= 1;
+        if mz >= 0 {
+            if mz == 0 {
+                return zero();
+            }
+            mx = mz << 1;
+        }
+    }
+    if mz >= 0 {
+        mx = mz;
+    }
+    if mx == 0 {
+        return zero();
+    }
+    // back to a float: renormalise, then reassemble
+    if mx < 0x0080_0000 {
+        while mx < 0x0080_0000 {
+            mx <<= 1;
+            iy -= 1;
+        }
+        sub = iy < -126;
+    }
+    ix = iy; // the result's exponent is the divisor's, after the shifts above
+    if !sub {
+        f32::from_bits(((mx - 0x0080_0000) | ((ix + 127) << 23)) as u32 | sx)
+    } else {
+        f32::from_bits((mx >> (-ix - 126)) as u32 | sx)
+    }
 }
