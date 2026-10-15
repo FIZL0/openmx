@@ -11,6 +11,9 @@ already pasted into the first turn, waits for it to finish, merges the branch, a
     ./kit run 1               one at a time (the sequential run; also what you get without tmux)
     ./kit run --force         keep starting tasks past the weekly usage cap
 
+Environment: `KIT_MODEL` the agents' model, `KIT_MASTER_MODEL` the master's (both default to opus),
+`KIT_AGENT` the CLI to run, `KIT_LEAN=0` to give the agents the full tool set.
+
 What it has to get right, and why each of these is here rather than left to the agent:
 
 **Task picking** goes down `plan/TODO.md` in order and skips: blocked tasks (`[~]`), split parents (a task
@@ -38,8 +41,18 @@ quietly drop a task from the night.
 no transcript activity for `--stall` seconds at a prompt (or past the Bash timeout with a tool running) is
 logged and belled, with the pane to attach to.
 
-Without tmux it degrades to a single sequential session and says so. Linux/macOS only — the Windows edition
-of the kit does this differently.
+**A master for the merges it cannot do.** A branch that conflicts in anything but append-only text needs
+somebody to read both sides and decide, and for most of a run there is nobody. So the run keeps one more
+session — a long-lived agent in the main checkout, in its own tmux window — and hands it those branches one
+at a time, clearing its context in between. It is the difference between a night that finishes and a night
+that stops: `pick` skips tasks whose branch is waiting to be merged, and anything `(after X)` on one of
+them, so a few unmergeable branches can hold up the whole critical path until a human wakes up. The master
+may not touch the worktrees, do task work, or publish the shared branch — that last one stays a decision a
+person makes. Its ledger is `context/notes/master.md`, which is also where the runner's own merges go.
+
+Without tmux it degrades to a single sequential session and says so (and then there is no master: a merge
+that needs one is logged for the human, as it was before). Linux/macOS only — the Windows edition of the kit
+does this differently.
 
 Internal modes (used by the sessions it starts, not by you):
     --stop-hook            Stop hook: arm the idle timer for the session that is stopping
@@ -70,6 +83,9 @@ SLOTS_DIR = ROOT.parent / f'{ROOT.name}-slots'
 TASK = re.compile(r'^- \[ \] \*\*([^*\s]+)\*\*(.*)')
 ANY_TASK = re.compile(r'^- \[.\] \*\*([^*\s]+)\*\*')
 PLAIN = re.compile(r'(plan|research/journal)/.*\.md')  # text whose merge conflicts the runner joins itself
+# A task that blocked itself on something this run can in fact do unattended: the emulator, a capture, a
+# screenshot. Worth a second look rather than a human's morning, so it is flagged in the master's notes.
+SUSPECT = re.compile(r'BLOCKED:.*(pcsx2|pine|capture|record|screenshot|save state|unattended)', re.I)
 WEEKLY_MAX = 90  # % of the account's 7-day usage; at or past it, no new task starts unless --force
 
 PROMPT = """Unattended run: nobody will answer questions, so never ask one — decide, write down why, and go on.
@@ -121,6 +137,19 @@ def log(msg: str) -> None:
 
 def git(*a: str, cwd=None) -> sp.CompletedProcess:
     return sp.run(['git', *a], cwd=str(cwd or ROOT), capture_output=True, text=True)
+
+
+def note(msg: str) -> None:
+    """Append one line to `context/notes/master.md`, the ledger of what happened to each branch.
+
+    One file, whether the runner merged a branch itself or the master did, because the question a human
+    asks in the morning is "what happened to my eight tasks" and not "which of you did it".
+    """
+    try:
+        with open(cfg(False).ctx('notes/master.md'), 'a', encoding='utf-8') as f:
+            f.write(msg + '\n')
+    except OSError:
+        pass
 
 
 def default_branch() -> str:
@@ -229,30 +258,46 @@ def tmux(*a: str, **kw) -> sp.CompletedProcess:
 def pane(name: str, cwd: Path, cmd: str, env=()) -> int:
     """Open cmd in a pane of the window "agents", tagged @kit=name; returns the pane's pid.
 
+    The master gets a window of its own ("master"), because it is the one session a human reads from the
+    top rather than glances at: it holds a whole merge conversation, not a task.
+
     Panes are found by their @kit option rather than their position, so you can break them out, join them or
     swap them around while the run goes on.
     """
     envs = [a for e in env for a in ('-e', e)]
+    w = 'master' if name == 'master' else 'agents'
     windows = tmux('list-windows', '-F', '#{window_name}').stdout.split()
-    where = ['new-window', '-n', 'agents']
-    if 'agents' in windows:
+    where = ['new-window', '-n', w]
+    if w in windows:
         here = sorted((int(h[1:]), p) for p, h in
-                      (l.split('\t') for l in tmux('list-panes', '-t', 'agents', '-F',
+                      (l.split('\t') for l in tmux('list-panes', '-t', w, '-F',
                                                    '#{pane_id}\t#{@kit}').stdout.splitlines())
                       if re.fullmatch(r's\d+', h))
         k = int(name[1:]) if re.fullmatch(r's\d+', name) else 0
         lower = [p for i, p in here if i < k]
         where = (['split-window', '-h', '-t', lower[-1]] if lower else
-                 ['split-window', '-h', '-b', '-t', here[0][1] if here else 'agents'])
+                 ['split-window', '-h', '-b', '-t', here[0][1] if here else w])
     r = tmux(*where, '-d', '-c', str(cwd), *envs, '-P', '-F', '#{pane_id} #{pane_pid}', cmd)
     if r.returncode or not r.stdout.split():
         raise SystemExit(f'tmux could not open a pane: {r.stderr.strip()}')
     pane_id, pid = r.stdout.split()[:2]
     tmux('set-option', '-p', '-t', pane_id, '@kit', name)
-    tmux('set-option', '-w', '-t', 'agents', 'pane-border-status', 'top')
-    tmux('set-option', '-w', '-t', 'agents', 'pane-border-format', ' #{@kit} ')
-    tmux('select-layout', '-t', 'agents', 'even-horizontal')
+    tmux('set-option', '-w', '-t', w, 'pane-border-status', 'top')
+    tmux('set-option', '-w', '-t', w, 'pane-border-format', ' #{@kit} ')
+    tmux('select-layout', '-t', w, 'even-horizontal')
     return int(pid)
+
+
+def panes() -> dict[str, tuple[str, int]]:
+    """{name: (pane id, pid)} for every slot and master pane in this tmux session."""
+    out: dict[str, tuple[str, int]] = {}
+    for l in tmux('list-panes', '-s', '-F',
+                  '#{pane_id}\t#{pane_pid}\t#{@kit}\t#{window_name}').stdout.splitlines():
+        pane_id, pid, name, window = (l.split('\t') + ['', '', '', ''])[:4]
+        name = name or ('master' if window == 'master' else '')
+        if name:
+            out[name] = (pane_id, int(pid))
+    return out
 
 
 # --- starting a session --------------------------------------------------------
@@ -296,10 +341,214 @@ def start(n: int, task, branch: str, model: str, idle: int, slots: int):
     return pid, sid, since
 
 
+MERGE = threading.Lock()  # one merge into the default branch at a time: the runner's, or the master's
+
+
+# --- the master ----------------------------------------------------------------
+#
+# The runner can merge a branch that merges cleanly, and it can join both sides of an append-only text
+# conflict (`union` below). Everything else needs somebody to read both sides and decide — and for most of
+# a run there is nobody. So the run keeps one more session: a long-lived agent in the main checkout whose
+# only job is the merges the runner could not do. It is handed one report at a time, with its context
+# cleared in between, so report number twenty costs what report number one did.
+#
+# The alternative is what this kit used to do: log LEFT FOR A HUMAN, push the branch and carry on. That is
+# correct and it loses the night — `pick` skips tasks whose branch has unmerged commits, and anything
+# `(after X)` on one of them, so a handful of unmergeable branches stops the whole critical path until
+# somebody wakes up. Eight of them did exactly that here on 2026-10-15.
+#
+# What it is *not* allowed to do: touch a worktree, do task work, or publish the shared branch. The last
+# one is the one difference from the project this came from, and it is deliberate — see `merge`.
+
+MASTER = """You are the master of an unattended `./kit run`: nobody will answer questions, so never ask one \
+— decide, write down why, and go on. Up to {slots} agents are working on `plan/TODO.md` tasks in git \
+worktrees under {slots_dir}, each on its own branch `task/<ID>`. The runner merges the branches it can and \
+hands you the ones it cannot. It clears your context and sends you one message at a time: `REPORT <ID> slot \
+<n>: <session, its commits>` as each one ends. What you decided about earlier reports is at the end of \
+`context/notes/master.md`. Handle the report here, in the main checkout, on `{branch}`:
+
+1. If `{branch}` has uncommitted changes that are not yours (a human edits `PLAN.md`, or notes in \
+`plan/`), `git stash push -m "master <ID>"` them, and `git stash pop` that entry back when you are done \
+whatever happened — merged, aborted or left. Never leave a stash behind.
+2. `git merge --no-edit task/<ID>` (if the branch has no commits, just say so). Resolve every conflict by \
+keeping both sides' intent, which means reading both sides: `git log {branch}..task/<ID>`, the task's \
+journal entry under `research/journal/`, and the journal of whatever landed on `{branch}` meanwhile. Tasks \
+run in parallel, so both sides' `plan/TODO.md` and `plan/DONE.md` moves belong, both sides' new struct \
+fields belong, and both sides' `PLAN.md` code-map lines belong. Watch for one side being simply older: a \
+branch that predates a paragraph on `{branch}` must not revert it, and joining two versions of the same \
+sentence leaves half a sentence behind. If a branch ticked or blocked its task by hand, redo that as `./kit \
+plan tick <ID>` or `./kit plan block <ID> "<why>"` — never edit a checkbox yourself.
+3. Then `./kit plan archive` (sweeps any `[x]` the merge brought in through to `plan/DONE.md`), and `./kit \
+check` in the foreground. The agent already passed it on its branch, so you can skip it when `git \
+diff --name-only task/<ID> HEAD` lists only `.md` files. Never wait on another `./kit check`: the slots run \
+their own. Fix what the merge broke; never "fix" the task's own work — if its journal says it deliberately \
+changed a value, the stale thing is the other side. Then commit.
+4. `git branch -d task/<ID>`. If you cannot make it pass: `git merge --abort`, leave the branch alone, and \
+say why. A branch left unmerged is a result; a broken `{branch}` is not.
+5. Append one line to `context/notes/master.md`: `<ID>: merged / conflicts fixed (what) / left (why)`, the \
+task's state (ticked, part, blocked), and anything a human must do.
+6. Commit every change you made, so `git status` shows only the human's popped-back edits (`context/` is \
+git-ignored, so `master.md` itself stays uncommitted). **Do not push `{branch}`.** Publishing the branch \
+everyone reads is a decision a person makes after reading the merge, not a side effect of a run finishing \
+a task at 4am; the task branches are already on the remote, so nothing is at risk of being lost. If you \
+think the merge is worth publishing, put the one-line `git push origin {branch}` in your `master.md` line \
+and leave it for them.
+
+Never touch the worktrees under {slots_dir}, and never do a task's own work. When the runner says `RUN \
+DONE`, write a short summary for the human at the *top* of `context/notes/master.md` and stop."""
+
+OUTBOX = 'notes/master.outbox'   # reports waiting for the master, one per line, on disk
+LOCK = 'notes/master.lock'       # "<ID> <master.md size> <time>" while the master is on a report
+MARK = 'notes/master.pane'       # the pane id of the master this code started
+
+_idle_since: float | None = None  # when the master's session was first seen idle while holding the lock
+
+
+def report(msg: str) -> None:
+    """Queue a line for the master. On disk, so a restarted run still delivers it."""
+    with open(cfg(False).ctx(OUTBOX), 'a', encoding='utf-8') as f:
+        f.write(msg + '\n')
+
+
+def queued() -> list[str]:
+    p = cfg(False).ctx(OUTBOX)
+    return p.read_text(encoding='utf-8').splitlines() if p.exists() else []
+
+
+def lock_holder() -> str:
+    try:
+        return cfg(False).ctx(LOCK).read_text(encoding='utf-8').split()[0]
+    except (OSError, IndexError):
+        return ''
+
+
+def master(branch: str, slots: int) -> None:
+    """Open the master's session if it is not up. Started once and adopted by a restarted run.
+
+    One it did not start is replaced — an older run's master has no idle hooks, so there is no way to tell
+    when it is ready for the next report — but only while it is holding nothing: no lock, no merge in flight.
+    """
+    mark = cfg(False).ctx(MARK)
+    old = panes().get('master')
+    if old and (mark.read_text(encoding='utf-8') if mark.exists() else '') != old[0] \
+            and not cfg(False).ctx(LOCK).exists() and not (ROOT / '.git' / 'MERGE_HEAD').exists():
+        tmux('kill-pane', '-t', old[0])
+        log('the master session in that pane was not this run\'s (no idle hooks); replaced it')
+    if 'master' in panes():
+        return
+    # Its hooks stamp a file when a prompt goes in and another when a turn ends with no background task
+    # left to wake it. `master_idle` compares the two — reading the screen instead is how you mistake a
+    # diff with "come back... (14 s)" in it for a session that is still working.
+    def stamp(name: str, guard: str = '') -> list:
+        return [{'hooks': [{'type': 'command',
+                            'command': guard + shlex.join(['touch', str(cfg(False).ctx(f'notes/{name}'))])}]}]
+    done = stamp('master.idle', "jq -e '(.background_tasks // []) | length == 0' >/dev/null && ")
+    hooks = {'UserPromptSubmit': stamp('master.busy'), 'Stop': done, 'StopFailure': done}
+    cli = os.environ.get('KIT_AGENT', 'claude')
+    cmd = shlex.join([cli, '--model', os.environ.get('KIT_MASTER_MODEL', 'opus'),
+                      '--permission-mode', 'bypassPermissions', '--disallowedTools', 'AskUserQuestion',
+                      '--settings', json.dumps({'hooks': hooks})])
+    for name in ('master.busy', 'master.idle'):  # a killed master's last stamp would read busy forever
+        cfg(False).ctx(f'notes/{name}').unlink(missing_ok=True)
+    pane('master', ROOT, cmd)
+    if up := panes().get('master'):
+        mark.write_text(up[0], encoding='utf-8')
+    log('master session started (window "master"): the merges this run cannot do go to it')
+    time.sleep(20)  # let the session come up before the first report is typed into it
+
+
+def master_idle() -> bool:
+    """Did the master's last turn end after its last prompt? Its own Stop/UserPromptSubmit hooks say so.
+
+    A turn that ends with background tasks still running does not count: they wake it again with no prompt,
+    and a report typed in on top of that lands in the middle of someone else's turn.
+    """
+    def when(name: str) -> float:
+        p = cfg(False).ctx(f'notes/{name}')
+        return p.stat().st_mtime if p.exists() else 0.0
+    return when('master.idle') >= when('master.busy')
+
+
+def master_busy() -> bool:
+    """True while the master is on a report: until it writes its `<ID>: ...` line and the checkout is clean.
+
+    Stale after 90 minutes — it died, or it forgot — at which point the lock is logged and freed, because a
+    master that never finishes must not hold every later merge back.
+    """
+    global _idle_since
+    lock = cfg(False).ctx(LOCK)
+    try:
+        tid, size, since = lock.read_text(encoding='utf-8').split()
+    except (OSError, ValueError):
+        return (ROOT / '.git' / 'MERGE_HEAD').exists()  # a merge in the checkout we did not start
+    md = cfg(False).ctx('notes/master.md')
+    new = md.read_bytes()[int(size):].decode(errors='replace') if md.exists() else ''
+    _idle_since = (_idle_since or time.time()) if master_idle() else None
+    # Done when it has written its line — or when it has sat idle two minutes, which is a report it had
+    # nothing to do for (already merged, no commits). Never while a merge is still open in the checkout.
+    done = (re.search(rf'^{re.escape(tid)}:', new, re.M) or
+            time.time() - (_idle_since or time.time()) >= 120) \
+        and not (ROOT / '.git' / 'MERGE_HEAD').exists()
+    if not done and time.time() - float(since) < 90 * 60:
+        return True
+    if not done:
+        log(f'{tid}: the master has held {ROOT.name} for 90 min with no master.md line; freeing it')
+    lock.unlink(missing_ok=True)
+    return False
+
+
+def enter(pane_id: str, text: str) -> bool:
+    """Type text into an agent's pane and submit it; True once its input box is empty again.
+
+    Keys sent straight after one another get mixed up — a leftover character before `/clear`, a report that
+    arrives as `/resume` — so: clear the box (Ctrl-U), paste the text as one bracketed paste, give the
+    session a moment to take it, then press Enter until the box is empty.
+    """
+    tmux('send-keys', '-t', pane_id, 'C-u')
+    tmux('set-buffer', '-b', 'kit', text)
+    tmux('paste-buffer', '-p', '-d', '-b', 'kit', '-t', pane_id)
+    for _ in range(5):
+        time.sleep(2)
+        tmux('send-keys', '-t', pane_id, 'Enter')
+        time.sleep(3)
+        screen = tmux('capture-pane', '-p', '-t', pane_id).stdout
+        box = [l for l in screen.splitlines() if l.startswith('❯')]
+        if box and box[-1].strip() == '❯':
+            return True
+    return False
+
+
+def hand(q: list[str], branch: str, slots: int) -> None:
+    """Clear the master's context and give it its instructions plus the next queued report."""
+    global _idle_since
+    m = panes().get('master')
+    if not m or not master_idle():
+        return
+    text = ' '.join(MASTER.format(slots=slots, branch=branch, slots_dir=SLOTS_DIR).split('\n'))
+    if not (enter(m[0], '/clear') and enter(m[0], text + ' ' + q[0])):
+        return  # not taken: the line stays queued for the next look
+    cfg(False).ctx(OUTBOX).write_text(''.join(l + '\n' for l in q[1:]), encoding='utf-8')
+    _idle_since = None
+    if r := re.match(r'REPORT (\S+)', q[0]):
+        md = cfg(False).ctx('notes/master.md')
+        size = md.stat().st_size if md.exists() else 0
+        cfg(False).ctx(LOCK).write_text(f'{r.group(1)} {size} {time.time()}', encoding='utf-8')
+        log(f'{r.group(1)}: handed to the master')
+
+
+def flush(branch: str, slots: int) -> None:
+    """Hand the master its next report, if it has one and is ready for it."""
+    if not (q := queued()):
+        return
+    master(branch, slots)  # bring it up at once, even while a merge holds the checkout
+    if master_busy() or not MERGE.acquire(blocking=False):
+        return  # one thing at a time in the checkout: the master's report, or the runner's own merge
+    try:
+        hand(q, branch, slots)
+    finally:
+        MERGE.release()
+
 # --- merging a finished branch -------------------------------------------------
-
-MERGE = threading.Lock()  # one merge into the default branch at a time
-
 
 def union(files: list[str], tid: str, branch: str) -> bool:
     """Join both sides of a conflict in plan/ and journal markdown: two agents both added lines, and both
@@ -345,12 +594,36 @@ def merge(tid: str, branch: str) -> str | None:
     Returns None when it landed, else why it was left alone (the target branch is then as it was, and the
     branch is still there for a human to look at).
     """
+    # The master's queued reports go first: back-to-back runner merges starve it, and a report it never
+    # gets is a branch nobody looks at. But never wait on it longer than 30 minutes — a master that has
+    # stopped taking its line must not hold every later merge back.
+    t0 = time.time()
+    while queued() and time.time() - t0 < 30 * 60:
+        time.sleep(10)
+    if queued():
+        log(f'{tid}: the master has not taken its queued reports in 30 min; merging without waiting')
     with MERGE:
-        if git('diff', '--name-only', '--diff-filter=U').stdout.strip():
-            return 'the main checkout has unmerged paths left over: fix them first'
+        # The master is mid-merge in the checkout, or somebody left conflicts there (a half-applied stash
+        # pop): queue behind it. Merging over unmerged paths "resolves" theirs and commits that instead of
+        # the branch, which is a wrong merge that looks like a clean one.
+        t0 = time.time()
+        while master_busy() or git('diff', '--name-only', '--diff-filter=U').stdout.strip():
+            if time.time() - t0 > 60 * 60:  # hard stop: hand it over rather than stall the run
+                return 'the main checkout stayed busy (the master, or unmerged paths) for 60 min'
+            time.sleep(10)
+        # Merges go into the shared branch whatever the checkout happens to be on: worktrees start from it
+        # and `pick` reads its task list, so a merge onto somebody's topic branch leaves the shared branch
+        # stale and its tasks open.
         cur = git('branch', '--show-current').stdout.strip()
-        if cur != branch and git('checkout', '-q', branch).returncode:
-            return f'the main checkout is on {cur or "a detached HEAD"} and would not switch to {branch}'
+        if cur != branch:
+            if git('checkout', '-q', branch).returncode:
+                return f'the main checkout is on {cur or "a detached HEAD"} and would not switch to {branch}'
+            # Commits made over there meanwhile (the master's fixes, a plan edit) belong on the shared
+            # branch too, when they fast-forward onto it.
+            ff = bool(cur) and not git('merge', '-q', '--ff-only', cur).returncode
+            log(f'{tid}: the main checkout was on {cur or "a detached HEAD"}; switched it to {branch} for '
+                f'the merge' + (f' ({branch} fast-forwarded to {cur})' if ff else
+                                f' ({cur} does not fast-forward, so its commits stay there)'))
         # somebody's uncommitted edits in the checkout: out of the way for the merge, back right after
         stashed = bool(git('status', '--porcelain', '--untracked-files=no').stdout.strip()) and \
             not git('stash', 'push', '-q', '-m', f'kit run {tid}').returncode
@@ -386,7 +659,12 @@ def merge(tid: str, branch: str) -> str | None:
         git('branch', '-d', f'task/{tid}')
         line = next((l for l in plan_text(branch) if f'**{tid}**' in l), '')
         state = 'blocked' if line.startswith('- [~]') else 'part' if line else 'ticked'
-        log(f'{tid}: merged ({state})')
+        added = git('diff', pre, 'HEAD', '--', *plan_files).stdout
+        sus = [l[1:].strip()[:200] for l in added.splitlines() if l.startswith('+') and SUSPECT.search(l)]
+        msg = f'{tid}: merged by the runner, {state}' + \
+              (f'; SUSPECT BLOCK (the run drives the emulator itself), recheck: {sus[0]}' if sus else '')
+        note(msg)
+        log(msg)
         # The merge target is never pushed from here: publishing the branch everyone reads is a thing
         # somebody chooses to do, not a side effect of a run finishing a task at 4am. What the run does
         # instead is make sure the task's own branch is on the remote, and drop it only once the remote
@@ -397,19 +675,50 @@ def merge(tid: str, branch: str) -> str | None:
         return None
 
 
-def finish(tid: str, n: int, sid: str, branch: str) -> None:
+HANDED: dict[str, bool] = {}  # branches given to the master -> whether the remote copy has been swept
+
+
+def finish(tid: str, n: int, sid: str, branch: str, has_master: bool = True) -> None:
+    """After a slot's session: merge its branch here. What this cannot merge goes to the master."""
     commits = git('log', '--format=%s', f'{branch}..task/{tid}').stdout.splitlines()
     if not commits:
         git('branch', '-D', f'task/{tid}')
+        note(f'{tid}: no commits — nothing to merge')
         log(f'{tid}: no commits — nothing to merge')
         return
-    if why := merge(tid, branch):
+    if not (why := merge(tid, branch)):
+        return
+    from ps2kit.checks import push  # an unmerged branch is the one copy of that work: get it off this disk
+    if out := push(ROOT, f'task/{tid}'):
+        log(f'{tid}: {out}')
+    if not has_master:  # no tmux to put one in: the old behaviour, and the branch is on the remote
+        note(f'{tid}: LEFT FOR A HUMAN — {why}')
         log(f'{tid}: LEFT FOR A HUMAN — {why}. Its {len(commits)} commits are on task/{tid}: '
             f'{" / ".join(commits)[:300]}')
-        from ps2kit.checks import push  # an unmerged branch is the one copy of that work: get it off this disk
-        if out := push(ROOT, f'task/{tid}'):
-            log(f'{tid}: {out}')
+        return
+    HANDED.setdefault(tid, False)
+    report(f'REPORT {tid} slot {n}: session {sid} ended; {len(commits)} commits: '
+           f'{" / ".join(commits)[:600]}. The runner could not merge it: {why}')
+    log(f'{tid}: the runner could not merge it ({why}); queued for the master')
 
+
+
+def sweep_handed() -> None:
+    """Drop the remote copy of a branch the master merged, once the remote can be seen to hold the merge.
+
+    The runner's own merges do this at the end of `merge`. The master's cannot: it is told not to push, and
+    it has no business deciding what the remote looks like. So the runner watches for the branch to go —
+    the master deletes it only when the merge passed — and then applies the same rule. A branch the master
+    left alone stays on the remote, which is exactly where you want the one copy of unmerged work.
+    """
+    from ps2kit.checks import drop_if_merged
+    for tid in [t for t, swept in HANDED.items() if not swept]:
+        if lock_holder() == tid or \
+                not git('rev-parse', '--verify', '--quiet', f'refs/heads/task/{tid}').returncode:
+            continue  # still with the master, or still a branch here: not merged yet
+        HANDED[tid] = True
+        if out := drop_if_merged(ROOT, f'task/{tid}'):
+            log(f'{tid}: {out}')
 
 
 # --- watching a session --------------------------------------------------------
@@ -661,13 +970,22 @@ def cmd_run(argv: list[str]) -> int:
     log(f'run: {a.slots} slots, mode {a.mode}, merging into {branch}'
         + (f', weekly usage {weekly()}%' if not a.force else ' (weekly cap ignored)'))
 
+    done = False  # RUN DONE has gone to the master
+    if queued():
+        master(branch, a.slots)  # reports a previous run left; otherwise it starts when a merge needs it
+
     # branches a previous run never merged (it was stopped, or a session ended while nothing watched)
     held = {l.removeprefix('branch refs/heads/') for l in
             git('worktree', 'list', '--porcelain').stdout.splitlines() if l.startswith('branch ')}
     open_ids = {m.group(1) for l in plan_text(branch) if (m := TASK.match(l))}
+    runlog = cfg(False).ctx('notes/run.log')
+    handed_before = runlog.read_text(encoding='utf-8', errors='replace') if runlog.exists() else ''
     for b in git('branch', '--format=%(refname:short)', '--list', 'task/*').stdout.split():
         tid = b.removeprefix('task/')
         if b in held or tid not in open_ids:
+            continue
+        if f'{tid}: queued for the master' in handed_before or f'{tid}: handed to the master' in handed_before:
+            HANDED.setdefault(tid, False)  # it has it, or it left it alone: either way not ours to retry
             continue
         if git('log', '--format=%s', f'{branch}..{b}').stdout.strip():
             log(f'{tid}: finished while no run was up; merging it now')
@@ -716,9 +1034,25 @@ def cmd_run(argv: list[str]) -> int:
                     else:
                         tried.add(task[0])
         merging = [t for t in merging if t.is_alive()]
-        if not procs and not merging and not pick(running, tried, a.mode, branch) \
+        # The merges wait on each other and on the master's reports, so RUN DONE goes out only once they
+        # are all in — otherwise the master is told the run is over and then handed three more reports.
+        if not done and not procs and not merging and not pick(running, tried, a.mode, branch) \
                 and all(dt.datetime.now() >= t for t in free_at.values()):
+            done = True
+            done_at = time.time()
+            if 'master' in panes() or queued():
+                report('RUN DONE')
             log(f'run done; tried this run: {", ".join(sorted(tried)) or "none"}')
+        flush(branch, a.slots)
+        sweep_handed()
+        # Stay up while the master still has something: a report typed into a session nobody is watching
+        # for is a merge that silently never happens. Capped, so a master that died cannot pin the run.
+        if done and not merging and not queued() and \
+                (not master_busy() or time.time() - done_at > 90 * 60):
+            sweep_handed()
+            if left := [t for t, swept in HANDED.items() if not swept]:
+                log(f'still with the master, or left unmerged on their branch: {", ".join(sorted(left))}')
+            log('the master session stays up for the next run; its notes are in context/notes/master.md')
             return 0
         time.sleep(10)
 
