@@ -25,9 +25,15 @@
 //!    controls, their strengths and the press timers from it — and a capture of real play becomes the
 //!    frames the game read, in the order it read them, through the stateful input layer.
 //!
-//! Plus the three tests that hook into the private side: every fixture file in `context/fixtures/` is
-//! replayed, every capture in `context/capture/` is parsed, and every capture that carries the pad
-//! columns is played back through the port and compared against the controls the game recorded. Those directories hold data read out
+//! 9. **A human's PCSX2 input recording reads as the pad the game was handed.** A `.p2m2` holds one
+//!    pad entry per video field and no `dt`; the reader maps its eighteen bytes onto the port's report
+//!    bytes (which the file's own pressure/bit redundancy proves), takes one field of each of the
+//!    game's two-field ticks, and runs at the engine's clamped step.
+//!
+//! Plus the four tests that hook into the private side: every fixture file in `context/fixtures/` is
+//! replayed, every capture in `context/capture/` is parsed, every capture that carries the pad
+//! columns is played back through the port and compared against the controls the game recorded, and
+//! every `.p2m2` in `context/recordings/` is played through the port. Those directories hold data read out
 //! of the game, so they are never committed — the tests say what they found and pass when there is
 //! nothing there, which is the only honest thing a test can do about a file it is not allowed to ship.
 //! Run the long ones with:
@@ -2020,6 +2026,406 @@ fn a_recording_of_the_real_game_plays_back_through_the_port() {
         println!(
             "no input capture in {} — record one with `./kit record watch/input.toml --frames 220 \
              --out context/capture/i3-input.csv` while a pad script drives the pad",
+            dir.display(),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// A human's PCSX2 input recording (.p2m2)
+// ---------------------------------------------------------------------------------------------------
+
+/// One pad entry as PCSX2 records it, from the game's own bitmask: the button word active low, the
+/// right stick centred and the left where it was asked for, and a full pressure byte for every
+/// analogue control that is down — which is what a digital host pad gives it, and what the one
+/// recording in the project holds (0 or 255 and nothing between).
+///
+/// Written here from `CONTROL_MAP`'s *report* indices shifted by the two header bytes a file entry does
+/// not have, so a test that passes is a test of the reader's own shift and not of a copy of it.
+fn p2m2_entry(buttons: u16, lx: u8, ly: u8) -> [u8; replay::P2M2_PAD_BYTES] {
+    let mut entry = [0u8; replay::P2M2_PAD_BYTES];
+    let low = !buttons;
+    entry[0] = (low >> 8) as u8;
+    entry[1] = low as u8;
+    entry[2] = game_sim::input::AXIS_CENTRE;
+    entry[3] = game_sim::input::AXIS_CENTRE;
+    entry[4] = lx;
+    entry[5] = ly;
+    for control in Control::ALL {
+        let binding = control.binding();
+        if binding.is_analogue() && buttons & binding.mask != 0 {
+            entry[binding.pressure as usize - 2] = 0xff;
+        }
+    }
+    entry
+}
+
+/// A `.p2m2` as PCSX2 writes one: the 570-byte header, the frame slot it never writes, then one frame
+/// per video field with the second port left unplugged.
+fn p2m2_file(author: &str, fields: &[[u8; replay::P2M2_PAD_BYTES]]) -> Vec<u8> {
+    let mut out = vec![0u8; replay::P2M2_HEADER_BYTES];
+    out[0] = replay::P2M2_FILE_VERSION;
+    let put = |out: &mut Vec<u8>, at: usize, text: &str| {
+        out[at..at + text.len()].copy_from_slice(text.as_bytes());
+    };
+    put(&mut out, 1, "PCSX2-v2.9.127");
+    put(&mut out, 51, author);
+    put(&mut out, 306, "MX Unleashed");
+    out[561..565].copy_from_slice(&(fields.len() as u32).to_le_bytes());
+    out[565..569].copy_from_slice(&3u32.to_le_bytes());
+    out[569] = 1;
+    out.extend_from_slice(&[0u8; replay::P2M2_FRAME_BYTES]);
+    for entry in fields {
+        out.extend_from_slice(entry);
+        out.extend_from_slice(&[0u8; replay::P2M2_PAD_BYTES]); // port 1: never written
+    }
+    out
+}
+
+/// A recording's header is read where PCSX2 put it, and its frames are the slots after the one it
+/// never writes.
+#[test]
+fn a_pcsx2_recording_reads_as_its_header_says() {
+    let fields = vec![p2m2_entry(Control::Cross.mask(), 0x7f, 0x7f); 9];
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &fields)).expect("PCSX2's own format");
+
+    assert_eq!(movie.file_version, replay::P2M2_FILE_VERSION);
+    assert_eq!(movie.emulator, "PCSX2-v2.9.127");
+    assert_eq!(movie.author, "rycs");
+    assert_eq!(movie.game, "MX Unleashed");
+    assert_eq!(movie.total_frames, 9);
+    assert_eq!(movie.undo_count, 3);
+    assert!(movie.from_savestate, "and so only replayable against the state beside it");
+    assert_eq!(movie.fields(), 9, "the written fields, frame 0 dropped");
+    // Nine fields is five ticks of the first field of each pair and four of the second.
+    assert_eq!(movie.ticks(replay::TickPhase::First), 5);
+    assert_eq!(movie.ticks(replay::TickPhase::Second), 4);
+}
+
+/// **The byte mapping**: eighteen recorded bytes become the twenty the game's poll reads, and the
+/// controls the port derives from them are the ones the human held.
+#[test]
+fn a_recorded_pad_entry_becomes_the_bytes_the_games_poll_reads() {
+    let held = Control::Cross.mask() | Control::L1.mask() | Control::Start.mask();
+    let entry = p2m2_entry(held, 0x20, 0xe0);
+    let report = replay::report_of_p2m2(&entry);
+
+    assert_eq!(report.status(), 0, "a recorded frame is a read that happened");
+    assert_eq!(report.mode(), game_sim::input::MODE_PRESSURES, "the mode the pressures imply");
+    assert_eq!(report.buttons(), held, "the word, big-endian and back to active high");
+    assert_eq!((report.axis(0), report.axis(1)), (0x7f, 0x7f), "the right stick, centred");
+    assert_eq!((report.axis(2), report.axis(3)), (0x20, 0xe0), "the left stick, where it was");
+    assert_eq!(report.pressure(Control::Cross.binding().pressure), 0xff);
+    assert_eq!(report.pressure(Control::L1.binding().pressure), 0xff);
+    assert_eq!(report.pressure(Control::Circle.binding().pressure), 0x00);
+    assert_eq!(report.0[20..], [0u8; game_sim::input::REPORT_BYTES - 20], "nothing past the pressures");
+
+    // And through the game's own poll: the pressures are what twelve of the sixteen are read from, so
+    // a mapping that put them anywhere else would leave cross and L1 released however good the word is.
+    let frame = PadFrame::new(replay::CAPPED_DT, [report, Report::missing()]);
+    assert_eq!(frame.held_mask(0), held);
+    assert_eq!(frame.stick(0), (-95, 97), "the centre byte taken off");
+}
+
+/// An entry PCSX2 never wrote is no pad, not a pad holding everything.
+///
+/// Eighteen zero bytes are an active-low word with every bit down and both sticks hard into a corner.
+/// That is what port 1 of a one-pad recording looks like, on every frame, and reading it literally
+/// would replay a session with a second rider leaning into the scenery.
+#[test]
+fn an_unwritten_pad_entry_is_no_pad_not_every_button() {
+    assert_eq!(replay::report_of_p2m2(&[0u8; replay::P2M2_PAD_BYTES]), Report::missing());
+
+    let fields = vec![p2m2_entry(0, 0x7f, 0x7f); 4];
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &fields)).unwrap();
+    assert_eq!(movie.field(0, 1), Report::missing(), "port 1 was never plugged in");
+    assert_eq!(movie.field(0, 0).status(), 0, "port 0 was");
+    assert_eq!(movie.field(99, 0), Report::missing(), "and past the end there is nothing");
+
+    let tape = movie.tape(replay::TickPhase::First);
+    assert!(tape.frames.iter().all(|f| f.reports[1] == Report::missing()));
+    assert_eq!(replay::play(&tape, 0).input.pad(1).held_mask(), 0, "so pad 1 holds nothing");
+}
+
+/// **The file's own proof of the byte mapping.** Twelve of the sixteen controls are recorded twice —
+/// as a bit of the word and as a pressure byte — and the two must agree on every frame. A pairing
+/// that is off by one disagrees immediately, which is what makes this a measurement rather than a
+/// convention.
+#[test]
+fn the_pressure_bytes_of_a_recording_prove_the_byte_mapping() {
+    let fields: Vec<_> = (0..20u16)
+        .map(|k| p2m2_entry(wire_of((1 << (k % CONTROLS as u16)) as u16), 0x7f, 0x7f))
+        .collect();
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &fields)).unwrap();
+    // Twelve analogue controls per written pad, and port 1 is not a pad at all.
+    assert_eq!(movie.check_pressures().expect("the file agrees with itself"), 20 * 12);
+
+    // The same recording with the pressures rotated by one control: the file still parses, every
+    // report still looks like a pad, and the first frame that holds anything says what is wrong.
+    let rotated: Vec<_> = fields
+        .iter()
+        .map(|entry| {
+            let mut e = *entry;
+            e[6..18].rotate_right(1);
+            e
+        })
+        .collect();
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &rotated)).unwrap();
+    let e = movie.check_pressures().expect_err("a rotated pairing cannot agree");
+    assert!(
+        e.message.contains("by its bit") && e.message.contains("by its pressure byte"),
+        "it says which half of the entry disagreed: {e}",
+    );
+
+    // A recording of a host pad that reported no pressures at all is refused the same way, because the
+    // game reads twelve of its sixteen controls from those bytes and would see nothing held.
+    let mut flat = p2m2_entry(Control::Cross.mask(), 0x7f, 0x7f);
+    flat[6..18].fill(0);
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &[flat; 2])).unwrap();
+    let e = movie.check_pressures().expect_err("no pressures is no input");
+    assert!(e.message.contains("cross"), "named by control: {e}");
+    assert!(PadTape::from_p2m2(&p2m2_file("rycs", &[flat; 2]), replay::TickPhase::First).is_err());
+}
+
+/// Five ways a file can look like a recording and not be one, each refused by the byte it is at.
+///
+/// Four of them move every frame of the file by a whole slot or half a tick, which is the kind of
+/// wrong that replays as a plausible session that diverges everywhere.
+#[test]
+fn a_file_that_is_not_a_recording_is_refused_by_the_byte_it_is_at() {
+    let good = p2m2_file("rycs", &[p2m2_entry(0, 0x7f, 0x7f); 6]);
+    replay::P2m2::parse(&good).expect("the control");
+
+    let short = replay::P2m2::parse(&good[..200]).expect_err("a header and a half");
+    assert!(short.message.contains("header alone is 570"), "{short}");
+
+    let ragged = replay::P2m2::parse(&good[..good.len() - 7]).expect_err("a truncated frame");
+    assert!(ragged.message.contains("short of a whole frame"), "{ragged}");
+
+    let mut miscounted = good.clone();
+    miscounted[561..565].copy_from_slice(&9u32.to_le_bytes());
+    let e = replay::P2m2::parse(&miscounted).expect_err("a count that is not the file's");
+    assert!(e.message.contains("7 frame slots for a totalFrames of 9"), "{e}");
+
+    let mut written = good.clone();
+    written[replay::P2M2_HEADER_BYTES] = 0xff;
+    let e = replay::P2m2::parse(&written).expect_err("a written frame 0");
+    assert!(e.message.contains("slot 0 is written"), "{e}");
+    assert_eq!(e.at, replay::P2M2_HEADER_BYTES, "and where to look");
+
+    let mut versioned = good.clone();
+    versioned[0] = 2;
+    let e = replay::P2m2::parse(&versioned).expect_err("a format this reader has not seen");
+    assert!(e.message.contains("file version 2"), "{e}");
+}
+
+/// **One tick is two of PCSX2's frames**, and which of the two the game read is the one thing the file
+/// cannot say — so it is a named choice with both answers available, and a measurement of what it
+/// costs to pick the wrong one.
+#[test]
+fn a_tape_takes_one_field_of_each_tick_and_says_which_one() {
+    // Ten fields, each tagged by its own left-stick X, with a button crossing an edge between the two
+    // fields of the third tick.
+    let fields: Vec<_> = (0..10u8)
+        .map(|k| {
+            let buttons = if k == 5 { Control::Cross.mask() } else { 0 };
+            p2m2_entry(buttons, 0x10 + k, 0x7f)
+        })
+        .collect();
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &fields)).unwrap();
+
+    let first = movie.tape(replay::TickPhase::First);
+    let second = movie.tape(replay::TickPhase::Second);
+    assert_eq!(first.len(), 5, "fields 1, 3, 5, 7, 9 of the file");
+    assert_eq!(second.len(), 5, "fields 2, 4, 6, 8, 10");
+    let x_of = |tape: &PadTape| -> Vec<u8> {
+        tape.frames.iter().map(|f| f.reports[0].axis(2)).collect()
+    };
+    assert_eq!(x_of(&first), vec![0x10, 0x12, 0x14, 0x16, 0x18]);
+    assert_eq!(x_of(&second), vec![0x11, 0x13, 0x15, 0x17, 0x19]);
+    assert!(first.name.contains("first") && second.name.contains("second"), "the tape says which");
+    assert_eq!(first.name, "p2m2-rycs-10f-first");
+
+    // The stick moved in every pair; the press happened between the two fields of one of them, and it
+    // is the press that would land a tick early or late.
+    assert_eq!(movie.ticks_the_phase_moves(), (5, 1));
+    // And it is a real difference, not a bookkeeping one: the port holds cross on a different tick.
+    let cross_on = |tape: &PadTape| -> Vec<bool> {
+        let mut run = Playback::new(0);
+        tape.frames
+            .iter()
+            .map(|f| {
+                run.advance(f);
+                run.input.pad(0).held(Control::Cross)
+            })
+            .collect()
+    };
+    assert_eq!(cross_on(&first), vec![false, false, false, false, false]);
+    assert_eq!(cross_on(&second), vec![false, false, true, false, false]);
+}
+
+/// A tape of a recording runs at the 30 fps cap, because that is what the engine handed the frame.
+///
+/// The `.p2m2` holds no `dt` at all, and the three readings that settle what it was are in
+/// `P2m2::tape`'s own documentation: this is the test that the reader actually uses them, since a tape
+/// at the wrong step reproduces the buttons and not the millisecond timers the front end's repeat
+/// rates are a function of.
+#[test]
+fn a_tape_of_a_recording_runs_at_the_cap() {
+    let movie =
+        replay::P2m2::parse(&p2m2_file("rycs", &[p2m2_entry(0, 0x7f, 0x7f); 8])).unwrap();
+    let tape = movie.tape(replay::TickPhase::First);
+    assert_eq!(tape.dt_range(), Some((replay::CAPPED_DT, replay::CAPPED_DT)));
+    assert!(tape.frames.iter().all(|f| f.dt == replay::CAPPED_DT.to_bits()));
+
+    // The timers follow from it: a flat +33 ms a frame, which is what the original's own clock
+    // accumulates while the clamp is biting.
+    let held = replay::P2m2::parse(&p2m2_file("rycs", &[p2m2_entry(Control::Cross.mask(), 0x7f, 0x7f); 8]))
+        .unwrap()
+        .tape(replay::TickPhase::First);
+    let run = replay::play(&held, 0);
+    assert_eq!(run.input.pad(0).control(Control::Cross).held_ms, 99, "three frames at 33 ms");
+
+    // A step of one's own, for a recording the engine did not clamp (the front end runs under the cap).
+    let slow = movie.tape_with_dt(replay::TickPhase::First, F(0.05));
+    assert_eq!(slow.dt_range(), Some((F(0.05), F(0.05))));
+}
+
+/// **A recorded session drives the port**: file bytes in, the port's own input layer and simulation
+/// out, with the controls the human held on the ticks they held them.
+#[test]
+fn a_recorded_session_drives_the_port() {
+    // Forty fields of something like play: a button held in runs, the stick wandering, pairs of fields
+    // carrying the same input most of the time and not always.
+    let script: Vec<u16> = (0..40)
+        .map(|k| match k / 6 {
+            0 => 0,
+            1 => Control::Cross.mask(),
+            2 => Control::Cross.mask() | Control::L1.mask(),
+            3 => Control::Circle.mask(),
+            4 => Control::Up.mask(),
+            5 => Control::Start.mask(),
+            _ => 0,
+        })
+        .collect();
+    let fields: Vec<_> = script
+        .iter()
+        .enumerate()
+        .map(|(k, held)| p2m2_entry(*held, (0x40 + k) as u8, 0x7f))
+        .collect();
+    let bytes = p2m2_file("rycs", &fields);
+
+    let tape = PadTape::from_p2m2(&bytes, replay::TickPhase::First).expect("a recording");
+    assert_eq!(tape.len(), 20, "one tick per two of PCSX2's frames");
+
+    let mut run = Playback::new(0x1234_5678);
+    let mut transitions = 0;
+    for (tick, frame) in tape.frames.iter().enumerate() {
+        let before = run.input.pad(0).held_mask();
+        run.advance(frame);
+        assert_eq!(
+            run.input.pad(0).held_mask(),
+            script[tick * 2],
+            "tick {tick} holds what field {} of the file recorded",
+            tick * 2 + 1,
+        );
+        assert_eq!(run.tick() as usize, tick + 1, "and one tick is one frame of the recording");
+        transitions += (before != run.input.pad(0).held_mask()) as usize;
+    }
+    assert_eq!(transitions, 6, "five changes of script plus the first press");
+    assert_eq!(run.hash(), replay::play(&tape, 0x1234_5678).hash());
+
+    // The same recording as a fixture: the port's run over a human's input, which is a regression
+    // fixture of real play while the state a capture watches is still being ported.
+    let f = replay::record(&tape.name, 1, &tape.inputs(), &WATCHED).unwrap();
+    assert_eq!(f.hashes.len(), 20);
+    replay::verify(&f).expect("the port agrees with its own run of the recorded input");
+    assert_eq!(Fixture::from_tape(&tape, 1).inputs, f.inputs, "and the fixture's inputs are the tape's");
+
+    // And through the tape file, so a recording read once need not be read again.
+    assert_eq!(PadTape::parse(&tape.to_text()).expect("a tape of a recording"), tape);
+}
+
+/// **The human's recording in `context/recordings/`, played through the port.**
+///
+/// A `.p2m2` is game data — somebody's play of a disc — so it lives in the git-ignored `context/` and
+/// this test says what it found and passes when there is nothing there, like the capture tests above.
+///
+/// What it proves when the file is there: the reader's three decisions hold on a real sixty seconds of
+/// free riding (the header against the file's own length, the byte mapping against the file's own
+/// redundancy, the tick phase as a counted difference), the tape plays through the port's stateful
+/// input layer from end to end, and it survives its file form. What it cannot prove is the simulation
+/// side: `Sim` is still the example ball, so this is the input half of the acceptance run and S8 is
+/// the other half.
+#[test]
+fn the_human_recording_in_context_drives_the_port() {
+    let dir = private_dir("recordings");
+    let mut proved = 0;
+    for path in files_in(&dir, "p2m2") {
+        let bytes = std::fs::read(&path).expect("a readable recording");
+        let movie = replay::P2m2::parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(movie.fields(), movie.total_frames as usize);
+        let agreements = movie
+            .check_pressures()
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(agreements, movie.fields() * 12, "twelve controls recorded twice, every frame");
+
+        let tape = PadTape::from_p2m2(&bytes, replay::TickPhase::First)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(tape.len(), movie.ticks(replay::TickPhase::First));
+        assert_eq!(
+            tape.dt_range(),
+            Some((replay::CAPPED_DT, replay::CAPPED_DT)),
+            "a recording of play runs at the clamped step",
+        );
+
+        let mut run = Playback::new(0);
+        let (mut transitions, mut seen) = (0usize, 0u16);
+        for frame in &tape.frames {
+            let before = run.input.pad(0).held_mask();
+            run.advance(frame);
+            seen |= run.input.pad(0).held_mask();
+            transitions += (before != run.input.pad(0).held_mask()) as usize;
+        }
+        assert_eq!(run.tick() as usize, tape.len());
+        // A recording of a pad nobody touched would pass every assertion above.
+        assert!(
+            transitions >= 4,
+            "{}: only {transitions} ticks where a control changed — not a recording of play",
+            path.display(),
+        );
+        assert_eq!(PadTape::parse(&tape.to_text()).expect("a tape of a recording"), tape);
+        assert_eq!(replay::play(&tape, 0).hash(), run.hash(), "and plays back to the same state");
+
+        // The other phase is a different session, and this says by how much: the ticks whose two
+        // fields disagree, and the few where the disagreement is a button rather than the stick.
+        let (moved, buttons_moved) = movie.ticks_the_phase_moves();
+        let other = movie.tape(replay::TickPhase::Second);
+        if buttons_moved > 0 {
+            assert_ne!(
+                replay::play(&other, 0).hash(),
+                run.hash(),
+                "{}: the two phases should not play to the same state",
+                path.display(),
+            );
+        }
+        println!(
+            "{}: {} fields by {} on {}, savestate {} → {} ticks, {transitions} transitions, \
+             controls {seen:#06x}, {agreements} pressure/bit agreements, phase moves {moved} ticks \
+             ({buttons_moved} of them a button)",
+            path.display(),
+            movie.total_frames,
+            movie.author,
+            movie.emulator,
+            movie.from_savestate,
+            tape.len(),
+        );
+        proved += 1;
+    }
+    if proved == 0 {
+        println!(
+            "no PCSX2 recording in {} — make one with PCSX2's own input recording (Tools → Input \
+             Recording → New), which writes the `.p2m2` and its `_SaveState.p2s` together",
             dir.display(),
         );
     }
