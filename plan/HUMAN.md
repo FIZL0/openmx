@@ -27,11 +27,14 @@ first (C1). Nothing is blocked today.
       `SCPH-70012.bin` (slim, US) is the region match for this NTSC-U disc and is the one in use;
       `SCPH-77008` and `SCPH-90006` are PAL. A PAL BIOS with an NTSC disc gives the wrong refresh rate,
       which would quietly poison every frame-timing measurement in the port. BIOS dumps are copyrighted
-      and `.gitignore`'s `*.bin` keeps them out of git — the repo-root copies are redundant now and can
-      be deleted.
-- [x] **PCSX2 installed.** `pcsx2-latest-bin` 2.9.34, `/usr/bin/pcsx2-qt`, in `kit.toml` `[emu] pcsx2`.
-      Still to do once the BIOS is in: **boot the ISO by hand once** and confirm it reaches the title
-      screen, before any agent drives it.
+      and `.gitignore`'s `*.bin` keeps them out of git — the repo-root `PS2_bios/` copies are redundant
+      now (git ignores them, so they are harmless) and can be deleted whenever you like.
+- [x] **PCSX2 installed.** `pcsx2-latest-bin` 2.9.127, `/usr/bin/pcsx2-qt`, in `kit.toml` `[emu] pcsx2`.
+      The game boots and reaches the main menu under the kit — `context/shots/c1-title.png`, taken by
+      `./kit shot` — so there is nothing left to confirm by hand. Three settings had to be put in
+      `~/.config/PCSX2/inis/PCSX2.ini` first, and will have to go back if that file is ever reset:
+      `SetupWizardIncomplete = false` (otherwise every launch opens the first-run wizard and silently
+      ignores the ISO), `BIOS = SCPH-70012.bin`, and `ConfirmShutdown = false`.
 - [x] **Ghidra with the EmotionEngine extension.** Ghidra 12.1.2 at `/opt/ghidra` with
       `ghidra-emotionengine-reloaded` v2.1.38; the boot ELF is analysed (2m57s) and
       `./kit fn`/`xref`/`dis` work. One wrinkle, already fixed, worth knowing if Ghidra is ever
@@ -47,7 +50,10 @@ Agents can load states and replay recordings, but only a person can play the gam
 moment. Save states go in PCSX2's slots; by convention slots 3, 4 and 5 are the human's and are never
 overwritten, 8 and 9 are scratch for agents.
 
-The BIOS is in, so this is doable as soon as the game boots under the kit (C1).
+The game boots under the kit now (C1 is done), so these are doable today. Note that an agent can reach
+the main menu by itself — `KIT_PCSX2=6 ./kit pad send "press start 300"` and so on — so what is actually
+wanted from you is only the part that needs judgement and a controller: being *on* the right track, on
+the gate, and riding well enough to be worth matching.
 
 - [ ] **The title screen** (slot 3).
 - [ ] **On a supercross track, on the start gate** (slot 4), on `sx01` if the track select lets you pick

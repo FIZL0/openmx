@@ -233,6 +233,19 @@ def screenshot_tools() -> list[str]:
     return [t for t in names if shutil.which(t)]
 
 
+# A capture tool that hangs is worse than one that fails: PCSX2's game window wedges wlr-screencopy on
+# some compositors (seen on Hyprland 0.56.2 — `grim` returns at once with the emulator stopped, and never
+# returns once a game is running), and an unbounded wait takes the hotkey fallback away from `shot()`.
+GRAB_TIMEOUT = 15
+
+
+def _grab(argv: list[str]) -> bool:
+    try:
+        return subprocess.run(argv, timeout=GRAB_TIMEOUT).returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def screenshot_window(out: Path, pattern: str = 'pcsx2') -> bool:
     """Grab a window whose class/title contains `pattern`, without focusing it. False if it can't.
 
@@ -246,21 +259,22 @@ def screenshot_window(out: Path, pattern: str = 'pcsx2') -> bool:
     if shutil.which('hyprctl') and shutil.which('grim'):
         import json
         try:
-            clients = json.loads(subprocess.run(['hyprctl', 'clients', '-j'],
-                                                capture_output=True, text=True, check=True).stdout)
+            clients = json.loads(subprocess.run(['hyprctl', 'clients', '-j'], capture_output=True,
+                                                text=True, check=True, timeout=GRAB_TIMEOUT).stdout)
         except Exception:
             clients = []
         for c in clients:
             if pattern.lower() in f'{c.get("class", "")} {c.get("title", "")}'.lower():
                 geom = f'{c["at"][0]},{c["at"][1]} {c["size"][0]}x{c["size"][1]}'
-                return subprocess.run(['grim', '-g', geom, str(out)]).returncode == 0
+                return _grab(['grim', '-g', geom, str(out)])
     # GNOME / KDE Wayland portal, X11
     if shutil.which('xdotool') and shutil.which('import'):
-        wid = subprocess.run(['xdotool', 'search', '--name', pattern], capture_output=True, text=True).stdout.split()
+        wid = subprocess.run(['xdotool', 'search', '--name', pattern], capture_output=True, text=True,
+                             timeout=GRAB_TIMEOUT).stdout.split()
         if wid:
-            return subprocess.run(['import', '-window', wid[0], str(out)]).returncode == 0
+            return _grab(['import', '-window', wid[0], str(out)])
     if shutil.which('spectacle'):
-        return subprocess.run(['spectacle', '-abno', str(out)]).returncode == 0
+        return _grab(['spectacle', '-abno', str(out)])
     return False
 
 

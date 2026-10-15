@@ -225,6 +225,23 @@ def status() -> int | None:
 
 # --- kit copies --------------------------------------------------------------
 
+# A copy's controller port 1, bound to its own pad. Without this a copy inherits the *user's* Pad1
+# bindings — usually the keyboard, which `InputSources/Keyboard = false` below then switches off — so the
+# pad serves, the hotkeys work (they name SDL-0 explicitly) and the game itself receives nothing at all.
+# The names are PCSX2's SDL gamepad bindings for the layout `ps2kit/pad.py` presents (an Xbox-style pad).
+PAD1_SDL = {
+    'Up': 'SDL-0/DPadUp', 'Down': 'SDL-0/DPadDown', 'Left': 'SDL-0/DPadLeft', 'Right': 'SDL-0/DPadRight',
+    'Cross': 'SDL-0/A', 'Circle': 'SDL-0/B', 'Square': 'SDL-0/X', 'Triangle': 'SDL-0/Y',
+    'Start': 'SDL-0/Start', 'Select': 'SDL-0/Back',
+    'L1': 'SDL-0/LeftShoulder', 'R1': 'SDL-0/RightShoulder',
+    'L2': 'SDL-0/+LeftTrigger', 'R2': 'SDL-0/+RightTrigger',
+    'L3': 'SDL-0/LeftStick', 'R3': 'SDL-0/RightStick',
+    'LUp': 'SDL-0/-LeftY', 'LDown': 'SDL-0/+LeftY', 'LLeft': 'SDL-0/-LeftX', 'LRight': 'SDL-0/+LeftX',
+    'RUp': 'SDL-0/-RightY', 'RDown': 'SDL-0/+RightY',
+    'RLeft': 'SDL-0/-RightX', 'RRight': 'SDL-0/+RightX',
+}
+
+
 def copy_config(n: int) -> Path:
     """Create (or refresh) kit copy `n` from the user's own PCSX2 config, and return its config dir.
 
@@ -268,7 +285,7 @@ def copy_config(n: int) -> Path:
         ('Folders', 'Savestates', str(dst / 'savestates')),
         ('Folders', 'MemoryCards', str(dst / 'memcards')),
         ('Folders', 'Snapshots', str(dst / 'snaps')),
-    ]:
+    ] + [('Pad1', k, v) for k, v in PAD1_SDL.items()]:
         _ini_set(ini, section, key, value)
     _ini_del(ini, 'FrameAdvance')   # frame-advance bound to a pad button pauses copies by accident
     for sub in ('savestates', 'memcards', 'snaps', 'logs'):

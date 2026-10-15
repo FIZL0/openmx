@@ -116,6 +116,18 @@ It grabs the emulator's window — through the compositor on Wayland, through X 
 PCSX2's own screenshot hotkey if neither works. Screenshots go in the private directory, never in the
 journal or the repo: they are game data.
 
+**On this machine the fallback is the normal path, not the exception.** Hyprland's screencopy wedges as
+soon as PCSX2 is rendering a game: `grim` returns instantly with the emulator stopped and never returns
+with a game running. The grabs are capped at `platform_.GRAB_TIMEOUT` seconds for that reason, so a shot
+costs fifteen seconds and then goes through the pad. A copy always has a pad; the user's own emulator
+does not, so `./kit shot` without `KIT_PCSX2` can have no way to take a picture at all — **take
+screenshots on a copy.**
+
+A shot is only worth what you check: `magick <f> -colorspace Gray -format "%[fx:mean]" info:` reads 0.00
+on a black frame. And `ps2kit/hooks/guard.py` currently refuses any command naming a `context/` file over
+512 KB, which includes screenshots, so write big ones into the scratchpad, downscale there, and keep the
+small one in `context/shots/`.
+
 For anything visual, take the original and your port at the same moment and look at them side by side.
 It costs a minute and settles arguments that otherwise go several messages.
 
@@ -132,8 +144,23 @@ Unattended runs want more than one emulator. `KIT_PCSX2=N` gives a process its o
 | lock | its own, so copy 1 and copy 2 never block each other |
 | pad | its own, pinned by the SDL device filter |
 
+| controller port 1 | bound to that pad, so `./kit pad send` reaches the game |
+
 So `KIT_PCSX2=2 ./kit pcsx2 start` is a second, independent emulator, and every tool run with the same
 variable set talks to that one. This is what makes `./kit run 3` possible.
+
+A copy is made from **your** config, so your config has to be able to boot a game before a copy can. On a
+PCSX2 that has never been through its first-run wizard, that means three keys — otherwise every launch
+opens the wizard and ignores the ISO, while the kit cheerfully reports it as booting the game:
+
+```
+[UI]        SetupWizardIncomplete = false
+[Filenames] BIOS = SCPH-70012.bin      # a file in [Folders] Bios, not a path
+[UI]        ConfirmShutdown = false
+```
+
+`pcsx2-qt -testconfig` writes a default ini and exits without a GUI, which is a good way to create the
+file in the first place, but it does not clear the wizard flag.
 
 ---
 
