@@ -187,6 +187,12 @@ pub mod air;
 /// it hands back offsets instead of reading files.
 pub mod archive;
 
+/// The camera for normal play: the preset record the disc ships one of per camera, what the camera
+/// points at, the eight first-order lags that make it follow rather than snap, and the limits on its
+/// angles, its distance and its field of view. Presentation, not simulation — the module's own docs
+/// say how that was checked, and what it costs.
+pub mod camera;
+
 /// The worked example from `docs/EXAMPLE.md`: three functions of the synthetic program that `./kit demo`
 /// generates, ported, with `tests/demo.rs` proving them bit-exact against the original's instructions.
 /// Delete it once your own port has something real in it.
