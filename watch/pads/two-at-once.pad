@@ -1,0 +1,45 @@
+# two-at-once.pad — the edges I1 needs: two controls changing in the same frame, and one long hold.
+#
+# Written for I1's proof of the input layer. Three things this script produces that C5's
+# `menu-down-up.pad` cannot:
+#
+#   * two controls going down in the same pad field, so the capture shows what the game's one-frame
+#     event queue does with more than one transition in a frame (the question C5 left open);
+#   * two going *up* in the same field, for the release side of the same question;
+#   * a hold of over a second, so the ms-held timer runs long enough to show that it accumulates
+#     `dt * 1000` in float and chops to an int — the 33, 33, 33, 33, 34 pattern a fixed +33 misses.
+#
+# Only buttons a menu ignores (the shoulders) and the d-pad, so nothing here can leave the screen it
+# started on: no cross, no circle, no triangle, no start. Select is never sent (it is PCSX2's hotkey
+# modifier).
+#
+# Timing is wall-clock, not frame-exact: which frame each edge lands on is not reproducible, and
+# nothing that uses this script may depend on it. The capture records the button word per frame, so the
+# port is fed what the game actually saw, not what this script asked for.
+sleep 500
+down l1
+down r1
+sleep 400
+up l1
+up r1
+sleep 700
+down l2
+down down
+sleep 400
+up l2
+up down
+sleep 700
+down r1
+sleep 1200
+up r1
+sleep 500
+down up
+down l1
+down r2
+sleep 400
+up up
+up l1
+up r2
+sleep 700
+press r2 150
+sleep 500

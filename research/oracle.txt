@@ -209,3 +209,15 @@ keyframe_index_stride2      boot 0x001361e0 (t in f12, table, n) -> how many key
 #                                           +0, strictly increasing. Returns 0 below the first key and
 #                                           n at or past the last. 0x00137550 is the same search over
 #                                           0x28-byte entries
+
+# ---------------------------------------------------------------------------------------------------
+# I1 — the input layer. The pad poll's timer update is not a function: it is a span inside the poll,
+# so the test loads these instructions into a bare interpreter and appends its own `jr $ra`. The name
+# is the span's first instruction; the length is in the test.
+pad_timer_add_ms            boot 0x0016aef0 30 instructions, not a function: ($s2+0x330) += $f20 ms,
+#                                           where the stored value is read back as *unsigned* (bltz,
+#                                           then halve-convert-double) and the sum converted back as
+#                                           unsigned (c.ole.s against 2^31, then subtract the bias and
+#                                           set the sign bit by hand). Falls through to the span's end,
+#                                           so the test's `jr $ra` sits where the poll's `b` went.
+#                                           The identical sequence at 0x0016ae68 does +0x334 (held ms)

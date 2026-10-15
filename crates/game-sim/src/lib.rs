@@ -192,6 +192,13 @@ pub mod demo;
 /// checked with it.
 pub mod hash;
 
+/// The input layer: the pad read once a frame, before the simulation, and mapped into the game's own
+/// bitmask. Sixteen controls per pad with "held", their press and release timers, and the one-frame
+/// event queue the front end reacts to — the original keeps no "pressed this frame" mask, so the module
+/// says exactly which frame latches what. A pure function of (state, pad report): nothing here touches
+/// the hardware.
+pub mod input;
+
 /// The acceptance test for the whole port: a fixture of recorded inputs plus the state it starts from,
 /// replayed through the simulation and compared tick by tick against the recording's hashes or its
 /// watched fields. A failure is one line — `tick 413: ball.vel[1] -58.94952 vs -58.949516` — not a diff of two
