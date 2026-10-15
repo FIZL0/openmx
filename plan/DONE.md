@@ -6,3 +6,4 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Next (in this order)
 - [x] **D0** Do the loop once on a game that does not exist: `./kit demo --check` (12 steps, under a second, no disc) and read `docs/EXAMPLE.md` alongside it. You are learning what each command's output looks like before any of it depends on your own disc; the walkthrough's closing section says where the synthetic program is kinder than a real one → docs/EXAMPLE.md · docs/PROVING.md | t: `./kit demo --check` prints 12/12 | j: d0-the-demo
+- [x] **D2** List and extract the disc: `./kit extract --list` shows the whole tree with sizes, `./kit extract <path>` writes into `context/disc/`. Note which files are archives (one container holding many), which look like code (ELF magic, or a plausible overlay size), and which are plain data → ps2kit/disc.py (read only) · context/disc/ | t: the extracted boot ELF's size matches the directory record | j: d1-the-disc
