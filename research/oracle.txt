@@ -172,3 +172,40 @@ actor_class_vehicle         boot 0x00318c30 type id 4, 0x0c60 bytes, MXWorld.cpp
 #                                           +0x48 class vtable, +0xd0/+0xe0/+0xf0/+0x100 four rigid-body
 #                                           points (x,y,z,1), +0x130 velocity, +0x180 4x4 world
 #                                           transform with the position in row 3 (+0x1b0)
+
+# ---------------------------------------------------------------------------------------------------
+# O1 — the functions the oracle was proved on. Chosen for being too small to be wrong about: a handful
+# of instructions each, no globals, no calls, no allocation, so a disagreement can only be the
+# interpreter. Together they still cover the FPU accumulator chain, sqrt, max/min, VU0 macro mode,
+# quadword loads and stores, out-parameters and one data-dependent loop. All of them are the game's own
+# inlined maths helpers, emitted once per header and called from everywhere.
+# crates/ps2-oracle/tests/basics.rs calls every one of these; how it was done is in
+# research/journal/2026-10-15-o1-oracle.
+#
+# Scalars, in f12/f13, result in f0. One instruction each.
+float_max                   boot 0x00107f80 max.s: (a, b) -> the larger. The game has no clamp of its
+#                                           own — call sites compose this with float_min
+float_min                   boot 0x00107f90 min.s: (a, b) -> the smaller
+float_abs                   boot 0x00107fe0 abs.s: (x) -> |x|
+#
+# Vec3, by pointer. The quadword forms read and write all four lanes, so the w lane must hold something
+# defined even when only xyz are wanted.
+vec3_dot                    boot 0x00107ff0 (a, b) -> dot, as mula.s/madda.s/madd.s in index order
+vec3_length                 boot 0x00108920 (v) -> sqrt of that same chain over (v, v)
+vec3_length_sq              boot 0x0010b270 (v) -> the chain without the sqrt. Identical code also at
+#                                           0x0010b260 (a thunk) and 0x0010b250 thunks vec3_length
+vec3_add                    boot 0x00111e60 (out, a, b): three add.s, three swc1 — out may alias
+vec3_sub                    boot 0x00111ea0 (out, a, b): the same with sub.s
+vec3_scale                  boot 0x00108890 (out, v, s in f12): VU0 macro, vmulx.xyz off a broadcast of
+#                                           s; w comes back from v untouched. 0x001088c0 is identical
+vec3_normalize              boot 0x00108070 (out, v): vmul/vadda/vmadd for the square, then vrsqrt —
+#                                           the VU approximation, not a correctly rounded one
+vec4_abs                    boot 0x00108020 (out, v): builds 0x7fffffff in four lanes with lui/ori,
+#                                           pextlw and pcpyld, then pand. All four lanes, w included
+#
+# A table lookup with a real loop.
+keyframe_index_stride2      boot 0x001361e0 (t in f12, table, n) -> how many keys are at or before t:
+#                                           a binary search over 8-byte entries keyed on the float at
+#                                           +0, strictly increasing. Returns 0 below the first key and
+#                                           n at or past the last. 0x00137550 is the same search over
+#                                           0x28-byte entries
