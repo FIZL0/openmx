@@ -121,6 +121,10 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
     describes itself once, with `impl hash::State`.
   - `rng.rs` — the C library's 64-bit LCG the whole game calls, plus the random float and the uniform
     list index its call sites wrap it in. Proved bit-exact in `tests/rng.rs` (R5).
+  - `track.rs` — one track as the disc stores it: the `.scn` scene (spawn, terrain layout, every model and
+    collision placement), the `.col` shapes the simulation tests against in their own bounding-volume tree,
+    and the `.trn` quantised heightfield with the game's own height and surface query. Proved against
+    free06 in `tests/track.rs` (D6).
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the
