@@ -157,6 +157,11 @@ added beside them:
     how a hit resolves into the blocked travel a caller takes off the motion, and the two limits the
     sweep allows itself (16 probes, 256 levels). Proved against the original's sweep over 10,000
     generated scenes in `tests/collide.rs` (S4).
+  - `state.rs` — the main actor's state machine: riding, down after a wreck, waiting, put back. The
+    reasons a rider comes off, the settle window and the wait that decide when it goes back on, the pad
+    chord beside them, which transitions share a frame, and the fact that a down rider's physics does
+    not step at all. Proved against the original machine, its entry and its put-back in
+    `tests/state.rs` (S5).
 - `game-render` — the drawing side: the disc's own models and textures, on screen. Host `f32`, no
   bit-exactness, nothing the simulation depends on.
   - `disc.rs` ISO 9660 → `MX.PSR` → a `.res` member, read from the user's disc at runtime ·
