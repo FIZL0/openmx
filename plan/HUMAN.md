@@ -11,17 +11,44 @@ constant is far more expensive than a blocked task: it looks like work and it is
 Write each item so it can be done without re-reading the whole project: the slot or file name to save to,
 how long it takes, and what to do if it goes wrong.
 
+## Right now, there is exactly one thing
+
+- [ ] **A PS2 BIOS from your own console**, as a `.bin` in `~/.config/PCSX2/bios/`. Drop in the `.nvm`,
+      `.mec` and `.rom1`/`.rom2` siblings too if your dumper produced them. Then `./kit doctor` to confirm
+      — it is the only `[FIX]` left.
+
+      This is the last `[FIX]` in `./kit doctor` and the only blocker on anything live. It unblocks, in
+      order of how much they matter: `./kit probe vsync` (every recorder needs the frame counter as its
+      clock), `./kit record` and the replay acceptance test (A2, S8), save states (C3), screen captures
+      (C4, V1–V3), and `./kit pcsx2` at all.
+
+      It does **not** block the work in progress. Reverse engineering runs against the program image in
+      the kit's own R5900 interpreter, not in an emulator, so R1–R6, F1–F5, O1–O2 and the first cut of
+      S1–S4 all proceed without it. Nothing is waiting on you to keep going — this is what stops the
+      results being *proved* against the real console, which is the point of the whole exercise.
+
+      If dumping is not practical soon, say so: there is a lot of static work ahead of the first thing
+      that needs a running game, and it is worth knowing whether to plan around it.
+
 ## Before anything works
 
-- [ ] **Dump the disc you own** to `game.iso` in the repo root (never committed; `.gitignore` has it). Note
-      the serial, the build date and the file's SHA-256 in the journal — every address in this repo is only
-      true of that one dump, and a different region's disc is a different game.
-- [ ] **A PS2 BIOS from your own console**, in PCSX2's `bios/`. The kit will not download one and cannot run
-      anything live without it.
-- [ ] **PCSX2 2.x installed**, launchable as the command in `kit.toml` `[emu] pcsx2`, and able to boot the
-      ISO by hand once before any agent drives it.
-- [ ] **Ghidra with the EmotionEngine processor extension**, path in `kit.toml` `[ghidra] home`. Without it
-      there is no decompilation and most of the backlog is impossible.
+- [x] **Dump the disc you own.** Done: `MX Unleashed (USA).iso` in the repo root (git-ignored),
+      2,219,933,696 bytes, sha256 `fc64c537824f616277b821fd24da58949d13fe83b2e3be89ddd58a89795e1aa2`,
+      serial `SLUS-20767`, US, version 1.00. Recorded in
+      `research/journal/2026-10-15-d1-the-disc/`. **Every address in this repo is only true of that dump**
+      — a PAL or 1.01 disc is a different game.
+- [ ] **A PS2 BIOS** — see above.
+- [x] **PCSX2 installed.** `pcsx2-latest-bin` 2.9.34, `/usr/bin/pcsx2-qt`, in `kit.toml` `[emu] pcsx2`.
+      Still to do once the BIOS is in: **boot the ISO by hand once** and confirm it reaches the title
+      screen, before any agent drives it.
+- [x] **Ghidra with the EmotionEngine extension.** Ghidra 12.1.2 at `/opt/ghidra` with
+      `ghidra-emotionengine-reloaded` v2.1.38; the boot ELF is analysed (2m57s) and
+      `./kit fn`/`xref`/`dis` work. One wrinkle, already fixed, worth knowing if Ghidra is ever
+      reinstalled: the extension ships `r5900.slaspec` but no compiled `r5900.sla`, and Ghidra tries to
+      compile it next to the spec in root-owned `/opt`, which fails. Fix:
+      `sudo /opt/ghidra/support/sleigh -a /opt/ghidra/Ghidra/Extensions/ghidra-emotionengine-reloaded/data/languages`
+      then `sudo chmod -R a+rX /opt/ghidra/Ghidra/Extensions/ghidra-emotionengine-reloaded` — the sleigh
+      run writes the `.sla` root-readable-only, so without the chmod it fails identically.
 
 ## Save states and recordings
 
@@ -29,20 +56,34 @@ Agents can load states and replay recordings, but only a person can play the gam
 moment. Save states go in PCSX2's slots; by convention slots 3, 4 and 5 are the human's and are never
 overwritten, 8 and 9 are scratch for agents.
 
-- [ ] **The title screen** (slot 3) and **a mid-action moment** (slot 4), with a line here saying what each
-      holds: characters, difficulty, any options that change the simulation.
-- [ ] **Something that runs itself** (slot 5): a demo, attract mode, a CPU-versus-CPU match. This is the
-      most valuable state you will make, because a capture that needs a person playing cannot be repeated
-      exactly, and a port can only be proved against something repeatable.
-- [ ] **One longer recording of real play** (a few minutes, PCSX2 input recording) for the acceptance test:
-      start from the slot-4 state, play normally, include whatever is rare (a failure, a special move, a
-      mode change). Save it under `context/recordings/` and note which state it starts from and which
-      controller ports were used — a recording whose save state is lost is worthless.
+All of this needs the BIOS first. Listed now so it can be done in one sitting later.
+
+- [ ] **The title screen** (slot 3).
+- [ ] **On a supercross track, on the start gate** (slot 4), on `sx01` if the track select lets you pick
+      it by name — that is the track the port is being built against (`Tracks\sx01.res`), and its archive
+      is already extracted and understood. Note here which bike and which difficulty, because
+      `bike\race250a.phy` and `bike\race250p.phy` are different parameter sets and the port has to know
+      which one it is being compared against.
+- [ ] **Something that runs itself** (slot 5): attract mode, or a race left to the AI. The most valuable
+      state you will make, because a capture that needs a person playing cannot be repeated exactly, and
+      a port can only be proved against something repeatable.
+- [ ] **One longer recording of real play** for the acceptance test: start from the slot-4 state, ride a
+      couple of laps normally, and include the awkward things — a crash, a whip, a landing from height, a
+      wall. Save under `context/recordings/` with a line here saying which state it starts from and which
+      controller port. A recording whose save state is lost is worthless.
+
+      What this proves: the same button presses fed to the port produce the same bike position, frame by
+      frame. It is the only test that can show the physics really match rather than merely look right.
 
 ## Decisions only you can make
 
+- [x] **What this port is for, first.** Decided: the map and the player controller, riding the dirt bike
+      with the original's physics. That is backlog S3 (movement) and S4 (collision) with V1 (first draw)
+      behind it, and it sets the order everything before them is done in.
 - [ ] **What has to be exact, and what only has to look right.** The default in `AGENT.md` is: simulation
-      exact, rendering by eye, front end free. Confirm or change it per area, once, and write it there so
-      nobody relitigates it per task.
-- [ ] **What this port is for** (a faithful remaster, a mod platform, a research record). It changes which
-      tasks are worth doing, and in which order.
+      exact, rendering by eye, front end free. That fits the goal above, so it stands unless you say
+      otherwise — the thing worth confirming is whether you want the *bike's* arithmetic bit-exact (which
+      is the plan, and is slow) or merely close (which is faster and will drift).
+- [ ] **How far past the bike to go** — one track and one bike riding correctly is the near goal; whether
+      this becomes the whole game, a mod platform, or a research record changes which tasks are worth
+      doing after that.
