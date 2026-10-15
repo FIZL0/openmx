@@ -176,20 +176,27 @@ def test_brief():
 def test_shipped_backlog():
     """The backlog, whether it is the one the kit ships or one a port has half worked through.
 
-    Both have to hold, because this suite runs for the life of a project: the shape of a task line and
-    the ids `(after X)` points at. What cannot hold is a count — a port that is going well has fewer
-    open tasks every week — and a dependency is satisfied by a *finished* task, which is in `DONE.md`
-    and no longer here. `pick` already reads it that way; this test used to disagree, and so went red in
-    every port repo the moment its first dependency landed.
+    Most of this holds for the life of a project: the shape of a task line, and the ids `(after X)`
+    points at — where a dependency is satisfied by a *finished* task, which is in `DONE.md` and no
+    longer here. `pick` already reads it that way; this test used to disagree, and so went red in every
+    port repo the moment its first dependency landed.
+
+    The count is the one assertion that belongs to the kit's own repo and not to a port. There it is a
+    real guard that the shipped backlog has not been truncated, and nothing ever finishes a task in it;
+    here a backlog that shrinks every week is the point. So it runs only where it means something, asked
+    the way the kit asks it elsewhere: no `[game]` table at all means this tree is not a port — a port
+    has one from the moment `kit.toml` is copied from the example, filled in or not.
     """
     print('plan: the backlog, shipped or worked through')
+    from ps2kit.config import cfg
     todo = ROOT / 'plan/TODO.md'
     ls = plan.lines(todo)
     ids = [m.group(3) for l in ls if (m := plan.ITEM.match(l))]
     done = [m.group(3) for l in plan.lines(ROOT / 'plan/DONE.md') if (m := plan.ITEM.match(l))]
     eq(len(ids), len(set(ids)), 'every id in plan/TODO.md is unique')
     check(ids or done, 'the backlog has tasks, open or finished')
-    check(len(ids) <= 60, f'{len(ids)} open tasks: a session each, not a wish list')
+    if not cfg(False).raw.get('game'):
+        check(25 <= len(ids) <= 60, f'{len(ids)} tasks: a session each, enough to start a port')
     check(any(l.startswith('### Stretch') for l in ls), 'there is a ### Stretch section')
     check(all(' → ' in l or ' | ' in l for l in ls if plan.ITEM.match(l)),
           'every task line names the files it touches or the test it adds')
