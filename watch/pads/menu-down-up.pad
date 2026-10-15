@@ -1,0 +1,28 @@
+# menu-down-up.pad — move a menu selection, once a second, for as long as a short capture lasts.
+#
+# Written for C5's proof that a scripted press reaches the game: the dialog in save state 3 has two
+# entries, so every press flips the selection and the flip is visible in RAM and on screen. The presses
+# are 120 ms (3-4 frames at 30 Hz) — long enough that no capture can miss the press entirely, short
+# enough that the menu's auto-repeat never starts.
+#
+# Timing is wall-clock, not frame-exact: which frame a press lands on is not reproducible, and nothing
+# that uses this script may depend on it.
+press down 120
+sleep 1200
+press up 120
+sleep 1200
+press down 120
+sleep 1200
+press up 120
+sleep 1200
+press down 120
+sleep 1200
+press up 120
+sleep 1200
+press down 120
+sleep 1200
+press up 120
+sleep 1200
+press down 120
+sleep 1200
+press up 120
