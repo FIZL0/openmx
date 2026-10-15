@@ -131,7 +131,8 @@ added beside them:
     zone of ±0.2 that is the only shaping there is — no clamp and no curve (I2).
   - `replay.rs` — the replay harness: a fixture of inputs and expectations replayed tick by tick (A2),
     plus the pad tape — a recorded session as the report bytes and measured `dt` of each frame, which
-    `Playback` plays back through the input layer so a human-played sequence drives the port (I3).
+    `Playback` plays back through the input layer so a human-played sequence drives the port (I3), and
+    the reader for a human's PCSX2 input recording (`.p2m2` → `PadTape`, I4).
   - `rng.rs` — the C library's 64-bit LCG the whole game calls, plus the random float and the uniform
     list index its call sites wrap it in. Proved bit-exact in `tests/rng.rs` (R5).
   - `track.rs` — one track as the disc stores it: the `.scn` scene (spawn, terrain layout, every model and

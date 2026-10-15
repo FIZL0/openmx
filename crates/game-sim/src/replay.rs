@@ -62,6 +62,10 @@
 //!   proves nothing whatever about the original.
 //! - [`Capture::parse`] reads a `./kit record` CSV of the **original** and turns chosen columns into
 //!   watches. That is an **acceptance** fixture, and the only kind that proves the port is right.
+//! - [`P2m2::parse`] reads a human's PCSX2 input recording (`.p2m2`) and [`P2m2::tape`] turns it into
+//!   the pad the game was handed, frame by frame. That is the input half of an acceptance fixture with
+//!   no capture session in it at all — somebody rode for a minute, and the recording is replayable on
+//!   the original whenever the port changes.
 //!
 //! A fixture is a text file ([`Fixture::parse`], [`Fixture::to_text`]) so a recorded session can be
 //! stored and replayed later. Those files hold values read out of the game, so they are game data:
@@ -1399,5 +1403,445 @@ impl Fixture {
             inputs: tape.inputs(),
             ..Default::default()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// A PCSX2 input recording (.p2m2)
+// ---------------------------------------------------------------------------------------------------
+
+/// The file version this reader was measured against — the first byte of a `.p2m2`.
+pub const P2M2_FILE_VERSION: u8 = 1;
+
+/// How many bytes of header a PCSX2 input recording begins with: the file version (`u8`), the
+/// emulator's version string (`char[50]`), the author (`char[255]`), the game's name (`char[255]`),
+/// the frame count (`u32`), the undo count (`u32`) and the "started from a save state" flag (`u8`),
+/// in that order, little-endian and with no padding.
+pub const P2M2_HEADER_BYTES: usize = 570;
+
+/// One pad's entry in one of PCSX2's frames: the SIO2 reply the emulated pad will give, less its three
+/// header bytes. Both halves of the button word, the four stick axes, then the twelve pressures.
+pub const P2M2_PAD_BYTES: usize = 18;
+
+/// How many pads one frame of the file holds. PCSX2 writes both of them every frame whether anything
+/// is plugged into the second port or not, which is why an unused port reads as eighteen zero bytes.
+pub const P2M2_PADS: usize = 2;
+
+/// One frame of the file: a pad entry per port.
+pub const P2M2_FRAME_BYTES: usize = P2M2_PAD_BYTES * P2M2_PADS;
+
+/// How many of PCSX2's frames go by in one tick of this game.
+///
+/// PCSX2 counts a frame per video field (59.94 Hz on this disc) and writes the pad it was handed into
+/// every one of them. This game simulates once per **two** fields — measured three ways: the recorder's
+/// vsync counter rises by 2 while the game's own frame counter rises by 1 (S8, 300 of 300 rows), R6 saw
+/// the same in a level, and the engine's `dt` is a thirtieth of a second rather than a sixtieth. So
+/// half of a recording's frames were never read by the game, and a tape takes every second one.
+pub const P2M2_FIELDS_PER_TICK: usize = 2;
+
+/// Where a PCSX2 input recording could not be read, with the byte it was at — the binary counterpart
+/// of [`ParseError`], which carries a line number a file with no lines cannot have.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P2m2Error {
+    /// The offset in the file, so a hex dump can be opened where the trouble is.
+    pub at: usize,
+    pub message: String,
+}
+
+impl fmt::Display for P2m2Error {
+    fn fmt(&self, w: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(w, "byte {:#x}: {}", self.at, self.message)
+    }
+}
+
+impl std::error::Error for P2m2Error {}
+
+fn p2m2_err<T>(at: usize, message: impl Into<String>) -> Result<T, P2m2Error> {
+    Err(P2m2Error { at, message: message.into() })
+}
+
+/// **A human's PCSX2 input recording**, read as the pad the game was handed.
+///
+/// A `.p2m2` is what PCSX2's own input recording writes: a fixed header, then one entry per pad per
+/// *video field* for as long as the recording ran. It is the cheapest honest source of a long
+/// human-played sequence there is — no capture session, no PINE, no kit, just somebody riding — and
+/// with its `_SaveState.p2s` beside it, it is reproducible on the original: load the state, play the
+/// recording, and the emulator does the same sixty seconds again.
+///
+/// Three things this reader decides, each measured rather than assumed, and each a silent desync if
+/// got wrong:
+///
+/// - **Which byte is which.** The eighteen bytes of an entry are mapped onto the port's own
+///   [`Report`] by [`report_of_p2m2`]. The file proves that mapping itself: for twelve of the sixteen
+///   controls the entry carries *both* the button's bit and its pressure byte, and the two must agree
+///   on every frame ([`P2m2::check_pressures`]). On the one recording in the project that is 43,452
+///   agreements and no disagreement, where either neighbouring pairing of pressure to bit disagrees
+///   5,814 times.
+/// - **Frame 0 is not a frame.** PCSX2 seeks to `header + frame * 36` and numbers a recording's frames
+///   from 1, so the slot before the first one is never written and reads as thirty-six zero bytes —
+///   which, mapped literally, would be a pad with every button held and both sticks hard into a
+///   corner. [`P2m2::parse`] requires it to be unwritten and drops it, and refuses a file whose slot
+///   count is not `totalFrames + 1` rather than replay a recording half a tick out of step.
+/// - **Two fields, one tick.** Half the frames of the file were never read by the game
+///   ([`P2M2_FIELDS_PER_TICK`]); which half is [`TickPhase`], and it is the one thing the file cannot
+///   say.
+///
+/// The `dt` is not in the file either, and does not need to be: see [`P2m2::tape`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P2m2 {
+    /// The first byte of the file. [`P2M2_FILE_VERSION`] is what this reader knows.
+    pub file_version: u8,
+    /// The emulator that wrote it, e.g. `PCSX2-v2.9.127`.
+    pub emulator: String,
+    /// Who played it.
+    pub author: String,
+    /// The game, as PCSX2 names it.
+    pub game: String,
+    /// How many video fields the recording covers, which is the header's own count and the number of
+    /// entries [`P2m2::field`] has.
+    pub total_frames: u32,
+    /// How many times the recording was rewound while it was made. Recorded for provenance; nothing
+    /// here reads it.
+    pub undo_count: u32,
+    /// Whether the recording starts from a save state (the `_SaveState.p2s` beside it) rather than from
+    /// power-on. A tape of a recording that starts from a state is only replayable against that state.
+    pub from_savestate: bool,
+    /// One entry per *written* field, in file order: `fields[0]` is the file's frame 1.
+    fields: Vec<[u8; P2M2_FRAME_BYTES]>,
+}
+
+/// Which of a tick's two video fields the game's pad read landed on.
+///
+/// The pad library refreshes one of its two buffer halves per field and the poll copies the fresher
+/// half, so the bytes a tick reads are the ones PCSX2 replied with at the field that tick began on —
+/// one of the two, consistently, for the whole recording. Which one depends on where in PCSX2's frame
+/// the recording's save state was taken, and the file does not say: it is a choice between two
+/// sequences that agree on most ticks and not all ([`P2m2::ticks_the_phase_moves`] counts them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TickPhase {
+    /// The first field of each pair: fields 1, 3, 5… of the file. The default.
+    #[default]
+    First,
+    /// The second field of each pair: fields 2, 4, 6… of the file.
+    Second,
+}
+
+impl TickPhase {
+    /// How many of the file's fields are skipped before the first tick's.
+    pub fn offset(self) -> usize {
+        match self {
+            TickPhase::First => 0,
+            TickPhase::Second => 1,
+        }
+    }
+
+    /// The word a tape's name carries, so a fixture says which phase it was built with.
+    pub fn name(self) -> &'static str {
+        match self {
+            TickPhase::First => "first",
+            TickPhase::Second => "second",
+        }
+    }
+}
+
+/// One pad's eighteen recorded bytes as the report the game's own poll reads.
+///
+/// | report byte | what | from |
+/// |---|---|---|
+/// | 0 | status, 0 for a good read | this reader: a recorded frame is a read that happened |
+/// | 1 | mode | [`input::MODE_PRESSURES`] — it recorded pressures. Never read by the poll |
+/// | 2, 3 | the button word, big-endian and active low | entry bytes 0, 1 |
+/// | 4..8 | right X, right Y, left X, left Y | entry bytes 2..6 |
+/// | 8..20 | the twelve pressures, in the DualShock 2 order | entry bytes 6..18 |
+///
+/// The pressure order is the same in both, which is what makes the last row a copy rather than a
+/// permutation: [`input::CONTROL_MAP`]'s pressure indices were read out of the game's own RAM and the
+/// file's order is the DualShock 2's, and they agree byte for byte.
+///
+/// An entry of eighteen zero bytes is [`Report::missing`] — a port PCSX2 never wrote, which is every
+/// frame of port 1 in a one-pad recording. It is not a pad holding all sixteen buttons with its sticks
+/// at zero, which is what the bytes would otherwise say.
+pub fn report_of_p2m2(entry: &[u8; P2M2_PAD_BYTES]) -> Report {
+    if *entry == [0u8; P2M2_PAD_BYTES] {
+        return Report::missing();
+    }
+    let mut bytes = [0u8; input::REPORT_BYTES];
+    bytes[1] = input::MODE_PRESSURES;
+    bytes[2] = entry[0];
+    bytes[3] = entry[1];
+    bytes[4..8].copy_from_slice(&entry[2..6]);
+    bytes[8..20].copy_from_slice(&entry[6..18]);
+    Report::from_bytes(bytes)
+}
+
+impl P2m2 {
+    /// Read a `.p2m2`.
+    ///
+    /// Refuses, by the byte it is at: a file too short to hold a header, a frame area that is not a
+    /// whole number of frames, a slot count that is not `totalFrames + 1`, a written frame 0, and a
+    /// file version this reader has not been measured against. Every one of those is a file whose
+    /// frames are not where this reader thinks they are, and a tape built from one would replay
+    /// plausible nonsense.
+    pub fn parse(bytes: &[u8]) -> Result<P2m2, P2m2Error> {
+        if bytes.len() < P2M2_HEADER_BYTES {
+            return p2m2_err(
+                bytes.len(),
+                format!(
+                    "{} bytes is not a PCSX2 input recording: the header alone is {P2M2_HEADER_BYTES}",
+                    bytes.len(),
+                ),
+            );
+        }
+        let text = |at: usize, len: usize| -> String {
+            let field = &bytes[at..at + len];
+            let end = field.iter().position(|b| *b == 0).unwrap_or(len);
+            String::from_utf8_lossy(&field[..end]).trim().to_string()
+        };
+        let file_version = bytes[0];
+        if file_version != P2M2_FILE_VERSION {
+            return p2m2_err(
+                0,
+                format!(
+                    "file version {file_version}; this reader was measured against \
+                     {P2M2_FILE_VERSION} ({}), and a layout change would move every frame",
+                    text(1, 50),
+                ),
+            );
+        }
+        let word = |at: usize| -> u32 {
+            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
+        let total_frames = word(561);
+        let frames = &bytes[P2M2_HEADER_BYTES..];
+        if frames.len() % P2M2_FRAME_BYTES != 0 {
+            return p2m2_err(
+                P2M2_HEADER_BYTES + frames.len() - frames.len() % P2M2_FRAME_BYTES,
+                format!(
+                    "{} bytes of frames is {} short of a whole frame ({P2M2_FRAME_BYTES} bytes: \
+                     {P2M2_PAD_BYTES} per pad, {P2M2_PADS} pads) — a truncated recording",
+                    frames.len(),
+                    P2M2_FRAME_BYTES - frames.len() % P2M2_FRAME_BYTES,
+                ),
+            );
+        }
+        let slots = frames.len() / P2M2_FRAME_BYTES;
+        if slots as u64 != u64::from(total_frames) + 1 {
+            return p2m2_err(
+                561,
+                format!(
+                    "{slots} frame slots for a totalFrames of {total_frames}: PCSX2 numbers a \
+                     recording's frames from 1 and leaves the slot before them unwritten, so a file \
+                     of {total_frames} frames holds {} slots. Reading this one would put every tick \
+                     a field out of step",
+                    u64::from(total_frames) + 1,
+                ),
+            );
+        }
+        if frames[..P2M2_FRAME_BYTES] != [0u8; P2M2_FRAME_BYTES] {
+            return p2m2_err(
+                P2M2_HEADER_BYTES,
+                "frame slot 0 is written, and this reader assumes PCSX2 never writes it (it numbers \
+                 a recording's frames from 1). Either the file is from a build that numbers them \
+                 from 0 — in which case every tick of a tape would be a field out of step — or it is \
+                 not a recording at all"
+                    .to_string(),
+            );
+        }
+        let mut fields = Vec::with_capacity(slots - 1);
+        for slot in 1..slots {
+            let at = slot * P2M2_FRAME_BYTES;
+            let mut entry = [0u8; P2M2_FRAME_BYTES];
+            entry.copy_from_slice(&frames[at..at + P2M2_FRAME_BYTES]);
+            fields.push(entry);
+        }
+        Ok(P2m2 {
+            file_version,
+            emulator: text(1, 50),
+            author: text(51, 255),
+            game: text(306, 255),
+            total_frames,
+            undo_count: word(565),
+            from_savestate: bytes[569] != 0,
+            fields,
+        })
+    }
+
+    /// How many video fields the recording holds — the header's `totalFrames`, which this reader has
+    /// already checked the file's own length against.
+    pub fn fields(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// One pad of one field, as the report the poll reads. `field` is 0-based over the *written*
+    /// fields, so field 0 is the file's frame 1.
+    pub fn field(&self, field: usize, pad: usize) -> Report {
+        let Some(frame) = self.fields.get(field) else {
+            return Report::missing();
+        };
+        if pad >= P2M2_PADS {
+            return Report::missing();
+        }
+        let at = pad * P2M2_PAD_BYTES;
+        let mut entry = [0u8; P2M2_PAD_BYTES];
+        entry.copy_from_slice(&frame[at..at + P2M2_PAD_BYTES]);
+        report_of_p2m2(&entry)
+    }
+
+    /// How many ticks a tape of this recording has: the fields of the chosen phase.
+    pub fn ticks(&self, phase: TickPhase) -> usize {
+        let fields = self.fields();
+        match fields.checked_sub(phase.offset()) {
+            Some(n) => n.div_ceil(P2M2_FIELDS_PER_TICK),
+            None => 0,
+        }
+    }
+
+    /// **The recording as a tape**, at the step the engine handed the frame.
+    ///
+    /// `dt` is the one thing a tape needs that a `.p2m2` does not hold, and for a recording of play it
+    /// is a constant: [`CAPPED_DT`], the 30 fps cap. The engine measures each frame, averages the last
+    /// thirty and then clamps the mean to 0.03333 — and on a machine keeping up with the disc's
+    /// 59.94 Hz, two fields are 33.3667 ms, so the mean is over the cap and the clamp bites on every
+    /// frame. Three measurements of this recording's own save state say so, and they are the reason
+    /// this method takes no `dt` argument:
+    ///
+    /// - the `dt` the simulation was handed on the frame the state was taken (app+0x344) is
+    ///   0.033330001, exactly [`CAPPED_DT`], with 1/`dt` at 30.003;
+    /// - the frame's raw measured delta (app+0x358) is 0.034 — 34 ms, over the cap, so the clamp was
+    ///   applied rather than coincidentally matched;
+    /// - the accumulated *simulated* clock (app+0x330) is 975 ms behind the wall clock it was seeded
+    ///   from, over 2,773 frames. That deficit is what clamping 33.37 ms frames to a 33 ms step costs,
+    ///   and it says the cap has been biting all session rather than on the one frame that was looked
+    ///   at.
+    ///
+    /// R6 measured the same 0.0333300 across 119 ticks of a level with the cap flag reading 1, and S1
+    /// found the flag set by the game object's constructor and never cleared. [`PadTape::from_capture`]
+    /// is the other way round: a capture carries the `dt` the engine really used, so a tape made from
+    /// one does not have to reason about the cap at all.
+    ///
+    /// Use [`P2m2::tape_with_dt`] where a measured `dt` is to hand — the front end runs under the cap
+    /// (S8 saw 0.032833 there), so a recording of a *menu* is not a recording this method describes.
+    pub fn tape(&self, phase: TickPhase) -> PadTape {
+        self.tape_with_dt(phase, CAPPED_DT)
+    }
+
+    /// [`P2m2::tape`] with a step of your own: for a recording whose frames the engine did not clamp,
+    /// or to replay the same recording at two steps and see what the millisecond timers do.
+    pub fn tape_with_dt(&self, phase: TickPhase, dt: F) -> PadTape {
+        let mut tape = PadTape::new(format!(
+            "p2m2-{}-{}f-{}",
+            slug(&self.author),
+            self.total_frames,
+            phase.name(),
+        ));
+        let mut field = phase.offset();
+        while field < self.fields() {
+            let mut reports = [Report::missing(); PADS];
+            for (pad, report) in reports.iter_mut().enumerate() {
+                *report = self.field(field, pad);
+            }
+            tape.push(PadFrame::new(dt, reports));
+            field += P2M2_FIELDS_PER_TICK;
+        }
+        tape
+    }
+
+    /// How much the phase can matter, measured on this recording: how many of its ticks carry
+    /// different pad bytes in their two fields, and how many of those differ in the button word.
+    ///
+    /// The human moved the stick between two fields far more often than they crossed a button's edge
+    /// between them, so the second number is the small one — and it is the one that would show up as a
+    /// press landing a tick early or late. Neither is zero, which is why [`TickPhase`] is a choice and
+    /// not a detail.
+    pub fn ticks_the_phase_moves(&self) -> (usize, usize) {
+        let mut moved = (0, 0);
+        for pair in self.fields.chunks_exact(P2M2_FIELDS_PER_TICK) {
+            if pair[0][..P2M2_PAD_BYTES] != pair[1][..P2M2_PAD_BYTES] {
+                moved.0 += 1;
+                if pair[0][..2] != pair[1][..2] {
+                    moved.1 += 1;
+                }
+            }
+        }
+        moved
+    }
+
+    /// **The file's own proof of the byte mapping**: every pressure byte agrees with the bit of the
+    /// same control, on every field, for both pads. Returns how many agreements it checked.
+    ///
+    /// Twelve of the sixteen controls are read from a pressure byte and not from their bit
+    /// ([`input::CONTROL_MAP`]), so the two halves of an entry are redundant — and they were written
+    /// by PCSX2 from a host pad, not by this reader. A pairing that is off by one disagrees on
+    /// thousands of frames, so this is the check that turns "the DualShock 2 order" from a convention
+    /// into a measurement.
+    ///
+    /// It is also the check that a recording can drive the port *at all*: a `.p2m2` of a host pad that
+    /// reported no pressures would leave those twelve controls released however much its button word
+    /// says, and the error names the first frame and control where the two disagree.
+    pub fn check_pressures(&self) -> Result<usize, P2m2Error> {
+        let mut agreements = 0;
+        for field in 0..self.fields() {
+            for pad in 0..P2M2_PADS {
+                let report = self.field(field, pad);
+                if report.status() != 0 {
+                    continue; // a port PCSX2 never wrote
+                }
+                let buttons = report.buttons();
+                for control in input::Control::ALL {
+                    let binding = control.binding();
+                    if !binding.is_analogue() {
+                        continue; // select, start, L3 and R3 have no pressure byte, in either format
+                    }
+                    let down = buttons & binding.mask != 0;
+                    let pressed = report.pressure(binding.pressure) != 0;
+                    if down != pressed {
+                        return p2m2_err(
+                            P2M2_HEADER_BYTES + (field + 1) * P2M2_FRAME_BYTES + pad * P2M2_PAD_BYTES,
+                            format!(
+                                "frame {} pad {pad}: {} reads {} by its bit and {} by its pressure \
+                                 byte ({:#04x}). The two are written from the same host pad, so \
+                                 either the byte mapping is wrong or this recording has no pressures \
+                                 — and the game reads this control from the pressure byte only",
+                                field + 1,
+                                control.name(),
+                                if down { "down" } else { "up" },
+                                if pressed { "down" } else { "up" },
+                                report.pressure(binding.pressure),
+                            ),
+                        );
+                    }
+                    agreements += 1;
+                }
+            }
+        }
+        Ok(agreements)
+    }
+}
+
+/// A name safe to write on a tape's `tape` line and read back: a `#` would be a comment and a space
+/// would end the name early.
+fn slug(text: &str) -> String {
+    let kept: String = text
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let trimmed = kept.trim_matches('-').to_string();
+    match trimmed.is_empty() {
+        true => "anon".to_string(),
+        false => trimmed,
+    }
+}
+
+impl PadTape {
+    /// **A human's PCSX2 recording as a tape, in one call**: read the file, check that its pressure
+    /// bytes agree with its button bits, and take one field of every tick.
+    ///
+    /// This is the whole path from `context/recordings/*.p2m2` to something [`play`] can drive the
+    /// port with. [`P2m2::parse`] and [`P2m2::tape`] are the same thing in two steps, for a caller
+    /// that wants the header or a step of its own.
+    pub fn from_p2m2(bytes: &[u8], phase: TickPhase) -> Result<PadTape, P2m2Error> {
+        let movie = P2m2::parse(bytes)?;
+        movie.check_pressures()?;
+        Ok(movie.tape(phase))
     }
 }
