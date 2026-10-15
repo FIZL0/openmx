@@ -215,6 +215,14 @@ pub mod math;
 /// the hardware.
 pub mod input;
 
+/// Animation driving: which motion plays for the state the rider is in, how far into it the frame is,
+/// and how one motion blends into the next. The tail of the rider update that the trick clocks stop
+/// short of: the selection per action id, the cross-fade a restarted motion starts with, the clip's own
+/// dt advance beside the phase the trick's progress drives it at, and the inclusive window a frame
+/// fires its action frames from. Timing, not looks: the pose the airborne blend lands on is the one the
+/// landing test judges.
+pub mod motion;
+
 /// The acceptance test for the whole port: a fixture of recorded inputs plus the state it starts from,
 /// replayed through the simulation and compared tick by tick against the recording's hashes or its
 /// watched fields. A failure is one line — `tick 413: ball.vel[1] -58.94952 vs -58.949516` — not a diff of two

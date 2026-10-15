@@ -162,6 +162,12 @@ added beside them:
     chord beside them, which transitions share a frame, and the fact that a down rider's physics does
     not step at all. Proved against the original machine, its entry and its put-back in
     `tests/state.rs` (S5).
+  - `motion.rs` — animation driving: which motion a rider's state plays, how far into it the frame is,
+    and how two of them blend. The action-id switch, the cross-fade that makes a motion start from the
+    pose the rider already had, the airborne pair chosen by the fore-aft lean with the shown crossup a
+    landing is judged on, the clip clock with its loop and its end, and the window one frame opens for
+    the action frames inside it. Proved against the original's driving, advance and window over 10,000
+    generated frames each in `tests/motion.rs` (S6).
 - `game-render` — the drawing side: the disc's own models and textures, on screen. Host `f32`, no
   bit-exactness, nothing the simulation depends on.
   - `disc.rs` ISO 9660 → `MX.PSR` → a `.res` member, read from the user's disc at runtime ·

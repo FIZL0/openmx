@@ -502,8 +502,11 @@ stunt_specials              boot 0x00258790 (obj) finds "nohandedlander" and "th
 #                                           when a name is absent
 stunt_display_name          boot 0x0037dc90 (obj, player, id) -> the HUD name: 26 "Stoppie", 25
 #                                           "Wheelie", 24 "BackFlip", else the mapped DisplayName
-anim_rewind                 boot 0x001461e0 (anim in a0, 0, 0) restart the rider's animation at the
-#                                           start; called when a trick restarts. Hooked in the tests
+anim_rewind                 boot 0x001461e0 (anim in a0, 0, 0) snapshots the rider's current joint
+#                                           poses into the motion object's two blend buffers, which
+#                                           is what a restarted motion cross-fades *from* — it does
+#                                           not rewind a clip. Called on every restart; hooked in the
+#                                           tests, because it reads a real skeleton
 clock_section_end           boot 0x00259b00 the join inside stunt_clocks where the clock section is
 #                                           over and the animation selection begins: a test hooks it
 #                                           to end the call before the tail's VU0 skinning work
@@ -519,6 +522,71 @@ wrecks_enabled              boot 0x00420bc0 the global stunt_landing returns imm
 #   +0x110 stop the animation
 #   +0x118 the hand-hold pose, on or off
 #   +0x120 whether an animation is playing, which is what gates stunt_idle
+
+# ---------------------------------------------------------------------------------------------------
+# S6 — animation driving: which motion plays per state, its frame advance and its blending. The port
+# is crates/game-sim/src/motion.rs and the proofs are crates/game-sim/tests/motion.rs. How each one was
+# found is in research/journal/2026-10-15-s6-s6-motion.
+#
+# The driving itself is the tail of stunt_clocks (above), past clock_section_end: the cross-fade ramp
+# at +0x9f4 decayed by the rate at +0x9f8, the restart test, and a switch on the latched action id at
+# +0xa78 that ends in exactly one of the four library entries below. The rider's clip per action id is
+# the pointer array at +0xa88 — 24 gesture clips "bike_<stunt name>", then "bike_air_Fwd", "_Mid" and
+# "_Bck" in the entries of ids 25, 26 and 27, which is why those ids' own arms never look a clip up.
+# Fields the driving writes: +0x9ec the fore-aft lean mapped to 0..1, +0x9e8 the shown pose (read by
+# stunt_state_pack), +0x9f0 "a cross-fade has run", and +0x788 the shown crossup — which is what
+# stunt_landing judges a landing on, and the one output of this section that is not presentation.
+# A test ends the call inside one of the four entries: past them the original skins the rider in VU0.
+motion_advance              boot 0x00144800 (dt in f12, motion in a0, 0, 0, 0) the free-running path:
+#                                           last = clip, prev = time, time += dt, the end test, then
+#                                           the channels (or the transition's smooth step), then the
+#                                           action frames, then the two resets. Does nothing at all
+#                                           when +0x3c (finished) is set or +0x48 (the playing clip)
+#                                           is null
+motion_blend_one            boot 0x00146870 (phase in f12, cross-fade in f13, motion in a0, handle in
+#                                           a1) the phase-driven path: clears +0x48, samples the clip
+#                                           at phase * duration, and fires the action frames between
+#                                           the last sample and this one
+motion_blend_two            boot 0x00146ed0 (phase in f12, mix in f13, cross-fade in f14, motion in
+#                                           a0, handle a in a1, handle b in a2) the same, with both
+#                                           clips sampled at the same seconds of a's duration and
+#                                           slerped by the mix: 0 is all b, 1 is all a. The action
+#                                           frames come from a
+motion_blend_three          boot 0x00147e40 (three weights in f12/f13/f14, cross-fade, motion, three
+#                                           handles) the three-clip entry. Reachable in the image but
+#                                           not from the rider's switch: Ghidra removes the two blocks
+#                                           that would set its mode, so the port does not model it
+motion_transition_weighted  boot 0x00145810 (weight in f12, motion in a0, ...) samples the two clips
+#                                           of a clip-to-clip transition and mixes them by the smooth
+#                                           step the advance works out. Not ported: the sampling is
+#                                           the renderer's, the weight is proved through the hook
+motion_transition_plain     boot 0x00145160 (motion in a0, ...) the same without the weight, which is
+#                                           which of the two the field at +0x4c picks
+motion_events               boot 0x00144f70 (from in f12, to in f13, motion in a0, clip in a1, wrapped
+#                                           in a2) the action frames one frame fires. Nothing when the
+#                                           clip's key list at +0x14 is null; when wrapped, two scans
+#                                           — (from, duration) then (0, to) — appended in that order
+motion_event_window         boot 0x001363a0 (from in f12, to in f13, key list in a0, out in a1) the
+#                                           scan itself: a binary search for the bracket, then the
+#                                           *inclusive* test from <= key <= to over it. Keys are the
+#                                           first word of a stride-8 entry at list+8, their action
+#                                           lists at list+0xc, the count at list+0
+new_array                   boot 0x001e51a0 operator new[](size, file, line) — the engine's heap. The
+#                                           wrap branch of motion_events builds a second list with it,
+#                                           so a test hooks it onto a bump allocator
+delete_array                boot 0x001e5220 operator delete[](ptr), the other half of the same
+motion_clip_over            boot 0x00140c60 (time in f12, clip in a0) -> duration (+0x3c) < time: the
+#                                           end test, strict, so a time exactly on the duration is
+#                                           still inside the clip and its last action frame fires
+motion_slerp                boot 0x0013ee10 (weight in f12, out, from, to, 1) the quaternion blend both
+#                                           blend entries mix their samples with. Not ported: the
+#                                           channel sampling it works on is the renderer's
+#   the motion object, by the offsets the advance touches: +0x3c finished, +0x48 the playing clip's
+#   handle, +0x4c which transition sampler, +0x50 the clip the last sample came from, +0x54 that
+#   sample's time, +0x58 the event context, +0x80 a transition is running, +0x84 the clip time,
+#   +0x88 the transition's clock, +0x8c when it is dropped, +0x90 its delay, +0x94 its length
+#   one clip, by the offsets the timing reads: +0x14 the key list, +0x20 rotation channels, +0x24
+#   position channels, +0x28 flags (bit 0 loops), +0x3c the duration in seconds
 
 # ---------------------------------------------------------------------------------------------------
 # R7 — the scripted freeride boot. Two words put the game into a loaded world with no front end:
