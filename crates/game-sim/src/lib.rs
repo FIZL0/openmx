@@ -101,12 +101,13 @@ impl Sim {
         self.ticks += 1;
     }
 
-    /// The state in 64 bits. Add a field here the moment you add it to the state, or a replay test will
-    /// pass over a divergence it cannot see.
+    /// The state in 64 bits. Add a field to [`hash`]'s walk the moment you add it to the state, or a
+    /// replay test will pass over a divergence it cannot see.
+    ///
+    /// One line, because the walk that produces it lives in [`hash`] and is shared with the dump mode
+    /// that says *which* field differed.
     pub fn hash(&self) -> u64 {
-        let mut h = state_hash(&self.ticks.to_le_bytes(), 0);
-        h = state_hash(&self.rng.to_le_bytes(), h);
-        self.ball.hash(h)
+        hash::of(self)
     }
 }
 
@@ -124,7 +125,11 @@ pub fn state_hash(bytes: &[u8], seed: u64) -> u64 {
     };
     for &b in bytes {
         h ^= b as u64;
-        h = h.wrapping_mul(0x1000_0000_01b3);
+        // 2⁴⁰ + 2⁸ + 0xb3, FNV-64's prime, written in full so a missing digit cannot hide in it. The
+        // standard constant matters beyond pedantry: a capture tool or a script outside this crate can
+        // reproduce a state hash from any FNV-1a implementation, and `tests/hash.rs` checks it against
+        // the published vectors.
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
 }
@@ -164,15 +169,10 @@ pub mod physics {
             self.spin *= SPIN_DECAY;
         }
 
-        /// Hashed as bit patterns, in a fixed order.
+        /// Hashed as bit patterns, in a fixed order — by the subsystem's own walk in [`super::hash`],
+        /// so that there is one description of this struct's state and not two to keep in step.
         pub fn hash(&self, seed: u64) -> u64 {
-            let mut h = seed;
-            for v in [self.pos, self.vel] {
-                for b in v.to_bits() {
-                    h = state_hash(&b.to_le_bytes(), h);
-                }
-            }
-            state_hash(&self.spin.to_bits().to_le_bytes(), h)
+            crate::hash::of_with_seed(self, seed)
         }
     }
 }
@@ -234,6 +234,11 @@ pub mod archive;
 /// Delete it once your own port has something real in it.
 pub mod demo;
 
+/// The state hash: one walk over the whole simulation state, hashed into 64 bits for a per-tick
+/// comparison, or dumped field by field to say which field first differed. Every port after this one is
+/// checked with it.
+pub mod hash;
+
 /// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.
@@ -253,7 +258,7 @@ mod tests {
         for _ in 0..100 {
             sim.tick(Input::default());
         }
-        assert_eq!(sim.hash(), 0x481b_a2a2_d10e_b072, "{:?}", sim.ball);
+        assert_eq!(sim.hash(), 0x7bbf_5ca2_d10e_b072, "{:?}", sim.ball);
     }
 
     #[test]
