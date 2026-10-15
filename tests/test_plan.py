@@ -174,12 +174,22 @@ def test_brief():
 
 
 def test_shipped_backlog():
-    print('plan: the backlog this kit ships with')
+    """The backlog, whether it is the one the kit ships or one a port has half worked through.
+
+    Both have to hold, because this suite runs for the life of a project: the shape of a task line and
+    the ids `(after X)` points at. What cannot hold is a count — a port that is going well has fewer
+    open tasks every week — and a dependency is satisfied by a *finished* task, which is in `DONE.md`
+    and no longer here. `pick` already reads it that way; this test used to disagree, and so went red in
+    every port repo the moment its first dependency landed.
+    """
+    print('plan: the backlog, shipped or worked through')
     todo = ROOT / 'plan/TODO.md'
     ls = plan.lines(todo)
     ids = [m.group(3) for l in ls if (m := plan.ITEM.match(l))]
+    done = [m.group(3) for l in plan.lines(ROOT / 'plan/DONE.md') if (m := plan.ITEM.match(l))]
     eq(len(ids), len(set(ids)), 'every id in plan/TODO.md is unique')
-    check(25 <= len(ids) <= 60, f'{len(ids)} tasks: a session each, enough to start a port')
+    check(ids or done, 'the backlog has tasks, open or finished')
+    check(len(ids) <= 60, f'{len(ids)} open tasks: a session each, not a wish list')
     check(any(l.startswith('### Stretch') for l in ls), 'there is a ### Stretch section')
     check(all(' → ' in l or ' | ' in l for l in ls if plan.ITEM.match(l)),
           'every task line names the files it touches or the test it adds')
@@ -190,7 +200,8 @@ def test_shipped_backlog():
         if not plan.ITEM.match(l):
             continue
         if m := re.search(r'\(after (\w+)\)', l):
-            check(m.group(1) in ids, f'(after {m.group(1)}) names a task that exists')
+            check(m.group(1) in ids or m.group(1) in done,
+                  f'(after {m.group(1)}) names a task that exists, open or done')
 
 
 # --- the journal --------------------------------------------------------------
@@ -372,6 +383,33 @@ def test_runner_picking():
     eq(R.pick({}, {t[0] for t in ts}, 'd', 'main'), None, 'nothing left once everything has been tried')
 
 
+def test_runner_union():
+    print('run: which merge conflicts the runner resolves itself')
+    from ps2kit import runner as R
+    for f in ('plan/TODO.md', 'plan/DONE.md', 'research/journal/2026-01-01-t7-walker/README.md',
+              'research/oracle.txt'):
+        check(R.joinable(f), f'{f} is a list of records, so the run may join both sides')
+    # PLAN.md is the interesting no: append-only, and still not joinable, because a union of two
+    # reflowed paragraphs strands half a sentence inside a bullet instead of failing.
+    for f in ('PLAN.md', 'AGENT.md', 'README.md', 'docs/WORKFLOW.md', 'crates/game-sim/src/tick.rs',
+              'plan/notes.txt', 'kit.toml.example'):
+        check(not R.joinable(f), f'{f} needs reading, so it goes to a human')
+
+    # The address list is the one joinable file where both sides can be *wrong together*: nothing
+    # downstream picks between two addresses for one name, so a clash must not be resolved here.
+    both = 'angle 0x1004c0 the stick angle\nspeed 0x100500\n'
+    eq(R.addresses(both + 'speed 0x100500\n', 'o.txt'), both,
+       'a name both sides added at the same address is kept once')
+    eq(R.addresses('angle 0x1004c0\nangle 0x2004c0\n', 'o.txt'), None,
+       'the same name at two addresses is left for a human, never picked')
+    eq(R.addresses('angle main 0x1004c0\nangle menu 0x1004c0\n', 'o.txt').count('angle'), 2,
+       'the same name in two overlays is two addresses and both stay')
+    eq(R.addresses('angle\n', 'o.txt'), None, 'a line that is not an address stops the join too')
+    kept = R.addresses('# the stick\nangle 0x1004c0\n\n# the bike\nspeed 0x100500\n', 'o.txt')
+    eq(kept, '# the stick\nangle 0x1004c0\n\n# the bike\nspeed 0x100500\n',
+       'comments and blank lines survive the join (a note belongs to the line under it)')
+
+
 def test_stop_hook_never_crashes():
     print('run: the Stop hook that ends an idle session')
     for payload in ('{}', 'garbage', '{"transcript_path": "/nonexistent"}', '{"transcript_path": null}'):
@@ -394,7 +432,7 @@ def test_cli_help():
 def main() -> int:
     for t in (test_plan_roundtrip, test_plan_index_and_sections, test_brief, test_shipped_backlog,
               test_journal, test_check_summary, test_audit, test_guard, test_inbox, test_runner_picking,
-              test_stop_hook_never_crashes, test_cli_help):
+              test_runner_union, test_stop_hook_never_crashes, test_cli_help):
         t()
     print()
     if FAILED:
