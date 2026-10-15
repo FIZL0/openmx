@@ -18,6 +18,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "openmx"
+version = "1.0.0"
+dependencies = [
+ "game-render",
+ "game-sim",
+ "ps2-float",
+]
+
+[[package]]
 name = "ps2-float"
 version = "1.0.0"
 dependencies = [

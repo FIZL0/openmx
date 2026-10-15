@@ -1,0 +1,18 @@
+[package]
+name = "openmx"
+description = "The playable shell: a window, a real pad, the ported simulation at 60 Hz, and the freeride area drawn with the port's own renderer"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "openmx"
+path = "src/main.rs"
+
+[dependencies]
+# The simulation (input layer, fixed update, track, collision) and the renderer. Nothing else: the
+# window, the pad and the frame pacing are all std, the same way the rest of this workspace has no
+# dependency outside it.
+game-sim = { path = "../game-sim" }
+game-render = { path = "../game-render" }
+ps2-float = { path = "../ps2-float" }

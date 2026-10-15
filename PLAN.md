@@ -169,6 +169,22 @@ added beside them:
   - `raster.rs` a depth-buffered, perspective-correct, textured triangle rasteriser · `png.rs` a PNG
     writer · `mat.rs` vectors and 4x4 transforms in the files' own convention ·
     `bin/first-draw.rs` the whole chain: disc in, one frame of a track out
+- `openmx` — the playable shell: the binary a person rides. A window, a real pad, the ported simulation
+  at the game's own 60 Hz, and the freeride area drawn with the renderer, with no emulator, no fixture
+  and no menu in the way (P1).
+  - `main.rs` — the loop: the disc's track and bike, the scene read twice (the simulation's reader for
+    the spawn and the terrain, the renderer's for props, lights and fog), then a frame of
+    `tick::Engine::step` — which polls the pad through `input::Manager` and moves the bike — followed by
+    the draw, the present and the pace to 60 Hz.
+  - `window.rs` — a window with no dependencies: the X11 wire protocol over the display's unix socket,
+    a window, a graphics context, keyboard events, and the frame pushed across as one `PutImage` a band.
+  - `pad.rs` — the host's pad: Linux's joystick events and the keyboard, folded into the 32-byte
+    DualShock 2 report the ported input layer reads, so the port's own poll is what the game sees.
+  - `ground.rs` — the freeride area's ground: the ported terrain query asked about a world point rather
+    than a sample, and the samples around the rider turned into triangles, because the renderer's `.trn`
+    reader does not read an off-road layout.
+  - `ride.rs` — **not a port**: a stand-in for the bike's ground physics while S3 is unwritten. Host
+    floats, invented constants, outside `game-sim` on purpose, and deleted when S3 lands.
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the
