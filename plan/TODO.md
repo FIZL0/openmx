@@ -44,7 +44,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 ### Phase 5 — the first proven function, and the harness
 
 - [ ] **O2** (after O1) Oracle coverage for the arithmetic of F1–F4: run each ported op against the real code over ≥10k generated inputs, including the awkward ones (zero, denormals, the largest magnitudes, equal exponents, exponent differences of 24 and over) → crates/ps2-float/tests/ · research/oracle.txt | t: crates/ps2-float/tests/oracle.rs | j: o2-float-oracle
-- [ ] **A3** (after A2) Make the hash platform-independent and prove it: the same fixture hashes identically on x86-64 and on aarch64 (and on wasm32 if this port will run in a browser). Transcendentals go through the game's own `libm`, never the host's → crates/game-sim/tests/platforms.rs | t: crates/game-sim/tests/platforms.rs | j: a3-platforms — moved to stretch: a hash that agrees across architectures matters when the port ships, not while one bike is being made to ride
 
 ### Phase 6 — input, the game's own way
 
