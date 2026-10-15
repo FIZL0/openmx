@@ -1,0 +1,138 @@
+# axes.toml — the six analogue axes of pad 0, and what the game's own consumers make of them.
+#
+#   ./kit record --dry-run watch/axes.toml
+#   ./kit record watch/axes.toml --state 9 --pad watch/pads/stick-sweep.pad -n 220 \
+#       -o context/capture/i2-axes.csv
+#
+# I1's `watch/input.toml` records the sixteen controls; this spec records the part of the same poll
+# that input.toml leaves out — the axes — and nothing else, so the two can be recorded independently.
+#
+#   ax_raw          the six raw axis slots the poll stores, as floats: 127.0 where the map has no
+#                   report byte bound, otherwise the byte itself. Bytes 4..7 of the report are right X,
+#                   right Y, left X, left Y, and the map says which axis takes which.
+#   ax_map          the map itself, which the game builds when it binds the pad (so it is RAM, not a
+#                   table in the image) — recorded so the capture states its own mapping.
+#   ax2.*           the consumers registered on axis 2, followed through the pointer list in the pad
+#                   object: each one's mapped value and the five floats of its range. They are menu
+#                   widgets on the heap, so the pointers are chased every frame rather than once.
+#                   Axis 2 is the only axis anything is registered on in the main menu — and it is also
+#                   the one the poll hands out inverted, which is what makes it the useful one.
+#
+# Read a row as: libpad's older buffer half is what the poll saw, `ax_raw` is what it stored, and
+# `ax2.value` is what it handed its consumers — `255 - ax_raw[2]` through the range in the same row.
+#
+# The sweep is about 130 frames and the recording ends with it: left idle, the main menu hands over to
+# the attract loop and the engine's frame counter stops, so `frames` here is an upper bound and a short
+# capture that ends with "emulator stopped ticking" is the expected outcome, not a failure.
+
+[watch]
+name        = "axes"
+description = "the six axis slots of pad 0, the axis map, and the mapped value each axis-2 consumer got"
+every       = 1
+frames      = 220
+
+[setup]
+state  = 9
+warmup = 10
+pad    = "watch/pads/stick-sweep.pad"
+
+# --- the frame -------------------------------------------------------------------------------------
+[[field]]
+name = "engine_frame"
+addr = "@app + 0x374"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@app + 0x344"
+type = "f32"
+
+# --- what libpad left in RAM ------------------------------------------------------------------------
+# Two 0x80-byte halves refreshed per video field; the poll reads the half whose stamp is the smaller,
+# and a row sampled after the tick sees the other one refreshed. [0] status, [1] mode, [2..3] the
+# button word, [4..7] the sticks.
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:8"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:8"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+# --- the six axis slots, and the map that fills them -------------------------------------------------
+[[array]]
+name   = "ax_raw"
+addr   = "@pad0_axis_raw"
+count  = 6
+stride = 4
+
+[[array.field]]
+name = "v"
+off  = 0
+type = "f32"
+
+[[array]]
+name   = "ax_map"
+addr   = "@pad0_axis_map"
+count  = 6
+stride = 4
+
+[[array.field]]
+name = "byte"
+off  = 0
+type = "u32"
+
+# --- the consumers registered on axis 2 --------------------------------------------------------------
+[[field]]
+name = "ax2_consumers"      # how many of the five slots below are live
+addr = "@pad0_axis2_count"
+type = "u32"
+
+[[array]]
+name   = "ax2"
+addr   = "@pad0_axis2_slots -> 0"
+count  = 5
+stride = 4
+deref  = true
+
+[[array.field]]
+name = "value"              # what the poll's dispatch wrote this frame
+off  = 0x24
+type = "f32"
+
+[[array.field]]
+name = "centre"             # the range: output inside the dead zone
+off  = 0x28
+type = "f32"
+
+[[array.field]]
+name = "lo"                 # output at raw 0
+off  = 0x2c
+type = "f32"
+
+[[array.field]]
+name = "hi"                 # output at raw 255
+off  = 0x30
+type = "f32"
+
+[[array.field]]
+name = "dead_hi"            # the top of the dead zone, in output units
+off  = 0x34
+type = "f32"
+
+[[array.field]]
+name = "dead_lo"            # the bottom of it
+off  = 0x38
+type = "f32"

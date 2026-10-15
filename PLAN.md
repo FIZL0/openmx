@@ -122,7 +122,9 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
   - `input.rs` — the input layer: the pad read once a frame before the simulation, mapped into the
     game's own bitmask and kept as sixteen controls a pad — held, strength, the press and release
     timers — plus the one-frame event queue the front end reacts to. The original keeps no "pressed
-    this frame" mask, so the edge is the event and "held with the timer at 0" (I1).
+    this frame" mask, so the edge is the event and "held with the timer at 0" (I1). The same poll's
+    six analogue axes: the report byte each one reads, the inversion one of them gets, and the dead
+    zone of ±0.2 that is the only shaping there is — no clamp and no curve (I2).
   - `rng.rs` — the C library's 64-bit LCG the whole game calls, plus the random float and the uniform
     list index its call sites wrap it in. Proved bit-exact in `tests/rng.rs` (R5).
   - `track.rs` — one track as the disc stores it: the `.scn` scene (spawn, terrain layout, every model and

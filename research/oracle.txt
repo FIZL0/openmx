@@ -221,3 +221,20 @@ pad_timer_add_ms            boot 0x0016aef0 30 instructions, not a function: ($s
 #                                           set the sign bit by hand). Falls through to the span's end,
 #                                           so the test's `jr $ra` sits where the poll's `b` went.
 #                                           The identical sequence at 0x0016ae68 does +0x334 (held ms)
+
+# ---------------------------------------------------------------------------------------------------
+# I2 — the analogue axes. The poll's axis pass is a span inside 0x0016ab10 (three copies of it: the
+# absent pad, the bad read, the good read); the arithmetic it dispatches to is a function of its own.
+pad_axis_curve              boot 0x0011d2e0 (raw in f12, full in f13, consumer in a0) -> writes the
+#                                           mapped axis to consumer+0x24: v = lo + (raw/full)*(hi-lo),
+#                                           then the dead zone — centre inside it, and each side
+#                                           stretched back to the full range. The consumer's floats are
+#                                           +0x24 value, +0x28 centre, +0x2c lo, +0x30 hi, +0x34
+#                                           dead_hi, +0x38 dead_lo. No clamp: raw is a report byte.
+pad_axis_dispatch           boot 0x00134f50 (raw, full, pad, axis) walks the axis's consumer list at
+#                                           pad+0x640+axis*0x18 and calls the curve on each
+pad_axis_read_one           boot 0x0011d3d0 the single-axis reader: its own scePadRead, the stick byte
+#                                           hardcoded per axis (0->6, 1->7, 2->4 inverted, 3->5), then
+#                                           the same arithmetic inline. Not an oracle candidate — it
+#                                           reads the pad through libpad
+pad_poll_axes_centre        boot 0x0016aa40 centre every axis and release every control (pad closed)

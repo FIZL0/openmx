@@ -45,6 +45,16 @@
 //! built at runtime when a pad is bound (an unbound second pad has it all zero), so it is not read-only
 //! data in the image; it is reproduced here as a constant, from the game's own RAM.
 //!
+//! # The sticks are not controls
+//!
+//! The four stick halves are none of the sixteen: the same poll walks six separate *axes* ([`Axis`]),
+//! each a report byte stored as a float and then mapped onto −1..1 through a dead zone
+//! ([`AxisRange`]). The dead zone is ±0.2 of the mapped range — a fifth of the travel either side of
+//! centre does nothing — and each segment outside it is stretched back out to the full range, so the
+//! rest of the stick is 1.25× steeper than the byte. There is no curve beyond those two straight
+//! segments and no clamp anywhere (a report byte cannot leave the range), and the arithmetic is one
+//! divide, one multiply and one add, in that order (I2).
+//!
 //! # Timers are integers, re-read every frame
 //!
 //! `held_ms += dt * 1000` is done in float and **stored back as an integer every frame**, so the
@@ -327,11 +337,17 @@ impl Report {
         self.0[index as usize]
     }
 
-    /// A stick axis byte, 0 to 3 being right X, right Y, left X, left Y. Kept because the report holds
-    /// it; the axes themselves — the dead zone, the curve and the sample history — are not this
-    /// module's, and nothing here reads them.
+    /// A stick axis byte, 0 to 3 being right X, right Y, left X, left Y — the report's own order, which
+    /// is not the pad's axis order ([`AXIS_MAP`] is that). The poll reads these bytes through the map
+    /// rather than through here.
     pub fn axis(&self, index: usize) -> u8 {
         self.0[4 + index]
+    }
+
+    /// Write one stick axis byte, in the report's own order — the other half of the port's seam with a
+    /// host pad, the way [`Report::from_buttons`] is for the buttons.
+    pub fn set_axis(&mut self, index: usize, byte: u8) {
+        self.0[4 + index] = byte;
     }
 }
 
@@ -531,6 +547,14 @@ pub struct Pad {
     pub connected: bool,
     /// The sixteen controls, in [`Control::ALL`] order.
     pub controls: [ControlState; CONTROLS],
+    /// Each axis's report byte as a float, exactly as the poll stores it: `127.0` for an axis with no
+    /// report byte bound to it, and for every axis of a pad that has gone away. In [`Axis::ALL`] order.
+    pub axis_raw: [F; AXES],
+    /// What the poll hands each axis's consumers, through [`AxisRange::STICK`] — the one range every
+    /// stick consumer in the game carries. The original stores this in each consumer rather than in the
+    /// pad, and hands every consumer of an axis the same number, so one per axis is what there is to
+    /// keep; see [`AxisRange`].
+    pub axis_value: [F; AXES],
 }
 
 impl Default for Pad {
@@ -549,6 +573,8 @@ impl Pad {
             index,
             connected: false,
             controls: [ControlState::default(); CONTROLS],
+            axis_raw: [AXIS_CENTRE_RAW; AXES],
+            axis_value: [F::ZERO; AXES],
         }
     }
 
@@ -575,6 +601,19 @@ impl Pad {
     /// How hard: 1.0 for a digital control, `(pressure + 1) / 256` for an analogue one.
     pub fn strength(&self, control: Control) -> F {
         self.control(control).strength
+    }
+
+    /// One axis, after the dead zone and the two segments: −1 to 1, 0 while the stick is inside the
+    /// dead zone. This is the number the original hands its consumers, for a consumer with the game's
+    /// own [`AxisRange::STICK`] range.
+    pub fn axis(&self, axis: Axis) -> F {
+        self.axis_value[axis.index()]
+    }
+
+    /// One axis's raw report byte as the poll stored it, before the inversion and before the range —
+    /// 0 to 255 as a float, 127.0 for an axis with nothing bound to it.
+    pub fn raw_axis(&self, axis: Axis) -> F {
+        self.axis_raw[axis.index()]
     }
 
     /// Everything held, back in the game's own bitmask.
@@ -609,18 +648,20 @@ impl Pad {
     /// Read one pad report into the sixteen controls, raising an event for every transition. The
     /// original's own frame, in the original's order:
     ///
-    /// 1. If the pad library says this pad is gone, clear every control's `held` and `strength` and
-    ///    stop. No events, and the timers are not touched.
+    /// 1. If the pad library says this pad is gone, centre all six axes and clear every control's
+    ///    `held` and `strength`, then stop. No events, and the timers are not touched.
     /// 2. Copy this frame's `held` flags aside and clear them all — so a failed read leaves everything
     ///    released.
     /// 3. Read the pad. A non-zero status byte (or a read that fails outright) stops the frame here,
-    ///    with every control released, **no events** and the timers untouched: a pad unplugged
-    ///    mid-press loses its release event, and its release timer then keeps counting from whatever
-    ///    it held before the press.
-    /// 4. Compute the button word once, then walk the sixteen controls in map order: an analogue
+    ///    with every control released, every axis handed out centred, **no events** and the timers
+    ///    untouched: a pad unplugged mid-press loses its release event, and its release timer then
+    ///    keeps counting from whatever it held before the press. The stored axis bytes are *not*
+    ///    touched on this path — only the value the consumers are handed is.
+    /// 4. Store all six axis bytes and hand them out ([`Pad::axis`]).
+    /// 5. Compute the button word once, then walk the sixteen controls in map order: an analogue
     ///    control is held when its pressure byte is above [`PRESSURE_THRESHOLD`], with strength
     ///    `(pressure + 1) / 256`; any other is held when its bit is in the word, with strength 1.0.
-    /// 5. Walk the sixteen again, comparing against the copies: unchanged, the matching timer takes
+    /// 6. Walk the sixteen again, comparing against the copies: unchanged, the matching timer takes
     ///    another `dt * 1000` and its old value is kept beside it; changed, the *other* timer pair is
     ///    zeroed and an event is queued.
     ///
@@ -632,6 +673,7 @@ impl Pad {
     /// the pad is worth asking anything else.
     pub fn poll(&mut self, dt: F, report: &Report, events: &mut EventQueue) -> bool {
         if !self.connected {
+            self.read_axes(None);
             for state in &mut self.controls {
                 state.strength = F::ZERO;
                 state.held = 0;
@@ -647,10 +689,12 @@ impl Pad {
         }
 
         if report.status() != 0 {
+            self.centre_axes();
             return false;
         }
 
         let buttons = report.buttons();
+        self.read_axes(Some(report));
         for (i, binding) in CONTROL_MAP.iter().enumerate() {
             let state = &mut self.controls[i];
             if binding.is_analogue() {
@@ -706,6 +750,41 @@ impl Pad {
         }
         true
     }
+
+    /// The poll's own axis pass: store each axis's report byte as a float — `127.0` where the map has
+    /// nothing bound, and for every axis when the pad is gone (`report` is `None`) — and hand each one
+    /// to its consumers, inverting [`AXIS_INVERTED`] on the way out.
+    ///
+    /// The byte goes to float through the *unsigned* conversion the original uses, which for a value a
+    /// report byte can hold is the plain one.
+    fn read_axes(&mut self, report: Option<&Report>) {
+        for i in 0..AXES {
+            self.axis_raw[i] = match report {
+                Some(r) if AXIS_MAP[i] != 0 => F::from(r.0[AXIS_MAP[i] as usize] as i32),
+                _ => AXIS_CENTRE_RAW,
+            };
+            let out = if i == AXIS_INVERTED {
+                AXIS_FULL - self.axis_raw[i]
+            } else {
+                self.axis_raw[i]
+            };
+            self.axis_value[i] = AxisRange::STICK.apply(out, AXIS_FULL);
+        }
+    }
+
+    /// The axis pass of the branch the original takes when the read fails or the status byte is bad: it
+    /// hands the consumers a centred axis — the constants its own code carries, 127.0 and the inverted
+    /// axis's 128.0 — and leaves the stored bytes exactly as they were, stale.
+    fn centre_axes(&mut self) {
+        for i in 0..AXES {
+            let raw = if i == AXIS_INVERTED {
+                AXIS_CENTRE_RAW_INVERTED
+            } else {
+                AXIS_CENTRE_RAW
+            };
+            self.axis_value[i] = AxisRange::STICK.apply(raw, AXIS_FULL);
+        }
+    }
 }
 
 /// `timer + dt * 1000`, as the original does it: the stored integer is read back as an *unsigned*
@@ -725,6 +804,163 @@ pub fn add_ms(timer: u32, dt_ms: F) -> u32 {
         sum.to_i32() as u32
     } else {
         ((sum - BIAS).to_i32() as u32) | 0x8000_0000
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The analogue axes: the sticks
+// ---------------------------------------------------------------------------------------------------
+
+/// How many axes a pad keeps. Six, not four: the game's pad class has six axis slots and this game
+/// binds four of them — the two stick halves of each stick — leaving two with no report byte at all.
+pub const AXES: usize = 6;
+
+/// Which report byte each axis takes its value from, `0` meaning nothing is bound to it. The game fills
+/// this in when it binds a pad, so it is RAM rather than a table in the image; this is pad 0's, read
+/// out of a RAM image, and it agrees with the mapping the game's own single-axis reader has compiled in
+/// (0 → 6, 1 → 7, 2 → 4, 3 → 5 — the same four bytes, with the right stick's X inverted the same way).
+pub const AXIS_MAP: [u8; AXES] = [6, 7, 4, 0, 0, 5];
+
+/// The one axis the poll hands out **inverted**: it dispatches `255 - raw` for it and `raw` for the
+/// other five. The original's other axis reader inverts the same index, so the inversion belongs to the
+/// axis and not to this one call site.
+pub const AXIS_INVERTED: usize = 2;
+
+/// The divisor the poll passes with every axis: the full range of a report byte, as a float.
+pub const AXIS_FULL: F = F(255.0);
+
+/// A centred axis byte as a float. The poll stores this for an axis with no report byte bound, and for
+/// every axis of a pad the pad library says is gone.
+pub const AXIS_CENTRE_RAW: F = F(127.0);
+
+/// A centred *inverted* axis, which is `255 - 127` and is the constant the game's own code carries for
+/// the one branch that centres the axes without storing them (a read that fails or a bad status byte).
+pub const AXIS_CENTRE_RAW_INVERTED: F = F(128.0);
+
+/// The six axes, in the order the pad keeps them, named for what this game binds each to.
+///
+/// The two unbound slots are kept because the poll walks all six every frame — it stores a centred
+/// 127.0 for them and hands that to anything registered on them — so dropping them would change the
+/// loop rather than tidy it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum Axis {
+    LeftX = 0,
+    LeftY,
+    /// The right stick's X, and the one axis the poll inverts.
+    RightX,
+    /// No report byte: permanently centred.
+    Unbound3,
+    /// No report byte: permanently centred.
+    Unbound4,
+    RightY,
+}
+
+/// The names, in axis order, so a dump reads as words rather than indices.
+const AXIS_NAMES: [&str; AXES] = ["left_x", "left_y", "right_x", "unbound3", "unbound4", "right_y"];
+
+impl Axis {
+    /// Every axis, in the pad's own order.
+    pub const ALL: [Axis; AXES] = {
+        use Axis::*;
+        [LeftX, LeftY, RightX, Unbound3, Unbound4, RightY]
+    };
+
+    /// Its index in the pad's axis slots.
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The axis at an index, or `None` past the sixth.
+    pub const fn from_index(i: usize) -> Option<Axis> {
+        if i < AXES {
+            Some(Axis::ALL[i])
+        } else {
+            None
+        }
+    }
+
+    /// Which report byte it reads, or `None` if nothing is bound to it.
+    pub const fn report_byte(self) -> Option<u8> {
+        match AXIS_MAP[self as usize] {
+            0 => None,
+            b => Some(b),
+        }
+    }
+
+    /// Whether the poll hands this axis out as `255 - raw`.
+    pub const fn is_inverted(self) -> bool {
+        self as usize == AXIS_INVERTED
+    }
+
+    /// The name the project calls it, for a dump or a log line.
+    pub const fn name(self) -> &'static str {
+        AXIS_NAMES[self as usize]
+    }
+}
+
+/// How one consumer turns an axis byte into a number it can use: a linear map onto `lo..hi`, a dead
+/// zone around the centre, and the two straight segments either side of it.
+///
+/// In the original these five floats live in the *consumer*, not in the pad: a consumer registers
+/// itself on one of the pad's six axes, the poll walks that axis's list every frame and writes the
+/// mapped value into each entry (at the consumer's own `+0x24`). Every stick consumer in this game
+/// carries the same five numbers — [`AxisRange::STICK`], measured in a RAM image across every
+/// registered entry of both pads — so the port keeps the one value they would all have been handed,
+/// in [`Pad::axis`], and this type for anything that wants a range of its own.
+///
+/// There is no clamp anywhere in it, and none is needed: the input is a report byte, so `raw / full` is
+/// within `0..=1` and the result is within `lo..=hi` by construction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AxisRange {
+    /// What comes out while the axis is inside the dead zone, and the hinge both segments pass through.
+    pub centre: F,
+    /// What comes out at `raw == 0`.
+    pub lo: F,
+    /// What comes out at `raw == full`.
+    pub hi: F,
+    /// The top of the dead zone, in output units — not in bytes.
+    pub dead_hi: F,
+    /// The bottom of the dead zone, in output units.
+    pub dead_lo: F,
+}
+
+impl AxisRange {
+    /// What every stick consumer in the game carries: the byte mapped onto −1..1, centred at 0, with a
+    /// dead zone of ±0.2 and each segment stretched back out to the full range.
+    ///
+    /// A fifth of the travel either side of centre is dead, so the first fifth of a stick's movement
+    /// does nothing at all and the rest is 1.25× steeper than the raw byte — which is why an
+    /// approximated curve here changes every movement in the game rather than just the small ones.
+    pub const STICK: AxisRange = AxisRange {
+        centre: F(0.0),
+        lo: F(-1.0),
+        hi: F(1.0),
+        dead_hi: F(0.2),
+        dead_lo: F(-0.2),
+    };
+
+    /// One axis byte through the dead zone and the two segments, in the original's own arithmetic:
+    /// one divide, then the linear map, then whichever segment the result lands in.
+    ///
+    /// `full` is the divisor the caller passes — always 255.0 from the pad poll, and the reason it is
+    /// an argument rather than a constant is that it is one in the original too.
+    ///
+    /// The comparisons are the original's, including which way each boundary falls: at exactly
+    /// `dead_hi` it takes the upper segment and at exactly `dead_lo` the lower one, and both of those
+    /// come out at `centre` anyway, so the boundaries are only visible in the arithmetic, never in the
+    /// result.
+    pub fn apply(&self, raw: F, full: F) -> F {
+        let v = self.lo + (raw / full) * (self.hi - self.lo);
+        if v < self.dead_hi {
+            if v <= self.dead_lo {
+                (v - self.dead_lo) * ((self.centre - self.lo) / (self.dead_lo - self.lo)) + self.centre
+            } else {
+                self.centre
+            }
+        } else {
+            (v - self.dead_hi) * ((self.hi - self.centre) / (self.hi - self.dead_hi)) + self.centre
+        }
     }
 }
 
@@ -854,6 +1090,16 @@ impl State for Pad {
         w.u32("index", self.index);
         w.bool("connected", self.connected);
         w.list("controls", &self.controls);
+        w.group("axis_raw", |w| {
+            for (axis, raw) in Axis::ALL.iter().zip(&self.axis_raw) {
+                w.f(axis.name(), *raw);
+            }
+        });
+        w.group("axis", |w| {
+            for (axis, v) in Axis::ALL.iter().zip(&self.axis_value) {
+                w.f(axis.name(), *v);
+            }
+        });
     }
 }
 
