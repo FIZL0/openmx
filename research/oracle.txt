@@ -209,3 +209,64 @@ keyframe_index_stride2      boot 0x001361e0 (t in f12, table, n) -> how many key
 #                                           +0, strictly increasing. Returns 0 below the first key and
 #                                           n at or past the last. 0x00137550 is the same search over
 #                                           0x28-byte entries
+
+# ---------------------------------------------------------------------------------------------------
+# F4 — the transcendentals the disc actually links. The float set is fdlibm's `float` flavour (Sun's
+# freely-distributable libm, as shipped in the SDK's libm.a), compiled with every decimal constant
+# rounded *toward zero*: S1 is 0xbe2aaaaa, one ulp below fdlibm's own 0xbe2aaaab, and so on through
+# every polynomial. There is **no atan2f and no expf/logf in the image at all** — see the journal entry
+# research/journal/2026-10-15-f4-libm for the full inventory and for what the game uses instead.
+# `sqrtf` is not a function: all 305 square roots are an inlined `sqrt.s`.
+# sinf, cosf, atanf, powf, fmodf and sqrtf are proved bit-exact against crates/ps2-float/src/libm.rs
+# over every exponent an f32 has: cargo test -p ps2-oracle --test libm (52k inputs).
+#
+# The float set. One argument in f12 (two for powf/fmodf: f12, f13), result in f0.
+sinf                        boot 0x0040aac0 fdlibm sinf: |x|<pi/4 -> kernel_sinf, else rem_pio2f + the
+#                                           kernel the quadrant picks. Only 3 call sites — the game does
+#                                           its angles with its own helpers, not with libm
+cosf                        boot 0x0040a820 fdlibm cosf, the same shape
+powf                        boot 0x00406d20 fdlibm __ieee754_powf. 0x0040abf0 is the thunk the game calls
+fmodf                       boot 0x00406b50 fdlibm __ieee754_fmodf: exact, integer shift-and-subtract,
+#                                           no rounding anywhere. Thunk at 0x0040abd8, 15 call sites
+sqrtf                       boot 0x0011b880 the game's own one-instruction sqrtf: `sqrt.s $f0,$f12` and
+#                                           nothing else. Every other square root in the image (305 of
+#                                           them) is the same instruction inlined, so this *is* the
+#                                           game's sqrtf, and it rounds to nearest like all EE divides
+atanf                       boot 0x0040a478 fdlibm atanf, aT[0..10] from the table at 0x0044aa5c. One
+#                                           call site. No atan2f to pair it with
+#
+# The float internals, exposed because a disagreement in sinf is always in one of these.
+kernel_sinf                 boot 0x00409900 (x, y, iy) -> sin(x+y) for |x| <= pi/4; iy!=0 means y matters
+kernel_cosf                 boot 0x00408f48 (x, y) -> cos(x+y), with the 1-z/2 split above |x|>0.3
+rem_pio2f                   boot 0x00407500 (x, &y[2]) -> n, y0+y1 = x - n*pi/2. Exact to |x| <= 2^7*pi/2
+kernel_rem_pio2f            boot 0x00409098 the big fixed-point reduction rem_pio2f falls back to:
+#                                           (x[], &y[2], e0, nx, prec, two_over_pi). rem_pio2f passes
+#                                           prec=2 and the table at 0x0044a420 (198 ints, the 8-bit
+#                                           digits of 2/pi). init_jk = {4,7,9} at 0x0044a9b8, and the
+#                                           eleven pieces of pi/2 at 0x0044a9c8 (six of them one ulp
+#                                           below fdlibm's source, the toward-zero rounding again)
+floorf                      boot 0x0040a920 fdlibm s_floorf, called by kernel_rem_pio2f
+scalbnf                     boot 0x0040a9f8 fdlibm s_scalbnf, but with no gradual-underflow path: below
+#                                           the smallest normal it saturates to +-0 through tiny*tiny,
+#                                           because this FPU has no denormals to return
+copysignf                   boot 0x0040a7e0 sign bit of y onto x
+fabsf                       boot 0x0040a8f8 and.s with 0x7fffffff, out of line
+#
+# powf's tables: bp[2] = {1.0, 1.5} at 0x0044a390, dp_h[2] at 0x0044a3a0, dp_l[2] at 0x0044a3a8, and
+# 0x0044a41c holds 0x7f7fffff, which the |y| > 2^27 shortcut returns where fdlibm's source returns
+# huge*huge. Its over/underflow limits are the EE's: it gives up at 2^-126 and 2^129, where fdlibm's
+# source says 2^-150 and 2^128. Everything in powf that tests for zero tests `< 0x00800000`, i.e. it
+# calls a denormal zero; fmodf does the same with its divisor. That is the SDK's doing, not fdlibm's.
+#
+# The *double* set, for the record: the game calls these on float data through the compiler's implicit
+# promotion, and the EE has no double FPU, so each one runs on libgcc-style soft float (correctly
+# rounded IEEE754, round-to-nearest) — which means a Rust `f64` port of fdlibm matches them exactly.
+# Not ported by F4; see its journal entry.
+sin_double                  boot 0x00409a50 fdlibm sin, 2 call sites
+cos_double                  boot 0x0040a298 fdlibm cos, 3 call sites
+tan_double                  boot 0x0040a3d0 fdlibm tan, 2 call sites
+acos_double                 boot 0x00405548 fdlibm __ieee754_acos; thunk 0x0040aba8, 3 call sites
+log_double                  boot 0x00405c70 fdlibm __ieee754_log; thunk 0x0040abc0, 10 call sites
+sqrt_double                 boot 0x00406830 fdlibm __ieee754_sqrt, called by acos_double
+ldexp_double                boot 0x00409e70 scalbn + the EDOM check; 27 call sites, the most used of all
+rem_pio2_double             boot 0x00406278 the double argument reduction behind sin/cos/tan

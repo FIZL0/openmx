@@ -38,7 +38,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 ### Phase 4 — the arithmetic, before any ported math
 
 - [ ] **F3** VU0 macro mode: the ops the game actually uses (`vmul`, `vadd`, `vmadd`, `vmula`, `vdiv`, `vsqrt`, `vrsqrt`, the clipping and min/max ones), with VU0's own rounding and its flag behaviour. Take the list from the disassembly rather than implementing the whole ISA → crates/ps2-float/src/vu.rs | t: crates/ps2-float/tests/vu.rs | j: f3-vu0
-- [ ] **F4** (after O1) The game's own transcendentals: whatever `sinf`, `cosf`, `atan2f`, `sqrtf` and `powf` the disc links. They are rarely the standard library's, and a port that calls the host's `sin` will differ in the last bits of every angle. Port the disc's implementations and check them against the oracle over the full input range → crates/ps2-float/src/libm.rs (new) · research/oracle.txt | t: crates/ps2-float/tests/libm.rs | j: f4-libm
 - [ ] **F5** (after F3) The matrix and quaternion helpers the game uses for bones and cameras, built on F1–F3 with the same op order as the original (the order changes the last bits) → crates/game-sim/src/math.rs | t: crates/game-sim/tests/math.rs | j: f5-matrix
 
 ### Phase 5 — the first proven function, and the harness
