@@ -32,7 +32,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **D6** The freeride area on the disc: one freeride track from the `.res` list R7 names, read with D5s archive reader — the ground geometry, the collision shapes the sim actually tests against, the spawn point, and which `bike\*.phy` parameter set freeride defaults to. S4 cannot be proved against anything until the real collision data parses → crates/game-sim/src/track.rs | t: crates/game-sim/tests/track.rs | j: d6-freeride-track
 ### Phase 2 — a decompilation you can read
 
-- [ ] **R6** (after C3) The actor/entity table: where live objects are kept in RAM (base address, stride, how many), and the first few fields of one — position, velocity, state, type. Dump the same table across a handful of frames from a save state so the stride and the fields are not guesses → research/oracle.txt · docs/CONTEXT.md | t: a dumped table from a state parses with the documented stride | j: r6-actor-table
 
 ### Phase 3 — the frame, and your first capture
 
