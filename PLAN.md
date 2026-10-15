@@ -138,6 +138,11 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
     clock, the thirty-entry `dt` average with its 30 fps clamp, the pad latch, the markers around the
     simulation, and the three different ways a frame can not simulate. `Engine::step` is the top-level
     step everything else hangs off. Proved against `engine_tick` itself in `tests/tick.rs` (S1).
+  - `air.rs` — the bike in the air: where the sim decides the wheels left the ground, the hang time and
+    the crossup angle, the preload and the backflip taken off a lip, what the stick still commands while
+    airborne, and the test a landing has to pass for the rider to stay on. Carries the game's own
+    double-precision arc cosine and the startup table built from it. Proved against the original over
+    20,000 generated substeps in `tests/air.rs` (S10).
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the

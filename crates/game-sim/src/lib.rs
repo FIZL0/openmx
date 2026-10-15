@@ -177,6 +177,11 @@ pub mod physics {
     }
 }
 
+/// The bike in the air: where the sim decides the wheels have left the ground, what the stick may still
+/// do up there, the preload and backflip carried off the lip, and the test a landing has to pass for the
+/// rider to stay on. Half of how riding around feels is in here.
+pub mod air;
+
 /// The disc's two archive formats: the one container holding the game, and the compressed containers
 /// holding each track, bike and menu. Pure parsing over byte slices — see the module's own docs for why
 /// it hands back offsets instead of reading files.
