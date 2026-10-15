@@ -168,6 +168,11 @@ added beside them:
     chord beside them, which transitions share a frame, and the fact that a down rider's physics does
     not step at all. Proved against the original machine, its entry and its put-back in
     `tests/state.rs` (S5).
+  - `camera.rs` — the camera for normal play: the 160-byte preset record the disc ships one of per
+    camera, the target point and the look-ahead it leads the rider by, the eight first-order lags that
+    make it follow instead of snap, and the limits on its yaw, pitch, distance and field of view.
+    Presentation, not simulation — it reads the rider and writes a view, and touches neither the RNG
+    nor the clock. Proved against the original in `tests/camera.rs` (S7).
 - `game-render` — the drawing side: the disc's own models and textures, on screen. Host `f32`, no
   bit-exactness, nothing the simulation depends on.
   - `disc.rs` ISO 9660 → `MX.PSR` → a `.res` member, read from the user's disc at runtime ·

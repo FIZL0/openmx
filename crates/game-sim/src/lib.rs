@@ -193,6 +193,12 @@ pub mod air;
 /// it hands back offsets instead of reading files.
 pub mod archive;
 
+/// The camera for normal play: the preset record the disc ships one of per camera, what the camera
+/// points at, the eight first-order lags that make it follow rather than snap, and the limits on its
+/// angles, its distance and its field of view. Presentation, not simulation — the module's own docs
+/// say how that was checked, and what it costs.
+pub mod camera;
+
 /// Collision against the world: the shape test the original sweeps a bundle of probe segments
 /// through a collision mesh's tree with, how a hit resolves into a push-out, and the limits the
 /// sweep allows itself. The question every wheel, bale and rider asks once a substep.

@@ -348,8 +348,10 @@ fabsf                       boot 0x0040a8f8 and.s with 0x7fffffff, out of line
 # promotion, and the EE has no double FPU, so each one runs on libgcc-style soft float (correctly
 # rounded IEEE754, round-to-nearest) — which means a Rust `f64` port of fdlibm matches them exactly.
 # Not ported by F4; see its journal entry.
-sin_double                  boot 0x00409a50 fdlibm sin, 2 call sites
-cos_double                  boot 0x0040a298 fdlibm cos, 3 call sites
+cos_double                  boot 0x00409a50 fdlibm cos, 3 call sites. Named the other way round until
+#                                           S7 called both with a zero: this one answers 1.0
+sin_double                  boot 0x0040a298 fdlibm sin, 2 call sites, and the one the curve table
+#                                           builder calls second, for each entry's second word
 tan_double                  boot 0x0040a3d0 fdlibm tan, 2 call sites
 acos_double                 boot 0x00405548 fdlibm __ieee754_acos; thunk 0x0040aba8, 3 call sites
 log_double                  boot 0x00405c70 fdlibm __ieee754_log; thunk 0x0040abc0, 10 call sites
@@ -953,3 +955,99 @@ opponent_difficulty_widget  boot 0x002ccd10 the front-end screen loader that bin
 # With the state loaded and nothing pressed, rand_state still advances 2..19+ draws per simulation
 # tick (median ~8) — the opponents and the effects. A port without them cannot match the LCG past
 # tick 0, which is where the tick-exact window has to end: at the first wreck or contact.
+
+# ---------------------------------------------------------------------------------------------------
+# S7 — the camera for normal play. The port is crates/game-sim/src/camera.rs and the proofs are
+# crates/game-sim/tests/camera.rs. How each one was found is in
+# research/journal/2026-10-15-s7-s7-camera.
+#
+# One C++ class (its __FILE__ is "SimpleFollowCam.cpp", 0x0042d350), reached through the secondary-base
+# vtable at 0x00452060. The object's fields: +0x7c viewport (its +0x19c is the collision-derived
+# nearest distance), +0x8c target actor (+0x10 body point, +0x30 forward row, +0x40 second basis row,
+# +0x50 velocity, +0x84 lean), +0xa0..0xac the offset copy, +0xd0 distance, +0xd4 yaw, +0xd8 pitch,
+# +0xdc base fov, +0xe0/+0xe4 camera/look swing, +0xe8 collision tester, +0xf0..+0x104 the six vector
+# filter *pointers*, +0x114/+0x118 the fov and spare filter pointers, +0x11c..+0x128 the four user
+# offsets (zoom, yaw, pitch, fov), +0x13c/+0x140/+0x144 the three reverse ramps, +0x148 reverse speed
+# threshold, +0x14c speed reference (ctor: 1.0), +0x150 look-at height bias (ctor: 3.0), +0x158/+0x15c
+# current/previous preset, +0x160 preset count, +0x164 preset array, +0x168 snap, +0x16c pitch-down
+# lock, +0x170 collision-hit flag, +0x174 viewport index. A filter is 5 floats: value, tau, alpha,
+# +FLT_MAX, -FLT_MAX.
+camera_update               boot 0x001fa4c0 (dt in f12, cam) the whole frame, vtable slot 0x98. Writes
+#                                           only its own fields and the viewport; calls no rand and
+#                                           does not touch the frame clock, which is why the port is
+#                                           allowed to be presentation
+camera_get_fov              boot 0x001fb0b0 (cam) -> f0: base + user fov, clamped to the preset's
+#                                           MinFOV/MaxFOV with the user offset walked back to the stop
+camera_forward_reverse      boot 0x001fb120 (speed in f12, cam, heading, vel) -> 0/1: acos of
+#                                           normalize(vel) . heading through the shared table at
+#                                           acos_table_ptr; past a quarter turn and above cam+0x148 it
+#                                           ramps +0x13c/+0x140/+0x144 up to the preset's three
+camera_aim                  boot 0x001fb440 (swing in f12, cam): yaw = AngleY - user yaw - swing*
+#                                           CameraSwing through fmodf, pitch = user + AngleX - reverse
+#                                           ramp clamped to +-1.4835324 with the user offset rewritten
+camera_look_at              boot 0x001fb600 (speed, fov ratio, swing in f12..f14, out, cam, target
+#                                           point, heading, &vel, reverse) the look-ahead point
+camera_position             boot 0x001fba30 (out, cam, dir, target point, heading, &look at, sideways,
+#                                           &vel): out = target point + dir * cam+0xd0. Everything
+#                                           else in it — a yaw-driven swing over two 3pi/8 arcs — is
+#                                           computed into stack slots nothing reads
+camera_filter               boot 0x001fbc20 (dt in f12, cam, position, look at, &fov, &spare, target
+#                                           point): the eight one-pole lags, or the snap that loads
+#                                           them instead when the preset does not filter
+camera_set_preset           boot 0x001fabb0 (cam, index): copies the preset into the object, sets the
+#                                           six taus, arms the snap unfiltered -> filtered, and clears
+#                                           the four user offsets unless leaving a look-back preset
+camera_nudge                boot 0x001fc630 (stick x, stick y in f14/f15, cam, control table, pad): the
+#                                           right stick. Reads analogue controls 0x1e and 0x1f through
+#                                           pad_control_index; with either held the stick zooms or
+#                                           widens, otherwise it swings yaw and pitch
+camera_load_presets         boot 0x001fbf50 (cam, file): fills the 0xa0-byte preset records from the
+#                                           camera ini. Section [NumberOfPresets], then Preset%d (or
+#                                           Preset%dh/v/q by viewport index, or Preset%dw/x/z when the
+#                                           word at 0x004211a0 is 3). Keys, in record order: +0x00
+#                                           LookFilters, +0x10 PosFilters, +0x20 OffsetFromBodyPoint,
+#                                           +0x30 Name[32], +0x50 AngleY and +0x54 AngleX (degrees,
+#                                           times 0.01745329), +0x58 FollowingDistance, +0x5c FOV,
+#                                           +0x60 ReverseAngleXOffset, +0x64 ReverseFollowingOffset,
+#                                           +0x68 ReverseLookAheadOffset, +0x6c
+#                                           ForwardReverseSwitchSpeed, +0x70 CycleThruThisPreset,
+#                                           +0x74 FilterThisPreset, +0x78 LookAheadDistance, +0x7c
+#                                           IsLookBackCam, +0x80 CameraSwing, +0x84 LookSwing, +0x88
+#                                           MinFollowingDistance, +0x8c MaxFollowingDistance, +0x90
+#                                           MinFOV, +0x94 MaxFOV, +0x98 LowSpeedAngleXVelCutoff, +0x9c
+#                                           LowSpeedAngleXScaleFactor. A missing key keeps the zero
+camera_set_look_filters     boot 0x001fad70 (cam, values or 0, taus or 0) for +0xf0/+0xf4/+0xf8:
+#                                           FLT_MAX in a lane means leave that one alone; a tau also
+#                                           resets alpha to 1.0
+camera_set_pos_filters      boot 0x001faf00 the same for +0xfc/+0x100/+0x104
+camera_frame_noop           boot 0x001fb090 vtable slot 0x108 in this class: `return 1`, no transform
+camera_ground_probe_zero    boot 0x001fb0a0 vtable slot 0x10c in this class: `return 0.0f`, so the
+#                                           look-at's ground lift is always zero
+camera_vtable               boot 0x00452060 the secondary-base vtable: +0x98 update, +0x100/+0x104 the
+#                                           filter setters, +0x108 frame, +0x10c ground probe, +0x110
+#                                           fov, +0x114 forward/reverse, +0x118 aim, +0x11c look at,
+#                                           +0x120 position, +0x124 filter, +0x128 load presets,
+#                                           +0x12c nudge
+rotate_about_axis           boot 0x001344e0 (angle in f12, unit axis, v, out): Rodrigues through the
+#                                           6000-entry curve table — wrap into +-pi twice, index by
+#                                           (angle+pi)*curve_table_invstep, correct the entry with the
+#                                           leftover angle's derivative, then d*axis + cos*perp +
+#                                           sin*cross(axis, perp). out.w = 1.0
+pad_control_index           boot 0x0011e2d0 (pad, control, 2, 10, ...) -> index into a 0x18-stride
+#                                           control table; the value is at +4 of the entry
+# The curve table's builder reaches the SDK's double-precision cos and sin — already named above as
+# cos_double and sin_double — through float_to_double (0x00417b48) and double_to_float (0x00418700).
+camera_park_nudges          boot 0x001fa440 (cam) vtable slot 0xf0: copies +0x11c..+0x128, the player's
+#                                           four nudges, into the shadow at +0x12c..+0x138
+camera_unpark_nudges        boot 0x001fa470 (cam) vtable slot 0xf4: copies them back
+camera_clear_nudges         boot 0x001fa4a0 (cam) vtable slot 0xf8: zeroes all four. Nothing in the
+#                                           camera calls this one
+viewport_set_eye            boot 0x00112ac0 (viewport, &position or 0, &dir or 0, &up or 0, &index or
+#                                           0, &fov or 0): the viewport's setter the camera's last
+#                                           three lines go through. Writes +0x140 position, +0x150
+#                                           and +0x160 the two normalised axes, +0x174 index, +0x170
+#                                           fov when it is not zero, all only while +0x208 and +0x209
+#                                           are both -1
+camera_base_update          boot 0x00113ec0 (dt in f12, cam): the base class's own update, which the
+#                                           camera's last line calls. Walks the list at cam+0x80 and
+#                                           then 0x00133500; nothing of it is the camera
