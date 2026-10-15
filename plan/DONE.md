@@ -55,3 +55,4 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 7 — one subsystem, end to end
 - [x] **S11** Tricks: the trick table — which stick-and-button gesture starts which trick, the frame windows that decide whether it counts, the rotation each one applies, and what makes a landing a crash instead. Tricks are the point of freeroam, so they are ported and proved like the rest of the simulation, not approximated by eye → crates/game-sim/src/trick.rs | t: crates/game-sim/tests/trick.rs | j: s11-tricks
+- [x] **I3** (after I1) Input recording and playback in the port: a fixture of pad frames drives a run, so a human-played sequence from the real game can be replayed against the port (this is what A2's fixtures are made of) → crates/game-sim/src/replay.rs | t: crates/game-sim/tests/replay.rs | j: i3-input-fixtures

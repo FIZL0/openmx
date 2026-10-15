@@ -42,7 +42,6 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 
 ### Phase 6 — input, the game's own way
 
-- [ ] **I3** (after I1) Input recording and playback in the port: a fixture of pad frames drives a run, so a human-played sequence from the real game can be replayed against the port (this is what A2's fixtures are made of) → crates/game-sim/src/replay.rs | t: crates/game-sim/tests/replay.rs | j: i3-input-fixtures
 
 ### Phase 7 — one subsystem, end to end
 

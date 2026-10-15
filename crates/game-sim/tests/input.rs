@@ -818,7 +818,13 @@ fn a_recording_of_the_real_game_replays_row_for_row() {
             Ok(c) => c,
             Err(e) => panic!("{}: {e}", path.display()),
         };
-        if !capture.columns.iter().any(|c| c == "ctl0.held") {
+        // Every column this replay reads, not just the first: a capture of a spec that watches the
+        // controls' `held` alone — `watch/acceptance.toml`, whose business is the input of a run and
+        // not the input layer — has nothing to say about the timers and is not this test's evidence.
+        if !["held", "value", "rel_ms", "held_ms", "prev_rel_ms", "prev_held_ms"]
+            .iter()
+            .all(|f| capture.columns.iter().any(|c| c == &format!("ctl0.{f}")))
+        {
             continue; // some other task's capture, watching something else
         }
         replay(&path, &capture);
