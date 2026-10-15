@@ -123,6 +123,9 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
     game's own bitmask and kept as sixteen controls a pad — held, strength, the press and release
     timers — plus the one-frame event queue the front end reacts to. The original keeps no "pressed
     this frame" mask, so the edge is the event and "held with the timer at 0" (I1).
+  - `replay.rs` — the replay harness: a fixture of inputs and expectations replayed tick by tick (A2),
+    plus the pad tape — a recorded session as the report bytes and measured `dt` of each frame, which
+    `Playback` plays back through the input layer so a human-played sequence drives the port (I3).
   - `rng.rs` — the C library's 64-bit LCG the whole game calls, plus the random float and the uniform
     list index its call sites wrap it in. Proved bit-exact in `tests/rng.rs` (R5).
   - `track.rs` — one track as the disc stores it: the `.scn` scene (spawn, terrain layout, every model and

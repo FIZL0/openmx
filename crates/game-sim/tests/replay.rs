@@ -20,9 +20,14 @@
 //! 6. **A `./kit record` CSV reads as watches**, with its sparse rows, its empty cells (which mean
 //!    "not sampled", never zero) and its frame counter mapped to ticks.
 //! 7. **An off-by-one in frame alignment is recognisable**: it fails at tick 1, not at tick 400.
+//! 8. **A recorded pad sequence plays back as the pad it was.** A tape carries the report bytes and
+//!    the measured `dt` of each frame rather than a button mask, so the port's own poll derives the
+//!    controls, their strengths and the press timers from it — and a capture of real play becomes the
+//!    frames the game read, in the order it read them, through the stateful input layer.
 //!
-//! Plus the two tests that hook into the private side: every fixture file in `context/fixtures/` is
-//! replayed, and every capture in `context/capture/` is parsed. Those directories hold data read out
+//! Plus the three tests that hook into the private side: every fixture file in `context/fixtures/` is
+//! replayed, every capture in `context/capture/` is parsed, and every capture that carries the pad
+//! columns is played back through the port and compared against the controls the game recorded. Those directories hold data read out
 //! of the game, so they are never committed — the tests say what they found and pass when there is
 //! nothing there, which is the only honest thing a test can do about a file it is not allowed to ship.
 //! Run the long ones with:
@@ -34,7 +39,10 @@
 use std::path::PathBuf;
 
 use game_sim::hash::Leaf;
-use game_sim::replay::{self, Capture, Fixture, Reason, Sample, Value, Watch};
+use game_sim::input::{Control, Report, CONTROL_MAP, CONTROLS as PORT_CONTROLS};
+use game_sim::replay::{
+    self, Capture, Fixture, PadFrame, PadTape, Playback, Reason, Sample, Value, Watch,
+};
 use game_sim::{Input, Sim};
 use ps2_float::{F, Vf};
 
@@ -710,6 +718,44 @@ const CONTROL_MASK: [u16; CONTROLS] = [
     0x8000, // 15 left
 ];
 
+/// The other half of the game's own control map: which report byte each control's **pressure** is in,
+/// and `None` for the four a DualShock 2 reports no pressure for.
+///
+/// It matters to a recording because the game reads those twelve controls from the pressure byte and
+/// never from the bit (I1 measured that; `the_synthetic_capture_is_the_map_the_port_measured` below
+/// checks this table against the port's own). A synthetic capture therefore has to write the pressures
+/// as well as the word, or it describes a frame the game would have read as nothing held.
+const CONTROL_PRESSURE: [Option<usize>; CONTROLS] = [
+    Some(12), // 0  triangle
+    Some(13), // 1  circle
+    Some(14), // 2  cross
+    Some(15), // 3  square
+    Some(16), // 4  L1
+    Some(17), // 5  R1
+    Some(18), // 6  L2
+    Some(19), // 7  R2
+    None,     // 8  select
+    None,     // 9  start
+    None,     // 10 R3
+    None,     // 11 L3
+    Some(10), // 12 up
+    Some(8),  // 13 right
+    Some(11), // 14 down
+    Some(9),  // 15 left
+];
+
+/// A set of controls as the port's own bitmask: the wire bits those controls sit on.
+///
+/// The two mask spaces of this file, and the one thing to keep straight in it. A capture's `ctlN.held`
+/// columns are indexed by **control** (0 is triangle, 6 is L2); [`Input::buttons`] and everything in
+/// `game_sim::input` is the game's own **bitmask** (triangle is 0x0010, L2 is 0x0001). Before I1 landed
+/// its mapping the fixtures here carried the former, which would have pressed the wrong buttons the
+/// first time one was replayed through the input layer; they carry the latter now, and this is the
+/// conversion.
+fn wire_of(controls: u16) -> u16 {
+    (0..CONTROLS).filter(|n| controls & (1 << n) != 0).fold(0, |w, n| w | CONTROL_MASK[n])
+}
+
 fn column(cap: &Capture, name: &str) -> Result<usize, String> {
     cap.columns
         .iter()
@@ -736,18 +782,24 @@ fn cell<'a>(cap: &'a Capture, row: usize, at: usize) -> &'a str {
 /// or missing a frame the recorder dropped as torn, is not an acceptance recording. This is what turns
 /// that from a silent desync into a sentence.
 fn ticks_of(cap: &Capture) -> Result<Vec<u64>, String> {
-    let at = column(cap, "frame_counter")?;
+    // Either name the specs give that one word: `frame_counter` in `watch/acceptance.toml`,
+    // `engine_frame` in `watch/input.toml`. Both are app+0x374, and a reader that insisted on one of
+    // them would refuse half the recordings in the project.
+    let name = ["frame_counter", "engine_frame"]
+        .into_iter()
+        .find(|n| column(cap, n).is_ok())
+        .ok_or_else(|| column(cap, "frame_counter").unwrap_err())?;
+    let at = column(cap, name)?;
     let mut counters = Vec::with_capacity(cap.rows.len());
     for row in 0..cap.rows.len() {
         let text = cell(cap, row, at);
-        counters.push(text.parse::<u64>().map_err(|_| {
-            format!("row {row}: frame_counter '{text}' is not a number")
-        })?);
+        counters
+            .push(text.parse::<u64>().map_err(|_| format!("row {row}: {name} '{text}' is not a number"))?);
     }
     for (row, pair) in counters.windows(2).enumerate() {
         if pair[1] != pair[0] + 1 {
             return Err(format!(
-                "frame_counter {} follows {} (row {}): an acceptance recording needs every tick's \
+                "{name} {} follows {} (row {}): an acceptance recording needs every tick's \
                  input, so it must be recorded with every = 1 and no skipped rows",
                 pair[1],
                 pair[0],
@@ -826,30 +878,6 @@ fn half(cap: &Capture, row: usize, at: usize) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-/// The left stick, from the half of libpad's port buffer that the game actually read.
-///
-/// **The half with the *smaller* stamp.** `scePadRead` takes the half whose stamp is the larger, but a
-/// PINE row is sampled after the tick, and by then the IOP has refreshed the other half — so the half
-/// the game read this frame is the older one by the time the recorder sees it. C5 measured that on 300
-/// of 300 rows, with the two halves disagreeing on the 6 rows where a press began or ended. Getting
-/// this backwards shifts the input by a frame on exactly those rows, which is the hardest kind of
-/// desync to find: the replay is right for minutes and then is not.
-///
-/// Bytes `[4..8]` are RX RY LX LY, centre 0x7f, so the left stick is bytes 6 and 7 with 0x7f taken off.
-/// The dead zone and whatever curve the game applies are I2's, and are the port's business rather than
-/// the recording's: this is the number that arrived.
-fn stick(cap: &Capture, row: usize, at: &PadColumns) -> Result<(i8, i8), String> {
-    let stamp = |column| -> Result<u64, String> {
-        let text = cell(cap, row, column);
-        text.parse()
-            .map_err(|_| format!("frame {}: stamp '{text}' is not a number", cap.frames[row]))
-    };
-    let older = if stamp(at.stamp_a)? <= stamp(at.stamp_b)? { at.pad_a } else { at.pad_b };
-    let bytes = half(cap, row, older)?;
-    let axis = |b: u8| (i16::from(b) - 0x7f).clamp(-127, 127) as i8;
-    Ok((axis(bytes[6]), axis(bytes[7])))
-}
-
 struct PadColumns {
     pad_a: usize,
     stamp_a: usize,
@@ -868,24 +896,11 @@ struct PadColumns {
 /// [`Watch::shifted`] is the knob; `an_off_by_one_in_alignment_fails_at_the_first_tick` above is what
 /// that failure looks like.
 fn inputs_from_capture(cap: &Capture) -> Result<Vec<Input>, String> {
+    // The game's own tick counter, which `PadTape::from_capture` only falls back to the recorder's
+    // `frame` column for: a capture of this spec has one, and its gap message names it.
     ticks_of(cap)?;
-    let held: Vec<usize> = (0..CONTROLS)
-        .map(|n| column(cap, &format!("ctl{n}.held")))
-        .collect::<Result<_, _>>()?;
-    let pad = PadColumns {
-        pad_a: column(cap, "pad_a")?,
-        stamp_a: column(cap, "stamp_a")?,
-        pad_b: column(cap, "pad_b")?,
-        stamp_b: column(cap, "stamp_b")?,
-    };
-    (1..cap.rows.len())
-        .map(|row| {
-            Ok(Input {
-                buttons: held_mask(cap, row, &held)?,
-                stick: stick(cap, row, &pad)?,
-            })
-        })
-        .collect()
+    let tape = PadTape::from_capture(cap).map_err(|e| e.to_string())?;
+    Ok(tape.inputs())
 }
 
 /// A capture of `watch/acceptance.toml` as a complete fixture: the inputs the original was given, and
@@ -1017,6 +1032,15 @@ fn acceptance_csv(frames: usize, input: impl Fn(usize) -> (u16, (u8, u8))) -> St
             .fold(0, |w, n| w | CONTROL_MASK[n]);
         bytes[2] = !(wire >> 8) as u8;
         bytes[3] = !wire as u8;
+        // And the pressures, because the game reads twelve of its sixteen controls from those bytes
+        // and not from the word: a capture whose pressures are all zero is one the game itself would
+        // have read as nothing held, however much its control columns say. A digital source reports
+        // full pressure, which is what the kit's virtual pad sends and what the real captures show.
+        for n in 0..CONTROLS {
+            if let (true, Some(at)) = (buttons & (1 << n) != 0, CONTROL_PRESSURE[n]) {
+                bytes[at] = 0xff;
+            }
+        }
         bytes[4] = 0x7f; // RX
         bytes[5] = 0x7f; // RY
         bytes[6] = lx;
@@ -1109,9 +1133,16 @@ fn a_capture_of_real_play_becomes_a_fixture() {
     assert_eq!(f.checks(), BIKE.len() * 241);
 
     // Row 1's controls are tick 1's input, which is `played(1)`: down, and the stick where it was.
-    assert_eq!(f.inputs[0], Input { buttons: 1 << 14, stick: (-5, 1) });
-    assert_eq!(f.inputs[1], Input { buttons: (1 << 14) | (1 << 6), stick: (-4, 2) });
-    assert_eq!(f.inputs[4], Input { buttons: 1 << 4, stick: (-1, 0) });
+    // The buttons are the game's own bitmask, not the control indices the capture's columns are in.
+    assert_eq!(f.inputs[0], Input { buttons: wire_of(1 << 14), stick: (-5, 1) });
+    assert_eq!(f.inputs[0].buttons, Control::Down.mask(), "control 14 is down, bit 0x4000");
+    assert_eq!(f.inputs[1], Input { buttons: wire_of((1 << 14) | (1 << 6)), stick: (-4, 2) });
+    assert_eq!(
+        f.inputs[1].buttons,
+        Control::Down.mask() | Control::L2.mask(),
+        "down and L2 — and L2 is bit 0x0001, which is the whole reason for the conversion",
+    );
+    assert_eq!(f.inputs[4], Input { buttons: wire_of(1 << 4), stick: (-1, 0) });
     assert_eq!(f.inputs[5], Input { buttons: 0xffff, stick: (0, 1) }, "every button at once");
     assert_eq!(f.inputs[6], Input { buttons: 0, stick: (1, 2) }, "and a frame with nothing held");
 
@@ -1529,5 +1560,467 @@ fn the_acceptance_run() {
     match replay::verify(&f) {
         Ok(end) => println!("the port agrees with every recorded frame; ticks {}", end.ticks),
         Err(d) => panic!("the acceptance run diverges: {d}"),
+    }
+}
+
+// ===================================================================================================
+// I3 — the pad tape: a played sequence recorded, stored, and played back through the port
+// ===================================================================================================
+//
+// A fixture carries one `Input` per frame, which is what the simulation reads. A **tape** carries the
+// frame the *pad* delivered: the 32 bytes of each pad's report and the `dt` the engine measured. The
+// difference is the whole of this section:
+//
+//   * a report holds the twelve pressures, and the game reads twelve of its sixteen controls from
+//     those bytes rather than from the button word — so a recording of a mask cannot reproduce a
+//     control's strength, and a *capture* of a mask cannot be turned back into one;
+//   * the input layer is stateful (the press and release timers, the one-frame event queue), so the
+//     frames have to be played *through* it, in the original's order, and not merely listed;
+//   * `dt` is measured by this engine rather than assumed, and the timers accumulate `dt * 1000`.
+//
+// So the tape is what a human-played sequence from the real game is recorded as, and `Playback` is the
+// port being driven by one. The proofs below are: the frame decodes the way the game's own poll does,
+// the file round-trips bit for bit, a capture becomes the frames the game actually read (the right
+// half of the pad library's buffer, every tick, aligned to the fixture's tick numbering), a playback
+// reads the pad before it simulates, and — the one that is evidence rather than plumbing — every real
+// capture in `context/capture/` replays through the port with the game's own sixteen controls agreeing
+// row for row.
+
+/// The two halves of the control map restated in this file are the map the port measured.
+///
+/// `CONTROL_MASK` and `CONTROL_PRESSURE` are written out here so that the synthetic captures above are
+/// not built from the same table they are checked against. That only works while the two agree, and
+/// nothing but this test says they do.
+#[test]
+fn the_tables_in_this_file_are_the_map_the_port_measured() {
+    assert_eq!(CONTROLS, PORT_CONTROLS);
+    for n in 0..CONTROLS {
+        assert_eq!(CONTROL_MASK[n], CONTROL_MAP[n].mask, "control {n}'s bit");
+        let pressure = CONTROL_MAP[n].is_analogue().then_some(CONTROL_MAP[n].pressure as usize);
+        assert_eq!(CONTROL_PRESSURE[n], pressure, "control {n}'s pressure byte");
+    }
+    // And the sixteen bits are a permutation of the sixteen controls, which is why "everything at
+    // once" is 0xffff in either space and why only the single-control cases above catch a mix-up.
+    assert_eq!(wire_of(0xffff), 0xffff);
+    assert_eq!(wire_of(1 << 6), Control::L2.mask());
+}
+
+/// A frame's controls are whatever the game's own poll makes of its report — pressures included.
+///
+/// The three cases that a recording of a button mask would get wrong: an analogue control is read from
+/// its pressure byte and **not** from its bit, a digital one from its bit, and a pad whose status byte
+/// says it is not there holds nothing at all.
+#[test]
+fn a_frames_controls_are_what_the_games_own_poll_makes_of_it() {
+    let dt = replay::CAPPED_DT;
+
+    // Cross's bit set, its pressure byte zero: the wire says pressed and the game does not.
+    let mut bytes = Report::idle().0;
+    let low = !Control::Cross.mask();
+    bytes[2] = (low >> 8) as u8;
+    bytes[3] = low as u8;
+    let bit_only = PadFrame::new(dt, [Report::from_bytes(bytes), Report::missing()]);
+    assert_eq!(bit_only.reports[0].buttons(), Control::Cross.mask(), "the word says cross");
+    assert_eq!(bit_only.held_mask(0), 0, "and the game reads cross from its pressure byte");
+
+    // The same press with the pressure a real pad reports.
+    bytes[CONTROL_MAP[Control::Cross.index()].pressure as usize] = 0xff;
+    let real = PadFrame::new(dt, [Report::from_bytes(bytes), Report::missing()]);
+    assert_eq!(real.held_mask(0), Control::Cross.mask());
+    assert_eq!(real.input().buttons, Control::Cross.mask());
+
+    // A digital control has no pressure byte, so its bit is all there is.
+    let start = PadFrame::of_buttons(dt, Control::Start.mask());
+    assert_eq!(start.held_mask(0), Control::Start.mask());
+    // And `of_buttons` is the digital source: full pressure for the analogue ones, so they read back.
+    let both = PadFrame::of_buttons(dt, Control::Start.mask() | Control::Cross.mask());
+    assert_eq!(both.held_mask(0), Control::Start.mask() | Control::Cross.mask());
+
+    // No pad: nothing held, whatever the rest of the bytes say.
+    assert_eq!(PadFrame::default().held_mask(0), 0);
+    assert_eq!(PadFrame::default().stick(0), (0, 0), "a missing pad's sticks are centred");
+
+    // The stick as it arrived: the centre byte off, and the one value that cannot be represented
+    // clamped rather than wrapped (0xff - 0x7f is 128, which is not an i8).
+    let stick = |x: u8, y: u8| {
+        let mut bytes = Report::idle().0;
+        bytes[6] = x;
+        bytes[7] = y;
+        PadFrame::new(dt, [Report::from_bytes(bytes), Report::missing()]).stick(0)
+    };
+    assert_eq!(stick(0x7f, 0x7f), (0, 0));
+    assert_eq!(stick(0x89, 0x75), (10, -10));
+    assert_eq!(stick(0x00, 0xff), (-127, 127), "hard left, hard down, with 0xff clamped");
+}
+
+/// A tape round-trips through its file form byte for byte, with every byte of every report and every
+/// bit of every `dt`.
+#[test]
+fn a_tape_round_trips_as_a_file() {
+    let mut tape = PadTape::new("hand-made");
+    tape.push(PadFrame::of_buttons(replay::CAPPED_DT, Control::Cross.mask()));
+    tape.push(PadFrame::new(F(0.03283332), [Report::idle(), Report::idle()]));
+    tape.push(PadFrame::default());
+    let mut odd = Report::idle().0;
+    odd[0] = 0; // a good read…
+    odd[19] = 0x1a; // …with R2 just over the threshold, which is a value a mask cannot hold
+    tape.push(PadFrame::new(F(0.041532), [Report::from_bytes(odd), Report::missing()]));
+
+    let text = tape.to_text();
+    let back = PadTape::parse(&text).expect("what it just wrote");
+    assert_eq!(back, tape, "every report byte, every dt bit, and the name");
+    assert_eq!(back.to_text(), text, "and writing it again gives the same bytes");
+    assert_eq!(back.frames[3].held_mask(0), Control::R2.mask(), "0x1a is above the threshold");
+    assert_eq!(
+        back.dt_range().map(|(a, b)| (a.to_bits(), b.to_bits())),
+        Some((F(0.03283332).to_bits(), F(0.041532).to_bits())),
+        "the spread of a run the original measured frame by frame",
+    );
+}
+
+/// A tape as a human would type one: the mask form, the bytes form, `-` for an absent pad, and a `dt`
+/// written as a decimal.
+#[test]
+fn a_hand_written_tape_reads_as_it_looks() {
+    let tape = PadTape::parse(
+        "# two frames\n\
+         format 1\n\
+         tape by-hand\n\
+         frame 0.03333 *0x0040            # cross, and no second pad\n\
+         frame 0x3d0699a3 0x0079fffb7f7f7f7f0000000000000000ff000000 -\n",
+    )
+    .expect("the documented format");
+
+    assert_eq!(tape.name, "by-hand");
+    assert_eq!(tape.len(), 2);
+    assert_eq!(tape.frames[0].dt().to_bits(), F(0.03333).to_bits());
+    assert_eq!(tape.frames[0].held_mask(0), Control::Cross.mask());
+    assert_eq!(tape.frames[0].reports[1], Report::missing(), "an omitted pad is an absent pad");
+    // The second frame is a row of a real capture: L1, which the game reads from pressure byte 16.
+    assert_eq!(tape.frames[1].reports[0].mode(), 0x79);
+    assert_eq!(tape.frames[1].held_mask(0), Control::L1.mask());
+    assert_eq!(tape.frames[1].stick(0), (0, 0));
+    assert_eq!(tape.inputs(), vec![
+        Input { buttons: Control::Cross.mask(), stick: (0, 0) },
+        Input { buttons: Control::L1.mask(), stick: (0, 0) },
+    ]);
+}
+
+/// A typo in a tape says which line, like a fixture's: a recording that silently loses a frame is a
+/// recording that desyncs.
+#[test]
+fn a_broken_tape_file_says_which_line() {
+    let cases = [
+        ("format 1\nframes 3\n", 2, "unknown keyword"),
+        ("format 2\n", 1, "this build reads"),
+        ("format x\n", 1, "wants a version number"),
+        ("frame\n", 1, "frame wants"),
+        ("frame 0.03 - - -\n", 1, "frame wants"),
+        ("frame later -\n", 1, "dt 'later' is not a number"),
+        ("frame 0.03 *0x1ffff\n", 1, "not a 16-bit bitmask"),
+        ("frame 0.03 0x0079ff\n", 1, "is not a pad report"),
+        ("frame 0.03 0x0079fffb7f7f7f7g\n", 1, "is not hex"),
+    ];
+    for (text, line, needle) in cases {
+        let e = PadTape::parse(text).unwrap_err();
+        assert_eq!(e.line, line, "{text:?} -> {e}");
+        assert!(e.to_string().contains(needle), "{text:?} -> {e}");
+    }
+}
+
+/// A capture of the original becomes the pad frames the game actually read.
+///
+/// Four properties, each of them a silent desync when it is wrong: the frame count and its alignment
+/// to the harness's ticks, the half of the pad library's buffer the frame comes from, the `dt` of each
+/// frame, and the controls — which must come out as the sixteen the *game* believed were held, since
+/// that is what the simulation reads.
+#[test]
+fn a_capture_becomes_the_pad_frames_the_game_read() {
+    let cap = Capture::parse(&acceptance_csv(240, played)).expect("the recorder's format");
+    let tape = PadTape::from_capture(&cap).expect("a well-formed input capture");
+
+    assert_eq!(cap.rows.len(), 241);
+    assert_eq!(tape.len(), 240, "row 0's input belongs to the tick before the recording");
+
+    // The controls the game itself recorded, row for row: the capture's own `ctlN.held` columns, which
+    // are written by different code than the pad buffer the tape is decoded from.
+    let held: Vec<usize> =
+        (0..CONTROLS).map(|n| column(&cap, &format!("ctl{n}.held")).unwrap()).collect();
+    for (k, frame) in tape.frames.iter().enumerate() {
+        let row = k + 1;
+        let want = wire_of(held_mask(&cap, row, &held).unwrap());
+        assert_eq!(frame.held_mask(0), want, "frame {k} (row {row}) of the recording");
+        assert_eq!(frame.input().buttons, want);
+        // And the frame's own dt, not the cap and not the next row's.
+        let dt = cell(&cap, row, column(&cap, "dt").unwrap());
+        assert_eq!(frame.dt().to_bits(), dt.parse::<f32>().unwrap().to_bits(), "frame {k}'s dt");
+    }
+    assert_eq!(tape.inputs(), inputs_from_capture(&cap).unwrap(), "the reader above is this one");
+
+    // The half with the smaller stamp is the half the game read. This synthetic capture puts the
+    // *next* frame's input in the newer half, so reading the wrong one shifts everything by a frame —
+    // which is right 97% of the time on a real recording, and wrong on exactly the frames that matter.
+    let swapped: String = cap
+        .rows
+        .iter()
+        .map(|cells| {
+            let mut cells = cells.clone();
+            cells.swap(column(&cap, "stamp_a").unwrap(), column(&cap, "stamp_b").unwrap());
+            cells.join(",")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let other = Capture::parse(&format!("{}\n{swapped}", cap.columns.join(","))).unwrap();
+    let wrong = PadTape::from_capture(&other).unwrap();
+    assert_eq!(
+        wrong.inputs().iter().map(|i| i.buttons).collect::<Vec<_>>(),
+        tape.inputs().iter().map(|i| i.buttons).skip(1).chain([wire_of(played(241).0)]).collect::<Vec<_>>(),
+        "the other half is the next frame's input",
+    );
+}
+
+/// A capture with a tick missing is not an input recording, and says so with the row.
+///
+/// Two counters, because a capture has two: the game's own `frame_counter`, which rises by 1 a tick,
+/// and the recorder's `frame`, which counts video fields and rises by 2 in this game. A capture with
+/// neither column is not a capture at all — `frame` is the one column the format guarantees.
+#[test]
+fn a_capture_with_a_tick_missing_is_refused() {
+    // With the game's counter: the step is 1, and a dropped row makes it 2.
+    let csv = acceptance_csv(30, played);
+    let mut lines: Vec<&str> = csv.lines().collect();
+    lines.remove(12);
+    let cap = Capture::parse(&lines.join("\n")).unwrap();
+    let e = PadTape::from_capture(&cap).expect_err("a frame of input is missing");
+    assert!(e.to_string().contains("frame_counter 2280 follows 2278"), "{e}");
+    assert!(e.to_string().contains("every = 1"), "{e}");
+
+    // Without it: the stride of the recorder's `frame` column, whatever it is, has to be constant.
+    let vsync = |frames: &[u64]| {
+        let mut csv = String::from("frame,dt,pad_a,stamp_a,pad_b,stamp_b\n");
+        for (k, frame) in frames.iter().enumerate() {
+            let pad = format!("0x{}", hex20(Control::Cross.mask()));
+            csv += &format!("{frame},0.03333,{pad},{},{pad},{}\n", 2 * k + 1, 2 * k);
+        }
+        Capture::parse(&csv).unwrap()
+    };
+    let even = vsync(&[900, 902, 904, 906]);
+    assert_eq!(PadTape::from_capture(&even).unwrap().len(), 3, "a video-field stride of 2 is fine");
+    let e = PadTape::from_capture(&vsync(&[900, 902, 906, 908])).expect_err("a dropped frame");
+    assert!(e.to_string().contains("frame 906 follows 902"), "{e}");
+    assert!(e.to_string().contains("a step of 4"), "{e}");
+    assert_eq!(e.line, 4, "the row it happened on");
+
+    // And the columns a tape needs are named when they are absent, rather than guessed at.
+    let bare = Capture::parse("frame,ball_pos.y\n900,1.0\n901,2.0\n").unwrap();
+    let e = PadTape::from_capture(&bare).expect_err("not an input capture");
+    assert!(e.to_string().contains("no column 'dt'"), "{e}");
+}
+
+/// The first 20 bytes of a pad report holding `buttons`, as a capture's `bytes:20` column writes them:
+/// every byte the game's poll reads.
+fn hex20(buttons: u16) -> String {
+    Report::from_buttons(buttons).0[..20].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A playback reads the pad *before* it simulates, and the input layer is carried from frame to frame.
+///
+/// This is why a tape is played rather than listed: the timers and the event queue are state, and a
+/// harness that fed the simulation a list of masks would have neither.
+#[test]
+fn a_playback_reads_the_pad_before_it_simulates() {
+    let dt = replay::CAPPED_DT;
+    let mut tape = PadTape::new("a press, held, then let go");
+    for _ in 0..3 {
+        tape.push(PadFrame::of_buttons(dt, Control::Cross.mask()));
+    }
+    for _ in 0..2 {
+        tape.push(PadFrame::of_buttons(dt, 0));
+    }
+
+    let mut run = Playback::new(7);
+    run.advance(&tape.frames[0]);
+    assert_eq!(run.tick(), 1, "one frame of input is one tick of the simulation");
+    assert!(run.input.pad(0).held(Control::Cross), "the press is latched before the tick that acts");
+    assert!(run.input.pad(0).pressed(Control::Cross), "and this is its press frame");
+    assert_eq!(run.input.events.len(), 1, "one transition, on the frame it happened");
+    assert_eq!(run.input.pad(0).control(Control::Cross).held_ms, 0);
+
+    run.advance(&tape.frames[1]);
+    assert!(!run.input.pad(0).pressed(Control::Cross), "the edge does not survive the frame");
+    assert_eq!(run.input.pad(0).control(Control::Cross).held_ms, 33, "a flat +33 at the cap");
+    assert!(run.input.events.is_empty(), "the queue is cleared at the top of every update");
+
+    run.advance(&tape.frames[3]);
+    assert!(run.input.pad(0).released(Control::Cross));
+    assert_eq!(run.input.events.len(), 1);
+    assert_eq!(run.input.events.events()[0].pressed, 0, "a release");
+
+    // The whole tape in one call, and the same place.
+    let whole = replay::play(&tape, 7);
+    assert_eq!(whole.tick(), 5);
+    assert_eq!(whole.hash(), replay::play(&tape, 7).hash(), "a replay is a function of its tape");
+
+    // The hash covers the input layer, which is the half a fixture's hashes cannot see: these two runs
+    // leave the simulation in the same state (it ignores its input today) and the pad in different
+    // ones, and a playback hash that could not tell them apart would prove nothing about the input.
+    let idle: PadTape = PadTape { frames: vec![PadFrame::of_buttons(dt, 0); 5], ..tape.clone() };
+    assert_eq!(replay::play(&idle, 7).sim.hash(), whole.sim.hash(), "the same simulation state");
+    assert_ne!(replay::play(&idle, 7).hash(), whole.hash(), "and a different pad");
+
+    // A tape played from a mid-session state starts there: a recording that begins at a save state.
+    let mut middle = Sim::new(7);
+    middle.tick(Input::default());
+    let from = replay::play_from(&tape, middle);
+    assert_eq!(from.tick(), 6, "the state's own tick count carries on");
+}
+
+/// A fixture of pad frames: the tape's own inputs, replayed against the port's recording of the same
+/// run — the shape an acceptance fixture has once the input side comes from a capture.
+#[test]
+fn a_fixture_of_pad_frames_replays() {
+    let cap = Capture::parse(&acceptance_csv(240, played)).unwrap();
+    let tape = PadTape::from_capture(&cap).unwrap();
+
+    let bare = Fixture::from_tape(&tape, 0x1234_5678);
+    assert_eq!(bare.inputs, tape.inputs(), "one input per recorded frame");
+    assert_eq!(bare.last_tick(), 240);
+    assert_eq!(bare.checks(), 0, "a tape expects nothing on its own: the watches are the capture's");
+
+    // The port's own run over the recorded input, which is a regression fixture of a real session.
+    let f = replay::record("played", bare.seed, &bare.inputs, &WATCHED).unwrap();
+    assert_eq!(f.inputs, bare.inputs);
+    assert_eq!(f.hashes.len(), 240);
+    replay::verify(&f).expect("the port agrees with its own run of the recorded input");
+
+    // And it survives the file: a session recorded once is replayable a year later.
+    let text = f.to_text();
+    let back = Fixture::parse(&text).expect("the fixture format");
+    assert_eq!(back.inputs, f.inputs);
+    replay::verify(&back).expect("still replaying");
+}
+
+/// The tape at the scale of the acceptance run: nine thousand frames through the file and through the
+/// port, since a format that loses a byte in 700 kB and a playback that drifts after a few thousand
+/// ticks are both invisible in a test of five frames.
+#[test]
+fn a_long_tape_round_trips_and_plays() {
+    let dt = replay::CAPPED_DT;
+    let mut tape = PadTape::new("nine thousand frames");
+    for k in 0..SEVERAL_MINUTES {
+        // Something held on most frames, nothing on some, and the stick wandering.
+        let buttons = wire_of(match k % 7 {
+            0 => 0,
+            6 => 0xffff,
+            n => (1 << n) | (1 << (n + 8)),
+        });
+        let mut report = Report::from_buttons(buttons).0;
+        report[6] = (0x7f + (k % 61) as u8).wrapping_sub(30);
+        report[7] = (0x7f + (k % 37) as u8).wrapping_sub(18);
+        tape.push(PadFrame::new(dt, [Report::from_bytes(report), Report::missing()]));
+    }
+
+    let text = tape.to_text();
+    assert_eq!(PadTape::parse(&text).expect("nine thousand frames"), tape);
+
+    let run = replay::play(&tape, 0x1234_5678);
+    assert_eq!(run.tick(), SEVERAL_MINUTES as u64);
+    // The timers are still counting at the end of it: a nine-thousand-frame playback where the input
+    // layer had stopped moving would agree with anything.
+    let longest = Control::ALL
+        .iter()
+        .map(|c| run.input.pad(0).control(*c).held_ms)
+        .max()
+        .unwrap();
+    assert!(longest > 0, "nothing was held at the end of the run");
+    assert_eq!(Fixture::from_tape(&tape, 1).inputs.len(), SEVERAL_MINUTES);
+}
+
+/// **A recording of the real game, played back through the port.**
+///
+/// Every capture in `context/capture/` that carries the pad columns becomes a tape and is played
+/// through [`Playback`]; the sixteen controls the *game* recorded for that frame are compared against
+/// the sixteen the port's input layer makes of the same pad bytes, row for row. The capture's control
+/// columns and its pad buffer are written by different code at different times, so this is a real
+/// comparison and not a restatement of the decode.
+///
+/// What it proves, and does not: the input side of a replay — that a human-played sequence from the
+/// real game, recorded by the kit, drives the port's input layer to the state the original was in. The
+/// simulation it drives is still A1's example ball, so the *simulation* side of the acceptance run is
+/// `the_acceptance_run` above and waits for its recording.
+///
+/// Captures are game data and live in the git-ignored `context/`, so this says what it found and
+/// passes when there is nothing there.
+#[test]
+fn a_recording_of_the_real_game_plays_back_through_the_port() {
+    let dir = private_dir("capture");
+    let mut proved = 0;
+    for path in files_in(&dir, "csv") {
+        let text = std::fs::read_to_string(&path).expect("a readable capture");
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        if column(&cap, "ctl0.held").is_err() || column(&cap, "pad_a").is_err() {
+            println!("{}: not an input capture, skipped", path.display());
+            continue;
+        }
+        let tape = PadTape::from_capture(&cap)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(tape.len(), cap.rows.len() - 1);
+
+        let held: Vec<usize> =
+            (0..CONTROLS).map(|n| column(&cap, &format!("ctl{n}.held")).unwrap()).collect();
+        let events = column(&cap, "events").ok();
+        let mut run = Playback::new(0);
+        let (mut transitions, mut seen) = (0usize, 0u16);
+        for (k, frame) in tape.frames.iter().enumerate() {
+            let row = k + 1;
+            let before = run.input.pad(0).held_mask();
+            run.advance(frame);
+            let got = run.input.pad(0).held_mask();
+            let want = wire_of(held_mask(&cap, row, &held).unwrap_or_else(|e| panic!("{e}")));
+            assert_eq!(
+                got,
+                want,
+                "{}: frame {} (row {row}): the port holds 0x{got:04x} where the game held \
+                 0x{want:04x}",
+                path.display(),
+                cap.frames[row],
+            );
+            if let Some(at) = events {
+                let want: usize = cell(&cap, row, at).parse().expect("an event count");
+                assert_eq!(
+                    run.input.events.len(),
+                    want,
+                    "{}: row {row}: the transitions the game raised",
+                    path.display(),
+                );
+            }
+            transitions += (before != got) as usize;
+            seen |= got;
+        }
+        // A recording of a pad nobody touched would pass every assertion above.
+        assert!(
+            transitions >= 4,
+            "{}: only {transitions} frames where a control changed — not a recording of play",
+            path.display(),
+        );
+        let (least, most) = tape.dt_range().expect("a non-empty tape");
+        println!(
+            "{}: {} frames played back, {transitions} transitions, controls 0x{seen:04x}, \
+             dt {least:?}..{most:?}",
+            path.display(),
+            tape.len(),
+        );
+        // The tape of a real recording survives its file form too, bytes and dt alike.
+        let again = PadTape::parse(&tape.to_text()).expect("a tape of a real capture");
+        assert_eq!(again, tape);
+        assert_eq!(replay::play(&again, 0).hash(), run.hash(), "and plays back to the same state");
+        proved += 1;
+    }
+    if proved == 0 {
+        println!(
+            "no input capture in {} — record one with `./kit record watch/input.toml --frames 220 \
+             --out context/capture/i3-input.csv` while a pad script drives the pad",
+            dir.display(),
+        );
     }
 }

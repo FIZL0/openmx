@@ -72,7 +72,10 @@
 
 use core::fmt;
 
+use ps2_float::F;
+
 use crate::hash::{self, Dump, Leaf};
+use crate::input::{self, Manager, PADS, Report};
 use crate::{Input, Sim};
 
 /// The version written into a fixture file's `format` line, bumped when the text format changes in a
@@ -892,5 +895,509 @@ impl Capture {
             samples.push(Sample { tick: self.tick_of(row), value });
         }
         Ok(Watch::new(path, samples))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The pad tape: the input recorded, and played back
+// ---------------------------------------------------------------------------------------------------
+
+/// The `dt` the engine hands the poll when a frame came in under its 30 fps cap — the only value a
+/// recording of the original is ever *allowed* to be short of, and the one a hand-written tape uses.
+///
+/// It is not the `dt` of a running game. The engine measures the frame and averages it, so a capture of
+/// real play carries three or four distinct values in a few hundred frames (0.03283332, 0.03286665,
+/// 0.03333000 in the front end; R6 saw 0.041532 in a level). That is why [`PadFrame`] carries the
+/// frame's own `dt` rather than assuming this one: the millisecond timers in [`crate::input`] accumulate
+/// `dt * 1000` in float, so a tape replayed at a fixed step reproduces the *buttons* and not the timers,
+/// and the front end's repeat rates are a function of the timers.
+pub const CAPPED_DT: F = F(0.03333);
+
+/// One frame of pad input, exactly as the engine's own poll was handed it: the frame's `dt` and one pad
+/// report per port.
+///
+/// This is the unit a human-played session is recorded in. A [`Input`] is what the simulation gets
+/// *after* the input layer has read this, and is derived from it ([`PadFrame::input`]) rather than
+/// stored: the report carries the twelve pressures and the four axes too, and the pressures are what
+/// twelve of the sixteen controls are actually read from (see [`crate::input::CONTROL_MAP`]), so a
+/// recording that kept only a button mask could not reproduce a control's strength.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PadFrame {
+    /// The frame's `dt` in seconds, as a bit pattern so that a frame is `Eq` and a tape file
+    /// round-trips exactly. Read it with [`PadFrame::dt`].
+    pub dt: u32,
+    /// One report per pad, in the device-list order [`Manager::tick`] reads them in.
+    pub reports: [Report; PADS],
+}
+
+impl Default for PadFrame {
+    /// A frame at the 30 fps cap with no pad plugged in: what [`Report::missing`] means, for every pad.
+    fn default() -> PadFrame {
+        PadFrame { dt: CAPPED_DT.to_bits(), reports: [Report::missing(); PADS] }
+    }
+}
+
+impl PadFrame {
+    /// One frame from the reports the platform layer built and the `dt` the engine measured.
+    pub fn new(dt: F, reports: [Report; PADS]) -> PadFrame {
+        PadFrame { dt: dt.to_bits(), reports }
+    }
+
+    /// One frame of a single pad holding exactly this bitmask ([`crate::input::Control::mask`]), with
+    /// no second pad: the digital source — a keyboard, the kit's virtual pad, a hand-written tape.
+    ///
+    /// Full pressure on every analogue control in the mask, which is what [`Report::from_buttons`]
+    /// means by a digital press and what `./kit pad` actually sends.
+    pub fn of_buttons(dt: F, buttons: u16) -> PadFrame {
+        PadFrame::new(dt, [Report::from_buttons(buttons), Report::missing()])
+    }
+
+    /// The frame's `dt`, as the poll is handed it.
+    pub fn dt(&self) -> F {
+        F::from_bits(self.dt)
+    }
+
+    /// What the game's input manager would believe is held on `pad` this frame, in the game's own
+    /// bitmask — which is what [`Input::buttons`] carries.
+    ///
+    /// Computed by running the game's own poll ([`crate::input::Pad::poll`]) on a throwaway pad, so
+    /// there is one implementation of "is this control down" in the port and not two. The first of
+    /// poll's two passes is a pure function of the report; the second is the timers, which this throws
+    /// away.
+    pub fn held_mask(&self, pad: usize) -> u16 {
+        let mut p = input::Pad::new(pad as u32);
+        p.connected = true;
+        p.poll(self.dt(), &self.reports[pad], &mut input::EventQueue::new());
+        p.held_mask()
+    }
+
+    /// The left stick of `pad` as it arrived, with the centre byte taken off: `(-127..=127, …)`, right
+    /// and down positive, as the report's bytes are.
+    ///
+    /// The raw arrival value, and nothing else: the dead zone, the curve and whatever history the game
+    /// keeps of it are the port's business, not the recording's.
+    pub fn stick(&self, pad: usize) -> (i8, i8) {
+        let report = &self.reports[pad];
+        let axis = |b: u8| {
+            (i16::from(b) - i16::from(input::AXIS_CENTRE)).clamp(-127, 127) as i8
+        };
+        (axis(report.axis(2)), axis(report.axis(3)))
+    }
+
+    /// This frame as the simulation's own input: pad 0's held controls and its left stick.
+    ///
+    /// The reduction a [`Fixture`] stores, and the lossy half of this module. Three things in the frame
+    /// do not survive it — the second pad, the analogue strengths, and the frame's `dt` — so a fixture
+    /// replays the buttons of a recorded session and a [`Playback`] replays the session.
+    pub fn input(&self) -> Input {
+        Input { buttons: self.held_mask(0), stick: self.stick(0) }
+    }
+}
+
+/// A recording of the pad: one [`PadFrame`] per frame, in the order they were polled.
+///
+/// Two ways in, and they are the same two a [`Fixture`] has:
+///
+/// - [`PadTape::from_capture`] reads the pad columns of a `./kit record` capture of the **original**.
+///   That is a human-played sequence, and it is what an acceptance fixture's inputs are made of.
+/// - [`PadTape::push`] is the port writing down its own frames as it plays them, which is how a
+///   session in the port becomes a regression fixture.
+///
+/// Out: [`PadTape::inputs`] for a [`Fixture`], [`play`] to drive the port with the whole thing, and
+/// [`PadTape::to_text`]/[`PadTape::parse`] for the file in between. A tape holds values read out of the
+/// game, so a tape file is game data and lives in the git-ignored `context/`, never in the repository.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PadTape {
+    /// What this recording is, for a failure line and for a human reading the directory. Free text
+    /// without newlines.
+    pub name: String,
+    /// One entry per frame, in order.
+    pub frames: Vec<PadFrame>,
+}
+
+impl PadTape {
+    /// An empty recording, named.
+    pub fn new(name: impl Into<String>) -> PadTape {
+        PadTape { name: name.into(), frames: Vec::new() }
+    }
+
+    /// Write down one frame: the port recording what it just played.
+    pub fn push(&mut self, frame: PadFrame) {
+        self.frames.push(frame);
+    }
+
+    /// How many frames the recording is.
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// One [`Input`] per frame, for [`Fixture::inputs`].
+    pub fn inputs(&self) -> Vec<Input> {
+        self.frames.iter().map(PadFrame::input).collect()
+    }
+
+    /// The least and greatest `dt` in the recording, as bit patterns.
+    ///
+    /// Worth looking at before trusting a replay: a tape whose two ends differ is a tape of a run the
+    /// original measured frame by frame, and a port with a fixed step cannot match it however good the
+    /// harness is. `None` for an empty tape.
+    pub fn dt_range(&self) -> Option<(F, F)> {
+        let mut frames = self.frames.iter().map(PadFrame::dt);
+        let first = frames.next()?;
+        Some(frames.fold((first, first), |(least, most), dt| {
+            (if dt < least { dt } else { least }, if dt > most { dt } else { most })
+        }))
+    }
+
+    /// The pad frames of a `./kit record` capture: what a human-played session actually gave the game,
+    /// ready to drive the port.
+    ///
+    /// Reads five columns, all of them in `watch/input.toml` and `watch/acceptance.toml`:
+    ///
+    /// | column | what it is |
+    /// |---|---|
+    /// | `dt` | the `dt` the engine handed this frame's poll |
+    /// | `pad_a`, `pad_b` | the two halves of the pad library's buffer for port 0, as hex bytes |
+    /// | `stamp_a`, `stamp_b` | their stamps, which say **which half the game read** |
+    ///
+    /// Three things that are each a silent desync if got wrong, and are all decided here:
+    ///
+    /// - **The half with the smaller stamp is the one the game read.** `scePadRead` copies the half
+    ///   whose stamp is the larger, but the pad library refreshes a half per video field — twice per
+    ///   tick of this game — so by the time the recorder samples the row, the *other* half is the fresh
+    ///   one. Measured on 600 rows of two captures: the controls the game believed were held matched
+    ///   the older half's word in 600, and the newer half's in 582 — the rows where a press began or
+    ///   ended being exactly the rows that matter.
+    /// - **Row *k* is the input of the tick that produced row *k*.** The recorder samples once a frame,
+    ///   after the tick, so row 0's pad bytes belong to the tick *before* the recording started and are
+    ///   dropped: a tape is one frame shorter than the capture, and `frames[k - 1]` is the input of
+    ///   tick *k*, which is [`Fixture`]'s own numbering.
+    /// - **Every tick must be there.** The port has nothing to simulate a missing frame's input with,
+    ///   so a capture written with `every = 2`, gated by a `when`, or with a row the recorder dropped,
+    ///   is refused by its row number rather than replayed with a hole in it. Density is judged by the
+    ///   game's own `frame_counter` where the capture has one, because the recorder's `frame` column
+    ///   counts video fields and this game ticks once per two of them.
+    ///
+    /// The second pad is [`Report::missing`]: no watch spec records one, and I1 found the second pad's
+    /// control map all zeros in a game nobody had plugged a second pad into. A capture that grows pad-1
+    /// columns is the place this changes.
+    pub fn from_capture(cap: &Capture) -> Result<PadTape, ParseError> {
+        let dt = column_at(cap, "dt")?;
+        let (pad_a, stamp_a) = (column_at(cap, "pad_a")?, column_at(cap, "stamp_a")?);
+        let (pad_b, stamp_b) = (column_at(cap, "pad_b")?, column_at(cap, "stamp_b")?);
+        dense_ticks(cap)?;
+
+        let mut tape = PadTape::new(String::new());
+        // Row 0's input belongs to the tick before the recording: the first frame of the tape is row 1.
+        for row in 1..cap.rows.len() {
+            let line = row + 2; // the header is line 1, so row 0 is line 2
+            let number = |at: usize| -> Result<u64, ParseError> {
+                let cell = cap.rows[row][at].as_str();
+                parse_u64(cell).ok_or_else(|| ParseError {
+                    line,
+                    message: format!("'{cell}' in column '{}' is not a number", cap.columns[at]),
+                })
+            };
+            let older = if number(stamp_a)? <= number(stamp_b)? { pad_a } else { pad_b };
+            let bytes = cap.rows[row][older].as_str();
+            let cell = cap.rows[row][dt].as_str();
+            let Some(step) = parse_f32(cell) else {
+                return err(line, format!("dt '{cell}' is not a number"));
+            };
+            tape.push(PadFrame {
+                dt: step,
+                reports: [report_from_hex(bytes, line, &cap.columns[older])?, Report::missing()],
+            });
+        }
+        Ok(tape)
+    }
+
+    /// Read a pad tape file. The format, which is the fixture format's shape:
+    ///
+    /// ```text
+    /// # game-sim pad tape
+    /// format 1
+    /// tape freeride-two-minutes
+    /// frame 0x3d0699a3 0x0079fffb7f7f7f7f0000000000000000ff000000  # dt, pad 0, [pad 1]
+    /// frame 0x3d0699a3 *0x0040 -                   # … or a bitmask, and "-" for no pad at all
+    /// ```
+    ///
+    /// A `frame` line is `<dt> <pad 0> [<pad 1>]`, and a pad is written one of three ways:
+    ///
+    /// - `0x…` or bare hex — the report's bytes as the pad library left them. Short is allowed (a
+    ///   capture records the first 20, which is every byte the poll reads) and the rest are zero.
+    /// - `*<mask>` — the game's own bitmask, through [`Report::from_buttons`]: for a tape written by
+    ///   hand or by a digital source, where there is no hardware to quote.
+    /// - `-` — no pad ([`Report::missing`]). A `frame` line with one pad means the second is absent.
+    ///
+    /// `dt` is a float pattern (`0x3d0699a3`, exact — what [`PadTape::to_text`] writes) or a decimal
+    /// (`0.03333`, read to the nearest float). Unknown keywords are errors with their line number, so
+    /// a typo cannot quietly shorten a recording.
+    pub fn parse(text: &str) -> Result<PadTape, ParseError> {
+        let mut tape = PadTape::default();
+        for (i, raw) in text.lines().enumerate() {
+            let n = i + 1;
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut word = line.split_whitespace();
+            match word.next().unwrap_or("") {
+                "format" => match word.next().and_then(parse_u64) {
+                    Some(v) if v as u32 == FORMAT_VERSION => {}
+                    Some(v) => {
+                        return err(n, format!("tape format {v}, this build reads {FORMAT_VERSION}"));
+                    }
+                    None => return err(n, "format wants a version number"),
+                },
+                "tape" => tape.name = line["tape".len()..].trim().to_string(),
+                "frame" => {
+                    let fields: Vec<&str> = word.collect();
+                    if fields.is_empty() || fields.len() > 1 + PADS {
+                        return err(n, format!("frame wants: <dt> <pad 0> [pad 1] ({PADS} pads)"));
+                    }
+                    let Some(dt) = parse_f32(fields[0]) else {
+                        return err(n, format!("frame dt '{}' is not a number", fields[0]));
+                    };
+                    let mut reports = [Report::missing(); PADS];
+                    for (pad, field) in fields[1..].iter().enumerate() {
+                        reports[pad] = parse_report(field, n)?;
+                    }
+                    tape.push(PadFrame { dt, reports });
+                }
+                other => return err(n, format!("unknown keyword '{other}'")),
+            }
+        }
+        Ok(tape)
+    }
+
+    /// Write the recording out in the form [`PadTape::parse`] reads: every report as its bytes and
+    /// every `dt` as a pattern, so the round trip is exact.
+    pub fn to_text(&self) -> String {
+        use fmt::Write;
+        let mut s = String::new();
+        let _ = writeln!(s, "# game-sim pad tape: {} frames", self.frames.len());
+        let _ = writeln!(s, "format {FORMAT_VERSION}");
+        if !self.name.is_empty() {
+            let _ = writeln!(s, "tape {}", self.name);
+        }
+        for frame in &self.frames {
+            let _ = write!(s, "frame 0x{:08x}", frame.dt);
+            for report in &frame.reports {
+                let _ = match *report == Report::missing() {
+                    true => write!(s, " -"),
+                    false => write!(s, " 0x{}", hex_of(report)),
+                };
+            }
+            let _ = writeln!(s);
+        }
+        s
+    }
+}
+
+/// A pad report's bytes as the hex a tape file and a capture both write them.
+fn hex_of(report: &Report) -> String {
+    use fmt::Write;
+    let mut s = String::with_capacity(report.0.len() * 2);
+    for byte in report.0 {
+        let _ = write!(s, "{byte:02x}");
+    }
+    s
+}
+
+/// One pad of a `frame` line: `-`, `*<mask>`, or the report's bytes as hex.
+fn parse_report(field: &str, line: usize) -> Result<Report, ParseError> {
+    if field == "-" {
+        return Ok(Report::missing());
+    }
+    if let Some(mask) = field.strip_prefix('*') {
+        return match parse_u64(mask).filter(|m| *m <= u64::from(u16::MAX)) {
+            Some(m) => Ok(Report::from_buttons(m as u16)),
+            None => err(line, format!("'{mask}' is not a 16-bit bitmask")),
+        };
+    }
+    report_from_hex(field, line, "frame")
+}
+
+/// A report from a hex string of its bytes, as a capture's `bytes:N` column and a tape file both hold
+/// it. Fewer than [`crate::input::REPORT_BYTES`] bytes is allowed and the rest are zero: a capture
+/// records the first 20, which is every byte the poll reads (status, mode, the button word, the four
+/// axes and the twelve pressures), so the bytes past them are known to be unread rather than known to
+/// be zero.
+fn report_from_hex(text: &str, line: usize, column: &str) -> Result<Report, ParseError> {
+    let hex = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")).unwrap_or(text);
+    // Eight bytes reach the first pressure; a shorter cell is a truncated recording, not a pad.
+    if hex.len() < 16 || hex.len() % 2 != 0 || hex.len() > input::REPORT_BYTES * 2 {
+        return err(
+            line,
+            format!(
+                "'{text}' in '{column}' is not a pad report: wanted 8 to {} bytes of hex",
+                input::REPORT_BYTES,
+            ),
+        );
+    }
+    let mut bytes = [0u8; input::REPORT_BYTES];
+    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
+        let pair = core::str::from_utf8(pair).unwrap_or("");
+        let Ok(value) = u8::from_str_radix(pair, 16) else {
+            return err(line, format!("'{text}' in '{column}' is not hex"));
+        };
+        *byte = value;
+    }
+    Ok(Report::from_bytes(bytes))
+}
+
+/// The index of a capture's column, or an error naming the columns it does have.
+fn column_at(cap: &Capture, name: &str) -> Result<usize, ParseError> {
+    cap.columns.iter().position(|c| c == name).ok_or_else(|| ParseError {
+        line: 1,
+        message: format!("no column '{name}' in the capture ({})", cap.columns.join(", ")),
+    })
+}
+
+/// The column holding the game's own frame counter, under either name a capture spec gives it.
+///
+/// Two names for one word (app+0x374): `watch/acceptance.toml` records it as `frame_counter` and
+/// `watch/input.toml` as `engine_frame`. A reader that knew only one of them would silently fall back
+/// to the recorder's video-field `frame` on half the captures in the project, which is the counter that
+/// says twice the tick for this game.
+fn game_counter(cap: &Capture) -> Option<usize> {
+    ["frame_counter", "engine_frame"].iter().find_map(|name| column_at(cap, name).ok())
+}
+
+/// One row per tick, with nothing missing — the check that makes a capture an input recording.
+///
+/// By the game's own `frame_counter` when the capture has one (it rises by exactly 1 a tick), and
+/// otherwise by the recorder's `frame` column, which counts **video fields**: this game ticks once per
+/// two of them, so what is checked there is a constant stride rather than a step of 1. A capture with a
+/// variable stride is one with a dropped row in it, whichever column is doing the counting.
+fn dense_ticks(cap: &Capture) -> Result<(), ParseError> {
+    let (counting, step) = match game_counter(cap) {
+        Some(at) => (at, Some(1)),
+        None => (0, None), // the `frame` column, whose stride the first two rows decide
+    };
+    let mut want = step;
+    let mut previous: Option<u64> = None;
+    for row in 0..cap.rows.len() {
+        let line = row + 2;
+        let cell = cap.rows[row][counting].as_str();
+        let Some(value) = parse_u64(cell) else {
+            return err(line, format!("'{cell}' in '{}' is not a number", cap.columns[counting]));
+        };
+        if let Some(last) = previous {
+            let delta = value.wrapping_sub(last);
+            let want = *want.get_or_insert(delta);
+            if delta != want {
+                return err(
+                    line,
+                    format!(
+                        "{} {value} follows {last}, a step of {delta} where every other row steps \
+                         {want}: an input recording needs every tick, so it must be recorded with \
+                         every = 1 and no row dropped",
+                        cap.columns[counting],
+                    ),
+                );
+            }
+        }
+        previous = Some(value);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Playing a tape back through the port
+// ---------------------------------------------------------------------------------------------------
+
+/// The port being driven by a recording: the input layer the pad frames go into, and the simulation it
+/// feeds.
+///
+/// One frame is [`Playback::advance`], which is the original's own order — the pad is read, *then* the
+/// simulation runs — so a press is latched before the frame that acts on it. That ordering is the whole
+/// reason this type exists rather than a loop over [`PadTape::inputs`]: the input layer is stateful (the
+/// press and release timers, the one-frame event queue) and a replay that fed the simulation without
+/// ticking it would have no timers at all.
+///
+/// What it does **not** yet do is give the simulation the frame's `dt` or the pad's strengths:
+/// [`Sim::tick`] takes an [`Input`] and no step. The input layer gets both and is proved against a
+/// capture through them (`tests/replay.rs`); closing that gap is the port's tick's business, not the
+/// harness's.
+#[derive(Clone, Debug)]
+pub struct Playback {
+    /// The input layer, read once a frame before the simulation.
+    pub input: Manager,
+    /// The simulation.
+    pub sim: Sim,
+}
+
+impl Playback {
+    /// A run from a seed, with pad 0 plugged in and pad 1 not — the shape every capture of this game
+    /// was taken in.
+    pub fn new(seed: u32) -> Playback {
+        Playback::from_state(Sim::new(seed))
+    }
+
+    /// A run from a state: a session that starts in the middle of a level, from a save state's RAM.
+    pub fn from_state(sim: Sim) -> Playback {
+        let mut input = Manager::new();
+        input.pad_mut(0).connected = true;
+        Playback { input, sim }
+    }
+
+    /// One frame, in the original's order: read the pad, then simulate.
+    pub fn advance(&mut self, frame: &PadFrame) {
+        self.input.tick(frame.dt(), &frame.reports);
+        self.sim.tick(frame.input());
+    }
+
+    /// Which tick the run is on, counting from the state it started at.
+    pub fn tick(&self) -> u64 {
+        self.sim.ticks
+    }
+
+    /// The whole port in 64 bits: the simulation's state hash, folded on through the input layer's.
+    ///
+    /// Not what a [`Fixture`]'s hashes are — those are [`Sim::hash`] alone, because the original's
+    /// input layer is a separate capture — so this is for comparing one playback against another (two
+    /// platforms, two builds), where a divergence in the timers matters as much as one in the physics.
+    pub fn hash(&self) -> u64 {
+        hash::of_with_seed(&self.input, hash::of(&self.sim))
+    }
+}
+
+/// Play a whole recording into a fresh run and hand back where it ended up.
+pub fn play(tape: &PadTape, seed: u32) -> Playback {
+    play_from(tape, Sim::new(seed))
+}
+
+/// Play a whole recording into a run that starts from `sim`.
+pub fn play_from(tape: &PadTape, sim: Sim) -> Playback {
+    let mut run = Playback::from_state(sim);
+    for frame in &tape.frames {
+        run.advance(frame);
+    }
+    run
+}
+
+impl Fixture {
+    /// The fixture of a recorded session: its inputs are the tape's, and it expects nothing yet.
+    ///
+    /// What to add to it, and from where:
+    ///
+    /// - the **watches**, from the same capture the tape came from ([`Capture::float`] and friends) —
+    ///   that is an acceptance fixture, and the only kind that proves the port right;
+    /// - the **hashes**, by running the port over [`PadTape::inputs`] with [`record`] — that is a
+    ///   regression fixture of a real session's input, which is the next best thing to have while the
+    ///   state a capture watches is still being ported.
+    pub fn from_tape(tape: &PadTape, seed: u32) -> Fixture {
+        Fixture {
+            name: tape.name.clone(),
+            seed,
+            inputs: tape.inputs(),
+            ..Default::default()
+        }
     }
 }

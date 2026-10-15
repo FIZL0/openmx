@@ -40,3 +40,4 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 6 — input, the game's own way
 - [x] **I1** (after C5) The input layer: pads mapped to the game's own bitmask, with "held", "pressed this frame" and "released" exactly as the original keeps them (including the frame it latches them, which decides whether a press on the frame of a state change counts) → crates/game-sim/src/input.rs | t: crates/game-sim/tests/input.rs | j: i1-input
+- [x] **I3** (after I1) Input recording and playback in the port: a fixture of pad frames drives a run, so a human-played sequence from the real game can be replayed against the port (this is what A2's fixtures are made of) → crates/game-sim/src/replay.rs | t: crates/game-sim/tests/replay.rs | j: i3-input-fixtures
