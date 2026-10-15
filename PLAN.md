@@ -134,6 +134,10 @@ committed, no game data. `context/` — everything game-derived, git-ignored.
     collision placement), the `.col` shapes the simulation tests against in their own bounding-volume tree,
     and the `.trn` quantised heightfield with the game's own height and surface query. Proved against
     free06 in `tests/track.rs` (D6).
+  - `tick.rs` — the fixed update: one frame as the original runs it. The mode mailbox, the Timer 0
+    clock, the thirty-entry `dt` average with its 30 fps clamp, the pad latch, the markers around the
+    simulation, and the three different ways a frame can not simulate. `Engine::step` is the top-level
+    step everything else hangs off. Proved against `engine_tick` itself in `tests/tick.rs` (S1).
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the

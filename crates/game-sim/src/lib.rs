@@ -210,6 +210,11 @@ pub mod replay;
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.
 pub mod rng;
 
+/// The fixed update: one frame of the game as the original runs it — one mode request serviced, the
+/// wall clock sampled and averaged into `dt`, the pads read, and then the simulation. The top-level
+/// step everything else in this crate hangs off, and the place to look for what runs before what.
+pub mod tick;
+
 /// One track as the disc stores it: the scene that lists what is on it, the collision shapes the
 /// simulation tests against, and the terrain the wheels run on. Pure parsing over borrowed bytes — the
 /// app layer reads them out of the archives and hands them over.

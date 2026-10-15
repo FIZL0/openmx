@@ -356,3 +356,51 @@ log_double                  boot 0x00405c70 fdlibm __ieee754_log; thunk 0x0040ab
 sqrt_double                 boot 0x00406830 fdlibm __ieee754_sqrt, called by acos_double
 ldexp_double                boot 0x00409e70 scalbn + the EDOM check; 27 call sites, the most used of all
 rem_pio2_double             boot 0x00406278 the double argument reduction behind sin/cos/tan
+# S1 — the fixed update. The frame is two functions: the game's tick services one mode request and then
+# calls the engine's, which samples the clock, averages dt, reads the pads and runs the simulation.
+# R3 traced the order, R4 the mode switch; S1 ported them and proves the arithmetic by calling
+# `engine_tick` itself with its five indirect calls hooked. How, and what had to be patched to do it,
+# is in research/journal/2026-10-15-s1-fixed-update.
+game_tick                   boot 0x00201d00 MXGame::Tick(app) -> bool: the mode-request switch, then
+#                                           engine_tick, then the quit flag. The loop's whole body.
+engine_tick                 boot 0x00131100 Game::Tick(app) -> bool: clock, dt, pads, markers, the
+#                                           simulation and the render. Not pure — see the journal for
+#                                           the five hooks and the one patched `lui` that make it so.
+engine_clock_prime          boot 0x00131800 (app): the first frame's clock, written to both ends of the
+#                                           delta so the first dt is exactly zero
+interrupts_off              boot 0x00404d20 `di` — wraps every read of the Timer 0 pair
+interrupts_on               boot 0x00404d68 `ei`
+display_ring_advance        boot 0x001a1c40 (gfx): steps the display-list buffer ring, end of frame
+iop_command_flush           boot 0x00199b20 (queue): one RPC of the frame's queued commands to the IOP
+#
+# The engine's timing globals. Data, not functions: `addr()` resolves them the same way, and a test
+# that builds a frame has to write all five.
+dt_ring                     boot 0x0046a830 30 floats: the frame deltas the mean is taken over
+dt_ring_index               boot 0x0046a8a8 where the next delta goes, 0..29
+dt_ring_primed              boot 0x0046a8b0 0 = refill the whole ring from the next delta
+fps30_cap                   boot 0x0046a808 set by MXGame's constructor: clamp dt to 0.03333
+time_scale_object           boot 0x004e24c0 null normally; its +0x40 is the slow-motion factor
+boot_countdown              boot 0x0046a7f8 frames until the one-shot boot object at 0x46a800 is freed
+wall_ticks                  boot 0x0047b190 the 100 ms wall-tick count the clock's whole part comes from.
+#                                           Read in eight places; nothing in the decompiled C writes it
+#                                           — the Timer 0 interrupt handler R3 traced does.
+app_pointer                 boot 0x0041f770 the one global pointer to the application object; the mode
+#                                           switch reaches two of its fields through this instead of
+#                                           through its own argument
+display_object              boot 0x0048a560 pointer to the display singleton: the mode switch raises its
+#                                           +0x2c on every front-end build, and the quit path flushes it
+#
+# The mode switch's eleven handlers, in the order `game_tick`'s cases call them. R4 named them from the
+# `.cfg` parser and the heap API's __FILE__ arguments; S1 hooks every one of them, so what they *do* is
+# still unproved here — only which of them a request calls, and on which frame.
+mode_enter_world            boot 0x00202940 case 1 and case 6: build the world and its activity
+mode_leave_world            boot 0x00202da0 cases 2 and 7: tear the world down
+mode_build_front_end        boot 0x00202300 "Main" / "Initial": build a front-end page group
+mode_tear_down_front_end    boot 0x002027b0 the counterpart, by group name
+mode_reset_viewports        boot 0x00202010 case 2 only
+mode_commit_event           boot 0x002b0850 case 6: commit the settings' event before the world builds
+mode_shutdown               boot 0x00203160 case 8, and the only path out of the loop besides the flag
+mode_loading_begin          boot 0x00202190 raise the loading screen
+mode_loading_end            boot 0x00202270 drop it
+mode_world_wait             boot 0x00211290 case 2: wait for the world before tearing it down
+mode_ui_flush               boot 0x0022bd90 case 4: the boot-time memory-card page

@@ -46,3 +46,6 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Phase 4 — the arithmetic, before any ported math
 - [x] **F3** VU0 macro mode: the ops the game actually uses (`vmul`, `vadd`, `vmadd`, `vmula`, `vdiv`, `vsqrt`, `vrsqrt`, the clipping and min/max ones), with VU0's own rounding and its flag behaviour. Take the list from the disassembly rather than implementing the whole ISA → crates/ps2-float/src/vu.rs | t: crates/ps2-float/tests/vu.rs | j: f3-vu0
+
+### Phase 7 — one subsystem, end to end
+- [x] **S1** (after R3) The fixed update: the tick order from R3, as the top-level step of the simulation — what updates before what, where input is read, where the RNG is drawn from, what happens on the frames the game is loading or paused → crates/game-sim/src/lib.rs | t: crates/game-sim/tests/tick.rs | j: s1-fixed-update
