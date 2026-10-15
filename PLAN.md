@@ -82,7 +82,7 @@ only on this disk is the one that loses work outright.
 
 Pushing your own branch is nobody's manual step: `./kit done` pushes the branch you are on when it is a
 task's own (an agent's `task/<ID>` from its worktree, a topic branch here), and a `./kit run` pushes the
-branch of any task whose merge it had to leave for a human. Publishing the **shared** branch stays a
+branch of any task it could not merge itself, before handing it to the master. Publishing the **shared** branch stays a
 decision somebody makes: neither a wrap-up nor a run pushes it, and a wrap-up in the main checkout prints
 the one-line `git push` instead. A merged `task/<ID>` is dropped from the remote, but only once the remote
 actually holds the merge — before that, the branch is the only copy of that work the remote has. A remote
@@ -178,8 +178,16 @@ project.
 ```
 
 Each agent gets a git worktree on a `task/<ID>` branch, so three can build and test without fighting over
-one target directory. Tasks are picked to avoid working on the same files. See `docs/WORKFLOW.md` for what
-to expect from a long run and how to pick up the pieces afterwards.
+one target directory. Tasks are picked to avoid working on the same files, and each branch is merged when
+its session ends.
+
+A merge that is not append-only text goes to the **master**: one more long-lived session, in the main
+checkout and its own tmux window, handed those branches one at a time. It exists because a run skips tasks
+whose branch is still waiting to be merged — so without it a few conflicts stop the critical path until
+somebody wakes up. It resolves, runs the tests, ticks the task, drops the branch, and writes a line in
+`context/notes/master.md` saying what it decided. It does not publish the shared branch: that stays the
+decision above. See `docs/WORKFLOW.md` for what to expect from a long run and how to pick up the pieces
+afterwards.
 
 ## When blocked
 

@@ -165,19 +165,35 @@ sitting with fresh context, and that is deliberate.
 What to expect from a long run:
 
 - It needs `tmux` and `git worktree`. Without tmux (or with `N` of 1, or `--no-tmux`) it degrades to one
-  sequential session in the current checkout and says so.
+  sequential session in the current checkout and says so — and then there is no master either: a merge
+  that needs one is logged for you, as it was before, with its branch on the remote.
 - Each agent works on `task/<ID>` in its own worktree, with its own build directory, so three can run
-  tests at once. Merge them afterwards; conflicts are rare if tasks were picked for different files.
+  tests at once. The run merges each branch itself when the session ends, so by morning the shared
+  branch holds the night's work and the finished branches are gone.
+- A conflict in anything but append-only text goes to the **master**: one more session, long-lived, in
+  the main checkout and in its own tmux window, handed those branches one at a time with its context
+  cleared in between. This matters more than it sounds: a run skips tasks whose branch is waiting to be
+  merged, and anything `(after X)` on one of them, so a handful of unmergeable branches can hold up the
+  critical path for the rest of the night. The master reads both sides, resolves, runs `./kit check`,
+  ticks the task and deletes the branch — and writes down what it decided. It does not touch the
+  worktrees, does not do task work, and does not publish the shared branch.
+- `context/notes/master.md` is the ledger, and the first file to read in the morning: every merge is one
+  line, the runner's and the master's alike, because the question is "what happened to my eight tasks"
+  and not "which of you did it". `./kit run`'s own `context/notes/run.log` has the session-by-session
+  detail.
 - Expect roughly one blocked task in five. Blocked is a result, not a failure — the reason is recorded
   and the next session can pick it up.
 - Build directories grow fast. A Rust workspace per worktree can reach tens of gigabytes; `./kit check`
   cleans the oldest when the total passes its cap, and the cap is in `kit.toml`.
-- Afterwards: `./kit plan` to see what moved, `git log --oneline` per branch, then merge. Read the
-  journal entries before the diffs — they tell you which commits to trust.
+- Afterwards: `context/notes/master.md` for what was merged and how, `./kit plan` for what moved,
+  `git log --oneline` for the night, and `git branch --list 'task/*'` for anything still standing. Read
+  the journal entries before the diffs — they tell you which commits to trust.
 - No merge is pushed: a run moves work onto the shared branch locally and stops there, because whether
-  that becomes the project's public history is yours to decide when you read it. What the run does push
-  is the branch of any task whose merge it had to leave for a human — that branch is the one copy of
-  that work, and losing it costs a whole session. A merged `task/<ID>` is dropped from the remote only
+  that becomes the project's public history is yours to decide when you read it. That holds for the
+  master too — where the upstream kit pushes, this one writes the one-line `git push` into
+  `context/notes/master.md` instead. What the run does push is the branch of any task it could not merge
+  itself, before handing it over: that branch is the one copy of that work, and losing it costs a whole
+  session. A merged `task/<ID>` is dropped from the remote only
   once the remote holds the merge, so `git ls-remote --heads origin` is the list of work the shared
   branch has not published yet, never a list with something missing from it.
 

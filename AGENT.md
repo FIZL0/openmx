@@ -92,7 +92,9 @@ journal entry, then `./kit done <ID> "<message>"` — which runs the tests, tick
 pushes the branch you are on, in one call. Then stop and report. Don't merge tasks, don't skip ahead. If a
 task turns out to be too big, split it into sub-tasks first (`./kit plan add`), then do the first one.
 
-**Never merge, rebase, or push the shared branch by hand.** `./kit done` pushes the branch it committed
+**Never merge, rebase, or push the shared branch by hand.** (One session is allowed to merge into it: the
+master an unattended `./kit run` keeps for the branches it could not merge itself, and it is told so in its
+own first message. If you were not told that, this rule is you.) `./kit done` pushes the branch it committed
 on, as long as that branch is your own — your `task/<ID>` in a worktree, or any topic branch. So the
 branch of a task whose merge went wrong is on the remote, which is the one case where a lost branch costs
 a whole session. **The shared branch is never pushed for you**, by a wrap-up or by `./kit run`: whether a
