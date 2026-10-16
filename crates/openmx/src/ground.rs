@@ -6,10 +6,9 @@
 //! `free06`. What that query answers is "the four corners of the cell at sample (x, z)". A rider needs
 //! two things on top of it, and both are this module's rather than the port's:
 //!
-//! * **Where between the samples they are.** The game interpolates a contact point inside the cell in
-//!   its wheel code, which is the bike's ground physics and is not ported yet (S3). The bilinear blend
-//!   below is this shell's own, so the height under the wheels is right at every sample and smooth
-//!   between them — but it is not the original's arithmetic and makes no claim to be.
+//! * **Where between the samples they are.** That blend is the ride's question, not the picture's, and
+//!   it lives beside the ride in [`game_sim::world::Ground`] (P2) — still not the original's
+//!   arithmetic, and still saying so there. This module only draws.
 //! * **A mesh to draw.** The renderer's own `.trn` reader (V1) reads the supercross layout, and the
 //!   off-road tracks — `free06` among them — are laid out the other way and refused by it. So the
 //!   ground drawn here is built from D6's samples: the ones around the rider, as two triangles a cell,
@@ -35,27 +34,6 @@ const LEAF_SAMPLES: u32 = 16;
 /// honest about being flat.
 const DIRT: [f32; 3] = [150.0, 118.0, 86.0];
 
-/// Something a rider can ask about the ground under a point.
-///
-/// One method, so that the ride can be stepped over a real track or over a flat plane a test makes up,
-/// and so that nothing in the ride has to know what a terrain file is.
-pub trait Surface {
-    fn contact(&self, x: f32, z: f32) -> Option<Contact>;
-}
-
-impl Surface for Ground<'_> {
-    fn contact(&self, x: f32, z: f32) -> Option<Contact> {
-        self.at(x, z)
-    }
-}
-
-/// A closure is a surface too, which is what a test rides on.
-impl<F: Fn(f32, f32) -> Option<Contact>> Surface for F {
-    fn contact(&self, x: f32, z: f32) -> Option<Contact> {
-        self(x, z)
-    }
-}
-
 /// The terrain, and what the scene says about how big it is.
 pub struct Ground<'a> {
     terrain: Terrain<'a>,
@@ -64,17 +42,6 @@ pub struct Ground<'a> {
     /// How many samples the field holds across and along.
     pub samples_x: u32,
     pub samples_z: u32,
-}
-
-/// What the ground is doing under one point.
-#[derive(Clone, Copy, Debug)]
-pub struct Contact {
-    /// World height.
-    pub y: f32,
-    /// The surface normal, normalised — the stored one is not.
-    pub normal: V3,
-    /// The surface id, which is the index of a friction surface in the bike's `.phy`.
-    pub surface: u8,
 }
 
 impl<'a> Ground<'a> {
@@ -99,45 +66,6 @@ impl<'a> Ground<'a> {
             (self.samples_x - 1) as f32 * self.spacing,
             (self.samples_z - 1) as f32 * self.spacing,
         )
-    }
-
-    /// The ground under a world point: the cell's four corners, blended.
-    ///
-    /// The blend is the shell's, not the game's (see the module's own note). Off the edge of the field
-    /// there is no answer at all, which is what keeps the rider on the map.
-    pub fn at(&self, x: f32, z: f32) -> Option<Contact> {
-        if x < 0.0 || z < 0.0 {
-            return None;
-        }
-        let (fx, fz) = (x / self.spacing, z / self.spacing);
-        let (sx, sz) = (fx as u32, fz as u32);
-        if sx + 1 >= self.samples_x || sz + 1 >= self.samples_z {
-            return None;
-        }
-        let quad = self.terrain.cell(sx, sz, 1)?;
-        let (tx, tz) = (fx - sx as f32, fz - sz as f32);
-        // The corners come back as the sample, +x, +z, then both: a bilinear blend in that order.
-        let weight = [
-            (1.0 - tx) * (1.0 - tz),
-            tx * (1.0 - tz),
-            (1.0 - tx) * tz,
-            tx * tz,
-        ];
-        let mut y = 0.0;
-        let mut normal = v3(0.0, 0.0, 0.0);
-        for i in 0..4 {
-            y += weight[i] * quad.height[i].0;
-            let n = quad.normal[i];
-            normal = normal.add(v3(n[0].0, n[1].0, n[2].0).scale(weight[i]));
-        }
-        // The surface is the nearest corner's: a surface id is a choice of friction table, and
-        // averaging two of them would name a third.
-        let nearest = (tx > 0.5) as usize + 2 * (tz > 0.5) as usize;
-        Some(Contact {
-            y: self.spacing * y,
-            normal: normal.norm(),
-            surface: quad.surface[nearest],
-        })
     }
 
     /// Draw the ground around a point: every cell within `radius` samples of it, as two triangles.

@@ -56,6 +56,7 @@
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::air::AcosTable;
+use crate::phy::Ini;
 use ps2_float::fpu::Acc;
 use ps2_float::{Dest, F, Vf, fpu, libm, vu};
 
@@ -865,4 +866,80 @@ fn normalize(v: Vf) -> Vf {
 /// instructions. `w` is the first operand's, and nothing here reads it.
 fn cross(a: Vf, b: Vf) -> Vf {
     Vf::opmsub(Vf::opmula(a, b), b, a)
+}
+
+// --- the camera file -------------------------------------------------------------------------------
+
+impl Preset {
+    /// Read a camera file (`cpresets.ini`) the way the game's loader reads one.
+    ///
+    /// The count comes from `[NumberOfPresets]`'s `NumberOfPresets` key — the section and the key have
+    /// the same name — and a count below one is a failed load, which comes back here as no presets at
+    /// all. Each preset `i` is the section `Preset{i+1}` with `suffix` after the number: the loader
+    /// builds the name with the viewport's letter, `""` for a full-screen view and `h`, `v` or `q` for
+    /// the split-screen ones (`w`, `x`, `z` when the game's own layout global is 3). A section the file
+    /// does not have leaves that preset **entirely zero**, because the loader zeroes the records first
+    /// and then skips the missing one; so does a key the section does not have.
+    ///
+    /// The two angles are the only keys the loader scales, and it scales them only when the key was
+    /// found: `AngleY = 0` and a missing `AngleY` both leave zero here, but a preset read twice over a
+    /// file that mentions one and not the other does not drift.
+    pub fn read(ini: &Ini, suffix: &str) -> Vec<Preset> {
+        let count = ini.section("NumberOfPresets").int("NumberOfPresets").unwrap_or(0);
+        if count < 1 {
+            return Vec::new();
+        }
+        (0..count).map(|i| Preset::one(ini, &format!("Preset{}{}", i + 1, suffix))).collect()
+    }
+
+    /// The same, from a file's bytes.
+    pub fn read_bytes(bytes: &[u8], suffix: &str) -> Vec<Preset> {
+        Preset::read(&Ini::parse_bytes(bytes), suffix)
+    }
+
+    /// One preset out of one section, in the loader's own key order. The order matters only for a
+    /// file with a key twice, which the first-match scan settles anyway; it is kept because it is the
+    /// record of what the loader reads.
+    fn one(ini: &Ini, name: &str) -> Preset {
+        let mut p = Preset::default();
+        if !ini.names().iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            return p;
+        }
+        let s = ini.section(name);
+        // `Name`'s default is the section's own name, so an unnamed preset is called `Preset3`.
+        p.name = s.text("Name").unwrap_or(name).to_string();
+        // Degrees in the file, radians here, and only when the key was there.
+        if let Some(v) = s.float("AngleY") {
+            p.angle_y = v * F(DEG_TO_RAD);
+        }
+        if let Some(v) = s.float("AngleX") {
+            p.angle_x = v * F(DEG_TO_RAD);
+        }
+        p.following_distance = s.float_or("FollowingDistance", p.following_distance);
+        p.min_following_distance = s.float_or("MinFollowingDistance", p.min_following_distance);
+        p.max_following_distance = s.float_or("MaxFollowingDistance", p.max_following_distance);
+        p.fov = s.float_or("FOV", p.fov);
+        p.min_fov = s.float_or("MinFOV", p.min_fov);
+        p.max_fov = s.float_or("MaxFOV", p.max_fov);
+        p.look_ahead_distance = s.float_or("LookAheadDistance", p.look_ahead_distance);
+        p.cycle_thru_this_preset = s.flag("CycleThruThisPreset", p.cycle_thru_this_preset);
+        p.filter_this_preset = s.flag("FilterThisPreset", p.filter_this_preset);
+        p.is_look_back_cam = s.flag("IsLookBackCam", p.is_look_back_cam);
+        p.camera_swing = s.float_or("CameraSwing", p.camera_swing);
+        p.look_swing = s.float_or("LookSwing", p.look_swing);
+        p.look_filters = s.vector("LookFilters", p.look_filters);
+        p.pos_filters = s.vector("PosFilters", p.pos_filters);
+        p.reverse_angle_x_offset = s.float_or("ReverseAngleXOffset", p.reverse_angle_x_offset);
+        p.reverse_following_offset = s.float_or("ReverseFollowingOffset", p.reverse_following_offset);
+        p.reverse_look_ahead_offset =
+            s.float_or("ReverseLookAheadOffset", p.reverse_look_ahead_offset);
+        p.forward_reverse_switch_speed =
+            s.float_or("ForwardReverseSwitchSpeed", p.forward_reverse_switch_speed);
+        p.low_speed_angle_x_vel_cutoff =
+            s.float_or("LowSpeedAngleXVelCutoff", p.low_speed_angle_x_vel_cutoff);
+        p.low_speed_angle_x_scale_factor =
+            s.float_or("LowSpeedAngleXScaleFactor", p.low_speed_angle_x_scale_factor);
+        p.offset_from_body_point = s.vector("OffsetFromBodyPoint", p.offset_from_body_point);
+        p
+    }
 }

@@ -3376,3 +3376,287 @@ fn the_attachment_update_carries_this_frames_chassis() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// P2 — a freeride fixture, replayed
+// ---------------------------------------------------------------------------------------------------
+//
+// The shell's ride is `game_sim::ride::Ride` on the disc's parameters, driven by the four ported
+// modules, and what P2's brief asks for is the one property that makes it worth porting anything
+// else into: the same session, ridden twice, is the same session. The three above it are the
+// harness' own, and this one is the harness pointed at the thing it was built for.
+//
+// It is a fixture in the file sense — `Fixture`'s inputs, hashes and watches, round-tripping through
+// the same text format as every other fixture in the project — but not in the `verify` sense:
+// `replay::verify` builds a `Sim`, which is the demo simulation, and the ride is not one. So the
+// walk, the comparison and the failure line are the module's; the loop that steps the state is this
+// section's, because there is nothing to hand the ride to.
+//
+// The bike is `tests/freeride-bike.phy.txt`, hand-written (the disc's `.phy` cannot be committed),
+// and the world is a flat floor: what is being replayed is the rider, not the track.
+
+use game_sim::hash::{self, Dump};
+use game_sim::input::{Manager, AXIS_CENTRE};
+use game_sim::phy::Phy;
+use game_sim::replay::Verdict;
+use game_sim::ride::{Controls, Ride, Tables};
+use game_sim::world::Flat;
+
+/// The frame the fixture is recorded at: the engine's clamped step.
+const FREERIDE_DT: F = F(1.0 / 60.0);
+
+/// How many frames of it — ten seconds, which is long enough that a divergence in the middle has
+/// hundreds of frames of ride behind it and hundreds in front.
+const FREERIDE_FRAMES: usize = 600;
+
+/// The fields the fixture watches, on top of the whole-state hash: a handful of columns, the way a
+/// capture of the original would arrive. They are here so that a failure can say *what* diverged and
+/// not only that something did.
+const FREERIDE_WATCHED: [&str; 8] = [
+    "chassis.cofg_world[1]",
+    "chassis.cofg_world[2]",
+    "chassis.speed",
+    "engine.rpm",
+    "engine.gear",
+    "front.w.compression",
+    "rear.mv.spin",
+    "air.airborne",
+];
+
+/// A session at the pad: the clutch in and the throttle open off the line, the stick working, the
+/// brake on and off, a trick asked for now and then. Written as the game's own held-button mask
+/// ([`Control::mask`]) plus the left stick as it arrives from the pad, because that is all a
+/// [`Fixture`] stores.
+fn freeride_inputs(frames: usize) -> Vec<Input> {
+    (0..frames)
+        .map(|k| {
+            let mut buttons = Control::Cross.mask();
+            if k < 15 {
+                buttons |= Control::L2.mask();
+            }
+            if k % 150 >= 130 {
+                buttons |= Control::Square.mask();
+            }
+            if k % 180 >= 168 {
+                buttons |= Control::Circle.mask() | Control::Up.mask();
+            }
+            if k % 240 >= 228 {
+                buttons |= Control::L3.mask();
+            }
+            let t = k as f32;
+            let stick = (
+                ((t * 0.09).sin() * 110.0) as i8,
+                ((t * 0.05).cos() * 90.0) as i8,
+            );
+            Input { buttons, stick }
+        })
+        .collect()
+}
+
+/// One frame of pad as the platform layer would have handed it over: a digital press is full pressure
+/// ([`Report::from_buttons`]), and the stick's two bytes are the arrival value the fixture stored.
+///
+/// This is why the fixture's lossy `Input` is enough here — the session was played on buttons, so the
+/// reports can be rebuilt from the mask exactly, and the ported poll derives the strengths and the
+/// press timers from them as it did when the fixture was recorded.
+fn freeride_frame(i: &Input) -> PadFrame {
+    let mut report = Report::from_buttons(i.buttons);
+    let byte = |v: i8| (i16::from(AXIS_CENTRE) + i16::from(v)).clamp(0, 255) as u8;
+    report.set_axis(2, byte(i.stick.0));
+    report.set_axis(3, byte(i.stick.1));
+    PadFrame::new(FREERIDE_DT, [report, Report::missing()])
+}
+
+/// A freeride, driven exactly the way the shell drives one: the pad through the ported input layer,
+/// the rider's hands off the pad ([`Controls::from_pad`]), the bike on a floor.
+struct Freeride {
+    tables: Tables,
+    phy: Phy,
+    input: Manager,
+    world: Flat,
+    ride: Ride,
+}
+
+impl Freeride {
+    fn new() -> Freeride {
+        let tables = Tables::build();
+        let phy = Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.curve);
+        let mounts = (phy.front.body_tire_force_position, phy.rear.body_tire_force_position);
+        let ride =
+            Ride::new(&phy, mounts, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0));
+        let mut input = Manager::new();
+        input.pad_mut(0).connected = true;
+        Freeride { tables, phy, input, world: Flat::default(), ride }
+    }
+
+    /// One frame, in the shell's order: read the pad, then ride.
+    fn advance(&mut self, frame: &PadFrame) {
+        self.input.tick(frame.dt(), &frame.reports);
+        let controls = Controls::from_pad(self.input.pad(0));
+        self.ride.frame(&self.phy, &self.tables, &controls, frame.dt(), &mut self.world);
+    }
+
+    fn hash(&self) -> u64 {
+        hash::of(&self.ride)
+    }
+}
+
+/// Ride the session and write down what happened: a hash every tick and the watched fields every
+/// thirtieth, which is the fixture.
+fn freeride_fixture(frames: usize) -> Fixture {
+    let inputs = freeride_inputs(frames);
+    let mut run = Freeride::new();
+    let mut hashes = Vec::with_capacity(frames);
+    let mut samples: Vec<Vec<Sample>> = vec![Vec::new(); FREERIDE_WATCHED.len()];
+    for (k, i) in inputs.iter().enumerate() {
+        run.advance(&freeride_frame(i));
+        hashes.push(run.hash());
+        let tick = k as u64 + 1;
+        if tick % 30 == 0 {
+            let dump = Dump::of(&run.ride);
+            for (w, path) in FREERIDE_WATCHED.iter().enumerate() {
+                let leaf = dump.get(path).unwrap_or_else(|| panic!("{path} is not in the ride"));
+                samples[w].push(Sample { tick, value: Value::of_leaf(leaf) });
+            }
+        }
+    }
+    let watches = FREERIDE_WATCHED
+        .iter()
+        .zip(samples)
+        .map(|(path, samples)| Watch::new(*path, samples))
+        .collect();
+    Fixture { name: "freeride".into(), seed: 0, start: None, inputs, hashes, watches }
+}
+
+/// Replay a freeride fixture: ride its inputs and compare every hash and every sample, reporting the
+/// first tick that disagrees in the same shape [`Divergence`] would.
+///
+/// `nudge` is the deliberate break the test below needs — "at this tick, move the bike" — and is
+/// `None` for an honest replay.
+fn replay_freeride(f: &Fixture, nudge: Option<u64>) -> Result<usize, String> {
+    let mut run = Freeride::new();
+    // One cursor per watch, as `verify` walks them.
+    let mut cursor = vec![0usize; f.watches.len()];
+    let mut checked = 0;
+    for (k, i) in f.inputs.iter().enumerate() {
+        run.advance(&freeride_frame(i));
+        let tick = k as u64 + 1;
+        if nudge == Some(tick) {
+            let v = run.ride.chassis.vel;
+            run.ride.chassis.vel = Vf::new(v.x(), v.y(), v.z() + 0.5, v.w());
+        }
+        if let Some(&want) = f.hashes.get(k) {
+            checked += 1;
+            if want != run.hash() {
+                // The watches say which field it was, where the hash can only say that it was one.
+                let dump = Dump::of(&run.ride);
+                let named = f.watches.iter().find_map(|w| {
+                    let s = w.samples.iter().find(|s| s.tick == tick)?;
+                    let got = dump.get(&w.path)?;
+                    (s.value.compare(got) != Verdict::Same).then(|| {
+                        format!("{} {} vs {}", w.path, s.value.as_leaf(), got)
+                    })
+                });
+                return Err(match named {
+                    Some(line) => format!("tick {tick}: {line}"),
+                    None => format!("tick {tick}: state hash {want:#018x} vs {:#018x}", run.hash()),
+                });
+            }
+        }
+        let dump = Dump::of(&run.ride);
+        for (w, watch) in f.watches.iter().enumerate() {
+            while let Some(s) = watch.samples.get(cursor[w]).filter(|s| s.tick == tick) {
+                cursor[w] += 1;
+                checked += 1;
+                let got = dump
+                    .get(&watch.path)
+                    .ok_or_else(|| format!("tick {tick}: {} is not in the walk", watch.path))?;
+                if s.value.compare(got) != Verdict::Same {
+                    return Err(format!(
+                        "tick {tick}: {} {} vs {got}",
+                        watch.path,
+                        s.value.as_leaf()
+                    ));
+                }
+            }
+        }
+    }
+    // A sample past the end of the run is the fixture's own problem, not a pass.
+    for (w, watch) in f.watches.iter().enumerate() {
+        if cursor[w] != watch.samples.len() {
+            return Err(format!(
+                "{}: {} of {} samples were never reached — the run ended at tick {}",
+                watch.path,
+                cursor[w],
+                watch.samples.len(),
+                f.inputs.len(),
+            ));
+        }
+    }
+    Ok(checked)
+}
+
+/// **The brief's test.** A freeride replays to the same hash twice.
+#[test]
+fn a_freeride_fixture_replays_to_the_same_hash_twice() {
+    let f = freeride_fixture(FREERIDE_FRAMES);
+    let checked = replay_freeride(&f, None).expect("the recorded ride replays");
+    assert_eq!(checked, f.checks());
+    assert_eq!(checked, FREERIDE_FRAMES + FREERIDE_WATCHED.len() * (FREERIDE_FRAMES / 30));
+
+    // And the recording itself is reproducible: a second ride of the same session writes the same
+    // fixture, which is the property a fixture recorded today and replayed next year rests on.
+    let again = freeride_fixture(FREERIDE_FRAMES);
+    assert_eq!(f.hashes, again.hashes, "two recordings of one session");
+    assert_eq!(f.watches, again.watches);
+}
+
+/// It is a ride and not a parked bike: a fixture of a frozen state would replay perfectly and prove
+/// nothing.
+#[test]
+fn the_freeride_fixture_is_a_ride() {
+    let f = freeride_fixture(FREERIDE_FRAMES);
+    let distinct: std::collections::BTreeSet<u64> = f.hashes.iter().copied().collect();
+    assert!(distinct.len() > FREERIDE_FRAMES * 8 / 10, "{} distinct hashes", distinct.len());
+
+    let moved = |path: &str| {
+        let w = f.watches.iter().find(|w| w.path == path).expect(path);
+        let first = w.samples.first().expect("samples").value;
+        w.samples.iter().any(|s| s.value != first)
+    };
+    assert!(moved("chassis.cofg_world[2]"), "the bike never went anywhere");
+    assert!(moved("chassis.speed"), "the bike never changed speed");
+    assert!(moved("engine.rpm"), "the engine never changed revs");
+    assert!(moved("front.w.compression"), "the front suspension never moved");
+}
+
+/// The file format carries a freeride fixture exactly, floats and all, so one recorded in the port
+/// today is replayable from a file.
+#[test]
+fn a_freeride_fixture_round_trips_as_a_file() {
+    let f = freeride_fixture(120);
+    let text = f.to_text();
+    let read = Fixture::parse(&text).expect("a fixture this module wrote");
+    assert_eq!(read.name, f.name);
+    assert_eq!(read.inputs, f.inputs);
+    assert_eq!(read.hashes, f.hashes);
+    assert_eq!(read.watches, f.watches);
+    assert_eq!(read.checks(), f.checks());
+    replay_freeride(&read, None).expect("the fixture read back off the file replays too");
+}
+
+/// A ride that diverges fails at the tick it diverged on, with the field named — not at tick 1, and
+/// not at the end.
+#[test]
+fn a_diverging_freeride_fails_at_the_tick_it_diverged_on() {
+    let f = freeride_fixture(300);
+    let why = replay_freeride(&f, Some(150)).expect_err("a nudged bike is a different bike");
+    assert!(why.starts_with("tick 150:"), "{why}");
+
+    // A nudge at a tick the fixture does not hash is still caught, at the next tick that is checked —
+    // which here is the next frame, because this fixture hashes every one of them.
+    let sparse = Fixture { hashes: Vec::new(), ..freeride_fixture(300) };
+    let why = replay_freeride(&sparse, Some(150)).expect_err("the watches catch it on their own");
+    assert!(why.starts_with("tick 180:"), "{why}");
+    assert!(why.contains("chassis."), "the failure names the field: {why}");
+}
