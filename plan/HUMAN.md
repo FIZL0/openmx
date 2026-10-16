@@ -174,6 +174,11 @@ Two things that bite:
       reproduces the recorded motion. With it, `the_acceptance_run` in `crates/game-sim/tests/replay.rs`
       becomes the port's verdict with no code to write.
 
+      **One sitting now answers two questions.** `watch/acceptance.toml` records the human rider's
+      `wreck_reason` (+0x748) as well as the bike, so the first row of the capture where it is not 0 is
+      the NPC contact S14 could not measure — the open item three bullets up, which otherwise needs its
+      own trip to the GUI. The command in step 3 is unchanged; the extra columns come along with it.
+
       If the playback desyncs (the bike doing something the human does not remember), say so here rather
       than deleting it: a `.p2m2` that does not replay on the emulator it was recorded on cannot be
       expected to replay on the port either, and that is worth knowing before anybody ports physics to

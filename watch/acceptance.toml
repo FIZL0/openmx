@@ -151,3 +151,35 @@ type = "f32x4"
 name = "bike_xform"               # +0x180: 4x4 world transform; row 3 (+0x1b0) is the position
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
 type = "mat4"
+
+# --- the rider, so one playback also answers S14's open question -------------------------------------
+# The human says there is a collision with an NPC rider somewhere in this minute, and S14 could not
+# measure which frame: the number in use is an inference from the tape's idle window (video ~1019,
+# tick ~510). The wreck reason below settles it with no second sitting at the GUI — the first row where
+# `wreck_reason` is not 0 is the contact, and it bounds the tick-exact window the acceptance test can
+# claim. Two hops land on the human's *rider* (the type-2 actor that carries the ride state), where the
+# eight hops above land on the vehicle; the two guards say so on every row.
+[[field]]
+name = "rider_type"               # +0x00: 2 = a rider
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "rider_ctl_src"            # +0x20 -> +0x34: 1 = a local human, 2 = an AI
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+required = true
+
+[[field]]
+name = "wreck_reason"             # +0x748: 0 while riding; the wreck reason while being put back on
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+# +0x550: `g_peak`, the per-lane signed max-by-magnitude body-frame acceleration over the frame's
+# substeps — the column S22 fixed the port against on a standing bike. On a real minute of riding it is
+# the reference for every jump and landing in the tape, which is worth having from the same capture.
+[[field]]
+name = "g_peak"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x550"
+type = "f32x4"
