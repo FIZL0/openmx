@@ -172,10 +172,11 @@ added beside them:
     rider's lean into forces on the chassis. Where the mass acts and how far the stick moves it, the
     steering lock fading out with speed, the donut's roll, the suspension rates, the gearbox and the
     clutch's launch ramp, the drag that sets the top speed, the rev limiter — and the substep loop
-    that is the order the whole ground frame runs in. The twenty-one callees it drives (suspension,
-    tires, roll and pitch, the torque curve) are not ported yet, so the step returns the ordered list
-    of them instead, which is what makes the order provable. Proved against the original over 2000
-    generated frames and a 240-frame ride in `tests/move.rs` (S3).
+    that is the order the whole ground frame runs in. Plus the engine behind all of it: the power
+    curve, the clutch's slip and lock-up, and the torque that reaches the driven wheel (S15). The
+    twenty callees it still drives (suspension, tires, roll and pitch) are not ported yet, so the step
+    returns the ordered list of them instead, which is what makes the order provable. Proved against
+    the original over 2000 generated frames and a 240-frame ride in `tests/move.rs` (S3, S15).
   - `camera.rs` — the camera for normal play: the 160-byte preset record the disc ships one of per
     camera, the target point and the look-ahead it leads the rider by, the eight first-order lags that
     make it follow instead of snap, and the limits on its yaw, pitch, distance and field of view.

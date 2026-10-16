@@ -1174,8 +1174,8 @@ wheel_tire_forces boot 0x0025bc70 (dt in f12, wheel) the tire's drive, brake and
 wheel_integrate boot 0x0025bbf0 (dt in f12, wheel) the wheel's own spin and steering integration
 bike_no_hander boot 0x00255d20 (dt in f12, bike) the no-hander, after its four accumulators are zeroed
 engine_update boot 0x00246fd0 (dt in f12, engine) the torque curve, the clutch's slip and the torque
-#                             that reaches the driven wheel. Reads f20 without setting it, so it gets
-#                             whatever the caller left there — which in the ground step is 0.0
+#                             that reaches the driven wheel. Ported and proved by S15; the S15 block
+#                             below has the detail, and corrects S3's note that it reads f20 unset
 transform_rotate boot 0x001b2ff0 (out, transform, v) -> out.xyz = the transform's three rows times
 #                                v's three lanes; the reverse push's only use of the chassis' frame
 transform_unrotate boot 0x001b30e0 (out, transform, v) -> the same through the transpose, which is
@@ -1185,3 +1185,32 @@ actor_search_gather boot 0x00218b80 (list, search, radius) refills it, with a ra
 bike_phy_load boot 0x002539e0 (bike, file) the bike's .phy tuning file: every parameter in
 #                             crates/game-sim/src/move.rs's Params comes from here, and the journal
 #                             entry has the full key -> offset map
+
+# ---------------------------------------------------------------------------------------------------
+# S15 — the engine's torque curve. engine_update's own arithmetic, the two curve helpers behind it and
+# the setters that fill the engine in. The port is crates/game-sim/src/move.rs (engine_update,
+# curve_seek, curve_value) and the proof is the_engine_is_the_originals in
+# crates/game-sim/tests/move.rs; how each one was found is in
+# research/journal/2026-10-15-s15-engine-torque. engine_update itself is in the S3 block above.
+curve_seek boot 0x0013e6f0 (cursor, x in f12) walks a {count, index, frac, xs*} cursor to x: up while
+#                          x >= xs[index], then down while x < xs[index-1], then frac =
+#                          (xs[index] - x) / (xs[index] - xs[index-1]), or 0 on the bottom point. Off
+#                          the top it parks on the last point with frac 0. Both bounds tests unsigned
+curve_value boot 0x0013e7c0 (cursor, ys) -> ys[index] - frac * (ys[index] - ys[index-1]), or ys[0] on
+#                           the bottom point. Takes the table as an argument, so one seek can read
+#                           any number of curves at the same place
+wheel_add_drive_torque boot 0x0025c380 (wheel, torque in f12) -> wheel+0x210 += torque. An
+#                                      accumulator: the engine, the brake and the tires all add here
+engine_set_power_curve boot 0x00246ce0 (engine, n, rpm[], hp[]) fills engine+0x6c/+0x70/+0x74 and the
+#                                      +0x8c cursor, turns each hp into a torque (5252*hp/rpm, and a
+#                                      point with rpm <= 0 is skipped, not zeroed), keeps the peak and
+#                                      its rpm at +0xb8/+0xb0, and sets the rev limit at +0xb4 from
+#                                      the last point's rpm
+engine_set_gearbox boot 0x00246e80 (engine, n, ratios[], final) -> engine+0x78/+0x7c/+0x40
+engine_set_inertia boot 0x00246f20 (engine, inertia in f12) -> engine+0x44, and 1/inertia at +0x48
+#                                  when inertia > 0
+engine_set_driven_wheel boot 0x00246cd0 (engine, wheel) -> engine+0x9c
+engine_ctor boot 0x00246b70 zeroes the engine and sets +0x40/+0x5c/+0x80/+0x84/+0x88/+0xbc to 1.0 and
+#                          the gear at +0x68 to 1. +0x30/+0x34 are left null; the bike's own setup at
+#                          0x002535c4 points them at bike+0x658 and bike+0x65c, the rate-limited
+#                          throttle and clutch (and the two wheels' +0x30 at bike+0x650/+0x654)
