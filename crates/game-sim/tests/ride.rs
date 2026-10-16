@@ -348,7 +348,7 @@ fn the_walk_names_every_field_once() {
 
     // The two numbers that catch a field added to the struct and not to the walk. Both move on
     // purpose when the ride gains state, and the per-tick hashes of every fixture move with them.
-    assert_eq!(dump.fields.len(), 471, "the walk's leaves");
+    assert_eq!(dump.fields.len(), 472, "the walk's leaves");
     assert_eq!(std::mem::size_of::<Ride>(), 1800, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
@@ -359,5 +359,5 @@ fn the_walk_names_every_field_once() {
     assert!(dump.get("air.hang_time").is_some());
     assert!(dump.get("engine.curve.frac").is_some());
     assert!(dump.get("held.stick_hold").is_some());
-    assert_eq!(dump.fields.last().map(|f| f.path.as_str()), Some("touching"));
+    assert_eq!(dump.fields.last().map(|f| f.path.as_str()), Some("stunt"));
 }

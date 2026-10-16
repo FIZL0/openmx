@@ -1785,3 +1785,23 @@ transform_set_axes boot 0x001b1e20 (node, relative_to, forward, up, sync_a in t0
 # the engine makes no torque at all: engine_update multiplies by +0x88 to get the torque and by +0xbc
 # to get the torque reaching the wheel. Whoever constructs an engine has to apply the constructor's
 # six ones, not just the loader's keys.
+# --- P3: tricks in the shell ----------------------------------------------------------------------
+# No new function either — P3 wires stunt_clocks, bike_wreck_test and the ride state machine onto the
+# ported bike — but one field had been read two ways by two tasks and the disassembly settles it.
+#
+# bike +0x420..+0x42c is a *vector*, not four scalars: the bike constructor (0x0024f420, near its end)
+# fills it from the constant quad at 0x00426db0, which is 0, 1, 0, 1 — the up axis — just as it fills
+# +0x410..+0x41c from 0x00426dc0, which is 0, 0, 1, 1, the forward axis. So the no-hander clause at
+# the bottom of bike_wreck_test,
+#
+#     if (*(int *)(obj + 0xa44) != 0 && *(float *)(obj + 0x424) < *(float *)(obj + 0x780))  -> reason 12
+#
+# is comparing the *y component of the bike's up axis* against +0x780, and +0x780 is where the .phy
+# loader puts NoHanderMaxRollAngle *after* passing it through the game's cosine table. It is a roll
+# test, not a speed test. NoHanderWreckSpeedLimit is +0x77c and is spent one clause higher up, against
+# the vertical g load at +0x554 with the same +0xa44 flag in front of it. S11's journal reads +0x424
+# as the bike's speed and +0x780 as the speed limit; that is wrong on both halves, and S10's air.rs is
+# the correct port of the clause. Nothing calls trick.rs's version any more.
+#
+# The two reason codes that look like a clash are not one: bike_wreck_test's no-hander reason is 0xc
+# and the trick machine's mid-trick reason is 12. Same number, same clause, two names.

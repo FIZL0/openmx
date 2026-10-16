@@ -55,6 +55,7 @@ use crate::hash::{State, Walk};
 use crate::math::{self, Mat4};
 use crate::phy::{self, Phy};
 use crate::r#move::{self as mv, Frame, Outside as _, Side};
+use crate::trick;
 use crate::wheel;
 use crate::world::World;
 use ps2_float::{Acc, Dest, F, Field, Vf, fpu, libm, vu};
@@ -101,6 +102,12 @@ pub struct Controls {
     pub dpad_dir: i32,
     /// A stunt is being held.
     pub stunt: bool,
+    /// The three trick buttons, in the order the trick decoder reads them: the group they make is
+    /// one half of the gesture that names a stunt ([`trick::group`]).
+    pub trick: [bool; trick::TRICK_BUTTONS],
+    /// The d-pad, in the order the trick decoder polls it — left, right, up, down — which is the
+    /// other half of that gesture and not the eight-way code [`Controls::dpad_dir`] carries.
+    pub dpad: [bool; trick::DPAD],
     /// The rider is balancing on one wheel.
     pub balance: bool,
     /// Put the bike back on the start line.
@@ -133,8 +140,26 @@ impl Controls {
             // directions wins is the front end's business.
             dpad_dir: dpad.iter().position(|c| pad.held(*c)).map_or(0, |i| i as i32 * 2 + 1),
             stunt: pad.held(Control::Circle),
+            // The shipped pad's three trick buttons, in the order the decoder tests them. Which
+            // host button each is remains the shell's choice; the *order* is the disc's, because it
+            // is what numbers the six groups and so which of the 24 slots a gesture names.
+            trick: [
+                pad.held(Control::Circle),
+                pad.held(Control::Triangle),
+                pad.held(Control::R1),
+            ],
+            dpad: [
+                pad.held(Control::Left),
+                pad.held(Control::Right),
+                pad.held(Control::Up),
+                pad.held(Control::Down),
+            ],
             balance: pad.held(Control::L3),
-            respawn: pad.pressed(Control::Triangle),
+            // The reset chord. The original's is two buttons taken together and this one is too, but
+            // which two is the shell's choice like everything else here: with the three trick buttons
+            // and the d-pad spoken for, the two stick clicks are what is left that a gesture can
+            // never be mistaken for.
+            respawn: pad.held(Control::L3) && pad.pressed(Control::R3),
         }
     }
 }
@@ -319,6 +344,12 @@ pub struct Ride {
     /// Whether the body itself is against something solid — a prop, a wall, the scene. `air.rs`
     /// reads it to know a landing is not the only way to be stopped.
     pub touching: bool,
+    /// A trick is running. The original's airborne control and its wreck test both read one word on
+    /// the bike for this (the trick clocks' "in progress"), and the clocks run *after* the ground
+    /// step, so what a frame's air code sees is the previous frame's verdict. [`crate::rider`] is
+    /// what writes it; a bare [`Ride`] with no trick machine leaves it false, which is the state of
+    /// a rider that never asks for a stunt.
+    pub stunt: bool,
 }
 
 impl Ride {
@@ -376,6 +407,7 @@ impl Ride {
             spawn_facing: facing,
             near: F::ONE,
             touching: false,
+            stunt: false,
         };
         ride.place(at, facing);
         ride
@@ -525,7 +557,7 @@ fn set_axes(forward: Vf, up: Vf) -> [Vf; 3] {
 /// this port can read, so what is here is value noise with the same shape: `[-1, 1]`, continuous, and
 /// a feature per unit of `t`. S17's proof of [`mv::balance`] hooks the real one on both sides, so the
 /// controller around it is the original's and only the wobble's waveform is this.
-fn noise(t: F) -> F {
+pub fn noise(t: F) -> F {
     let whole = t.to_i32();
     let frac = t - F(fpu::from_i32(whole));
     let (a, b) = (noise_at(whole), noise_at(whole.wrapping_add(1)));
@@ -1022,7 +1054,8 @@ impl Ride {
             self.place(at, facing);
         }
         let Ride {
-            mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, ..
+            mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
+            ..
         } = self;
         *touching = false;
 
@@ -1109,7 +1142,9 @@ impl Ride {
             front_brake: held.front_brake,
             rear_brake: held.rear_brake,
             lean: held.stick.0,
-            stunt: c.stunt,
+            // The trick clocks' "a trick is in progress", not the button: the original's airborne
+            // control reads the clocks' own word, which last frame's clocks wrote.
+            stunt: *stunt,
             touching: false,
         };
 
@@ -1398,6 +1433,7 @@ impl State for Ride {
         w.vf("spawn_facing", self.spawn_facing);
         w.f("near", self.near);
         w.bool("touching", self.touching);
+        w.bool("stunt", self.stunt);
     }
 }
 

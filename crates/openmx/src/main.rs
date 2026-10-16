@@ -30,6 +30,11 @@
 //!   parameters the bike's own `.phy` carries. The ground it asks about and the props it runs into are
 //!   [`game_sim::world::Place`] — D6's terrain query and S4's sweep over the scene's own collision
 //!   placements. Nothing in this file moves the bike.
+//! * **The rider** is P3: [`game_sim::rider::Rider`] puts S11's trick machine, S10's airborne wreck
+//!   test and S5's ride state machine on top of that bike, in the order the original's ridden actor
+//!   runs them. The 24 stunts a gesture can name are the disc's own, read out of `appstart.res`'s
+//!   `stunts.ini` by the ported table reader, and the limits a landing is judged against come off the
+//!   same `.phy` as the ride. Nothing in this file decides a trick or a wreck either.
 //! * **The picture** is V1: the scene's props, the bike and the parts its `.sub` bolts on, lit and
 //!   fogged by the scene's own values, through the port's rasteriser, with the follow camera S7 ported
 //!   reading the track's own `cpresets.ini`.
@@ -41,11 +46,25 @@
 //! # The controls
 //!
 //! Cross is the throttle and Square the brake (both analogue, as the pad reports them), L2 is the
-//! clutch and R2 the front brake on its own, the left stick steers and leans, Circle holds a trick, the
-//! d-pad preloads, L3 asks the rider to balance and R3 is reverse. Triangle puts the bike back on the
-//! start line, Start freezes and unfreezes the ride, L1 and R1 cycle the track's own camera presets,
-//! and Escape or closing the window quits. The same controls are on the keyboard for a machine with no
-//! pad: X/Space, Z, the arrow keys, V, Return.
+//! clutch and R2 the front brake on its own, the left stick steers and leans, L3 asks the rider to
+//! balance and R3 is reverse.
+//!
+//! A **trick** is a gesture: hold one, two or three of Circle, Triangle and R1 — which is what names
+//! one of the six groups — and push the d-pad in one of four directions, which names one of the 24
+//! stunts the rider carries. The d-pad still preloads, and a gesture only counts in the air. Hold the
+//! buttons past the stunt's hold time and the rider holds the pose; let go and it runs to its end.
+//! Land with one still running and the rider comes off.
+//!
+//! **L3 and R3 clicked together** put the bike back on the start line, which while the rider is down
+//! is the only way back — the automatic reset needs a settle window a bike's class never asks for
+//! (S5). Start freezes and unfreezes the ride, L1 cycles the track's own camera presets, and Escape
+//! or closing the window quits. The same controls are on the keyboard for a machine with no pad:
+//! X/Space, Z, the arrow keys, C/V/D for the three trick buttons, Q+E for the reset, Return.
+//!
+//! Which host button is which is this file's and [`game_sim::ride::Controls::from_pad`]'s own choice
+//! and not the disc's — the original's binding table is in its front end and is not ported. What *is*
+//! the disc's is the order of the three trick buttons, because that order is what numbers the six
+//! groups and so which stunt a gesture names.
 
 #![forbid(unsafe_code)]
 
@@ -65,9 +84,12 @@ use game_render::{ini, png, scene as view};
 use game_sim::camera::{Follow, Preset, Target};
 use game_sim::input::{Control, Manager, PADS, Report};
 use game_sim::phy::Phy;
-use game_sim::ride::{Controls, Ride, Tables};
+use game_sim::ride::Controls;
+use game_sim::rider::{self, Rider};
 use game_sim::rng::Rng;
+use game_sim::state::Phase;
 use game_sim::tick::{Engine, Game, Outcome, Timer0};
+use game_sim::trick::{Set, Stunts};
 use game_sim::world::Place;
 use game_sim::{Input, track, world as sim_world};
 use ps2_float::{F, Vf};
@@ -91,6 +113,11 @@ const GROUND_RADIUS: u32 = 44;
 /// The chassis model every bike is built on, which is the name the parts in a `.sub` hang off.
 const CHASSIS: &str = "bike";
 
+/// Where the rider's stunt table lives: one member of the app's own archive, the same two names the
+/// trick task's proofs read it by.
+const STUNT_ARCHIVE: &str = "appstart.res";
+const STUNT_TABLE: &str = "stunts.ini";
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("openmx: {e}");
@@ -113,13 +140,16 @@ struct World<'a> {
     /// This frame's reports, written by the app layer before the step the way the original's device
     /// manager fills its buffers before the frame reads them.
     reports: [Report; PADS],
-    /// The bike's own parameters, as its `.phy` carries them, and the two tables the step reads.
+    /// The bike's own parameters, as its `.phy` carries them, and the three tables the step reads.
     phy: Phy,
-    tables: Tables,
-    ride: Ride,
+    tables: rider::Tables,
+    /// The bike and the person on it: P3's rider, which owns P2's ride and steps it.
+    rider: Rider,
     /// Whether the ride is moving. Start toggles it: the original's pause is a whole front-end page
     /// and this shell has no pages, so freezing the ride is the shell's own stand-in for it.
     riding: bool,
+    /// What the rider did this frame, kept so the loop can print it after the pass.
+    said: rider::Frame,
 }
 
 impl Game for World<'_> {
@@ -141,8 +171,9 @@ impl Game for World<'_> {
         // Which button means what lives in the ride, so the shell and a replay fixture read a pad
         // the same way.
         let controls = Controls::from_pad(pad);
+        self.said = rider::Frame::default();
         if self.riding {
-            self.ride.frame(&self.phy, &self.tables, &controls, dt, &mut self.place);
+            self.said = self.rider.frame(&self.phy, &self.tables, &controls, dt, &mut self.place);
         }
         true
     }
@@ -164,6 +195,12 @@ struct Args {
     /// Draw one frame posed from a moment of the original (V2) instead of riding: the moment file
     /// and the path to write that frame to.
     moment: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    /// Whether the session wrecks at all ([`game_sim::state::Sense::wrecks_enabled`]), which is the
+    /// original's own per-session flag. On by default, because that is what a freestyle session is;
+    /// `--no-wrecks` is here because the ported ride's g loads currently oscillate up past the
+    /// bike's own `SideWreckSpeedLimit` within a few seconds of the start line, so with wrecks on
+    /// there is no riding to be done (P3's journal entry, and a task of its own).
+    wrecks: bool,
 }
 
 fn run() -> Result<(), String> {
@@ -183,6 +220,20 @@ fn run() -> Result<(), String> {
         archives.push(disc.res(name)?);
     }
     let archives = archives;
+
+    // The rider's stunts, which are neither the track's nor the bike's: one table in the app's own
+    // archive, read by the ported reader (S11). It holds 57 records and a 24-slot gesture map for
+    // each player, and the 24 the first player's map reaches are what this rider can do.
+    let stunt_bytes = member_ending(&disc, STUNT_ARCHIVE)
+        .and_then(|name| disc.res(&name))
+        .and_then(|res| res.read_suffix(STUNT_TABLE).map_err(|e| format!("{STUNT_ARCHIVE}: {e}")))?;
+    let table = Stunts::parse(&stunt_bytes)?;
+    let stunts = Set::new(table.selection(0));
+    println!(
+        "stunts: {} on the disc, {} this rider can do",
+        table.stunts.len(),
+        stunts.stunts.iter().filter(|s| !s.name.is_empty()).count()
+    );
 
     let scn = archives[0]
         .entries()
@@ -263,7 +314,7 @@ fn run() -> Result<(), String> {
     // ---- the bike and where the rider starts ---------------------------------------------------
     // The two tables the simulation shares: the arc cosine curve and the game's {cos, sin} table.
     // They are built once, read by the ride, the camera and the `.phy` loader, and never written.
-    let tables = Tables::build();
+    let tables = rider::Tables::build();
 
     // The bike's own physics, off the disc, by the ported loader (S18) — every number the ride runs
     // on comes from here, and a bike whose file is missing is not rideable.
@@ -271,7 +322,7 @@ fn run() -> Result<(), String> {
         .read_suffix(&format!("{}.phy", args.bike))
         .or_else(|_| archives[1].read_suffix(".phy"))
         .map_err(|e| format!("the bike archive has no .phy: {e}"))?;
-    let phy = Phy::read_bytes(&phy_bytes, &tables.curve);
+    let phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
 
     // The follow cameras the track carries, in the file's own order, read by S7's own reader. L1 and
     // R1 walk them. `reverse_speed` is a constructor argument in the original and the call site was
@@ -298,7 +349,8 @@ fn run() -> Result<(), String> {
     // Where the wheels hang from the chassis: the `.phy`'s own force positions, which is what the
     // suspension's ray starts from.
     let mounts = (phy.front.body_tire_force_position, phy.rear.body_tire_force_position);
-    let ride = Ride::new(&phy, mounts, at, heading);
+    let mut rider = Rider::new(&phy, mounts, at, heading, stunts);
+    rider.sense.wrecks_enabled = args.wrecks;
     println!(
         "start: {:.0}, {:.0}, {:.0} facing {:.0} degrees, {} camera presets",
         spawn.x,
@@ -356,8 +408,9 @@ fn run() -> Result<(), String> {
         reports: [Report::missing(); PADS],
         phy,
         tables,
-        ride,
+        rider,
         riding: true,
+        said: rider::Frame::default(),
     };
 
     let mut shot = args.shot.clone();
@@ -378,28 +431,40 @@ fn run() -> Result<(), String> {
             break;
         }
 
+        // What the rider did, as a line: a run nobody is watching still says whether a trick
+        // started, landed or put the rider down, and by which of the original's reason codes.
+        if let Some(t) = world.said.started {
+            println!("trick: {}", table.display_name(0, t));
+        }
+        if let Some(t) = world.said.landed {
+            println!("landed: {}", table.display_name(0, t));
+        }
+        if let Some(why) = world.said.wreck {
+            println!("wreck: reason {} — L3 and R3 together to get back on", why.0);
+        }
+        if world.said.respawned {
+            println!("back on the start line");
+        }
+
         // The camera, after the frame, which is where the original's viewport updates it: the shell
         // picks the preset, S7's own camera does everything else.
         let presets = camera.presets.len();
         if presets > 1 {
             let pad = world.input.pad(0);
-            if pad.pressed(Control::R1) {
+            // L1 only: R1 is the third of the trick decoder's buttons now.
+            if pad.pressed(Control::L1) {
                 which = (which + 1) % presets;
                 camera.set_preset(which);
             }
-            if pad.pressed(Control::L1) {
-                which = (which + presets - 1) % presets;
-                camera.set_preset(which);
-            }
         }
-        let (forward, up) = world.ride.axes();
-        let bike_pos = world.ride.position();
+        let (forward, up) = world.rider.ride.axes();
+        let bike_pos = world.rider.ride.position();
         let target = Target {
             body_point: bike_pos,
             forward,
             up,
-            vel: world.ride.chassis.vel,
-            lean: world.ride.held.stick.0,
+            vel: world.rider.ride.chassis.vel,
+            lean: world.rider.ride.held.stick.0,
         };
         let view = if presets == 0 {
             None
@@ -407,7 +472,7 @@ fn run() -> Result<(), String> {
             // Nothing limits the camera's distance here: the original's limit comes from a collision
             // probe the camera owns, which is not ported, and zero is what that probe answers in the
             // open.
-            Some(camera.update(step.dt, &target, F::ZERO, &world.tables.curve, &world.tables.acos))
+            Some(camera.update(step.dt, &target, F::ZERO, &world.tables.ride.curve, &world.tables.ride.acos))
         };
         let bike_look = vector(forward);
         let bike_up = vector(up);
@@ -469,8 +534,13 @@ fn run() -> Result<(), String> {
                 frames as f32 / since.elapsed().as_secs_f32(),
                 triangles / frames.max(1) as usize,
                 // Feet a second to miles an hour, for a number a rider can read.
-                world.ride.chassis.speed.0 * 0.681_818,
-                if world.riding { "" } else { " (frozen)" }
+                world.rider.ride.chassis.speed.0 * 0.681_818,
+                match (world.riding, world.rider.phase()) {
+                    (false, _) => " (frozen)",
+                    (_, Phase::Riding) => "",
+                    (_, Phase::Down) => " (down)",
+                    (_, Phase::Resetting) => " (getting up)",
+                }
             );
             window_of_frames = (Instant::now(), 0, 0);
         }
@@ -590,6 +660,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         pad: None,
         shot: None,
         moment: None,
+        wrecks: true,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
     };
     let mut argv = std::env::args().skip(1);
@@ -606,6 +677,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.moment = Some((file, out));
             }
             "--display" => args.display = next("a display, like :0")?,
+            "--no-wrecks" => args.wrecks = false,
             "--seconds" => {
                 args.seconds = Some(
                     next("how long to ride")?
@@ -634,14 +706,17 @@ fn parse_args() -> Result<Option<Args>, String> {
                 println!(
                     "openmx [--track free06] [--bike 125sx] [--size 640x448] [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png]\n\
+                            [--moment FILE OUT.png] [--no-wrecks]\n\
                      \n\
                      Rides the freeride area from the disc named in kit.toml.\n\
                      Cross throttle, Square brake, R2 front brake, L2 clutch, left stick steers\n\
-                     and leans, Circle holds a trick, the d-pad preloads, L3 balances, R3 reverses,\n\
-                     Triangle respawns, Start freezes, L1/R1 change camera, Escape quits.\n\
-                     On the keyboard: X throttle, Z brake, arrows steer, V respawn, Return start.\n\
-                     --moment draws one frame posed from a moment of the original and quits."
+                     and leans, the d-pad preloads, L3 balances, R3 reverses, Start freezes,\n\
+                     L1 changes camera, Escape quits.\n\
+                     A trick is a gesture: hold Circle, Triangle and/or R1 and push the d-pad.\n\
+                     L3 and R3 clicked together put the bike back on the start line.\n\
+                     On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, Q+E reset.\n\
+                     --no-wrecks turns the session's wrecks off; --moment draws one frame posed\n\
+                     from a moment of the original and quits."
                 );
                 return Ok(None);
             }

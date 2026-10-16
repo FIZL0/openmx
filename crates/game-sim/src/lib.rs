@@ -266,6 +266,12 @@ pub mod replay;
 /// handful of engine helpers nobody has read yet, which it marks as its own.
 pub mod ride;
 
+/// A rider on the bike: the trick machine, the airborne wreck test and the ride state machine wired
+/// onto `ride` in the order the original's ridden actor runs them, so that one value is a person who
+/// can gesture for a stunt, hold it, land it and come off. The joining is all this module is — every
+/// decision inside it belongs to one of the four ported modules it calls.
+pub mod rider;
+
 /// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.

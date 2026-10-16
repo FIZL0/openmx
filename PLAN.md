@@ -217,6 +217,11 @@ added beside them:
     answers to every callee those modules hand out — the suspension ray, the tire patch, the wheel's
     spin and the body's sweep. `impl hash::State` walks every word of it, which is what makes a
     freeride replay comparable. The ride that `openmx` rides (P2).
+  - `rider.rs` — **the person on the bike**: `trick.rs`'s machine, `air.rs`'s wreck test and
+    `state.rs`'s ride states wired onto `ride.rs` in the order the original's ridden actor runs them —
+    the latch, the physics, the gesture, the request, the clocks and the animation header, then the
+    machine carrying the wreck test. Joining is all it is: every number comes off the disc and every
+    decision belongs to one of the four modules it calls. The rider that `openmx` rides (P3).
 - `game-render` — the drawing side: the disc's own models and textures, on screen. Host `f32`, no
   bit-exactness, nothing the simulation depends on.
   - `disc.rs` ISO 9660 → `MX.PSR` → a `.res` member, read from the user's disc at runtime ·

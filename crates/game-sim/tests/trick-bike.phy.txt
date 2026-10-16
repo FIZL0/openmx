@@ -1,0 +1,121 @@
+# A bike, hand-written for the tests — NOT the disc's.
+#
+# The freeride bike of `freeride-bike.phy.txt`, with the four sections the rider needs that the ride
+# alone did not: the wreck limits, the airborne crossup angle, the stunt overlap and the reset clock.
+# Nothing here came off a disc either. The limits are deliberately wide — the point of the fixture
+# that reads this is which *trick* clause of the wreck test fires, so every clause in front of it is
+# set where a plain drop onto flat ground cannot reach it, and the journal says so.
+#
+# Read by crates/game-sim/tests/trick.rs.
+[Mass Properties]
+Weight = 400
+Gravity = 0.3
+Inertia = 22.4, 18.4, 10.9
+CofG = 0.0, 1.6, 0.0
+BalanceCofG = 0.0, 1.6, 0.0
+CofGTravelForward = 0.5
+CofGTravelBack = 0.5
+[Front Tire]
+StrutCompression = 1.0
+Spring = 2.5
+SpringWhenStopped = 2.5
+BounceDampingRatio = 0.4
+ReboundDampingRatio = 0.6
+TireRadius = 1.08
+TireInertia = 1.2
+SteeringTorque = 40
+SteeringDamping = 8
+SteeringInertia = 2
+MaxSteerAngle = 30
+BodyTireForcePosition = 0.0, 1.1, 2.1
+NumberOfSurfaces = 1
+WheelFriction1 = 1.1
+WheelDrag1 = 0.02
+MaxBrakingTorque1 = 300
+MaxDriveForce1 = 400
+MaxSideForce1 = 400
+SideForce1 = 60
+[Rear Tire]
+StrutCompression = 1.0
+Spring = 2.2
+SpringWhenStopped = 2.2
+BounceDampingRatio = 0.4
+ReboundDampingRatio = 0.6
+TireRadius = 1.12
+TireInertia = 1.4
+BodyTireForcePosition = 0.0, 1.1, -2.1
+OtherTireNormalLoadScale = 1.0
+NumberOfSurfaces = 1
+WheelFriction1 = 1.2
+WheelDrag1 = 0.02
+MaxBrakingTorque1 = 400
+MaxDriveForce1 = 600
+MaxSideForce1 = 500
+SideForce1 = 70
+[Engine]
+NumberOfRPMPoints = 4
+RPM1 = 2000
+HP1 = 6
+RPM2 = 5000
+HP2 = 26
+RPM3 = 8000
+HP3 = 38
+RPM4 = 11000
+HP4 = 30
+NumberOfGears = 5
+GearRatio1 = 2.1
+GearRatio2 = 1.7
+GearRatio3 = 1.4
+GearRatio4 = 1.15
+GearRatio5 = 1.0
+FinalGearRatio = 3.6
+EngineInertia = 0.4
+MinRPM = 1800
+IdleThrottle = 0.08
+EngineBraking = 0.3
+ClutchStaticFriction = 90
+ClutchKineticFriction = 70
+ClutchTorqueScaleTime = 1.5
+MaxClutchTorqueScale = 2.5
+MaxClutchTorqueScaleSpeed = 15
+ClutchCofGTravelBack = 0.2
+UpShiftRPM = 9500
+DownShiftRPM = 3000
+ReverseGain = 40
+ReverseSpeed = 4
+[Aerodynamics]
+Drag = 0.5
+[Joystick]
+XAxisRateLimit = 6
+YAxisRateLimit = 6
+GasRateLimit = 4
+BrakeRateLimit = 6
+ClutchInRateLimit = 8
+ClutchOutRateLimit = 4
+[Roll Control]
+RollGain = 6
+MaxRollCommand = 0.4
+[Pitch Control]
+WheelieTopSpeed = 40
+[Airborne Control]
+MaxCrossupAngle = 45
+[Animation]
+StuntOverlapTime = 0.5
+[Wrecks]
+MaxWreckTime = 3
+CannonballWreckTime = 5
+FrontWreckSpeedLimit = 400
+BackWreckSpeedLimit = 400
+SideWreckSpeedLimit = 400
+RacingDownWreckSpeedLimit = 400
+FreestyleDownWreckSpeedLimit = 4000
+GroundPitchDownWreckAngle = 85
+GroundPitchUpWreckAngle = 85
+AirbornePitchDownWreckAngle = 175
+AirbornePitchUpWreckAngle = 175
+AirborneRollWreckAngle = 175
+NoHanderWreckSpeedLimit = 5
+NoHanderMaxRollAngle = 45
+JoustWreckHeight = 2
+CrossupWreck = 1
+CrossupWreckTime = 0.3

@@ -1,6 +1,7 @@
 //! The trick machine against the original.
 //!
-//! Eight proofs, covering each of the four pieces:
+//! Nine proofs: eight covering each of the four pieces, and one (P3) running the whole machine on a
+//! bike.
 //!
 //! 1. **the table**, read off the disc through the same archive reader the app layer uses, so the 57
 //!    records and the default gesture map are the ones the game ships rather than ones typed in here.
@@ -23,18 +24,26 @@
 //!    with the attitude limits in front of it set where nothing can reach them.
 //! 8. **the idle request**, every state of the three flags that decide what a rider with no gesture
 //!    asks for.
+//! 9. **the machine on a bike**, which is not an oracle proof but a fixture: a scripted pad over the
+//!    ported ride, landing one trick and wrecking another. It proves the *wiring* P3 added — that a
+//!    gesture reaches the request, the clocks run on the stunt the disc's table names, and the
+//!    verdict reaches the ride state machine — and nothing about the clauses themselves.
 //!
 //! Three things the original does that these stand in for: the queue's heap nodes, the library's
 //! `strcmp` (hand-written with quadword compares the interpreter does not implement), and the engine's
 //! shared smooth noise. What is not proved here, and why, is in the journal entry's last section.
 
 use game_sim::archive::{Psr, Res};
+use game_sim::phy::Phy;
+use game_sim::ride::Controls;
+use game_sim::rider;
 use game_sim::rng::Rng;
 use game_sim::trick::{
     AngleTable, Bike, Dir, Params, SLOTS, STUNTS, Set, Stunt, Stunts, Trick, Tricks, look, slot_of,
     stick,
 };
-use ps2_float::{F, fpu};
+use game_sim::world::Flat;
+use ps2_float::{F, Vf, fpu};
 use ps2_oracle::{DONE, Ee, Kit, addr, game_or_skip, skip};
 use std::cell::Cell;
 use std::fs::File;
@@ -1174,4 +1183,201 @@ fn the_idle_request_matches_every_state() {
         }
     }
     println!("the idle request: 16 states, exact");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// (9) the whole machine on a bike: a scripted pad lands one trick and wrecks another
+// ---------------------------------------------------------------------------------------------------
+
+/// The bike the two flights below are flown on: the freeride test bike with the wreck limits the
+/// rider needs. Hand-written, not the disc's — see the file's own head.
+const RIDER_BIKE: &str = include_str!("trick-bike.phy.txt");
+
+/// The frame the fixture runs at: the engine's own clamped step.
+const FRAME: F = F(1.0 / 60.0);
+
+/// How high the bike is dropped from. High enough for a stunt to run its whole duration before the
+/// wheels come down, which is what makes a landed trick and a wrecked one two scripts and not two
+/// bikes.
+const DROP: f32 = 30.0;
+
+/// The buttons that make a group: the six combinations [`game_sim::trick::group`] numbers, by group.
+fn buttons_for(group: u8) -> [bool; 3] {
+    match group {
+        1 => [true, false, false],
+        2 => [false, true, false],
+        3 => [true, true, false],
+        4 => [true, false, true],
+        5 => [false, true, true],
+        6 => [true, true, true],
+        _ => [false, false, false],
+    }
+}
+
+/// The d-pad that names a direction, in the order the decoder polls it: left, right, up, down.
+fn dpad_for(dir: Dir) -> [bool; 4] {
+    let mut out = [false; 4];
+    match dir {
+        Dir::Left => out[0] = true,
+        Dir::Right => out[1] = true,
+        Dir::Up => out[2] = true,
+        Dir::Down => out[3] = true,
+        Dir::None => {}
+    }
+    out
+}
+
+/// The gesture that names a slot: the first group-and-direction pair that maps to it.
+fn gesture_for(slot: usize) -> (u8, Dir) {
+    for group in 1..=6u8 {
+        for dir in [Dir::Up, Dir::Down, Dir::Left, Dir::Right] {
+            if slot_of(group, dir) == Some(slot) {
+                return (group, dir);
+            }
+        }
+    }
+    panic!("no gesture names slot {slot}");
+}
+
+/// What one scripted flight produced.
+struct Flown {
+    /// The rider at the end of it.
+    rider: rider::Rider,
+    /// The trick the gesture started, the trick that was landed, and the reason the rider came off.
+    started: Option<Trick>,
+    landed: Option<Trick>,
+    wreck: Option<game_sim::trick::Wreck>,
+    /// The furthest the stunt's clock got, which is what says whether it ran out in the air.
+    elapsed: F,
+    /// The frame the wheels first touched, or the length of the script if they never did.
+    ground: usize,
+}
+
+/// Fly one drop, asking for a stunt on the frame the script says and holding the gesture for that
+/// frame only, so the clock runs free instead of stopping in the hold.
+///
+/// `ask_at` past the end of the script is a drop with nobody touching the pad.
+fn flight(p: &Phy, t: &rider::Tables, set: &Set, ask_at: usize, gesture: (u8, Dir), frames: usize) -> Flown {
+    let mounts = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+    let at = Vf::new(0.0, DROP, 0.0, 1.0);
+    let mut r = rider::Rider::new(p, mounts, at, Vf::new(0.0, 0.0, 1.0, 0.0), set.clone());
+    let mut world = Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let mut out = Flown {
+        rider: rider::Rider::new(p, mounts, at, Vf::new(0.0, 0.0, 1.0, 0.0), set.clone()),
+        started: None,
+        landed: None,
+        wreck: None,
+        elapsed: F::ZERO,
+        ground: frames,
+    };
+    for k in 0..frames {
+        let hands = if k == ask_at {
+            Controls { trick: buttons_for(gesture.0), dpad: dpad_for(gesture.1), ..Controls::default() }
+        } else {
+            Controls::default()
+        };
+        let f = r.frame(p, t, &hands, FRAME, &mut world);
+        out.started = out.started.or(f.started);
+        out.landed = out.landed.or(f.landed);
+        out.wreck = out.wreck.or(f.wreck);
+        if r.tricks.elapsed > out.elapsed {
+            out.elapsed = r.tricks.elapsed;
+        }
+        if r.ride.air.on_ground && out.ground == frames {
+            out.ground = k;
+        }
+        if out.wreck.is_some() {
+            break;
+        }
+    }
+    out.rider = r;
+    out
+}
+
+/// **P3.** The trick machine, the airborne wreck test and the ride state machine, wired onto the
+/// ported ride and driven by a pad.
+///
+/// Two drops onto flat ground off the same bike, with the same stunt and the same gesture — only the
+/// frame the gesture is made on differs:
+///
+/// - asked for early, the stunt runs its whole duration in the air and the wheels come down with
+///   nothing in progress: the rider lands it and stays on the bike.
+/// - asked for two frames before the ground, the stunt is still running and nowhere near its safe
+///   time when the wheels touch: the wreck test's trick clause fires and the state machine puts the
+///   rider down, with its reason, its clock and its counter.
+///
+/// Every clause of the wreck test in front of the trick ones is set out of reach in the fixture's
+/// `.phy` (see its head), so what this proves is the *wiring*: that a pad gesture reaches the
+/// request, that the clocks run on the stunt the disc's table names for that gesture, that
+/// `in_progress` reaches the wreck test through [`game_sim::air::Loads`], and that the verdict
+/// reaches the state machine. The clauses themselves are proved against the original in (7) above
+/// and in `tests/air.rs`, and the stunt table in (1).
+#[test]
+fn a_scripted_pad_lands_one_trick_and_wrecks_another() {
+    let Some(bytes) = table_bytes() else { return };
+    let stunts = Stunts::parse(&bytes).expect("the stunt table");
+    let set = Set::new(stunts.selection(0));
+    assert_eq!(set.stunts.len(), SLOTS, "a rider's selection is 24 slots");
+
+    let tables = rider::Tables::build();
+    let p = Phy::read_bytes(RIDER_BIKE.as_bytes(), &tables.ride.curve);
+
+    // The stunt to do: the shortest of the rider's 24, so that it fits inside one drop with room to
+    // spare either side. Which one that is comes off the disc, not out of this file.
+    let (slot, stunt) = set
+        .stunts
+        .iter()
+        .enumerate()
+        .filter(|(k, s)| {
+            // Not the no-hander and not the throw-away: the wreck test has a clause of its own for
+            // each, and what this fixture is for is the ordinary ending.
+            *k != set.no_hander && *k != set.throwaway && s.duration > F::ZERO && s.safe_time > F::ZERO
+        })
+        .min_by(|a, b| a.1.duration.0.total_cmp(&b.1.duration.0))
+        .map(|(k, s)| (k, s.clone()))
+        .expect("a stunt to do");
+    let gesture = gesture_for(slot);
+    let span = (stunt.duration.0 / FRAME.0).ceil() as usize;
+    println!(
+        "slot {slot} is {:?}: {} s long ({span} frames), safe at {} s; its gesture is group {} {:?}",
+        stunt.name, stunt.duration.0, stunt.safe_time.0, gesture.0, gesture.1
+    );
+
+    // The drop with nobody touching the pad, which is what both scripts are timed against and the
+    // control for everything the two of them assert.
+    let plain = flight(&p, &tables, &set, usize::MAX, gesture, 600);
+    assert_eq!(plain.wreck, None, "an untouched drop onto flat ground does not wreck");
+    assert_eq!(plain.landed, None, "and lands no trick, because none was asked for");
+    let ground = plain.ground;
+    assert!(ground > span + 8, "the drop ({ground} frames) has to outlast the stunt ({span})");
+    println!("the drop reaches the ground on frame {ground}");
+
+    // (a) asked for early: the stunt runs out in the air and the rider lands it.
+    let a = flight(&p, &tables, &set, 2, gesture, ground + 30);
+    assert_eq!(a.started, Some(Trick(slot as u8)), "the gesture started the stunt it names");
+    assert!(a.elapsed >= stunt.duration, "the stunt ran its whole duration: {}", a.elapsed.0);
+    assert_eq!(a.wreck, None, "a stunt finished in the air is landed, not wrecked");
+    assert_eq!(a.landed, Some(Trick(slot as u8)), "the landed trick is the one that was started");
+    assert_eq!(a.rider.phase(), game_sim::state::Phase::Riding, "still on the bike");
+    assert!(!a.rider.tricks.in_progress, "the stunt is over by the time the wheels are down");
+    assert_eq!(a.rider.state.wrecks, 0, "nothing to count");
+    assert_eq!(a.ground, ground, "the stunt did not move the bike: the same landing frame");
+
+    // (b) asked for two frames before the ground: still running, and nowhere near safe.
+    let late = ground - 2;
+    let b = flight(&p, &tables, &set, late, gesture, ground + 30);
+    assert_eq!(b.started, Some(Trick(slot as u8)), "the same gesture started the same stunt");
+    assert!(b.elapsed < stunt.safe_time, "the stunt is not safe to land: {}", b.elapsed.0);
+    assert_eq!(b.landed, None, "there is no landing to count when the rider comes off");
+    assert_eq!(
+        b.wreck,
+        Some(game_sim::trick::Wreck::TRICK),
+        "landing on a stunt that is still running is the trick clause's own reason"
+    );
+    assert_eq!(b.rider.phase(), game_sim::state::Phase::Down, "off the bike");
+    assert_eq!(b.rider.state.wrecks, 1, "one wreck, counted once");
+    assert_eq!(b.rider.tricks.requested, Trick::NONE, "the wreck stopped the trick");
+    assert!(b.rider.tricks.queue.is_empty(), "and emptied the queue");
+
+    println!("a scripted pad: {:?} landed from frame 2, wrecked from frame {late}", stunt.name);
 }

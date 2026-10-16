@@ -668,6 +668,12 @@ pub struct Params {
     /// at half the trick's duration, so a short trick cannot be cut in half twice over.
     pub overlap: F,
     /// `NoHanderWreckSpeedLimit`: below this, landing a no-hander is a wreck.
+    ///
+    /// **This is a mis-reading, found in P3 and kept only because `landing` is no longer called.**
+    /// The word the clause compares against is the bike's up axis, not its speed, and the parameter
+    /// it compares it to is `NoHanderMaxRollAngle` already turned into a cosine by the loader. See
+    /// `air::Params::no_hander_max_roll_angle`, which is the same clause read correctly, and the P3
+    /// journal entry for the evidence.
     pub no_hander_speed: F,
 }
 
@@ -923,6 +929,12 @@ impl Tricks {
     /// The attitude tests — too much pitch, too much roll, landing backwards — come *before* these in
     /// the original and belong to the bike-in-the-air task; this answers for the trick only, and a
     /// caller that has already decided on one of those never gets here.
+    ///
+    /// **Nothing calls this.** `air::wreck_test` is the same tail of the same original function with
+    /// the attitude tests in front of it, and its reading of the third way is the right one — see
+    /// `Params::no_hander_speed`. A rider wires up `air::wreck_test` and hands it the trick machine's
+    /// state through `air::Loads`; this stays for the first two ways, which it has right, and for its
+    /// tests.
     pub fn landing(&self, set: &Set, bike: Bike, params: Params) -> Option<Wreck> {
         if (bike.on_ground || bike.contact) && self.in_progress && !self.no_hander && !self.safe {
             return Some(Wreck::TRICK);
