@@ -38,6 +38,11 @@
 //! * **The picture** is V1: the scene's props, the bike and the parts its `.sub` bolts on, lit and
 //!   fogged by the scene's own values, through the port's rasteriser, with the follow camera S7 ported
 //!   reading the track's own `cpresets.ini`.
+//! * **The body on the bike** is V4, V5, V7 and V8: the rider's own archive, the clips it carries,
+//!   and the skeleton they pose — driven by the one animation driver the simulation already runs
+//!   inside the rider's frame ([`game_sim::rider::Rider::animation`]), so the stunt the bike is
+//!   doing and the stunt the body is doing are the same selection. The body is skinned every frame
+//!   and drawn at the bike's transform; the clips put it on the bike themselves.
 //!
 //! What is **not** a port, and is marked as such where it happens: the bilinear blend inside a terrain
 //! cell ([`ground`]), the host-float arithmetic of the camera-to-rasteriser hand-off, and this file's
@@ -78,6 +83,7 @@ use std::time::{Duration, Instant};
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, V3, v3};
 use game_render::raster::Frame;
+use game_render::rider::{Body, Sex};
 use game_render::scene::Vehicle;
 use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
 use game_render::{ini, png, scene as view};
@@ -198,6 +204,9 @@ impl Game for World<'_> {
 struct Args {
     track: String,
     bike: String,
+    /// Which rider archive to put on the bike, or `none` to ride an empty bike. Nothing on the disc
+    /// names a rider — the choice is a menu's, and this shell has no menus.
+    rider: String,
     width: usize,
     height: usize,
     scale: usize,
@@ -241,8 +250,17 @@ fn run() -> Result<(), String> {
     // A track is two archives: the props and the terrain in one, the bike's animation set, its
     // physics and the follow camera in the other, which the game loads alongside it.
     let second = member_ending(&disc, &format!("{}_2.res", args.track)).ok();
+    // The rider is a fourth archive, named after the rider rather than the track or the bike: the
+    // body, its gear and its motions are all in there.
+    let rider_member = match args.rider.as_str() {
+        "none" => None,
+        name => Some(member_ending(&disc, &format!("{name}.res"))?),
+    };
     let mut archives: Vec<Res> = vec![disc.res(&track_member)?, disc.res(&bike_member)?];
     if let Some(name) = &second {
+        archives.push(disc.res(name)?);
+    }
+    if let Some(name) = &rider_member {
         archives.push(disc.res(name)?);
     }
     let archives = archives;
@@ -349,6 +367,51 @@ fn run() -> Result<(), String> {
         .or_else(|_| archives[1].read_suffix(".phy"))
         .map_err(|e| format!("the bike archive has no .phy: {e}"))?;
     let phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
+
+    // ---- the rider on it ------------------------------------------------------------------------
+    // The body, the gear it is painted in, and the clips the animation driving plays on it (V4, V5,
+    // V7, V8). The archive is opened a second time for the clips: the animation set reads members
+    // out of its own copy as the simulation asks for them, where `archives` is what the models and
+    // textures are loaded from. The blend time the cross-fade falls at is the bike's, off its
+    // `.phy` — the same `Params` the simulation's own driver runs on.
+    let mut body = match &rider_member {
+        None => None,
+        Some(member) => {
+            let own = vec![disc.res(member)?];
+            match Body::load(own, &args.rider, Sex::Male, "", &table.stunts, phy.motion()) {
+                Ok(body) => Some(body),
+                Err(e) => {
+                    println!("rider: {e}");
+                    None
+                }
+            }
+        }
+    };
+    if let Some(body) = &body {
+        // The gear is a repaint of the one shared body, exactly as a bike's `.sub` repaints the one
+        // shared chassis, so the renames go in before the geometry is loaded.
+        assets.rename_materials(&body.rider.suit.materials);
+        let drawn = assets.load(&archives, body.geometry());
+        let bound = body.rig.set.clips.len();
+        let slots = body.rig.lib.stunt.iter().filter(|c| c.is_some()).count();
+        println!(
+            "rider: {} wearing {} -> {} -> {}.psg, {bound} clips bound, \
+             {slots} of {} gesture slots, {} airborne{}",
+            args.rider,
+            body.rider.mcf,
+            body.rider.suit.mcf,
+            body.geometry(),
+            game_sim::trick::SLOTS,
+            [body.rig.lib.air_fwd, body.rig.lib.air_mid, body.rig.lib.air_bck]
+                .iter()
+                .filter(|c| c.is_some())
+                .count(),
+            if drawn { "" } else { ", no body to draw" }
+        );
+        for m in body.rig.set.missing.iter().take(3) {
+            println!("  {m:?}");
+        }
+    }
 
     // The follow cameras the track carries, in the file's own order, read by S7's own reader. L1 and
     // R1 walk them. `reverse_speed` is a constructor argument in the original and the call site was
@@ -576,6 +639,18 @@ fn run() -> Result<(), String> {
             break;
         }
 
+        // The body on the bike, posed from the frame the simulation's own animation driving just
+        // answered: the clip it asked for, at the phase its clock reached, faded by its ramp. A
+        // frozen ride does not step the driver, so the pose is left where it was.
+        if let Some(body) = &mut body {
+            if world.riding {
+                body.pose(step.dt, world.rider.animation);
+                if let Some(loaded) = assets.models.get_mut(body.geometry()) {
+                    body.skin_into(loaded);
+                }
+            }
+        }
+
         // What the rider did, as a line: a run nobody is watching still says whether a trick
         // started, landed or put the rider down, and by which of the original's reason codes.
         if let Some(t) = world.said.started {
@@ -675,6 +750,15 @@ fn run() -> Result<(), String> {
                     None => bike_at,
                 };
                 actor.push((part.model.as_str(), at));
+            }
+        }
+        // And the rider, at the bike's own transform: the clips put the body on the bike
+        // themselves, so there is nothing to bolt (`game_render::rider`). Not before a frame has
+        // posed it, though: a blend with no clip behind it leaves the bind pose, which is the one
+        // pose the game never draws.
+        if let Some(body) = &body {
+            if body.posed {
+                actor.push((body.geometry(), bike_at));
             }
         }
         drawn += draw_scene(&mut frame, &look, &assets, &actor, &camera);
@@ -818,6 +902,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         // The freeride area D6 read and proved: no gates, no laps, nobody else on the track.
         track: "free06".to_string(),
         bike: "125sx".to_string(),
+        // The stock gear. Every other rider archive on the disc is a repaint of the same body.
+        rider: "thq1".to_string(),
         width: 640,
         height: 448,
         scale: 1,
@@ -837,6 +923,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         match a.as_str() {
             "--track" => args.track = next("a track name, like free06")?,
             "--bike" => args.bike = next("a bike name, like 125sx")?,
+            "--rider" => args.rider = next("a rider name, like thq1, or none")?,
             "--pad" => args.pad = Some(next("a device, like /dev/input/js0")?),
             "--shot" => args.shot = Some(next("a path for the first frame")?.into()),
             "--moment" => {
@@ -887,7 +974,8 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "openmx [--track free06] [--bike 125sx] [--size 640x448] [--scale 1]\n\
+                    "openmx [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
+                            [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks]\n\
                      \n\

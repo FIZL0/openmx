@@ -380,6 +380,16 @@ impl Rig {
     pub fn new(mut set: Set, prefix: &str, stunts: &[Stunt], params: Params) -> Rig {
         set.load_listed();
         let lib = Library::load(prefix, stunts, &mut set);
+        Rig::bound(set, lib, params)
+    }
+
+    /// A rig whose clip table was filled by somebody else.
+    ///
+    /// [`Library::load`] names every clip after the *bike* — `<prefix>bike_<stunt name>` — because
+    /// that is the actor the simulation's loader was read off. A rider's own clips are named after
+    /// the rider ([`crate::rider::Body`]), so its table is built with the same two passes and
+    /// different names, and handed over here.
+    pub fn bound(set: Set, lib: Library, params: Params) -> Rig {
         Rig {
             set,
             lib,
@@ -397,13 +407,28 @@ impl Rig {
     /// original computes the restart test once, at the top, and both halves read it.
     pub fn frame(&mut self, dt: F, r: Request, lean: game_sim::motion::Pose) -> (Frame, Played) {
         let frame = self.driver.frame(dt, self.params, r, lean, self.lib.present());
+        (frame, self.driven(dt, frame).0)
+    }
+
+    /// The rest of a frame, for a rig whose driving was done elsewhere: the rewind, the clock, the
+    /// sample, the pose.
+    ///
+    /// The simulation's own rider runs a [`Driver`] for the crossup its landing test reads and
+    /// keeps what it answered ([`game_sim::rider::Rider::animation`]). A rider drawn from that
+    /// frame has had its selection made already, so this is the half that is left — and it is the
+    /// same half [`Rig::frame`] runs, because it is the same code.
+    ///
+    /// Answers what the clock did, and whether the frame wrote a pose at all — a blend with no
+    /// clip behind it leaves the one that was already there, which on the first frame of a run is
+    /// the bind pose.
+    pub fn driven(&mut self, dt: F, frame: Frame) -> (Played, bool) {
         if frame.restart {
             self.set.rewind(&mut self.snapshot);
         }
         let clip = self.set.timing(self.player.clock_clip(frame.blend, &self.lib));
         let played = self.player.run(dt, frame.blend, &self.lib, &clip);
-        self.set.apply(frame.blend, &self.lib, &self.player);
-        (frame, played)
+        let posed = self.set.apply(frame.blend, &self.lib, &self.player);
+        (played, posed)
     }
 
     /// Every joint's transform under the frame's pose.
