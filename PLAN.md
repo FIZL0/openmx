@@ -204,6 +204,17 @@ added beside them:
     landing is judged on, the clip clock with its loop and its end, and the window one frame opens for
     the action frames inside it. Proved against the original's driving, advance and window over 10,000
     generated frames each in `tests/motion.rs` (S6).
+  - `world.rs` — what the simulation asks the world: the ground under a point (height, normal and
+    surface, from the ported terrain query) and the scene's collision placements swept as one bundle,
+    each placement's mesh in its own space, so a prop stops the rider the way the original's does.
+    `trait World` is the one seam between the ride and a track; `Flat` is the void a test rides in
+    (P2).
+  - `ride.rs` — **the bike as one state**: the player's ride, driven by `move.rs`'s ground step with
+    `wheel.rs`, `chassis.rs`, `air.rs` and `collide.rs` behind it on the parameters `phy.rs` reads off
+    the disc. The input layer's rate limit, the frame's four steps in the original's order, and the
+    answers to every callee those modules hand out — the suspension ray, the tire patch, the wheel's
+    spin and the body's sweep. `impl hash::State` walks every word of it, which is what makes a
+    freeride replay comparable. The ride that `openmx` rides (P2).
 - `game-render` — the drawing side: the disc's own models and textures, on screen. Host `f32`, no
   bit-exactness, nothing the simulation depends on.
   - `disc.rs` ISO 9660 → `MX.PSR` → a `.res` member, read from the user's disc at runtime ·
@@ -220,9 +231,10 @@ added beside them:
   at the game's own 60 Hz, and the freeride area drawn with the renderer, with no emulator, no fixture
   and no menu in the way (P1).
   - `main.rs` — the loop: the disc's track and bike, the scene read twice (the simulation's reader for
-    the spawn and the terrain, the renderer's for props, lights and fog), then a frame of
-    `tick::Engine::step` — which polls the pad through `input::Manager` and moves the bike — followed by
-    the draw, the present and the pace to 60 Hz.
+    the spawn, the terrain and the collision placements, the renderer's for props, lights and fog),
+    then a frame of `tick::Engine::step` — which polls the pad through `input::Manager` and steps
+    `game_sim::ride::Ride` on the disc's own `.phy` — followed by `game_sim::camera`'s follow camera,
+    the draw, the present and the pace to 60 Hz (P2).
   - `window.rs` — a window with no dependencies: the X11 wire protocol over the display's unix socket,
     a window, a graphics context, keyboard events, and the frame pushed across as one `PutImage` a band.
   - `pad.rs` — the host's pad: Linux's joystick events and the keyboard, folded into the 32-byte
@@ -230,8 +242,6 @@ added beside them:
   - `ground.rs` — the freeride area's ground: the ported terrain query asked about a world point rather
     than a sample, and the samples around the rider turned into triangles, because the renderer's `.trn`
     reader does not read an off-road layout.
-  - `ride.rs` — **not a port**: a stand-in for the bike's ground physics while S3 is unwritten. Host
-    floats, invented constants, outside `game-sim` on purpose, and deleted when S3 lands.
   - `moment.rs` — `--moment FILE OUT.png`: one frame posed from a moment file (a bike's transform and
     the frame's camera, read out of a save state by `research/shots/moment.py`) instead of from the
     simulation, so the port's picture can be put beside the original's (V2).

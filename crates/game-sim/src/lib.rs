@@ -259,6 +259,13 @@ pub mod phy;
 /// files. The module's own docs say how a fixture is made and where one lives.
 pub mod replay;
 
+/// The whole bike, assembled: the four views of the chassis and the two of each wheel lined up into
+/// one state, the tuning the `.phy` reader leaves, and one frame of the ground step driven in the
+/// order `move.rs` drives it with the engine's own callees dispatched where the original calls them.
+/// This is the module a shell rides; everything it does is somebody else's proved port, bar the
+/// handful of engine helpers nobody has read yet, which it marks as its own.
+pub mod ride;
+
 /// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.
@@ -289,6 +296,10 @@ pub mod trick;
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground
 /// step empties every substep and keeps by offset get their names here.
 pub mod wheel;
+
+/// The world outside the bike, as the ride asks about it: where the ground is under a point, and the
+/// scene's collision meshes stood where the scene puts them, with the sweep against the lot.
+pub mod world;
 
 #[cfg(test)]
 mod tests {

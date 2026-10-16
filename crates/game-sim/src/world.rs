@@ -1,0 +1,415 @@
+//! The world a bike rides over, as the ride asks about it: where the ground is under a point, and what
+//! the collision sweep runs into.
+//!
+//! Two things in the ride's frame reach outside the bike, and this is both of them:
+//!
+//! * **The ground query.** [`wheel::suspension`] walks a ray down from each wheel's mount and asks the
+//!   world where the surface under the ray's end is and which way it faces. The original's answer
+//!   comes out of the terrain object's own query, which D6 ported ([`track::Terrain::cell`]) down to
+//!   the four corners of a cell; what is *not* ported is how the game picks a point inside the cell,
+//!   because that lives in the terrain collision class nobody has read yet. [`Ground::at`] blends the
+//!   cell bilinearly, which is this module's own arithmetic and is marked as such.
+//! * **The sweep.** The scene lists a collision mesh for every solid thing on the track — three
+//!   hundred and fifty-three of them on `free06` — each with a position and a pair of axes. S4 ported
+//!   the sweep itself ([`collide::sweep`]), which works in one mesh's own space, so [`Props`] is the
+//!   bookkeeping on top: the place of each mesh in the world, the cheap sphere reject that keeps the
+//!   other three hundred and fifty-two out of the frame, and the merge of one mesh's hits into the
+//!   bundle's record in world space.
+//!
+//! The merge is worth a word, because it is the one place this module does the original's bookkeeping
+//! rather than its own: a probe keeps its *nearest* hit, the bundle latches its nearest across all
+//! probes, and the push-out is recomputed from the world-space direction and normal — the same three
+//! rules `collide`'s leaf applies, applied again one level up. Sweeping every mesh into one record
+//! directly would be wrong, because the record's points and normals would be in whichever mesh was
+//! swept last.
+
+#![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
+
+use crate::collide::{self, Bundle, MeshRef, Probe, Record};
+use crate::math::{self, Mat4};
+use crate::track::{self, Mesh, Placement, Terrain, TerrainLayout};
+use ps2_float::{Dest, F, Vf, vu};
+
+/// How many samples a terrain tree's leaf holds along one side, which is also how many cells: the
+/// shared seventeenth sample belongs to the next leaf along.
+const LEAF_SAMPLES: u32 = 16;
+
+/// The height a ground query answers with where there is no ground: far enough below anything a wheel
+/// can reach that [`wheel::suspension`]'s "the ground is below the probe's end" test refuses it.
+const NO_GROUND: f32 = -1.0e6;
+
+/// Everything outside the bike that one frame of the ride asks about.
+///
+/// Two methods, so that a test can ride a flat plane with nothing on it ([`Flat`]) and the shell can
+/// ride a track ([`Place`]) without the ride knowing which it has.
+pub trait World {
+    /// Where the surface under a world point is, and which way it faces: the answer
+    /// [`crate::wheel::suspension`]'s ray wants. The point comes back moved onto the surface.
+    fn ground(&mut self, at: Vf) -> (Vf, Vf);
+
+    /// Which friction surface the ground under a point is, as an index into the tire's own
+    /// [`crate::phy::Tire::surfaces`] table. The original keeps it in the contact record the ground
+    /// query fills in; here it is a second question, so that [`World::ground`] stays the shape
+    /// [`crate::wheel::suspension`]'s closure wants. A world with one kind of dirt answers zero.
+    fn surface(&mut self, at: Vf) -> u8 {
+        let _ = at;
+        0
+    }
+
+    /// Sweep a bundle of probes against everything solid, in world space. `true` when anything was
+    /// looked at — the record says what was hit.
+    fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool;
+}
+
+/// A flat plane at a height, with nothing standing on it. What a fixture rides.
+#[derive(Clone, Copy, Debug)]
+pub struct Flat {
+    pub y: F,
+    pub normal: Vf,
+}
+
+impl Default for Flat {
+    fn default() -> Flat {
+        Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 1.0) }
+    }
+}
+
+impl World for Flat {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        (Vf::new(at.x(), self.y.0, at.z(), 1.0), self.normal)
+    }
+
+    fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
+        false
+    }
+}
+
+// --- the ground ------------------------------------------------------------------------------------
+
+/// What the ground is doing under one point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    /// World height.
+    pub y: F,
+    /// The surface normal, normalised — the stored one is not.
+    pub normal: Vf,
+    /// The surface id, which is the index of a friction surface in the bike's `.phy`.
+    pub surface: u8,
+}
+
+/// One track's terrain, and what the scene says about how big it is.
+///
+/// The same shape as the shell's own `ground.rs`, in [`F`] rather than host floats, because what comes
+/// out of it reaches the simulation here: a height under a wheel decides a spring force.
+pub struct Ground<'a> {
+    terrain: &'a Terrain<'a>,
+    /// World units between neighbouring samples, which is also local height to world height.
+    pub spacing: F,
+    /// How many samples the field holds across and along.
+    pub samples_x: u32,
+    pub samples_z: u32,
+}
+
+impl<'a> Ground<'a> {
+    /// The ground of one track: its terrain file, and the scene's own statement of how many root cells
+    /// it has. Each level of the tree is sixteen cells across, so a field is `width × 16^levels`
+    /// samples.
+    pub fn new(terrain: &'a Terrain<'a>, layout: &TerrainLayout) -> Ground<'a> {
+        let per_root = LEAF_SAMPLES.pow(terrain.levels);
+        Ground {
+            spacing: terrain.scale,
+            samples_x: layout.width.max(1) * per_root,
+            samples_z: layout.breadth.max(1) * per_root,
+            terrain,
+        }
+    }
+
+    /// How big the field is in world units.
+    pub fn extent(&self) -> (F, F) {
+        (
+            F::from((self.samples_x - 1) as i32) * self.spacing,
+            F::from((self.samples_z - 1) as i32) * self.spacing,
+        )
+    }
+
+    /// The ground under a world point: the cell's four corners, blended.
+    ///
+    /// The blend is **this module's own**, not the game's — see the module note. Off the edge of the
+    /// field there is no answer at all, which is what keeps a rider on the map.
+    pub fn at(&self, x: F, z: F) -> Option<Hit> {
+        if x < F::ZERO || z < F::ZERO {
+            return None;
+        }
+        let (fx, fz) = (x / self.spacing, z / self.spacing);
+        let (ix, iz) = (fx.to_i32(), fz.to_i32());
+        if ix < 0 || iz < 0 {
+            return None;
+        }
+        let (sx, sz) = (ix as u32, iz as u32);
+        if sx + 1 >= self.samples_x || sz + 1 >= self.samples_z {
+            return None;
+        }
+        let quad = self.terrain.cell(sx, sz, 1)?;
+        let (tx, tz) = (fx - F::from(ix), fz - F::from(iz));
+        // The corners come back as the sample, +x, +z, then both: a bilinear blend in that order.
+        let weight = [
+            (F::ONE - tx) * (F::ONE - tz),
+            tx * (F::ONE - tz),
+            (F::ONE - tx) * tz,
+            tx * tz,
+        ];
+        let mut y = F::ZERO;
+        let mut normal = Vf::ZERO;
+        for i in 0..4 {
+            y = y + weight[i] * quad.height[i];
+            let n = quad.normal[i];
+            let n = Vf::new(n[0].0, n[1].0, n[2].0, 0.0);
+            normal = normal.add(n.mul_q(weight[i].0));
+        }
+        // The surface is the nearest corner's: a surface id is a choice of friction table, and
+        // averaging two of them would name a third.
+        let nearest = usize::from(tx > F(0.5)) + 2 * usize::from(tz > F(0.5));
+        Some(Hit {
+            y: self.spacing * y,
+            normal: normalize(normal),
+            surface: quad.surface[nearest],
+        })
+    }
+}
+
+impl World for Ground<'_> {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        match self.at(F(at.x()), F(at.z())) {
+            Some(hit) => (Vf::new(at.x(), hit.y.0, at.z(), 1.0), hit.normal),
+            None => (Vf::new(at.x(), NO_GROUND, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0)),
+        }
+    }
+
+    fn surface(&mut self, at: Vf) -> u8 {
+        self.at(F(at.x()), F(at.z())).map_or(0, |hit| hit.surface)
+    }
+
+    fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
+        false
+    }
+}
+
+// --- the props -------------------------------------------------------------------------------------
+
+/// One solid thing on the track: its collision mesh, where it stands, and the sphere that gets it out
+/// of a frame it is nowhere near.
+pub struct Prop {
+    pub mesh: Mesh,
+    /// The mesh's own space into the world: the mesh file's transform followed by the scene's
+    /// placement.
+    pub to_world: Mat4,
+    /// And back, which is what a bundle of world-space probes has to go through before the sweep sees
+    /// it — [`collide::sweep`] works in the mesh's own space.
+    pub from_world: Mat4,
+    /// The root node's box, as a sphere in world space.
+    pub centre: Vf,
+    pub radius: F,
+}
+
+impl Prop {
+    /// A parsed mesh, stood where the scene puts it.
+    ///
+    /// The placement is a position and two axes, which go through the engine's own look-at
+    /// ([`math::basis`], orthogonalising and keeping the forward axis, as the scene loader asks for
+    /// one); the mesh carries a transform of its own, which goes first.
+    pub fn place(mesh: Mesh, at: &Placement) -> Prop {
+        let place = math::basis(
+            Vf::new(at.position[0].0, at.position[1].0, at.position[2].0, 1.0),
+            Vf::new(at.look[0].0, at.look[1].0, at.look[2].0, 0.0),
+            Vf::new(at.up[0].0, at.up[1].0, at.up[2].0, 0.0),
+            true,
+            true,
+        );
+        let own = Mat4([
+            row(mesh.transform[0], 0.0),
+            row(mesh.transform[1], 0.0),
+            row(mesh.transform[2], 0.0),
+            row(mesh.transform[3], 1.0),
+        ]);
+        let to_world = math::mul(&own, &place);
+        let (centre, radius) = match mesh.nodes.first() {
+            Some(node) => {
+                let c = row(node.centre, 1.0);
+                let h = row(node.half_extent, 0.0);
+                (math::transform_point(&to_world, c), length(h))
+            }
+            None => (Vf::new(0.0, 0.0, 0.0, 1.0), F::ZERO),
+        };
+        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius }
+    }
+}
+
+/// Everything solid on a track, and the sweep against the lot.
+#[derive(Default)]
+pub struct Props {
+    pub props: Vec<Prop>,
+}
+
+impl Props {
+    /// Read the scene's collision list, asking `read` for each mesh's bytes. A file the archive does
+    /// not have, or one that does not parse, is skipped with its reason — a track is rideable without
+    /// one of its fences.
+    pub fn load(
+        scene: &track::Scene,
+        mut read: impl FnMut(&str) -> Result<Vec<u8>, String>,
+    ) -> (Props, Vec<String>) {
+        let mut props = Props::default();
+        let mut missed = Vec::new();
+        for at in &scene.collision {
+            match read(&at.file).and_then(|b| Mesh::parse(&b)) {
+                Ok(mesh) => props.props.push(Prop::place(mesh, at)),
+                Err(e) => missed.push(format!("{}: {e}", at.file)),
+            }
+        }
+        (props, missed)
+    }
+
+    /// Sweep a world-space bundle against every prop it could reach.
+    ///
+    /// Each prop is swept in its own space into a scratch record and merged back in world space, by
+    /// the three rules [`collide`]'s leaf uses: a probe keeps its nearest hit, the bundle latches its
+    /// nearest, and the push-out is the travel left over along the normal.
+    pub fn sweep(&self, bundle: &Bundle, record: &mut Record) -> bool {
+        let mut looked = false;
+        for (owner, prop) in self.props.iter().enumerate() {
+            if prop.radius == F::ZERO && prop.mesh.nodes.is_empty() {
+                continue;
+            }
+            // The cheap reject: two spheres. The bundle's own centre and radius are the caller's
+            // statement of where its probes are.
+            let gap = length(sub3(prop.centre, bundle.centre));
+            if gap > prop.radius + bundle.radius {
+                continue;
+            }
+            let local = into(prop, bundle);
+            let mut scratch = Record::new();
+            if !collide::sweep(&local, &MeshRef::of(&prop.mesh), &mut scratch) {
+                continue;
+            }
+            looked = true;
+            merge(record, bundle, prop, &scratch, owner as i32);
+        }
+        looked
+    }
+}
+
+/// A bundle of world-space probes in one prop's space.
+fn into(prop: &Prop, bundle: &Bundle) -> Bundle {
+    let mut out = Bundle {
+        count: bundle.count,
+        probes: [Probe { origin: Vf::ZERO, dir: Vf::ZERO, length: F::ZERO }; collide::MAX_PROBES],
+        centre: math::transform_point(&prop.from_world, bundle.centre),
+        radius: bundle.radius,
+    };
+    for i in 0..bundle.count.min(collide::MAX_PROBES) {
+        let p = &bundle.probes[i];
+        out.probes[i] = Probe {
+            origin: math::transform_point(&prop.from_world, p.origin),
+            dir: direction(&prop.from_world, p.dir),
+            length: p.length,
+        };
+    }
+    out
+}
+
+/// One prop's hits into the bundle's record, in world space.
+fn merge(record: &mut Record, bundle: &Bundle, prop: &Prop, found: &Record, owner: i32) {
+    for i in 0..bundle.count.min(collide::MAX_PROBES) {
+        if !found.hit[i] {
+            continue;
+        }
+        let nearer = found.fraction[i] < record.fraction[i] || record.fraction[i] < F::ZERO;
+        if nearer {
+            record.fraction[i] = found.fraction[i];
+            record.point[i] = math::transform_point(&prop.to_world, found.point[i]);
+            record.normal[i] = direction(&prop.to_world, found.normal[i]);
+            record.owner[i] = owner;
+        }
+        record.hit[i] = true;
+        record.hits += 1;
+        if record.fraction[i] < record.nearest {
+            record.nearest = record.fraction[i];
+            record.nearest_probe = Some(i);
+            record.nearest_normal = record.normal[i];
+            record.nearest_point = record.point[i];
+            // The travel left over, along the normal, in units of one unit of travel — `collide`'s
+            // own rule, with the world-space direction this time.
+            let left = bundle.probes[i].dir.mul_q((F::ONE - record.fraction[i]).0);
+            let n = record.normal[i];
+            let depth = vu::dot3(left.0, n.0);
+            record.push = n.merge(Dest::XYZ, n.mul_q(depth));
+        }
+    }
+}
+
+/// A whole track: the ground and the props on it.
+pub struct Place<'a> {
+    pub ground: Ground<'a>,
+    pub props: Props,
+}
+
+impl World for Place<'_> {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.ground.ground(at)
+    }
+
+    fn surface(&mut self, at: Vf) -> u8 {
+        self.ground.surface(at)
+    }
+
+    fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
+        self.props.sweep(bundle, record)
+    }
+}
+
+// --- the small arithmetic --------------------------------------------------------------------------
+
+/// A scene's three-float row as a quadword.
+fn row(v: [F; 3], w: f32) -> Vf {
+    Vf::new(v[0].0, v[1].0, v[2].0, w)
+}
+
+/// A *direction* through a matrix: the three rotation rows, with the translation left out.
+fn direction(m: &Mat4, v: Vf) -> Vf {
+    let acc = m.0[0].mul_q(v.x());
+    let acc = Vf::madd(acc, m.0[1], v.bc(vu::Field::Y));
+    let acc = Vf::madd(acc, m.0[2], v.bc(vu::Field::Z));
+    v.merge(Dest::XYZ, acc)
+}
+
+/// The inverse of a rigid transform: the rotation transposed, and the translation back through it.
+/// A mesh transform with scale in it would need more than this, and none of the disc's have.
+fn invert_rigid(m: &Mat4) -> Mat4 {
+    let r = [m.0[0], m.0[1], m.0[2]];
+    let t = m.0[3];
+    let inv = Mat4([
+        Vf::new(r[0].x(), r[1].x(), r[2].x(), 0.0),
+        Vf::new(r[0].y(), r[1].y(), r[2].y(), 0.0),
+        Vf::new(r[0].z(), r[1].z(), r[2].z(), 0.0),
+        Vf::new(0.0, 0.0, 0.0, 1.0),
+    ]);
+    let back = direction(&inv, t);
+    Mat4([inv.0[0], inv.0[1], inv.0[2], Vf::new(-back.x(), -back.y(), -back.z(), 1.0)])
+}
+
+/// `a - b` over `xyz`.
+fn sub3(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, a.sub(b))
+}
+
+/// The length of a vector's `xyz`, by a real square root: nothing here is the original's arithmetic,
+/// and a sphere reject that is a bit out rejects nothing.
+fn length(v: Vf) -> F {
+    F(vu::dot3(v.0, v.0)).sqrt()
+}
+
+/// Normalise `xyz` through VU0's *approximate* reciprocal square root, as everything else in the port
+/// that normalises a vector does. `w` comes through untouched.
+fn normalize(v: Vf) -> Vf {
+    v.merge(Dest::XYZ, v.mul_q(vu::rsqrt(1.0, vu::dot3(v.0, v.0))))
+}

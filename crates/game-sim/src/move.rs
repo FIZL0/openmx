@@ -79,13 +79,13 @@ const SPRING_STOPPED: f32 = 14.6666;
 const SPRING_MOVING: f32 = 29.3332;
 /// Below this speed, a rider who is not on the throttle has the clutch pulled in for them — which is
 /// what stops the engine stalling when the bike rolls to a halt.
-const IDLE_SPEED: f32 = 7.3333;
+pub const IDLE_SPEED: f32 = 7.3333;
 /// How far the stick has to be deflected before a donut counts as commanded.
 const DONUT_DEFLECTION: f32 = 0.9;
 /// Half, as the drag's own register constant.
 const HALF: f32 = 0.5;
 /// How close something has to be before the collision record is told to look at it.
-const COLLISION_NEAR: f32 = 0.25;
+pub const COLLISION_NEAR: f32 = 0.25;
 
 /// The speed below which the low-speed upright controller runs, and the end of the window it fades
 /// its own force across — the same literal twice, which is what makes that fade a constant 1.

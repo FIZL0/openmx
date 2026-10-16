@@ -380,3 +380,55 @@ fn sin_poly(x: Vf) -> Vf {
     let p = Vf::madd(Vf::splat(C.x()), sq, p);
     x.mul(p)
 }
+
+/// A quaternion as three Euler angles, the way the engine's own `quat_to_euler` does it — the
+/// conversion the chassis measures its pitch and roll with every frame, and so the one that feeds
+/// `air.rs`'s whole preload-and-flip machine.
+///
+/// The three angles come out as `(x, y, z)` with `w` of one, and they are all **negated**: the
+/// original computes an arc cosine and writes `-v`, which makes `y` a heading that grows clockwise.
+/// Each one is the same four steps — two terms of the rotation matrix, the first divided by the
+/// length of the pair through the *approximate* reciprocal square root, clamped to `[-1, 1]` twice
+/// (the clamp is written out twice, not called twice, and the second pass can only matter for a NaN),
+/// and read off the arc cosine table — with the sign taken from the second term.
+///
+/// `z` and `y` share nothing, but `x` reuses `z`'s sum: its first term is `sqrt(a² + c²)`, the length
+/// of the pair `z` normalised. A quaternion whose `a` and `c` are both zero therefore hands `rsqrt` a
+/// zero, which on the FPU is an infinity the clamp catches rather than a NaN.
+pub fn quat_to_euler(q: Vf, table: &AcosTable) -> Vf {
+    let (qx, qy, qz, qw) = (F(q.x()), F(q.y()), F(q.z()), F(q.w()));
+    let two = F(2.0);
+    let xx = qx * qx;
+    // The two matrix diagonals, each `1 - 2(…)`, and the three off-diagonal pairs, each through the
+    // accumulator with the *product* of the two imaginary parts first.
+    let a = F::ONE - two * (xx + qz * qz);
+    let b = F::ONE - two * (xx + qy * qy);
+    let c = two * Acc::mula(qx, qy).madd(qw, qz);
+    let d = two * Acc::mula(qx, qz).madd(qw, qy);
+    let e = two * Acc::mula(qy, qz).msub(qw, qx);
+
+    // `y`: the pair is `(b, d)`, and the accumulator takes the *sign* term's square first.
+    let angle = |first: F, sum: F, sign: F| {
+        let t = first * F::ONE.rsqrt(sum);
+        let v = table.at(clamp_unit(clamp_unit(t)));
+        if sign < F::ZERO { v } else { -v }
+    };
+    let y = angle(b, Acc::mula(d, d).madd(b, b), d);
+    let zs = Acc::mula(c, c).madd(a, a);
+    let z = angle(a, zs, c);
+    // `x`'s first term is the length of `z`'s pair, by a real square root this time.
+    let r = zs.sqrt();
+    let x = angle(r, Acc::mula(e, e).madd(r, r), -e);
+    Vf::new(x.0, y.0, z.0, 1.0)
+}
+
+/// `[-1, 1]` as the original's two compares and two moves, which is not `min`/`max`: a branch on an
+/// ordered compare and `min.s` disagree about a NaN, and anything unordered comes back as `1.0`.
+/// `move.rs` has the same four lines for the same reason.
+fn clamp_unit(c: F) -> F {
+    if c <= F::ONE {
+        if c < F(-1.0) { F(-1.0) } else { c }
+    } else {
+        F::ONE
+    }
+}
