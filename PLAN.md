@@ -242,6 +242,15 @@ added beside them:
   - `raster.rs` a depth-buffered, perspective-correct, textured triangle rasteriser · `png.rs` a PNG
     writer · `mat.rs` vectors and 4x4 transforms in the files' own convention ·
     `bin/first-draw.rs` the whole chain: disc in, one frame of a track out
+  - `rider.rs` the rider: its `.sub`, the `.mcf` it names, its suit and how it bolts onto the chassis ·
+    `skin.rs` `.mot` motion clips and the one `Skeleton` a model is read into: the channels, the
+    quaternion blend, the joint map a clip is bound through, and the pose on a model (V4, V5)
+  - `anim.rs` — **the animation seam**: the port's one implementation of `game_sim::motion::Animations`.
+    `Set` is one animation set — a `.mcf`, the `.psg` it names as its skeleton, and the clips of that
+    set read off the disc and *bound* to it, which is where the joint map is built and kept; `Rig` is
+    that set with the simulation's driver, clip table and clock beside it, so one call is one frame:
+    the selection, the clock, the sample, the pose, the bones. The simulation names a clip and knows
+    nothing about where it comes from; this is the only thing in the chain that opens a file (V7).
 - `openmx` — the playable shell: the binary a person rides. A window, a real pad, the ported simulation
   at the game's own 60 Hz, and the freeride area drawn with the renderer, with no emulator, no fixture
   and no menu in the way (P1).

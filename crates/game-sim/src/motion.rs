@@ -94,6 +94,12 @@ use ps2_float::F;
 ///
 /// The original's clip holds a lot more — the channels, their key streams, the joint map — and all of
 /// that is the renderer's. What the timing needs is these three.
+///
+/// There is one clip in the port and not two: the drawing side's parsed `.mot`
+/// (`game_render::skin::Clip`) holds *this* record as its `timing` field, so the duration the
+/// sampler reads and the duration the clock compares against are the same word. `looping` comes
+/// from the animation set's own `.mcf` entry rather than from the `.mot`, which is why it is filled
+/// in when the clip is bound ([`Animations::load`]) and not when it is parsed.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Clip {
     /// The clip's length in seconds. Also the denominator of nothing: a phase-driven blend multiplies
@@ -221,6 +227,11 @@ impl Default for Clips {
 /// the simulation's: one reads the disc, the other walks a list of loaded clips. The port asks for them
 /// so that [`Library::load`] can be the part that *is* the simulation's — which name each state's clip
 /// is asked for by, which states ask at all, and which field the answer lands in.
+///
+/// The port has one implementation of this that reads the user's disc — `game_render::anim::Set`,
+/// which is the animation set of one `.mcf` with its clips bound to one skeleton. Binding is where
+/// the joint map is built, which is the thing that lets a stunt's clip reach the bones it animates;
+/// see that module for the name-to-member rules.
 pub trait Animations {
     /// Find the clip of this name in the set, load it if the set has it and it is not loaded, and bind
     /// it to the rider's motion object.
@@ -444,7 +455,9 @@ impl Default for Params {
     }
 }
 
-/// Where the rider is this frame, as the selection reads it.
+/// Where the rider is this frame, as the selection reads it: a lean and an angle, not a pose of
+/// joints. The joints' pose is the drawing side's `game_render::skin::Pose`, which the simulation
+/// only ever sees through [`Joints`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pose {
     /// The rider's lean, −1 to 1 (`air::Step::lean`). Only [`Driver::pose`] is taken from it.
@@ -872,6 +885,23 @@ impl Player {
         }
     }
 
+    /// The clip time this frame's pose is sampled at, once [`Player::run`] has been called.
+    ///
+    /// The two kinds of driving keep their clip time in different fields, and which one the pose
+    /// comes from is the same question as which one [`Blend::driven`] answers: a phase-driven blend
+    /// samples at `duration x phase`, which [`Player::drive_at`] has just left in [`Player::prev`],
+    /// and the free-running advance samples at [`Player::time`], where its own dt step left it. The
+    /// renderer needs the number and has no business recomputing it, so it is named here.
+    ///
+    /// Only the clock is the simulation's; what is done with the number — which channels it samples
+    /// and which bones they reach — is the drawing side's (`game_render::anim`).
+    pub fn sample_time(&self, blend: Blend) -> F {
+        match blend.driven() {
+            None => self.time,
+            Some(_) => self.prev,
+        }
+    }
+
     /// Put a clip on, crossing out of whatever is playing over `put.length` seconds.
     ///
     /// This is the only thing in the original that sets [`Fade::on`]: the rider's own per-frame driving
@@ -956,6 +986,11 @@ impl Put {
 /// The two reads are the engine's own joint accessors — the rotation pulled back out of the joint's
 /// local matrix as a quaternion, and the translation as a point. Both are the renderer's side of the
 /// motion library, which is why they are asked for rather than done here.
+///
+/// The drawing side implements this on the live joint pose it keeps (`game_render::skin::Pose`), so
+/// there is one buffer of joint poses in the program and this trait is how the simulation copies out
+/// of it. Note that [`Pose`] in *this* module is a different thing entirely — the rider's lean, as
+/// the selection reads it — and not a pose of joints.
 pub trait Joints {
     /// How many joints the rider's skeleton has. The snapshot is this long.
     fn count(&self) -> usize;
