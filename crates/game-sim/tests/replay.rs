@@ -2476,21 +2476,26 @@ fn the_human_recording_in_context_drives_the_port() {
 //     PINE reads of libpad's buffer in EE RAM — and over the ticks where both runs had the pad at rest
 //     they produce byte-identical [`PadFrame`]s, `dt` and absent second pad included.
 //
-// What it did not settle, which is the task's own *Not verified* list:
+// What it did not settle then, and what has settled it since:
 //
-//   * **The original was never driven by the recording's input.** PCSX2 plays a `.p2m2` back from its
-//     GUI only (no CLI flag, no ini key), and this machine has no way to reach that GUI — so
-//     `acceptance-freeride.csv` is the original's own minute from the recording's start state *under no
-//     input at all*. The human's recorded input therefore has no original to agree with yet, and the
-//     tick phase I4 left open stays open: the overlap where the recording and that capture agree is the
-//     overlap where *both* pads were at rest, which no choice of phase can disagree about.
+//   * **The original driven by the recording's own input.** PCSX2 plays a `.p2m2` back from its GUI
+//     only — no CLI flag, no ini key, no hotkey — and no keystroke this desktop can synthesise reaches
+//     its window. What does reach it is the desktop's accessibility bus: the menu item Tools → Input
+//     Recording → Play can be pressed through it and the file dialog it opens filled the same way. So
+//     `acceptance-freeride.csv` is now the human's minute driven by the human's input, sampled tick by
+//     tick from the recording's own start state: 1,811 rows, 1,449 of them with a control held, the
+//     bike to 77 units/s over 3,071 units of ground, and two crashes in it.
 //
-//     What there is instead is `acceptance-ride.csv`: thirty seconds from the same save state with the
-//     kit's virtual pad riding it — six distinct control masks, the bike up to 51 units/s and 555 units
-//     from where it started — which is an acceptance capture with input and motion in it that any agent
-//     can remake with no human and no GUI (`./kit pad script` beside `./kit record`). It is not the
-//     human's ride, and that is the whole of the difference: a scripted pad cannot crash, scrape a
-//     slope or land sideways on purpose.
+//     That also settled the tick phase I4 left open, which an undriven capture never could: every
+//     field before the first press is the same neutral pad, so both phases agree about the prefix and
+//     only a driven run can disagree past it. `TickPhase::Second` matches RAM on all 1,810 overlapping
+//     ticks and `First` loses it at the press — the game reads the **second** field of each tick
+//     (`the_capture_is_the_recording_played_back_and_the_game_reads_the_second_field`).
+//
+//     The scripted alternative is still there and still useful, kept under `context/capture/s8/`:
+//     thirty seconds from the same save state with the kit's virtual pad riding it, which any agent
+//     can remake with no human and no GUI (`./kit pad script` beside `./kit record`). What it cannot
+//     do is crash, scrape a slope or land sideways on purpose.
 //   * **The port has no bike.** S3 (movement) is open, so the verdict of the real fixture today is
 //     `NoSuchField bike.pos[0]` at tick 0 — the fixture's own fault in A2's taxonomy, and the honest
 //     answer: there is nothing to compare. [`the_acceptance_run`] prints that and passes; the day S3
@@ -2502,8 +2507,9 @@ fn the_human_recording_in_context_drives_the_port() {
 /// This is what aligns the recording against a capture taken from the same state: a capture row whose
 /// counter is *c* was produced by the tick the recording's frame `c - 2773 - 1` drove. The recorder's
 /// first row lands a few ticks in (it loads the state, waits for its warmup and samples after a tick),
-/// so the first handful of the recording's ticks are not in any capture — measured at 18 on the
-/// capture in hand, and the reason the agreement window below starts where it does rather than at 0.
+/// so the first handful of the recording's ticks can be missing from a capture. On the capture in hand
+/// the load was caught with a tick to spare, so its first row is the recording's frame 0 and the
+/// agreement window below starts at 0; a slower load would simply start it further in.
 const RECORDING_START_TICK: u64 = 2_773;
 
 /// The recording whose save state the acceptance capture was taken from. Only this file can be
@@ -2590,12 +2596,12 @@ fn acceptance_verdict(f: &Fixture) {
 /// one of the area's three AI riders. All three are invisible in a CSV of 1,811 rows, and each of them
 /// is a way a capture can look like an acceptance recording and quietly not be one.
 ///
-/// It also reports how much *input* each capture holds, which is the honest difference between the two
-/// in hand (see this section's header): `acceptance-freeride.csv` is the recording's own minute with
-/// **nobody touching the pad**, because PCSX2 would not play the recording back without a human at its
-/// GUI; `acceptance-ride.csv` is a scripted ride through the kit's virtual pad from the same state —
-/// input, and a bike that moves — which an agent can remake from nothing. A count of zero is not a
-/// failure, it is the state of S8 printed where whoever runs the tests will see it.
+/// It also reports how much *input* each capture holds. `acceptance-freeride.csv` is the human's own
+/// minute played back on the original (see this section's header), so that count is 1,449 of 1,811
+/// ticks with a control held rather than the zero it was while the recording had no way into the
+/// emulator. A count of zero is still not a failure — a capture of the same state under no input is
+/// the original at a step the port can match, and it is the kind of capture an agent can make without
+/// a GUI — it is printed where whoever runs the tests will see it.
 #[test]
 fn every_acceptance_capture_is_the_original_at_a_step_the_port_can_match() {
     let dir = private_dir("capture");
@@ -2667,28 +2673,29 @@ fn every_acceptance_capture_is_the_original_at_a_step_the_port_can_match() {
 }
 
 /// **The recording's bytes are the bytes the original read** — `report_of_p2m2` against libpad's own
-/// buffer in EE RAM, over the ticks where the two runs' pads agree.
+/// buffer in EE RAM, over the whole minute the human played.
 ///
 /// Two paths to the same twenty bytes, sharing no code: a `.p2m2` on disk read by I4's reader, and the
 /// `pad_a`/`pad_b` columns of a capture taken through PINE after each tick (the half with the smaller
-/// stamp being the one the game read — C5's measurement, which `PadTape::from_capture` applies). Over
-/// the overlap they produce byte-identical `PadFrame`s: status, the mode byte, the button word
-/// active-low, the four axes, the twelve pressures, the `dt`, and the absent second pad.
+/// stamp being the one the game read — C5's measurement, which `PadTape::from_capture` applies). The
+/// capture is that recording *played back on the original*, so the comparison is no longer limited to
+/// the ticks where both pads happened to be at rest: over all 1,810 overlapping ticks the two produce
+/// byte-identical `PadFrame`s — status, the mode byte, the button word active-low, the four axes, the
+/// twelve pressures, the `dt`, and the absent second pad.
 ///
-/// **What this does not prove**, and the reason it is a cross-check rather than the acceptance run:
-/// the capture was taken under no input, so the window where the two agree is the window where both
-/// pads were at rest — fields 1..=55 of the recording are a written, neutral pad. The agreement
-/// therefore says the neutral encoding is right on real data and that the two readers agree about what
-/// "nothing held" looks like; it cannot say which of a tick's two fields the game read, because both
-/// fields of every tick in that window are identical. Settling the phase needs the original driven by
-/// the recording, which is the one thing this machine cannot do (see this section's header).
+/// **And which of a tick's two fields the game reads**, which is the question I4 could not answer and
+/// an undriven capture never could: fields 1..=55 of the recording are a written, neutral pad, so
+/// before the human's first press both phases say the same thing and either one "agrees". Past the
+/// press only one can. `TickPhase::Second` matches RAM on every one of the 1,810 overlapping ticks;
+/// `First` matches the neutral prefix and then sits one field behind for ever, its tick 28 being what
+/// RAM already held on tick 27. **The game reads the second field of each tick** — field 56 of this
+/// recording is the first input it ever saw.
 ///
-/// With teeth all the same: the agreement is asserted to run *exactly* up to the tick where the
-/// recording's human first presses something, so a reader that mangled the neutral word, the mode byte
-/// or the second pad, or an alignment that slipped, would show up as a shorter run than the recording's
-/// own idle prefix explains.
+/// Both halves are asserted, so a reader that mangled the neutral word, the mode byte or the second
+/// pad, an alignment that slipped, or a future capture taken from a different state would each show up
+/// here rather than as a divergence somewhere in the physics.
 #[test]
-fn the_recording_and_the_capture_hold_the_same_pad_where_both_were_idle() {
+fn the_capture_is_the_recording_played_back_and_the_game_reads_the_second_field() {
     let Some((cpath, cap)) = acceptance_capture() else { return };
     let rpath = private_dir("recordings").join(RECORDING);
     let Ok(bytes) = std::fs::read(&rpath) else {
@@ -2764,15 +2771,39 @@ fn the_recording_and_the_capture_hold_the_same_pad_where_both_were_idle() {
             tape.frames[offset],
             from_ram.frames[0],
         );
-        assert_eq!(
-            agreed,
-            played.saturating_sub(offset).min(overlap),
-            "phase {}: the agreement ends at tick {}, which is not where the recording's human \
-             first pressed something (tick {played}) — the capture was taken under no input, so \
-             every tick before that one must match and the first one after it must not",
-            phase.name(),
-            offset + agreed,
-        );
+        match phase {
+            // The phase the game reads: the whole overlap, byte for byte.
+            replay::TickPhase::Second => assert_eq!(
+                agreed,
+                overlap,
+                "phase second: the capture is this recording played back on the original, so all \
+                 {overlap} overlapping ticks must match byte for byte; tick {} does not:\n  \
+                 tape    {:?}\n  capture {:?}",
+                offset + agreed,
+                tape.frames[offset + agreed],
+                from_ram.frames[agreed],
+            ),
+            // The other phase, and why it is the other phase: it holds for the neutral prefix, and
+            // loses it one tick before its *own* first input, because RAM already carries field 56's.
+            replay::TickPhase::First => {
+                assert_eq!(
+                    offset + agreed,
+                    played - 1,
+                    "phase first: the agreement ends at tick {}, and the only place it can end is \
+                     the tick before this phase's first input (tick {played}) — RAM has field \
+                     {FIRST_PLAYED_FIELD}'s press on the tick before the first-field tape sees it",
+                    offset + agreed,
+                );
+                assert_eq!(
+                    tape.frames[offset + agreed + 1],
+                    from_ram.frames[agreed],
+                    "phase first: past the press the wrong phase should be a one-field shift of the \
+                     right one, not a different pad — the capture's tick {} is the first-field \
+                     tape's next tick or the two readers disagree about more than the phase",
+                    offset + agreed,
+                );
+            }
+        }
     }
 }
 
@@ -2786,8 +2817,9 @@ fn the_recording_and_the_capture_hold_the_same_pad_where_both_were_idle() {
 // the rest of the rider update that these per-function proofs cannot". Call three ported functions in
 // the wrong order and every per-function proof still passes.
 //
-// S8's answer to that — replaying a human's recording tick by tick — is blocked on a person at
-// PCSX2's GUI. This section is the whole-frame proof that is reachable without one: `watch/
+// S8's answer to that — replaying a human's recording tick by tick — now has its half of the data,
+// the recording captured off the original (I3's header), and no bike in the port to replay it against
+// until S3 lands. This section is the whole-frame proof that waits for neither: `watch/
 // frame-bike.toml` samples the human's rider **once per tick** on the live emulator, from the save
 // state the recording is anchored to, with the kit's own pad riding it (`watch/pads/
 // frame-bike-ride.pad`). Each row carries, for the same tick:

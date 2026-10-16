@@ -1517,6 +1517,13 @@ pub struct P2m2 {
 /// one of the two, consistently, for the whole recording. Which one depends on where in PCSX2's frame
 /// the recording's save state was taken, and the file does not say: it is a choice between two
 /// sequences that agree on most ticks and not all ([`P2m2::ticks_the_phase_moves`] counts them).
+///
+/// It can be *measured* for a given recording, by playing it back on the original and comparing
+/// against libpad's buffer in EE RAM tick by tick — only the right phase survives past the first
+/// press. Done once so far, for `context/recordings/first_recording.p2m2`: `Second`. That is a fact
+/// about that file and its save state, not about the game, so it is not this enum's default; the
+/// proof is `the_capture_is_the_recording_played_back_and_the_game_reads_the_second_field` in
+/// `crates/game-sim/tests/replay.rs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TickPhase {
     /// The first field of each pair: fields 1, 3, 5… of the file. The default.

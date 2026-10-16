@@ -135,54 +135,43 @@ Two things that bite:
       opponents are not switchable — a one-player freeride is always four racers, so any recording made
       on a freeride area has three AI riders in it whether you want them or not.
 
-      **Still open from S14, and only you can do it:** which frame the NPC contact lands on. PCSX2 plays
-      a `.p2m2` from its GUI only — no command-line flag, no ini key — so no unattended session can
-      measure it. The recipe is in S14's journal entry: play the recording from the GUI with a recorder
-      attached to the bike's wreck flag, and the first frame it reads 1 is the contact. Until then the
-      number in use is an inference from the tape's idle window (video frame ~1019, simulation tick
-      ~510), good to a few frames at best.
+      **S14's open frame is measured** (2026-10-16, no human needed in the end — see the next item). The
+      recording was played back on the original with the rider's `wreck_reason` (+0x748) recorded beside
+      the bike: it is 0 while riding and non-zero in two windows, ticks **3259–3349** and **4167–4190**,
+      reason 5 in both. So the tick-exact window runs from the recording's first tick to **3258**, about
+      sixteen seconds, rather than the ~510 inferred from the idle prefix. What reason 5 *is* — the NPC
+      contact you remember, or a crash of your own — is still a number without a name.
 
-- [ ] **Play that recording back in PCSX2 while the kit records** — the one step of S8 that needs a
-      person at the desktop, and the only thing between the project and a tick-exact acceptance run.
-      About ten minutes.
+- [x] **Play that recording back in PCSX2 while the kit records** — **done 2026-10-16, by the agent, so
+      you can skip it.** It was listed here because PCSX2 starts an input-recording playback from its GUI
+      only (Tools → Input Recording → Play): no CLI flag, no `.ini` key, no hotkey, and nothing on this
+      desktop can send the emulator a keystroke or move focus to its window. What it *can* do is press a
+      Qt menu item over the desktop's accessibility bus, which needs neither focus nor a pointer. The
+      emulator was started with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`, the menu item pressed over the bus,
+      the file dialog filled the same way, and the save-state load caught on the tick it happened
+      (`frame_counter` jumping back to 2773, which is the counter in the recording's own state).
 
-      Why an agent cannot: PCSX2 starts an input-recording *playback* from its GUI only (Tools → Input
-      Recording → Play), there is no CLI flag and no `.ini` key for it, and this machine has no way for
-      an agent to reach that GUI — Hyprland's dispatcher would not move focus to the emulator window,
-      `grim` hung, and there is no `ydotool`. So the capture S8 made is the original's own minute from
-      the recording's start state with **nobody touching the pad**, which proves the step and the actor
-      but cannot prove the physics.
+      What it produced: `context/capture/` now holds the human's own minute as the original played it —
+      1,811 rows, one per tick, no gap; 1,449 ticks with a control held; the bike to 77 units/s over
+      3,071 units of ground; two crashes. Both questions this item was for are answered. **The game reads
+      the second of a tick's two video fields** (`TickPhase::Second` matches the recording byte for byte
+      on all 1,810 overlapping ticks; `First` loses it at the first press), and the recorded input does
+      reproduce the recorded motion. `the_acceptance_run` in `crates/game-sim/tests/replay.rs` is now the
+      port's verdict on every `./kit check`; today it prints `NoSuchField bike.pos[0]`, which is the
+      honest state of the port rather than a problem with the data. The details are in
+      `research/journal/2026-10-15-s8-s8-acceptance/3-s8-acceptance-PART.md`.
 
-      The recipe, in your own PCSX2 (not a kit copy — the kit's copies are for agents):
+      **One thing to know if you ever play a recording back yourself: PCSX2 writes to the `.p2m2`.** At
+      the end of the movie it switches to record mode and keeps appending to the same file — the human's
+      recording grew from 130,962 bytes to over 1.2 MB while the emulator sat open after the capture. It
+      was restored byte for byte from the copies in the worktrees (md5
+      `59900dc955641ee3ef9fcf50211b5d22`) and the save state was never touched, and
+      `context/recordings/first_recording.p2m2` is now **read-only** so it cannot happen again. Point any
+      playback at a copy.
 
-      1. Copy `context/recordings/first_recording.p2m2_SaveState.p2s` into your PCSX2's `savestates/` as
-         `SLUS-20767 (9866FE54).08.p2s` (slot 8; any free slot will do if you tell S8's successor which).
-      2. Boot `MX Unleashed (USA).iso`, then Tools → Input Recording → **Play** →
-         `context/recordings/first_recording.p2m2`. It starts from the recording's own save state, so do
-         not load a state by hand first.
-      3. With the playback running, in a second terminal:
-         `./kit record watch/acceptance.toml -n 1811 -o context/capture/acceptance-ride.csv` — with no
-         `--state`, because the playback loads the state itself. Starting a few ticks late costs
-         alignment, not correctness: the capture carries the game's own `frame_counter` and the test
-         aligns on it (`RECORDING_START_TICK` = 2773, the counter in that save state).
-      4. Leave the pad alone for the whole minute. A single press of your own is a frame of input the
-         `.p2m2` does not contain, and it will show up as a divergence nobody can explain later.
-
-      What it unblocks: the two questions I4 and S8 left open — **which of a tick's two video fields the
-      game reads** (`TickPhase`; the right phase agrees with the capture on all 1811 ticks, the wrong one
-      disagrees on the 18 where the two fields differ in a button) and whether the recorded input really
-      reproduces the recorded motion. With it, `the_acceptance_run` in `crates/game-sim/tests/replay.rs`
-      becomes the port's verdict with no code to write.
-
-      **One sitting now answers two questions.** `watch/acceptance.toml` records the human rider's
-      `wreck_reason` (+0x748) as well as the bike, so the first row of the capture where it is not 0 is
-      the NPC contact S14 could not measure — the open item three bullets up, which otherwise needs its
-      own trip to the GUI. The command in step 3 is unchanged; the extra columns come along with it.
-
-      If the playback desyncs (the bike doing something the human does not remember), say so here rather
-      than deleting it: a `.p2m2` that does not replay on the emulator it was recorded on cannot be
-      expected to replay on the port either, and that is worth knowing before anybody ports physics to
-      match it.
+      **What is still worth your time:** a *longer* recording. S8 asks for several minutes and this one is
+      60.4 seconds, so the hundredth awkward landing is still not in any data. Recording is still a person
+      at a pad; playing it back and capturing it is not, any more.
 
 ## Decisions only you can make
 

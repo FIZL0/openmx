@@ -25,3 +25,20 @@ list entry, and the capture now carries the control-source column that proves it
 the 30 fps clamp on all 2,711 captured ticks, and PCSX2 plays a `.p2m2` back only from its GUI — which an
 agent cannot reach here, so the human's own input has still never driven the original. That is the new
 `plan/HUMAN.md` ask, ten minutes at the desktop, and it is why the entry is READY.
+
+**Third session (3-s8-acceptance-PART.md).** The recording drove the original. PCSX2 plays a `.p2m2` back
+from its GUI only and no keystroke on this desktop reaches its window — but a Qt menu item can be pressed
+over the accessibility bus without focus or a pointer, so Tools → Input Recording → Play was pressed that
+way, the file dialog filled the same way, and the save-state load caught on the tick it happened
+(`frame_counter` back to 2773). The capture is the human's own minute as the original played it: 1,811
+ticks with no gap, 1,449 of them with a control held, the bike to 77 units/s over 3,071 units of ground,
+two crashes. That settles the tick phase I4 left open and an idle capture never could — **the game reads
+the second of a tick's two video fields**, matching RAM byte for byte on all 1,810 overlapping ticks while
+the other phase loses it at the first press — and it measures two other tasks' open numbers: S14's wreck
+window (ticks 3259–3349 and 4167–4190, reason 5, so the tick-exact window ends at 3258) and S22's
+headroom (sideways `g_peak` peaks at 6.12 against a limit of 16.87). The verdict is unchanged and still
+honest: `NoSuchField bike.pos[0]`, because S3 has not landed a bike — but the 14,488 checks behind it are
+now checks against a minute somebody rode. One casualty, repaired: PCSX2 switches to record mode at the
+end of a movie and kept appending to the human's `.p2m2`; a test caught it, four worktree copies restored
+it byte for byte, and the file is read-only now. The entry is PART, not READY: nothing in S8 needs a
+person any more except a *longer* recording.
