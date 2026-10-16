@@ -240,7 +240,7 @@ fn quat_mul_conj(a: Vf, b: Vf) -> Vf {
 /// `a`, turned by the quaternion `q`: ten VU0 operations, two cross products with the scalar terms
 /// folded in, and not a matrix in sight. `w` is `a`'s, which is how the axis the correction block
 /// hands on keeps the `w` of the vector it came from.
-fn turn(q: Vf, a: Vf) -> Vf {
+pub(crate) fn turn(q: Vf, a: Vf) -> Vf {
     let acc = Vf::opmula(q, a);
     let acc = Vf::madd(acc, a, q.bc(Field::W));
     let t = Vf::opmsub(acc, a, q);

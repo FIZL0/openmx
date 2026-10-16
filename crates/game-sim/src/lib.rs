@@ -303,6 +303,13 @@ pub mod trick;
 /// step empties every substep and keeps by offset get their names here.
 pub mod wheel;
 
+/// The vehicle's own animation state machine, which is what the animation library was written for:
+/// the sixty-entry switch on the bike's animation state, its own clip table, the two lags the rows are
+/// mixed along, and the two entry points of that library — the four-clip blend and a sixth arm — that
+/// nothing else in the game reaches. `motion` is the rider's half of the same library; this is the
+/// bike's, and the bigger of the two.
+pub mod vehicle_anim;
+
 /// The world outside the bike, as the ride asks about it: where the ground is under a point, and the
 /// scene's collision meshes stood where the scene puts them, with the sweep against the lot.
 pub mod world;

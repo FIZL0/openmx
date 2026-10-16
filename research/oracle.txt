@@ -2041,3 +2041,124 @@ race_camera_frame_setup     boot 0x0021e4d0 vtable slot 0x108, the override of c
 #                                           `return 1`: a real routine that rebuilds the probe bundle
 #                                           and collides it. The frame never calls it, so it is not
 #                                           ported; the only caller of slot 0x108 is elsewhere
+
+# ---------------------------------------------------------------------------------------------------
+# S25 — the vehicle's own animation state machine, which is the only live caller of what S20 ported:
+# a sixty-entry jump table on the bike's animation state, its own clip table, the sixth arm of the
+# library dispatch, and the two arms that ask for the four-clip blend. The port is
+# crates/game-sim/src/vehicle_anim.rs, the proofs are crates/game-sim/tests/vehicle_anim.rs, and how
+# each one was found is in research/journal/2026-10-16-s25-vehicle-animation.
+#
+# This supersedes the S20 block's note on vehicle_animation above: it *is* ported now, all of it, and
+# Ghidra's "it drops both of those blocks" is why the whole function was read through `./kit dis`
+# (0x002492b0..0x00249ca4, 637 instructions) rather than the decompiler. Two things in that note to
+# correct: the four-clip arms pick their pairs out of +0x960..+0x980 of a table that starts at +0x900
+# and is indexed by state, not out of a table of its own; and the mode register holds 0, 1, 2, 4 and 5
+# — never 3, in this copy of the dispatch either.
+#
+# The vehicle is its own motion object: anim_bind_clip, anim_clip_handle, motion_play, anim_rewind and
+# all six library entries take the vehicle pointer itself, so +0x40/+0x44 (the bound handles) and
+# +0x48..+0x94 (the clock) are the same fields the S20 block describes.
+#
+# The vehicle's own fields, by offset. A test may say where these live; the port may not:
+#   +0x30   the node the placement writes          +0x1e0  the name buffer the loader fills first
+#   +0x2ac  }  both non-zero and a request that is not holding skips the placement entirely
+#   +0x2b0  }
+#   +0x488  a pointer to the request block below   +0x630/+0x634  pointers to the two lag records
+#   +0x680  "this frame came off the clip table"   +0x684  holding a pose   +0x688  ever started
+#   +0x68c  the cross-fade ramp                    +0x690  the rate it falls at, picked per restart
+#   +0x694  ready rate  +0x698  hold rate  +0x69c  default rate  +0x6a0  pose rate  +0x6a4  stunt rate
+#   +0x8dc  the new clip's phase  +0x8e0  the old clip's  +0x8e4  where the old one started
+#   +0x8e8  the longest the stunt cross-fade may take
+#   +0x8ec  the previous state  +0x8f0  the state running  +0x8f4  the state asked for
+#   +0x8f8  the phase the stunt cross-fade starts the old clip at
+#   +0x8fc  a *byte*: the request count the restart test compares against. Nothing here writes it
+#   +0x900..+0x9ec  the sixty-entry clip table, indexed by animation state
+#   +0x9f0  which added record to play instead, or negative for none
+#   +0x9f4  the added-record list: its count, +0x9f8 a flag byte, +0x9fc the array of pointers
+#   +0xa14/+0xa18/+0xa1c  the pose grid's three thresholds   +0xa3c  the reverse pair's phase clock
+# The request block (the pointer at +0x488): +0x8 take the position from the base, +0xc holding,
+# +0xf0 a pointer to the offset vector, +0x140 cut the start-line group short, +0x170 the phase axis'
+# target, +0x174 the mix axis', +0x178 the number the pose grid cuts up, +0x180 the base position
+# (quadword), +0x190 the rotation quaternion, +0x1a4 how far through the gesture, +0x1a8 the request
+# count.
+# A lag record is three floats: {value, time constant, the ratio the last step left}.
+#
+# The frame, in the order it runs: the placement (transform_set_position then
+# transform_set_rotation); the restart test, which is `asked != running || (seq >= 2 && seq != the
+# byte at +0x8fc)`; the fade-rate switch, which only runs on a restart; the restart itself
+# (anim_rewind, +0x688 = 1, +0x68c = 1.0, all three weights zeroed); the held request's override
+# (+0x690 and +0x68c zeroed); the latch of +0x8f4 into +0x8f0; `+0x68c -= +0x690 * dt`; +0x680
+# cleared; the hold released when the ramp has run out, on every state but 0x26; the two axes, snapped
+# first if the request is holding and the target is not FLT_MAX, then stepped — the one at +0x630
+# before the one at +0x634; the selection; and then the three weights and the ramp clamped to 0..1 and
+# the dispatch.
+#
+# The fade-rate table is at 0x00431a80, indexed by the state *asked for* (`sltiu` against 60 in front
+# of it, so a negative one is out of range and takes the default):
+#   0x00..0x17, 0x27                     -> +0x6a4   the gesture slots and nohandedlander
+#   0x18..0x20, 0x24, 0x25, out of range -> +0x69c   the default
+#   0x21, 0x22                           -> +0x69c   and +0xa3c = 0: the reverse pair's clock
+#   0x23, 0x26                           -> +0x6a0   the airborne row and the backflip
+#   0x28..0x2d                           -> +0x698   the wreck-and-hold group
+#   0x2e..0x38                           -> 0 if the request asks to cut, else +0x694
+#   0x39..0x3b                           -> +0x694   the three start poses, which cannot be cut
+# The state table is at 0x00431990, indexed by the state *running*, same range test:
+#   0..23  -> 0x249a24  the gesture slots: the pair at two phases, or the new clip alone
+#   30     -> 0x2496f8  the pose grid, which is where the four-clip blend's two callers are
+#   33, 34 -> 0x249978  the reverse pair, at its own clock
+#   35     -> 0x249928  the airborne row
+#   38     -> 0x2499e0  the backflip, held at a tenth of its clip
+#   39     -> 0x249a04  nohandedlander
+#   40..59 -> 0x2496cc  the two played-once groups: motion_play on the frame they start
+#   24..29, 31, 32, 36, 37 -> 0x249b14  no arm at all, which is the free-running advance
+# The two writers of mode 4 are 0x002497b4 (the band below the first threshold, mixing the stopped row
+# with the still row) and 0x002498d4 (the band between the second and third, mixing the still row with
+# the riding row). Each is the delay slot of the branch out of its own arm, which is why the two
+# `addiu $17, 4` sit after an unconditional branch and Ghidra drops both blocks.
+# The rows are four states apart in groups of three: 24..26 stopped, 27..29 still, 30..32 riding,
+# 33/34 the reverse pair, 35..37 airborne. The within-row mix is the mix axis stretched over each half
+# (`mix < 0.5 ? 2*mix : 2*(mix-0.5)`) and it picks which two of the three the pair is.
+# The function itself is `vehicle_animation` (boot 0x002492b0, 2548 bytes, dt in f12 and the vehicle
+# in a0), named in the S20 block above and resolved under that name by this task's proofs.
+transform_set_position boot 0x001b2660 (transform in a0, space in a1, position in a2) write a node's
+#                                     position. a1 == 0 and no parent (+0x100) is a straight store of
+#                                     the quadword through 0x001b2640; a1 == a0 adds it to +0x70
+#                                     instead; anything else brings it through the parent. The
+#                                     placement passes 0, so the vector in a2 is what the step decided
+motion_blend_pair boot 0x00147640 (the first clip's phase in f12, the second clip's in f13, the mix in
+#                                 f14, the cross-fade in f15, motion in a0, clips in a1/a2, five
+#                                 zeros) the sixth entry point, and 0x00249c58 is its only caller in
+#                                 the image. The one entry that samples its two clips at two
+#                                 *different* times: param_1 = a.duration * f12 and param_2 =
+#                                 b.duration * f13, where motion_blend_two would have used one time in
+#                                 seconds for both. The clock is driven off a alone, exactly as the
+#                                 other entries drive it off their first clip -- +0x48 cleared, +0x50
+#                                 = a's handle, +0x54 = a's time, motion_events over the span -- and
+#                                 it has no test of that time against zero, so a clip it has only just
+#                                 been handed fires the empty window. The mix goes to
+#                                 motion_slerp(f14, out = b, from = b, to = a, 1), so 0 is all of b
+#                                 and 1 is all of a. It writes no pose fields of its own
+vehicle_load_clips boot 0x002483a0 (vehicle in a0, the first stunt record in a1, the name prefix in
+#                                  a2) the vehicle's clip table. Two passes over 24 records of stride
+#                                  0x54, each building "<prefix><Name>" with snprintf into a 32-byte
+#                                  buffer -- the first calls anim_find_or_load and anim_bind_clip for
+#                                  *every* record, with no UsedForBike gate, which is the one place it
+#                                  differs from rider_load_clips; the second writes
+#                                  anim_clip_handle(anim_clip_by_name(...)) into +0x900 + i*4. Then 36
+#                                  literal names, bare -- no "bike_" -- looked up but never loaded,
+#                                  into +0x960..+0x9ec. The strings are at 0x431608 ("%s%s") and
+#                                  0x431658..0x431950. It opens by writing its own name buffer at
+#                                  +0x1e0 from two globals (0x004e1eb0 and 0x0041e930), which nothing
+#                                  in the animation reads
+vehicle_extra_at boot 0x0024eee0 (list in a0, index in a1) one element of the added-record list:
+#                                `*(*(list+8) + index*4)`, five instructions and no range check, so an
+#                                index past the count reads whatever is behind the array. A record is
+#                                12 bytes: {the key the caller recognises, the clip the mix goes
+#                                towards, the clip it comes from}
+vehicle_add_anim boot 0x00248150 (vehicle in a0, key in a1, the first clip's name in a2, the second's
+#                                in a3) append one added record, if the flag byte at +0x9f8 is set and
+#                                no record already has that key. Each name is loaded, bound and looked
+#                                up the same way the loader does it; an empty name leaves that half of
+#                                the record 0. Not ported: it is the caller's half, and what the
+#                                machine does with a record is proved from records laid out in RAM
