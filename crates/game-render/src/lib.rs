@@ -14,6 +14,7 @@
 //!   ini.rs       the plain-text format `.psm` and `.scn` share
 //!   scene.rs     `.scn` scenes (start point, fog, lights, 1506 placed props) and `.psm` materials
 //!   world.rs     a track in memory: models, materials and textures matched up by name, and drawn
+//!   rider.rs     the rider: its `.sub`, the `.mcf` it names, its skeleton and how it bolts on
 //!   raster.rs    a depth-buffered, perspective-correct, textured triangle rasteriser
 //!   png.rs       a PNG writer, so a frame can be looked at
 //!   mat.rs       vectors and 4x4 transforms in the files' own convention
@@ -30,6 +31,7 @@ pub mod png;
 pub mod psg;
 pub mod pst;
 pub mod raster;
+pub mod rider;
 pub mod scene;
 pub mod terrain;
 pub mod world;
@@ -39,6 +41,7 @@ pub use mat::{M4, V3, v3};
 pub use psg::Model;
 pub use pst::Texture;
 pub use raster::Frame;
+pub use rider::{Rider, Skeleton, Suit};
 pub use scene::{Material, Scene};
 pub use terrain::{Terrain, draw_terrain};
 pub use world::{Assets, Camera, draw_scene};
