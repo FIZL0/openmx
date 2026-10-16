@@ -50,7 +50,6 @@ half-ported ones, and it is the first time the port is worth running.
 
 ### Phase 8 — showing it
 - [ ] **V8** (after V7) a rider you can see: the skinned geometry V4 read off the disc, put on the bike, posed every frame by the animation driving the rider already runs for one field and throws away — the shell draws the rider where the bike's rider point says, in the pose the driver asks for, so a stunt looks like the stunt it is -> crates/game-render/src/rider.rs · crates/openmx/src/main.rs | t: a 60 s ride draws the rider every frame with no panic, and a stunt's first and last frames differ in the rider's pose | j: rider-drawn
-- [ ] **S25** (after V7) the vehicle's own animation state machine, which is the only live caller of what S20 ported: a sixty-entry jump table on the actor's animation state, its own clip table, a sixth arm nothing else reaches, and the two arms that ask for the four-clip blend that exists for nothing else in the image — ported into a module of its own, so the animation caller has the caller it was written for | t: the jump table's arms are proved against the original one state at a time, including both writers of mode four | j: vehicle-animation
 
 ### Stretch
 

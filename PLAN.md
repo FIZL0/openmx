@@ -213,6 +213,14 @@ added beside them:
     landing is judged on, the clip clock with its loop and its end, and the window one frame opens for
     the action frames inside it. Proved against the original's driving, advance and window over 10,000
     generated frames each in `tests/motion.rs` (S6).
+  - `vehicle_anim.rs` — the caller `motion.rs` was written for: the vehicle's own animation state
+    machine, one frame of it. Where the vehicle puts itself each frame, the sixty-entry switch on its
+    animation state and the fade rate each state restarts with, its own clip table loaded off the
+    stunt names, the two lags that carry the pose grid's axes, the extra records a track can add past
+    the switch, and the arm that crosses a gesture out over the pose it was played from. Picks the
+    blend `motion.rs` runs — including the four-clip blend and the sixth entry point that nothing else
+    in the image reaches. Proved against the original one state at a time over 24,000 generated frames
+    in `tests/vehicle_anim.rs` (S25).
   - `world.rs` — what the simulation asks the world: the ground under a point (height, normal and
     surface, from the ported terrain query) and the scene's collision placements swept as one bundle,
     each placement's mesh in its own space, so a prop stops the rider the way the original's does.

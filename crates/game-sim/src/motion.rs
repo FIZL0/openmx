@@ -644,7 +644,7 @@ pub fn restarted(r: Request, playing: Trick) -> bool {
 }
 
 /// `max.s` then `min.s`, which is how the original clamps every weight it hands the library.
-fn clamp01(x: F) -> F {
+pub(crate) fn clamp01(x: F) -> F {
     x.max(F::ZERO).min(F::ONE)
 }
 
@@ -653,7 +653,7 @@ fn clamp01(x: F) -> F {
 ///
 /// The same three-instruction lerp the trick clocks' hold amplitude goes through, so it is spelled the
 /// same way here: `adda.s` of the low end, then `madd.s` by the span.
-fn remap(x: F, in_lo: F, in_hi: F, out_lo: F, out_hi: F) -> F {
+pub(crate) fn remap(x: F, in_lo: F, in_hi: F, out_lo: F, out_hi: F) -> F {
     if in_lo == in_hi {
         return out_lo;
     }
