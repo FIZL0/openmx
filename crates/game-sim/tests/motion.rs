@@ -1,6 +1,7 @@
 //! Animation driving against the original.
 //!
-//! Four proofs:
+//! Eight proofs — the first four of the driving and the clock (S6), the last four of the call the
+//! frame ends in (S20):
 //!
 //! 1. **the driving** — ten thousand generated frames of the rider's own animation section: the
 //!    cross-fade ramp, the restart test, the pose fields it leaves behind, and which of the motion
@@ -15,6 +16,21 @@
 //! 4. **the frame counts** — what the numbers mean at thirty frames a second, which is the part of
 //!    "to the frame" no oracle call can state: the cross-fade's length, a stunt's phase per frame, and
 //!    the double fire of an action frame that lands on a sample time.
+//!
+//! 5. **the clip table** — four thousand generated riders through the original's own loader, with the
+//!    disc read and the three allocating binds hooked onto a Rust-side shelf and everything between
+//!    them running for real: the name every slot is looked up by, the flag that decides which slots
+//!    are loaded at all, and which field each answer lands in.
+//! 6. **putting a clip on** — ten thousand generated calls of the one function in the game that starts
+//!    a clip-to-clip transition, over both of its entry points, against every field it writes and
+//!    whether it asked for the pose snapshot.
+//! 7. **the pose snapshot** — five thousand snapshots of two thousand generated skeletons, with the
+//!    engine's heap hooked onto a bump allocator and its two joint reads replaced by something
+//!    recognisable, against both buffers, the tag array no caller passes, and when the buffers are
+//!    made and reused.
+//! 8. **the call itself** — ten thousand frames through all four of the library's entry points, which
+//!    is where the clip time and the action frames of a driven clip come from, and the one rule the
+//!    entries disagree about.
 //!
 //! The channel sampling, the quaternion blending and the skinning are the renderer's and are not
 //! ported; what else is not proved here, and why, is in the journal entry's last section.
@@ -242,6 +258,18 @@ fn as_call(blend: Blend, dt: F) -> Call {
         },
         Blend::Two { phase, mix, ramp, a, b } => Call {
             mode: Some(2),
+            w0: phase.to_bits(),
+            w1: mix.to_bits(),
+            ramp: ramp.to_bits(),
+            clip_a: slot_handle(a),
+            clip_b: slot_handle(b),
+        },
+        // The rider's dispatch never asks for the four-clip blend — its mode register only ever holds
+        // 0, 1 or 2 — so this arm is here to be exhaustive. It drops the second pair on purpose: if a
+        // frame ever did reach it the comparison would fail and print the case, which is what should
+        // happen. Proof 4 is where the four-clip entry is driven.
+        Blend::Three { phase, mix, ramp, a, b, .. } => Call {
+            mode: Some(4),
             w0: phase.to_bits(),
             w1: mix.to_bits(),
             ramp: ramp.to_bits(),
@@ -571,6 +599,8 @@ fn the_driving_matches_over_ten_thousand_frames() {
 const MOTION: u32 = 0x010c_0000;
 const ONE_HANDLE: u32 = 0x010c_1000;
 const ONE_CLIP: u32 = 0x010c_2000;
+/// A second handle, for the clip a transition is coming out of.
+const TWO_HANDLE: u32 = 0x010c_3000;
 
 /// What one advance did that is not a field: the window it fired its action frames from, and the
 /// transition's weight if one was running.
@@ -578,7 +608,11 @@ const ONE_CLIP: u32 = 0x010c_2000;
 struct Advanced {
     window: Option<(u32, u32, bool)>,
     weight: Option<u32>,
-    plain: bool,
+    /// Which of the two cross-fade arms the frame called: `true` is the one that mixes the new clip
+    /// with the clip the transition is coming out of, `false` the one that mixes it with the pose
+    /// snapshot. Both take the same weight; the choice is made by whether there is a clip to come out
+    /// of, which S6 had the wrong way round.
+    from_clip: bool,
 }
 
 /// The port's answer in the same shape. The split of a wrapped window into its two halves is the event
@@ -591,22 +625,18 @@ fn as_advanced(played: game_sim::motion::Played) -> Advanced {
             Window::Wrapped { tail, head } => Some((tail.0.to_bits(), head.1.to_bits(), true)),
         },
         weight: played.fade.map(|w| w.to_bits()),
-        plain: false,
+        from_clip: false,
     }
 }
 
 #[test]
 fn the_frame_advance_matches_over_ten_thousand_frames() {
     let Some(mut ee) = game_or_skip() else { return };
-    let Some(at) = named(&[
-        "motion_advance",
-        "motion_events",
-        "motion_transition_weighted",
-        "motion_transition_plain",
-    ]) else {
+    let Some(at) = named(&["motion_advance", "motion_events", "fade_from_pose", "fade_from_clip"])
+    else {
         return;
     };
-    let (advance, events, weighted, plain) = (at[0], at[1], at[2], at[3]);
+    let (advance, events, from_pose, from_clip) = (at[0], at[1], at[2], at[3]);
 
     let seen = Rc::new(Cell::new(Advanced::default()));
     let out = Rc::clone(&seen);
@@ -616,21 +646,22 @@ fn the_frame_advance_matches_over_ten_thousand_frames() {
         out.set(a);
     }));
     let out = Rc::clone(&seen);
-    ee.hooks.insert(weighted, Box::new(move |ee| {
+    ee.hooks.insert(from_pose, Box::new(move |ee| {
         let mut a = out.get();
         a.weight = Some(ee.f(12).to_bits());
         out.set(a);
     }));
     let out = Rc::clone(&seen);
-    ee.hooks.insert(plain, Box::new(move |_| {
+    ee.hooks.insert(from_clip, Box::new(move |ee| {
         let mut a = out.get();
-        a.plain = true;
-        a.weight = None;
+        a.weight = Some(ee.f(12).to_bits());
+        a.from_clip = true;
         out.set(a);
     }));
 
     let mut pick = Pick(0x0123_4567_89ab_cdef);
     let (mut cases, mut loops, mut ends, mut fades, mut inert) = (0, 0, 0, 0, 0);
+    let mut out_of_pose = 0;
     for k in 0..10_000 {
         let duration = match pick.upto(6) {
             0 => 0.0,
@@ -659,7 +690,9 @@ fn the_frame_advance_matches_over_ten_thousand_frames() {
         let playing = pick.upto(8) != 0;
         let last0 = if pick.upto(3) == 0 { 0 } else { ONE_HANDLE };
         let fade_on = pick.upto(2) == 1;
-        let fade_plain = pick.upto(4) == 0;
+        // The clip the transition is coming out of: a real handle, or nothing, which is the whole
+        // choice between the two cross-fade arms.
+        let from0 = if pick.upto(3) == 0 { 0 } else { TWO_HANDLE };
         let clock0 = pick.float(1.0).abs();
         let delay0 = match pick.upto(4) {
             0 => 0.0,
@@ -693,7 +726,7 @@ fn the_frame_advance_matches_over_ten_thousand_frames() {
         ee.set_f32(MOTION + M_PREV, prev0);
         ee.set_f32(MOTION + M_TIME, time0);
         ee.set_u32(MOTION + M_FADE_ON, u32::from(fade_on));
-        ee.set_u32(MOTION + M_SAMPLER, u32::from(fade_plain));
+        ee.set_u32(MOTION + M_SAMPLER, from0);
         ee.set_f32(MOTION + M_CLOCK, clock0);
         ee.set_f32(MOTION + M_DELAY, delay0);
         ee.set_f32(MOTION + M_LENGTH, length0);
@@ -719,7 +752,7 @@ fn the_frame_advance_matches_over_ten_thousand_frames() {
             finished,
             fade: game_sim::motion::Fade {
                 on: fade_on,
-                plain: fade_plain,
+                from: (from0 != 0).then_some(ClipId(TWO_HANDLE)),
                 clock: F(clock0),
                 delay: F(delay0),
                 length: F(length0),
@@ -739,16 +772,19 @@ fn the_frame_advance_matches_over_ten_thousand_frames() {
         );
         let why = format!(
             "case {k}: duration {duration:e} flags {flags:#x} time {time0:e} prev {prev0:e} \
-             dt {dt:e} finished {finished} playing {playing} last {last0:#x} fade {fade_on}/\
-             {fade_plain} clock {clock0:e} delay {delay0:e} length {length0:e} end {end0:e}"
+             dt {dt:e} finished {finished} playing {playing} last {last0:#x} fade {fade_on} \
+             out of {from0:#x} clock {clock0:e} delay {delay0:e} length {length0:e} end {end0:e}"
         );
         assert_eq!(got, want, "{why}: (time, prev, last, finished, fade on, clock, clip)");
+        // Nothing is copied off the oracle's answer here: which arm the port picks is its own
+        // `fade.from`, which the advance does not touch, so the comparison is a real one.
         let mut answer = as_advanced(played);
-        answer.plain = seen.get().plain;
-        if answer.plain {
-            answer.weight = None;
-        }
-        assert_eq!(answer, seen.get(), "{why}: (the action-frame window, the transition's weight)");
+        answer.from_clip = played.fade.is_some() && p.fade.from.is_some();
+        assert_eq!(
+            answer,
+            seen.get(),
+            "{why}: (the action-frame window, the transition's weight, which arm it faded with)"
+        );
 
         if played.looped {
             loops += 1;
@@ -762,15 +798,20 @@ fn the_frame_advance_matches_over_ten_thousand_frames() {
         if played.window == Window::None {
             inert += 1;
         }
+        if seen.get().from_clip {
+            out_of_pose += 1;
+        }
         cases += 1;
     }
     assert!(loops > 100, "only {loops} frames looped");
     assert!(ends > 100, "only {ends} frames ran out of clip");
     assert!(fades > 100, "only {fades} frames were in a transition");
     assert!(inert > 100, "only {inert} frames did nothing");
+    assert!(out_of_pose > 100, "only {out_of_pose} frames faded out of a clip");
+    assert!(fades - out_of_pose > 100, "only {} frames faded out of the pose", fades - out_of_pose);
     println!(
         "the frame advance: {cases} frames, bit-exact ({loops} looped, {ends} ended, \
-         {fades} in a transition, {inert} inert)"
+         {fades} in a transition, {out_of_pose} of those out of a clip, {inert} inert)"
     );
 }
 
@@ -1101,4 +1142,860 @@ fn the_frame_counts_are_the_games() {
 /// The action frames one advance fired, so the assertion above reads as one line.
 fn clip_keys_fired(clip: &Clip, played: game_sim::motion::Played) -> Vec<usize> {
     clip.fired(played.window)
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 5 — the clip each state asks for
+// ---------------------------------------------------------------------------------------------------
+
+/// The rider, its records, its motion object and the animation set the clips come out of.
+const LOAD_OBJ: u32 = 0x0110_0000;
+const LOAD_MOTION: u32 = 0x0110_4000;
+const LOAD_SET: u32 = 0x0110_5000;
+/// The set's own array of pointers to clips, and the clips, and their name strings.
+const SET_CLIPS: u32 = 0x0110_6000;
+const SET_CLIP: u32 = 0x0110_7000;
+const SET_NAMES: u32 = 0x0110_c000;
+/// The motion object's array of pointers to handles, and the handles themselves.
+const MOTION_HANDLES: u32 = 0x0110_e000;
+const BOUND: u32 = 0x0110_f000;
+/// The rider's name prefix, which is the loader's second argument.
+const PREFIX: u32 = 0x0111_0000;
+
+/// The rider's fields the loader writes, past the ones the driving uses.
+const THROWAWAY_ID: u32 = 0xa84;
+const AIR_FWD: u32 = 0xaec;
+const AIR_MID: u32 = 0xaf0;
+const AIR_BCK: u32 = 0xaf4;
+/// The animation set: a count and an array of pointers to clips.
+const S_COUNT: u32 = 0xc;
+const S_CLIPS: u32 = 0x10;
+/// The motion object's bound clips: a count and an array of pointers to handles.
+const M_COUNT: u32 = 0x40;
+const M_HANDLES: u32 = 0x44;
+
+/// Loading is 24 names built with the engine's own `snprintf`, which is thousands of instructions a
+/// time.
+const LOAD_BUDGET: u64 = 8_000_000;
+
+/// A NUL-terminated string out of the oracle's RAM.
+fn c_string(ee: &Ee, at: u32) -> String {
+    let mut out = Vec::new();
+    let mut a = at;
+    loop {
+        for b in ee.u32_at(a).to_le_bytes() {
+            if b == 0 {
+                return String::from_utf8_lossy(&out).into_owned();
+            }
+            out.push(b);
+        }
+        a += 4;
+    }
+}
+
+/// The same, written in.
+fn write_c_string(ee: &mut Ee, at: u32, s: &str) {
+    let mut bytes = s.as_bytes().to_vec();
+    bytes.push(0);
+    ee.load(at, &bytes);
+}
+
+/// The port's side of the asset layer: which clips the disc has, which of them the set has reached,
+/// and which of those the motion object has a handle for — mirroring, field for field, what this
+/// test's two hooks do to the oracle's RAM.
+struct Shelf {
+    /// Names the disc can produce. Anything else loads as nothing.
+    disc: Vec<String>,
+    /// The set's clips, in the order they were added. The index is the clip.
+    set: Vec<String>,
+    /// One per bound handle, which clip it is for. The index is the handle.
+    bound: Vec<usize>,
+}
+
+impl game_sim::motion::Animations for Shelf {
+    fn load(&mut self, name: &str) {
+        // The original looks in the set first and only then at the disc, and binds whatever came back
+        // — including a second handle for a clip it has already bound, which is what two records of
+        // the same name get.
+        let found = match self.set.iter().position(|n| n.eq_ignore_ascii_case(name)) {
+            Some(clip) => Some(clip),
+            None if self.disc.iter().any(|n| n.eq_ignore_ascii_case(name)) => {
+                self.set.push(name.to_owned());
+                Some(self.set.len() - 1)
+            }
+            None => None,
+        };
+        if let Some(clip) = found {
+            self.bound.push(clip);
+        }
+    }
+
+    fn bound(&self, name: &str) -> Option<ClipId> {
+        let clip = self.set.iter().position(|n| n.eq_ignore_ascii_case(name))?;
+        let handle = self.bound.iter().position(|&c| c == clip)?;
+        Some(ClipId(BOUND + handle as u32 * 8))
+    }
+}
+
+#[test]
+fn the_clip_each_state_asks_for_matches() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let Some(at) = named(&["rider_load_clips", "anim_find_or_load", "anim_bind_clip", "anim_set"])
+    else {
+        return;
+    };
+    let (load, find_or_load, bind, set_global) = (at[0], at[1], at[2], at[3]);
+
+    // The two halves of the asset layer the port asks for rather than ports: one reads the disc, the
+    // other allocates three ways. Everything between them — the name each slot is looked up by, the
+    // flag that decides whether a slot is loaded at all, the set search and the handle search — is the
+    // original's own code running for real.
+    let disc: Rc<std::cell::RefCell<Vec<String>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let shelf = Rc::clone(&disc);
+    ee.hooks.insert(find_or_load, Box::new(move |ee| {
+        let (set, name) = (ee.r(4) as u32, c_string(ee, ee.r(6) as u32));
+        let (count, clips) = (ee.u32_at(set + S_COUNT), ee.u32_at(set + S_CLIPS));
+        for i in 0..count {
+            let clip = ee.u32_at(clips + i * 4);
+            if c_string(ee, ee.u32_at(clip)).eq_ignore_ascii_case(&name) {
+                ee.set(2, u64::from(clip));
+                return;
+            }
+        }
+        if !shelf.borrow().iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+            ee.set(2, 0);
+            return;
+        }
+        let (clip, text) = (SET_CLIP + count * 0x80, SET_NAMES + count * 0x40);
+        write_c_string(ee, text, &name);
+        ee.set_u32(clip, text);
+        ee.set_u32(clips + count * 4, clip);
+        ee.set_u32(set + S_COUNT, count + 1);
+        ee.set(2, u64::from(clip));
+    }));
+    ee.hooks.insert(bind, Box::new(move |ee| {
+        let (motion, clip) = (ee.r(4) as u32, ee.r(5) as u32);
+        let n = ee.u32_at(motion + M_COUNT);
+        let handle = BOUND + n * 8;
+        ee.set_u32(handle, 0); // the joint map, which nothing here reads
+        ee.set_u32(handle + 4, clip);
+        ee.set_u32(ee.u32_at(motion + M_HANDLES) + n * 4, handle);
+        ee.set_u32(motion + M_COUNT, n + 1);
+    }));
+
+    let mut pick = Pick(0xdead_beef_0bad_f00d);
+    let (mut cases, mut missing, mut unbound, mut truncated, mut air) = (0, 0, 0, 0, 0);
+    for k in 0..4_000 {
+        // Names with the things that bite: mixed case, because the lookup is a stricmp; a pair of
+        // duplicates, which bind twice and look up to the first handle; one long enough to be cut off
+        // by the 32-byte buffer; and the two the rider finds its specials by.
+        let prefix = ["", "mx", "Rider_", "a_rather_long_rider_name_prefix"][pick.upto(4) as usize];
+        let long = format!("{:0>40}", pick.next());
+        // One of each special name at most: two records of the same name leave the original pointing
+        // at the *last* of them, and the port's table reader at the first.
+        let (no_slot, throw_slot) = (pick.upto(SLOTS as u32), pick.upto(SLOTS as u32));
+        let names: Vec<String> = (0..SLOTS)
+            .map(|i| match i as u32 {
+                i if i == no_slot => "nohandedlander".to_owned(),
+                i if i == throw_slot => "throwaway".to_owned(),
+                _ => match pick.upto(8) {
+                    0 => long.clone(),
+                    1 => format!("StUnT{}", i % 5),
+                    _ => format!("stunt{i}"),
+                },
+            })
+            .collect();
+        let stunts: Vec<Stunt> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| Stunt {
+                name: name.clone(),
+                index: i as i32,
+                for_bike: pick.upto(4) != 0,
+                ..Stunt::default()
+            })
+            .collect();
+
+        // What the disc has, and what the set already has without anything having bound it — the two
+        // ways a slot ends up with no handle, which the original stores the same null for.
+        let full: Vec<String> = names
+            .iter()
+            .map(|n| game_sim::motion::Library::stunt_name(prefix, n))
+            .chain(["bike_air_Fwd", "bike_air_Mid", "bike_air_Bck"].map(str::to_owned))
+            .collect();
+        // Nothing here loads the three airborne clips — the original expects them bound already, by
+        // whatever loaded the rider's base animation — so they can only arrive as part of the set the
+        // loader is handed, which is what `bound` means below.
+        let mut on_disc = Vec::new();
+        let mut in_set: Vec<(String, bool)> = Vec::new();
+        for (i, name) in full.iter().enumerate() {
+            let air = i >= SLOTS;
+            match pick.upto(8) {
+                0 if !air => {}                                  // on neither: nothing to find
+                1 => in_set.push((name.clone(), false)),         // in the set, nothing bound it
+                2 => in_set.push((name.clone(), true)),          // in the set and already bound
+                _ if air => in_set.push((name.clone(), true)),   // the airborne ones, the usual way
+                _ => on_disc.push(name.clone()),
+            }
+        }
+        *disc.borrow_mut() = on_disc.clone();
+
+        ee.load(LOAD_OBJ, &vec![0u8; 0xb00]);
+        ee.load(LOAD_MOTION, &vec![0u8; 0x400]);
+        ee.load(LOAD_SET, &vec![0u8; 0x40]);
+        ee.load(SET_CLIPS, &vec![0u8; 0x200]);
+        ee.load(SET_CLIP, &vec![0u8; 0x4000]);
+        ee.load(SET_NAMES, &vec![0u8; 0x2000]);
+        ee.load(MOTION_HANDLES, &vec![0u8; 0x200]);
+        ee.load(BOUND, &vec![0u8; 0x400]);
+        write_records(&mut ee, &stunts);
+        ee.set_u32(LOAD_OBJ + STUNT_ARRAY, RECORDS);
+        ee.set_u32(LOAD_OBJ + ANIM, LOAD_MOTION);
+        ee.set_u32(LOAD_MOTION + M_HANDLES, MOTION_HANDLES);
+        ee.set_u32(LOAD_SET + S_CLIPS, SET_CLIPS);
+        // The clips the set starts with, and the handles the motion object already has for some of
+        // them: the handle index is the order they were bound in, which both sides have to agree on.
+        let mut pre_bound = Vec::new();
+        for (i, (name, bound)) in in_set.iter().enumerate() {
+            let (clip, text) = (SET_CLIP + i as u32 * 0x80, SET_NAMES + i as u32 * 0x40);
+            write_c_string(&mut ee, text, name);
+            ee.set_u32(clip, text);
+            ee.set_u32(SET_CLIPS + i as u32 * 4, clip);
+            if *bound {
+                let handle = BOUND + pre_bound.len() as u32 * 8;
+                ee.set_u32(handle + 4, clip);
+                ee.set_u32(MOTION_HANDLES + pre_bound.len() as u32 * 4, handle);
+                pre_bound.push(i);
+            }
+        }
+        ee.set_u32(LOAD_SET + S_COUNT, in_set.len() as u32);
+        ee.set_u32(LOAD_MOTION + M_COUNT, pre_bound.len() as u32);
+        ee.set_u32(set_global, LOAD_SET);
+        write_c_string(&mut ee, PREFIX, prefix);
+
+        ee.call(load, &[u64::from(LOAD_OBJ), u64::from(PREFIX)], &[], LOAD_BUDGET);
+
+        let mut shelf = Shelf {
+            disc: on_disc,
+            set: in_set.iter().map(|(name, _)| name.clone()).collect(),
+            bound: pre_bound,
+        };
+        let lib = game_sim::motion::Library::load(prefix, &stunts, &mut shelf);
+        let why = format!("case {k}: prefix {prefix:?}");
+        for slot in 0..SLOTS {
+            let want = ee.u32_at(LOAD_OBJ + CLIP_ARRAY + slot as u32 * 4);
+            assert_eq!(
+                lib.stunt[slot].map_or(0, |c| c.0),
+                want,
+                "{why}: the handle for slot {slot} ({:?})",
+                names[slot]
+            );
+            if want == 0 {
+                missing += 1;
+                // The other way a slot ends up empty: the set has the clip, but this rider's motion
+                // object never bound it, so the handle search answers the same null.
+                let name = game_sim::motion::Library::stunt_name(prefix, &names[slot]);
+                if shelf.set.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                    unbound += 1;
+                }
+            }
+        }
+        for (got, at, which) in [
+            (lib.air_fwd, AIR_FWD, "bike_air_Fwd"),
+            (lib.air_mid, AIR_MID, "bike_air_Mid"),
+            (lib.air_bck, AIR_BCK, "bike_air_Bck"),
+        ] {
+            let want = ee.u32_at(LOAD_OBJ + at);
+            assert_eq!(got.map_or(0, |c| c.0), want, "{why}: the handle for {which}");
+            if want != 0 {
+                air += 1;
+            }
+        }
+        // The two special slots come out of the same walk, and the port finds them in the table
+        // reader rather than here — so this is the one place the two halves are checked together.
+        let set = Set::new(stunts.clone());
+        assert_eq!(
+            (set.no_hander as u32, set.throwaway as u32),
+            (ee.u32_at(LOAD_OBJ + NO_HANDER_ID), ee.u32_at(LOAD_OBJ + THROWAWAY_ID)),
+            "{why}: the no-hander and the throw-away"
+        );
+
+        if names.iter().any(|n| n == &long) {
+            truncated += 1;
+        }
+        cases += 1;
+    }
+    assert!(missing > 100, "only {missing} slots had no clip");
+    assert!(unbound > 100, "only {unbound} slots had a clip in the set that nothing bound");
+    assert!(truncated > 100, "only {truncated} cases had a name long enough to be cut off");
+    assert!(air > 100, "only {air} airborne clips were found");
+    println!(
+        "the clip table: {cases} riders x {} slots, exact ({missing} empty slots, {air} airborne \
+         clips, {truncated} cases with a truncated name)",
+        SLOTS + 3
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 6 — putting a clip on
+// ---------------------------------------------------------------------------------------------------
+
+/// The clip behind the second handle, for proof 6: the one already playing when another is put on.
+const TWO_CLIP: u32 = 0x010c_4000;
+/// A clip's own cross-fade length, which the engine's one-argument play takes the fade from.
+const C_FADE: u32 = 0x40;
+
+/// Everything putting a clip on writes, in the order the fields sit in: the one shape both sides are
+/// read into so a mismatch prints the whole object.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+struct Put {
+    finished: bool,
+    clip: u32,
+    from: u32,
+    fade_on: bool,
+    time: u32,
+    clock: u32,
+    end: u32,
+    delay: u32,
+    length: u32,
+    snapshot: bool,
+}
+
+#[test]
+fn putting_a_clip_on_matches() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let Some(at) = named(&["motion_play", "motion_play_clip", "anim_rewind"]) else { return };
+    let (play, play_clip, rewind) = (at[0], at[1], at[2]);
+
+    // The pose snapshot, which needs a skeleton this object does not have. Whether it was asked for is
+    // the whole of what this proof wants from it, and proof 7 is what it does.
+    let took = Rc::new(Cell::new(false));
+    let seen = Rc::clone(&took);
+    ee.hooks.insert(rewind, Box::new(move |_| seen.set(true)));
+
+    let mut pick = Pick(0x1357_9bdf_0246_8ace);
+    let (mut cases, mut cuts, mut snapshots, mut carried, mut wrapped) = (0, 0, 0, 0, 0);
+    for k in 0..10_000 {
+        // Zero length is the hard cut, so it has to come up often rather than never.
+        let length = match pick.upto(5) {
+            0 | 1 => 0.0,
+            2 => 1.0 / 30.0,
+            _ => pick.float(2.0).abs(),
+        };
+        let new_duration = match pick.upto(4) {
+            0 => 1.0,
+            1 => 0.0,
+            _ => pick.float(3.0).abs(),
+        };
+        let old_duration = match pick.upto(4) {
+            0 => 1.0,
+            1 => 0.0,
+            _ => pick.float(3.0).abs(),
+        };
+        let time0 = match pick.upto(4) {
+            0 => 0.0,
+            1 => old_duration,
+            _ => pick.float(3.0).abs(),
+        };
+        let fade_on = pick.upto(3) == 0;
+        let finished = pick.upto(4) == 0;
+        // Nothing playing is a real state — it is what the first clip of a motion goes on top of — but
+        // only without `keep`: the original works the carried time out through the old clip's pointer
+        // before it looks at anything, so `keep` with no clip reads through a null.
+        let playing = pick.upto(4) != 0;
+        let keep = playing && pick.upto(3) == 0;
+        // Every fifth case goes through the engine's one-argument play instead, which takes the
+        // cross-fade length out of the clip rather than from its caller.
+        let through_clip = pick.upto(5) == 0;
+
+        ee.load(MOTION, &vec![0u8; 0x300]);
+        ee.load(ONE_CLIP, &vec![0u8; 0x80]);
+        ee.load(TWO_CLIP, &vec![0u8; 0x80]);
+        ee.set_u32(ONE_HANDLE, 0);
+        ee.set_u32(ONE_HANDLE + 4, ONE_CLIP);
+        ee.set_u32(TWO_HANDLE, 0);
+        ee.set_u32(TWO_HANDLE + 4, TWO_CLIP);
+        ee.set_f32(ONE_CLIP + C_DURATION, new_duration);
+        ee.set_f32(ONE_CLIP + C_FADE, length);
+        ee.set_f32(TWO_CLIP + C_DURATION, old_duration);
+        ee.set_u32(MOTION + M_CLIP, if playing { TWO_HANDLE } else { 0 });
+        ee.set_u32(MOTION + M_FINISHED, u32::from(finished));
+        ee.set_u32(MOTION + M_FADE_ON, u32::from(fade_on));
+        ee.set_f32(MOTION + M_TIME, time0);
+        took.set(false);
+
+        let args = [u64::from(MOTION), u64::from(ONE_HANDLE), u64::from(keep)];
+        if through_clip {
+            ee.call(play_clip, &args, &[], BUDGET);
+        } else {
+            ee.call(play, &args, &[length], BUDGET);
+        }
+        let want = Put {
+            finished: ee.u32_at(MOTION + M_FINISHED) != 0,
+            clip: ee.u32_at(MOTION + M_CLIP),
+            from: ee.u32_at(MOTION + M_SAMPLER),
+            fade_on: ee.u32_at(MOTION + M_FADE_ON) != 0,
+            time: ee.f32_at(MOTION + M_TIME).to_bits(),
+            clock: ee.f32_at(MOTION + M_CLOCK).to_bits(),
+            end: ee.f32_at(MOTION + M_END).to_bits(),
+            delay: ee.f32_at(MOTION + M_DELAY).to_bits(),
+            length: ee.f32_at(MOTION + M_LENGTH).to_bits(),
+            snapshot: took.get(),
+        };
+
+        let mut p = Player {
+            clip: playing.then_some(ClipId(TWO_HANDLE)),
+            time: F(time0),
+            finished,
+            fade: game_sim::motion::Fade { on: fade_on, ..game_sim::motion::Fade::default() },
+            ..Player::default()
+        };
+        // The one-argument play is the same call with the length read off the clip, which is the thing
+        // being checked when `through_clip` is set: the port's caller is handed the same number.
+        let put = if through_clip && !keep {
+            game_sim::motion::Put::clip(ClipId(ONE_HANDLE), F(new_duration), F(length))
+        } else {
+            game_sim::motion::Put {
+                length: F(length),
+                clip: ClipId(ONE_HANDLE),
+                duration: F(new_duration),
+                keep_phase: keep,
+            }
+        };
+        let snapshot = p.play(put, F(old_duration));
+        let got = Put {
+            finished: p.finished,
+            clip: p.clip.map_or(0, |c| c.0),
+            from: p.fade.from.map_or(0, |c| c.0),
+            fade_on: p.fade.on,
+            time: p.time.to_bits(),
+            clock: p.fade.clock.to_bits(),
+            end: p.fade.end.to_bits(),
+            delay: p.fade.delay.to_bits(),
+            length: p.fade.length.to_bits(),
+            snapshot,
+        };
+        assert_eq!(
+            got,
+            want,
+            "case {k}: length {length:e} new {new_duration:e} old {old_duration:e} time {time0:e} \
+             fade {fade_on} finished {finished} playing {playing} keep {keep} \
+             through the clip {through_clip}"
+        );
+
+        if length == 0.0 {
+            cuts += 1;
+        }
+        if snapshot {
+            snapshots += 1;
+        }
+        if keep {
+            carried += 1;
+        }
+        if through_clip {
+            wrapped += 1;
+        }
+        cases += 1;
+    }
+    assert!(cuts > 100, "only {cuts} hard cuts");
+    assert!(snapshots > 100, "only {snapshots} took the pose snapshot");
+    assert!(carried > 100, "only {carried} carried the clip's phase over");
+    assert!(wrapped > 100, "only {wrapped} went through the one-argument play");
+    println!(
+        "putting a clip on: {cases} calls, bit-exact ({cuts} hard cuts, {snapshots} snapshots, \
+         {carried} carried the phase, {wrapped} through the clip's own length)"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 7 — the pose a cross-fade fades from
+// ---------------------------------------------------------------------------------------------------
+
+/// The motion object whose pose is snapshotted, its joints, their nodes, the tags a caller could hand
+/// in, and the arena the engine's two allocators hand out of.
+const SNAP_MOTION: u32 = 0x0112_0000;
+const SNAP_JOINTS: u32 = 0x0112_1000;
+const SNAP_NODES: u32 = 0x0112_8000;
+const SNAP_TAGS: u32 = 0x0112_c000;
+const BUMP: u32 = 0x0113_0000;
+
+/// The snapshot's own fields on the motion object.
+const M_JOINT_COUNT: u32 = 0x230;
+const M_JOINTS: u32 = 0x234;
+const M_ROTATIONS: u32 = 0x248;
+const M_TRANSLATIONS: u32 = 0x24c;
+const M_TAGS: u32 = 0x250;
+const M_TAGGED: u32 = 0x254;
+/// One joint: the stride of the array, and where its node sits in it.
+const J_STRIDE: u32 = 0x60;
+const J_NODE: u32 = 0x34;
+
+/// A stand-in for the engine's joint reads, chosen so that both sides get the identical four words out
+/// of the identical node pointer without either of them doing the matrix arithmetic the real ones do.
+/// Always finite: the top bit and the exponent's top bit are cut, so no lane can be an infinity or a
+/// NaN and a bit comparison means what it says.
+fn fake_joint(node: u32, lane: u32, salt: u32) -> u32 {
+    (node ^ salt).wrapping_mul(0x9e37_79b9).rotate_left(lane * 7) & 0x7f7f_ffff
+}
+
+/// The port's side of the skeleton: the same four words per joint, out of the same node pointers.
+struct Skeleton {
+    nodes: Vec<u32>,
+}
+
+impl game_sim::motion::Joints for Skeleton {
+    fn count(&self) -> usize {
+        self.nodes.len()
+    }
+    fn rotation(&self, joint: usize) -> [F; 4] {
+        [0, 1, 2, 3].map(|lane| F(f32::from_bits(fake_joint(self.nodes[joint], lane, 0))))
+    }
+    fn translation(&self, joint: usize) -> [F; 4] {
+        [0, 1, 2, 3].map(|lane| F(f32::from_bits(fake_joint(self.nodes[joint], lane, 0x5bd1_e995))))
+    }
+}
+
+#[test]
+fn the_pose_snapshot_matches() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let Some(at) = named(&[
+        "anim_rewind",
+        "anim_joint_rotation",
+        "anim_joint_translation",
+        "malloc",
+        "operator_new",
+    ]) else {
+        return;
+    };
+    let (rewind, rotation, translation) = (at[0], at[1], at[2]);
+
+    // The engine's heap, onto a bump allocator: what the snapshot allocates and when is half of what
+    // this proof is about, so the pointers have to be real and have to differ.
+    let next = Rc::new(Cell::new(BUMP));
+    for alloc in [at[3], at[4]] {
+        let at = Rc::clone(&next);
+        ee.hooks.insert(alloc, Box::new(move |ee| {
+            let size = ee.r(4) as u32;
+            let p = at.get();
+            at.set((p + size.max(4) + 15) & !15);
+            ee.set(2, u64::from(p));
+        }));
+    }
+    // The two joint reads, which pull a quaternion out of the joint's local matrix and a point out of
+    // its translation. Both are the renderer's side of the motion library and neither is ported, so
+    // they are replaced by something recognisable on both sides: what this proves is which node ends
+    // up in which slot of which buffer, in which order.
+    for (hook, salt) in [(rotation, 0), (translation, 0x5bd1_e995)] {
+        ee.hooks.insert(hook, Box::new(move |ee| {
+            let (node, out) = (ee.r(4) as u32, ee.r(5) as u32);
+            for lane in 0..4 {
+                ee.set_u32(out + lane * 4, fake_joint(node, lane, salt));
+            }
+        }));
+    }
+
+    let mut pick = Pick(0x2468_ace0_1357_9bdf);
+    let (mut cases, mut takes, mut tagged, mut reused) = (0, 0, 0, 0);
+    for k in 0..2_000 {
+        let n = match pick.upto(6) {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => pick.upto(40),
+        };
+        // Nodes far enough apart to be told from each other, and in no particular order, so a buffer
+        // written in the wrong order cannot pass.
+        let nodes: Vec<u32> = (0..n).map(|_| SNAP_NODES + pick.upto(0x400) * 0x40).collect();
+
+        ee.load(SNAP_MOTION, &vec![0u8; 0x300]);
+        ee.load(SNAP_JOINTS, &vec![0u8; (J_STRIDE * 40) as usize]);
+        ee.load(BUMP, &vec![0u8; 0x8000]);
+        next.set(BUMP);
+        ee.set_u32(SNAP_MOTION + M_JOINT_COUNT, n);
+        ee.set_u32(SNAP_MOTION + M_JOINTS, SNAP_JOINTS);
+        for (j, &node) in nodes.iter().enumerate() {
+            ee.set_u32(SNAP_JOINTS + j as u32 * J_STRIDE + J_NODE, node);
+        }
+
+        // Two or three snapshots of the same object in a row, because when the buffers are made and
+        // when they are reused is the thing: the original allocates on the first call only, and every
+        // call after it overwrites every entry.
+        let mut snap = game_sim::motion::Snapshot::default();
+        let skeleton = Skeleton { nodes: nodes.clone() };
+        let (mut rot_at, mut trans_at) = (0, 0);
+        for call in 0..2 + pick.upto(2) {
+            // The tag array no caller in the game passes, and the mask it would be exclusive-ored
+            // with: a quarter of the calls take it, so the dead path is exercised in both directions.
+            let tags: Option<Vec<u32>> =
+                (pick.upto(4) == 0).then(|| (0..n).map(|_| pick.next()).collect());
+            let mask = pick.next();
+            if let Some(tags) = &tags {
+                for (j, &t) in tags.iter().enumerate() {
+                    ee.set_u32(SNAP_TAGS + j as u32 * 4, t);
+                }
+            }
+            let arg = if tags.is_some() { SNAP_TAGS } else { 0 };
+            ee.call(rewind, &[u64::from(SNAP_MOTION), u64::from(arg), u64::from(mask)], &[], BUDGET);
+            snap.take(&skeleton, tags.as_deref(), mask);
+
+            let why = format!("case {k} call {call}: {n} joints, tags {}", tags.is_some());
+            let (rot, trans) = (ee.u32_at(SNAP_MOTION + M_ROTATIONS), ee.u32_at(SNAP_MOTION + M_TRANSLATIONS));
+            assert_ne!(rot, 0, "{why}: the rotation buffer was never made");
+            assert_ne!(trans, 0, "{why}: the translation buffer was never made");
+            if call == 0 {
+                (rot_at, trans_at) = (rot, trans);
+            } else {
+                assert_eq!((rot, trans), (rot_at, trans_at), "{why}: the buffers moved");
+                reused += 1;
+            }
+            assert_eq!(
+                ee.u32_at(SNAP_MOTION + M_TAGGED) != 0,
+                snap.tagged,
+                "{why}: whether the pose is tagged"
+            );
+            for j in 0..n {
+                let want: Vec<u32> = (0..4).map(|l| ee.u32_at(rot + j * 0x10 + l * 4)).collect();
+                let got: Vec<u32> = snap.rotation[j as usize].iter().map(|f| f.to_bits()).collect();
+                assert_eq!(got, want, "{why}: joint {j}'s rotation");
+                let want: Vec<u32> = (0..4).map(|l| ee.u32_at(trans + j * 0x10 + l * 4)).collect();
+                let got: Vec<u32> =
+                    snap.translation[j as usize].iter().map(|f| f.to_bits()).collect();
+                assert_eq!(got, want, "{why}: joint {j}'s translation");
+            }
+            if let Some(tags) = &tags {
+                let buffer = ee.u32_at(SNAP_MOTION + M_TAGS);
+                assert_ne!(buffer, 0, "{why}: the tag buffer was never made");
+                let want: Vec<u32> = (0..n).map(|j| ee.u32_at(buffer + j * 4)).collect();
+                let got = snap.tag.clone().unwrap_or_default();
+                assert_eq!(got[..n as usize], want[..], "{why}: the tags");
+                assert_eq!(
+                    want,
+                    tags.iter().map(|t| mask ^ t).collect::<Vec<u32>>(),
+                    "{why}: and what the tags are"
+                );
+                tagged += 1;
+            }
+            takes += 1;
+        }
+        cases += 1;
+    }
+    assert!(tagged > 100, "only {tagged} snapshots were tagged");
+    assert!(reused > 100, "only {reused} snapshots reused their buffers");
+    println!(
+        "the pose snapshot: {takes} snapshots over {cases} skeletons, bit-exact ({tagged} tagged, \
+         {reused} into buffers that already existed)"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 8 — the call itself
+// ---------------------------------------------------------------------------------------------------
+
+/// Proof 8's motion object, its four clip handles and their clips.
+const CALL_MOTION: u32 = 0x0114_0000;
+const CALL_HANDLES: u32 = 0x0114_1000;
+const CALL_CLIPS: u32 = 0x0114_2000;
+
+/// The handle of one of proof 8's four clips, and the clip behind it.
+fn call_handle(i: u32) -> u32 {
+    CALL_HANDLES + i * 0x10
+}
+fn call_clip(i: u32) -> u32 {
+    CALL_CLIPS + i * 0x80
+}
+
+#[test]
+fn the_four_entry_points_drive_the_clock_the_same() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let Some(at) = named(&[
+        "motion_advance",
+        "motion_blend_one",
+        "motion_blend_two",
+        "motion_blend_three",
+        "motion_events",
+    ]) else {
+        return;
+    };
+    let (entries, events) = ([at[0], at[1], at[2], at[3]], at[4]);
+
+    // The action frames, which is where the clip time each entry point decided on shows up.
+    let window: Rc<Cell<Option<(u32, u32, bool)>>> = Rc::new(Cell::new(None));
+    let out = Rc::clone(&window);
+    ee.hooks.insert(events, Box::new(move |ee| {
+        out.set(Some((ee.f(12).to_bits(), ee.f(13).to_bits(), ee.r(6) != 0)));
+    }));
+
+    // Four clips, and the library that says which handle each of the selection's slots means.
+    let mut lib = game_sim::motion::Library::default();
+    for i in 0..4 {
+        lib.stunt[i] = Some(ClipId(call_handle(i as u32)));
+    }
+
+    let mut pick = Pick(0x7f4a_7c15_9e37_79b9);
+    let (mut cases, mut fresh, mut wraps, mut inert) = (0, 0, 0, 0);
+    let mut per_mode = [0u32; 4];
+    for k in 0..10_000 {
+        let mode = pick.upto(4) as usize;
+        let durations: Vec<f32> = (0..4)
+            .map(|_| match pick.upto(4) {
+                0 => 1.0,
+                1 => 0.0,
+                _ => pick.float(3.0).abs(),
+            })
+            .collect();
+        // The phase, which every entry point multiplies the first clip's duration by — and the three
+        // weights, which none of them put anywhere this proof can see.
+        let phase = match pick.upto(5) {
+            0 => 0.0,
+            1 => 1.0,
+            2 => 0.5,
+            _ => pick.float(1.0).abs(),
+        };
+        let (mix, cross, ramp) = (pick.float(1.0).abs(), pick.float(1.0).abs(), pick.float(1.0).abs());
+        let dt = match pick.upto(3) {
+            0 => 1.0 / 30.0,
+            1 => 0.0,
+            _ => pick.float(0.2).abs(),
+        };
+        // Which clip the last frame sampled, which decides whether this frame's action frames start
+        // from the last sample or from the beginning of the clip.
+        let last = match pick.upto(4) {
+            0 => 0,
+            1 => call_handle(1),
+            _ => call_handle(0),
+        };
+        let prev = match pick.upto(4) {
+            0 => 0.0,
+            1 => durations[0] * phase,
+            _ => pick.float(3.0).abs(),
+        };
+        let playing = pick.upto(4) != 0;
+        let finished = pick.upto(8) == 0;
+
+        ee.load(CALL_MOTION, &vec![0u8; 0x300]);
+        ee.load(CALL_HANDLES, &vec![0u8; 0x40]);
+        ee.load(CALL_CLIPS, &vec![0u8; 0x200]);
+        for i in 0..4 {
+            ee.set_u32(call_handle(i), 0); // the joint map, which a channel-less clip never reads
+            ee.set_u32(call_handle(i) + 4, call_clip(i));
+            ee.set_f32(call_clip(i) + C_DURATION, durations[i as usize]);
+        }
+        ee.set_u32(CALL_MOTION + M_CLIP, if playing { call_handle(0) } else { 0 });
+        ee.set_u32(CALL_MOTION + M_FINISHED, u32::from(finished));
+        ee.set_u32(CALL_MOTION + M_LAST, last);
+        ee.set_f32(CALL_MOTION + M_PREV, prev);
+        // Sixteen bytes of argument space: the four-clip entry takes two of its arguments there, and
+        // the second of them picks the pass that drives the clock.
+        for word in 0..4 {
+            ee.set_u32(ee.stack + word * 4, 0);
+        }
+        window.set(None);
+
+        let motion = u64::from(CALL_MOTION);
+        let (a, b, c, d) = (
+            u64::from(call_handle(0)),
+            u64::from(call_handle(1)),
+            u64::from(call_handle(2)),
+            u64::from(call_handle(3)),
+        );
+        match mode {
+            0 => ee.call(entries[0], &[motion, 0, 0, 0], &[dt], BUDGET),
+            1 => ee.call(entries[1], &[motion, a, 0, 0, 0, 0, 0], &[phase, ramp], BUDGET),
+            2 => ee.call(entries[2], &[motion, a, b, 0, 0, 0, 0], &[phase, mix, ramp], BUDGET),
+            _ => ee.call(
+                entries[3],
+                &[motion, a, b, c, d, 0, 0, 0],
+                &[phase, mix, cross, ramp],
+                BUDGET,
+            ),
+        }
+        let want = (
+            ee.u32_at(CALL_MOTION + M_CLIP),
+            ee.u32_at(CALL_MOTION + M_LAST),
+            ee.f32_at(CALL_MOTION + M_PREV).to_bits(),
+            window.get(),
+        );
+
+        let slot = |i: u8| Slot::Stunt(i);
+        let blend = match mode {
+            0 => Blend::Free,
+            1 => Blend::One { phase: F(phase), ramp: F(ramp), clip: slot(0) },
+            2 => Blend::Two { phase: F(phase), mix: F(mix), ramp: F(ramp), a: slot(0), b: slot(1) },
+            _ => Blend::Three {
+                phase: F(phase),
+                mix: F(mix),
+                cross: F(cross),
+                ramp: F(ramp),
+                a: slot(0),
+                b: slot(1),
+                c: slot(2),
+                d: slot(3),
+            },
+        };
+        let mut p = Player {
+            clip: playing.then_some(ClipId(call_handle(0))),
+            last: (last != 0).then_some(ClipId(last)),
+            prev: F(prev),
+            finished,
+            ..Player::default()
+        };
+        // The clip behind the handle the call works on, which is the blend's first one or whatever is
+        // already playing — the port names it rather than being handed it.
+        let driven = p.clock_clip(blend, &lib).map_or(0, |c| c.0);
+        let clip = Clip {
+            duration: F(durations[if driven == 0 { 0 } else { (driven - CALL_HANDLES) / 0x10 } as usize]),
+            looping: false,
+            keys: Vec::new(),
+        };
+        let played = p.run(F(dt), blend, &lib, &clip);
+        let got = (
+            p.clip.map_or(0, |c| c.0),
+            p.last.map_or(0, |c| c.0),
+            p.prev.to_bits(),
+            match played.window {
+                Window::None => None,
+                Window::Span(x, y) => Some((x.to_bits(), y.to_bits(), false)),
+                Window::Wrapped { tail, head } => Some((tail.0.to_bits(), head.1.to_bits(), true)),
+            },
+        );
+        assert_eq!(
+            got,
+            want,
+            "case {k}: mode {mode} phase {phase:e} dt {dt:e} durations {durations:?} \
+             last {last:#x} prev {prev:e} playing {playing} finished {finished}: \
+             (the free-running clip, the last sampled clip, its time, the action frames)"
+        );
+        if driven != 0 {
+            assert_eq!(driven, call_handle(0), "case {k}: the clock came off the wrong clip");
+        }
+
+        per_mode[mode] += 1;
+        if last != call_handle(0) {
+            fresh += 1;
+        }
+        if matches!(played.window, Window::Wrapped { .. }) {
+            wraps += 1;
+        }
+        if played.window == Window::None {
+            inert += 1;
+        }
+        cases += 1;
+    }
+    assert!(per_mode.iter().all(|&n| n > 100), "a mode was barely reached: {per_mode:?}");
+    assert!(fresh > 100, "only {fresh} frames started a clip the last frame was not on");
+    assert!(wraps > 100, "only {wraps} frames went backwards into a wrap");
+    assert!(inert > 100, "only {inert} frames fired nothing");
+    println!(
+        "the call: {cases} frames over the library's four entry points, bit-exact \
+         ({per_mode:?} per mode, {fresh} onto a new clip, {wraps} wrapped, {inert} inert)"
+    );
+
+    // The one case the original does not survive: a blend whose first clip has no handle. It hands the
+    // entry point a null and the entry reads through it; the port does nothing at all.
+    let mut p = Player { clip: Some(ClipId(call_handle(0))), ..Player::default() };
+    let empty = game_sim::motion::Library::default();
+    let blend = Blend::One { phase: F(0.5), ramp: F::ONE, clip: Slot::Stunt(0) };
+    let clip = Clip { duration: F::ONE, looping: false, keys: Vec::new() };
+    assert_eq!(p.run(F(DT.to_f32()), blend, &empty, &clip), game_sim::motion::Played::default());
+    assert_eq!(p.clip, Some(ClipId(call_handle(0))), "and it leaves the clock alone");
 }

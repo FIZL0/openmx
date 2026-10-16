@@ -16,7 +16,7 @@
 //! - the cross-fade [`Driver::ramp`] is what makes a restarted motion start from the pose the rider
 //!   was already in, and it is a fixed number of frames long ([`Params::blend_rate`]).
 //!
-//! ## The three parts
+//! ## The four parts
 //!
 //! 1. **The frame's header** — [`Driver::frame`] decays the cross-fade ramp, decides whether the
 //!    motion starts over, and latches the requested action id into the one the selection runs on.
@@ -25,9 +25,14 @@
 //!    motion plays per state" of the task, and the states are the action ids
 //!    ([`crate::trick::Trick`]): the 24 gesture slots each play their own clip, the two idles blend
 //!    the three airborne poses, and the rotating moves are left to run on their own.
-//! 3. **The playback** — [`Player`], the motion object's own clock: the dt advance with its loop and
+//! 3. **The call** — [`Player::run`], the dispatch the frame ends in: one of four entry points by
+//!    [`Blend::mode`], each driving the motion object's clock from the *first* clip it was handed
+//!    ([`Blend::driven`]). Which handle a [`Slot`] means is [`Library`]'s, and that table is filled by
+//!    name ([`Library::load`]).
+//! 4. **The playback** — [`Player`], the motion object's own clock: the dt advance with its loop and
 //!    its end, the phase-driven sample the blends use instead, the transition weight, and the window
-//!    of clip time each frame fires its action frames from.
+//!    of clip time each frame fires its action frames from. [`Player::play`] is what puts a clip on,
+//!    and the only thing anywhere that starts a transition.
 //!
 //! ## What drives what
 //!
@@ -42,8 +47,16 @@
 //!   29..             whatever was started, free-running             dt
 //! ```
 //!
-//! The names are the strings the rider's loader looks the clips up by, and a gesture slot whose clip
-//! the animation set does not have falls back on the same fixed pose as id 28.
+//! The names are the strings the rider's loader looks the clips up by — `"<prefix>bike_<Name>"` from
+//! the stunt's own `Name` in `stunts.ini`, and the three airborne poses by their literal names — and a
+//! gesture slot the rider has no clip *handle* for falls back on the same fixed pose as id 28. Two
+//! things make a slot handle-less: the animation set has no clip of that name, or the slot's record is
+//! not marked `UsedForBike`, in which case the loader never binds the clip even when it exists
+//! ([`Library::load`]).
+//!
+//! A fifth kind of call exists in the library and no arm of the rider's switch asks for it: the
+//! four-clip, three-weight [`Blend::Three`]. The vehicle's own animation step asks for it, from two of
+//! its arms, so the variant is modelled; nothing in the rider's path reaches it.
 //!
 //! ## The frame
 //!
@@ -63,12 +76,13 @@
 //! rather than clearing them — so a rider in the middle of a stunt shows the crossup the last airborne
 //! idle frame left behind. That is why they are state here and not outputs.
 //!
-//! `research/journal/2026-10-15-s6-s6-motion/` has the addresses, the clip names and the proofs.
+//! `research/journal/2026-10-15-s6-s6-motion/` and `research/journal/2026-10-16-s20-s20-animation-caller/`
+//! have the addresses, the clip names and the proofs.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::hash;
-use crate::trick::{SLOTS, Trick};
+use crate::trick::{SLOTS, Stunt, Trick};
 use ps2_float::F;
 
 // ---------------------------------------------------------------------------------------------------
@@ -201,6 +215,96 @@ impl Default for Clips {
     }
 }
 
+/// What the rider's clip table needs of the layer that owns the animation set and the disc.
+///
+/// The original's loader reaches into the engine's animation library for both of these, and neither is
+/// the simulation's: one reads the disc, the other walks a list of loaded clips. The port asks for them
+/// so that [`Library::load`] can be the part that *is* the simulation's — which name each state's clip
+/// is asked for by, which states ask at all, and which field the answer lands in.
+pub trait Animations {
+    /// Find the clip of this name in the set, load it if the set has it and it is not loaded, and bind
+    /// it to the rider's motion object.
+    ///
+    /// Called once per gesture slot whose stunt record is marked for the bike, and **never** for one
+    /// that is not — which is the whole of the `UsedForBike` flag's effect on the animation: an
+    /// unmarked slot is never bound, so [`Animations::bound`] has no handle for it and the slot plays
+    /// the fallback pose instead. The three airborne clips are never loaded here; they are expected to
+    /// be bound already.
+    fn load(&mut self, name: &str);
+
+    /// The handle the rider's motion object has for the clip of this name, if it has one.
+    ///
+    /// `None` covers both of the original's ways of answering nothing — the set has no clip of that
+    /// name, and it has one but this motion object never bound it — because the original stores the
+    /// same null for both.
+    fn bound(&self, name: &str) -> Option<ClipId>;
+}
+
+/// The clip the rider plays per state: the handles the selection's [`Slot`] names.
+///
+/// Four fields and not one array of 28, even though the original's are four consecutive words and the
+/// three airborne ones sit exactly where ids 25, 26 and 27 would: the loader writes them as named
+/// fields, and the ids whose arms would index them never index anything. The id-24 word between the
+/// two groups is never written at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Library {
+    /// Per gesture slot, the handle for `"<prefix>bike_<stunt name>"`.
+    pub stunt: [Option<ClipId>; SLOTS],
+    /// `bike_air_Fwd`.
+    pub air_fwd: Option<ClipId>,
+    /// `bike_air_Mid` — the neutral pose, the grounded idle, and the fallback for a gesture slot with
+    /// no clip of its own.
+    pub air_mid: Option<ClipId>,
+    /// `bike_air_Bck`.
+    pub air_bck: Option<ClipId>,
+}
+
+impl Library {
+    /// The name a gesture slot's clip is looked up by: the rider's own prefix, then `bike_`, then the
+    /// stunt's `Name` from `stunts.ini`. The original builds it with one format string per slot, and
+    /// into a buffer of 32 bytes — so a long enough stunt name is truncated, which the port keeps.
+    pub fn stunt_name(prefix: &str, stunt: &str) -> String {
+        let whole = format!("{prefix}bike_{stunt}");
+        String::from_utf8_lossy(&whole.as_bytes()[..whole.len().min(31)]).into_owned()
+    }
+
+    /// The rider's clip table, as its loader fills it.
+    ///
+    /// Two passes over the 24 gesture slots, in order: the first loads and binds the clip of every slot
+    /// marked for the bike, the second asks for the handle of every slot's clip whether it was marked
+    /// or not. Then the three airborne poses, which are only asked for — nothing here loads them.
+    pub fn load(prefix: &str, stunts: &[Stunt], anim: &mut impl Animations) -> Library {
+        for stunt in stunts.iter().take(SLOTS) {
+            if stunt.for_bike {
+                anim.load(&Library::stunt_name(prefix, &stunt.name));
+            }
+        }
+        let mut lib = Library::default();
+        for (slot, stunt) in stunts.iter().take(SLOTS).enumerate() {
+            lib.stunt[slot] = anim.bound(&Library::stunt_name(prefix, &stunt.name));
+        }
+        lib.air_fwd = anim.bound("bike_air_Fwd");
+        lib.air_mid = anim.bound("bike_air_Mid");
+        lib.air_bck = anim.bound("bike_air_Bck");
+        lib
+    }
+
+    /// The handle behind one of the selection's clip slots.
+    pub fn clip(&self, slot: Slot) -> Option<ClipId> {
+        match slot {
+            Slot::Stunt(i) => *self.stunt.get(usize::from(i)).unwrap_or(&None),
+            Slot::AirFwd => self.air_fwd,
+            Slot::AirMid => self.air_mid,
+            Slot::AirBck => self.air_bck,
+        }
+    }
+
+    /// Which gesture slots have a clip, which is the one thing the selection asks of the table.
+    pub fn present(&self) -> Clips {
+        Clips { stunt: self.stunt.map(|c| c.is_some()) }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // what the library is handed
 // ---------------------------------------------------------------------------------------------------
@@ -239,6 +343,83 @@ pub enum Blend {
         /// The clip `mix` interpolates from.
         b: Slot,
     },
+    /// Four clips and three weights: two pairs, each mixed by `mix`, and the two results mixed by
+    /// `cross` — all of it sampled at `phase` of the *first* clip's length and faded in by `ramp`.
+    ///
+    /// No arm of the rider's own switch asks for this one. The vehicle's animation step does, from two
+    /// of its own arms, which is why the variant is here: the entry point is the fourth case of the
+    /// same dispatch, and a port of that step has nothing to call without it. See the journal.
+    Three {
+        /// Where in the clips, 0 to 1 of `a`'s duration. Every one of the four is sampled at the same
+        /// number of seconds, and the action frames come from `a`.
+        phase: F,
+        /// How far from `b` to `a`, and from `d` to `c`: one weight, used inside both pairs.
+        mix: F,
+        /// How far from the `c`/`d` pair to the `a`/`b` pair.
+        cross: F,
+        /// The cross-fade from the snapshotted pose, as in [`Blend::One`].
+        ramp: F,
+        /// The first pair's near clip.
+        a: Slot,
+        /// The first pair's far clip.
+        b: Slot,
+        /// The second pair's near clip.
+        c: Slot,
+        /// The second pair's far clip.
+        d: Slot,
+    },
+}
+
+impl Blend {
+    /// Which of the library's entry points this is, by the number the original's dispatch switches
+    /// on: 0 the free-running advance, 1 one clip, 2 two, 4 four clips and three weights.
+    ///
+    /// **3 is not a mode.** The dispatch is a chain of equality tests with no arm for it, so a 3
+    /// falls out of the bottom and the frame makes no call at all — as does anything above 4 in the
+    /// rider's copy of the dispatch, and anything above 5 in the vehicle's, which has one more entry.
+    pub fn mode(self) -> u8 {
+        match self {
+            Blend::Free => 0,
+            Blend::One { .. } => 1,
+            Blend::Two { .. } => 2,
+            Blend::Three { .. } => 4,
+        }
+    }
+
+    /// The clip the entry point drives the motion object's clock from, and the phase it drives it at.
+    ///
+    /// Every blend entry takes its clip time from its **first** clip — `phase` of *that* one's
+    /// duration — and fires *that* one's action frames, however many clips it goes on to mix in. The
+    /// free-running advance drives whatever is already playing, so it names no clip.
+    pub fn driven(self) -> Option<(F, Slot)> {
+        match self {
+            Blend::Free => None,
+            Blend::One { phase, clip, .. } => Some((phase, clip)),
+            Blend::Two { phase, a, .. } => Some((phase, a)),
+            Blend::Three { phase, a, .. } => Some((phase, a)),
+        }
+    }
+
+    /// Whether a clip the entry point has only just been handed fires the empty window `0..0` when its
+    /// clip time comes out as exactly zero.
+    ///
+    /// The one place the three blend entries differ. The one-clip entry tests its sample time against
+    /// zero and skips the action frames entirely; the two-clip and four-clip entries do not test it,
+    /// so a clip switched to at a phase of zero fires whatever key sits on its first frame. The
+    /// free-running advance never takes this path at all.
+    pub fn fires_empty(self) -> bool {
+        matches!(self, Blend::Two { .. } | Blend::Three { .. })
+    }
+
+    /// Every clip the entry point samples, in the order it takes them as arguments.
+    pub fn clips(self) -> Vec<Slot> {
+        match self {
+            Blend::Free => Vec::new(),
+            Blend::One { clip, .. } => vec![clip],
+            Blend::Two { a, b, .. } => vec![a, b],
+            Blend::Three { a, b, c, d, .. } => vec![a, b, c, d],
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -488,11 +669,20 @@ pub struct ClipId(pub u32);
 pub struct Fade {
     /// A transition is running: the pose comes from two clips, not from the one.
     pub on: bool,
-    /// Take the plain sampler, which ignores the weight below.
-    pub plain: bool,
-    /// How long the transition has been going.
+    /// The clip the transition is coming *out* of, which is the one that was playing when
+    /// [`Player::play`] put the new one on.
+    ///
+    /// `None` is the other way out: the rider's pose at that moment, snapshotted joint by joint
+    /// ([`Snapshot`]), which is what a transition started on top of another transition fades from
+    /// because the clip it would have faded from is itself half-way into a blend. Which of the two it
+    /// is picks the sampler, and the sampler is the renderer's — but the choice is made here.
+    pub from: Option<ClipId>,
+    /// How long the transition has been going. Also the clip time the clip it is coming out of is
+    /// sampled at, which is why it starts at `delay` rather than at zero: the old clip keeps playing
+    /// through the cross-fade.
     pub clock: F,
-    /// How long it waits before it starts moving.
+    /// How long it waits before it starts moving — the clip time the old clip had reached, so that
+    /// `clock - delay` is the time since the transition began.
     pub delay: F,
     /// How long the move itself takes.
     pub length: F,
@@ -620,6 +810,14 @@ impl Player {
     /// On a blend of two clips it is the *first* one that is handed over here: both are sampled at the
     /// same number of seconds, and the action frames come from the first one's list.
     pub fn drive(&mut self, phase: F, clip: &Clip, id: ClipId) -> Window {
+        self.drive_at(phase, clip, id, false)
+    }
+
+    /// The same, with the one thing the blend entries disagree about: whether a clip they have only
+    /// just been handed, at a clip time of exactly zero, fires the empty window or nothing at all.
+    /// [`Blend::fires_empty`] is which, and it is not cosmetic — an empty window still fires a key
+    /// that sits on the clip's first frame, because the window test is inclusive at both ends.
+    pub fn drive_at(&mut self, phase: F, clip: &Clip, id: ClipId, fires_empty: bool) -> Window {
         self.clip = None;
         let t = clip.duration * phase;
         let window = if self.last == Some(id) {
@@ -628,7 +826,7 @@ impl Player {
             } else {
                 Window::Span(self.prev, t)
             }
-        } else if t != F::ZERO {
+        } else if t != F::ZERO || fires_empty {
             // A clip that has only just been put on fires everything from its start up to here.
             Window::Span(F::ZERO, t)
         } else {
@@ -637,6 +835,193 @@ impl Player {
         self.last = Some(id);
         self.prev = t;
         window
+    }
+
+    /// The call the selection asked for: the dispatch that ends the rider's animation frame.
+    ///
+    /// The original clamps the weights, switches on which entry point it wants, and calls it with the
+    /// motion object, the cross-fade ramp and the handles — all of which [`Blend`] already carries.
+    /// What is left is this: a blend drives the clock from its first clip ([`Blend::driven`]), and
+    /// nothing driven means the clip already on advances by `dt` ([`Player::advance`]) instead.
+    ///
+    /// `clip` is the clip behind the handle the call works on — the blend's first one, or the one
+    /// already playing when the blend is [`Blend::Free`]. [`Player::clock_clip`] names it.
+    ///
+    /// A blend whose first handle is missing is the one case the original does not survive: it hands
+    /// the entry point a null handle and the entry dereferences it. The port does nothing instead,
+    /// which is a divergence on a frame the original crashes on.
+    pub fn run(&mut self, dt: F, blend: Blend, lib: &Library, clip: &Clip) -> Played {
+        match blend.driven() {
+            None => self.advance(dt, clip),
+            Some((phase, slot)) => match lib.clip(slot) {
+                None => Played::default(),
+                Some(id) => Played {
+                    window: self.drive_at(phase, clip, id, blend.fires_empty()),
+                    ..Played::default()
+                },
+            },
+        }
+    }
+
+    /// The handle whose clip [`Player::run`] needs this frame: the blend's first one, or the clip
+    /// already playing when nothing is driven.
+    pub fn clock_clip(&self, blend: Blend, lib: &Library) -> Option<ClipId> {
+        match blend.driven() {
+            None => self.clip,
+            Some((_, slot)) => lib.clip(slot),
+        }
+    }
+
+    /// Put a clip on, crossing out of whatever is playing over `put.length` seconds.
+    ///
+    /// This is the only thing in the original that sets [`Fade::on`]: the rider's own per-frame driving
+    /// never starts a transition, it only ever asks for a phase-driven blend, so every transition in
+    /// the game comes through here. The cross-fade [`Driver::ramp`] drives is a different one — that is
+    /// the blend entry's own weight against the pose snapshot, and it is not this.
+    ///
+    /// `playing` is the duration of the clip already on, and only `put.keep_phase` reads it.
+    ///
+    /// Returns whether the pose snapshot was taken: the original asks for it from here as well as from
+    /// a restart, when the transition has no clip to come out of. The caller owns the skeleton, so it
+    /// is the caller that has to run [`Snapshot::take`] when this says so.
+    pub fn play(&mut self, put: Put, playing: F) -> bool {
+        // Worked out before anything is switched, from the old clip and the old clock, and written
+        // back at the very end — after the hard cut or the transition has put the clock back to zero.
+        let carried = put.keep_phase.then(|| put.duration * (self.time / playing));
+        let mut snapshot = false;
+        if put.length == F::ZERO {
+            // A hard cut: no transition, and nothing to fade from.
+            self.finished = false;
+            self.clip = Some(put.clip);
+            self.fade.on = false;
+            self.time = F::ZERO;
+        } else {
+            // The transition's clock starts at the old clip's time, and its delay is that same time,
+            // so the first frame of the cross-fade earns a weight of zero and the clip it is coming
+            // out of carries on from where it was.
+            self.fade.delay = self.time;
+            self.fade.clock = self.time;
+            self.fade.end = self.time + put.length;
+            self.fade.length = put.length;
+            self.fade.from = self.clip;
+            if self.fade.from.is_none() || self.fade.on {
+                // Nothing was playing, or a transition already is — in which case the clip it would
+                // fade from is itself mid-blend. Either way it fades from the rider's pose instead.
+                self.fade.from = None;
+                snapshot = true;
+            }
+            self.finished = false;
+            self.clip = Some(put.clip);
+            self.time = F::ZERO;
+            self.fade.on = true;
+        }
+        if let Some(t) = carried {
+            self.time = t;
+        }
+        snapshot
+    }
+}
+
+/// What putting a clip on takes: the clip, how long the cross into it is, and where its clock starts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Put {
+    /// How long the cross out of whatever is playing takes. **Zero is a hard cut** — no transition at
+    /// all, the new clip from its first frame.
+    pub length: F,
+    /// The clip going on.
+    pub clip: ClipId,
+    /// Its duration. Read only by `keep_phase`.
+    pub duration: F,
+    /// Start the new clip at the same *fraction* of its own length as the old clip had reached, rather
+    /// than at its beginning. The original divides by the old clip's duration to get there, so a caller
+    /// that asks for this with nothing playing reads through a null clip.
+    pub keep_phase: bool,
+}
+
+impl Put {
+    /// Put a clip on with the cross-fade length the clip itself carries, which is how the engine's own
+    /// one-argument play does it.
+    pub fn clip(clip: ClipId, duration: F, length: F) -> Put {
+        Put { length, clip, duration, keep_phase: false }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// the pose a cross-fade fades from
+// ---------------------------------------------------------------------------------------------------
+
+/// What [`Snapshot::take`] needs of the rider's skeleton: how many joints it has, and each one's own
+/// current local pose.
+///
+/// The two reads are the engine's own joint accessors — the rotation pulled back out of the joint's
+/// local matrix as a quaternion, and the translation as a point. Both are the renderer's side of the
+/// motion library, which is why they are asked for rather than done here.
+pub trait Joints {
+    /// How many joints the rider's skeleton has. The snapshot is this long.
+    fn count(&self) -> usize;
+    /// The joint's current local rotation, as a quaternion.
+    fn rotation(&self, joint: usize) -> [F; 4];
+    /// The joint's current local translation, as a point — the original writes 1 into the fourth lane.
+    fn translation(&self, joint: usize) -> [F; 4];
+}
+
+/// The pose a cross-fade fades *from*: the rider's joints as they stood the moment the motion was
+/// restarted or a clip was put on with nothing to come out of.
+///
+/// This is what the blend entries' `ramp` weight interpolates away from, and the reason a restarted
+/// motion appears to start from the pose the rider was already in rather than snapping to the first
+/// frame of the new clip. It is not a clip rewind: nothing about the clip's own clock moves.
+///
+/// Two buffers and not one, because the original keeps rotations and translations apart — the blend
+/// entries read them in two separate passes, each one taking its own `ramp` branch.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Snapshot {
+    /// Per joint, its rotation when the snapshot was taken.
+    pub rotation: Vec<[F; 4]>,
+    /// Per joint, its translation when the snapshot was taken.
+    pub translation: Vec<[F; 4]>,
+    /// Per joint, a tag the caller can hand in to be stored alongside the pose, exclusive-ored with a
+    /// mask. `None` until something asks for one, and then kept for good — the original never frees
+    /// it, and it leaks a four-byte allocation making it. No call site in the game asks.
+    pub tag: Option<Vec<u32>>,
+    /// Whether the pose has tags alongside it, which is the last caller's answer and not whether the
+    /// buffer exists: the original keeps the two apart, so a snapshot taken without tags leaves the
+    /// buffer it already had alone and only says it is not using it.
+    pub tagged: bool,
+}
+
+impl Snapshot {
+    /// Take the snapshot: every joint's rotation into one buffer and its translation into the other,
+    /// in joint order.
+    ///
+    /// Both buffers are made on the first call and reused after it, and every call overwrites every
+    /// entry — so a restart always fades from *this* frame's pose and never from a stale one. The
+    /// original only ever allocates them when they are null, so a skeleton that grew joints between
+    /// two snapshots would write past them; the port grows instead, which is the one place it is
+    /// deliberately not the original.
+    ///
+    /// `tags` is the argument no caller in the game passes: with `None` the pose is simply not tagged,
+    /// and with `Some` the buffer is made (filled with ones) if there is not one yet and then written
+    /// with `mask ^ tags[joint]`, joint by joint, interleaved with the pose reads.
+    pub fn take(&mut self, joints: &impl Joints, tags: Option<&[u32]>, mask: u32) {
+        let n = joints.count();
+        if self.rotation.len() < n {
+            self.rotation = vec![[F::ZERO; 4]; n];
+        }
+        if self.translation.len() < n {
+            self.translation = vec![[F::ZERO; 4]; n];
+        }
+        self.tagged = tags.is_some();
+        if tags.is_some() && self.tag.as_ref().is_none_or(|t| t.len() < n) {
+            self.tag = Some(vec![1; n]);
+        }
+        for joint in 0..n {
+            if let (Some(tags), Some(tag)) = (tags, self.tag.as_mut()) {
+                tag[joint] = mask ^ tags[joint];
+            }
+            self.rotation[joint] = joints.rotation(joint);
+            self.translation[joint] = joints.translation(joint);
+        }
     }
 }
 
@@ -664,7 +1049,7 @@ impl hash::State for Player {
         w.bool("finished", self.finished);
         w.group("fade", |w| {
             w.bool("on", self.fade.on);
-            w.bool("plain", self.fade.plain);
+            w.u32("from", self.fade.from.map_or(u32::MAX, |c| c.0));
             w.f("clock", self.fade.clock);
             w.f("delay", self.fade.delay);
             w.f("length", self.fade.length);

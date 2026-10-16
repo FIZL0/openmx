@@ -147,7 +147,7 @@ name = "wreck_reason"             # +0x748: 0 = riding; the ground step runs onl
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
 type = "u32"
 
-# --- stage 2: the actor update (0x00133500, the attachments) ------------------------------------------
+# --- stage 2: the actor update (the chassis base update, the attachments) -------------------------
 # The rider's own copy of where it is sitting, written by the attachment walk out of the chassis it
 # rides. Sampled on the same row as the vehicle's transform below, it says whether the attachment walk
 # ran before or after this frame's physics: a frame late and the pair is a whole frame of motion apart.
