@@ -28,7 +28,6 @@ The first four phases are tooling and feel like a detour from the port. They are
 port that converges and one that is 90 % done forever: every task after them is proved with what they
 build. Do them in order; inside a later phase, tasks that touch different files can go in any order.
 
-- [ ] **S18** the bike's `.phy` file as the port reads it: bike_phy_load, so every physics parameter comes off the disc instead of being written into a test — the key->offset map S3 recovered by reading, run for real. It fills move.rs's params and air::Params together, which is what air.rs and trick.rs have been waiting for, and it gives MaxCrossupAngle the retail value S6 could not prove. Take D7's Race125 set alongside it, so the freeride bike is the one the human rode -> crates/game-sim/src/phy.rs | t: crates/game-sim/tests/phy.rs | j: s18-phy-load
 ### Phase 2 — a decompilation you can read
 
 
