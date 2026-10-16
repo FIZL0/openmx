@@ -953,3 +953,22 @@ opponent_difficulty_widget  boot 0x002ccd10 the front-end screen loader that bin
 # With the state loaded and nothing pressed, rand_state still advances 2..19+ draws per simulation
 # tick (median ~8) — the opponents and the effects. A port without them cannot match the LCG past
 # tick 0, which is where the tick-exact window has to end: at the first wreck or contact.
+
+# ---------------------------------------------------------------------------------------------------
+# V2 — the camera of the frame on screen, which is what a side-by-side screenshot has to be posed from.
+# Read out of the human's save state, not decompiled: no writer was found, so these are named from
+# their contents. research/journal/2026-10-15-v2-v2-side-by-side.
+#
+render_camera           gameplay 0x0046a540 the render camera as a 4x4 in the files' row convention:
+#                                           rows x/y/z and the eye at +0x30 (0x0046a570), w = 1
+view_projection         gameplay 0x0046a580 that frame's view-projection, **relative to the eye** —
+#                                           project (p - eye), not p. Columns 0/1/3 give right, up and
+#                                           forward; the lengths of columns 0 and 1 are 1/tan(fov/2),
+#                                           so this matrix alone yields the field of view (85.00 across,
+#                                           68.997 down in the human's state = 4:3 on a 640x448 buffer)
+#
+# Confirmed by projection rather than by code: through 0x0046a580 the human's bike origin lands on pixel
+# (318, 305) of 640x448 and its seat on (318, 220), which is where the frame stored inside the state has
+# them. The eye sits 11.1 ft behind and 7.0 above the bike, 13.1 away — cpresets.ini's FollowingDistance
+# = 13 and FOV = 85 for the first follow camera (V1), i.e. this is the chase camera after the game's own
+# filtering. Another activity (replay, split screen) may keep its camera elsewhere; unchecked.
