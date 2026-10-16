@@ -11,20 +11,21 @@
 //!
 //! The original's step calls twenty-one other functions, and the three biggest of them (the suspension
 //! ray, the tire's ground forces, the roll and pitch control) are each a task's worth of work on their
-//! own. So this module ports the *spine* — everything the step does itself, which is where the brief's
-//! four questions are actually answered:
+//! own. So this module ports the *spine* — everything the step does itself, plus the engine behind it
+//! ([`engine_update`], S15), which is where the brief's four questions are actually answered:
 //!
 //! | The brief | Where it is |
 //! |---|---|
 //! | turning | [`steer_scale`] and [`steer_command`]: the lean times the wheel's limit, faded out with speed |
-//! | acceleration | [`road_rpm`] and [`shift`] choose the gear, [`clutch`] scales the torque that comes off the launch |
+//! | acceleration | [`engine_update`] is the torque; [`road_rpm`] and [`shift`] choose the gear, [`clutch`] scales a launch |
 //! | friction | [`drag`], the only force the step applies against the direction of travel |
 //! | maximum speed | [`drag`] against the engine, with [`engine_post`]'s rev limiter on top of the gear [`shift`] picked |
 //! | the update order | [`step`], which returns the ordered list of everything it called ([`Call`]) |
 //!
 //! The pieces it does not port are not guessed at: [`step`] records each one in the [`Call`] list it
 //! returns, in the order and with the substep `dt` the original passes, so the order is proved even
-//! where the callee is not. `tests/move.rs` proves the list against the original with every one of
+//! where the callee is not. One of them has since been ported and so has left the list: the engine's
+//! own update, which runs for real between [`Call::Backflip`] and the drag. `tests/move.rs` proves the list against the original with every one of
 //! those callees hooked, and `research/journal/…-S3-…` lists them with the reason each was deferred.
 //!
 //! # The substep, and the one call that does not get it
@@ -59,6 +60,10 @@ const SUBSTEP_RATE: f32 = 55.0;
 /// two literals hold.
 const RPM_PER_RAD: f32 = 9.549296;
 const RAD_PER_RPM: f32 = 0.1047198;
+/// How many points the engine's power curve is allowed. The original allocates exactly
+/// `NumberOfRPMPoints` floats for it at load time, so this is the port's capacity and not a limit the
+/// game has; nothing reads past [`Curve::points`].
+pub const MAX_RPM_POINTS: usize = 16;
 /// The speed window the wheel springs fade across, in the chassis' own units: stopped below the
 /// first, fully moving above the second (the second is exactly twice the first).
 const SPRING_STOPPED: f32 = 14.6666;
@@ -221,6 +226,20 @@ pub struct Wheel {
     /// Set on the rear wheel: the front is down and the rear is not, which the tire forces use to
     /// move load off a wheel that is in the air.
     pub other_tire_down: bool,
+    /// The torque this wheel has been handed this substep. [`engine_update`] *adds* into it, and the
+    /// wheel's own integration (S16's) spends it on the spin and then clears it — so it is an
+    /// accumulator and not a value, and nothing in the substep loop resets it.
+    pub drive_torque: F,
+    /// `TireRadius`, the moment arm the tire's own force acts on. [`Wheel::inv_radius`] is the
+    /// reciprocal the loader caches beside it.
+    pub radius: F,
+    /// This wheel's spin comes from the torque on it rather than from the ground under it. The
+    /// wheel's own integration (S16's) is what sets it and what mostly reads it; the engine reads it
+    /// to decide where the load on the crank comes from.
+    pub spin_from_torque: bool,
+    /// The tire's force along the direction of travel, at the contact patch — what the engine feels
+    /// back through the gearbox. Written by the tire forces, which are S16's, so it is an input here.
+    pub contact_force_fwd: F,
     /// Everything else [`wheel_clear`] empties. See [`Fresh`].
     pub fresh: Fresh,
 }
@@ -239,6 +258,40 @@ pub struct Fresh {
     pub scalars: [F; 7],
     /// The three quadwords it sets to [`NOTHING`]: `+0x170`, `+0x1b0`, `+0x1c0`.
     pub vectors: [Vf; 3],
+}
+
+/// A cursor into a table of points, which is how the original reads any of its curves: it remembers
+/// where it was last time, so a seek is a step or two rather than a search, and it keeps the
+/// interpolation weight beside the index so that reading a second table at the same place is free.
+///
+/// The weight runs *backwards*: it is the distance from the point at `index` down to the input, over
+/// the gap between that point and the one below it. So `0` means "exactly on the point at `index`".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Curve {
+    /// How many points the table has, and which one the cursor is sitting on. Both unsigned, as the
+    /// original keeps them: the bounds test is an unsigned compare.
+    pub points: u32,
+    pub index: u32,
+    /// The weight, kept as bits so [`Curve`] can be compared for equality. [`Curve::frac`] reads it.
+    frac_bits: u32,
+}
+
+impl Curve {
+    /// A cursor over `points` points, at the bottom of the table. What the loader leaves behind.
+    pub fn new(points: u32) -> Curve {
+        Curve::at(points, 0, F::ZERO)
+    }
+    /// A cursor parked anywhere, for a proof that wants to start where the last one finished.
+    pub fn at(points: u32, index: u32, frac: F) -> Curve {
+        Curve { points, index, frac_bits: frac.to_bits() }
+    }
+    /// The interpolation weight.
+    pub fn frac(self) -> F {
+        F::from_bits(self.frac_bits)
+    }
+    fn set_frac(&mut self, w: F) {
+        self.frac_bits = w.to_bits();
+    }
 }
 
 /// The engine, as far as this step is concerned: the gearbox and the two numbers that turn engine
@@ -260,8 +313,50 @@ pub struct Engine {
     /// The clutch is locked up, so the engine and the wheel turn together — which is the only case
     /// [`engine_post`]'s rev limiter can do anything about.
     pub clutch_locked: bool,
-    /// The rev limit, in RPM.
+    /// The rev limit, in RPM. The loader sets it to the *last* point of the power curve, so the
+    /// engine is never asked for a torque past the end of its own table.
     pub rev_limit: F,
+
+    /// `IdleThrottle`: added to the rider's throttle before the curve is read, which is what keeps a
+    /// closed throttle making a little torque instead of none. The sum is capped at 1 and never
+    /// floored, so this is an offset and not a minimum.
+    pub idle_throttle: F,
+    /// `EngineBraking`: the torque the engine makes *against* its own revs, against their square. It
+    /// is taken off twice — once inside the throttle's blend and once outside it — so a shut throttle
+    /// leaves exactly `-brake` and a pinned one leaves the curve.
+    pub engine_braking: F,
+    /// `1 / EngineInertia`, which the loader caches because this is the only thing that reads it:
+    /// how fast the revs answer the torque that is left over after the clutch has taken its share.
+    pub inv_inertia: F,
+    /// `ClutchStaticFriction` and `ClutchKineticFriction`, both scaled by how far *out* the lever is:
+    /// the torque a locked clutch will hold before it breaks away, and the torque a slipping one
+    /// passes while it is slipping.
+    pub clutch_static: F,
+    pub clutch_kinetic: F,
+    /// `MinRPM`: the idle floor the revs are never allowed below, however hard the engine is braking
+    /// or however slowly the road is turning it.
+    pub min_rpm: F,
+
+    /// The power curve, as the loader leaves it: the RPM of each point, and the torque at it. The
+    /// file gives horsepower (`HP%d` against `RPM%d`) and the loader turns each into a torque with
+    /// `hp * 5252 / rpm`, so what is here is already torque.
+    pub curve_rpm: [F; MAX_RPM_POINTS],
+    pub curve_torque: [F; MAX_RPM_POINTS],
+    /// Where the curve lookup got to last time. State, not tuning: it is carried from substep to
+    /// substep, and the engine's revs are what walks it.
+    pub curve: Curve,
+
+    /// What [`engine_update`] works out, in the order it works it out: the torque the engine is
+    /// making, the torque that reaches the driven wheel, the revs, and the revs the road is asking
+    /// for through this gear. The last one is kept across the substep because the clutch locks up on
+    /// the revs *crossing* it, which needs the previous value as well as this one.
+    pub torque: F,
+    pub wheel_torque: F,
+    pub rpm: F,
+    pub road_rpm: F,
+    /// The scale on the torque that leaves the gearbox. The engine's constructor sets it to 1 and
+    /// nothing on the ported path writes it; see the journal entry for what was and was not found.
+    pub torque_scale: F,
 }
 
 /// What the rest of the bike hands the ground step for one frame: the controls as the input layer
@@ -324,9 +419,6 @@ pub enum Call {
     /// `bike_preload` and `bike_backflip` — the preload and the backflip, both ported in `air.rs` (S10).
     Preload(F),
     Backflip(F),
-    /// `engine_update` — the engine: the torque curve, the clutch's slip, and the torque that reaches
-    /// the driven wheel.
-    EngineUpdate(F),
     /// `bike_airborne_control` — what the stick commands while airborne, also S10's.
     AirborneControl(F),
     /// `transform_rotate` — the chassis' transform rotating the reverse push's local force into the world.
@@ -548,6 +640,147 @@ pub fn engine_post(eng: &Engine, driven: &mut Wheel) {
     }
 }
 
+// --- the engine ------------------------------------------------------------------------------------
+
+/// Walk a curve's cursor to `x`, and work out the weight between the point it lands on and the one
+/// below it.
+///
+/// The original's own two loops: up while the input is still at or above the point the cursor is on,
+/// then down while it is below the point beneath it. A cursor already in the right place costs two
+/// compares, and one that has drifted by a point costs three — which is why the engine can read its
+/// curve every substep for nothing.
+///
+/// Off the top of the table the cursor parks on the *last* point with a weight of 0, which is what
+/// makes a curve flat past its end rather than extrapolated. Both bounds tests are unsigned, as the
+/// original keeps the index and the count, so a table with no points at all leaves the index at
+/// `points - 1` wrapped round — the original then reads off the end of its own allocation, and this
+/// panics instead. The loader cannot produce one (the rev limit is read from the last point), so
+/// neither case is reachable.
+pub fn curve_seek(cur: &mut Curve, xs: &[F; MAX_RPM_POINTS], x: F) {
+    while cur.index < cur.points && !(x < xs[cur.index as usize]) {
+        cur.index += 1;
+    }
+    while cur.index != 0 && x < xs[cur.index as usize - 1] {
+        cur.index -= 1;
+    }
+    if cur.index < cur.points {
+        if cur.index == 0 {
+            cur.set_frac(F::ZERO);
+        } else {
+            let hi = xs[cur.index as usize];
+            cur.set_frac((hi - x) / (hi - xs[cur.index as usize - 1]));
+        }
+    } else {
+        cur.set_frac(F::ZERO);
+        cur.index = cur.points.wrapping_sub(1);
+    }
+}
+
+/// Read a table at the cursor [`curve_seek`] left: the point the cursor is on, pulled back towards
+/// the one below it by the weight. On the bottom point there is nothing to pull towards, so the
+/// answer is that point exactly.
+///
+/// The table is a separate argument from the cursor, which is the whole reason the original keeps the
+/// weight: the engine seeks once on the RPM axis and could read any number of curves at that place.
+pub fn curve_value(cur: &Curve, ys: &[F; MAX_RPM_POINTS]) -> F {
+    if cur.index == 0 {
+        ys[0]
+    } else {
+        let hi = ys[cur.index as usize];
+        hi - cur.frac() * (hi - ys[cur.index as usize - 1])
+    }
+}
+
+/// **The engine, once a substep**: the torque the curve makes at these revs, what the clutch does
+/// with it, the torque that reaches the driven wheel, and where the revs go next.
+///
+/// `throttle` and `clutch` are the two floats the engine reads through the pointers the bike hands it
+/// when it is built (`+0x30` and `+0x34`): the rider's throttle and clutch *after* the input layer's
+/// rate limits, which is why neither jumps.
+///
+/// Four things happen, in this order.
+///
+/// **The curve.** [`curve_seek`] walks the cursor to the current revs and [`curve_value`] reads the
+/// torque there. The engine's own braking is `EngineBraking * rpm²`, and it is taken off *twice* —
+/// once inside the throttle's blend and once outside it: `(curve + brake) * throttle - brake`. So a
+/// shut throttle leaves exactly `-brake` and a pinned one leaves the curve, with the throttle fading
+/// between them. [`Engine::idle_throttle`] is added to the rider's throttle first and the sum capped
+/// at 1, and the whole thing is scaled by the launch multiplier [`clutch`] worked out.
+///
+/// **The clutch.** Locked, it passes the engine's torque straight through until either the lever
+/// moves off its stop at all or that torque is more than `ClutchStaticFriction` will hold — and then
+/// it breaks away in the same substep. Slipping, it passes `ClutchKineticFriction` signed towards
+/// whichever end is turning slower, and it locks up again when the engine's revs *cross* the revs the
+/// road is asking for. Crossing, not matching: that is why [`Engine::road_rpm`] is kept from the last
+/// substep as well as computed for this one. Both frictions are scaled by how far *out* the lever is,
+/// so a clutch held in holds nothing.
+///
+/// **The gearbox.** The shaft torque through the overall ratio, and onto the driven wheel's
+/// accumulator — added, not stored, because the brake and the tires put their torques in the same
+/// place.
+///
+/// **The revs.** Locked up, the engine turns with the wheel, so its revs are simply the road's.
+/// Slipping, what is left of the engine's torque after the clutch's share accelerates the crank
+/// against `EngineInertia`. The exception is a wheel whose spin is driven by its torque rather than
+/// by the ground ([`Wheel::spin_from_torque`]): then the load on the crank comes back from the tire's
+/// own contact force through the gearbox instead of from the clutch. Either way the revs end up
+/// clamped between `MinRPM` and the rev limit — and the clamp applies to the locked path too, so the
+/// limiter catches a bike being driven over its limit by the road.
+pub fn engine_update(eng: &mut Engine, driven: &mut Wheel, throttle: F, clutch: F, dt: F) {
+    curve_seek(&mut eng.curve, &eng.curve_rpm, eng.rpm);
+    let curve = curve_value(&eng.curve, &eng.curve_torque);
+    let brake = eng.rpm * (eng.engine_braking * eng.rpm);
+    let thr = (throttle + eng.idle_throttle).min(F::ONE);
+    eng.torque = eng.clutch_torque_scale * ((curve + brake) * thr - brake);
+
+    // Both sides of the crossing test, which is why this one is read before it is overwritten.
+    let was_road_rpm = eng.road_rpm;
+    eng.road_rpm = (F(RPM_PER_RAD) * driven.spin) * eng.ratio;
+
+    // The torque that reaches the gearbox. Every path below writes it before it is read — including
+    // the two that write it in a branch delay slot, which is why a decompiler shows this as an
+    // uninitialised read and the S3 journal entry recorded it as one.
+    let mut shaft = F::ZERO;
+    if eng.clutch_locked {
+        if clutch == F::ONE || !(eng.torque.abs() <= eng.clutch_static * (F::ONE - clutch)) {
+            eng.clutch_locked = false;
+        } else {
+            shaft = eng.torque;
+        }
+    }
+    if !eng.clutch_locked {
+        let sign = if (eng.rpm - eng.road_rpm) < F::ZERO { -1 } else { 1 };
+        shaft = (eng.clutch_kinetic * (F::ONE - clutch)) * F(fpu::from_i32(sign));
+        // Lever fully out, and the revs crossed the road's revs from either side.
+        if clutch < F::ONE
+            && ((was_road_rpm < eng.rpm && eng.rpm < eng.road_rpm)
+                || (eng.rpm < was_road_rpm && eng.road_rpm < eng.rpm))
+        {
+            eng.clutch_locked = true;
+            shaft = eng.torque;
+        }
+    }
+
+    eng.wheel_torque = eng.torque_scale * (shaft * eng.ratio);
+    driven.drive_torque = driven.drive_torque + eng.wheel_torque;
+
+    if eng.clutch_locked {
+        eng.rpm = eng.road_rpm;
+    } else {
+        let load = if driven.spin_from_torque {
+            eng.inv_ratio * (driven.radius * ((F::ONE - clutch) * driven.contact_force_fwd))
+        } else {
+            shaft
+        };
+        eng.rpm = eng.rpm + F(RPM_PER_RAD) * ((eng.inv_inertia * (eng.torque - load)) * dt);
+    }
+    if eng.rpm < eng.min_rpm {
+        eng.rpm = eng.min_rpm;
+    } else if eng.rev_limit < eng.rpm {
+        eng.rpm = eng.rev_limit;
+    }
+}
+
 // --- the clutch -----------------------------------------------------------------------------------
 
 /// The clutch, once a frame: the ramp that lets a launch make more torque than the engine does.
@@ -705,7 +938,7 @@ pub fn step(p: &Params, b: &mut Bike<'_>, s: &Step) -> Vec<Call> {
         calls.push(Call::RollPitch(h));
         calls.push(Call::Preload(h));
         calls.push(Call::Backflip(h));
-        calls.push(Call::EngineUpdate(h));
+        engine_update(b.engine, b.rear, s.gas_rate_limited, b.ride.clutch_in, h);
         b.chassis.force = add_xyz(b.chassis.force, drag(p, b.chassis));
         calls.push(Call::AirborneControl(h));
         if b.rear.contact && s.reverse != 0.0 {

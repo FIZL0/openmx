@@ -1,8 +1,9 @@
-//! S3 — movement on the ground, proved against the original.
+//! S3 and S15 — movement on the ground, proved against the original.
 //!
-//! Six proofs. Four for the pieces of the ground step that are functions of their own in the original
-//! — the clutch's launch ramp, the gearbox, the rev limiter and the per-substep wheel clear — and then
-//! two for the step itself: one over generated states, and one replay of a scripted 240-tick ride.
+//! Seven proofs. Five for the pieces of the ground step that are functions of their own in the
+//! original — the clutch's launch ramp, the gearbox, the rev limiter, the per-substep wheel clear and
+//! the engine's own update — and then two for the step itself: one over generated states, and one
+//! replay of a scripted 240-tick ride.
 //!
 //! They all work the way `tests/air.rs` does, because it is the same object: the harness lays the
 //! bike, its chassis, its two wheels, its engine and its collision record out in the interpreter's
@@ -11,15 +12,20 @@
 //! graph. Comparing the region rather than a list of fields is the point: a field the original writes
 //! and the port does not model shows up as a difference.
 //!
-//! # The twenty-one calls
+//! # The twenty-one calls, less the engine
 //!
 //! The ground step is mostly a driver: it calls the suspension, the tires, the engine, the roll and
-//! pitch control and a dozen more, and S3 ports none of those (the journal says why for each). So
+//! pitch control and a dozen more, and S3 ported none of those (the journal says why for each). So
 //! every one of them is hooked, which does two things. It makes the step's own arithmetic comparable
 //! — with the callees doing nothing, what is left in the object graph is what the step itself wrote —
 //! and it turns the oracle into a tracer: each hook records the address it was reached at and the
 //! `dt` it was handed, and the result is compared with the ordered list [`mv::step`] returns. That is
 //! how the update order gets proved even where the callee does not.
+//!
+//! One of the twenty-one is no longer hooked: `engine_update`, which S15 ported. It runs for real on
+//! both sides of the two step proofs, so the engine's revs, its torque and the driven wheel's torque
+//! accumulator are part of the compared graph there, and they carry from substep to substep and from
+//! frame to frame the way the game's do.
 
 use game_sim::r#move::{self as mv, Bike, Call, Chassis, Engine, Fresh, NOTHING, Params, Ride, Side, Step, Wheel};
 use ps2_float::{F, Vf};
@@ -55,6 +61,10 @@ const RATIOS: u32 = 0x0126_3000;
 const ORIENTATION: u32 = 0x0126_4000;
 const SEARCH: u32 = 0x0126_5000;
 const ACTORS: u32 = 0x0126_6000;
+/// The engine's power curve: the RPM of each point and the torque at it, two heap arrays in the
+/// original. `engine_set_power_curve` fills them at load time and nothing writes them afterwards.
+const CURVE_RPM: u32 = 0x0126_7000;
+const CURVE_TORQUE: u32 = 0x0126_8000;
 /// Where the two vtable slots point. Nothing is there: a hook catches the call, which is the only way
 /// to see a virtual call happen at all.
 const INTEGRATE: u32 = 0x0127_0000;
@@ -113,6 +123,14 @@ fn wire(ee: &mut Ee) {
     ee.set_u32(COLL_VTABLE + 0x80, COLLISION_BEGIN);
     ee.set_u32(ENGINE + 0x7c, RATIOS);
     ee.set_u32(ENGINE + 0x9c, REAR);
+    // The two floats the engine reads through a pointer, which the bike's own setup aims at its
+    // rate-limited throttle and clutch (`0x002535c4`), and the power curve's two arrays — the second
+    // of which the cursor at `+0x8c` holds a third pointer to.
+    ee.set_u32(ENGINE + 0x30, OBJ + 0x658);
+    ee.set_u32(ENGINE + 0x34, OBJ + 0x65c);
+    ee.set_u32(ENGINE + 0x70, CURVE_RPM);
+    ee.set_u32(ENGINE + 0x74, CURVE_TORQUE);
+    ee.set_u32(ENGINE + 0x98, CURVE_RPM);
 }
 
 /// Write a state into the object graph: every field the step reads or writes, at the offset the
@@ -180,6 +198,10 @@ fn poke(ee: &mut Ee, s: &State) {
         put_f(ee, base + 0x1d4, w.spin);
         put_b(ee, base + 0xdc, w.contact);
         put_b(ee, base + 0xc4, w.other_tire_down);
+        put_f(ee, base + 0x210, w.drive_torque);
+        put_f(ee, base + 0x214, w.radius);
+        put_b(ee, base + 0xe0, w.spin_from_torque);
+        put_f(ee, base + 0x858, w.contact_force_fwd);
         for (a, v) in [0xd0u32, 0xd4, 0x1f0, 0x1f4, 0xf0, 0xf8, 0x1a0].into_iter().zip(w.fresh.scalars) {
             put_f(ee, base + a, v);
         }
@@ -199,6 +221,27 @@ fn poke(ee: &mut Ee, s: &State) {
     put_f(ee, ENGINE + 0x88, eng.clutch_torque_scale);
     put_b(ee, ENGINE + 0x64, eng.clutch_locked);
     put_f(ee, ENGINE + 0xb4, eng.rev_limit);
+    put_f(ee, ENGINE + 0x38, eng.idle_throttle);
+    put_f(ee, ENGINE + 0x3c, eng.engine_braking);
+    put_f(ee, ENGINE + 0x48, eng.inv_inertia);
+    put_f(ee, ENGINE + 0x50, eng.clutch_static);
+    put_f(ee, ENGINE + 0x54, eng.clutch_kinetic);
+    put_f(ee, ENGINE + 0x60, eng.min_rpm);
+    put_f(ee, ENGINE + 0xa0, eng.torque);
+    put_f(ee, ENGINE + 0xa4, eng.wheel_torque);
+    put_f(ee, ENGINE + 0xa8, eng.rpm);
+    put_f(ee, ENGINE + 0xac, eng.road_rpm);
+    put_f(ee, ENGINE + 0xbc, eng.torque_scale);
+    // The cursor, and the count the loader keeps twice — once for the curve's own arrays at `+0x6c`
+    // and once inside the cursor at `+0x8c`. The port keeps one, because they cannot disagree.
+    ee.set_u32(ENGINE + 0x6c, eng.curve.points);
+    ee.set_u32(ENGINE + 0x8c, eng.curve.points);
+    ee.set_u32(ENGINE + 0x90, eng.curve.index);
+    put_f(ee, ENGINE + 0x94, eng.curve.frac());
+    for k in 0..eng.curve_rpm.len() as u32 {
+        put_f(ee, CURVE_RPM + 4 * k, eng.curve_rpm[k as usize]);
+        put_f(ee, CURVE_TORQUE + 4 * k, eng.curve_torque[k as usize]);
+    }
 
     poke_step(ee, &s.st);
 }
@@ -301,13 +344,12 @@ fn harness() -> Option<(Ee, Rc<RefCell<Tape>>)> {
     let tape = Rc::new(RefCell::new(Tape::default()));
 
     // The plain `(dt, bike)` and `(dt, wheel)` callees: record the call and do nothing.
-    let plain: [(&str, fn(&Ee) -> Call); 9] = [
+    let plain: [(&str, fn(&Ee) -> Call); 8] = [
         ("bike_stand_upright", |ee| Call::StandUpright(F(ee.f(12)))),
         ("bike_balance", |ee| Call::Balance(F(ee.f(12)))),
         ("bike_roll_pitch", |ee| Call::RollPitch(F(ee.f(12)))),
         ("bike_preload", |ee| Call::Preload(F(ee.f(12)))),
         ("bike_backflip", |ee| Call::Backflip(F(ee.f(12)))),
-        ("engine_update", |ee| Call::EngineUpdate(F(ee.f(12)))),
         ("bike_airborne_control", |ee| Call::AirborneControl(F(ee.f(12)))),
         ("bike_wheel_contacts", |ee| Call::Contacts(F(ee.f(12)))),
         ("bike_no_hander", |ee| Call::NoHander(F(ee.f(12)))),
@@ -426,6 +468,21 @@ impl Gen {
             Vf::new(self.f(-30.0, 30.0).0, self.f(-12.0, 12.0).0, self.f(-30.0, 30.0).0, 1.0)
         }
     }
+    /// A power curve as the loader leaves one: a few points, strictly rising in RPM so that the
+    /// seek's divide can never be by zero, with a torque at each. The slots past the last point are
+    /// zero on both sides — the original's array is exactly that long, so nothing may read them.
+    fn curve(&mut self) -> (u32, [F; mv::MAX_RPM_POINTS], [F; mv::MAX_RPM_POINTS]) {
+        let points = 1 + self.bits() % 8;
+        let (mut rpm, mut torque) = ([F::ZERO; mv::MAX_RPM_POINTS], [F::ZERO; mv::MAX_RPM_POINTS]);
+        let mut at = self.f(400.0, 1500.0);
+        for k in 0..points as usize {
+            rpm[k] = at;
+            torque[k] = self.f(8.0, 95.0);
+            at = at + self.f(400.0, 1600.0);
+        }
+        (points, rpm, torque)
+    }
+
     fn wheel(&mut self) -> Wheel {
         Wheel {
             balancing: self.b(),
@@ -437,6 +494,10 @@ impl Gen {
             spin: self.f(-20.0, 400.0),
             contact: self.b(),
             other_tire_down: self.b(),
+            drive_torque: self.f(-400.0, 400.0),
+            radius: self.f(0.25, 0.7),
+            spin_from_torque: self.b(),
+            contact_force_fwd: self.f(-900.0, 900.0),
             fresh: Fresh {
                 scalars: std::array::from_fn(|_| self.f(-1000.0, 1000.0)),
                 vectors: std::array::from_fn(|_| self.vec(-1000.0, 1000.0)),
@@ -490,6 +551,7 @@ impl Gen {
             gravity: self.vec(-200.0, 200.0),
         };
         let gears = 1 + (self.bits() % 6) as i32;
+        let (points, curve_rpm, curve_torque) = self.curve();
         let eng = Engine {
             gear: 1 + (self.bits() % 7) as i32,
             gears,
@@ -499,14 +561,38 @@ impl Gen {
             inv_ratio: self.f(0.08, 2.0),
             clutch_torque_scale: self.f(1.0, 4.0),
             clutch_locked: self.b(),
-            rev_limit: self.f(3000.0, 12000.0),
+            // The loader's own invariant: the limit is the last point of the curve, so the engine is
+            // never asked for a torque past the end of its own table.
+            rev_limit: curve_rpm[points as usize - 1],
+            idle_throttle: self.f(0.0, 0.25),
+            // `EngineBraking` is a coefficient on the square of the revs, so it is this small: at
+            // 8000 rpm this range costs the engine between 6 and 130 lb-ft.
+            engine_braking: self.f(1.0e-7, 2.0e-6),
+            inv_inertia: self.f(0.2, 8.0),
+            clutch_static: self.f(0.0, 400.0),
+            clutch_kinetic: self.f(0.0, 400.0),
+            min_rpm: self.f(700.0, 1600.0),
+            curve_rpm,
+            curve_torque,
+            // Sometimes parked past the end, which is the seek's own out-of-range path.
+            curve: mv::Curve::at(points, self.bits() % (points + 1), self.f(0.0, 1.0)),
+            torque: self.f(-200.0, 600.0),
+            wheel_torque: self.f(-2000.0, 6000.0),
+            // Occasionally below the curve and occasionally past it, because those are the two ends
+            // the cursor's seek parks at.
+            rpm: if self.one_in(6) { self.f(0.0, 600.0) } else { self.f(600.0, 13000.0) },
+            road_rpm: self.f(-500.0, 13000.0),
+            // 1.0 in the game: the engine's constructor sets it and no setter was found. Varied here
+            // anyway, so that the port is proved to read it rather than to assume it.
+            torque_scale: self.f(0.5, 1.5),
         };
         let r = Ride {
             g_peak: self.vec(-40.0, 40.0),
             clutch_timer: self.maybe_zero(0.0, 1.2),
             clutch_scale_start: self.f(0.5, 4.0),
             clutch_cofg_weight: self.f(0.0, 1.0),
-            clutch_in: self.f(0.0, 1.0),
+            // A control, not a number: the engine's clutch tests it against 1 and against 0 exactly.
+            clutch_in: self.control(),
             collision_near: self.b(),
             no_hander_scratch: std::array::from_fn(|_| self.f(-10.0, 10.0)),
         };
@@ -684,6 +770,94 @@ fn the_wheel_clear_is_the_originals() {
     }
 }
 
+/// **The engine**, against `engine_update`, over 10,000 generated states: the power curve's cursor
+/// and the torque it reads, the clutch's lock-up and break-away, the torque that reaches the driven
+/// wheel's accumulator, and where the revs go next.
+///
+/// This is the one proof where the generator has to aim. The clutch locks up when the engine's revs
+/// *cross* the revs the road is asking for, and a pair of unrelated random numbers almost never
+/// straddles a third — so half the states are built the other way round: the road's revs are placed a
+/// step either side of where the wheel now puts them, and the engine's revs are placed somewhere
+/// along (or just past) that step. Both directions of the crossing and the near miss come out of the
+/// same three draws, which is what the tally checks.
+#[test]
+fn the_engine_is_the_originals() {
+    let Some((mut ee, _)) = harness() else { return };
+    let mut g = Gen(0x6e13);
+    let mut tally = std::collections::BTreeMap::new();
+    for k in 0..10_000 {
+        let mut s = g.state();
+        if g.b() {
+            // Where this substep's wheel speed puts the road's revs, the step the last substep took
+            // to get there, and the engine somewhere along that step — past the end of it one time
+            // in six, which is the near miss that does not lock up.
+            let now = F(9.549296) * s.rear.spin * s.eng.ratio;
+            let step = g.f(-400.0, 400.0);
+            s.eng.road_rpm = now + step;
+            s.eng.rpm = now + step * g.f(0.0, 1.2);
+        }
+        let points = s.eng.curve.points as usize;
+        *tally
+            .entry(if s.eng.rpm < s.eng.curve_rpm[0] {
+                "below the curve"
+            } else if !(s.eng.rpm < s.eng.curve_rpm[points - 1]) {
+                "past the curve"
+            } else {
+                "on the curve"
+            })
+            .or_insert(0) += 1;
+        *tally.entry(if s.rear.spin_from_torque { "load from the tire" } else { "load from the clutch" }).or_insert(0) += 1;
+
+        reset(&mut ee);
+        poke(&mut ee, &s);
+        ee.call(addr("engine_update").unwrap(), &[ENGINE as u64], &[s.st.dt.0], 4_000);
+        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("the engine, state {k}: {e}\n{s:#?}"));
+        let was = snap(&ee);
+
+        let mut t = s.clone();
+        mv::engine_update(&mut t.eng, &mut t.rear, t.st.gas_rate_limited, t.r.clutch_in, t.st.dt);
+        *tally
+            .entry(match (s.eng.clutch_locked, t.eng.clutch_locked) {
+                (true, true) => "stayed locked",
+                (true, false) => "broke away",
+                (false, true) => "locked up",
+                (false, false) => "stayed slipping",
+            })
+            .or_insert(0) += 1;
+        *tally
+            .entry(if t.eng.rpm == s.eng.min_rpm {
+                "at the idle floor"
+            } else if t.eng.rpm == s.eng.rev_limit {
+                "at the rev limit"
+            } else {
+                "revving freely"
+            })
+            .or_insert(0) += 1;
+        reset(&mut ee);
+        poke(&mut ee, &t);
+        same("the engine", k, &was, &snap(&ee), &s);
+    }
+    covered(
+        "the engine",
+        &tally,
+        &[
+            "below the curve",
+            "on the curve",
+            "past the curve",
+            "load from the tire",
+            "load from the clutch",
+            "stayed locked",
+            "broke away",
+            "locked up",
+            "stayed slipping",
+            "at the idle floor",
+            "at the rev limit",
+            "revving freely",
+        ],
+        100,
+    );
+}
+
 // --- the whole step -------------------------------------------------------------------------------
 
 /// Apply the port to a state, and give back the calls it says it made.
@@ -859,8 +1033,24 @@ fn a_scripted_ride_replays_the_same() {
             vel: Vf::new(0.0, 0.0, 0.0, 1.0),
             flags: (0, 0, 0),
         },
-        front: Wheel { max_steer_angle: F(0.52), inv_radius: F(2.8), contact: true, ..g.wheel() },
-        rear: Wheel { max_steer_angle: F::ZERO, inv_radius: F(2.6), contact: true, ..g.wheel() },
+        front: Wheel {
+            max_steer_angle: F(0.52),
+            inv_radius: F(2.8),
+            radius: F(0.357),
+            contact: true,
+            spin_from_torque: false,
+            drive_torque: F::ZERO,
+            ..g.wheel()
+        },
+        rear: Wheel {
+            max_steer_angle: F::ZERO,
+            inv_radius: F(2.6),
+            radius: F(0.385),
+            contact: true,
+            spin_from_torque: false,
+            drive_torque: F::ZERO,
+            ..g.wheel()
+        },
         eng: Engine {
             gear: 1,
             gears: 5,
@@ -871,6 +1061,33 @@ fn a_scripted_ride_replays_the_same() {
             clutch_torque_scale: F::ONE,
             clutch_locked: true,
             rev_limit: F(11000.0),
+            idle_throttle: F(0.08),
+            engine_braking: F(6.0e-7),
+            inv_inertia: F(2.4),
+            clutch_static: F(260.0),
+            clutch_kinetic: F(180.0),
+            min_rpm: F(1100.0),
+            // Five points, the last at the rev limit: a 450 four-stroke's shape, in torque.
+            curve_rpm: {
+                let mut a = [F::ZERO; mv::MAX_RPM_POINTS];
+                for (k, v) in [2000.0, 4500.0, 6500.0, 8500.0, 11000.0].into_iter().enumerate() {
+                    a[k] = F(v);
+                }
+                a
+            },
+            curve_torque: {
+                let mut a = [F::ZERO; mv::MAX_RPM_POINTS];
+                for (k, v) in [22.0, 31.0, 34.0, 30.0, 21.0].into_iter().enumerate() {
+                    a[k] = F(v);
+                }
+                a
+            },
+            curve: mv::Curve::new(5),
+            torque: F::ZERO,
+            wheel_torque: F::ZERO,
+            rpm: F(1100.0),
+            road_rpm: F::ZERO,
+            torque_scale: F::ONE,
         },
         st: tape_at(0, F::ZERO),
     };
