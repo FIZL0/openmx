@@ -11,6 +11,7 @@
 //!   psg.rs       `.psg` geometry: nodes, materials, LOD groups, VIF streams -> triangle strips
 //!   pst.rs       `.pst` textures: a 256-colour palette in the GS's order, plus its mip chain
 //!   terrain.rs   `.trn` ground: a patched height field, its palette and its ground texture
+//!   skin.rs      `.mot` motion clips: the channels, the quaternion blend, and the joints on a model
 //!   ini.rs       the plain-text format `.psm` and `.scn` share
 //!   scene.rs     `.scn` scenes (start point, fog, lights, 1506 placed props) and `.psm` materials
 //!   world.rs     a track in memory: models, materials and textures matched up by name, and drawn
@@ -33,6 +34,7 @@ pub mod pst;
 pub mod raster;
 pub mod rider;
 pub mod scene;
+pub mod skin;
 pub mod terrain;
 pub mod world;
 
@@ -43,5 +45,8 @@ pub use pst::Texture;
 pub use raster::Frame;
 pub use rider::{Rider, Skeleton, Suit};
 pub use scene::{Material, Scene};
+// `skin` has a `Skeleton` of its own; V4's is the one re-exported here, so it keeps the name it
+// landed with. Reach V5's as `skin::Skeleton` until the two are reconciled.
+pub use skin::{Clip, Pose};
 pub use terrain::{Terrain, draw_terrain};
 pub use world::{Assets, Camera, draw_scene};

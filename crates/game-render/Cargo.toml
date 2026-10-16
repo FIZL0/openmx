@@ -8,3 +8,7 @@ publish.workspace = true
 [dependencies]
 # The disc's two archive formats live in the sim, which has no IO; this crate does the IO.
 game-sim = { path = "../game-sim" }
+
+[dev-dependencies]
+# The oracle is a *test* dependency: the port must not need the game's code to draw a frame.
+ps2-oracle = { path = "../ps2-oracle" }
