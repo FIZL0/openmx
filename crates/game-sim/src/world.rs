@@ -16,6 +16,13 @@
 //!   other three hundred and fifty-two out of the frame, and the merge of one mesh's hits into the
 //!   bundle's record in world space.
 //!
+//! A third thing asks, and it is not the ride: the follow camera. It asks twice, and both are answered
+//! at the end of this file. Its obstacle probe wants the nearest thing on one segment
+//! ([`crate::camera::Obstacles`]) and its ground probe wants the surface under one point
+//! ([`crate::camera::Surface`]) — the same two answers the ride gets, the terrain and the collision
+//! shapes, because in the original it is the same collision world the bike is swept against and the
+//! same ground query the wheels use.
+//!
 //! The merge is worth a word, because it is the one place this module does the original's bookkeeping
 //! rather than its own: a probe keeps its *nearest* hit, the bundle latches its nearest across all
 //! probes, and the push-out is recomputed from the world-space direction and normal — the same three
@@ -25,6 +32,7 @@
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
+use crate::camera::{Obstacle, Obstacles, Surface};
 use crate::collide::{self, Bundle, MeshRef, Probe, Record};
 use crate::math::{self, Mat4};
 use crate::track::{self, Mesh, Placement, Terrain, TerrainLayout};
@@ -412,4 +420,151 @@ fn length(v: Vf) -> F {
 /// that normalises a vector does. `w` comes through untouched.
 fn normalize(v: Vf) -> Vf {
     v.merge(Dest::XYZ, v.mul_q(vu::rsqrt(1.0, vu::dot3(v.0, v.0))))
+}
+
+// --- what the camera asks --------------------------------------------------------------------------
+
+/// How many steps of the terrain march there may be per sample of the heightfield, and the ceiling on
+/// the whole march: a camera probe is a dozen feet long, so the ceiling is never the binding one.
+const STEPS_PER_SAMPLE: i32 = 2;
+const MAX_STEPS: i32 = 64;
+/// How many times the crossing is halved once the march has bracketed it. Eight halvings put the
+/// point within a four-hundredth of a sample of the real crossing, which is a fraction of an inch.
+const HALVINGS: u32 = 8;
+
+impl Ground<'_> {
+    /// Where a segment first goes under the terrain: the fraction of the way along it, and the
+    /// crossing point with the surface normal there.
+    ///
+    /// **The port's own arithmetic, not the original's.** The game has a terrain collision class that
+    /// answers a swept probe directly and nobody has read it; this walks the segment in steps of half
+    /// a sample — short enough that no cell can be stepped over — and halves the first step that ends
+    /// up underground. What it shares with the original is the rule that decides whether there is a
+    /// hit at all: a segment that *starts* under the surface comes out of it unobstructed, because the
+    /// original's triangle test culls back faces.
+    ///
+    /// Off the edge of the field there is no ground and so no hit, which is the same answer
+    /// [`Ground::at`] gives the ride's suspension there.
+    pub fn under(&self, start: Vf, end: Vf) -> Option<(F, Obstacle)> {
+        let span = sub3(end, start);
+        let len = length(span);
+        if len <= F::ZERO || self.clearance(start)? <= F::ZERO {
+            return None;
+        }
+        let per_step = self.spacing / F::from(STEPS_PER_SAMPLE);
+        let steps = (len / per_step).to_i32().clamp(1, MAX_STEPS);
+        let mut lo = F::ZERO;
+        for i in 1..=steps {
+            let hi = F::from(i) / F::from(steps);
+            let Some(clear) = self.clearance(along(start, span, hi)) else {
+                // Off the field: nothing to hit, and nothing to bracket a crossing against either.
+                lo = hi;
+                continue;
+            };
+            if clear > F::ZERO {
+                lo = hi;
+                continue;
+            }
+            // Bracketed: the segment was above the dirt at `lo` and is under it at `hi`.
+            let (mut lo, mut hi) = (lo, hi);
+            for _ in 0..HALVINGS {
+                let mid = (lo + hi) / F(2.0);
+                match self.clearance(along(start, span, mid)) {
+                    Some(c) if c > F::ZERO => lo = mid,
+                    _ => hi = mid,
+                }
+            }
+            let point = along(start, span, hi);
+            let hit = self.at(F(point.x()), F(point.z()))?;
+            return Some((hi, Obstacle { point: Vf::new(point.x(), hit.y.0, point.z(), 1.0), normal: hit.normal }));
+        }
+        None
+    }
+
+    /// How far a world point is above the dirt, or `None` where there is no dirt under it.
+    fn clearance(&self, at: Vf) -> Option<F> {
+        self.at(F(at.x()), F(at.z())).map(|hit| F(at.y()) - hit.y)
+    }
+}
+
+impl Obstacles for Ground<'_> {
+    fn nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        self.under(start, end).map(|(_, hit)| hit)
+    }
+}
+
+impl Surface for Ground<'_> {
+    /// The point dropped onto the dirt: the terrain's own height at its `x` and `z`, with the other
+    /// three lanes left alone. Off the edge of the field the point comes back where it was, which is
+    /// what the original's query does when it finds nothing — and what the camera's ground probe
+    /// reads as "no lift".
+    fn on_surface(&mut self, point: Vf) -> Vf {
+        match self.at(F(point.x()), F(point.z())) {
+            Some(hit) => Vf::new(point.x(), hit.y.0, point.z(), point.w()),
+            None => point,
+        }
+    }
+}
+
+impl Props {
+    /// The nearest thing on one segment: the camera's probe, as a one-probe bundle swept against
+    /// everything solid. The fraction comes back with it so that a caller with a second answer — the
+    /// ground — can take whichever is nearer.
+    pub fn along(&self, start: Vf, end: Vf) -> Option<(F, Obstacle)> {
+        let probe = Probe::between(start, end);
+        if probe.length <= F::ZERO {
+            return None;
+        }
+        let mut bundle = Bundle { count: 1, ..Bundle::default() };
+        bundle.probes[0] = probe;
+        // The sphere every tree node is tested against first has to cover the whole segment: the
+        // midpoint and half the length, which is the smallest one that does.
+        bundle.centre = along(start, sub3(end, start), F(0.5));
+        bundle.radius = probe.length / F(2.0);
+        let mut record = Record::new();
+        self.sweep(&bundle, &mut record);
+        if !record.hit[0] || record.fraction[0] < F::ZERO {
+            return None;
+        }
+        Some((
+            record.fraction[0],
+            Obstacle { point: record.point[0], normal: record.normal[0] },
+        ))
+    }
+}
+
+impl Obstacles for Props {
+    fn nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        self.along(start, end).map(|(_, hit)| hit)
+    }
+}
+
+impl Surface for Place<'_> {
+    /// The ground, which is the terrain and nothing else: the original's query walks the terrain
+    /// collision tree, and a collision shape standing on it is not ground. So a camera looking over a
+    /// ramp is lifted by the hill the ramp sits on and not by the ramp — which is the obstacle probe's
+    /// job, one step later in the frame.
+    fn on_surface(&mut self, point: Vf) -> Vf {
+        self.ground.on_surface(point)
+    }
+}
+
+impl Obstacles for Place<'_> {
+    /// The nearer of the two answers: the terrain's crossing and the collision shapes' hit, compared
+    /// as fractions of the same segment. This is what a [`crate::camera::Follow`] with a track under it
+    /// probes, and between them they are the whole of what the original's camera could have hit.
+    fn nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        match (self.ground.under(start, end), self.props.along(start, end)) {
+            (Some((dirt, on_dirt)), Some((prop, on_prop))) => {
+                Some(if dirt <= prop { on_dirt } else { on_prop })
+            }
+            (Some((_, hit)), None) | (None, Some((_, hit))) => Some(hit),
+            (None, None) => None,
+        }
+    }
+}
+
+/// A point a fraction of the way along `span` from `start`, over `xyz`, with `start`'s own `w`.
+fn along(start: Vf, span: Vf, t: F) -> Vf {
+    start.merge(Dest::XYZ, start.add(span.mul_q(t.0)))
 }

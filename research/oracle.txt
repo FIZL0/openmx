@@ -1805,3 +1805,92 @@ transform_set_axes boot 0x001b1e20 (node, relative_to, forward, up, sync_a in t0
 #
 # The two reason codes that look like a clash are not one: bike_wreck_test's no-hander reason is 0xc
 # and the trick machine's mid-trick reason is 12. Same number, same clause, two names.
+# --- S23: the camera's two probes, and what its distance floor really is ---------------------------
+# S7 read camera_update's distance floor as "whatever the camera's collision probe says". It is not:
+# the argument is the *viewport's near clip plane*.
+#
+viewport_set_near           boot 0x00112a80 (near, viewport): writes viewport+0x19c and calls the
+#                                           viewport's +0xc0. Three call sites, all in FUN_0020aaa0
+#                                           (0x0020ac2c, 0x0020ae08, 0x0020aff0), each guarded by a
+#                                           `... + 4 == 5` test on the chain at DAT_0041f770+0x3d4
+#                                           and each passing 0x4019999a = 2.4
+viewport_set_near_far       boot 0x001131d0 (near, far, viewport): writes +0x19c and +0x1a0 and builds
+#                                           1/(1 - near/far) into the projection — a depth range, so
+#                                           +0x19c is the near plane and nothing to do with collision
+viewport_ctor               boot 0x00112310 puts 1.0 at +0x19c and 2.0 at +0x1a0
+#
+# The camera the game creates for a race is *not* the class S7 ported. It derives from it:
+#
+race_camera_ctor            boot 0x0021e1d0 called from 0x001ff270; vtable 0x00452c20
+race_camera_vtable          boot 0x00452c20 overrides the base 0x00452060 at +0x008, +0x038, +0x07c,
+#                                           +0x094, +0x0dc, +0x108 (-> 0x0021e4d0), +0x10c (->
+#                                           0x0021e7d0) and +0x12c
+race_camera_update          boot 0x0021e880 its frame. Distance floor = viewport+0x19c * 4.5, then the
+#                                           same min/max against the preset, so on the disc the floor
+#                                           is max(MinFollowingDistance, 10.8). No push-out block at
+#                                           all. Its look-ahead differs from the base's: speed as
+#                                           handed instead of the velocity along the heading and no
+#                                           cap at 1.0, one fall correction (vel.y < -9.0, / 1.8)
+#                                           instead of two at +-5.0, the look-ahead clamped at zero,
+#                                           and a look-back preset handled by a zero look-ahead
+#                                           instead of an early return down the reversed heading
+race_camera_ground_probe    boot 0x0021e7d0 vtable slot 0x10c, the override of the base's
+#                                           `return 0.0f`: ground_query (0x001dc960) on a copy of the
+#                                           point, then `if (point.y < snapped.y) lift = (snapped.y -
+#                                           point.y) * 0.6 else lift = lift * 0.02`, where lift is the
+#                                           camera's own +0x18c — last frame's answer. Ported as
+#                                           camera::Follow::probe_ground
+race_camera_look_at         boot 0x0021f320 builds the probe's point as swung_heading * ((|pitch| /
+#                                           1.5707964) * 1.2 + 0.3) + target_point, on the same
+#                                           normalised swung heading the look-ahead point rides, and
+#                                           writes y = y_term + height_bias + lift. The base
+#                                           (0x001fb600) builds the same point and writes y = y_term +
+#                                           lift + height_bias — the one float order the two classes
+#                                           disagree on
+race_camera_position        boot 0x0021f600 the derived position; not read
+#
+# The base class's own probe, which is the only part of the camera that asks where anything solid is:
+# camera_update's last act, gated on cam+0xe8 (the collision object, zeroed by the ctor 0x001f9910
+# and written by camera_make_probe below, which is a vtable slot and not the ctor — which is why a
+# reader of the frame alone finds no writer). Segment from target_point + rider_up * 2.0 to the
+# filtered position, both quads keeping the w they were built from; on a hit,
+# position = cam+0xb0 - normalize(end - start) * 2.0, normalised through the EE FPU (mula.s/madda.s/
+# madd.s then rsqrt.s, not VU0's approximate rsqrt), a zero-length segment leaving the direction at
+# the constant quad 0x00426d70 = (0, 0, 0, 1). The lags are not told. Ported as camera::push_out.
+probe_bundle_set_points     boot 0x001e8850 (obj, count, points or null): 2*count points into +0x128
+#                                           and a float each into +0x124, zeroed when null
+probe_object_moved          boot 0x00119be0 the "this object moved" refresh
+probe_collide_world         boot 0x0011a150 the generic collide-against-the-world routine
+#
+# Where the collision object at cam+0xe8 comes from, which no reader of the frame alone can see: the
+# vtable slot the race's setup calls once, not the constructor.
+camera_make_probe           boot 0x001fa100 (cam, point, world) base vtable slot 0xdc: allocates a
+#                                           0x170-byte probe object into cam+0xe8, gives it one probe
+#                                           (0x001e8460), the camera as its owner at +0x78 and the
+#                                           hit callback at +0x10c, then sets its points. The derived
+#                                           class's own is 0x0021e350, the same but for its callback
+#                                           and its __FILE__ string
+camera_probe_hit            boot 0x001f98d0 (probe object) that callback, a bare label: copies
+#                                           record+0x98 into cam+0xb0 (the hit point) and record+0x20
+#                                           into cam+0xc0 (the nearest normal), and sets the flag at
+#                                           cam+0x170 that the frame reads one line later
+race_camera_create          boot 0x001ff270 builds the race camera and hands it the world: the write
+#                                           of the world pointer into camera+0x184 that
+#                                           race_camera_ground_probe reads. Also the ctor's one caller
+#
+# The field of view, for the other half of S23: the angle in cpresets.ini is the *horizontal* one and
+# the vertical one follows the shape of the viewport, so a port that hard-codes 4:3 is wrong on every
+# other window. The split-screen layouts are the proof that the engine reads its real shape.
+viewport_set_window         boot 0x00112670 (viewport, x, y, w, h) -> +0x180..+0x18c and the shape
+#                                           term +0x198 = (h/w) / (+0x17c * +0x1a8/+0x1a4), the
+#                                           second factor being the pixel aspect of a PS2 display
+#                                           mode, which a square-pixel window makes 1
+viewport_build_projection   boot 0x00112e00 (viewport) -> frustum_from_fov(+0x19c, +0x1a0, +0x170 *
+#                                           0.01745329, 1.0 / +0x198) into the viewport's own 4x4
+frustum_from_fov            boot 0x0013e170 (near, far, horizontal fov in radians, aspect, out 4x4):
+#                                           a wrapper that copies the 4x4 out
+frustum_half_angles         boot 0x001e7840 (fov in f12, aspect in f13, near in f14, far, out, 0):
+#                                           half width = near * tan(fov/2), the tangent read out of
+#                                           the game's own {cos, sin} curve table with a first-order
+#                                           correction, and half height = that / aspect, into
+#                                           0x001e7700 as (left, right, bottom, top, near, far)

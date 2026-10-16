@@ -39,18 +39,31 @@
 //!    three offsets up or down instead of snapping the camera round.
 //! 6. [`Follow::aim`] — yaw and pitch, wrapped and clamped (this is "its limits").
 //! 7. The direction: the heading turned by pitch about the sideways axis, then by yaw about up.
-//! 8. [`Follow::limit_distance`] — the follow distance against the preset's two limits and whatever
-//!    the camera's collision probe says is the nearest it may sit.
-//! 9. [`Follow::look_at`] — the look-ahead point (this is "its target").
+//! 8. [`Follow::limit_distance`] — the follow distance against the preset's two limits and the
+//!    viewport's own near clip plane, which is what the original's call site hands it (2.4 feet in
+//!    play, 1.0 out of the viewport's constructor): a camera is not allowed to sit closer to the
+//!    rider than the plane that would clip the rider away. It is *not* a collision distance — the
+//!    class's answer to an obstacle is step 12.
+//! 9. [`Follow::look_at`] — the look-ahead point (this is "its target"), lifted by the ground probe:
+//!    [`Follow::probe_ground`] asks where the surface under a point ahead of the rider is
+//!    ([`Follow::ground_probe_point`]) and the look-at climbs out of it, which is what keeps the view
+//!    from looking into the inside of a hill.
 //! 10. [`Follow::position`] — the target point plus the direction times the distance.
 //! 11. [`Follow::filter`] — eight first-order lags, three on the look-at, three on the position, one
 //!     on the field of view (this is "its lag").
+//! 12. [`Follow::update_probed`]'s last step — the probe: one segment from above the rider out to
+//!     where the camera ended up, swept against the scene, and the camera parked short of whatever
+//!     it ran into ([`Follow::probe_segment`], [`push_out`]). With step 9 these are the only two
+//!     questions the class asks the world, and a camera with nothing to answer them sinks into the
+//!     ground and slides through the props.
 //!
 //! # What this module is not
 //!
-//! It does not read the camera file off the disc, it does not do the camera's collision push-out, and
-//! it does not poll the pad: [`Follow::nudge`] takes the two stick axes and the two modifier buttons
-//! as arguments, because this crate does no input. The journal entry for this task lists each of
+//! It does not read the camera file off the disc and it does not poll the pad: [`Follow::nudge`]
+//! takes the two stick axes and the two modifier buttons as arguments, because this crate does no
+//! input. The two probes are here, but the world they ask about is not: [`Surface`] and [`Obstacles`]
+//! are the seams, [`Nothing`] is the empty world a fixture rides in, and [`crate::world`] answers
+//! both from a track's terrain and collision shapes. The journal entries for S7 and S23 list each of
 //! those, and what is known about them.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
@@ -406,6 +419,11 @@ pub struct Follow {
     /// While this is set the player's stick may not pitch the camera *down*, only up. The front end
     /// owns it; nothing in this module sets it.
     pub pitch_down_locked: bool,
+    /// The lift the ground probe answered last frame, which this frame's decay multiplies — see
+    /// [`Follow::probe_ground`]. The original keeps it in the *derived* camera object rather than in
+    /// this one, because the probe is that class's override and this class's is a stub; it is here
+    /// because this is the object the frame runs on.
+    pub ground_lift: F,
 }
 
 impl Follow {
@@ -443,6 +461,7 @@ impl Follow {
             speed_reference: F::ONE,
             height_bias: F(3.0),
             pitch_down_locked: false,
+            ground_lift: F::ZERO,
         };
         if !cam.presets.is_empty() {
             cam.set_preset(0);
@@ -630,15 +649,24 @@ impl Follow {
         }
     }
 
-    /// The follow distance and its limits. `nearest` is how close the camera's collision probe says
-    /// it may sit — the viewport keeps it, and it fights the preset's own minimum, whichever is
-    /// further out winning.
+    /// The follow distance and its limits. `near_clip` is the viewport's near clip distance — the
+    /// field the original's call site reads for this argument, which the engine's own near/far setter
+    /// writes along with the projection's depth terms — and it fights the preset's own minimum,
+    /// whichever is further out winning. S7 read it as a collision distance; it is not. The class's
+    /// answer to an obstacle is the probe at the end of [`Follow::update_probed`], and the floor here
+    /// only keeps the camera out of its own near plane. This frame reads the field raw, and the
+    /// viewport the disc sets up for a race puts 2.4 feet in it. The camera class the disc actually
+    /// creates has a frame of its own which multiplies the same field by four and a half first,
+    /// giving it a floor of ten and four fifths of a foot instead; which of the two beats a preset's
+    /// own `MinFollowingDistance` is a question about the track's `cpresets.ini` that this port has
+    /// not read those numbers to answer. Porting that frame is its own task. A caller hands over its
+    /// own viewport's near clip.
     ///
     /// On either limit the player's zoom is rewritten to the offset that reaches it, as in
     /// [`Follow::field_of_view`].
-    pub fn limit_distance(&mut self, nearest: F) {
+    pub fn limit_distance(&mut self, near_clip: F) {
         let p = self.preset().clone();
-        let floor = p.min_following_distance.max(nearest);
+        let floor = p.min_following_distance.max(near_clip);
         let want = self.reverse_following + (self.user_zoom + p.following_distance);
         self.distance = want;
         if want < floor {
@@ -662,15 +690,16 @@ impl Follow {
     ///
     /// The point itself is pushed along the heading *swung* by the rider's lean, not along the
     /// heading, which is what makes the camera lead into a turn. Its height is lifted by the rider's
-    /// vertical speed — more at a narrow field of view — and then by [`Follow::height_bias`]. The
-    /// original also asks the ground underneath the look-at point for a height, but this class's probe
-    /// answers zero for every point, so the only thing that addition does here is turn a negative zero
-    /// positive; it is written out for that reason.
+    /// vertical speed — more at a narrow field of view — then by whatever the ground probe answers
+    /// ([`Follow::probe_ground`], asked about [`Follow::ground_probe_point`]), and then by
+    /// [`Follow::height_bias`], in that order: the probe's lift goes in *before* the bias, which is
+    /// the one place the base class's two adds are not interchangeable with the derived class's.
     ///
-    /// The look-back cam skips all of it and looks straight back down the heading.
+    /// The look-back cam skips all of it and looks straight back down the heading — and skips the
+    /// probe with it, so a glance behind neither asks the ground anything nor decays the lift.
     #[allow(clippy::too_many_arguments)]
     pub fn look_at(
-        &self,
+        &mut self,
         speed: F,
         fov_ratio: F,
         swing: F,
@@ -679,6 +708,7 @@ impl Follow {
         vel: Vf,
         reverse: bool,
         curve: &CurveTable,
+        scene: &mut impl Surface,
     ) -> Vf {
         let along = Acc::mula(F(vel.x()), F(heading.x()))
             .madda(F(vel.y()), F(heading.y()))
@@ -703,9 +733,50 @@ impl Follow {
         }
         let swung = normalize(rotate(swing * (F(-0.7) * self.look_swing), UP, heading, curve));
         let point = add3(target_point, scale(swung, ahead));
-        let lift = F(point.y()) + (F::ONE - fov_ratio) * F(vel.y()) * 0.25;
-        let lift = (lift + F::ZERO) + self.height_bias;
+        let rise = F(point.y()) + (F::ONE - fov_ratio) * F(vel.y()) * 0.25;
+        let ground = self.probe_ground(self.ground_probe_point(swung, target_point), scene);
+        let lift = (rise + ground) + self.height_bias;
         Vf::new(point.x(), lift.0, point.z(), point.w())
+    }
+
+    /// Where the ground probe looks: the target point pushed along the swung heading — the same
+    /// vector the look-ahead point rides, normalised once and used twice — by a reach that grows with
+    /// how far the camera is pitched. Three tenths of a foot looking level, a foot and a half at the
+    /// pitch limit, and it does not care which way the pitch goes.
+    ///
+    /// Asking about a point *ahead of the rider* rather than about the camera is what makes this a
+    /// look-at lift and not a push-out: the view stays pointed at ground it can see over.
+    pub fn ground_probe_point(&self, swung: Vf, target_point: Vf) -> Vf {
+        let reach = (self.pitch.abs() / F(HALF_PI)) * 1.2 + 0.3;
+        add3(scale(swung, reach), target_point)
+    }
+
+    /// The **ground probe**: how far the look-at point is lifted so the view does not sink into the
+    /// dirt. Vtable slot `+0x10c`, which S7 found a `return 0.0f`.
+    ///
+    /// That stub is the base class's answer, and it is why the port's look-at used to add a literal
+    /// zero. The class the game actually creates for a race overrides the slot with this: drop the
+    /// point onto the surface under it through the world's own ground query
+    /// ([`Surface::on_surface`]), and then
+    ///
+    /// * if the ground came out *above* the point, the lift is six tenths of how far above — so the
+    ///   look-at climbs most of the way out of a hillside in one frame and the rest over the next
+    ///   few, rather than popping;
+    /// * otherwise the lift is last frame's times a fiftieth — a fast decay, not a snap back to
+    ///   nothing, so coming out of a dip does not jerk the view down.
+    ///
+    /// The decay is the whole reason this needs `&mut self`: it reads [`Follow::ground_lift`]. A point
+    /// with no ground under it comes back unmoved and lands in the decay arm, which is also what a
+    /// camera over [`Nothing`] gets every frame — and `0.0 * 0.02` is the zero the stub returned, so
+    /// a camera with no scene is bit-for-bit the camera S7 proved.
+    pub fn probe_ground(&mut self, point: Vf, scene: &mut impl Surface) -> F {
+        let on_surface = scene.on_surface(point);
+        self.ground_lift = if F(point.y()) < F(on_surface.y()) {
+            (F(on_surface.y()) - F(point.y())) * 0.6
+        } else {
+            self.ground_lift * 0.02
+        };
+        self.ground_lift
     }
 
     /// Where the camera is: the target point plus the direction it is pointed times the follow
@@ -754,18 +825,37 @@ impl Follow {
         *spare = self.spare_filter.step(*spare, dt);
     }
 
-    /// One frame of the camera: everything above, in the original's order.
-    ///
-    /// `nearest` is the closest the camera's collision probe will let it sit, which the viewport
-    /// measures and this module takes as an argument. The returned [`View`] is exactly what the
-    /// original writes into the viewport.
+    /// One frame of the camera in an empty world: [`Follow::update_probed`] over [`Nothing`], which
+    /// has no ground to lift the view off and nothing solid to push it out of. The second half of
+    /// that is the original's own behaviour when the camera's collision object has never been made —
+    /// the frame tests the pointer and skips the probe when it is null — and the first half is the
+    /// base class's ground probe, which answers zero for every point.
     pub fn update(
         &mut self,
         dt: F,
         target: &Target,
-        nearest: F,
+        near_clip: F,
         curve: &CurveTable,
         acos: &AcosTable,
+    ) -> View {
+        self.update_probed(dt, target, near_clip, curve, acos, &mut Nothing)
+    }
+
+    /// One frame of the camera: everything above, in the original's order, ending with the probe.
+    ///
+    /// `near_clip` is the viewport's near clip distance, which bounds the follow distance (see
+    /// [`Follow::limit_distance`]); `scene` answers both of the camera's questions about the world —
+    /// the ground under the look-at point ([`Surface`]) and the nearest thing in front of the lens
+    /// ([`Obstacles`]). The returned [`View`] is exactly what the original writes into the viewport.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_probed(
+        &mut self,
+        dt: F,
+        target: &Target,
+        near_clip: F,
+        curve: &CurveTable,
+        acos: &AcosTable,
+        scene: &mut (impl Obstacles + Surface),
     ) -> View {
         let mut fov = self.field_of_view();
 
@@ -799,15 +889,146 @@ impl Follow {
         let sideways = cross(heading, UP);
         let direction = rotate(self.yaw, UP, rotate(self.pitch, sideways, heading, curve), curve);
 
-        self.limit_distance(nearest);
+        self.limit_distance(near_clip);
 
-        let mut look_at =
-            self.look_at(speed, fov_ratio, swing, target_point, heading, target.vel, reverse, curve);
+        let mut look_at = self.look_at(
+            speed,
+            fov_ratio,
+            swing,
+            target_point,
+            heading,
+            target.vel,
+            reverse,
+            curve,
+            scene,
+        );
         let mut position = self.position(direction, target_point);
         let mut spare = F::ZERO;
         self.filter(dt, &mut position, &mut look_at, &mut fov, &mut spare);
+
+        // The probe, after the filters and after everything else: a camera that has just been lagged
+        // into a hillside is pulled back out of it here, and the lags are *not* told, so the next
+        // frame's filtering starts from the position the camera would have had in the open. That is
+        // the original's order, and it is why the push-out does not feel like the camera following
+        // the wall.
+        let (from, to) = self.probe_segment(target_point, target.up, position);
+        if let Some(hit) = scene.nearest(from, to) {
+            position = push_out(from, to, hit.point);
+        }
         View { position, look_at, fov }
     }
+
+    /// The segment the probe sweeps, as the original builds it: from the frame's target point lifted
+    /// [`PROBE_CLEARANCE`] along the *rider's* own up axis — not the world's — out to where the
+    /// camera ended up this frame.
+    ///
+    /// Starting above the target point rather than at it is what keeps the probe from hitting the
+    /// ground the bike is standing on: the segment leaves the rider's head, not the rider's wheels.
+    pub fn probe_segment(&self, target_point: Vf, up: Vf, position: Vf) -> (Vf, Vf) {
+        (add3(target_point, scale(up, F(PROBE_CLEARANCE))), position)
+    }
+}
+
+// --- the camera's own collision probe --------------------------------------------------------------
+
+/// How far above the target point the probe starts, and how far short of what it hit the camera is
+/// parked. One number in the original — the same register holds it for both ends of the probe.
+pub const PROBE_CLEARANCE: f32 = 2.0;
+
+/// What the camera's probe ran into: the point on the obstacle and the surface normal there, both in
+/// world space.
+///
+/// The original gets these back from its collision object through a callback it installs on the
+/// object — the callback copies the probe's hit point and the record's nearest normal into the camera
+/// and sets a flag the frame reads one line later. Nothing in the class reads either vector after
+/// that frame, so here they come straight back from [`Obstacles::nearest`] instead of through three
+/// fields of the camera. The normal is carried because the original carries it, and for the same
+/// reason: nothing in this class uses it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Obstacle {
+    pub point: Vf,
+    pub normal: Vf,
+}
+
+/// The world, as the camera asks about it: one segment, and the nearest thing along it.
+///
+/// This is the whole of the camera's view of the scene. The original's object is a one-probe bundle of
+/// the same collision class the bike sweeps with, run through the broad phase against everything
+/// solid, and its answer is the nearest hit — so a port only has to answer the segment.
+pub trait Obstacles {
+    /// The nearest hit on the segment `start -> end`, or `None` for a clear line. A hit the segment
+    /// leaves from the *inside* is not a hit: the original's triangle test culls back faces, so a
+    /// probe that starts under the ground or inside a prop comes out of it unobstructed.
+    fn nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle>;
+}
+
+/// Nothing to run into and nothing to stand on. What [`Follow::update`] probes: the first half is
+/// the original's own frame when the camera's collision object has never been created — the pointer
+/// is null and the whole step is skipped — and the second is the base class's ground probe, a
+/// `return 0.0f`, which a point that never moves reproduces exactly.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Nothing;
+
+impl Obstacles for Nothing {
+    fn nearest(&mut self, _start: Vf, _end: Vf) -> Option<Obstacle> {
+        None
+    }
+}
+
+impl Surface for Nothing {
+    fn on_surface(&mut self, point: Vf) -> Vf {
+        point
+    }
+}
+
+// --- what the camera asks the ground ---------------------------------------------------------------
+
+/// The ground, as the camera asks about it: one point, moved onto the surface under it.
+///
+/// This is a *different* question from [`Obstacles`], asked down a different route in the original:
+/// the obstacle probe goes through a collision object the camera owns, and this goes straight to the
+/// world's own ground query — the same routine the bike's ground step and eighty other callers use,
+/// which takes a point in place and a normal, a flags word and a record the camera all pass as null.
+/// So it is two traits here, because it is two questions there.
+pub trait Surface {
+    /// `point` with its height replaced by the height of the surface under it, in world space.
+    ///
+    /// A point with nothing under it comes back unchanged, which is what the original's query does
+    /// when its own search finds no triangle: the point it was handed is the point it leaves. `x`,
+    /// `z` and `w` come back untouched either way — the query moves a point *down* onto the ground,
+    /// it does not move it sideways.
+    fn on_surface(&mut self, point: Vf) -> Vf;
+}
+
+/// Where the camera goes when the probe hit something: [`PROBE_CLEARANCE`] short of the hit, back
+/// along the probe, so the obstacle stays behind the camera instead of in front of the lens.
+///
+/// The step back is along the *probe's* direction and not along the surface normal, which is what
+/// makes this a pull-in towards the rider rather than a slide along the wall. `w` comes through from
+/// the hit point, as the original's `vsub.xyz` leaves it.
+///
+/// The direction is normalised through the EE FPU — the dot product in the accumulator and then
+/// `rsqrt.s` — and not through VU0's approximate reciprocal square root, which is what the rest of
+/// this module normalises with. A segment of no length at all answers the zero point, which the
+/// original reaches by loading a constant quadword, and the camera is left exactly on the hit.
+pub fn push_out(start: Vf, end: Vf, hit: Vf) -> Vf {
+    let delta = end.merge(Dest::XYZ, end.sub(start));
+    let len2 = Acc::mula(F(delta.x()), F(delta.x()))
+        .madda(F(delta.y()), F(delta.y()))
+        .madd(F(delta.z()), F(delta.z()));
+    let along = if len2 == F::ZERO {
+        Vf::new(0.0, 0.0, 0.0, 1.0)
+    } else {
+        let inv = F::ONE.rsqrt(len2);
+        Vf::new(
+            (F(delta.x()) * inv).0,
+            (F(delta.y()) * inv).0,
+            (F(delta.z()) * inv).0,
+            delta.w(),
+        )
+    };
+    let back = scale(along, F(PROBE_CLEARANCE));
+    hit.merge(Dest::XYZ, hit.sub(back))
 }
 
 // --- the small shapes the original inlines everywhere -----------------------------------------------

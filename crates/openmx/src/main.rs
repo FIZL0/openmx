@@ -79,7 +79,7 @@ use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, V3, v3};
 use game_render::raster::Frame;
 use game_render::scene::Vehicle;
-use game_render::world::{Assets, Camera, Lighting, draw_scene};
+use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
 use game_render::{ini, png, scene as view};
 use game_sim::camera::{Follow, Preset, Target};
 use game_sim::input::{Control, Manager, PADS, Report};
@@ -109,6 +109,21 @@ const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 /// than a software rasteriser can fill at 60 Hz, so the dirt fades out at a radius instead. Nine feet
 /// a sample makes this about a hundred and twenty yards of ground in every direction.
 const GROUND_RADIUS: u32 = 44;
+
+/// The near clip plane the frame is drawn with, in feet, and the number the follow camera is handed
+/// as its distance floor, because the original's call site hands its camera the near plane of the
+/// viewport it is drawing into — one field, read by the projection and by the camera alike.
+///
+/// This is the disc's own number: the engine's viewport constructor puts a foot there and the race's
+/// viewport setup overwrites it with 2.4 for all three of its layouts, full screen and both splits.
+/// So the shell hands the camera 2.4 and draws with 2.4, which is what the original does.
+///
+/// It is also the one number in the picture that the camera class the disc actually creates reads
+/// differently from the one this port has: that class multiplies it by four and a half before the
+/// `max`, putting its follow distance on a floor of 10.8 feet, where the ported frame's floor is the
+/// preset's own minimum. The frame it uses is a different function altogether; S23's journal entry
+/// says what else differs and S24 is the task for porting it.
+const NEAR_CLIP: f32 = 2.4;
 
 /// The chassis model every bike is built on, which is the name the parts in a `.sub` hang off.
 const CHASSIS: &str = "bike";
@@ -469,10 +484,17 @@ fn run() -> Result<(), String> {
         let view = if presets == 0 {
             None
         } else {
-            // Nothing limits the camera's distance here: the original's limit comes from a collision
-            // probe the camera owns, which is not ported, and zero is what that probe answers in the
-            // open.
-            Some(camera.update(step.dt, &target, F::ZERO, &world.tables.ride.curve, &world.tables.ride.acos))
+            // The camera's own probe, answered by the track: the terrain under the segment and the
+            // scene's collision shapes along it (S23). Without it the view sinks into the dirt on
+            // the first dip, because the probe is the only question the camera asks the world.
+            Some(camera.update_probed(
+                step.dt,
+                &target,
+                F(NEAR_CLIP),
+                &world.tables.ride.curve,
+                &world.tables.ride.acos,
+                &mut world.place,
+            ))
         };
         let bike_look = vector(forward);
         let bike_up = vector(up);
@@ -481,10 +503,10 @@ fn run() -> Result<(), String> {
             Some(view) => Camera {
                 eye: vector(view.position),
                 at: vector(view.look_at),
-                // The file's field of view is the horizontal one at 4:3; the rasteriser wants the
-                // vertical one in radians.
-                fov: vertical_fov(view.fov.0),
-                near: 0.05,
+                // The file's field of view is the horizontal one; the rasteriser wants the vertical
+                // one in radians, which depends on the shape of the window it is drawing into.
+                fov: vertical_fov(view.fov.0, aspect(&frame)),
+                near: NEAR_CLIP,
                 far: 4000.0,
             },
             None => Camera::behind(pos, bike_look),
@@ -611,11 +633,10 @@ fn vector(v: Vf) -> V3 {
     v3(v.x(), v.y(), v.z())
 }
 
-/// The disc's field of view — horizontal, in degrees, at 4:3 — as the vertical one in radians that
-/// [`Camera`] and the rasteriser's projection want.
-fn vertical_fov(horizontal_degrees: f32) -> f32 {
-    let horizontal = horizontal_degrees.to_radians();
-    2.0 * (horizontal / 2.0).tan().atan2(4.0 / 3.0)
+/// The shape of the frame being drawn into, which is the shape of the window: what
+/// [`vertical_fov`] divides by, and what the rasteriser's own projection uses.
+fn aspect(frame: &Frame) -> f32 {
+    frame.width as f32 / frame.height as f32
 }
 
 /// The terrain file a scene asks for. Most scenes name it `SX02.trn`, but what the archive holds is

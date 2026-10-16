@@ -19,7 +19,9 @@
 //! presets, to the actor or to a global would be state the port cannot have.
 
 use game_sim::air::AcosTable;
-use game_sim::camera::{CURVE_ENTRIES, CurveTable, Follow, Preset, Target, View, rotate};
+use game_sim::camera::{
+    CURVE_ENTRIES, CurveTable, Follow, Nothing, Preset, Surface, Target, View, rotate,
+};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, addr, game_or_skip};
 use std::cell::RefCell;
@@ -624,7 +626,10 @@ fn the_look_at_point_is_the_games_own() {
     let Some((mut ee, curve, _)) = harness() else { return };
     let mut g = Gen(0x5eed_0005);
     for case in 0..CASES {
-        let c = g.cam();
+        // `mut`, and the scene below, only because the look-at asks the ground probe for a lift: over
+        // `Nothing` that probe is the `return 0.0f` this class's vtable really holds, so what is
+        // compared here is the original's own function. S23's journal entry has the rest.
+        let mut c = g.cam();
         let t = g.target();
         let (speed, fov_ratio, swing) = (g.maybe_zero(0.0, 30.0), g.f(0.3, 1.0), g.maybe_zero(-1.0, 1.0));
         let (heading, reverse) = (g.dir(), g.b());
@@ -649,7 +654,17 @@ fn the_look_at_point_is_the_games_own() {
         only_touched_the_regions(&ee).unwrap();
         let theirs = snap(&ee);
 
-        let ours = c.look_at(speed, fov_ratio, swing, t.body_point, heading, t.vel, reverse, &curve);
+        let ours = c.look_at(
+            speed,
+            fov_ratio,
+            swing,
+            t.body_point,
+            heading,
+            t.vel,
+            reverse,
+            &curve,
+            &mut Nothing,
+        );
         reset(&mut ee);
         poke(&mut ee, &c);
         put_v(&mut ee, SCR_TARGET, t.body_point);
@@ -658,6 +673,117 @@ fn the_look_at_point_is_the_games_own() {
         put_v(&mut ee, SCR_LOOK_AT, ours);
         same(case, "look at", &theirs, &snap(&ee));
     }
+}
+
+/// A ground for the probe to find: a surface a fixed distance above — or below — whatever point it is
+/// asked about, and a note of the point it was asked about.
+///
+/// A fixed rise is what lets a case *choose* the lift the probe will answer, which is the only way the
+/// original can be made to answer the same one: its own probe needs a world object and a terrain tree,
+/// and this harness has neither. A rise below the point takes the probe's other arm, the decay, where
+/// the lift is zero because nothing has lifted it yet.
+struct Dirt {
+    rise: F,
+    asked: Vf,
+}
+
+impl Surface for Dirt {
+    fn on_surface(&mut self, point: Vf) -> Vf {
+        self.asked = point;
+        Vf::new(point.x(), (F(point.y()) + self.rise).0, point.z(), point.w())
+    }
+}
+
+/// The ground probe: the point it is asked about, and where its answer lands in the look-at.
+///
+/// The class this harness builds answers zero for every point — slot `+0x10c` is a `return 0.0f`,
+/// which is why `the_look_at_point_is_the_games_own` cannot see any of this: with a zero lift the probe
+/// could be asking about anywhere. So the slot is hooked here. The port runs first, over a [`Dirt`]
+/// that answers a chosen lift; the hook then hands the original *that* lift and writes down the point
+/// it was asked about. What this proves is the probe's point and the order its answer is added in — the
+/// lift's own arithmetic belongs to the derived class and is read off the disassembly, not run, which
+/// S23's journal entry says in as many words.
+#[test]
+fn the_ground_probes_point_is_the_games_own() {
+    let Some((mut ee, curve, _)) = harness() else { return };
+    let asked = Rc::new(RefCell::new(Vf::ZERO));
+    let answer = Rc::new(RefCell::new(0.0f32));
+    {
+        let (asked, answer) = (asked.clone(), answer.clone());
+        ee.hooks.insert(
+            addr("camera_ground_probe_zero").unwrap(),
+            Box::new(move |ee| {
+                let p = ee.r(5) as u32;
+                *asked.borrow_mut() = get_v(ee, p);
+                ee.set_f(0, *answer.borrow());
+            }),
+        );
+    }
+    let mut g = Gen(0x5eed_000c);
+    let mut lifted = 0;
+    for case in 0..CASES {
+        let mut c = g.cam();
+        // The look-back camera returns before the probe is ever asked, and has its own proof above.
+        c.presets[c.preset].is_look_back_cam = false;
+        let t = g.target();
+        let (speed, fov_ratio, swing) = (g.maybe_zero(0.0, 30.0), g.f(0.3, 1.0), g.maybe_zero(-1.0, 1.0));
+        let (heading, reverse) = (g.dir(), g.b());
+        let mut dirt = Dirt { rise: g.f(-20.0, 20.0), asked: Vf::ZERO };
+
+        // Ours first, because the hook has to hand the original the lift ours worked out.
+        let ours =
+            c.look_at(speed, fov_ratio, swing, t.body_point, heading, t.vel, reverse, &curve, &mut dirt);
+        *answer.borrow_mut() = c.ground_lift.0;
+        if c.ground_lift != F::ZERO {
+            lifted += 1;
+        }
+
+        reset(&mut ee);
+        poke(&mut ee, &c);
+        put_v(&mut ee, SCR_TARGET, t.body_point);
+        put_v(&mut ee, SCR_HEADING, heading);
+        put_v(&mut ee, SCR_VEL, t.vel);
+        ee.call(
+            addr("camera_look_at").unwrap(),
+            &[
+                SCR_LOOK_AT as u64,
+                CAM as u64,
+                SCR_TARGET as u64,
+                SCR_HEADING as u64,
+                SCR_VEL as u64,
+                reverse as u64,
+            ],
+            &[speed.0, fov_ratio.0, swing.0],
+            200_000,
+        );
+        only_touched_the_regions(&ee).unwrap();
+        let (theirs, theirs_asked) = (snap(&ee), *asked.borrow());
+
+        reset(&mut ee);
+        poke(&mut ee, &c);
+        put_v(&mut ee, SCR_TARGET, t.body_point);
+        put_v(&mut ee, SCR_HEADING, heading);
+        put_v(&mut ee, SCR_VEL, t.vel);
+        put_v(&mut ee, SCR_LOOK_AT, ours);
+        same(case, "look at over ground", &theirs, &snap(&ee));
+        assert_eq!(
+            [
+                theirs_asked.x().to_bits(),
+                theirs_asked.y().to_bits(),
+                theirs_asked.z().to_bits(),
+                theirs_asked.w().to_bits()
+            ],
+            [
+                dirt.asked.x().to_bits(),
+                dirt.asked.y().to_bits(),
+                dirt.asked.z().to_bits(),
+                dirt.asked.w().to_bits()
+            ],
+            "case {case}: the point the ground probe was asked about"
+        );
+    }
+    println!("{lifted} of {CASES} cases found ground above the probe's point and lifted the look-at");
+    assert!(lifted > 100, "the generator did not reach the lift");
 }
 
 /// Where the camera is. The original's routine also computes a yaw-driven sideways swing into stack

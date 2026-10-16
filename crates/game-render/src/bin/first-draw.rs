@@ -222,7 +222,7 @@ fn run() -> Result<(), String> {
                 90.0 - p.angle_x,
                 p.fov
             );
-            Camera::chase(stand, dir, p)
+            Camera::chase(stand, dir, p, width as f32 / height as f32)
         }
         None => Camera::behind(stand, dir),
     };

@@ -199,7 +199,10 @@ added beside them:
     camera, the target point and the look-ahead it leads the rider by, the eight first-order lags that
     make it follow instead of snap, and the limits on its yaw, pitch, distance and field of view.
     Presentation, not simulation — it reads the rider and writes a view, and touches neither the RNG
-    nor the clock. Proved against the original in `tests/camera.rs` (S7).
+    nor the clock. Proved against the original in `tests/camera.rs` (S7). Its two questions about the
+    world are `trait Surface`, the ground under the look-at point, and `trait Obstacles`, the nearest
+    solid thing in front of the lens; `Nothing` answers neither, which is what the class the original
+    reads answers, and a track answers both through `world.rs` (S23).
   - `motion.rs` — animation driving: which motion a rider's state plays, how far into it the frame is,
     and how two of them blend. The action-id switch, the cross-fade that makes a motion start from the
     pose the rider already had, the airborne pair chosen by the fore-aft lean with the shown crossup a
@@ -210,7 +213,8 @@ added beside them:
     surface, from the ported terrain query) and the scene's collision placements swept as one bundle,
     each placement's mesh in its own space, so a prop stops the rider the way the original's does.
     `trait World` is the one seam between the ride and a track; `Flat` is the void a test rides in
-    (P2).
+    (P2). The follow camera's two probes are answered here too, off the same terrain and the same
+    placements (S23).
   - `ride.rs` — **the bike as one state**: the player's ride, driven by `move.rs`'s ground step with
     `wheel.rs`, `chassis.rs`, `air.rs` and `collide.rs` behind it on the parameters `phy.rs` reads off
     the disc. The input layer's rate limit, the frame's four steps in the original's order, and the

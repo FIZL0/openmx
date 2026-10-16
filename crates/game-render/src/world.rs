@@ -153,8 +153,12 @@ impl Camera {
 
     /// The camera the game itself follows a rider with, from a preset of the track's `cpresets.ini`.
     /// `AngleY` turns it around the bike (180 is straight behind), `AngleX` is measured away from
-    /// straight up, and the field of view in the file is the horizontal one at 4:3.
-    pub fn chase(pos: V3, dir: V3, preset: &Preset) -> Camera {
+    /// straight up, and the field of view in the file is the horizontal one — `aspect` is the shape of
+    /// the frame it will be drawn into, which is what turns it into the vertical one the projection
+    /// wants. The original reads that term out of its viewport too, so a frame that is not 4:3 is not
+    /// the disc's 4:3 picture stretched: it keeps the horizontal sweep and takes the vertical one from
+    /// its own shape.
+    pub fn chase(pos: V3, dir: V3, preset: &Preset, aspect: f32) -> Camera {
         let dir = dir.norm();
         let yaw = preset.angle_y.to_radians();
         // `dir` turned about the up axis, so yaw 180 points from the bike back towards the camera.
@@ -164,11 +168,10 @@ impl Camera {
         let eye = pos
             .add(away.scale(preset.distance * up_from_x.cos()))
             .add(v3(0.0, preset.distance * up_from_x.sin(), 0.0));
-        let horizontal = preset.fov.to_radians();
         Camera {
             eye,
             at: pos.add(dir.scale(preset.look_ahead)),
-            fov: 2.0 * (horizontal / 2.0).tan().atan2(4.0 / 3.0),
+            fov: vertical_fov(preset.fov, aspect),
             near: 0.05,
             far: 4000.0,
         }
@@ -180,6 +183,23 @@ impl Camera {
         M4::look_at(self.eye, self.at, v3(0.0, 1.0, 0.0))
             .mul(M4::perspective(self.fov, aspect, self.near, self.far))
     }
+}
+
+/// The disc's field of view — horizontal, in degrees — as the vertical one in radians that [`Camera`]
+/// and [`M4::perspective`] want, for a viewport of the given aspect.
+///
+/// This is the original's own conversion, and `aspect` is a term it reads out of its viewport rather
+/// than a constant: the engine builds its projection from the horizontal angle alone, takes the half
+/// width at the near plane as `near * tan(fov / 2)`, and divides *that* by the viewport's aspect for
+/// the half height. So the angle in `cpresets.ini` is horizontal on every shape of window and the
+/// vertical angle follows the window — which is also what that projection does to a split screen's
+/// half-height viewport: the full horizontal sweep, and about half the vertical one.
+///
+/// At 4:3 it answers the 68.997 degrees down that the frame in the human's save state was drawn with
+/// (V2), from the 85 across that `Preset1` asks for.
+pub fn vertical_fov(horizontal_degrees: f32, aspect: f32) -> f32 {
+    let horizontal = horizontal_degrees.to_radians();
+    2.0 * (horizontal / 2.0).tan().atan2(aspect)
 }
 
 /// How a scene's lights and fog are applied, pulled out of the `.scn` once.
