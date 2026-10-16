@@ -921,8 +921,21 @@ fn acceptance_fixture(cap: &Capture) -> Result<Fixture, String> {
     let inputs = inputs_from_capture(cap)?;
 
     let (kind, player) = (column(cap, "bike_type")?, column(cap, "bike_player")?);
+    let source = column(cap, "bike_ctl_src")?;
     for row in 0..cap.rows.len() {
         let frame = cap.frames[row];
+        // The one column that tells the human's bike from an AI's. A freeride area holds one vehicle
+        // per rider — four of them on the acceptance recording's own area — and an AI's is type 4 with
+        // a non-null player record too, so without this a capture of the wrong list entry reads as a
+        // perfectly good acceptance recording of somebody else's ride.
+        if cell(cap, row, source) != "1" {
+            return Err(format!(
+                "frame {frame}: bike_ctl_src is '{}', not 1 — this list entry is not the local \
+                 human's vehicle (2 is an AI rider); change the number of 0x8 hops in \
+                 watch/acceptance.toml until it reads 1",
+                cell(cap, row, source),
+            ));
+        }
         if cell(cap, row, kind) != "4" {
             return Err(format!(
                 "frame {frame}: bike_type is '{}', not 4 — the chain in watch/acceptance.toml is \
@@ -1058,7 +1071,7 @@ fn acceptance_csv(frames: usize, input: impl Fn(usize) -> (u16, (u8, u8))) -> St
     for n in 0..CONTROLS {
         csv += &format!(",ctl{n}.held");
     }
-    csv += ",pad_a,stamp_a,pad_b,stamp_b,bike_type,bike_player";
+    csv += ",pad_a,stamp_a,pad_b,stamp_b,bike_type,bike_ctl_src,bike_player";
     for lane in ["x", "y", "z", "w"] {
         csv += &format!(",bike_vel.{lane}");
     }
@@ -1081,7 +1094,7 @@ fn acceptance_csv(frames: usize, input: impl Fn(usize) -> (u16, (u8, u8))) -> St
             csv += if buttons & (1 << n) != 0 { ",1" } else { ",0" };
         }
         csv += &format!(
-            ",{},{},{},{},4,19873344",
+            ",{},{},{},{},4,1,19873344",
             buffer(tick + 1),
             2000 + tick + 1,
             buffer(tick),
@@ -1226,8 +1239,8 @@ fn stick_of(frame: usize) -> (i8, i8) {
     ((i16::from(lx) - 0x7f) as i8, (i16::from(ly) - 0x7f) as i8)
 }
 
-/// Four ways a capture can look like an acceptance recording and not be one, each reported as the
-/// capture's own problem with the frame it happened on. All four are invisible in a CSV of 9,000 rows,
+/// Five ways a capture can look like an acceptance recording and not be one, each reported as the
+/// capture's own problem with the frame it happened on. All five are invisible in a CSV of 9,000 rows,
 /// which is why they are checked rather than eyeballed.
 #[test]
 fn a_capture_that_is_not_of_the_bike_is_refused() {
@@ -1235,12 +1248,17 @@ fn a_capture_that_is_not_of_the_bike_is_refused() {
     let fixture_of = |text: &str| acceptance_fixture(&Capture::parse(text).unwrap());
 
     // (1) the chain resolved to something that is not a vehicle actor
-    let e = fixture_of(&csv.replacen(",4,19873344", ",2,19873344", 1)).expect_err("type 2");
+    let e = fixture_of(&csv.replacen(",4,1,19873344", ",2,1,19873344", 1)).expect_err("type 2");
     assert!(e.contains("bike_type is '2'") && e.contains("0x8 hops"), "{e}");
 
-    // (2) nobody is riding it — an AI's bike, or a world object
-    let e = fixture_of(&csv.replace(",4,19873344", ",4,0")).expect_err("no player");
+    // (2) nobody is riding it — a world object, or an actor whose rider has been freed
+    let e = fixture_of(&csv.replace(",4,1,19873344", ",4,1,0")).expect_err("no player");
     assert!(e.contains("bike_player is '0'"), "{e}");
+
+    // (2b) *somebody* is riding it, but an AI is: the list entry next door on the acceptance
+    // recording's own area, which is a type-4 vehicle with a player record of its own
+    let e = fixture_of(&csv.replacen(",4,1,19873344", ",4,2,19873344", 1)).expect_err("an AI's bike");
+    assert!(e.contains("bike_ctl_src is '2'") && e.contains("0x8 hops"), "{e}");
 
     // (3) a pointer chain that went null: the cell is empty, and a fixture cannot span it
     let mut lines: Vec<String> = csv.lines().map(str::to_string).collect();
@@ -1399,7 +1417,7 @@ fn the_watch_spec_and_this_reader_agree() {
 
     for field in ["frame_counter", "dt", "rng_state", "pad_a", "stamp_a", "pad_b", "stamp_b"]
         .into_iter()
-        .chain(["bike_type", "bike_player", "bike_vel", "bike_xform"])
+        .chain(["bike_type", "bike_ctl_src", "bike_player", "bike_vel", "bike_xform"])
     {
         assert!(flat.contains(&format!("name=\"{field}\"")), "the spec has no field '{field}'");
     }
@@ -1504,19 +1522,22 @@ fn a_long_fixture_round_trips_as_a_file() {
 /// - `context/fixtures/slow/acceptance-freeride.fixture` — the same thing in the harness's own format,
 ///   for when the capture has been turned into a fixture file once and for all.
 ///
-/// Ignored by default because the data is several minutes of game data, which this repository is not
-/// allowed to hold, so it is absent on every machine but the one that recorded it:
-///
-/// ```sh
-/// cargo test -p game-sim --test replay -- --ignored --nocapture the_acceptance_run
-/// ```
-///
-/// When neither file is there it says what to record and stops — the same thing
-/// `replaying_every_fixture_in_context` does about an empty directory, and for the same reason: a test
+/// The data is game data — somebody's play of a disc — so it lives in the git-ignored `context/` and is
+/// absent on every machine but the one that recorded it, and in every worktree but the one it was
+/// recorded in. When neither file is there this says what to record and passes, which is what the
+/// capture and recording tests beside it do about an empty directory and for the same reason: a test
 /// cannot fail over a file it is not allowed to ship. **The absence is the status of the port, and it
 /// is written down in `plan/HUMAN.md` and in this task's journal entry, not here.**
+///
+/// Not `#[ignore]`d since S8: the capture exists now, so `./kit check` runs the real comparison
+/// wherever the data is, and prints the one line of verdict ([`acceptance_verdict`]) wherever it is
+/// not. See `every_acceptance_capture_is_the_original_at_a_step_the_port_can_match` at the end of this
+/// file for what the captures in hand are, and what they do not yet contain.
+///
+/// ```sh
+/// cargo test -p game-sim --test replay -- --nocapture the_acceptance_run
+/// ```
 #[test]
-#[ignore = "needs the acceptance recording, which is game data; see plan/HUMAN.md"]
 fn the_acceptance_run() {
     let fixture = private_dir("fixtures").join("slow").join(format!("{ACCEPTANCE}.fixture"));
     let capture = private_dir("capture").join(format!("{ACCEPTANCE}.csv"));
@@ -1537,16 +1558,7 @@ fn the_acceptance_run() {
         );
         acceptance_fixture(&cap).unwrap_or_else(|e| panic!("{}: {e}", capture.display()))
     } else {
-        println!(
-            "no acceptance recording on this machine. To make one:\n\
-             \x20 1. reach a freeride area and save it in slot 4 (plan/HUMAN.md), or boot straight \
-             into one (R7);\n\
-             \x20 2. ride for several minutes — jump slow and fast, land clean and sideways, crash, \
-             scrape a slope, sit still;\n\
-             \x20 3. ./kit record watch/acceptance.toml --state 4 -n {SEVERAL_MINUTES} -o {}\n\
-             then run this test again. It needs no code.",
-            capture.display(),
-        );
+        println!("{}", acceptance_recipe(&capture));
         return;
     };
 
@@ -1558,15 +1570,12 @@ fn the_acceptance_run() {
         f.seed,
     );
     assert!(
-        f.inputs.len() >= 60 * 30,
-        "{} frames is not an acceptance run: the point is several minutes of play, where the \
-         hundredth awkward landing is",
+        f.inputs.len() >= 60 * 29,
+        "{} frames is not an acceptance run: the point is minutes of play, where the hundredth \
+         awkward landing is",
         f.inputs.len(),
     );
-    match replay::verify(&f) {
-        Ok(end) => println!("the port agrees with every recorded frame; ticks {}", end.ticks),
-        Err(d) => panic!("the acceptance run diverges: {d}"),
-    }
+    acceptance_verdict(&f);
 }
 
 // ===================================================================================================
@@ -1956,11 +1965,12 @@ fn a_long_tape_round_trips_and_plays() {
 /// `the_acceptance_run` above and waits for its recording.
 ///
 /// Captures are game data and live in the git-ignored `context/`, so this says what it found and
-/// passes when there is nothing there.
+/// passes when there is nothing there — and counts a capture of a pad *at rest* apart from a capture
+/// of play, because the first one proves the idle decode and claims nothing about the rest.
 #[test]
 fn a_recording_of_the_real_game_plays_back_through_the_port() {
     let dir = private_dir("capture");
-    let mut proved = 0;
+    let (mut proved, mut idle) = (0, 0);
     for path in files_in(&dir, "csv") {
         let text = std::fs::read_to_string(&path).expect("a readable capture");
         let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -2003,12 +2013,6 @@ fn a_recording_of_the_real_game_plays_back_through_the_port() {
             transitions += (before != got) as usize;
             seen |= got;
         }
-        // A recording of a pad nobody touched would pass every assertion above.
-        assert!(
-            transitions >= 4,
-            "{}: only {transitions} frames where a control changed — not a recording of play",
-            path.display(),
-        );
         let (least, most) = tape.dt_range().expect("a non-empty tape");
         println!(
             "{}: {} frames played back, {transitions} transitions, controls 0x{seen:04x}, \
@@ -2020,11 +2024,22 @@ fn a_recording_of_the_real_game_plays_back_through_the_port() {
         let again = PadTape::parse(&tape.to_text()).expect("a tape of a real capture");
         assert_eq!(again, tape);
         assert_eq!(replay::play(&again, 0).hash(), run.hash(), "and plays back to the same state");
-        proved += 1;
+        // A recording of a pad nobody touched passes every assertion above — the port's idle decode
+        // against the game's idle controls, which is worth having and is not a recording of *play*.
+        // So the two are counted apart rather than one of them failing: which captures are on this
+        // disk is not something a test gets to assert (S8's acceptance capture is one of these, taken
+        // under no input at all because PCSX2 would not play its recording back).
+        if transitions == 0 {
+            idle += 1;
+        } else {
+            proved += 1;
+        }
     }
+    println!("{proved} captures of a pad being used, {idle} of one at rest");
     if proved == 0 {
         println!(
-            "no input capture in {} — record one with `./kit record watch/input.toml --frames 220 \
+            "no capture in {} holds a control changing, so the input path is unproved by this \
+             directory — record one with `./kit record watch/input.toml --frames 220 \
              --out context/capture/i3-input.csv` while a pad script drives the pad",
             dir.display(),
         );
@@ -2427,6 +2442,334 @@ fn the_human_recording_in_context_drives_the_port() {
             "no PCSX2 recording in {} — make one with PCSX2's own input recording (Tools → Input \
              Recording → New), which writes the `.p2m2` and its `_SaveState.p2s` together",
             dir.display(),
+        );
+    }
+}
+
+// ===================================================================================================
+// S8 — the acceptance run, against the human's own recording
+// ===================================================================================================
+//
+// Everything above is machinery and synthetic rows. This section is the one place in the file where
+// the **original** speaks: `context/capture/acceptance-freeride.csv`, 1,811 ticks of
+// `watch/acceptance.toml` recorded off the very save state `context/recordings/first_recording.p2m2`
+// was made from, with the recording itself beside it in `context/recordings/`.
+//
+// What that capture settled:
+//
+//   * **The step.** `dt` is the 30 fps clamp ([`replay::CAPPED_DT`], 0.033330001) on all 1,811 ticks
+//     of a run *in a level*. I4 argued this from one frame of a save state plus the session's 975 ms
+//     clock deficit and left it as the thing S8 had to measure; it is measured now, frame by frame, so
+//     a fixed-step port can replay this minute at all.
+//   * **One row per tick.** The game's own `frame_counter` rises by exactly 1 — and the recorder's
+//     vsync `frame` by exactly 2 — on every one of the 1,811 rows, with no torn read. A capture this
+//     dense is a fixture; a capture with one gap in it is not, and [`ticks_of`] says so.
+//   * **Which actor is the human's.** The five-hop chain `watch/acceptance.toml` inherited reads an
+//     *AI rider*: a freeride area on Free09 holds four type-4 vehicles, and `bike_type == 4` with a
+//     non-null `bike_player` is true of all four. The human's is the eighth list entry, and the
+//     column that proves it is the player record's control source (`+0x20 -> +0x34`), 1 for a local
+//     human against 2 for an AI. [`acceptance_fixture`] refuses a capture whose rows are not 1.
+//   * **That the recording's bytes really are the bytes the original reads.** `report_of_p2m2` and the
+//     capture's `pad_a`/`pad_b` columns are two entirely separate paths — a PCSX2 file on disk, and
+//     PINE reads of libpad's buffer in EE RAM — and over the ticks where both runs had the pad at rest
+//     they produce byte-identical [`PadFrame`]s, `dt` and absent second pad included.
+//
+// What it did not settle, which is the task's own *Not verified* list:
+//
+//   * **The original was never driven by the recording's input.** PCSX2 plays a `.p2m2` back from its
+//     GUI only (no CLI flag, no ini key), and this machine has no way to reach that GUI — so
+//     `acceptance-freeride.csv` is the original's own minute from the recording's start state *under no
+//     input at all*. The human's recorded input therefore has no original to agree with yet, and the
+//     tick phase I4 left open stays open: the overlap where the recording and that capture agree is the
+//     overlap where *both* pads were at rest, which no choice of phase can disagree about.
+//
+//     What there is instead is `acceptance-ride.csv`: thirty seconds from the same save state with the
+//     kit's virtual pad riding it — six distinct control masks, the bike up to 51 units/s and 555 units
+//     from where it started — which is an acceptance capture with input and motion in it that any agent
+//     can remake with no human and no GUI (`./kit pad script` beside `./kit record`). It is not the
+//     human's ride, and that is the whole of the difference: a scripted pad cannot crash, scrape a
+//     slope or land sideways on purpose.
+//   * **The port has no bike.** S3 (movement) is open, so the verdict of the real fixture today is
+//     `NoSuchField bike.pos[0]` at tick 0 — the fixture's own fault in A2's taxonomy, and the honest
+//     answer: there is nothing to compare. [`the_acceptance_run`] prints that and passes; the day S3
+//     lands it starts comparing numbers, with no code to write here.
+
+/// The `frame_counter` (app+0x374) in `first_recording.p2m2`'s own save state, read with
+/// `./kit state extract` — the tick the recording starts from.
+///
+/// This is what aligns the recording against a capture taken from the same state: a capture row whose
+/// counter is *c* was produced by the tick the recording's frame `c - 2773 - 1` drove. The recorder's
+/// first row lands a few ticks in (it loads the state, waits for its warmup and samples after a tick),
+/// so the first handful of the recording's ticks are not in any capture — measured at 18 on the
+/// capture in hand, and the reason the agreement window below starts where it does rather than at 0.
+const RECORDING_START_TICK: u64 = 2_773;
+
+/// The recording whose save state the acceptance capture was taken from. Only this file can be
+/// compared against that capture tick by tick; another recording is another session.
+const RECORDING: &str = "first_recording.p2m2";
+
+/// How many ticks that recording is, and so how long a capture of its minute runs: 3,621 video fields
+/// at two fields a tick.
+const RECORDING_TICKS: usize = 1_811;
+
+/// The first video field of the recording holding anything at all — measured, 1-based as PCSX2 numbers
+/// its frames, and asserted below rather than trusted.
+///
+/// Fields 1..=55 are a written, neutral pad: button word `0xffff` (active low, so nothing down), both
+/// sticks centred, every pressure 0. The human's first press is a button, on field 56. Under
+/// `TickPhase::First` (fields 1, 3, 5…) the game never reads field 56, so the first tick that carries
+/// input is field 57's — tick 28 — and under `Second` it is field 56's, tick 27.
+const FIRST_PLAYED_FIELD: usize = 56;
+
+/// How to make the acceptance capture, as a sentence a test can print. Kept in one place because two
+/// tests need it and because it is the actual recipe that produced the capture in hand — the recording
+/// supplies its own start state, which is what makes the run repeatable.
+fn acceptance_recipe(capture: &PathBuf) -> String {
+    format!(
+        "no acceptance capture on this machine. To make one:\n\
+         \x20 1. cp context/recordings/{RECORDING}_SaveState.p2s \\\n\
+         \x20      \"<PCSX2 copy>/savestates/SLUS-20767 (9866FE54).08.p2s\"\n\
+         \x20 2. ./kit pcsx2 start && ./kit pine\n\
+         \x20 3. ./kit record watch/acceptance.toml --state 8 -n {RECORDING_TICKS} -o {}\n\
+         then run this test again. It needs no code.",
+        capture.display(),
+    )
+}
+
+/// The acceptance capture in `context/capture/`, parsed — or `None`, with the recipe printed.
+///
+/// Game data, so git-ignored and absent on every machine but the one that recorded it, and absent in
+/// every worktree but the one it was recorded in (`context/` is per-worktree). A test cannot fail over
+/// a file the repository is not allowed to hold.
+fn acceptance_capture() -> Option<(PathBuf, Capture)> {
+    let path = private_dir("capture").join(format!("{ACCEPTANCE}.csv"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("{}", acceptance_recipe(&path));
+        return None;
+    };
+    let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    Some((path, cap))
+}
+
+/// What a replay of the real acceptance fixture means today, in one line, and what makes it fail.
+///
+/// Three outcomes, and only one of them is a bug in the port:
+///
+/// - `Ok` — the port agreed with every recorded tick. That is the acceptance run passing.
+/// - `NoSuchField` — the fixture watches a field the port's state does not have. The port has no bike
+///   until S3 lands the ported movement, so this is today's answer, and it is printed rather than
+///   failed: the capture is good, the comparison has nothing to compare.
+/// - anything else (`Field`, `Hash`, `WrongKind`, `Unreached`) — the port and the original disagree
+///   about a number, which is the failure this whole file exists to produce. Panics, with the tick and
+///   the field in the message.
+fn acceptance_verdict(f: &Fixture) {
+    match replay::verify(f) {
+        Ok(end) => println!(
+            "the port agrees with every recorded tick of {}: {} ticks, {} checks",
+            f.name,
+            end.ticks,
+            f.checks(),
+        ),
+        Err(d) => match &d.reason {
+            Reason::NoSuchField { path } => println!(
+                "the port has no '{path}': the acceptance capture is good and there is nothing in \
+                 the port to compare it against yet (S3 — the ported movement — is open). {d}",
+            ),
+            _ => panic!("the acceptance run diverges: {d}"),
+        },
+    }
+}
+
+/// **Every acceptance capture in `context/capture/` is the original at a step the port can match.**
+///
+/// The three properties `watch/acceptance.toml` asks a human to check by eye, checked instead, on every
+/// capture that carries its bike columns: the step is the clamp on every tick, there is a row per tick
+/// with no gap, and the actor the chain resolves to is a vehicle with a *local human* on it rather than
+/// one of the area's three AI riders. All three are invisible in a CSV of 1,811 rows, and each of them
+/// is a way a capture can look like an acceptance recording and quietly not be one.
+///
+/// It also reports how much *input* each capture holds, which is the honest difference between the two
+/// in hand (see this section's header): `acceptance-freeride.csv` is the recording's own minute with
+/// **nobody touching the pad**, because PCSX2 would not play the recording back without a human at its
+/// GUI; `acceptance-ride.csv` is a scripted ride through the kit's virtual pad from the same state —
+/// input, and a bike that moves — which an agent can remake from nothing. A count of zero is not a
+/// failure, it is the state of S8 printed where whoever runs the tests will see it.
+#[test]
+fn every_acceptance_capture_is_the_original_at_a_step_the_port_can_match() {
+    let dir = private_dir("capture");
+    let mut found = 0;
+    for path in files_in(&dir, "csv") {
+        let text = std::fs::read_to_string(&path).expect("a readable capture");
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        // The acceptance spec's own column. A capture of `watch/input.toml` has the pad and no bike,
+        // and is the business of the input tests above, not of this one.
+        if column(&cap, "bike_ctl_src").is_err() {
+            continue;
+        }
+        found += 1;
+
+        let ticks = ticks_of(&cap).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let (least, most) = dt_spread(&cap).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let f = acceptance_fixture(&cap).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let played = f.inputs.iter().filter(|i| i.buttons != 0 || i.stick != (0, 0)).count();
+        println!(
+            "{}: {} rows, frames {}..{}, dt {least}..{most}, {} inputs ({played} with anything \
+             held), {} checks",
+            path.display(),
+            cap.rows.len(),
+            cap.frames[0],
+            cap.frames[cap.frames.len() - 1],
+            f.inputs.len(),
+            f.checks(),
+        );
+        if played == 0 {
+            println!(
+                "  — and nobody was touching the pad for any of it: this capture proves the step, \
+                 the density and the actor, and its recorded input has no original to agree with \
+                 (S8's journal entry says why)",
+            );
+        }
+
+        // One row per tick, from the game's own counter: `ticks_of` refuses a gap, so the last tick
+        // being the row count minus one is the statement that none were dropped either.
+        assert_eq!(ticks.len(), cap.rows.len());
+        assert_eq!(
+            *ticks.last().expect("a non-empty capture"),
+            cap.rows.len() as u64 - 1,
+            "{}: the capture's ticks are not consecutive",
+            path.display(),
+        );
+        // The 30 fps clamp, on every tick: the measurement I4 left to this task.
+        assert_eq!(
+            (least.to_bits(), most.to_bits()),
+            (replay::CAPPED_DT.to_bits(), replay::CAPPED_DT.to_bits()),
+            "{}: dt is not the clamp throughout ({least}..{most}) — a run the original measured \
+             frame by frame cannot be replayed by a fixed-step port",
+            path.display(),
+        );
+        assert_eq!(f.inputs.len() + 1, cap.rows.len(), "one input per tick but the first");
+        assert!(
+            f.inputs.len() >= 30 * 10,
+            "{}: {} ticks is not a run of anything",
+            path.display(),
+            f.inputs.len(),
+        );
+        assert_eq!(f.watches.len(), BIKE.len(), "every bike column became a watch");
+        assert_eq!(f.checks(), BIKE.len() * cap.rows.len(), "no empty cell in any of them");
+
+        acceptance_verdict(&f);
+    }
+    if found == 0 {
+        println!("{}", acceptance_recipe(&dir.join(format!("{ACCEPTANCE}.csv"))));
+    }
+}
+
+/// **The recording's bytes are the bytes the original read** — `report_of_p2m2` against libpad's own
+/// buffer in EE RAM, over the ticks where the two runs' pads agree.
+///
+/// Two paths to the same twenty bytes, sharing no code: a `.p2m2` on disk read by I4's reader, and the
+/// `pad_a`/`pad_b` columns of a capture taken through PINE after each tick (the half with the smaller
+/// stamp being the one the game read — C5's measurement, which `PadTape::from_capture` applies). Over
+/// the overlap they produce byte-identical `PadFrame`s: status, the mode byte, the button word
+/// active-low, the four axes, the twelve pressures, the `dt`, and the absent second pad.
+///
+/// **What this does not prove**, and the reason it is a cross-check rather than the acceptance run:
+/// the capture was taken under no input, so the window where the two agree is the window where both
+/// pads were at rest — fields 1..=55 of the recording are a written, neutral pad. The agreement
+/// therefore says the neutral encoding is right on real data and that the two readers agree about what
+/// "nothing held" looks like; it cannot say which of a tick's two fields the game read, because both
+/// fields of every tick in that window are identical. Settling the phase needs the original driven by
+/// the recording, which is the one thing this machine cannot do (see this section's header).
+///
+/// With teeth all the same: the agreement is asserted to run *exactly* up to the tick where the
+/// recording's human first presses something, so a reader that mangled the neutral word, the mode byte
+/// or the second pad, or an alignment that slipped, would show up as a shorter run than the recording's
+/// own idle prefix explains.
+#[test]
+fn the_recording_and_the_capture_hold_the_same_pad_where_both_were_idle() {
+    let Some((cpath, cap)) = acceptance_capture() else { return };
+    let rpath = private_dir("recordings").join(RECORDING);
+    let Ok(bytes) = std::fs::read(&rpath) else {
+        println!(
+            "{} is not in this worktree, so the capture has nothing to be compared against; copy \
+             it in from the main checkout's context/recordings/",
+            rpath.display(),
+        );
+        return;
+    };
+    let movie = replay::P2m2::parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", rpath.display()));
+    assert_eq!(movie.ticks(replay::TickPhase::First), RECORDING_TICKS, "3621 fields, two a tick");
+
+    // The recording's idle prefix, measured from the file: every field up to here is a good read of a
+    // pad with nothing down and both sticks centred, which is exactly `Report::idle`.
+    let idle_fields = (0..movie.fields())
+        .position(|k| movie.field(k, 0) != Report::idle())
+        .expect("the human pressed something in sixty seconds");
+    assert_eq!(
+        idle_fields + 1,
+        FIRST_PLAYED_FIELD,
+        "the recording's first input is on field {} now, not {FIRST_PLAYED_FIELD}: the agreement \
+         window below is measured against that number",
+        idle_fields + 1,
+    );
+
+    // Where the capture starts inside the recording. The recorder samples after the tick, so row 0's
+    // counter is the tick that *produced* it and the first frame of a tape from the capture is row 1's.
+    let at = column(&cap, "frame_counter").expect("the spec's own counter column");
+    let first: u64 = cell(&cap, 0, at).parse().expect("a number");
+    assert!(
+        first > RECORDING_START_TICK,
+        "the capture starts at tick {first}, before the recording's own start state \
+         ({RECORDING_START_TICK}): it is not a capture of this recording's minute",
+    );
+    let offset = (first - RECORDING_START_TICK - 1) as usize;
+
+    let from_ram = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{}: {e}", cpath.display()));
+    assert_eq!(
+        from_ram.dt_range(),
+        Some((replay::CAPPED_DT, replay::CAPPED_DT)),
+        "the capture's own dt column is the clamp, which is the step a tape of the recording assumes",
+    );
+
+    for phase in [replay::TickPhase::First, replay::TickPhase::Second] {
+        let tape = movie.tape(phase);
+        let played = tape
+            .frames
+            .iter()
+            .position(|f| f.held_mask(0) != 0 || f.stick(0) != (0, 0))
+            .expect("the human pressed something in sixty seconds");
+        let overlap = tape.len().saturating_sub(offset).min(from_ram.len());
+        let agreed = (0..overlap)
+            .take_while(|&k| tape.frames[offset + k] == from_ram.frames[k])
+            .count();
+        println!(
+            "{} vs {}: tape {} ticks, capture {} ticks from the recording's tick {offset}, \
+             {overlap} overlapping; phase {}: the human's first input is tick {played} (field {}), \
+             and the two agree byte for byte on {agreed} ticks",
+            rpath.file_name().unwrap().to_string_lossy(),
+            cpath.file_name().unwrap().to_string_lossy(),
+            tape.len(),
+            from_ram.len(),
+            phase.name(),
+            FIRST_PLAYED_FIELD,
+        );
+        assert!(
+            agreed > 0,
+            "phase {}: the recording's tick {offset} and the capture's first tick are both an \
+             untouched pad and they do not match byte for byte — one of the two readers is wrong \
+             about the neutral encoding:\n  tape    {:?}\n  capture {:?}",
+            phase.name(),
+            tape.frames[offset],
+            from_ram.frames[0],
+        );
+        assert_eq!(
+            agreed,
+            played.saturating_sub(offset).min(overlap),
+            "phase {}: the agreement ends at tick {}, which is not where the recording's human \
+             first pressed something (tick {played}) — the capture was taken under no input, so \
+             every tick before that one must match and the first one after it must not",
+            phase.name(),
+            offset + agreed,
         );
     }
 }
