@@ -44,6 +44,7 @@
 #![forbid(unsafe_code)]
 
 mod ground;
+mod moment;
 mod pad;
 mod ride;
 mod window;
@@ -63,6 +64,7 @@ use game_sim::{Input, track};
 use ps2_float::F;
 
 use ground::Ground;
+use moment::{Moment, Shot};
 use pad::Pads;
 use ride::{Controls, Ride};
 use window::{Window, key};
@@ -149,6 +151,9 @@ struct Args {
     display: String,
     /// Write the first frame here and keep riding — how an unattended run proves what it drew.
     shot: Option<std::path::PathBuf>,
+    /// Draw one frame posed from a moment of the original (V2) instead of riding: the moment file
+    /// and the path to write that frame to.
+    moment: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 fn run() -> Result<(), String> {
@@ -250,6 +255,26 @@ fn run() -> Result<(), String> {
         heading.to_degrees(),
         ride.pos.y
     );
+
+    // ---- one frame of the original, posed from a save state (V2) -------------------------------
+    // Everything the picture needs is loaded by now, and nothing a window or a pad gives is wanted:
+    // the pose is the original's, not this shell's.
+    if let Some((file, out)) = &args.moment {
+        let moment = Moment::read(file)?;
+        if !moment.track.is_empty() && !moment.track.eq_ignore_ascii_case(&args.track) {
+            return Err(format!(
+                "the moment is on {} and the shell was pointed at {}",
+                moment.track, args.track
+            ));
+        }
+        let shot = Shot {
+            width: args.width,
+            height: args.height,
+            ground_radius: GROUND_RADIUS,
+            chassis: CHASSIS,
+        };
+        return moment::draw(&moment, out, &shot, &ground, &assets, &vehicle, &look);
+    }
 
     // ---- the window and the pad ---------------------------------------------------------------
     let mut window = Window::open(
@@ -462,6 +487,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         seconds: None,
         pad: None,
         shot: None,
+        moment: None,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
     };
     let mut argv = std::env::args().skip(1);
@@ -472,6 +498,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--bike" => args.bike = next("a bike name, like 125sx")?,
             "--pad" => args.pad = Some(next("a device, like /dev/input/js0")?),
             "--shot" => args.shot = Some(next("a path for the first frame")?.into()),
+            "--moment" => {
+                let file: std::path::PathBuf = next("a moment file")?.into();
+                let out: std::path::PathBuf = next("a path for the frame")?.into();
+                args.moment = Some((file, out));
+            }
             "--display" => args.display = next("a display, like :0")?,
             "--seconds" => {
                 args.seconds = Some(
@@ -501,11 +532,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                 println!(
                     "openmx [--track free06] [--bike 125sx] [--size 640x448] [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
+                            [--moment FILE OUT.png]\n\
                      \n\
                      Rides the freeride area from the disc named in kit.toml.\n\
                      Cross throttle, Square brake, left stick steers, Triangle respawns,\n\
                      Start freezes, L1/R1 change camera, Escape quits.\n\
-                     On the keyboard: X throttle, Z brake, arrows steer, V respawn, Return start."
+                     On the keyboard: X throttle, Z brake, arrows steer, V respawn, Return start.\n\
+                     --moment draws one frame posed from a moment of the original and quits."
                 );
                 return Ok(None);
             }

@@ -51,8 +51,6 @@ half-ported ones, and it is the first time the port is worth running.
 
 ### Phase 8 — showing it
 
-- [ ] **V2** (after V1) Side-by-side screenshots: the same moment in the original and in the port, from the same save state, in `context/shots/`, with the differences listed. Do this once a subsystem lands, not once at the end → context/shots/ | t: none (by eye) | j: v2-side-by-side
-
 ### Stretch
 
 Worth doing, not worth blocking on. Nothing here is picked up by an unattended run.

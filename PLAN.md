@@ -207,6 +207,9 @@ added beside them:
     reader does not read an off-road layout.
   - `ride.rs` — **not a port**: a stand-in for the bike's ground physics while S3 is unwritten. Host
     floats, invented constants, outside `game-sim` on purpose, and deleted when S3 lands.
+  - `moment.rs` — `--moment FILE OUT.png`: one frame posed from a moment file (a bike's transform and
+    the frame's camera, read out of a save state by `research/shots/moment.py`) instead of from the
+    simulation, so the port's picture can be put beside the original's (V2).
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the
