@@ -199,6 +199,13 @@ pub mod archive;
 /// say how that was checked, and what it costs.
 pub mod camera;
 
+/// The chassis under the bike: the rigid body the ground step pushes on. The step that turns a
+/// substep's force and torque into motion — two integrations, the limits and the freedom flags that
+/// pin them, the transform brought along — plus the per-frame speed measure, the transform's
+/// rotate/unrotate pair, the two-step integrator itself and the contact distributor that spreads a
+/// frame's collision contacts onto the two wheels.
+pub mod chassis;
+
 /// Collision against the world: the shape test the original sweeps a bundle of probe segments
 /// through a collision mesh's tree with, how a hit resolves into a push-out, and the limits the
 /// sweep allows itself. The question every wheel, bale and rider asks once a substep.

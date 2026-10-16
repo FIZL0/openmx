@@ -658,6 +658,25 @@ impl Ee {
                 let w = |v: u128, k: u32| v >> (32 * k) & 0xffff_ffff;
                 q(self, w(qt, 0) | w(qt, 2) << 32 | w(qt, 1) << 64 | w(qt, 3) << 96);
             }
+            (0x28, 0x02) => {
+                // pceqw: a word of all ones where the two agree and a word of zeroes where they do
+                // not. With `ppach`, `xor -1` and `movz` after it, this is how the EE compares two
+                // quadwords for equality in four instructions and no branches — which is what the
+                // chassis tests its correction accumulator against its idle constant with.
+                let w = |v: u128, k: u32| (v >> (32 * k)) as u32;
+                q(self, (0..4).fold(0u128, |a, k| {
+                    a | u128::from(if w(qs, k) == w(qt, k) { u32::MAX } else { 0 }) << (32 * k)
+                }));
+            }
+            (0x08, 0x17) => {
+                // ppach: the low halfword of each of the eight words, packed into one quadword, rt's
+                // four in the low half and rs' four in the high one. After a `pceqw` it squeezes the
+                // four all-ones-or-zeroes words into a 64-bit value a plain integer compare can read.
+                let h = |v: u128, k: u32| v >> (32 * k) & 0xffff;
+                q(self, (0..4).fold(0u128, |a, k| {
+                    a | h(qt, k) << (16 * k) | h(qs, k) << (16 * k + 64)
+                }));
+            }
             (0x09, 0x0e) => q(self, (qt & lo64) | (qs & lo64) << 64), // pcpyld
             (0x09, 0x12) => q(self, qs & qt),                         // pand
             (0x09, 0x13) => q(self, qs ^ qt),                         // pxor

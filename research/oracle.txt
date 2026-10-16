@@ -1259,3 +1259,70 @@ transform_sync boot 0x001b2770 (transform, flags) -> brings the transform up to 
 # The three constant quadwords it reads. The proof reads the third one out of the image rather than
 # trusting the port's copy, so its value is proved and not assumed:
 #   0x00426d70 (0, 0, 0, 1)   0x00426d80 (1, 1, 1, 1)   0x00426db0 (0, 1, 0, 1)
+
+# ---------------------------------------------------------------------------------------------------
+# S19 — the chassis under the bike. The rigid body the ground step pushes on: the integrate virtual
+# it ends every substep with, the per-frame speed measure, the transform's rotate/unrotate pair, the
+# two-step integrator the body reaches through a pointer on itself, and the contact distributor.
+# The port is crates/game-sim/src/chassis.rs, the proofs are crates/game-sim/tests/chassis.rs, and
+# how each one was found is in research/journal/2026-10-16-s19-s19-chassis. chassis_set_flags,
+# bike_wheel_contacts, transform_rotate and transform_unrotate are named in the S3 block above --
+# and transform_unrotate's transpose is worth a warning: five MMI packs build it and then a plain
+# `move` finishes the third column, which is a 64-bit or and writes only the low half of its
+# destination, so that column's z is row 2's own z, still sitting in the register. Read as a
+# quadword copy it comes out as row 0's w, which is wrong and looks like a bug in the original.
+chassis_integrate boot 0x0015c540 (chassis, dt in f12) the body's own integrate, vtable +0x3c: the
+#                                force and the torque the substep accumulated turned into motion,
+#                                the transform brought along, and the accumulators emptied. Returns
+#                                a constant 1 that no caller reads. Ghidra puts the chassis in
+#                                param_2; the prologue (move $16, $4 / mov.s $f20, $f12) says
+#                                otherwise
+chassis_measure boot 0x0015c4c0 (chassis, dt in f12) the per-frame measure, vtable +0x38: the
+#                              orientation as euler angles into +0x90, the velocity's length into
+#                              +0x34, then the base class' frame update. Called before the ground
+#                              step, so the speed the steering fade reads is last frame's
+chassis_base_update boot 0x00133500 (chassis, dt in f12) the base class' per-frame update, which the
+#                                  measure tail-calls and which this port does not follow
+chassis_clear_contacts boot 0x00158fd0 (chassis) vtable +0xa4: one word, chassis+0x1e0 = 0. The last
+#                                     thing every integrate does, on both of its paths
+chassis_local_velocity boot 0x0015cbf0 (out, chassis) vtable +0xb4: transform_unrotate of
+#                                     chassis+0x260, the velocity in the body's own frame -> +0x270
+chassis_world_ang_vel boot 0x0015cbe0 (out, chassis) vtable +0xc0: transform_rotate of chassis+0x290,
+#                                    the angular velocity in the world -> +0x280
+chassis_vtable boot 0x0044e8f0 the chassis' vtable, so a proof can dispatch through the real one
+#                             rather than a fake: +0x38 measure, +0x3c integrate, +0xa4 clear
+#                             contacts, +0xb4 local velocity, +0xc0 world angular velocity
+integrate_ab2 boot 0x0013e460 (n, x, dx, dt in f12) two-step Adams-Bashforth over n floats:
+#                            x[i] += (dt/2) * (3*dx[i] - prev[i]), then prev[i] = dx[i], where prev
+#                            is dx + 4*n. Unrolled eight at a time above n = 8 and a plain loop
+#                            below; the chassis only ever asks for three or four. The rigid body's
+#                            constructor writes this address into chassis+0x25c and the integrate
+#                            calls it through that pointer four times a step
+quat_to_euler boot 0x0013fa60 (out, q) the orientation as three angles, for the measure's records
+quat_from_axis_angle boot 0x0013ec80 (out, axis, angle in f12) the correction turn the contacts asked
+#                                   for. The axis it is handed is already normalised and already
+#                                   turned into the world, and its w lane is the one the unnormalised
+#                                   correction had
+orientation_set boot 0x001b2130 (transform, q, position) the transform written back from where the
+#                              body now is
+transform_touch boot 0x001b4ba0 (transform) marks it moved, so whatever hangs off it rebuilds
+transform_rebuild boot 0x001b1750 (transform) the lazy rebuild of a chain of parent frames that
+#                                transform_rotate and transform_unrotate begin with. Returns at once
+#                                when the transform's +0x110 bit 0 is set, which is how a proof of
+#                                the two of them keeps the rows it generated
+list_element boot 0x0011cb80 (list, index) one element of the owner's listener list, each of which
+#                           the contact distributor tells (through its own vtable +0xc, with two
+#                           zero arguments) that something has touched it
+# The chassis object: 0x330 bytes. What the integrate reads and writes, by offset --
+#   +0x08 vtable         +0x34 speed           +0x60 centre of gravity, world
+#   +0x70 acceleration   +0x80 ang accel       +0x90 euler angles
+#   +0xf0/+0x100/+0x110 inverse inertia rows   +0x130 force   +0x140 torque   +0x150 impulse
+#   +0x160 orientation correction (axis * angle)              +0x190 centre of gravity, local
+#   +0x1a0 orientation   +0x1b4 awake          +0x1e0 contact count
+#   +0x214 1/mass        +0x220 max speed^2    +0x224 max angular speed^2
+#   +0x230.. per-axis angular velocity maxima  +0x240.. minima
+#   +0x254 transform     +0x25c integrator     +0x260 velocity  +0x270 velocity, body frame
+#   +0x280 angular velocity, world             +0x290 angular velocity, body frame
+#   +0x2a0.. three linear freedom flags        +0x2ac.. three angular ones (chassis_set_flags')
+#   +0x2b8/+0x2c4 the integrator's history for the position, +0x2d0/+0x2dc for the velocity,
+#   +0x2f0/+0x300 for the orientation (four lanes), +0x310/+0x31c for the angular velocity
