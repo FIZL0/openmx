@@ -53,6 +53,8 @@
 
 use crate::mat::{M4, V3, v3};
 use crate::psg::{Model, Strip, Tri};
+use game_sim::motion;
+use ps2_float::F;
 use std::cell::Cell;
 use std::sync::OnceLock;
 
@@ -162,7 +164,11 @@ pub struct Clip {
     pub frames: i32,
     /// The joint names the channels index.
     pub names: Vec<String>,
-    pub duration: f32,
+    /// The clip's timing, which is the simulation's own record of a clip and not a copy of it: its
+    /// length, whether it loops, and the times inside it that fire an action frame. [`Clip::parse`]
+    /// fills the length from the file; the other two are the animation set's, so they are filled
+    /// when the clip is bound ([`crate::anim::Set`]) and left at their defaults until then.
+    pub timing: motion::Clip,
     pub position: Vec<PosChannel>,
     pub rotation: Vec<RotChannel>,
 }
@@ -248,7 +254,14 @@ impl Clip {
         if p != d.len() {
             return Err(format!("not a .mot: its channels end at {p}, not at {}", d.len()));
         }
-        Ok(Clip { version, frames, names, duration, position, rotation })
+        let timing = motion::Clip::new(F(duration), false);
+        Ok(Clip { version, frames, names, timing, position, rotation })
+    }
+
+    /// The clip's length in seconds, which is the one field of the timing record that comes out of
+    /// the file rather than out of the animation set.
+    pub fn duration(&self) -> f32 {
+        self.timing.duration.0
     }
 
     /// This clip's name table resolved against a skeleton: one joint index per name, [`SKIP`] where
@@ -260,7 +273,7 @@ impl Clip {
     pub fn joints(&self, skel: &Skeleton) -> Vec<u8> {
         self.names
             .iter()
-            .map(|n| match skel.joint(n) {
+            .map(|n| match skel.find(n) {
                 Some(j) if j < SKIP as usize => j as u8,
                 _ => SKIP,
             })
@@ -288,7 +301,23 @@ impl Clip {
         self.lay(time, Some((other, mix)), map, None, out);
     }
 
-    /// The body of all three: the channel walk both of the original's blend entries share.
+    /// Both at once: two clips mixed, and the result faded back towards the pose under it. This is
+    /// the shape the airborne idle actually asks for — [`motion::Blend::Two`] carries a `mix` and a
+    /// `ramp` together, and the original's two-clip entry takes both in one pass over the channels.
+    pub fn pose_mixed_faded(
+        &self,
+        other: &Clip,
+        time: f32,
+        mix: f32,
+        map: &[u8],
+        fade: f32,
+        under: &Pose,
+        out: &mut Pose,
+    ) {
+        self.lay(time, Some((other, mix)), map, Some((fade, under)), out);
+    }
+
+    /// The body of all four: the channel walk both of the original's blend entries share.
     fn lay(
         &self,
         time: f32,
@@ -560,7 +589,14 @@ pub fn rotation(q: [f32; 4]) -> M4 {
 ///
 /// A clip animates the joints it has channels for and leaves the rest where the skeleton's rest pose
 /// put them, so [`Skeleton::world`] needs to know which is which.
-#[derive(Clone, Debug)]
+///
+/// **This is the pose of joints, and there is one of it.** The simulation keeps a record of the same
+/// two buffers ([`motion::Snapshot`] — the pose a cross-fade fades from, whose field order and
+/// allocation rules are proved against the original) but it never holds the live one: it copies out
+/// of this through [`motion::Joints`], which this type implements, and the copy comes back the other
+/// way through [`Pose::of_snapshot`]. What the simulation calls `motion::Pose` is a different thing
+/// again — the rider's lean, not a pose of joints.
+#[derive(Clone, Debug, Default)]
 pub struct Pose {
     pub rot: Vec<[f32; 4]>,
     pub pos: Vec<[f32; 4]>,
@@ -585,39 +621,152 @@ impl Pose {
         self.turned.fill(false);
         self.moved.fill(false);
     }
+
+    /// The simulation's snapshot of a pose, as a pose again: the other end of [`motion::Joints`].
+    ///
+    /// Every joint counts as written, because every joint of a snapshot *was* read — the original
+    /// copies the whole skeleton, not the channels a clip happens to have.
+    pub fn of_snapshot(snapshot: &motion::Snapshot) -> Pose {
+        let n = snapshot.rotation.len().min(snapshot.translation.len());
+        Pose {
+            rot: snapshot.rotation[..n].iter().map(|q| q.map(|v| v.0)).collect(),
+            pos: snapshot.translation[..n].iter().map(|p| p.map(|v| v.0)).collect(),
+            turned: vec![true; n],
+            moved: vec![true; n],
+        }
+    }
 }
 
-/// A model's joints: a name, a parent and a rest transform each.
+/// The simulation reads the live joint pose through this and nothing else — which is what makes the
+/// renderer's [`Pose`] the one buffer of joint poses in the port rather than one of two.
+///
+/// The original's two accessors pull the rotation out of the joint's local matrix as a quaternion and
+/// take its translation as a point with 1 in the fourth lane. Here the pose already holds both in
+/// that shape, so the reads are plain; a joint the clip did not write answers with the identity
+/// rotation and the origin rather than with the bone's own rest transform, which is a divergence
+/// recorded in V7's journal.
+impl motion::Joints for Pose {
+    fn count(&self) -> usize {
+        self.rot.len()
+    }
+
+    fn rotation(&self, joint: usize) -> [F; 4] {
+        self.rot.get(joint).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]).map(F)
+    }
+
+    fn translation(&self, joint: usize) -> [F; 4] {
+        self.pos.get(joint).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]).map(F)
+    }
+}
+
+/// One bone, as the `.psg`'s node tree gives it.
+///
+/// A bone and a joint are the same thing here: a `.psg` node. The two names are the two halves this
+/// module joins — the model side calls them bones and hangs geometry off them, the clip side calls
+/// them joints and names them in its channels.
 #[derive(Clone, Debug)]
+pub struct Bone {
+    pub name: String,
+    pub parent: Option<usize>,
+    /// Relative to the parent bone, and what a clip's channel replaces.
+    pub local: M4,
+    /// The bind pose: the bone's place in model space, parents composed in. Kept rather than
+    /// recomputed because the bolting-on in [`crate::rider`] is a question about two bind poses and
+    /// nothing else; [`Skeleton::rebind`] puts it back in step after a hand edit of `local`.
+    pub rest: M4,
+}
+
+impl Bone {
+    /// Where the bone sits in the bind pose.
+    pub fn at(&self) -> V3 {
+        self.rest.point(v3(0.0, 0.0, 0.0))
+    }
+}
+
+/// A model's node tree read as a skeleton: the bones in file order, each with its parent, its own
+/// transform and its bind pose.
+///
+/// **One skeleton, not two.** The drawing side used to declare this twice — once for bolting a rider
+/// onto a bike by its bind pose, once for hanging a clip's channels on a model — and a clip bound to
+/// one of them could not be posed on the other. They are the same tree: a `.psg`'s nodes *are* the
+/// joints, a vertex names one of them (`psg::Vertex::node`), and a clip's channel names are those
+/// node names.
+#[derive(Clone, Debug, Default)]
 pub struct Skeleton {
-    pub names: Vec<String>,
-    pub parents: Vec<Option<usize>>,
-    /// Where the joint sits when no clip is driving it, relative to its parent.
-    pub rest: Vec<M4>,
+    pub bones: Vec<Bone>,
 }
 
 impl Skeleton {
-    /// A `.psg`'s own node tree. Its nodes *are* the joints: a vertex names one of them, and the
-    /// clip's channel names are those node names.
+    /// A `.psg`'s own node tree, with each bone's bind pose composed down the chain.
     pub fn of(model: &Model) -> Skeleton {
         Skeleton {
-            names: model.nodes.iter().map(|n| n.name.clone()).collect(),
-            parents: model.nodes.iter().map(|n| n.parent).collect(),
-            rest: model.nodes.iter().map(|n| n.local).collect(),
+            bones: model
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| Bone {
+                    name: n.name.clone(),
+                    parent: n.parent,
+                    local: n.local,
+                    rest: model.world(i),
+                })
+                .collect(),
         }
     }
 
-    /// The joint of that name, ignoring case as the game's own name matching does.
-    pub fn joint(&self, name: &str) -> Option<usize> {
-        self.names.iter().position(|n| n.eq_ignore_ascii_case(name))
+    /// How many joints the skeleton has, which is how long a [`Pose`] of it is.
+    pub fn len(&self) -> usize {
+        self.bones.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bones.is_empty()
+    }
+
+    /// A bone by name, case-insensitively, which is how the game's own name matching works: the
+    /// rider spells its anchors `Dummy_foot_L` and the chassis spells the same joint `Dummy_Foot_L`,
+    /// and a clip's channel names agree with neither in case.
+    pub fn find(&self, name: &str) -> Option<usize> {
+        self.bones.iter().position(|b| b.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Where a named bone sits in the bind pose.
+    pub fn at(&self, name: &str) -> Option<V3> {
+        Some(self.bones[self.find(name)?].at())
+    }
+
+    /// The bone names the two skeletons have in common — the anchors one is meant to be hung off the
+    /// other by. Four of them for a rider and a chassis: two grips and two foot pegs.
+    pub fn shared_with(&self, other: &Skeleton) -> Vec<String> {
+        self.bones
+            .iter()
+            .filter(|b| other.find(&b.name).is_some())
+            .map(|b| b.name.clone())
+            .collect()
+    }
+
+    /// Recompute every bone's bind pose from its own transform and its parents. Only needed after
+    /// something has written `local` by hand — [`Skeleton::of`] leaves the two in step.
+    pub fn rebind(&mut self) {
+        let local: Vec<M4> = self.bones.iter().map(|b| b.local).collect();
+        let parents: Vec<Option<usize>> = self.bones.iter().map(|b| b.parent).collect();
+        let mut out = vec![None; local.len()];
+        for j in 0..local.len() {
+            resolve(j, &local, &parents, &mut out);
+        }
+        for (b, m) in self.bones.iter_mut().zip(out) {
+            b.rest = m.unwrap_or(M4::IDENTITY);
+        }
     }
 
     /// Every joint's local transform under a pose: the clip's rotation and translation where it wrote
-    /// them, the rest pose's where it did not.
+    /// them, the bone's own where it did not.
     pub fn locals(&self, pose: &Pose) -> Vec<M4> {
-        (0..self.rest.len())
-            .map(|j| {
-                let mut m = self.rest[j];
+        self.bones
+            .iter()
+            .enumerate()
+            .map(|(j, bone)| {
+                let mut m = bone.local;
                 if pose.turned.get(j) == Some(&true) {
                     let r = rotation(pose.rot[j]);
                     m.0[0][..3].copy_from_slice(&r.0[0][..3]);
@@ -637,9 +786,10 @@ impl Skeleton {
     /// list still lands right.
     pub fn world(&self, pose: &Pose) -> Vec<M4> {
         let local = self.locals(pose);
+        let parents: Vec<Option<usize>> = self.bones.iter().map(|b| b.parent).collect();
         let mut out = vec![None; local.len()];
         for j in 0..local.len() {
-            resolve(j, &local, &self.parents, &mut out);
+            resolve(j, &local, &parents, &mut out);
         }
         out.into_iter().map(|m| m.unwrap_or(M4::IDENTITY)).collect()
     }

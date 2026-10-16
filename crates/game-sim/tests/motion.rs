@@ -1,7 +1,7 @@
 //! Animation driving against the original.
 //!
-//! Eight proofs — the first four of the driving and the clock (S6), the last four of the call the
-//! frame ends in (S20):
+//! Nine proofs — the first four of the driving and the clock (S6), the next four of the call the
+//! frame ends in (S20), and one of the number the drawing side reads out of the clock (V7):
 //!
 //! 1. **the driving** — ten thousand generated frames of the rider's own animation section: the
 //!    cross-fade ramp, the restart test, the pose fields it leaves behind, and which of the motion
@@ -31,6 +31,10 @@
 //! 8. **the call itself** — ten thousand frames through all four of the library's entry points, which
 //!    is where the clip time and the action frames of a driven clip come from, and the one rule the
 //!    entries disagree about.
+//!
+//! 9. **the sample time** — which clip time this frame's pose comes from, for both kinds of driving,
+//!    against the window the clock itself reported. Port only: the original passes the number
+//!    straight into the channel samplers and stores it nowhere.
 //!
 //! The channel sampling, the quaternion blending and the skinning are the renderer's and are not
 //! ported; what else is not proved here, and why, is in the journal entry's last section.
@@ -1998,4 +2002,137 @@ fn the_four_entry_points_drive_the_clock_the_same() {
     let clip = Clip { duration: F::ONE, looping: false, keys: Vec::new() };
     assert_eq!(p.run(F(DT.to_f32()), blend, &empty, &clip), game_sim::motion::Played::default());
     assert_eq!(p.clip, Some(ClipId(call_handle(0))), "and it leaves the clock alone");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 9 — the clip time the pose is sampled at
+// ---------------------------------------------------------------------------------------------------
+
+/// Where in the clip this frame's pose is read, for both kinds of driving.
+///
+/// **Port only — no oracle call.** The original never stores this number: each entry point works it
+/// out and passes it straight into the channel samplers, which are the renderer's and are not
+/// ported, so there is no field to read back and compare. What *can* be proved, and is what anything
+/// downstream leans on, is that [`Player::sample_time`] is the same clip time the clock itself just
+/// reported — the far end of the window [`Player::run`] returned — in every mode, including the two
+/// frames where the two look like they should disagree:
+///
+/// - a **wrap**, where the window is in two halves and the sample is at the end of the second one,
+///   not at the end of the clip;
+/// - the frame a non-looping clip **finishes**, where the advance fires its action frames past the
+///   end and *then* resets the clock to zero. The sample time is the zero, which is the one place in
+///   the port where the number is not the end of the window — see `game_render::anim::Set::apply`,
+///   which holds the pose rather than redrawing it there, and V7's journal entry.
+#[test]
+fn the_sample_time_is_where_the_clock_left_the_clip() {
+    let id = ClipId(7);
+    let mut lib = game_sim::motion::Library::default();
+    lib.stunt[0] = Some(id);
+    lib.stunt[1] = Some(ClipId(8));
+    let slot = Slot::Stunt(0);
+    let other = Slot::Stunt(1);
+
+    // The driven modes: the sample is `duration x phase`, whatever route the window took to it.
+    let (mut driven, mut wraps, mut empties) = (0u32, 0u32, 0u32);
+    for duration in [F(0.5), F::ONE, F(2.5)] {
+        let clip = Clip { duration, looping: false, keys: Vec::new() };
+        for step in 0..=10u32 {
+            // Each phase is played twice: once onto a clip the clock was not on, once after a phase
+            // that is further through the clip, which is the backwards step that makes a wrap.
+            for before in [None, Some(F(0.9))] {
+                let phase = F(step as f32 / 10.0);
+                for blend in [
+                    Blend::One { phase, ramp: F(0.25), clip: slot },
+                    Blend::Two { phase, mix: F(0.5), ramp: F(0.25), a: slot, b: other },
+                    Blend::Three {
+                        phase,
+                        mix: F(0.5),
+                        cross: F(0.5),
+                        ramp: F(0.25),
+                        a: slot,
+                        b: other,
+                        c: other,
+                        d: slot,
+                    },
+                ] {
+                    let mut p = Player::default();
+                    if let Some(first) = before {
+                        p.drive_at(first, &clip, id, blend.fires_empty());
+                    }
+                    let played = p.run(F(1.0 / 30.0), blend, &lib, &clip);
+                    let want = duration * phase;
+                    assert_eq!(
+                        p.sample_time(blend),
+                        want,
+                        "mode {} at phase {:e} of {:e}: the sample time is the \
+                         phase-driven one",
+                        blend.mode(),
+                        phase.0,
+                        duration.0
+                    );
+                    match played.window {
+                        Window::Span(_, end) => assert_eq!(end, want, "the window ends at the sample"),
+                        Window::Wrapped { head, .. } => {
+                            assert_eq!(head.1, want, "the wrap's second half ends at the sample");
+                            wraps += 1;
+                        }
+                        Window::None => {
+                            assert_eq!(want, F::ZERO, "only a clip time of zero fires nothing");
+                            empties += 1;
+                        }
+                    }
+                    // The dt clock is untouched by a driven frame, so it is not what was sampled.
+                    assert_eq!(p.time, F::ZERO, "a driven blend does not move the free-running clock");
+                    driven += 1;
+                }
+            }
+        }
+    }
+    assert!(wraps > 10, "only {wraps} driven frames went backwards into a wrap");
+    assert!(empties > 0, "no driven frame fired the empty window");
+
+    // The free-running advance: the sample is the clock the dt step left behind.
+    let dt = F(1.0 / 30.0);
+    for looping in [false, true] {
+        let clip = Clip { duration: F(0.2), looping, keys: Vec::new() };
+        let mut p = Player { clip: Some(id), ..Player::default() };
+        let (mut looped, mut ended) = (0u32, 0u32);
+        for frame in 0..12 {
+            let played = p.run(dt, Blend::Free, &lib, &clip);
+            let at = p.sample_time(Blend::Free);
+            assert_eq!(at, p.time, "frame {frame}: the free sample is the free clock");
+            match played.window {
+                Window::Span(_, end) if !played.finished => {
+                    assert_eq!(end, at, "frame {frame}: the window ends at the sample");
+                }
+                Window::Span(_, end) => {
+                    // The clip ran out: the action frames fired past the end, the clock went to zero.
+                    assert!(end > clip.duration || end == clip.duration);
+                    assert_eq!(at, F::ZERO, "frame {frame}: a finished clip's clock is reset");
+                    ended += 1;
+                }
+                Window::Wrapped { head, .. } => {
+                    assert_eq!(head.1, at, "frame {frame}: the wrap's second half ends at the sample");
+                    looped += 1;
+                }
+                Window::None => assert!(p.finished, "frame {frame}: only a finished clip is inert"),
+            }
+        }
+        if looping {
+            assert!(looped > 0, "a looping clip of 0.2s should have wrapped inside twelve frames");
+        } else {
+            assert_eq!(ended, 1, "a clip ends once and then does nothing");
+        }
+    }
+
+    // No clip on, nothing driven: nothing is sampled anywhere, and the number is still answerable.
+    let mut p = Player::default();
+    let clip = Clip { duration: F::ONE, looping: false, keys: Vec::new() };
+    assert_eq!(p.run(dt, Blend::Free, &lib, &clip), game_sim::motion::Played::default());
+    assert_eq!(p.sample_time(Blend::Free), F::ZERO);
+
+    println!(
+        "the sample time: {driven} driven frames over three modes ({wraps} wrapped, {empties} \
+         empty) and both free-running clips, each at the clip time its own window ended on"
+    );
 }

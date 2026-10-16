@@ -54,8 +54,7 @@
 
 use crate::disc::Res;
 use crate::ini;
-use crate::mat::{M4, V3, v3};
-use crate::psg::Model;
+use crate::mat::{M4, v3};
 
 /// Which body a `.sub`'s `MCF = rider.mcf` means. Only [`Sex::Male`] is on this disc.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,71 +209,10 @@ impl MotionSet {
     }
 }
 
-/// One bone, as the `.psg`'s node tree gives it.
-#[derive(Clone, Debug)]
-pub struct Bone {
-    pub name: String,
-    pub parent: Option<usize>,
-    /// Relative to the parent bone.
-    pub local: M4,
-    /// The bind pose: the bone's place in model space, parents composed in.
-    pub rest: M4,
-}
-
-impl Bone {
-    /// Where the bone sits in the bind pose.
-    pub fn at(&self) -> V3 {
-        self.rest.point(v3(0.0, 0.0, 0.0))
-    }
-}
-
-/// A model's node tree read as a skeleton: the bones in file order, each with its bind pose.
-///
-/// Both the rider and the chassis are read this way, because bolting one to the other is a question
-/// about two bind poses and nothing else.
-#[derive(Clone, Debug, Default)]
-pub struct Skeleton {
-    pub bones: Vec<Bone>,
-}
-
-impl Skeleton {
-    pub fn of(model: &Model) -> Skeleton {
-        Skeleton {
-            bones: model
-                .nodes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| Bone {
-                    name: n.name.clone(),
-                    parent: n.parent,
-                    local: n.local,
-                    rest: model.world(i),
-                })
-                .collect(),
-        }
-    }
-
-    /// A bone by name, case-insensitively: the rider spells its anchors `Dummy_foot_L` and the
-    /// chassis spells the same joint `Dummy_Foot_L`.
-    pub fn find(&self, name: &str) -> Option<usize> {
-        self.bones.iter().position(|b| b.name.eq_ignore_ascii_case(name))
-    }
-
-    /// Where a named bone sits in the bind pose.
-    pub fn at(&self, name: &str) -> Option<V3> {
-        Some(self.bones[self.find(name)?].at())
-    }
-
-    /// The bone names the two skeletons have in common — the anchors one is meant to be hung off the
-    /// other by. Four of them for a rider and a chassis: two grips and two foot pegs.
-    pub fn shared_with(&self, other: &Skeleton) -> Vec<String> {
-        self.bones
-            .iter()
-            .filter(|b| other.find(&b.name).is_some())
-            .map(|b| b.name.clone())
-            .collect()
-    }
-}
+// The skeleton this module used to declare is now `skin::Skeleton`: the clip side needs the same
+// tree to hang its channels on, and two of them meant a clip bound to one could not pose the other.
+// It keeps the name it landed with here, so nothing that reads a rider's skeleton has to change.
+pub use crate::skin::{Bone, Skeleton};
 
 /// The rider's foot anchors, which the chassis spells `Dummy_Foot_L` / `Dummy_Foot_R` at its pegs.
 pub const FOOT_ANCHORS: [&str; 2] = ["Dummy_foot_L", "Dummy_foot_R"];
@@ -421,6 +359,7 @@ fn basename(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mat::V3;
 
     /// `thq1.sub`, the stock gear every rider archive is cut from, comments and all.
     const SUB: &str = "[Rider]\n; if male, MCF filename will automatically begin with 'm', else 'f'\n\

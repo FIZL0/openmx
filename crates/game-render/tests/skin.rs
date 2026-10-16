@@ -618,7 +618,7 @@ fn every_clip_on_the_disc_parses() {
 
             let where_ = format!("{a} :: {n}");
             assert_eq!(clip.version, 3, "{where_}: the port only reads version 3");
-            assert!(clip.duration > 0.0, "{where_}: a duration of {}", clip.duration);
+            assert!(clip.duration() > 0.0, "{where_}: a duration of {}", clip.duration());
             assert!(clip.frames > 0, "{where_}: {} frames", clip.frames);
             assert!(!clip.names.is_empty(), "{where_}: no name table");
             for c in &clip.rotation {
@@ -674,7 +674,7 @@ fn every_clip_on_the_disc_parses() {
                 (0..clip.names.len()).map(|k| if k < SKIP as usize { k as u8 } else { SKIP }).collect();
             let mut pose = Pose::new(clip.names.len());
             for step in -1..=11 {
-                let time = clip.duration * step as f32 / 10.0;
+                let time = clip.duration() * step as f32 / 10.0;
                 clip.pose(time, &map, &mut pose);
                 for (j, q) in pose.rot.iter().enumerate() {
                     if !pose.turned[j] {
@@ -717,7 +717,7 @@ fn a_rider_is_posed_and_skinned_by_its_own_clips() {
     };
     let model = Model::parse(&res.read_suffix("mrider.psg").unwrap()).unwrap();
     let skel = Skeleton::of(&model);
-    let rest = skel.world(&Pose::new(skel.names.len()));
+    let rest = skel.world(&Pose::new(skel.len()));
 
     let mut posed = 0;
     for name in ["rider\\anim\\turn_stop_fwd.mot", "rider\\anim\\backflip.mot"] {
@@ -728,13 +728,13 @@ fn a_rider_is_posed_and_skinned_by_its_own_clips() {
                 "{name}: only {named} of {} channel names are joints of mrider.psg — the clip and the \
                  model do not belong together", map.len());
 
-        let mut pose = Pose::new(skel.names.len());
+        let mut pose = Pose::new(skel.len());
         let mut moved = 0;
         for step in 0..=10 {
-            let time = clip.duration * step as f32 / 10.0;
+            let time = clip.duration() * step as f32 / 10.0;
             clip.pose(time, &map, &mut pose);
             let world = skel.world(&pose);
-            assert_eq!(world.len(), skel.names.len());
+            assert_eq!(world.len(), skel.len());
             for (j, m) in world.iter().enumerate() {
                 assert!(m.0.iter().flatten().all(|v| v.is_finite()),
                         "{name} at {time}s: joint {j}'s matrix is {m:?}");
@@ -755,7 +755,7 @@ fn a_rider_is_posed_and_skinned_by_its_own_clips() {
         println!("{name}: {} channels, {named} of them joints of mrider.psg, {} joints moved across \
                   eleven poses", map.len(), moved);
     }
-    println!("{posed} poses skinned onto mrider.psg's {} joints", skel.names.len());
+    println!("{posed} poses skinned onto mrider.psg's {} joints", skel.len());
 }
 
 // --- the plumbing, port only -------------------------------------------------------------------------
@@ -768,7 +768,7 @@ fn a_channel_whose_name_is_no_joint_is_skipped() {
     let map = clip.joints(&skel);
     assert_eq!(map, vec![1, SKIP, 0], "the map is case-insensitive, and 0xff is 'no joint'");
 
-    let mut pose = Pose::new(skel.names.len());
+    let mut pose = Pose::new(skel.len());
     clip.pose(0.0, &map, &mut pose);
     assert_eq!(pose.turned, vec![true, true, false], "the elbow channel should have written nothing");
     assert_eq!(pose.moved, vec![true, true, false]);
@@ -859,9 +859,11 @@ fn the_two_clip_mix_ends_are_the_two_clips() {
 fn a_joint_is_placed_by_its_parents() {
     // Three joints: a child of a parent of the root, with the parent listed last.
     let mut skel = bones(&["child", "root", "parent"]);
-    skel.parents = vec![Some(2), None, Some(1)];
+    for (j, parent) in [Some(2), None, Some(1)].into_iter().enumerate() {
+        skel.bones[j].parent = parent;
+    }
     for (j, step) in [(0usize, 1.0f32), (1, 10.0), (2, 100.0)] {
-        skel.rest[j].0[3] = [step, 0.0, 0.0, 1.0];
+        skel.bones[j].local.0[3] = [step, 0.0, 0.0, 1.0];
     }
     let world = skel.world(&Pose::new(3));
     assert_eq!(world[0].0[3][0], 111.0, "the child should carry its parent and its grandparent");
@@ -884,7 +886,9 @@ fn a_joint_is_placed_by_its_parents() {
     assert!(world[0].0[3][1].abs() > 0.9, "the child should have swung off the x axis: {:?}", world[0].0[3]);
 
     // A node whose parent is itself gets its own transform rather than hanging.
-    skel.parents = vec![Some(0), None, Some(2)];
+    for (j, parent) in [Some(0), None, Some(2)].into_iter().enumerate() {
+        skel.bones[j].parent = parent;
+    }
     let world = skel.world(&Pose::new(3));
     assert_eq!(world[0].0[3][0], 1.0);
 
@@ -970,7 +974,7 @@ fn clip_of(names: &[&str]) -> Clip {
         version: 3,
         frames: 30,
         names: names.iter().map(|n| (*n).to_string()).collect(),
-        duration: 1.0,
+        timing: game_sim::motion::Clip::new(ps2_float::F(1.0), false),
         position,
         rotation,
     }

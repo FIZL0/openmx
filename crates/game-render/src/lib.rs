@@ -12,6 +12,7 @@
 //!   pst.rs       `.pst` textures: a 256-colour palette in the GS's order, plus its mip chain
 //!   terrain.rs   `.trn` ground: a patched height field, its palette and its ground texture
 //!   skin.rs      `.mot` motion clips: the channels, the quaternion blend, and the joints on a model
+//!   anim.rs      the animation seam: the sim's driving on the disc's clips, bound to one skeleton
 //!   ini.rs       the plain-text format `.psm` and `.scn` share
 //!   scene.rs     `.scn` scenes (start point, fog, lights, 1506 placed props) and `.psm` materials
 //!   world.rs     a track in memory: models, materials and textures matched up by name, and drawn
@@ -25,6 +26,7 @@
 //! The format notes are in each module's own docs; they were recovered from the bytes on the disc, so
 //! where a field is still unexplained the doc says so rather than inventing a name for it.
 
+pub mod anim;
 pub mod disc;
 pub mod ini;
 pub mod mat;
@@ -38,15 +40,16 @@ pub mod skin;
 pub mod terrain;
 pub mod world;
 
+pub use anim::{Rig, Set};
 pub use disc::{Disc, Res};
 pub use mat::{M4, V3, v3};
 pub use psg::Model;
 pub use pst::Texture;
 pub use raster::Frame;
-pub use rider::{Rider, Skeleton, Suit};
+pub use rider::{Rider, Suit};
 pub use scene::{Material, Scene};
-// `skin` has a `Skeleton` of its own; V4's is the one re-exported here, so it keeps the name it
-// landed with. Reach V5's as `skin::Skeleton` until the two are reconciled.
-pub use skin::{Clip, Pose};
+// One skeleton, in `skin` where the clips are: `rider::Skeleton` is a re-export of it, so the name
+// a rider's model is read into and the name a clip is bound against are the same type.
+pub use skin::{Bone, Clip, Pose, Skeleton};
 pub use terrain::{Terrain, draw_terrain};
 pub use world::{Assets, Camera, draw_scene};
