@@ -499,6 +499,9 @@ pub struct Pitch {
     pub stoppie_pitch_gain: F,
     pub stoppie_yaw_rate_scale: F,
     pub stoppie_top_speed: F,
+    /// Not one of the pitch controller's own: its stoppie latch compares the front brake against a
+    /// literal zero and never touches this word. The pad layer is what reads it — while the latch is
+    /// set, a held brake button is worth this much instead of the 1.0 it is otherwise worth.
     pub stoppie_brake: F,
 }
 
@@ -727,6 +730,18 @@ impl Phy {
             roll_control_max_cg: s.float("RollControlMaxCG").unwrap_or(F::ZERO),
             max_roll_rate_disturbance: s.float("MaxRollRateDisturbance").unwrap_or(F::ZERO),
         };
+        // Nine of those eleven words are also the ground step's, and it reads the same words the
+        // loader wrote — so they are copied here rather than taken off the file a second time.
+        // `MaxRollRateCommand` and `MaxRollYawRate` are the two nothing on the ground reads.
+        mv.max_roll_command = roll.max_roll_command;
+        mv.max_roll_speed = roll.max_roll_speed;
+        mv.roll_gain = roll.roll_gain;
+        mv.min_stand_upright_speed = roll.min_stand_upright_speed;
+        mv.max_stand_upright_speed = roll.max_stand_upright_speed;
+        mv.roll_control_gain = roll.roll_control_gain;
+        mv.roll_control_rate_gain = roll.roll_control_rate_gain;
+        mv.roll_control_max_cg = roll.roll_control_max_cg;
+        mv.max_roll_rate_disturbance = roll.max_roll_rate_disturbance;
 
         // --- [Pitch Control] ---
         let s = ini.section("Pitch Control");
@@ -742,6 +757,17 @@ impl Phy {
             stoppie_top_speed: s.float("StoppieTopSpeed").unwrap_or(F::ZERO) * MPH,
             stoppie_brake: s.float("StoppieBrake").unwrap_or(F::ZERO),
         };
+        // All of them but `StoppieBrake`, which the pitch controller does not read: its stoppie latch
+        // compares the front brake against a literal zero, and the only thing that reads the key is
+        // the pad layer, which makes it the brake the lever asks for while the latch is set.
+        mv.max_pitch_command = pitch.max_pitch_command;
+        mv.pitch_gain = pitch.pitch_gain;
+        mv.pitch_rate_gain = pitch.pitch_rate_gain;
+        mv.inv_wheelie_top_speed = pitch.inv_wheelie_top_speed;
+        mv.max_stoppie_pitch_command = pitch.max_stoppie_pitch_command;
+        mv.stoppie_pitch_gain = pitch.stoppie_pitch_gain;
+        mv.stoppie_yaw_rate_scale = pitch.stoppie_yaw_rate_scale;
+        mv.stoppie_top_speed = pitch.stoppie_top_speed;
 
         // --- [Aerodynamics] ---
         mv.drag = ini.section("Aerodynamics").float("Drag").unwrap_or(F::ZERO);
@@ -831,6 +857,9 @@ impl Phy {
         // radians, and the one a turn away from it.
         mv.donut_angle = s.float_or("MinDonutAngle", F::ZERO) * -DEG;
         mv.donut_angle_back = F(-PI) - mv.donut_angle;
+        // The one the no-hander's roll widens itself by, whose default of 1.0 the ground step would
+        // otherwise never see.
+        mv.donut_roll_angle_scale = donuts.roll_angle_scale;
 
         // --- [No Hander Lander] ---
         let s = ini.section("No Hander Lander");
@@ -843,6 +872,14 @@ impl Phy {
             balance_noise_amplitude: s.float("BalanceNoiseAmplitude").unwrap_or(F::ZERO),
             balance_noise_time_scale: s.float("BalanceNoiseTimeScale").unwrap_or(F::ZERO),
         };
+        // All seven: the balance controller is the ground step's, so every word of this section is.
+        mv.min_balance_inertia = balance.min_balance_inertia;
+        mv.max_balance_inertia = balance.max_balance_inertia;
+        mv.balance_inertia_rate = balance.balance_inertia_rate;
+        mv.input_inertia = balance.input_inertia;
+        mv.max_balance_point = balance.max_balance_point;
+        mv.balance_noise_amplitude = balance.balance_noise_amplitude;
+        mv.balance_noise_time_scale = balance.balance_noise_time_scale;
 
         // --- [Collisions] ---
         let s = ini.section("Collisions");

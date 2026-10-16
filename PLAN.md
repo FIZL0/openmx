@@ -192,7 +192,9 @@ added beside them:
     engine and its collision record, filling `move.rs`'s params and `air::Params` together. Proved
     against the original four ways in `tests/phy.rs` (S18): every key of three files read six ways,
     960 words of the bike from a zeroed start, all 128 setter calls' arguments, and the bike in the
-    human's own recording.
+    human's own recording. The four rider controllers' twenty-five gains, limits and speed bands
+    reach `move::Params` as copies of the loader's own words, checked bit for bit on all eighteen
+    `.phy` files the disc carries (S21).
   - `camera.rs` — the camera for normal play: the 160-byte preset record the disc ships one of per
     camera, the target point and the look-ahead it leads the rider by, the eight first-order lags that
     make it follow instead of snap, and the limits on its yaw, pitch, distance and field of view.
