@@ -81,7 +81,7 @@ use game_render::raster::Frame;
 use game_render::scene::Vehicle;
 use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
 use game_render::{ini, png, scene as view};
-use game_sim::camera::{Follow, Preset, Target};
+use game_sim::camera::{Preset, Race, Ridden, Switches, Target};
 use game_sim::input::{Control, Manager, PADS, Report};
 use game_sim::phy::Phy;
 use game_sim::ride::Controls;
@@ -349,7 +349,14 @@ fn run() -> Result<(), String> {
         .unwrap_or_default();
     let reverse_speed =
         presets.first().map_or(F(5.0), |p| p.forward_reverse_switch_speed);
-    let mut camera = Follow::new(presets, reverse_speed);
+    // The derived class, not the base one: the base camera's frame is dead code on the disc (S24),
+    // and this is the frame the picture comes out of.
+    let mut camera = Race::new(presets, reverse_speed);
+    // The first frame starts the eight lags where the camera actually is instead of lagging them in
+    // from zero, which is what the camera's own snap flag is for. The disc gets it from the race's
+    // setup applying a preset over a previous one; the constructor here applies its first preset to
+    // itself, and that comparison cannot fire.
+    camera.cam.snap = true;
     let mut which = 0usize;
 
     // The scene's own start line and start direction, as the simulation's reader read them.
@@ -372,7 +379,7 @@ fn run() -> Result<(), String> {
         spawn.y,
         spawn.z,
         facing.x.atan2(facing.z).to_degrees(),
-        camera.presets.len()
+        camera.cam.presets.len()
     );
     // The ground under the start line, asked the way the ride asks it, so a start that is not on the
     // dirt says so before the window opens.
@@ -462,37 +469,51 @@ fn run() -> Result<(), String> {
         }
 
         // The camera, after the frame, which is where the original's viewport updates it: the shell
-        // picks the preset, S7's own camera does everything else.
-        let presets = camera.presets.len();
+        // picks the preset, the ported camera does everything else.
+        let presets = camera.cam.presets.len();
         if presets > 1 {
             let pad = world.input.pad(0);
             // L1 only: R1 is the third of the trick decoder's buttons now.
             if pad.pressed(Control::L1) {
                 which = (which + 1) % presets;
-                camera.set_preset(which);
+                camera.cam.set_preset(which);
             }
         }
         let (forward, up) = world.rider.ride.axes();
         let bike_pos = world.rider.ride.position();
-        let target = Target {
-            body_point: bike_pos,
-            forward,
-            up,
-            vel: world.rider.ride.chassis.vel,
-            lean: world.rider.ride.held.stick.0,
+        // The grounded flag and the speed are read off the actor by the frame rather than worked
+        // out from the velocity; the ride's own two fields are what the actor's are written from.
+        let rider = Ridden {
+            target: Target {
+                body_point: bike_pos,
+                forward,
+                up,
+                vel: world.rider.ride.chassis.vel,
+                lean: world.rider.ride.held.stick.0,
+            },
+            grounded: world.rider.ride.air.on_ground,
+            speed: world.rider.ride.chassis.speed,
         };
         let view = if presets == 0 {
             None
         } else {
-            // The camera's own probe, answered by the track: the terrain under the segment and the
-            // scene's collision shapes along it (S23). Without it the view sinks into the dirt on
-            // the first dip, because the probe is the only question the camera asks the world.
-            Some(camera.update_probed(
+            // The camera's one question about the world: the ground under the look-at point, which
+            // the track answers (S23). Without it the view sinks into the dirt on the first dip.
+            // This frame has no obstacle push-out — the base class's did, and the base class's
+            // frame is not the one the disc runs.
+            Some(camera.update(
                 step.dt,
-                &target,
+                &rider,
                 F(NEAR_CLIP),
                 &world.tables.ride.curve,
-                &world.tables.ride.acos,
+                Switches {
+                    // Nothing in the shell sets the engine bit that stops the look-ahead, and the
+                    // window is one view: the split-screen pitch trim wants a window less than
+                    // 0.55 as tall as it is wide, which is the same test the original makes of its
+                    // own viewport's two extents.
+                    no_look_ahead: false,
+                    short_viewport: (frame.height as f32) / (frame.width as f32) < 0.55,
+                },
                 &mut world.place,
             ))
         };

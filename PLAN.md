@@ -202,7 +202,11 @@ added beside them:
     nor the clock. Proved against the original in `tests/camera.rs` (S7). Its two questions about the
     world are `trait Surface`, the ground under the look-at point, and `trait Obstacles`, the nearest
     solid thing in front of the lens; `Nothing` answers neither, which is what the class the original
-    reads answers, and a track answers both through `world.rs` (S23).
+    reads answers, and a track answers both through `world.rs` (S23). `Follow` is the base class, and
+    the disc never instantiates it on its own: `Race` beside it is the derived class the game creates
+    for a race, a near-copy of the same frame with its own aim, look-at and position and no obstacle
+    push-out, and it is the one the shell runs and the one later camera work is measured against
+    (S24).
   - `motion.rs` — animation driving: which motion a rider's state plays, how far into it the frame is,
     and how two of them blend. The action-id switch, the cross-fade that makes a motion start from the
     pose the rider already had, the airborne pair chosen by the fore-aft lean with the shown crossup a
