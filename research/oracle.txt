@@ -466,6 +466,11 @@ pad_to_gesture              boot 0x00250fb0 (obj) the whole controller read: the
 #                                           into the group at +0x9fc, the d-pad into the stick at
 #                                           +0x628/+0x62c, then stick_direction into +0xa00. Reads the
 #                                           input layer's control strengths, so not a pure function
+#                                           Also the gas and brake levers: +0x63c is 1.0 or 0, and
+#                                           +0x640 is 1.0 or 0 — except while the stoppie latch
+#                                           (+0x728) is set, when a held brake is worth StoppieBrake
+#                                           (+0x72c) instead. The only read of +0x72c with that
+#                                           displacement anywhere in the program (S21)
 stunt_request               boot 0x002589c0 (obj in a0, fallback id in a1) -> 1 if a trick is wanted
 #                                           or running. The gate, the group/direction switch that
 #                                           names one of the 24 slots, and the overlap test that lets
@@ -1755,3 +1760,9 @@ transform_set_axes boot 0x001b1e20 (node, relative_to, forward, up, sync_a in t0
 #   BalanceNoiseAmplitude     +0xa68
 #   BalanceNoiseTimeScale     +0xa70
 #   MaxBalancePoint           +0xa74
+#   StoppieBrake              +0x72c  the loader writes it and the pitch controller never reads it:
+#                                 the stoppie latch at 0x002566a0 compares
+#                                 the front brake (+0x650) against a zero built with `mtc1 $zero`,
+#                                 and nothing in 0x00256470..0x00256940 touches +0x72c. pad_to_gesture
+#                                 is what reads it. So it is a loader key and an input key, not one
+#                                 of the ground step's twenty-five (S21)

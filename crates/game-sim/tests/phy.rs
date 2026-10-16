@@ -1375,3 +1375,110 @@ fn the_race125_pair_holds_the_retail_numbers() {
         println!("{what}: {} pounds, {} gears, crossup {} rad", p.mass.weight.0, p.engine.gears, p.max_crossup.0);
     }
 }
+
+/// Every distinct `.phy` on the disc, not just the pair [`RETAIL`] names: the copy proved below is
+/// the same copy for every bike, and a file that leaves one of these keys out is the only way to see
+/// that the loader's default travels with it.
+fn every_phy_file(f: &mut File, psr: &Psr) -> Vec<(String, Vec<u8>)> {
+    let archives: Vec<String> = psr
+        .entries
+        .iter()
+        .map(|e: &Entry| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("bike\\") && n.ends_with(".res")
+        })
+        .collect();
+    let mut leaves: Vec<String> = Vec::new();
+    for archive in &archives {
+        let bytes = member(f, psr, archive);
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        for e in &res.entries {
+            let leaf = e.name.to_ascii_lowercase();
+            let leaf = leaf.rsplit('\\').next().unwrap_or(&leaf).to_string();
+            if leaf.ends_with(".phy") && !leaves.contains(&leaf) {
+                leaves.push(leaf);
+            }
+        }
+    }
+    let want: Vec<&str> = leaves.iter().map(|s| s.as_str()).collect();
+    phy_files(f, psr, &want)
+}
+
+/// S21 — the twenty-five words the four rider controllers read, on a bike that came off the disc.
+///
+/// The reader takes them into its own `[Roll Control]`, `[Pitch Control]`, `[Donuts]` and
+/// `[No Hander Lander]` structs, which
+/// [`the_whole_loader_fills_the_bike_the_way_the_original_does`] already compares against the
+/// original loader's own bike, word for word at the offsets the original writes. So what is left to
+/// say is that the ground step's copy is that same word and not a second reading of the file — which
+/// is what this asserts, bit for bit, for every bike on the disc.
+///
+/// `MaxRollRateCommand`, `MaxRollYawRate` and `StoppieBrake` are the three keys of those sections
+/// that are deliberately *not* here: nothing on the ground reads the first two, and `StoppieBrake`
+/// belongs to the pad layer (see [`phy::Pitch::stoppie_brake`]).
+#[test]
+fn the_ground_step_gets_the_controller_keys_off_the_disc() {
+    let Some(mut f) = container() else { return };
+    let psr = directory(&mut f);
+    let files = every_phy_file(&mut f, &psr);
+    assert!(files.len() >= RETAIL.len(), "the disc should hold at least the Race125 pair");
+
+    // The port's own table, which nothing asserted here goes through — none of the twenty-five is a
+    // curve lookup.
+    let curve = CurveTable::build();
+    // One flag per key: a key that is zero in every file on the disc would make its assertion hold
+    // whether the copy happened or not, so each one has to be seen carrying a number somewhere.
+    let mut carried: BTreeMap<&str, bool> = BTreeMap::new();
+    for (what, bytes) in &files {
+        let p = Phy::read_bytes(bytes, &curve);
+        let m = &p.mv;
+        let (r, pc, d, b) = (&p.roll, &p.pitch, &p.donuts, &p.balance);
+        let keys: [(&str, F, F); 25] = [
+            // [Roll Control]
+            ("MaxRollCommand", m.max_roll_command, r.max_roll_command),
+            ("MaxRollSpeed", m.max_roll_speed, r.max_roll_speed),
+            ("RollGain", m.roll_gain, r.roll_gain),
+            ("MinStandUprightSpeed", m.min_stand_upright_speed, r.min_stand_upright_speed),
+            ("MaxStandUprightSpeed", m.max_stand_upright_speed, r.max_stand_upright_speed),
+            ("RollControlGain", m.roll_control_gain, r.roll_control_gain),
+            ("RollControlRateGain", m.roll_control_rate_gain, r.roll_control_rate_gain),
+            ("RollControlMaxCG", m.roll_control_max_cg, r.roll_control_max_cg),
+            ("MaxRollRateDisturbance", m.max_roll_rate_disturbance, r.max_roll_rate_disturbance),
+            // [Pitch Control]
+            ("MaxPitchCommand", m.max_pitch_command, pc.max_pitch_command),
+            ("PitchGain", m.pitch_gain, pc.pitch_gain),
+            ("PitchRateGain", m.pitch_rate_gain, pc.pitch_rate_gain),
+            ("WheelieTopSpeed", m.inv_wheelie_top_speed, pc.inv_wheelie_top_speed),
+            ("MaxStoppiePitchCommand", m.max_stoppie_pitch_command, pc.max_stoppie_pitch_command),
+            ("StoppiePitchGain", m.stoppie_pitch_gain, pc.stoppie_pitch_gain),
+            ("StoppieYawRateScale", m.stoppie_yaw_rate_scale, pc.stoppie_yaw_rate_scale),
+            ("StoppieTopSpeed", m.stoppie_top_speed, pc.stoppie_top_speed),
+            // [Donuts]
+            ("DonutRollAngleScale", m.donut_roll_angle_scale, d.roll_angle_scale),
+            // [No Hander Lander]
+            ("MinBalanceInertia", m.min_balance_inertia, b.min_balance_inertia),
+            ("MaxBalanceInertia", m.max_balance_inertia, b.max_balance_inertia),
+            ("BalanceInertiaRate", m.balance_inertia_rate, b.balance_inertia_rate),
+            ("InputInertia", m.input_inertia, b.input_inertia),
+            ("MaxBalancePoint", m.max_balance_point, b.max_balance_point),
+            ("BalanceNoiseAmplitude", m.balance_noise_amplitude, b.balance_noise_amplitude),
+            ("BalanceNoiseTimeScale", m.balance_noise_time_scale, b.balance_noise_time_scale),
+        ];
+        for (key, got, want) in keys {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "{what}: {key} reached the ground step as {} and the loader read {}",
+                got.0,
+                want.0
+            );
+            *carried.entry(key).or_insert(false) |= want.to_bits() != 0;
+        }
+    }
+    assert_eq!(carried.len(), 25, "twenty-five keys, each named once");
+    for (key, seen) in &carried {
+        assert!(seen, "{key} is zero in every file on the disc, so its copy proves nothing");
+    }
+    println!("{} .phy files on the disc, 25 controller keys each, bit-exact", files.len());
+}
