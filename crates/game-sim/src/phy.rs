@@ -1045,6 +1045,15 @@ pub fn spring_rate(rate: F, mass: F) -> F {
     (rate * mass * G).abs()
 }
 
+/// The damping rate as the wheel works it out: the file gives a *ratio of critical damping*, and the
+/// wheel turns it into a rate against the spring it has just been handed —
+/// `ratio * 2 * sqrt(mass * rate)`. Both of a wheel's two damping rates come out of the **last**
+/// spring the loader sets, which is `Spring` and not `SpringWhenStopped`, because the loader calls
+/// the setter again with the moving rate and the setter recomputes the damping each time.
+pub fn damping(ratio: F, mass: F, rate: F) -> F {
+    ratio * F(2.0) * (mass * rate).sqrt()
+}
+
 /// The cosine of an angle, the way the loader takes one: wrapped into `-pi..pi` — twice, because the
 /// original's first correction can leave it a turn out — and then read **straight out of the
 /// engine's curve table**, with none of the derivative correction a rotation would use. So this is

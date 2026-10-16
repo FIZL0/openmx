@@ -254,17 +254,22 @@ impl Wheel {
             w: wheel::Wheel {
                 has_ground: true,
                 mount,
-                // The suspension line: straight down the chassis' own `y`, as far as the strut goes.
-                probe: Vf::new(0.0, -travel.0, 0.0, 0.0),
-                probe_length: travel,
+                // The suspension line: straight down the chassis' own `y`, **one tire radius** long —
+                // `wheel_set_tire_derived` builds the same line, from the strut's top at `+0x48` to
+                // `-(wheel+0x214)`, and `wheel_suspension` scales the aim by `-(wheel+0x214)` every
+                // step of its relaxation. The strut is how far the suspension may *compress*, which
+                // is a different number and stays on `max_compression`.
+                probe: Vf::new(0.0, -radius.0, 0.0, 0.0),
+                probe_length: radius,
                 ground_normal: UP,
                 max_compression: travel,
                 max_damper_speed: t.max_compression_rate,
                 extension_rate: t.max_decompression_rate,
                 spring_rate: phy::spring_rate(t.spring, mass),
-                // The damping ratios the file gives are of the spring's own rate.
-                damping_out: phy::spring_rate(t.rebound_damping_ratio * t.spring, mass),
-                damping_in: phy::spring_rate(t.bounce_damping_ratio * t.spring, mass),
+                // The damping ratios the file gives are of *critical* damping, against the spring
+                // rate the loader set last, which is `Spring`'s ([`phy::damping`]).
+                damping_out: phy::damping(t.rebound_damping_ratio, mass, phy::spring_rate(t.spring, mass)),
+                damping_in: phy::damping(t.bounce_damping_ratio, mass, phy::spring_rate(t.spring, mass)),
                 steered,
                 steer_damping: t.steering_damping,
                 steer_inv_inertia: if t.steering_inertia == F::ZERO {
@@ -1076,11 +1081,12 @@ impl Ride {
 
         let mut out = Out { chassis: body, node };
 
-        // What the ground step takes as given, all of it the chassis' transform's work and all of it a
-        // frame constant — the transform only moves when the body is integrated, and `mv::Step` is
-        // what the original's own stack frame is.
+        // What the ground step takes as given: the chassis' transform's work, at the top of the frame.
+        // Two of the three are frame constants, because the transform only moves when the body is
+        // integrated and `mv::Step` is what the original's own stack frame is. [`mv::Step::local_accel`]
+        // is **not** one of them: the original re-reads the accumulator and re-rotates it every
+        // substep, so the substep loop below fills it in rather than this.
         let rot = out.mat3(Frame::Chassis);
-        let local_accel = chassis::unrotate(&rot, chassis.accel);
         let forward_speed = F(chassis.local_vel.z());
         let reverse_force = chassis::rotate(&rot, mv::reverse_push(&p.mv, forward_speed));
         let (stick_angle, deflection) = stick(held.stick);
@@ -1100,7 +1106,8 @@ impl Ride {
             gas_rate_limited: held.gas,
             reverse: c.reverse,
             balancing: c.balance,
-            local_accel,
+            // Per substep, in the loop: see [`mv::g_peak`]'s call below.
+            local_accel: mv::NOTHING,
             reverse_force,
             node_distance: *near,
             stick_x: c.stick.0,
@@ -1114,8 +1121,13 @@ impl Ride {
         let mut mvc = mv::Chassis {
             speed: chassis.speed,
             force: chassis.force,
-            accel: chassis.accel,
-            ang_accel: chassis.ang_accel,
+            // `+0x170` and `+0x180`, which are *not* the body's own `+0x70`/`+0x80`: these two are the
+            // impact accumulators the ground step empties at the top of every frame and only a
+            // bottomed-out suspension writes ([`wheel::tire_forces`]). Nothing outside the frame reads
+            // them, so they live here and nowhere else — and the body's two keep their own values,
+            // which the integrate writes from the force and the torque.
+            accel: mv::NOTHING,
+            ang_accel: mv::NOTHING,
             cofg: chassis.cofg,
             has_transform: true,
             vel: chassis.vel,
@@ -1274,13 +1286,18 @@ impl Ride {
             // meshes; here one is made where it is swept, so there is nothing to open.
             calls.push(mv::Call::CollisionBegin(k == 0));
             calls.push(mv::Call::Unrotate(mvc.accel));
-            ride.g_peak = mv::g_peak(ride.g_peak, s.local_accel);
+            // The answer to the call just handed over, and the whole of what the wreck test judges a
+            // landing on: the impact accumulator at `+0x170`, brought back into the bike's own frame
+            // by the transform **as it is now**, and kept per lane by magnitude over the frame's
+            // substeps. The vector is the bottom-out shove's, so a bike whose suspension never
+            // bottoms out holds g loads of exactly zero — which is what 300 frames of the original
+            // idling off the line read on every row (S22).
+            let local_accel = chassis::unrotate(&out.mat3(Frame::Chassis), mvc.accel);
+            ride.g_peak = mv::g_peak(ride.g_peak, local_accel);
 
             calls.push(mv::Call::Integrate(h));
             chassis.force = mvc.force;
             chassis.torque = mvc.torque;
-            chassis.accel = mvc.accel;
-            chassis.ang_accel = mvc.ang_accel;
             chassis.cofg = mvc.cofg;
             chassis.vel = mvc.vel;
             chassis.ang_vel = mvc.ang_vel;
@@ -1289,8 +1306,6 @@ impl Ride {
             out.chassis = math::quat_to_mat4(chassis.quat, *origin);
             mvc.force = chassis.force;
             mvc.torque = chassis.torque;
-            mvc.accel = chassis.accel;
-            mvc.ang_accel = chassis.ang_accel;
             mvc.vel = chassis.vel;
             mvc.ang_vel = chassis.ang_vel;
             mvc.world_ang_vel = chassis.world_ang_vel;

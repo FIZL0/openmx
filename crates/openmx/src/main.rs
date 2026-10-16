@@ -201,6 +201,17 @@ struct Args {
     /// bike's own `SideWreckSpeedLimit` within a few seconds of the start line, so with wrecks on
     /// there is no riding to be done (P3's journal entry, and a task of its own).
     wrecks: bool,
+    /// `--trace N`: ride N frames with nobody touching the pad and print one line per frame of what
+    /// the solver is doing, then quit without opening a window. S22's measuring stick for the ride's
+    /// g loads — the one thing the shell could show about them before was that it had wrecked.
+    trace: Option<u32>,
+    /// `--trace-dt S`: the frame length `--trace` steps at, when it should not be the original's own
+    /// 30 fps clamp — the one knob that tells a solver ringing at the frame rate from one ringing
+    /// however small the step is.
+    trace_dt: Option<f32>,
+    /// `--trace-brake`: hold both brakes through the trace, which is the brief's own case — a bike
+    /// standing still on the start line rather than one free-rolling down the first slope.
+    trace_brake: bool,
 }
 
 fn run() -> Result<(), String> {
@@ -346,9 +357,24 @@ fn run() -> Result<(), String> {
         ground: sim_world::Ground::new(&sim_terrain, &place.terrain),
         props,
     };
-    // Where the wheels hang from the chassis: the `.phy`'s own force positions, which is what the
-    // suspension's ray starts from.
-    let mounts = (phy.front.body_tire_force_position, phy.rear.body_tire_force_position);
+    // Where the wheels hang off the chassis, which is where each suspension ray starts: the **bike
+    // model's own wheel nodes**. `bike_attach_nodes` looks "TireFront" and "TireRear" up in the bike's
+    // node by name and writes each one's place, in that node's frame, straight into the wheel's
+    // `+0xa0`; "Shocks" and "Handlebars" go the same way into the front wheel's steering axis
+    // (S22, `research/oracle.txt`). `BodyTireForcePosition` is a different field of the `.phy`: it
+    // lands at the wheel's `+0xb0`, which neither the suspension nor the tire step ever reads. The
+    // original has no fallback here — a bike always has a model — so the one below is the port's own,
+    // for a `.phy` whose model has no such node.
+    let node_at = |name: &str| -> Option<Vf> {
+        let chassis = assets.models.get(CHASSIS)?;
+        let i = chassis.model.nodes.iter().position(|n| n.name == name)?;
+        let w = chassis.model.world(i);
+        Some(Vf::new(w.0[3][0], w.0[3][1], w.0[3][2], 1.0))
+    };
+    let mounts = (
+        node_at("TireFront").unwrap_or(phy.front.body_tire_force_position),
+        node_at("TireRear").unwrap_or(phy.rear.body_tire_force_position),
+    );
     let mut rider = Rider::new(&phy, mounts, at, heading, stunts);
     rider.sense.wrecks_enabled = args.wrecks;
     println!(
@@ -382,6 +408,103 @@ fn run() -> Result<(), String> {
             chassis: CHASSIS,
         };
         return moment::draw(&moment, out, &shot, &ground, &assets, &vehicle, &look);
+    }
+
+    // ---- `--trace`: the solver's own numbers, with nobody on the pad (S22) -----------------------
+    // No window, no pad, no camera and no drawing: just the ported frame, at the `dt` the original
+    // runs a level at (the engine's 30 fps clamp, which is what a live capture of the original shows
+    // on every row), and one line per frame of what the ground solver did with it. The columns are
+    // the ones a ringing solver shows first — the peak g the wreck test reads, the body's own
+    // acceleration in its frame, and each wheel's contact, load and sideways slip.
+    if let Some(frames) = args.trace {
+        let dt = F(args.trace_dt.unwrap_or(game_sim::tick::DeltaTime::CAP_30));
+        let controls = if args.trace_brake {
+            Controls { brake: F::ONE, front_brake: F::ONE, rear_brake: F::ONE, ..Controls::default() }
+        } else {
+            Controls::default()
+        };
+        println!(
+            "trace: {frames} frames at dt {} on {} / {}",
+            dt.0, args.track, args.bike
+        );
+        // The numbers behind the columns, so a trace in a journal entry carries the tuning it was
+        // taken on rather than a bike's name.
+        {
+            let (f, r) = (&rider.ride.front, &rider.ride.rear);
+            println!(
+                "bike: mass {} inertia {:?} cofg {:?} gravity {:?}",
+                phy.mass.mass.0,
+                (phy.mass.inertia.x(), phy.mass.inertia.y(), phy.mass.inertia.z()),
+                (phy.mv.cofg.x(), phy.mv.cofg.y(), phy.mv.cofg.z()),
+                (phy.mv.gravity.x(), phy.mv.gravity.y(), phy.mv.gravity.z()),
+            );
+            for (name, w, t) in [("front", f, &phy.front), ("rear", r, &phy.rear)] {
+                println!(
+                    "{name}: mount {:?} travel {} spring {}/{} damp {}/{} maxdamp {} ext {} radius {} inertia {}",
+                    (w.w.mount.x(), w.w.mount.y(), w.w.mount.z()),
+                    w.w.probe_length.0,
+                    t.spring.0, t.spring_when_stopped.0,
+                    w.w.damping_in.0, w.w.damping_out.0,
+                    w.w.max_damper_speed.0, w.w.extension_rate.0,
+                    w.mv.radius.0, t.tire_inertia.0,
+                );
+                let s0 = t.surfaces.first().copied().unwrap_or_default();
+                println!(
+                    "{name} surface0: friction {} drive {} side {} drag {}",
+                    s0.wheel_friction.0, s0.max_drive_force.0, s0.max_side_force.0, s0.wheel_drag.0,
+                );
+            }
+        }
+        println!(
+            "{:>5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>3} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            "frame", "gx", "gy", "gz", "vel_x", "vel_y", "vel_z", "pos_y", "fr", "f_comp",
+            "r_comp", "f_load", "r_load", "f_side", "r_side", "pitch", "roll", "tq_x",
+            "aa_x", "wx", "fz_y"
+        );
+        let mut peak = (F::ZERO, F::ZERO, F::ZERO);
+        for i in 0..frames {
+            let f = rider.frame(&phy, &tables, &controls, dt, &mut sim);
+            if let Some(w) = f.wreck {
+                println!("frame {i}: WRECK {w:?}");
+            }
+            let r = &rider.ride;
+            let g = r.mv.g_peak;
+            peak = (
+                if F(g.x()).abs() > peak.0.abs() { F(g.x()) } else { peak.0 },
+                if F(g.y()).abs() > peak.1.abs() { F(g.y()) } else { peak.1 },
+                if F(g.z()).abs() > peak.2.abs() { F(g.z()) } else { peak.2 },
+            );
+            let g = r.mv.g_peak;
+            let v = r.chassis.vel;
+            // The sideways slide the tire answers: the contact's velocity across the chassis' own
+            // `x`, which is the axis the g load that wrecks the bike is measured along. Host floats:
+            // this is a diagnostic print, not a simulation step.
+            let m = r.transform();
+            let side = |w: &game_sim::ride::Wheel| {
+                let (v, x) = (w.w.contact_velocity, m.0[0]);
+                v.x() * x.x() + v.y() * x.y() + v.z() * x.z()
+            };
+            let touch = |w: &game_sim::ride::Wheel| if w.mv.contact { 1 } else { 0 };
+            println!(
+                "{:>5} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.2} {:>1}{:>1}{:>1} {:>8.4} {:>8.4} {:>8.1} {:>8.1} {:>8.3} {:>8.3} {:>8.4} {:>8.4} {:>8.1} {:>8.2} {:>8.3} {:>8.1}",
+                i,
+                g.x(), g.y(), g.z(),
+                v.x(), v.y(), v.z(),
+                r.position().y(),
+                touch(&r.front), touch(&r.rear), if r.air.on_ground { 1 } else { 0 },
+                r.front.w.compression.0, r.rear.w.compression.0,
+                r.front.w.spring_force.0, r.rear.w.spring_force.0,
+                side(&r.front), side(&r.rear),
+                r.chassis.euler.x(), r.chassis.euler.z(),
+                r.chassis.torque.x(), r.chassis.ang_accel.x(), r.chassis.ang_vel.x(),
+                r.chassis.force.y(),
+            );
+        }
+        println!(
+            "peak g over {frames} frames: {:.3} sideways, {:.3} vertical, {:.3} along — phase {:?}",
+            peak.0.0, peak.1.0, peak.2.0, rider.phase()
+        );
+        return Ok(());
     }
 
     // ---- the window and the pad ---------------------------------------------------------------
@@ -661,6 +784,9 @@ fn parse_args() -> Result<Option<Args>, String> {
         shot: None,
         moment: None,
         wrecks: true,
+        trace: None,
+        trace_dt: None,
+        trace_brake: false,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
     };
     let mut argv = std::env::args().skip(1);
@@ -678,6 +804,21 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--display" => args.display = next("a display, like :0")?,
             "--no-wrecks" => args.wrecks = false,
+            "--trace-brake" => args.trace_brake = true,
+            "--trace-dt" => {
+                args.trace_dt = Some(
+                    next("a frame length in seconds")?
+                        .parse()
+                        .map_err(|_| "--trace-dt: not a number of seconds")?,
+                );
+            }
+            "--trace" => {
+                args.trace = Some(
+                    next("how many frames to trace")?
+                        .parse()
+                        .map_err(|_| "--trace: not a number of frames")?,
+                )
+            }
             "--seconds" => {
                 args.seconds = Some(
                     next("how long to ride")?
@@ -716,7 +857,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      L3 and R3 clicked together put the bike back on the start line.\n\
                      On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, Q+E reset.\n\
                      --no-wrecks turns the session's wrecks off; --moment draws one frame posed\n\
-                     from a moment of the original and quits."
+                     from a moment of the original and quits; --trace N rides N frames with\n\
+                     nobody on the pad and prints the solver's own numbers."
                 );
                 return Ok(None);
             }

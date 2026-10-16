@@ -3626,7 +3626,19 @@ fn the_freeride_fixture_is_a_ride() {
     };
     assert!(moved("chassis.cofg_world[2]"), "the bike never went anywhere");
     assert!(moved("chassis.speed"), "the bike never changed speed");
-    assert!(moved("engine.rpm"), "the engine never changed revs");
+    // The engine's own revs, read upstream of the idle clamp. `engine.rpm` is the wrong column to
+    // ask this of on *this* bike: with the clutch locked the engine turns at the road's revs
+    // (`9.549 * spin * ratio`), the fixture bike's first gear is 2.1 against a 3.6 final drive, and
+    // a flat floor leaves it cruising at about 17 rad/s of wheel — some 1700 road rpm, under the
+    // file's `MinRPM = 1800`. So `engine.rpm` sits on its floor for the whole session and steps off
+    // it only for the odd single frame, which no 30-frame sample lands on. It stays in the watch
+    // list, where the replay compares it tick for tick; what says the engine is turning here is the
+    // driven wheel it is locked to. (Before S22 this read `engine.rpm` and passed on a different
+    // accident: the old solver threw the bike into the air for half the session, and a wheel with no
+    // ground under it free-revs the engine. The fixture bike's `EngineBraking = 0.3` is its own
+    // oddity, 0.3 * rpm^2 of crank braking, and it is what knocks the spin to -51000 rad/s in the
+    // first ten frames — before this task's changes and after them alike.)
+    assert!(moved("rear.mv.spin"), "the engine never changed revs");
     assert!(moved("front.w.compression"), "the front suspension never moved");
 }
 
