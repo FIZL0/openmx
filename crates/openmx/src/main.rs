@@ -25,28 +25,33 @@
 //!   original degrades when a frame runs long: the clock is real, so `dt` grows.
 //! * **The place** is D6: the spawn, the start direction and the terrain come out of `free06`'s own
 //!   `.scn` and `.ps2.trn`, through the ported scene reader and the ported height-and-surface query.
+//! * **The ride** is P2: [`game_sim::ride::Ride`] is the bike, stepped by the ported ground step with
+//!   the suspension, the tires, the rigid body, the air state and the collision sweep behind it, on the
+//!   parameters the bike's own `.phy` carries. The ground it asks about and the props it runs into are
+//!   [`game_sim::world::Place`] — D6's terrain query and S4's sweep over the scene's own collision
+//!   placements. Nothing in this file moves the bike.
 //! * **The picture** is V1: the scene's props, the bike and the parts its `.sub` bolts on, lit and
-//!   fogged by the scene's own values, through the port's rasteriser, with the chase camera read from
-//!   the track's `cpresets.ini`.
+//!   fogged by the scene's own values, through the port's rasteriser, with the follow camera S7 ported
+//!   reading the track's own `cpresets.ini`.
 //!
-//! The one thing that is **not** a port is the bike's ground physics, which is S3 and is not written
-//! yet — see [`ride`], which says so at length. Everything that moves the bike lives in that one
-//! module, outside `game-sim`, in host floats, so that it cannot be mistaken for the game's own
-//! behaviour and cannot be depended on by anything that is.
+//! What is **not** a port, and is marked as such where it happens: the bilinear blend inside a terrain
+//! cell ([`ground`]), the host-float arithmetic of the camera-to-rasteriser hand-off, and this file's
+//! own choice of which pad control means what.
 //!
 //! # The controls
 //!
-//! Cross is the throttle and Square the brake (both analogue, as the pad reports them), the left stick
-//! steers and leans, Triangle puts the bike back on the start line, Start freezes and unfreezes the
-//! ride, L1 and R1 cycle the track's own camera presets, and Escape or closing the window quits. The
-//! same controls are on the keyboard for a machine with no pad: X/Space, Z, the arrow keys, V, Return.
+//! Cross is the throttle and Square the brake (both analogue, as the pad reports them), L2 is the
+//! clutch and R2 the front brake on its own, the left stick steers and leans, Circle holds a trick, the
+//! d-pad preloads, L3 asks the rider to balance and R3 is reverse. Triangle puts the bike back on the
+//! start line, Start freezes and unfreezes the ride, L1 and R1 cycle the track's own camera presets,
+//! and Escape or closing the window quits. The same controls are on the keyboard for a machine with no
+//! pad: X/Space, Z, the arrow keys, V, Return.
 
 #![forbid(unsafe_code)]
 
 mod ground;
 mod moment;
 mod pad;
-mod ride;
 mod window;
 
 use std::time::{Duration, Instant};
@@ -54,19 +59,22 @@ use std::time::{Duration, Instant};
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, V3, v3};
 use game_render::raster::Frame;
-use game_render::scene::{Preset, Vehicle};
+use game_render::scene::Vehicle;
 use game_render::world::{Assets, Camera, Lighting, draw_scene};
 use game_render::{ini, png, scene as view};
+use game_sim::camera::{Follow, Preset, Target};
 use game_sim::input::{Axis, Control, Manager, PADS, Report};
+use game_sim::phy::Phy;
+use game_sim::ride::{Controls, Ride, Tables};
 use game_sim::rng::Rng;
 use game_sim::tick::{Engine, Game, Outcome, Timer0};
-use game_sim::{Input, track};
-use ps2_float::F;
+use game_sim::world::Place;
+use game_sim::{Input, track, world as sim_world};
+use ps2_float::{F, Vf};
 
 use ground::Ground;
 use moment::{Moment, Shot};
 use pad::Pads;
-use ride::{Controls, Ride};
 use window::{Window, key};
 
 /// The game's own frame rate. The simulation is not fixed to it — it is handed the wall clock's own
@@ -96,13 +104,18 @@ fn main() {
 /// This is what [`Game`] is implemented on, so the only thing that happens inside a simulation pass is
 /// what the game would do in one — reading the pad and moving the world.
 struct World<'a> {
-    /// The ground, borrowed: the ride asks it where the dirt is, the draw asks it for triangles.
-    ground: &'a Ground<'a>,
+    /// What the ride asks about the world: the ported terrain query and the scene's collision
+    /// placements, swept by S4's own sweep. The *drawn* ground is the loop's own [`Ground`], which
+    /// reads the same file for triangles instead.
+    place: Place<'a>,
     /// The port's input manager, ticked with the frame's own `dt` at the top of the pass.
     input: Manager,
     /// This frame's reports, written by the app layer before the step the way the original's device
     /// manager fills its buffers before the frame reads them.
     reports: [Report; PADS],
+    /// The bike's own parameters, as its `.phy` carries them, and the two tables the step reads.
+    phy: Phy,
+    tables: Tables,
     ride: Ride,
     /// Whether the ride is moving. Start toggles it: the original's pause is a whole front-end page
     /// and this shell has no pages, so freezing the ride is the shell's own stand-in for it.
@@ -124,15 +137,29 @@ impl Game for World<'_> {
         if pad.pressed(Control::Start) {
             self.riding = !self.riding;
         }
+
+        // Which control means what is the shell's own choice (the original's binding table is the
+        // front end's). Everything past this point is the port's.
+        let held = |c: Control| if pad.held(c) { F::ONE } else { F::ZERO };
+        let dpad = [Control::Up, Control::Right, Control::Down, Control::Left];
         let controls = Controls {
-            throttle: pad.strength(Control::Cross).0,
-            brake: pad.strength(Control::Square).0,
-            steer: pad.axis(Axis::LeftX).0,
-            lean: pad.axis(Axis::LeftY).0,
+            gas: pad.strength(Control::Cross),
+            brake: pad.strength(Control::Square),
+            front_brake: pad.strength(Control::R2),
+            rear_brake: F::ZERO,
+            clutch: pad.strength(Control::L2),
+            reverse: held(Control::R3),
+            stick: (pad.axis(Axis::LeftX), pad.axis(Axis::LeftY)),
+            dpad_y: pad.held(Control::Up) || pad.held(Control::Down),
+            // Zero for nothing and a direction otherwise, which is all the air step reads of it; the
+            // eight-way code the original builds out of the pad is the front end's.
+            dpad_dir: dpad.iter().position(|c| pad.held(*c)).map_or(0, |i| i as i32 * 2 + 1),
+            stunt: pad.held(Control::Circle),
+            balance: pad.held(Control::L3),
             respawn: pad.pressed(Control::Triangle),
         };
         if self.riding {
-            self.ride.step(dt.0, &controls, self.ground);
+            self.ride.frame(&self.phy, &self.tables, &controls, dt, &mut self.place);
         }
         true
     }
@@ -188,7 +215,10 @@ fn run() -> Result<(), String> {
     let look = view::Scene::parse(&ini::text(&scn_bytes));
 
     let terrain_bytes = terrain_bytes(&archives[0], &place.terrain_file)?;
+    // The same file parsed twice, because the two sides of it are owned by different crates: the
+    // shell's `Ground` draws it in host floats, the port's answers the ride's ray in the game's.
     let ground = Ground::new(track::Terrain::parse(&terrain_bytes)?, &place.terrain);
+    let sim_terrain = track::Terrain::parse(&terrain_bytes)?;
     let (extent_x, extent_z) = ground.extent();
     println!(
         "{}: {} props, {} collision shapes, ground {:.0} x {:.0} feet in {} x {} samples",
@@ -200,6 +230,21 @@ fn run() -> Result<(), String> {
         ground.samples_x,
         ground.samples_z
     );
+
+    // Everything solid the scene stands on the ground, in its own space with its own place in the
+    // world: this is what stops the rider at a fence instead of letting them through it.
+    let (props, missed) = sim_world::Props::load(&place, |name| {
+        archives.iter().find_map(|a| a.read_suffix(name).ok()).ok_or_else(|| "no such member".into())
+    });
+    println!(
+        "solid: {} of {} collision meshes{}",
+        props.props.len(),
+        place.collision.len(),
+        if missed.is_empty() { String::new() } else { format!(" ({})", missed.len()) }
+    );
+    for line in missed.iter().take(3) {
+        println!("  {line}");
+    }
 
     // ---- what to draw -------------------------------------------------------------------------
     let mut assets = Assets::default();
@@ -232,29 +277,57 @@ fn run() -> Result<(), String> {
         if has_bike { ", bike" } else { ", no bike" }
     );
 
-    // The follow cameras the track carries, in the file's own order. L1 and R1 walk them.
+    // ---- the bike and where the rider starts ---------------------------------------------------
+    // The two tables the simulation shares: the arc cosine curve and the game's {cos, sin} table.
+    // They are built once, read by the ride, the camera and the `.phy` loader, and never written.
+    let tables = Tables::build();
+
+    // The bike's own physics, off the disc, by the ported loader (S18) — every number the ride runs
+    // on comes from here, and a bike whose file is missing is not rideable.
+    let phy_bytes = archives[1]
+        .read_suffix(&format!("{}.phy", args.bike))
+        .or_else(|_| archives[1].read_suffix(".phy"))
+        .map_err(|e| format!("the bike archive has no .phy: {e}"))?;
+    let phy = Phy::read_bytes(&phy_bytes, &tables.curve);
+
+    // The follow cameras the track carries, in the file's own order, read by S7's own reader. L1 and
+    // R1 walk them. `reverse_speed` is a constructor argument in the original and the call site was
+    // not read; the preset's own switch speed is the closest number the disc has.
     let presets: Vec<Preset> = archives
         .iter()
         .find_map(|a| a.read_suffix("cpresets.ini").ok())
-        .map(|b| Preset::parse(&ini::text(&b)))
+        .map(|b| Preset::read_bytes(&b, ""))
         .unwrap_or_default();
+    let reverse_speed =
+        presets.first().map_or(F(5.0), |p| p.forward_reverse_switch_speed);
+    let mut camera = Follow::new(presets, reverse_speed);
     let mut which = 0usize;
 
-    // ---- where the rider starts ----------------------------------------------------------------
-    // The scene's own start line and start direction, as the simulation's reader read them. The
-    // heading is the angle of that direction about the up axis, which is what the ride carries.
+    // The scene's own start line and start direction, as the simulation's reader read them.
     let spawn = point(place.start);
     let facing = point(place.start_direction).norm();
-    let heading = facing.x.atan2(facing.z);
-    let ride = Ride::new(spawn, heading, &ground);
+    let at = Vf::new(spawn.x, spawn.y, spawn.z, 1.0);
+    let heading = Vf::new(facing.x, facing.y, facing.z, 0.0);
+    let mut sim = Place {
+        ground: sim_world::Ground::new(&sim_terrain, &place.terrain),
+        props,
+    };
+    // Where the wheels hang from the chassis: the `.phy`'s own force positions, which is what the
+    // suspension's ray starts from.
+    let mounts = (phy.front.body_tire_force_position, phy.rear.body_tire_force_position);
+    let ride = Ride::new(&phy, mounts, at, heading);
     println!(
-        "start: {:.0}, {:.0}, {:.0} facing {:.0} degrees, on dirt at {:.1} feet",
+        "start: {:.0}, {:.0}, {:.0} facing {:.0} degrees, {} camera presets",
         spawn.x,
         spawn.y,
         spawn.z,
-        heading.to_degrees(),
-        ride.pos.y
+        facing.x.atan2(facing.z).to_degrees(),
+        camera.presets.len()
     );
+    // The ground under the start line, asked the way the ride asks it, so a start that is not on the
+    // dirt says so before the window opens.
+    let (on, _) = sim_world::World::ground(&mut sim, at);
+    println!("the dirt under the start line is at {:.1} feet", on.y());
 
     // ---- one frame of the original, posed from a save state (V2) -------------------------------
     // Everything the picture needs is loaded by now, and nothing a window or a pad gives is wanted:
@@ -295,9 +368,11 @@ fn run() -> Result<(), String> {
     let mut frame = Frame::new(args.width, args.height, look.fog_color);
     let mut engine = Engine::new();
     let mut world = World {
-        ground: &ground,
+        place: sim,
         input: Manager::connected(),
         reports: [Report::missing(); PADS],
+        phy,
+        tables,
         ride,
         riding: true,
     };
@@ -320,26 +395,57 @@ fn run() -> Result<(), String> {
             break;
         }
 
-        // The camera, after the frame: the shell's own choice of preset, the track's own numbers.
-        if !presets.is_empty() {
+        // The camera, after the frame, which is where the original's viewport updates it: the shell
+        // picks the preset, S7's own camera does everything else.
+        let presets = camera.presets.len();
+        if presets > 1 {
             let pad = world.input.pad(0);
             if pad.pressed(Control::R1) {
-                which = (which + 1) % presets.len();
+                which = (which + 1) % presets;
+                camera.set_preset(which);
             }
             if pad.pressed(Control::L1) {
-                which = (which + presets.len() - 1) % presets.len();
+                which = (which + presets - 1) % presets;
+                camera.set_preset(which);
             }
         }
-        let (bike_look, bike_up) = world.ride.frame(&ground);
-        let camera = match presets.get(which) {
-            Some(preset) => Camera::chase(world.ride.pos, bike_look, preset),
-            None => Camera::behind(world.ride.pos, bike_look),
+        let (forward, up) = world.ride.axes();
+        let bike_pos = world.ride.position();
+        let target = Target {
+            body_point: bike_pos,
+            forward,
+            up,
+            vel: world.ride.chassis.vel,
+            lean: world.ride.held.stick.0,
+        };
+        let view = if presets == 0 {
+            None
+        } else {
+            // Nothing limits the camera's distance here: the original's limit comes from a collision
+            // probe the camera owns, which is not ported, and zero is what that probe answers in the
+            // open.
+            Some(camera.update(step.dt, &target, F::ZERO, &world.tables.curve, &world.tables.acos))
+        };
+        let bike_look = vector(forward);
+        let bike_up = vector(up);
+        let pos = vector(bike_pos);
+        let camera = match &view {
+            Some(view) => Camera {
+                eye: vector(view.position),
+                at: vector(view.look_at),
+                // The file's field of view is the horizontal one at 4:3; the rasteriser wants the
+                // vertical one in radians.
+                fov: vertical_fov(view.fov.0),
+                near: 0.05,
+                far: 4000.0,
+            },
+            None => Camera::behind(pos, bike_look),
         };
 
         // The picture: the dirt, then the scene's props and the bike standing on them.
         clear(&mut frame, look.fog_color);
-        let mut drawn = ground.draw(&mut frame, &camera, &light, world.ride.pos, GROUND_RADIUS);
-        let bike_at = M4::placement(world.ride.pos, bike_look, bike_up);
+        let mut drawn = ground.draw(&mut frame, &camera, &light, pos, GROUND_RADIUS);
+        let bike_at = M4::placement(pos, bike_look, bike_up);
         // Each part rides on one node of the chassis, so its transform is that node's place in the
         // chassis followed by the chassis's place in the world.
         let mut actor: Vec<(&str, M4)> = vec![(CHASSIS, bike_at)];
@@ -380,7 +486,7 @@ fn run() -> Result<(), String> {
                 frames as f32 / since.elapsed().as_secs_f32(),
                 triangles / frames.max(1) as usize,
                 // Feet a second to miles an hour, for a number a rider can read.
-                world.ride.speed * 0.681_818,
+                world.ride.chassis.speed.0 * 0.681_818,
                 if world.riding { "" } else { " (frozen)" }
             );
             window_of_frames = (Instant::now(), 0, 0);
@@ -444,6 +550,19 @@ fn clear(frame: &mut Frame, color: [u8; 3]) {
 /// do not, and this is the one place the two meet.
 fn point(p: [F; 3]) -> V3 {
     v3(p[0].0, p[1].0, p[2].0)
+}
+
+/// A quadword the simulation holds, as the renderer's own vector: the other half of [`point`], for a
+/// position or an axis the ride has already computed.
+fn vector(v: Vf) -> V3 {
+    v3(v.x(), v.y(), v.z())
+}
+
+/// The disc's field of view — horizontal, in degrees, at 4:3 — as the vertical one in radians that
+/// [`Camera`] and the rasteriser's projection want.
+fn vertical_fov(horizontal_degrees: f32) -> f32 {
+    let horizontal = horizontal_degrees.to_radians();
+    2.0 * (horizontal / 2.0).tan().atan2(4.0 / 3.0)
 }
 
 /// The terrain file a scene asks for. Most scenes name it `SX02.trn`, but what the archive holds is
@@ -535,8 +654,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--moment FILE OUT.png]\n\
                      \n\
                      Rides the freeride area from the disc named in kit.toml.\n\
-                     Cross throttle, Square brake, left stick steers, Triangle respawns,\n\
-                     Start freezes, L1/R1 change camera, Escape quits.\n\
+                     Cross throttle, Square brake, R2 front brake, L2 clutch, left stick steers\n\
+                     and leans, Circle holds a trick, the d-pad preloads, L3 balances, R3 reverses,\n\
+                     Triangle respawns, Start freezes, L1/R1 change camera, Escape quits.\n\
                      On the keyboard: X throttle, Z brake, arrows steer, V respawn, Return start.\n\
                      --moment draws one frame posed from a moment of the original and quits."
                 );
