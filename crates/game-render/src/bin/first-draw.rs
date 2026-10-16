@@ -11,6 +11,7 @@
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, v3};
 use game_render::raster::Frame;
+use game_render::rider::{FOOT_ANCHORS, Rider, Sex, Skeleton, bolt_onto};
 use game_render::scene::{Preset, Scene, Vehicle};
 use game_render::terrain::{Terrain, draw_terrain};
 use game_render::world::{Assets, Camera, Lighting, draw_scene};
@@ -26,6 +27,9 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut track = "sx01".to_string();
     let mut bike = "250sx".to_string();
+    // The stock gear. Every other rider archive on the disc is a repaint of the same body, and
+    // nothing in a scene says which one a race uses — that comes from the player's profile.
+    let mut rider_name = "thq1".to_string();
     let mut out = std::path::PathBuf::from("context/shots/first-draw.png");
     let mut width = 640usize;
     let mut height = 448usize;
@@ -35,6 +39,7 @@ fn run() -> Result<(), String> {
         match a.as_str() {
             "--track" => track = next("a track name, like sx01")?,
             "--bike" => bike = next("a bike name, like 250sx")?,
+            "--rider" => rider_name = next("a rider name, like thq1, or none")?,
             "--out" => out = next("a path")?.into(),
             "--size" => {
                 let v = next("WIDTHxHEIGHT")?;
@@ -44,7 +49,8 @@ fn run() -> Result<(), String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "first-draw [--track sx01] [--bike 250sx] [--size 640x448] [--out PATH]\n\
+                    "first-draw [--track sx01] [--bike 250sx] [--rider thq1|none] \
+                     [--size 640x448] [--out PATH]\n\
                      Draws one frame of a track from the disc named in kit.toml."
                 );
                 return Ok(());
@@ -63,6 +69,12 @@ fn run() -> Result<(), String> {
     let mut archives: Vec<Res> = vec![disc.res(&track_member)?, disc.res(&bike_member)?];
     if let Some(name) = &second {
         archives.push(disc.res(name)?);
+    }
+    // The rider is a fourth archive, named after the rider rather than the track or the bike.
+    if rider_name != "none" {
+        let member = member_ending(&disc, &format!("{rider_name}.res"))?;
+        println!("rider: {member}");
+        archives.push(disc.res(&member)?);
     }
     let archives = archives;
 
@@ -138,11 +150,40 @@ fn run() -> Result<(), String> {
     }
     // The actor: the bike's own model, which carries its wheels and forks as nodes of one tree,
     // and the parts its `.sub` bolts on.
-    let rider = "bike";
-    let has_bike = assets.load(&archives, rider);
+    let chassis_name = "bike";
+    let has_bike = assets.load(&archives, chassis_name);
     for part in &vehicle.parts {
         assets.load(&archives, &part.model);
     }
+    // The rider on it: one body shared by every rider on the disc, painted in this one's gear. The
+    // repaint has to be in before the body is loaded, the same as the bike's.
+    let rider = match rider_name.as_str() {
+        "none" => None,
+        name => match Rider::load(&archives, name, Sex::Male) {
+            Ok(r) => {
+                assets.rename_materials(&r.suit.materials);
+                if assets.load(&archives, &r.geometry) {
+                    println!(
+                        "rider: {} wearing {}, {} -> {} -> {}.psg, {} motions",
+                        r.name,
+                        r.suit.base_materials.len(),
+                        format_args!("{name}.sub"),
+                        r.mcf,
+                        r.geometry,
+                        r.set.motions.len()
+                    );
+                    Some(r)
+                } else {
+                    println!("rider: no {}.psg", r.geometry);
+                    None
+                }
+            }
+            Err(e) => {
+                println!("rider: {e}");
+                None
+            }
+        },
+    };
     println!(
         "loaded: {} of {} models, {} textures{}",
         assets.models.len(),
@@ -193,8 +234,8 @@ fn run() -> Result<(), String> {
     let bike_at = M4::placement(stand, dir, v3(0.0, 1.0, 0.0));
     // Each part rides on one node of the chassis, so its transform is that node's place in the
     // chassis followed by the chassis's place in the world.
-    let mut actor: Vec<(&str, M4)> = vec![(rider, bike_at)];
-    if let Some(chassis) = assets.models.get(rider) {
+    let mut actor: Vec<(&str, M4)> = vec![(chassis_name, bike_at)];
+    if let Some(chassis) = assets.models.get(chassis_name) {
         for part in &vehicle.parts {
             let node = chassis
                 .model
@@ -206,6 +247,22 @@ fn run() -> Result<(), String> {
                 None => bike_at,
             };
             actor.push((part.model.as_str(), at));
+        }
+        // The rider stands on the chassis's foot pegs: the two models share four node names and
+        // nothing else, and those are the anchors. See `rider.rs` on why the bind pose's placement
+        // is a choice and the feet are the pair that suits it.
+        if let Some(rider) = &rider {
+            if let Some(body) = assets.models.get(&rider.geometry) {
+                let bolt = bolt_onto(
+                    &Skeleton::of(&body.model),
+                    &Skeleton::of(&chassis.model),
+                    &FOOT_ANCHORS,
+                );
+                match bolt {
+                    Some(bolt) => actor.push((rider.geometry.as_str(), bolt.mul(bike_at))),
+                    None => println!("rider: the chassis has no foot pegs to stand on"),
+                }
+            }
         }
     }
     drawn += draw_scene(&mut frame, &scene, &assets, &actor, &camera);
