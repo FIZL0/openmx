@@ -142,6 +142,43 @@ Two things that bite:
       number in use is an inference from the tape's idle window (video frame ~1019, simulation tick
       ~510), good to a few frames at best.
 
+- [ ] **Play that recording back in PCSX2 while the kit records** — the one step of S8 that needs a
+      person at the desktop, and the only thing between the project and a tick-exact acceptance run.
+      About ten minutes.
+
+      Why an agent cannot: PCSX2 starts an input-recording *playback* from its GUI only (Tools → Input
+      Recording → Play), there is no CLI flag and no `.ini` key for it, and this machine has no way for
+      an agent to reach that GUI — Hyprland's dispatcher would not move focus to the emulator window,
+      `grim` hung, and there is no `ydotool`. So the capture S8 made is the original's own minute from
+      the recording's start state with **nobody touching the pad**, which proves the step and the actor
+      but cannot prove the physics.
+
+      The recipe, in your own PCSX2 (not a kit copy — the kit's copies are for agents):
+
+      1. Copy `context/recordings/first_recording.p2m2_SaveState.p2s` into your PCSX2's `savestates/` as
+         `SLUS-20767 (9866FE54).08.p2s` (slot 8; any free slot will do if you tell S8's successor which).
+      2. Boot `MX Unleashed (USA).iso`, then Tools → Input Recording → **Play** →
+         `context/recordings/first_recording.p2m2`. It starts from the recording's own save state, so do
+         not load a state by hand first.
+      3. With the playback running, in a second terminal:
+         `./kit record watch/acceptance.toml -n 1811 -o context/capture/acceptance-ride.csv` — with no
+         `--state`, because the playback loads the state itself. Starting a few ticks late costs
+         alignment, not correctness: the capture carries the game's own `frame_counter` and the test
+         aligns on it (`RECORDING_START_TICK` = 2773, the counter in that save state).
+      4. Leave the pad alone for the whole minute. A single press of your own is a frame of input the
+         `.p2m2` does not contain, and it will show up as a divergence nobody can explain later.
+
+      What it unblocks: the two questions I4 and S8 left open — **which of a tick's two video fields the
+      game reads** (`TickPhase`; the right phase agrees with the capture on all 1811 ticks, the wrong one
+      disagrees on the 18 where the two fields differ in a button) and whether the recorded input really
+      reproduces the recorded motion. With it, `the_acceptance_run` in `crates/game-sim/tests/replay.rs`
+      becomes the port's verdict with no code to write.
+
+      If the playback desyncs (the bike doing something the human does not remember), say so here rather
+      than deleting it: a `.p2m2` that does not replay on the emulator it was recorded on cannot be
+      expected to replay on the port either, and that is worth knowing before anybody ports physics to
+      match it.
+
 ## Decisions only you can make
 
 - [x] **What this port is for, first.** Decided: **freeroam** — riding the dirt bike around a freeride
