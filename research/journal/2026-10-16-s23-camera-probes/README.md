@@ -10,6 +10,7 @@ behind two small traits (`camera::Surface`, `camera::Obstacles`) answered from t
 already has, and settled the brief's question on the way: the argument S7 called "the nearest allowed
 distance" is the viewport's **near clip plane**, and nothing probes for it. Also made the
 horizontal-to-vertical field-of-view conversion read the window's real aspect instead of the disc's
-4:3. Thirteen oracle proofs in `tests/camera.rs` now, 441 tests green; what is read rather than run is
-listed in `1-camera-probes-FINAL.md`, and the biggest item there is that the rest of that derived
-camera class — four more differences in its look-ahead — is still not ported.
+4:3. Fifteen oracle proofs in `tests/camera.rs` now — three of them new, covering the probe's point, the
+lift's own arithmetic and the push-out in its frame — and 444 tests green; what is read rather than run
+is listed in `1-camera-probes-FINAL.md`, and the biggest item there is that the rest of that derived
+camera class — four more differences in its look-ahead — is still not ported (S24).

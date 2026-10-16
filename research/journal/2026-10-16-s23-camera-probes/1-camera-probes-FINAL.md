@@ -26,9 +26,15 @@ Gave the follow camera something to stand on, and gave the window its real shape
   frame's own width over height instead of 4:3. The authored angle stays the horizontal one, which is
   what the original's projection does with it, so a widescreen window sees *more* top and bottom than
   4:3 did rather than a stretched 4:3 picture.
-* **Proved the probe.** A thirteenth proof in `tests/camera.rs`,
-  `the_ground_probes_point_is_the_games_own`, which hooks the vtable slot so the original can be made
-  to answer a chosen lift. The other twelve are untouched and still green.
+* **Proved all three of them.** Three new proofs in `tests/camera.rs` —
+  `the_ground_probes_point_is_the_games_own` (the point the probe asks about and where its answer lands
+  in the look-at), `the_ground_lift_is_the_games_own` (the lift's own arithmetic, with the world's
+  ground query hooked so a case can put the surface where it likes) and
+  `the_push_out_is_the_games_own` (a whole frame with the collision object non-null and its three calls
+  hooked). Fifteen in the file now; S7's twelve are untouched and still green.
+* **Used the disc's own near plane.** `NEAR_CLIP` in the shell is 2.4 rather than the rasteriser's
+  0.05, because it is one field on the disc too: the number the projection is built with *is* the
+  number the camera's distance floor reads.
 
 ## What the original does
 
@@ -95,25 +101,45 @@ is 68.997 down, which is what the human's save state recorded (V2) and what the 
 
 ## How it was proved
 
-`./kit check` — **441 tests**, green, including `tests/camera.rs`'s thirteen.
+`./kit check` — **444 tests**, green, including `tests/camera.rs`'s fifteen. Each of the three new
+ones runs **4000 generated cases** and asserts its branch counts, so none of them can pass vacuously.
 
-The new one, `the_ground_probes_point_is_the_games_own`, over **4000 generated cases**: the harness
-hooks the vtable's `+0x10c` so the hook writes down the point the original asks about and hands back a
-lift; the port runs first over a fake ground (`Dirt`) that answers a chosen lift, and the hook then
-feeds the original *that* lift. Both halves are compared — the point the probe was asked about, lane
-by lane, and the look-at the original then writes. More than a hundred cases take the lifting arm (the
-test asserts it, so it cannot pass vacuously: with a zero lift it would be
-`the_look_at_point_is_the_games_own` again).
+**`the_ground_probes_point_is_the_games_own`** — the point. The harness hooks the vtable's `+0x10c` so
+the hook writes down the point the original asks about and hands back a lift; the port runs first over
+a fake ground (`Dirt`) that answers a chosen lift, and the hook then feeds the original *that* lift.
+Both halves are compared — the point the probe was asked about, lane by lane, and the look-at the
+original then writes. More than a hundred cases take the lifting arm; with a zero lift this would just
+be `the_look_at_point_is_the_games_own` again.
+
+**`the_ground_lift_is_the_games_own`** — the lift. This calls the *derived* class's probe itself, with
+the world's ground query hooked to move the point to a height the case picks. That is the whole of what
+the probe needs from a world, so the arithmetic around it — six tenths of the error, a fiftieth of last
+frame's answer, and which of the two a point gets — is run against the original rather than read: the
+lift it returns and the lift it keeps at `+0x18c`, both bit for bit, and the point the query was
+handed. A quarter of the cases leave the camera's world pointer null, which is the original's own
+no-world arm and also what a camera over `camera::Nothing` does every frame.
+
+**`the_push_out_is_the_games_own`** — the obstacle. The same whole frame as
+`one_frame_is_the_games_own`, but with `cam+0xe8` non-null, which turns the block at the end of the
+frame on. The object itself is never touched: the bundle's point setter is hooked to write down the two
+points, the refresh does nothing, and the collide stands in for the collision — on three cases in four
+it writes a chosen hit point into `cam+0xb0` and sets `cam+0x170`, which is what the real object's
+callback would have done. Compared: the camera word for word, the view, and the probe's own segment
+against the two points the port's `probe_segment` built. The three fields the port does not model (the
+object pointer, the hit point, the flag) are written into the port's image by hand, which is the one
+place in the file where the two images are not made the same way.
 
 The twelve S7 proofs still compare the whole camera object and the whole view, unchanged, because over
 `camera::Nothing` the ported probe answers `0.0 * 0.02` — bit for bit the stub's `return 0.0f`.
 
 ## Not verified / not 1:1
 
-* **The lift's own arithmetic is read, not run.** The `* 0.6` / `* 0.02` arms of `0x0021e7d0` come off
-  the decompilation. Running the original's probe needs a live world object and a terrain tree at
-  `+0x184`, which the camera harness has no way to build. What *is* proved against the original is the
-  probe's point, that the probe is asked at all, and where its answer lands in the look-at.
+* **What the real ground query would have answered is not known.** The lift's arithmetic is run now
+  (`the_ground_lift_is_the_games_own`), but only because the query under it — `0x001dc960`, which wants
+  a live world object and a terrain tree at `cam+0x184` the camera harness cannot build — is hooked and
+  made to answer a height the case picks. So the probe is proved to ask the right question, of the
+  right point, and to do the right thing with the answer; how far down the game's own query would have
+  moved that point is the next bullet's business, and is still unread.
 * **The heights the probe reads are not the original's.** `world::Ground::at` is P2/D6's bilinear
   blend of a terrain cell; how the game's terrain *collision* class picks a point inside a cell is
   still unread. So the probe asks the right question and gets this port's answer to it.
@@ -128,24 +154,33 @@ The twelve S7 proofs still compare the whole camera object and the whole view, u
   and speed off the actor rather than being handed them. That class is a task of its own — S24 — and
   this entry is the brief for it.
 * **The push-out may be dead on retail.** `cam+0xe8`, the collision object the block is gated on, is
-  zeroed by the base constructor (`0x001f9910`) and nothing was found that fills it; no writer was
-  found for the hit flag at `+0x170` or the hit point at `+0xb0` (the listener that would copy them in
-  is reached through the collision object's own callback list); and the frame the game actually runs,
-  `0x0021e880`, has no such block at all. Its arithmetic is read off the disassembly and not run. It
-  is ported and wired anyway, because the shell has to keep the view out of the props and this is the
-  only code in the class that does — if a later task proves the block dead, the shell should stop
-  calling it rather than the module lose it.
+  zeroed by the base constructor (`0x001f9910`), and the one thing that fills it is a vtable slot of
+  the class's own — `+0xdc`, `camera_make_probe` (`0x001fa100`), overridden at `0x0021e350` — whose two
+  implementations are referenced from nowhere but the two tables. Whether anything on the disc ever
+  calls that slot is a virtual call this task did not chase, so the answer is unknown rather than no.
+  The hit point at `+0xb0`, the normal at `+0xc0` and the flag at `+0x170` likewise have no writer
+  outside the callback the probe object itself would hold (`camera_probe_hit`, `0x001f98d0`). And the
+  frame the game actually runs, `0x0021e880`, has no such block at all. The block now *runs* in the
+  proofs — the harness fills `cam+0xe8` and stands in for the object — so its arithmetic is no longer
+  read-only; two details of it still are: the value the real callback writes into the flag (the frame
+  only tests it against zero, and the harness writes 1), and the zero-length arm, which hands the
+  direction the constant quad `(0, 0, 0, 1)` — no generated frame put the camera exactly two feet above
+  its own target point. It is ported and wired anyway, because the shell has to keep the view out of
+  the props and this is the only code in the class that does — if a later task proves the block dead,
+  the shell should stop calling it rather than the module lose it.
 * **The obstacle answer is not the original's collision world.** The terrain half is a stepped march
   with a bisection over `Ground::at` (`world::Ground::under`, this port's own); the prop half is S4's
   sweep over the scene's 353 shapes. The original sweeps a one-probe bundle of the same collision
   class through its own broad phase. Back faces are culled in both, so a probe that starts underground
   comes out unobstructed either way.
-* **The shell passes its own near clip, not the disc's.** `openmx` hands the camera its rasteriser's
-  near plane (0.05 ft), so the distance floor is the preset's `MinFollowingDistance` alone. The disc's
-  race viewport would make it 2.4 × 4.5 = 10.8 ft. Two things stopped me using that: what the `== 5`
-  test in front of all three 2.4 call sites selects is unknown, and whether 10.8 ever beats a preset's
-  `MinFollowingDistance` was not checked — the presets are inside `MX.PSR` and I did not read them out.
-  If it does beat them, the retail camera cannot be zoomed in as close as this shell's can.
+* **Whether the distance floor ever binds was not checked.** The shell now hands the camera 2.4 and
+  draws with 2.4, which is what the disc's race viewport setup writes in all three of its layouts — one
+  field, read by the projection and by the camera alike. What is not checked is the two things around
+  it: what the `... + 4 == 5` test in front of all three of those call sites selects (so whether some
+  other mode leaves the constructor's 1.0 in that field), and whether the floor ever beats a preset's
+  `MinFollowingDistance` — the presets are inside `MX.PSR` and I did not read them out. On the ported
+  frame the floor is 2.4; on the frame the disc runs it would be 2.4 × 4.5 = 10.8. If 10.8 beats those
+  presets, the retail camera cannot be zoomed in as close as this shell's can.
 * **The field of view at a non-4:3 window is not compared against anything.** The disc renders 4:3 and
   nothing else, so there is no original frame to hold a widescreen window up against; what is checked
   is that the conversion is unchanged at 4:3. The choice itself — keep the authored horizontal angle
@@ -158,7 +193,7 @@ The twelve S7 proofs still compare the whole camera object and the whole view, u
 
 ## Next
 
-Nothing is waiting on this file: the task is finished and the entry can be renamed `-FINAL`. The
-follow-up it leaves behind is the third bullet above — port the camera class the game actually creates
+Nothing is waiting on this file: the task is finished. The follow-up it leaves behind is the third
+bullet above — port the camera class the game actually creates
 (ctor `0x0021e1d0`, frame `0x0021e880`, look-at `0x0021f320`, position `0x0021f600`, vtable
 `0x00452c20`), whose five remaining differences from S7's base class are listed there.
