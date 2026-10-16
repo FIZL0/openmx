@@ -1755,3 +1755,22 @@ transform_set_axes boot 0x001b1e20 (node, relative_to, forward, up, sync_a in t0
 #   BalanceNoiseAmplitude     +0xa68
 #   BalanceNoiseTimeScale     +0xa70
 #   MaxBalancePoint           +0xa74
+# --- P2: the shell on the ported physics ----------------------------------------------------------
+# No new function here — P2 wires the ported ones together — but two things had to be read off the
+# disassembly to wire them, and both are easy to get backwards.
+#
+# chassis_integrate's two transform calls are in this order (./kit dis 0x0015cad0 --len 24, then
+# 0x0015cb10 --len 20):
+#   0x0015cadc  transform_rotate  of chassis+0x190 (the centre of gravity) against the transform as
+#                                 it stood when integrate was entered
+#   0x0015cb1c  orientation_set   writes the new rotation back
+# So the origin the transform ends up at is built from the *previous* rotation, and the two calls
+# after the set are answered against the new one. A port that answers all four against one matrix is
+# wrong by one frame of rotation in the origin.
+#
+# engine_ctor (0x00246b70, in the S15 block above) is the only writer of two of the engine's words:
+# +0x88, the clutch's launch multiplier, and +0xbc, the scale on the torque leaving the gearbox.
+# Neither is a .phy key, so a port that builds its engine from the file alone leaves both at zero and
+# the engine makes no torque at all: engine_update multiplies by +0x88 to get the torque and by +0xbc
+# to get the torque reaching the wheel. Whoever constructs an engine has to apply the constructor's
+# six ones, not just the loader's keys.

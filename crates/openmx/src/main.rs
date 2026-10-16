@@ -63,7 +63,7 @@ use game_render::scene::Vehicle;
 use game_render::world::{Assets, Camera, Lighting, draw_scene};
 use game_render::{ini, png, scene as view};
 use game_sim::camera::{Follow, Preset, Target};
-use game_sim::input::{Axis, Control, Manager, PADS, Report};
+use game_sim::input::{Control, Manager, PADS, Report};
 use game_sim::phy::Phy;
 use game_sim::ride::{Controls, Ride, Tables};
 use game_sim::rng::Rng;
@@ -138,26 +138,9 @@ impl Game for World<'_> {
             self.riding = !self.riding;
         }
 
-        // Which control means what is the shell's own choice (the original's binding table is the
-        // front end's). Everything past this point is the port's.
-        let held = |c: Control| if pad.held(c) { F::ONE } else { F::ZERO };
-        let dpad = [Control::Up, Control::Right, Control::Down, Control::Left];
-        let controls = Controls {
-            gas: pad.strength(Control::Cross),
-            brake: pad.strength(Control::Square),
-            front_brake: pad.strength(Control::R2),
-            rear_brake: F::ZERO,
-            clutch: pad.strength(Control::L2),
-            reverse: held(Control::R3),
-            stick: (pad.axis(Axis::LeftX), pad.axis(Axis::LeftY)),
-            dpad_y: pad.held(Control::Up) || pad.held(Control::Down),
-            // Zero for nothing and a direction otherwise, which is all the air step reads of it; the
-            // eight-way code the original builds out of the pad is the front end's.
-            dpad_dir: dpad.iter().position(|c| pad.held(*c)).map_or(0, |i| i as i32 * 2 + 1),
-            stunt: pad.held(Control::Circle),
-            balance: pad.held(Control::L3),
-            respawn: pad.pressed(Control::Triangle),
-        };
+        // Which button means what lives in the ride, so the shell and a replay fixture read a pad
+        // the same way.
+        let controls = Controls::from_pad(pad);
         if self.riding {
             self.ride.frame(&self.phy, &self.tables, &controls, dt, &mut self.place);
         }

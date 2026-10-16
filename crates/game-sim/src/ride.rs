@@ -107,6 +107,38 @@ pub struct Controls {
     pub respawn: bool,
 }
 
+impl Controls {
+    /// What one pad is asking for, through the ported input layer.
+    ///
+    /// **The binding is the port's own.** The original's front end builds a table of binding to
+    /// command and that table is not ported (see [`Held`]), so which button is the throttle is a
+    /// choice this project makes and not a fact about the disc; what is the disc's is everything
+    /// downstream — the strengths and press timers come from [`crate::input::Pad`]'s ported poll, and
+    /// the rate limit from the `.phy`. It lives here rather than in the shell so that a replay fixture
+    /// and the shell derive the rider's hands from a pad the same way.
+    pub fn from_pad(pad: &crate::input::Pad) -> Controls {
+        use crate::input::{Axis, Control};
+        let dpad = [Control::Up, Control::Right, Control::Down, Control::Left];
+        Controls {
+            gas: pad.strength(Control::Cross),
+            brake: pad.strength(Control::Square),
+            front_brake: pad.strength(Control::R2),
+            rear_brake: F::ZERO,
+            clutch: pad.strength(Control::L2),
+            reverse: if pad.held(Control::R3) { F::ONE } else { F::ZERO },
+            stick: (pad.axis(Axis::LeftX), pad.axis(Axis::LeftY)),
+            dpad_y: pad.held(Control::Up) || pad.held(Control::Down),
+            // The eight-way code the trick table reads: odd for a single direction, and the game's
+            // own order round the d-pad. A diagonal is not derived, because which of two held
+            // directions wins is the front end's business.
+            dpad_dir: dpad.iter().position(|c| pad.held(*c)).map_or(0, |i| i as i32 * 2 + 1),
+            stunt: pad.held(Control::Circle),
+            balance: pad.held(Control::L3),
+            respawn: pad.pressed(Control::Triangle),
+        }
+    }
+}
+
 /// The controls after the input layer's rate limit: what the bike is actually holding.
 ///
 /// The original's input layer walks a table of bindings and moves each command towards what the pad
@@ -323,7 +355,17 @@ impl Ride {
                 ang_vel_min: [F(-MAX_ANG_SPEED); 3],
                 ..chassis::Chassis::default()
             },
-            engine: p.engine,
+            // The engine as its own constructor leaves it, with the file's keys on top. Two of the
+            // values the constructor writes are not `.phy` keys, so the loader cannot have written
+            // them and a zeroed engine makes no torque at all: the clutch's launch multiplier (which
+            // [`mv::clutch`] owns from the first frame the lever is out) and the scale on the torque
+            // leaving the gearbox, both one. `research/oracle.txt`'s S15 block is where the
+            // constructor's six ones are read off.
+            engine: mv::Engine {
+                clutch_torque_scale: F::ONE,
+                torque_scale: F::ONE,
+                ..p.engine
+            },
             air: air::Air::default(),
             front: Wheel::of(&p.front, mass, mounts.0, true),
             rear: Wheel::of(&p.rear, mass, mounts.1, false),
@@ -460,12 +502,12 @@ impl mv::Outside for Out<'_> {
     }
 }
 
-/// `transform_set_axes` (0x001b1e20): a frame's three rows from a forward and an up axis, by
+/// The transform helper that sets a frame's axes: its three rows from a forward and an up axis, by
 /// Gram-Schmidt — row0 is `forward × up`, row1 the up and row2 the forward, which is the pair
 /// `orientation_axes` reads back out.
 ///
 /// **This arrangement of the cross products is the port's.** The original hands five more registers
-/// to an orthonormalising callee (0x0013e330) that is not ported, so which of the three rows it
+/// to an orthonormalising callee that is not ported, so which of the three rows it
 /// trusts and which it rebuilds is not proved; what is proved (S17) is the two axes it is handed and
 /// in what order. Taking the forward as given and rebuilding the up is the arrangement that keeps the
 /// bike pointing where the no-hander aimed it.
@@ -476,7 +518,7 @@ fn set_axes(forward: Vf, up: Vf) -> [Vf; 3] {
     [r, u, f]
 }
 
-/// `smooth_noise` (0x0013e810): the engine's shared one-dimensional noise, which while the bike is
+/// The engine's shared one-dimensional smooth noise, which while the bike is
 /// balancing is the rider's own unsteadiness.
 ///
 /// **A stand-in.** The original reads tables built at start-up, which are not on the disc in a form
@@ -504,7 +546,7 @@ fn noise_at(i: i32) -> F {
 /// `1 / 2^22`, which takes the 23 bits [`noise_at`] keeps onto `0..2`.
 const NOISE_KNOT: f32 = 2.384_185_8e-7;
 
-/// `quat_from_axis_angle` (0x0013ec80): the turn the contacts asked for, as a quaternion.
+/// The turn the contacts asked for, as a quaternion, through the SDK's axis-and-angle helper.
 ///
 /// **A stand-in**, in the one respect that matters: the half angle's sine and cosine come from
 /// [`libm`] and not from the SDK's own, so the last bit or two can differ. The shape — the axis
@@ -540,9 +582,9 @@ const GIVEN_PASSES: usize = 4;
 /// arithmetic is duplicated here; the loop only answers.
 ///
 /// Two of the answers are deliberately taken against the transform as it stood when the frame began,
-/// because that is when the original asks: `transform_rotate` of the centre of gravity is at
-/// 0x0015cadc and `orientation_set` only at 0x0015cb1c, so the origin the transform ends up at is
-/// built from the *previous* rotation. The last two calls are after the set and so are answered
+/// because that is when the original asks: it rotates the centre of gravity several instructions
+/// *before* it sets the orientation (both call sites are in `research/oracle.txt`'s P2 block), so
+/// the origin the transform ends up at is built from the *previous* rotation. The last two calls are after the set and so are answered
 /// against the new one.
 fn integrate(ch: &mut chassis::Chassis, dt: F, origin: &mut Vf) -> Vec<chassis::Call> {
     let entry = math::quat_to_mat4(ch.quat, *origin);
@@ -691,7 +733,7 @@ fn patch(wh: &Wheel, m: &Mat4, curve: &CurveTable) -> Patch {
     }
 }
 
-/// `wheel_contact_velocity` (0x0025c2a0): how fast the contact patch is moving through the world —
+/// The wheel helper that measures its contact velocity: how fast the contact patch is moving —
 /// the body's own velocity plus what the body's spin adds at the arm from its centre of mass.
 ///
 /// **Close to the original, not proved against it.** The shape of a rigid body's velocity at a point
@@ -710,12 +752,12 @@ fn push(c: &mut wheel::Chassis, m: &Mat4, force: Vf, at: Vf) {
     c.torque = add_xyz(c.torque, cross(arm, local_force));
 }
 
-/// `wheel_surface_drag` (0x0025c440): what the surface under the wheel takes out of it — the rolling
+/// The wheel's surface drag: what the surface under it takes out of it — the rolling
 /// resistance against the patch's slide, and the brake's torque against the spin.
 ///
 /// **A stand-in.** Every number in it is the disc's: `WheelDrag` and `MaxBrakingTorque` out of the
 /// tire's own per-surface table, and the load out of the suspension. The *shape* is this module's —
-/// the original's own version is 0x0025c440 and is not ported. Two things it is careful about: the
+/// the original's own version is named in `research/oracle.txt` and is not ported. Two things it is careful about: the
 /// resistance is proportional to the slide only up to one unit a second, so a stopped wheel is not
 /// shoved by it; and the brake cannot turn the wheel backwards inside one substep.
 fn surface_drag(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, brake: F, dt: F,
@@ -732,7 +774,7 @@ fn surface_drag(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, brake: F, dt: F
     wh.mv.spin = if spin < F::ZERO { spin + step } else { spin - step };
 }
 
-/// `wheel_spin_integrate` (0x0025c780): the wheel's own spin, and what the tire puts through its
+/// The wheel's spin integration: the wheel's own spin, and what the tire puts through its
 /// contact patch.
 ///
 /// **A stand-in**, and the largest one in this module. Its numbers are all the disc's — the
@@ -778,7 +820,7 @@ fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, dt: F,
     wh.mv.contact_force_fwd = along;
 }
 
-/// `wheel_hinge_force` (0x0025bf90): a steered wheel the bike is balancing on puts its suspension
+/// The steering hinge's force: a steered wheel the bike is balancing on puts its suspension
 /// force through the steering hinge rather than straight into the chassis.
 ///
 /// **A stand-in.** The chassis still gets the force — it is what holds the bike up, and the original

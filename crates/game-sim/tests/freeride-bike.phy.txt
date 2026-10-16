@@ -1,0 +1,98 @@
+# A bike, hand-written for the tests — NOT the disc's.
+#
+# `.phy` is the game's own parameter format and `phy::Phy::read_bytes` is the ported loader, so a test
+# bike is written in it. Nothing in this file came off a disc: it is a plausible 250 cc four-stroke
+# and no number in it is claimed to be the game's. The keys here are the ones `ride.rs` actually
+# drives; the loader's defaults cover the rest of the file.
+#
+# Read by crates/game-sim/tests/ride.rs and crates/game-sim/tests/replay.rs.
+[Mass Properties]
+Weight = 400
+Gravity = 1
+Inertia = 22.4, 18.4, 10.9
+CofG = 0.0, 1.6, 0.0
+BalanceCofG = 0.0, 1.6, 0.0
+CofGTravelForward = 0.5
+CofGTravelBack = 0.5
+[Front Tire]
+StrutCompression = 1.0
+Spring = 2.5
+SpringWhenStopped = 2.5
+BounceDampingRatio = 0.4
+ReboundDampingRatio = 0.6
+TireRadius = 1.08
+TireInertia = 1.2
+SteeringTorque = 40
+SteeringDamping = 8
+SteeringInertia = 2
+MaxSteerAngle = 30
+BodyTireForcePosition = 0.0, 1.1, 2.1
+NumberOfSurfaces = 1
+WheelFriction1 = 1.1
+WheelDrag1 = 0.02
+MaxBrakingTorque1 = 300
+MaxDriveForce1 = 400
+MaxSideForce1 = 400
+SideForce1 = 60
+[Rear Tire]
+StrutCompression = 1.0
+Spring = 2.2
+SpringWhenStopped = 2.2
+BounceDampingRatio = 0.4
+ReboundDampingRatio = 0.6
+TireRadius = 1.12
+TireInertia = 1.4
+BodyTireForcePosition = 0.0, 1.1, -2.1
+OtherTireNormalLoadScale = 1.0
+NumberOfSurfaces = 1
+WheelFriction1 = 1.2
+WheelDrag1 = 0.02
+MaxBrakingTorque1 = 400
+MaxDriveForce1 = 600
+MaxSideForce1 = 500
+SideForce1 = 70
+[Engine]
+NumberOfRPMPoints = 4
+RPM1 = 2000
+HP1 = 6
+RPM2 = 5000
+HP2 = 26
+RPM3 = 8000
+HP3 = 38
+RPM4 = 11000
+HP4 = 30
+NumberOfGears = 5
+GearRatio1 = 2.1
+GearRatio2 = 1.7
+GearRatio3 = 1.4
+GearRatio4 = 1.15
+GearRatio5 = 1.0
+FinalGearRatio = 3.6
+EngineInertia = 0.4
+MinRPM = 1800
+IdleThrottle = 0.08
+EngineBraking = 0.3
+ClutchStaticFriction = 90
+ClutchKineticFriction = 70
+ClutchTorqueScaleTime = 1.5
+MaxClutchTorqueScale = 2.5
+MaxClutchTorqueScaleSpeed = 15
+ClutchCofGTravelBack = 0.2
+UpShiftRPM = 9500
+DownShiftRPM = 3000
+ReverseGain = 40
+ReverseSpeed = 4
+[Aerodynamics]
+Drag = 0.5
+[Joystick]
+XAxisRateLimit = 6
+YAxisRateLimit = 6
+GasRateLimit = 4
+BrakeRateLimit = 6
+ClutchInRateLimit = 8
+ClutchOutRateLimit = 4
+[Roll Control]
+RollGain = 6
+MaxRollCommand = 0.4
+[Pitch Control]
+WheelieTopSpeed = 40
