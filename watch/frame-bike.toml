@@ -1,0 +1,240 @@
+# frame-bike.toml — one whole frame of the human's bike, stage by stage, so the *order* of the rider
+# update can be proved on the live original instead of assumed.
+#
+# S6 ends with the reason this spec exists: every proof it has is a per-function oracle call, and
+# "a whole-frame comparison would catch an ordering mistake between the animation header and the rest
+# of the rider update that these per-function proofs cannot". S8's tick-exact replay of a human's
+# recording is blocked on somebody standing at PCSX2's GUI. This is the whole-frame proof that is
+# reachable from here: the save state the recording is anchored to, the kit's own pad, and one row per
+# tick carrying the input, the physics output, the animation output and the actor's world transform —
+# the three stages of `FUN_002520d0` in the order it runs them.
+#
+#   ./kit record --dry-run watch/frame-bike.toml                      # check the spec, no emulator
+#   cp context/recordings/first_recording.p2m2_SaveState.p2s \
+#      "<copy>/PCSX2/savestates/SLUS-20767 (9866FE54).08.p2s"         # slot 8 = the recording's state
+#   ./kit pcsx2 with -- bash -c '
+#       ./kit record watch/frame-bike.toml --state 8 -n 1400 \
+#           -o context/capture/frame-bike-ride.csv & rec=$!
+#       sleep 7                                                       # the state load and the warmup
+#       ./kit pad script watch/pads/frame-bike-ride.txt               # throttle, then lean and steer
+#       wait $rec'
+#
+# The ride has to get **airborne**, and it has to move both stick axes: grounded frames hold the
+# animation's three interesting fields still (a 200-frame idle capture reads action 28, ramp 0 and a
+# constant pose on every row and proves nothing). A5's capture has 500+ airborne frames, 26 restarts
+# and 27 distinct lean values; `crates/game-sim/tests/replay.rs` refuses a capture without them.
+#
+# ## The chains, and why the hop counts are what they are
+#
+# R6's walk, one arrow at a time — each arrow is **one read, then add the offset**: the GameManager
+# singleton -> the actor manager (+0x34) -> its list head (+0x34) -> N `next` hops (+0x8) -> that
+# node's item (+0x0) -> a field of the actor.
+#
+# Free09 (the recording's own state) holds nine actors: the human's rider and vehicle, three AI riders
+# and their three vehicles, and two more. **Two** `next` hops land on the human's rider, **eight** on
+# the human's vehicle; S8 measured the vehicle's eight and A5's probe re-walked the whole list. Those
+# counts are true of *this save state* and nothing else — another area or another mode reorders the
+# list. "Rider" here is the type-2 actor: the one that carries the ride state machine, the tricks and
+# the animation (S5's journal calls the same object "the bike"); the type-4 actor is the chassis whose
+# velocity and world transform the physics moves. What tells the human's actors from an AI's is the
+# control source on the player record
+# (`-> 0x20 -> 0x34`): 1 is a local human, 2 is an AI. So both guard columns matter:
+#
+#   `rider_type`    reads 2 (a rider; the vehicle is 4) or the hop count is wrong
+#   `rider_ctl_src` reads 1 in every row, or the chain is aimed at an AI rider
+#
+# (The column is `rider_ctl_src`, not `bike_ctl_src`: S8's acceptance reader keys on the name
+# `bike_ctl_src` and would try to build a fixture out of this capture.)
+#
+# An empty cell is a chain that went null — no level loaded, or the actor was freed — and no proof can
+# be read across one. The test refuses a capture with any.
+#
+# For re-exploring rather than proving, swap the named rider fields for one block and dig in Python:
+#
+#   [[field]]
+#   name = "rider"
+#   addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+#   type = "bytes:2688"
+#   required = true
+#
+# ## The stages, in the order the original runs them
+#
+# The riding branch of the rider's per-frame update calls, in this order: the ground step (when the
+# ride state's reason at +0x748 is 0), the air state, the attachment update that moves the actors hanging
+# off the rider, the stunt idle, the stunt state pack, and last the animation header, which is the tail
+# of the stunt clocks past the end of the clock section. The addresses of all six, and the `./kit dis`
+# range that lists the branch, are in A5's journal entry and `research/oracle.txt`.
+#
+# The columns below are grouped by which of those wrote them, which is what makes the lag tests in
+# `crates/game-sim/tests/replay.rs` readable: a producer and its consumer sampled on the same row fit
+# at lag 0 and not at lag 1 exactly when the consumer ran *after* the producer in the frame.
+
+[watch]
+name        = "frame-bike"
+description = "one whole frame of the human's bike: the input, the physics, the animation, the actor"
+every       = 1          # one row per tick; a lag test cannot be read across a gap
+frames      = 1400       # ~47 s of riding, enough for several jumps; --frames overrides
+
+[setup]
+state  = 8               # the human recording's own save state, copied into the scratch slot
+warmup = 10              # let the state settle before the first row
+
+# --- when the frame was ------------------------------------------------------------------------------
+# The app's own counter rises by 1 per tick while the recorder's `frame` column (vsync) rises by 2, so
+# this is the column that says whether two rows really are consecutive frames of one simulation.
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+# The dt the whole rider update is handed. In a level it is pinned at the engine's 30 fps clamp,
+# 0.033330001 (I4) and not 1/30 = 0.033333335; any other value is a frame the port would integrate
+# differently for no reason, and the test checks the bits.
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+# --- which actor this is -----------------------------------------------------------------------------
+[[field]]
+name = "rider_type"               # +0x00: 2 = a rider
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "rider_ctl_src"            # +0x20 -> +0x34: 1 = a local human, 2 = an AI
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+# --- stage 1: the physics (the ground step and the air state) ----------------------------------------
+# The crossup angle in radians and the rider's two leans in -1..1: the physics' outputs that the
+# animation header reads. `max_crossup_phys` is the same constant the air state clamps the angle with,
+# kept beside it so a capture carries the value rather than a guess — it reads 0.7853980660438538
+# (45 degrees) throughout A5's capture, which is the retail value of `MaxCrossupAngle` that S6's
+# per-function proofs could not pin down.
+[[field]]
+name = "crossup"                  # +0x600: the physics' crossup angle, radians
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x600"
+type = "f32"
+
+# The lean pair, side by side in the object as they are in the port's `motion::Pose`: the roll lean
+# the two neutral arms turn into the shown pose, and the fore-aft lean the airborne arm turns into the
+# clip pair it blends. Both were found by searching a capture of the whole rider object for the field
+# the header's output is a function of (`research/frame/bike_probe.py` dumps it); the fore-aft one is
+# the only input of `fore_aft` below, and the roll one the only input of `pose` on a grounded frame.
+[[field]]
+name = "lean_roll"                # +0x670: roll lean, -1 to 1
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x670"
+type = "f32"
+
+[[field]]
+name = "lean_fore_aft"            # +0x674: fore-aft lean, -1 forward to 1 back
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x674"
+type = "f32"
+
+[[field]]
+name = "max_crossup_phys"         # +0x6d8: MaxCrossupAngle as the physics holds it
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x6d8"
+type = "f32"
+
+# The ride state's reason: 0 while riding, and the wreck reason while the rider is down and being put
+# back on the bike (S5 — the reason the ground step is skipped). A5's ride wrecks twice: 11 (a bad
+# landing attitude) for 79 frames and 1 for 87. Those frames are why the capture carries this column:
+# the animation's outputs are cleared on the way back and `motion::Driver` has no reset, so the
+# whole-frame comparison has to be able to see a down rider rather than fail on one.
+[[field]]
+name = "wreck_reason"             # +0x748: 0 = riding; the ground step runs only while it is 0
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+# --- stage 2: the actor update (0x00133500, the attachments) ------------------------------------------
+# The rider's own copy of where it is sitting, written by the attachment walk out of the chassis it
+# rides. Sampled on the same row as the vehicle's transform below, it says whether the attachment walk
+# ran before or after this frame's physics: a frame late and the pair is a whole frame of motion apart.
+[[field]]
+name = "rider_pos"                # +0x820: the seat position the attachment walk wrote
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x820"
+type = "f32x3"
+
+# --- stage 3: the animation header (the tail of the stunt clocks) -------------------------------------
+# Everything `motion::Driver` is: the two ids (requested, then the one the header latched to play),
+# the request count and the copy the restart test compares it against, the cross-fade's flag and ramp,
+# the pose and the fore-aft lean mapped to 0..1, and the crossup the airborne arm is showing — which
+# is the field the landing test judges a wreck on, so it is a simulation output and not a cosmetic.
+[[field]]
+name = "requested"                # +0x864: the id the trick machine asked for this frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x864"
+type = "u32"
+
+[[field]]
+name = "shown_crossup"            # +0x788: the crossup the airborne pose is showing, 0..1
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x788"
+type = "f32"
+
+[[field]]
+name = "pose"                     # +0x9e8: the pose the rider is showing, 0..1 with 0.5 neutral
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9e8"
+type = "f32"
+
+[[field]]
+name = "fore_aft"                 # +0x9ec: `lean` mapped to 0..1; picks the airborne clip pair
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9ec"
+type = "f32"
+
+[[field]]
+name = "faded"                    # +0x9f0: a cross-fade has been started at least once
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9f0"
+type = "u32"
+
+[[field]]
+name = "ramp"                     # +0x9f4: the cross-fade, 1 on a restart down to 0
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9f4"
+type = "f32"
+
+[[field]]
+name = "blend_rate"               # +0x9f8: how fast the ramp falls, per second (3.0 in the ctor)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9f8"
+type = "f32"
+
+[[field]]
+name = "max_crossup"              # +0x9e4: MaxCrossupAngle as the animation holds it
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9e4"
+type = "f32"
+
+[[field]]
+name = "seq"                      # +0xa04: the request count the restart test reads
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa04"
+type = "u32"
+
+[[field]]
+name = "prev_seq"                 # +0xa08: the copy of it from the end of the previous frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa08"
+type = "u32"
+
+[[field]]
+name = "action"                   # +0xa78: the id the header latched and the selection ran on
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa78"
+type = "u32"
+
+# --- the vehicle the rider is on: eight hops, not two -------------------------------------------------
+# The chassis the physics moved. Row 3 of the transform (+0x1b0) is the position, which is what
+# `rider_pos` above is compared against.
+[[field]]
+name = "veh_type"                 # +0x00: 4 = a vehicle, or the hop count is wrong
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "veh_ctl_src"              # +0x20 -> +0x34: 1 = the human's vehicle, 2 = an AI's
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "veh_vel"                  # +0x130: velocity, world units per second
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x4"
+
+[[field]]
+name = "veh_xform"                # +0x180: 4x4 world transform; row 3 is the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"

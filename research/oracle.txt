@@ -1259,3 +1259,41 @@ transform_sync boot 0x001b2770 (transform, flags) -> brings the transform up to 
 # The three constant quadwords it reads. The proof reads the third one out of the image rather than
 # trusting the port's copy, so its value is proved and not assumed:
 #   0x00426d70 (0, 0, 0, 1)   0x00426d80 (1, 1, 1, 1)   0x00426db0 (0, 1, 0, 1)
+
+# A5 — the whole frame, measured on the live emulator rather than one function at a time. The spec is
+# watch/frame-bike.toml, the proofs are the A5 tests at the end of crates/game-sim/tests/replay.rs,
+# and how each number was found is in research/journal/2026-10-16-a5-whole-frame.
+#
+# The riding branch of the ridden actor's per-frame update (0x002520d0, $s0 the actor, $f20 the dt;
+# ./kit dis 0x002521a0 0x00252268 lists it), in the order it calls:
+#   vt+0x0ec 0x0027ffd0 -> bike_ground_step 0x00257a00, only while +0x748 is 0 -> bike_air_state
+#   0x00251d20 -> 0x00133500 (obj+0x50, dt) the attachment walk -> stunt_idle vt+0x124 0x00258cc0 ->
+#   stunt_state_pack vt+0x128 0x00258d50 -> stunt_clocks vt+0x130 0x002593e0, whose tail past
+#   clock_section_end 0x00259b00 is the animation header -> obj+0xa08 = obj+0xa04 ->
+#   ride_state_machine vt+0x0f8 0x0027bc90.
+# The dispatch table is obj+0x48 and the twelve slots are read live by research/frame/bike_probe.py,
+# so the order above is this save state's own table and not a reading of the listing.
+#
+# Fields of the ridden actor, measured over 1,400 consecutive ticks of one ride (the human's rider is
+# list entry 2 and its chassis entry 8 on the recording's save state; control source 1 on
+# +0x20 -> +0x34 tells them from the three AI riders'):
+#   +0x600  the crossup angle in radians, written by bike_air_state. The header's airborne arm remaps
+#           it onto +0x788 and +0x9e8 in the *same* frame: exact on 513 of 513 airborne ticks, and
+#           nothing like it one tick late
+#   +0x670  the roll lean, -1..1 -> +0x9e8 = 0.5 + 0.5 * it on a grounded tick, same frame
+#   +0x674  the fore-aft lean, -1..1 -> +0x9ec = (it + 1) * 0.5, every tick, same frame
+#   +0x6d8  MaxCrossupAngle as the physics holds it, and +0x9e4 as the animation holds it: both
+#           0x3f490fd9 = 0.7853980660438538 = 45 degrees, on all 1,400 ticks. This is the retail value
+#           S6 could not prove; Params::max_crossup in the port is still handed it by the caller
+#   +0x748  the ride state's reason, 0 while riding (S5). Non-zero for 158 of the 1,400 ticks of the
+#           ride — two wrecks, reason 11 then 1 — and the reset that follows puts +0x788 back to 0.5
+#   +0x820  the seat position the attachment walk writes out of the chassis. Against the chassis'
+#           own transform (entry 8, +0x180 row 3) it is a rigid pair within one tick: 0.134 units
+#           apart on the same tick against 1.734 one tick late, with 1.853 units of travel in the
+#           median tick, so the attachment walk ran after this tick's physics
+#   +0x864  the id the state pack latched == +0xa78 the id the header ran on, 1,399 of 1,399 ticks at
+#           lag 0 and 1,377 at lag 1: the header latches the pack's id in the pack's own frame
+#   +0x8a0  reads as a packed word (0xd4002100, 0xd40c2900) and not the small count the note on
+#           stunt_state_pack above suggests. The count the restart test reads is +0xa04, with the
+#           previous frame's copy at +0xa08 (both 0 for all 1,400 ticks: never exercised)
+#   +0x9f8  the blend rate, 3.0 (0x40400000) throughout, which is the constructor's value

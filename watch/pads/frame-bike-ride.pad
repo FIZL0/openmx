@@ -1,0 +1,36 @@
+# frame-bike-ride.pad — ride the human recording's save state hard enough that one frame of the bike
+# has something in it: throttle held, several jumps, and both stick axes swept.
+#
+#   ./kit record watch/frame-bike.toml --state 8 --pad watch/pads/frame-bike-ride.pad -n 1400
+#
+# Why a ride and not an idle: grounded and still, the rider's animation header reads action 28, ramp 0
+# and a constant pose on every row — a capture of it proves nothing about the order of the frame. A
+# capture that proves the order needs the physics' outputs *moving*, which means air time (the airborne
+# arm is the only one that writes the crossup the landing is judged on) and the lean off centre (the
+# fore-aft map is the header's other live input). A5's capture of this script: 507 airborne frames,
+# 26 cross-fade restarts, 499 distinct crossup angles, 27 distinct leans.
+#
+# Timing is wall clock, not frame-exact, and nothing here needs to be: every row carries the values the
+# game itself held that tick. Free09 is open ground, so the exact line the bike takes does not matter —
+# only that it keeps leaving the ground.
+down cross
+sleep 9000
+stick l 0.35 0
+sleep 3000
+stick l 0 1
+sleep 4000
+stick l 0.5 1
+sleep 3000
+stick l 0 -1
+sleep 4000
+stick l -0.35 -1
+sleep 3000
+stick l 0 0
+sleep 3000
+stick l -0.6 0.5
+sleep 4000
+stick l 0.6 -0.5
+sleep 4000
+stick l 0 0
+sleep 5000
+release
