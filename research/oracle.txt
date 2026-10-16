@@ -424,8 +424,14 @@ bike_airborne_control boot 0x00256e50 (dt in f12, bike) -> the moment the stick 
 #                                     airborne, the damping or auto-levelling, and the lean force
 bike_wreck_test boot 0x002522c0 (bike, other) -> the whole wreck decision: g loads, pitch and roll
 #                               limits, the landing crossup test, no-hander and joust
-orientation_axes boot 0x001b24d0 (orientation, which, out_axis, out_angles) -> samples a chassis
-#                                orientation into two vec4s; hook it to choose a heading
+orientation_axes boot 0x001b24d0 (frame, relative_to, out_forward, out_up) -> copies a transform's
+#                                two axis rows out as vec4s with w = 0: out_forward from frame+0xa0
+#                                (the z row), out_up from frame+0x90 (the y row), each optionally
+#                                brought into `relative_to`'s frame. With the two frames equal — which
+#                                includes both being null — it answers the identity's two axes,
+#                                (0,0,1,0) and (0,1,0,0), and does not dereference either. Hook it to
+#                                choose a heading. S3's note called a1 an axis index and a3 the
+#                                angles; both were wrong
 acos_table_build boot 0x0012e150 () -> fills the 30000-entry acos table from the double routine
 curve_table_build boot 0x0012e260 () -> fills the 6000-entry {cos, sin} table, 8 bytes each,
 #                              indexed from -pi in steps of 2pi/5999
@@ -1471,3 +1477,98 @@ motion_rot_channel_new      boot 0x00135cd0 (chan) a rotation channel: +4 = 1 on
 motion_rot_channel_new_narrow boot 0x00135c00 (chan) the same for the eight-byte key kind, with the
 #                                           other vtable
 motion_pos_channel_new      boot 0x00135900 (chan) a position channel: the same without the cache
+
+# ---------------------------------------------------------------------------------------------------
+# S17 — the rider's four controllers. The three the ground step drives every substep and the
+# no-hander it drives when the bike is not balancing, all four of them listed but not ported by S3.
+# The port is crates/game-sim/src/move.rs (stand_upright, balance, roll_pitch, no_hander) and the
+# proofs are in crates/game-sim/tests/move.rs; how each one was found is in
+# research/journal/2026-10-16-s17-the-rider-controllers. The four addresses are in the S3 block above.
+#
+# All four are read through `./kit dis`, not the decompiler: every one of them builds its accumulator
+# chain in an order Ghidra reorders, and one of them calls a function with seven register arguments,
+# which Ghidra prints as a call with two.
+#
+# bike_stand_upright 0x002574e0 — the low-speed upright controller. Only with both wheels down, not
+#   balancing, no throttle and |speed| < 10 (a literal, not a key). It takes the part of gravity that
+#   runs along the ground — gravity less its component along the front wheel's contact normal — splits
+#   that into the part along the chassis' forward axis flattened into the contact plane and the part
+#   across it, and pushes back: minus the across part always, minus the along part as well while the
+#   brake is held. The forward axis comes from orientation_axes against the chassis' own transform,
+#   which may be null; the function does not check, and the null answer is (0,0,1,0). A flattened
+#   forward of exactly zero length makes it give up and add nothing.
+# bike_balance 0x002561f0 — balance on one wheel. Only with the front wheel in contact. Four
+#   accumulators, all of them at +0xa4c..+0xa6f and all of them zeroed by the step whenever the bike
+#   is not balancing (S3 read that clearing as the no-hander's; it is this one's):
+#     +0xa4c balance_inertia      the rate the rider's input is let through, ramped by
+#                                 BalanceInertiaRate between MinBalanceInertia and MaxBalanceInertia
+#     +0xa60 balance_command      the command the stick and the noise make, clamped to +-1
+#     +0xa64 balance_point        the lean the command integrates to, clamped to +-MaxBalancePoint
+#     +0xa6c balance_noise_time   the noise's own clock
+#   The roll angle it controls to comes from the front wheel's contact normal (front+0x130) brought
+#   into the bike node's frame, flattened into the frame's xy plane, normalised, and read off the acos
+#   table — the same lookup air.rs::AcosTable::at already is. The controller is a P term on that angle
+#   less the roll rate (chassis+0x290's z) and less the disturbance the balance point commands, and
+#   what it moves is the chassis' centre of gravity in x, clamped to +-RollControlMaxCG.
+# bike_roll_pitch 0x00256470 — the roll and pitch the rider's lean feeds, on the ground only. Two
+#   halves, each a PI controller on a pitch rate with the integral at +0x724:
+#     the wheelie — rear wheel down, throttle on, speed over 5 (a literal), the *rear* brake off
+#       (+0x654), no clutch, and the stick pulled back past 0.5. The command fades out with speed
+#       through +0x720's 1/WheelieTopSpeed.
+#     the stoppie — latched at +0x728 by the *front* brake (+0x650) and the stick pushed forward past
+#       -1, and dropped
+#       again below -0.1 of stick or under 7 of speed. It adds a yaw term as well:
+#       1000 * (StoppieYawRateScale * lean - the rate about the rear contact normal).
+#   The wheelie half measures the same rate against the same normal and multiplies the result by a
+#   literal zero, so that whole dot product is dead.
+# bike_no_hander 0x00255d20 — rolls the bike node about its own forward axis so the rider can let go.
+#   The angle it rolls towards is the ground's roll angle under whichever wheels are properly down
+#   (a ray hit, or a swept contact whose normal is more than 0.17 up), faded out with speed, with the
+#   rider's lean commanding a roll up to MaxRollCommand — widened by DonutRollAngleScale while the
+#   donut is on — and RollGain * dt of first-order lag on the way. It ends in transform_set_axes.
+transform_set_axes boot 0x001b1e20 (node, relative_to, forward, up, sync_a in t0, sync_b in t1,
+#                                  sync_c in t2) -> builds the node's world matrix from two axes by
+#                                  Gram-Schmidt: row0 (+0x40) = forward x up, row1 (+0x90) = up,
+#                                  row2 (+0xa0) = forward, row3 the translation it keeps. The pair
+#                                  orientation_axes reads back out, which is how a2 is known to be the
+#                                  forward (z) axis and a3 the up (y) axis. Ghidra prints the
+#                                  orthonormalising callee (0x0013e330) as a two-argument call; it
+#                                  takes five, in a2, a3, t0, t1 and t2, passed straight through
+# The two brake words the two halves read are not copies of one another: the bike's setup at
+# 0x002535a0 hands the front wheel a pointer to bike+0x650 as its +0x30 and the rear wheel one to
+# bike+0x654, beside the engine's +0x658/+0x65c (the rate-limited throttle and clutch), and each wheel
+# reads its own word as a brake — 0x0025c4c8 in wheel_surface_drag turns it into a torque against the
+# spin, 0x0025cb8c in wheel_tire_forces gates the locked-wheel path on it being nonzero. So the
+# wheelie's veto is the driven wheel's brake and the stoppie's gate is the front's. Who writes the two
+# words (one lever into two rate limiters, or two levers) was not chased down; the port keeps them as
+# two inputs, Step::front_brake and Step::rear_brake.
+# rotate_about_axis 0x001344e0 (the S7 block has it: angle in f12, unit axis, v, out) is the
+# no-hander's last arithmetic — the ground normal turned about the node's own forward axis by minus
+# the angle. Ported and proved by S7 as camera::rotate.
+# The .phy keys the four controllers read, on top of S3's table. The loader is bike_phy_load
+# 0x002539e0; a default in brackets is the one the loader passes when the key is absent.
+#   DonutRollAngleScale       +0x540  [1.0]  (loaded at 0x00255380, far down the same function)
+#   MaxRollCommand            +0x6d8  * 0.01745329 (degrees)
+#   MaxRollSpeed              +0x6e0  * 1.46666
+#   RollGain                  +0x6e8
+#   MinStandUprightSpeed      +0x6ec  [10.0] * 1.46666
+#   MaxStandUprightSpeed      +0x6f0  [30.0] * 1.46666
+#   RollControlGain           +0x704
+#   RollControlRateGain       +0x708
+#   RollControlMaxCG          +0x70c
+#   MaxRollRateDisturbance    +0x710
+#   MaxPitchCommand           +0x714  * 0.01745329
+#   PitchGain                 +0x718
+#   PitchRateGain             +0x71c
+#   WheelieTopSpeed           +0x720  stored as 1.0 / (key * 1.46666)
+#   MaxStoppiePitchCommand    +0x730  * 0.01745329
+#   StoppiePitchGain          +0x734
+#   StoppieYawRateScale       +0x738
+#   StoppieTopSpeed           +0x73c  * 1.46666
+#   BalanceInertiaRate        +0xa50
+#   MinBalanceInertia         +0xa54
+#   MaxBalanceInertia         +0xa58
+#   InputInertia              +0xa5c
+#   BalanceNoiseAmplitude     +0xa68
+#   BalanceNoiseTimeScale     +0xa70
+#   MaxBalancePoint           +0xa74

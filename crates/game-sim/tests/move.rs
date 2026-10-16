@@ -27,7 +27,12 @@
 //! accumulator are part of the compared graph there, and they carry from substep to substep and from
 //! frame to frame the way the game's do.
 
-use game_sim::r#move::{self as mv, Bike, Call, Chassis, Engine, Fresh, NOTHING, Params, Ride, Side, Step, Wheel};
+use game_sim::air::AcosTable;
+use game_sim::camera::{CURVE_ENTRIES, CurveTable};
+use game_sim::r#move::{
+    self as mv, Bike, Call, Chassis, Engine, Frame, Fresh, NOTHING, Outside, Params, Ride, Side,
+    Step, Tables, Wheel,
+};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, addr, game_or_skip};
 use std::cell::RefCell;
@@ -69,6 +74,10 @@ const CURVE_TORQUE: u32 = 0x0126_8000;
 /// to see a virtual call happen at all.
 const INTEGRATE: u32 = 0x0127_0000;
 const COLLISION_BEGIN: u32 = 0x0127_1000;
+/// The engine's two start-up tables, which the no-hander's rotation and both roll angles read: the
+/// 6001-entry `{cos, sin}` curve and the 30001-entry arc cosine. Far enough apart for both.
+const CURVE: u32 = 0x0130_0000;
+const ACOS: u32 = 0x0140_0000;
 
 /// One generated frame: the bike's tuning, the state the step owns, and the four objects it reaches.
 #[derive(Clone, Debug)]
@@ -80,6 +89,12 @@ struct State {
     rear: Wheel,
     eng: Engine,
     st: Step,
+    /// The forward axis of each of the two frames the controllers ask about — the `z` row of the
+    /// frame's world matrix, which is the word `orientation_axes` copies out. The harness keeps them
+    /// where that function reads them, so the hook hands back the same quadword the real one would
+    /// and the port's [`Outside`] can hand back the same again.
+    node_forward: Vf,
+    chassis_forward: Vf,
 }
 
 fn put_f(ee: &mut Ee, a: u32, v: F) {
@@ -166,6 +181,31 @@ fn poke(ee: &mut Ee, s: &State) {
     put_f(ee, OBJ + 0x548, p.reverse_gain);
     put_f(ee, OBJ + 0x6a8, p.drag);
     put_v(ee, OBJ + 0x450, p.gravity);
+    put_f(ee, OBJ + 0x540, p.donut_roll_angle_scale);
+    put_f(ee, OBJ + 0x6d8, p.max_roll_command);
+    put_f(ee, OBJ + 0x6e0, p.max_roll_speed);
+    put_f(ee, OBJ + 0x6e8, p.roll_gain);
+    put_f(ee, OBJ + 0x6ec, p.min_stand_upright_speed);
+    put_f(ee, OBJ + 0x6f0, p.max_stand_upright_speed);
+    put_f(ee, OBJ + 0x704, p.roll_control_gain);
+    put_f(ee, OBJ + 0x708, p.roll_control_rate_gain);
+    put_f(ee, OBJ + 0x70c, p.roll_control_max_cg);
+    put_f(ee, OBJ + 0x710, p.max_roll_rate_disturbance);
+    put_f(ee, OBJ + 0x714, p.max_pitch_command);
+    put_f(ee, OBJ + 0x718, p.pitch_gain);
+    put_f(ee, OBJ + 0x71c, p.pitch_rate_gain);
+    put_f(ee, OBJ + 0x720, p.inv_wheelie_top_speed);
+    put_f(ee, OBJ + 0x730, p.max_stoppie_pitch_command);
+    put_f(ee, OBJ + 0x734, p.stoppie_pitch_gain);
+    put_f(ee, OBJ + 0x738, p.stoppie_yaw_rate_scale);
+    put_f(ee, OBJ + 0x73c, p.stoppie_top_speed);
+    put_f(ee, OBJ + 0xa50, p.balance_inertia_rate);
+    put_f(ee, OBJ + 0xa54, p.min_balance_inertia);
+    put_f(ee, OBJ + 0xa58, p.max_balance_inertia);
+    put_f(ee, OBJ + 0xa5c, p.input_inertia);
+    put_f(ee, OBJ + 0xa74, p.max_balance_point);
+    put_f(ee, OBJ + 0xa68, p.balance_noise_amplitude);
+    put_f(ee, OBJ + 0xa70, p.balance_noise_time_scale);
 
     put_v(ee, OBJ + 0x550, r.g_peak);
     put_f(ee, OBJ + 0x6c0, r.clutch_timer);
@@ -173,15 +213,22 @@ fn poke(ee: &mut Ee, s: &State) {
     put_f(ee, OBJ + 0x6cc, r.clutch_cofg_weight);
     put_f(ee, OBJ + 0x65c, r.clutch_in);
     put_b(ee, COLL + 0x30, r.collision_near);
-    for (a, v) in [0xa6cu32, 0xa64, 0xa4c, 0xa60].into_iter().zip(r.no_hander_scratch) {
-        put_f(ee, OBJ + a, v);
-    }
+    put_f(ee, OBJ + 0xa4c, r.balance_inertia);
+    put_f(ee, OBJ + 0xa60, r.balance_command);
+    put_f(ee, OBJ + 0xa64, r.balance_point);
+    put_f(ee, OBJ + 0xa6c, r.balance_noise_time);
+    put_f(ee, OBJ + 0x724, r.pitch_integral);
+    put_b(ee, OBJ + 0x728, r.stoppie);
 
     put_f(ee, CHASSIS + 0x34, ch.speed);
     put_v(ee, CHASSIS + 0x130, ch.force);
     put_v(ee, CHASSIS + 0x170, ch.accel);
     put_v(ee, CHASSIS + 0x180, ch.ang_accel);
     put_v(ee, CHASSIS + 0x190, ch.cofg);
+    put_v(ee, CHASSIS + 0x90, ch.euler);
+    put_v(ee, CHASSIS + 0x140, ch.torque);
+    put_v(ee, CHASSIS + 0x280, ch.world_ang_vel);
+    put_v(ee, CHASSIS + 0x290, ch.ang_vel);
     ee.set_u32(CHASSIS + 0x254, if ch.has_transform { ORIENTATION } else { 0 });
     put_v(ee, CHASSIS + 0x260, ch.vel);
     ee.set_u32(CHASSIS + 0x2ac, ch.flags.0 as u32);
@@ -202,8 +249,10 @@ fn poke(ee: &mut Ee, s: &State) {
         put_f(ee, base + 0x214, w.radius);
         put_b(ee, base + 0xe0, w.spin_from_torque);
         put_f(ee, base + 0x858, w.contact_force_fwd);
+        put_v(ee, base + 0x130, w.contact_normal);
+        put_b(ee, base + 0x38, w.steered);
         for (a, v) in [0xd0u32, 0xd4, 0x1f0, 0x1f4, 0xf0, 0xf8, 0x1a0].into_iter().zip(w.fresh.scalars) {
-            put_f(ee, base + a, v);
+            ee.set_u32(base + a, v);
         }
         for (a, v) in [0x170u32, 0x1b0, 0x1c0].into_iter().zip(w.fresh.vectors) {
             put_v(ee, base + a, v);
@@ -243,6 +292,11 @@ fn poke(ee: &mut Ee, s: &State) {
         put_f(ee, CURVE_TORQUE + 4 * k, eng.curve_torque[k as usize]);
     }
 
+    // Outside the compared regions: the two frames' forward axes, where `orientation_axes` reads
+    // them from. Both of the harness' sides answer from the same quadword.
+    put_v(ee, NODE + 0xa0, s.node_forward);
+    put_v(ee, ORIENTATION + 0xa0, s.chassis_forward);
+
     poke_step(ee, &s.st);
 }
 
@@ -262,6 +316,10 @@ fn poke_step(ee: &mut Ee, st: &Step) {
     put_f(ee, OBJ + 0x648, st.reverse);
     put_b(ee, OBJ + 0xa48, st.balancing);
     put_f(ee, NODE + 0x94, st.node_distance);
+    put_f(ee, OBJ + 0x628, st.stick_x);
+    put_f(ee, OBJ + 0x650, st.front_brake);
+    put_f(ee, OBJ + 0x654, st.rear_brake);
+    put_f(ee, OBJ + 0x674, st.lean_fore_aft);
 }
 
 /// Every word of every region, in order.
@@ -319,6 +377,25 @@ fn same(name: &str, k: u32, was: &[u32], now: &[u32], s: &State) {
     );
 }
 
+/// The same for the ordered list of transform calls: where the two lists part company, and what each
+/// side asked for there. A controller that skipped a call, made one against the wrong frame, or
+/// handed over a vector a word different fails here rather than in the object graph — which is the
+/// only way to see it at all for the no-hander, whose whole answer goes out through one of them.
+fn same_out(name: &str, k: u32, ours: &[Out], theirs: &[Out], s: &State) {
+    if ours == theirs {
+        return;
+    }
+    let i = ours.iter().zip(theirs).position(|(a, b)| a != b).unwrap_or(ours.len().min(theirs.len()));
+    panic!(
+        "{name}, state {k}: transform call {i} of {} is {:?} in the port and {i} of {} is {:?} in \
+         the original\n{s:#?}",
+        ours.len(),
+        ours.get(i),
+        theirs.len(),
+        theirs.get(i),
+    );
+}
+
 // --- the tracer -----------------------------------------------------------------------------------
 
 /// What the hooks record, and what the two vectors the hooked transforms hand back are. One of these
@@ -331,28 +408,141 @@ struct Tape {
     /// same two vectors as given.
     local_accel: Vf,
     reverse_force: Vf,
+    /// Every [`Outside`] call the four controllers made, in order. The port's own [`Outside`] records
+    /// the same list, and the two are compared.
+    out: Vec<Out>,
 }
 
-/// A machine with the object graph wired up and every callee of the ground step hooked.
+/// One call into the engine's transform code. Four of them, and the original makes all four through
+/// functions this crate does not port — so each side records what it asked for, and the two lists are
+/// compared the same way the [`Call`] list is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Out {
+    Unrotate(Frame, Vf),
+    Forward(Frame),
+    Noise(F),
+    SetAxes(Vf, Vf),
+}
+
+/// Which of the two frames a pointer is. Anything else is a bug in the port or in this harness, and
+/// there is no third answer to fall back on.
+fn frame_of(a: u32) -> Frame {
+    match a {
+        NODE => Frame::Node,
+        // A null frame is the chassis without a transform: the one the low-speed upright controller
+        // asks about without checking.
+        ORIENTATION | 0 => Frame::Chassis,
+        _ => panic!("the transform code was handed {a:#010x}, which is neither frame"),
+    }
+}
+
+/// A stand-in for `transform_unrotate`: a different exact rotation for each of the two frames, so
+/// that a port which skipped the call, or made it against the other frame, comes out with a different
+/// number rather than the same one.
+///
+/// Both are signed lane permutations — orthonormal, and exact in `f32` — so a unit normal stays a unit
+/// normal and the roll angle the controllers measure from it is a real angle. `w` comes through as the
+/// original's does.
+fn fake_unrotate(frame: Frame, v: Vf) -> Vf {
+    let (x, y, z, w) = (v.x(), v.y(), v.z(), v.w());
+    match frame {
+        // A quarter turn about `z`: `x` and `y` swap roles, which is what the roll angle reads.
+        Frame::Node => Vf::new(-y, x, z, w),
+        Frame::Chassis => Vf::new(z, -x, y, w),
+    }
+}
+
+/// A stand-in for the engine's smooth noise, the same table `tests/trick.rs` uses: both sides get the
+/// identical single from the identical argument without either of them doing any arithmetic. It
+/// reaches `+-1`, which is what pushes the balance command onto its own clamp.
+fn fake_noise(x: f32) -> f32 {
+    const WAVE: [f32; 8] = [0.0, 1.0, -1.0, 0.5, -0.25, 0.937_5, -0.812_5, 0.125];
+    WAVE[(x.to_bits() >> 3) as usize & 7]
+}
+
+/// What a frame answers when it is asked for its forward axis: the `z` row of its world matrix, which
+/// is what the original copies out, with `w` of zero.
+fn forward_at(ee: &Ee, frame: u32) -> Vf {
+    Vf::new(ee.f32_at(frame + 0xa0), ee.f32_at(frame + 0xa4), ee.f32_at(frame + 0xa8), 0.0)
+}
+
+/// The port's side of the four transform calls: the same stand-ins the hooks use, and the same
+/// ordered record.
+struct Stands<'a> {
+    node_forward: Vf,
+    chassis_forward: Vf,
+    has_transform: bool,
+    out: &'a mut Vec<Out>,
+}
+
+impl Outside for Stands<'_> {
+    fn unrotate(&mut self, frame: Frame, v: Vf) -> Vf {
+        self.out.push(Out::Unrotate(frame, v));
+        fake_unrotate(frame, v)
+    }
+    fn forward(&mut self, frame: Frame) -> Vf {
+        self.out.push(Out::Forward(frame));
+        let v = match frame {
+            Frame::Node => self.node_forward,
+            // The one call the original makes with a frame that can be null — the low-speed upright
+            // controller does not check. `orientation_axes` compares its two frame arguments, finds
+            // them both zero, and answers with the default forward axis.
+            Frame::Chassis if !self.has_transform => Vf::new(0.0, 0.0, 1.0, 0.0),
+            Frame::Chassis => self.chassis_forward,
+        };
+        Vf::new(v.x(), v.y(), v.z(), 0.0)
+    }
+    fn noise(&mut self, t: F) -> F {
+        self.out.push(Out::Noise(t));
+        F(fake_noise(t.0))
+    }
+    fn set_axes(&mut self, forward: Vf, up: Vf) {
+        self.out.push(Out::SetAxes(forward, up));
+    }
+}
+
+/// A machine with the object graph wired up and every callee of the ground step hooked, with the two
+/// start-up tables the four controllers read built in it.
 ///
 /// The hooks are the proof's instrument as much as its scaffolding: each one records the call and
-/// (for the two transforms) hands back the vector the harness chose, so that what is left in the
-/// object graph afterwards is exactly what the step itself wrote.
-fn harness() -> Option<(Ee, Rc<RefCell<Tape>>)> {
+/// (for the transforms) hands back the vector the harness chose, so that what is left in the object
+/// graph afterwards is exactly what the step itself wrote.
+///
+/// The `{cos, sin}` curve is built by the *game's* own builder, through a hooked `mem_alloc` that
+/// hands it [`CURVE`], and the port is given those 6000 entries — the global has to be filled in
+/// before any of this runs, because the no-hander's rotation reads it through that pointer. The arc
+/// cosine goes the other way: [`AcosTable::build`] is already proved equal to the game's builder
+/// (`tests/air.rs`), and writing the port's copy into the original's table is what proves both roll
+/// angles read it at the same index.
+fn harness() -> Option<(Ee, Rc<RefCell<Tape>>, AcosTable, CurveTable)> {
     let mut ee = game_or_skip()?;
     wire(&mut ee);
+
+    ee.hooks.insert(addr("mem_alloc").unwrap(), Box::new(|ee| ee.set(2, CURVE as u64)));
+    ee.call(addr("curve_table_build").unwrap(), &[], &[], 2_000_000_000);
+    ee.hooks.remove(&addr("mem_alloc").unwrap());
+    assert_eq!(ee.v0(), 1, "the game's curve table builder reported failure");
+    assert_eq!(ee.u32_at(addr("curve_table_ptr").unwrap()), CURVE, "the table went somewhere else");
+    let entries: Vec<[f32; 2]> = (0..CURVE_ENTRIES as u32)
+        .map(|i| [ee.f32_at(CURVE + 8 * i), ee.f32_at(CURVE + 8 * i + 4)])
+        .collect();
+    let curve = CurveTable::from_entries(&entries);
+    let acos = AcosTable::build();
+    for (i, e) in acos.entries().iter().enumerate() {
+        ee.set_f32(ACOS + 4 * i as u32, *e);
+    }
+    ee.set_u32(addr("acos_table_ptr").unwrap(), ACOS);
+    ee.set_f32(addr("acos_table_scale").unwrap(), 14999.5);
+
     let tape = Rc::new(RefCell::new(Tape::default()));
 
-    // The plain `(dt, bike)` and `(dt, wheel)` callees: record the call and do nothing.
-    let plain: [(&str, fn(&Ee) -> Call); 8] = [
-        ("bike_stand_upright", |ee| Call::StandUpright(F(ee.f(12)))),
-        ("bike_balance", |ee| Call::Balance(F(ee.f(12)))),
-        ("bike_roll_pitch", |ee| Call::RollPitch(F(ee.f(12)))),
+    // The plain `(dt, bike)` and `(dt, wheel)` callees: record the call and do nothing. The four
+    // controllers are no longer among them — S17 ported them, so they run for real on both sides.
+    let plain: [(&str, fn(&Ee) -> Call); 4] = [
         ("bike_preload", |ee| Call::Preload(F(ee.f(12)))),
         ("bike_backflip", |ee| Call::Backflip(F(ee.f(12)))),
         ("bike_airborne_control", |ee| Call::AirborneControl(F(ee.f(12)))),
         ("bike_wheel_contacts", |ee| Call::Contacts(F(ee.f(12)))),
-        ("bike_no_hander", |ee| Call::NoHander(F(ee.f(12)))),
     ];
     for (name, make) in plain {
         let t = tape.clone();
@@ -387,15 +577,65 @@ fn harness() -> Option<(Ee, Rc<RefCell<Tape>>)> {
             put_v(ee, out, force);
         }),
     );
+    // `transform_unrotate` is made from two places now: the step itself, which brings the chassis'
+    // measured acceleration back into the bike's frame, and two of the four controllers, which bring
+    // a contact normal in. The vector tells them apart — the step's is the chassis' own field, and a
+    // controller's is a stack slot — and they are answered differently: the step's with the vector
+    // the harness chose, a controller's with an exact rotation the port repeats.
     let t = tape.clone();
     ee.hooks.insert(
         addr("transform_unrotate").unwrap(),
         Box::new(move |ee| {
-            let (out, v) = (ee.r(4) as u32, ee.r(6) as u32);
+            let (out, frame, v) = (ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32);
             let given = get_v(ee, v);
-            let accel = t.borrow().local_accel;
-            t.borrow_mut().calls.push(Call::Unrotate(given));
-            put_v(ee, out, accel);
+            if v == CHASSIS + 0x170 {
+                let accel = t.borrow().local_accel;
+                t.borrow_mut().calls.push(Call::Unrotate(given));
+                put_v(ee, out, accel);
+            } else {
+                let frame = frame_of(frame);
+                t.borrow_mut().out.push(Out::Unrotate(frame, given));
+                put_v(ee, out, fake_unrotate(frame, given));
+            }
+        }),
+    );
+    // A frame's forward axis. The real function copies the `z` row of the frame's world matrix out
+    // with a `w` of zero, which is what this does — and answers the identity's `z` for the null frame
+    // the low-speed upright controller hands it without checking.
+    let t = tape.clone();
+    ee.hooks.insert(
+        addr("orientation_axes").unwrap(),
+        Box::new(move |ee| {
+            let (frame, relative, out, up) = (ee.r(4) as u32, ee.r(5), ee.r(6) as u32, ee.r(7));
+            assert_eq!(relative, 0, "the axes were asked for relative to another frame");
+            assert_eq!(up, 0, "the up axis was asked for as well");
+            t.borrow_mut().out.push(Out::Forward(frame_of(frame)));
+            let v = if frame == 0 { Vf::new(0.0, 0.0, 1.0, 0.0) } else { forward_at(ee, frame) };
+            put_v(ee, out, v);
+        }),
+    );
+    // The engine's shared smooth noise, which only the balance controller asks for.
+    let t = tape.clone();
+    ee.hooks.insert(
+        addr("smooth_noise").unwrap(),
+        Box::new(move |ee| {
+            let x = ee.f(12);
+            t.borrow_mut().out.push(Out::Noise(F(x)));
+            ee.set_f(0, fake_noise(x));
+        }),
+    );
+    // The no-hander's last act: the bike's node, pointed by two axes. Nothing is written, because
+    // what the real one writes is the node's world matrix, which is outside the compared graph — the
+    // two axes it was handed are the port's own arithmetic, and those are what is compared.
+    let t = tape.clone();
+    ee.hooks.insert(
+        addr("transform_set_axes").unwrap(),
+        Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, NODE, "the no-hander pointed something other than the node");
+            assert_eq!(ee.r(5), 0, "the axes were given relative to another frame");
+            assert_eq!((ee.r(8), ee.r(9), ee.r(10)), (1, 1, 1), "the three sync flags are not all 1");
+            let (forward, up) = (get_v(ee, ee.r(6) as u32), get_v(ee, ee.r(7) as u32));
+            t.borrow_mut().out.push(Out::SetAxes(forward, up));
         }),
     );
     // The two virtual calls, and the two halves of the nearby-actor search.
@@ -416,7 +656,7 @@ fn harness() -> Option<(Ee, Rc<RefCell<Tape>>)> {
         assert_eq!(ee.r(6), 3, "the search radius is not 3");
         t.borrow_mut().calls.push(Call::SearchGather);
     }));
-    Some((ee, tape))
+    Some((ee, tape, acos, curve))
 }
 
 // --- the generator --------------------------------------------------------------------------------
@@ -459,6 +699,31 @@ impl Gen {
     fn vec(&mut self, lo: f32, hi: f32) -> Vf {
         Vf::new(self.f(lo, hi).0, self.f(lo, hi).0, self.f(lo, hi).0, self.f(lo, hi).0)
     }
+    /// A contact normal. Mostly a real one — near enough a unit vector that the roll angle read off
+    /// it is a real angle — and sometimes one of the four shapes the angle's own arithmetic turns on:
+    /// straight up and straight down (where the flattened `xy` is nothing at all), a `y` of exactly
+    /// zero (where the two clamps meet their ends), and nothing whatsoever.
+    fn normal(&mut self) -> Vf {
+        match self.bits() % 16 {
+            0 => Vf::new(0.0, 1.0, 0.0, 0.0),
+            1 => Vf::new(0.0, -1.0, 0.0, 0.0),
+            2 => NOTHING,
+            3 => Vf::new(self.f(-1.0, 1.0).0, 0.0, self.f(-1.0, 1.0).0, 0.0),
+            _ => {
+                let (x, y, z) = (self.f(-0.7, 0.7), self.f(-1.0, 1.0), self.f(-0.7, 0.7));
+                let n = (x.0 * x.0 + y.0 * y.0 + z.0 * z.0).sqrt();
+                let n = if n == 0.0 { 1.0 } else { n };
+                Vf::new(x.0 / n, y.0 / n, z.0 / n, 0.0)
+            }
+        }
+    }
+    /// A word the original reads with `lw` and tests with `beqz`: the suspension's two "did it find
+    /// anything" flags. Zero often, because that is a branch in the no-hander three times over, and
+    /// otherwise the game's own `1` — a word, not a float, which is the whole reason [`Fresh`] keeps
+    /// these seven as words.
+    fn flag_word(&mut self) -> u32 {
+        if self.one_in(3) { 0 } else { 1 }
+    }
     /// A velocity, occasionally exactly nothing so that what the normalise idiom does with a length
     /// of zero is covered too.
     fn vel(&mut self) -> Vf {
@@ -486,7 +751,9 @@ impl Gen {
     fn wheel(&mut self) -> Wheel {
         Wheel {
             balancing: self.b(),
-            donut_scale: self.f(0.0, 1.0),
+            // Exactly zero one time in three: no donut is the no-hander's other branch, and the
+            // step overwrites the back wheel's copy of this anyway.
+            donut_scale: if self.one_in(3) { F::ZERO } else { self.f(0.0, 1.0) },
             spring: self.f(0.0, 4000.0),
             max_steer_angle: self.f(0.0, 0.8),
             steer_command: self.f(-0.8, 0.8),
@@ -498,8 +765,15 @@ impl Gen {
             radius: self.f(0.25, 0.7),
             spin_from_torque: self.b(),
             contact_force_fwd: self.f(-900.0, 900.0),
+            contact_normal: self.normal(),
+            steered: self.b(),
             fresh: Fresh {
-                scalars: std::array::from_fn(|_| self.f(-1000.0, 1000.0)),
+                // The first two are the suspension's `lw`-and-`beqz` flags, which the no-hander
+                // reads; the other five are floats nothing here looks at.
+                scalars: std::array::from_fn(|i| match i {
+                    0 | 1 => self.flag_word(),
+                    _ => self.f(-1000.0, 1000.0).to_bits(),
+                }),
                 vectors: std::array::from_fn(|_| self.vec(-1000.0, 1000.0)),
             },
         }
@@ -522,6 +796,13 @@ impl Gen {
         // The steering fade's two speeds, equal often enough to cover the branch that skips it.
         let steer_speed_1 = self.f(0.0, 10.0);
         let steer_speed_2 = if self.one_in(6) { steer_speed_1 } else { self.f(10.0, 40.0) };
+        // The no-hander's speed fade, and the balance controller's inertia limits: the same again.
+        let min_stand_upright_speed = self.f(0.0, 12.0);
+        let max_stand_upright_speed =
+            if self.one_in(6) { min_stand_upright_speed } else { self.f(12.0, 45.0) };
+        let min_balance_inertia = self.f(0.0, 1.0);
+        let max_balance_inertia =
+            if self.one_in(6) { min_balance_inertia } else { self.f(1.0, 4.0) };
         let p = Params {
             cofg: self.vec(-1.0, 1.0),
             balance_cofg: self.vec(-1.0, 1.0),
@@ -549,6 +830,35 @@ impl Gen {
             reverse_gain: self.f(0.0, 600.0),
             drag: self.f(0.0, 4.0),
             gravity: self.vec(-200.0, 200.0),
+            // S17's twenty-five, in offset order. The two pairs of limits are equal one time in six,
+            // which is the branch each of the two speed fades takes when its range is empty.
+            donut_roll_angle_scale: self.f(0.5, 3.0),
+            max_roll_command: self.f(0.0, 0.8),
+            max_roll_speed: self.maybe_zero(0.0, 40.0),
+            roll_gain: self.f(0.0, 12.0),
+            min_stand_upright_speed,
+            max_stand_upright_speed,
+            roll_control_gain: self.f(0.0, 40.0),
+            // Mostly the size the clamp on the centre of gravity is meant for — a tenth of a metre
+            // for a few degrees of roll — and sometimes big enough to peg it, which is the clamp.
+            roll_control_rate_gain: if self.one_in(3) { self.f(0.0, 2.0) } else { self.f(0.0, 0.02) },
+            roll_control_max_cg: self.f(0.0, 0.6),
+            max_roll_rate_disturbance: self.f(0.0, 4.0),
+            max_pitch_command: self.f(0.0, 0.9),
+            pitch_gain: self.f(0.0, 60.0),
+            pitch_rate_gain: self.f(0.0, 200.0),
+            inv_wheelie_top_speed: self.f(0.02, 0.2),
+            max_stoppie_pitch_command: self.f(0.0, 0.9),
+            stoppie_pitch_gain: self.f(0.0, 60.0),
+            stoppie_yaw_rate_scale: self.f(0.0, 4.0),
+            stoppie_top_speed: self.maybe_zero(0.0, 40.0),
+            balance_inertia_rate: self.f(0.0, 8.0),
+            min_balance_inertia,
+            max_balance_inertia,
+            input_inertia: self.f(0.0, 5.0),
+            max_balance_point: self.f(0.0, 1.5),
+            balance_noise_amplitude: self.maybe_zero(0.0, 2.0),
+            balance_noise_time_scale: self.f(0.0, 4.0),
         };
         let gears = 1 + (self.bits() % 6) as i32;
         let (points, curve_rpm, curve_torque) = self.curve();
@@ -594,7 +904,14 @@ impl Gen {
             // A control, not a number: the engine's clutch tests it against 1 and against 0 exactly.
             clutch_in: self.control(),
             collision_near: self.b(),
-            no_hander_scratch: std::array::from_fn(|_| self.f(-10.0, 10.0)),
+            // The balance controller's four accumulators and the pitch controller's one, as a frame
+            // part way into a wheelie or a balance would have left them, plus the stoppie's latch.
+            balance_inertia: self.f(0.0, 4.0),
+            balance_command: self.f(-1.0, 1.0),
+            balance_point: self.f(-1.5, 1.5),
+            balance_noise_time: self.f(0.0, 30.0),
+            pitch_integral: self.f(-400.0, 400.0),
+            stoppie: self.b(),
         };
         let ch = Chassis {
             speed: self.f(0.0, 40.0),
@@ -605,7 +922,13 @@ impl Gen {
             has_transform: !self.one_in(4),
             vel: self.vel(),
             flags: (0, 0, 0),
+            euler: self.vec(-3.2, 3.2),
+            torque: self.vec(-2000.0, 2000.0),
+            world_ang_vel: self.vec(-12.0, 12.0),
+            ang_vel: self.vec(-12.0, 12.0),
         };
+        // The front wheel's own rate-limited brake; the rear's is generated beside it below.
+        let front_brake = self.control();
         let st = Step {
             // Mostly a 60 fps frame, which is one substep; the rest spread over the counts up to five.
             dt: if self.one_in(3) { self.f(0.0, 0.085) } else { F(1.0 / 60.0) },
@@ -622,14 +945,46 @@ impl Gen {
             brake: self.control(),
             clutch: self.control(),
             gas_rate_limited: self.control(),
+            front_brake,
             reverse: if self.b() { F::ZERO } else { F::ONE },
             balancing: self.one_in(4),
             local_accel: self.vec(-40.0, 40.0),
             reverse_force: self.vec(-600.0, 600.0),
             node_distance: self.f(0.0, 0.5),
+            stick_x: self.f(-1.1, 1.1),
+            // The rear wheel's brake, a word of its own: the wheelie's veto reads this one and the
+            // stoppie's gate the front's, so they differ half the time here and a port that read the
+            // wrong one of the two fails. Equal the other half, because both halves of the
+            // controller also have to be reached with one brake lever pulling both wheels.
+            rear_brake: if self.b() { self.control() } else { front_brake },
+            // The gates the two pitch controllers test are 0.5 forward and -1.0 back, with -0.1 the
+            // stoppie's way out, so each of the three is landed on exactly often enough to prove the
+            // compare is the original's and not one either side of it.
+            lean_fore_aft: match self.bits() % 8 {
+                0 => F(0.5),
+                1 => F(-1.0),
+                2 => F(-0.1),
+                3 | 4 => self.f(-1.1, -0.9),
+                _ => self.f(-1.1, 1.1),
+            },
         };
         let (front, rear) = (self.wheel(), self.wheel());
-        State { p, r, ch, front, rear, eng, st }
+        // The two frames' forward axes. One time in nine the chassis' is the front wheel's contact
+        // normal, which is the one way the low-speed upright controller's flattened forward comes out
+        // with no length at all.
+        let chassis_forward =
+            if self.one_in(9) { front.contact_normal } else { self.vec(-1.0, 1.0) };
+        State {
+            p,
+            r,
+            ch,
+            front,
+            rear,
+            eng,
+            st,
+            node_forward: self.vec(-1.0, 1.0),
+            chassis_forward,
+        }
     }
 }
 
@@ -650,7 +1005,7 @@ fn covered(name: &str, tally: &std::collections::BTreeMap<&str, u32>, paths: &[&
 /// The clutch's launch ramp, against `bike_clutch`.
 #[test]
 fn the_clutch_is_the_originals() {
-    let Some((mut ee, _)) = harness() else { return };
+    let Some((mut ee, _, _, _)) = harness() else { return };
     let mut g = Gen(0x5133);
     let mut tally = std::collections::BTreeMap::new();
     for k in 0..10_000 {
@@ -682,7 +1037,7 @@ fn the_clutch_is_the_originals() {
 /// The gearbox, against `bike_set_gear` — including the two gears out of range, which it refuses.
 #[test]
 fn the_gearbox_is_the_originals() {
-    let Some((mut ee, _)) = harness() else { return };
+    let Some((mut ee, _, _, _)) = harness() else { return };
     let mut g = Gen(0x9e21);
     let mut tally = std::collections::BTreeMap::new();
     for k in 0..10_000 {
@@ -715,7 +1070,7 @@ fn the_gearbox_is_the_originals() {
 /// The rev limiter, against `engine_rev_limit`.
 #[test]
 fn the_rev_limiter_is_the_originals() {
-    let Some((mut ee, _)) = harness() else { return };
+    let Some((mut ee, _, _, _)) = harness() else { return };
     let mut g = Gen(0x1cc7);
     let mut tally = std::collections::BTreeMap::new();
     for k in 0..10_000 {
@@ -751,7 +1106,7 @@ fn the_rev_limiter_is_the_originals() {
 /// eleven fields on each and a transposed offset would show up on one and not the other.
 #[test]
 fn the_wheel_clear_is_the_originals() {
-    let Some((mut ee, _)) = harness() else { return };
+    let Some((mut ee, _, _, _)) = harness() else { return };
     let mut g = Gen(0x4a0d);
     for k in 0..2_000 {
         let s = g.state();
@@ -782,7 +1137,7 @@ fn the_wheel_clear_is_the_originals() {
 /// same three draws, which is what the tally checks.
 #[test]
 fn the_engine_is_the_originals() {
-    let Some((mut ee, _)) = harness() else { return };
+    let Some((mut ee, _, _, _)) = harness() else { return };
     let mut g = Gen(0x6e13);
     let mut tally = std::collections::BTreeMap::new();
     for k in 0..10_000 {
@@ -860,9 +1215,16 @@ fn the_engine_is_the_originals() {
 
 // --- the whole step -------------------------------------------------------------------------------
 
-/// Apply the port to a state, and give back the calls it says it made.
-fn apply(t: &mut State) -> Vec<Call> {
+/// Apply the port to a state, and give back the calls it says it made and the transform calls it
+/// made on the way.
+fn apply(t: &mut State, tb: &Tables<'_>, out: &mut Vec<Out>) -> Vec<Call> {
     let (p, st) = (t.p, t.st);
+    let mut o = Stands {
+        node_forward: t.node_forward,
+        chassis_forward: t.chassis_forward,
+        has_transform: t.ch.has_transform,
+        out,
+    };
     let mut b = Bike {
         ride: &mut t.r,
         chassis: &mut t.ch,
@@ -870,14 +1232,15 @@ fn apply(t: &mut State) -> Vec<Call> {
         rear: &mut t.rear,
         engine: &mut t.eng,
     };
-    mv::step(&p, &mut b, &st)
+    mv::step(&p, &mut b, &st, tb, &mut o)
 }
 
 /// **The ground step**, against `bike_ground_step`, over 2000 generated frames: the whole object graph
 /// word for word, and the ordered list of everything it called.
 #[test]
 fn the_ground_step_is_the_originals() {
-    let Some((mut ee, tape)) = harness() else { return };
+    let Some((mut ee, tape, acos, curve)) = harness() else { return };
+    let tables = Tables { acos: &acos, curve: &curve };
     let mut g = Gen(0x3c5b);
     let mut tally = std::collections::BTreeMap::new();
     for k in 0..2_000 {
@@ -893,22 +1256,39 @@ fn the_ground_step_is_the_originals() {
             })
             .or_insert(0) += 1;
         *tally.entry(if mv::donut_roll(&s.p, &s.ch, &s.st) == F::ZERO { "no donut" } else { "donut" }).or_insert(0) += 1;
+        // The four controllers, as far as the step decides whether they do anything at all. Their own
+        // branches are tallied by their own proofs below.
+        *tally
+            .entry(if !s.st.both_wheels || s.st.balancing || s.st.gas != F::ZERO {
+                "no upright hold"
+            } else {
+                "upright hold"
+            })
+            .or_insert(0) += 1;
+        *tally.entry(if s.st.on_ground { "pitch control" } else { "airborne, no pitch" }).or_insert(0) += 1;
+        *tally.entry(if s.st.balancing && s.front.contact { "balance" } else { "no balance" }).or_insert(0) += 1;
 
         reset(&mut ee);
         poke(&mut ee, &s);
         {
             let mut t = tape.borrow_mut();
             t.calls.clear();
+            t.out.clear();
             t.local_accel = s.st.local_accel;
             t.reverse_force = s.st.reverse_force;
         }
         ee.call(addr("bike_ground_step").unwrap(), &[OBJ as u64], &[s.st.dt.0], 400_000);
         only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("the ground step, state {k}: {e}\n{s:#?}"));
         let was = snap(&ee);
-        let theirs = tape.borrow().calls.clone();
+        let (theirs, theirs_out) = {
+            let t = tape.borrow();
+            (t.calls.clone(), t.out.clone())
+        };
 
         let mut t = s.clone();
-        let ours = apply(&mut t);
+        let mut ours_out = Vec::new();
+        let ours = apply(&mut t, &tables, &mut ours_out);
+        same_out("the ground step", k, &ours_out, &theirs_out, &s);
         if ours != theirs {
             let i = ours.iter().zip(&theirs).position(|(a, b)| a != b).unwrap_or(ours.len().min(theirs.len()));
             panic!(
@@ -927,7 +1307,345 @@ fn the_ground_step_is_the_originals() {
     covered(
         "the ground step",
         &tally,
-        &["balancing", "riding", "one substep", "several substeps", "reverse push", "no reverse", "donut", "no donut"],
+        &[
+            "balancing", "riding", "one substep", "several substeps", "reverse push", "no reverse",
+            "donut", "no donut", "upright hold", "no upright hold", "pitch control",
+            "airborne, no pitch", "balance", "no balance",
+        ],
+        100,
+    );
+}
+
+// --- the four controllers -------------------------------------------------------------------------
+
+/// Hand a state to the port and let one of its functions at it: the same five objects the original
+/// reaches through its one pointer, and the [`Outside`] the harness' hooks stand in for.
+fn with_port(
+    t: &mut State,
+    out: &mut Vec<Out>,
+    f: impl FnOnce(&Params, &mut Bike<'_>, &Step, &mut dyn Outside),
+) {
+    let (p, st) = (t.p, t.st);
+    let mut o = Stands {
+        node_forward: t.node_forward,
+        chassis_forward: t.chassis_forward,
+        has_transform: t.ch.has_transform,
+        out,
+    };
+    let mut b = Bike {
+        ride: &mut t.r,
+        chassis: &mut t.ch,
+        front: &mut t.front,
+        rear: &mut t.rear,
+        engine: &mut t.eng,
+    };
+    f(&p, &mut b, &st, &mut o);
+}
+
+/// One controller over one state, both sides: run the original on the graph in RAM, run the port on
+/// its own copy of the same state, and compare every word of the graph and the ordered list of
+/// transform calls.
+///
+/// Gives the port's state back, so a proof can tally the branch a state *actually took* from what
+/// came out of it rather than from a second copy of the controller's own conditions.
+fn one_controller(
+    ee: &mut Ee,
+    tape: &Rc<RefCell<Tape>>,
+    name: &'static str,
+    func: &str,
+    k: u32,
+    s: &State,
+    dt: F,
+    port: impl FnOnce(&mut State, &mut Vec<Out>),
+) -> State {
+    reset(ee);
+    poke(ee, s);
+    tape.borrow_mut().out.clear();
+    ee.call(addr(func).unwrap(), &[OBJ as u64], &[dt.0], 200_000);
+    only_touched_the_regions(ee).unwrap_or_else(|e| panic!("{name}, state {k}: {e}\n{s:#?}"));
+    let was = snap(ee);
+    let theirs = tape.borrow().out.clone();
+
+    let mut t = s.clone();
+    let mut ours = Vec::new();
+    port(&mut t, &mut ours);
+    same_out(name, k, &ours, &theirs, s);
+    reset(ee);
+    poke(ee, &t);
+    same(name, k, &was, &snap(ee), s);
+    t
+}
+
+/// **The low-speed upright controller**, against `bike_stand_upright`, over 10,000 generated states.
+///
+/// Three states in four are aimed at the four conditions the controller sits behind — both wheels
+/// down, not balancing, the throttle shut and under ten units of speed — because a state that does
+/// not get through them proves only that the port gives up where the original does.
+///
+/// The branch that cannot be aimed at from a tuning value is the forward axis flattening to nothing,
+/// and it needs the bike pointed exactly along the ground's normal with a normal that is exactly a
+/// unit vector — anything else leaves a residue of the order of an ulp, which is not zero. One state
+/// in six is built that way, and the mutation that proves the branch is reached is in the journal.
+#[test]
+fn the_upright_hold_is_the_originals() {
+    let Some((mut ee, tape, _, _)) = harness() else { return };
+    let mut g = Gen(0x1b0d);
+    let mut tally = std::collections::BTreeMap::new();
+    for k in 0..10_000 {
+        let mut s = g.state();
+        if !g.one_in(4) {
+            s.st.both_wheels = true;
+            s.st.balancing = false;
+            s.st.gas = F::ZERO;
+            // Either side of the ten the guard tests, and sometimes backwards.
+            s.st.speed = if g.one_in(8) { g.f(-14.0, 0.0) } else { g.f(0.0, 12.0) };
+        }
+        let parallel = g.one_in(6);
+        if parallel {
+            let n = match g.bits() % 3 {
+                0 => Vf::new(1.0, 0.0, 0.0, 0.0),
+                1 => Vf::new(0.0, 1.0, 0.0, 0.0),
+                _ => Vf::new(0.0, 0.0, 1.0, 0.0),
+            };
+            s.front.contact_normal = n;
+            s.chassis_forward = n;
+            s.ch.has_transform = true;
+        }
+        let held =
+            s.st.both_wheels && !s.st.balancing && s.st.gas == F::ZERO && s.st.speed.abs() < F(10.0);
+        *tally.entry(if held { "held" } else { "skipped" }).or_insert(0) += 1;
+        if held {
+            *tally.entry(if s.st.brake == F::ZERO { "rolling" } else { "braked" }).or_insert(0) += 1;
+            *tally.entry(if s.ch.has_transform { "a heading" } else { "no transform" }).or_insert(0) += 1;
+            *tally.entry(if parallel { "flat against the ground" } else { "a forward to use" }).or_insert(0) += 1;
+        }
+        let (_, h) = mv::substeps(s.st.dt);
+        one_controller(&mut ee, &tape, "the upright hold", "bike_stand_upright", k, &s, h, |t, out| {
+            with_port(t, out, |p, b, st, o| mv::stand_upright(p, b, st, o));
+        });
+    }
+    covered(
+        "the upright hold",
+        &tally,
+        &[
+            "held", "skipped", "rolling", "braked", "a heading", "no transform",
+            "flat against the ground", "a forward to use",
+        ],
+        100,
+    );
+}
+
+/// **Balancing on one wheel**, against `bike_balance`, over 10,000 generated states.
+///
+/// The four accumulators are generated part-way along rather than from zero, so each of the three
+/// clamps is met from both sides, and the tally is read off what came *out* of the port — the inertia
+/// sitting on one of its two limits, the command on `+-1`, the balance point on `+-MaxBalancePoint`
+/// and the centre of gravity on `RollControlMaxCG` — which is the branch the state actually took and
+/// not a second copy of the controller's conditions.
+#[test]
+fn the_balance_is_the_originals() {
+    let Some((mut ee, tape, acos, curve)) = harness() else { return };
+    let tables = Tables { acos: &acos, curve: &curve };
+    let mut g = Gen(0x2c1e);
+    let mut tally = std::collections::BTreeMap::new();
+    for k in 0..10_000 {
+        let mut s = g.state();
+        if !g.one_in(4) {
+            s.front.contact = true;
+        }
+        *tally.entry(if s.front.contact { "balanced" } else { "no contact" }).or_insert(0) += 1;
+        if s.front.contact {
+            let n = s.front.contact_normal;
+            *tally
+                .entry(match () {
+                    _ if F(n.y()) > F::ZERO => "rolled one way",
+                    _ if F(n.y()) < F::ZERO => "rolled the other",
+                    _ => "on edge",
+                })
+                .or_insert(0) += 1;
+            *tally
+                .entry(if s.p.balance_noise_amplitude == F::ZERO { "no noise" } else { "noise" })
+                .or_insert(0) += 1;
+        }
+        let (_, h) = mv::substeps(s.st.dt);
+        let t = one_controller(&mut ee, &tape, "the balance", "bike_balance", k, &s, h, |t, out| {
+            with_port(t, out, |p, b, st, o| mv::balance(p, b, st, &tables, o, h));
+        });
+        if !s.front.contact {
+            continue;
+        }
+        let (p, r) = (&s.p, &t.r);
+        *tally
+            .entry(match () {
+                _ if r.balance_inertia == p.min_balance_inertia => "inertia at the floor",
+                _ if r.balance_inertia == p.max_balance_inertia => "inertia at the ceiling",
+                _ => "inertia between",
+            })
+            .or_insert(0) += 1;
+        *tally
+            .entry(if r.balance_command.abs() == F::ONE { "command clamped" } else { "command free" })
+            .or_insert(0) += 1;
+        *tally
+            .entry(if r.balance_point.abs() == p.max_balance_point { "point clamped" } else { "point free" })
+            .or_insert(0) += 1;
+        *tally
+            .entry(if F(t.ch.cofg.x()).abs() == p.roll_control_max_cg { "weight clamped" } else { "weight free" })
+            .or_insert(0) += 1;
+    }
+    covered(
+        "the balance",
+        &tally,
+        &[
+            "balanced", "no contact", "rolled one way", "rolled the other", "noise", "no noise",
+            "inertia at the floor", "inertia at the ceiling", "inertia between", "command clamped",
+            "command free", "point clamped", "point free", "weight clamped", "weight free",
+        ],
+        100,
+    );
+}
+
+/// **The wheelie and the stoppie**, against `bike_roll_pitch`, over 10,000 generated states.
+///
+/// Both halves run on the same state, so the aim is at their two sets of conditions at once: the
+/// generator already lands the stick on each of the three gates it is tested against exactly, and the
+/// throttle, the brake and the speed are nudged into range three states in four. The stoppie's latch
+/// is generated already set as often as not, which is the only way to reach the half that runs
+/// without starting.
+#[test]
+fn the_pitch_control_is_the_originals() {
+    let Some((mut ee, tape, _, _)) = harness() else { return };
+    let mut g = Gen(0x3d2f);
+    let mut tally = std::collections::BTreeMap::new();
+    for k in 0..10_000 {
+        let mut s = g.state();
+        if !g.one_in(4) {
+            s.st.on_ground = true;
+            s.st.speed = g.f(4.0, 20.0);
+            s.rear.contact = g.b();
+            s.front.contact = g.b();
+            s.r.clutch_in = if g.one_in(3) { g.control() } else { F::ZERO };
+            s.st.gas_rate_limited = if g.one_in(3) { F::ZERO } else { g.f(0.1, 1.0) };
+            s.st.front_brake = if g.one_in(3) { F::ZERO } else { g.f(0.1, 1.0) };
+            s.st.rear_brake = if g.b() { g.control() } else { s.st.front_brake };
+        }
+        let lean = s.st.lean_fore_aft;
+        let wheelie = s.rear.contact
+            && s.st.gas_rate_limited > F::ZERO
+            && s.st.speed > F(5.0)
+            && s.st.rear_brake == F::ZERO
+            && s.r.clutch_in == F::ZERO
+            && lean >= F(0.5);
+        let start = s.front.contact
+            && !s.r.stoppie
+            && s.st.front_brake > F::ZERO
+            && s.st.speed > F(15.0)
+            && lean <= F(-1.0);
+        *tally.entry(if s.st.on_ground { "grounded" } else { "airborne" }).or_insert(0) += 1;
+        if s.st.on_ground {
+            *tally.entry(if wheelie { "wheelie" } else { "no wheelie" }).or_insert(0) += 1;
+            *tally.entry(if start { "stoppie starts" } else { "no stoppie start" }).or_insert(0) += 1;
+            *tally
+                .entry(if s.r.stoppie || start { "stoppie runs" } else { "no stoppie" })
+                .or_insert(0) += 1;
+            if wheelie || s.r.stoppie || start {
+                *tally
+                    .entry(if s.ch.has_transform { "a yaw torque" } else { "no transform" })
+                    .or_insert(0) += 1;
+            }
+        }
+        let (_, h) = mv::substeps(s.st.dt);
+        let t = one_controller(&mut ee, &tape, "the pitch control", "bike_roll_pitch", k, &s, h, |t, out| {
+            with_port(t, out, |p, b, st, o| mv::roll_pitch(p, b, st, o, h));
+        });
+        if s.st.on_ground && (s.r.stoppie || start) {
+            *tally
+                .entry(if t.r.stoppie { "stoppie held" } else { "stoppie let go" })
+                .or_insert(0) += 1;
+            *tally
+                .entry(if s.p.stoppie_top_speed == F::ZERO { "no speed fade" } else { "a speed fade" })
+                .or_insert(0) += 1;
+        }
+    }
+    covered(
+        "the pitch control",
+        &tally,
+        &[
+            "grounded", "airborne", "wheelie", "no wheelie", "stoppie starts", "no stoppie start",
+            "stoppie runs", "no stoppie", "a yaw torque", "no transform", "stoppie held",
+            "stoppie let go", "a speed fade", "no speed fade",
+        ],
+        100,
+    );
+}
+
+/// **The no-hander's roll**, against `bike_no_hander`, over 10,000 generated states.
+///
+/// The one function here whose whole answer leaves through a call the port does not make itself, so
+/// what the `Out` list carries is the proof: the frame the ground normal was brought into, the
+/// argument the noise was walked to — there is none here — and the two axes the node was pointed by.
+/// Not one word of the compared graph moves.
+///
+/// The aim is at the three ways a wheel counts as properly down (a suspension ray that found
+/// something, a collision sweep whose normal is more than a little off level, and neither) and at the
+/// two ends of the speed fade, backwards as well as forwards.
+#[test]
+fn the_no_hander_is_the_originals() {
+    let Some((mut ee, tape, acos, curve)) = harness() else { return };
+    let tables = Tables { acos: &acos, curve: &curve };
+    let mut g = Gen(0x4e30);
+    let mut tally = std::collections::BTreeMap::new();
+    for k in 0..10_000 {
+        let mut s = g.state();
+        if !g.one_in(4) {
+            s.front.contact = g.b();
+            s.rear.contact = true;
+        }
+        // Either side of the fade's two speeds, and backwards one time in four.
+        if !g.one_in(3) {
+            let v = g.f(0.0, 1.3) * s.p.max_stand_upright_speed;
+            s.st.speed = if g.one_in(4) { F::ZERO - v } else { v };
+        }
+        let down = |w: &Wheel| {
+            w.contact
+                && (w.fresh.scalars[0] != 0
+                    || (w.fresh.scalars[1] != 0 && F(w.contact_normal.y()) > F(0.17)))
+        };
+        *tally
+            .entry(match () {
+                _ if down(&s.front) => "the front wheel's ground",
+                _ if down(&s.rear) => "the back wheel's ground",
+                _ => "no ground",
+            })
+            .or_insert(0) += 1;
+        let v = s.st.speed.abs();
+        *tally
+            .entry(match () {
+                _ if s.p.min_stand_upright_speed == s.p.max_stand_upright_speed => "no fade",
+                _ if v <= s.p.min_stand_upright_speed => "level",
+                _ if v >= s.p.max_stand_upright_speed => "with the ground",
+                _ => "between",
+            })
+            .or_insert(0) += 1;
+        *tally.entry(if s.st.speed < F::ZERO { "backwards" } else { "forwards" }).or_insert(0) += 1;
+        *tally
+            .entry(if s.rear.donut_scale > F::ZERO { "a donut" } else { "no donut" })
+            .or_insert(0) += 1;
+        *tally
+            .entry(if s.p.max_roll_speed == F::ZERO { "no roll command" } else { "a roll command" })
+            .or_insert(0) += 1;
+        let (_, h) = mv::substeps(s.st.dt);
+        one_controller(&mut ee, &tape, "the no-hander", "bike_no_hander", k, &s, h, |t, out| {
+            with_port(t, out, |p, b, st, o| mv::no_hander(p, b, st, &tables, o, h));
+        });
+    }
+    covered(
+        "the no-hander",
+        &tally,
+        &[
+            "the front wheel's ground", "the back wheel's ground", "no ground", "no fade", "level",
+            "with the ground", "between", "backwards", "forwards", "a donut", "no donut",
+            "a roll command", "no roll command",
+        ],
         100,
     );
 }
@@ -976,6 +1694,21 @@ fn tape_at(i: u32, speed: F) -> Step {
         gas_rate_limited: F(if phase == 3 || phase == 5 { 0.0 } else { 0.8 }),
         reverse: F(if phase == 5 { 1.0 } else { 0.0 }),
         balancing: phase == 4,
+        // The rider's weight fore and aft: a wheelie out of the second phase and through the balance,
+        // and the stick hard back under the brakes at the end, which is a stoppie.
+        lean_fore_aft: F(match phase {
+            2 => 0.8,
+            4 => 0.6,
+            5 => -1.05,
+            _ => 0.0,
+        }),
+        // Sideways on the seat, which is what the balance controller's command integrates.
+        #[allow(clippy::float_arithmetic)]
+        stick_x: F(if phase == 4 { 0.6 * (t * 1.7).sin() } else { 0.0 }),
+        // The two wheels' brakes as the rate limiter leaves them: one lever, both wheels, held
+        // through the jump and again at the end.
+        front_brake: F(if phase == 3 || phase == 5 { 1.0 } else { 0.0 }),
+        rear_brake: F(if phase == 3 || phase == 5 { 1.0 } else { 0.0 }),
         // Two vectors that belong to the chassis' transform: made to wander so that a frame's g-load
         // peaks are not the frame before's.
         #[allow(clippy::float_arithmetic)]
@@ -990,7 +1723,8 @@ fn tape_at(i: u32, speed: F) -> Step {
 /// stepped 240 times over its own state, compared in full after every frame.
 #[test]
 fn a_scripted_ride_replays_the_same() {
-    let Some((mut ee, tape)) = harness() else { return };
+    let Some((mut ee, tape, acos, curve)) = harness() else { return };
+    let tables = Tables { acos: &acos, curve: &curve };
     // One plausible bike, not a generated one: a fixture is about the sequence, not the coverage.
     let mut g = Gen(0x7777);
     let start = State {
@@ -1021,6 +1755,32 @@ fn a_scripted_ride_replays_the_same() {
             reverse_gain: F(220.0),
             drag: F(0.42),
             gravity: Vf::new(0.0, -7084.0, 0.0, 1.0),
+            donut_roll_angle_scale: F(1.5),
+            max_roll_command: F(0.5),
+            max_roll_speed: F(14.0),
+            roll_gain: F(6.0),
+            // The loader's two defaults, in the units it leaves them in: 10 and 30 times 1.46666.
+            min_stand_upright_speed: F(14.6666),
+            max_stand_upright_speed: F(44.0),
+            roll_control_gain: F(12.0),
+            roll_control_rate_gain: F(0.05),
+            roll_control_max_cg: F(0.25),
+            max_roll_rate_disturbance: F(1.5),
+            max_pitch_command: F(0.6),
+            pitch_gain: F(30.0),
+            pitch_rate_gain: F(90.0),
+            inv_wheelie_top_speed: F::ONE / F(22.0),
+            max_stoppie_pitch_command: F(0.45),
+            stoppie_pitch_gain: F(25.0),
+            stoppie_yaw_rate_scale: F(1.2),
+            stoppie_top_speed: F(24.0),
+            balance_inertia_rate: F(1.6),
+            min_balance_inertia: F(0.4),
+            max_balance_inertia: F(2.2),
+            input_inertia: F(1.8),
+            max_balance_point: F::ONE,
+            balance_noise_amplitude: F(0.35),
+            balance_noise_time_scale: F(0.8),
         },
         r: Ride::default(),
         ch: Chassis {
@@ -1032,6 +1792,14 @@ fn a_scripted_ride_replays_the_same() {
             has_transform: true,
             vel: Vf::new(0.0, 0.0, 0.0, 1.0),
             flags: (0, 0, 0),
+            // The attitude the two pitch controllers work against, and the rates they damp with. The
+            // chassis would turn these over as it integrated, and the chassis is not this task's — so
+            // the fixture sets a bike a few degrees nose-up and slightly out of shape and leaves it,
+            // which is enough for the integral to wind up and the accumulators to drift.
+            euler: Vf::new(0.11, 0.0, -0.06, 1.0),
+            torque: NOTHING,
+            world_ang_vel: Vf::new(0.2, -0.1, 0.35, 1.0),
+            ang_vel: Vf::new(0.2, -0.1, 0.35, 1.0),
         },
         front: Wheel {
             max_steer_angle: F(0.52),
@@ -1040,6 +1808,9 @@ fn a_scripted_ride_replays_the_same() {
             contact: true,
             spin_from_torque: false,
             drive_torque: F::ZERO,
+            steered: true,
+            // A little off camber, and the suspension's ray saying it found it.
+            contact_normal: Vf::new(0.12, 0.98, 0.16, 0.0),
             ..g.wheel()
         },
         rear: Wheel {
@@ -1049,6 +1820,8 @@ fn a_scripted_ride_replays_the_same() {
             contact: true,
             spin_from_torque: false,
             drive_torque: F::ZERO,
+            steered: false,
+            contact_normal: Vf::new(0.08, 0.99, 0.11, 0.0),
             ..g.wheel()
         },
         eng: Engine {
@@ -1090,6 +1863,8 @@ fn a_scripted_ride_replays_the_same() {
             torque_scale: F::ONE,
         },
         st: tape_at(0, F::ZERO),
+        node_forward: Vf::new(0.0, 0.1, 0.995, 0.0),
+        chassis_forward: Vf::new(0.0, 0.1, 0.995, 0.0),
     };
 
     // The speed the fixture rides at: the chassis would compute this from the forces, and the chassis
@@ -1107,19 +1882,23 @@ fn a_scripted_ride_replays_the_same() {
         {
             let mut t = tape.borrow_mut();
             t.calls.clear();
+            t.out.clear();
             t.local_accel = st.local_accel;
             t.reverse_force = st.reverse_force;
         }
         ee.call(addr("bike_ground_step").unwrap(), &[OBJ as u64], &[st.dt.0], 400_000);
         only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("frame {i}: {e}"));
-        theirs.push((snap(&ee), tape.borrow().calls.clone()));
+        let t = tape.borrow();
+        theirs.push((snap(&ee), t.calls.clone(), t.out.clone()));
     }
 
     // Pass two: the port, 240 frames over its own state, compared with each of theirs in turn.
     let mut t = start.clone();
-    for (i, (was, their_calls)) in theirs.into_iter().enumerate() {
+    for (i, (was, their_calls, their_out)) in theirs.into_iter().enumerate() {
         t.st = tape_at(i as u32, speed_at(i as u32));
-        let ours = apply(&mut t);
+        let mut ours_out = Vec::new();
+        let ours = apply(&mut t, &tables, &mut ours_out);
+        same_out("the replay", i as u32, &ours_out, &their_out, &t);
         assert_eq!(ours, their_calls, "frame {i}: the calls differ");
         reset(&mut ee);
         poke(&mut ee, &t);
