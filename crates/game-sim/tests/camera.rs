@@ -7,6 +7,12 @@
 //! and the right stick — and finally one for a whole frame, which is also what proves the distance
 //! limiting, since the original inlines that into its frame and has no routine for it.
 //!
+//! Three more came with S23, for the two questions the camera asks the world: the point its ground
+//! probe asks about and where the answer lands in the look-at, the lift that answer is turned into,
+//! and the push-out at the end of the frame, run with the collision object the harness fills in by
+//! hand. Those three are the only ones here that hook a call in order to *answer* it rather than to
+//! watch it, because they are the only ones whose original reaches outside the camera.
+//!
 //! They all work the same way, and the way is worth explaining once. The original's camera is a C++
 //! object that reads two other objects (a viewport and the rider's actor) and points at eight little
 //! filter structs and an array of preset records. The harness lays all of that out in the
@@ -20,7 +26,8 @@
 
 use game_sim::air::AcosTable;
 use game_sim::camera::{
-    CURVE_ENTRIES, CurveTable, Follow, Nothing, Preset, Surface, Target, View, rotate,
+    CURVE_ENTRIES, CurveTable, Follow, Nothing, Obstacle, Obstacles, Preset, Surface, Target, View,
+    rotate,
 };
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, addr, game_or_skip};
@@ -678,10 +685,10 @@ fn the_look_at_point_is_the_games_own() {
 /// A ground for the probe to find: a surface a fixed distance above — or below — whatever point it is
 /// asked about, and a note of the point it was asked about.
 ///
-/// A fixed rise is what lets a case *choose* the lift the probe will answer, which is the only way the
-/// original can be made to answer the same one: its own probe needs a world object and a terrain tree,
-/// and this harness has neither. A rise below the point takes the probe's other arm, the decay, where
-/// the lift is zero because nothing has lifted it yet.
+/// A fixed rise is what lets a case *choose* the lift the probe will answer, which is how the original
+/// is made to answer the same one: the class this harness builds has no world object and no terrain
+/// tree, so the one call that would read them is hooked and handed this rise instead. A rise below the
+/// point takes the probe's other arm, the decay.
 struct Dirt {
     rise: F,
     asked: Vf,
@@ -784,6 +791,104 @@ fn the_ground_probes_point_is_the_games_own() {
     }
     println!("{lifted} of {CASES} cases found ground above the probe's point and lifted the look-at");
     assert!(lifted > 100, "the generator did not reach the lift");
+}
+/// The lift itself: the climb out of the ground, the decay back out of it, and the one-frame lag both
+/// are built on — the *derived* class's probe, run rather than read.
+///
+/// The probe needs a world to ask and a terrain tree inside it, which this harness cannot build. What
+/// it can do is take the world's own ground query away: the query is one call, it moves the point it
+/// is handed onto the surface under it, and a hook in its place can put the surface wherever a case
+/// wants it. So the arithmetic around the query — the `* 0.6` of the error, the `* 0.02` of last
+/// frame's answer, and which of the two a point gets — is proved here against the original, and what
+/// stays read-not-run is only how far down the real query would have moved the point.
+///
+/// A quarter of the cases leave the camera's world pointer null, which is the arm the original takes
+/// when it has no world at all: no query, so the point cannot be below anything, so the lift decays.
+/// That is also the arm a camera over [`Nothing`] takes every frame.
+#[test]
+fn the_ground_lift_is_the_games_own() {
+    let Some((mut ee, _, _)) = harness() else { return };
+    // Where the camera keeps the world it asks, and the lift it answered last frame. Both are the
+    // derived class's own fields, past the end of the base object the rest of this file pokes.
+    const CAM_WORLD: u32 = CAM + 0x184;
+    const CAM_LIFT: u32 = CAM + 0x18c;
+    // A world that is never dereferenced, because the one call that would is hooked.
+    const WORLD: u32 = 0x0122_6000;
+
+    let surface = Rc::new(RefCell::new(0.0f32));
+    let asked = Rc::new(RefCell::new(Vf::ZERO));
+    {
+        let (surface, asked) = (surface.clone(), asked.clone());
+        ee.hooks.insert(
+            addr("ground_query").unwrap(),
+            Box::new(move |ee| {
+                let p = ee.r(5) as u32;
+                *asked.borrow_mut() = get_v(ee, p);
+                ee.set_f32(p + 4, *surface.borrow());
+            }),
+        );
+    }
+    let mut g = Gen(0x5eed_000d);
+    let (mut climbed, mut decayed, mut worldless) = (0usize, 0usize, 0usize);
+    for case in 0..CASES {
+        let point = g.vec(-200.0, 200.0);
+        let rise = if g.one_in(3) { g.f(-20.0, 20.0) } else { g.f(0.0, 20.0) };
+        let before = g.maybe_zero(-50.0, 50.0);
+        let has_world = !g.one_in(4);
+        if !has_world {
+            worldless += 1;
+        } else if rise > F::ZERO {
+            climbed += 1;
+        } else {
+            decayed += 1;
+        }
+        *surface.borrow_mut() = (F(point.y()) + rise).0;
+
+        reset(&mut ee);
+        ee.set_u32(CAM_WORLD, if has_world { WORLD } else { 0 });
+        put_f(&mut ee, CAM_LIFT, before);
+        put_v(&mut ee, SCR_TARGET, point);
+        *asked.borrow_mut() = Vf::ZERO;
+        ee.call(
+            addr("race_camera_ground_probe").unwrap(),
+            &[CAM as u64, SCR_TARGET as u64],
+            &[],
+            100_000,
+        );
+        for (a, b) in ee.written_ranges() {
+            let frame = (ee.stack - 0x4000, ee.stack + 0x40);
+            let inside = (a >= CAM && b <= CAM + 0x190)
+                || (a >= SCR && b <= SCR + 0x80)
+                || (a >= frame.0 && b <= frame.1);
+            assert!(inside, "case {case}: the original wrote {a:#010x}..{b:#010x}");
+        }
+        let (theirs, theirs_kept, theirs_asked) =
+            (F(ee.f0()), F(ee.f32_at(CAM_LIFT)), *asked.borrow());
+
+        let mut c = g.cam();
+        c.ground_lift = before;
+        let mut dirt = Dirt { rise, asked: Vf::ZERO };
+        let ours = if has_world {
+            c.probe_ground(point, &mut dirt)
+        } else {
+            c.probe_ground(point, &mut Nothing)
+        };
+        assert_eq!(theirs.0.to_bits(), ours.0.to_bits(), "case {case}: the lift the probe answered");
+        assert_eq!(
+            theirs_kept.0.to_bits(),
+            c.ground_lift.0.to_bits(),
+            "case {case}: the lift the camera kept"
+        );
+        if has_world {
+            assert_eq!(
+                [theirs_asked.x().to_bits(), theirs_asked.y().to_bits(), theirs_asked.z().to_bits()],
+                [dirt.asked.x().to_bits(), dirt.asked.y().to_bits(), dirt.asked.z().to_bits()],
+                "case {case}: the point the ground query was handed"
+            );
+        }
+    }
+    println!("{climbed} cases climbed, {decayed} decayed, {worldless} had no world to ask");
+    assert!(climbed > 100 && decayed > 100 && worldless > 100, "the generator missed an arm");
 }
 
 /// Where the camera is. The original's routine also computes a yaw-driven sideways swing into stack
@@ -1083,4 +1188,166 @@ fn one_frame_is_the_games_own() {
             "case {case}: the view's field of view"
         );
     }
+}
+
+/// A wall somewhere along the probe's line, and nothing to stand on.
+///
+/// `nearest` writes down the segment it was asked about so that the proof can hold it up against the
+/// two points the original hands its collision object, and answers a hit the case chose. `on_surface`
+/// leaves the point where it is, which is this class's own ground probe: a `return 0.0f`.
+struct Wall {
+    hit: Option<Obstacle>,
+    segment: (Vf, Vf),
+}
+
+impl Obstacles for Wall {
+    fn nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        self.segment = (start, end);
+        self.hit
+    }
+}
+
+impl Surface for Wall {
+    fn on_surface(&mut self, point: Vf) -> Vf {
+        point
+    }
+}
+
+/// The push-out, in its frame: the segment the camera probes along, and where the view ends up when
+/// something is in the way.
+///
+/// `one_frame_is_the_games_own` runs the frame with the camera's collision object left null, which is
+/// how the harness finds it and — as far as this task could tell — how retail leaves it. This runs the
+/// same frame with a non-null object in that field, which turns on the block at the end of it. The
+/// object itself is never touched: the three calls the block makes are hooked, the first to write down
+/// the segment, the second to do nothing, and the third to stand in for the collision — on a case with
+/// a hit it writes the chosen hit point into the camera and sets the flag the next line reads, which
+/// is what the real object's callback would have done.
+///
+/// Three fields of the camera are the hooks' doing and not the port's: the object pointer, the hit
+/// point and the hit flag. The port models none of them — it hands the hit back from
+/// [`Obstacles::nearest`] instead — so the proof writes the same three words into its own image by
+/// hand before comparing, and that is the one place in this file where the two images are not made the
+/// same way. Everything else in the camera, and the whole view, is compared as usual.
+#[test]
+fn the_push_out_is_the_games_own() {
+    let Some((mut ee, curve, acos)) = harness() else { return };
+    // The collision object, never dereferenced: all three calls that take it are hooked.
+    const PROBE: u32 = 0x0122_7000;
+    // Where the object's callback leaves its answer, and the flag the frame tests one line later.
+    const CAM_HIT: u32 = CAM + 0xb0;
+    const CAM_FLAG: u32 = CAM + 0x170;
+    const CAM_PROBE: u32 = CAM + 0xe8;
+
+    let view = Rc::new(RefCell::new(View::default()));
+    {
+        let view = view.clone();
+        ee.hooks.insert(
+            addr("viewport_set_eye").unwrap(),
+            Box::new(move |ee| {
+                let (p, f) = (ee.r(5) as u32, ee.r(9) as u32);
+                let mut v = view.borrow_mut();
+                v.position = get_v(ee, p);
+                v.fov = F(ee.f32_at(f));
+            }),
+        );
+    }
+    {
+        let view = view.clone();
+        ee.hooks.insert(
+            SET_LOOK_AT,
+            Box::new(move |ee| {
+                let l = ee.r(5) as u32;
+                view.borrow_mut().look_at = get_v(ee, l);
+            }),
+        );
+    }
+    ee.hooks.insert(addr("camera_base_update").unwrap(), Box::new(|_| {}));
+
+    let segment = Rc::new(RefCell::new((Vf::ZERO, Vf::ZERO)));
+    {
+        let segment = segment.clone();
+        ee.hooks.insert(
+            addr("probe_bundle_set_points").unwrap(),
+            Box::new(move |ee| {
+                let p = ee.r(5) as u32;
+                *segment.borrow_mut() = (get_v(ee, p), get_v(ee, p + 0x10));
+            }),
+        );
+    }
+    ee.hooks.insert(addr("probe_object_moved").unwrap(), Box::new(|_| {}));
+    let hit = Rc::new(RefCell::new(None::<Vf>));
+    {
+        let hit = hit.clone();
+        ee.hooks.insert(
+            addr("probe_collide_world").unwrap(),
+            Box::new(move |ee| {
+                if let Some(h) = *hit.borrow() {
+                    put_v(ee, CAM_HIT, h);
+                    ee.set_u32(CAM_FLAG, 1);
+                }
+            }),
+        );
+    }
+
+    let mut g = Gen(0x5eed_000e);
+    let (mut struck, mut clear) = (0usize, 0usize);
+    for case in 0..CASES {
+        let mut c = g.cam();
+        let t = g.target();
+        let dt = if g.one_in(4) { g.f(0.8, 2.0) } else { g.f(0.0, 0.1) };
+        let near_clip = if g.one_in(3) { g.f(0.0, 40.0) } else { g.f(0.0, 6.0) };
+        let wall = if g.one_in(4) {
+            None
+        } else {
+            Some(Obstacle { point: g.vec(-200.0, 200.0), normal: g.dir() })
+        };
+        if wall.is_some() {
+            struck += 1;
+        } else {
+            clear += 1;
+        }
+        *hit.borrow_mut() = wall.map(|w| w.point);
+
+        reset(&mut ee);
+        poke(&mut ee, &c);
+        poke_target(&mut ee, &t);
+        ee.set_u32(CAM_PROBE, PROBE);
+        ee.set_f32(VIEWPORT + 0x19c, near_clip.0);
+        *view.borrow_mut() = View::default();
+        *segment.borrow_mut() = (Vf::ZERO, Vf::ZERO);
+        ee.call(addr("camera_update").unwrap(), &[CAM as u64], &[dt.0], 1_000_000);
+        only_touched_the_regions(&ee).unwrap();
+        let (theirs, theirs_view, theirs_segment) = (snap(&ee), *view.borrow(), *segment.borrow());
+
+        let mut scene = Wall { hit: wall, segment: (Vf::ZERO, Vf::ZERO) };
+        let ours_view = c.update_probed(dt, &t, near_clip, &curve, &acos, &mut scene);
+        reset(&mut ee);
+        poke(&mut ee, &c);
+        ee.set_u32(CAM_PROBE, PROBE);
+        if let Some(w) = wall {
+            put_v(&mut ee, CAM_HIT, w.point);
+            ee.set_u32(CAM_FLAG, 1);
+        }
+        same(case, "one frame over a wall", &theirs, &snap(&ee));
+        for (k, a, b) in [
+            ("position", theirs_view.position, ours_view.position),
+            ("look at", theirs_view.look_at, ours_view.look_at),
+            ("probe start", theirs_segment.0, scene.segment.0),
+            ("probe end", theirs_segment.1, scene.segment.1),
+        ] {
+            assert_eq!(
+                [a.x().to_bits(), a.y().to_bits(), a.z().to_bits(), a.w().to_bits()],
+                [b.x().to_bits(), b.y().to_bits(), b.z().to_bits(), b.w().to_bits()],
+                "case {case}: the {k}"
+            );
+        }
+        assert_eq!(
+            theirs_view.fov.0.to_bits(),
+            ours_view.fov.0.to_bits(),
+            "case {case}: the view's field of view"
+        );
+    }
+    println!("{struck} cases ran into something, {clear} had a clear line");
+    assert!(struck > 100 && clear > 100, "the generator missed an arm");
 }
