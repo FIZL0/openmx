@@ -185,6 +185,14 @@ added beside them:
     the contact distributor that spreads a frame's collisions onto the two wheels. The transform's own
     arithmetic is not ported, so the step returns the ordered list of what it called. Proved against
     the original over 10,000 generated bodies each in `tests/chassis.rs` (S19).
+  - `phy.rs` — the bike's `.phy` file as the port reads it: the game's own plain-text reader
+    (whitespace removed rather than trimmed, `strtod` and then the truncating conversion to a float,
+    three delimiter sets for a quadword, `T/F/ON/OFF/Y/N` before `strtol`) and the whole of
+    `bike_phy_load` on top of it — seventeen sections into the bike, its chassis, its two wheels, its
+    engine and its collision record, filling `move.rs`'s params and `air::Params` together. Proved
+    against the original four ways in `tests/phy.rs` (S18): every key of three files read six ways,
+    960 words of the bike from a zeroed start, all 128 setter calls' arguments, and the bike in the
+    human's own recording.
   - `camera.rs` — the camera for normal play: the 160-byte preset record the disc ships one of per
     camera, the target point and the look-ahead it leads the rider by, the eight first-order lags that
     make it follow instead of snap, and the limits on its yaw, pitch, distance and field of view.

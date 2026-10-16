@@ -248,6 +248,11 @@ pub mod input;
 /// landing test judges.
 pub mod motion;
 
+/// The bike's own numbers, off the disc: the `.phy` file every vehicle's physics is written in, the
+/// reader the engine reads it with, and the whole key-to-parameter map the loader walks — which is
+/// where the ground step's and the air step's parameters come from, instead of from a test.
+pub mod phy;
+
 /// The acceptance test for the whole port: a fixture of recorded inputs plus the state it starts from,
 /// replayed through the simulation and compared tick by tick against the recording's hashes or its
 /// watched fields. A failure is one line — `tick 413: ball.vel[1] -58.94952 vs -58.949516` — not a diff of two

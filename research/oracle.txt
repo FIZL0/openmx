@@ -1471,3 +1471,83 @@ motion_rot_channel_new      boot 0x00135cd0 (chan) a rotation channel: +4 = 1 on
 motion_rot_channel_new_narrow boot 0x00135c00 (chan) the same for the eight-byte key kind, with the
 #                                           other vtable
 motion_pos_channel_new      boot 0x00135900 (chan) a position channel: the same without the cache
+# ---------------------------------------------------------------------------------------------------
+# S18: the .phy reader. bike_phy_load (above) opens the bike's file through these ten, and every
+# parameter in the game comes off the disc through them.
+ini_new boot 0x00149f20 (reader) -> the empty reader: a 0x18b0-byte object on the caller's stack
+ini_open boot 0x0014a3e0 (reader, name, 0, -1, in_memory) -> 1 if it has the file. The fifth argument
+#                        is a {u64 length, bytes...} block for a file somebody else already loaded;
+#                        with 0 there it opens `name` through fs_open/fs_size/fs_read/fs_close.
+#                        Whitespace is removed rather than trimmed, except inside [] or quotes;
+#                        quotes are removed; a line whose squeezed form starts with ';' is a comment;
+#                        the value is everything after the first '='; a pair with an empty value is
+#                        dropped. Matching is case-insensitive.
+ini_del boot 0x00149f80 (reader, -1) -> frees it
+ini_section boot 0x0014a7a0 (reader, name) -> 1 if the section is there, and it becomes the one the
+#                           getters read. A second section with a name already seen is a second
+#                           section: the getters find the first one's keys.
+ini_text boot 0x0014af90 (reader, key, dst, size) -> 1 and the value copied, or 0 and dst untouched
+ini_int boot 0x0014b3f0 (reader, key, dst) -> T/F/ON/OFF/Y/N first, else strtol with base 0
+ini_float boot 0x0014b520 (reader, key, dst) -> strtod, then double_to_float, which truncates
+ini_bool boot 0x0014b6f0 (default, reader, key, dst) -> like ini_int but with a default
+ini_float_default boot 0x0014b790 (default in f12, reader, key, dst) -> always writes dst
+ini_quadword boot 0x0014b810 (reader, key, default, dst) -> up to four floats, split at any of
+#                            " \t,;" then "();" then "()," ; lanes the text does not reach keep the
+#                            default's. The defaults the bike's loader passes: 0x00426d70 (0,0,0,1)
+#                            and 0x00426d90 (-1,-1,-1,1), which the physics reads as "unset".
+# The two pieces of ini_open worth naming on their own: 0x0014c300 classifies one squeezed line
+# (comment, section, pair) and 0x0014c8c0 takes the pair apart at the first '='.
+strtod boot 0x0040ac20 (text, end) -> the double a decimal string names; "0x" hex floats, inf and nan
+#                      are all accepted, and the port's reader does not model them (no retail file
+#                      holds one)
+strtol boot 0x00412e38 (text, end, base) -> base 0 reads 0x hex and leading-0 octal
+strtok boot 0x00412b18 (text, delimiters) -> the C one, with the static cursor
+fs_open boot 0x001255f0 (mode, name) -> a handle, or -1
+fs_size boot 0x00125d00 (handle) -> the file's length in bytes
+fs_read boot 0x001246f0 (file, handle, dst, length) -> bytes read
+fs_close boot 0x00125400 (handle)
+rigid_body_set_mass boot 0x00158dc0 (mass in f12, body) -> the chassis' vtable slot +0x78, which is
+#                            how the loader hands over Weight/32.2
+# The seven the loader reaches a wheel through, all taking the wheel as the first integer argument
+# while the floats come in f12 up (the EE ABI fills the two banks independently):
+wheel_set_suspension boot 0x0025ac50 (strut, max compression rate, max decompression rate, spring,
+#                                    bounce ratio, rebound ratio in f12..f17, wheel) -> and the rate
+#                                    it works out lands at wheel+0x54, which the loader reads back
+wheel_set_tire boot 0x0025acd0 (radius, inertia, 6.0, 24.0 in f12..f15, wheel)
+wheel_set_surface_drive boot 0x0025ada0 (SideForce, SlippingSideForce, MaxDriveForce, MaxSideForce,
+#                                       MaxSlippingSideForce, SkidDriveForce, SkidSideForce,
+#                                       SkidSlippingSideForce in f12..f19, wheel, surface)
+wheel_set_surface_side boot 0x0025ade0 (SlippingSideForceRoundOff/DropOff/Scale/SpeedScale,
+#                                      BrakingSideForceRoundOff/DropOff/Scale/SpeedScale in f12..f19,
+#                                      wheel, surface, then SideForceRoundOff/DropOff/Scale/
+#                                      SpeedScale and DonutsSideForceSpeedScale on the stack, a slot
+#                                      every eight bytes: sp+0x0, +0x8, +0x10, +0x18, +0x20.
+#                                      [Front Tire] has no DonutsSideForceSpeedScale%d key, and the
+#                                      front's call stores a zero in that slot (sw $zero, 0x20($sp))
+wheel_set_surface_drag boot 0x0025ae50 (MaxBrakingTorque, WheelFriction, WheelDrag in f12..f14,
+#                                      wheel, surface)
+wheel_set_steering boot 0x0025ae80 (damping, inertia, torque in f12..f14, wheel) -- the front only
+wheel_set_tire_derived boot 0x0025b160 (wheel) -> the numbers the wheel works out for itself once its
+#                                      tire and surfaces are in
+bike_physics_lines boot 0x00253900 (bike) -> called between the tires and the engine; does nothing
+#                                  unless bike+0x7c8 is set
+# The seven the collision record is set through, the record being bike+0x7d0:
+collision_set_mass boot 0x0026fd80 (CollisionWeight * 0.0310559 in f12, record, CofG offset)
+collision_set_springs boot 0x0026ff10 (MaxCompression, Spring, Damping, Restitution, Body* of the
+#                                     same four in f12..f19, record)
+collision_set_high_speed boot 0x00270220 (ray speed scale, unpenetration distance, cos of the minimum
+#                                        angle in f12..f14, record, enabled, ray offset)
+collision_set_angular boot 0x002701a0 (record, enabled, body enabled)
+collision_set_moment_scales boot 0x002700d0 (record, spring, friction, body spring, body friction)
+collision_set_friction boot 0x002701d0 (Friction, BodyFriction in f12..f13, record)
+collision_set_surface_friction boot 0x002701b0 (TerrainFriction in f12, record, surface) -> called for
+#                                              all sixteen surfaces whatever NumberOfSurfaces says
+# The C library's one lock, which strtod's helper at 0x0040ac80 takes and gives back. An oracle has
+# one thread, so both halves are hooked to nothing — otherwise the first number read reaches the EE
+# kernel's GetThreadId (syscall 47, 0x003fbed0) and WaitSema.
+libc_lock boot 0x0040e250 () -> GetThreadId, and WaitSema(0x00422b10) if the owner at 0x004241e0 is
+#                   somebody else; the count at 0x004241e4 makes it recursive
+libc_unlock boot 0x0040e2d0 () -> the other half
+sbrk boot 0x00410560 (reent, increment) -> the break before the increment, which is how the C
+#                    library's own malloc — the one strtod's hard rounding path allocates from —
+#                    grows. It insists the blocks be contiguous, so a hook has to bump a pointer
