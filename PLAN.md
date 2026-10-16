@@ -177,6 +177,14 @@ added beside them:
     twenty callees it still drives (suspension, tires, roll and pitch) are not ported yet, so the step
     returns the ordered list of them instead, which is what makes the order provable. Proved against
     the original over 2000 generated frames and a 240-frame ride in `tests/move.rs` (S3, S15).
+  - `chassis.rs` — the rigid body under the bike: the integrate virtual the ground step ends every
+    substep with (the transform's own turn carried onto the body, force and torque through the inverse
+    mass and inverse inertia, four two-step integrations, the speed and per-axis limits, the six
+    freedom flags, the contact correction and the transform written back), the per-frame measure that
+    gives the body its speed, the transform's rotate/unrotate pair, the two-step integrator itself and
+    the contact distributor that spreads a frame's collisions onto the two wheels. The transform's own
+    arithmetic is not ported, so the step returns the ordered list of what it called. Proved against
+    the original over 10,000 generated bodies each in `tests/chassis.rs` (S19).
   - `camera.rs` — the camera for normal play: the 160-byte preset record the disc ships one of per
     camera, the target point and the look-ahead it leads the rider by, the eight first-order lags that
     make it follow instead of snap, and the limits on its yaw, pitch, distance and field of view.
