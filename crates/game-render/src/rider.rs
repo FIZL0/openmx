@@ -51,10 +51,29 @@
 //! ([`FOOT_ANCHORS`]) stands the rider on the pegs, which is where a rider stands and the only pair
 //! the bind pose's straight legs suit; taking the grips would hang the body from the bars with its
 //! feet through the engine. The motions replace the whole question with their own root channel.
+//!
+//! And they do, which is now measured rather than expected: every clip in a rider's set writes the
+//! pelvis's position, and the pose that comes out stands on the bike by itself. Posed by a clip the
+//! rider rides in — the turns, the three airborne poses at the midpoint the grounded idle plays
+//! them at, `backflip` — the body's four dummy anchors land within a third of an inch of the
+//! chassis's four, feet on the pegs and hands on the grips, against five inches out in the bind
+//! pose. So [`Body`], the posed rider the shell draws, is drawn at the bike's own transform and
+//! bolts nothing. [`bolt_onto`] stays for the one case it was written for: a body with no clip to
+//! pose it.
+//!
+//! A gesture is the exception that proves it: `hold_knee_left` takes a foot four inches off its peg
+//! and `wreck_sep_over_bars` throws the whole body over the bars. That is the stunt being done, and
+//! it is why where the rider is cannot be a placement this module computes.
 
+use crate::anim::{Rig, Set};
 use crate::disc::Res;
 use crate::ini;
 use crate::mat::{M4, v3};
+use crate::skin::skin;
+use crate::world::Loaded;
+use game_sim::motion::{Animations, Library, Params, Played};
+use game_sim::trick::{SLOTS, Stunt};
+use ps2_float::F;
 
 /// Which body a `.sub`'s `MCF = rider.mcf` means. Only [`Sex::Male`] is on this disc.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,6 +373,137 @@ fn pick(
 /// The last `\`-separated part of an archive member's name.
 fn basename(name: &str) -> &str {
     name.rsplit(['\\', '/']).next().unwrap_or(name)
+}
+
+// ---------------------------------------------------------------------------------------------------
+// the body on the bike, posed
+// ---------------------------------------------------------------------------------------------------
+
+/// The name a rider's clip for a gesture slot is asked for by: the mode's prefix, the word `rider`,
+/// and the stunt's `Name` from `stunts.ini`.
+///
+/// [`game_sim::motion::Library::stunt_name`] builds the same name with `bike` in the middle, because
+/// the loader it was read off is the *vehicle's*: a stunt animates the bike and the body on it with
+/// two clips of the same name but for that one word. Both are in the archives side by side —
+/// `bike\anim\bike_nacnac.mot` in `Bike\250sx.res`, `rider\anim\rider_nacnac.mot` in `Rider\thq1.res`
+/// — and a rider archive's `motions.ini` lists its own under `[Stunts]` and `[ff_Stunts]`, which is
+/// where the mode prefix comes in: `ff_rider_nacnac.mot` for the freestyle minibikes.
+///
+/// The 31-byte truncation is the original's, kept here for the same reason it is kept there: the
+/// name is formatted into a 32-byte buffer. No name on this disc is long enough to reach it.
+pub fn stunt_name(prefix: &str, stunt: &str) -> String {
+    let whole = format!("{prefix}rider_{stunt}");
+    String::from_utf8_lossy(&whole.as_bytes()[..whole.len().min(31)]).into_owned()
+}
+
+/// The three airborne poses, as a rider's own `.mcf` names them: forward, middle and back.
+///
+/// A bike's `.mcf` spells the same three `bike_air_Fwd`, `_Mid` and `_Bck`, which is what
+/// [`game_sim::motion::Library::load`] asks for; a rider's `.mcf` lists them without the actor's
+/// word, and no rider archive holds a `rider_air_*.mot`. So this is the one place where the rider's
+/// names are not the bike's with one word changed, and it is read off the disc rather than derived.
+pub const AIR_POSES: [&str; 3] = ["air_Fwd", "air_Mid", "air_Bck"];
+
+/// A rider ready to be drawn: the three files, the clips bound to the body's own skeleton, and the
+/// pose the last frame left on it.
+///
+/// This is [`crate::anim::Rig`] with a rider's clip table instead of a bike's, and without a driver
+/// of its own. The driving is the simulation's: [`game_sim::rider::Rider`] runs one
+/// [`game_sim::motion::Driver`] per frame for the crossup its landing test reads, and what that
+/// driver answers — which clip, at what phase, faded by how much — is what poses the body here
+/// ([`Body::pose`]). Running a second driver beside it would be two state machines where the
+/// original has one, and the second one would be guessing at the first one's inputs.
+///
+/// ## Where the body sits
+///
+/// Nowhere, by this type: the clips put it there. Every one of them carries a position channel on
+/// the pelvis, and the place it moves the pelvis to is on the bike — posed by a clip the rider
+/// rides in, the body's four dummy anchors land within a third of an inch of the chassis's four,
+/// feet on the pegs and hands on the grips. So a posed rider is drawn with the bike's own
+/// transform and nothing else, which is the answer to the question [`bolt_onto`] was written for:
+/// the bind pose needs a placement because the game never draws one, and a posed body does not.
+pub struct Body {
+    /// The chain: the `.sub`'s gear, the `.mcf` it names, and the name of the geometry to load.
+    pub rider: Rider,
+    /// The clips, the clip table, the clock and the live pose.
+    pub rig: Rig,
+    /// Whether any frame has written a pose yet. Until one has, the live pose is the bind pose the
+    /// body was modelled in, and a shell that drew it then would draw a rider with its arms out.
+    /// A frame writes nothing when the blend it carries has no clip behind it — the
+    /// [`game_sim::motion::Blend::Free`] a rig starts in, a gesture slot the set could not bind —
+    /// so this stays false until the driving asks for something the set has.
+    ///
+    /// The first frame of a ride is *not* one of those: it asks for the grounded idle and gets it,
+    /// but a restart puts the cross-fade ramp at 1, so what it draws is all of the pose the rider
+    /// was in, which is the bind pose. That fade is the driving's and is left alone; see
+    /// `tests/body.rs`.
+    pub posed: bool,
+}
+
+impl Body {
+    /// Read a rider's three files and bind every clip its gesture slots and airborne poses name.
+    ///
+    /// `archives` are searched in order and must include the rider's own; `name` is the archive's
+    /// own name (`thq1`), `prefix` the mode's (empty, or `ff_` for the freestyle minibikes) and
+    /// `stunts` the `stunts.ini` table, of which only the first 24 records are gesture slots.
+    ///
+    /// The caller still loads the geometry itself, through [`crate::world::Assets`] and after
+    /// handing it [`Suit::materials`]: the body is one mesh shared by all 162 riders and the gear is
+    /// a repaint of it.
+    pub fn load(
+        archives: Vec<Res>,
+        name: &str,
+        sex: Sex,
+        prefix: &str,
+        stunts: &[Stunt],
+        params: Params,
+    ) -> Result<Body, String> {
+        let rider = Rider::load(&archives, name, sex)?;
+        let mut set = Set::load(archives, &rider.mcf)?;
+        // The set's own motions first — the airborne poses, the turns and the idles are all in the
+        // `.mcf` — and then the gesture slots, which are in no `.mcf` and are found by name.
+        set.load_listed();
+        for stunt in stunts.iter().take(SLOTS).filter(|s| !s.name.is_empty()) {
+            // Every slot, and not just the ones `UsedForBike` marks: that flag says the *bike* has
+            // no clip for this stunt, which is what makes the stunt rider-only. The rider has one
+            // either way.
+            set.load(&stunt_name(prefix, &stunt.name));
+        }
+        let mut lib = Library::default();
+        for (slot, stunt) in stunts.iter().take(SLOTS).enumerate() {
+            lib.stunt[slot] = set.bound(&stunt_name(prefix, &stunt.name));
+        }
+        lib.air_fwd = set.bound(AIR_POSES[0]);
+        lib.air_mid = set.bound(AIR_POSES[1]);
+        lib.air_bck = set.bound(AIR_POSES[2]);
+        Ok(Body { rider, rig: Rig::bound(set, lib, params), posed: false })
+    }
+
+    /// Pose the body from a frame of the simulation's own animation driving
+    /// ([`game_sim::rider::Rider::animation`]), at the same `dt` the simulation stepped with.
+    pub fn pose(&mut self, dt: F, frame: game_sim::motion::Frame) -> Played {
+        let (played, posed) = self.rig.driven(dt, frame);
+        self.posed |= posed;
+        played
+    }
+
+    /// The model name to load and to draw this body as: `mrider` for a player, `airider` for one of
+    /// the pack.
+    pub fn geometry(&self) -> &str {
+        &self.rider.geometry
+    }
+
+    /// Write this frame's pose into a loaded model, as the triangles the scene draw reads.
+    ///
+    /// A skinned model has no triangles of its own — the ones [`crate::world::Assets`] expanded at
+    /// load time are the bind pose, which is the one pose the game never shows — so the frame's are
+    /// written over them and the body is then drawn like any other model, at the bike's transform.
+    /// They stay in the model's own space, because that is what a joint matrix leaves them in.
+    ///
+    /// Expands the same level of detail `Assets` does, which is the finest.
+    pub fn skin_into(&self, loaded: &mut Loaded) {
+        loaded.tris = skin(&loaded.model, &self.rig.world(), 0);
+    }
 }
 
 #[cfg(test)]

@@ -8,14 +8,17 @@
 //! models the scene places, and their textures. Nothing is written except the PNG, and that goes under
 //! `context/`, which is not committed.
 
+use game_render::anim::Set;
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, v3};
 use game_render::raster::Frame;
 use game_render::rider::{FOOT_ANCHORS, Rider, Sex, Skeleton, bolt_onto};
 use game_render::scene::{Preset, Scene, Vehicle};
+use game_render::skin::{Pose, skin};
 use game_render::terrain::{Terrain, draw_terrain};
 use game_render::world::{Assets, Camera, Lighting, draw_scene};
 use game_render::{ini, png};
+use game_sim::motion::Animations;
 
 fn main() {
     if let Err(e) = run() {
@@ -30,6 +33,8 @@ fn run() -> Result<(), String> {
     // The stock gear. Every other rider archive on the disc is a repaint of the same body, and
     // nothing in a scene says which one a race uses — that comes from the player's profile.
     let mut rider_name = "thq1".to_string();
+    // Empty means the bind pose, bolted to the pegs. A clip name poses the body instead.
+    let mut pose_spec = String::new();
     let mut out = std::path::PathBuf::from("context/shots/first-draw.png");
     let mut width = 640usize;
     let mut height = 448usize;
@@ -40,6 +45,7 @@ fn run() -> Result<(), String> {
             "--track" => track = next("a track name, like sx01")?,
             "--bike" => bike = next("a bike name, like 250sx")?,
             "--rider" => rider_name = next("a rider name, like thq1, or none")?,
+            "--pose" => pose_spec = next("a clip name, like backflip, or NAME:PHASE")?,
             "--out" => out = next("a path")?.into(),
             "--size" => {
                 let v = next("WIDTHxHEIGHT")?;
@@ -50,7 +56,7 @@ fn run() -> Result<(), String> {
             "--help" | "-h" => {
                 println!(
                     "first-draw [--track sx01] [--bike 250sx] [--rider thq1|none] \
-                     [--size 640x448] [--out PATH]\n\
+                     [--pose NAME[:PHASE]] [--size 640x448] [--out PATH]\n\
                      Draws one frame of a track from the disc named in kit.toml."
                 );
                 return Ok(());
@@ -71,10 +77,11 @@ fn run() -> Result<(), String> {
         archives.push(disc.res(name)?);
     }
     // The rider is a fourth archive, named after the rider rather than the track or the bike.
+    let mut rider_member = String::new();
     if rider_name != "none" {
-        let member = member_ending(&disc, &format!("{rider_name}.res"))?;
-        println!("rider: {member}");
-        archives.push(disc.res(&member)?);
+        rider_member = member_ending(&disc, &format!("{rider_name}.res"))?;
+        println!("rider: {rider_member}");
+        archives.push(disc.res(&rider_member)?);
     }
     let archives = archives;
 
@@ -184,6 +191,22 @@ fn run() -> Result<(), String> {
             }
         },
     };
+    // The pose the still is drawn in, if one was asked for. A posed body already stands in the
+    // bike's own space — its clips put it there — so it wants no bolt, and the skinned triangles
+    // replace the bind pose's in the model the draw already knows about.
+    let posed = match (&rider, pose_spec.is_empty()) {
+        (Some(r), false) => match pose_body(&mut disc, &rider_member, r, &mut assets, &pose_spec) {
+            Ok(what) => {
+                println!("pose: {what}");
+                true
+            }
+            Err(e) => {
+                println!("pose: {e}");
+                false
+            }
+        },
+        _ => false,
+    };
     println!(
         "loaded: {} of {} models, {} textures{}",
         assets.models.len(),
@@ -252,7 +275,9 @@ fn run() -> Result<(), String> {
         // nothing else, and those are the anchors. See `rider.rs` on why the bind pose's placement
         // is a choice and the feet are the pair that suits it.
         if let Some(rider) = &rider {
-            if let Some(body) = assets.models.get(&rider.geometry) {
+            if posed {
+                actor.push((rider.geometry.as_str(), bike_at));
+            } else if let Some(body) = assets.models.get(&rider.geometry) {
                 let bolt = bolt_onto(
                     &Skeleton::of(&body.model),
                     &Skeleton::of(&chassis.model),
@@ -274,6 +299,38 @@ fn run() -> Result<(), String> {
     png::write_rgb(&out, width, height, &frame.color)?;
     println!("wrote {}", out.display());
     Ok(())
+}
+
+/// Pose the body with one of its own clips and skin it there, so a still can show the rider doing
+/// something rather than standing in the bind pose it was modelled in.
+///
+/// `spec` is a clip name, optionally followed by `:PHASE` — a fraction of the clip's length, 0 by
+/// default. The set is loaded from its own copy of the rider archive because an animation set owns
+/// the archives it reads its `.mot` files out of.
+fn pose_body(
+    disc: &mut Disc,
+    member: &str,
+    rider: &Rider,
+    assets: &mut Assets,
+    spec: &str,
+) -> Result<String, String> {
+    let (name, phase) = match spec.split_once(':') {
+        Some((name, phase)) => (name, phase.parse::<f32>().map_err(|_| "--pose: not a phase")?),
+        None => (spec, 0.0),
+    };
+    let mut set = Set::load(vec![disc.res(member)?], &rider.mcf)?;
+    set.load_listed();
+    Animations::load(&mut set, name);
+    let id = set.id(name).ok_or(format!("no clip named {name}"))?;
+    let bound = set.get(id).ok_or(format!("no clip named {name}"))?;
+    let time = phase * bound.clip.timing.duration.0;
+    let mut pose = Pose::new(set.skeleton.len());
+    bound.clip.pose(time, &bound.joints, &mut pose);
+    let world = set.skeleton.world(&pose);
+    let loaded = assets.models.get_mut(&rider.geometry).ok_or("the body is not loaded")?;
+    loaded.tris = skin(&loaded.model, &world, 0);
+    let whole = bound.clip.timing.duration.0;
+    Ok(format!("{name} at {time:.3}s of {whole:.3}s, {} triangles", loaded.tris.len()))
 }
 
 /// The terrain file a scene asks for. Most scenes name it `SX02.trn`, but what the archive holds is

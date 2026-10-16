@@ -110,6 +110,15 @@ pub struct Rider {
     pub sense: state::Sense,
     /// A racing event rather than freestyle, which is a different vertical g limit.
     pub racing: bool,
+    /// What the animation driving asked for this frame: the one thing [`motion::Driver::frame`]
+    /// answers, kept rather than dropped.
+    ///
+    /// The rider itself reads nothing out of it — the only field of the driving it needs is the
+    /// crossup the header writes ([`motion::Driver::shown_crossup`]) — but a shell that draws the
+    /// rider needs the blend the selection asked for, and running a second driver beside this one
+    /// to get it would be two state machines where the original has one. Left at
+    /// [`motion::Blend::Free`] until the first frame.
+    pub animation: motion::Frame,
 
     /// The last trick asked for since the wheels left the ground, for [`Frame::landed`].
     flight: Trick,
@@ -142,6 +151,7 @@ impl Rider {
                 settles: false,
             },
             racing: false,
+            animation: motion::Frame { blend: motion::Blend::Free, restart: false },
             flight: Trick::NONE,
             airborne: false,
         }
@@ -163,7 +173,9 @@ impl Rider {
     /// **One frame of the rider**, in the original's order. The six steps at the top of this file.
     pub fn frame(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World) -> Frame {
         let mut out = Frame::default();
-        let Rider { ride, tricks, state, motion, set, clips, sense, racing, flight, airborne } = self;
+        let Rider {
+            ride, tricks, state, motion, set, clips, sense, racing, animation, flight, airborne,
+        } = self;
         let sense = *sense;
 
         // 1 — the top of the player's update: the hand-reset latch is dropped.
@@ -241,7 +253,8 @@ impl Rider {
             fore_aft: ride.held.stick.1,
             crossup: ride.air.crossup,
         };
-        motion.frame(dt, p.motion(), motion::Request { progress: tricks.progress, ..request }, pose, *clips);
+        let asked = motion::Request { progress: tricks.progress, ..request };
+        *animation = motion.frame(dt, p.motion(), asked, pose, *clips);
 
         // The word next frame's airborne control reads. The clocks run after the ground step, so what
         // a frame's air code sees is always the previous frame's verdict — which is why this is a
