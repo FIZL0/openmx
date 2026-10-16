@@ -1,4 +1,5 @@
-//! S7 — the camera for normal play, proved against the original.
+//! S7 — the camera for normal play, proved against the original, and S24 — the camera the disc
+//! actually creates, proved the same way at the end of the file.
 //!
 //! Twelve proofs. One for the sine table every rotation in the game reads, which is the one thing in
 //! the ported module that is *not* bit-exact and so is the one proof with a tolerance in it. One for
@@ -1350,4 +1351,517 @@ fn the_push_out_is_the_games_own() {
     }
     println!("{struck} cases ran into something, {clear} had a clear line");
     assert!(struck > 100 && clear > 100, "the generator missed an arm");
+}
+
+// --- S24: the camera the disc actually creates -----------------------------------------------------
+//
+// Four more proofs, of the derived class's frame and of the three routines it has of its own. They
+// share the harness above: the derived object is the base object with a longer tail, its frame reads
+// the same viewport and the same actor, and the filters and the field of view it uses are the base
+// class's unoverridden. What is new is the tail of the object, two fields of the actor, and three
+// globals — the application object the frame and the aim reach through one pointer, and the word the
+// aim's split-screen trim tests.
+
+use game_sim::camera::{Race, Ridden, Switches};
+
+/// The application object the frame's look-ahead bit and the aim's second trim live in, and the
+/// sub-object that trim's second veto is a field of.
+const APP: u32 = 0x0122_6000;
+const APP_SUB: u32 = 0x0122_7000;
+
+/// The direction basis: what the derived look-at swings, where the base swings the heading. It shares
+/// its scratch slot with the sideways axis, which that routine does not take.
+const SCR_BASIS: u32 = SCR + 0x70;
+
+/// The derived object runs to `+0x1c4` where the base stops at `+0x180`, and the ground probe the
+/// derived class overrides writes last frame's lift at `+0x18c`, so the compared camera is longer
+/// than the base's proofs compare. Everything else is the same three regions.
+const RACE_REGIONS: [(&str, u32, u32); 3] =
+    [("camera", CAM, 0x1c4), ("filters", FILT, 0x100), ("scratch", SCR, 0x80)];
+
+fn race_reset(ee: &mut Ee) {
+    for (_, base, len) in RACE_REGIONS {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(base + o, 0);
+        }
+    }
+}
+
+fn race_snap(ee: &Ee) -> Vec<u32> {
+    let mut out = Vec::new();
+    for (_, base, len) in RACE_REGIONS {
+        for o in (0..len).step_by(4) {
+            out.push(ee.u32_at(base + o));
+        }
+    }
+    out
+}
+
+fn race_where_is(i: usize) -> String {
+    let mut i = i as u32 * 4;
+    for (name, _, len) in RACE_REGIONS {
+        if i < len {
+            return format!("{name} + {i:#x}");
+        }
+        i -= len;
+    }
+    "past the end".into()
+}
+
+fn race_only_touched(ee: &Ee) -> Result<(), String> {
+    let frame = (ee.stack - 0x4000, ee.stack + 0x40);
+    for (a, b) in ee.written_ranges() {
+        let inside = RACE_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len)
+            || (a >= frame.0 && b <= frame.1);
+        if !inside {
+            return Err(format!(
+                "the original wrote {a:#010x}..{b:#010x}, which is neither the camera nor the stack"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn race_same(case: usize, what: &str, theirs: &[u32], ours: &[u32]) {
+    let mut bad = 0;
+    for (i, (&t, &o)) in theirs.iter().zip(ours).enumerate() {
+        if t != o {
+            if bad < 8 {
+                println!("{what} case {case}: {} theirs {t:#010x} ours {o:#010x}", race_where_is(i));
+            }
+            bad += 1;
+        }
+    }
+    assert_eq!(bad, 0, "{what} case {case}: {bad} words differ");
+}
+
+/// The derived camera: the base object, the one vtable slot of the three the frame reaches that this
+/// class overrides, and the tail the derived constructor fills.
+///
+/// Of that tail only the lift at `+0x18c` is ever read while the ground probe is hooked — the world
+/// pointer at `+0x184` is what the real probe would read, and a hooked probe does not. The rest is
+/// written so that both snapshots hold the same bytes rather than whatever the case before left.
+fn poke_race(ee: &mut Ee, r: &Race) {
+    poke(ee, &r.cam);
+    ee.set_u32(VTABLE + 0x10c, addr("race_camera_ground_probe").unwrap());
+    for o in (0x180..0x1c4).step_by(4) {
+        ee.set_u32(CAM + o, 0);
+    }
+    ee.set_f32(CAM + 0x18c, r.cam.ground_lift.0);
+    ee.set_f32(CAM + 0x19c, 1.0);
+    ee.set_f32(CAM + 0x1a0, 3.0);
+    ee.set_f32(CAM + 0x1a4, f32::MAX);
+    ee.set_u32(CAM + 0x1a8, 0xffff_ffff);
+    ee.set_u32(CAM + 0x1ac, 1);
+}
+
+/// The rider, as the derived frame sees it: the base's five fields plus the two the derived class
+/// reads off the actor instead of working out — the grounded flag and the speed.
+fn poke_rider(ee: &mut Ee, r: &Ridden) {
+    poke_target(ee, &r.target);
+    ee.set_u32(ACTOR + 0xb0, r.grounded as u32);
+    put_f(ee, ACTOR + 0xb4, r.speed);
+}
+
+/// The three globals. `no_look_ahead` is bit 3 of the byte at `+0x325` of the application object;
+/// `mode_is_3` and `sub_flag` are the aim's two vetoes, either of which stops the split-screen trim.
+fn poke_app(ee: &mut Ee, no_look_ahead: bool, mode_is_3: bool, sub_flag: bool) {
+    ee.set_u32(addr("app_pointer").unwrap(), APP);
+    ee.set_u32(APP + 0x324, 0);
+    ee.write(APP + 0x325, 1, if no_look_ahead { 0x08 } else { 0x00 });
+    ee.set_u32(APP + 0x3cc, APP_SUB);
+    ee.set_u32(APP_SUB + 0x78, sub_flag as u32);
+    ee.set_u32(addr("race_camera_split_mode").unwrap(), if mode_is_3 { 3 } else { 1 });
+}
+
+/// The viewport's shape, as two integers the aim divides: a window less than fifty-five hundredths as
+/// tall as it is wide is what the trim calls a split screen.
+fn poke_viewport_shape(ee: &mut Ee, short: bool, g: &mut Gen) {
+    ee.set_u32(VIEWPORT + 0x188, 640);
+    ee.set_u32(VIEWPORT + 0x18c, if short { 120 + g.bits() % 200 } else { 400 + g.bits() % 400 });
+}
+
+/// A rider for the derived frame. The speed is not the length of the velocity — the original reads it
+/// off the actor, and the two disagree whenever the ride's own number does — so it is generated on its
+/// own, mostly around the four cutoffs the frame tests it against and sometimes honest.
+#[allow(clippy::float_arithmetic)]
+fn ridden(g: &mut Gen) -> Ridden {
+    let target = g.target();
+    let v = target.vel;
+    let honest = (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    let speed = match g.bits() % 8 {
+        0 => F::ZERO,
+        1 => F(honest),
+        2 => F(v.y().abs()),     // the degenerate direction basis
+        3 => g.f(3.5, 4.5),      // the reverse test's cutoff
+        4 => g.f(4.5, 5.5),      // the direction basis' cutoff
+        5 => g.f(19.0, 21.0),    // the heading's cutoff
+        _ => g.f(0.0, 40.0),
+    };
+    Ridden { target, grounded: !g.one_in(4), speed }
+}
+
+/// The derived aim: the base's yaw, a pitch with no reverse term in it, and the two trims the base
+/// class has neither of — the low-speed one, which is the only reader this port has found for the
+/// preset's `LowSpeedAngleXVelCutoff` and `LowSpeedAngleXScaleFactor`, and the split-screen one.
+#[test]
+fn the_race_aim_is_the_games_own() {
+    let Some((mut ee, _, _)) = harness() else { return };
+    let mut g = Gen(0x5eed_0101);
+    let (mut scaled, mut trimmed, mut vetoed) = (0usize, 0usize, 0usize);
+    for case in 0..CASES {
+        let mut r = Race { cam: g.cam() };
+        // Swings far beyond anything a lean produces, so that the yaw wrap is exercised on both sides.
+        let swing = if g.one_in(3) { g.f(-20.0, 20.0) } else { g.f(-1.0, 1.0) };
+        // Often low, because low is the branch with the two preset fields in it.
+        let speed = if g.b() { g.f(0.0, 12.0) } else { g.f(0.0, 60.0) };
+        let forward_y = g.f(-1.0, 1.0);
+        let (short, mode_is_3, sub_flag) = (g.b(), g.one_in(4), g.one_in(4));
+        let trim = short && !mode_is_3 && !sub_flag;
+        let cutoff = r.cam.preset().low_speed_angle_x_vel_cutoff;
+
+        race_reset(&mut ee);
+        poke_race(&mut ee, &r);
+        poke_app(&mut ee, false, mode_is_3, sub_flag);
+        poke_viewport_shape(&mut ee, short, &mut g);
+        ee.call(
+            addr("race_camera_aim").unwrap(),
+            &[CAM as u64],
+            &[swing.0, speed.0, forward_y.0],
+            100_000,
+        );
+        race_only_touched(&ee).unwrap();
+        let theirs = race_snap(&ee);
+
+        r.aim(swing, speed, forward_y, trim);
+        race_reset(&mut ee);
+        poke_race(&mut ee, &r);
+        race_same(case, "race aim", &theirs, &race_snap(&ee));
+
+        if speed < cutoff && cutoff != 0.0 {
+            scaled += 1;
+        }
+        if trim {
+            trimmed += 1;
+        } else if short {
+            vetoed += 1;
+        }
+    }
+    println!(
+        "{scaled} of {CASES} cases took the low-speed pitch scale, {trimmed} the split-screen trim, \
+         {vetoed} were short windows one of the two vetoes stopped"
+    );
+    assert!(scaled > 100 && trimmed > 100 && vetoed > 100, "the generator did not reach the branches");
+}
+
+/// The derived look-at: the lead, its one fall correction, the clamp at zero, the swung *basis* it
+/// rides, and where the ground probe's lift lands.
+///
+/// The probe is hooked, as it is in `the_ground_probes_point_is_the_games_own` and for the same
+/// reason: the real slot `+0x10c` needs a world object and a terrain tree, and this harness has
+/// neither. The port runs first over a [`Dirt`] that answers a chosen lift; the hook then hands the
+/// original that lift, writes it into the camera where the real routine writes it, and notes the point
+/// it was asked about, which is compared with the point the port asked about.
+#[test]
+fn the_race_look_at_point_is_the_games_own() {
+    let Some((mut ee, curve, _)) = harness() else { return };
+    let asked = Rc::new(RefCell::new(Vf::ZERO));
+    let answer = Rc::new(RefCell::new(0.0f32));
+    {
+        let (asked, answer) = (asked.clone(), answer.clone());
+        ee.hooks.insert(
+            addr("race_camera_ground_probe").unwrap(),
+            Box::new(move |ee| {
+                let (cam, p) = (ee.r(4) as u32, ee.r(5) as u32);
+                *asked.borrow_mut() = get_v(ee, p);
+                ee.set_f32(cam + 0x18c, *answer.borrow());
+                ee.set_f(0, *answer.borrow());
+            }),
+        );
+    }
+    let mut g = Gen(0x5eed_0102);
+    let (mut look_back, mut clamped, mut falling) = (0usize, 0usize, 0usize);
+    for case in 0..CASES {
+        let mut r = Race { cam: g.cam() };
+        let t = g.target();
+        let (speed, fov_ratio) = (g.maybe_zero(0.0, 30.0), g.f(0.3, 1.0));
+        let swing = if g.one_in(4) { g.f(-20.0, 20.0) } else { g.maybe_zero(-1.0, 1.0) };
+        let (heading, basis) = (g.dir(), g.dir());
+        // A fall fast enough to shorten the lead, often: it is the one correction left of the base's
+        // two, and it is the only way the lead comes out negative and meets the clamp.
+        let vel = if g.b() {
+            Vf::new(t.vel.x(), g.f(-60.0, -8.0).0, t.vel.z(), 1.0)
+        } else {
+            t.vel
+        };
+        let mut dirt = Dirt { rise: g.f(-20.0, 20.0), asked: Vf::ZERO };
+
+        // Ours first, because the hook has to hand the original the lift ours worked out.
+        let ours = r.look_at(
+            speed, fov_ratio, swing, t.body_point, basis, vel, &curve, &mut dirt,
+        );
+        *answer.borrow_mut() = r.cam.ground_lift.0;
+
+        race_reset(&mut ee);
+        poke_race(&mut ee, &r);
+        put_v(&mut ee, SCR_TARGET, t.body_point);
+        put_v(&mut ee, SCR_HEADING, heading);
+        put_v(&mut ee, SCR_BASIS, basis);
+        put_v(&mut ee, SCR_VEL, vel);
+        ee.call(
+            addr("race_camera_look_at").unwrap(),
+            &[
+                SCR_LOOK_AT as u64,
+                CAM as u64,
+                SCR_TARGET as u64,
+                SCR_HEADING as u64,
+                SCR_BASIS as u64,
+                SCR_VEL as u64,
+                0,
+            ],
+            &[speed.0, fov_ratio.0, swing.0],
+            200_000,
+        );
+        race_only_touched(&ee).unwrap();
+        let (theirs, theirs_asked) = (race_snap(&ee), *asked.borrow());
+
+        race_reset(&mut ee);
+        poke_race(&mut ee, &r);
+        put_v(&mut ee, SCR_TARGET, t.body_point);
+        put_v(&mut ee, SCR_HEADING, heading);
+        put_v(&mut ee, SCR_BASIS, basis);
+        put_v(&mut ee, SCR_VEL, vel);
+        put_v(&mut ee, SCR_LOOK_AT, ours);
+        race_same(case, "race look at", &theirs, &race_snap(&ee));
+        assert_eq!(
+            [theirs_asked.x().to_bits(), theirs_asked.y().to_bits(), theirs_asked.z().to_bits(), theirs_asked.w().to_bits()],
+            [dirt.asked.x().to_bits(), dirt.asked.y().to_bits(), dirt.asked.z().to_bits(), dirt.asked.w().to_bits()],
+            "case {case}: the point the ground probe was asked about"
+        );
+
+        if r.cam.preset().is_look_back_cam {
+            look_back += 1;
+        }
+        if vel.y() < -9.0 {
+            falling += 1;
+            if speed != F::ZERO && F(vel.y()) / speed / 1.8 < -1.0 {
+                clamped += 1;
+            }
+        }
+    }
+    println!(
+        "{look_back} of {CASES} cases were the look-back cam, {falling} were falling fast enough to \
+         shorten the lead, {clamped} of those far enough for the clamp at zero"
+    );
+    assert!(look_back > 100 && falling > 100 && clamped > 100, "the generator did not reach the branches");
+}
+
+/// The derived position: the direction times the distance, and the standing-still lead. Six of the
+/// routine's eleven arguments are read and five are not; the proof passes all eleven and the port
+/// takes five.
+#[test]
+fn the_race_position_is_the_games_own() {
+    let Some((mut ee, _, _)) = harness() else { return };
+    let mut g = Gen(0x5eed_0103);
+    let mut still = 0usize;
+    for case in 0..CASES {
+        let r = Race { cam: g.cam() };
+        let (direction, target_point, look_at, sideways, heading) =
+            (g.dir(), g.vec(-200.0, 200.0), g.vec(-200.0, 200.0), g.dir(), g.dir());
+        let vel = g.vec(-30.0, 30.0);
+        let (dt, lean) = (g.f(0.0, 0.1), g.f(-1.0, 1.0));
+        // Half the cases stand still, which is the arm the base class has nothing like.
+        let speed = if g.b() { g.f(0.0, 0.00005) } else { g.f(0.0, 40.0) };
+
+        race_reset(&mut ee);
+        poke_race(&mut ee, &r);
+        put_v(&mut ee, SCR_DIRECTION, direction);
+        put_v(&mut ee, SCR_TARGET, target_point);
+        put_v(&mut ee, SCR_HEADING, heading);
+        put_v(&mut ee, SCR_LOOK_AT, look_at);
+        put_v(&mut ee, SCR_SIDEWAYS, sideways);
+        put_v(&mut ee, SCR_VEL, vel);
+        ee.call(
+            addr("race_camera_position").unwrap(),
+            &[
+                SCR_POSITION as u64,
+                CAM as u64,
+                SCR_DIRECTION as u64,
+                SCR_TARGET as u64,
+                SCR_HEADING as u64,
+                SCR_LOOK_AT as u64,
+                SCR_SIDEWAYS as u64,
+                SCR_VEL as u64,
+            ],
+            &[dt.0, (-lean).0, speed.0],
+            100_000,
+        );
+        race_only_touched(&ee).unwrap();
+        let theirs = race_snap(&ee);
+
+        let ours = r.position(dt, speed, direction, target_point, vel);
+        race_reset(&mut ee);
+        poke_race(&mut ee, &r);
+        put_v(&mut ee, SCR_DIRECTION, direction);
+        put_v(&mut ee, SCR_TARGET, target_point);
+        put_v(&mut ee, SCR_HEADING, heading);
+        put_v(&mut ee, SCR_LOOK_AT, look_at);
+        put_v(&mut ee, SCR_SIDEWAYS, sideways);
+        put_v(&mut ee, SCR_VEL, vel);
+        put_v(&mut ee, SCR_POSITION, ours);
+        race_same(case, "race position", &theirs, &race_snap(&ee));
+        if speed < 0.0001 {
+            still += 1;
+        }
+    }
+    println!("{still} of {CASES} cases were standing still and took the position's own lead");
+    assert!(still > 100, "the generator did not reach the standing-still lead");
+}
+
+/// One frame of the camera the disc actually creates, end to end — which is the frame the picture on
+/// screen comes out of, and the one every later camera comparison is measured against.
+///
+/// The hooks are `one_frame_is_the_games_own`'s three, which is how the view leaves the camera, plus
+/// the ground probe, which is hooked for the reason the look-at's proof above gives. Everything else
+/// — the distance floor at four and a half near planes, the two velocity switches, the reverse sign
+/// test, the lead and the standing-still branch — is run.
+#[test]
+fn one_race_frame_is_the_games_own() {
+    let Some((mut ee, curve, _)) = harness() else { return };
+    let view = Rc::new(RefCell::new(View::default()));
+    {
+        let view = view.clone();
+        ee.hooks.insert(
+            addr("viewport_set_eye").unwrap(),
+            Box::new(move |ee| {
+                let (p, f) = (ee.r(5) as u32, ee.r(9) as u32);
+                let mut v = view.borrow_mut();
+                v.position = get_v(ee, p);
+                v.fov = F(ee.f32_at(f));
+            }),
+        );
+    }
+    {
+        let view = view.clone();
+        ee.hooks.insert(
+            SET_LOOK_AT,
+            Box::new(move |ee| {
+                let l = ee.r(5) as u32;
+                view.borrow_mut().look_at = get_v(ee, l);
+            }),
+        );
+    }
+    ee.hooks.insert(addr("camera_base_update").unwrap(), Box::new(|_| {}));
+    let asked = Rc::new(RefCell::new(Vf::ZERO));
+    let answer = Rc::new(RefCell::new(0.0f32));
+    {
+        let (asked, answer) = (asked.clone(), answer.clone());
+        ee.hooks.insert(
+            addr("race_camera_ground_probe").unwrap(),
+            Box::new(move |ee| {
+                let (cam, p) = (ee.r(4) as u32, ee.r(5) as u32);
+                *asked.borrow_mut() = get_v(ee, p);
+                ee.set_f32(cam + 0x18c, *answer.borrow());
+                ee.set_f(0, *answer.borrow());
+            }),
+        );
+    }
+
+    let mut g = Gen(0x5eed_0104);
+    let (mut from_vel, mut reversed, mut zeroed) = (0usize, 0usize, 0usize);
+    let (mut stills, mut floored) = (0usize, 0usize);
+    for case in 0..CASES {
+        let mut r = Race { cam: g.cam() };
+        let rider = ridden(&mut g);
+        let dt = if g.one_in(4) { g.f(0.8, 2.0) } else { g.f(0.0, 0.1) };
+        let near = if g.one_in(3) { g.f(0.0, 8.0) } else { g.f(0.0, 2.5) };
+        let switches = Switches {
+            no_look_ahead: g.one_in(4),
+            short_viewport: false, // set below, out of what the three globals say
+        };
+        let (short, mode_is_3, sub_flag) = (g.b(), g.one_in(4), g.one_in(4));
+        let switches = Switches {
+            short_viewport: short && !mode_is_3 && !sub_flag,
+            ..switches
+        };
+        let rise = g.f(-20.0, 20.0);
+
+        // The port first again, to work out the lift the hook has to hand the original.
+        let mut mine = Race { cam: r.cam.clone() };
+        let mut dirt = Dirt { rise, asked: Vf::ZERO };
+        let ours_view = mine.update(dt, &rider, near, &curve, switches, &mut dirt);
+        *answer.borrow_mut() = mine.cam.ground_lift.0;
+
+        race_reset(&mut ee);
+        poke_race(&mut ee, &r);
+        poke_rider(&mut ee, &rider);
+        poke_app(&mut ee, switches.no_look_ahead, mode_is_3, sub_flag);
+        poke_viewport_shape(&mut ee, short, &mut g);
+        ee.set_f32(VIEWPORT + 0x19c, near.0);
+        *view.borrow_mut() = View::default();
+        *asked.borrow_mut() = Vf::ZERO;
+        ee.call(addr("race_camera_update").unwrap(), &[CAM as u64], &[dt.0], 1_000_000);
+        race_only_touched(&ee).unwrap();
+        let (theirs, theirs_view, theirs_asked) = (race_snap(&ee), *view.borrow(), *asked.borrow());
+
+        r = mine;
+        race_reset(&mut ee);
+        poke_race(&mut ee, &r);
+        race_same(case, "one race frame", &theirs, &race_snap(&ee));
+        for (k, a, b) in [
+            ("position", theirs_view.position, ours_view.position),
+            ("look at", theirs_view.look_at, ours_view.look_at),
+        ] {
+            assert_eq!(
+                [a.x().to_bits(), a.y().to_bits(), a.z().to_bits(), a.w().to_bits()],
+                [b.x().to_bits(), b.y().to_bits(), b.z().to_bits(), b.w().to_bits()],
+                "case {case}: the view's {k}"
+            );
+        }
+        assert_eq!(
+            theirs_view.fov.0.to_bits(),
+            ours_view.fov.0.to_bits(),
+            "case {case}: the view's field of view"
+        );
+        assert_eq!(
+            [theirs_asked.x().to_bits(), theirs_asked.y().to_bits(), theirs_asked.z().to_bits()],
+            [dirt.asked.x().to_bits(), dirt.asked.y().to_bits(), dirt.asked.z().to_bits()],
+            "case {case}: the point the ground probe was asked about"
+        );
+
+        if rider.grounded && rider.speed > 20.0 {
+            from_vel += 1;
+        }
+        if switches.no_look_ahead || rider.speed < 0.0001 {
+            stills += 1;
+        }
+        if rider.speed > 4.0 && !r.cam.preset().is_look_back_cam {
+            reversed += 1;
+            // The sign of the same dot product the frame takes, worked out on the host from the
+            // unflattened row: normalising and zeroing `y` cannot change which side of zero it is
+            // on, so this counts the arm that throws the velocity away without re-deriving it.
+            let src = if rider.grounded && rider.speed > 20.0 {
+                rider.target.vel
+            } else {
+                rider.target.forward
+            };
+            #[allow(clippy::float_arithmetic)]
+            let dot = src.x() * rider.target.vel.x() + src.z() * rider.target.vel.z();
+            if dot < 0.0 {
+                zeroed += 1;
+            }
+        }
+        if r.cam.preset().min_following_distance < F(4.5) * near {
+            floored += 1;
+        }
+    }
+    println!(
+        "{from_vel} of {CASES} cases took the heading off the velocity, {reversed} tested the \
+         velocity's sign and {zeroed} of those threw it away, {stills} stood still, {floored} had \
+         the near plane beat the preset's minimum distance"
+    );
+    assert!(
+        from_vel > 100 && zeroed > 100 && stills > 100 && floored > 100,
+        "the generator did not reach the frame's branches"
+    );
 }

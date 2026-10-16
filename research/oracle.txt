@@ -1956,3 +1956,88 @@ wheel_contact_velocity boot 0x0025b710 (wheel) the contact-velocity step, wheel+
 # StrutCompression. wheel_set_tire_derived builds the suspension line from it and wheel_suspension
 # re-aims it by -(+0x214) every step of its relaxation; StrutCompression is +0x48, how far the strut
 # may compress before it bottoms out, and that is all it is.
+
+# --- S24: the rest of the race camera's frame, which is the one the picture comes from -------------
+# S23 found the derived class and three of its differences. The whole frame reads as follows, and is
+# ported as camera::Race. Addresses already above: race_camera_update 0x0021e880 (the frame),
+# race_camera_look_at 0x0021f320, race_camera_position 0x0021f600, race_camera_ground_probe 0x0021e7d0.
+#
+race_camera_aim             boot 0x0021efc0 (swing, speed, forward.y in f12..f14, cam). Not in the
+#                                           derived vtable at all — race_camera_update is its one
+#                                           caller, where the base reaches camera_aim through slot
+#                                           0x118. The base's yaw exactly; the pitch without the
+#                                           reverse ramp, and with two
+#                                           trims after the +-1.4835324 clamp. First: below
+#                                           LowSpeedAngleXVelCutoff (and only when that is not zero)
+#                                           pitch *= k + (speed/cutoff)*(1-k) and then pitch -= k *
+#                                           |forward.y|, k = LowSpeedAngleXScaleFactor. That is the
+#                                           only reader found for either field; S7 recorded both as
+#                                           unread. Second: pitch -= 0.33 * AngleX when the mode word
+#                                           at 0x004211a0 is not 3, *(*(app_pointer+0x3cc)+0x78) is 0,
+#                                           and (u32 viewport+0x18c)/(u32 viewport+0x188) < 0.55 —
+#                                           a viewport less than 0.55 as tall as it is wide, i.e. a
+#                                           horizontally split screen
+camera_no_look_ahead_bit    boot 0x0041f770 bit 3 (0x08) of the byte at *(app_pointer) + 0x325, which
+#                                           the frame tests before the speed: set, the look-at is the
+#                                           plain target point + height bias and the ground probe is
+#                                           not asked at all, and the position takes the standing-
+#                                           still lead. Cleared by mode_leave_world (0x00202da0) and
+#                                           written from a parameter by FUN_00207770 (46 callers);
+#                                           what the engine means by it was not pinned down
+race_camera_split_mode      boot 0x004211a0 the word race_camera_aim's second trim tests against 3
+#
+# The frame, in order, with $17 = cam and $f24 = dt (frame size 480):
+#   1. no actor at cam+0x8c -> camera_base_update(dt, cam) and return
+#   2. fov = vtable+0x110 (camera_get_fov, not overridden)
+#   3. target point = actor+0x10 + forward*offset.z + up*offset.y (+ cross(up,forward)*offset.x only
+#      when offset.x != 0) — the base's, unchanged
+#   4. heading = normalize(xz of (actor+0xb0 != 0 && actor+0xb4 > 20.0 ? actor+0x50 : actor+0x30));
+#      y zeroed with an integer store, w from the source row
+#   5. speed = actor+0xb4, *read off the actor*, where the base takes |velocity| every frame;
+#      grounded = actor+0xb0
+#   6. swing = (0.21 * -lean) * (fov / MaxFOV). No CameraSwing factor — the base has one here. The aim
+#      still multiplies the yaw by CameraSwing, so the preset is not ignored, only this share of it
+#   7. reverse: no acos, no ramps. if (speed > 4.0 && !IsLookBackCam) and heading.vel < 0 then the
+#      local velocity becomes the constant quad 0x00426d70 = (0,0,0,1) and speed becomes 0. The three
+#      reverse ramps are still read (by the distance and nothing else here) and never written
+#   8. race_camera_aim(swing, speed, actor+0x34, cam) — the rider's own forward.y, not the heading's
+#   9. direction basis = normalize(xz of ((grounded && speed > 5.0 && |speed - |vel.y|| > 0.01) ?
+#      vel : heading)) with w = 1.0 written as a literal
+#  10. sideways = cross(basis, UP); dir = rotate(wrap(yaw), UP, rotate(wrap(pitch), sideways, basis)) —
+#      both angles corrected into -pi..pi first, which the base's frame does not do
+#  11. distance: floor = max(MinFollowingDistance, 4.5 * viewport+0x19c), then the base's clamp
+#  12. still branch (camera_no_look_ahead_bit set, or speed < 0.0001): look-at = target point with
+#      y += height_bias, and the position's target is the plain target point. Moving branch: the
+#      position's target is target + vel * min(dt, 0.2) and the look-at is race_camera_look_at of it
+#  13. race_camera_position(dt, -lean, speed, out, cam, dir, that target, heading, &look_at, sideways,
+#      actor+0x50) — the actor's *raw* velocity, not the copy step 7 may have zeroed. Of its eleven
+#      arguments it reads five: out, cam, dir, target, speed, vel. The heading, the look-at and the
+#      sideways axis are dead
+#  14. spare = 0; vtable+0x124 (camera_filter, not overridden) with the *plain* target point
+#  15. viewport_set_eye(viewport, &position, 0, 0, 0, &fov); viewport+0x26c -> +0xc4(viewport,
+#      &look_at, UP); camera_base_update(dt, cam)
+#  16. no push-out block at all, and no test of cam+0xe8
+#
+# race_camera_look_at 0x0021f320 (speed, fov ratio, swing in f12..f14; out, cam, target, heading,
+# basis, &vel, reverse) in full. The heading and the reverse flag are dead — the swung vector is the
+# *basis*, not the heading, and it is not normalised afterwards (no rsqrt in the routine; the base
+# normalises the same rotation):
+#   k    = (distance * fov ratio) / 90.0 + 1.0      (written 1.0 + x)
+#   lead = (speed / SpeedReference) * (k * ((1.8 * (1.0 - distance/600.0)) * k))
+#   if (vel.y < -9.0) lead *= 1.0 + (vel.y / speed) / 1.8
+#   ahead = IsLookBackCam ? 0.0 : max(0.0, lead * LookAheadDistance)
+#   swung = rotate(wrap(swing * (-0.7 * LookSwing)), UP, basis)
+#   point = target + swung * ahead                  (w from the target)
+#   y     = point.y + (1.0 - fov ratio) * (0.25 * vel.y)   (the base associates this the other way)
+#   lift  = vtable+0x10c(cam, swung * ((|pitch|/1.5707964) * 1.2 + 0.3) + target)
+#   out   = (point.x, y + (height_bias + lift), point.z, point.w)
+# The look-back cam runs all of that with a zero lead, where the base returns early down the reversed
+# heading and skips the ground probe with it.
+#
+# race_camera_position 0x0021f600 in full: out = target + dir * distance, and then, if speed < 0.0001,
+# + (vel * dt) * 10.0. No dead yaw swing in it; the base's is dead code.
+#
+race_camera_frame_setup     boot 0x0021e4d0 vtable slot 0x108, the override of camera_frame_noop's
+#                                           `return 1`: a real routine that rebuilds the probe bundle
+#                                           and collides it. The frame never calls it, so it is not
+#                                           ported; the only caller of slot 0x108 is elsewhere

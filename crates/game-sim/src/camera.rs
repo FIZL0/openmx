@@ -1164,3 +1164,385 @@ impl Preset {
         p
     }
 }
+
+// --- the camera the disc actually creates ----------------------------------------------------------
+
+/// How much of the viewport's near clip distance floors the race camera's follow distance. The base
+/// class reads the field raw; this frame multiplies it by four and a half first, so the race
+/// viewport's 2.4 feet becomes a floor of ten and four fifths.
+pub const NEAR_CLIP_FLOOR: f32 = 4.5;
+
+/// Above this, and only while the rider is grounded, the heading comes off the velocity instead of
+/// the rider's forward axis — so a slide points the camera where the bike is going, not where it is
+/// facing.
+const HEADING_FROM_VEL_SPEED: f32 = 20.0;
+
+/// Above this, and only while grounded, the *direction basis* comes off the velocity too. Lower than
+/// the heading's cutoff: the two vectors disagree over the band between them.
+const BASIS_FROM_VEL_SPEED: f32 = 5.0;
+
+/// How close the speed has to be to the rider's bare vertical speed before the velocity is refused as
+/// a direction basis. A rider moving straight up or straight down has no horizontal direction to
+/// flatten, and the flattened vector would be noise.
+const BASIS_DEGENERATE: f32 = 0.01;
+
+/// Above this the frame checks whether the rider is actually travelling backwards, by the sign of the
+/// velocity along the heading. This frame's answer to reverse: throw the velocity away. (The base
+/// class instead measures the angle through the arc cosine table and ramps three offsets; none of
+/// that is here.)
+const REVERSE_TEST_SPEED: f32 = 4.0;
+
+/// Below this the rider counts as standing still: the look-at stops leading and the position starts
+/// leading instead.
+const STILL_SPEED: f32 = 0.0001;
+
+/// The longest step the look-at's lead is allowed to integrate over, so that one slow frame does not
+/// throw the camera's target forward.
+const LEAD_STEP_LIMIT: f32 = 0.2;
+
+/// Falling faster than this shortens the look-ahead. The base class has a pair of these at plus and
+/// minus five; this frame kept only the falling arm, and moved it out to nine.
+const FALL_SPEED: f32 = -9.0;
+
+/// How far the frame leads the *position* while the rider is standing still: ten frames' worth of
+/// velocity, which is not nothing even at a speed below [`STILL_SPEED`].
+const STILL_POSITION_LEAD: f32 = 10.0;
+
+/// How much of the preset's pitch is trimmed away in a viewport shorter than
+/// [`Switches::short_viewport`] calls short.
+const SHORT_VIEWPORT_PITCH: f32 = 0.33;
+
+/// What the race camera asks the rider for, beyond the [`Target`] the base class takes.
+///
+/// The original reads all three off the one actor the camera holds a pointer to: the target rows at
+/// `+0x10`/`+0x30`/`+0x50`, the grounded flag at `+0xb0` and the speed at `+0xb4`. The speed is
+/// *read*, not computed — where the base class takes the length of the velocity every frame, this
+/// frame trusts the number the ride code already wrote, and the two are not the same whenever the
+/// ride's own speed is anything but the length of that vector.
+pub struct Ridden {
+    /// The rows and the lean, exactly as the base class takes them.
+    pub target: Target,
+    /// Is the rider on the ground. Gates both of the "use the velocity" switches.
+    pub grounded: bool,
+    /// The rider's speed, off the actor rather than out of the velocity.
+    pub speed: F,
+}
+
+/// The two engine-wide bits the race camera's frame reads that are not the rider's and not the
+/// preset's. Both are inputs here, because neither is the camera's to decide.
+#[derive(Clone, Copy, Default)]
+pub struct Switches {
+    /// Bit 3 of the byte the app object holds at `+0x325`. With it set the frame takes its "standing
+    /// still" branch whatever the speed: the look-at stops leading, the ground probe is not asked,
+    /// and the lift decays. What the engine means by the bit was not pinned down — see the journal.
+    pub no_look_ahead: bool,
+    /// Is the viewport shorter than fifty-five hundredths as tall as it is wide — the original
+    /// divides the viewport's two integer extents and compares. True on a horizontally split screen
+    /// and false at 4:3 or 16:9, and it trims [`SHORT_VIEWPORT_PITCH`] of the preset's pitch away.
+    /// The original also requires a mode word to not be three and an app sub-object's own flag to be
+    /// clear; a caller that wants either of those to veto the trim passes `false`.
+    pub short_viewport: bool,
+}
+
+/// The follow camera the disc actually creates for a race: the derived class whose vtable overrides
+/// the frame, the look-at, the position, the aim and the ground probe.
+///
+/// The base class ([`Follow`]) is never instantiated on its own — its only constructor call is from
+/// this one — so the bit-exact frame S7 proved is dead code on the disc, and this is the frame that
+/// draws the picture. It is a near-copy, not a subclass that adds a step: it has its own look-at,
+/// its own position and its own aim, each a rewrite of the base's with pieces taken out and pieces
+/// put in. What survives unoverridden is the field of view, the filters and the preset handling, and
+/// those are reached here through the base object this one holds.
+///
+/// Measured against [`Follow::update_probed`], the frame differs in these ways:
+///
+/// * the follow distance's floor is the near plane times [`NEAR_CLIP_FLOOR`], not the near plane;
+/// * the speed is read off the rider ([`Ridden::speed`]) rather than taken from the velocity, and
+///   the heading and the direction basis swing over to the velocity once the rider is grounded and
+///   fast — so the camera trails a slide;
+/// * the lean swing does not carry the preset's `CameraSwing` into the look-at (the aim still
+///   applies it to the yaw);
+/// * reverse is one sign test on the velocity along the heading, which zeroes the velocity and the
+///   speed, instead of an arc cosine and three ramps — the ramps are still read by the distance and
+///   the aim, and nothing in this frame ever writes them;
+/// * the aim scales the pitch down at low speed, through the preset's `LowSpeedAngleXVelCutoff` and
+///   `LowSpeedAngleXScaleFactor` — the first reader found for either — and trims it again in a short
+///   viewport, and it has no reverse term;
+/// * the look-at leads from the *direction basis* and does not normalise it afterwards, drops the
+///   base's cap of one on the along-heading term, keeps only the falling arm of the two vertical
+///   corrections, and clamps the result at zero; the look-back cam zeroes the lead but still runs
+///   the rest, where the base class returns early;
+/// * the look-at's target is the target point led a step forward by the velocity;
+/// * standing still, the look-at is the plain target point lifted by the height bias and the
+///   position leads by ten steps of velocity instead;
+/// * there is no obstacle push-out at all.
+///
+/// The ground probe the base class stubs is overridden too; [`Follow::probe_ground`] is already that
+/// override, so it is used from here as it is.
+pub struct Race {
+    /// The base object this one is built on. Everything the derived class does not override — the
+    /// presets, the filters, the field of view, the nudges, the ground lift — lives here and is
+    /// reached through here.
+    pub cam: Follow,
+}
+
+impl Race {
+    /// A race camera over the given presets. The derived constructor runs the base one and then
+    /// writes its own fields; of those, only the ground lift and the world pointer are ever read by
+    /// the frame, and the lift is the base object's own.
+    pub fn new(presets: Vec<Preset>, reverse_speed: F) -> Self {
+        Race { cam: Follow::new(presets, reverse_speed) }
+    }
+
+    /// Yaw and pitch, this class's way. Not a vtable slot at all, unlike the base class's: the
+    /// derived frame is its one caller, where the base reaches [`Follow::aim`] through slot `+0x118`.
+    ///
+    /// The yaw is the base class's exactly. The pitch is not: there is no reverse ramp in it, and
+    /// after the limit two trims can take it down.
+    ///
+    /// The first trim is the low-speed one, and it is the only reader this port has found for the
+    /// preset's `LowSpeedAngleXVelCutoff` and `LowSpeedAngleXScaleFactor` — S7 recorded both as
+    /// having no known reader. Below the cutoff the pitch is scaled towards the scale factor as the
+    /// speed goes to zero, and then the factor times the rider's bare forward tilt is subtracted: a
+    /// bike stopped on a slope looks level-ish rather than into the hill. A cutoff of zero turns the
+    /// whole thing off even for a rider stopped dead, which is how the original tests it.
+    ///
+    /// The second is `short_viewport` (see [`Switches`]), which takes a third of the preset's pitch
+    /// off.
+    ///
+    /// `forward_y` is the rider's forward axis' `y` — the actor's own row, not the flattened heading.
+    pub fn aim(&mut self, swing: F, speed: F, forward_y: F, short_viewport: bool) {
+        let c = &mut self.cam;
+        let (angle_y, angle_x) = (c.preset().angle_y, c.preset().angle_x);
+        c.yaw = angle_y - c.user_yaw;
+        c.yaw = c.yaw - c.camera_swing * swing;
+        c.yaw = F(libm::fmodf(c.yaw.0, TWO_PI));
+        if c.yaw > PI {
+            c.yaw = c.yaw - TWO_PI;
+        } else if c.yaw < -PI {
+            c.yaw = c.yaw + TWO_PI;
+        }
+        let cutoff = c.preset().low_speed_angle_x_vel_cutoff;
+        c.pitch = c.user_pitch + angle_x;
+        if c.pitch >= -PITCH_LIMIT {
+            if c.pitch > PITCH_LIMIT {
+                c.pitch = F(PITCH_LIMIT);
+                c.user_pitch = F(PITCH_LIMIT) - angle_x;
+            }
+        } else {
+            c.pitch = F(-PITCH_LIMIT);
+            c.user_pitch = F(-PITCH_LIMIT) - angle_x;
+        }
+        if speed < cutoff && cutoff != 0.0 {
+            let k = c.preset().low_speed_angle_x_scale_factor;
+            c.pitch = c.pitch * (k + (speed / cutoff) * (F::ONE - k));
+            c.pitch = c.pitch - k * forward_y.abs();
+        }
+        if short_viewport {
+            c.pitch = c.pitch - F(SHORT_VIEWPORT_PITCH) * angle_x;
+        }
+    }
+
+    /// The follow distance and its limits — [`Follow::limit_distance`] with [`NEAR_CLIP_FLOOR`] times
+    /// the near clip for a floor instead of the near clip itself. Everything else about it, down to
+    /// rewriting the player's zoom on a clamp, is the same.
+    pub fn limit_distance(&mut self, near_clip: F) {
+        let p = self.cam.preset().clone();
+        let floor = p.min_following_distance.max(F(NEAR_CLIP_FLOOR) * near_clip);
+        let want = self.cam.reverse_following + (self.cam.user_zoom + p.following_distance);
+        self.cam.distance = want;
+        if want < floor {
+            self.cam.distance = floor;
+            self.cam.user_zoom = self.cam.distance - p.following_distance;
+        } else if p.max_following_distance < want {
+            self.cam.distance = p.max_following_distance;
+            self.cam.user_zoom = self.cam.distance - p.following_distance;
+        }
+    }
+
+    /// Where the camera looks. Called straight from the frame, not through the vtable.
+    ///
+    /// A rewrite of [`Follow::look_at`], and the differences are all in the lead:
+    ///
+    /// * the lead is the plain speed over [`Follow::speed_reference`], where the base takes the
+    ///   velocity's component along the heading and caps it at one — so this one does not shorten
+    ///   when the rider slides sideways, and does not stop growing above the reference speed;
+    /// * only a fall faster than [`FALL_SPEED`] corrects it, and the correction is divided by 1.8
+    ///   where the base's is not;
+    /// * the result is floored at zero after the preset's `LookAheadDistance` is applied, so a
+    ///   correction that went negative does not push the target *behind* the rider;
+    /// * the look-back cam takes zero lead and then runs the rest of the routine — including the
+    ///   ground probe, which the base class's early return skips.
+    ///
+    /// The swung vector is the *direction basis* rotated by the lean swing, and unlike the base's it
+    /// is not normalised afterwards: the basis went in normalised and a rotation does not change
+    /// that, so the base's extra `rsqrt` was only ever rounding. It is used twice, as the base's is —
+    /// once for the lead and once for the ground probe's reach — and the probe is
+    /// [`Follow::ground_probe_point`] and [`Follow::probe_ground`] unchanged.
+    ///
+    /// `target_point` is the led point, not the plain one. The returned `w` is the led point's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn look_at(
+        &mut self,
+        speed: F,
+        fov_ratio: F,
+        swing: F,
+        target_point: Vf,
+        direction_base: Vf,
+        vel: Vf,
+        curve: &CurveTable,
+        scene: &mut impl Surface,
+    ) -> Vf {
+        let pull = (self.cam.distance * fov_ratio) / 90.0 + 1.0;
+        let mut lead = (speed / self.cam.speed_reference)
+            * (pull * ((F(1.8) * (F::ONE - self.cam.distance / 600.0)) * pull));
+        if F(vel.y()) < FALL_SPEED {
+            lead = lead * (F::ONE + (F(vel.y()) / speed) / 1.8);
+        }
+        let p = self.cam.preset();
+        let ahead = if p.is_look_back_cam {
+            F::ZERO
+        } else {
+            F::ZERO.max(lead * p.look_ahead_distance)
+        };
+        let swung = rotate(
+            wrap_half_turn(swing * (F(-0.7) * self.cam.look_swing)),
+            UP,
+            direction_base,
+            curve,
+        );
+        let point = add3(target_point, scale(swung, ahead));
+        // The base class writes this as `(1 - ratio) * vel.y * 0.25`, left to right; this one
+        // multiplies the quarter in first. Different rounding, same intent.
+        let rise = F(point.y()) + (F::ONE - fov_ratio) * (F(vel.y()) * 0.25);
+        let lift = self.cam.probe_ground(self.cam.ground_probe_point(swung, target_point), scene);
+        let y = rise + (self.cam.height_bias + lift);
+        Vf::new(point.x(), y.0, point.z(), point.w())
+    }
+
+    /// Where the camera is. Called straight from the frame, not through the vtable.
+    ///
+    /// The target point plus the direction times the follow distance, as the base class has it — and
+    /// then, for a rider standing still, [`STILL_POSITION_LEAD`] steps of velocity on top. That arm
+    /// is the mirror of the look-at's: below [`STILL_SPEED`] the look-at stops leading the target and
+    /// the position starts leading instead, so the view drifts rather than freezing. The velocity it
+    /// leads with is the rider's own, not the copy the frame may have zeroed for reverse.
+    ///
+    /// The original's routine also takes the heading, the look-at and the sideways axis and does
+    /// nothing with any of them; they are not arguments here. The base class's dead yaw swing is not
+    /// in this one at all.
+    pub fn position(&self, dt: F, speed: F, direction: Vf, target_point: Vf, vel: Vf) -> Vf {
+        let at = add3(target_point, scale(direction, self.cam.distance));
+        if speed < STILL_SPEED {
+            add3(at, scale(scale(vel, dt), F(STILL_POSITION_LEAD)))
+        } else {
+            at
+        }
+    }
+
+    /// One frame of the race camera, in the original's order. Vtable slot `+0x38` of the derived
+    /// class, which is slot `+0x98` of the secondary vtable the base class's frame sits in.
+    ///
+    /// `near_clip` is the viewport's near clip distance (see [`Race::limit_distance`]); `switches`
+    /// are the two engine bits the frame reads; `scene` answers the ground probe. There is no
+    /// obstacle argument because this frame has no push-out — the derived class does make a
+    /// collision object, in an override the frame never calls.
+    ///
+    /// A camera with no actor runs none of this in the original and falls through to the base
+    /// class's *other* update, the one that only ages the nudges; a caller here simply does not call
+    /// it.
+    pub fn update(
+        &mut self,
+        dt: F,
+        rider: &Ridden,
+        near_clip: F,
+        curve: &CurveTable,
+        switches: Switches,
+        scene: &mut impl Surface,
+    ) -> View {
+        let t = &rider.target;
+        let mut fov = self.cam.field_of_view();
+
+        // The target point, exactly as the base class builds it.
+        let mut offset = add3(
+            scale(t.forward, F(self.cam.offset.z())),
+            scale(t.up, F(self.cam.offset.y())),
+        );
+        if self.cam.offset.x() != 0.0 {
+            offset = add3(offset, scale(cross(t.up, t.forward), F(self.cam.offset.x())));
+        }
+        let target_point = add3(t.body_point, offset);
+
+        // The heading: the velocity once the rider is grounded and fast, the forward axis otherwise;
+        // flattened and normalised either way. `y` is zeroed with an integer store and `w` comes
+        // through from whichever row was picked.
+        let from = if rider.grounded && rider.speed > HEADING_FROM_VEL_SPEED { t.vel } else { t.forward };
+        let heading = normalize(Vf::new(from.x(), 0.0, from.z(), from.w()));
+
+        let mut vel = t.vel;
+        let mut speed = rider.speed;
+        let fov_ratio = fov / self.cam.preset().max_fov;
+        // No `CameraSwing` here — the base class folds it in at this point and this frame does not.
+        // The aim still applies it to the yaw, so the preset is not ignored, only the look-at's
+        // share of it.
+        let swing = (F(0.21) * -t.lean) * fov_ratio;
+
+        // Reverse, this frame's way: if the rider is moving against the heading at any speed worth
+        // testing, the velocity and the speed are thrown away. Written as the original's test is, so
+        // that a NaN speed takes the same branch.
+        if !(speed <= REVERSE_TEST_SPEED) && !self.cam.preset().is_look_back_cam {
+            let along = Acc::mula(F(heading.x()), F(vel.x()))
+                .madda(F(heading.y()), F(vel.y()))
+                .madd(F(heading.z()), F(vel.z()));
+            if along < 0.0 {
+                vel = Vf::new(0.0, 0.0, 0.0, 1.0);
+                speed = F::ZERO;
+            }
+        }
+
+        self.aim(swing, speed, F(t.forward.y()), switches.short_viewport);
+
+        // The direction basis: the velocity again, but over a lower speed and only while it has a
+        // horizontal part worth flattening. `w` is a literal one here, where the heading's came
+        // through from the row.
+        let steer = rider.grounded
+            && !(speed <= BASIS_FROM_VEL_SPEED)
+            && !((speed - F(vel.y()).abs()).abs() <= BASIS_DEGENERATE);
+        let from = if steer { vel } else { heading };
+        let basis = normalize(Vf::new(from.x(), 0.0, from.z(), 1.0));
+
+        // Pitch about the sideways axis first, then yaw about up — with both angles wrapped into
+        // `-pi..pi` first, which the base class's frame does not bother to do.
+        let sideways = cross(basis, UP);
+        let direction = rotate(
+            wrap_half_turn(self.cam.yaw),
+            UP,
+            rotate(wrap_half_turn(self.cam.pitch), sideways, basis, curve),
+            curve,
+        );
+
+        self.limit_distance(near_clip);
+
+        let (mut look_at, lead_point) = if switches.no_look_ahead || speed < STILL_SPEED {
+            let still = Vf::new(
+                target_point.x(),
+                (F(target_point.y()) + self.cam.height_bias).0,
+                target_point.z(),
+                target_point.w(),
+            );
+            (still, target_point)
+        } else {
+            let lead_point = add3(target_point, scale(vel, F(LEAD_STEP_LIMIT).min(dt)));
+            let look_at =
+                self.look_at(speed, fov_ratio, swing, lead_point, basis, vel, curve, scene);
+            (look_at, lead_point)
+        };
+
+        let mut position = self.position(dt, speed, direction, lead_point, t.vel);
+        let mut spare = F::ZERO;
+        // The filters are the base class's, unoverridden. The original hands them the plain target
+        // point as well, and the base class's filter does not read it.
+        self.cam.filter(dt, &mut position, &mut look_at, &mut fov, &mut spare);
+        View { position, look_at, fov }
+    }
+}
