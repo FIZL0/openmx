@@ -284,8 +284,12 @@ pub struct Chassis {
     /// Speed along the ground, which the chassis measures: the steering fade, the drag and the donut
     /// test all read this one rather than the bike's own forward speed.
     pub speed: F,
-    /// The force accumulator the substep adds into, and the two acceleration accumulators it clears
-    /// once a frame.
+    /// The force accumulator the substep adds into (`+0x130`), and the two acceleration accumulators
+    /// it clears once a frame: `+0x170` and `+0x180`. Those two are **not** the body's own `+0x70`
+    /// and `+0x80`, which the integrate writes from the force and the torque — they are the *impact*
+    /// accumulators, and the only thing that writes them is a suspension bottoming out, which takes
+    /// the into-the-ground part out of the body's velocity and records what it took over `dt`
+    /// ([`crate::wheel::tire_forces`]). A ride that never bottoms out leaves them at zero all frame.
     pub force: Vf,
     pub accel: Vf,
     pub ang_accel: Vf,
@@ -524,9 +528,11 @@ pub struct Step {
     /// The bike is being balanced on one wheel: a different centre of gravity, no steering, and the
     /// balance step runs instead of the no-hander one.
     pub balancing: bool,
-    /// The acceleration the chassis measured, already turned into the bike's own frame. The
-    /// transform that does that belongs to the chassis, so the port takes the answer as given and
-    /// records the vector it handed over as [`Call::Unrotate`].
+    /// [`Chassis::accel`] — the impact accumulator, not the body's acceleration — already turned into
+    /// the bike's own frame. The transform that does that belongs to the chassis, so the port takes
+    /// the answer as given and records the vector it handed over as [`Call::Unrotate`]. The original
+    /// re-reads the accumulator and rotates it again **every substep**, so this is a per-substep
+    /// input and not a frame constant: the caller refills it at the [`Call::Unrotate`] below.
     pub local_accel: Vf,
     /// The reverse push's force, already rotated into the world. Likewise the chassis' transform's
     /// work: the port computes the local vector itself, hands it over as [`Call::Rotate`], and adds

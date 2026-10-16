@@ -1894,3 +1894,65 @@ frustum_half_angles         boot 0x001e7840 (fov in f12, aspect in f13, near in 
 #                                           the game's own {cos, sin} curve table with a first-order
 #                                           correction, and half height = that / aspect, into
 #                                           0x001e7700 as (left, right, bottom, top, near, far)
+# --- S22: the g loads the wreck test reads, and where a wheel's geometry comes from ---------------
+# The symptom was a standing bike wrecking itself: P3 measured the port's sideways g load alternating
+# sign and growing frame over frame off the start line, past SideWreckSpeedLimit in about 2.5 s. The
+# g loads were not ringing. They were reading the wrong field.
+#
+# bike_ground_step clears **chassis+0x170** (and +0x180) in the same breath as the bike's own
+# +0x550..+0x55c, once a frame, and the line that feeds the g loads is
+#
+#     transform_unrotate(&local, bike+0x18, chassis+0x170);   // then max by magnitude into +0x550
+#
+# once per substep, just before the integrate. chassis+0x170 is **not** the body's acceleration at
+# +0x70 that chassis_integrate writes from the force: it is an *impact* accumulator, and the only
+# thing in the frame that writes it is the bottom-out branch of wheel_tire_forces, which takes the
+# into-the-ground part out of chassis+0x260 and subtracts the same scalar, along the body's own up
+# brought into the world (the constant (0,1,0,1) at 0x00426db0), from chassis+0x170. No dt: what the
+# accumulator holds is the closing speed the shove cancelled, not that over a step. A ride that never
+# bottoms out therefore holds g loads of exactly zero. 300 frames of the original idling off the line
+# (watch/s22-standing.toml) read +0x550, +0x170 and +0x180 as zero on every row while +0x70 is
+# nonzero throughout, which is the whole proof in one capture. The port had the accumulator (it is
+# mv::Chassis::accel and wheel::Chassis::accel, both +0x170) and the shell was syncing it with the
+# body's +0x70 around the integrate and unrotating it once a frame instead of once a substep.
+#
+# bike+0x18 is the same transform as the chassis' +0x254: bike_attach_nodes below hands it to the
+# chassis through the body's vtable +0x74. So "unrotate by the bike's transform" and "unrotate by the
+# chassis' transform" are one thing, and the port's separate bike node (which keeps the no-hander's
+# roll) is not involved.
+bike_attach_nodes boot 0x00253760 (bike) hangs the physics off the bike's model: the chassis is given
+#                                bike+0x18 as its transform (vtable +0x74), then the node named
+#                                "TireFront" is looked up in it (0x001b37b0 by name, 0x001b2870 for
+#                                its place in that frame) and written straight into the front wheel's
+#                                +0xa0, "Shocks" and "Handlebars" become the normalised steering axis
+#                                at front wheel +0x8c0, and "TireRear" lands at the rear wheel's
+#                                +0xa0. So a wheel's mount is the *model's* own tire node and not a
+#                                .phy key: the live wheels read (0, 1.2332027, 2.5224998) and
+#                                (0, 1.1946994, -2.5897298) on a cr125_faisst, a 5.11 ft wheelbase,
+#                                which is exactly what the bike's TireFront/TireRear nodes measure.
+#                                BodyTireForcePosition is a different field: bike_phy_load puts it at
+#                                the wheel's +0xb0 (./kit dis 0x00253d3c --len 32) and neither
+#                                wheel_suspension nor wheel_tire_forces ever reads it -- both of the
+#                                +0xb0 loads in those two are the *transform's* +0xb0, its translation
+wheel_contact_velocity boot 0x0025b710 (wheel) the contact-velocity step, wheel+0x170 and the
+#                                     chassis' own at +0x1a0..: the arm is **wheel+0x140 (the load
+#                                     point) minus chassis+0x60 (the centre of gravity in the world)**,
+#                                     crossed with chassis+0x280 and added to chassis+0x260. Not the
+#                                     contact point at +0x120, which is what this port measures it at
+#
+# wheel_set_suspension's arithmetic in full, which the loader calls twice (SpringWhenStopped, then
+# Spring) and the ground step overwrites +0x54 of every frame:
+#   +0x48 = StrutCompression          +0x4c = MaxCompressionRate   +0x50 = MaxDecompressionRate
+#   +0x54 = |spring * mass * 32.2|    (mass is chassis+0x210)
+#   +0x58 = BounceDampingRatio  * 2 * sqrt(mass * (+0x54))
+#   +0x5c = ReboundDampingRatio * 2 * sqrt(mass * (+0x54))
+# The damping ratios are of *critical* damping, against the rate the setter has just worked out from
+# `Spring` -- not ratios of the spring rate itself, which is 3.5x too stiff on a cr125_faisst's front
+# and 4.5x on its rear. Live: rate 439.999939 (the stopped rate, re-blended per frame), damping
+# 51.7998924 front and 89.164505 rear, which is 2*0.3*sqrt(12.42236*600) and
+# 2*0.4*sqrt(12.42236*1000) to the bit.
+#
+# And the probe: wheel+0x214 is **one tire radius** (live 1.19999993 = TireRadius), not
+# StrutCompression. wheel_set_tire_derived builds the suspension line from it and wheel_suspension
+# re-aims it by -(+0x214) every step of its relaxation; StrutCompression is +0x48, how far the strut
+# may compress before it bottoms out, and that is all it is.
