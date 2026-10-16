@@ -1185,3 +1185,49 @@ actor_search_gather boot 0x00218b80 (list, search, radius) refills it, with a ra
 bike_phy_load boot 0x002539e0 (bike, file) the bike's .phy tuning file: every parameter in
 #                             crates/game-sim/src/move.rs's Params comes from here, and the journal
 #                             entry has the full key -> offset map
+
+# --- S16: the wheel ------------------------------------------------------------------------------
+# The three the ground step drives the wheel through are named above. What they reach, and where the
+# ten fields wheel_clear empties are written. Found in research/journal/2026-10-15-s16-*.
+ground_query boot 0x001dc960 (world, point in/out, normal out, flags, record) -> moves the point onto
+#                            the surface under it and writes that surface's normal. Eighty-four
+#                            callers across the game: the world's query, not the wheel's
+wheel_set_contact boot 0x0025b250 (wheel, owner, vehicle) -> wheel+0xd4 = 1 with the two objects the
+#                                 contact belongs to at +0x1f0 and +0x1f4
+wheel_surface_drag boot 0x0025c390 (wheel; dt is still in f12 but is not read) -> the rolling
+#                                  resistance of the surface under the wheel: the three per-surface
+#                                  tables at +0x778, +0x7b8 and +0x7f8, indexed by the contact
+#                                  record's surface byte at +0x110, into a force on the chassis and a
+#                                  torque at +0x210
+wheel_spin_integrate boot 0x0025c530 (dt in f12, wheel) -> the wheel's own spin, and the steering
+#                                    hinge's contribution to the chassis' angular velocity. Reads the
+#                                    hinge axis at +0x8c0 and its frame at +0x8d0..+0x8f0
+wheel_steer_integrate boot 0x0025d1b0 (dt in f12, wheel) -> the steering hinge: +0x6c's torque less
+#                                     +0x70's damping, through +0x78's inverse inertia into +0x8b0's
+#                                     rate, into +0x8ac's angle, clamped to +0x80..+0x7c with the rate
+#                                     killed at either end. +0x6c is spent to zero
+wheel_steer_stop boot 0x0025d1a0 (wheel) -> +0x8b0 = 0 and +0x6c = 0: the steered-but-not-balancing
+#                                case, where the angle the ground step commanded stands
+wheel_contact_velocity boot 0x0025b710 (wheel) -> how fast the contact is moving relative to whatever
+#                                     the wheel is touching: +0x170 = the contact point's velocity
+#                                     less the other body's at that point (+0x1c0), +0x180 = the
+#                                     chassis' velocity (owner+0x260) less the other body's (+0x1b0),
+#                                     +0x190 = that in the chassis' frame, and +0x1a0 = 1 so the whole
+#                                     thing runs once a substep
+wheel_hinge_force boot 0x0025cf40 (scale in f12, wheel, force, point) -> puts a force at a point
+#                                through the steering hinge instead of straight into the chassis.
+#                                wheel_tire_forces calls it with a scale of exactly 1.0
+transform_unpoint boot 0x001b3180 (out, transform, p) -> a world point back into the transform's own
+#                                 frame: the transpose of the rotation applied to p less the origin.
+#                                 transform_rotate's and transform_unrotate's sibling, and like them
+#                                 it may rebuild a lazy chain of parent frames first (0x001b1750)
+transform_sync boot 0x001b2770 (transform, flags) -> brings the transform up to date; called with
+#                              flags 0 and its answer thrown away
+# The five one-line VU0 helpers wheel_tire_forces calls, all inlined in the port (moving words about
+# and a masked lane op, nothing that can round differently):
+#   0x00107fa0 (out, a) out = a, one quadword     0x00107fb0 vec3_sub_vu, above
+#   0x00155c30 (a, b) a.xyz += b.xyz in place     0x0010b290 (out, a, b) out.xyz = a x b, out.w = a.w
+#   0x001bb910 (out, a, b) out.xyz = a.xyz * b.xyz, out.w = a.w
+# The three constant quadwords it reads. The proof reads the third one out of the image rather than
+# trusting the port's copy, so its value is proved and not assumed:
+#   0x00426d70 (0, 0, 0, 1)   0x00426d80 (1, 1, 1, 1)   0x00426db0 (0, 1, 0, 1)

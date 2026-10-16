@@ -646,6 +646,18 @@ impl Ee {
                     a | (byte(qs, k).wrapping_sub(byte(qt, k)) as u128) << (8 * k)
                 }));
             }
+            (0x28, 0x12) => {
+                // pextuw: the same interleave as pextlw, over the two *upper* halves. A matrix
+                // transpose built out of quadwords reaches for this one and pexcw together.
+                let w = |v: u128, k: u32| v >> (32 * k) & 0xffff_ffff;
+                q(self, w(qt, 2) | w(qs, 2) << 32 | w(qt, 3) << 64 | w(qs, 3) << 96);
+            }
+            (0x29, 0x1e) => {
+                // pexcw: the two middle words of rt swapped, the outer two left alone. One operand,
+                // so `rs` is whatever the assembler put there.
+                let w = |v: u128, k: u32| v >> (32 * k) & 0xffff_ffff;
+                q(self, w(qt, 0) | w(qt, 2) << 32 | w(qt, 1) << 64 | w(qt, 3) << 96);
+            }
             (0x09, 0x0e) => q(self, (qt & lo64) | (qs & lo64) << 64), // pcpyld
             (0x09, 0x12) => q(self, qs & qt),                         // pand
             (0x09, 0x13) => q(self, qs ^ qt),                         // pxor

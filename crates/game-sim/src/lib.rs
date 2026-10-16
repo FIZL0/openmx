@@ -272,6 +272,12 @@ pub mod track;
 /// that decide whether it counts, and the trick's own half of what makes a landing a crash.
 pub mod trick;
 
+/// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
+/// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
+/// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground
+/// step empties every substep and keeps by offset get their names here.
+pub mod wheel;
+
 #[cfg(test)]
 mod tests {
     use super::*;
