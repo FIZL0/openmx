@@ -167,6 +167,14 @@ added beside them:
     chord beside them, which transitions share a frame, and the fact that a down rider's physics does
     not step at all. Proved against the original machine, its entry and its put-back in
     `tests/state.rs` (S5).
+  - `move.rs` — movement on the ground: the per-frame step that turns the throttle, the brake and the
+    rider's lean into forces on the chassis. Where the mass acts and how far the stick moves it, the
+    steering lock fading out with speed, the donut's roll, the suspension rates, the gearbox and the
+    clutch's launch ramp, the drag that sets the top speed, the rev limiter — and the substep loop
+    that is the order the whole ground frame runs in. The twenty-one callees it drives (suspension,
+    tires, roll and pitch, the torque curve) are not ported yet, so the step returns the ordered list
+    of them instead, which is what makes the order provable. Proved against the original over 2000
+    generated frames and a 240-frame ride in `tests/move.rs` (S3).
 - `game-render` — the drawing side: the disc's own models and textures, on screen. Host `f32`, no
   bit-exactness, nothing the simulation depends on.
   - `disc.rs` ISO 9660 → `MX.PSR` → a `.res` member, read from the user's disc at runtime ·

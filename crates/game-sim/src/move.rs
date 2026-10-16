@@ -310,47 +310,50 @@ pub struct Step {
 /// Everything the ground step calls and this module does not port, in the order it calls them and
 /// with the `dt` it passes. [`step`] returns these as a list, which is how the update order gets
 /// proved even where the callee does not.
+///
+/// Each variant names the original's function; `research/oracle.txt` has the address, and
+/// `research/journal/…-S3-…` says why that one was deferred.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Call {
-    /// `0x002574e0` — holds the bike upright at low speed.
+    /// `bike_stand_upright` — holds the bike upright at low speed.
     StandUpright(F),
-    /// `0x002561f0` — the balance-on-one-wheel controller, only while [`Step::balancing`].
+    /// `bike_balance` — the balance-on-one-wheel controller, only while [`Step::balancing`].
     Balance(F),
-    /// `0x00256470` — the roll and pitch control: the rider's lean, and what the stick does to it.
+    /// `bike_roll_pitch` — the roll and pitch control: the rider's lean, and what the stick does to it.
     RollPitch(F),
-    /// `0x00256940` and `0x00256b50` — the preload and the backflip, both ported in `air.rs` (S10).
+    /// `bike_preload` and `bike_backflip` — the preload and the backflip, both ported in `air.rs` (S10).
     Preload(F),
     Backflip(F),
-    /// `0x00246fd0` — the engine: the torque curve, the clutch's slip, and the torque that reaches
+    /// `engine_update` — the engine: the torque curve, the clutch's slip, and the torque that reaches
     /// the driven wheel.
     EngineUpdate(F),
-    /// `0x00256e50` — what the stick commands while airborne, also S10's.
+    /// `bike_airborne_control` — what the stick commands while airborne, also S10's.
     AirborneControl(F),
-    /// `0x001b2ff0` — the chassis' transform rotating the reverse push's local force into the world.
+    /// `transform_rotate` — the chassis' transform rotating the reverse push's local force into the world.
     /// Carries the local vector, so the port's own arithmetic for it is compared.
     Rotate(Vf),
-    /// `0x00257820` — distributes the frame's collision contacts onto the two wheels. The one call
+    /// `bike_wheel_contacts` — distributes the frame's collision contacts onto the two wheels. The one call
     /// in the loop that gets the frame's `dt` and not the substep's.
     Contacts(F),
-    /// `0x0025b280` — the suspension ray: where the ground is under this wheel and what the spring
+    /// `wheel_suspension` — the suspension ray: where the ground is under this wheel and what the spring
     /// does about it.
     Suspension(Side, F),
-    /// `0x0025bc70` — the tire's forces on the ground: drive, brake and side.
+    /// `wheel_tire_forces` — the tire's forces on the ground: drive, brake and side.
     TireForces(Side, F),
-    /// `0x0025bbf0` — the wheel's own integration: its spin, and its steering angle.
+    /// `wheel_integrate` — the wheel's own integration: its spin, and its steering angle.
     WheelIntegrate(Side, F),
     /// The collision record's per-substep opening call, through the record's vtable at `+0x80`. The
     /// flag is "this is the first substep".
     CollisionBegin(bool),
-    /// `0x001b30e0` — the chassis' transform taking the measured acceleration back into the bike's
+    /// `transform_unrotate` — the chassis' transform taking the measured acceleration back into the bike's
     /// frame. Carries the vector handed over.
     Unrotate(Vf),
     /// The rigid-body integrator, through the chassis' vtable at `+0x3c`: the one call that turns
     /// everything above into motion.
     Integrate(F),
-    /// `0x00255d20` — the no-hander, after its four accumulators have been cleared.
+    /// `bike_no_hander` — the no-hander, after its four accumulators have been cleared.
     NoHander(F),
-    /// `0x00119be0` and `0x00218b80` — the nearby-actor search the step resets and refills once a
+    /// `actor_search_reset` and `actor_search_gather` — the nearby-actor search the step resets and refills once a
     /// frame, with a radius of 3.
     SearchReset,
     SearchGather,
