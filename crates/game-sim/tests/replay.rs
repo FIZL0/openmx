@@ -46,9 +46,11 @@ use std::path::PathBuf;
 
 use game_sim::hash::Leaf;
 use game_sim::input::{Control, Report, CONTROL_MAP, CONTROLS as PORT_CONTROLS};
+use game_sim::motion::{Clips, Driver, Params, Pose, Request};
 use game_sim::replay::{
     self, Capture, Fixture, PadFrame, PadTape, Playback, Reason, Sample, Value, Watch,
 };
+use game_sim::trick::Trick;
 use game_sim::{Input, Sim};
 use ps2_float::{F, Vf};
 
@@ -2770,6 +2772,607 @@ fn the_recording_and_the_capture_hold_the_same_pad_where_both_were_idle() {
              every tick before that one must match and the first one after it must not",
             phase.name(),
             offset + agreed,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// A5 — one whole frame of the original's bike, compared against the port's same frame
+// ---------------------------------------------------------------------------------------------------
+//
+// Everything above this line compares the port against the original *one function at a time*, or
+// against a fixture the port itself recorded. S6's entry says what that cannot catch, in its own
+// words: "a whole-frame comparison would catch an ordering mistake between the animation header and
+// the rest of the rider update that these per-function proofs cannot". Call three ported functions in
+// the wrong order and every per-function proof still passes.
+//
+// S8's answer to that — replaying a human's recording tick by tick — is blocked on a person at
+// PCSX2's GUI. This section is the whole-frame proof that is reachable without one: `watch/
+// frame-bike.toml` samples the human's rider **once per tick** on the live emulator, from the save
+// state the recording is anchored to, with the kit's own pad riding it (`watch/pads/
+// frame-bike-ride.pad`). Each row carries, for the same tick:
+//
+//   the physics' outputs     `crossup` (+0x600) and `lean` (+0x674), written by the air state and the
+//                            ground step — calls 1 and 2 of the rider's frame
+//   the actor update's       `rider_pos` (+0x820), written by the attachment walk out of the chassis,
+//                            beside the chassis' own world transform — call 4
+//   the animation's outputs  `action`, `ramp`, `faded`, `fore_aft`, `pose` and `shown_crossup` — the
+//                            six fields `motion::Driver` is, written by the animation header in the
+//                            tail of the stunt clocks — the last call of the frame
+//
+// A producer and its consumer sampled on the same row is what makes the order measurable: feed the
+// port the physics of **this** row and it reproduces the animation bit for bit; feed it the physics of
+// the row before and it does not. That is the ordering mistake S6 could not catch, caught by a test
+// rather than argued from a disassembly listing.
+//
+// What the capture cannot say is in A5's journal entry under "Not verified": the chassis integrate is
+// not compared numerically (the port has no bike yet), the attachment walk is proved by a distance
+// rather than bit-exactly, and the rider's lean was zero on every grounded frame of the capture, so
+// `Pose::lean` is fed zero rather than measured.
+
+/// The columns a capture must have to be a whole-frame capture of the bike. `rider_ctl_src` rather
+/// than `bike_ctl_src` deliberately: that is the name S8's acceptance scanner keys on, and this
+/// capture is not an acceptance recording — it holds no input columns at all.
+const WHOLE_FRAME_COLUMNS: [&str; 5] =
+    ["rider_ctl_src", "crossup", "lean_fore_aft", "shown_crossup", "action"];
+
+/// What the original held on one tick: the inputs of the rider's frame, and what its animation header
+/// left behind. One row of `watch/frame-bike.toml`.
+struct WholeFrame {
+    /// The tick, from the game's own counter with the first row at 0.
+    tick: u64,
+    dt: F,
+    // --- the physics (calls 1 and 2 of the rider's frame) ---
+    crossup: F,
+    lean_roll: F,
+    lean_fore_aft: F,
+    /// The ride state's reason, 0 while riding and the wreck reason while the rider is down.
+    wreck_reason: u32,
+    // --- the actor update (call 4) ---
+    rider_pos: [f32; 3],
+    veh_pos: [f32; 3],
+    // --- what the header was asked for ---
+    requested: u8,
+    seq: u32,
+    prev_seq: i32,
+    blend_rate: F,
+    max_crossup: F,
+    // --- what the header left behind ---
+    action: u8,
+    ramp: F,
+    faded: bool,
+    fore_aft: F,
+    pose: F,
+    shown_crossup: F,
+}
+
+fn float_at(cap: &Capture, row: usize, at: usize, name: &str) -> Result<F, String> {
+    let text = cell(cap, row, at);
+    // The recorder writes floats through `repr()`, so this parse is the capture's exact bits back.
+    text.parse::<f32>()
+        .map(F)
+        .map_err(|_| format!("row {row}: {name} is '{text}', which is not a number"))
+}
+
+fn int_at(cap: &Capture, row: usize, at: usize, name: &str) -> Result<u32, String> {
+    let text = cell(cap, row, at);
+    text.parse::<u32>()
+        .map_err(|_| format!("row {row}: {name} is '{text}', which is not a whole number"))
+}
+
+/// Read a whole-frame capture, with every check that makes it evidence rather than a CSV.
+///
+/// The actor the chains resolve to has to be the *human's rider* (type 2, control source 1) and the
+/// *human's vehicle* (type 4, control source 1) on every row — Free09 holds three AI riders on three
+/// more vehicles, and the only field that tells them apart is the control source on the player record.
+/// The step has to be the engine's 30 fps clamp throughout, bit for bit, or the frame the original ran
+/// is not a frame the port can be handed. And the rows have to be consecutive ticks of one simulation
+/// (`ticks_of`, off the game's counter rather than the recorder's vsync `frame`), because a lag test
+/// across a gap compares two frames that were never neighbours.
+fn whole_frame(cap: &Capture) -> Result<Vec<WholeFrame>, String> {
+    let ticks = ticks_of(cap)?;
+    let at = |name: &str| column(cap, name);
+    let (dt, crossup, wrecked) = (at("dt")?, at("crossup")?, at("wreck_reason")?);
+    let (lean_roll, lean_fore_aft) = (at("lean_roll")?, at("lean_fore_aft")?);
+    let rider_pos = [at("rider_pos.x")?, at("rider_pos.y")?, at("rider_pos.z")?];
+    let veh_pos = [at("veh_xform.m30")?, at("veh_xform.m31")?, at("veh_xform.m32")?];
+    let (requested, seq, prev_seq) = (at("requested")?, at("seq")?, at("prev_seq")?);
+    let (blend_rate, max_crossup) = (at("blend_rate")?, at("max_crossup")?);
+    let (action, ramp, faded) = (at("action")?, at("ramp")?, at("faded")?);
+    let (fore_aft, pose, shown) = (at("fore_aft")?, at("pose")?, at("shown_crossup")?);
+    let (rider_type, rider_src) = (at("rider_type")?, at("rider_ctl_src")?);
+    let (veh_type, veh_src) = (at("veh_type")?, at("veh_ctl_src")?);
+
+    let mut out = Vec::with_capacity(cap.rows.len());
+    for row in 0..cap.rows.len() {
+        // The actor the chain found, before anything is read out of it.
+        let (kind, src) = (int_at(cap, row, rider_type, "rider_type")?, int_at(cap, row, rider_src, "rider_ctl_src")?);
+        if (kind, src) != (2, 1) {
+            return Err(format!(
+                "row {row}: the rider chain resolves to type {kind} control source {src}, not the \
+                 human's rider (type 2, source 1) — change the number of '-> 0x8' hops in \
+                 watch/frame-bike.toml until it does, and re-record",
+            ));
+        }
+        let (kind, src) = (int_at(cap, row, veh_type, "veh_type")?, int_at(cap, row, veh_src, "veh_ctl_src")?);
+        if (kind, src) != (4, 1) {
+            return Err(format!(
+                "row {row}: the vehicle chain resolves to type {kind} control source {src}, not the \
+                 human's vehicle (type 4, source 1) — one of the area's AI riders, or no vehicle",
+            ));
+        }
+        let step = float_at(cap, row, dt, "dt")?;
+        if step.to_bits() != replay::CAPPED_DT.to_bits() {
+            return Err(format!(
+                "row {row}: dt is {} ({:#010x}), not the engine's 30 fps clamp {} ({:#010x}) — the \
+                 original integrated this frame with a step the port would not use",
+                step.0,
+                step.to_bits(),
+                replay::CAPPED_DT.0,
+                replay::CAPPED_DT.to_bits(),
+            ));
+        }
+        let pos = |at: [usize; 3]| -> Result<[f32; 3], String> {
+            Ok([
+                float_at(cap, row, at[0], "a position")?.0,
+                float_at(cap, row, at[1], "a position")?.0,
+                float_at(cap, row, at[2], "a position")?.0,
+            ])
+        };
+        out.push(WholeFrame {
+            tick: ticks[row],
+            dt: step,
+            crossup: float_at(cap, row, crossup, "crossup")?,
+            lean_roll: float_at(cap, row, lean_roll, "lean_roll")?,
+            lean_fore_aft: float_at(cap, row, lean_fore_aft, "lean_fore_aft")?,
+            wreck_reason: int_at(cap, row, wrecked, "wreck_reason")?,
+            rider_pos: pos(rider_pos)?,
+            veh_pos: pos(veh_pos)?,
+            requested: int_at(cap, row, requested, "requested")? as u8,
+            seq: int_at(cap, row, seq, "seq")?,
+            prev_seq: int_at(cap, row, prev_seq, "prev_seq")? as i32,
+            blend_rate: float_at(cap, row, blend_rate, "blend_rate")?,
+            max_crossup: float_at(cap, row, max_crossup, "max_crossup")?,
+            action: int_at(cap, row, action, "action")? as u8,
+            ramp: float_at(cap, row, ramp, "ramp")?,
+            faded: int_at(cap, row, faded, "faded")? != 0,
+            fore_aft: float_at(cap, row, fore_aft, "fore_aft")?,
+            pose: float_at(cap, row, pose, "pose")?,
+            shown_crossup: float_at(cap, row, shown, "shown_crossup")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Every whole-frame capture in `context/capture/`, read. Like the acceptance scanner next door: a
+/// capture that carries the columns is checked, a malformed one is a failure, and no captures at all
+/// is a printed sentence rather than a pass that checked nothing — the directory is game data and is
+/// never committed.
+fn whole_frame_captures() -> Vec<(PathBuf, Vec<WholeFrame>)> {
+    let dir = private_dir("capture");
+    let mut out = Vec::new();
+    for path in files_in(&dir, "csv") {
+        let text = std::fs::read_to_string(&path).expect("a readable capture");
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        if !WHOLE_FRAME_COLUMNS.iter().all(|c| column(&cap, c).is_ok()) {
+            continue;
+        }
+        let rows = whole_frame(&cap).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        out.push((path, rows));
+    }
+    if out.is_empty() {
+        println!(
+            "no whole-frame capture in {} — record one:\n  \
+             cp context/recordings/first_recording.p2m2_SaveState.p2s \\\n    \
+             \"<pcsx2 copy>/PCSX2/savestates/SLUS-20767 (9866FE54).08.p2s\"\n  \
+             ./kit pcsx2 with -- ./kit record watch/frame-bike.toml --state 8 \\\n    \
+             --pad watch/pads/frame-bike-ride.pad -n 1400 -o context/capture/frame-bike-ride.csv",
+            dir.display(),
+        );
+    }
+    out
+}
+
+/// How much the capture has to hold before any of the proofs below mean anything.
+///
+/// A capture of a bike standing still reads action 28, ramp 0 and a constant pose on every row: the
+/// lag tests all "pass" on it because nothing in them ever changes, which is the one way this whole
+/// section could be green and prove nothing. So the floor is in a constant, checked once, and quoted
+/// in the failure: airborne frames (the only arm that writes `shown_crossup`), cross-fade restarts,
+/// and distinct lean values (the header's other live input).
+const NEEDS: (usize, usize, usize) = (100, 5, 10);
+
+fn airborne(rows: &[WholeFrame]) -> Vec<usize> {
+    (0..rows.len()).filter(|&t| rows[t].action == Trick::WHEELIE.0).collect()
+}
+
+fn restarts(rows: &[WholeFrame]) -> Vec<usize> {
+    (1..rows.len())
+        .filter(|&t| rows[t].ramp == F::ONE && rows[t - 1].ramp < F::ONE)
+        .collect()
+}
+
+/// **A whole-frame capture is one tick of the human on the bike, with something happening in it.**
+#[test]
+fn a_whole_frame_capture_is_the_human_riding() {
+    for (path, rows) in whole_frame_captures() {
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(rows.len() > 1, "{name}: a capture of {} row(s) proves no ordering", rows.len());
+        // `whole_frame` has already refused a gap, an AI's actor and a dt that is not the clamp.
+        assert_eq!(
+            rows.last().unwrap().tick,
+            rows.len() as u64 - 1,
+            "{name}: {} rows but the last tick is {} — the rows are not consecutive ticks",
+            rows.len(),
+            rows.last().unwrap().tick,
+        );
+        let air = airborne(&rows);
+        let back = restarts(&rows);
+        let leans: std::collections::BTreeSet<u32> =
+            rows.iter().map(|r| r.lean_fore_aft.to_bits()).collect();
+        let (need_air, need_restarts, need_leans) = NEEDS;
+        assert!(
+            air.len() >= need_air && back.len() >= need_restarts && leans.len() >= need_leans,
+            "{name}: {} airborne frame(s), {} restart(s), {} distinct lean(s) — a capture has to hold \
+             at least {need_air}/{need_restarts}/{need_leans} or the proofs below hold nothing still \
+             against nothing moving. Ride it: watch/pads/frame-bike-ride.pad",
+            air.len(),
+            back.len(),
+            leans.len(),
+        );
+        println!(
+            "{name}: {} ticks of the human's rider, dt the clamp throughout; {} airborne, {} \
+             restart(s), {} distinct lean(s), {} distinct crossup(s), {} frame(s) down",
+            rows.len(),
+            air.len(),
+            back.len(),
+            leans.len(),
+            rows.iter().map(|r| r.crossup.to_bits()).collect::<std::collections::BTreeSet<u32>>().len(),
+            rows.iter().filter(|r| r.wreck_reason != 0).count(),
+        );
+    }
+}
+
+/// What one frame of the port's animation driving disagreed with the original about.
+///
+/// `aside` is why the disagreement is not the port's fault, where the capture itself says so — the
+/// two cases are in [`driving_against_the_capture`]. One with an `aside` is reported and not failed;
+/// one without is the port and the original disagreeing about a number, which is a failure.
+struct Disagreement {
+    tick: u64,
+    field: &'static str,
+    port: String,
+    game: String,
+    aside: Option<&'static str>,
+}
+
+impl std::fmt::Display for Disagreement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tick {}: {} {} vs {}", self.tick, self.field, self.port, self.game)?;
+        match self.aside {
+            Some(why) => write!(f, " ({why})"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Whether two rows hold the same frame: every sampled field equal, bit for bit.
+///
+/// A capture of a *moving* bike cannot produce two such rows honestly — the chassis moves 1.8 units
+/// in the median frame of A5's ride — so a pair of them means the sample at the second one caught a
+/// frame the simulation had not stepped. Measured: one row in 1,400, and the frame after it carries
+/// two frames of cross-fade decay against one frame of chassis travel. See A5's journal entry.
+fn the_same_frame(a: &WholeFrame, b: &WholeFrame) -> bool {
+    let bits = |r: &WholeFrame| {
+        (
+            [r.crossup.to_bits(), r.lean_roll.to_bits(), r.lean_fore_aft.to_bits()],
+            [r.ramp.to_bits(), r.fore_aft.to_bits(), r.pose.to_bits(), r.shown_crossup.to_bits()],
+            [r.action, r.requested],
+            r.rider_pos.map(f32::to_bits),
+            r.veh_pos.map(f32::to_bits),
+        )
+    };
+    bits(a) == bits(b)
+}
+
+/// Run `motion::Driver` over a captured ride and compare all six of its fields against what the
+/// original's animation header actually wrote, bit for bit, on every tick.
+///
+/// `lag` is the ordering knob and the whole point of this function: at 0 the driving is handed the
+/// physics outputs sampled on the **same** tick, which is what the original's frame order means; at 1
+/// it is handed the previous tick's, which is what a port that ran the animation header before the
+/// physics would compute.
+///
+/// Three inputs the capture cannot see, and what is fed instead:
+///
+/// - `Request::force` — the trick machine's "asked for again" flag, which lives in `Tricks` and not in
+///   the rider. Fed `false`. It is not a hole in the proof: a forced restart would put the captured
+///   ramp back to 1 on a tick where the port left it falling, and the ramp is compared bit-exactly.
+/// - `Request::progress` — only the stunt arm reads it, and the capture holds no stunt frames (the
+///   ride never lands a trick). Fed zero.
+/// Everything else is the capture's own: the step, the two request ids, the request count and its
+/// previous copy, both of the engine's `MaxCrossupAngle` copies, the blend rate, the crossup angle and
+/// both leans. Where those came from is worth knowing — the two lean fields (+0x670 and +0x674) are
+/// not in any disassembly listing of the header; they were found by searching a capture of the whole
+/// 2,688-byte rider object for the field each output is a function of.
+///
+/// `Blend` — what the motion library was asked for — is not compared, because nothing in the rider
+/// object records it; S6's oracle proofs cover that side.
+fn driving_against_the_capture(
+    rows: &[WholeFrame],
+    lag: usize,
+) -> (usize, Vec<Disagreement>, Vec<Disagreement>) {
+    let first = &rows[0];
+    let mut driver = Driver {
+        action: Trick(first.action),
+        ramp: first.ramp,
+        faded: first.faded,
+        fore_aft: first.fore_aft,
+        pose: first.pose,
+        shown_crossup: first.shown_crossup,
+    };
+    // The rows whose sample caught a frame the simulation had not stepped yet.
+    let stalled: Vec<bool> = (0..rows.len())
+        .map(|t| t > 0 && the_same_frame(&rows[t], &rows[t - 1]))
+        .collect();
+    let mut found = Vec::new();
+    let mut aside = Vec::new();
+    for t in 1..rows.len() {
+        let row = &rows[t];
+        let physics = &rows[t - lag];
+        // The rider is down and being put back on the bike: the ride state's reason (+0x748) is
+        // non-zero, and for a frame or two after it clears, the reset puts the pose state back —
+        // including the shown crossup, which it sets to 0.5, straight ahead. `Driver` has no reset
+        // (S6 ported the driving, not the state machine), so a disagreement in that window is
+        // reported separately rather than failing the comparison.
+        let respawning = (t.saturating_sub(2)..=t).any(|s| rows[s].wreck_reason != 0);
+        // A stalled sample is two frames the port cannot step through: the one that did not move,
+        // and the one after it, which moved twice.
+        let why = if respawning {
+            Some("the rider was down and being put back on the bike, which Driver does not model")
+        } else if stalled[t] || stalled[t - 1] {
+            Some("the capture's sample caught a frame the simulation had not stepped")
+        } else {
+            None
+        };
+        driver.frame(
+            row.dt,
+            Params { blend_rate: row.blend_rate, max_crossup: row.max_crossup },
+            Request {
+                action: Trick(row.requested),
+                force: false,
+                seq: row.seq as u8,
+                prev_seq: row.prev_seq,
+                frozen: false,
+                progress: F::ZERO,
+            },
+            Pose {
+                lean: physics.lean_roll,
+                fore_aft: physics.lean_fore_aft,
+                crossup: physics.crossup,
+            },
+            Clips::default(),
+        );
+        let mut note = |mut d: Disagreement| {
+            d.aside = why;
+            if why.is_some() {
+                aside.push(d);
+            } else {
+                found.push(d);
+            }
+        };
+        let mut bad = |field: &'static str, port: F, game: F| {
+            if port.to_bits() != game.to_bits() {
+                note(Disagreement {
+                    tick: row.tick,
+                    field,
+                    port: format!("{} ({:#010x})", port.0, port.to_bits()),
+                    game: format!("{} ({:#010x})", game.0, game.to_bits()),
+                    aside: None,
+                });
+            }
+        };
+        bad("ramp", driver.ramp, row.ramp);
+        bad("fore_aft", driver.fore_aft, row.fore_aft);
+        bad("pose", driver.pose, row.pose);
+        bad("shown_crossup", driver.shown_crossup, row.shown_crossup);
+        if driver.action.0 != row.action {
+            note(Disagreement {
+                tick: row.tick,
+                field: "action",
+                port: driver.action.0.to_string(),
+                game: row.action.to_string(),
+                aside: None,
+            });
+        }
+        if driver.faded != row.faded {
+            note(Disagreement {
+                tick: row.tick,
+                field: "faded",
+                port: driver.faded.to_string(),
+                game: row.faded.to_string(),
+                aside: None,
+            });
+        }
+        // The capture is the original's own state, so a diverged driver is re-anchored to it before
+        // the next frame: without this, one bad tick reports as a thousand and the first disagreement
+        // — the one that matters — is buried.
+        driver.action = Trick(row.action);
+        driver.ramp = row.ramp;
+        driver.faded = row.faded;
+        driver.fore_aft = row.fore_aft;
+        driver.pose = row.pose;
+        driver.shown_crossup = row.shown_crossup;
+    }
+    (rows.len() - 1, found, aside)
+}
+
+/// **The port's animation driving is the original's, frame for frame, on the live game.**
+///
+/// Not a generated frame and not an oracle call: the captured ride's own dt, request ids, cross-fade
+/// state, lean and crossup angle, against the six fields the original's header wrote on that tick.
+#[test]
+fn the_ported_driving_matches_the_whole_captured_frame() {
+    for (path, rows) in whole_frame_captures() {
+        let name = path.file_name().unwrap().to_string_lossy();
+        let (frames, bad, aside) = driving_against_the_capture(&rows, 0);
+        assert!(
+            bad.is_empty(),
+            "{name}: the port's animation driving disagrees with the original on {} of {frames} \
+             frame(s). First: {}",
+            bad.len(),
+            bad[0],
+        );
+        println!(
+            "{name}: the port's animation driving agrees with the original on every one of {frames} \
+             live frames — six fields, {} restart(s), {} airborne frame(s), max crossup {}",
+            restarts(&rows).len(),
+            airborne(&rows).len(),
+            rows[0].max_crossup.0,
+        );
+        // Not a pass and not a failure: what the live frame holds that the port has no code for. The
+        // lines are printed in full because this is the one thing in the section a reader could not
+        // work out from the source.
+        // Not a pass and not a failure: the frames the capture itself excuses. They are printed in
+        // full, and there have to be few of them — an excuse that covers a tenth of the ride is not
+        // an excuse, it is a port that does not match.
+        assert!(
+            aside.len() * 50 < frames,
+            "{name}: {} of {frames} frame(s) disagree for a reason the capture excuses, which is too \
+             many to excuse. First: {}",
+            aside.len(),
+            aside[0],
+        );
+        if !aside.is_empty() {
+            println!(
+                "{name}: and {} disagreement(s) the capture itself accounts for:{}",
+                aside.len(),
+                aside.iter().map(|d| format!("\n    {d}")).collect::<String>(),
+            );
+        }
+    }
+}
+
+/// **The animation header runs after the physics.** The ordering proof, and the reason this section
+/// exists: the same replay, handed the physics outputs of the *previous* tick, stops matching.
+///
+/// This is the mistake no per-function proof can catch. A port that calls the animation header before
+/// the air state would compute exactly what `lag = 1` computes here — every ported function right, the
+/// frame wrong — and it diverges on the live capture within a frame or two of the rider moving.
+#[test]
+fn the_driving_reads_the_physics_of_its_own_frame() {
+    for (path, rows) in whole_frame_captures() {
+        let name = path.file_name().unwrap().to_string_lossy();
+        let (frames, late, _) = driving_against_the_capture(&rows, 1);
+        assert!(
+            !late.is_empty(),
+            "{name}: the driving matched on all {frames} frames when it was handed the *previous* \
+             frame's crossup and lean, which means this capture cannot tell the two orders apart — \
+             the physics outputs never moved. Ride it harder.",
+        );
+        // A tenth of the moving frames is a floor with room in it: the lean holds still for seconds
+        // at a time under a scripted pad, and a held value is the same at both lags.
+        let moving = (1..rows.len())
+            .filter(|&t| {
+                rows[t].crossup.to_bits() != rows[t - 1].crossup.to_bits()
+                    || rows[t].lean_roll.to_bits() != rows[t - 1].lean_roll.to_bits()
+                    || rows[t].lean_fore_aft.to_bits() != rows[t - 1].lean_fore_aft.to_bits()
+            })
+            .count();
+        assert!(
+            late.len() * 10 >= moving,
+            "{name}: handing the driving last frame's physics only broke {} of the {moving} frame(s) \
+             where the physics moved — too few to call an ordering proof",
+            late.len(),
+        );
+        println!(
+            "{name}: fed the previous frame's physics the same driving breaks on {} frame(s) of \
+             {frames} ({moving} with the physics moving); first {}",
+            late.len(),
+            late[0],
+        );
+    }
+}
+
+/// **The header latches the id the state pack asked for, in the same frame.**
+///
+/// `requested` (+0x864) is written by the stunt state pack, call 5 of the rider's frame; `action`
+/// (+0xa78) is what the animation header latched to run on. They are equal on every captured tick and
+/// unequal on 1 in 60 when the comparison is shifted a frame, which puts the header after the pack.
+#[test]
+fn the_header_latches_this_frames_requested_id() {
+    for (path, rows) in whole_frame_captures() {
+        let name = path.file_name().unwrap().to_string_lossy();
+        let same = |lag: usize| {
+            (1..rows.len()).filter(|&t| rows[t].action == rows[t - lag].requested).count()
+        };
+        let frames = rows.len() - 1;
+        assert_eq!(
+            same(0),
+            frames,
+            "{name}: the id the header ran on is not the id asked for on the same tick, on {} of \
+             {frames} frame(s)",
+            frames - same(0),
+        );
+        assert!(
+            same(1) < frames,
+            "{name}: the ids are equal a frame apart too, on all {frames} frames — the requested id \
+             never changed, so this capture cannot say which frame the latch happened in",
+        );
+        println!(
+            "{name}: action == requested on {frames}/{frames} ticks, and on {}/{frames} a frame \
+             apart — the header latches the pack's id in its own frame",
+            same(1),
+        );
+    }
+}
+
+/// **The actor update carries this frame's chassis, not last frame's.**
+///
+/// The rider's seat position (+0x820) is written by the attachment walk, call 4 of the rider's frame,
+/// out of the chassis the physics has already moved. Sampled against the chassis' own
+/// world transform it is a rigid pair *within one tick*: the gap between them stays a small constant
+/// offset, while the gap to the previous tick's chassis is a whole frame of travel.
+///
+/// This one is a tolerance argument and not a bit-exact proof, and it is the weakest thing in this
+/// section — A5's journal entry says so under "Not verified". Nothing in the capture reproduces the
+/// chassis transform from the rider's own fields (no 16-float block in the rider object matches it,
+/// and no field satisfies `pos[t] - pos[t-1] == vel * dt`), so the comparison is between distances:
+/// the same-frame gap has to be a small fraction of how far the bike moves in a frame, and the
+/// one-frame-late gap has to be of the order of that motion.
+#[test]
+fn the_attachment_update_carries_this_frames_chassis() {
+    for (path, rows) in whole_frame_captures() {
+        let name = path.file_name().unwrap().to_string_lossy();
+        let dist = |a: [f32; 3], b: [f32; 3]| {
+            let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+        };
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        let gap = |lag: usize| -> Vec<f32> {
+            (1..rows.len()).map(|t| dist(rows[t].rider_pos, rows[t - lag].veh_pos)).collect()
+        };
+        let (here, late) = (gap(0), gap(1));
+        let mut motion: Vec<f32> =
+            (1..rows.len()).map(|t| dist(rows[t].veh_pos, rows[t - 1].veh_pos)).collect();
+        motion.sort_by(f32::total_cmp);
+        let median = motion[motion.len() / 2];
+        let (here_mean, late_mean) = (mean(&here), mean(&late));
+        assert!(
+            median > 0.1,
+            "{name}: the bike moved {median} units in the median frame — it was parked, and a \
+             distance test on a parked bike says nothing about the order of the frame",
+        );
+        assert!(
+            here_mean * 4.0 < median && late_mean > median / 2.0,
+            "{name}: the rider's seat is {here_mean} from this frame's chassis and {late_mean} from \
+             last frame's, against {median} units of travel in the median frame — that is not the \
+             signature of an attachment walk that ran after this frame's physics",
+        );
+        println!(
+            "{name}: the rider's seat sits {here_mean} from this tick's chassis and {late_mean} from \
+             the previous tick's, with {median} units of travel in the median frame — the attachment \
+             walk ran after the physics, in the same frame",
         );
     }
 }
