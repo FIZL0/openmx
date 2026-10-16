@@ -1259,3 +1259,108 @@ transform_sync boot 0x001b2770 (transform, flags) -> brings the transform up to 
 # The three constant quadwords it reads. The proof reads the third one out of the image rather than
 # trusting the port's copy, so its value is proved and not assumed:
 #   0x00426d70 (0, 0, 0, 1)   0x00426d80 (1, 1, 1, 1)   0x00426db0 (0, 1, 0, 1)
+
+# ---------------------------------------------------------------------------------------------------
+# V5 — the motions themselves: what a clip looks like. The port is crates/game-render/src/skin.rs and
+# the proofs are crates/game-render/tests/skin.rs. How each one was found is in
+# research/journal/2026-10-16-v5-v5-motion-clips.
+#
+# The chain: motion_blend_one (S6, above) walks the clip's two channel lists, samples each channel at
+# phase * duration through its vtable (+0x10 rotation, +0x14 position), maps the channel's name index
+# through the clip's own name->joint byte array (0xff = skip the channel), cross-fades the sample
+# against the blend buffer the restart snapshotted, and writes the joint record at motion+0x234,
+# stride 0x60: +0x40 the translation, +0x50 the quaternion, +0x34 the transform node they are pushed
+# into. motion_blend_two does the same with both clips sampled at the same seconds.
+# The rotation channel comes in two classes, one per key kind, picked by the clip's +0x2c when
+# motion_channels_new allocates them. Both are 0x1c bytes with the same fields (+0 name index, +4 the
+# on flag, +8 the key count, +0x14 the key array, +0x18 the cached pair) and the same vtable shape,
+# whose +0x10 is the sampler and +0x20 the "reserve n keys". Kind 1 (twelve-byte keys) is the vtable at
+# 0x0044dce0; kind 0 (eight-byte keys) is 0x0044dd10, and its sampler and decoder are the same code
+# over bytes instead of shorts.
+# Both rotation samplers have a path for a channel of fewer than three keys that weights the pair from
+# the float *in front of* the key array — the allocator's own bytes. It is reachable: two rotation
+# channels on the disc have two keys (Tracks\free10_ss.res :: tracks\free10_ss\anim\sh_windsock.mot).
+# The port weights those from the first key instead, which is the same clip with a defined weight.
+motion_rot_sample           boot 0x00136880 (seconds in f12, channel in a0, out in a1) a rotation
+#                                           channel's quaternion: the cached-pair hint and its two
+#                                           guesses, a forward then a backward walk, then
+#                                           motion_quat_slerp_keys over the pair. Writes nothing when
+#                                           the channel is off (+4) or empty. Held at the ends — and
+#                                           before the first key it holds key *1*, not key 0, which
+#                                           is the index its fallback uses
+motion_rot_sample_narrow    boot 0x00136de0 (seconds in f12, channel in a0, out in a1) the same
+#                                           sampler for the eight-byte key: the same hint, the same
+#                                           two walks, the same held ends and the same key-1 fallback,
+#                                           with a stride of 8 and motion_quat_slerp_keys_narrow
+motion_pos_sample           boot 0x00137e70 (seconds in f12, channel in a0, out in a1) a position
+#                                           channel's translation, w = 1. Past the last key it
+#                                           extrapolates along the last interval rather than holding.
+#                                           Its other path — channel off, or fewer than two keys —
+#                                           writes the key's z into x and never writes z at all; no
+#                                           clip on this disc has fewer than six keys in a channel
+motion_pos_bracket          boot 0x001380b0 (seconds in f12, keys in a0, count in a1, out a/b/u) the
+#                                           binary search the position sampler uses: -> false and the
+#                                           last two keys when the time is at or past the last, and
+#                                           with a time before the first key it brackets keys[-1]
+motion_quat_decode          boot 0x00100a50 (key in a0, out in a1) one 8-byte rotation key as a
+#                                           quaternion: axis * sin/32767 with the cosine's sign folded
+#                                           in, w = |cos|, so w is never negative
+motion_quat_decode_narrow   boot 0x001008e0 (key in a0, out in a1) the four-byte rotation: a u8 turn
+#                                           index into motion_turn_table_narrow and three i8 axis
+#                                           components, otherwise identical to motion_quat_decode
+motion_quat_slerp_keys      boot 0x0013f000 (weight in f12, key a in a1, key b in a2, out in a0)
+#                                           decodes both keys and hands them to motion_slerp with the
+#                                           shortest-path flag set, which is the only caller that sets
+#                                           it
+motion_quat_slerp_keys_narrow boot 0x0013ef20 (weight in f12, key a in a1, key b in a2, out in a0) the
+#                                           same for two four-byte keys
+transform_set_rotation      boot 0x001b2130 (transform in a0, quaternion in a1, 0 in a2) writes the
+#                                           quaternion as three rows at +0x40/+0x50/+0x60 — the
+#                                           row-vector form, the transpose of the textbook one — then
+#                                           marks the chain dirty. a2 non-zero loads the identity
+#                                           instead
+transform_dirty             boot 0x001b1930 (transform) the "this frame's matrix is stale" mark
+#                                           transform_set_rotation ends in; hooked in the proofs
+transform_rotate            boot 0x001b3060 (out, transform, p) -> p turned into the transform's frame
+#                                           without its origin; the mirroring path's half of
+#                                           transform_unpoint
+#
+# The two tables the quaternion code reads. Both are built at start-up into memory nothing in the
+# image's call graph writes, so the port rebuilds them from sin/cos/acos; a save state's copies agree
+# to 1.8e-7 and 1.1e-5. Addresses, not functions.
+motion_turn_table           boot 0x0045fa20 4096 entries of (f32 sin(n*pi/4096)/32767, f32
+#                                           cos(n*pi/4096)), stride 8. The cosine's sign bit is the
+#                                           one motion_quat_decode folds into the axis
+motion_turn_table_narrow    boot 0x00467a20 256 entries of (f32 sin(n*pi/256)/127, f32 cos(n*pi/256)),
+#                                           stride 8: the same table for the four-byte key, and it
+#                                           sits immediately after the wide one (0x45fa20 + 0x8000)
+motion_arc_table            boot 0x0046a688 a pointer to 30002 f32 of acos(i/14999.5 - 1) — 0x0062eaa0
+#                                           in the save state. The last two live entries are
+#                                           0.00048828125, not an arc cosine of anything, and the
+#                                           slerp reads them for any dot product above 0.99997
+motion_arc_scale            boot 0x0046a6a0 14999.5: the f32 a dot product's magnitude is scaled by,
+#                                           and also the table's own middle
+motion_sine_poly            boot 0x00426e10 the slerp's sine series: 1, -1/6, 1/120, -1/5040
+motion_slerp_one            boot 0x0041f730 1.0: the dot product at or past which the slerp returns
+#                                           its `from` untouched instead of dividing by sin 0
+#
+# The clip on disc. All 17,337 `.mot` members in the disc's archives are version 3 with position key
+# kind 0 (sixteen bytes); 17,295 are rotation key kind 1 (twelve bytes) and 42 are rotation key kind 0
+# (eight) — the trucks and scrapers of the free-ride tracks, e.g. Tracks\free06_ss.res ::
+# tracks\free06_ss\anim\scraper_01.mot. The 40-byte position key and versions 1 and 2 are read by
+# motion_clip_read but appear nowhere on the disc.
+motion_clip_read            boot 0x00142750 (archive in a1, clip in a2) the `.mot` reader: the version
+#                                           and frame count, the name table, the duration (+0x3c), the
+#                                           two key kinds (+0x2c rotation, +0x30 position), the two
+#                                           channel counts (+0x20 position, +0x24 rotation), then the
+#                                           channels — count into chan+8, name index into chan+0, then
+#                                           the keys read raw into chan+0x14
+motion_channels_new         boot 0x00140c80 (clip, count) the rotation channel array: an array of
+#                                           `count` 0x1c-byte channels of the class the clip's
+#                                           rotation kind names, and a list of pointers to them at
+#                                           clip+0x1c
+motion_rot_channel_new      boot 0x00135cd0 (chan) a rotation channel: +4 = 1 on, +8 = 0 keys,
+#                                           +0x14 = no key array, +0x18 = 1, the cached pair
+motion_rot_channel_new_narrow boot 0x00135c00 (chan) the same for the eight-byte key kind, with the
+#                                           other vtable
+motion_pos_channel_new      boot 0x00135900 (chan) a position channel: the same without the cache

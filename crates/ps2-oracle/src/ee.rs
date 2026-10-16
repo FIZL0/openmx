@@ -556,6 +556,18 @@ impl Ee {
                     0x2a => Some(lanes(&|i| vu::mul(a[i], b[i]))),
                     0x2c => Some(lanes(&|i| vu::sub(a[i], b[i]))),
                     0x2e => Some(lanes(&|i| vu::mul(a[cy[i]], b[cz[i]]))), // vopmula
+                    0x10..=0x13 => {
+                        // vitof0/4/12/15: the lanes' bit patterns as integers, scaled into floats
+                        let frac = [0, 4, 12, 15][op as usize - 0x10];
+                        self.put_vf(ft, dest, ps2_float::Vf(a).itof_bits(frac).0);
+                        None
+                    }
+                    0x14..=0x17 => {
+                        // vftoi0/4/12/15: the other way, the integers left in the register file
+                        let frac = [0, 4, 12, 15][op as usize - 0x14];
+                        self.put_vf(ft, dest, ps2_float::Vf(a).ftoi_bits(frac).0);
+                        None
+                    }
                     0x2f | 0x3b => None, // vnop, vwaitq (nothing to wait for without pipelines)
                     0x30 => {
                         self.put_vf(ft, dest, a); // vmove
