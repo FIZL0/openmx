@@ -35,11 +35,11 @@
 //! `openmx` has no library target for them to live in and neither crate may `include_str!` the other's
 //! fixtures (`game_sim::stock`'s own head says why).
 //!
-//! **Two legs do not pass, and ship `#[ignore]`d with the defect named in the test** — the steering
-//! command never reaches the front wheel, and a locked clutch re-drives the rear one at idle, so the
-//! bike neither turns nor stops. Both are the simulation's and are written up at length in the sibling
-//! file; they are repeated here because a leg of a minute is not proved by a leg of another minute,
-//! and because this is the file whose failure would be a player's complaint.
+//! **One leg does not pass, and ships `#[ignore]`d with the defect named in the test** — a locked
+//! clutch re-drives the rear wheel at idle, so the bike will not stop. It is the simulation's and is
+//! written up at length in the sibling file; it is repeated here because a leg of a minute is not
+//! proved by a leg of another minute, and because this is the file whose failure would be a player's
+//! complaint. The other was the steering command never reaching the front wheel, and P12 paid it.
 
 use game_sim::collide::{Bundle, Record};
 use game_sim::input::{AXIS_CENTRE, CONTROL_MAP, Control, PADS, Report};
@@ -115,14 +115,30 @@ CrossupWreckTime = 0.3
 /// connected to anything at all; and `Drag = 0.5` holds this bike to about 48 ft/s, which is nothing
 /// like the 75.78 the human's recording reaches, so the minute's speeds would mean nothing. Neither
 /// patch is a claim about the disc's file.
+///
+/// **P12 moved two things, and both are the sibling file's `ridden_bike` catching up.** The steering
+/// fade's far end is `0.05` and not the `0.25` this file shipped with: 0.25 asks the tires for five
+/// and a half g at the top speed, and a bike asked for grip it has not got slides instead of turning.
+/// And `BodyTireForcePosition` is P8's tuning arm here as well — the sibling's third patch, which this
+/// file never got because nothing had ever steered this bike and the difference did not show. Read as
+/// the drive and tire force's arm, the file's own value is a foot *above* the body origin and two feet
+/// behind the axle, which is both a nose-diving launch (P8) and a yaw arm two and a half times the
+/// sibling's: on the unpatched bike the stick at 0.05 of the lock spun the minute a full turn and a
+/// quarter in four seconds. The mounts are kept off the *unpatched* text, which is what
+/// [`ride_the_minute`] builds the rider with and what the sibling file's harness does.
+///
+/// The two files' bikes have to agree, because `the_pad_script_is_the_minute` is what says the shell
+/// rides the same minute `game-sim` does.
 fn ridden_bike() -> String {
     let mut out = stock::BIKE.to_string();
     let patches = [
         (
             "XAxisRateLimit = 6\n",
-            "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.25\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
+            "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.05\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
         ),
         ("Drag = 0.5", "Drag = 0.06"),
+        ("BodyTireForcePosition = 0.0, 1.1, 2.1", "BodyTireForcePosition = 0.0, -0.3, 0.8"),
+        ("BodyTireForcePosition = 0.0, 1.1, -2.1", "BodyTireForcePosition = 0.0, -0.3, -0.8"),
     ];
     for (key, with) in patches {
         assert!(out.contains(key), "game_sim::stock::BIKE no longer has `{}`", key.trim_end());
@@ -439,10 +455,23 @@ fn turn_rate(seen: &[&Seat]) -> f32 {
 fn ride_the_minute() -> Minute {
     let tables = Arc::new(Tables::build());
     let phy = Phy::read_bytes(ridden_bike().as_bytes(), &tables.ride.curve);
-    // `Sim::ride` is the shell's own constructor, spawn and facing included; the wreck files are the
-    // disc's and this ride has none, which is the state the shell runs in without them — the machine
-    // still calls a wreck, there is just no body to tumble.
-    let mut sim = Sim::ride(0, tables, phy, stock::SPAWN, stock::FACING, Set::default());
+    // The wheel mounts come off the *unpatched* text, because `ridden_bike`'s third patch moves the
+    // key this crate reads as the mounts when the bike model has no wheel nodes — the sibling file's
+    // harness keeps them the same way, and the two minutes have to be one bike. That is why the rider
+    // is built here and handed over (`Sim::with_rider`, which is also how the shell itself builds one)
+    // rather than through `Sim::ride`, which would take the mounts off the patched copy.
+    //
+    // The wreck files are the disc's and this ride has none, which is the state the shell runs in
+    // without them — the machine still calls a wreck, there is just no body to tumble.
+    let geom = Phy::read_bytes(stock::BIKE.as_bytes(), &tables.ride.curve);
+    let rider = game_sim::rider::Rider::new(
+        &phy,
+        stock::mounts(&geom),
+        stock::SPAWN,
+        stock::FACING,
+        Set::default(),
+    );
+    let mut sim = Sim::with_rider(0, tables, phy, rider);
     let mut world = Jump::nothing();
 
     let mut out = Minute { legs: Vec::new() };
@@ -584,16 +613,14 @@ fn it_reaches_the_top_speed_and_holds_it() {
     assert_eq!(wrecks(&flat_out), 0, "the bike wrecked flat out");
 }
 
-/// The stick goes hard over and the bike does not turn — the pad's fault for all a player knows, and
-/// `the_pad_script_is_the_minute` is what says it is not.
+/// The stick goes hard over and the bike comes round — through the shell's own pad, which is the half
+/// of the turn this crate can prove and the sibling file cannot.
 ///
-/// **Why it is ignored.** The simulation never puts the steering command on the hinge:
-/// `mv::steer_command` works the angle out and the only writer of `wheel.steer_angle` is
-/// `wheel::steer_integrate`, which runs for a balancing wheel and otherwise leaves the commanded angle
-/// to "stand" — at zero, because nothing commanded it. The sibling file's version of this test has the
-/// long version. Not this file's to fix: the fix is in `game-sim`.
+/// **Paid by P12**, in `game-sim`: the ground step's commanded angle and the steering hinge's own
+/// angle are one word on the wheel in the original, and `ride.rs` now copies it both ways round the
+/// ported call instead of leaving the hinge at zero. The sibling file's version of this test has the
+/// long version.
 #[test]
-#[ignore = "the steering command never reaches the hinge: nothing writes wheel.steer_angle from mv::steer_command"]
 fn it_turns_the_way_the_stick_is_pushed() {
     let m = ride_the_minute();
     for (leg, sign) in [("turning right", 1.0), ("turning left", -1.0)] {

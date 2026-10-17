@@ -993,16 +993,18 @@ fn the_two_captured_wrecks_match_their_lengths() {
 // loose on purpose. The point is the legs, not the tolerances: this is a test that should be loud when
 // the bike stops being drivable and silent about everything else.
 //
-// **Three legs do not pass, and ship `#[ignore]`d with the defect named in the test.** They are not
+// **Two legs do not pass, and ship `#[ignore]`d with the defect named in the test.** They are not
 // aspirational: each one fails today for a reason traced to a line, each reason is a bike a rider
-// cannot ride, and none of them is this task's file to fix (they live in `ride.rs` and `move.rs`).
+// cannot ride, and neither is this task's file to fix (they live in `ride.rs` and `move.rs`).
 // Deleting them would lose the finding; leaving them failing would redden `./kit check` for every
 // other task in flight. Ignored, they are a list of what the port owes a rider, and the day one is
 // paid the `#[ignore]` comes off.
 //
-//     `it_turns_the_way_the_stick_is_pushed`        the steering command never reaches the hinge
 //     `it_brakes_to_a_stop`                         a locked clutch re-drives the rear wheel at idle
 //     `it_pulls_away_after_a_frame_off_the_throttle`  `clutch_in` latches and is never cleared
+//
+// The third was `it_turns_the_way_the_stick_is_pushed` — the steering command never reached the
+// hinge — and P12 paid it.
 //
 // The rest pass, and `the_minute_notices_a_bike_that_loops_out` rides the same minute on a bike geared
 // four times too tall to show the asserts are not vacuous.
@@ -1039,8 +1041,17 @@ CrossupWreckTime = 0.3
 ///    `SteerScale1/2` or `SteerSpeed1/2`, so [`phy`]'s loader leaves the steering scale at zero and
 ///    `mv::steer_command` multiplies the rider's lean by nothing: on that bike the stick is not
 ///    connected to the front wheel at all, whatever `ride.rs` does with the command. A bike the
-///    original would ship has them, so the minute rides one that does — full lock at walking pace
-///    falling to a quarter of it at 50 mph, which is the shape every road vehicle's is.
+///    original would ship has them, so the minute rides one that does — full lock at walking pace,
+///    falling with speed, which is the shape every road vehicle's is.
+///
+///    **The fade's far end is a calibration, and P12 moved it from a quarter to a twentieth.** It was
+///    written before anything put the command on the hinge, so until P12 no ride had ever been
+///    steered by it. A quarter of a 30° lock is 7.5° at the top speed, which on this bike's 4.2 ft
+///    wheelbase asks for a 32 ft radius at 75 ft/s — five and a half g, where the file's own
+///    `MaxSideForce` keys can hold about four. Asked for what it cannot have, the port understeers,
+///    slides, and sheds three quarters of its speed in a four-second turn. A twentieth keeps the
+///    demand near one g at every speed the fade covers, which is what a rider can hold; it is this
+///    file's number and not the disc's, like the rest of the bike.
 /// 2. **`Drag`.** 0.5 holds the hand-written bike to about 48 ft/s flat out, well under the 75.78 the
 ///    human's recording reaches, and a minute whose top speed is nothing like the original's cannot
 ///    be compared against it. 0.06 puts this bike's terminal speed within half a foot a second of the
@@ -1062,7 +1073,7 @@ fn ridden_bike() -> String {
     let patches = [
         (
             "XAxisRateLimit = 6\n",
-            "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.25\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
+            "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.05\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
         ),
         ("Drag = 0.5", "Drag = 0.06"),
     ];
@@ -1393,21 +1404,20 @@ fn it_reaches_the_top_speed_and_holds_it() {
     assert_eq!(wrecks(&flat_out), 0, "the bike wrecked flat out");
 }
 
-/// The stick is pushed and the bike does not turn — not a little, not slowly, not at all.
+/// The stick is pushed and the bike comes round the way it was pushed: at a rate the human managed
+/// with the same stick, without falling over or losing the speed that makes a turn a turn.
 ///
-/// **Why it is ignored.** `mv::steer_command` works the commanded angle out every substep and nothing
-/// ever puts it on the hinge: `ride.rs`'s `patch` reads `wheel.w.steer_angle`, and the only writer of
-/// that field is `wheel::steer_integrate`, which `wheel::integrate` runs when the wheel is
-/// `balancing` and otherwise skips with a comment that the commanded angle stands. Nothing commands
-/// it, so it stands at zero for the whole minute and the yaw rate below is `0.000` in both
-/// directions. Fixing it means deciding where the command meets the hinge, which is `ride.rs`'s and
-/// `move.rs`'s business, not this test's.
+/// **Paid by P12.** It was ignored because nothing put the commanded angle on the hinge, and the
+/// whole minute was ridden at a steer angle of zero. The original keeps the command and the hinge's
+/// angle in *one word* on the wheel, which the ground step's pose stores straight into and which the
+/// steered-but-not-balancing case of the wheel's own integration leaves alone; `ride.rs` holds that
+/// word in two structs and now copies it both ways round the ported call. P12's journal entry has the
+/// decompiled store.
 ///
-/// What this asserts when it is paid: the bike comes round the way the stick is pushed, at a rate the
-/// human managed with the same stick, without falling over or losing the speed that makes a turn a
-/// turn.
+/// The turn rate the leg comes out at is the *fixture's*, through `ridden_bike`'s recalibrated
+/// `SteerScale2` — see that function's first patch, and P12's journal for why 0.25 could not be
+/// ridden by a bike with this port's stand-in cornering grip.
 #[test]
-#[ignore = "the steering command never reaches the hinge: nothing writes wheel.steer_angle from mv::steer_command"]
 fn it_turns_the_way_the_stick_is_pushed() {
     let m = ride_the_minute(&ridden_bike());
     for (leg, sign) in [("turning right", 1.0), ("turning left", -1.0)] {

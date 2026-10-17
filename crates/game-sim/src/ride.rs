@@ -287,6 +287,16 @@ impl Wheel {
     }
 
     /// The ground step's view into the wheel module's, before the wheel module runs.
+    ///
+    /// The commanded steering angle and the hinge's own angle are **one word** in the original —
+    /// `wheel+0x8ac`. The ground step's pose stores the command straight into it (the front wheel's
+    /// lock times the rider's lean times the speed fade, and nothing else), the steered-but-not-
+    /// balancing case of the wheel's own integration leaves it alone, and the balancing case
+    /// integrates it under the hinge's torque. Two structs hold that word here, so the two are
+    /// copied across each way round the ported call: [`mv::Wheel::steer_command`] in,
+    /// [`wheel::Wheel::steer_angle`] out ([`Wheel::from_wheel`]). Copying it in unconditionally is
+    /// the aliasing itself and not a decision: outside the pose the two always agree, because
+    /// `from_wheel` has just written the hinge's answer back over the command.
     fn to_wheel(&mut self) {
         self.w.contact = self.mv.contact;
         self.w.balancing = self.mv.balancing;
@@ -294,9 +304,10 @@ impl Wheel {
         self.w.spring_rate = self.mv.spring;
         self.w.max_steer_angle = self.mv.max_steer_angle;
         self.w.min_steer_angle = -self.mv.max_steer_angle;
+        self.w.steer_angle = self.mv.steer_command;
     }
 
-    /// And back, after it has. Only the four words the ground step reads: the contact flag, the
+    /// And back, after it has. The four words the ground step reads — the contact flag, the
     /// contact normal both roll angles are measured off, and the two flags
     /// `Wheel::ray_hit`/`Wheel::swept_contact` sit in — `+0xd0` and `+0xd4`, the first two of
     /// [`mv::Fresh`]'s seven. The other five and the three quadwords are the suspension's own
@@ -306,6 +317,10 @@ impl Wheel {
         self.mv.contact_normal = self.w.contact_normal;
         self.mv.fresh.scalars[0] = self.w.ray_hit as u32;
         self.mv.fresh.scalars[1] = self.w.swept_contact as u32;
+        // The fifth word, and the one the ground step does *not* read: the shared steering angle,
+        // back out of the hinge. See [`Wheel::to_wheel`] — it is here so the two copies of
+        // `wheel+0x8ac` cannot disagree, which is what the state hash would otherwise show twice.
+        self.mv.steer_command = self.w.steer_angle;
     }
 }
 
