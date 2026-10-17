@@ -298,7 +298,7 @@ impl Clip {
     /// The two clips must have the same channels in the same order — the original pairs them by
     /// position in the list, not by name — which is how the airborne idle blends two leans.
     pub fn pose_mixed(&self, other: &Clip, time: f32, mix: f32, map: &[u8], out: &mut Pose) {
-        self.lay(time, Some((other, mix)), map, None, out);
+        self.lay(time, Some((other, mix, time)), map, None, out);
     }
 
     /// Both at once: two clips mixed, and the result faded back towards the pose under it. This is
@@ -314,14 +314,36 @@ impl Clip {
         under: &Pose,
         out: &mut Pose,
     ) {
-        self.lay(time, Some((other, mix)), map, Some((fade, under)), out);
+        self.lay(time, Some((other, mix, time)), map, Some((fade, under)), out);
     }
 
-    /// The body of all four: the channel walk both of the original's blend entries share.
+    /// Two clips **each at its own second**, mixed and then faded back towards the pose under it: the
+    /// sixth entry point ([`game_sim::vehicle_anim::Blend::Pair`]), which only the vehicle's gesture
+    /// slots ask for.
+    ///
+    /// The difference from [`Clip::pose_mixed_faded`] is `other_time`: a two-clip blend samples both
+    /// clips at the same number of seconds, which only makes sense for clips of the same length, and
+    /// this one lets the clip being crossed out of carry on from wherever it had got to. `mix` 0 is
+    /// all of `other`, 1 is all of this one, as everywhere else here.
+    pub fn pose_paired_faded(
+        &self,
+        other: &Clip,
+        time: f32,
+        other_time: f32,
+        mix: f32,
+        map: &[u8],
+        fade: f32,
+        under: &Pose,
+        out: &mut Pose,
+    ) {
+        self.lay(time, Some((other, mix, other_time)), map, Some((fade, under)), out);
+    }
+
+    /// The body of all five: the channel walk the original's blend entries share.
     fn lay(
         &self,
         time: f32,
-        mixed: Option<(&Clip, f32)>,
+        mixed: Option<(&Clip, f32, f32)>,
         map: &[u8],
         faded: Option<(f32, &Pose)>,
         out: &mut Pose,
@@ -329,8 +351,8 @@ impl Clip {
         for (i, c) in self.rotation.iter().enumerate() {
             let Some(j) = joint(map, c.name, out.rot.len()) else { continue };
             let Some(mut q) = c.sample(time) else { continue };
-            if let Some((other, mix)) = mixed {
-                let Some(o) = other.rotation.get(i).and_then(|c| c.sample(time)) else { continue };
+            if let Some((other, mix, at)) = mixed {
+                let Some(o) = other.rotation.get(i).and_then(|c| c.sample(at)) else { continue };
                 q = slerp(mix, o, q, true);
             }
             if let Some((fade, under)) = faded {
@@ -344,8 +366,8 @@ impl Clip {
         for (i, c) in self.position.iter().enumerate() {
             let Some(j) = joint(map, c.name, out.pos.len()) else { continue };
             let Some(mut p) = c.sample(time) else { continue };
-            if let Some((other, mix)) = mixed {
-                let Some(o) = other.position.get(i).and_then(|c| c.sample(time)) else { continue };
+            if let Some((other, mix, at)) = mixed {
+                let Some(o) = other.position.get(i).and_then(|c| c.sample(at)) else { continue };
                 // the original's grouping: the second clip's sample, less the mix of the difference
                 p = sub4(o, scale4(sub4(o, p), mix));
             }
@@ -785,7 +807,20 @@ impl Skeleton {
     /// vertex. Parents are composed before children, so a joint whose parent comes after it in the
     /// list still lands right.
     pub fn world(&self, pose: &Pose) -> Vec<M4> {
-        let local = self.locals(pose);
+        self.compose(&self.locals(pose))
+    }
+
+    /// The same composition down the tree, from local transforms the caller built itself.
+    ///
+    /// [`Skeleton::world`] is this over [`Skeleton::locals`]. It is separate because a pose is not the
+    /// only thing that writes a local transform: the vehicle's suspension, steering and wheel nodes
+    /// are driven from the simulation's own numbers *after* the clip has been sampled
+    /// ([`crate::vehicle`]), which means overwriting four of the locals and then composing. A list
+    /// shorter than the skeleton is padded with the bones' own transforms.
+    pub fn compose(&self, local: &[M4]) -> Vec<M4> {
+        let local: Vec<M4> = (0..self.bones.len())
+            .map(|j| local.get(j).copied().unwrap_or(self.bones[j].local))
+            .collect();
         let parents: Vec<Option<usize>> = self.bones.iter().map(|b| b.parent).collect();
         let mut out = vec![None; local.len()];
         for j in 0..local.len() {
