@@ -460,12 +460,41 @@ pub fn record(
     inputs: &[Input],
     paths: &[&str],
 ) -> Result<Fixture, Reason> {
-    let mut sim = Sim::new(seed);
+    record_at(name, seed, None, inputs, paths)
+}
+
+/// [`record`] from a state somebody else built, rather than from a seed.
+///
+/// What a recording of the *original* starts from is a bike in the middle of a session — a save state,
+/// or an acceptance capture's own first row — and that state is not [`Sim::new`]'s spawn. A regression
+/// fixture of such a run has to start where the run started, or its first tick is a teleport; so the
+/// state goes in and comes back out in [`Fixture::start`], which is what [`verify`] replays from.
+///
+/// The fixture's [`Fixture::seed`] is the state's own [`Sim::rng`], so the two halves of a fixture
+/// cannot disagree about what the run was seeded with.
+pub fn record_from(
+    name: impl Into<String>,
+    start: Sim,
+    inputs: &[Input],
+    paths: &[&str],
+) -> Result<Fixture, Reason> {
+    let seed = start.rng;
+    record_at(name, seed, Some(start), inputs, paths)
+}
+
+fn record_at(
+    name: impl Into<String>,
+    seed: u32,
+    start: Option<Sim>,
+    inputs: &[Input],
+    paths: &[&str],
+) -> Result<Fixture, Reason> {
+    let mut sim = start.as_ref().map_or_else(|| Sim::new(seed), Sim::clone);
     {
         // A path that is not in the walk is a typo, and a watch of a typo would pass for ever.
-        let start = Dump::of(&sim);
+        let at_start = Dump::of(&sim);
         for p in paths {
-            if start.get(p).is_none() {
+            if at_start.get(p).is_none() {
                 return Err(Reason::NoSuchField { path: (*p).to_string() });
             }
         }
@@ -495,7 +524,7 @@ pub fn record(
     Ok(Fixture {
         name: name.into(),
         seed,
-        start: None,
+        start,
         inputs: inputs.to_vec(),
         hashes,
         watches,

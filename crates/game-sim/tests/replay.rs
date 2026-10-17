@@ -46,13 +46,14 @@ use std::path::PathBuf;
 
 use game_sim::hash::Leaf;
 use game_sim::input::{Control, Report, CONTROL_MAP, CONTROLS as PORT_CONTROLS};
+use game_sim::math::{self, Mat4};
 use game_sim::motion::{Clips, Driver, Params, Pose, Request};
 use game_sim::replay::{
     self, Capture, Fixture, PadFrame, PadTape, Playback, Reason, Sample, Value, Watch,
 };
 use game_sim::trick::Trick;
 use game_sim::{Input, Sim};
-use ps2_float::{F, Vf};
+use ps2_float::{Acc, F, Vf};
 
 /// A run with something happening in it: the stick wandering so the inputs are not all identical, long
 /// enough that a divergence in the middle is a middle.
@@ -678,10 +679,12 @@ fn every_capture_in_context_parses() {
 //  3. **The recording itself**, which is game data and therefore not in this repository, and which is
 //     absent in every worktree but the one that recorded it — see this task's journal entry and
 //     `plan/HUMAN.md`. `the_acceptance_run` is where it lands: drop the capture in
-//     `context/capture/acceptance-freeride.csv` and that test is the port's verdict, with no code to
+//     `context/capture/acceptance/` (or loose in `context/capture/`, where `./kit record` writes it
+//     by default — the reader looks in both) and that test is the port's verdict, with no code to
 //     write. Since P5 that verdict is a real comparison: the eight lanes a capture carries are eight
 //     fields of the state the harness drives, so the answer is a tick and a field rather than
-//     `NoSuchField` at tick 0.
+//     `NoSuchField` at tick 0; and since S8 the run starts from the capture's own first row, so tick
+//     0 is an agreement rather than two different spawns.
 //
 // Plus the scale the word "acceptance" implies: the tests at the end of this file run a fixture of
 // several minutes rather than several hundred frames, because a harness that is exact over 600 ticks
@@ -1014,10 +1017,84 @@ fn acceptance_fixture(cap: &Capture) -> Result<Fixture, String> {
             inputs.len(),
         ),
         seed: state as u32,
+        // Where the run starts, read off the capture's own first row rather than fallen back to
+        // `Sim::new`'s spawn — see [`acceptance_start`], and S8's journal entry for the verdict that
+        // made it necessary.
+        start: Some(acceptance_start(cap, state as u32)?),
         inputs,
         watches,
         ..Default::default()
     })
+}
+
+/// **The state the capture's first row was taken in**, as a [`Sim`] the harness can start from.
+///
+/// An acceptance capture is frames out of the middle of a session — the one in hand is the game's
+/// ticks 2774..4584 of a ride that was already minutes old — so [`Sim::new`]'s start line is not
+/// where it begins. Without this, [`Fixture::initial`] falls back to that spawn and the very first
+/// comparison is `tick 0: bike.pos[0] 4309.563 vs 0`: the fixture's own start against the port's,
+/// before a single force has been computed. That was the verdict P5 left to S8 and it is not a
+/// statement about the physics at all.
+///
+/// What the capture carries of a start state is four quads, and all four are seeded here from the
+/// original's own bits:
+///
+/// - the bike's **whole world transform** — its basis in rows 0..2 and its origin in row 3. The basis
+///   goes in as a quaternion through [`math::mat4_to_quat`] rather than through [`Ride::place`]'s
+///   `basis(at, forward, UP)`, because that rebuilds an *up-righted* frame from a forward vector and a
+///   bike mid-ride is rolled and pitched. An up-righted copy of a leaning bike is a different state.
+/// - the body's **velocity** quad, `w` lane included: the original's reads 1.0 on the capture in hand
+///   and a port that leaves it 0 has a divergence in `bike.vel[3]` on every tick of the run.
+///
+/// Everything else about that instant is **not in the capture** and stays at what [`Sim::ride`]
+/// builds: the engine's revs and gear, the suspension's compression and the wheels' spin, the air and
+/// trick state, the balance accumulators, the input layer's press timers, and the area's respawn
+/// point (set here to where the capture starts, which is at least on the ground the rider was on).
+/// Each of those is a real difference from the original's state at tick 0 and each of them is a
+/// reason the replay diverges a few ticks in rather than at tick 0; the journal entry lists them
+/// against what would close them.
+fn acceptance_start(cap: &Capture, seed: u32) -> Result<Sim, String> {
+    // Read through `Capture::float`, which is the same parse the watches get, so the start state's
+    // position and velocity are bit-identical to the tick-0 samples they are compared against.
+    let lane = |column: &str| -> Result<f32, String> {
+        let w = cap.float(column, column).map_err(|e| e.to_string())?;
+        match w.samples.first().map(|s| s.value) {
+            Some(Value::Float(bits)) => Ok(f32::from_bits(bits)),
+            _ => Err(format!("column '{column}' has no first row to start from")),
+        }
+    };
+    let row = |n: usize| -> Result<Vf, String> {
+        Ok(Vf::new(
+            lane(&format!("bike_xform.m{n}0"))?,
+            lane(&format!("bike_xform.m{n}1"))?,
+            lane(&format!("bike_xform.m{n}2"))?,
+            lane(&format!("bike_xform.m{n}3"))?,
+        ))
+    };
+    let m = Mat4([row(0)?, row(1)?, row(2)?, row(3)?]);
+    let vel =
+        Vf::new(lane("bike_vel.x")?, lane("bike_vel.y")?, lane("bike_vel.z")?, lane("bike_vel.w")?);
+
+    let origin = m.0[3];
+    // Row 2 is the forward axis, which is where the original's own reader takes it off this transform
+    // (`Ride::axes`). `place` is called for its clean slate — the derived fields, the wheels, the air
+    // and the ground step's accumulators all zeroed together — and then the parts of the pose the
+    // capture actually measured are put in over the top of it.
+    let mut sim = Sim::new(seed);
+    let ride = &mut sim.rider.ride;
+    ride.place(origin, m.0[2]);
+    ride.spawn = ride.origin;
+    ride.spawn_facing = m.0[2];
+    ride.chassis.quat = math::mat4_to_quat(&m);
+    ride.node = [m.0[0], m.0[1], m.0[2]];
+    ride.chassis.cofg_world = math::transform_point(&m, ride.chassis.cofg);
+    ride.chassis.vel = vel;
+    // A pure function of the velocity, and the integrator's own four instructions for it (`mula`,
+    // `madda`, `madd`, `sqrt`): seeded, because the ground step reads a speed on the frame before the
+    // integrator first writes one and a standing bike's zero is not what the original read there.
+    ride.chassis.speed =
+        Acc::mula(vel.x(), vel.x()).madda(vel.y(), vel.y()).madd(vel.z(), vel.z()).sqrt();
+    Ok(sim)
 }
 
 /// The eight lanes a capture of the original carries, as the port's state names them — the right column
@@ -1063,11 +1140,18 @@ const RNG_STATE: u64 = 0x0123_4567_89ab_cdef;
 /// the rows have to exist before the numbers that belong in them can be simulated. The first pass
 /// writes the capture with its bike columns zeroed and reads it back exactly as a test would; the
 /// second writes the same capture with the port's own numbers in those columns.
+///
+/// Since S8 the start state is one of the things the reader derives from the rows, so the recording
+/// pass starts from the first pass's own [`Fixture::initial`] rather than from a bare seed, and the
+/// two passes are a fixed point: the blank capture's start is the origin with an identity basis and
+/// no velocity, a run from there puts exactly that in row 0, and reading row 0 back gives the same
+/// start again. A `record` from `Sim::new`'s spawn instead would make a capture whose first row is a
+/// state its own reader does not rebuild, and every synthetic fixture would diverge at tick 0.
 fn acceptance_csv(frames: usize, input: impl Fn(usize) -> (u16, (u8, u8))) -> String {
     let blank = acceptance_rows(frames, &input, &|_, _| "0".to_string());
     let read = acceptance_fixture(&Capture::parse(&blank).expect("the recorder's format"))
         .expect("a well-formed capture, whatever its bike columns hold");
-    let port = replay::record("port", read.seed, &read.inputs, &AS_THE_PORT_HAS_THEM)
+    let port = replay::record_from("port", read.initial(), &read.inputs, &AS_THE_PORT_HAS_THEM)
         .expect("the port's own lanes");
     acceptance_rows(frames, &input, &|n: usize, tick: usize| {
         match port.watches[n].samples[tick].value {
@@ -1246,6 +1330,131 @@ fn the_acceptance_run_compares_the_bike_the_port_rides() {
     let d = replay::verify(&moved).expect_err("a divergence in a watched lane fails the run");
     assert_eq!(d.tick, 37);
     assert!(matches!(&d.reason, Reason::Field { path, .. } if path == "bike.pos[1]"), "{d}");
+}
+
+/// The same capture with a chosen basis in its transform's first three rows, leaving the position in
+/// row 3 and the velocity alone.
+///
+/// [`acceptance_rows`] writes an identity basis, which is the one orientation an up-righted rebuild of
+/// a forward vector happens to agree with — so a leaning bike has to be written in by hand for the
+/// start-state test below to be able to tell the two apart.
+fn with_basis(csv: &str, basis: [Vf; 3]) -> String {
+    let mut out = String::new();
+    for (n, line) in csv.lines().enumerate() {
+        let mut cells: Vec<String> = line.split(',').map(str::to_string).collect();
+        // The sixteen transform cells are the last sixteen columns, row-major, so the basis is the
+        // twelve before the position's four.
+        let first = cells.len() - 16;
+        if n > 0 {
+            for row in 0..3 {
+                for col in 0..4 {
+                    cells[first + 4 * row + col] = format!("{}", basis[row].0[col]);
+                }
+            }
+        }
+        out += &cells.join(",");
+        out.push('\n');
+    }
+    out
+}
+
+/// **A fixture starts where the capture starts**, and not at [`Sim::new`]'s start line.
+///
+/// This is S8's own fix. An acceptance capture is frames out of the middle of a session, so a fixture
+/// that falls back to a bare seed is a run that begins with a teleport: the real capture's verdict
+/// before this was `tick 0: bike.pos[0] 4309.563 vs 0`, which compares two spawns and says nothing
+/// about the simulation. Checked three ways, because each one is a different way to get it wrong:
+///
+///  1. all eight lanes of the start state are the capture's own first row, bit for bit — which is also
+///     what makes tick 0 of the real run agree;
+///  2. the *whole basis* survives, not an up-righted copy of it. [`Ride::place`] rebuilds a frame from
+///     a forward vector and world up, which is right for a bike put on a start line and wrong for one
+///     mid-corner; a capture of a leaning bike proves the difference is not being thrown away.
+///  3. it is not the spawn, so a fixture that quietly lost its start state cannot pass this.
+#[test]
+fn a_fixture_starts_where_the_capture_starts() {
+    // A bike leaning left: the basis rolled about its own forward axis (+z) by about 17 degrees,
+    // orthonormal to the last bit the literals can carry.
+    let basis = [
+        Vf::new(0.956_304_8, 0.292_371_7, 0.0, 0.0),
+        Vf::new(-0.292_371_7, 0.956_304_8, 0.0, 0.0),
+        Vf::new(0.0, 0.0, 1.0, 0.0),
+    ];
+    let cap = Capture::parse(&with_basis(&acceptance_csv(8, played), basis)).unwrap();
+    let f = acceptance_fixture(&cap).expect("a well-formed capture");
+    let start = f.initial();
+
+    // (1) The eight lanes the capture carries, as the start state holds them.
+    let lanes = [
+        start.bike_pos().x(),
+        start.bike_pos().y(),
+        start.bike_pos().z(),
+        start.bike_pos().w(),
+        start.bike_vel().x(),
+        start.bike_vel().y(),
+        start.bike_vel().z(),
+        start.bike_vel().w(),
+    ];
+    for (n, path) in AS_THE_PORT_HAS_THEM.iter().enumerate() {
+        assert_eq!(
+            f.watches[n].samples[0].value,
+            Value::Float(lanes[n].to_bits()),
+            "{path}: the start state is not the capture's first row",
+        );
+        assert_eq!(f.watches[n].samples[0].tick, 0, "{path}: the first sample is tick 0");
+    }
+
+    // (2) The lean. The state's own orientation is the quaternion, so the matrix is read back out of
+    // it: a round trip through `mat4_to_quat`, which is exact to about a part in a million and is not
+    // what this is measuring. What it is measuring is that the up axis is the capture's leaning one
+    // and not the world's, and those are 0.29 apart — five orders of magnitude more than the trip.
+    let up = start.rider.ride.transform().0[1];
+    for lane in 0..4 {
+        let (got, want) = (up.0[lane], basis[1].0[lane]);
+        assert!((got - want).abs() < 1e-5, "up lane {lane}: {got} is not {want}");
+    }
+    let upright = Sim::new(f.seed);
+    let world_up = upright.rider.ride.transform().0[1];
+    assert!(
+        (world_up.0[0] - up.0[0]).abs() > 0.1,
+        "an up-righted basis would be indistinguishable from the capture's, so (2) proves nothing",
+    );
+
+    // (3) And it is not the spawn.
+    assert_ne!(
+        start.bike_pos().y(),
+        upright.bike_pos().y(),
+        "the fixture started at `Sim::new`'s spawn, which is the bug this test is about",
+    );
+}
+
+/// **The acceptance gate bites.** A fixture that has lost its start state diverges on tick 0, which is
+/// at or before [`ACCEPTANCE_AGREES_THROUGH`], and [`acceptance_verdict`] fails rather than reporting.
+///
+/// Without this the whole ratchet could be an assert that cannot fire: the verdict reports every
+/// divergence the port has today on purpose, so the one thing worth proving is that it still has a
+/// floor under it.
+#[test]
+#[should_panic(expected = "gone backwards")]
+fn the_acceptance_gate_fails_when_a_run_stops_starting_where_its_capture_does() {
+    let cap = Capture::parse(&acceptance_csv(60, played)).unwrap();
+    let mut f = acceptance_fixture(&cap).unwrap();
+    f.start = None; // what every acceptance fixture was before S8
+    acceptance_verdict(&f);
+}
+
+/// The acceptance capture is looked for in its own folder first and in the recorder's default output
+/// directory second — the mismatch S8 arrived to find, where the capture was in one and the reader
+/// looked only in the other, so the run skipped and said nothing.
+#[test]
+fn an_acceptance_capture_is_looked_for_where_it_is_kept_and_where_the_recorder_writes_it() {
+    let dirs = acceptance_dirs();
+    assert_eq!(dirs[0], private_dir("capture").join("acceptance"), "its own folder, first");
+    assert_eq!(dirs[1], private_dir("capture"), "and `./kit record -o`'s default, second");
+    // Whichever of them holds it, the run finds it: this is the test that would have caught the skip.
+    if let Some((path, _)) = acceptance_capture_text() {
+        assert!(dirs.iter().any(|d| path.parent() == Some(d)), "{} is in neither", path.display());
+    }
 }
 
 /// A capture with a gap in its frames is not an acceptance recording, and says so rather than
@@ -1576,11 +1785,17 @@ fn a_long_fixture_round_trips_as_a_file() {
 ///
 /// Two forms, either of which this finds on its own:
 ///
-/// - `context/capture/acceptance-freeride.csv` — a capture of `watch/acceptance.toml`, straight off
-///   `./kit record`. Read by [`acceptance_fixture`] above, which also checks it really is a recording
-///   of a ridden bike at a fixed step with no frame missing.
+/// - `context/capture/acceptance/acceptance-freeride.csv`, or the same name loose in
+///   `context/capture/` — a capture of `watch/acceptance.toml`, straight off `./kit record`
+///   ([`acceptance_dirs`] says why there are two places and which to prefer). Read by
+///   [`acceptance_fixture`] above, which also checks it really is a recording of a ridden bike at a
+///   fixed step with no frame missing, and which seeds the run's start state from its first row.
 /// - `context/fixtures/slow/acceptance-freeride.fixture` — the same thing in the harness's own format,
-///   for when the capture has been turned into a fixture file once and for all.
+///   for when the capture has been turned into a fixture file once and for all. **Not equivalent to
+///   the capture since S8**: the text format cannot carry a start state yet
+///   ([`replay::Fixture::start`]), so a file written out of this capture replays from `Sim::new`'s
+///   spawn and diverges on tick 0 — the gate below says so in as many words. The capture is the
+///   canonical form of an acceptance run until the format grows a state reader.
 ///
 /// The data is game data — somebody's play of a disc — so it lives in the git-ignored `context/` and is
 /// absent on every machine but the one that recorded it, and in every worktree but the one it was
@@ -1600,14 +1815,11 @@ fn a_long_fixture_round_trips_as_a_file() {
 #[test]
 fn the_acceptance_run() {
     let fixture = private_dir("fixtures").join("slow").join(format!("{ACCEPTANCE}.fixture"));
-    let capture = private_dir("capture").join(format!("{ACCEPTANCE}.csv"));
 
     let f = if fixture.exists() {
         let text = std::fs::read_to_string(&fixture).expect("a readable fixture");
         Fixture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", fixture.display()))
-    } else if capture.exists() {
-        let text = std::fs::read_to_string(&capture).expect("a readable capture");
-        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+    } else if let Some((capture, cap)) = acceptance_capture() {
         println!(
             "{}: {} rows x {} columns, frames {}..{}",
             capture.display(),
@@ -1618,7 +1830,6 @@ fn the_acceptance_run() {
         );
         acceptance_fixture(&cap).unwrap_or_else(|e| panic!("{}: {e}", capture.display()))
     } else {
-        println!("{}", acceptance_recipe(&capture));
         return;
     };
 
@@ -2571,12 +2782,22 @@ fn the_human_recording_in_context_drives_the_port() {
 //     do is crash, scrape a slope or land sideways on purpose.
 //   * **The bike is now the thing the harness drives** (P5): `Sim` is the ride, the rider and the
 //     world the shell builds, and its walk names the capture's eight lanes, so the verdict of the real
-//     fixture is a tick and a field rather than `NoSuchField bike.pos[0]` at tick 0. It is a real
-//     comparison from here on, and [`acceptance_verdict`] *panics* on a `Field` divergence — which is
-//     the right failure and is also untried, because no acceptance capture exists in the worktree P5
-//     was done in. Whoever next runs `./kit check` where the data is owns the first verdict: the
-//     numbers are a stand-in bike's until S3's movement and S10's air are 1:1, so expect a
-//     divergence, and expect to decide there whether this gate panics or reports.
+//     fixture is a tick and a field rather than `NoSuchField bike.pos[0]` at tick 0.
+//   * **The run starts where the recording starts** (S8). P5's first real verdict was `tick 0:
+//     bike.pos[0] 4309.563 vs 0` — the capture is the game's ticks 2774..4584 of a session already
+//     minutes old, and the fixture fell back to `Sim::new`'s start line, so the comparison was two
+//     spawns and not a simulation. [`acceptance_start`] seeds the state from the capture's own first
+//     row: the bike's whole world transform and the body's velocity, bit for bit. Tick 0 agrees on all
+//     eight lanes now, and `bike.pos[3]` and `bike.vel[3]` — the quads' `w` lanes, 1.0 in the original
+//     — agree on all 1,810 recorded ticks, through both crashes.
+//   * **And the gate reports rather than panics, down to a recorded tick**
+//     ([`ACCEPTANCE_AGREES_THROUGH`]), which is the decision P5 left to S8. The run parts from the
+//     original at tick 1 and the reason is not the physics: a fixture has no ground in it, so the
+//     port's bike free-falls 208 units towards `Flat`'s floor while the original's rides Free09's.
+//     That is the status of the port, not a regression, and a gate that panics on it reddens every
+//     unrelated task's `./kit check` in any checkout holding the data — which is how the captures came
+//     to be parked out of the readers' way to begin with. So the agreement is a constant the run must
+//     reach, getting further asks for it to be raised, and falling short of it fails.
 
 /// The `frame_counter` (app+0x374) in `first_recording.p2m2`'s own save state, read with
 /// `./kit state extract` — the tick the recording starts from.
@@ -2621,51 +2842,167 @@ fn acceptance_recipe(capture: &PathBuf) -> String {
     )
 }
 
-/// The acceptance capture in `context/capture/`, parsed — or `None`, with the recipe printed.
+/// Where an acceptance capture lives, in the order the readers look.
+///
+/// Two places, because both are in use and neither is wrong:
+///
+/// - **`context/capture/acceptance/`** is the home of the captures of this recording, and the one
+///   whoever records more of them should use. `context/capture/` is scanned by half a dozen tests that
+///   each pick up any CSV carrying their columns — the input decode, the pad tape, the whole-frame
+///   lag tests — so a capture sitting loose in it is read by every one of them, and an acceptance
+///   capture is the one kind whose verdict is *the status of the port* rather than a pass or a fail.
+///   Keeping the set in a subfolder is what lets `./kit check` be green about unrelated work in a
+///   checkout that has the data (V16 moved them there for exactly that reason, and the main checkout
+///   keeps them there).
+/// - **`context/capture/`** is still read, because that is where `./kit record -o` puts a file by
+///   default and a capture dropped straight out of the recorder should be found, not skipped.
+///
+/// S8 decided this rather than moving the file: the reader looks in both, the recipe below names the
+/// subfolder, and nothing in `context/` is moved by a test.
+fn acceptance_dirs() -> [PathBuf; 2] {
+    [private_dir("capture").join("acceptance"), private_dir("capture")]
+}
+
+/// The acceptance capture, from the first of [`acceptance_dirs`] that holds it — or `None`, with the
+/// recipe printed.
 ///
 /// Game data, so git-ignored and absent on every machine but the one that recorded it, and absent in
 /// every worktree but the one it was recorded in (`context/` is per-worktree). A test cannot fail over
 /// a file the repository is not allowed to hold.
 fn acceptance_capture() -> Option<(PathBuf, Capture)> {
-    let path = private_dir("capture").join(format!("{ACCEPTANCE}.csv"));
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        println!("{}", acceptance_recipe(&path));
+    let Some((path, text)) = acceptance_capture_text() else {
+        println!("{}", acceptance_recipe(&acceptance_dirs()[0].join(format!("{ACCEPTANCE}.csv"))));
         return None;
     };
     let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     Some((path, cap))
 }
 
+/// The acceptance capture's path and bytes, wherever it is.
+fn acceptance_capture_text() -> Option<(PathBuf, String)> {
+    for dir in acceptance_dirs() {
+        let path = dir.join(format!("{ACCEPTANCE}.csv"));
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            return Some((path, text));
+        }
+    }
+    None
+}
+
+/// **The last tick the port is known to agree with the original on**, and so the gate the acceptance
+/// run is: it must still agree through this tick, and a divergence at or before it is a regression and
+/// a failure. Raising this number is the progress every task after S8 makes.
+///
+/// It is 0, and 0 is not nothing: tick 0 is the state the run starts from, and the port agreeing with
+/// the original there on all eight lanes of [`BIKE`] — the bike's whole world transform and the body's
+/// velocity, bit for bit — is what [`acceptance_start`] bought. It was `NoSuchField` before P5 and a
+/// 4,309-unit teleport before S8.
+///
+/// Tick 1 is where it stops, and the reason is measured rather than guessed: `bike.pos[1]` is
+/// 208.02884 in the original and 207.98192 in the port. Over the first eight ticks the port's bike
+/// loses 0.0475, 0.0809, 0.1165, 0.1519… units a tick — second differences of a flat 0.0353, which at
+/// the 30 Hz step is an acceleration of 31.8 units/s², i.e. [`game_sim::phy::G`] and nothing else.
+/// **The port's bike is in free fall and the original's is on the ground**, losing 0.00058 a tick down
+/// a gentle slope. The recording is a ride over Free09 at a ground height of about 208 and
+/// [`replay::verify`] replays over [`game_sim::world::Flat`] at y = 0, so the port's wheels find
+/// nothing 208 units below them.
+///
+/// So the first thing between this gate and the acceptance run passing is **the world, not the
+/// physics**: a fixture carries a start state now and still carries no ground, and until it carries
+/// the track the rider was on there is no tick 1 to agree about. After that, in the order they will
+/// bite: the bike is a stand-in 250 and the recording is a Race125 (D7), and S3's movement and S10's
+/// air are not yet 1:1.
+const ACCEPTANCE_AGREES_THROUGH: u64 = 0;
+
 /// What a replay of the real acceptance fixture means today, in one line, and what makes it fail.
 ///
-/// Three outcomes, and only one of them is a bug in the port:
+/// **This reports rather than fails, down to [`ACCEPTANCE_AGREES_THROUGH`].** P5 left the choice to
+/// S8 and this is it, for one reason: a divergence here is the *status of the port*, not a regression
+/// in whoever ran the tests. The acceptance run is the only test in the project whose red means "the
+/// port is not finished yet", and the port is not finished yet — the world is not in a fixture, the
+/// bike is a stand-in and two movement tasks are open. A gate that panics on that reddens `./kit
+/// check` for every unrelated task in any checkout that has the data, which is how the data came to
+/// be parked out of the readers' way in the first place ([`acceptance_dirs`]); and a gate that is
+/// merely silent proves nothing. So it is a ratchet: the agreement so far is a constant, the run has
+/// to reach it, and getting further prints a line asking for the constant to be raised.
 ///
-/// - `Ok` — the port agreed with every recorded tick. That is the acceptance run passing.
+/// Four outcomes:
+///
+/// - `Ok` — the port agreed with every recorded tick. That is the acceptance run passing, and the
+///   point of the whole file.
+/// - a divergence **after** the agreed tick — printed, with how far the run got and the first tick
+///   each lane parts company on, which is where to start reading. Not a failure.
+/// - a divergence **at or before** the agreed tick — panics. The port has gone backwards, or the
+///   fixture has stopped carrying its start state.
 /// - `NoSuchField` — the fixture watches a field the port's state does not have. Since P5 the eight
-///   bike lanes of [`BIKE`] are all fields of the state the harness drives, so this is no longer the
-///   expected answer: it now means a fixture file older than the walk, or a capture carrying a column
-///   the reader aims somewhere the walk does not go. Printed rather than failed either way, because
-///   the port is not what is wrong in that case.
-/// - anything else (`Field`, `Hash`, `WrongKind`, `Unreached`) — the port and the original disagree
-///   about a number, which is the failure this whole file exists to produce. Panics, with the tick and
-///   the field in the message.
+///   bike lanes of [`BIKE`] are all fields of the state the harness drives, so this means a fixture
+///   file older than the walk, or a capture carrying a column the reader aims somewhere the walk does
+///   not go. Printed: the port is not what is wrong in that case.
 fn acceptance_verdict(f: &Fixture) {
-    match replay::verify(f) {
-        Ok(end) => println!(
-            "the port agrees with every recorded tick of {}: {} ticks, {} checks",
-            f.name,
-            end.ticks,
-            f.checks(),
-        ),
-        Err(d) => match &d.reason {
-            Reason::NoSuchField { path } => println!(
-                "the state has no '{path}': the capture names a field this walk does not, which is \
-                 the fixture's own fault and not a divergence — a fixture file recorded against an \
-                 older walk, or a column aimed at a path nothing renames. {d}",
-            ),
-            _ => panic!("the acceptance run diverges: {d}"),
-        },
+    let d = match replay::verify(f) {
+        Ok(end) => {
+            println!(
+                "the port agrees with every recorded tick of {}: {} ticks, {} checks",
+                f.name,
+                end.ticks,
+                f.checks(),
+            );
+            return;
+        }
+        Err(d) => d,
+    };
+    if let Reason::NoSuchField { path } = &d.reason {
+        println!(
+            "the state has no '{path}': the capture names a field this walk does not, which is the \
+             fixture's own fault and not a divergence — a fixture file recorded against an older \
+             walk, or a column aimed at a path nothing renames. {d}",
+        );
+        return;
     }
+    assert!(
+        d.tick > ACCEPTANCE_AGREES_THROUGH,
+        "the acceptance run has gone backwards: it agreed through tick \
+         {ACCEPTANCE_AGREES_THROUGH} and now diverges at {d}. If this is tick 0 and the run came \
+         from a `.fixture` file, that is the text format rather than the port: it cannot carry a \
+         start state yet (`Fixture::start`), so an acceptance fixture written out with `to_text` \
+         replays from the spawn — replay the capture instead",
+    );
+    println!(
+        "the acceptance run of {} reaches tick {} of {} before it parts from the original: {d}",
+        f.name,
+        d.tick,
+        f.last_tick(),
+    );
+    for (path, tick) in first_divergence_per_lane(f) {
+        match tick {
+            Some(tick) => println!("  {path}: agrees through tick {}, parts at {tick}", tick - 1),
+            None => println!("  {path}: agrees on every recorded tick"),
+        }
+    }
+    if d.tick > ACCEPTANCE_AGREES_THROUGH + 1 {
+        println!(
+            "  — further than ACCEPTANCE_AGREES_THROUGH ({ACCEPTANCE_AGREES_THROUGH}) says: raise \
+             it to {} and the gate holds the new ground",
+            d.tick - 1,
+        );
+    }
+}
+
+/// Which lane parts company with the original first, and on which tick — A1's field-level diff, over
+/// the one fixture that compares the port against the game.
+///
+/// One replay per lane, each a copy of the fixture watching that lane alone, because `verify` stops at
+/// the first disagreement of any kind: the run's own first divergence says *a* lane and this says all
+/// eight. A lane that never disagrees is `None`, which on a divergent run is the interesting answer —
+/// it means the lane the whole-fixture verdict named is the only one that moved.
+fn first_divergence_per_lane(f: &Fixture) -> Vec<(String, Option<u64>)> {
+    f.watches
+        .iter()
+        .map(|w| {
+            let one = Fixture { watches: vec![w.clone()], hashes: Vec::new(), ..f.clone() };
+            (w.path.clone(), replay::verify(&one).err().map(|d| d.tick))
+        })
+        .collect()
 }
 
 /// **Every acceptance capture in `context/capture/` is the original at a step the port can match.**
@@ -2684,9 +3021,9 @@ fn acceptance_verdict(f: &Fixture) {
 /// a GUI — it is printed where whoever runs the tests will see it.
 #[test]
 fn every_acceptance_capture_is_the_original_at_a_step_the_port_can_match() {
-    let dir = private_dir("capture");
+    let dirs = acceptance_dirs();
     let mut found = 0;
-    for path in files_in(&dir, "csv") {
+    for path in dirs.iter().flat_map(|d| files_in(d, "csv")) {
         let text = std::fs::read_to_string(&path).expect("a readable capture");
         let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         // The acceptance spec's own column. A capture of `watch/input.toml` has the pad and no bike,
@@ -2748,7 +3085,7 @@ fn every_acceptance_capture_is_the_original_at_a_step_the_port_can_match() {
         acceptance_verdict(&f);
     }
     if found == 0 {
-        println!("{}", acceptance_recipe(&dir.join(format!("{ACCEPTANCE}.csv"))));
+        println!("{}", acceptance_recipe(&dirs[0].join(format!("{ACCEPTANCE}.csv"))));
     }
 }
 
