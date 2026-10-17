@@ -68,6 +68,7 @@ use game_sim::motion::{
     Snapshot,
 };
 use game_sim::trick::Stunt;
+use game_sim::vehicle_anim;
 use ps2_float::F;
 
 /// A clip bound to a skeleton: the file, and the map from its channel names to that skeleton's
@@ -250,9 +251,11 @@ impl Set {
     ///   `ramp` ([`Clip::pose_faded`]).
     /// - [`Blend::Two`] — two clips at the *first* one's clip time, mixed by `mix`, and the result
     ///   faded by `ramp` ([`Clip::pose_mixed_faded`]).
-    /// - [`Blend::Three`] — four clips and three weights. Not drawn: no arm of the rider's own
-    ///   selection asks for it (S6, S20), the nesting of two mixes into a third is not ported, and
-    ///   inventing it would be arithmetic nobody has checked. The pose is left as it was.
+    /// - [`Blend::Three`] — four clips and three weights: two pairs mixed by `mix`, the two results
+    ///   crossed by `cross`, all four at the first clip's clip time, faded by `ramp`
+    ///   ([`Clip::pose_four_faded`]). No arm of the rider's own selection asks for it; the rider's
+    ///   *other* state machine does, from the two interpolating bands of its pose grid
+    ///   ([`Set::apply_vehicle`], V11).
     ///
     /// A blend whose clips are not all bound draws nothing and leaves the pose alone, which is the
     /// same frame the simulation's clock skips.
@@ -262,130 +265,142 @@ impl Set {
             lib.clip(slot).map(|id| id.0 as usize).filter(|&at| at < set.clips.len())
         };
         match blend {
-            Blend::Free => {
-                // A clip that has run out holds the pose it ended on. The advance stops stepping a
-                // finished clip and resets its clock to zero on the way out, so sampling at
-                // `sample_time` here would snap the rider back to the clip's first frame — which is
-                // not what "a finished clip holds its last pose" means. See the journal.
-                if player.finished {
-                    return false;
-                }
-                let Some(at) = player.clip.map(|id| id.0 as usize).filter(|&at| at < self.clips.len())
-                else {
-                    return false;
-                };
-                let bound = &self.clips[at];
-                bound.clip.pose(time, &bound.joints, &mut self.pose);
-                true
-            }
-            Blend::One { ramp, clip: slot, .. } => {
-                let Some(at) = clip(self, slot) else { return false };
-                let bound = &self.clips[at];
-                bound.clip.pose_faded(time, &bound.joints, ramp.0, &self.under, &mut self.pose);
-                true
-            }
+            Blend::Free => self.draw_free(time, player),
+            Blend::One { ramp, clip: slot, .. } => self.draw_one(time, ramp.0, clip(self, slot)),
             Blend::Two { mix, ramp, a, b, .. } => {
-                let (Some(x), Some(y)) = (clip(self, a), clip(self, b)) else { return false };
-                let (first, second) = (&self.clips[x], &self.clips[y]);
-                first.clip.pose_mixed_faded(
-                    &second.clip,
-                    time,
-                    mix.0,
-                    &first.joints,
-                    ramp.0,
-                    &self.under,
-                    &mut self.pose,
-                );
-                true
+                self.draw_two(time, mix.0, ramp.0, clip(self, a), clip(self, b))
             }
-            Blend::Three { .. } => false,
+            Blend::Three { mix, cross, ramp, a, b, c, d, .. } => {
+                let four = [clip(self, a), clip(self, b), clip(self, c), clip(self, d)];
+                self.draw_four(time, mix.0, cross.0, ramp.0, four)
+            }
         }
     }
 
-    /// Write [`Set::pose`] from one of the *vehicle's* blends
-    /// ([`game_sim::vehicle_anim::Blend`]), at the clip time its clock reached.
+    /// Write [`Set::pose`] from a blend of the *other* animation machine — the sixty-state one the
+    /// rider's own body actor runs ([`game_sim::vehicle_anim`], S25 and V11) — which is where the two
+    /// entry points nothing else in the image calls come from.
     ///
-    /// The vehicle's machine reaches five of the library's entry points where the rider's reaches
-    /// three, and it names its clips by handle rather than by slot — its table is indexed by
-    /// animation state and has no slot names. Mode for mode this is the same mapping [`Set::apply`]
-    /// makes, with the two the rider never asks for added:
+    /// The same five samplers as [`Set::apply`], plus:
     ///
-    /// - `Free`, `One`, `Two` — the same three samplers, for the same reasons.
-    /// - `Pair` — two clips **each at its own phase**, mixed and faded
-    ///   ([`Clip::pose_paired_faded`]). The second clip's time is its own duration times its own
-    ///   phase, which is what [`game_sim::motion::Player::drive_at`] would have computed for it had
-    ///   the clock driven it; the clock only ever drives the first.
-    /// - `Four` — four clips and three weights. Not drawn, exactly as [`Blend::Three`] is not: the
-    ///   nesting of two mixes into a third is not ported and inventing it would be arithmetic
-    ///   nobody has checked. The pose is left as it was.
-    pub fn apply_vehicle(&mut self, blend: game_sim::vehicle_anim::Blend, player: &Player) -> bool {
-        use game_sim::vehicle_anim::Blend as VBlend;
-        // The vehicle's own `sample_time`: the same question `Player::sample_time` answers, asked of
-        // the other blend — a phase-driven blend samples where `drive_at` left `prev`, and the
-        // free-running advance samples its own clock.
-        let time = match blend.driven() {
-            None => player.time,
-            Some(_) => player.prev,
+    /// - [`vehicle_anim::Blend::Four`] — the pose grid's two interpolating bands, which is
+    ///   [`Blend::Three`] on the library's side and the same [`Clip::pose_four_faded`] call;
+    /// - [`vehicle_anim::Blend::Pair`] — the gesture slots' arm: two clips **each at its own clip
+    ///   time**, `b`'s being last frame's progress through the gesture that was running
+    ///   ([`Clip::pose_pair_faded`]).
+    ///
+    /// It takes no library: this machine's blends carry the handles themselves, because its clip table
+    /// is indexed by state and not by stunt slot.
+    pub fn apply_vehicle(&mut self, blend: vehicle_anim::Blend, player: &Player) -> bool {
+        let time = blend.sample_time(player).0;
+        let at = |set: &Set, id: Option<ClipId>| -> Option<usize> {
+            id.map(|id| id.0 as usize).filter(|&at| at < set.clips.len())
         };
         match blend {
-            VBlend::Free => {
-                if player.finished {
-                    return false;
-                }
-                let Some(at) = self.at(player.clip) else { return false };
-                let bound = &self.clips[at];
-                bound.clip.pose(time.0, &bound.joints, &mut self.pose);
-                true
+            vehicle_anim::Blend::Free => self.draw_free(time, player),
+            vehicle_anim::Blend::One { ramp, clip, .. } => {
+                self.draw_one(time, ramp.0, at(self, clip))
             }
-            VBlend::One { ramp, clip, .. } => {
-                let Some(at) = self.at(clip) else { return false };
-                let bound = &self.clips[at];
-                bound.clip.pose_faded(time.0, &bound.joints, ramp.0, &self.under, &mut self.pose);
-                true
+            vehicle_anim::Blend::Two { mix, ramp, a, b, .. } => {
+                self.draw_two(time, mix.0, ramp.0, at(self, a), at(self, b))
             }
-            VBlend::Two { mix, ramp, a, b, .. } => {
-                let (Some(x), Some(y)) = (self.at(a), self.at(b)) else { return false };
-                let (first, second) = (&self.clips[x], &self.clips[y]);
-                first.clip.pose_mixed_faded(
-                    &second.clip,
-                    time.0,
-                    mix.0,
-                    &first.joints,
-                    ramp.0,
-                    &self.under,
-                    &mut self.pose,
-                );
-                true
+            vehicle_anim::Blend::Four { mix, cross, ramp, a, b, c, d, .. } => {
+                let four = [at(self, a), at(self, b), at(self, c), at(self, d)];
+                self.draw_four(time, mix.0, cross.0, ramp.0, four)
             }
-            VBlend::Pair { phase_b, mix, ramp, a, b, .. } => {
-                let (Some(x), Some(y)) = (self.at(a), self.at(b)) else { return false };
-                let (first, second) = (&self.clips[x], &self.clips[y]);
-                // The machine's second phase is a ratio of two clip durations, and a clip the set
-                // could not bind has a duration of zero — so it can arrive as a non-number. The
-                // renderer takes that as the clip's start rather than passing it on: a NaN sample
-                // time poses the whole skeleton with NaN, which is a hole in the screen.
-                let other = (second.clip.timing.duration * phase_b).0;
-                let other = if other.is_finite() { other } else { 0.0 };
-                first.clip.pose_paired_faded(
-                    &second.clip,
-                    time.0,
-                    other,
-                    mix.0,
-                    &first.joints,
-                    ramp.0,
-                    &self.under,
-                    &mut self.pose,
-                );
-                true
+            vehicle_anim::Blend::Pair { mix, ramp, a, b, .. } => {
+                // the second clip's own clip time: its duration times its own phase, which is the one
+                // number this entry point needs and the four-clip one does not
+                let second = blend.pair_time(&self.timing(b)).unwrap_or_default();
+                self.draw_pair(time, second.0, mix.0, ramp.0, at(self, a), at(self, b))
             }
-            VBlend::Four { .. } => false,
         }
     }
 
-    /// Where a handle sits in [`Set::clips`], or `None` for the two ways of having no clip: the
-    /// handle is missing, or it points past the clips this set actually bound.
-    fn at(&self, id: Option<ClipId>) -> Option<usize> {
-        id.map(|id| id.0 as usize).filter(|&at| at < self.clips.len())
+    /// Mode 0: the clip already on, at the clock its own dt step left.
+    fn draw_free(&mut self, time: f32, player: &Player) -> bool {
+        // A clip that has run out holds the pose it ended on. The advance stops stepping a finished
+        // clip and resets its clock to zero on the way out, so sampling at `sample_time` here would
+        // snap the rider back to the clip's first frame — which is not what "a finished clip holds its
+        // last pose" means. See the journal.
+        if player.finished {
+            return false;
+        }
+        let Some(at) = player.clip.map(|id| id.0 as usize).filter(|&at| at < self.clips.len()) else {
+            return false;
+        };
+        let bound = &self.clips[at];
+        bound.clip.pose(time, &bound.joints, &mut self.pose);
+        true
+    }
+
+    /// Mode 1: one clip, faded back towards the snapshotted pose.
+    fn draw_one(&mut self, time: f32, ramp: f32, a: Option<usize>) -> bool {
+        let Some(at) = a else { return false };
+        let bound = &self.clips[at];
+        bound.clip.pose_faded(time, &bound.joints, ramp, &self.under, &mut self.pose);
+        true
+    }
+
+    /// Mode 2: two clips at the first one's clip time.
+    fn draw_two(&mut self, time: f32, mix: f32, ramp: f32, a: Option<usize>, b: Option<usize>) -> bool {
+        let (Some(x), Some(y)) = (a, b) else { return false };
+        let (first, second) = (&self.clips[x], &self.clips[y]);
+        first.clip.pose_mixed_faded(
+            &second.clip,
+            time,
+            mix,
+            &first.joints,
+            ramp,
+            &self.under,
+            &mut self.pose,
+        );
+        true
+    }
+
+    /// Mode 4: four clips and three weights, all at the first one's clip time.
+    fn draw_four(&mut self, time: f32, mix: f32, cross: f32, ramp: f32, of: [Option<usize>; 4]) -> bool {
+        let [Some(w), Some(x), Some(y), Some(z)] = of else { return false };
+        let (a, b, c, d) = (&self.clips[w], &self.clips[x], &self.clips[y], &self.clips[z]);
+        a.clip.pose_four_faded(
+            &b.clip,
+            &c.clip,
+            &d.clip,
+            time,
+            mix,
+            cross,
+            &a.joints,
+            ramp,
+            &self.under,
+            &mut self.pose,
+        );
+        true
+    }
+
+    /// Mode 5: two clips, each at its own clip time.
+    fn draw_pair(
+        &mut self,
+        time: f32,
+        other_time: f32,
+        mix: f32,
+        ramp: f32,
+        a: Option<usize>,
+        b: Option<usize>,
+    ) -> bool {
+        let (Some(x), Some(y)) = (a, b) else { return false };
+        let (first, second) = (&self.clips[x], &self.clips[y]);
+        first.clip.pose_pair_faded(
+            &second.clip,
+            time,
+            other_time,
+            mix,
+            &first.joints,
+            &second.joints,
+            ramp,
+            &self.under,
+            &mut self.pose,
+        );
+        true
     }
 
     /// Every joint's transform under the live pose — one matrix per joint, which is what places a

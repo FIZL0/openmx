@@ -49,11 +49,13 @@
 //!   46..=59 get_ready group       played once               the same
 //! ```
 //!
-//! ## What it is not
+//! ## Which state
 //!
-//! The function that *decides* the state — [`Driver::want`]'s writer — is the vehicle's own update and
-//! is not here; this module is handed the state and answers with the call. Nothing here draws: the
-//! clips are handles ([`crate::motion::ClipId`]) and the pose they sample is the renderer's, exactly as in
+//! The function that *decides* the state is the animated object's own update, which in the original
+//! is the step's caller: it chooses, calls the step, and files two fields away for the next frame.
+//! That is [`Update`], and the two fields are what make the restart test and the stunt cross-fade
+//! read one frame behind. Nothing here draws: the clips are handles
+//! ([`crate::motion::ClipId`]) and the pose they sample is the renderer's, exactly as in
 //! [`crate::motion`].
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
@@ -61,6 +63,7 @@
 use crate::chassis::turn;
 use crate::hash;
 use crate::motion::{Animations, Clip, ClipId, Played, Player, Put, clamp01, remap};
+use crate::rng::Rng;
 use crate::trick::{SLOTS, Stunt};
 use ps2_float::{Dest, F, Vf, libm};
 
@@ -137,6 +140,14 @@ pub const GET_READY: i32 = 46;
 /// `get_ready_start_pos_01`, the first of the three start poses — the tail of the start-line group,
 /// which is the one part of it a cut request does not shorten.
 pub const START_POS: i32 = 57;
+/// `get_ready_idle_01`, the first of the ten idles in the start-line group. The chooser draws from
+/// them twice: once for the pose a body waits on the gate in, and once for the fidget a body plays
+/// when it has been standing still for long enough.
+pub const IDLE: i32 = GET_READY + 1;
+/// How many of those idles there are.
+pub const IDLES: i32 = 10;
+/// How many start poses there are, which is the other list the chooser draws from.
+pub const START_POSES: i32 = 3;
 
 // ---------------------------------------------------------------------------------------------------
 // which clip
@@ -267,8 +278,12 @@ impl Lag {
 // what the step is handed
 // ---------------------------------------------------------------------------------------------------
 
-/// The vehicle's own numbers that the step reads and never writes: the five fade rates, the two
-/// phases the stunt cross-fade is built from, and the pose grid's three thresholds.
+/// The animated object's own numbers: the five fade rates, the two phases the stunt cross-fade is
+/// built from, and the pose grid's three thresholds.
+///
+/// The step only reads them. [`Update::serviced`] writes one, [`Params::start_phase`], because in the
+/// original that field lives on the object beside the rest of these and is filed away by the update
+/// after every step.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Params {
     /// The rate a gesture slot's cross-fade falls at, and `nohandedlander`'s.
@@ -326,6 +341,41 @@ pub struct Request {
     /// How many requests the caller has made. The restart test compares it against the count the step
     /// was last run with, so a repeat of the *same* state still restarts.
     pub seq: i32,
+}
+
+/// The id the gesture field holds when nothing is asked for: the slot count, one past the last
+/// gesture slot.
+pub const NO_GESTURE: i32 = SLOTS as i32;
+
+/// The whole request block: the fields the step reads ([`Request`]), and the ones only the state
+/// chooser reads.
+///
+/// One block in the original, two structs here, because [`Driver::frame`] was ported first and takes
+/// the half it reads on its own. [`Update::want`] is handed this, reads both halves, and writes
+/// exactly one field of it — the start-line flag, which it clears on the frame the gate opens.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Asked {
+    /// What the step itself reads. Its [`Request::cut`] is the start-line flag the chooser branches
+    /// on first, and the only field of the block anything in the port writes.
+    pub request: Request,
+    /// The body is wrecked. Nothing else gets a look in while it is.
+    pub wrecked: bool,
+    /// Which gesture slot is asked for, or [`NO_GESTURE`] for none.
+    pub gesture: i32,
+    /// The body is in a flip.
+    pub flipping: bool,
+    /// The body is in the air.
+    pub airborne: bool,
+    /// The landing is a no-hander, which takes the place of whatever gesture was asked for.
+    pub no_hands: bool,
+    /// Not zero while the bike is going backwards; which of the two reverse states runs is then the
+    /// phase axis against a half.
+    pub reversing: F,
+    /// Not zero while the rider is being told to go. This is what opens the start gate.
+    pub commanded: F,
+    /// The number the start-line breathe is three and a half seconds less, less the start-line fade
+    /// rate. What it measures is not known: the writer of this block is not located.
+    pub settle: F,
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -413,6 +463,31 @@ impl Blend {
             Blend::Two { phase, a, .. } => Some((phase, a)),
             Blend::Four { phase, a, .. } => Some((phase, a)),
             Blend::Pair { phase_a, a, .. } => Some((phase_a, a)),
+        }
+    }
+
+    /// The clip time the pose comes from, which is the same question as which clock the entry point
+    /// drives: a phase-driven blend samples at `duration x phase`, where [`Player::drive_at`] has just
+    /// left it, and the free-running advance at the clock its own dt step reached.
+    ///
+    /// The same rule as [`crate::motion::Player::sample_time`], and the same reason it is named on
+    /// this side: the clock is the simulation's and the drawing side has no business recomputing it.
+    /// The pair at two phases needs one number more — its second clip's own time, which is
+    /// [`Blend::pair_time`].
+    pub fn sample_time(self, player: &Player) -> F {
+        match self.driven() {
+            None => player.time,
+            Some(_) => player.prev,
+        }
+    }
+
+    /// The *second* clip's clip time, for the pair at two phases: that clip's own duration times its
+    /// own phase. `None` for every other entry point, none of which samples a second clip anywhere but
+    /// at the first one's time.
+    pub fn pair_time(self, b: &Clip) -> Option<F> {
+        match self {
+            Blend::Pair { phase_b, .. } => Some(b.duration * phase_b),
+            _ => None,
         }
     }
 
@@ -510,16 +585,17 @@ pub struct Frame {
 /// The vehicle's animation state, as the step keeps it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Driver {
-    /// The state the caller has asked for. Written by the vehicle's own update, which is not this
-    /// module; the step latches it into [`Driver::state`] and never writes it.
+    /// The state the caller has asked for. Written by [`Update::want`], the animated object's own
+    /// update; the step latches it into [`Driver::state`] and never writes it.
     pub want: i32,
     /// The state running. Out of `0..60` and the frame makes no call at all.
     pub state: i32,
     /// The state that was running before the last restart, and the clip the stunt cross-fade comes out
     /// of. Only a value below [`SLOTS`] gets that cross-fade; anything else plays the new clip alone.
     pub prev: i32,
-    /// The request count the restart test compares against. The step only reads it — the vehicle's
-    /// update is what stores the count it has serviced.
+    /// The request count the restart test compares against. The step only reads it:
+    /// [`Update::serviced`] is what stores the count, after the step, which is why a count that
+    /// moves restarts the state on exactly one frame.
     pub seq: u8,
     /// The rate the cross-fade ramp falls at, picked out of [`Params`] by the asked-for state on every
     /// restart. Also the length of the cross the played-once groups put their clip on with.
@@ -795,6 +871,207 @@ impl Driver {
             _ => Blend::Free,
         };
         Frame { place, restart, play, blend }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// which state
+// ---------------------------------------------------------------------------------------------------
+
+/// The state the chooser reaches for outside the body it belongs to: the game's generator, and the
+/// start poses already handed out.
+///
+/// Both are globals in the original — the generator is the C library's one word, the list is a file
+/// static with its own count — and the list being shared is the point of it: two bodies on the same
+/// start line draw from one list, so they cannot be given the same pose. One of these per race, not
+/// one per body.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Shared {
+    /// The generator every draw in the chooser comes out of.
+    pub rng: Rng,
+    /// The start poses handed out so far. The tenth draw fills it; the next one throws it away and
+    /// starts again with the one new pose.
+    pub used: Vec<i32>,
+}
+
+/// The body's own update: the writer of [`Driver::want`], which is what the machine was missing.
+///
+/// [`Driver::frame`] is handed a state and answers with a call into the motion library. This is the
+/// half that picks the state — and in the original it is the *caller*: one function that chooses,
+/// calls the step, and then files two fields away for the next frame. The port is that function in
+/// two halves with the step between them, [`Update::want`] and [`Update::serviced`], because nothing
+/// else can be done with a function that calls what it is handed.
+///
+/// Without this, nothing in the port ever asks for the pose grid, and the pose grid is the only
+/// caller of the four-clip blend in the image.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Update {
+    /// How long until the next standing-still fidget. Counted down on every frame the body is
+    /// standing still with nothing commanded, and re-armed to a draw between [`Update::wait`] when it
+    /// is not running at all.
+    pub idle_wait: F,
+    /// A fidget is playing, which is what stops the chooser asking for the pose grid again until the
+    /// clip has run out.
+    pub idle_playing: bool,
+    /// A start-line pose has been drawn for this body.
+    pub start_picked: bool,
+    /// How long the start-line breathe has left before another pose is drawn.
+    pub breathe_wait: F,
+    /// How slow counts as standing still. The body's constructor sets a fifth of the pose grid's
+    /// first threshold.
+    pub still_band: F,
+    /// The two bounds the fidget's wait is drawn between, low then high: fifteen and forty-five
+    /// seconds in the body's constructor.
+    pub wait: [F; 2],
+    /// The wrecked body has stopped moving. Written by another method of the same object, which is
+    /// not ported: false is the airborne flail, true is one of the five hold poses.
+    pub settled: bool,
+}
+
+impl Update {
+    /// The state to ask for this frame: everything the original's update does *before* it calls the
+    /// step.
+    ///
+    /// Writes [`Driver::want`], the chooser's own four live fields, and — on the one frame the start
+    /// gate opens — the request's start-line flag. [`Player::finished`] is read and cleared here
+    /// too: a played-once pose running out is how the chooser knows to choose again.
+    pub fn want(
+        &mut self,
+        dt: F,
+        d: &mut Driver,
+        p: &Params,
+        a: &mut Asked,
+        player: &mut Player,
+        shared: &mut Shared,
+    ) {
+        if !a.request.cut {
+            // Riding, in the original's order of precedence.
+            if a.wrecked {
+                if !self.settled {
+                    d.want = HOLD;
+                } else if d.want < HOLD + 1 {
+                    // Drawn once: the test is on the state asked for, so the five hold poses do not
+                    // get redrawn every frame the body lies there.
+                    d.want = HOLD + 1 + shared.rng.index(5);
+                }
+            } else if a.gesture != NO_GESTURE {
+                d.want = if a.no_hands { NO_HANDER } else { a.gesture };
+            } else if a.flipping {
+                d.want = BACKFLIP;
+            } else if a.airborne {
+                d.want = AIR;
+            } else if a.reversing == F::ZERO || a.request.phase_axis < F(0.5) {
+                // The reverse pair, as the original tests it: the flag and the axis against a half,
+                // twice and in both directions, which is also what decides a NaN axis.
+                if a.reversing == F::ZERO || a.request.phase_axis >= F(0.5) {
+                    self.standing(dt, d, a, player, shared);
+                } else {
+                    d.want = REVERSE_L;
+                }
+            } else {
+                d.want = REVERSE_R;
+            }
+        } else if self.breathe_wait > F::ZERO {
+            // On the gate: breathe while the timer runs.
+            d.want = GET_READY;
+            self.breathe_wait = self.breathe_wait - dt;
+        } else if !self.start_picked {
+            d.want = Update::draw_start(shared);
+            self.start_picked = true;
+        } else if !player.finished {
+            if d.want == GET_READY {
+                d.want = START_POS + shared.rng.index(START_POSES);
+            } else if a.commanded != F::ZERO {
+                // The gate opens. The chooser clearing this flag is the only writer of it I found,
+                // and it is what hands the body over to the pose grid.
+                a.request.cut = false;
+                d.want = TURN_RIDING;
+            }
+        } else {
+            d.want = GET_READY;
+            self.breathe_wait = (F(3.5) - a.settle) - p.rate_ready;
+        }
+        // Last, and in both branches: moving disarms the fidget. The threshold is the pose grid's
+        // own first one, so a body that is moving at all cannot be waiting to fidget.
+        if p.band[0] < a.request.band {
+            self.idle_wait = F::ZERO;
+            self.idle_playing = false;
+        }
+    }
+
+    /// Standing still, which is the arm that ends in the pose grid: the fidget's countdown, and then
+    /// state [`TURN_RIDING`] unless a fidget is playing.
+    ///
+    /// The countdown only runs while the body is *actually* standing still — slower than
+    /// [`Update::still_band`], both axes at exactly a half, nothing commanded — and the draw that
+    /// re-arms it is made on the frame it is found not to be running, not on the frame it runs out.
+    fn standing(
+        &mut self,
+        dt: F,
+        d: &mut Driver,
+        a: &Asked,
+        player: &mut Player,
+        shared: &mut Shared,
+    ) {
+        if a.request.band.abs() < self.still_band
+            && a.request.phase_axis == F(0.5)
+            && a.request.mix_axis == F(0.5)
+            && a.commanded == F::ZERO
+        {
+            if self.idle_wait > F::ZERO {
+                // The step is taken and stored before it is tested, so the frame it goes negative is
+                // the frame the fidget starts.
+                self.idle_wait = self.idle_wait - dt;
+                if self.idle_wait < F::ZERO {
+                    d.want = IDLE + shared.rng.index(IDLES);
+                    self.idle_playing = true;
+                    // A fidget is played once, and the finished flag is what the chooser watches for
+                    // the end of it, so it starts the wait cleared.
+                    player.finished = false;
+                }
+            } else {
+                self.idle_wait =
+                    remap(shared.rng.unit(), F::ZERO, F::ONE, self.wait[0], self.wait[1]);
+            }
+        }
+        if !self.idle_playing {
+            d.want = TURN_RIDING;
+        } else if player.finished {
+            self.idle_playing = false;
+        }
+    }
+
+    /// A start-line pose no other body on this line has taken.
+    ///
+    /// The list is redrawn against until the draw is not in it; the tenth draw fills it, and the
+    /// next call throws the whole list away and starts again with its own one pose. An empty list is
+    /// the same first case, which is how the first body on the line is served.
+    fn draw_start(shared: &mut Shared) -> i32 {
+        if shared.used.is_empty() || shared.used.len() == IDLES as usize {
+            let pick = IDLE + shared.rng.index(IDLES);
+            shared.used.clear();
+            shared.used.push(pick);
+            return pick;
+        }
+        loop {
+            let pick = IDLE + shared.rng.index(IDLES);
+            if !shared.used.contains(&pick) {
+                shared.used.push(pick);
+                return pick;
+            }
+        }
+    }
+
+    /// The two fields the original's update writes *after* the step has run: the phase the stunt
+    /// cross-fade is built from, and the request count the restart test compares against.
+    ///
+    /// Both are last frame's by construction — the step reads them before this writes them — which is
+    /// where the one frame of lag in both of them comes from, and it is what makes the restart test
+    /// fire on exactly the frame the request's count changes rather than on every frame after it.
+    pub fn serviced(d: &mut Driver, p: &mut Params, a: &Asked) {
+        p.start_phase = a.request.progress;
+        // The original stores a byte, so a count of 256 compares equal to one of 0.
+        d.seq = a.request.seq as u8;
     }
 }
 

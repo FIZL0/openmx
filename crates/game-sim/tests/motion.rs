@@ -1,7 +1,8 @@
 //! Animation driving against the original.
 //!
-//! Nine proofs — the first four of the driving and the clock (S6), the next four of the call the
-//! frame ends in (S20), and one of the number the drawing side reads out of the clock (V7):
+//! Ten proofs — the first four of the driving and the clock (S6), the next four of the call the
+//! frame ends in (S20), one of the number the drawing side reads out of the clock (V7), and one of a
+//! whole ride reaching the two entry points nothing in the port used to ask for (V11):
 //!
 //! 1. **the driving** — ten thousand generated frames of the rider's own animation section: the
 //!    cross-fade ramp, the restart test, the pose fields it leaves behind, and which of the motion
@@ -36,12 +37,26 @@
 //!    against the window the clock itself reported. Port only: the original passes the number
 //!    straight into the channel samplers and stores it nowhere.
 //!
+//! 10. **a ride that reaches them** — a bike on a hill and a pad script, through the ported ride, the
+//!    trick machine, the rider's second animation machine and its newly ported state chooser: the
+//!    start line's group at the gate, the gate opening on the first commanded frame, the pose grid's
+//!    bands crossed in order with their four-clip blends naming the grid's own rows, and a gesture
+//!    handed to a gesture reaching the pair at two phases. Port only, and the one proof in the file
+//!    that asserts no original: what it is for is the *wiring*, and every piece of it is proved
+//!    against the image either above, in `tests/vehicle_anim.rs`, or in the files the ride's own
+//!    tasks wrote.
+//!
 //! The channel sampling, the quaternion blending and the skinning are the renderer's and are not
 //! ported; what else is not proved here, and why, is in the journal entry's last section.
 
 use game_sim::motion::{Blend, Clip, ClipId, Clips, Driver, Params, Player, Pose, Request, Slot, Window};
+use game_sim::phy::Phy;
+use game_sim::ride::Controls;
+use game_sim::rider;
 use game_sim::trick::{Bike, SLOTS, Set, Stunt, Trick, Tricks};
-use ps2_float::F;
+use game_sim::vehicle_anim;
+use game_sim::world::Flat;
+use ps2_float::{F, Vf};
 use ps2_oracle::{DONE, Ee, addr, game_or_skip, skip};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -2134,5 +2149,457 @@ fn the_sample_time_is_where_the_clock_left_the_clip() {
     println!(
         "the sample time: {driven} driven frames over three modes ({wraps} wrapped, {empties} \
          empty) and both free-running clips, each at the clip time its own window ended on"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 10 — a ride that reaches the blends nothing in the port ever asked for
+// ---------------------------------------------------------------------------------------------------
+
+/// The bike the ride is ridden on: the trick task's own fixture bike, whose wreck limits are set out
+/// of reach so a script can ride it without coming off. Hand-written, not the disc's.
+const RIDER_BIKE: &str = include_str!("trick-bike.phy.txt");
+
+/// The frame the ride runs at: the engine's own clamped step.
+const FRAME: F = F(1.0 / 60.0);
+
+/// Feet per second per mile an hour, which is what the body's own thresholds are round numbers of.
+const MPH: f32 = 1.466_666_7;
+
+/// The rider's body actor, as the two halves of the original's update make one: the chooser, the
+/// step, and the motion clock between them.
+///
+/// Nothing in here is handed a blend or a state. [`Body::frame`] is the original's own order — choose,
+/// step, clock, file the two tail fields away — and what comes out is the entry point the frame ended
+/// in.
+struct Body {
+    update: vehicle_anim::Update,
+    driver: vehicle_anim::Driver,
+    params: vehicle_anim::Params,
+    lib: vehicle_anim::Library,
+    shared: vehicle_anim::Shared,
+    player: Player,
+}
+
+impl Body {
+    /// A body with the numbers its constructor writes: the still band, the pose grid's three
+    /// thresholds, the fidget's fifteen-to-forty-five seconds, the two axes centred with their own
+    /// time constants, and the state the constructor leaves asked for, which is the grid itself.
+    ///
+    /// The five fade rates and the stunt cross-fade's cap are zero in the constructor and written by
+    /// something this task did not find, so they are the fixture's — see the journal.
+    fn new() -> Body {
+        // Every clip handle present and every clip a second long: what is being proved here is which
+        // entry point the machine reaches and which clips it names, and a clip table with holes in it
+        // would answer for the machine.
+        let mut lib = vehicle_anim::Library::default();
+        for state in 0..vehicle_anim::STATES {
+            lib.clip[state] = Some(ClipId(state as u32));
+        }
+        Body {
+            update: vehicle_anim::Update {
+                still_band: F(MPH),
+                wait: [F(15.0), F(45.0)],
+                ..vehicle_anim::Update::default()
+            },
+            driver: vehicle_anim::Driver {
+                want: vehicle_anim::TURN_RIDING,
+                state: vehicle_anim::TURN_RIDING,
+                prev: vehicle_anim::TURN_RIDING,
+                extra: -1,
+                mix: vehicle_anim::Lag { value: F(0.5), tau: F(0.125), ratio: F::ZERO },
+                phase: vehicle_anim::Lag { value: F(0.5), tau: F(0.15), ratio: F::ZERO },
+                ..vehicle_anim::Driver::default()
+            },
+            params: vehicle_anim::Params {
+                rate_stunt: F(3.0),
+                rate_default: F(3.0),
+                rate_pose: F(3.0),
+                rate_hold: F(3.0),
+                rate_ready: F(3.0),
+                cross_cap: F(0.2),
+                start_phase: F::ZERO,
+                band: [F(5.0 * MPH), F(10.0 * MPH), F(15.0 * MPH)],
+            },
+            lib,
+            shared: vehicle_anim::Shared::default(),
+            player: Player::default(),
+        }
+    }
+
+    /// One frame of the body: the original's update, which is the chooser with the step inside it.
+    fn frame(&mut self, asked: &mut vehicle_anim::Asked) -> vehicle_anim::Frame {
+        let one = |_: ClipId| F::ONE;
+        self.update.want(FRAME, &mut self.driver, &self.params, asked, &mut self.player, &mut self.shared);
+        let frame =
+            self.driver.frame(FRAME, &self.params, &asked.request, &self.lib, true, one);
+        if let Some(play) = frame.play {
+            match play.put() {
+                Some(put) => {
+                    self.player.play(put, F::ONE);
+                }
+                None => self.player.clip = None,
+            }
+        }
+        let clip = Clip { duration: F::ONE, looping: false, keys: Vec::new() };
+        frame.blend.run(&mut self.player, FRAME, &clip);
+        vehicle_anim::Update::serviced(&mut self.driver, &mut self.params, asked);
+        frame
+    }
+}
+
+/// What the ride tells the body, in the port's reading of the request block: the writer of that block
+/// is not located, so this mapping is the one thing in the proof below that is not off the image.
+///
+/// The band is the chassis' own speed, in feet per second, which is what makes the grid's thresholds
+/// 5, 10 and 15 mph (see the journal). The two axes are the body's rest value of a half, with the
+/// mix axis — which is the one that picks a row's pair — leaned by the stick.
+fn asked_of(r: &rider::Rider, c: &Controls, cut: bool) -> vehicle_anim::Asked {
+    vehicle_anim::Asked {
+        request: vehicle_anim::Request {
+            cut,
+            phase_axis: F(0.5),
+            mix_axis: F(0.5) + F(0.5) * c.stick.0,
+            band: r.ride.chassis.speed,
+            progress: r.tricks.progress,
+            seq: r.tricks.seq,
+            ..vehicle_anim::Request::default()
+        },
+        wrecked: r.phase() == game_sim::state::Phase::Down,
+        gesture: r.tricks.current.slot().map_or(vehicle_anim::NO_GESTURE, |s| s as i32),
+        airborne: !r.ride.air.on_ground,
+        no_hands: r.tricks.no_hander,
+        reversing: c.reverse,
+        commanded: c.gas,
+        ..vehicle_anim::Asked::default()
+    }
+}
+
+/// The six combinations of the three trick buttons, by the group they make.
+fn buttons_for(group: u8) -> [bool; 3] {
+    match group {
+        1 => [true, false, false],
+        2 => [false, true, false],
+        3 => [true, true, false],
+        4 => [true, false, true],
+        5 => [false, true, true],
+        6 => [true, true, true],
+        _ => [false, false, false],
+    }
+}
+
+/// The d-pad that names a direction, in the order the trick decoder polls it.
+fn dpad_for(dir: game_sim::trick::Dir) -> [bool; 4] {
+    use game_sim::trick::Dir;
+    let mut out = [false; 4];
+    match dir {
+        Dir::Left => out[0] = true,
+        Dir::Right => out[1] = true,
+        Dir::Up => out[2] = true,
+        Dir::Down => out[3] = true,
+        Dir::None => {}
+    }
+    out
+}
+
+/// The gesture that names a slot: the first group-and-direction pair that maps to it.
+fn gesture_for(slot: usize) -> (u8, game_sim::trick::Dir) {
+    use game_sim::trick::Dir;
+    for group in 1..=6u8 {
+        for dir in [Dir::Up, Dir::Down, Dir::Left, Dir::Right] {
+            if game_sim::trick::slot_of(group, dir) == Some(slot) {
+                return (group, dir);
+            }
+        }
+    }
+    panic!("no gesture names slot {slot}");
+}
+
+/// The dirt the first ride is ridden on: a hill of constant grade, falling away in `+z`, which is the
+/// direction the rider is spawned facing.
+///
+/// A hill and not the flat the rest of the file uses, because the port cannot *drive* this bike: the
+/// clutch command `mv::engine_update` reads (`ride.clutch_in`) is only ever written to one, by the
+/// idle-clutch rule in `ride::Ride::frame`, and in the image that word is the rate-limited clutch
+/// lever itself — so until the lever reaches it, a clutch that is always fully in passes no torque to
+/// the rear wheel whatever the throttle does (see the journal). Gravity needs no clutch, so the band
+/// value this proof is about comes from a chassis that is genuinely moving, and the rider's hands
+/// only hold the brake and let it go.
+struct Hill {
+    /// Feet of fall per foot forward.
+    grade: f32,
+}
+
+impl game_sim::world::World for Hill {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        let y = -self.grade * at.z();
+        let len = (1.0 + self.grade * self.grade).sqrt();
+        (Vf::new(at.x(), y, at.z(), 1.0), Vf::new(0.0, 1.0 / len, self.grade / len, 0.0))
+    }
+
+    fn solid(
+        &mut self,
+        _bundle: &game_sim::collide::Bundle,
+        _record: &mut game_sim::collide::Record,
+    ) -> bool {
+        false
+    }
+}
+
+/// A rider on the fixture bike, dropped from `drop` feet with 24 stunts a second long.
+fn a_rider(p: &Phy, set: &game_sim::trick::Set, drop: f32) -> rider::Rider {
+    a_rider_facing(p, set, drop, 0.0)
+}
+
+/// The same rider, pitched nose-down by a grade so that a hill can be ridden instead of landed on.
+fn a_rider_facing(p: &Phy, set: &game_sim::trick::Set, drop: f32, grade: f32) -> rider::Rider {
+    let mounts = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+    let at = Vf::new(0.0, drop, 0.0, 1.0);
+    let len = (1.0 + grade * grade).sqrt();
+    let forward = Vf::new(0.0, -grade / len, 1.0 / len, 0.0);
+    rider::Rider::new(p, mounts, at, forward, set.clone())
+}
+
+/// One run of frames the body spent in the same entry point on the same clips: what the ride did,
+/// recorded the way the ride itself divides up.
+#[derive(Debug)]
+struct Stage {
+    mode: u8,
+    clips: Vec<Option<ClipId>>,
+    frames: usize,
+    /// The chassis speed on the first and last frame of the run, in feet a second.
+    speed: (F, F),
+    /// The two weights on the first and last frame of the run.
+    mix: (F, F),
+    cross: (F, F),
+}
+
+/// The clip a state's handle is in [`Body::new`]'s library, which is the state's own number.
+fn of(state: i32) -> Option<ClipId> {
+    Some(ClipId(state as u32))
+}
+
+/// **10.** The two blend entries nothing in the port could ask for, reached from a ride.
+///
+/// The whole point of the task this proof belongs to: the four-clip blend is called from two places
+/// in the whole image, both inside the rider's *other* animation machine, and until its state chooser
+/// was ported nothing in the port ever asked for the state those two arms live in. So no blend value
+/// here is written out by hand — it is a bike, a pad script, the ported ride, the trick machine, the
+/// state chooser and the animation step, and what is asserted is which entry point each frame of the
+/// ride ended in, which clips that entry named, and that its weights sit strictly between them.
+///
+/// Two rides:
+///
+/// 1. **the gate, and then the pose grid's bands.** The body is held at the start line by the
+///    request's at-start flag and draws from the start-line group; the throttle is commanded, the
+///    chooser clears the flag and hands the body to the pose grid; and the bike rolls away down a
+///    hill, crossing the grid's thresholds — which are 5, 10 and 15 mph of chassis speed — in order.
+///    Both of the grid's interpolating bands are four-clip blends, and the clips they name are the
+///    grid's own rows.
+/// 2. **a gesture out of a gesture.** A drop with two stunts asked for, the second while the first is
+///    still running, so the trick machine hands one straight to the other: that is the pair at two
+///    phases, the sixth entry point, which has no other caller anywhere in the image.
+///
+/// A hill rather than a throttle because the port cannot drive this bike yet — see [`Hill`] — and the
+/// hill's own terminal speed is 12.4 mph, so the fourth band (one row, over 15 mph) is the one arm of
+/// the grid this ride does not reach; it is covered by the entry-point proof in `vehicle_anim.rs`.
+///
+/// What the two entries then *draw* is `game-render/tests/anim.rs`: the pose strictly between the
+/// clips named here.
+#[test]
+fn a_ride_reaches_the_four_clip_blend_and_the_pair() {
+    let tables = rider::Tables::build();
+    let phy = Phy::read_bytes(RIDER_BIKE.as_bytes(), &tables.ride.curve);
+    let stunts: Vec<Stunt> = (0..SLOTS)
+        .map(|i| Stunt {
+            name: format!("stunt{i}"),
+            safe_time: F(0.2),
+            duration: F(1.0),
+            index: i as i32,
+            ..Stunt::default()
+        })
+        .collect();
+    let set = game_sim::trick::Set::new(stunts);
+
+    // --- ride one: the gate, and then the grid's bands ----------------------------------------------
+    let grade = 1.0;
+    let mut r = a_rider_facing(&phy, &set, 1.0, grade);
+    let mut world = Hill { grade };
+    let mut body = Body::new();
+    let mut cut = true;
+    let mut stages: Vec<Stage> = Vec::new();
+    let mut start_line: Vec<i32> = Vec::new();
+    let mut opened = None;
+    for k in 0..600 {
+        let c = if k < 60 {
+            // At the gate: the brake on, nothing commanded, both axes centred.
+            Controls { brake: F::ONE, front_brake: F::ONE, rear_brake: F::ONE, ..Controls::default() }
+        } else {
+            // The gate opens: the brake off, the throttle commanded and held, and a lean on the
+            // stick, which is the axis that picks which pair of a row's three clips is blended.
+            Controls { gas: F::ONE, stick: (F(-0.5), F::ZERO), ..Controls::default() }
+        };
+        r.frame(&phy, &tables, &c, FRAME, &mut world);
+        let mut asked = asked_of(&r, &c, cut);
+        let frame = body.frame(&mut asked);
+        cut = asked.request.cut;
+        if cut {
+            start_line.push(body.driver.state);
+            continue;
+        }
+        if opened.is_none() {
+            opened = Some(k);
+        }
+        let (mix, cross) = match frame.blend {
+            vehicle_anim::Blend::Four { mix, cross, .. } => (mix, cross),
+            vehicle_anim::Blend::Two { mix, .. } => (mix, F::ZERO),
+            _ => (F::ZERO, F::ZERO),
+        };
+        let (mode, clips, speed) = (frame.blend.mode(), frame.blend.clips(), r.ride.chassis.speed);
+        match stages.last_mut() {
+            Some(s) if s.mode == mode && s.clips == clips => {
+                s.frames += 1;
+                (s.speed.1, s.mix.1, s.cross.1) = (speed, mix, cross);
+            }
+            _ => stages.push(Stage {
+                mode,
+                clips,
+                frames: 1,
+                speed: (speed, speed),
+                mix: (mix, mix),
+                cross: (cross, cross),
+            }),
+        }
+    }
+
+    // The gate. Every frame in front of it drew from the start-line group — the breathe, the ten
+    // idles and the three start poses — and the frame the throttle was first commanded is the frame
+    // the chooser cleared the flag on and handed the body to the grid.
+    assert_eq!(opened, Some(60), "the gate opens on the first frame with the throttle commanded");
+    assert_eq!(start_line.len(), 60, "the start line ran until the throttle was commanded");
+    let group = vehicle_anim::GET_READY..vehicle_anim::START_POS + vehicle_anim::START_POSES;
+    assert!(
+        start_line.iter().all(|s| group.contains(s)),
+        "every frame at the gate is one of the start-line states: {start_line:?}"
+    );
+    let idles = vehicle_anim::IDLE..vehicle_anim::IDLE + vehicle_anim::IDLES;
+    assert!(
+        start_line.iter().any(|s| idles.contains(s)),
+        "the body waits on the gate in one of the ten idles: {start_line:?}"
+    );
+
+    // The grid, in the order the hill reached it: a four-clip blend of the stopped and the standing
+    // rows, one row on its own, and a four-clip blend of the standing and the riding rows. The
+    // stick is leaned to a quarter, which is below the middle of the mix axis, so each row is
+    // blended across its *low* pair — the row's own clip and the one after it.
+    use vehicle_anim::{TURN_RIDING, TURN_STILL, TURN_STOP};
+    let want: Vec<(u8, Vec<Option<ClipId>>)> = vec![
+        (4, vec![of(TURN_STOP + 1), of(TURN_STOP), of(TURN_STILL + 1), of(TURN_STILL)]),
+        (2, vec![of(TURN_STILL + 1), of(TURN_STILL)]),
+        (4, vec![of(TURN_STILL + 1), of(TURN_STILL), of(TURN_RIDING + 1), of(TURN_RIDING)]),
+    ];
+    let got: Vec<(u8, Vec<Option<ClipId>>)> =
+        stages.iter().map(|s| (s.mode, s.clips.clone())).collect();
+    assert_eq!(got, want, "the grid's bands, in the order the ride reached them: {stages:#?}");
+
+    // Each run of frames stayed inside the band whose arm it is, which is what makes the bands the
+    // thresholds and not the script: under the first threshold, between the first and the second,
+    // and between the second and the third.
+    let band = body.params.band;
+    assert!(stages[0].speed.1 < band[0], "the first arm is the band under the first threshold");
+    assert!(
+        band[0] <= stages[1].speed.0 && stages[1].speed.1 <= band[1],
+        "the middle band plays one row from the first threshold to the second"
+    );
+    assert!(
+        band[1] < stages[2].speed.0 && stages[2].speed.1 <= band[2],
+        "the second arm is the band between the second and the third threshold"
+    );
+
+    // And both four-clip blends asked for a pose strictly between the four clips they named: every
+    // weight inside its ends, and the cross weight falling as the speed rose, because it is the
+    // distance left to the top of the band.
+    for s in [&stages[0], &stages[2]] {
+        for w in [s.mix.0, s.mix.1, s.cross.0, s.cross.1] {
+            assert!(F::ZERO < w && w < F::ONE, "a four-clip weight is strictly inside: {s:#?}");
+        }
+        assert!(s.cross.1 < s.cross.0, "the cross weight falls as the band is crossed: {s:#?}");
+        assert!(s.frames > 1, "the arm ran for more than one frame: {s:#?}");
+    }
+
+    // --- ride two: a gesture out of a gesture -------------------------------------------------------
+    //
+    // Two stunts of a second each, asked for five frames apart in the air. The first starts at once;
+    // the second is queued, and the trick machine hands the running one over half a second in — its
+    // overlap time — which is the restart the chooser turns into the pair at two phases.
+    let (first, second) = (gesture_for(3), gesture_for(7));
+    let mut r = a_rider(&phy, &set, 30.0);
+    let mut flat = Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let mut body = Body::new();
+    let mut pair: Vec<(usize, vehicle_anim::Blend, i32)> = Vec::new();
+    let mut alone = None;
+    for k in 0..180 {
+        let c = match k {
+            5 => Controls { trick: buttons_for(first.0), dpad: dpad_for(first.1), ..Controls::default() },
+            10 => {
+                Controls { trick: buttons_for(second.0), dpad: dpad_for(second.1), ..Controls::default() }
+            }
+            _ => Controls::default(),
+        };
+        r.frame(&phy, &tables, &c, FRAME, &mut flat);
+        let mut asked = asked_of(&r, &c, false);
+        let frame = body.frame(&mut asked);
+        match frame.blend {
+            vehicle_anim::Blend::One { .. } if alone.is_none() => alone = Some(k),
+            vehicle_anim::Blend::Pair { .. } => pair.push((k, frame.blend, r.tricks.seq)),
+            _ => {}
+        }
+    }
+
+    // The first gesture plays alone — there was no gesture to come out of — and the second one, which
+    // the trick machine handed the first to, is the pair.
+    let (slot_a, slot_b) = (game_sim::trick::slot_of(first.0, first.1), game_sim::trick::slot_of(second.0, second.1));
+    assert!(alone.is_some(), "the first gesture plays its clip alone");
+    assert!(!pair.is_empty(), "the second gesture comes out of the first through the pair");
+    assert!(
+        pair.iter().all(|&(_, _, seq)| seq == 2),
+        "the pair is the trick machine's second request, not a restart of the first: {pair:#?}"
+    );
+    let crossing = pair
+        .iter()
+        .find_map(|&(k, b, _)| match b {
+            vehicle_anim::Blend::Pair { phase_a, phase_b, mix, a, b, .. }
+                if F::ZERO < mix && mix < F::ONE =>
+            {
+                Some((k, phase_a, phase_b, mix, a, b))
+            }
+            _ => None,
+        })
+        .expect("a frame of the pair that is between the two clips");
+    let (k, phase_a, phase_b, mix, a, b) = crossing;
+    assert_eq!(
+        (a, b),
+        (slot_b.map(|s| ClipId(s as u32)), slot_a.map(|s| ClipId(s as u32))),
+        "the pair names the gesture asked for and the gesture it is coming out of, in that order"
+    );
+    assert!(
+        F::ZERO < phase_a && phase_a < phase_b,
+        "each clip is read at its own phase: the new one just started, the old one is half gone"
+    );
+
+    println!(
+        "the gate opened on frame {}; the hill crossed {} of the grid's bands — {} — and a gesture \
+         out of a gesture reached the pair on frame {k} at {:.3}/{:.3} of its two clips, mixed \
+         {:.3}",
+        opened.unwrap(),
+        stages.len(),
+        stages
+            .iter()
+            .map(|s| format!("mode {} on {:?} for {} frames", s.mode, s.clips, s.frames))
+            .collect::<Vec<_>>()
+            .join(", "),
+        phase_a.0,
+        phase_b.0,
+        mix.0,
     );
 }

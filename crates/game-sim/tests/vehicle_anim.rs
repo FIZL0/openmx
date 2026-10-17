@@ -1,6 +1,7 @@
 //! The vehicle's own animation state machine against the original.
 //!
-//! Three proofs of the one function S25 ported, and of the two things only it reaches:
+//! Four proofs: three of the one function S25 ported and of the two things only it reaches, and one
+//! of the function that decides what to ask it for, which is what V11 came for.
 //!
 //! 1. **the state machine** — twenty-four thousand generated frames of the vehicle's animation step, one
 //!    state at a time: every one of the sixty arms of its jump table and two states outside it, every
@@ -15,13 +16,21 @@
 //! 3. **the sixth entry point** — six thousand frames through the entry nothing but this machine
 //!    calls, against the clock it drives and the action frames it fires: the one entry that gives each
 //!    of its two clips its own phase.
+//! 4. **the state chooser** — twelve thousand generated frames of the one writer of the state asked
+//!    for, which is the caller of all of the above and was not ported with them: every arm of its
+//!    priority, the fidget's countdown, the start line's draws against the list the whole start line
+//!    shares, and the two fields it files away after the step. It calls the step itself, so the step
+//!    is hooked to nothing and what is left running is the chooser.
 //!
 //! What is not proved here, and why, is in the journal entry's last section.
 
 use game_sim::motion::{Animations, Clip, ClipId, Played, Player, Window};
+use game_sim::rng::Rng;
 use game_sim::trick::{SLOTS, Stunt};
 use game_sim::vehicle_anim::{
-    Blend, Driver, Extra, Lag, Library, POSE_CLIPS, Params, Place, Request, STATES, TURN_RIDING,
+    AIR, Asked, BACKFLIP, Blend, Driver, Extra, GET_READY, HOLD, IDLE, IDLES, Lag, Library,
+    NO_GESTURE, NO_HANDER, POSE_CLIPS, Params, Place, REVERSE_L, REVERSE_R, Request, START_POS,
+    START_POSES, STATES, Shared, TURN_RIDING, Update,
 };
 use ps2_float::{F, Vf};
 use ps2_oracle::{DONE, Ee, addr, game_or_skip, skip};
@@ -1217,4 +1226,418 @@ fn the_sixth_entry_point_drives_the_clock_off_its_first_clip() {
     let clip = Clip { duration: F::ONE, looping: false, keys: Vec::new() };
     assert_eq!(blend.run(&mut player, F(1.0 / 30.0), &clip), Played::default());
     assert_eq!(player.clip, Some(ClipId(pair_handle(0))), "and it leaves the clock alone");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 4 — the state chooser
+// ---------------------------------------------------------------------------------------------------
+
+/// The chooser's own fields of the object, past the step's.
+const V_FINISHED: u32 = 0x3c;
+const V_SETTLED: u32 = 0x6b4;
+const V_START_PICKED: u32 = 0xa0c;
+const V_STILL_BAND: u32 = 0xa10;
+const V_BREATHE: u32 = 0xa28;
+const V_IDLE_PLAYING: u32 = 0xa2c;
+const V_IDLE_WAIT: u32 = 0xa30;
+const V_WAIT_LO: u32 = 0xa34;
+const V_WAIT_HI: u32 = 0xa38;
+
+/// The chooser's own fields of the request block, past the step's.
+const R_AIRBORNE: u32 = 0xf8;
+const R_FLIPPING: u32 = 0xfc;
+const R_NO_HANDS: u32 = 0x100;
+const R_WRECKED: u32 = 0x104;
+const R_SETTLE: u32 = 0x144;
+const R_COMMANDED: u32 = 0x160;
+const R_REVERSING: u32 = 0x16c;
+const R_GESTURE: u32 = 0x1a0;
+
+/// How long the list of start poses already handed out is.
+const DRAWN: u32 = IDLES as u32;
+
+/// Everything the chooser decided, in one shape so a mismatch prints both sides the same way.
+///
+/// The three floats are compared as bits, not as floats: a countdown that is `-0.0` where the
+/// original has `0.0` is a different word in a save state and would be a different draw next frame.
+#[derive(Clone, PartialEq, Debug)]
+struct Chose {
+    want: i32,
+    idle_wait: u32,
+    idle_playing: bool,
+    start_picked: bool,
+    breathe: u32,
+    finished: bool,
+    cut: bool,
+    start_phase: u32,
+    seq: u8,
+    drawn: Vec<i32>,
+    rand_state: u64,
+}
+
+#[test]
+fn the_state_chooser_matches_over_twelve_thousand_frames() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let Some(at) = named(&[
+        "vehicle_anim_want",
+        "vehicle_animation",
+        "vehicle_anim_rand_seeded",
+        "vehicle_anim_start_idles",
+        "rand_state",
+    ]) else {
+        return;
+    };
+    let (chooser, step, seeded, drawn, rand_state) = (at[0], at[1], at[2], at[3], at[4]);
+    // The list's count is six words past its ten entries.
+    let drawn_count = drawn + DRAWN * 4;
+
+    // The step, which the chooser calls in its own tail and which the first proof above has already
+    // taken apart frame by frame. Hooked to nothing at all, so what is left running is the chooser:
+    // the hook returns to `ra`, which is the instruction after the call, and the two fields the tail
+    // writes after it are still written. Everything the chooser reads it reads *before* the call, so
+    // a step that does nothing cannot change what it chose.
+    let stepped = Rc::new(Cell::new(0u32));
+    let seen = Rc::clone(&stepped);
+    ee.hooks.insert(step, Box::new(move |_| seen.set(seen.get() + 1)));
+
+    let mut pick = Pick(0x2545_f491_4f6c_dd1d);
+    let mut per_want = [0u32; 62];
+    let (mut gate, mut disarmed, mut fidgets, mut rearmed) = (0, 0, 0, 0);
+    let (mut reset_draw, mut searched_draw, mut held_draw, mut fidget_ended) = (0, 0, 0, 0);
+    for k in 0..12_000 {
+        // Which half of the chooser this frame is in: on the gate, or riding. The flag is the request
+        // block's own, and the one thing in the port that writes it is the chooser clearing it.
+        let cut = k % 3 == 0;
+        let still = !cut && k % 5 == 0;
+        let dt = match pick.upto(4) {
+            0 => 1.0 / 60.0,
+            1 => 1.0 / 30.0,
+            2 => 0.0,
+            _ => pick.float(0.2).abs(),
+        };
+        // The state asked for last frame. The wreck's hold poses are drawn once and the test that
+        // makes them drawn once is on this, and the start line's second pose is drawn only out of the
+        // breathe, so both of those values have to come up often.
+        let want0: i32 = match pick.upto(6) {
+            0 => GET_READY,
+            1 => HOLD,
+            2 => HOLD + 1 + pick.upto(5) as i32,
+            3 => pick.upto(STATES as u32) as i32,
+            4 => TURN_RIDING,
+            _ => pick.next() as i32,
+        };
+        let seq0 = pick.next() as u8;
+        // The start line's own three fields.
+        let breathe0 = match pick.upto(5) {
+            0 => 0.0,
+            1 => -pick.float(1.0).abs(),
+            2 => dt,
+            _ => pick.float(3.5).abs(),
+        };
+        let start_picked = pick.upto(3) != 0;
+        let finished0 = pick.upto(2) == 1;
+        let settle = match pick.upto(4) {
+            0 => 0.0,
+            1 => 3.5,
+            _ => pick.float(5.0),
+        };
+        let rate_ready = pick.float(60.0);
+        // Riding, in the order the chooser tests them.
+        let wrecked = pick.upto(4) == 0;
+        let settled = pick.upto(2) == 1;
+        let gesture: i32 = match pick.upto(4) {
+            0 | 1 => NO_GESTURE,
+            2 => pick.upto(SLOTS as u32) as i32,
+            // The chooser copies this field into `want` with no range test of any kind, which is
+            // worth proving rather than assuming.
+            _ => pick.next() as i32,
+        };
+        let no_hands = pick.upto(3) == 0;
+        let flipping = pick.upto(4) == 0;
+        let airborne = pick.upto(4) == 0;
+        let reversing = match pick.upto(3) {
+            0 => 0.0,
+            1 => -pick.float(10.0).abs(),
+            _ => pick.float(10.0),
+        };
+        let commanded = match pick.upto(3) {
+            0 => 0.0,
+            _ => pick.float(1.0),
+        };
+        // Standing still: the band, the still band it is tested against, and the two axes, which the
+        // chooser wants at *exactly* a half. The reverse pair reads the phase axis as well.
+        let still_band = match pick.upto(4) {
+            0 => 1.466_666_7,
+            1 => 0.0,
+            _ => pick.float(5.0).abs(),
+        };
+        let b0 = match pick.upto(4) {
+            0 => 7.333_333,
+            1 => 0.0,
+            _ => pick.float(10.0).abs(),
+        };
+        let band = match pick.upto(6) {
+            0 => 0.0,
+            1 => b0,
+            2 => still_band,
+            3 => -pick.float(1.0).abs(),
+            _ => pick.float(20.0),
+        };
+        let axis = |pick: &mut Pick| match pick.upto(4) {
+            0 | 1 => 0.5,
+            2 => 0.499_999_97,
+            _ => pick.float(1.5),
+        };
+        let (phase_axis, mix_axis) = (axis(&mut pick), axis(&mut pick));
+        // The fidget's countdown and the range it is re-armed to.
+        let idle_wait0 = match pick.upto(6) {
+            0 => 0.0,
+            1 => dt,
+            2 => -pick.float(1.0).abs(),
+            // Within a frame of running out, which is the only way a fidget is ever started: a
+            // countdown drawn from the real fifteen-to-forty-five seconds needs nine hundred frames
+            // to get there and this proof gives each case one.
+            3 | 4 => pick.float(dt * 2.0).abs(),
+            _ => pick.float(45.0).abs(),
+        };
+        let idle_playing = pick.upto(3) == 0;
+        let (wait_lo, wait_hi) = match pick.upto(4) {
+            0 => (15.0, 45.0),
+            // Backwards, which the engine's remap clamps the other way round.
+            1 => (45.0, 15.0),
+            2 => (pick.float(30.0), pick.float(30.0)),
+            _ => (0.0, 0.0),
+        };
+        // The tail's two inputs.
+        let progress = pick.float(1.0).abs();
+        let seq = pick.next() as i32;
+        // The start poses other bodies on the line have taken: empty, part full, and exactly full,
+        // which is the case that throws the list away. A list of distinct entries is what the game
+        // can produce; one with repeats is fed in too, because the chooser's search does not care.
+        let count = match pick.upto(5) {
+            0 => 0,
+            1 => DRAWN,
+            2 => DRAWN - 1,
+            _ => pick.upto(DRAWN),
+        };
+        let list: Vec<i32> = {
+            let mut out = Vec::new();
+            while out.len() < count as usize {
+                let p = IDLE + pick.upto(DRAWN) as i32;
+                if pick.upto(8) == 0 || !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+            out
+        };
+        // One case in five is forced to be *standing still*, which is the arm that ends in the pose
+        // grid and the fidget. Every one of its ten conditions has to hold at once — nothing
+        // wrecked, asked for, flipping, airborne, reversing or commanded, both axes at exactly a
+        // half and the band under the still band — so a generator that draws them independently
+        // gets there twice in twelve thousand frames and proves nothing about the countdown.
+        let (wrecked, gesture, flipping, airborne) =
+            if still { (false, NO_GESTURE, false, false) } else { (wrecked, gesture, flipping, airborne) };
+        let (reversing, commanded) = if still { (0.0, 0.0) } else { (reversing, commanded) };
+        let (phase_axis, mix_axis) = if still { (0.5, 0.5) } else { (phase_axis, mix_axis) };
+        let (still_band, band) = if still { (1.466_666_7, pick.float(1.0)) } else { (still_band, band) };
+        // Above the band the frame is standing in, so the disarm at the end of the chooser does not
+        // take back what the fidget just did.
+        let b0 = if still { 7.333_333 } else { b0 };
+
+        // The generator, mid-chain: a chooser proved from state 1 would only ever prove its first
+        // draw.
+        let state0 = u64::from(pick.next()) << 32 | u64::from(pick.next());
+
+        ee.load(VEH, &vec![0u8; 0xb00]);
+        ee.load(REQ, &vec![0u8; 0x200]);
+        ee.set_u32(VEH + V_REQUEST, REQ);
+        ee.set_u32(VEH + V_FINISHED, u32::from(finished0));
+        ee.set_u32(VEH + V_SETTLED, u32::from(settled));
+        ee.set_f32(VEH + V_RATE_READY, rate_ready);
+        ee.set_u32(VEH + V_WANT, want0 as u32);
+        ee.set_f32(VEH + V_START_PHASE, pick.float(1.0));
+        ee.load(VEH + V_SEQ, &[seq0]);
+        ee.set_f32(VEH + V_BAND, b0);
+        ee.set_u32(VEH + V_START_PICKED, u32::from(start_picked));
+        ee.set_f32(VEH + V_STILL_BAND, still_band);
+        ee.set_f32(VEH + V_BREATHE, breathe0);
+        ee.set_u32(VEH + V_IDLE_PLAYING, u32::from(idle_playing));
+        ee.set_f32(VEH + V_IDLE_WAIT, idle_wait0);
+        ee.set_f32(VEH + V_WAIT_LO, wait_lo);
+        ee.set_f32(VEH + V_WAIT_HI, wait_hi);
+        ee.set_u32(REQ + R_CUT, u32::from(cut));
+        ee.set_f32(REQ + R_PHASE_AXIS, phase_axis);
+        ee.set_f32(REQ + R_MIX_AXIS, mix_axis);
+        ee.set_f32(REQ + R_BAND, band);
+        ee.set_f32(REQ + R_PROGRESS, progress);
+        ee.set_u32(REQ + R_SEQ, seq as u32);
+        ee.set_u32(REQ + R_AIRBORNE, u32::from(airborne));
+        ee.set_u32(REQ + R_FLIPPING, u32::from(flipping));
+        ee.set_u32(REQ + R_NO_HANDS, u32::from(no_hands));
+        ee.set_u32(REQ + R_WRECKED, u32::from(wrecked));
+        ee.set_f32(REQ + R_SETTLE, settle);
+        ee.set_f32(REQ + R_COMMANDED, commanded);
+        ee.set_f32(REQ + R_REVERSING, reversing);
+        ee.set_u32(REQ + R_GESTURE, gesture as u32);
+        // The two globals. The flag is the one in front of the chooser's `srand`: set, so the five
+        // copies of "seed me from the time of day" the inliner left in it are all skipped. A test
+        // cannot prove a seeding off the clock and a game that has run for one frame has done it, so
+        // the port has no seeding at all and `Shared` is handed a generator.
+        ee.set_u32(seeded, 1);
+        for i in 0..DRAWN {
+            ee.set_u32(drawn + i * 4, list.get(i as usize).copied().unwrap_or(0) as u32);
+        }
+        ee.set_u32(drawn_count, count);
+        ee.set_u32(rand_state, state0 as u32);
+        ee.set_u32(rand_state + 4, (state0 >> 32) as u32);
+        stepped.set(0);
+
+        ee.call(chooser, &[u64::from(VEH)], &[dt], BUDGET);
+        let after_count = ee.u32_at(drawn_count);
+        let want_fields = Chose {
+            want: ee.u32_at(VEH + V_WANT) as i32,
+            idle_wait: ee.f32_at(VEH + V_IDLE_WAIT).to_bits(),
+            idle_playing: ee.u32_at(VEH + V_IDLE_PLAYING) != 0,
+            start_picked: ee.u32_at(VEH + V_START_PICKED) != 0,
+            breathe: ee.f32_at(VEH + V_BREATHE).to_bits(),
+            finished: ee.u32_at(VEH + V_FINISHED) != 0,
+            cut: ee.u32_at(REQ + R_CUT) != 0,
+            start_phase: ee.f32_at(VEH + V_START_PHASE).to_bits(),
+            seq: ee.u32_at(VEH + V_SEQ).to_le_bytes()[0],
+            drawn: (0..after_count).map(|i| ee.u32_at(drawn + i * 4) as i32).collect(),
+            rand_state: u64::from(ee.u32_at(rand_state))
+                | u64::from(ee.u32_at(rand_state + 4)) << 32,
+        };
+        assert_eq!(ee.u32_at(seeded), 1, "case {k}: the chooser re-seeded the generator");
+        assert_eq!(stepped.get(), 1, "case {k}: the chooser called the step {} times", stepped.get());
+
+        let mut d = Driver { want: want0, seq: seq0, ..Driver::default() };
+        let mut p = Params { rate_ready: F(rate_ready), band: [F(b0), F::ZERO, F::ZERO], ..Params::default() };
+        let mut u = Update {
+            idle_wait: F(idle_wait0),
+            idle_playing,
+            start_picked,
+            breathe_wait: F(breathe0),
+            still_band: F(still_band),
+            wait: [F(wait_lo), F(wait_hi)],
+            settled,
+        };
+        let mut a = Asked {
+            request: Request {
+                cut,
+                phase_axis: F(phase_axis),
+                mix_axis: F(mix_axis),
+                band: F(band),
+                progress: F(progress),
+                seq,
+                ..Request::default()
+            },
+            wrecked,
+            gesture,
+            flipping,
+            airborne,
+            no_hands,
+            reversing: F(reversing),
+            commanded: F(commanded),
+            settle: F(settle),
+        };
+        let mut player = Player { finished: finished0, ..Player::default() };
+        let mut shared = Shared { rng: Rng::from_state(state0), used: list.clone() };
+        u.want(F(dt), &mut d, &p, &mut a, &mut player, &mut shared);
+        // Where the step goes. The two fields the original writes after it are the chooser's, not the
+        // step's, which is what the second half of the port is for.
+        Update::serviced(&mut d, &mut p, &a);
+        let got_fields = Chose {
+            want: d.want,
+            idle_wait: u.idle_wait.to_bits(),
+            idle_playing: u.idle_playing,
+            start_picked: u.start_picked,
+            breathe: u.breathe_wait.to_bits(),
+            finished: player.finished,
+            cut: a.request.cut,
+            start_phase: p.start_phase.to_bits(),
+            seq: d.seq,
+            drawn: shared.used.clone(),
+            rand_state: shared.rng.state(),
+        };
+        let why = format!(
+            "case {k}: cut {cut} dt {dt:e} want0 {want0} breathe {breathe0:e} picked \
+             {start_picked} finished {finished0} settle {settle:e}/{rate_ready:e} \
+             wrecked {wrecked}/{settled} gesture {gesture} no_hands {no_hands} flip {flipping} \
+             air {airborne} reversing {reversing:e} commanded {commanded:e} \
+             band {band:e} of {b0:e} still {still_band:e} axes {phase_axis:e}/{mix_axis:e} \
+             idle {idle_wait0:e}/{idle_playing} wait {wait_lo:e}..{wait_hi:e} \
+             list {list:?} rand {state0:#x}"
+        );
+        assert_eq!(
+            got_fields, want_fields,
+            "{why}: (want, the countdown, playing, picked, breathe, finished, the start-line flag, \
+             the start phase, the request count, the poses drawn, the generator)"
+        );
+
+        per_want[got_fields.want.clamp(0, 61) as usize] += 1;
+        if cut && !got_fields.cut {
+            gate += 1;
+        }
+        if idle_wait0 != 0.0 && got_fields.idle_wait == 0 && b0 < band {
+            disarmed += 1;
+        }
+        if !idle_playing && got_fields.idle_playing {
+            fidgets += 1;
+        }
+        if idle_playing && !got_fields.idle_playing && !(b0 < band) {
+            fidget_ended += 1;
+        }
+        if got_fields.idle_wait != idle_wait0.to_bits() && got_fields.idle_wait != 0 {
+            rearmed += 1;
+        }
+        if !start_picked && cut && !(breathe0 > 0.0) {
+            if count == 0 || count == DRAWN {
+                reset_draw += 1;
+            } else {
+                searched_draw += 1;
+            }
+        }
+        if wrecked && settled && want0 < HOLD + 1 && !cut {
+            held_draw += 1;
+        }
+    }
+
+    // Every arm of the chooser, and the eight things only some of them do. The counts are what makes
+    // this a proof of the whole function rather than of the three branches a ride happens to take.
+    for state in [
+        TURN_RIDING,
+        REVERSE_L,
+        REVERSE_R,
+        AIR,
+        BACKFLIP,
+        NO_HANDER,
+        HOLD,
+        GET_READY,
+    ] {
+        assert!(per_want[state as usize] > 20, "only {} frames asked for state {state}", per_want[state as usize]);
+    }
+    for state in HOLD + 1..=HOLD + 5 {
+        assert!(per_want[state as usize] > 2, "no frame asked for hold pose {state}");
+    }
+    for state in IDLE..IDLE + IDLES {
+        assert!(per_want[state as usize] > 2, "no frame asked for start idle {state}");
+    }
+    for state in START_POS..START_POS + START_POSES {
+        assert!(per_want[state as usize] > 2, "no frame asked for start pose {state}");
+    }
+    assert!(per_want[0] > 2, "no frame asked for a gesture slot");
+    assert!(gate > 20, "only {gate} frames opened the start gate");
+    assert!(disarmed > 20, "only {disarmed} frames disarmed the fidget");
+    assert!(fidgets > 20, "only {fidgets} frames started a fidget");
+    assert!(fidget_ended > 20, "only {fidget_ended} frames ended one");
+    assert!(rearmed > 20, "only {rearmed} frames re-armed the countdown");
+    assert!(reset_draw > 20, "only {reset_draw} frames drew a start pose from a list it threw away");
+    assert!(searched_draw > 20, "only {searched_draw} frames drew one the line had not taken");
+    assert!(held_draw > 20, "only {held_draw} frames drew a hold pose");
+    println!(
+        "the state chooser: 12000 frames, bit-exact ({gate} opening the gate, {fidgets} starting a \
+         fidget, {rearmed} re-arming it, {reset_draw}+{searched_draw} drawing a start pose, \
+         {held_draw} drawing a hold pose)"
+    );
 }
