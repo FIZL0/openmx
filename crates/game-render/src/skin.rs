@@ -282,14 +282,14 @@ impl Clip {
 
     /// Sample every channel at `time` seconds and write the joints it names.
     pub fn pose(&self, time: f32, map: &[u8], out: &mut Pose) {
-        self.lay(time, None, map, None, out);
+        self.lay(time, Mixed::Alone, map, None, out);
     }
 
     /// Sample at `time`, then fade each joint `fade` of the way back to `under`: the cross-fade a
     /// restarted motion runs against the pose it was in when it restarted. `fade` is 1 at the restart
     /// and falls to 0, so 0 is all of this clip and 1 is all of `under`.
     pub fn pose_faded(&self, time: f32, map: &[u8], fade: f32, under: &Pose, out: &mut Pose) {
-        self.lay(time, None, map, Some((fade, under)), out);
+        self.lay(time, Mixed::Alone, map, Some((fade, under)), out);
     }
 
     /// Both clips sampled at the same second and mixed: `mix` 0 is all of `other`, 1 is all of this
@@ -298,7 +298,7 @@ impl Clip {
     /// The two clips must have the same channels in the same order — the original pairs them by
     /// position in the list, not by name — which is how the airborne idle blends two leans.
     pub fn pose_mixed(&self, other: &Clip, time: f32, mix: f32, map: &[u8], out: &mut Pose) {
-        self.lay(time, Some((other, mix)), map, None, out);
+        self.lay(time, Mixed::With { other, mix }, map, None, out);
     }
 
     /// Both at once: two clips mixed, and the result faded back towards the pose under it. This is
@@ -314,24 +314,104 @@ impl Clip {
         under: &Pose,
         out: &mut Pose,
     ) {
-        self.lay(time, Some((other, mix)), map, Some((fade, under)), out);
+        self.lay(time, Mixed::With { other, mix }, map, Some((fade, under)), out);
     }
 
-    /// The body of all four: the channel walk both of the original's blend entries share.
-    fn lay(
+    /// Four clips and three weights, faded back towards the pose under it: the original's fourth blend
+    /// entry ([`motion::Blend::Three`]), whose only callers in the whole image are the two
+    /// interpolating bands of the rider's pose grid (`game_sim::vehicle_anim`).
+    ///
+    /// All four clips are sampled at the same second — `time`, which is *this* clip's duration times
+    /// the phase, however long the other three are — and paired by position in the channel list, as
+    /// the two-clip entry pairs its two. `mix` is used inside both pairs: 1 is this clip and `c`, 0 is
+    /// `b` and `d`. `cross` 1 is this clip's pair and 0 is `c`'s.
+    ///
+    /// Every channel writes the joint *this* clip's map names, including the three clips mixed in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pose_four_faded(
         &self,
+        b: &Clip,
+        c: &Clip,
+        d: &Clip,
         time: f32,
-        mixed: Option<(&Clip, f32)>,
+        mix: f32,
+        cross: f32,
         map: &[u8],
-        faded: Option<(f32, &Pose)>,
+        fade: f32,
+        under: &Pose,
         out: &mut Pose,
     ) {
+        self.lay(time, Mixed::Four { b, c, d, mix, cross }, map, Some((fade, under)), out);
+    }
+
+    /// Two clips, **each at its own second**, faded back towards the pose under it: the original's
+    /// sixth blend entry (`game_sim::vehicle_anim::Blend::Pair`), which the gesture slots' arm of the
+    /// rider's own state machine is the only caller of.
+    ///
+    /// `mix` 0 is all of `other` and 1 is all of this clip, as in [`Clip::pose_mixed`] — the whole
+    /// difference is `other_time`, which lets a gesture cross out of the gesture that was running at
+    /// whatever point *that* clip had reached rather than at a second of this clip's length.
+    ///
+    /// The one asymmetry: the rotation channels write the joint **`other`'s** map names and the
+    /// position channels the joint this clip's map names. That is the original's, not a port decision,
+    /// and it only shows on two clips whose channel lists disagree.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pose_pair_faded(
+        &self,
+        other: &Clip,
+        time: f32,
+        other_time: f32,
+        mix: f32,
+        map: &[u8],
+        other_map: &[u8],
+        fade: f32,
+        under: &Pose,
+        out: &mut Pose,
+    ) {
+        let mixed = Mixed::Pair { other, time: other_time, map: other_map, mix };
+        self.lay(time, mixed, map, Some((fade, under)), out);
+    }
+
+    /// The body of all six entries: the channel walk every one of the original's blend entry points
+    /// shares, with [`Mixed`] standing for what each of them adds to it.
+    fn lay(&self, time: f32, mixed: Mixed, map: &[u8], faded: Option<(f32, &Pose)>, out: &mut Pose) {
         for (i, c) in self.rotation.iter().enumerate() {
-            let Some(j) = joint(map, c.name, out.rot.len()) else { continue };
+            // Which map names the joint this channel writes. Every entry but the pair takes it from
+            // this clip's own; the pair takes the *second* clip's map and the second clip's channel.
+            let (named, name) = match mixed {
+                Mixed::Pair { other, map, .. } => match other.rotation.get(i) {
+                    Some(o) => (map, o.name),
+                    None => continue,
+                },
+                _ => (map, c.name),
+            };
+            let Some(j) = joint(named, name, out.rot.len()) else { continue };
             let Some(mut q) = c.sample(time) else { continue };
-            if let Some((other, mix)) = mixed {
-                let Some(o) = other.rotation.get(i).and_then(|c| c.sample(time)) else { continue };
-                q = slerp(mix, o, q, true);
+            match mixed {
+                Mixed::Alone => {}
+                Mixed::With { other, mix } => {
+                    let Some(o) = other.rotation.get(i).and_then(|c| c.sample(time)) else {
+                        continue;
+                    };
+                    q = slerp(mix, o, q, true);
+                }
+                Mixed::Pair { other, time, mix, .. } => {
+                    let Some(o) = other.rotation.get(i).and_then(|c| c.sample(time)) else {
+                        continue;
+                    };
+                    q = slerp(mix, o, q, true);
+                }
+                Mixed::Four { b, c, d, mix, cross } => {
+                    let three = (b.rotation.get(i), c.rotation.get(i), d.rotation.get(i));
+                    let (Some(b), Some(c), Some(d)) = three else { continue };
+                    let (Some(b), Some(c), Some(d)) =
+                        (b.sample(time), c.sample(time), d.sample(time))
+                    else {
+                        continue;
+                    };
+                    // the pairs first, by the one mix, then the two results by the cross
+                    q = slerp(cross, slerp(mix, d, c, true), slerp(mix, b, q, true), true);
+                }
             }
             if let Some((fade, under)) = faded {
                 if let (true, Some(&was)) = (fade > 0.0, under.rot.get(j)) {
@@ -342,12 +422,37 @@ impl Clip {
             out.turned[j] = true;
         }
         for (i, c) in self.position.iter().enumerate() {
+            // The position channels take the joint from this clip's own map in every entry, the pair
+            // included — which is what makes the pair's rotation loop an asymmetry and not a reading.
             let Some(j) = joint(map, c.name, out.pos.len()) else { continue };
             let Some(mut p) = c.sample(time) else { continue };
-            if let Some((other, mix)) = mixed {
-                let Some(o) = other.position.get(i).and_then(|c| c.sample(time)) else { continue };
-                // the original's grouping: the second clip's sample, less the mix of the difference
-                p = sub4(o, scale4(sub4(o, p), mix));
+            match mixed {
+                Mixed::Alone => {}
+                Mixed::With { other, mix } => {
+                    let Some(o) = other.position.get(i).and_then(|c| c.sample(time)) else {
+                        continue;
+                    };
+                    // the original's grouping: the second clip's sample, less the mix of the difference
+                    p = sub4(o, scale4(sub4(o, p), mix));
+                }
+                Mixed::Pair { other, time, mix, .. } => {
+                    let Some(o) = other.position.get(i).and_then(|c| c.sample(time)) else {
+                        continue;
+                    };
+                    p = sub4(o, scale4(sub4(o, p), mix));
+                }
+                Mixed::Four { b, c, d, mix, cross } => {
+                    let three = (b.position.get(i), c.position.get(i), d.position.get(i));
+                    let (Some(b), Some(c), Some(d)) = three else { continue };
+                    let (Some(b), Some(c), Some(d)) =
+                        (b.sample(time), c.sample(time), d.sample(time))
+                    else {
+                        continue;
+                    };
+                    let near = sub4(b, scale4(sub4(b, p), mix));
+                    let far = sub4(d, scale4(sub4(d, c), mix));
+                    p = sub4(far, scale4(sub4(far, near), cross));
+                }
             }
             if let Some((fade, under)) = faded {
                 if let (true, Some(&was)) = (fade > 0.0, under.pos.get(j)) {
@@ -358,6 +463,27 @@ impl Clip {
             out.moved[j] = true;
         }
     }
+}
+
+/// What a blend entry point adds to [`Clip::lay`]'s channel walk: nothing, one more clip, three more,
+/// or one more at its own clip time.
+///
+/// The original has six entries and they are one loop with four shapes of body. This is that
+/// difference, and nothing else: the channel pairing, the joint maps, the cross-fade against the
+/// snapshotted pose and the writes are the same in all of them.
+#[derive(Clone, Copy)]
+enum Mixed<'a> {
+    /// The advance (mode 0) and the one-clip entry (mode 1): this clip alone.
+    Alone,
+    /// The two-clip entry (mode 2): `other` at the same second, `mix` 0 all of it and 1 all of this
+    /// clip.
+    With { other: &'a Clip, mix: f32 },
+    /// The four-clip entry (mode 4): this clip and `b` mixed, `c` and `d` mixed, the two results
+    /// crossed. All four at the one second.
+    Four { b: &'a Clip, c: &'a Clip, d: &'a Clip, mix: f32, cross: f32 },
+    /// The pair entry (mode 5): `other` at *its* own second `time`, and — for the rotation channels
+    /// only — its own joint map.
+    Pair { other: &'a Clip, time: f32, map: &'a [u8], mix: f32 },
 }
 
 /// A channel's joint, or `None` when the clip's map says to skip it.

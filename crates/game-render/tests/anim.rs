@@ -13,7 +13,9 @@
 //! 2. **which clips a bike has** — `stunts.ini`'s `UsedForBike` against the clips the archives
 //!    actually ship, slot for slot, over every bike on the disc. Two tables written by different
 //!    people that have to agree, and do.
-//! 3. **the name rules**, **binding** and **the blend modes** — port only, on fixtures.
+//! 3. **the name rules**, **binding** and **the blend modes** — port only, on fixtures — and the
+//!    two blends nothing in the port could draw until V11: the four-clip pose grid and the pair at
+//!    two phases, both taken out of the machine that asks for them rather than written by hand.
 //!
 //! Needs the user's own disc; the disc tests skip with the reason when it is not there.
 
@@ -27,6 +29,7 @@ use game_sim::motion::{
     Animations, Blend, ClipId, Joints, Library, Params, Player, Request, Slot, Snapshot,
 };
 use game_sim::trick::{Stunts, Trick};
+use game_sim::vehicle_anim;
 use ps2_float::F;
 
 /// The bike the port is built against, and the animation set every bike archive carries.
@@ -390,8 +393,8 @@ fn each_blend_mode_poses_what_its_entry_point_takes() {
         assert!((got - want).abs() < 1e-6, "{:?} is not the mix of a clip with itself", set.pose.pos[0]);
     }
 
-    // Four clips and three weights: not drawn, and it leaves the pose exactly as it was.
-    let was = set.pose.clone();
+    // Four clips and three weights, all of them the same shape: still that shape, whatever the
+    // three weights are. What the weights do is the next proof down.
     let blend = Blend::Three {
         phase: F(0.5),
         mix: F(0.5),
@@ -403,9 +406,10 @@ fn each_blend_mode_poses_what_its_entry_point_takes() {
         d: b,
     };
     player.run(F(DT), blend, &lib, &set.timing(Some(ClipId(0))));
-    assert!(!set.apply(blend, &lib, &player), "mode 4 is not ported");
-    assert_eq!(set.pose.pos, was.pos, "and it must not have touched the pose");
-    assert_eq!(set.pose.rot, was.rot);
+    assert!(set.apply(blend, &lib, &player), "mode 4 should have posed");
+    for (got, want) in set.pose.pos[0].iter().zip(half) {
+        assert!((got - want).abs() < 1e-6, "{:?} is not the mix of a clip with itself", set.pose.pos[0]);
+    }
 
     // The free-running advance poses the clip that is on, and holds it once it has finished.
     let mut player = Player { clip: Some(ClipId(0)), ..Player::default() };
@@ -469,6 +473,217 @@ fn a_set_whose_geometry_is_missing_says_so() {
     assert!(why.contains(BIKE_MCF), "{why}");
 }
 
+// ---------------------------------------------------------------------------------------------------
+// 4 — the two blends nothing could draw (V11)
+// ---------------------------------------------------------------------------------------------------
+
+/// The four-clip blend: the pose grid's low band, through the machine that asks for it, and the pose
+/// it writes is between the four clips it names.
+///
+/// Nothing here is a handmade blend value. The state is the grid (`vehicle_anim::TURN_RIDING`, which
+/// is what the state chooser asks for on a ride — `game-sim/tests/motion.rs`), the band value is
+/// under the grid's first threshold, and the selection picks the four clips, the two pair mixes and
+/// the cross itself. The nine fixture clips stand in nine different places and turn nine different
+/// ways, so a pose between four of them cannot have come from any other four.
+#[test]
+fn the_four_clip_blend_draws_between_the_four_rows_it_names() {
+    let mut set = Set::new(MotionSet::default(), bones(&["x", "y"]), Vec::new());
+    let mut lib = vehicle_anim::Library::default();
+    for i in 0..9 {
+        let turn = 128 + 64 * i as u16;
+        let clip = clip_turning(&["x"], turn, [i as f32, 10.0 * i as f32, -1.0], 1.0 + 0.25 * i as f32);
+        let joints = clip.joints(&set.skeleton);
+        set.clips.push(Bound { name: format!("row{i}"), member: format!("{i}.mot"), clip, joints });
+        lib.clip[vehicle_anim::TURN_STOP as usize + i] = Some(ClipId(i as u32));
+    }
+
+    // The grid's own thresholds, which are 5, 10 and 15 mph of chassis speed — see the journal.
+    let params = vehicle_anim::Params {
+        rate_default: F(3.0),
+        band: [F(7.333_333), F(14.666_667), F(22.0)],
+        ..vehicle_anim::Params::default()
+    };
+    let request = vehicle_anim::Request {
+        phase_axis: F(0.5),
+        mix_axis: F(0.25),
+        band: F(3.0),
+        seq: 1,
+        ..vehicle_anim::Request::default()
+    };
+    let mut driver = vehicle_anim::Driver {
+        want: vehicle_anim::TURN_RIDING,
+        extra: -1,
+        mix: vehicle_anim::Lag::new(F(0.2)),
+        phase: vehicle_anim::Lag::new(F(0.2)),
+        ..vehicle_anim::Driver::default()
+    };
+    let mut player = Player::default();
+
+    // Half a second of standing nearly still, which is the low band: the two axes ease towards their
+    // targets, so the weights the last frame draws with are the machine's and not a chosen pair.
+    let mut frame = driver.frame(F(DT), &params, &request, &lib, true, |_| F::ONE);
+    for _ in 0..15 {
+        frame = driver.frame(F(DT), &params, &request, &lib, true, |id| {
+            set.timing(Some(id)).duration
+        });
+        let clip = set.timing(frame.blend.clock_clip(&player));
+        frame.blend.run(&mut player, F(DT), &clip);
+        assert!(set.apply_vehicle(frame.blend, &player), "the grid's low band should have posed");
+    }
+
+    let vehicle_anim::Blend::Four { mix, cross, a, b, c, d, .. } = frame.blend else {
+        panic!("the grid's low band is not a four-clip blend: {:?}", frame.blend)
+    };
+    // The clips it named: the stopped row's middle and low clips, and the still row's — the mix axis
+    // is under a half, so each row's pair is the one below its middle.
+    let row = |state: i32| Some(ClipId((state - vehicle_anim::TURN_STOP) as u32));
+    assert_eq!(
+        [a, b, c, d],
+        [
+            row(vehicle_anim::TURN_STOP + 1),
+            row(vehicle_anim::TURN_STOP),
+            row(vehicle_anim::TURN_STILL + 1),
+            row(vehicle_anim::TURN_STILL),
+        ],
+        "the four clips are not the grid's own rows"
+    );
+    assert!(mix.0 > 0.0 && mix.0 < 1.0 && cross.0 > 0.0 && cross.0 < 1.0, "{mix:?} {cross:?}");
+
+    // What the four clips themselves say at the one second the blend samples them all at — which is
+    // the *first* clip's duration times the phase, so the four are read at one time and not four.
+    let time = player.prev.0;
+    let sample = |id: Option<ClipId>| {
+        let bound = &set.clips[id.expect("a named clip").0 as usize];
+        (bound.clip.rotation[0].sample(time).unwrap(), bound.clip.position[0].sample(time).unwrap())
+    };
+    let (qa, pa) = sample(a);
+    let (qb, pb) = sample(b);
+    let (qc, pc) = sample(c);
+    let (qd, pd) = sample(d);
+
+    // Rotation: every clip turns about the same axis, so the two pair mixes and the cross between
+    // them come out as one angle, and the angle the pose holds has to be that nesting exactly.
+    let (near, far) = (lerp(mix.0, angle(qb), angle(qa)), lerp(mix.0, angle(qd), angle(qc)));
+    let want = lerp(cross.0, far, near);
+    let got = angle(set.pose.rot[0]);
+    assert!((got - want).abs() < 1e-4, "the pose turns {got}, not the {want} the four clips mix to");
+    let (lo, hi) = bounds(&[angle(qa), angle(qb), angle(qc), angle(qd)]);
+    assert!(lo < got && got < hi, "{got} is not between the four clips' {lo}..{hi}");
+
+    // Position: the same nesting, on each axis, and strictly inside the four.
+    for k in 0..3 {
+        let (near, far) = (lerp(mix.0, pb[k], pa[k]), lerp(mix.0, pd[k], pc[k]));
+        let want = lerp(cross.0, far, near);
+        let got = set.pose.pos[0][k];
+        assert!((got - want).abs() < 1e-4, "axis {k} is at {got}, not the {want} the four mix to");
+        let (lo, hi) = bounds(&[pa[k], pb[k], pc[k], pd[k]]);
+        assert!(lo <= got && got <= hi, "axis {k}: {got} is not between {lo}..{hi}");
+    }
+
+    // And nothing but the joint the clips name was touched.
+    assert_eq!(set.pose.turned, vec![true, false], "only the channels' own joints");
+    assert_eq!(set.pose.moved, vec![true, false]);
+}
+
+/// The pair at two phases: a gesture crossing out of the gesture that was running, each clip read at
+/// its own point, and the joint map asymmetry the original has and nothing else in the port shows.
+///
+/// The two fixture clips name *different* joints — the gesture being asked for turns `y` and the one
+/// it is coming out of turns `x` — which is the sharpest form of the asymmetry: the rotation channels
+/// write the joint the **second** clip's map names and the position channels the one the first's does,
+/// so one blend writes the rotation of one joint and the position of another. It is the original's
+/// sixth blend entry that does that, not the port's reading of it.
+#[test]
+fn the_pair_blend_reads_each_clip_at_its_own_phase() {
+    let mut set = Set::new(MotionSet::default(), bones(&["x", "y"]), Vec::new());
+    let mut lib = vehicle_anim::Library::default();
+    // two gesture slots: the one being asked for, two seconds long, and the one it comes out of
+    for (slot, (name, turn, p, len)) in
+        [("x", 128u16, [1.0, 2.0, 3.0], 2.0), ("y", 1024, [-5.0, -6.0, -7.0], 0.5)]
+            .into_iter()
+            .enumerate()
+    {
+        let clip = clip_turning(&[name], turn, p, len);
+        let joints = clip.joints(&set.skeleton);
+        set.clips.push(Bound { name: name.to_string(), member: format!("{slot}.mot"), clip, joints });
+        lib.clip[slot] = Some(ClipId(slot as u32));
+    }
+
+    let params = vehicle_anim::Params {
+        rate_stunt: F(3.0),
+        cross_cap: F(0.25),
+        start_phase: F(0.5),
+        ..vehicle_anim::Params::default()
+    };
+    // A gesture a third of the way through, asked for while slot 0 is the state that was running:
+    // the machine's own route to the pair is a repeat of a gesture, which restarts on the count.
+    let request = vehicle_anim::Request {
+        phase_axis: F(0.5),
+        mix_axis: F(0.5),
+        progress: F(1.0 / 3.0),
+        seq: 1,
+        ..vehicle_anim::Request::default()
+    };
+    let mut driver = vehicle_anim::Driver {
+        want: 1,
+        extra: -1,
+        mix: vehicle_anim::Lag::new(F(0.2)),
+        phase: vehicle_anim::Lag::new(F(0.2)),
+        ..vehicle_anim::Driver::default()
+    };
+    let mut player = Player::default();
+    let length = |id: ClipId| set.timing(Some(id)).duration;
+
+    // The restart frame zeroes the new clip's phase and starts the old one at `start_phase`; the
+    // frame after it is the one that reads both clips at their own point.
+    driver.frame(F(DT), &params, &request, &lib, true, length);
+    let frame = driver.frame(F(DT), &params, &request, &lib, true, length);
+    let vehicle_anim::Blend::Pair { phase_a, phase_b, mix, a, b, .. } = frame.blend else {
+        panic!("a gesture out of a gesture is not a pair blend: {:?}", frame.blend)
+    };
+    assert_eq!((a, b), (Some(ClipId(1)), Some(ClipId(0))), "the new gesture, out of the old one");
+    assert!(phase_a.0 > 0.0 && phase_b.0 > phase_a.0, "{phase_a:?} {phase_b:?}");
+
+    let clip = set.timing(frame.blend.clock_clip(&player));
+    frame.blend.run(&mut player, F(DT), &clip);
+    assert!(set.apply_vehicle(frame.blend, &player), "the pair should have posed");
+
+    // The two times: the first clip's own duration times its phase, which the clock left behind, and
+    // the second clip's duration times *its* phase, which is the whole point of this entry point.
+    let (first, second) = (&set.clips[1], &set.clips[0]);
+    let ta = player.prev.0;
+    let tb = second.clip.duration() * phase_b.0;
+    assert!((ta - first.clip.duration() * phase_a.0).abs() < 1e-6, "the clock is not a's own time");
+    assert!((tb - ta).abs() > 0.1, "the two clips are being read at the same time after all");
+
+    let (qa, pa) = (
+        first.clip.rotation[0].sample(ta).unwrap(),
+        first.clip.position[0].sample(ta).unwrap(),
+    );
+    let (qb, pb) = (
+        second.clip.rotation[0].sample(tb).unwrap(),
+        second.clip.position[0].sample(tb).unwrap(),
+    );
+
+    // The asymmetry: the rotation landed on the joint the *second* clip names, the position on the
+    // joint the first one names, out of the one blend.
+    assert_eq!(set.pose.turned, vec![true, false], "the rotation writes the second clip's joint, x");
+    assert_eq!(set.pose.moved, vec![false, true], "the position writes the first clip's joint, y");
+
+    let got = angle(set.pose.rot[0]);
+    let want = lerp(mix.0, angle(qb), angle(qa));
+    assert!((got - want).abs() < 1e-4, "the pose turns {got}, not the {want} the two clips mix to");
+    let (lo, hi) = bounds(&[angle(qa), angle(qb)]);
+    assert!(lo < got && got < hi, "{got} is not between the two clips' {lo}..{hi}");
+    for k in 0..3 {
+        let got = set.pose.pos[1][k];
+        let want = lerp(mix.0, pb[k], pa[k]);
+        assert!((got - want).abs() < 1e-4, "axis {k} is at {got}, not {want}");
+        let (lo, hi) = bounds(&[pa[k], pb[k]]);
+        assert!(lo < got && got < hi, "axis {k}: {got} is not between {lo}..{hi}");
+    }
+}
+
 // --- small fixtures ---------------------------------------------------------------------------------
 
 /// A skeleton of named joints, all at the origin and all roots.
@@ -510,4 +725,50 @@ fn clip_of(names: &[&str]) -> Clip {
         position,
         rotation,
     }
+}
+
+/// A clip whose one rotation channel per name turns about `x` from `turn` to a quarter-turn past it
+/// over `duration` seconds, and whose position channel stands still at `p`.
+///
+/// The turn is what proves *when* a blend read the clip, and the position what it mixed: the two
+/// halves of "the pose is between the clips it names".
+fn clip_turning(names: &[&str], turn: u16, p: [f32; 3], duration: f32) -> Clip {
+    let (mut rotation, mut position) = (Vec::new(), Vec::new());
+    for k in 0..names.len() {
+        rotation.push(RotChannel::new(k as i32, vec![
+            RotKey { t: 0.0, turn, axis: [32767, 0, 0] },
+            RotKey { t: duration * 0.5, turn: turn + 256, axis: [32767, 0, 0] },
+            RotKey { t: duration, turn: turn + 512, axis: [32767, 0, 0] },
+        ]));
+        position.push(PosChannel::new(k as i32, vec![
+            PosKey { t: 0.0, p },
+            PosKey { t: duration * 0.5, p },
+            PosKey { t: duration, p },
+        ]));
+    }
+    Clip {
+        version: 3,
+        frames: 30,
+        names: names.iter().map(|n| (*n).to_string()).collect(),
+        timing: game_sim::motion::Clip::new(F(duration), false),
+        position,
+        rotation,
+    }
+}
+
+/// The angle a quaternion about `x` holds, in radians, which is the one number the fixture clips
+/// differ by.
+fn angle(q: [f32; 4]) -> f32 {
+    2.0 * q[0].atan2(q[3])
+}
+
+/// `from` at 0 and `to` at 1 — the weight convention every one of the original's blend entries uses.
+fn lerp(t: f32, from: f32, to: f32) -> f32 {
+    from + t * (to - from)
+}
+
+/// The lowest and highest of a blend's inputs: what "between the clips it names" is measured against.
+fn bounds(of: &[f32]) -> (f32, f32) {
+    let lo = of.iter().copied().fold(f32::INFINITY, f32::min);
+    (lo, of.iter().copied().fold(f32::NEG_INFINITY, f32::max))
 }

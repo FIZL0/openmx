@@ -2162,3 +2162,57 @@ vehicle_add_anim boot 0x00248150 (vehicle in a0, key in a1, the first clip's nam
 #                                up the same way the loader does it; an empty name leaves that half of
 #                                the record 0. Not ported: it is the caller's half, and what the
 #                                machine does with a record is proved from records laid out in RAM
+
+# ---------------------------------------------------------------------------------------------------
+# V11 — the state chooser: the one writer of the sixty-state machine's `want`, and so the one thing
+# between a ride and the four-clip blend. It is a method of the same object S25 mapped (which the
+# disc says is the *rider*, not the bike: all 36 of the fixed clip names are in every rider archive
+# and none are in 250sx.res). The port is `Update` in crates/game-sim/src/vehicle_anim.rs, the proof
+# is the fourth test in crates/game-sim/tests/vehicle_anim.rs, and the decode is in
+# research/journal/2026-10-17-v11-blends-that-never-run.
+vehicle_anim_want boot 0x00248a70 (dt in f12, the object in a0) the chooser, 2068 bytes. Writes +0x8f4
+#                                 and calls vehicle_animation (0x002492b0) in its own tail; after the
+#                                 call it writes +0x8f8 = request+0x1a4 and the byte +0x8fc =
+#                                 (char)request+0x1a8, which is the writer the S25 block above says
+#                                 nothing has. Four parts: the start-line group off request+0x140;
+#                                 the riding priority (wrecked, gesture, flipping, airborne,
+#                                 reversing, else the grid); the idle wait; the tail. On its first
+#                                 call it seeds the generator from gettimeofday unless the flag at
+#                                 0x0045fa10 is set, so a proof sets that flag
+vehicle_anim_rand_seeded boot 0x0045fa10 the once-only flag in front of that srand call
+vehicle_anim_start_idles boot 0x004e1fc0 a file-static list of the start idles other bodies on the
+#                                        line have already drawn, ten ints, count at 0x004e1fe8. The
+#                                        chooser redraws until its pick is not in the list, appends
+#                                        it, and resets the list to the one new entry once all ten
+#                                        are gone. The port models it as `vehicle_anim::Shared`
+#                                        because it is shared between bodies, not owned by one
+# The object's fields the chooser owns, past the S25 map:
+#   +0x3c   the motion object's "the clip finished" flag (read, and cleared when a fidget starts)
+#   +0x6b4  "the wreck has come to rest", written by another method of the object (0x0024c7e0)
+#   +0xa0c  a start pose has been drawn   +0xa10  the still band, 1.46667
+#   +0xa28  the breathe timer   +0xa2c  a fidget is playing   +0xa30  the idle countdown
+#   +0xa34/+0xa38  the countdown's range in seconds, 15 and 45
+# The request block, past the S25 map: +0xf8 airborne, +0xfc flipping, +0x100 no hands, +0x104
+# wrecked, +0x144 how long the body has been settled, +0x160 the commanded throttle, +0x16c
+# reversing, +0x1a0 the gesture asked for (24 is "none"). The writer of the block is not located
+vehicle_anim_ctor boot 0x002472c0 the object's constructor, 1396 bytes, which is where the numbers the
+#                                 step and the chooser read come from. The five fade rates
+#                                 (+0x694..+0x6a4) and the stunt cross-fade cap (+0x8e8) are *zero*
+#                                 here and written by something not located; these are not:
+#                                   +0xa10 1.46666  the still band
+#                                   +0xa14 7.3333   }  the pose grid's three thresholds
+#                                   +0xa18 14.6666  }
+#                                   +0xa1c 21.9999  }
+#                                   +0xa20 73.3330  }  two more the step does not read
+#                                   +0xa24 80.6666  }
+#                                   +0xa34 15.0  +0xa38 45.0  the idle countdown's range in seconds
+#                                   +0x8f4 = +0x8f0 = +0x8ec = 0x1e: the body starts in the pose grid
+#                                 1/1.46666 is 0.681818, which is the number openmx/src/main.rs turns
+#                                 the chassis speed into mph with — so the band is feet per second and
+#                                 the six thresholds are 1, 5, 10, 15, 50 and 55 mph exactly
+vehicle_anim_build boot 0x00247a60 (728 bytes) the body's build, which makes the two lag records the
+#                                  axes are eased in: five words each, {value 0.5, time constant,
+#                                  1.0, FLT_MAX, -FLT_MAX}. The mix axis (+0x630) is built with
+#                                  0.125 and the phase axis (+0x634) with 0.15, and both start
+#                                  centred at a half — which is what makes a body that is not being
+#                                  steered sit in the middle of each row of the grid
