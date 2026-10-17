@@ -4,6 +4,8 @@
 //! cargo run --release -p openmx                    # ride
 //! cargo run --release -p openmx -- --seconds 60    # ride for a minute and quit (the task's own test)
 //! cargo run --release -p openmx -- --pad /dev/input/js1 --size 512x384 --scale 2
+//! cargo run --release -p openmx -- --record context/tapes/spin.tape   # write the pad down
+//! cargo run --release -p openmx -- --play context/tapes/spin.tape     # and ride it back
 //! ```
 //!
 //! No emulator, no fixture, no menu. Everything it shows is read at runtime from the user's own disc —
@@ -66,6 +68,26 @@
 //! or closing the window quits. The same controls are on the keyboard for a machine with no pad:
 //! X/Space, Z, the arrow keys, C/V/D for the three trick buttons, Q+E for the reset, Return.
 //!
+//! # Tapes
+//!
+//! `--record FILE` writes down the pad of every frame the simulation ran — the reports as the pad
+//! library left them and the `dt` that frame was handed — and `--play FILE` rides one back instead of
+//! reading the pad at all, at the tape's own frame lengths, and quits when it runs out. The file is
+//! I3's [`game_sim::replay::PadTape`], so a tape of this shell, a tape read off a capture of the
+//! original ([`game_sim::replay::PadTape::from_capture`]) and a tape of a human's PCSX2 recording
+//! ([`game_sim::replay::PadTape::from_p2m2`]) are the same kind of file and all three ride here —
+//! `--play` reads a `.p2m2` as the tape it is, so `--play a.p2m2 --phase second --record a.tape`
+//! turns a human's minute on the original into a tape of this port's own kind by riding it.
+//!
+//! What it buys: a control complaint stops being a story. "It spins out after ten seconds" becomes a
+//! file somebody else can ride, and a physics change can be tried against the same input twice. A
+//! played session is a function of its tape — the pad and the frame length both come off it, and
+//! nothing else in the frame reaches the simulation — so `--play t --record t2` writes `t2` identical
+//! to `t`, and that is the check that the two halves agree.
+//!
+//! A tape holds values read out of the game, so it is game data: write it under `context/`, which is
+//! git-ignored, and never into the repository.
+//!
 //! Which host button is which is this file's and [`game_sim::ride::Controls::from_pad`]'s own choice
 //! and not the disc's — the original's binding table is in its front end and is not ported. What *is*
 //! the disc's is the order of the three trick buttons, because that order is what numbers the six
@@ -91,6 +113,7 @@ use game_render::{ini, png, scene as view};
 use game_sim::camera::{Preset, Race, Ridden, Switches, Target};
 use game_sim::input::{Control, Manager, PADS, Report};
 use game_sim::phy::Phy;
+use game_sim::replay::{Head, PadTape, Recorder, TickPhase};
 use game_sim::ride::Controls;
 use game_sim::rider::{self, Rider};
 use game_sim::rng::Rng;
@@ -177,6 +200,12 @@ struct World<'a> {
     riding: bool,
     /// What the rider did this frame, kept so the loop can print it after the pass.
     said: rider::Frame,
+    /// `--record`: the tape this session is being written to, one frame per simulation pass.
+    tape: Option<Recorder>,
+    /// `--play`: the frame length the tape says this pass is, which replaces the one the engine
+    /// measured. The recorded session simulated with the tape's own `dt`, so a playback that used the
+    /// wall clock would reproduce the buttons and not the ride.
+    played_dt: Option<F>,
 }
 
 impl Game for World<'_> {
@@ -186,6 +215,15 @@ impl Game for World<'_> {
     /// reports are in `self.reports` and the port's manager is what reads them. Nothing here draws
     /// from `rng`: the only thing that moves is the bike, and the rider decides where it goes.
     fn simulate(&mut self, dt: F, _input: Input, _rng: &mut Rng) -> bool {
+        // Riding a tape: the frame is as long as the tape says it was, not as long as this machine
+        // took to draw the last one. Everything below reads this `dt` and nothing reads the engine's.
+        let dt = self.played_dt.unwrap_or(dt);
+        // Writing one: the pass's own `dt` and the reports it is about to read, which is what a
+        // replay of this tape will be handed (`game_sim::replay::Recorder`).
+        if let Some(tape) = &mut self.tape {
+            tape.frame(dt, &self.reports);
+        }
+
         // The game's poll, with the frame's dt: this is what turns report bytes into held controls,
         // press and release edges, and stick axes with the game's own dead zone.
         self.input.tick(dt, &self.reports);
@@ -242,6 +280,17 @@ struct Args {
     /// `--trace-brake`: hold both brakes through the trace, which is the brief's own case — a bike
     /// standing still on the start line rather than one free-rolling down the first slope.
     trace_brake: bool,
+    /// `--record FILE`: write every simulated frame's pad to a tape, and the tape to this file when
+    /// the session ends. A tape holds values read out of the game, so the file belongs under
+    /// `context/`.
+    record: Option<std::path::PathBuf>,
+    /// `--play FILE`: ride this tape instead of the pad, and quit when it runs out. A `.p2m2` is a
+    /// human's PCSX2 recording of the original and is read as the tape it is.
+    play: Option<std::path::PathBuf>,
+    /// `--phase first|second`: which of a tick's two video fields the game's pad read landed on, for
+    /// a `.p2m2`. The file cannot say, and it is a fact about the recording rather than about the
+    /// game, so there is nothing better than asking.
+    phase: TickPhase,
 }
 
 fn run() -> Result<(), String> {
@@ -634,6 +683,31 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    // ---- the tape ------------------------------------------------------------------------------
+    // `--play` reads one in before anything opens, because a tape that will not parse should say so
+    // before a window appears; `--record` starts an empty one and the loop writes it out at the end.
+    let mut head = match &args.play {
+        None => None,
+        Some(path) => {
+            let tape = read_tape(path, args.phase)?;
+            println!(
+                "riding {}: {} frames{}",
+                path.display(),
+                tape.len(),
+                match tape.name.is_empty() {
+                    true => String::new(),
+                    false => format!(" of {}", tape.name),
+                }
+            );
+            Some(Head::new(tape))
+        }
+    };
+    let recorder = args.record.as_ref().map(|path| {
+        println!("recording to {}", path.display());
+        // What the tape is of, for a human reading a directory of them and for a failure line.
+        Recorder::new(format!("{} on {} / {}", args.rider, args.track, args.bike))
+    });
+
     // ---- the window and the pad ---------------------------------------------------------------
     let mut window = Window::open(
         &args.display,
@@ -661,6 +735,8 @@ fn run() -> Result<(), String> {
         rider,
         riding: true,
         said: rider::Frame::default(),
+        tape: recorder,
+        played_dt: None,
     };
 
     // Where the chassis wants the body's hands and feet: the four dummy anchors at its grips and its
@@ -681,20 +757,42 @@ fn run() -> Result<(), String> {
         if window.closed() || window.held(key::ESCAPE) {
             break;
         }
-        world.reports = [pads.report(&window), Report::missing()];
+        // The pad this frame: the tape's, if one is being ridden, and the host's otherwise. A tape
+        // that has run out ends the session — there is no pad behind it to carry on with.
+        match &mut head {
+            None => world.reports = [pads.report(&window), Report::missing()],
+            Some(head) => match head.next() {
+                Some(frame) => {
+                    world.reports = frame.reports;
+                    world.played_dt = Some(frame.dt());
+                }
+                None => {
+                    println!("the tape ran out after {} frames", head.len());
+                    break;
+                }
+            },
+        }
 
         // One frame of the game's own fixed update, which calls `World::simulate` inside itself.
         let step = engine.step(wall(started), engine_input(&world.reports[0]), &mut world);
         if step.outcome == Outcome::Quit {
             break;
         }
+        // A frame the engine did not simulate is a frame of the tape nobody rode, and the rest of the
+        // ride would be a different run from the one recorded. Nothing in this shell sets the engine's
+        // frozen flag, so this says so and stops rather than carrying on with a hole in the ride.
+        if head.is_some() && !step.simulated {
+            return Err("the engine skipped a frame while a tape was being ridden".into());
+        }
+        // What the simulation was actually handed, which the pose and the camera below step with too.
+        let dt = world.played_dt.unwrap_or(step.dt);
 
         // The body on the bike, posed from the frame the simulation's own animation driving just
         // answered: the clip it asked for, at the phase its clock reached, faded by its ramp. A
         // frozen ride does not step the driver, so the pose is left where it was.
         if let Some(body) = &mut body {
             if world.riding {
-                body.pose(step.dt, world.rider.animation);
+                body.pose(dt, world.rider.animation);
             }
         }
 
@@ -707,7 +805,7 @@ fn run() -> Result<(), String> {
                 let ride = &world.rider.ride;
                 let want = Chassis::want(ride, &world.rider.tricks);
                 let request = Chassis::request(ride, &world.rider.tricks);
-                chassis.frame(step.dt, want, &request, Drive::of(ride));
+                chassis.frame(dt, want, &request, Drive::of(ride));
                 if let Some(loaded) = assets.models.get_mut(CHASSIS) {
                     chassis.skin_into(loaded);
                 }
@@ -763,7 +861,7 @@ fn run() -> Result<(), String> {
             // This frame has no obstacle push-out — the base class's did, and the base class's
             // frame is not the one the disc runs.
             Some(camera.update(
-                step.dt,
+                dt,
                 &rider,
                 F(NEAR_CLIP),
                 &world.tables.ride.curve,
@@ -882,6 +980,28 @@ fn run() -> Result<(), String> {
         }
     }
 
+    // The tape, written once the session is over: every frame the simulation ran, in order, in the
+    // form `game_sim::replay::PadTape::parse` reads back. It is game data, so it goes where the
+    // caller said and the caller is expected to say `context/`.
+    if let (Some(path), Some(tape)) = (&args.record, &world.tape) {
+        if let Some(dir) = path.parent() {
+            if !dir.as_os_str().is_empty() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+        }
+        std::fs::write(path, tape.to_text()).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("wrote {} ({} frames)", path.display(), tape.len());
+    }
+
+    // Where a session that was taped ended up, as the number the replay harness compares runs by.
+    // A played tape is a function of its file — the pad and the frame length both come off it — so
+    // two rides of one tape print the same hash, and a change that moved the physics prints a
+    // different one. It is only printed for a taped session: a live ride is paced by the wall clock
+    // and its hash would be a different number every time, which is a number worth nothing.
+    if head.is_some() || args.record.is_some() {
+        println!("ride hash {:#018x}", game_sim::hash::of(&world.rider.ride));
+    }
+
     println!(
         "ridden for {:.1}s over {} frames",
         started.elapsed().as_secs_f32(),
@@ -957,6 +1077,31 @@ fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| format!("the archive has no member ending in {named} or {tagged}"))
 }
 
+/// A tape to ride, from the file it is in.
+///
+/// Two kinds, because a tape of the port and a tape of the original are the same kind of file and the
+/// shell should ride either:
+///
+/// - a `.tape` (anything that is not a `.p2m2`) — the form [`PadTape::to_text`] writes, which is what
+///   `--record` leaves behind and what a tape read off a `./kit record` capture of the original is
+///   written as;
+/// - a `.p2m2` — a human's PCSX2 input recording of the original, read by the ported reader (I4).
+///   Which of a tick's two video fields the game actually read is the one thing that file cannot say,
+///   so `--phase` says it; `second` is the measured answer for the recording the project has, and
+///   that is a fact about that recording rather than about the game.
+///
+/// Which means `--play a.p2m2 --phase second --record a.tape` converts one into the other, by riding
+/// it: the tape written is the pad the port was handed, frame for frame.
+fn read_tape(path: &std::path::Path, phase: TickPhase) -> Result<PadTape, String> {
+    let named = |e: std::io::Error| format!("{}: {e}", path.display());
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("p2m2")) {
+        let bytes = std::fs::read(path).map_err(named)?;
+        return PadTape::from_p2m2(&bytes, phase).map_err(|e| format!("{}: {e}", path.display()));
+    }
+    let text = std::fs::read_to_string(path).map_err(named)?;
+    PadTape::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// The member of `MX.PSR` whose name ends that way — archives are named after the track or bike they
 /// hold, in a directory this code does not need to know.
 fn member_ending(disc: &Disc, suffix: &str) -> Result<String, String> {
@@ -990,6 +1135,9 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace: None,
         trace_dt: None,
         trace_brake: false,
+        record: None,
+        play: None,
+        phase: TickPhase::default(),
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
     };
     let mut argv = std::env::args().skip(1);
@@ -1008,6 +1156,15 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--display" => args.display = next("a display, like :0")?,
             "--no-wrecks" => args.wrecks = false,
+            "--record" => args.record = Some(next("a path for the tape")?.into()),
+            "--play" => args.play = Some(next("a tape to ride")?.into()),
+            "--phase" => {
+                args.phase = match next("first or second")?.as_str() {
+                    "first" => TickPhase::First,
+                    "second" => TickPhase::Second,
+                    other => return Err(format!("--phase: first or second, not {other}")),
+                }
+            }
             "--trace-brake" => args.trace_brake = true,
             "--trace-dt" => {
                 args.trace_dt = Some(
@@ -1053,6 +1210,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks]\n\
+                            [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                      \n\
                      Rides the freeride area from the disc named in kit.toml.\n\
                      Cross throttle, Square brake, R2 front brake, L2 clutch, left stick steers\n\
@@ -1063,7 +1221,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                      On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, Q+E reset.\n\
                      --no-wrecks turns the session's wrecks off; --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\
-                     nobody on the pad and prints the solver's own numbers."
+                     nobody on the pad and prints the solver's own numbers.\n\
+                     --record writes every simulated frame's pad to a tape (under context/,\n\
+                     it is game data); --play rides one instead of the pad, at the tape's own\n\
+                     frame lengths, and quits when it runs out. A human's PCSX2 recording\n\
+                     of the original (.p2m2) is a tape too and rides the same; --phase says\n\
+                     which of a tick's two video fields that recording's game read."
                 );
                 return Ok(None);
             }

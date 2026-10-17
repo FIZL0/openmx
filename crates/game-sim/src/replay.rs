@@ -1852,3 +1852,121 @@ impl PadTape {
         Ok(movie.tape(phase))
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The shell's own tape: writing one while a session plays, and riding one instead of a pad
+// ---------------------------------------------------------------------------------------------------
+
+/// A tape being written by a session that is being played right now: the app layer hands it every
+/// frame it simulates, in the order it simulated them, and it hands back the file.
+///
+/// The shell's `--record FILE` is this type and nothing else. It exists rather than a bare
+/// [`PadTape::push`] so that the two rules a recording has to keep are kept in one place, by code a
+/// test can drive without a window:
+///
+/// - **One entry per simulation pass, not per loop iteration.** A frame the engine did not simulate
+///   (a frozen frame, the shutdown frame) has no input the port could replay, and a tape with one in
+///   it plays back one tick longer than the session it recorded. So the recorder is fed from inside
+///   the simulation pass, where the `dt` and the reports are the ones that frame actually used.
+/// - **The `dt` recorded is the `dt` the simulation was handed**, not the wall clock's delta: the
+///   engine averages thirty frames and clamps at 30 fps ([`crate::tick::DeltaTime`]), so the measured
+///   delta of a frame is not what that frame simulated with, and a tape of the deltas would replay as
+///   a different run.
+///
+/// What comes out is an ordinary [`PadTape`] — the same file [`PadTape::from_capture`] makes of a
+/// capture of the original and [`PadTape::from_p2m2`] makes of a human's PCSX2 recording, so a tape of
+/// the port and a tape of the original are the same kind of file and [`play`] rides either.
+#[derive(Clone, Debug, Default)]
+pub struct Recorder {
+    /// What has been recorded so far.
+    pub tape: PadTape,
+}
+
+impl Recorder {
+    /// A recorder writing a tape under this name.
+    pub fn new(name: impl Into<String>) -> Recorder {
+        Recorder { tape: PadTape::new(name) }
+    }
+
+    /// Write down the frame the simulation is in the middle of: the `dt` it was handed and the reports
+    /// it read.
+    pub fn frame(&mut self, dt: F, reports: &[Report; PADS]) {
+        self.tape.push(PadFrame::new(dt, *reports));
+    }
+
+    /// How many frames have been recorded.
+    pub fn len(&self) -> usize {
+        self.tape.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tape.is_empty()
+    }
+
+    /// The tape as its file, for the app layer to write — this crate does not touch files.
+    pub fn to_text(&self) -> String {
+        self.tape.to_text()
+    }
+}
+
+/// The playback head: where a live loop has got to in the tape it is riding.
+///
+/// [`Playback`] plays a whole tape into the headless simulation in one call. A shell with a window
+/// cannot do that — it has a frame to draw and a camera to move between one pad frame and the next —
+/// so it holds a head instead and pulls one frame per loop, which is what the shell's `--play FILE`
+/// does. The head is the whole of the difference between the two: a tape is still played in order,
+/// every frame exactly once, and [`Head::done`] is how the loop knows the ride is over.
+///
+/// A loop riding a tape must take the frame's `dt` from the tape too, and not from its own clock.
+/// Everything the recorded session simulated it simulated with the tape's `dt`, so a playback paced by
+/// the wall clock reproduces the buttons and not the run.
+#[derive(Clone, Debug, Default)]
+pub struct Head {
+    /// The recording being ridden.
+    pub tape: PadTape,
+    /// How many of its frames have been handed out.
+    at: usize,
+}
+
+impl Head {
+    /// A head at the start of a tape.
+    pub fn new(tape: PadTape) -> Head {
+        Head { tape, at: 0 }
+    }
+
+    /// How many frames have been handed out, which is the tick the ride is on.
+    pub fn at(&self) -> usize {
+        self.at
+    }
+
+    /// How many frames the recording is.
+    pub fn len(&self) -> usize {
+        self.tape.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tape.is_empty()
+    }
+
+    /// Whether the tape has run out, which is the loop's cue to stop.
+    pub fn done(&self) -> bool {
+        self.at >= self.tape.len()
+    }
+}
+
+/// The head hands out the recording's frames in order, one per call, and then stops: a loop can ride a
+/// tape with `while let Some(frame) = head.next()` and a test can `collect` one.
+impl Iterator for Head {
+    type Item = PadFrame;
+
+    fn next(&mut self) -> Option<PadFrame> {
+        let frame = *self.tape.frames.get(self.at)?;
+        self.at += 1;
+        Some(frame)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.tape.len() - self.at;
+        (left, Some(left))
+    }
+}
