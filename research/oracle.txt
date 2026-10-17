@@ -2288,3 +2288,23 @@ vehicle_anim_build boot 0x00247a60 (728 bytes) the body's build, which makes the
 #                                  0.125 and the phase axis (+0x634) with 0.15, and both start
 #                                  centred at a half — which is what makes a body that is not being
 #                                  steered sit in the middle of each row of the grid
+
+# ---------------------------------------------------------------------------------------------------
+# V14 — how a clip *name* becomes a file. One animation set for the whole game, keyed by name, so the
+# first set to claim a name decides what every motion object built later gets. The port is the
+# `claimed`/`claims`/`claim` additions in crates/game-render/src/anim.rs and the entry is
+# research/journal/2026-10-17-v14-the-grid-rows-third-column.
+anim_mcf_motion boot 0x00142220 (set in a0, the motion-set object in a1, the ini section in a2) one
+#                               `[MOTION n]` of a `.mcf`. Reads `Name=` (default "NONE"), calls
+#                               anim_clip_by_name and **returns that clip untouched when it exists**:
+#                               `VUE=`, `Looping` and `TransitionTime` are all inside the not-found
+#                               arm, so a later `.mcf` that names a clip someone else has claimed
+#                               changes neither its file nor its loop bit. The file is the object's
+#                               content directory (+0x1e0) joined to `VUE=`, with everything from the
+#                               first '.' replaced by ".MOT". Its sibling at 0x00142e10 is the same
+#                               shape for the set's second list (+0x1c count, +0x20 array)
+#   the key strings: 0x00426ed0 "Name", 0x00426ed8 "NONE", 0x00426ee0 "VUE", 0x00426ef0 "Looping",
+#   0x00426ef8 ".MOT", 0x00426f00 "TransitionTime", 0x00426f10 ".vue", 0x00426ee8 "" (the path buffer's
+#   initial byte). anim_find_or_load 0x00142430 builds "<+0x1e0><name>" and forces ".MOT" the same
+#   way, and never reads `VUE=` at all -- which is why the 36 bare pose names of vehicle_load_clips
+#   ignore aliases entirely
