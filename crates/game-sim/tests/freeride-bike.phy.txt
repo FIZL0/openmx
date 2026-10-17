@@ -5,6 +5,11 @@
 # and no number in it is claimed to be the game's. The keys here are the ones `ride.rs` actually
 # drives; the loader's defaults cover the rest of the file.
 #
+# Units are the simulation's: feet, slugs, pounds of force, g = 32.2 ft/s^2. The four per-surface
+# grip keys — `WheelFriction`, `WheelDrag`, `MaxDriveForce`, `MaxSideForce` and `SideForce` — are
+# coefficients *per unit of tire load*, not pounds, so they are small numbers here where they used
+# to be hundreds. A wheel of this bike carries about two hundred pounds, which is the factor.
+#
 # Read by crates/game-sim/tests/ride.rs and crates/game-sim/tests/replay.rs.
 [Mass Properties]
 Weight = 400
@@ -28,12 +33,12 @@ SteeringInertia = 2
 MaxSteerAngle = 30
 BodyTireForcePosition = 0.0, 1.1, 2.1
 NumberOfSurfaces = 1
-WheelFriction1 = 1.1
+WheelFriction1 = 8.0
 WheelDrag1 = 0.02
 MaxBrakingTorque1 = 300
-MaxDriveForce1 = 400
-MaxSideForce1 = 400
-SideForce1 = 60
+MaxDriveForce1 = 1.5
+MaxSideForce1 = 3.5
+SideForce1 = 0.2
 [Rear Tire]
 StrutCompression = 1.0
 Spring = 2.2
@@ -45,12 +50,12 @@ TireInertia = 1.4
 BodyTireForcePosition = 0.0, 1.1, -2.1
 OtherTireNormalLoadScale = 1.0
 NumberOfSurfaces = 1
-WheelFriction1 = 1.2
+WheelFriction1 = 9.0
 WheelDrag1 = 0.02
 MaxBrakingTorque1 = 400
-MaxDriveForce1 = 600
-MaxSideForce1 = 500
-SideForce1 = 70
+MaxDriveForce1 = 2.4
+MaxSideForce1 = 4.0
+SideForce1 = 0.25
 [Engine]
 NumberOfRPMPoints = 4
 RPM1 = 2000
