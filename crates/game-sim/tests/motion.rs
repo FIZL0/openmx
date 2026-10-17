@@ -2409,9 +2409,11 @@ fn of(state: i32) -> Option<ClipId> {
 ///    still running, so the trick machine hands one straight to the other: that is the pair at two
 ///    phases, the sixth entry point, which has no other caller anywhere in the image.
 ///
-/// A hill rather than a throttle because the port cannot drive this bike yet — see [`Hill`] — and the
-/// hill's own terminal speed is 12.4 mph, so the fourth band (one row, over 15 mph) is the one arm of
-/// the grid this ride does not reach; it is covered by the entry-point proof in `vehicle_anim.rs`.
+/// A hill *and* the throttle. The hill is here because the port could not drive this bike when the
+/// proof was written — see [`Hill`] — and since P8 it can, so the ride is no longer held to the
+/// hill's own 12.4 mph terminal speed and reaches the grid's last threshold instead of settling under
+/// it. It stops there: the fourth band is one row and no blend, so both of the arms this proof is for
+/// are behind it, and the fourth is covered by the entry-point proof in `vehicle_anim.rs`.
 ///
 /// What the two entries then *draw* is `game-render/tests/anim.rs`: the pose strictly between the
 /// clips named here.
@@ -2449,6 +2451,12 @@ fn a_ride_reaches_the_four_clip_blend_and_the_pair() {
             Controls { gas: F::ONE, stick: (F(-0.5), F::ZERO), ..Controls::default() }
         };
         r.frame(&phy, &tables, &c, FRAME, &mut world);
+        // The last threshold, and the end of this ride: past it the grid plays one row with no
+        // blend, and a bike that drives itself sits astride that line rather than climbing away
+        // from it, crossing back and forth once a frame.
+        if r.ride.chassis.speed >= body.params.band[2] {
+            break;
+        }
         let mut asked = asked_of(&r, &c, cut);
         let frame = body.frame(&mut asked);
         cut = asked.request.cut;

@@ -186,3 +186,38 @@ tasks. Pay them in this order, because each one hides the next from a player: th
 cannot pull away at all), then the steering (it cannot turn), then the brake (it cannot stop). When each
 lands, take the `#[ignore]` off the leg that names it in **both** `crates/game-sim/tests/ride.rs` and
 `crates/openmx/tests/ride.rs` — they are deliberately the same assertions on the two sides of the pad.
+
+## At merge (P8)
+
+P8 landed after this entry and moved the ground the minute stands on. Two changes to
+`crates/game-sim/tests/ride.rs`'s section (7), both made at the merge and neither of them this task's
+finding being revised — section (7) is intact, its ten legs assert what they always did, and the three
+`#[ignore]`d legs are still ignored and still failing.
+
+**The minute now rides P8's bike.** P8 found that the `.phy`'s `BodyTireForcePosition` is the arm the
+original crosses the tire's force on, and that `freeride-bike.phy.txt`'s value was written for the
+key's other job in this crate — the wheel mounts — so read as an arm it sits a foot *above* the body
+origin and the drive force shoves the bike's nose into the ground. `ridden_bike` therefore has a third
+patch, section (8)'s own `launch_bike`, and `ride_the_minute` takes its mounts from the unpatched file
+the way section (8)'s harness does. Without it the minute was riding a bike whose drive pitched it
+nose-down, which is not a bike anyone meant to test.
+
+**The negative control changed bikes, because P8 removed the defect it was leaning on.**
+`the_minute_notices_a_bike_that_loops_out` rode `FinalGearRatio = 14.4` and required the launch to
+wreck or stand up. It stood up because the port was putting the drive force in at the contact patch,
+two feet under the centre of gravity — the very defect P8 fixed. On the fixed port that bike rides the
+minute clean: 0 to 67 ft/s on the launch, 81.2 ft/s flat out, no wreck, and not one leg failing. A
+control that asserts a defect proves nothing once the defect is paid, so it is now
+`the_minute_notices_a_bike_it_cannot_ride` on `cannot_pull_away` — a quarter of the final drive, which
+takes four seconds to reach 15 ft/s and tops out at 60 — and it re-asserts three of the legs' own
+numbers rather than a wreck: the half-second mark, the two-second mark and the top speed. It also
+asserts that bike never wrecks and never falls over, so what the legs caught is unrideability and not
+a fixture collapsing. The purpose is the one this entry gave it; only the bad bike is different.
+
+**The clutch latch is paid, and the leg that names it still fails.** P8's `Ride::frame` now writes the
+rate-limited lever every frame, which is the fix this entry asked for, and
+`it_pulls_away_after_a_frame_off_the_throttle` now runs with `clutch_in 0`. It still does not pass:
+after a frame off the throttle, ten seconds of full throttle reaches 18.6 ft/s where the leg wants the
+top speed. So the latch was one cause and not the only one, the `#[ignore]`'s stated reason is now out
+of date, and whoever takes that task starts from a bike that no longer latches. The ordering this
+entry's **Next** gives still holds; its first item is half paid.

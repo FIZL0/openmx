@@ -310,6 +310,9 @@ struct Args {
     /// `--trace-brake`: hold both brakes through the trace, which is the brief's own case — a bike
     /// standing still on the start line rather than one free-rolling down the first slope.
     trace_brake: bool,
+    /// `--trace-gas`: pin the throttle through the trace, which is P8's own case — full throttle
+    /// from a standstill on the start line.
+    trace_gas: bool,
     /// `--record FILE`: write every simulated frame's pad to a tape, and the tape to this file when
     /// the session ends. A tape holds values read out of the game, so the file belongs under
     /// `context/`.
@@ -675,11 +678,14 @@ fn run() -> Result<(), String> {
     // acceleration in its frame, and each wheel's contact, load and sideways slip.
     if let Some(frames) = args.trace {
         let dt = F(args.trace_dt.unwrap_or(game_sim::tick::DeltaTime::CAP_30));
-        let controls = if args.trace_brake {
-            Controls { brake: F::ONE, front_brake: F::ONE, rear_brake: F::ONE, ..Controls::default() }
-        } else {
-            Controls::default()
-        };
+        let mut controls = Controls::default();
+        if args.trace_brake {
+            controls = Controls { brake: F::ONE, front_brake: F::ONE, rear_brake: F::ONE, ..controls };
+        }
+        if args.trace_gas {
+            controls.gas = F::ONE;
+        }
+        let controls = controls;
         println!(
             "trace: {frames} frames at dt {} on {} / {}",
             dt.0, args.track, args.bike
@@ -704,6 +710,16 @@ fn run() -> Result<(), String> {
                     w.w.damping_in.0, w.w.damping_out.0,
                     w.w.max_damper_speed.0, w.w.extension_rate.0,
                     w.mv.radius.0, t.tire_inertia.0,
+                );
+                // The arm the drive and side force go in on, which P8 found is the `.phy`'s own
+                // vector used as it stands and not the contact patch.
+                println!(
+                    "{name}: tire force at {:?}",
+                    (
+                        t.body_tire_force_position.x(),
+                        t.body_tire_force_position.y(),
+                        t.body_tire_force_position.z(),
+                    ),
                 );
                 let s0 = t.surfaces.first().copied().unwrap_or_default();
                 println!(
@@ -1263,6 +1279,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace: None,
         trace_dt: None,
         trace_brake: false,
+        trace_gas: false,
         record: None,
         play: None,
         phase: TickPhase::default(),
@@ -1314,6 +1331,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                         .map_err(|why| format!("--pad-pressure: {why}"))?;
             }
             "--trace-brake" => args.trace_brake = true,
+            "--trace-gas" => args.trace_gas = true,
             "--trace-dt" => {
                 args.trace_dt = Some(
                     next("a frame length in seconds")?
@@ -1377,7 +1395,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
                      rider, tumbles the bike and puts you back on it); --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\
-                     nobody on the pad and prints the solver's own numbers.\n\
+                     nobody on the pad and prints the solver's own numbers, and --trace-brake\n\
+                     or --trace-gas hold the brakes or the throttle while it does.\n\
                      --record writes every simulated frame's pad to a tape (under context/,\n\
                      it is game data); --play rides one instead of the pad, at the tape's own\n\
                      frame lengths, and quits when it runs out. A human's PCSX2 recording\n\
