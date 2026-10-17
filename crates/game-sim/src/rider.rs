@@ -58,8 +58,8 @@
 use crate::air;
 use crate::hash::{self, State, Walk};
 use crate::motion;
-use crate::phy::Phy;
-use crate::ride::{self, Controls, Ride};
+use crate::phy::{self, Phy};
+use crate::ride::{self, Controls, Crash, Ride};
 use crate::rider_anim;
 use crate::state;
 use crate::trick::{self, AngleTable, Set, Trick, Tricks, Wreck};
@@ -99,6 +99,9 @@ pub struct Frame {
     pub landed: Option<Trick>,
     /// The rider came off this frame, for this reason.
     pub wreck: Option<Wreck>,
+    /// The rider let go of the bars this frame: the wreck's `HandHoldTime` is up and the rider is off
+    /// the bike, which is the frame the separation gesture would be played on.
+    pub separated: bool,
     /// The rider was put back on the bike this frame.
     pub respawned: bool,
 }
@@ -119,6 +122,23 @@ pub struct Gate {
     /// would leave the seeded flag clear so that the next draw read the clock again — see
     /// [`rider_anim::Pool::seeded`]); a replay hands back the numbers it recorded.
     pub clock: rider_anim::Clock,
+}
+
+/// **The two files a wreck needs**, which are not the bike's own: `Wreckbike.phy`'s one rigid-body
+/// part, and the `[Wrecks]` block of the rider's.
+///
+/// A [`Rider`] built without these cannot wreck and recover — [`crate::state::Sense::settles`] is
+/// never set, the automatic reset is out of reach, and the hand chord is the only way back, which is
+/// where this port was before S26. [`Rider::carries_wreck`] is how a shell hands them over.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wreckage {
+    /// `Wreckbike.phy`, section `[PhysicsPart1]`.
+    pub part: phy::Part,
+    /// The rider's `[Wrecks]`, out of `rider\anim\mrider.phy`.
+    pub wrecks: phy::Wrecks,
+    /// The wreck body's inertia tensor, which comes from its model and not from either file:
+    /// [`crate::ride::WRECK_INERTIA`] for the disc's own bike.
+    pub inertia: Vf,
 }
 
 /// A bike with somebody on it.
@@ -142,6 +162,12 @@ pub struct Rider {
     pub sense: state::Sense,
     /// A racing event rather than freestyle, which is a different vertical g limit.
     pub racing: bool,
+    /// The two wreck files, once a shell has handed them over ([`Rider::carries_wreck`]).
+    pub wreckage: Option<Wreckage>,
+    /// The wreck being ridden out, if the rider is down: the bike tumbling and the rider coming off
+    /// it ([`Crash`]). `None` whenever the rider is up, and `None` for a rider with no
+    /// [`Wreckage`] — which is a rider who stays down until the chord, as before S26.
+    pub crash: Option<Crash>,
     /// What the animation driving asked for this frame: the one thing [`motion::Driver::frame`]
     /// answers, kept rather than dropped.
     ///
@@ -196,9 +222,10 @@ impl Rider {
             motion: motion::Driver::default(),
             set,
             clips: motion::Clips::default(),
-            // A local human, freestyle, wrecks on. `settles` is false because a bike's class never
-            // asks to settle (S5), which is why the automatic reset below is out of reach and the
-            // rider's own chord is the way back.
+            // A local human, freestyle, wrecks on. `settles` starts false and is written every frame
+            // from the wreck in progress ([`Crash::settles`]) once a shell has handed over the two
+            // wreck files; a rider with none keeps it false, and for that one the automatic reset is
+            // out of reach and the chord is the way back.
             sense: state::Sense {
                 ai_route: false,
                 owner: Some(state::Owner { human: true, screen: false }),
@@ -206,6 +233,8 @@ impl Rider {
                 settles: false,
             },
             racing: false,
+            wreckage: None,
+            crash: None,
             animation: motion::Frame { blend: motion::Blend::Free, restart: false },
             body: rider_anim::Body::default(),
             body_numbers: rider_anim::Params::built(),
@@ -224,9 +253,19 @@ impl Rider {
     /// Put the rider and the bike back at a place, as a respawn does.
     pub fn place(&mut self, at: Vf, facing: Vf) {
         self.ride.place(at, facing);
+        self.crash = None;
         self.tricks.reset();
         self.flight = Trick::NONE;
         self.airborne = false;
+    }
+
+    /// **Hand the rider the two files a wreck needs** — `Wreckbike.phy`'s part and the rider's
+    /// `[Wrecks]` — and the wreck body's inertia tensor.
+    ///
+    /// Not an argument to [`Rider::new`] because a rider is rideable without them: everything a
+    /// shell or a fixture does up to the first wreck is the same either way.
+    pub fn carries_wreck(&mut self, part: phy::Part, wrecks: phy::Wrecks, inertia: Vf) {
+        self.wreckage = Some(Wreckage { part, wrecks, inertia });
     }
 
     /// Which of the three states the rider is in.
@@ -238,9 +277,10 @@ impl Rider {
     pub fn frame(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World) -> Frame {
         let mut out = Frame::default();
         let Rider {
-            ride, tricks, state, motion, set, clips, sense, racing, animation, flight, airborne, ..
+            ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
+            flight, airborne, ..
         } = self;
-        let sense = *sense;
+        let mut sense = *sense;
 
         // 1 — the top of the player's update: the hand-reset latch is dropped.
         state.frame_start();
@@ -250,6 +290,13 @@ impl Rider {
         let was_airborne = *airborne;
         if state.wreck.is_none() {
             ride.frame(p, &t.ride, &Controls { respawn: false, ..*c }, dt, world);
+        } else if let (Some(w), Some(down)) = (wreckage.as_ref(), crash.as_mut()) {
+            // The physics of a rider who is down: the wreck body tumbling and the rider coming off
+            // it. The original's is the same swap — the bike's own step is skipped while the reason
+            // is set, and the wreck bike and the ragdoll are stepped instead.
+            let held = down.holding;
+            down.step(dt, &w.part, &w.wrecks, world);
+            out.separated = held && !down.holding;
         }
         *airborne = ride.air.airborne;
 
@@ -269,8 +316,12 @@ impl Rider {
             state.take_chord();
             if state.request_reset(state::Kind::Wrecked, false, sense.owner) == Some(state::Reset::Now) {
                 state.respawn();
-                let (at, facing) = (ride.spawn, ride.spawn_facing);
+                let (at, facing) = match crash.as_ref() {
+                    Some(down) => down.rest(),
+                    None => (ride.spawn, ride.spawn_facing),
+                };
                 ride.place(at, facing);
+                *crash = None;
                 tricks.reset();
                 *flight = Trick::NONE;
                 out.respawned = true;
@@ -362,6 +413,9 @@ impl Rider {
             // machine's "this one can be landed now".
             trick_wrecked: tricks.safe,
         };
+        // **The settle gate.** The machine's one input the port could not fill in before: the rider,
+        // having let go of the bars, is on the ground. See [`Crash`] for what was measured.
+        sense.settles = crash.as_ref().is_some_and(Crash::settles);
         let air = &mut ride.air;
         let verdict = state.step(
             dt,
@@ -381,6 +435,12 @@ impl Rider {
         );
         if let Some(reason) = verdict.wreck {
             out.wreck = Some(reason);
+            // The wreck entered on the bike's side: `Wreckbike.phy`'s body takes the bike's place,
+            // its velocity and its spin. A rider with no wreck files has none of this and lies there
+            // until the chord, which is where the port was before S26.
+            *crash = wreckage
+                .as_ref()
+                .map(|w| Crash::begin(ride, reason, &w.part, w.inertia, &w.wrecks, None));
             // The caller's half of the entry, as far as this port goes: the running trick stops and
             // the queue is emptied, so a trick asked for on the way down does not fire on the way
             // out. The rest of the original's entry — the rider placed at the bike's rider point with
@@ -392,9 +452,16 @@ impl Rider {
             *flight = Trick::NONE;
         }
         if verdict.reset == Some(state::Reset::Now) {
-            // The machine has done its own half; the bike's placement is the caller's.
-            let (at, facing) = (ride.spawn, ride.spawn_facing);
+            // The machine has done its own half; the bike's placement is the caller's. It goes back
+            // to **where the wreck ended up** and not to the spawn — see [`Crash::rest`], which is
+            // measured — and to the spawn only for a rider who was put down without a wreck body
+            // under them (no wreck files, or [`crate::state::Wreck::NO_CONTROL`] before the first).
+            let (at, facing) = match crash.as_ref() {
+                Some(down) => down.rest(),
+                None => (ride.spawn, ride.spawn_facing),
+            };
             ride.place(at, facing);
+            *crash = None;
             tricks.reset();
             *flight = Trick::NONE;
             out.respawned = true;
@@ -504,5 +571,11 @@ impl State for Rider {
         w.group("motion", |w| hash::State::walk(&self.motion, w));
         w.u8("flight", self.flight.0);
         w.bool("airborne", self.airborne);
+        // The wreck in progress, when there is one: a rider who is up hashes as one who has never
+        // been down, which is what makes a respawned rider comparable with a fresh one.
+        w.bool("crashing", self.crash.is_some());
+        if let Some(down) = &self.crash {
+            w.group("crash", |w| hash::State::walk(down, w));
+        }
     }
 }

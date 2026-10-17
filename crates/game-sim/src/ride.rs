@@ -1733,3 +1733,311 @@ const POINT: [&str; mv::MAX_RPM_POINTS] =
     ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "p11", "p12", "p13", "p14",
      "p15"];
 const WORD: [&str; 7] = ["w0", "w1", "w2", "w3", "w4", "w5", "w6"];
+
+// --- the wreck, and getting back up ----------------------------------------------------------------
+
+/// **The wreck bike's inertia tensor**, which no file holds.
+///
+/// A rigid-body part's inertia is worked out by its loader from the *model's* bounding box
+/// ([`phy::Part::inertia`]), and this port has no model library, so the tensor the game builds for
+/// `Wreckbike.phy` is taken from the running game instead: it is the diagonal the wreck body carries
+/// in a freestyle session, read over PINE, with the three reciprocals the body actually integrates
+/// with in the quadword after it. `Wreckbike.phy`'s own
+/// `Weight = 250` and `InertiaScale = 1,1,1` imply a box of about 3.65 x 5.37 x 7.61 feet through the
+/// loader's formula, which is a bike — so this is the measured value of a formula that is ported, not
+/// a number of the port's own.
+pub const WRECK_INERTIA: Vf = Vf([56.111691, 46.036716, 27.289017, 1.0]);
+
+/// Which of `[Wrecks]`' seven throws a wreck reason uses.
+///
+/// **The port's own inference, and the one piece of this task with nothing behind it.** The names in
+/// [`phy::Hit`] are the file's and the reasons are [`air::Wreck`]'s, and the mapping between them is
+/// in neither: there is no string, no table and no key for it anywhere in the executable, and the
+/// ragdoll code that would read one is not ported. What is written here is what the names say, and
+/// only [`phy::Hit::Bottom`] — the reason the human's capture hit twice — is exercised by a test.
+pub fn hit_of(reason: trick::Wreck) -> phy::Hit {
+    match reason.0 {
+        1 => phy::Hit::Front,          // air::Wreck::Front, thrown over the bars
+        2 | 3 => phy::Hit::Side,       // Left, Right
+        4 => phy::Hit::Back,           // Back
+        5 => phy::Hit::Bottom,         // Flat — landed too hard, and the only one proved
+        8 => phy::Hit::FallOffFront,   // NoseDive
+        0xb => phy::Hit::FallOffBack,  // Tail
+        7 | 0xc => phy::Hit::Stunt,    // Joust, NoHander — came off doing something
+        13 => phy::Hit::Front,         // state::Wreck::CANNONBALL, which is a hit from in front
+        _ => phy::Hit::Bottom,         // state::Wreck::NO_CONTROL and anything new: put down
+    }
+}
+
+/// **A wreck in progress**: the bike's wreck body tumbling, and the rider coming off it.
+///
+/// This is the half of a wreck the ride state machine ([`crate::state`]) does not do. The machine
+/// keeps the reason and the clocks and decides when to put the rider back; what it *waits* for is a
+/// signal it calls settling ([`crate::state::Sense::settles`]), and nothing in the port set that
+/// before this. A [`Crash`] is what sets it, by simulating the two things the original has lying on
+/// the dirt:
+///
+/// * **The bike**, as `Wreckbike.phy`'s one `[PhysicsPart1]` — a rigid body of its own, entered from
+///   the bike's own velocity and spin by [`Crash::begin`] (a port of `bike_wreck_entry`'s body half)
+///   and integrated by the same ported integrator the bike uses ([`chassis::integrate`]).
+/// * **The rider**, as one point. The original's rider is an eighteen-part ragdoll with twenty-six
+///   constraints running at 25 Hz, which is not ported and is not a small job; what is here is the
+///   one thing the machine needs out of it — when the rider, having let go of the bars after the
+///   throw's `HandHoldTime`, hits the ground.
+///
+/// # What says the rider has landed, and why it is that
+///
+/// Measured, not guessed. In the running game the settle gate (`player + 0xd3c`) comes on 18, 22 and
+/// 26 ticks after the entry across three reason-5 wrecks (two driven live over PINE, one in the
+/// human's capture) — 0.60 s, 0.73 s and 0.87 s. `HitBottomHandHoldTime` is 0.3 s and
+/// `RiderFlailHeight` is 3 feet, and a 3-foot fall under the file's own gravity takes 0.43 s: 0.3 +
+/// 0.43 = 0.73 s, which is the middle of the three to the frame. The spread either side is the
+/// vertical velocity the rider leaves with, which is what this port carries off the wreck body.
+///
+/// Two models the same measurement **rules out**: the gate is not the wreck body coming to rest (the
+/// body was still doing 42 feet a second when the gate came on), and it is not the throw force
+/// applied to a whole rider (800 lbf for 0.1 s over the ragdoll's total mass is 11 feet a second
+/// upwards, a 0.89 s flight, and a gate 10 ticks late). So the throw's force is **loaded and not
+/// applied** here: it poses a ragdoll this port does not have, and applying it to a point moves the
+/// one number that was measured the wrong way.
+#[derive(Clone, Debug)]
+pub struct Crash {
+    /// The reason the machine entered with, and the throw it picks.
+    pub reason: trick::Wreck,
+    pub hit: phy::Hit,
+    pub throw: phy::Throw,
+    /// Seconds since the entry. The machine's own clock is restarted when its latch arms; this one
+    /// is not, because the hand-hold time is measured from the entry.
+    pub clock: F,
+    /// The rider still has hold of the bars.
+    pub holding: bool,
+    /// What is left of the throw's `ForceTime` once the hands are off. Counted down and not spent —
+    /// see the type's own docs.
+    pub throwing: F,
+    /// The bike's wreck body, and its transform's origin.
+    pub body: chassis::Chassis,
+    pub origin: Vf,
+    /// Where the rider is and how fast, as one point, and whether they have hit the ground yet.
+    pub rider: Vf,
+    pub rider_vel: Vf,
+    pub landed: bool,
+    /// The wreck body has stopped, by `Wreckbike.phy`'s own `SpeedThreshold` and
+    /// `AngularRateThreshold`. Not what the machine waits for — see [`Crash::settles`] — but it is
+    /// what says the place [`Crash::rest`] hands back has stopped moving.
+    pub resting: bool,
+    /// Where the bike was pointing when it wrecked, flattened.
+    pub facing: Vf,
+}
+
+impl Crash {
+    /// **The wreck entered**, as the original's own wreck entry does its half of it: the wreck body is
+    /// put where the bike is, and takes the bike's velocity and the bike's spin *in its own frame*.
+    ///
+    /// `inertia` is the body's tensor — [`WRECK_INERTIA`] off the disc, or [`phy::Part::inertia`] of a
+    /// box. `spin` is the cannonball's: for reason 13 the original throws three random numbers in
+    /// `[0, 1)` at the body's angular velocity instead of the bike's, which needs the game's own
+    /// `rand` stream and so is handed in rather than drawn here. `None` uses the bike's spin, which is
+    /// every other reason's path.
+    pub fn begin(
+        ride: &Ride,
+        reason: trick::Wreck,
+        part: &phy::Part,
+        inertia: Vf,
+        wrecks: &phy::Wrecks,
+        spin: Option<Vf>,
+    ) -> Crash {
+        let hit = hit_of(reason);
+        let m = ride.transform();
+        let inv = |v: f32| if v == 0.0 { F::ZERO } else { F::ONE / F(v) };
+        let body = chassis::Chassis {
+            awake: 1,
+            cofg: part.cofg,
+            inv_mass: if part.mass == F::ZERO { F::ZERO } else { F::ONE / part.mass },
+            inv_inertia: Mat3::new(
+                Vf::new(inv(inertia.x()).0, 0.0, 0.0, 0.0),
+                Vf::new(0.0, inv(inertia.y()).0, 0.0, 0.0),
+                Vf::new(0.0, 0.0, inv(inertia.z()).0, 0.0),
+            ),
+            quat: ride.chassis.quat,
+            cofg_world: math::transform_point(&m, part.cofg),
+            // The entry's two copies: `chassis + 0x260` into the body's velocity and `chassis + 0x290`
+            // — the spin in the bike's own frame — into the body's.
+            vel: ride.chassis.vel,
+            ang_vel: spin.unwrap_or(ride.chassis.ang_vel),
+            free: [1; 3],
+            ang_free: [1; 3],
+            // The same stand-in limits the bike is built with, and for the same reason: a zero limit
+            // is read as a standstill by the clamp. `Wreckbike.phy`'s own `BodyAngularRateLimit` is
+            // one of the four keys nothing in the game reads.
+            max_speed_sq: F(MAX_SPEED * MAX_SPEED),
+            max_ang_speed_sq: F(MAX_ANG_SPEED * MAX_ANG_SPEED),
+            ang_vel_max: [F(MAX_ANG_SPEED); 3],
+            ang_vel_min: [F(-MAX_ANG_SPEED); 3],
+            correction: chassis::CLEAR,
+            ..chassis::Chassis::default()
+        };
+        let (forward, _) = ride.axes();
+        let flat = Vf::new(forward.x(), 0.0, forward.z(), 0.0);
+        Crash {
+            reason,
+            hit,
+            throw: wrecks.throw(hit),
+            clock: F::ZERO,
+            holding: true,
+            throwing: F::ZERO,
+            body,
+            origin: ride.origin,
+            // While the hands are on the bars the rider is where the bike is; the flail height is
+            // taken when they come off.
+            rider: ride.origin,
+            rider_vel: ride.chassis.vel,
+            landed: false,
+            resting: false,
+            facing: if length(flat) > F::ZERO { normalize(flat) } else { ride.spawn_facing },
+        }
+    }
+
+    /// **One frame of the wreck**: the hands, the body, and the rider.
+    pub fn step(&mut self, dt: F, part: &phy::Part, wrecks: &phy::Wrecks, world: &mut dyn World) {
+        self.clock = self.clock + dt;
+
+        // The hands come off the bars once the hold time is up, and the rider leaves with the body's
+        // velocity, from the flail height above where the body is.
+        if self.holding && !(self.clock < self.throw.hand_hold_time) {
+            self.holding = false;
+            self.throwing = self.throw.force_time;
+            self.rider = add_xyz(self.body.cofg_world, scale(UP, wrecks.rider_flail_height));
+            self.rider_vel = self.body.vel;
+        }
+
+        // The body: its own gravity, the dirt under it, and the ported integrator.
+        self.body.force = add_xyz(self.body.force, part.gravity);
+        self.contact(dt, part, world);
+        integrate(&mut self.body, dt, &mut self.origin);
+        self.resting = length(self.body.vel) <= part.speed_threshold
+            && length(self.body.ang_vel) <= part.angular_rate_threshold;
+
+        // The rider, as one point, until they reach the dirt.
+        if !self.holding && !self.landed {
+            if self.throwing > F::ZERO {
+                self.throwing = self.throwing - dt;
+            }
+            let g = -(part.gravity_scale * phy::G);
+            self.rider_vel = add_xyz(self.rider_vel, Vf::new(0.0, (g * dt).0, 0.0, 0.0));
+            self.rider = add_xyz(self.rider, scale(self.rider_vel, dt));
+            let (on, _) = world.ground(self.rider);
+            if self.rider.y() <= on.y() {
+                self.rider = Vf::new(self.rider.x(), on.y(), self.rider.z(), 1.0);
+                self.rider_vel = Vf::ZERO;
+                self.landed = true;
+            }
+        } else if self.holding {
+            self.rider = self.body.cofg_world;
+            self.rider_vel = self.body.vel;
+        }
+    }
+
+    /// The dirt under the wreck body, as a spring, a damper and a friction at one contact point.
+    ///
+    /// **The shape is the original's and the numbers are the file's; the solver is not ported.** The
+    /// engine resolves a part against the world through its collision record, which this crate has no
+    /// port of (`collide.rs` is the sweep, not the response). What is here is the contact the file is
+    /// written for: `SpringStiffness` and `SpringDamping` against the penetration of the part's own
+    /// `Radius` sphere, held to `MaxPenetration`, with `FrictionZone1` across it, each put in at the
+    /// contact point so that it turns the body as well as pushing it, and each scaled by the file's
+    /// own `SpringMomentScale` and `FrictionMomentScale`. The two rates go through the same
+    /// [`phy::spring_rate`] and [`phy::damping`] the wheels' do, which is what makes a stiffness of 5
+    /// hold a 250 lb body up.
+    fn contact(&mut self, dt: F, part: &phy::Part, world: &mut dyn World) {
+        if !part.collision_enabled {
+            return;
+        }
+        let (on, normal) = world.ground(self.body.cofg_world);
+        let depth = part.radius - dot3(sub_xyz(self.body.cofg_world, on), normal);
+        if depth <= F::ZERO {
+            return;
+        }
+        let m = math::quat_to_mat4(self.body.quat, self.origin);
+        let at = on;
+        let rate = phy::spring_rate(part.spring_stiffness, part.mass);
+        let held = if depth < part.max_penetration { depth } else { part.max_penetration };
+        let v = contact_velocity(self.body.vel, self.body.world_ang_vel, at, self.body.cofg_world);
+        let closing = -dot3(v, normal);
+        let load = rate * held + phy::damping(part.spring_damping, part.mass, rate) * closing;
+        let load = if load > F::ZERO { load } else { F::ZERO };
+        self.push(&m, scale(normal, load), at, part.spring_moment_scale);
+
+        // The slide across the contact, held to what would stop it inside one step so that a body at
+        // rest is not shoved about by its own friction.
+        let across = sub_xyz(v, scale(normal, dot3(v, normal)));
+        let speed = length(across);
+        if speed > F::ZERO {
+            let grip = part.friction_zone1 * load;
+            let stop = speed * part.mass / dt;
+            let f = if grip < stop { grip } else { stop };
+            self.push(&m, scale(normal_of(across, speed), -f), at, part.friction_moment_scale);
+        }
+        self.body.contacts += 1;
+    }
+
+    /// A force into the wreck body at a point, with the part of its moment the file allows: the same
+    /// shape as [`push`], which is how the wheels put theirs into the bike.
+    fn push(&mut self, m: &Mat4, force: Vf, at: Vf, moment_scale: Vf) {
+        let local = chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), force);
+        let arm = sub_xyz(unpoint(m, at), self.body.cofg);
+        self.body.force = add_xyz(self.body.force, force);
+        let moment = cross(arm, local);
+        self.body.torque = add_xyz(self.body.torque, moment.merge(Dest::XYZ, moment.mul(moment_scale)));
+    }
+
+    /// **What the ride state machine waits for**: the rider is on the ground.
+    ///
+    /// This is [`crate::state::Sense::settles`], which the port could not set before — see this
+    /// type's own docs for what was measured and what that rules out.
+    pub fn settles(&self) -> bool {
+        self.landed
+    }
+
+    /// Where the bike goes back to, and which way it faces there: where the wreck body ended up, and
+    /// the way the bike was pointing when it wrecked, flattened.
+    ///
+    /// **Measured for the position, the port's own for the facing.** The original's reset puts the
+    /// rider back at the wreck and not at the spawn: in a live reason-5 wreck the respawned bike
+    /// stood at `(4294.28, 136.99, 3473.11)` and the wreck body had come to rest at
+    /// `(4294.79, 137.25, 3470.86)`, half a foot and two feet away, while its spawn was most of a lap
+    /// behind it. Which way it points there is not measured — the game has a track to face along and
+    /// this port does not — so it keeps the heading it wrecked with.
+    pub fn rest(&self) -> (Vf, Vf) {
+        (self.origin, self.facing)
+    }
+}
+
+/// `across / speed`, where the length is already known: the slide's direction.
+fn normal_of(across: Vf, speed: F) -> Vf {
+    scale(across, F::ONE / speed)
+}
+
+impl State for Crash {
+    fn walk(&self, w: &mut Walk<'_>) {
+        w.u8("reason", self.reason.0);
+        w.i32("hit", self.hit as i32);
+        w.group("throw", |w| {
+            w.f("force_time", self.throw.force_time);
+            w.f("hand_hold_time", self.throw.hand_hold_time);
+            w.vf("force", self.throw.force);
+            w.f("force_time_delta", self.throw.force_time_delta);
+            w.f("hand_hold_time_delta", self.throw.hand_hold_time_delta);
+            w.vf("force_delta", self.throw.force_delta);
+        });
+        w.f("clock", self.clock);
+        w.bool("holding", self.holding);
+        w.f("throwing", self.throwing);
+        w.group("body", |w| walk_chassis(w, &self.body));
+        w.vf("origin", self.origin);
+        w.vf("rider", self.rider);
+        w.vf("rider_vel", self.rider_vel);
+        w.bool("landed", self.landed);
+        w.bool("resting", self.resting);
+        w.vf("facing", self.facing);
+    }
+}

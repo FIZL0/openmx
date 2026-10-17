@@ -62,9 +62,10 @@
 //! buttons past the stunt's hold time and the rider holds the pose; let go and it runs to its end.
 //! Land with one still running and the rider comes off.
 //!
-//! **L3 and R3 clicked together** put the bike back on the start line, which while the rider is down
-//! is the only way back — the automatic reset needs a settle window a bike's class never asks for
-//! (S5). Start freezes and unfreezes the ride, L1 cycles the track's own camera presets, and Escape
+//! **L3 and R3 clicked together** put the bike back on the start line, which is how a rider who is
+//! stuck gets going again. A wreck no longer needs it: the bike tumbles, the rider comes off it and
+//! the ride comes back up on its own, on the wreck's own two files (S26). Start freezes and
+//! unfreezes the ride, L1 cycles the track's own camera presets, and Escape
 //! or closing the window quits. The same controls are on the keyboard for a machine with no pad:
 //! X/Space, Z, the arrow keys, C/V/D for the three trick buttons, Q+E for the reset, Return.
 //!
@@ -118,9 +119,9 @@ use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
 use game_render::{ini, png, scene as view};
 use game_sim::camera::{Preset, Race, Ridden, Switches, Target};
 use game_sim::input::{Control, Manager, PADS, Report};
-use game_sim::phy::Phy;
+use game_sim::phy::{self, Phy};
 use game_sim::replay::{Head, PadTape, Recorder, TickPhase};
-use game_sim::ride::Controls;
+use game_sim::ride::{self, Controls};
 use game_sim::rider::{self, Rider};
 use game_sim::rng::Rng;
 use game_sim::state::Phase;
@@ -279,10 +280,15 @@ struct Args {
     /// and the path to write that frame to.
     moment: Option<(std::path::PathBuf, std::path::PathBuf)>,
     /// Whether the session wrecks at all ([`game_sim::state::Sense::wrecks_enabled`]), which is the
-    /// original's own per-session flag. On by default, because that is what a freestyle session is;
-    /// `--no-wrecks` is here because the ported ride's g loads currently oscillate up past the
-    /// bike's own `SideWreckSpeedLimit` within a few seconds of the start line, so with wrecks on
-    /// there is no riding to be done (P3's journal entry, and a task of its own).
+    /// original's own per-session flag. On by default, because that is what a freestyle session is.
+    ///
+    /// `--no-wrecks` was once the only way to ride for a minute, because the ported ride's g loads
+    /// oscillate up past the bike's own `SideWreckSpeedLimit` within a few seconds of the start line
+    /// and a wreck stayed down for good (P3's journal entry). Since S26 a wreck gets up by itself —
+    /// the bike tumbles on `wreckbike.phy`, the rider is thrown and rolls on the rider file's
+    /// `[Wrecks]`, and the ride is put back where the wreck came to rest — so the flag is now what
+    /// it says it is: a way to ride without being judged, not a way to ride at all. The g loads are
+    /// still a task of their own.
     wrecks: bool,
     /// `--trace N`: ride N frames with nobody touching the pad and print one line per frame of what
     /// the solver is doing, then quit without opening a window. S22's measuring stick for the ride's
@@ -438,6 +444,25 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("the bike archive has no .phy: {e}"))?;
     let phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
 
+    // The crash, which is two more files (S26). The bike the rider leaves behind is a rigid body of
+    // its own — `wreckbike.phy`, shipped beside every bike's own file and read by nothing before now
+    // — and how the rider comes off it, how high they flail and how long they lie there is in the
+    // rider's file, under `[Wrecks]`. Neither is named after the bike or the rider: there is one
+    // wreck bike and one `mrider.phy` on the disc, which is why both are looked for by suffix across
+    // every archive the session opened. A session that finds neither simply stays down until the
+    // reset chord, which is where this port was before S26.
+    let wreckage = archives.iter().find_map(|a| a.read_suffix("wreckbike.phy").ok()).zip(
+        archives.iter().find_map(|a| a.read_suffix("mrider.phy").ok()),
+    );
+    match &wreckage {
+        Some((bike, rider)) => println!(
+            "wrecks: {} bytes of wreck bike, {} bytes of rider wreck set",
+            bike.len(),
+            rider.len()
+        ),
+        None => println!("wrecks: no wreckbike.phy and mrider.phy pair — a wreck will not get up"),
+    }
+
     // ---- the rider on it ------------------------------------------------------------------------
     // The body, the gear it is painted in, and the clips the animation driving plays on it (V4, V5,
     // V7, V8). The archive is opened a second time for the clips: the animation set reads members
@@ -568,6 +593,16 @@ fn run() -> Result<(), String> {
     );
     let mut rider = Rider::new(&phy, mounts, at, heading, stunts);
     rider.sense.wrecks_enabled = args.wrecks;
+    // The wreck's own parameters, if the disc had them: the part the bike becomes, the rider's
+    // throw-and-roll set, and the tumbling body's inertia tensor, which is neither file's — it comes
+    // off the wreck model's own box ([`ride::WRECK_INERTIA`]).
+    if let Some((bike, body)) = &wreckage {
+        rider.carries_wreck(
+            phy::Part::read_bytes(bike, "PhysicsPart1"),
+            phy::Wrecks::read_bytes(body),
+            ride::WRECK_INERTIA,
+        );
+    }
     println!(
         "start: {:.0}, {:.0}, {:.0} facing {:.0} degrees, {} camera presets",
         spawn.x,
@@ -1264,7 +1299,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      L3 and R3 clicked together put the bike back on the start line.\n\
                      On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, Q+E reset.\n\
                      H toggles the riding overlay, which --hud starts on.\n\
-                     --no-wrecks turns the session's wrecks off; --moment draws one frame posed\n\
+                     --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
+                     rider, tumbles the bike and puts you back on it); --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\
                      nobody on the pad and prints the solver's own numbers.\n\
                      --record writes every simulated frame's pad to a tape (under context/,\n\
