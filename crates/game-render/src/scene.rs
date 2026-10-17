@@ -246,6 +246,9 @@ pub struct Part {
 #[derive(Clone, Debug, Default)]
 pub struct Vehicle {
     pub parts: Vec<Part>,
+    /// `[Objects] MCF`: the animation set the chassis is posed from — `bike.mcf` on every `.sub` on
+    /// this disc. The chassis model itself comes from that set's own `SLTFile`.
+    pub mcf: String,
     /// `from` -> `to`, as `[Material Changes]` lists them.
     pub materials: Vec<(String, String)>,
 }
@@ -255,6 +258,7 @@ impl Vehicle {
         let sections = ini::parse(text);
         let mut parts = Vec::new();
         let mut materials = Vec::new();
+        let mut mcf = String::new();
         for section in &sections {
             let lower = section.name.to_ascii_lowercase();
             if lower.starts_with("subobject") {
@@ -264,6 +268,8 @@ impl Vehicle {
                         placement: section.get("Placement").unwrap_or("Bike").to_string(),
                     });
                 }
+            } else if lower == "objects" {
+                mcf = section.get("MCF").unwrap_or("").to_string();
             } else if lower == "material changes" {
                 // Here the keys are the names the meshes use and the values are what to load
                 // instead, so the section is read as pairs rather than looked up by name.
@@ -272,7 +278,7 @@ impl Vehicle {
                 }
             }
         }
-        Vehicle { parts, materials }
+        Vehicle { parts, mcf, materials }
     }
 }
 

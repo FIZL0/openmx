@@ -85,6 +85,7 @@ use game_render::mat::{M4, V3, v3};
 use game_render::raster::Frame;
 use game_render::rider::{Body, Sex};
 use game_render::scene::Vehicle;
+use game_render::vehicle::{Chassis, Drive, params as vehicle_params};
 use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
 use game_render::{ini, png, scene as view};
 use game_sim::camera::{Preset, Race, Ridden, Switches, Target};
@@ -133,6 +134,11 @@ const NEAR_CLIP: f32 = 2.4;
 
 /// The chassis model every bike is built on, which is the name the parts in a `.sub` hang off.
 const CHASSIS: &str = "bike";
+/// What the vehicle's own clip loader puts in front of a name: the actor's word, which its
+/// `stunt_name` does *not* bake in the way the rider's does
+/// (`game_sim::vehicle_anim::Library::stunt_name`). This is what turns the stunt table's `nacnac`
+/// into `bike_nacnac` and the machine's `air_Mid` into the `.mcf`'s `bike_air_Mid`.
+const BIKE_PREFIX: &str = "bike_";
 
 /// Where the rider's stunt table lives: one member of the app's own archive, the same two names the
 /// trick task's proofs read it by.
@@ -413,6 +419,42 @@ fn run() -> Result<(), String> {
         }
     }
 
+    // ---- the bike that moves (V9) ---------------------------------------------------------------
+    // The chassis' own animation: the `.sub`'s `[Objects] MCF`, the clips the sixty-state machine
+    // names, and the chassis skeleton they are bound to. The archive is opened a second time for the
+    // same reason the rider's is — the set reads members as the machine asks for them.
+    //
+    // Without this the bike is a statue: every part sat at its node's *bind* transform, read once per
+    // frame off the model the archive shipped, so nothing on it moved. With it the forks compress,
+    // the wheels turn, the front end steers and the swingarm follows the rear axle, all from the
+    // simulation's own numbers, and the chassis skeleton is posed from the vehicle's own driver.
+    let mut chassis = match vehicle.mcf.is_empty() {
+        true => None,
+        false => {
+            let own = vec![disc.res(&bike_member)?];
+            match Chassis::load(own, &vehicle.mcf, BIKE_PREFIX, &table.stunts, vehicle_params()) {
+                Ok(chassis) => Some(chassis),
+                Err(e) => {
+                    println!("chassis: {e}");
+                    None
+                }
+            }
+        }
+    };
+    if let Some(chassis) = &chassis {
+        let slots = chassis.lib.clip[..game_sim::trick::SLOTS].iter().filter(|c| c.is_some()).count();
+        let poses = chassis.lib.clip[game_sim::trick::SLOTS..].iter().filter(|c| c.is_some()).count();
+        println!(
+            "chassis: {} -> {}.psg, {} clips bound, {slots} of {} gesture slots, {poses} of {}              pose clips, nodes {:?}",
+            vehicle.mcf,
+            chassis.geometry,
+            chassis.set.clips.len(),
+            game_sim::trick::SLOTS,
+            game_sim::vehicle_anim::POSE_CLIPS.len(),
+            chassis.nodes,
+        );
+    }
+
     // The follow cameras the track carries, in the file's own order, read by S7's own reader. L1 and
     // R1 walk them. `reverse_speed` is a constructor argument in the original and the call site was
     // not read; the preset's own switch speed is the closest number the disc has.
@@ -651,6 +693,22 @@ fn run() -> Result<(), String> {
             }
         }
 
+        // And the bike under it (V9). Two halves in one call: the chassis skeleton posed from the
+        // vehicle's own animation machine, and then the suspension, steering and wheel nodes written
+        // over that pose from the ride's own numbers — the fork travel, the steering angle and the two
+        // wheels' spin, which are not in any clip because no clip could have them.
+        if let Some(chassis) = &mut chassis {
+            if world.riding {
+                let ride = &world.rider.ride;
+                let want = Chassis::want(ride, &world.rider.tricks);
+                let request = Chassis::request(ride, &world.rider.tricks);
+                chassis.frame(step.dt, want, &request, Drive::of(ride));
+                if let Some(loaded) = assets.models.get_mut(CHASSIS) {
+                    chassis.skin_into(loaded);
+                }
+            }
+        }
+
         // What the rider did, as a line: a run nobody is watching still says whether a trick
         // started, landed or put the rider down, and by which of the original's reason codes.
         if let Some(t) = world.said.started {
@@ -738,19 +796,22 @@ fn run() -> Result<(), String> {
         // Each part rides on one node of the chassis, so its transform is that node's place in the
         // chassis followed by the chassis's place in the world.
         let mut actor: Vec<(&str, M4)> = vec![(CHASSIS, bike_at)];
-        if let Some(chassis) = assets.models.get(CHASSIS) {
-            for part in &vehicle.parts {
-                let node = chassis
-                    .model
-                    .nodes
-                    .iter()
-                    .position(|n| n.name.eq_ignore_ascii_case(&part.placement));
-                let at = match node {
-                    Some(i) => chassis.model.world(i).mul(bike_at),
-                    None => bike_at,
-                };
-                actor.push((part.model.as_str(), at));
-            }
+        // The node's *live* transform where a frame has posed the chassis, and its bind transform
+        // where nothing has: the front fender and the number plate hang off `Handlebars`, so a part
+        // placed at a bind pose is a part that does not steer with the bike it is bolted to.
+        let node_now = |name: &str| -> Option<M4> {
+            chassis.as_ref().and_then(|c| c.node(name)).or_else(|| {
+                let model = &assets.models.get(CHASSIS)?.model;
+                let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
+                Some(model.world(i))
+            })
+        };
+        for part in &vehicle.parts {
+            let at = match node_now(&part.placement) {
+                Some(node) => node.mul(bike_at),
+                None => bike_at,
+            };
+            actor.push((part.model.as_str(), at));
         }
         // And the rider, at the bike's own transform: the clips put the body on the bike
         // themselves, so there is nothing to bolt (`game_render::rider`). Not before a frame has

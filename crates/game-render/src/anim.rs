@@ -302,6 +302,92 @@ impl Set {
         }
     }
 
+    /// Write [`Set::pose`] from one of the *vehicle's* blends
+    /// ([`game_sim::vehicle_anim::Blend`]), at the clip time its clock reached.
+    ///
+    /// The vehicle's machine reaches five of the library's entry points where the rider's reaches
+    /// three, and it names its clips by handle rather than by slot — its table is indexed by
+    /// animation state and has no slot names. Mode for mode this is the same mapping [`Set::apply`]
+    /// makes, with the two the rider never asks for added:
+    ///
+    /// - `Free`, `One`, `Two` — the same three samplers, for the same reasons.
+    /// - `Pair` — two clips **each at its own phase**, mixed and faded
+    ///   ([`Clip::pose_paired_faded`]). The second clip's time is its own duration times its own
+    ///   phase, which is what [`game_sim::motion::Player::drive_at`] would have computed for it had
+    ///   the clock driven it; the clock only ever drives the first.
+    /// - `Four` — four clips and three weights. Not drawn, exactly as [`Blend::Three`] is not: the
+    ///   nesting of two mixes into a third is not ported and inventing it would be arithmetic
+    ///   nobody has checked. The pose is left as it was.
+    pub fn apply_vehicle(&mut self, blend: game_sim::vehicle_anim::Blend, player: &Player) -> bool {
+        use game_sim::vehicle_anim::Blend as VBlend;
+        // The vehicle's own `sample_time`: the same question `Player::sample_time` answers, asked of
+        // the other blend — a phase-driven blend samples where `drive_at` left `prev`, and the
+        // free-running advance samples its own clock.
+        let time = match blend.driven() {
+            None => player.time,
+            Some(_) => player.prev,
+        };
+        match blend {
+            VBlend::Free => {
+                if player.finished {
+                    return false;
+                }
+                let Some(at) = self.at(player.clip) else { return false };
+                let bound = &self.clips[at];
+                bound.clip.pose(time.0, &bound.joints, &mut self.pose);
+                true
+            }
+            VBlend::One { ramp, clip, .. } => {
+                let Some(at) = self.at(clip) else { return false };
+                let bound = &self.clips[at];
+                bound.clip.pose_faded(time.0, &bound.joints, ramp.0, &self.under, &mut self.pose);
+                true
+            }
+            VBlend::Two { mix, ramp, a, b, .. } => {
+                let (Some(x), Some(y)) = (self.at(a), self.at(b)) else { return false };
+                let (first, second) = (&self.clips[x], &self.clips[y]);
+                first.clip.pose_mixed_faded(
+                    &second.clip,
+                    time.0,
+                    mix.0,
+                    &first.joints,
+                    ramp.0,
+                    &self.under,
+                    &mut self.pose,
+                );
+                true
+            }
+            VBlend::Pair { phase_b, mix, ramp, a, b, .. } => {
+                let (Some(x), Some(y)) = (self.at(a), self.at(b)) else { return false };
+                let (first, second) = (&self.clips[x], &self.clips[y]);
+                // The machine's second phase is a ratio of two clip durations, and a clip the set
+                // could not bind has a duration of zero — so it can arrive as a non-number. The
+                // renderer takes that as the clip's start rather than passing it on: a NaN sample
+                // time poses the whole skeleton with NaN, which is a hole in the screen.
+                let other = (second.clip.timing.duration * phase_b).0;
+                let other = if other.is_finite() { other } else { 0.0 };
+                first.clip.pose_paired_faded(
+                    &second.clip,
+                    time.0,
+                    other,
+                    mix.0,
+                    &first.joints,
+                    ramp.0,
+                    &self.under,
+                    &mut self.pose,
+                );
+                true
+            }
+            VBlend::Four { .. } => false,
+        }
+    }
+
+    /// Where a handle sits in [`Set::clips`], or `None` for the two ways of having no clip: the
+    /// handle is missing, or it points past the clips this set actually bound.
+    fn at(&self, id: Option<ClipId>) -> Option<usize> {
+        id.map(|id| id.0 as usize).filter(|&at| at < self.clips.len())
+    }
+
     /// Every joint's transform under the live pose — one matrix per joint, which is what places a
     /// vertex ([`crate::skin::skin`]).
     pub fn world(&self) -> Vec<M4> {

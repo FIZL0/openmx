@@ -38,6 +38,7 @@ pub mod rider;
 pub mod scene;
 pub mod skin;
 pub mod terrain;
+pub mod vehicle;
 pub mod world;
 
 pub use anim::{Rig, Set};
