@@ -1,0 +1,61 @@
+# A minute you can ride — P10, in the kit's own pad notation.
+#
+# Ten legs, 3600 frames of a 60 Hz ride. `crates/openmx/tests/ride.rs` reads this file frame by frame,
+# turns it into the DualShock 2 reports the shell's pad would have built, and rides it headless under
+# `./kit check`. The same file is a script for a real machine:
+#
+#     ./kit pad serve &
+#     ./kit pad script crates/openmx/tests/ride-minute.pad
+#
+# which is the same minute approximately — the kit's sender is wall-clock and not frame-exact, so what
+# it proves is that the notation below is a script a human can also run, not a number.
+#
+# Cross is the throttle and Square the brake, which is this shell's own binding (`src/main.rs`), and
+# the left stick is the handlebars. A `# leg:` line starts a leg; every other comment is a comment.
+
+# leg: the launch
+# Full throttle from a standstill, on the first frame: the shell's clutch latches if the throttle is
+# ever shut while the bike is stopped, so a rider who reaches for it a moment later never moves at all
+# (`it_pulls_away_after_a_frame_off_the_throttle` in the sibling test).
+down cross
+sleep 120f
+
+# leg: flat out
+# Twenty seconds of it, which is what this bike needs to stop accelerating.
+sleep 1200f
+
+# leg: turning right
+# The stick hard over, the throttle still pinned: a rider holding a turn at speed.
+stick l 1 0
+sleep 240f
+
+# leg: straight after the right
+stick l 0 0
+sleep 120f
+
+# leg: turning left
+stick l -1 0
+sleep 240f
+
+# leg: straight after the left
+stick l 0 0
+sleep 120f
+
+# leg: the run-up
+# The take-off ramp goes in here, 250 ft ahead of wherever the bike is and on whatever heading it has.
+sleep 180f
+
+# leg: the jump
+# Over the lip, through the air, and down on its wheels.
+sleep 300f
+
+# leg: the brake
+# The throttle shut and the brake pinned, from the top speed to a stop.
+up cross
+down square
+sleep 600f
+
+# leg: stopped
+# Hands off the pad: it should still be standing there eight seconds later.
+release
+sleep 480f
