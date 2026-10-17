@@ -1077,3 +1077,270 @@ fn wrap_turn(angle: F) -> F {
         a
     }
 }
+
+// --- the other two files this reader reads ----------------------------------------------------------
+
+/// The all-ones quadword the part loader hands as its damping and scale default: one constant in
+/// the executable's data, handed to several of the getters below.
+const ONES: Vf = Vf([1.0, 1.0, 1.0, 1.0]);
+/// The part loader's `InertiaScale` default, which it builds rather than names: [`ONES`] with every
+/// lane doubled (`vmulbc` by a broadcast 2.0), so a file with no `InertiaScale` gets **two**, not one.
+const TWOS: Vf = Vf([2.0, 2.0, 2.0, 2.0]);
+/// The largest `f32`, which is the "no threshold" the part loader defaults its four sleep tests to.
+const NO_THRESHOLD: F = F(f32::MAX);
+
+/// **One rigid-body part of a physics file**, as `physics_part_read` (`0x0015a500`) loads it: the base
+/// every `Type = RigidBody` part shares, under whatever section the caller has selected.
+///
+/// The bike's own `.phy` is a vehicle and is read by [`Phy::read`]; the files built out of *parts* —
+/// `Wreckbike.phy`'s one `[PhysicsPart1]`, the rider ragdoll's eighteen — go through this instead, and
+/// it is a different reader and not an extension of that one: different keys, different defaults, and
+/// a mass that is **not** `Weight/32.2`.
+///
+/// Three things worth knowing before using one:
+///
+/// * **The mass is `Weight * 0.0310559`**, the same rounding of 1/32.2 the vehicle loader uses for its
+///   *collision* mass only. A part of 250 lb has mass 7.763975 and inverse mass 0.1288.
+/// * **The gravity is a force**, `(0, -GravityScale * Weight, 0, 1)`, written straight into the part.
+///   Through the inverse mass that is an acceleration of `-GravityScale * 32.2`.
+/// * **The inertia needs the model's box**, which no file holds: the loader asks the part's model for
+///   its bounding box and works the tensor out from it — see [`Part::inertia`]. A port with no model
+///   library has to be given the box or the tensor.
+///
+/// Four keys of `Wreckbike.phy` are **not read by this loader and not read anywhere in the game**:
+/// `LimitAngularRate`, `BodyAngularRateLimit`, `ImpactVelocityDamping` and `ImpactAngularRateDamping`
+/// have no string in the executable at all. They are the authoring tool's, and a port that honours
+/// them moves the wreck differently from the disc.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Part {
+    /// `Weight`, in pounds, and the mass it becomes.
+    pub weight: F,
+    pub mass: F,
+    /// `CofG` — where the mass sits in the part's own frame.
+    pub cofg: Vf,
+    /// `GravityScale`, and the force it becomes.
+    pub gravity_scale: F,
+    pub gravity: Vf,
+    /// `InertiaScale`, a per-axis scale on the tensor [`Part::inertia`] works out.
+    pub inertia_scale: Vf,
+    /// `Radius`, the part's own sphere.
+    pub radius: F,
+    /// `DefaultVelocityDamping` and `DefaultAngularRateDamping`, per axis.
+    pub velocity_damping: Vf,
+    pub angular_rate_damping: Vf,
+    /// `CollisionEnabled`, `DetectCollisionsWhenDisabled`.
+    pub collision_enabled: bool,
+    pub detect_collisions_when_disabled: bool,
+    /// `CollisionWeight` (defaulting to `Weight`) and the mass the collision record gets.
+    pub collision_weight: F,
+    pub collision_mass: F,
+    /// `CollisionCofGOffset`.
+    pub collision_cofg_offset: Vf,
+    /// The high-speed sweep: `CheckForHighSpeedCollisions`, `HighSpeedRayOffset`,
+    /// `HighSpeedRaySpeedScale`, `HighSpeedUnpenetrationDistance`.
+    pub check_for_high_speed_collisions: bool,
+    pub high_speed_ray_offset: Vf,
+    pub high_speed_ray_speed_scale: F,
+    pub high_speed_unpenetration_distance: F,
+    /// The contact: `SpringStiffness`, `SpringDamping`, `MaxPenetration`, and the two frictions —
+    /// `FrictionZone1`, and `BodyFriction` which defaults to it.
+    pub spring_stiffness: F,
+    pub spring_damping: F,
+    pub max_penetration: F,
+    pub friction_zone1: F,
+    pub body_friction: F,
+    /// `ImpulseAngularRateScale`, `SpringMomentScale`, `FrictionMomentScale` — how much of each
+    /// contact force is allowed to turn the part rather than push it.
+    pub impulse_angular_rate_scale: Vf,
+    pub spring_moment_scale: Vf,
+    pub friction_moment_scale: Vf,
+    /// `ResetOffEdgeOfWorld`, `ResetTime` — a part that falls out of the world comes back.
+    pub reset_off_edge_of_world: bool,
+    pub reset_time: F,
+    /// The four thresholds a part is allowed to go to sleep under: `SpeedThreshold`,
+    /// `AngularRateThreshold`, `AccelerationThreshold`, `AngularAccelerationThreshold`, and the two
+    /// impulse ones beside them. `Wreckbike.phy` sets the two accelerations to 0.01 and leaves the
+    /// rest; the defaults of the last four are "never".
+    pub speed_threshold: F,
+    pub angular_rate_threshold: F,
+    pub acceleration_threshold: F,
+    pub angular_acceleration_threshold: F,
+    pub speed_impulse_threshold: F,
+    pub body_angular_speed_impulse_threshold: F,
+}
+
+impl Part {
+    /// Read a part out of a file's bytes by section name — `Wreckbike.phy` with `"PhysicsPart1"`.
+    pub fn read_bytes(bytes: &[u8], section: &str) -> Part {
+        Part::read(Ini::parse_bytes(bytes).section(section))
+    }
+
+    /// Load one part's section, in the loader's own order — which matters once: `Weight` is read
+    /// first because it is the default for `CollisionWeight`.
+    pub fn read(s: Section) -> Part {
+        let weight = s.float_or("Weight", F(500.0));
+        let gravity_scale = s.float_or("GravityScale", F::ONE);
+        let collision_weight = s.float_or("CollisionWeight", weight);
+        let friction_zone1 = s.float_or("FrictionZone1", F::ONE);
+        Part {
+            weight,
+            mass: weight * COLLISION_MASS_PER_POUND,
+            cofg: s.vector("CofG", UNIT_W),
+            gravity_scale,
+            // The loader writes the three lanes and a literal one in `w`, as the vehicle's gravity is
+            // written: a force in pounds, so the acceleration it makes is `-GravityScale * 32.2`.
+            gravity: Vf::new(0.0, (-gravity_scale * weight).0, 0.0, 1.0),
+            inertia_scale: s.vector("InertiaScale", TWOS),
+            radius: s.float_or("Radius", F(0.5)),
+            velocity_damping: s.vector("DefaultVelocityDamping", ONES),
+            angular_rate_damping: s.vector("DefaultAngularRateDamping", ONES),
+            collision_enabled: s.flag("CollisionEnabled", true),
+            detect_collisions_when_disabled: s.flag("DetectCollisionsWhenDisabled", false),
+            collision_weight,
+            collision_mass: collision_weight * COLLISION_MASS_PER_POUND,
+            collision_cofg_offset: s.vector("CollisionCofGOffset", UNIT_W),
+            check_for_high_speed_collisions: s.flag("CheckForHighSpeedCollisions", false),
+            high_speed_ray_offset: s.vector("HighSpeedRayOffset", UNIT_W),
+            high_speed_ray_speed_scale: s.float_or("HighSpeedRaySpeedScale", F(2.0)),
+            high_speed_unpenetration_distance: s.float_or("HighSpeedUnpenetrationDistance", F(2.0)),
+            spring_stiffness: s.float_or("SpringStiffness", F(10.0)),
+            spring_damping: s.float_or("SpringDamping", F(0.7)),
+            max_penetration: s.float_or("MaxPenetration", F(0.25)),
+            friction_zone1,
+            body_friction: s.float_or("BodyFriction", friction_zone1),
+            impulse_angular_rate_scale: s.vector("ImpulseAngularRateScale", ONES),
+            spring_moment_scale: s.vector("SpringMomentScale", ONES),
+            friction_moment_scale: s.vector("FrictionMomentScale", ONES),
+            reset_off_edge_of_world: s.flag("ResetOffEdgeOfWorld", true),
+            reset_time: s.float_or("ResetTime", F(5.0)),
+            speed_threshold: s.float_or("SpeedThreshold", F(0.3)),
+            angular_rate_threshold: s.float_or("AngularRateThreshold", F(0.3)),
+            acceleration_threshold: s.float_or("AccelerationThreshold", NO_THRESHOLD),
+            angular_acceleration_threshold: s.float_or("AngularAccelerationThreshold", NO_THRESHOLD),
+            speed_impulse_threshold: s.float_or("SpeedImpulseThreshold", NO_THRESHOLD),
+            body_angular_speed_impulse_threshold: s
+                .float_or("BodyAngularSpeedImpulseThreshold", NO_THRESHOLD),
+        }
+    }
+
+    /// The part's inertia tensor as the loader works it out, given the **full** extents of its
+    /// model's box (the engine's bounding box is a half-box, and the loader doubles it):
+    /// `InertiaScale * (mass/12) * (the sum of the squares of the other two extents)` — a solid
+    /// cuboid's tensor, per axis.
+    ///
+    /// The box comes out of the model library, which this port does not have, so every caller has to
+    /// hand one in or use a measured tensor instead.
+    pub fn inertia(&self, dims: Vf) -> Vf {
+        let twelfth = self.mass / 12.0;
+        let (x, y, z) = (F(dims.x()), F(dims.y()), F(dims.z()));
+        Vf::new(
+            (F(self.inertia_scale.x()) * twelfth * (y * y + z * z)).0,
+            (F(self.inertia_scale.y()) * twelfth * (x * x + z * z)).0,
+            (F(self.inertia_scale.z()) * twelfth * (x * x + y * y)).0,
+            1.0,
+        )
+    }
+}
+
+/// Which of `[Wrecks]`' seven throws a wreck uses, in the order the loader reads them.
+///
+/// The names are the file's own. Which wreck reason picks which one is **not** in this module: the
+/// mapping is not a key and not a string in the executable — see [`crate::ride::Crash`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Hit {
+    Front,
+    Side,
+    Back,
+    Bottom,
+    FallOffFront,
+    FallOffBack,
+    Stunt,
+}
+
+/// One of the seven: how long the rider keeps hold of the bars, and the force that throws them off
+/// when they let go.
+///
+/// Every one of the six keys defaults to zero — a rider in a file with no `[Wrecks]` lets go at once
+/// and is thrown by nothing. The three `*Delta` keys are the spread the original picks a random value
+/// inside; `0` in both retail rider files for every kind but the first three.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Throw {
+    pub force_time: F,
+    pub hand_hold_time: F,
+    pub force: Vf,
+    pub force_time_delta: F,
+    pub hand_hold_time_delta: F,
+    pub force_delta: Vf,
+}
+
+/// **The rider's `[Wrecks]` block**, as `rider_wrecks_read` (inside `0x00249cb0`) loads it: seven
+/// throws and four numbers about what the rider does on the ground afterwards.
+///
+/// It lives in the *rider's* physics file (`rider\anim\mrider.phy`), not the bike's, because it is the
+/// ragdoll that is thrown. The bike's side of a wreck is [`Part`] (`Wreckbike.phy`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Wrecks {
+    pub hit_front: Throw,
+    pub hit_side: Throw,
+    pub hit_back: Throw,
+    pub hit_bottom: Throw,
+    pub fall_off_front: Throw,
+    pub fall_off_back: Throw,
+    pub stunt: Throw,
+    /// `GroundAngularRateDamping`: **one** number in the file, written into all three lanes of a
+    /// damping quadword by the loader.
+    pub ground_angular_rate_damping: Vf,
+    /// `RiderFlailHeight`: how far above the ground the rider is held while they flail.
+    pub rider_flail_height: F,
+    /// `RiderRollTime`, and `RiderRollSpeed` — **in miles per hour**, the one key of the block the
+    /// loader scales (by [`MPH`]).
+    pub rider_roll_time: F,
+    pub rider_roll_speed: F,
+}
+
+impl Wrecks {
+    /// Read the block out of a rider file's bytes.
+    pub fn read_bytes(bytes: &[u8]) -> Wrecks {
+        Wrecks::read(&Ini::parse_bytes(bytes))
+    }
+
+    /// Load `[Wrecks]`, in the loader's order: the seven groups of six, then the four.
+    pub fn read(ini: &Ini) -> Wrecks {
+        let s = ini.section("Wrecks");
+        let throw = |name: &str| Throw {
+            force_time: s.float_or(&format!("{name}ForceTime"), F::ZERO),
+            hand_hold_time: s.float_or(&format!("{name}HandHoldTime"), F::ZERO),
+            force: s.vector(&format!("{name}Force"), UNIT_W),
+            force_time_delta: s.float_or(&format!("{name}ForceTimeDelta"), F::ZERO),
+            hand_hold_time_delta: s.float_or(&format!("{name}HandHoldTimeDelta"), F::ZERO),
+            force_delta: s.vector(&format!("{name}ForceDelta"), UNIT_W),
+        };
+        let damping = s.float_or("GroundAngularRateDamping", F::ZERO);
+        Wrecks {
+            hit_front: throw("HitFront"),
+            hit_side: throw("HitSide"),
+            hit_back: throw("HitBack"),
+            hit_bottom: throw("HitBottom"),
+            fall_off_front: throw("FallOffFront"),
+            fall_off_back: throw("FallOffBack"),
+            stunt: throw("Stunt"),
+            ground_angular_rate_damping: Vf::new(damping.0, damping.0, damping.0, 1.0),
+            rider_flail_height: s.float_or("RiderFlailHeight", F::ZERO),
+            rider_roll_time: s.float_or("RiderRollTime", F::ZERO),
+            rider_roll_speed: s.float_or("RiderRollSpeed", F::ZERO) * MPH,
+        }
+    }
+
+    /// The throw a kind of hit uses.
+    pub fn throw(&self, hit: Hit) -> Throw {
+        match hit {
+            Hit::Front => self.hit_front,
+            Hit::Side => self.hit_side,
+            Hit::Back => self.hit_back,
+            Hit::Bottom => self.hit_bottom,
+            Hit::FallOffFront => self.fall_off_front,
+            Hit::FallOffBack => self.fall_off_back,
+            Hit::Stunt => self.stunt,
+        }
+    }
+}

@@ -44,8 +44,9 @@
 //! the first frame whose clock *exceeds* its limit.
 //!
 //! - The settle window, [`SETTLE`] (or [`SETTLE_CANNONBALL`] for a cannonball), is how long the rider
-//!   is down before the reset clock is armed. It is skipped entirely unless the vehicle's class asks
-//!   to settle ([`Sense::settles`]).
+//!   is down before the reset clock is armed. It does not start until something tells the machine the
+//!   vehicle has settled ([`Sense::settles`]) — for a bike, the rider hitting the ground after the
+//!   wreck ([`crate::ride::Crash`]).
 //! - The reset limit is the bike's own `MaxWreckTime`, or `CannonballWreckTime` for a cannonball
 //!   ([`Params`]).
 //!
@@ -109,8 +110,8 @@ pub const SETTLE_CANNONBALL: F = F(2.5);
 pub enum Phase {
     /// On the bike.
     Riding,
-    /// Off the bike, reset clock not armed. For a bike this is where a wreck stays until the player
-    /// asks for the reset or the front end's wreck page does — see [`Sense::settles`].
+    /// Off the bike, reset clock not armed. A wreck stays here until it settles ([`Sense::settles`]),
+    /// or until the player or the front end's wreck page asks for the reset.
     Down,
     /// Off the bike with the reset clock armed against the reason's limit.
     Resetting,
@@ -160,9 +161,13 @@ pub struct Sense {
     /// Wrecks are switched on at all. One global in the original, cleared by the modes that must not
     /// wreck anybody.
     pub wrecks_enabled: bool,
-    /// The vehicle's class wants a settle window before the reset clock is armed. A bike has nothing
-    /// that sets it, so the window and the whole automatic reset are unreachable for one — see the
-    /// journal's `Not verified` section.
+    /// The vehicle has settled: the window in front of the reset clock may start. **Not a property of
+    /// the class** — S5 read it as one and said so here, and that was wrong. It is a runtime signal,
+    /// written during a wreck by the rider's own side of it, and a player bike's copy of it
+    /// (`player + 0xd3c`) reads 1 part way through every wreck: 18, 22 and 26 ticks after the entry
+    /// across three measured reason-5 wrecks. So the automatic reset is not out of reach for a bike —
+    /// it is the normal way back, and the hand chord only cuts it short. [`crate::ride::Crash`] is
+    /// what sets this in the port, and its docs have the measurements.
     pub settles: bool,
 }
 

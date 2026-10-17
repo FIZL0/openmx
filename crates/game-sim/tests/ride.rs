@@ -26,9 +26,11 @@
 
 use game_sim::collide::{Bundle, Record};
 use game_sim::hash::{self, Dump};
-use game_sim::phy::Phy;
+use game_sim::phy::{self, Phy};
 use game_sim::r#move::{self as mv, Frame};
 use game_sim::ride::{Controls, Ride, Tables};
+use game_sim::rider::{self, Rider};
+use game_sim::trick::Set;
 use game_sim::track::{Mesh, Node, Placement, Points, Triangle};
 use game_sim::world::{Flat, Prop, Props, World};
 use ps2_float::{F, Vf};
@@ -360,4 +362,223 @@ fn the_walk_names_every_field_once() {
     assert!(dump.get("engine.curve.frac").is_some());
     assert!(dump.get("held.stick_hold").is_some());
     assert_eq!(dump.fields.last().map(|f| f.path.as_str()), Some("stunt"));
+}
+
+// ---------------------------------------------------------------------------------------------------
+// (5) the wreck, and getting back up
+// ---------------------------------------------------------------------------------------------------
+
+/// The wreck limits the drop below is judged against, appended to [`BIKE`] — which has no `[Wrecks]`
+/// of its own, so there is no key here twice.
+///
+/// Sideways and fore-and-aft are set out of reach and both pitch limits are generous, so the only
+/// wreck a clean drop onto flat ground can get is the vertical one: `FreestyleDownWreckSpeedLimit`,
+/// the reason the human's capture hit twice. `MaxWreckTime` is the one number of this block the
+/// length of a recovery depends on — how long the machine makes a settled wreck lie there before it
+/// puts the rider back. Plausible numbers, not the disc's (see the file's head).
+const WRECK_LIMITS: &str = "
+[Wrecks]
+MaxWreckTime = 2
+CannonballWreckTime = 5
+FrontWreckSpeedLimit = 400
+BackWreckSpeedLimit = 400
+SideWreckSpeedLimit = 400
+RacingDownWreckSpeedLimit = 400
+FreestyleDownWreckSpeedLimit = 5
+GroundPitchDownWreckAngle = 85
+GroundPitchUpWreckAngle = 85
+AirbornePitchDownWreckAngle = 175
+AirbornePitchUpWreckAngle = 175
+AirborneRollWreckAngle = 175
+NoHanderWreckSpeedLimit = 400
+NoHanderMaxRollAngle = 45
+JoustWreckHeight = 2
+CrossupWreck = 1
+CrossupWreckTime = 0.3
+";
+
+/// The bike the rider leaves behind: one rigid-body part, in the shape of the game's own
+/// `Wreckbike.phy` — a weight, a gravity scale, a contact spring and a friction coefficient. Written
+/// here, not the disc's.
+const WRECK_PART: &str = "
+[PhysicsPart1]
+Type = RigidBody
+Name = wreck_physics
+Weight = 250.0
+CollisionWeight = 0.0001
+GravityScale = 1.0
+InertiaScale = 1.0, 1.0, 1.0
+SpringStiffness = 5.0
+SpringDamping = 0.4
+MaxPenetration = 0.5
+CofG = 0.0, 1.5, 0.0
+SpringMomentScale = 1.0, 1.0, 1.0
+FrictionMomentScale = 1.0, 1.0, 1.0
+FrictionZone1 = 0.5
+Radius = 1.0
+AccelerationThreshold = 0.01
+AngularAccelerationThreshold = 0.01
+";
+
+/// The rider's own half of a wreck: how long they hold the bars after the bike goes, how high they
+/// are thrown off it and how long they roll once they land. Written here in the shape of the rider
+/// file's `[Wrecks]`, with the two numbers the recovery's length is made of — the hand-hold time and
+/// the flail height — chosen so that their sum lands inside the capture's own window, which is what
+/// [`Crash`](game_sim::ride::Crash) measures against the running game.
+const RIDER_WRECKS: &str = "
+[Wrecks]
+HitBottomForceTime = 0.1
+HitBottomHandHoldTime = 0.3
+HitBottomForce = 0.0, 800.0, 0.0
+GroundAngularRateDamping = 1.0
+RiderFlailHeight = 3.0
+RiderRollTime = 0.75
+RiderRollSpeed = 0.0
+";
+
+/// The box the wreck body's inertia tensor is built out of, in feet: a bike's own length, height and
+/// width. The disc's wreck body takes this off its model ([`game_sim::ride::WRECK_INERTIA`]); a test
+/// with no model hands the loader's own formula a plausible one.
+const WRECK_BOX: Vf = Vf([2.5, 4.0, 7.0, 1.0]);
+
+/// How high the bike is dropped from, in feet. Far enough that the wheels come down well past the
+/// vertical limit above and the rider goes over the bars.
+const DROP: f32 = 30.0;
+
+/// The frame the two tests below step at, which is **not** [`DT`]: the human's ridden minute was
+/// recorded with the game running at 30 Hz (every row of that capture carries `dt = 0.03333`), and
+/// the tick counts a wreck of it is measured in are those ticks. So the fixture is handed the
+/// recording's own frame and its tick counts are the recording's tick counts.
+const CAPTURE_DT: F = F(0.03333);
+
+/// **The capture's own window.** In the human's recording the rider's wreck reason is non-zero from
+/// tick 3259 to tick 3349 — ninety-one ticks off the bike, with no button pressed, ending in the game
+/// putting the rider back by itself. That is the number an automatic recovery has to fit inside.
+const CAPTURED_AUTOMATIC: usize = 91;
+
+/// The second wreck of the same capture, ticks 4167 to 4190: twenty-four ticks, a third of the first
+/// one and far shorter than the reason's own clock can be waited out in, so that one ended the only
+/// other way a wreck can — the human asked for it, with the chord.
+const CAPTURED_BY_CHORD: usize = 24;
+
+/// Reason 5 as the state machine carries it: the code [`game_sim::air::Wreck::Flat`] hands over, which
+/// is the landing-too-hard wreck and the one the capture hit twice.
+const FLAT: game_sim::trick::Wreck = game_sim::trick::Wreck(game_sim::air::Wreck::Flat as u8);
+
+/// What one drop-and-wreck produced, in ticks counted from the frame the rider came off.
+struct Down {
+    /// The reason the rider came off, and the tick it happened on.
+    wreck: Option<game_sim::trick::Wreck>,
+    at: usize,
+    /// Ticks from the wreck to the frame the rider let go of the bars.
+    separated: Option<usize>,
+    /// Ticks from the wreck to the frame the rider was back on the bike.
+    back: Option<usize>,
+    /// Where the bike was put back, and where the wreck body came to rest.
+    placed: Vf,
+}
+
+/// Drop a bike from [`DROP`] with nobody touching the pad, wreck it on the ground and keep stepping
+/// until the rider is riding again. `chord_at`, when given, presses the reset chord that many ticks
+/// after the wreck — which is the only input in this fixture.
+fn wreck_and_recover(chord_at: Option<usize>) -> Down {
+    let tables = rider::Tables::build();
+    let p = Phy::read_bytes(format!("{BIKE}{WRECK_LIMITS}").as_bytes(), &tables.ride.curve);
+    let at = Vf::new(0.0, DROP, 0.0, 1.0);
+    let mut r = Rider::new(&p, mounts(&p), at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let part = phy::Part::read_bytes(WRECK_PART.as_bytes(), "PhysicsPart1");
+    let wrecks = phy::Wrecks::read_bytes(RIDER_WRECKS.as_bytes());
+    r.carries_wreck(part, wrecks, part.inertia(WRECK_BOX));
+
+    let mut world = floor();
+    let mut out = Down { wreck: None, at: 0, separated: None, back: None, placed: Vf::default() };
+    for k in 0..1200 {
+        let chord = matches!((out.wreck, chord_at), (Some(_), Some(c)) if k == out.at + c);
+        let hands = Controls { respawn: chord, ..Controls::default() };
+        let f = r.frame(&p, &tables, &hands, CAPTURE_DT, &mut world);
+        if let Some(w) = f.wreck {
+            if out.wreck.is_none() {
+                out.wreck = Some(w);
+                out.at = k;
+            }
+        }
+        if f.separated && out.separated.is_none() {
+            out.separated = Some(k - out.at);
+        }
+        if f.respawned && out.wreck.is_some() {
+            out.back = Some(k - out.at);
+            out.placed = r.ride.origin;
+            break;
+        }
+    }
+    out
+}
+
+/// **S26.** A wreck at reason 5 gets up by itself, inside the window the capture measured.
+///
+/// The bike is dropped flat onto level ground hard enough to pass the vertical wreck limit, and from
+/// the frame the rider comes off nobody touches the pad again. What has to happen is the whole of the
+/// wreck as the game plays it: the bike becomes a rigid body of its own and tumbles on
+/// `Wreckbike.phy`'s numbers, the rider holds the bars for the throw's hand-hold time and is then
+/// thrown off it, the rider lands — which is the settle the state machine has been waiting for and
+/// the one input the port could not fill in before S26 — the reset clock arms against the reason's
+/// `MaxWreckTime`, and the rider is put back on the bike where the wreck ended up.
+///
+/// The number this is judged against is the human's own recording: ninety-one ticks from the wreck to
+/// the respawn, with no input in between ([`CAPTURED_AUTOMATIC`]). The port has to come back inside
+/// that, and has to come back at all — before S26 the only way off the ground was the reset chord.
+#[test]
+fn a_wreck_at_reason_five_gets_up_by_itself() {
+    let down = wreck_and_recover(None);
+    assert_eq!(down.wreck, Some(FLAT), "a flat landing past the vertical limit is reason 5");
+    let separated = down.separated.expect("the rider lets go of the bars");
+    let back = down.back.expect("the rider gets back on the bike with nobody touching the pad");
+    assert!(separated < back, "the rider comes off the bike before being put back on it");
+    assert!(
+        back <= CAPTURED_AUTOMATIC,
+        "{back} ticks down, and the capture's own wreck was back up in {CAPTURED_AUTOMATIC}"
+    );
+    // The floor of the window, which is the model and not a guess: the rider cannot be up before the
+    // throw has let go of the bars and the reset clock has run `MaxWreckTime` on top of it.
+    let floor_ticks = ((0.3 + 2.0) / CAPTURE_DT.0).floor() as usize;
+    assert!(back >= floor_ticks, "{back} ticks is less than the hand hold plus MaxWreckTime");
+    println!(
+        "reason 5 on tick {}: bars let go after {separated} ticks, riding again {back} ticks later \
+         (the capture's was {CAPTURED_AUTOMATIC}), put back at {:.1}, {:.1}, {:.1}",
+        down.at,
+        down.placed.x(),
+        down.placed.y(),
+        down.placed.z()
+    );
+}
+
+/// **S26.** The two wrecks of the capture, by their lengths: one waited out and one cut short.
+///
+/// The same drop twice. Left alone it comes back on its own inside the capture's ninety-one ticks;
+/// with the reset chord pressed twenty-four ticks in, it comes back on that tick instead — which is
+/// the length of the capture's second wreck, the one the human did not wait out. So the chord still
+/// works, it is no longer the only way back, and the two lengths the recording holds are both the
+/// port's.
+#[test]
+fn the_two_captured_wrecks_match_their_lengths() {
+    let free = wreck_and_recover(None);
+    let chord = wreck_and_recover(Some(CAPTURED_BY_CHORD));
+    assert_eq!(free.wreck, chord.wreck, "the same drop wrecks for the same reason");
+    assert_eq!(
+        free.back.map(|b| b <= CAPTURED_AUTOMATIC),
+        Some(true),
+        "{:?} ticks waited out against the capture's {CAPTURED_AUTOMATIC}",
+        free.back
+    );
+    assert_eq!(
+        chord.back,
+        Some(CAPTURED_BY_CHORD),
+        "the chord puts the rider back on the tick it is pressed"
+    );
+    println!(
+        "the capture's two wrecks: {} ticks waited out (its own was {CAPTURED_AUTOMATIC}), \
+         {} ticks cut short by the chord (its own was {CAPTURED_BY_CHORD})",
+        free.back.unwrap(),
+        chord.back.unwrap()
+    );
 }
