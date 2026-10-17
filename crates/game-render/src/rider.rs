@@ -68,8 +68,8 @@
 use crate::anim::{Rig, Set};
 use crate::disc::Res;
 use crate::ini;
-use crate::mat::{M4, v3};
-use crate::skin::skin;
+use crate::mat::{M4, V3, v3};
+use crate::skin::{rotation, skin};
 use crate::world::Loaded;
 use game_sim::motion::{Animations, Library, Params, Played};
 use game_sim::trick::{SLOTS, Stunt};
@@ -260,6 +260,238 @@ pub fn bolt_onto(rider: &Skeleton, chassis: &Skeleton, anchors: &[&str]) -> Opti
     let mut m = M4::IDENTITY;
     m.0[3] = [offset.x, offset.y, offset.z, 1.0];
     Some(m)
+}
+
+/// One of the four limbs the original aims at an anchor, as the rider's own bones name it: the joint
+/// the limb swings from, the joint it bends at, and the dummy anchor at the end of it — which is also
+/// the name of the chassis bone it is aimed at, because the two skeletons spell that joint the same
+/// (give or take the case, which [`Skeleton::find`] ignores as the game does).
+///
+/// Nothing between the bend and the anchor is turned, and that is the original's choice rather than a
+/// simplification: it corrects each target by the end bone's own offset to the anchor and solves the
+/// limb against *that*, so a hand keeps the orientation the clip gave it and the arm is what moves to
+/// put it on the grip. The same offset is already in this joint array — the anchor is a joint of it —
+/// so the correction is not needed here and the hand's own rotation is left alone either way.
+pub struct Limb {
+    pub root: &'static str,
+    pub bend: &'static str,
+    pub anchor: &'static str,
+}
+
+/// The four limbs the original builds a controller for, in the order the vehicle caches the anchors
+/// they are aimed at: the two feet, then the two hands.
+pub const LIMBS: [Limb; 4] = [
+    Limb { root: "UprLegL", bend: "LwrLegL", anchor: FOOT_ANCHORS[0] },
+    Limb { root: "UprLegR", bend: "LwrLegR", anchor: FOOT_ANCHORS[1] },
+    Limb { root: "UprArmL", bend: "LwrArmL", anchor: HAND_ANCHORS[0] },
+    Limb { root: "UprArmR", bend: "LwrArmR", anchor: HAND_ANCHORS[1] },
+];
+
+/// Where the four anchors of [`LIMBS`] are to be put, in the bike's own space — which is the body's,
+/// because a posed rider is drawn at the bike's transform and bolts nothing. `None` for an anchor the
+/// chassis has not got, and that limb is then left as the clip posed it.
+pub type Anchors = [Option<V3>; 4];
+
+/// Read the four targets off a chassis: where its own grips and foot pegs are this frame.
+///
+/// This is what the original hands its limb controllers — the vehicle caches those four chassis nodes
+/// when it loads and the rider reads their world positions every frame. `world` is the chassis's own
+/// joint array ([`Skeleton::world`]); pass an empty slice for the bind pose, which is where a chassis
+/// that nothing animates keeps them.
+pub fn anchors_of(chassis: &Skeleton, world: &[M4]) -> Anchors {
+    let mut out = [None; 4];
+    for (limb, slot) in LIMBS.iter().zip(out.iter_mut()) {
+        let Some(j) = chassis.find(limb.anchor) else { continue };
+        *slot = Some(match world.get(j) {
+            Some(m) => m.point(v3(0.0, 0.0, 0.0)),
+            None => chassis.bones[j].at(),
+        });
+    }
+    out
+}
+
+/// Put the rider's hands on the grips and its feet on the pegs: the inverse kinematics the four dummy
+/// anchors exist for, solved in place on a joint array from [`Skeleton::world`].
+///
+/// A clip is a recording, and a recording of a rider is right only while the bike is where it was
+/// when the animator posed it. The bars turn, the suspension moves, the chassis the body is drawn on
+/// is not the chassis the clip was made against — and at speed that reads as a hand floating off the
+/// grip, which is the difference between a rider holding on and a clip playing. So the original does
+/// not trust the clip with the ends of the limbs: it keeps four controllers, one per limb, each with
+/// the bone it ends at and the offset from that bone to its anchor, and every frame it aims them at
+/// the vehicle's own four anchors.
+///
+/// **Which limbs hold on is decided by how far the clip already has them from the bike**, and that is
+/// this port's rule rather than the original's — the original has a weight per limb, which it reads
+/// off the bone it is solving and scales by a term it takes off the vehicle, and what is in that
+/// weight is not known (see the journal). A rule is needed either way: a stunt that lets go of the
+/// bike on purpose must be left alone, or the solve draws a different stunt. Half of this rider's
+/// gestures take a limb off — `superman` puts both feet six and a half feet from the pegs, `cancan`
+/// swings one four and a half feet over the seat, `nohandedlander` takes both hands nearly three feet
+/// off the bars — and on this disc that is a clean gap: inside a gesture, a limb the stunt holds on
+/// with is never more than about a foot from its anchor and a limb it lets go of is never nearer than
+/// two and a third feet. So a limb within [`HOLD_WITHIN`] is pulled all the way on, a limb past
+/// [`LET_GO_AT`] is left exactly where the clip put it, and in between it is faded, because a rule
+/// with an edge in it would pop the frame the pose crossed it.
+///
+/// `strength` scales all four weights: 1 to hold on, 0 to leave the pose alone. Drawing passes 1.
+///
+/// Returns how far each anchor ended from the target it was aimed at, in the disc's unit, which is a
+/// foot; `None` for a limb that was not solved — no target, a joint this skeleton has not got, a limb
+/// with no length, or a `world` that is not this skeleton's.
+pub fn hold_on(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: f32) -> [Option<f32>; 4] {
+    let mut out = [None; 4];
+    if world.len() != skel.len() {
+        return out;
+    }
+    for (i, limb) in LIMBS.iter().enumerate() {
+        let (Some(target), Some(root), Some(bend), Some(anchor)) = (
+            targets[i],
+            skel.find(limb.root),
+            skel.find(limb.bend),
+            skel.find(limb.anchor),
+        ) else {
+            continue;
+        };
+        let off = world[anchor].point(v3(0.0, 0.0, 0.0)).sub(target).len();
+        let weight = strength * holding(off);
+        if weight <= SMALL {
+            out[i] = Some(off);
+            continue;
+        }
+        out[i] = aim(skel, world, [root, bend, anchor], target, weight);
+    }
+    out
+}
+
+/// How far an anchor may start from its target and still be pulled all the way onto it, in feet.
+pub const HOLD_WITHIN: f32 = 1.0;
+
+/// And how far out the limb is taken to have let go of the bike on purpose, so the pose is left as
+/// the clip wrote it.
+pub const LET_GO_AT: f32 = 2.0;
+
+/// The weight a limb holds on with, for an anchor this far from where the bike wants it: 1 inside
+/// [`HOLD_WITHIN`], 0 past [`LET_GO_AT`], and a straight line between them.
+pub fn holding(off: f32) -> f32 {
+    ((LET_GO_AT - off) / (LET_GO_AT - HOLD_WITHIN)).clamp(0.0, 1.0)
+}
+
+/// One limb's solve: bend the middle joint until the anchor is as far from the root as the target is,
+/// then swing the root until it points at the target.
+///
+/// Two turns and no iteration, which is the shape of the original's as well — its solve is a page of
+/// VU0 quaternion arithmetic with no loop in it, so it is a closed form of the same two moves. The
+/// hinge goes first because bending it is what sets how far the limb reaches; once the reach is right
+/// the swing is a single rotation that lands the anchor on the target exactly. A target further away
+/// than the limb can reach straightens it and the limb points at the target as far as it goes; one
+/// nearer than the limb can fold leaves it folded.
+///
+/// `joints` are the limb's three in order: swing, bend, anchor. `strength` fades the target towards
+/// where the anchor already is, and the answer is how far the anchor ended from the target that was
+/// *asked* for — so a limb held at half weight answers about half of what it started out.
+
+fn aim(skel: &Skeleton, world: &mut [M4], joints: [usize; 3], target: V3, strength: f32) -> Option<f32> {
+    let [root, bend, anchor] = joints;
+    let at = |world: &[M4], j: usize| world[j].point(v3(0.0, 0.0, 0.0));
+    let (r, b, e) = (at(world, root), at(world, bend), at(world, anchor));
+    // What the limb is made of: the two lengths the solve has to work with. They are the posed
+    // lengths rather than the skeleton's, because the second one runs through the end bone to the
+    // anchor and so depends on how the clip turned that bone.
+    let (upper, lower) = (b.sub(r).len(), e.sub(b).len());
+    if upper < SMALL || lower < SMALL {
+        return None;
+    }
+    let asked = target;
+    let target = e.add(target.sub(e).scale(strength));
+    let span = target.sub(r).len().clamp((upper - lower).abs() + SMALL, upper + lower - SMALL);
+    // The hinge, by the law of cosines: the angle between the two lengths that holds the anchor
+    // `span` from the root, less the angle they are at now.
+    let folded = |across: f32| {
+        ((upper * upper + lower * lower - across * across) / (2.0 * upper * lower)).clamp(-1.0, 1.0).acos()
+    };
+    let turn = folded(span) - folded(e.sub(r).len());
+    if turn.abs() > SMALL {
+        // The hinge plane's own normal, and any normal at all when the limb is folded flat and has
+        // none. Which way round it the joint goes is not the sign of the normal — that flips with how
+        // the limb happens to be bent — so take whichever of the two turns gets the reach right.
+        let normal = r.sub(b).cross(e.sub(b));
+        let normal = if normal.len() > SMALL { normal.norm() } else { across(b.sub(r)) };
+        let reach = |way: f32| spun(e, b, turned(normal, way * turn)).sub(r).len();
+        let way = if (reach(1.0) - span).abs() <= (reach(-1.0) - span).abs() { 1.0 } else { -1.0 };
+        spin(world, &under(skel, bend), b, turned(normal, way * turn));
+    }
+    // And the swing, which is one rotation of the whole limb about the root: the anchor where the
+    // hinge left it, turned onto the line from the root to the target.
+    let (from, to) = (at(world, anchor).sub(r), target.sub(r));
+    if from.len() > SMALL && to.len() > SMALL {
+        let (from, to) = (from.norm(), to.norm());
+        let angle = from.dot(to).clamp(-1.0, 1.0).acos();
+        let axis = from.cross(to);
+        let axis = if axis.len() > SMALL { axis.norm() } else { across(from) };
+        if angle > SMALL {
+            spin(world, &under(skel, root), r, turned(axis, angle));
+        }
+    }
+    Some(at(world, anchor).sub(asked).len())
+}
+
+/// Below this a length is noise and an angle is nothing: the solve's own guard against dividing by a
+/// limb of no length or turning about an axis of none.
+const SMALL: f32 = 1e-5;
+
+/// A rotation of `angle` radians about a unit `axis`, as the quaternion [`rotation`] wants.
+fn turned(axis: V3, angle: f32) -> [f32; 4] {
+    let half = angle / 2.0;
+    let s = half.sin();
+    [axis.x * s, axis.y * s, axis.z * s, half.cos()]
+}
+
+/// One point turned about an axis through `pivot`, which is how the solve measures a turn before it
+/// commits to it.
+fn spun(p: V3, pivot: V3, q: [f32; 4]) -> V3 {
+    rotation(q).dir(p.sub(pivot)).add(pivot)
+}
+
+/// Turn a set of joints about an axis through `pivot`, in the space their matrices are already in:
+/// each gets the same rotation after its own, which is what carries a limb rigidly with the joint
+/// that turned.
+fn spin(world: &mut [M4], joints: &[usize], pivot: V3, q: [f32; 4]) {
+    let mut m = rotation(q);
+    // A turn about a point, in the row-vector form the rest of the crate uses: `p * r` and then back
+    // by however far the pivot itself moved.
+    let back = pivot.sub(m.dir(pivot));
+    m.0[3] = [back.x, back.y, back.z, 1.0];
+    for &j in joints {
+        world[j] = world[j].mul(m);
+    }
+}
+
+/// A joint and everything hanging off it, which is what a turn of that joint has to carry.
+fn under(skel: &Skeleton, joint: usize) -> Vec<usize> {
+    (0..skel.len())
+        .filter(|&j| {
+            let mut at = Some(j);
+            // The walk is capped rather than trusted: a parent loop gives up instead of hanging, as
+            // everywhere else this crate walks the tree.
+            for _ in 0..=skel.len() {
+                match at {
+                    Some(i) if i == joint => return true,
+                    Some(i) => at = skel.bones[i].parent,
+                    None => return false,
+                }
+            }
+            false
+        })
+        .collect()
+}
+
+/// Any unit vector at right angles to `v`: the axis to turn about when the geometry has none of its
+/// own, which is a limb folded flat or already pointing where it is being sent.
+fn across(v: V3) -> V3 {
+    let other = if v.x.abs() < 0.9 { v3(1.0, 0.0, 0.0) } else { v3(0.0, 1.0, 0.0) };
+    let c = v.cross(other);
+    if c.len() > SMALL { c.norm() } else { v3(0.0, 1.0, 0.0) }
 }
 
 /// One rider, as the three files name each other: the archive's `.sub`, the `.mcf` it points at, and
@@ -500,9 +732,42 @@ impl Body {
     /// written over them and the body is then drawn like any other model, at the bike's transform.
     /// They stay in the model's own space, because that is what a joint matrix leaves them in.
     ///
-    /// Expands the same level of detail `Assets` does, which is the finest.
+    /// Expands the same level of detail `Assets` does, which is the finest, and holds nothing: for a
+    /// rider the camera is going to pull away from, or one whose hands belong on the bars,
+    /// [`Body::skin_into_at`].
     pub fn skin_into(&self, loaded: &mut Loaded) {
-        loaded.tris = skin(&loaded.model, &self.rig.world(), 0);
+        self.skin_into_at(loaded, 0, None);
+    }
+
+    /// The same, at one level of detail and holding on to the bike.
+    ///
+    /// `group` is which of the model's five the camera has earned ([`Body::group_for`]); `hold` the
+    /// four places the chassis wants the body's anchors ([`anchors_of`]), or `None` to draw the pose
+    /// as the clips left it. Answers what [`hold_on`] does: how far each anchor ended from its
+    /// target, which is the one number that says whether the rider is holding on.
+    pub fn skin_into_at(
+        &self,
+        loaded: &mut Loaded,
+        group: usize,
+        hold: Option<&Anchors>,
+    ) -> [Option<f32>; 4] {
+        let mut world = self.rig.world();
+        let held = match hold {
+            Some(targets) => hold_on(&self.rig.set.skeleton, &mut world, targets, 1.0),
+            None => [None; 4],
+        };
+        loaded.tris = skin(&loaded.model, &world, group);
+        held
+    }
+
+    /// Which of the body's levels of detail to draw, for a camera `distance` from the bike whose
+    /// focal length is `focal` pixels ([`crate::world::Camera::focal`]).
+    ///
+    /// The body's own thresholds, through the engine's own rule — [`crate::psg::Model::group_for`],
+    /// which is where the rule is written down. A rider two hundred feet away is three groups coarser
+    /// than the one on your bike and costs a tenth of its triangles.
+    pub fn group_for(&self, loaded: &Loaded, distance: f32, focal: f32) -> usize {
+        loaded.model.group_for(distance, loaded.radius, focal)
     }
 }
 

@@ -952,7 +952,7 @@ fn bones(names: &[&str]) -> Skeleton {
             radius: 0.0,
         })
         .collect();
-    Skeleton::of(&Model { nodes, materials: vec![], meshes: vec![], groups: 1 })
+    Skeleton::of(&Model { nodes, materials: vec![], meshes: vec![], groups: 1, group_distance: vec![f32::MAX] })
 }
 
 /// A one-second clip with one rotation and one position channel per name, each of two keys that move.
