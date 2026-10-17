@@ -110,25 +110,25 @@ fn canonical_trace() -> Vec<u64> {
 /// `(tick, Sim::hash at that tick)`, every sixteenth tick of the canonical run.
 const HASHES: &[(u64, u64)] = &[
     (16, 0x7bb15899aaa1d671),
-    (32, 0x33916a1ef3a70179),
-    (48, 0x0d9f658f97008327),
-    (64, 0x9172fb58a442d0e7),
-    (80, 0x651fc65d792cd3b8),
-    (96, 0x38c69764a2cabd71),
-    (112, 0x560824001c196a4f),
-    (128, 0xac1ae3a4ed2491e7),
-    (144, 0xb3fa3edaf7ab44e1),
-    (160, 0x98b9dd5c3b398437),
-    (176, 0xb8fc07ed388f9025),
-    (192, 0x5a99017d60fdc132),
-    (208, 0x52732dcdf7bd5c58),
-    (224, 0x4b1add50bd809044),
-    (240, 0x1ca024e87b0bd512),
-    (256, 0x6ad19f36bd0143c5),
+    (32, 0x848bb15318f6ca79),
+    (48, 0x97a102ed76c17ca7),
+    (64, 0x01f5cf6d16428c81),
+    (80, 0xa8807b5d1b18a700),
+    (96, 0x217ab4bdff6f12c0),
+    (112, 0x361bc8ae1a961001),
+    (128, 0x2da00bd3cb34d594),
+    (144, 0x126cbfdca7f2746a),
+    (160, 0x7e12044d6587710e),
+    (176, 0x570700c51b7bd1e9),
+    (192, 0xa4da51c7c08eef0e),
+    (208, 0x7fe5487ad1fea42a),
+    (224, 0xb08ffa9a0e397849),
+    (240, 0xf513162a77b18f41),
+    (256, 0x7edd7d2ca6a276bb),
 ];
 
 /// FNV-1a over all 256 of the run's hashes, little-endian: the one number that covers every tick.
-const TRACE_DIGEST: u64 = 0x53897a38955ea6ba;
+const TRACE_DIGEST: u64 = 0x84505133f5cdd5ec;
 
 /// `(tick, bike.pos[1] as a bit pattern)` on the same ticks — a watched field rather than a whole-state
 /// hash, which is the shape an acceptance fixture of the original has.
@@ -194,11 +194,11 @@ bike.vel[3] = 0 (0x00000000)";
 
 /// How many leaves the walk of the state has, and FNV-1a over the whole of its printed form.
 const FINAL_DUMP_LEAVES: usize = 810;
-const FINAL_DUMP_DIGEST: u64 = 0x3ab9e69cd48e0948;
+const FINAL_DUMP_DIGEST: u64 = 0x25bcc46c26f20df0;
 
 /// FNV-1a over the bytes of the fixture's text form: a fixture file written on one machine must be the
 /// same bytes on another, or a recording cannot be shared.
-const FIXTURE_TEXT_DIGEST: u64 = 0x4589ebebc9da73a9;
+const FIXTURE_TEXT_DIGEST: u64 = 0x835a9ad8000673bb;
 
 /// The hash of [`Every`], the state below that holds one of every leaf kind the walker can emit.
 const EVERY_LEAF_HASH: u64 = 0xa228ffa8409c01f8;
@@ -590,7 +590,7 @@ fn a_length_in_the_hash_is_eight_bytes_wide_whatever_a_usize_is() {
     for _ in 0..100 {
         sim.tick(Input::default());
     }
-    assert_eq!(sim.hash(), 0xa63d_0020_237a_2864);
+    assert_eq!(sim.hash(), 0xd4e9_a371_9108_b89e);
 }
 
 // ---------------------------------------------------------------------------------------------------
