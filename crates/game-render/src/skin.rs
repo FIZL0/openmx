@@ -53,8 +53,9 @@
 
 use crate::mat::{M4, V3, v3};
 use crate::psg::{Model, Strip, Tri};
+use game_sim::math;
 use game_sim::motion;
-use ps2_float::F;
+use ps2_float::{F, Vf};
 use std::cell::Cell;
 use std::sync::OnceLock;
 
@@ -905,6 +906,50 @@ impl Skeleton {
                 m
             })
             .collect()
+    }
+
+    /// The node tree as a pose: every joint's *local* transform under `pose`, read back the way the
+    /// original's pose snapshot reads it — a rotation and a translation per joint, with every joint
+    /// counting as written.
+    ///
+    /// **Why this is not the pose itself.** A clip writes the joints it has channels for and leaves
+    /// the rest alone, and the original keeps those two apart in two places: the blend buffer, which
+    /// is [`Pose`], and the node tree the blend is then pushed into, which is [`Skeleton::locals`].
+    /// A joint no channel of the playing clip names keeps the `.psg`'s own transform in the node,
+    /// not the zero the blend buffer holds. The restart hook that takes the snapshot reads the
+    /// *node* — each joint record's transform at `+0x34`, its rotation out of the matrix and its
+    /// translation out of the matrix' last row with `1` written into the fourth lane — so the
+    /// snapshot of a joint the clip does not translate is the bone's own local translation and not
+    /// zero. On this disc's rider that is 21 joints of 22, up to 0.96 apart (V15 measured it; V16 is
+    /// this).
+    ///
+    /// The rotation of a joint the clip *did* write is taken straight from the pose rather than put
+    /// into a matrix and read back out of it: the original round-trips it through
+    /// [`game_sim::math::mat4_to_quat`] and comes back with the quaternion it started from, which
+    /// V15 measured bit for bit on all 22 joints. A joint the clip did not turn has no quaternion to
+    /// take, so that one is read out of the bone's matrix with the original's own conversion.
+    pub fn nodes(&self, pose: &Pose) -> Pose {
+        let mut out = Pose::new(self.bones.len());
+        for (j, bone) in self.bones.iter().enumerate() {
+            out.rot[j] = match pose.turned.get(j) {
+                Some(&true) => pose.rot[j],
+                _ => {
+                    let rows = bone.local.0.map(|r| Vf::new(r[0], r[1], r[2], r[3]));
+                    let q = math::mat4_to_quat(&math::Mat4(rows));
+                    [q.x(), q.y(), q.z(), q.w()]
+                }
+            };
+            let t = match pose.moved.get(j) {
+                Some(&true) => pose.pos[j],
+                _ => bone.local.0[3],
+            };
+            // The fourth lane is the original's, written rather than read: the node's last row is a
+            // point and the accessor puts 1 in `w` whatever the matrix holds there.
+            out.pos[j] = [t[0], t[1], t[2], 1.0];
+        }
+        out.turned.fill(true);
+        out.moved.fill(true);
+        out
     }
 
     /// Every joint's transform all the way to the root — one matrix per joint, which is what places a
