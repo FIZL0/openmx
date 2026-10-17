@@ -35,11 +35,23 @@
 //! `research/journal/2026-10-16-p3-tricks-in-the-shell/` has why, and which of the two reads the
 //! disputed parameter the way the loader stores it.
 //!
+//! # The body is a second actor
+//!
+//! The six steps above are the *player's* update, and the rider's own animation is not one of them:
+//! the body is an actor of its own, stepped by the actor list, and [`crate::rider_anim`] is its
+//! machine (S27). So it is here as [`Rider::body_frame`] — a second entry point, called after
+//! [`Rider::frame`] by whoever holds the clip table — rather than a seventh step inside the frame.
+//! What this module contributes is the mapping: which of the rider's own fields each half of the
+//! request block the body reads is published from. That mapping is **the port's own** and is listed
+//! on `body_frame`; the publisher in the original was not found (S25 left it unidentified too).
+//!
 //! # What is this module's own and not a port
 //!
 //! Only the joining. Every number comes off the disc through [`Phy`] and the stunt table; every
 //! decision is made inside one of the four ported modules. The three places the wiring had to choose
-//! are marked **the port's own** where they are written, and all three are in the journal.
+//! are marked **the port's own** where they are written, and all three are in the journal. The body's
+//! request block is a fourth, with a section of its own above and a table on [`Rider::body_frame`]:
+//! that one is a choice because the original's publisher of the block was never found.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -48,8 +60,10 @@ use crate::hash::{self, State, Walk};
 use crate::motion;
 use crate::phy::Phy;
 use crate::ride::{self, Controls, Ride};
+use crate::rider_anim;
 use crate::state;
 use crate::trick::{self, AngleTable, Set, Trick, Tricks, Wreck};
+use crate::vehicle_anim;
 use crate::world::World;
 use ps2_float::{F, Vf};
 
@@ -89,6 +103,24 @@ pub struct Frame {
     pub respawned: bool,
 }
 
+/// What the rider's own animation needs that the rider does not hold.
+///
+/// Two inputs, both of them someone else's: the gate's clock, which the body's get-ready sequence
+/// counts its breathing off, and the wall clock the idle pool seeds its generator from the first
+/// time it draws ([`rider_anim::Clock`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Gate {
+    /// Seconds left on the start-line clock, which the body takes off its own three and a half
+    /// (`rider_anim`'s `BREATHE`). The original reads it out of the request block; this port has no
+    /// race, so it is an argument.
+    pub countdown: F,
+    /// The clock the idle pool seeds itself off, the first time anything draws from it. A shell that
+    /// does not care may leave it at zero (which seeds the generator with zero, and in the original
+    /// would leave the seeded flag clear so that the next draw read the clock again — see
+    /// [`rider_anim::Pool::seeded`]); a replay hands back the numbers it recorded.
+    pub clock: rider_anim::Clock,
+}
+
 /// A bike with somebody on it.
 pub struct Rider {
     /// The bike: P2's assembled ride, stepped by this module and not by the shell.
@@ -119,6 +151,29 @@ pub struct Rider {
     /// to get it would be two state machines where the original has one. Left at
     /// [`motion::Blend::Free`] until the first frame.
     pub animation: motion::Frame,
+
+    /// The rider's **own** animation machine (S27): the body actor's selection and the step it feeds.
+    /// Run by [`Rider::body_frame`] and by nothing else — [`Rider::frame`] neither reads nor writes
+    /// it, so a sim that does not draw costs nothing for having it here.
+    pub body: rider_anim::Body,
+    /// The body's three numbers ([`rider_anim::Params::built`]).
+    pub body_numbers: rider_anim::Params,
+    /// The fade rates and pose-grid thresholds the body's *step* reads.
+    ///
+    /// **Left at zero, and a shell is expected to fill it.** No loader of the body's five rate fields
+    /// or of its three thresholds was found (S25's journal left the same hole, and S27 did not close
+    /// it), so rather than invent eight numbers this starts at the default: every fade is a hard cut
+    /// and the pose grid's rows all meet at zero. [`rider_anim::Body::latch`] writes `start_phase`
+    /// here every frame, which is why the whole block is a field and not an argument.
+    pub body_rates: vehicle_anim::Params,
+    /// The idle pool: which of the ten gate idles have been used, and the generator they are drawn
+    /// with.
+    pub idles: rider_anim::Pool,
+    /// The request block the body's selection and step read, as this module publishes it.
+    /// [`Rider::body_frame`] rewrites every field it derives from the rider each frame and leaves the
+    /// other two (`cut`, `offset`) alone, because the body itself is the only thing here that writes
+    /// them. [`Rider::new`] raises `cut`: a rider is put on the bike at the gate.
+    pub body_request: vehicle_anim::Request,
 
     /// The last trick asked for since the wheels left the ground, for [`Frame::landed`].
     flight: Trick,
@@ -152,6 +207,15 @@ impl Rider {
             },
             racing: false,
             animation: motion::Frame { blend: motion::Blend::Free, restart: false },
+            body: rider_anim::Body::default(),
+            body_numbers: rider_anim::Params::built(),
+            body_rates: vehicle_anim::Params::default(),
+            idles: rider_anim::Pool::default(),
+            // At the gate: the cut flag is what the body's selection takes its get-ready sequence
+            // off, and the body is the only thing in the port that ever clears it (the throttle
+            // opening). **The port's own** — in the original the flag is published by whatever owns
+            // the request block, which is not identified.
+            body_request: vehicle_anim::Request { cut: true, ..vehicle_anim::Request::default() },
             flight: Trick::NONE,
             airborne: false,
         }
@@ -174,7 +238,7 @@ impl Rider {
     pub fn frame(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World) -> Frame {
         let mut out = Frame::default();
         let Rider {
-            ride, tricks, state, motion, set, clips, sense, racing, animation, flight, airborne,
+            ride, tricks, state, motion, set, clips, sense, racing, animation, flight, airborne, ..
         } = self;
         let sense = *sense;
 
@@ -337,9 +401,102 @@ impl Rider {
         }
         out
     }
+
+    /// **One frame of the rider's own animation** (S27): the body actor's selection, the step it
+    /// hands its answer to, and the clip clock.
+    ///
+    /// Not a step of [`Rider::frame`] — the body is an actor of its own (see the module header), so
+    /// this is a second entry point. Call it once a frame, after `frame`, from whoever holds the clip
+    /// table: `lib` is the body's sixty-entry table ([`vehicle_anim::Library::load`] with the
+    /// *rider's* prefix, `rider_` or `ff_rider_`, which is the one thing S27 corrected about S25's
+    /// identity of that loader) and `clip` answers what a handle's clip is, which only the shell that
+    /// loaded them knows.
+    ///
+    /// The step is told the body places itself, which skips the request's placement: a body posed by
+    /// one of its own clips is drawn at the bike's transform and bolts nothing (V8's measurement), so
+    /// there is no offset for this port to want.
+    ///
+    /// # The mapping is the port's own
+    ///
+    /// The original's publisher of the request block was not found, here or in S25, so which of the
+    /// rider's fields each of the body's inputs comes off is this module's choice. All of it reads
+    /// the same frame's latched trick id (`Tricks::requested`) rather than the running one, because
+    /// that is the id the frame's own animation header plays. The two that are not off the trick
+    /// machine are the bike's own words:
+    ///
+    /// | the body asks | this answers with |
+    /// |---|---|
+    /// | the gesture slot, or 24 for none | the latched id's own slot ([`Trick::slot`]) |
+    /// | a backflip | the latched id is [`Trick::BACKFLIP`] |
+    /// | airborne | the bike's own verdict, [`crate::air::Air::airborne`] |
+    /// | the no-hander | [`crate::trick::Tricks::no_hander`] |
+    /// | a wreck | the ride state machine has a reason |
+    /// | the throttle, reverse | the controls, unfiltered |
+    /// | the phase axis | [`motion::Driver::pose`] — lean on the ground, crossup in the air, 0..1 |
+    /// | the mix axis | [`motion::Driver::fore_aft`], the same 0..1 the airborne pair is mixed with |
+    /// | the band the grid's rows are cut out of | the chassis's speed |
+    /// | the progress and the request count | the trick clocks' |
+    ///
+    /// One input has no answer here: [`rider_anim::Body::settled`], which decides whether a wrecked
+    /// body flails or holds a limb, is written by a different function of the original (the wreck's
+    /// own mode machine, which is not ported — its address is in the journal) — so a body wrecked by
+    /// this port flails until a shell says it has settled.
+    pub fn body_frame(
+        &mut self,
+        dt: F,
+        c: &Controls,
+        gate: Gate,
+        lib: &vehicle_anim::Library,
+        clip: &impl Fn(motion::ClipId) -> motion::Clip,
+    ) -> vehicle_anim::Frame {
+        let Rider {
+            ride, tricks, state, motion, body, body_numbers, body_rates, body_request, idles, ..
+        } = self;
+        let ask = rider_anim::Ask {
+            // The wheels are off the ground. The id would nearly do instead — `Trick::WHEELIE` *is*
+            // `motion.rs`'s airborne idle — but it is only set on a flight with no trick asked for,
+            // and the body's airborne pose is what a stoppie in the air should show too. For a
+            // gesture the choice makes no difference: the gesture arm runs in front of this one.
+            airborne: ride.air.airborne,
+            backflip: tricks.requested == Trick::BACKFLIP,
+            no_hander: tricks.no_hander,
+            wreck: state.wreck.is_some(),
+            countdown: gate.countdown,
+            throttle: c.gas,
+            reversing: c.reverse,
+            gesture: tricks.requested.slot().map_or(trick::SLOTS as i32, |s| s as i32),
+        };
+        // Every field the rider derives. `cut` and `offset` are left as they are: the body's own
+        // selection is the only writer of the first and nothing here wants the second.
+        body_request.held = false;
+        body_request.at_base = false;
+        body_request.base = ride.position();
+        body_request.rotation = ride.chassis.quat;
+        body_request.phase_axis = motion.pose;
+        body_request.mix_axis = motion.fore_aft;
+        body_request.band = ride.chassis.speed;
+        body_request.progress = tricks.progress;
+        body_request.seq = tricks.seq;
+        body.frame(
+            dt,
+            body_numbers,
+            body_rates,
+            body_request,
+            &ask,
+            lib,
+            idles,
+            gate.clock,
+            true,
+            clip,
+        )
+    }
 }
 
 impl State for Rider {
+    /// The six fields the simulation runs on, by name. The animation is **not** walked — neither the
+    /// header's frame (V8) nor the body and its pool (S27): nothing the rider simulates reads any of
+    /// them, and hashing them would move every replay hash in the crate for a value that only the
+    /// renderer looks at.
     fn walk(&self, w: &mut Walk<'_>) {
         w.group("ride", |w| self.ride.walk(w));
         w.group("tricks", |w| hash::State::walk(&self.tricks, w));

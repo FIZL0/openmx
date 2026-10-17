@@ -272,6 +272,13 @@ pub mod ride;
 /// decision inside it belongs to one of the four ported modules it calls.
 pub mod rider;
 
+/// The rider's *own* animation state machine: the function in front of `vehicle_anim`'s step, which
+/// is what decides the state it is handed. The gate's get-ready sequence, the wreck family, the
+/// reverse pair and the look-around idle — the clips in a rider's own motion file that nothing the
+/// bike asks for could ever reach. Also the body actor's identity: the actor `vehicle_anim` ports the
+/// step of is the rider's body, and this is the half of it that chooses.
+pub mod rider_anim;
+
 /// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.

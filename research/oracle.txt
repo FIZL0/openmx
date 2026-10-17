@@ -2162,3 +2162,69 @@ vehicle_add_anim boot 0x00248150 (vehicle in a0, key in a1, the first clip's nam
 #                                up the same way the loader does it; an empty name leaves that half of
 #                                the record 0. Not ported: it is the caller's half, and what the
 #                                machine does with a record is proved from records laid out in RAM
+
+# ---------------------------------------------------------------------------------------------------
+# S27 — the rider's own animation state machine: the function in *front* of vehicle_animation, which
+# is what decides the state that step is handed. The port is crates/game-sim/src/rider_anim.rs, the
+# proofs are crates/game-sim/tests/rider_anim.rs, and how it was found is in
+# research/journal/2026-10-17-s27-rider-animation.
+#
+# This corrects the S25 block above on one point of naming, and answers the question its journal left
+# open. The actor S25 calls "the vehicle" is the **rider's body**: the spawn that allocates it
+# (boot 0x0020e4f0) hands it the prefix string "rider_" at 0x0042ead8 or "ff_rider_" at 0x0042eb10 --
+# the two modes the disc's rider archive spells [Stunts] and [ff_Stunts] in its motions.ini -- and
+# vehicle_load_clips joins that prefix to the 24 gesture names only, looking the other 36 up bare.
+# Those 36 bare names are a rider's own .mcf clips (V8 proved all 24 gesture slots and the 3 airborne
+# poses bind under the rider's rule), so the sixty-entry table is the *rider's* clip table and
+# vehicle_anim::POSE_CLIPS is a list of rider clips. The state table's addresses, offsets and arms in
+# the S25 block are all still right; only the word "vehicle" in it is wrong.
+#
+# The open question of the S25 journal -- who writes the byte at +0x8fc that the restart test compares
+# the request's count against -- is answered by this function's tail: it writes both +0x8f8 (which S25
+# read as the configured start phase, and which is in fact *last frame's* progress through the
+# gesture) and the byte at +0x8fc, from the request's +0x1a4 and +0x1a8, after the step returns. So on
+# a live body the count moves only when the caller moves it, and a repeat of the running state
+# restarts on that frame alone.
+#
+# The body's own fields, by offset, on top of the S25 map. A test may say where these live; the port
+# may not:
+#   +0x3c   the motion object's "the clip has run out", which the look arm clears
+#   +0x6b4  the wrecked body has come to rest. Written by the body's mode machine (boot 0x0024c7e0,
+#           3592 bytes, which also drives the head and look dummies); read here and nowhere else
+#   +0xa0c  the gate has drawn its idle          +0xa28  what is left of the gate's breathe-and-wait
+#   +0xa2c  a look-around idle is playing        +0xa30  what is left of the wait before the next one
+#   +0xa34  the shortest wait (15.0 as built)    +0xa38  the longest (45.0)
+#   +0xa10  slower than this, either way, and the body counts as standing still (1.4666667 as built)
+#   +0xa14  the pose grid's first threshold (7.3333 as built), which doubles as the speed that cancels
+#           the look timer -- the one field this function and the step read for different reasons
+# The request block's other half (the pointer at +0x488; S25's block has the fields the step reads):
+#   +0xf8  airborne   +0xfc  a backflip is in progress   +0x100 the gesture is a no-hander
+#   +0x104 the body is off the bike              +0x144 the gate's own clock, in seconds
+#   +0x160 the throttle                         +0x16c  going backwards
+#   +0x1a0 the gesture slot asked for, or 24 for none
+#
+# The selection is a chain of else-ifs and the first arm that matches is the only one that runs: the
+# gate (+0x140 set), the wreck (+0x104 set), a gesture (+0x1a0 != 24), and then the backflip, the
+# airborne pose, the reverse pair and the idle-and-look-around. The states it can ask for are exactly
+# the states the step's jump table has an arm for -- 0..23, 30, 33, 34, 35, 38..59 -- and never one of
+# the ten (24..29, 31, 32, 36, 37) that fall to the step's free-running advance.
+#
+# Four arms draw a random number, each through the same lazily installed seed, and each `rand` call
+# site is preceded by the same inlined test of rand_seeded below. The draws are
+# `(int)(unit * n) + base`: 10 idles from 0x2f, 3 start poses from 0x39, 5 held limbs from 0x29, and
+# one bare unit remapped onto +0xa34..+0xa38 for the look timer (through the engine's shared remap
+# with constant bounds of 0.0 and 1.0, which is why Ghidra reports "Removing unreachable block
+# (ram,0x0024923c)" -- that block is the remap's `in_lo == in_hi` guard).
+rider_animation boot 0x00248a70 (dt in f12, body in a0) the rider's animation selection, 2068 bytes:
+#                               the only caller of vehicle_animation, a slot of the body actor's
+#                               vtable at 0x004544b8 and 0x00458f58, and the writer of +0x8f4 (the
+#                               state asked for), +0x8f8 and +0x8fc
+rider_idle_pool boot 0x004e1fc0 the ten get-ready idles' no-repeat list: ten words of state ids
+rider_idle_count boot 0x004e1fe8 how many of rider_idle_pool are in use. 0 and 10 both start a new
+#                                round of one; a draw already in the list is thrown away and redrawn
+rand_seeded boot 0x0045fa10 the seed `rand` was last given, and the flag that says it has been given
+#                           one: zero and the next draw anywhere in the program reads the CD drive's
+#                           clock (boot 0x0041a068, a BCD sceCdCLOCK: second at +1, minute at +2, hour
+#                           at +3, day at +5), stores `second + minute*60 + hour*0x168 + day*0x15180`
+#                           here and hands it to srand. 0x168 is 360, not 3600, so the hour's
+#                           contribution is a sixth of an hour's worth of seconds

@@ -221,6 +221,15 @@ added beside them:
     blend `motion.rs` runs — including the four-clip blend and the sixth entry point that nothing else
     in the image reaches. Proved against the original one state at a time over 24,000 generated frames
     in `tests/vehicle_anim.rs` (S25).
+  - `rider_anim.rs` — the half in front of `vehicle_anim.rs`'s step: the **rider's own** animation
+    selection, which is what decides the state the step is handed. The gate's get-ready sequence (the
+    breathe, the ten no-repeat idles and the three start poses), the wreck's flail and its five held
+    limbs, the gesture and the no-hander that replaces it, the backflip, the airborne pose, the
+    reverse pair and the look-around that fires while the bike stands still — the clips of a rider's
+    own set that nothing the bike asks for could ever reach. Its answers to S25's two open questions:
+    the actor that step belongs to is the rider's *body*, and this is the writer of both fields the
+    step only reads. Proved against the original arm by arm over 30,000 generated frames in
+    `tests/rider_anim.rs`, with the gate and the wreck also driven through a whole `rider.rs` (S27).
   - `world.rs` — what the simulation asks the world: the ground under a point (height, normal and
     surface, from the ported terrain query) and the scene's collision placements swept as one bundle,
     each placement's mesh in its own space, so a prop stops the rider the way the original's does.
@@ -237,7 +246,10 @@ added beside them:
     `state.rs`'s ride states wired onto `ride.rs` in the order the original's ridden actor runs them —
     the latch, the physics, the gesture, the request, the clocks and the animation header, then the
     machine carrying the wreck test. Joining is all it is: every number comes off the disc and every
-    decision belongs to one of the four modules it calls. The rider that `openmx` rides (P3).
+    decision belongs to one of the four modules it calls. `Rider::body_frame` is the second entry
+    point, for the rider's own animation: the body is an actor of its own, and this is where the
+    request block `rider_anim.rs` reads is published off the rider's own fields (S27). The rider that
+    `openmx` rides (P3).
 - `game-render` — the drawing side: the disc's own models and textures, on screen. Host `f32`, no
   bit-exactness, nothing the simulation depends on.
   - `disc.rs` ISO 9660 → `MX.PSR` → a `.res` member, read from the user's disc at runtime ·
