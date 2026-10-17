@@ -28,7 +28,6 @@ The first four phases are tooling and feel like a detour from the port. They are
 port that converges and one that is 90 % done forever: every task after them is proved with what they
 build. Do them in order; inside a later phase, tasks that touch different files can go in any order.
 
-- [ ] **V17** the two frames of V15's recording the port's one-step-a-tick animation cannot be: the frame a clip-to-clip transition **ends** on, where `+0x80` is already 0 but the original's joints are still the transition's (the port's own pose 2.6e-3 away with every lane's sign flipped, 3 ticks of 1499), and the frame a **wreck is declared**, where the vehicle skips the rider's animation step altogether (`+0x748` 0 -> 5 and the request block moves while the machine, both clocks, both lags and all 22 joints hold still) and the next frame then latches twice, 35 -> 30 -> 40 with `+0x8ec` left on the intermediate 30. Both are skipped with their shape asserted in V15's test → crates/game-render/src/anim.rs · crates/game-sim/src/vehicle_anim.rs | t: crates/game-sim/tests/motion.rs — the transition-end and held-frame skips go to zero | j: the-frames-the-port-cannot-step
 ### Phase 2 — a decompilation you can read
 
 

@@ -747,13 +747,34 @@ pub struct Player {
     pub fade: Fade,
 }
 
+/// What a running clip-to-clip transition posed this frame with: everything the sampler needs, read
+/// out of the motion object *before* the advance's own end-of-frame reset throws it away.
+///
+/// The reset is why this is carried out of the advance rather than read off [`Fade`] afterwards: the
+/// frame a transition ends on is posed with a weight of almost one and then clears `on` and zeroes
+/// the clock, so a renderer that looks at the motion object after the step sees no transition at all
+/// and draws the new clip alone. The original samples before the reset; so does the port, and this is
+/// how (V17).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Cross {
+    /// The transition's weight this frame: the smooth step, 0 all of what it is coming out of and 1
+    /// all of the new clip.
+    pub weight: F,
+    /// The clip it is coming out of, or `None` for the pose-snapshot arm — [`Fade::from`], which the
+    /// reset leaves alone but which says nothing on its own about whether a transition ran.
+    pub from: Option<ClipId>,
+    /// The clip time `from` is sampled at: the transition's clock as the advance left it, after this
+    /// frame's `dt` went on and before the reset. Nothing but the old clip reads it.
+    pub at: F,
+}
+
 /// What one dt advance did.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Played {
     /// The clip time the action frames come from.
     pub window: Window,
-    /// The transition's weight, when one was running this frame.
-    pub fade: Option<F>,
+    /// The transition that posed this frame, when one was running.
+    pub fade: Option<Cross>,
     /// The clip reached its end and carried on from the start.
     pub looped: bool,
     /// The clip reached its end and stopped there.
@@ -786,7 +807,12 @@ impl Player {
                 done = true;
             }
         }
-        let fade = self.fade.on.then(|| self.fade.step(dt));
+        // Before the reset below, which is what makes this the advance's answer and not something a
+        // caller can read off the motion object afterwards.
+        let fade = self.fade.on.then(|| {
+            let weight = self.fade.step(dt);
+            Cross { weight, from: self.fade.from, at: self.fade.clock }
+        });
         let window = if looped {
             Window::Wrapped { tail: (self.prev, clip.duration), head: (F::ZERO, self.time) }
         } else {

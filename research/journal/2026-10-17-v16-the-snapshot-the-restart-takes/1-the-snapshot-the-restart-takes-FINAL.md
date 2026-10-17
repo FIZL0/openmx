@@ -131,3 +131,25 @@ not translate is the bone's local translation, which is exactly the 21 joints V1
    the task's own second half.
 2. Find what writes the rider's node tree during a wreck. Until then every pose comparison after a
    wreck is against a tree this animation object did not write alone.
+
+## At merge (V17)
+
+One printed number in this entry no longer reproduces on `main`. **"22 restarts in the recording"
+is 25 there.** Nothing about `Set::rewind` changed: V17 runs the pair V16 skipped.
+
+V16's stepping test left out both pairs touching the row the recorder read early (tick 3259) —
+`!now.fresh || !before.fresh`. V17 showed that only the pair *into* that row has no step of the game
+in it, and runs the pair *out* of it with the missing step and its own, two in a row. That pair is
+tick 3260, and it rewinds three times; those three were never counted before. 22 + 3 = 25. (Tick
+4168's two rewinds in one step — the frame's own restart and a played-once group putting a clip on
+top of it — were already in the 22.)
+
+Everything this entry **asserts** is unchanged on the merge, because tick 3260 is past the
+recording's first wreck and so falls in the measured-not-asserted bucket either way: the 21 joints
+no clip of this set translates are still **0e0** over **394** pre-wreck ticks, **5** of them a tick
+the port took its own snapshot on, and `restarts >= 15` was never near the edge. The two numbers
+this entry could not match are also unchanged (root translation 8.39e-1, rotations 1.66e0).
+
+The rewinds themselves moved house: `Set::rewind`'s two call sites are now inside V17's
+`captured_step` helper in the same file and in the same order, because the two-step pair needs both
+of them twice. The helper answers how many it ran, which is what `snap_fresh` counts.

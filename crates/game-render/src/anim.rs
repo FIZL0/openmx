@@ -62,9 +62,9 @@ use crate::ini;
 use crate::mat::M4;
 use crate::psg::Model;
 use crate::rider::{Motion, MotionSet};
-use crate::skin::{Clip, Pose, SKIP, Skeleton};
+use crate::skin::{Clip, OutOf, Pose, SKIP, Skeleton};
 use game_sim::motion::{
-    Animations, Blend, ClipId, Driver, Frame, Library, Params, Played, Player, Request, Slot,
+    Animations, Blend, ClipId, Cross, Driver, Frame, Library, Params, Played, Player, Request, Slot,
     Snapshot,
 };
 use game_sim::trick::{SLOTS, Stunt};
@@ -392,6 +392,30 @@ impl Set {
         }
     }
 
+    /// [`Set::apply_vehicle`] with the clip-to-clip transition the frame's advance was running
+    /// ([`game_sim::motion::Cross`], V17), which is the one thing the blend itself cannot carry: the
+    /// transition lives in the motion object, is started by [`Player::play`] and not by any
+    /// selection, and the advance's own end-of-frame reset wipes it on the frame it ends on.
+    ///
+    /// It only shows in mode 0. The original's advance samples the transition *first* and the caller's
+    /// blend entry runs after it, writing the same joints again — so on modes 1, 2, 4 and 5 the blend
+    /// is what the frame is posed with and the transition is thrown away, and mode 0 is the arm whose
+    /// dispatch makes no call at all. A `None` cross, or any mode but 0, is exactly
+    /// [`Set::apply_vehicle`].
+    pub fn apply_vehicle_crossed(
+        &mut self,
+        blend: vehicle_anim::Blend,
+        player: &Player,
+        cross: Option<Cross>,
+    ) -> bool {
+        match (blend, cross) {
+            (vehicle_anim::Blend::Free, Some(cross)) => {
+                self.draw_crossed(blend.sample_time(player).0, player, cross)
+            }
+            _ => self.apply_vehicle(blend, player),
+        }
+    }
+
     /// Mode 0: the clip already on, at the clock its own dt step left.
     fn draw_free(&mut self, time: f32, player: &Player) -> bool {
         // A clip that has run out holds the pose it ended on. The advance stops stepping a finished
@@ -406,6 +430,29 @@ impl Set {
         };
         let bound = &self.clips[at];
         bound.clip.pose(time, &bound.joints, &mut self.pose);
+        true
+    }
+
+    /// Mode 0 while a transition is running: the clip that was just put on, at its own clock, crossed
+    /// out of the clip it replaced (at the transition's clock) or out of the pose snapshot.
+    ///
+    /// The snapshot arm reads [`Set::under`], which is the renderer's copy of the simulation's — one
+    /// [`Set::rewind`] fills both, and `Player::play` is one of its two callers for exactly this.
+    /// Either arm with a clip the set does not have draws nothing, as every other blend does.
+    fn draw_crossed(&mut self, time: f32, player: &Player, cross: Cross) -> bool {
+        let Some(at) = player.clip.map(|id| id.0 as usize).filter(|&at| at < self.clips.len()) else {
+            return false;
+        };
+        let out_of = match cross.from.map(|id| id.0 as usize) {
+            // the old clip's channels, paired with the new one's by position
+            Some(k) if k < self.clips.len() => {
+                OutOf::Clip { clip: &self.clips[k].clip, at: cross.at.0 }
+            }
+            Some(_) => return false,
+            None => OutOf::Snapshot(&self.under),
+        };
+        let bound = &self.clips[at];
+        bound.clip.pose_crossed(time, &bound.joints, cross.weight.0, out_of, &mut self.pose);
         true
     }
 
@@ -760,7 +807,7 @@ impl Stance {
     ///   Set::rewind          on a restart: the pose the cross-fade fades from
     ///   Player::play         a played-once group putting its clip on, with a cross out of the last
     ///   Blend::run           the clock: a dt advance, or a phase-driven sample
-    ///   Set::apply_vehicle   that blend's clips sampled on this skeleton              -> a Pose
+    ///   Set::apply_vehicle_crossed  that blend's clips sampled on this skeleton       -> a Pose
     /// ```
     ///
     /// `want` is the state to run and `r` the request block. The placement is left to the caller —
@@ -800,8 +847,10 @@ impl Stance {
             }
         }
         let clip = self.set.timing(frame.blend.clock_clip(&self.player));
-        frame.blend.run(&mut self.player, dt, &clip);
-        self.drawn = self.set.apply_vehicle(frame.blend, &self.player);
+        // The advance's answer is kept: a clip-to-clip transition is in it and nowhere else by the
+        // time the pose is drawn ([`Set::apply_vehicle_crossed`]).
+        let played = frame.blend.run(&mut self.player, dt, &clip);
+        self.drawn = self.set.apply_vehicle_crossed(frame.blend, &self.player, played.fade);
         self.posed |= self.drawn;
         frame
     }

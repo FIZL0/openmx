@@ -652,7 +652,7 @@ fn as_advanced(played: game_sim::motion::Played) -> Advanced {
             Window::Span(a, b) => Some((a.to_bits(), b.to_bits(), false)),
             Window::Wrapped { tail, head } => Some((tail.0.to_bits(), head.1.to_bits(), true)),
         },
-        weight: played.fade.map(|w| w.to_bits()),
+        weight: played.fade.map(|c| c.weight.to_bits()),
         from_clip: false,
     }
 }
@@ -2743,11 +2743,13 @@ struct Captured {
     /// Whether the animation object moved at all between the row before this one and this one.
     ///
     /// Two stepped frames of this recording are never identical — the clip clock, the ramp or a lag
-    /// axis moves on every one of 1489 of them — so a row the object held still on is a frame the
-    /// game did not step the animation on. This recording has one: tick 3259, the frame the wreck
-    /// is declared on, where `+0x748` goes from 0 to 5 and the request block moves while the
-    /// machine, both clocks, both lag records and all 22 joints hold still to the bit. The port's
-    /// step of that frame has nothing to be compared against.
+    /// axis moves on every one of 1489 of them — so a row the object held still on is a row the
+    /// recorder read before that frame's animation step. This recording has one: tick 3259, the
+    /// frame the first wreck is declared on, which is row 3258 again in **every** column but
+    /// `+0x748` — the request block and the wreck's own reason are written by the same vehicle
+    /// update, and only the reason had landed when the read came. So that frame's step is in the
+    /// recording nowhere, and neither is the request block it was handed; the pair after it carries
+    /// two steps (V17, and see the stepping test).
     fresh: bool,
     /// Whether this row is the row before it *in every field*, the recorder's own bookkeeping aside.
     ///
@@ -3278,6 +3280,98 @@ fn the_originals_posed_rider_and_the_ports_agree_joint_by_joint() {
     );
 }
 
+/// The machine's own numbers as one captured row carries them ([`the_ports_machine_steps_to_the_originals_clip_phase_and_pose`]).
+fn captured_params(c: &Captured) -> game_sim::vehicle_anim::Params {
+    use ps2_float::F;
+    game_sim::vehicle_anim::Params {
+        rate_ready: F(c.rates[0]),
+        rate_hold: F(c.rates[1]),
+        rate_default: F(c.rates[2]),
+        rate_pose: F(c.rates[3]),
+        rate_stunt: F(c.rates[4]),
+        cross_cap: F(c.cross_cap),
+        // `+0x8f8` is not a constant on this object — see the entry's not-verified list — and
+        // nothing in this minute reaches the arm that reads it (all three cross-fade phases are
+        // zero on all 1500 ticks), so the comparison does not depend on what it is.
+        start_phase: F::ZERO,
+        band: c.bands.map(F),
+    }
+}
+
+/// The request block the vehicle's own update left in front of the step, as one captured row carries
+/// it. The placement is the actor's own business here (`self_placed`), so the three vectors are never
+/// read and nothing the caller does looks at `Frame::place`.
+fn captured_request(c: &Captured) -> game_sim::vehicle_anim::Request {
+    use ps2_float::{Vf, F};
+    game_sim::vehicle_anim::Request {
+        held: c.held,
+        at_base: c.at_base,
+        cut: c.cut,
+        offset: Vf::ZERO,
+        base: Vf::ZERO,
+        rotation: Vf::ZERO,
+        phase_axis: F(c.phase_axis),
+        mix_axis: F(c.mix_axis),
+        band: F(c.band),
+        progress: F(c.progress),
+        seq: c.req_seq,
+    }
+}
+
+/// One frame of the sixty-state machine on the renderer's chassis, which is
+/// [`game_render::anim::Stance::frame`] with the inputs a captured row carries: the step, the two
+/// rewinds, the played-once group's play, and the clock. It answers the frame, the clip-to-clip
+/// transition the advance posed with — the one thing no field of the object still holds afterwards
+/// ([`game_sim::motion::Cross`]) — and how many pose snapshots it took, which is what tells a tick
+/// the port rewound on from one where `Set::under` is only the capture's own buffer (V16).
+///
+/// A function because the wreck's own frame needs two of these in a row: see the two-step pair in the
+/// test below.
+#[allow(clippy::too_many_arguments)]
+fn captured_step(
+    dt: ps2_float::F,
+    d: &mut game_sim::vehicle_anim::Driver,
+    player: &mut game_sim::motion::Player,
+    set: &mut game_render::anim::Set,
+    snapshot: &mut game_sim::motion::Snapshot,
+    lib: &game_sim::vehicle_anim::Library,
+    p: &game_sim::vehicle_anim::Params,
+    r: &game_sim::vehicle_anim::Request,
+) -> (game_sim::vehicle_anim::Frame, Option<game_sim::motion::Cross>, usize) {
+    let frame = d.frame(dt, p, r, lib, true, |id| set.timing(Some(id)).duration);
+    // The restart the step itself asks for, and then the played-once group's own — the same two
+    // rewinds and the same two arms the renderer's own chassis has, in its order, so this is its
+    // code. V15 handed the renderer the original's snapshot buffers instead of running these; V16
+    // runs them, which is what puts `Set::rewind` under this comparison.
+    let mut rewinds = 0usize;
+    if frame.restart {
+        set.rewind(snapshot);
+        rewinds += 1;
+    }
+    // A played-once group puts its clip on with a cross out of whatever was playing — the same two
+    // arms the renderer's own chassis has, so this is its code.
+    if let Some(play) = frame.play {
+        match play.put() {
+            Some(put) => {
+                let playing = set.timing(player.clip).duration;
+                if player.play(put, playing) {
+                    set.rewind(snapshot);
+                    rewinds += 1;
+                }
+            }
+            None => {
+                player.clip = None;
+                player.finished = false;
+                player.fade.on = false;
+                player.time = ps2_float::F::ZERO;
+            }
+        }
+    }
+    let timing = set.timing(frame.blend.clock_clip(player));
+    let played = frame.blend.run(player, dt, &timing);
+    (frame, played.fade, rewinds)
+}
+
 /// **V12.** The port's own machine, stepped one tick ahead of the capture, picks the clip and the
 /// phase the original picked — on every tick of the recording — and poses the skeleton the same.
 ///
@@ -3300,10 +3394,14 @@ fn the_originals_posed_rider_and_the_ports_agree_joint_by_joint() {
 ///      the renderer's pose snapshot from the capture's own two buffers, so the ticks with the
 ///      cross-fade ramp up — a fifth of the recording, and all four of the blends that fade — are
 ///      posed and compared here too instead of being skipped for want of a pose to fade from.
+///      **V17** poses the clip-to-clip transition as well, out of the outgoing clip and out of that
+///      same snapshot, which takes the last two shapes of tick the comparison skipped down to none:
+///      the frames a transition runs or ends on, and the one frame the recorder read before the
+///      animation stepped — whose step is run here as the first of two.
 #[test]
 fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
     use game_sim::vehicle_anim as va;
-    use ps2_float::{Vf, F};
+    use ps2_float::F;
 
     let Some((rows, table)) = captured_joints() else { return };
     let Some((mut set, lib)) = rider_clips() else { return };
@@ -3327,10 +3425,20 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
     // towards what the snapshot bought.
     let mut ramped = 0usize;
     let mut faded = 0usize;
-    // Pairs the game did not step the animation between, and pairs inside the stretch the
-    // recorder's sample phase slipped on. Neither is one step of the port; both are bounded below.
-    let mut held_still = 0usize;
+    // Pairs with no step of the game in them — the recorder's read landed before the animation
+    // step, so the row repeats the frame before's work — and pairs inside the stretch its sample
+    // phase slipped on. Neither is one step of the port; both are bounded above. `two_steps` counts
+    // the pairs out of such a row, which have the missing step *and* their own in them and are
+    // compared with both of them run.
+    let mut read_early = 0usize;
+    let mut two_steps = 0usize;
     let mut slipped = 0usize;
+    // Ticks posed with a clip-to-clip transition running (V17), which includes the three this
+    // recording ends one on, and how many of those were the arm that fades out of a *clip* rather
+    // than out of the pose snapshot — the two arms the original's `+0x4c` picks between.
+    let mut crossed = 0usize;
+    let mut crossed_from_clip = 0usize;
+    let mut cross_worst = (0.0f32, 0u64, 0usize, "", false);
     // V12 skipped every tick of this shape — the pose grid's middle row with the mix axis past
     // centre, the back half of the one row this disc's player `.mcf` aliases to its middle column —
     // and V15 found it reaching three of the four band regions rather than the one band V12's own
@@ -3405,23 +3513,28 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                 .or_default() += 1;
             continue;
         }
-        // A pair the game did not step the animation between (`Captured::fresh`) — the wreck's own
-        // first frame — and the pair after it, which then carries that frame's work on top of its
-        // own. One step of the port is neither, so neither is compared.
-        if !now.fresh || !before.fresh {
-            // Every frame this recording leaves unstepped is a wreck being declared: `+0x748` is
-            // already the reason on the row that held still.
-            let held = if now.fresh { before } else { now };
+        // A row the recorder read *before* that frame's animation step (`Captured::fresh`): the
+        // animation half of it is the frame before's work and the vehicle half is its own. V15 read
+        // this as the game skipping the rider's animation step on the frame a wreck is declared,
+        // and this recording's other wreck refutes it — tick 4167 is read the other way round,
+        // after the step, and there the wreck's own frame does step (35 -> 30, the ramp to 0.8667,
+        // the rate to 4.0) and the frame after it latches once more, to 40. One latch each and no
+        // frame held still. So the pair *into* such a row has no step of the game in it at all and
+        // nothing to compare, and the pair *out* of it has two — both of which are run (V17).
+        if !now.fresh {
+            // Only a wreck makes a frame long enough for the read to land early in this recording,
+            // and the reason is already on the row: the vehicle update that writes it fills the
+            // request block in the same breath, in front of the body's own step.
             assert_ne!(
-                held.wreck, 0,
-                "tick {} held the whole animation object still and no wreck was declared on it, \
-                 so the game skips the animation step for some other reason as well — that \
-                 reason wants finding before these ticks are written off",
-                held.tick
+                now.wreck, 0,
+                "tick {} holds the frame before's animation state and no wreck was declared on \
+                 it, so the recorder's read lands early for some other reason as well — that \
+                 reason wants finding before this tick is written off",
+                now.tick
             );
-            held_still += 1;
+            read_early += 1;
             *not_posed
-                .entry("the game did not step the animation between this pair of rows")
+                .entry("the recorder read this row before the frame's own animation step")
                 .or_default() += 1;
             continue;
         }
@@ -3458,68 +3571,7 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                 ratio: F(before.phase[2]),
             },
         };
-        let p = va::Params {
-            rate_ready: F(now.rates[0]),
-            rate_hold: F(now.rates[1]),
-            rate_default: F(now.rates[2]),
-            rate_pose: F(now.rates[3]),
-            rate_stunt: F(now.rates[4]),
-            cross_cap: F(now.cross_cap),
-            // `+0x8f8` is not a constant on this object — see the entry's not-verified list — and
-            // nothing in this minute reaches the arm that reads it (all three cross-fade phases are
-            // zero on all 1500 ticks), so the comparison does not depend on what it is.
-            start_phase: F::ZERO,
-            band: now.bands.map(F),
-        };
-        let r = va::Request {
-            held: now.held,
-            at_base: now.at_base,
-            cut: now.cut,
-            // The placement is the actor's own business here (`self_placed`), so the three vectors
-            // are never read. Nothing below looks at `Frame::place`.
-            offset: Vf::ZERO,
-            base: Vf::ZERO,
-            rotation: Vf::ZERO,
-            phase_axis: F(now.phase_axis),
-            mix_axis: F(now.mix_axis),
-            band: F(now.band),
-            progress: F(now.progress),
-            seq: now.req_seq,
-        };
-        let frame = d.frame(dt, &p, &r, &lib, true, |id| set.timing(Some(id)).duration);
-
-        assert_eq!(
-            d.state, now.state,
-            "tick {}: the port's machine latched state {} and the original ran {}",
-            now.tick, d.state, now.state
-        );
-        // The state it came out of. The one frame of this recording that disagrees about it is the
-        // wreck's first, where the original latched twice inside a frame the capture reads once
-        // (35 -> 30 -> 40, with `+0x8ec` left on the intermediate 30) — and that is a frame the
-        // game did not step the animation on, so the pair is already out above.
-        assert_eq!(
-            d.prev, now.prev,
-            "tick {}: the port came out of state {} and the original came out of {}",
-            now.tick, d.prev, now.prev
-        );
-        assert_eq!(
-            (d.from_table, d.holding, d.started),
-            (now.from_table, now.holding, now.started),
-            "tick {}: the port's three flags are not the original's",
-            now.tick
-        );
-        note("the cross-fade ramp (+0x68c)", d.ramp.0, now.ramp);
-        note("the fade rate (+0x690)", d.rate.0, now.rate);
-        note("the mix axis (+0x630)", d.mix.value.0, now.mix[0]);
-        note("the mix axis' ratio", d.mix.ratio.0, now.mix[2]);
-        note("the phase axis (+0x634)", d.phase.value.0, now.phase[0]);
-        note("the phase axis' ratio", d.phase.ratio.0, now.phase[2]);
-        note("the stunt cross-fade's phase (+0x8dc)", d.cross.0, now.cross);
-        note("the clip it comes out of (+0x8e0)", d.cross_prev.0, now.cross_prev);
-        note("the reverse clock (+0xa3c)", d.reverse.0, now.reverse);
-
-        // --- the clock ------------------------------------------------------------------------
-        // The player, seeded from the tick before the same way the machine was: the clip that was
+        // The clock, seeded from the tick before the same way the machine was: the clip that was
         // free-running, the clip the last sample came from, and where that sample was.
         let mut player = game_sim::motion::Player {
             clip: id_of(before.playing),
@@ -3536,38 +3588,97 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                 end: F(before.fade_end),
             },
         };
-        // The restart the step itself asks for, and then the played-once groups' own — the same two
-        // rewinds and the same two arms the renderer's own chassis has, in its order, so this is
-        // its code. V15 handed the renderer the original's snapshot buffers instead of running
-        // these; V16 runs them, which is what puts `Set::rewind` under this comparison.
-        let mut rewound = false;
-        if frame.restart {
-            set.rewind(&mut snapshot);
-            restarts += 1;
-            rewound = true;
+        // The step the recording is missing, run first. `before` is the row the read landed early
+        // on, so every animation field of it is the frame before's — which is exactly what seeds
+        // this step — and two of its inputs are not in the recording at all:
+        //
+        //   * the state the chooser asked for, which the body's own update writes after the read.
+        //     `now`'s `+0x8ec` is the state this step latched and a step latches the state it is
+        //     asked for, so that is the want it was given: 30 here, which is also what the
+        //     recording's other wreck (tick 4167, read after its step) is caught asking for on its
+        //     own wreck frame.
+        //   * the request block, which the vehicle writes in the same update as the wreck reason and
+        //     had not written yet. The newest one the recording has is the row's own, one frame
+        //     stale, and that is what this step is handed — the two eased axes are the only thing
+        //     downstream of here that can tell, and they are bounded rather than held to the bit
+        //     below.
+        //
+        // Both steps rewind on their own account, and both count towards V16's comparison below:
+        // what it asks is whether the port's `Set::rewind` left the original's two buffers, and a
+        // snapshot taken by the step the recording is missing is as much the port's as any other.
+        let mut rewound = 0usize;
+        if !before.fresh {
+            two_steps += 1;
+            let (p, r) = (captured_params(before), captured_request(before));
+            d.want = now.prev;
+            let (.., rewinds) =
+                captured_step(dt, &mut d, &mut player, &mut set, &mut snapshot, &lib, &p, &r);
+            rewound += rewinds;
+            d.want = now.want;
         }
-        // A played-once group puts its clip on with a cross out of whatever was playing — the same
-        // two arms the renderer's own chassis has, so this is its code.
-        if let Some(play) = frame.play {
-            match play.put() {
-                Some(put) => {
-                    let playing = set.timing(player.clip).duration;
-                    if player.play(put, playing) {
-                        set.rewind(&mut snapshot);
-                        restarts += 1;
-                        rewound = true;
-                    }
-                }
-                None => {
-                    player.clip = None;
-                    player.finished = false;
-                    player.fade.on = false;
-                    player.time = F::ZERO;
-                }
+        let p = captured_params(now);
+        let r = captured_request(now);
+        let (frame, cross, rewinds) =
+            captured_step(dt, &mut d, &mut player, &mut set, &mut snapshot, &lib, &p, &r);
+        rewound += rewinds;
+        restarts += rewound;
+
+        assert_eq!(
+            d.state, now.state,
+            "tick {}: the port's machine latched state {} and the original ran {}",
+            now.tick, d.state, now.state
+        );
+        // The state it came out of, which on the two-step pair is the intermediate the recording
+        // never shows: 35 -> 30 on the step it is missing and 30 -> 40 on the frame after, leaving
+        // `+0x8ec` on the 30 in between. V15 read that as one frame latching twice; it is two
+        // frames latching once each, and running both of them is what puts the port on the
+        // original's 30 here.
+        assert_eq!(
+            d.prev, now.prev,
+            "tick {}: the port came out of state {} and the original came out of {}",
+            now.tick, d.prev, now.prev
+        );
+        assert_eq!(
+            (d.from_table, d.holding, d.started),
+            (now.from_table, now.holding, now.started),
+            "tick {}: the port's three flags are not the original's",
+            now.tick
+        );
+        note("the cross-fade ramp (+0x68c)", d.ramp.0, now.ramp);
+        note("the fade rate (+0x690)", d.rate.0, now.rate);
+        note("the mix axis' ratio", d.mix.ratio.0, now.mix[2]);
+        note("the phase axis' ratio", d.phase.ratio.0, now.phase[2]);
+        if before.fresh {
+            note("the mix axis (+0x630)", d.mix.value.0, now.mix[0]);
+            note("the phase axis (+0x634)", d.phase.value.0, now.phase[0]);
+        } else {
+            // The two-step pair. Both axes are one frame of a lag towards the request block, and
+            // the missing step's request block is not in the recording (above), so these two are
+            // the one thing on this pair that cannot be held to the bit: a frame of staleness in
+            // the target, times the axis' own ratio, is 3e-3 of the mix axis and 3e-3 of the phase
+            // axis here. Bounded at ten times that, which still catches an axis that ran the wrong
+            // way or was not stepped twice — the pose on this pair does not come through either of
+            // them (the hold group draws one clip, mode 0) and the pair after it seeds both from
+            // the capture again, so nothing accumulates.
+            for (what, mine, theirs) in [
+                ("the mix axis (+0x630)", d.mix.value.0, now.mix[0]),
+                ("the phase axis (+0x634)", d.phase.value.0, now.phase[0]),
+            ] {
+                let off = (mine - theirs).abs();
+                assert!(
+                    off <= 3e-2,
+                    "tick {}: {what} is the port's {mine} against the original's {theirs} after \
+                     the two steps of this pair — off by {off}, which is more than one frame of \
+                     staleness in the request block can account for",
+                    now.tick
+                );
             }
         }
-        let timing = set.timing(frame.blend.clock_clip(&player));
-        frame.blend.run(&mut player, dt, &timing);
+        note("the stunt cross-fade's phase (+0x8dc)", d.cross.0, now.cross);
+        note("the clip it comes out of (+0x8e0)", d.cross_prev.0, now.cross_prev);
+        note("the reverse clock (+0xa3c)", d.reverse.0, now.reverse);
+
+        // --- the clock ------------------------------------------------------------------------
         // The sample time the pose comes out at, which is the same question `Set::apply_vehicle`
         // asks: a phase-driven blend samples where the drive left `+0x54`, the free-running advance
         // samples its own clip clock.
@@ -3630,7 +3741,7 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                 snap_seen += 1;
                 snap_root = snap_root.max(root);
                 snap_turn = snap_turn.max(turn);
-                if rewound {
+                if rewound > 0 {
                     snap_fresh += 1;
                     fresh_root = fresh_root.max(root);
                     fresh_turn = fresh_turn.max(turn);
@@ -3667,20 +3778,28 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                 ramped += 1;
             }
         }
-        if now.fading || before.fading {
-            // Same again for the clip-to-clip transition's own second clip — and for the frame the
-            // transition *ends* on, which V15's capture is the first to compare. `+0x80` is 0 by
-            // the time the row is read there, but the pose in the same row is still the
-            // transition's: on all three of this recording's endings the original's joints are the
-            // free-running clip's own pose 2.6e-3 away with every lane's sign flipped, which is
-            // the outgoing clip's quaternion still in the mix and not a frame of the clip alone.
-            // The port has no second clip here at all, so the frame is skipped like the rest.
-            *not_posed
-                .entry("a clip-to-clip transition was running, or ended inside this frame")
-                .or_default() += 1;
-            continue;
+        // The clip-to-clip transition, which V15 skipped every tick of and V17 poses: the weight
+        // and what it fades from come out of the port's own advance ([`game_sim::motion::Cross`]),
+        // and the frame the transition *ends* on is the reason they come from there rather than off
+        // the object afterwards — `+0x80` is 0 and the fade clock zeroed by the time the row is
+        // read, while the pose in the same row is still the transition's. (That is what V15
+        // measured as the port's own pose 2.6e-3 away with every lane's sign flipped: the outgoing
+        // pose still in the mix at a weight of 0.987, and the shortest-path slerp negating the
+        // other end of it.)
+        //
+        // A transition out of the pose snapshot needs the snapshot, and the snapshot is the
+        // capture's own two buffers seeded a few lines above.
+        if let Some(cross) = cross {
+            if cross.from.is_none() && now.under_rot.is_empty() {
+                *not_posed
+                    .entry("a transition out of a pose snapshot this capture does not carry")
+                    .or_default() += 1;
+                continue;
+            }
+            crossed += 1;
+            crossed_from_clip += usize::from(cross.from.is_some());
         }
-        if !set.apply_vehicle(frame.blend, &player) {
+        if !set.apply_vehicle_crossed(frame.blend, &player, cross) {
             // Mode 4 is the one entry point the port deliberately does not draw (V9 says so); a
             // blend whose clips did not bind would land here too, and the assert above rules that
             // out for the clip the clock drove.
@@ -3719,6 +3838,11 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                     // capture bought and the only thing the floor below can be read against.
                     if now.ramp != 0.0 && frame.blend.mode() != 0 && off > fade_worst.0 {
                         fade_worst = (off, now.tick, j, what);
+                    }
+                    // V17's own number, the same way: the worst lane on the ticks a clip-to-clip
+                    // transition posed, which V15 skipped every one of.
+                    if let (Some(cross), true) = (cross, off > cross_worst.0) {
+                        cross_worst = (off, now.tick, j, what, cross.from.is_some());
                     }
                     if off > joint.0 {
                         joint = (
@@ -3831,10 +3955,41 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
         rows.len() - 1
     );
     assert!(
-        held_still <= 6,
-        "the game left the animation unstepped on enough frames of this recording to cost \
-         {held_still} pairs. One wreck's first frame costs two; this is something else, and the \
-         port steps every frame",
+        read_early <= 2,
+        "the recorder read {read_early} rows of this recording before the frame's own animation \
+         step. This recording's first wreck costs one; more than that and the capture is sampling \
+         too late in the frame to be compared row by row at all",
+    );
+    assert_eq!(
+        read_early, two_steps,
+        "{read_early} rows were read early but {two_steps} pairs carried the missing step, so one \
+         of them is at an end of the recording and its step is in no pair at all"
+    );
+    assert!(
+        crossed >= 15,
+        "only {crossed} ticks were posed with a clip-to-clip transition running, and this \
+         recording has three wrecks' worth of them — the transition arm (V17) is no longer being \
+         exercised"
+    );
+    // Both arms, because they are two different samplers: `+0x4c` null is the pose snapshot and
+    // non-null is the old clip at the transition's own clock, and a capture that only reached one
+    // of them would leave the other proved by nothing.
+    assert!(
+        crossed_from_clip > 0 && crossed_from_clip < crossed,
+        "{crossed_from_clip} of the {crossed} transition ticks faded out of a clip and the rest \
+         out of the pose snapshot; this recording reaches both arms and one of them is now proved \
+         by nothing"
+    );
+    println!(
+        "  clip-to-clip transitions: {crossed} ticks posed with one running, {crossed_from_clip} \
+         of them out of the outgoing clip and {} out of the pose snapshot, worst lane {:e} ({} of \
+         joint {} at tick {}, out of {})",
+        crossed - crossed_from_clip,
+        cross_worst.0,
+        cross_worst.3,
+        cross_worst.2,
+        cross_worst.1,
+        if cross_worst.4 { "the outgoing clip" } else { "the pose snapshot" }
     );
 
     // **V16.** The joints no clip of the rider's set translates, in the port's own snapshot against
@@ -3906,8 +4061,10 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
          ({ramped} of them with the cross-fade ramp up), worst joint {} ({}) at \
          tick {}, off by {:e} — {}\n  not posed: {not_posed:?}\n  of those ticks {gap} were the \
          pose grid's middle row past centre, the back column V14 loads from the set that claimed \
-         the name first\n  pairs the original did not step the animation on: {held_still}\n  \
-         pairs inside the stretch the recorder's sample phase slipped on: {slipped}",
+         the name first\n  posed with a clip-to-clip transition running: {crossed}\n  rows the \
+         recorder read before the frame's own animation step: {read_early} ({two_steps} pairs \
+         stepped twice to carry them)\n  pairs inside the stretch the recorder's sample phase \
+         slipped on: {slipped}",
         rows.len() - 1,
         worst
             .iter()
