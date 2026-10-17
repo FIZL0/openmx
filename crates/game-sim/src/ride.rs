@@ -802,11 +802,15 @@ fn effective_mass(body: &Body, arm: Vf, dir: Vf) -> F {
     if inv > F::ZERO { F::ONE / inv } else { F::ZERO }
 }
 
-/// A force into the chassis at a point, the way [`wheel::tire_forces`] puts one in: the force itself
-/// in the world, and the moment it makes about the centre of mass in the body's own frame.
-fn push(c: &mut wheel::Chassis, m: &Mat4, force: Vf, at: Vf) {
+/// A force into the chassis on a given arm: the force itself in the world, and the moment it makes
+/// about the centre of mass in the body's own frame.
+///
+/// The arm is handed in rather than worked out from a point, because the two callers below do not
+/// take theirs where [`wheel::tire_forces`] takes the suspension's. The suspension's force acts at
+/// the load point and its arm is that point less the centre of gravity; the tire's drive and side
+/// force acts on the arm the `.phy` gives and nothing else — see [`spin_integrate`].
+fn push(c: &mut wheel::Chassis, m: &Mat4, force: Vf, arm: Vf) {
     let local_force = chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), force);
-    let arm = sub_xyz(unpoint(m, at), c.cofg);
     c.force = add_xyz(c.force, force);
     c.torque = add_xyz(c.torque, cross(arm, local_force));
 }
@@ -819,13 +823,20 @@ fn push(c: &mut wheel::Chassis, m: &Mat4, force: Vf, at: Vf) {
 /// the original's own version is named in `research/oracle.txt` and is not ported. Two things it is careful about: the
 /// resistance is proportional to the slide only up to one unit a second, so a stopped wheel is not
 /// shoved by it; and the brake cannot turn the wheel backwards inside one substep.
+///
+/// ## The resistance is a force and not a couple
+///
+/// The original's own version adds its drag to the chassis' force accumulator and **never touches
+/// the torque accumulator** — the only two writes it makes outside the wheel are that one force and
+/// the brake's torque on the spin (P8's journal entry has the address and the read). So the drag
+/// does not pitch the bike at all, whatever the slide is, and this does not either.
 fn surface_drag(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, brake: F, dt: F,
-                c: &mut wheel::Chassis, m: &Mat4) {
+                c: &mut wheel::Chassis) {
     if !wh.w.contact {
         return;
     }
     let drag = surf.wheel_drag * pt.load * clamp_unit(pt.roll);
-    push(c, m, scale(pt.forward, -drag), wh.w.load_point);
+    c.force = add_xyz(c.force, scale(pt.forward, -drag));
 
     let spin = wh.mv.spin;
     let torque = brake * surf.max_braking_torque;
@@ -874,10 +885,31 @@ fn surface_drag(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, brake: F, dt: F
 /// On the game's own numbers it never binds; it is what makes every surface in the data safe rather
 /// than the ones that happen to have been driven over.
 ///
+/// The arm the bound is taken on stays the contact patch's, even though the force goes in on the
+/// arm below: the slide being nulled is the *patch's*, and the patch is where a push moves it most.
+/// Measuring the bound anywhere else makes it looser — a force on the `.phy`'s own arm shifts the
+/// patch about a quarter as much per pound, so the impulse that would null the slide from there is
+/// four times larger. Loose is not safe here, so the tighter of the two is kept.
+///
 /// It also sets the two fields [`mv::engine_update`] reads back: the forward contact force, and
 /// whether the spin is the torque's or the ground's.
+///
+/// ## Where the force acts on the chassis is a `.phy` key, not the contact patch
+///
+/// This is the one thing in the function that is **not** a stand-in: the original's own version puts
+/// the force into the chassis' force accumulator and the couple into its torque accumulator on an
+/// arm it loads straight out of the wheel, and that arm is `BodyTireForcePosition` — the per-tire
+/// vector the loader writes there and that nothing else in the wheel reads. It is used exactly as
+/// it stands, as an arm about the centre of gravity, with no contact point and no centre of gravity
+/// subtracted from it. P8's journal entry has the two addresses and the loads.
+///
+/// That matters more than it looks. The patch sits about two feet under the centre of gravity, so a
+/// drive force taken there turns into a couple of two foot-pounds per pound and loops the bike over
+/// backwards the instant the throttle opens — which is what P8 came for. On the arm the file gives,
+/// the same force makes a couple the file's author chose, and full throttle from a standstill
+/// drives the bike forward instead of standing it up.
 fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, body: &Body, dt: F,
-                  c: &mut wheel::Chassis, m: &Mat4) {
+                  c: &mut wheel::Chassis, m: &Mat4, at: Vf) {
     let drive_torque = wh.mv.drive_torque;
     // The engine accumulates onto this every substep and nothing else empties it.
     wh.mv.drive_torque = F::ZERO;
@@ -900,7 +932,7 @@ fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, body: &Body, 
     let hold = effective_mass(body, arm, dir) * pt.side.abs() / dt;
     let cap = side_cap.min(grip).min(hold);
     let across = (-pt.side * surf.side_force * pt.load).clamp(-cap, cap);
-    push(c, m, add_xyz(scale(pt.forward, along), scale(pt.right, across)), wh.w.load_point);
+    push(c, m, add_xyz(scale(pt.forward, along), scale(pt.right, across)), at);
 
     // Rolling, plus whatever the grip would not take: the spin the road asks for, and the slip the
     // tire's own inertia lets it run away with.
@@ -1090,8 +1122,8 @@ fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, body: &Body, mvc:
         cofg: mvc.cofg,
         vel: mvc.vel,
     };
-    surface_drag(wh, &pt, &surf, brake, dt, &mut wc, m);
-    spin_integrate(wh, &pt, &surf, body, dt, &mut wc, m);
+    surface_drag(wh, &pt, &surf, brake, dt, &mut wc);
+    spin_integrate(wh, &pt, &surf, body, dt, &mut wc, m, tire.body_tire_force_position);
     let calls = wheel::integrate(&mut wh.w, dt);
     mvc.force = wc.force;
     mvc.torque = wc.torque;
@@ -1251,6 +1283,16 @@ impl Ride {
         ride.g_peak = mv::NOTHING;
         mvc.accel = mv::NOTHING;
         mvc.ang_accel = mv::NOTHING;
+        // The float the engine reads through its own pointer (`bike+0x65c`) is the input layer's
+        // rate-limited clutch, and the input layer writes it every frame — see
+        // [`mv::Ride::clutch_in`]. Only the idle rule below writes it inside the ground step, so
+        // without this line the lever the rider is holding never reaches the engine at all and a
+        // clutch pulled in once at a standstill is never let out again: the bike idles for ever with
+        // the throttle pinned. P8 found it that way.
+        ride.clutch_in = held.clutch;
+        // Rolling to a stop off the throttle: pull the clutch in for the rider so the engine does not
+        // stall. The *rate-limited* throttle is what is tested, so this does not fire the instant the
+        // rider lets go.
         if s.speed < F(mv::IDLE_SPEED) && s.gas_rate_limited == F::ZERO {
             ride.clutch_in = F::ONE;
         }

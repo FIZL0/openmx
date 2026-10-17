@@ -956,3 +956,303 @@ fn the_two_captured_wrecks_match_their_lengths() {
         chord.back.unwrap()
     );
 }
+
+// ---------------------------------------------------------------------------------------------------
+// (7) full throttle from a standstill
+// ---------------------------------------------------------------------------------------------------
+//
+// P8. Pin the throttle on the start line and the bike used to stand itself on its back wheel before it
+// had moved a foot: on the disc's own bike the chassis pitch ran from 0.0097 to 1.3111 radians over
+// frames 8 to 18, the front wheel's load went to zero at frame 9 and never came back, and the ride
+// wrecked six tenths of a second after the throttle opened.
+//
+// The cause was the same shape as the lateral defect P4 found. `ride::spin_integrate` put the tire's
+// drive force into the chassis at the *contact patch* — two feet under the centre of gravity, so a
+// couple of two foot-pounds for every pound of drive, with nothing holding the nose down. The
+// original does not do that. Its own spin integration crosses the force with the vector at
+// `wheel+0xb0`, which is the `.phy`'s `BodyTireForcePosition` written straight there by the loader,
+// and uses it *as it stands* as an arm about the centre of gravity: no contact point, no centre of
+// gravity subtracted. On the disc's bike that vector is a quarter of a foot under the body origin and
+// three quarters of a foot either side of it — a tuning arm the file's author chose, not a geometric
+// one, and nothing like the patch. The port now uses it the same way, and `ride::surface_drag` no
+// longer adds a couple at all, because the original's surface drag writes the force accumulator and
+// never the torque one. P8's journal entry has both functions and the reads.
+//
+// Two things make the statement below less direct than it looks, and both are in P8's journal entry.
+//
+// The file's bike is not the disc's, so no acceleration here can be compared to the disc's by value;
+// the capture-backed test asks only that the two are within a factor of two of each other, which is a
+// statement about the drive reaching the ground rather than about the parameters.
+//
+// And `BodyTireForcePosition` is doing two jobs in this checkout. It is the key above, and it is also
+// what every test in the crate — and `stock.rs`, and `openmx` when the model has no `TireFront` node —
+// hands [`Ride::new`] as the wheel *mounts*, because the mounts are the model's and a test has no
+// model. The fixture's value was written for that second job: axles a foot up and a four-foot
+// wheelbase. Read as the first job it is an arm a foot *above* the body origin, which is a bike whose
+// drive force shoves its own nose into the ground. So the launch runs on a copy of the file with that
+// one key set to a tuning arm of the right shape, and keeps the mounts the rest of the file stands on.
+
+/// The file's bike with the drive force's arm set to a tuning arm rather than to the wheel mount the
+/// rest of the crate reads that key as — see the section's head.
+fn launch_bike(text: &str) -> String {
+    text.replace("BodyTireForcePosition = 0.0, 1.1, 2.1", "BodyTireForcePosition = 0.0, -0.3, 0.8")
+        .replace("BodyTireForcePosition = 0.0, 1.1, -2.1", "BodyTireForcePosition = 0.0, -0.3, -0.8")
+}
+
+/// What a second of pinned throttle from a standstill came to. Speeds in feet a second, accelerations
+/// in feet a second squared, angles in radians, loads in pounds.
+struct Launch {
+    /// Forward speed at the end of each frame, from the frame the throttle opened.
+    speed: Vec<f32>,
+    /// The chassis' pitch each frame, nose up positive.
+    pitch: Vec<f32>,
+    /// The least either wheel's suspension ever carried while the throttle was open.
+    front_load: f32,
+    rear_load: f32,
+    /// Whether the ride wrecked, and why.
+    wreck: Option<game_sim::trick::Wreck>,
+}
+
+impl Launch {
+    /// Frame-to-frame forward acceleration, which is what the capture can be compared against.
+    fn accel(&self, dt: f32) -> Vec<f32> {
+        let mut was = 0.0;
+        self.speed
+            .iter()
+            .map(|&v| {
+                let a = (v - was) / dt;
+                was = v;
+                a
+            })
+            .collect()
+    }
+
+    fn peak_accel(&self, dt: f32) -> f32 {
+        self.accel(dt).into_iter().fold(0.0, f32::max)
+    }
+}
+
+/// Wreck limits for the launch: every speed limit set out of reach, so the only wreck a second of
+/// throttle on level ground can reach is the one the defect reached — the chassis pitching over
+/// backwards past `GroundPitchUpWreckAngle`. Plausible numbers, not the disc's (see the file's head).
+const LAUNCH_LIMITS: &str = "
+[Wrecks]
+MaxWreckTime = 2
+CannonballWreckTime = 5
+FrontWreckSpeedLimit = 400
+BackWreckSpeedLimit = 400
+SideWreckSpeedLimit = 400
+RacingDownWreckSpeedLimit = 400
+FreestyleDownWreckSpeedLimit = 400
+GroundPitchDownWreckAngle = 85
+GroundPitchUpWreckAngle = 85
+AirbornePitchDownWreckAngle = 175
+AirbornePitchUpWreckAngle = 175
+AirborneRollWreckAngle = 175
+NoHanderWreckSpeedLimit = 400
+NoHanderMaxRollAngle = 45
+JoustWreckHeight = 2
+CrossupWreck = 1
+CrossupWreckTime = 0.3
+";
+
+/// Settle a bike on the level, then pin the throttle and hold it, touching nothing else.
+///
+/// A [`Rider`] rather than a bare [`Ride`], because a wreck is one of the things being ruled out and
+/// the wreck test is the rider's.
+fn launch(dt: F, frames: usize) -> Launch {
+    let tables = rider::Tables::build();
+    // The mounts come from the unmodified file: only the force's arm is being changed.
+    let geom = Phy::read_bytes(BIKE.as_bytes(), &tables.ride.curve);
+    let text = format!("{}{LAUNCH_LIMITS}", launch_bike(BIKE));
+    let p = Phy::read_bytes(text.as_bytes(), &tables.ride.curve);
+    let mut r = Rider::new(
+        &p,
+        mounts(&geom),
+        Vf::new(0.0, 1.0, 0.0, 1.0),
+        Vf::new(0.0, 0.0, 1.0, 0.0),
+        Set::default(),
+    );
+    let mut world = floor();
+
+    let still = Controls::default();
+    for _ in 0..(2.0 / dt.0) as usize {
+        r.frame(&p, &tables, &still, dt, &mut world);
+    }
+    assert!(
+        r.ride.chassis.vel.z().abs() < 0.01,
+        "the bike has not settled: {} ft/s",
+        r.ride.chassis.vel.z()
+    );
+
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let mut out = Launch {
+        speed: Vec::with_capacity(frames),
+        pitch: Vec::with_capacity(frames),
+        front_load: f32::MAX,
+        rear_load: f32::MAX,
+        wreck: None,
+    };
+    for _ in 0..frames {
+        let f = r.frame(&p, &tables, &gas, dt, &mut world);
+        out.wreck = out.wreck.or(f.wreck);
+        // The bike's own forward, which is row 2 of its transform, against its world velocity.
+        let (v, m) = (r.ride.chassis.vel, r.ride.transform());
+        out.speed.push(v.x() * m.0[2].x() + v.y() * m.0[2].y() + v.z() * m.0[2].z());
+        out.pitch.push(r.ride.chassis.euler.x());
+        out.front_load = out.front_load.min(r.ride.front.w.spring_force.0);
+        out.rear_load = out.rear_load.min(r.ride.rear.w.spring_force.0);
+    }
+    out
+}
+
+/// The wheelie the brief names: `move::roll_pitch` only stands the bike up when the rider pulls the
+/// stick back past [`mv::WHEELIE_LEAN`], and nobody is touching the stick here, so a pitch anywhere
+/// near that arm is the chassis doing it by itself. Held in radians, which is what the defect ran to:
+/// 1.31 of them in ten frames.
+const WHEELIE: f32 = 0.5;
+
+/// **P8.** Full throttle from a standstill on the level drives the bike forward, on both wheels.
+///
+/// Three statements, in the order they failed before the fix.
+///
+/// *Both wheels stay loaded.* This is the one that catches the defect on this bike: with the drive
+/// force back at the contact patch the front's suspension carries nothing at all for the first two
+/// frames and settles at a tenth of what it holds now. The floor is a tenth of the bike's weight —
+/// well clear of the two hundred pounds a wheel of it carries standing still, and not a number the
+/// fixture's parameters were chosen to clear.
+///
+/// *The pitch stays under the wheelie threshold.* The brief's own statement, and the one the disc's
+/// bike failed loudest: it reached 1.31 radians and wrecked. This bike has a lower centre of gravity
+/// and never reached a tenth of that even with the defect in, so the bound is here to say what is
+/// being claimed rather than to catch a regression — the load floor above does the catching.
+///
+/// *It goes.* A bike that wrecks, or one whose clutch is pulled in for it and never let out again,
+/// reads as a bike that will not move; both of those were true of the port when P8 opened.
+#[test]
+fn full_throttle_from_a_standstill_drives_the_bike_forward() {
+    for (dt, frames) in IDLE_RATES.map(|(dt, _)| (dt, (1.0 / dt.0) as usize)) {
+        let run = launch(dt, frames);
+        assert_eq!(run.wreck, None, "a second of throttle at {} wrecked the bike", dt.0);
+
+        let floor = 40.0;
+        assert!(
+            run.front_load > floor,
+            "at {}: the front carried {} lb at its lightest",
+            dt.0,
+            run.front_load
+        );
+        assert!(
+            run.rear_load > floor,
+            "at {}: the rear carried {} lb at its lightest",
+            dt.0,
+            run.rear_load
+        );
+
+        let pitch = run.pitch.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        assert!(pitch < WHEELIE, "at {}: the chassis pitched to {pitch} rad", dt.0);
+
+        let end = *run.speed.last().unwrap();
+        assert!(end > 10.0, "at {}: a second of throttle got to {end} ft/s", dt.0);
+        println!(
+            "{} s: {end:.1} ft/s after a second, {:.1} ft/s2 at its hardest, \
+             pitch {pitch:.4} rad, wheels {:.0}/{:.0} lb at their lightest",
+            dt.0,
+            run.peak_accel(dt.0),
+            run.front_load,
+            run.rear_load
+        );
+    }
+}
+
+/// The acceptance capture, which has the human's own launches in it: the same recording `replay.rs`
+/// reads, kept in a subdirectory for the reason [`IDLE_CAPTURE`] gives.
+const LAUNCH_CAPTURE: [&str; 2] = ["capture/acceptance", "acceptance-freeride.csv"];
+
+/// The original's own launch, found rather than hard-coded: the first window in the recording where a
+/// bike that is standing still is given a button and goes.
+///
+/// `(peak, mean)` acceleration over the window, in feet a second squared. `None` when the capture is
+/// not in this checkout.
+fn captured_launch() -> Option<(f32, f32)> {
+    /// How long a window has to hold to count as a launch: four tenths of a second, which is as long
+    /// as the human held the throttle before easing off the first time.
+    const HELD: usize = 12;
+
+    let path = private_dir(LAUNCH_CAPTURE[0]).join(LAUNCH_CAPTURE[1]);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let cap = game_sim::replay::Capture::parse(&text).expect("the acceptance capture parses");
+    let col = |name: &str| {
+        cap.columns
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("no column '{name}' in {}", path.display()))
+    };
+    let at = |row: usize, name: &str| -> f32 {
+        cap.rows[row][col(name)].parse().unwrap_or_else(|_| {
+            panic!("{}: row {row}'s '{name}' is not a number", path.display())
+        })
+    };
+    let speed = |row: usize| {
+        let (x, z) = (at(row, "bike_vel.x"), at(row, "bike_vel.z"));
+        (x * x + z * z).sqrt()
+    };
+    let held = |row: usize, k: usize| at(row, &format!("ctl{k}.held")) != 0.0;
+
+    // A standstill that becomes a launch: stopped, a button that is held for the whole window, and
+    // five feet a second more by the end of it. Which button is the throttle is not written down
+    // anywhere this test can read, so it is the one that is down while the bike accelerates.
+    for row in 0..cap.rows.len() - HELD {
+        if speed(row) > 1.0 || speed(row + HELD) - speed(row) < 5.0 {
+            continue;
+        }
+        let Some(_) = (0..16).find(|&k| (row..=row + HELD).all(|r| held(r, k))) else {
+            continue;
+        };
+        let (mut peak, mut was) = (0.0f32, speed(row));
+        for r in row + 1..=row + HELD {
+            peak = peak.max((speed(r) - was) / CAPTURE_DT);
+            was = speed(r);
+        }
+        let mean = (speed(row + HELD) - speed(row)) / (HELD as f32 * CAPTURE_DT);
+        println!(
+            "the capture's launch: row {row}, {:.3} -> {:.3} ft/s over {HELD} ticks",
+            speed(row),
+            speed(row + HELD)
+        );
+        return Some((peak, mean));
+    }
+    panic!("{}: no full-throttle launch in the recording", path.display());
+}
+
+/// **P8.** The port's launch against the original's own.
+///
+/// The capture is of the disc's bike on the disc's start line and this bike is the file's, so what is
+/// compared is an order of magnitude and not a value: the port's launch has to be within a factor of
+/// two of the original's, either way. That is a loose bound on purpose. What it rules out is a port
+/// that puts the engine's whole output into standing the bike up (far too little) or one that drives
+/// as if the bike weighed nothing (far too much) — and before P8, with the drive force at the contact
+/// patch, the disc's bike wrecked inside six tenths of a second rather than reaching any speed at all.
+///
+/// Skipped, with a line saying so, in a checkout that has no capture.
+#[test]
+fn the_port_launches_about_as_hard_as_the_original() {
+    let Some((peak, mean)) = captured_launch() else {
+        println!("no acceptance capture in {} — skipped", private_dir(LAUNCH_CAPTURE[0]).display());
+        return;
+    };
+    let dt = F(CAPTURE_DT);
+    let run = launch(dt, (1.0 / CAPTURE_DT) as usize);
+    let ours_peak = run.peak_accel(CAPTURE_DT);
+    // The same window the capture's was measured over, so the two means are of the same thing.
+    let ours_mean = run.speed[11] / (12.0 * CAPTURE_DT);
+
+    for (what, ours, theirs) in [("peak", ours_peak, peak), ("mean", ours_mean, mean)] {
+        assert!(
+            ours > theirs * 0.5 && ours < theirs * 2.0,
+            "the port's {what} launch acceleration is {ours:.1} ft/s2 \
+             where the original's is {theirs:.1}"
+        );
+        println!("{what}: the port {ours:.1} ft/s2, the original {theirs:.1} ft/s2");
+    }
+}
