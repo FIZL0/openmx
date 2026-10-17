@@ -452,6 +452,6 @@ fn the_rngs_state_word_is_what_is_hashed() {
 /// one on the start line — `tests/platforms.rs` pins the count after a run as well.
 #[test]
 fn the_size_of_the_state_type_is_pinned() {
-    assert_eq!(size_of::<Sim>(), 6560, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 6608, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 750, "the walk's leaf count moved with it");
 }

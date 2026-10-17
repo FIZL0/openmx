@@ -199,6 +199,11 @@ pub struct Rider {
     /// The idle pool: which of the ten gate idles have been used, and the generator they are drawn
     /// with.
     pub idles: rider_anim::Pool,
+    /// What the body's clock did on the last [`Rider::body_frame`], for whoever draws the body: the
+    /// transition that posed the frame and the pose snapshot its put asked for
+    /// ([`rider_anim::Clocked`], and V17 on why neither can be read back off the motion object once
+    /// the step has returned). Written by `body_frame` and by nothing else.
+    pub body_clocked: rider_anim::Clocked,
     /// The request block the body's selection and step read, as this module publishes it.
     /// [`Rider::body_frame`] rewrites every field it derives from the rider each frame and leaves the
     /// other two (`cut`, `offset`) alone, because the body itself is the only thing here that writes
@@ -244,6 +249,7 @@ impl Rider {
             body_numbers: rider_anim::Params::built(),
             body_rates: vehicle_anim::Params::default(),
             idles: rider_anim::Pool::default(),
+            body_clocked: rider_anim::Clocked::default(),
             // At the gate: the cut flag is what the body's selection takes its get-ready sequence
             // off, and the body is the only thing in the port that ever clears it (the throttle
             // opening). **The port's own** — in the original the flag is published by whatever owns
@@ -521,7 +527,17 @@ impl Rider {
         clip: &impl Fn(motion::ClipId) -> motion::Clip,
     ) -> vehicle_anim::Frame {
         let Rider {
-            ride, tricks, state, motion, body, body_numbers, body_rates, body_request, idles, ..
+            ride,
+            tricks,
+            state,
+            motion,
+            body,
+            body_numbers,
+            body_rates,
+            body_request,
+            body_clocked,
+            idles,
+            ..
         } = self;
         let ask = rider_anim::Ask {
             // The wheels are off the ground. The id would nearly do instead — `Trick::WHEELIE` *is*
@@ -548,7 +564,7 @@ impl Rider {
         body_request.band = ride.chassis.speed;
         body_request.progress = tricks.progress;
         body_request.seq = tricks.seq;
-        body.frame(
+        let (frame, clocked) = body.frame_clocked(
             dt,
             body_numbers,
             body_rates,
@@ -559,7 +575,9 @@ impl Rider {
             gate.clock,
             true,
             clip,
-        )
+        );
+        *body_clocked = clocked;
+        frame
     }
 }
 

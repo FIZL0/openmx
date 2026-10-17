@@ -830,3 +830,129 @@ fn a_one_hander_keeps_the_other_hand_on_the_bars() {
         }
     }
 }
+
+/// **V18.** A frame of the shell's own driving puts the body on the bike: three seconds of riding,
+/// posed by the rider's own sixty-state machine, and the four anchors land on the chassis's inside
+/// the same tolerance the posed-rider test measures — not in the bind pose, and not standing up.
+///
+/// This is the test the task is about, and what it proves is the wiring and not the clips. V8's
+/// `a_posed_body_stands_on_the_bike_with_nothing_bolted` already measures the clips: posed by
+/// `turn_riding_Mid` the hands are on the grips and the feet on the pegs. What the shell drew instead
+/// was a body posed from `Rider::animation` — the *bike's* 28-slot driver — whose grounded idle is
+/// `air_Mid` held at its midpoint and whose pose grid a rider's set does not even name, so the rider
+/// stood upright on a bike that was being ridden. So the measurement here is the same one, at the end
+/// of a ride this port drove itself: `Body::ride` per frame, nothing else writing the pose.
+///
+/// The throttle is held because that is what makes a rider ride. The body's own start sequence is the
+/// gate's — a get-ready idle, a breathe, a start pose — and the throttle opening is the only thing in
+/// the machine that ends it (`game_sim::rider_anim`, the gate), so a ride with the throttle shut is a
+/// body still waiting at a line, which is a pose and not this one.
+#[test]
+fn a_frame_of_the_shells_own_driving_poses_the_body_on_the_bike() {
+    let Some(mut disc) = disc() else { return };
+    // The chassis, for the four places it wants the body's hands and feet. Read before the rider's
+    // archive, which takes the disc mutably.
+    let bike = member(&disc, &format!("{A_BIKE}.res")).expect("the disc has no bike archive");
+    let chassis = disc.res(&bike).and_then(|r| r.read_suffix("bike.psg")).expect("the chassis");
+    let chassis = Skeleton::of(&Model::parse(&chassis).expect("the chassis parses"));
+
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let mut body = body(&mut disc, &set, &p);
+
+    // Every one of the sixty states has a clip, which is the first half of being paired with the
+    // right machine: twelve of them would be a bike's set under the body's table (V13).
+    let bound = body.pose_lib.clip.iter().filter(|c| c.is_some()).count();
+    assert_eq!(bound, game_sim::vehicle_anim::STATES, "the body's own clip table is {bound} of 60");
+
+    // The rider the shell builds: a foot above a flat floor, pointed down +z, with the body's own
+    // eight numbers filled in as V12 measured them. Wrecks off — a wrecked body is thrown off the
+    // bike on purpose and its anchors are nowhere near it, and what is being measured here is a
+    // riding pose.
+    let mounts = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+    let mut r = rider::Rider::new(
+        &p,
+        mounts,
+        Vf::new(0.0, 1.0, 0.0, 1.0),
+        Vf::new(0.0, 0.0, 1.0, 0.0),
+        set.clone(),
+    );
+    r.sense.wrecks_enabled = false;
+    r.body_rates = game_render::vehicle::params();
+    let bind = body.rig.world();
+
+    let mut floor = Flat::default();
+    let hands = Controls { gas: F::ONE, ..Controls::default() };
+    let mut states: Vec<i32> = vec![r.body.veh.want];
+    // Three seconds of it, which is where the task measured the shell: the ride's own frame, and then
+    // the body's own frame off what it wrote — the two calls the shell makes, in the shell's order.
+    let mut last = None;
+    for _ in 0..3 * 60 {
+        r.frame(&p, &tables, &hands, FRAME, &mut floor);
+        last = Some(body.ride(FRAME, &mut r, &hands, rider::Gate::default()));
+        if states.last() != Some(&r.body.veh.want) {
+            states.push(r.body.veh.want);
+        }
+    }
+    let clips: Vec<String> = last
+        .expect("a frame")
+        .blend
+        .clips()
+        .iter()
+        .map(|c| match c {
+            Some(id) => body.rig.set.get(*id).map_or("?".into(), |b| b.name.clone()),
+            None => "-".into(),
+        })
+        .collect();
+    println!(
+        "states {states:?}, blend {clips:?}, phase {:?} mix {:?} band {:?} speed {:?}",
+        r.body.veh.phase.value, r.body.veh.mix.value, r.body_request.band, r.ride.chassis.speed
+    );
+    assert!(body.posed, "three seconds of riding never wrote a pose");
+    assert!(r.state.wreck.is_none(), "the ride wrecked, so there is no riding pose to measure");
+    assert!(r.ride.air.on_ground, "the bike left the ground, so this is not the grounded pose");
+    assert_eq!(
+        r.body.veh.want,
+        game_sim::vehicle_anim::TURN_RIDING,
+        "the body is in {:?} and not the pose grid",
+        r.body.veh.want
+    );
+
+    // The same four anchors the posed test measures, against the same chassis, with the same rule:
+    // the body is drawn at the bike's own transform, so the distance between the two skeletons'
+    // anchors in the bike's space is the whole of what "the rider is on the bike" means.
+    let anchors: Vec<&str> = FOOT_ANCHORS.iter().chain(HAND_ANCHORS.iter()).copied().collect();
+    let apart = |world: &[game_render::mat::M4], name: &str| -> f32 {
+        let i = body.rig.set.skeleton.find(name).expect("the rider has this anchor");
+        let at = world[i].0[3];
+        let want = chassis.at(name).expect("the chassis has this anchor");
+        ((at[0] - want.x).powi(2) + (at[1] - want.y).powi(2) + (at[2] - want.z).powi(2)).sqrt()
+    };
+    let world = body.rig.world();
+    let worst_bind = anchors.iter().map(|n| apart(&bind, n)).fold(0.0, f32::max);
+    let worst = anchors.iter().map(|n| apart(&world, n)).fold(0.0, f32::max);
+    for name in &anchors {
+        println!("  {name}: {:.3} from the chassis's, bind {:.3}", apart(&world, name), apart(&bind, name));
+    }
+    // The tolerance is the posed test's own, and so is the comparison with the bind pose: a body
+    // still in the pose it was modelled in misses the bike by five inches.
+    assert!(worst < 1.5, "three seconds in, an anchor is {worst} from the chassis's");
+    assert!(worst < worst_bind, "the ride is no closer to the bike than the bind pose");
+    // And it is not the bind pose by any measure: every joint has moved.
+    let moved = world
+        .iter()
+        .zip(bind.iter())
+        .map(|(a, b)| {
+            let (x, y) = (a.0[3], b.0[3]);
+            ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt()
+        })
+        .fold(0.0, f32::max);
+    assert!(moved > AN_INCH, "the pose is the bind pose: the furthest joint moved {moved}");
+    println!(
+        "three seconds of the shell's own driving: states {states:?}, {:.1} mph, \
+         the furthest anchor {worst:.3} from the chassis's (bind {worst_bind:.3}), \
+         the furthest joint {moved:.3} off its bind place",
+        r.ride.chassis.speed.0 * 0.681_818
+    );
+}

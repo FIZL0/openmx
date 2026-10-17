@@ -257,6 +257,24 @@ pub struct Lag {
     pub ratio: F,
 }
 
+/// The time constant the mix axis is eased in with, as the body's build writes it, and the phase
+/// axis'.
+///
+/// They are not in [`Params`] because in the original they are not on the object: each axis is a
+/// five-word record of its own (`{value, time constant, 1.0, FLT_MAX, -FLT_MAX}`) that the build
+/// allocates beside it, and the step walks both. V12 read the two taus off the running game and they
+/// are the same two numbers the build writes.
+///
+/// A [`Lag`] with no time constant divides by it ([`Lag::step`]), so these are the constructor's
+/// business and not a default: a body built with zeroes puts `-FLT_MAX` on both axes on its first
+/// frame, which is the bottom clamp of the record the original's own ease would have written.
+pub const MIX_TAU: F = F(0.125);
+pub const PHASE_TAU: F = F(0.15);
+
+/// Where both axes start: the middle of a row, which is what makes a body that is not being steered
+/// sit in the middle of each row of the pose grid rather than snap in from a column.
+pub const AXIS_START: F = F(0.5);
+
 impl Lag {
     /// An axis with a time constant and nothing yet in it.
     pub fn new(tau: F) -> Lag {
