@@ -540,18 +540,22 @@ impl mv::Outside for Out<'_> {
 }
 
 /// The transform helper that sets a frame's axes: its three rows from a forward and an up axis, by
-/// Gram-Schmidt — row0 is `forward × up`, row1 the up and row2 the forward, which is the pair
+/// Gram-Schmidt — row0 is `up × forward`, row1 the up and row2 the forward, which is the pair
 /// `orientation_axes` reads back out.
 ///
-/// **This arrangement of the cross products is the port's.** The original hands five more registers
-/// to an orthonormalising callee that is not ported, so which of the three rows it
+/// **The arrangement of the cross products is the port's; the handedness is not.** The original hands
+/// five more registers to an orthonormalising callee that is not ported, so which of the three rows it
 /// trusts and which it rebuilds is not proved; what is proved (S17) is the two axes it is handed and
 /// in what order. Taking the forward as given and rebuilding the up is the arrangement that keeps the
-/// bike pointing where the no-hander aimed it.
+/// bike pointing where the no-hander aimed it. Which way row0 points is *not* free: [`math::basis`]
+/// is the original's own VU0 orthonormaliser and it builds `right = up × forward`, so that is the
+/// cross taken here. The other order makes a reflection — determinant −1, the bike's right row
+/// pointing left — and then every frame-relative read of the node comes back with its roll negated,
+/// which is what left the no-hander's lean stuck at a twentieth of its command (P11).
 fn set_axes(forward: Vf, up: Vf) -> [Vf; 3] {
     let f = normalize(forward.merge(Dest::W, Vf::ZERO));
-    let r = normalize(cross(f, up));
-    let u = cross(r, f);
+    let r = normalize(cross(up, f).merge(Dest::W, Vf::ZERO));
+    let u = cross(f, r);
     [r, u, f]
 }
 
@@ -1277,6 +1281,15 @@ impl Ride {
         }
 
         mv::pose(mvp, &mut mvc, &mut front.mv, s);
+        // The pose's steering command *is* the hinge's angle: one word on the front wheel, which the
+        // ground step writes once a frame, the contact patch below reads and the hinge only takes
+        // over while the bike is being balanced on that wheel ([`wheel::integrate`]'s three cases).
+        // The port keeps the two views of that word in two structs, so the write is bridged here —
+        // once a frame, where the pose makes it, and not per substep, or a balancing bike's hinge
+        // would be overwritten by a command the pose never made.
+        if !s.balancing {
+            front.w.steer_angle = front.mv.steer_command;
+        }
         rear.mv.donut_scale = mv::donut_roll(mvp, &mvc, s);
         front.mv.spring = mv::spring(mvc.speed, mvp.front_spring_when_stopped, mvp.front_spring);
         rear.mv.spring = mv::spring(mvc.speed, mvp.rear_spring_when_stopped, mvp.rear_spring);
