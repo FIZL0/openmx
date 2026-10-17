@@ -20,11 +20,21 @@
 //!   are ramped toward the edge while a key is held and let back to centre when it is not
 //!   ([`KeyAxis`]), which is the difference between leaning and slamming.
 //!
+//! The throttle is the third source, and the reason this module has a [`Wiring`]. The original reads
+//! Cross from its *pressure byte* and not from its bit (the game's own control map, read out of its
+//! RAM — [`CONTROL_MAP`]), so on the disc the throttle was never a switch: a DualShock 2's face
+//! buttons travel, and part throttle out of a corner is a fraction of that travel. Hardly any pad
+//! sold since reports a face button as anything but one bit, so this module gives the rider three
+//! ways to it, in the order of how much of it is the device's own: a per-button pressure where the
+//! driver publishes one ([`Wiring::pressure`]), gas on a trigger axis where it does not
+//! ([`Throttle::Trigger`]), and a ramp under the keyboard's throttle key ([`KeyRamp`]) for a host
+//! with no travel anywhere.
+//!
 //! The report is built the way a DualShock 2 would have reported it, not the way the game sees it:
 //! raw stick bytes, the button word active-low, and a pressure byte per analogue control. Whether an
 //! axis is then inverted or dead-zoned is the port's business.
 
-use game_sim::input::{AXIS_CENTRE, CONTROL_MAP, Control, Report};
+use game_sim::input::{AXIS_CENTRE, CONTROL_MAP, Control, PRESSURE_THRESHOLD, Report};
 
 use crate::window::{Window, key};
 
@@ -47,8 +57,14 @@ const EVENT_BUTTON: u8 = 0x01;
 const EVENT_AXIS: u8 = 0x02;
 const EVENT_INIT: u8 = 0x80;
 
-/// How many of each the shell tracks. A pad with more says nothing the shell listens to.
-const AXES: usize = 8;
+/// How many of each the shell tracks.
+///
+/// Eight axes is a modern gamepad — two sticks, two triggers and a hat — and that is all the shell
+/// reads by itself. A device that also reports how hard each of its buttons is pressed publishes
+/// those pressures as further axes after them, which is what the room past eight is for: those axes
+/// are read only where a [`Wiring`] says which button each one belongs to. A pad with more axes than
+/// this says nothing the shell listens to.
+const AXES: usize = 32;
 const BUTTONS: usize = 12;
 
 /// Which control each joystick button index is, in the order Linux reports a gamepad's buttons.
@@ -97,6 +113,133 @@ const TRIGGER_DEAD: f32 = 0.12;
 /// Where a trigger axis sits when the trigger is not pulled: the bottom of its travel.
 const TRIGGER_REST: i16 = i16::MIN + 1;
 
+/// The twelve pressure bytes of a DualShock 2 report, in the order the report holds them (bytes 8
+/// to 19 — see [`CONTROL_MAP`], whose pressure indices were read out of the game's own RAM).
+///
+/// A driver that publishes a pad's per-button pressures as joystick axes publishes them in the order
+/// the device sent them, which for a DualShock-family pad is this one, so `ds2@N` in a
+/// [`Wiring`] spec is twelve consecutive axes from `N` mapped through this table.
+const DS2_PRESSURE_ORDER: [Control; 12] = [
+    Control::Right,
+    Control::Left,
+    Control::Up,
+    Control::Down,
+    Control::Triangle,
+    Control::Circle,
+    Control::Cross,
+    Control::Square,
+    Control::L1,
+    Control::R1,
+    Control::L2,
+    Control::R2,
+];
+
+/// Where the shell takes the throttle from.
+///
+/// The game reads Cross from its pressure byte, so [`game_sim::ride::Controls::gas`] is the fraction
+/// `(pressure + 1) / 256` and a pad with pressure-sensitive face buttons rides part throttle with no
+/// help from this module. A pad without them reports Cross as one bit, this module has to answer a
+/// full byte for it (a digital source cannot mean anything else), and the throttle is a switch: full
+/// or nothing, with the bike's own `GasRateLimit` — 10 a second on the 125, so three ticks of the
+/// engine's 30 Hz — the only thing between the two.
+///
+/// A trigger is the way out on such a pad. It is travel the kernel already reports and the port
+/// already reads L2 and R2 as pressures, so wiring gas onto one costs nothing but that trigger's own
+/// control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Throttle {
+    /// Cross: a bit on most pads, a pressure on a pad that reports one.
+    #[default]
+    Cross,
+    /// A trigger's travel, which gives up that trigger's own control for the session — R2 is the
+    /// front brake and L2 the clutch in this shell's binding, so this is a trade and not a free win.
+    Trigger(Control),
+}
+
+/// How the shell is wired to the host's pad: where the throttle comes from, and which joystick axes
+/// carry a per-button pressure.
+///
+/// Both are facts about the device in somebody's hands rather than about the game, which is why they
+/// are asked for (`--throttle`, `--pad-pressure`) instead of guessed. The default is the plain
+/// gamepad every machine has: Cross on its bit, no pressure axes, and nothing read past the eighth
+/// axis.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wiring {
+    /// Where gas comes from.
+    pub throttle: Throttle,
+    /// The control each joystick axis carries the pressure of, for a device that reports one.
+    pub pressure: [Option<Control>; AXES],
+}
+
+impl Default for Wiring {
+    fn default() -> Wiring {
+        Wiring { throttle: Throttle::default(), pressure: [None; AXES] }
+    }
+}
+
+impl Wiring {
+    /// Read a `--pad-pressure` spec: `none`, `ds2@AXIS` — twelve consecutive axes from `AXIS` in
+    /// [`DS2_PRESSURE_ORDER`] — or a comma-separated list of `AXIS:CONTROL` for a device that lays
+    /// them out some other way.
+    ///
+    /// A spec rather than a built-in table per pad because no device the project has ever had in
+    /// front of it reports per-button pressure: the project cannot say which axis a given driver
+    /// puts Cross's pressure on, and a wrong default would read a stick as a throttle. With the
+    /// overlay on (`--hud`) the right number is a minute's work — press the button, watch which
+    /// control's strength follows it.
+    pub fn parse_pressures(spec: &str) -> Result<[Option<Control>; AXES], String> {
+        let mut map = [None; AXES];
+        let spec = spec.trim();
+        if spec.is_empty() || spec == "none" {
+            return Ok(map);
+        }
+        if let Some(first) = spec.strip_prefix("ds2@") {
+            let first: usize = first
+                .parse()
+                .map_err(|_| format!("ds2@{first}: {first} is not an axis number"))?;
+            for (i, control) in DS2_PRESSURE_ORDER.iter().enumerate() {
+                let axis = first + i;
+                if axis >= AXES {
+                    return Err(format!(
+                        "ds2@{first}: the twelve pressures would reach axis {axis}, and the shell \
+                         reads {AXES}"
+                    ));
+                }
+                map[axis] = Some(*control);
+            }
+            return Ok(map);
+        }
+        for pair in spec.split(',') {
+            let (axis, control) = pair
+                .split_once(':')
+                .ok_or_else(|| format!("{pair}: an axis map is AXIS:CONTROL, like 14:cross"))?;
+            let axis: usize = axis
+                .trim()
+                .parse()
+                .map_err(|_| format!("{pair}: {axis} is not an axis number"))?;
+            if axis >= AXES {
+                return Err(format!("{pair}: the shell reads axes 0 to {}", AXES - 1));
+            }
+            let control = control_named(control.trim())
+                .ok_or_else(|| format!("{pair}: no control is called {control}"))?;
+            if !control.binding().is_analogue() {
+                return Err(format!(
+                    "{pair}: the game reads {} from its bit, so a pressure for it would never be \
+                     looked at",
+                    control.name(),
+                ));
+            }
+            map[axis] = Some(control);
+        }
+        Ok(map)
+    }
+}
+
+/// One of the sixteen controls by the name the project calls it ([`Control::name`]).
+pub fn control_named(name: &str) -> Option<Control> {
+    Control::ALL.into_iter().find(|c| c.name() == name)
+}
+
 /// How long a held direction key takes to push its stick all the way over, and how long a stick
 /// takes to come back to centre once the keys are let go, in seconds.
 ///
@@ -113,6 +256,20 @@ const KEY_TO_CENTRE: f32 = 0.10;
 /// first one after a level load, or a window dragged across a workspace — would otherwise hand the
 /// ramp a tenth of a second of travel at once, which is the slam this is here to stop.
 const KEY_STEP_MAX: f32 = 1.0 / 15.0;
+
+/// How long the keyboard's throttle key takes to reach full throttle, and how long it takes to shut
+/// again once it is let go, in seconds.
+///
+/// The same argument as [`KEY_TO_EDGE`]'s and a different number, because what this ramp has to be
+/// slower than is not a dead zone but the bike's own rate limit: `GasRateLimit` is 10 a second on the
+/// retail 125 (`Race125P.phy`, read off the disc), so the ride walks a stabbed throttle from nothing
+/// to full in a tenth of a second — three ticks of the engine's 30 Hz — all by itself. A key ramp
+/// quicker than that would be invisible: the limit would swallow it and the throttle would still be a
+/// switch with a three-tick fade. At 0.3 s a stab of two frames is a fifth of the throttle and a held
+/// key is still pinned a third of a second later, which is what makes part throttle something a
+/// keyboard can hold rather than something it passes through.
+const KEY_TO_FULL: f32 = 0.30;
+const KEY_TO_SHUT: f32 = 0.12;
 
 /// Which two keys drive which stick axis, and where that axis goes in the report. The low key is the
 /// one at the low end of the byte, which is up or left — the hardware's own sense (see [`stick_byte`]).
@@ -135,6 +292,10 @@ pub struct Pads {
     button: [bool; BUTTONS],
     /// The four keyboard stick axes, in [`KEY_STICKS`]' order, each part way to its edge.
     key_stick: [KeyAxis; KEY_STICKS.len()],
+    /// The keyboard's throttle, part way to full.
+    key_gas: KeyRamp,
+    /// Where the throttle comes from and which axes carry a button's pressure.
+    wiring: Wiring,
     /// When the last report was built, so the ramps travel at a rate in seconds rather than one a
     /// frame: the shell paces itself to 60 Hz but a heavy frame overruns, and a keyboard that leans
     /// further when the picture is cheap would be its own bug.
@@ -142,28 +303,22 @@ pub struct Pads {
 }
 
 impl Pads {
-    /// Open a pad: the one named, or the first of `/dev/input/js*` that opens.
+    /// Open a pad: the one named, or the first of `/dev/input/js*` that opens, wired as the person
+    /// asked ([`Wiring`] — where the throttle comes from, and which axes carry a button's pressure).
     ///
     /// No pad is not an error — the keyboard is a pad in this shell — so this always returns a
     /// `Pads`, with `name` saying whether a device was found.
-    pub fn open(named: Option<&str>) -> Pads {
+    pub fn open(named: Option<&str>, wiring: Wiring) -> Pads {
         // A stick and a hat rest in the middle of their range, but a trigger rests at the bottom of
         // its: zero on a trigger axis is the trigger pulled half way, which on a machine with no pad
         // at all is a permanent 43% of clutch and of front brake. A device that opens sends an
         // initial event for every axis and overwrites both within a frame; a machine with no device
         // never does, so the rest position is what they start at. (Found with P6's overlay, which is
         // what it is for.)
-        let mut axis = [0i16; AXES];
-        axis[AXIS_L2] = TRIGGER_REST;
-        axis[AXIS_R2] = TRIGGER_REST;
-        let mut pads = Pads {
-            device: None,
-            name: None,
-            axis,
-            button: [false; BUTTONS],
-            key_stick: [KeyAxis::CENTRED; KEY_STICKS.len()],
-            clock: None,
-        };
+        // A button's pressure axis rests at the bottom of its travel too, for the same reason and
+        // with the same consequence if it is not said: a mapped axis left at zero would read as a
+        // button held half way down before the device had spoken.
+        let mut pads = Pads::unplugged(wiring);
         let candidates: Vec<String> = match named {
             Some(path) => vec![path.to_string()],
             None => PAD_DEVICES.iter().map(|p| p.to_string()).collect(),
@@ -193,11 +348,44 @@ impl Pads {
         pads
     }
 
+    /// A `Pads` with no device: the keyboard on a machine with no pad, and what this module's own
+    /// tests ride, since a test that opened `/dev/input/js0` would read whatever is plugged in.
+    fn unplugged(wiring: Wiring) -> Pads {
+        let mut axis = [0i16; AXES];
+        axis[AXIS_L2] = TRIGGER_REST;
+        axis[AXIS_R2] = TRIGGER_REST;
+        for (slot, control) in axis.iter_mut().zip(wiring.pressure) {
+            if control.is_some() {
+                *slot = TRIGGER_REST;
+            }
+        }
+        Pads {
+            device: None,
+            name: None,
+            axis,
+            button: [false; BUTTONS],
+            key_stick: [KeyAxis::CENTRED; KEY_STICKS.len()],
+            key_gas: KeyRamp::SHUT,
+            wiring,
+            clock: None,
+        }
+    }
+
     /// Read whatever the pad has said since the last frame, then build this frame's report.
     ///
     /// The joystick interface sends the whole current state as "initial" events when the device is
     /// opened, so the first frame after opening already knows where the sticks are.
     pub fn report(&mut self, window: &Window) -> Report {
+        let seconds = self.since_the_last_report();
+        self.build(seconds, &|code| window.held(code))
+    }
+
+    /// This frame's report, from the pad's state and whatever `held` says about the keyboard.
+    ///
+    /// The key state arrives as a function rather than as a [`Window`] so that the ramps — which are
+    /// nothing but time and key state — can be ridden by a test: a window needs an X server, and the
+    /// whole point of a ramp is what it answers on the second frame of a press.
+    fn build(&mut self, seconds: f32, held: &dyn Fn(u8) -> bool) -> Report {
         self.drain();
         let mut report = Report::idle();
         let mut buttons = 0u16;
@@ -210,7 +398,7 @@ impl Pads {
         }
         buttons |= hat(self.axis[AXIS_HAT_X], Control::Left, Control::Right);
         buttons |= hat(self.axis[AXIS_HAT_Y], Control::Up, Control::Down);
-        buttons |= keyboard(window);
+        buttons |= keyboard(held);
 
         // The button word, active low, and a full pressure byte for every analogue control in it —
         // which is what a digital source has to mean, and what the game's own binding reads.
@@ -231,26 +419,46 @@ impl Pads {
         // The keyboard moves both sticks too, since half of riding is on them: the arrows are the
         // left stick and `IJKL` the right one, each ramped toward its edge for as long as the key is
         // held and let back to centre when it is not ([`KeyAxis`]).
-        let seconds = self.since_the_last_report();
         for (axis, (slot, low, high)) in self.key_stick.iter_mut().zip(KEY_STICKS) {
-            if let Some(byte) = axis.step(seconds, window.held(low), window.held(high)) {
+            if let Some(byte) = axis.step(seconds, held(low), held(high)) {
                 report.set_axis(slot, byte);
             }
         }
 
+        // How hard each button the *device* reports a pressure for is pressed, where a [`Wiring`]
+        // says which axis that is. The bit still decides whether the control is down — the device
+        // raised it — so this only ever replaces the full byte above with a smaller one, and a
+        // pressure the dead zone swallows leaves the press at full rather than dropping it.
+        for (axis, control) in self.wiring.pressure.iter().enumerate() {
+            let Some(binding) = control.map(Control::binding) else { continue };
+            if !binding.is_analogue() || buttons & binding.mask == 0 {
+                continue;
+            }
+            let pressure = trigger_pressure(self.axis[axis]);
+            if pressure > PRESSURE_THRESHOLD {
+                report.0[binding.pressure as usize] = pressure;
+            }
+        }
+
         // The analogue triggers, which are a pressure and not a bit: a pad's L2 and R2 travel, and
-        // the game reads those two controls from their pressure byte alone.
+        // the game reads those two controls from their pressure byte alone. One of them is the
+        // throttle instead when the session asked for that, and then it is not itself at all — a
+        // front brake that came on with the gas would be worse than no part throttle.
         for (axis, control) in [(AXIS_L2, Control::L2), (AXIS_R2, Control::R2)] {
             let pressure = trigger_pressure(self.axis[axis]);
+            let control = match self.wiring.throttle {
+                Throttle::Trigger(wired) if wired == control => Control::Cross,
+                _ => control,
+            };
             if pressure > 0 {
-                let binding = CONTROL_MAP[control.index()];
-                report.0[binding.pressure as usize] = pressure;
-                // The word is active low and the control is down, so clear its bit.
-                let bit = binding.mask;
-                let word = (((report.0[2] as u16) << 8) | report.0[3] as u16) & !bit;
-                report.0[2] = (word >> 8) as u8;
-                report.0[3] = word as u8;
+                press(&mut report, control, pressure);
             }
+        }
+
+        // And the keyboard's throttle, which is the one control a key cannot do justice to: ramped
+        // ([`KeyRamp`]), so a stab is part throttle and a held key is still pinned.
+        if let Some(pressure) = self.key_gas.step(seconds, held(key::X) || held(key::SPACE)) {
+            press(&mut report, Control::Cross, pressure);
         }
         report
     }
@@ -319,6 +527,27 @@ fn trigger_pressure(value: i16) -> u8 {
     (scaled * 255.0).clamp(0.0, 255.0) as u8
 }
 
+/// Press one control at a pressure: the byte the game's poll reads it from, and its bit in the
+/// active-low word.
+///
+/// **Harder wins.** Two sources on one control — a pad's own Cross and the keyboard's throttle ramp,
+/// or a trigger wired to gas on a pad whose Cross is also down — behave like two fingers on one
+/// button rather than like the last one written. The bit is only cleared once the pressure is past
+/// the threshold the game's poll calls a press, so the word and the pressures agree about whether
+/// the control is down even while a ramp is still under it.
+fn press(report: &mut Report, control: Control, pressure: u8) {
+    let binding = control.binding();
+    if binding.is_analogue() {
+        let slot = &mut report.0[binding.pressure as usize];
+        *slot = (*slot).max(pressure);
+    }
+    if pressure > PRESSURE_THRESHOLD {
+        let word = (((report.0[2] as u16) << 8) | report.0[3] as u16) & !binding.mask;
+        report.0[2] = (word >> 8) as u8;
+        report.0[3] = word as u8;
+    }
+}
+
 /// One axis of a d-pad hat as two of the game's controls.
 fn hat(value: i16, low: Control, high: Control) -> u16 {
     if value < -16384 {
@@ -335,12 +564,13 @@ fn hat(value: i16, low: Control, high: Control) -> u16 {
 /// Laid out so that the four face keys are where the four face buttons are on a pad: `Z` is Square,
 /// `X` Cross — the throttle — `C` Circle and `V` Triangle, with the shoulders on `A`, `S`, `D`, `F`
 /// above them, Start on Return, and the arrow keys on the left stick.
-fn keyboard(window: &Window) -> u16 {
+///
+/// The throttle keys (`X` and the space bar) are not in this table: they are a pressure and not a
+/// bit, and [`KeyRamp`] answers both the byte and the bit for them.
+fn keyboard(held: &dyn Fn(u8) -> bool) -> u16 {
     let mut mask = 0;
     for (code, control) in [
         (key::Z, Control::Square),
-        (key::X, Control::Cross),
-        (key::SPACE, Control::Cross),
         (key::C, Control::Circle),
         (key::V, Control::Triangle),
         (key::A, Control::L1),
@@ -352,7 +582,7 @@ fn keyboard(window: &Window) -> u16 {
         (key::Q, Control::L3),
         (key::E, Control::R3),
     ] {
-        if window.held(code) {
+        if held(code) {
             mask |= control.mask();
         }
     }
@@ -407,10 +637,51 @@ impl KeyAxis {
     }
 }
 
+/// A key as a pressure byte, ramped: the keyboard's throttle, 0 shut and 255 pinned.
+///
+/// [`KeyAxis`] is this for a stick and the reason is the same — a switch has no travel — but the
+/// answer is a different shape. A stick's rest is the middle of its range and it has two keys, one
+/// each way; a throttle's rest is one end of its range and it has one. What a rider does with the
+/// throttle that this is for is the thing a switch cannot do at all: hold it part way. So the ramp
+/// climbs at [`KEY_TO_FULL`] while the key is down and falls at [`KEY_TO_SHUT`] when it is not, and
+/// the pressure byte anywhere along it is a fraction of the throttle the game reads as that fraction
+/// ([`game_sim::input::Pad::strength`]).
+///
+/// The first few frames of a press are below the game's own pressure threshold, exactly as the first
+/// few frames of a held direction are inside I2's dead zone: a stab that short is not a throttle
+/// input at all, which is the same thing a real button does on its way down.
+#[derive(Clone, Copy)]
+struct KeyRamp {
+    /// How far the throttle is open, 0 to 1.
+    at: f32,
+}
+
+impl KeyRamp {
+    /// A throttle nobody is holding.
+    const SHUT: KeyRamp = KeyRamp { at: 0.0 };
+
+    /// One frame of `seconds` with the key as it is, as a pressure byte — or `None` once the throttle
+    /// has shut with the key up, so that a pad's own Cross (or a trigger wired to gas) owns the
+    /// control when the keyboard is not touching it.
+    fn step(&mut self, seconds: f32, held: bool) -> Option<u8> {
+        let rate = if held { KEY_TO_FULL } else { KEY_TO_SHUT };
+        let step = seconds / rate;
+        self.at = if held { (self.at + step).min(1.0) } else { (self.at - step).max(0.0) };
+        if self.at == 0.0 {
+            return None;
+        }
+        // The byte a DualShock 2 would have reported at this travel, which the game's poll reads
+        // back as `(byte + 1) / 256`: 255 is the throttle pinned and 0 is the lightest touch there
+        // is, not the absence of one, so a ramp that has left zero never answers zero.
+        Some((self.at * 255.0).round().clamp(1.0, 255.0) as u8)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use game_sim::input::{AXIS_CENTRE_RAW, AxisRange, Manager, PADS};
+    use game_sim::ride::Controls;
     use ps2_float::F;
 
     #[test]
@@ -556,5 +827,219 @@ mod tests {
             AxisRange::STICK.hi,
             "a stick pushed all the way reads all the way"
         );
+    }
+
+    /// Nobody's hands on anything, for a test that only cares about one control.
+    fn nothing(_: u8) -> bool {
+        false
+    }
+
+    /// What the gas is after one frame of `report`, through the port's own poll and binding.
+    fn gas_of(report: Report) -> F {
+        let mut manager = Manager::connected();
+        manager.tick(F(FRAME), &[report; PADS]);
+        Controls::from_pad(manager.pad(0)).gas
+    }
+
+    /// The task's own case, at the narrowest point it can be asked: a pressure byte between the two
+    /// stops is that fraction of the throttle and not all of it.
+    ///
+    /// This is the game's arithmetic and not the shell's — `(pressure + 1) / 256`, I1's — so what it
+    /// pins is the shell's end of the deal: the byte this module writes for a part-pressed button is
+    /// read as part throttle, which is what makes the two halves below worth building.
+    #[test]
+    fn a_pressure_byte_between_the_stops_is_that_fraction_of_the_throttle() {
+        for byte in [0x1a, 0x20, 0x40, 0x7f, 0x80, 0xc0, 0xfe, 0xff] {
+            let mut report = Report::idle();
+            press(&mut report, Control::Cross, byte);
+            assert_eq!(
+                gas_of(report),
+                F((byte as f32 + 1.0) / 256.0),
+                "a pressure of {byte:#x} is not {byte:#x}/256 of the throttle"
+            );
+        }
+        // And below the threshold the control is not down at all, which is the game's own rule and
+        // the reason a ramp's first frames are a touch and not a throttle.
+        let mut report = Report::idle();
+        press(&mut report, Control::Cross, PRESSURE_THRESHOLD);
+        assert_eq!(gas_of(report), F::ZERO);
+    }
+
+    /// Half of the first half: a pad that reports how hard a button is pressed is read that way.
+    #[test]
+    fn a_pads_own_button_pressure_reaches_the_gas() {
+        let pressure = Wiring::parse_pressures("ds2@8").expect("the DualShock 2's own order");
+        let mut pads = Pads::unplugged(Wiring { pressure, ..Wiring::default() });
+        // Cross is the seventh of the twelve pressures, so `ds2@8` puts it on axis 14.
+        assert_eq!(pressure[14], Some(Control::Cross));
+
+        // The button down and the device quiet about how hard: the full byte a digital source has to
+        // mean, because the bit is what said the control is down.
+        pads.button[0] = true;
+        assert_eq!(gas_of(pads.build(FRAME, &nothing)), F::ONE);
+
+        // The same button, half way down. The axis is a travel like a trigger's, so it comes through
+        // the same dead zone, and what reaches the gas is a fraction of the throttle and not all of
+        // it — which is the thing this module could not do before.
+        pads.axis[14] = 0;
+        let half = gas_of(pads.build(FRAME, &nothing));
+        assert_eq!(half, F((trigger_pressure(0) as f32 + 1.0) / 256.0));
+        assert!(half > F(0.3) && half < F(0.7), "half a button's travel reads {half:?}");
+
+        // A touch the dead zone swallows is still the press the bit says it is.
+        pads.axis[14] = TRIGGER_REST;
+        assert_eq!(gas_of(pads.build(FRAME, &nothing)), F::ONE);
+
+        // And the button up is no throttle, however hard the axis is leaning.
+        pads.button[0] = false;
+        pads.axis[14] = i16::MAX;
+        assert_eq!(gas_of(pads.build(FRAME, &nothing)), F::ZERO);
+    }
+
+    /// The second half: gas on a trigger, for a pad whose face buttons are switches. The trigger
+    /// stops being its own control, which is the trade.
+    #[test]
+    fn the_throttle_on_a_trigger_is_part_throttle_and_gives_up_its_own_control() {
+        let wiring = Wiring { throttle: Throttle::Trigger(Control::R2), ..Wiring::default() };
+        let mut pads = Pads::unplugged(wiring);
+        let controls = |pads: &mut Pads| {
+            let report = pads.build(FRAME, &nothing);
+            let mut manager = Manager::connected();
+            manager.tick(F(FRAME), &[report; PADS]);
+            Controls::from_pad(manager.pad(0))
+        };
+        // The trigger at rest: no throttle and no brake.
+        let c = controls(&mut pads);
+        assert_eq!((c.gas, c.front_brake), (F::ZERO, F::ZERO));
+
+        // Half way: part throttle, and the front brake it would otherwise have been is not applied.
+        pads.axis[AXIS_R2] = 0;
+        let c = controls(&mut pads);
+        assert_eq!(c.gas, F((trigger_pressure(0) as f32 + 1.0) / 256.0));
+        assert!(c.gas > F(0.3) && c.gas < F(0.7), "half a trigger reads {:?}", c.gas);
+        assert_eq!(c.front_brake, F::ZERO, "the throttle's trigger is not the brake as well");
+
+        // Pulled: full throttle. The same trigger on a pad wired the ordinary way is the front brake
+        // and no throttle at all, which is the one line of difference between the two sessions.
+        pads.axis[AXIS_R2] = i16::MAX;
+        assert_eq!(controls(&mut pads).gas, F::ONE);
+        let mut plain = Pads::unplugged(Wiring::default());
+        plain.axis[AXIS_R2] = i16::MAX;
+        let c = controls(&mut plain);
+        assert_eq!((c.gas, c.front_brake), (F::ZERO, F::ONE));
+    }
+
+    /// The third half: the keyboard's throttle ramps rather than stepping, and what it ramps through
+    /// is the gas the simulation reads.
+    #[test]
+    fn a_keyboard_throttle_ramps_rather_than_stepping() {
+        let mut pads = Pads::unplugged(Wiring::default());
+        let throttle = |code: u8| code == key::X;
+
+        // Frame one is a touch, not a throttle: below the game's own pressure threshold, exactly as
+        // frame one of a held direction is inside its dead zone. What this module used to answer here
+        // was a full byte — the switch the task is about.
+        assert_eq!(gas_of(pads.build(FRAME, &throttle)), F::ZERO);
+        let mut full = Report::idle();
+        press(&mut full, Control::Cross, 0xff);
+        assert_eq!(gas_of(full), F::ONE, "what frame one used to be");
+
+        // From there it climbs, every frame, through every fraction of the throttle on its way.
+        let mut last = F::ZERO;
+        let mut frames = 1;
+        let mut partial = 0;
+        while last < F::ONE {
+            let gas = gas_of(pads.build(FRAME, &throttle));
+            assert!(gas >= last, "frame {frames} went backwards: {last:?} then {gas:?}");
+            if gas > F::ZERO && gas < F::ONE {
+                partial += 1;
+            }
+            last = gas;
+            frames += 1;
+            assert!(frames < 120, "a held throttle key never reached full");
+        }
+        assert!(
+            (15..=22).contains(&frames),
+            "full throttle took {frames} frames, which is not about {KEY_TO_FULL} s"
+        );
+        assert!(partial > 10, "only {partial} frames of the climb were part throttle");
+
+        // A stab is a stab: three frames of the key is a fifth of the throttle, where the switch
+        // this replaces asked for all of it on frame one.
+        let mut pads = Pads::unplugged(Wiring::default());
+        pads.build(FRAME, &throttle);
+        pads.build(FRAME, &throttle);
+        let stab = gas_of(pads.build(FRAME, &throttle));
+        assert!(stab > F::ZERO && stab < F(0.3), "a three-frame stab asks for {stab:?}");
+
+        // Let go part way up and it closes through the fractions as well, quicker than it opened —
+        // a rider who lets go of the throttle has already decided — and then gets out of the way so
+        // that a pad's own Cross owns the control again.
+        let closing = gas_of(pads.build(FRAME, &nothing));
+        assert!(closing < stab, "the throttle did not close: {stab:?} then {closing:?}");
+        let mut frames = 1;
+        while pads.key_gas.step(FRAME, false).is_some() {
+            frames += 1;
+            assert!(frames < 60, "a released throttle key never shut");
+        }
+        assert!(frames < 15, "closing from a stab took {frames} frames");
+        assert_eq!(gas_of(pads.build(FRAME, &nothing)), F::ZERO);
+    }
+
+    /// A pad's Cross and the keyboard's ramp are two fingers on one button, not two writers of one
+    /// byte: whoever is pressing harder is what the bike gets.
+    #[test]
+    fn two_sources_on_the_throttle_are_the_harder_of_the_two() {
+        let mut pads = Pads::unplugged(Wiring::default());
+        pads.button[0] = true;
+        let throttle = |code: u8| code == key::X;
+        // The pad is pinned and the keyboard's ramp has barely started: full throttle, because the
+        // pad's full byte is what a digital press means.
+        assert_eq!(gas_of(pads.build(FRAME, &throttle)), F::ONE);
+        // The pad let go, the keyboard still part way: the keyboard's own fraction.
+        pads.button[0] = false;
+        let gas = gas_of(pads.build(FRAME, &throttle));
+        assert!(gas > F::ZERO && gas < F::ONE, "the keyboard's share of the throttle is {gas:?}");
+    }
+
+    /// A `--pad-pressure` spec, and what it refuses: the mapping is the device's and has to be asked
+    /// for, so the parse is the whole of the shell's defence against a wrong one.
+    #[test]
+    fn a_pressure_spec_maps_axes_to_controls_or_says_why_not() {
+        let none = Wiring::parse_pressures("none").expect("none");
+        assert!(none.iter().all(Option::is_none));
+        assert_eq!(Wiring::parse_pressures(""), Ok([None; AXES]));
+
+        let ds2 = Wiring::parse_pressures("ds2@8").expect("ds2@8");
+        assert_eq!(ds2[8], Some(Control::Right));
+        assert_eq!(ds2[14], Some(Control::Cross));
+        assert_eq!(ds2[19], Some(Control::R2));
+        assert_eq!(ds2[7], None);
+        assert_eq!(ds2[20], None);
+        // Every one of the twelve, and each on the axis its own pressure byte would be at: the table
+        // is the report's order, so axis = first + (pressure byte - 8).
+        for control in DS2_PRESSURE_ORDER {
+            let at = 8 + control.binding().pressure as usize - 8;
+            assert_eq!(ds2[at], Some(control), "{} is on the wrong axis", control.name());
+        }
+
+        let hand = Wiring::parse_pressures("14:cross, 15:square").expect("a hand-written pair");
+        assert_eq!((hand[14], hand[15]), (Some(Control::Cross), Some(Control::Square)));
+
+        assert!(Wiring::parse_pressures("ds2@25").is_err(), "twelve axes from 25 is past the end");
+        assert!(Wiring::parse_pressures("ds2@x").is_err());
+        assert!(Wiring::parse_pressures("14").is_err(), "an axis with no control");
+        assert!(Wiring::parse_pressures("14:gas").is_err(), "no control is called gas");
+        assert!(Wiring::parse_pressures("99:cross").is_err(), "axis 99 is not read");
+        // Start is read from its bit, so a pressure for it would never be looked at.
+        assert!(Wiring::parse_pressures("14:start").is_err(), "start has no pressure byte");
+    }
+
+    #[test]
+    fn a_control_is_named_the_way_the_port_names_it() {
+        assert_eq!(control_named("cross"), Some(Control::Cross));
+        assert_eq!(control_named("r2"), Some(Control::R2));
+        assert_eq!(control_named("Cross"), None, "the names are the port's, in lower case");
+        assert_eq!(control_named("throttle"), None);
     }
 }
