@@ -780,6 +780,28 @@ fn contact_velocity(vel: Vf, world_ang_vel: Vf, at: Vf, cofg_world: Vf) -> Vf {
     add_xyz(vel, cross(world_ang_vel, sub_xyz(at, cofg_world)))
 }
 
+/// What a tire's grip limit needs off the chassis, and nothing more: how much of a push it feels.
+/// Copied out once a frame because neither number changes inside one.
+#[derive(Clone, Copy)]
+struct Body {
+    inv_mass: F,
+    inv_inertia: Mat3,
+}
+
+/// The mass the chassis presents to a push at `arm` along the unit direction `dir`, both in the
+/// body's own frame: the inverse of `dir.M-1.dir + n.I-1.n` with `n = arm x dir`, which is the
+/// effective mass of a constraint along `dir` at that point. `dir` being a unit vector makes the
+/// first term the inverse mass itself.
+///
+/// The tensor goes through [`chassis::rotate`], which is the three instructions the chassis' own
+/// integrator already puts a torque through its inverse inertia with. The tensor is diagonal in this
+/// game's data; reading it as a matrix costs nothing and does not assume that.
+fn effective_mass(body: &Body, arm: Vf, dir: Vf) -> F {
+    let n = cross(arm, dir);
+    let inv = body.inv_mass + dot3(n, chassis::rotate(&body.inv_inertia, n));
+    if inv > F::ZERO { F::ONE / inv } else { F::ZERO }
+}
+
 /// A force into the chassis at a point, the way [`wheel::tire_forces`] puts one in: the force itself
 /// in the world, and the moment it makes about the centre of mass in the body's own frame.
 fn push(c: &mut wheel::Chassis, m: &Mat4, force: Vf, at: Vf) {
@@ -815,21 +837,46 @@ fn surface_drag(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, brake: F, dt: F
 /// contact patch.
 ///
 /// **A stand-in**, and the largest one in this module. Its numbers are all the disc's — the
-/// surface's `MaxDriveForce`, `MaxSideForce` and `WheelFriction`, the tire's `TireInertia` and
-/// `TireRadius` — and the engine's torque reaches it through [`mv::Wheel::drive_torque`], which the
-/// ported [`mv::engine_update`] filled in. What is this module's is the model:
+/// surface's `SideForce`, `MaxDriveForce`, `MaxSideForce` and `WheelFriction`, the tire's
+/// `TireInertia` and `TireRadius` — and the engine's torque reaches it through
+/// [`mv::Wheel::drive_torque`], which the ported [`mv::engine_update`] filled in. What is this
+/// module's is the model:
 ///
 /// - A wheel on the ground rolls: its spin is the patch's own speed over the radius. What it can put
 ///   down along itself is the drive torque turned into a force at the patch, capped by the surface's
 ///   drive limit and then by the grip the load allows; whatever the grip would not take spins the
 ///   wheel up instead, which is wheelspin.
-/// - Across itself it answers the slide with the same grip, capped by the surface's side limit — less
-///   whatever the donut command asked for, which is how the back end is let go.
+/// - Across itself it is a tire and not a damper: the slide times the surface's own cornering
+///   stiffness, saturated at the surface's side limit — less whatever the donut command asked for,
+///   which is how the back end is let go.
 /// - A wheel in the air just spins up under the engine's torque.
+///
+/// ## The four grip limits are per unit load
+///
+/// `SideForce`, `MaxSideForce`, `MaxDriveForce` and `WheelFriction` are coefficients and not pounds:
+/// on the game's own surfaces they are single digits, where a wheel of the bike carries a couple of
+/// hundred pounds. Taken as pounds they are a grip circle of a few pounds against a bike of several
+/// hundred — a bike with no sideways grip at all, which is the shape of the defect this function came
+/// for (P4's journal entry has the numbers; they are the disc's and so are not written here). Each is
+/// multiplied by the load the suspension is putting through the patch.
+///
+/// ## Why the side force cannot run away
+///
+/// A cornering stiffness is a spring against a *velocity*, so integrating it explicitly has a
+/// stability limit: the port's two-step integrator goes unstable once the force can reverse the
+/// slide inside one substep, and what that looks like from the pad is a bike that will not stand
+/// still and spins out on its own.
+///
+/// So the force is held to the one that stops the slide dead and no further: friction may null a
+/// slide, never reverse it. The bound is `m * |slide| / dt` with `m` the mass the chassis actually
+/// presents to a push there ([`effective_mass`]) — a statement about friction rather than a damping
+/// constant chosen by eye, and it is the same argument [`surface_drag`] already makes for the brake.
+/// On the game's own numbers it never binds; it is what makes every surface in the data safe rather
+/// than the ones that happen to have been driven over.
 ///
 /// It also sets the two fields [`mv::engine_update`] reads back: the forward contact force, and
 /// whether the spin is the torque's or the ground's.
-fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, dt: F,
+fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, body: &Body, dt: F,
                   c: &mut wheel::Chassis, m: &Mat4) {
     let drive_torque = wh.mv.drive_torque;
     // The engine accumulates onto this every substep and nothing else empties it.
@@ -843,10 +890,16 @@ fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, dt: F,
     }
 
     let grip = surf.wheel_friction * pt.load;
-    let drive = (drive_torque * wh.mv.inv_radius).clamp(-surf.max_drive_force, surf.max_drive_force);
+    let drive_cap = surf.max_drive_force * pt.load;
+    let drive = (drive_torque * wh.mv.inv_radius).clamp(-drive_cap, drive_cap);
     let along = drive.clamp(-grip, grip);
-    let cap = (surf.max_side_force * (F::ONE - wh.mv.donut_scale)).max(F::ZERO);
-    let across = (-pt.side * grip).clamp(-cap, cap);
+
+    let side_cap = (surf.max_side_force * (F::ONE - wh.mv.donut_scale)).max(F::ZERO) * pt.load;
+    let arm = sub_xyz(unpoint(m, wh.w.load_point), c.cofg);
+    let dir = chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), pt.right);
+    let hold = effective_mass(body, arm, dir) * pt.side.abs() / dt;
+    let cap = side_cap.min(grip).min(hold);
+    let across = (-pt.side * surf.side_force * pt.load).clamp(-cap, cap);
     push(c, m, add_xyz(scale(pt.forward, along), scale(pt.right, across)), wh.w.load_point);
 
     // Rolling, plus whatever the grip would not take: the spin the road asks for, and the slip the
@@ -1025,8 +1078,8 @@ fn answer(m: &Mat4, call: wheel::Call, hinge: &mut Option<(Vf, Vf)>, synced: &mu
 /// ported half integrates reads the torque the spin step puts on it — which is the order the original
 /// runs them in (surface drag, spin, steering), so the only difference is where the `Call` list is
 /// built.
-fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, mvc: &mut mv::Chassis, m: &Mat4,
-                   curve: &CurveTable, dt: F) -> Vec<wheel::Call> {
+fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, body: &Body, mvc: &mut mv::Chassis,
+                   m: &Mat4, curve: &CurveTable, dt: F) -> Vec<wheel::Call> {
     wh.to_wheel();
     let pt = patch(wh, m, curve);
     let surf = surface(tire, wh.surface);
@@ -1038,7 +1091,7 @@ fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, mvc: &mut mv::Cha
         vel: mvc.vel,
     };
     surface_drag(wh, &pt, &surf, brake, dt, &mut wc, m);
-    spin_integrate(wh, &pt, &surf, dt, &mut wc, m);
+    spin_integrate(wh, &pt, &surf, body, dt, &mut wc, m);
     let calls = wheel::integrate(&mut wh.w, dt);
     mvc.force = wc.force;
     mvc.torque = wc.torque;
@@ -1273,12 +1326,13 @@ impl Ride {
             }
             rear.mv.other_tire_down = front.mv.contact && !rear.mv.contact;
 
+            let body = Body { inv_mass: chassis.inv_mass, inv_inertia: chassis.inv_inertia };
             calls.push(mv::Call::WheelIntegrate(Side::Front, h));
             let brake = held.front_brake;
-            wheel_integrate(front, &p.front, brake, &mut mvc, &out.chassis, &tables.curve, h);
+            wheel_integrate(front, &p.front, brake, &body, &mut mvc, &out.chassis, &tables.curve, h);
             calls.push(mv::Call::WheelIntegrate(Side::Rear, h));
             let brake = held.rear_brake;
-            wheel_integrate(rear, &p.rear, brake, &mut mvc, &out.chassis, &tables.curve, h);
+            wheel_integrate(rear, &p.rear, brake, &body, &mut mvc, &out.chassis, &tables.curve, h);
 
             mv::engine_post(engine, &mut rear.mv);
 
