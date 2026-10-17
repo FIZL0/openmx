@@ -11,3 +11,8 @@ ps2-float = { path = "../ps2-float" }
 [dev-dependencies]
 # The oracle is a *test* dependency: the shipped sim must not need the disc at runtime.
 ps2-oracle = { path = "../ps2-oracle" }
+# Also test-only, and it points back the way the dependency already runs (game-render depends on
+# game-sim). `tests/motion.rs`'s last two tests compare the ported animation machine against joints
+# captured off the running original, and the clips those joints came out of are only readable
+# through the renderer's samplers — the sim itself has no business knowing what a skeleton is.
+game-render = { path = "../game-render" }
