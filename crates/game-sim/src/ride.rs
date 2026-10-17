@@ -287,6 +287,22 @@ impl Wheel {
     }
 
     /// The ground step's view into the wheel module's, before the wheel module runs.
+    ///
+    /// The commanded steering angle and the hinge's own angle are **one word** in the original —
+    /// `wheel+0x8ac`. The ground step's pose stores the command straight into it (the front wheel's
+    /// lock times the rider's lean times the speed fade, and nothing else), the steered-but-not-
+    /// balancing case of the wheel's own integration leaves it alone, and the balancing case
+    /// integrates it under the hinge's torque. Two structs hold that word here, so the two are
+    /// copied across each way round the ported call: [`mv::Wheel::steer_command`] in,
+    /// [`wheel::Wheel::steer_angle`] out ([`Wheel::from_wheel`]). Copying it in unconditionally is
+    /// the aliasing itself and not a decision: outside the pose the two always agree, because
+    /// `from_wheel` has just written the hinge's answer back over the command.
+    ///
+    /// That write-back is also the answer to P11's worry about doing this per substep rather than
+    /// once a frame — that a balancing bike's hinge would be overwritten by a command the pose never
+    /// made. [`mv::pose`] returns before the steering write while balancing, so the command is never
+    /// made then; `from_wheel` leaves the hinge's own integrated angle in it, and the copy back in is
+    /// a no-op for as long as the bike is balanced.
     fn to_wheel(&mut self) {
         self.w.contact = self.mv.contact;
         self.w.balancing = self.mv.balancing;
@@ -294,9 +310,10 @@ impl Wheel {
         self.w.spring_rate = self.mv.spring;
         self.w.max_steer_angle = self.mv.max_steer_angle;
         self.w.min_steer_angle = -self.mv.max_steer_angle;
+        self.w.steer_angle = self.mv.steer_command;
     }
 
-    /// And back, after it has. Only the four words the ground step reads: the contact flag, the
+    /// And back, after it has. The four words the ground step reads — the contact flag, the
     /// contact normal both roll angles are measured off, and the two flags
     /// `Wheel::ray_hit`/`Wheel::swept_contact` sit in — `+0xd0` and `+0xd4`, the first two of
     /// [`mv::Fresh`]'s seven. The other five and the three quadwords are the suspension's own
@@ -306,6 +323,10 @@ impl Wheel {
         self.mv.contact_normal = self.w.contact_normal;
         self.mv.fresh.scalars[0] = self.w.ray_hit as u32;
         self.mv.fresh.scalars[1] = self.w.swept_contact as u32;
+        // The fifth word, and the one the ground step does *not* read: the shared steering angle,
+        // back out of the hinge. See [`Wheel::to_wheel`] — it is here so the two copies of
+        // `wheel+0x8ac` cannot disagree, which is what the state hash would otherwise show twice.
+        self.mv.steer_command = self.w.steer_angle;
     }
 }
 
@@ -1281,15 +1302,11 @@ impl Ride {
         }
 
         mv::pose(mvp, &mut mvc, &mut front.mv, s);
-        // The pose's steering command *is* the hinge's angle: one word on the front wheel, which the
-        // ground step writes once a frame, the contact patch below reads and the hinge only takes
-        // over while the bike is being balanced on that wheel ([`wheel::integrate`]'s three cases).
-        // The port keeps the two views of that word in two structs, so the write is bridged here —
-        // once a frame, where the pose makes it, and not per substep, or a balancing bike's hinge
-        // would be overwritten by a command the pose never made.
-        if !s.balancing {
-            front.w.steer_angle = front.mv.steer_command;
-        }
+        // The pose's steering command *is* the hinge's angle — one word on the front wheel. P11
+        // bridged it here, once a frame; the bridge now lives where the two views of that word
+        // actually cross, in [`Wheel::to_wheel`]/[`Wheel::from_wheel`], which run either side of
+        // every ported substep. See `to_wheel` for why copying it in per substep is the aliasing
+        // and not a choice.
         rear.mv.donut_scale = mv::donut_roll(mvp, &mvc, s);
         front.mv.spring = mv::spring(mvc.speed, mvp.front_spring_when_stopped, mvp.front_spring);
         rear.mv.spring = mv::spring(mvc.speed, mvp.rear_spring_when_stopped, mvp.rear_spring);

@@ -39,7 +39,8 @@
 //! clutch re-drives the rear wheel at idle, so the bike will not stop. It is the simulation's and is
 //! written up at length in the sibling file; it is repeated here because a leg of a minute is not
 //! proved by a leg of another minute, and because this is the file whose failure would be a player's
-//! complaint.
+//! complaint. The other was the steering command never reaching the front wheel, which P11 and
+//! P12 between them paid.
 
 use game_sim::collide::{Bundle, Record};
 use game_sim::input::{AXIS_CENTRE, CONTROL_MAP, Control, PADS, Report};
@@ -115,14 +116,30 @@ CrossupWreckTime = 0.3
 /// connected to anything at all; and `Drag = 0.5` holds this bike to about 48 ft/s, which is nothing
 /// like the 75.78 the human's recording reaches, so the minute's speeds would mean nothing. Neither
 /// patch is a claim about the disc's file.
+///
+/// **P12 moved two things, and both are the sibling file's `ridden_bike` catching up.** The steering
+/// fade's far end is `0.05` and not the `0.25` this file shipped with: 0.25 asks the tires for five
+/// and a half g at the top speed, and a bike asked for grip it has not got slides instead of turning.
+/// And `BodyTireForcePosition` is P8's tuning arm here as well — the sibling's third patch, which this
+/// file never got because nothing had ever steered this bike and the difference did not show. Read as
+/// the drive and tire force's arm, the file's own value is a foot *above* the body origin and two feet
+/// behind the axle, which is both a nose-diving launch (P8) and a yaw arm two and a half times the
+/// sibling's: on the unpatched bike the stick at 0.05 of the lock spun the minute a full turn and a
+/// quarter in four seconds. The mounts are kept off the *unpatched* text, which is what
+/// [`ride_the_minute`] builds the rider with and what the sibling file's harness does.
+///
+/// The two files' bikes have to agree, because `the_pad_script_is_the_minute` is what says the shell
+/// rides the same minute `game-sim` does.
 fn ridden_bike() -> String {
     let mut out = stock::BIKE.to_string();
     let patches = [
         (
             "XAxisRateLimit = 6\n",
-            "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.25\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
+            "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.05\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
         ),
         ("Drag = 0.5", "Drag = 0.06"),
+        ("BodyTireForcePosition = 0.0, 1.1, 2.1", "BodyTireForcePosition = 0.0, -0.3, 0.8"),
+        ("BodyTireForcePosition = 0.0, 1.1, -2.1", "BodyTireForcePosition = 0.0, -0.3, -0.8"),
     ];
     for (key, with) in patches {
         assert!(out.contains(key), "game_sim::stock::BIKE no longer has `{}`", key.trim_end());
@@ -441,10 +458,23 @@ fn turn_rate(seen: &[&Seat]) -> f32 {
 fn ride_the_minute() -> Minute {
     let tables = Arc::new(Tables::build());
     let phy = Phy::read_bytes(ridden_bike().as_bytes(), &tables.ride.curve);
-    // `Sim::ride` is the shell's own constructor, spawn and facing included; the wreck files are the
-    // disc's and this ride has none, which is the state the shell runs in without them — the machine
-    // still calls a wreck, there is just no body to tumble.
-    let mut sim = Sim::ride(0, tables, phy, stock::SPAWN, stock::FACING, Set::default());
+    // The wheel mounts come off the *unpatched* text, because `ridden_bike`'s third patch moves the
+    // key this crate reads as the mounts when the bike model has no wheel nodes — the sibling file's
+    // harness keeps them the same way, and the two minutes have to be one bike. That is why the rider
+    // is built here and handed over (`Sim::with_rider`, which is also how the shell itself builds one)
+    // rather than through `Sim::ride`, which would take the mounts off the patched copy.
+    //
+    // The wreck files are the disc's and this ride has none, which is the state the shell runs in
+    // without them — the machine still calls a wreck, there is just no body to tumble.
+    let geom = Phy::read_bytes(stock::BIKE.as_bytes(), &tables.ride.curve);
+    let rider = game_sim::rider::Rider::new(
+        &phy,
+        stock::mounts(&geom),
+        stock::SPAWN,
+        stock::FACING,
+        Set::default(),
+    );
+    let mut sim = Sim::with_rider(0, tables, phy, rider);
     let mut world = Jump::nothing();
 
     let mut out = Minute { legs: Vec::new() };
@@ -586,11 +616,15 @@ fn it_reaches_the_top_speed_and_holds_it() {
     assert_eq!(wrecks(&flat_out), 0, "the bike wrecked flat out");
 }
 
-/// The stick goes hard over through the pad and the bike comes round the way it was pushed.
+/// The stick goes hard over and the bike comes round — through the shell's own pad, which is the half
+/// of the turn this crate can prove and the sibling file cannot.
 ///
 /// P10 shipped this ignored: the simulation never put the steering command on the hinge, so the bike
-/// could not turn however the pad was waggled. P11 bridges the command onto the hinge in
-/// `ride.rs`'s `Ride::frame` and the sibling file's version of this test has the long version.
+/// could not turn however the pad was waggled. P11 bridged the command onto the hinge in `ride.rs`'s
+/// `Ride::frame`; **P12 then moved the bridge to where the aliasing is.** The ground step's commanded
+/// angle and the steering hinge's own angle are one word on the wheel in the original, and `ride.rs`
+/// now copies it both ways round the ported call — in `Wheel::to_wheel`/`Wheel::from_wheel` — instead
+/// of leaving the hinge at zero. The sibling file's version of this test has the long version.
 #[test]
 fn it_turns_the_way_the_stick_is_pushed() {
     let m = ride_the_minute();
