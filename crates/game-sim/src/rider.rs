@@ -122,6 +122,10 @@ pub struct Gate {
 }
 
 /// A bike with somebody on it.
+///
+/// `Clone` because it is most of a [`crate::Sim`], and a snapshot of the simulation is a copy of
+/// one ([`crate::Sim::clone`]).
+#[derive(Clone, Debug)]
 pub struct Rider {
     /// The bike: P2's assembled ride, stepped by this module and not by the shell.
     pub ride: Ride,

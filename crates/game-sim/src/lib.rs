@@ -55,7 +55,17 @@
 // Float operators are denied per module (see each `mod` below) rather than crate-wide, so that the few
 // places that legitimately need host arithmetic — a hash, a test's statistics — can opt out knowingly.
 
+use std::fmt;
+use std::sync::Arc;
+
 use ps2_float::{F, Vf};
+
+use crate::input::{AXIS_CENTRE, Manager, PADS, Report};
+use crate::phy::Phy;
+use crate::ride::Controls;
+use crate::rider::{Rider, Tables};
+use crate::trick::Set;
+use crate::world::{Flat, World};
 
 /// One frame of controller input. Replace with the game's own buttons; keep it `Copy` and small, because
 /// a replay fixture is a list of these.
@@ -65,40 +75,177 @@ pub struct Input {
     pub stick: (i8, i8),
 }
 
-/// The entire simulation state.
+/// The entire simulation state: the bike, the person on it, and the pads they are holding.
 ///
-/// One value, no pointers, `Clone` for snapshots. When this grows past a screenful, split it into
-/// per-subsystem structs that live here — not into globals.
-#[derive(Clone, Debug)]
+/// **This is the value the harness drives and the value the shell drives.** `replay::verify` steps
+/// one of these; `crates/openmx` holds one and steps it with the track under it instead of a flat
+/// floor. There is no second simulation and no example state beside it: a measurement taken off the
+/// shell is a measurement of the thing a fixture compares.
+///
+/// Three of its fields are the run's *parameters* rather than its state, and are not in the walk
+/// ([`crate::hash`]): [`Sim::tables`], which is read-only arithmetic built once, and [`Sim::phy`],
+/// which is the vehicle's numbers as the disc carries them. Two runs of different bikes diverge in
+/// the first tick's `bike.pos` regardless, which is the failure a reader wants to see.
 pub struct Sim {
+    /// How many simulation passes this state has been through. Tick 0 is the state a run starts
+    /// from.
     pub ticks: u64,
+    /// What the run was seeded with. The original's generator is [`rng::Rng`] and the ride draws
+    /// nothing from it (see [`tick`]'s own docs); this is the word a fixture carries, kept in the
+    /// state so that two runs from two seeds differ from tick 0 even where nothing has drawn yet.
     pub rng: u32,
-    pub ball: physics::Ball,
+    /// The tables the ride and the trick decoder read: built once, never written, and shared by
+    /// every clone of this state rather than rebuilt per snapshot. Thirty thousand entries of arc
+    /// cosine is not something a per-tick snapshot should copy, and a shared *immutable* table is
+    /// not the hidden mutable state rule 3 is about.
+    pub tables: Arc<Tables>,
+    /// The bike's own parameters, off its `.phy`.
+    pub phy: Phy,
+    /// The input layer, read once a frame *before* the simulation — which is where the original
+    /// reads it ([`tick`]). It is state and not a parameter: the press and release timers and the
+    /// one-frame event queue are what a gesture is decoded out of.
+    pub input: Manager,
+    /// The bike and the rider on it.
+    pub rider: Rider,
 }
 
 impl Sim {
-    /// A fresh state from a seed. The seed is part of the state and part of a replay fixture: whatever
-    /// the original seeded its RNG with (a frame counter, a button press pattern) comes in here, never
-    /// from the clock.
+    /// A fresh state from a seed, on the stand-in bike and a level floor ([`stock`]).
+    ///
+    /// A seed is not enough to describe a ride — the bike, its wheel mounts, the spawn and the
+    /// track all come off the user's own disc — so what a bare seed builds is the bike this crate
+    /// can build without one. A fixture that means to prove the port against a recording of the
+    /// original carries a whole state in [`replay::Fixture::start`] instead.
     pub fn new(seed: u32) -> Sim {
-        // a serve, so the example has something to integrate
-        Sim {
-            ticks: 0,
-            rng: seed,
-            ball: physics::Ball {
-                vel: Vf([0.5, 3.0, 0.0, 0.0]),
-                spin: F(1.0),
-                ..Default::default()
-            },
-        }
+        let tables = Arc::new(Tables::build());
+        let phy = stock::phy(&tables.ride.curve);
+        let mut sim = Sim::ride(seed, tables, phy, stock::SPAWN, stock::FACING, Set::default());
+        // The wreck test off, which is the stand-in's own doing and not the original's: a bike
+        // placed on a start line has no velocity and has not asked the ground anything yet, and
+        // S10's airborne test answers `NoseDive` on the first frame of exactly that state
+        // ([`stock`] has the reproducer). A down rider is not integrated, so with the test on, the
+        // state a bare seed builds would stop being a ride on its first tick — and every fixture
+        // the port records against itself starts here.
+        sim.rider.sense.wrecks_enabled = false;
+        sim
     }
 
-    /// Advance one frame. This is the function whose every detail has to match the original, including
-    /// the *order* the subsystems run in — which is nearly always the order the original's main loop
-    /// calls them, and nearly never the order that reads nicely.
-    pub fn tick(&mut self, _input: Input) {
-        self.ball.step();
+    /// A state built around a bike somebody has read off a disc: the shell's constructor.
+    ///
+    /// `set` is the rider's own 24 stunts ([`trick::Stunts::selection`]); the wheel mounts come off
+    /// the bike's `.phy` the way [`stock::mounts`] takes them, because the model's own wheel nodes
+    /// are the renderer's side of the disc.
+    pub fn ride(
+        seed: u32,
+        tables: Arc<Tables>,
+        phy: Phy,
+        at: Vf,
+        facing: Vf,
+        set: Set,
+    ) -> Sim {
+        let mounts = stock::mounts(&phy);
+        let rider = Rider::new(&phy, mounts, at, facing, set);
+        Sim::with_rider(seed, tables, phy, rider)
+    }
+
+    /// A state around a rider somebody else built.
+    ///
+    /// The shell takes the wheel mounts off the bike *model's* own nodes rather than off the `.phy`
+    /// (`crates/openmx/src/main.rs`, S22) and turns the wreck test on or off from its command line,
+    /// so it builds the [`Rider`] itself and hands it over. Everything else about a state is the
+    /// same whichever way the bike arrived.
+    pub fn with_rider(seed: u32, tables: Arc<Tables>, phy: Phy, rider: Rider) -> Sim {
+        let mut input = Manager::new();
+        // Pad 0 plugged in and pad 1 not, which is the shape every capture of this game was taken
+        // in and the shape a one-player session has.
+        input.pad_mut(0).connected = true;
+        Sim { ticks: 0, rng: seed, tables, phy, input, rider }
+    }
+
+    /// **One frame of the simulation**, in the original's order: the pads are read, and then the
+    /// world moves ([`tick`] is what calls this, and says why that order is not negotiable).
+    ///
+    /// The world is an argument rather than a field because it is the one thing in a ride that
+    /// cannot be a snapshot: the shell's is a track's terrain and its collision meshes borrowed out
+    /// of the disc's archives, and a fixture's is a flat floor. Everything else a frame touches is
+    /// in `self`.
+    pub fn frame(
+        &mut self,
+        dt: F,
+        reports: &[Report; PADS],
+        world: &mut dyn World,
+    ) -> crate::rider::Frame {
+        let controls = self.poll(dt, reports);
+        self.step(dt, &controls, world)
+    }
+
+    /// The pad half of a frame: the device manager's update, and the rider's hands off it.
+    ///
+    /// Split out of [`Sim::frame`] for the shell, which reads the pad on every frame and rides on
+    /// only some of them (its pause is a page over a running frame in the original, and a stopped
+    /// ride in a shell with no pages).
+    pub fn poll(&mut self, dt: F, reports: &[Report; PADS]) -> Controls {
+        self.input.tick(dt, reports);
+        Controls::from_pad(self.input.pad(0))
+    }
+
+    /// The simulation half: one frame of the rider, and the tick counter behind it.
+    pub fn step(&mut self, dt: F, controls: &Controls, world: &mut dyn World) -> crate::rider::Frame {
+        let said = self.rider.frame(&self.phy, &self.tables, controls, dt, world);
         self.ticks += 1;
+        said
+    }
+
+    /// Advance one frame from a fixture's own input, over a flat floor.
+    ///
+    /// What a [`replay::Fixture`] can express, and so what [`replay::verify`] drives: an
+    /// [`Input`] is a button mask and a stick, which is rebuilt into the pad report the game would
+    /// have read ([`Sim::reports`]). The step is the 30 Hz clamp, because that is the step every
+    /// capture of the original in this project was taken at — a fixed-step port cannot replay a run
+    /// the original measured frame by frame, and `tests/replay.rs` refuses a capture that is not at
+    /// the clamp.
+    pub fn tick(&mut self, input: Input) {
+        self.tick_at(F(tick::DeltaTime::CAP_30), input);
+    }
+
+    /// [`Sim::tick`] with the frame length the caller measured: what [`tick::Engine`] hands its
+    /// game, and so the path a live loop with no track loaded takes.
+    pub fn tick_at(&mut self, dt: F, input: Input) {
+        self.tick_frame(dt, &Sim::reports(input));
+    }
+
+    /// One frame over a flat floor from the pad reports the platform layer actually read: what a
+    /// [`replay::PadTape`] carries, which an [`Input`] cannot (the twelve pressures, and the frame
+    /// length the engine measured).
+    pub fn tick_frame(&mut self, dt: F, reports: &[Report; PADS]) -> crate::rider::Frame {
+        self.frame(dt, reports, &mut Flat::default())
+    }
+
+    /// A fixture's [`Input`] as the pad reports the game would have read.
+    ///
+    /// Lossy in the direction that matters and exact in the direction a fixture is used: a digital
+    /// press is full pressure, so a session played on buttons rebuilds byte for byte, and a
+    /// throttle held *half* way cannot be expressed by a mask and does not survive. A recording
+    /// that needs the strengths is a [`replay::PadTape`] and not a list of [`Input`]s.
+    pub fn reports(input: Input) -> [Report; PADS] {
+        let mut report = Report::from_buttons(input.buttons);
+        let byte = |v: i8| (i16::from(AXIS_CENTRE) + i16::from(v)).clamp(0, 255) as u8;
+        report.set_axis(2, byte(input.stick.0));
+        report.set_axis(3, byte(input.stick.1));
+        let mut reports = [Report::missing(); PADS];
+        reports[0] = report;
+        reports
+    }
+
+    /// Where the bike is: the chassis transform's origin, which is the row 3 of the world transform
+    /// a capture of the original records.
+    pub fn bike_pos(&self) -> Vf {
+        self.rider.ride.position()
+    }
+
+    /// What the bike is doing: the body's velocity, which is the quad beside that transform.
+    pub fn bike_vel(&self) -> Vf {
+        self.rider.ride.chassis.vel
     }
 
     /// The state in 64 bits. Add a field to [`hash`]'s walk the moment you add it to the state, or a
@@ -108,6 +255,36 @@ impl Sim {
     /// that says *which* field differed.
     pub fn hash(&self) -> u64 {
         hash::of(self)
+    }
+}
+
+impl Clone for Sim {
+    /// A snapshot. The tables are shared rather than copied — they are immutable — so this is a copy
+    /// of the bike, the rider and the pads and nothing else.
+    fn clone(&self) -> Sim {
+        Sim {
+            ticks: self.ticks,
+            rng: self.rng,
+            tables: Arc::clone(&self.tables),
+            phy: self.phy.clone(),
+            input: self.input,
+            rider: self.rider.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for Sim {
+    /// The state a human wants in a failure message: which tick, and where the bike is. The whole
+    /// state is [`hash::Dump`], which prints it field by field; the tables have no `Debug` of their
+    /// own and thirty thousand entries of one would not help anybody.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sim")
+            .field("ticks", &self.ticks)
+            .field("rng", &self.rng)
+            .field("bike.pos", &self.bike_pos())
+            .field("bike.vel", &self.bike_vel())
+            .field("phase", &self.rider.phase())
+            .finish_non_exhaustive()
     }
 }
 
@@ -255,7 +432,7 @@ pub mod phy;
 
 /// The acceptance test for the whole port: a fixture of recorded inputs plus the state it starts from,
 /// replayed through the simulation and compared tick by tick against the recording's hashes or its
-/// watched fields. A failure is one line — `tick 413: ball.vel[1] -58.94952 vs -58.949516` — not a diff of two
+/// watched fields. A failure is one line — `tick 413: bike.vel[1] -58.94952 vs -58.949516` — not a diff of two
 /// files. The module's own docs say how a fixture is made and where one lives.
 pub mod replay;
 
@@ -289,6 +466,11 @@ pub mod rng;
 /// comes off, the two clocks that decide when it goes back on, the pad chord beside them, and which of
 /// those transitions share a frame.
 pub mod state;
+
+/// The bike and the floor a simulation rides when nobody has handed it a disc: the stand-in `.phy`
+/// a bare [`Sim::new`] builds its ride out of, and where it stands it. Hand-written, and not the
+/// disc's — the module's own head says why one has to exist at all.
+pub mod stock;
 
 /// The fixed update: one frame of the game as the original runs it — one mode request serviced, the
 /// wall clock sampled and averaged into `dt`, the pads read, and then the simulation. The top-level
@@ -325,6 +507,14 @@ pub mod world;
 mod tests {
     use super::*;
 
+    /// A hundred ticks of the state a bare seed builds: the stand-in bike dropped a foot onto a
+    /// level floor with nobody touching the pad ([`the_stand_in_bike_is_dropped_onto_the_floor`]
+    /// says what that is).
+    ///
+    /// The same literal as `tests/hash.rs`' own, and it moves whenever the state type or the ride
+    /// does. What it is here for is the *platform*: see the test below it.
+    const HUNDRED_TICKS: u64 = 0xd53f_5712_514b_9c0c;
+
     /// The hash is a constant of the code, not of the machine: this value must be the same on x86-64,
     /// aarch64 and wasm32. When a change to the state type changes it, that is expected — update it. When
     /// a *platform* changes it, something in here is using host arithmetic, and that is the bug this test
@@ -335,7 +525,40 @@ mod tests {
         for _ in 0..100 {
             sim.tick(Input::default());
         }
-        assert_eq!(sim.hash(), 0x7bbf_5ca2_d10e_b072, "{:?}", sim.ball);
+        assert_eq!(sim.hash(), HUNDRED_TICKS, "{sim:?}");
+    }
+
+    /// What a bare seed's state actually does, written down because every fixture the port records
+    /// against itself starts here ([`stock`]): the bike is dropped a foot onto a level floor, the
+    /// wheels take the landing and it settles there with nobody on the pad — a ride, not a wreck.
+    #[test]
+    fn the_stand_in_bike_is_dropped_onto_the_floor() {
+        let mut sim = Sim::new(1);
+        assert_eq!(sim.bike_pos(), stock::SPAWN, "a fresh state is on the start line");
+        assert_eq!(sim.bike_vel(), Vf::ZERO, "with nothing moving");
+
+        let mut wrecked = None;
+        for k in 0..100u64 {
+            let said = sim.tick_frame(F(tick::DeltaTime::CAP_30), &Sim::reports(Input::default()));
+            if said.wreck.is_some() && wrecked.is_none() {
+                wrecked = Some((k, said.wreck));
+            }
+        }
+        assert_eq!(wrecked, None, "the stand-in's wreck test is off: {sim:?}");
+        assert_eq!(sim.ticks, 100);
+        assert_eq!(sim.rider.phase(), crate::state::Phase::Riding, "{sim:?}");
+        // And it has come to rest on the floor it was dropped above, on both wheels, under its own
+        // suspension: three hundred more ticks do not move it by a bit. (The origin rests a little
+        // *below* the floor plane because it is the chassis' own reference point and not the lowest
+        // part of the bike — what is on the floor is the wheels.)
+        let (front, rear) = (&sim.rider.ride.front, &sim.rider.ride.rear);
+        assert!(front.mv.contact && rear.mv.contact, "both wheels on the floor: {sim:?}");
+        let rest = format!("{:.3}", sim.bike_pos().y());
+        for _ in 0..300 {
+            sim.tick(Input::default());
+        }
+        let now = format!("{:.3}", sim.bike_pos().y());
+        assert_eq!(now, rest, "it stays where it settled: {sim:?}");
     }
 
     #[test]

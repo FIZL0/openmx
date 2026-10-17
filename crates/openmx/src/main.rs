@@ -106,6 +106,7 @@ mod moment;
 mod pad;
 mod window;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use game_render::disc::{Disc, Res};
@@ -117,7 +118,7 @@ use game_render::vehicle::{Chassis, Drive, params as vehicle_params};
 use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
 use game_render::{ini, png, scene as view};
 use game_sim::camera::{Preset, Race, Ridden, Switches, Target};
-use game_sim::input::{Control, Manager, PADS, Report};
+use game_sim::input::{Control, PADS, Report};
 use game_sim::phy::Phy;
 use game_sim::replay::{Head, PadTape, Recorder, TickPhase};
 use game_sim::ride::Controls;
@@ -127,7 +128,7 @@ use game_sim::state::Phase;
 use game_sim::tick::{Engine, Game, Outcome, Timer0};
 use game_sim::trick::{Set, Stunts};
 use game_sim::world::Place;
-use game_sim::{Input, track, world as sim_world};
+use game_sim::{Input, Sim, track, world as sim_world};
 use ps2_float::{F, Vf};
 
 use ground::Ground;
@@ -192,16 +193,14 @@ struct World<'a> {
     /// placements, swept by S4's own sweep. The *drawn* ground is the loop's own [`Ground`], which
     /// reads the same file for triangles instead.
     place: Place<'a>,
-    /// The port's input manager, ticked with the frame's own `dt` at the top of the pass.
-    input: Manager,
     /// This frame's reports, written by the app layer before the step the way the original's device
     /// manager fills its buffers before the frame reads them.
     reports: [Report; PADS],
-    /// The bike's own parameters, as its `.phy` carries them, and the three tables the step reads.
-    phy: Phy,
-    tables: rider::Tables,
-    /// The bike and the person on it: P3's rider, which owns P2's ride and steps it.
-    rider: Rider,
+    /// Everything a frame of the simulation reads and writes that is not the world: the port's input
+    /// manager, the bike's `.phy`, the tables the step reads, and the rider on the bike. This is the
+    /// same value `game_sim::replay::verify` drives, so a tape of this shell and a replay fixture
+    /// are a frame of the same thing (P5).
+    sim: Sim,
     /// Whether the ride is moving. Start toggles it: the original's pause is a whole front-end page
     /// and this shell has no pages, so freezing the ride is the shell's own stand-in for it.
     riding: bool,
@@ -232,20 +231,17 @@ impl Game for World<'_> {
         }
 
         // The game's poll, with the frame's dt: this is what turns report bytes into held controls,
-        // press and release edges, and stick axes with the game's own dead zone.
-        self.input.tick(dt, &self.reports);
-        let pad = self.input.pad(0);
+        // press and release edges, and stick axes with the game's own dead zone — and then the
+        // rider's hands off it, because which button means what lives in the ride and not here.
+        let controls = self.sim.poll(dt, &self.reports);
 
-        if pad.pressed(Control::Start) {
+        if self.sim.input.pad(0).pressed(Control::Start) {
             self.riding = !self.riding;
         }
 
-        // Which button means what lives in the ride, so the shell and a replay fixture read a pad
-        // the same way.
-        let controls = Controls::from_pad(pad);
         self.said = rider::Frame::default();
         if self.riding {
-            self.said = self.rider.frame(&self.phy, &self.tables, &controls, dt, &mut self.place);
+            self.said = self.sim.step(dt, &controls, &mut self.place);
         }
         true
     }
@@ -743,11 +739,8 @@ fn run() -> Result<(), String> {
     let mut engine = Engine::new();
     let mut world = World {
         place: sim,
-        input: Manager::connected(),
         reports: [Report::missing(); PADS],
-        phy,
-        tables,
-        rider,
+        sim: Sim::with_rider(0, Arc::new(tables), phy, rider),
         riding: true,
         said: rider::Frame::default(),
         tape: recorder,
@@ -820,7 +813,7 @@ fn run() -> Result<(), String> {
         // frozen ride does not step the driver, so the pose is left where it was.
         if let Some(body) = &mut body {
             if world.riding {
-                body.pose(dt, world.rider.animation);
+                body.pose(dt, world.sim.rider.animation);
             }
         }
 
@@ -830,9 +823,9 @@ fn run() -> Result<(), String> {
         // wheels' spin, which are not in any clip because no clip could have them.
         if let Some(chassis) = &mut chassis {
             if world.riding {
-                let ride = &world.rider.ride;
-                let want = Chassis::want(ride, &world.rider.tricks);
-                let request = Chassis::request(ride, &world.rider.tricks);
+                let ride = &world.sim.rider.ride;
+                let want = Chassis::want(ride, &world.sim.rider.tricks);
+                let request = Chassis::request(ride, &world.sim.rider.tricks);
                 chassis.frame(dt, want, &request, Drive::of(ride));
                 if let Some(loaded) = assets.models.get_mut(CHASSIS) {
                     chassis.skin_into(loaded);
@@ -862,15 +855,15 @@ fn run() -> Result<(), String> {
         // picks the preset, the ported camera does everything else.
         let presets = camera.cam.presets.len();
         if presets > 1 {
-            let pad = world.input.pad(0);
+            let pad = world.sim.input.pad(0);
             // L1 only: R1 is the third of the trick decoder's buttons now.
             if pad.pressed(Control::L1) {
                 which = (which + 1) % presets;
                 camera.cam.set_preset(which);
             }
         }
-        let (forward, up) = world.rider.ride.axes();
-        let bike_pos = world.rider.ride.position();
+        let (forward, up) = world.sim.rider.ride.axes();
+        let bike_pos = world.sim.rider.ride.position();
         // The grounded flag and the speed are read off the actor by the frame rather than worked
         // out from the velocity; the ride's own two fields are what the actor's are written from.
         let rider = Ridden {
@@ -878,11 +871,11 @@ fn run() -> Result<(), String> {
                 body_point: bike_pos,
                 forward,
                 up,
-                vel: world.rider.ride.chassis.vel,
-                lean: world.rider.ride.held.stick.0,
+                vel: world.sim.rider.ride.chassis.vel,
+                lean: world.sim.rider.ride.held.stick.0,
             },
-            grounded: world.rider.ride.air.on_ground,
-            speed: world.rider.ride.chassis.speed,
+            grounded: world.sim.rider.ride.air.on_ground,
+            speed: world.sim.rider.ride.chassis.speed,
         };
         let view = if presets == 0 {
             None
@@ -895,7 +888,7 @@ fn run() -> Result<(), String> {
                 dt,
                 &rider,
                 F(NEAR_CLIP),
-                &world.tables.ride.curve,
+                &world.sim.tables.ride.curve,
                 Switches {
                     // Nothing in the shell sets the engine bit that stops the look-ahead, and the
                     // window is one view: the split-screen pitch trim wants a window less than
@@ -968,7 +961,7 @@ fn run() -> Result<(), String> {
         drawn += draw_scene(&mut frame, &look, &assets, &actor, &camera);
         // And the overlay over the top of it, after everything with a depth test and before anything
         // that reads the frame: what the window shows and what `--shot` writes are the same picture.
-        hud.draw(&mut frame, world.input.pad(0), &world.rider, world.riding);
+        hud.draw(&mut frame, world.sim.input.pad(0), &world.sim.rider, world.riding);
         window.present(&frame.color, frame.width, frame.height)?;
 
         // One frame, on paper, for a run nobody is watching: the first by default, or the one
@@ -992,8 +985,8 @@ fn run() -> Result<(), String> {
                 frames as f32 / since.elapsed().as_secs_f32(),
                 triangles / frames.max(1) as usize,
                 // Feet a second to miles an hour, for a number a rider can read.
-                world.rider.ride.chassis.speed.0 * 0.681_818,
-                match (world.riding, world.rider.phase()) {
+                world.sim.rider.ride.chassis.speed.0 * 0.681_818,
+                match (world.riding, world.sim.rider.phase()) {
                     (false, _) => " (frozen)",
                     (_, Phase::Riding) => "",
                     (_, Phase::Down) => " (down)",
@@ -1034,7 +1027,7 @@ fn run() -> Result<(), String> {
     // different one. It is only printed for a taped session: a live ride is paced by the wall clock
     // and its hash would be a different number every time, which is a number worth nothing.
     if head.is_some() || args.record.is_some() {
-        println!("ride hash {:#018x}", game_sim::hash::of(&world.rider.ride));
+        println!("ride hash {:#018x}", game_sim::hash::of(&world.sim.rider.ride));
     }
 
     println!(

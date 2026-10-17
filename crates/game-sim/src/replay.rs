@@ -7,7 +7,7 @@
 //! back is one line, with a tick number and two values:
 //!
 //! ```text
-//! tick 413: ball.vel[1] -58.94952 (0xc26bcc4f) vs -58.949516 (0xc26bcc4e)
+//! tick 413: bike.vel[1] -58.94952 (0xc26bcc4f) vs -58.949516 (0xc26bcc4e)
 //! ```
 //!
 //! not a diff of two files. That is the whole design goal of this module: a failure a human reads in
@@ -135,12 +135,13 @@ impl Fixture {
 
 /// One field of the state, and what it held on the ticks it was sampled.
 ///
-/// A watch is one column of a capture: `./kit record`'s `ball_pos.y` becomes the port's `ball.pos[1]`,
+/// A watch is one column of a capture: `./kit record`'s `bike_xform.m31` becomes the port's
+/// `bike.pos[1]`,
 /// whose name is a path through the state's walk (see [`crate::hash`]). Samples need not be dense —
 /// a capture with `every = 4`, or with rows gated by a `when` condition, is sparse and that is fine.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Watch {
-    /// The path of the field in the state's walk, exactly as a [`Dump`] prints it: `ball.vel[1]`,
+    /// The path of the field in the state's walk, exactly as a [`Dump`] prints it: `bike.vel[1]`,
     /// `players[2].bike.spin`.
     pub path: String,
     /// `(tick, expected value)`, in ascending tick order. [`verify`] walks them with a cursor, so a
@@ -299,7 +300,7 @@ pub enum Reason {
 }
 
 impl fmt::Display for Divergence {
-    /// `tick 413: ball.vel[1] -58.94952 (0xc26bcc4f) vs -58.949516 (0xc26bcc4e)` — expected first (the
+    /// `tick 413: bike.vel[1] -58.94952 (0xc26bcc4f) vs -58.949516 (0xc26bcc4e)` — expected first (the
     /// recording), the port's value second, the whole failure on one line.
     fn fmt(&self, w: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(w, "tick {}: ", self.tick)?;
@@ -551,7 +552,7 @@ impl Fixture {
     /// seed 0x1234abcd
     /// frame 0x0000 0 0 0x7bbf5ca2d10eb072     # buttons, stick x, stick y, [state hash]
     /// frame 0x0010 -64 0 0x1d02c5e9b0b8a1ff
-    /// watch 413 ball.vel[1] float 0x3fc00000  # tick, path, kind, value
+    /// watch 413 bike.vel[1] float 0x3fc00000  # tick, path, kind, value
     /// watch 413 ticks uint 413
     /// ```
     ///
@@ -734,17 +735,17 @@ fn write_value(v: Value) -> String {
 ///
 /// The recorder writes a header row of column names, then one row per sampled frame whose first column
 /// is the game's own frame counter. Columns are named after the watch spec's fields, with a suffix per
-/// lane (`ball_pos.x`), so turning a capture into a fixture is a list of "this column is that field of
+/// lane (`bike_vel.x`), so turning a capture into a fixture is a list of "this column is that field of
 /// my state":
 ///
 /// ```
 /// # use game_sim::replay::Capture;
-/// let csv = "frame,ball_pos.x,ball_pos.y,laps\n\
+/// let csv = "frame,bike_vel.x,bike_vel.y,laps\n\
 ///            101234,0.5,3,0\n\
 ///            101235,1,5.85,0\n";
 /// let cap = Capture::parse(csv).expect("the recorder's own format");
 /// let watches = vec![
-///     cap.float("ball_pos.y", "ball.pos[1]").unwrap(),
+///     cap.float("bike_vel.y", "bike.vel[1]").unwrap(),
 ///     cap.uint("laps", "ticks").unwrap(),
 /// ];
 /// assert_eq!(watches[0].samples.len(), 2);
@@ -1316,8 +1317,7 @@ fn dense_ticks(cap: &Capture) -> Result<(), ParseError> {
 // Playing a tape back through the port
 // ---------------------------------------------------------------------------------------------------
 
-/// The port being driven by a recording: the input layer the pad frames go into, and the simulation it
-/// feeds.
+/// The port being driven by a recording: a whole tape's worth of frames handed to the simulation.
 ///
 /// One frame is [`Playback::advance`], which is the original's own order — the pad is read, *then* the
 /// simulation runs — so a press is latched before the frame that acts on it. That ordering is the whole
@@ -1325,15 +1325,13 @@ fn dense_ticks(cap: &Capture) -> Result<(), ParseError> {
 /// press and release timers, the one-frame event queue) and a replay that fed the simulation without
 /// ticking it would have no timers at all.
 ///
-/// What it does **not** yet do is give the simulation the frame's `dt` or the pad's strengths:
-/// [`Sim::tick`] takes an [`Input`] and no step. The input layer gets both and is proved against a
-/// capture through them (`tests/replay.rs`); closing that gap is the port's tick's business, not the
-/// harness's.
+/// A tape carries more than a [`Fixture`]'s [`Input`] can, and all of it reaches the simulation here:
+/// the frame's own `dt` and the pad's twelve pressures, through [`Sim::frame`]. That is the one way
+/// riding a tape differs from replaying a fixture of the same session — the fixture's buttons rebuild
+/// a report with every press at full strength and simulate at the 30 Hz clamp ([`Sim::tick`]).
 #[derive(Clone, Debug)]
 pub struct Playback {
-    /// The input layer, read once a frame before the simulation.
-    pub input: Manager,
-    /// The simulation.
+    /// The simulation, which is where the input layer lives.
     pub sim: Sim,
 }
 
@@ -1346,15 +1344,19 @@ impl Playback {
 
     /// A run from a state: a session that starts in the middle of a level, from a save state's RAM.
     pub fn from_state(sim: Sim) -> Playback {
-        let mut input = Manager::new();
-        input.pad_mut(0).connected = true;
-        Playback { input, sim }
+        Playback { sim }
     }
 
-    /// One frame, in the original's order: read the pad, then simulate.
+    /// One frame, in the original's order: read the pad, then simulate. Both halves are
+    /// [`Sim::frame`], over a flat floor — a tape of a session on a *track* is ridden by the shell,
+    /// which has the track.
     pub fn advance(&mut self, frame: &PadFrame) {
-        self.input.tick(frame.dt(), &frame.reports);
-        self.sim.tick(frame.input());
+        self.sim.tick_frame(frame.dt(), &frame.reports);
+    }
+
+    /// The input layer this run is feeding, which is the simulation's own.
+    pub fn input(&self) -> &Manager {
+        &self.sim.input
     }
 
     /// Which tick the run is on, counting from the state it started at.
@@ -1362,13 +1364,11 @@ impl Playback {
         self.sim.ticks
     }
 
-    /// The whole port in 64 bits: the simulation's state hash, folded on through the input layer's.
-    ///
-    /// Not what a [`Fixture`]'s hashes are — those are [`Sim::hash`] alone, because the original's
-    /// input layer is a separate capture — so this is for comparing one playback against another (two
-    /// platforms, two builds), where a divergence in the timers matters as much as one in the physics.
+    /// The whole port in 64 bits: the simulation's state hash, which since P5 covers the input layer
+    /// too — the pads are part of the state the frame reads, and a divergence in a press timer is a
+    /// divergence.
     pub fn hash(&self) -> u64 {
-        hash::of_with_seed(&self.input, hash::of(&self.sim))
+        hash::of(&self.sim)
     }
 }
 
