@@ -69,6 +69,15 @@
 //! or closing the window quits. The same controls are on the keyboard for a machine with no pad:
 //! X/Space, Z, the arrow keys, C/V/D for the three trick buttons, Q+E for the reset, Return.
 //!
+//! **The throttle is a pressure and not a switch**, because the game reads Cross from its pressure
+//! byte: part throttle out of a corner is a fraction of that byte and the port has always read it as
+//! one. What has to be arranged is a host that can *ask* for a fraction (P9, [`pad`]) — almost no pad
+//! sold since the DualShock 2 reports a face button as anything but a bit. So: `--pad-pressure` says
+//! which joystick axes a device publishes its buttons' own pressures on, where it publishes them;
+//! `--throttle r2` rides gas on a trigger instead, which is travel every pad has, giving up that
+//! trigger's own control for the session; and the keyboard's throttle key ramps open over a third of
+//! a second rather than stepping, so a stab is part throttle on a machine with no pad at all.
+//!
 //! **H** draws the riding overlay ([`hud`]), which `--hud` starts on: the sixteen controls as the
 //! port's own input manager holds them, both sticks where its dead zone put them, and beside them
 //! the numbers the ride is running on. It is debugging furniture and matches nothing on the disc,
@@ -135,7 +144,7 @@ use ps2_float::{F, Vf};
 use ground::Ground;
 use hud::Hud;
 use moment::{Moment, Shot};
-use pad::Pads;
+use pad::{Pads, Throttle, Wiring};
 use window::{Window, key};
 
 /// The game's own frame rate. The simulation is not fixed to it — it is handed the wall clock's own
@@ -312,6 +321,10 @@ struct Args {
     /// a `.p2m2`. The file cannot say, and it is a fact about the recording rather than about the
     /// game, so there is nothing better than asking.
     phase: TickPhase,
+    /// `--throttle` and `--pad-pressure`: how the host's pad is wired to the throttle (P9). Both are
+    /// facts about the device in somebody's hands — whether its face buttons travel, and which axis
+    /// a driver publishes each button's pressure on — so neither can be guessed from here.
+    wiring: Wiring,
 }
 
 fn run() -> Result<(), String> {
@@ -784,10 +797,29 @@ fn run() -> Result<(), String> {
         args.scale,
         "openmx — freeride",
     )?;
-    let mut pads = Pads::open(args.pad.as_deref());
+    let mut pads = Pads::open(args.pad.as_deref(), args.wiring.clone());
     match &pads.name {
         Some(name) => println!("pad: {name}"),
         None => println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)"),
+    }
+    // How the throttle is wired, when it is not the plain binding: a session's own log should say,
+    // because a rider who mapped the wrong axis sees a bike that will not pull and no reason why.
+    match args.wiring.throttle {
+        Throttle::Cross => {}
+        Throttle::Trigger(control) => println!(
+            "throttle: the {0} trigger's travel — part throttle, and no {0} control this session",
+            control.name(),
+        ),
+    }
+    let pressures: Vec<String> = args
+        .wiring
+        .pressure
+        .iter()
+        .enumerate()
+        .filter_map(|(axis, c)| c.map(|c| format!("{axis}:{}", c.name())))
+        .collect();
+    if !pressures.is_empty() {
+        println!("pad pressures: {}", pressures.join(" "));
     }
 
     // ---- the loop ------------------------------------------------------------------------------
@@ -1234,6 +1266,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         record: None,
         play: None,
         phase: TickPhase::default(),
+        wiring: Wiring::default(),
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
     };
     let mut argv = std::env::args().skip(1);
@@ -1266,6 +1299,19 @@ fn parse_args() -> Result<Option<Args>, String> {
                     "second" => TickPhase::Second,
                     other => return Err(format!("--phase: first or second, not {other}")),
                 }
+            }
+            "--throttle" => {
+                args.wiring.throttle = match next("cross, r2 or l2")?.as_str() {
+                    "cross" => Throttle::Cross,
+                    "r2" => Throttle::Trigger(Control::R2),
+                    "l2" => Throttle::Trigger(Control::L2),
+                    other => return Err(format!("--throttle: cross, r2 or l2, not {other}")),
+                }
+            }
+            "--pad-pressure" => {
+                args.wiring.pressure =
+                    Wiring::parse_pressures(&next("an axis map, like ds2@8, or none")?)
+                        .map_err(|why| format!("--pad-pressure: {why}"))?;
             }
             "--trace-brake" => args.trace_brake = true,
             "--trace-dt" => {
@@ -1314,6 +1360,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--moment FILE OUT.png] [--no-wrecks] [--hud]\n\
                             [--shot-frame N]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
+                            [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                      \n\
                      Rides the freeride area from the disc named in kit.toml.\n\
                      Cross throttle, Square brake, R2 front brake, L2 clutch, left stick steers\n\
@@ -1322,6 +1369,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      A trick is a gesture: hold Circle, Triangle and/or R1 and push the d-pad.\n\
                      L3 and R3 clicked together put the bike back on the start line.\n\
                      On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, Q+E reset.\n\
+                     The throttle is a pressure and not a switch (the game reads Cross from its\n\
+                     pressure byte): a key ramps it, --throttle r2 rides it on a trigger instead,\n\
+                     giving up that trigger's own control, and --pad-pressure says which joystick\n\
+                     axes a pad reports its buttons' own pressures on.\n\
                      H toggles the riding overlay, which --hud starts on.\n\
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
                      rider, tumbles the bike and puts you back on it); --moment draws one frame posed\n\

@@ -3224,6 +3224,154 @@ fn the_capture_is_the_recording_played_back_and_the_game_reads_the_second_field(
     }
 }
 
+/// `GasRateLimit` in `Bike\\Race125P.phy` — the bike the human rode — read off the disc with the
+/// port's own `.phy` reader. Ten a second, so the ride walks the throttle from shut to pinned in a
+/// tenth of a second: three ticks of the engine's 30 Hz cap, whatever the pad did.
+const GAS_RATE_LIMIT: F = F(10.0);
+
+/// **How much of a human's minute is part throttle.** P9's third half: the answer is the recording's,
+/// and it is not the one the task expected.
+///
+/// The question is whether the throttle wants to be a pressure in this port — the original reads Cross
+/// from its pressure byte, so the disc could ride part throttle, and the shell could not. The one
+/// minute of real play the project has is `first_recording.p2m2`, and asked directly it says:
+///
+/// * **Every pressure byte in it is 0 or 255.** Not just Cross — all twelve analogue controls, on all
+///   1,810 ticks of the phase the game read. The human's throttle was a switch.
+/// * **The left stick in the same file is analogue**, 154 distinct bytes of it. So this is
+///   not a keyboard recording: it is somebody on a pad whose sticks travel and whose face buttons do
+///   not, which is every pad sold since the DualShock 2 — and PCSX2 writes what the host pad gave it.
+/// * **The throttle moved 18 times in sixty seconds** — nine stabs, the longest held for 346 ticks
+///   (11.5 s) and the shortest for 8 — so what the rider did with it was pin it and shut it.
+/// * **What part throttle there is, the bike makes itself.** Run the recording through the port's own
+///   poll and the 125's `GasRateLimit`, and `Held::gas` is strictly between shut and pinned on 54 of
+///   the 1,810 ticks: three ticks after each of the 18 edges, 3% of the minute and not one tick of it
+///   asked for by the rider.
+///
+/// That is a measurement and not a verdict on the shell: a recording made through PCSX2 can only
+/// carry what the host pad reported, so this says nothing about what a DualShock 2 on a PlayStation 2
+/// would have written, and the game's own binding still reads a pressure. What it does say is that
+/// the part throttle this project can *prove* the original was ridden on is the rate limit's, and that
+/// a shell with no analogue throttle at all was not failing to reproduce anything in this file. That
+/// 3% is the floor the shell's keyboard ramp lifts: it opens the throttle over 0.3 s against the
+/// limit's 0.1, so a stab on a key spends nine ticks on part throttle where this minute spent three.
+#[test]
+fn the_human_recording_is_a_switch_and_the_part_throttle_in_it_is_the_rate_limit_s() {
+    use game_sim::input::Manager;
+    use game_sim::phy::Joystick;
+    use game_sim::ride::{Controls, Held};
+
+    let rpath = private_dir("recordings").join(RECORDING);
+    let Ok(bytes) = std::fs::read(&rpath) else {
+        println!(
+            "{} is not in this worktree, so how the human rode the throttle cannot be counted; \
+             copy it in from the main checkout's context/recordings/",
+            rpath.display(),
+        );
+        return;
+    };
+    let movie = replay::P2m2::parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", rpath.display()));
+    // The phase the game read, measured from this file and its save state against RAM (S8).
+    let phase = replay::TickPhase::Second;
+    let ticks = movie.ticks(phase);
+    // One tick fewer than [`RECORDING_TICKS`]: the second-field phase starts a field in, so the
+    // file's last field has no partner and the tape is 1,810 ticks rather than 1,811.
+    assert_eq!(ticks, RECORDING_TICKS - 1, "3621 fields, two a tick, the first one skipped");
+
+    // Every pressure byte of every analogue control, and the throttle's own three counts.
+    let mut between = Vec::new();
+    let (mut shut, mut pinned) = (0usize, 0usize);
+    // The left stick's bytes, to tell a pad from a keyboard: report byte 6 is left X.
+    let mut stick_bytes = std::collections::BTreeSet::new();
+    // The gas the port's poll makes of it, and the gas the bike is left holding after the limit.
+    let mut manager = Manager::connected();
+    let joystick = Joystick { gas_rate_limit: GAS_RATE_LIMIT, ..Joystick::default() };
+    let mut held = Held::default();
+    let dt = replay::CAPPED_DT;
+    let (mut asked_part, mut held_part, mut held_pinned) = (0usize, 0usize, 0usize);
+    // And how often the throttle changed its mind at all.
+    let (mut edges, mut stabs) = (0usize, 0usize);
+    let mut was_on = false;
+
+    for tick in 0..ticks {
+        let field = tick * replay::P2M2_FIELDS_PER_TICK + phase.offset();
+        let report = movie.field(field, 0);
+        for control in Control::ALL {
+            let binding = control.binding();
+            if !binding.is_analogue() {
+                continue;
+            }
+            let pressure = report.pressure(binding.pressure);
+            if pressure != 0 && pressure != 0xff {
+                between.push((tick, control, pressure));
+            }
+        }
+        let throttle = report.pressure(Control::Cross.binding().pressure);
+        match throttle {
+            0 => shut += 1,
+            0xff => pinned += 1,
+            _ => {}
+        }
+        stick_bytes.insert(report.0[6]);
+
+        manager.tick(dt, &[report, movie.field(field, 1)]);
+        let asked = Controls::from_pad(manager.pad(0));
+        if asked.gas > F::ZERO && asked.gas < F::ONE {
+            asked_part += 1;
+        }
+        held.step(&asked, &joystick, dt);
+        if held.gas > F::ZERO && held.gas < F::ONE {
+            held_part += 1;
+        } else if held.gas == F::ONE {
+            held_pinned += 1;
+        }
+
+        let on = throttle != 0;
+        if on != was_on {
+            edges += 1;
+            stabs += usize::from(on);
+            was_on = on;
+        }
+    }
+
+    println!(
+        "the human's throttle over {ticks} ticks: {pinned} pinned, {shut} shut, {} between, \
+         {edges} edges in {stabs} stabs; the rate limit holds part throttle on {held_part} ticks \
+         ({:.1}%) and full on {held_pinned}; left stick {} distinct bytes",
+        between.len(),
+        100.0 * held_part as f32 / ticks as f32,
+        stick_bytes.len(),
+    );
+
+    assert!(
+        between.is_empty(),
+        "{} of this recording's pressure bytes are between the stops (first: tick {}, {} at {:#x}) \
+         — a human's part throttle is in this file after all, and the counts in this test's own \
+         comment are of a different recording",
+        between.len(),
+        between[0].0,
+        between[0].1.name(),
+        between[0].2,
+    );
+    assert_eq!((pinned, shut), (1_303, 507), "the throttle's own two states");
+    assert_eq!(asked_part, 0, "a switch asks for nothing in between, by definition");
+    assert_eq!((edges, stabs), (18, 9), "how often the human touched the throttle");
+    assert!(
+        stick_bytes.len() > 100,
+        "the left stick holds {} distinct bytes, so this recording's source may be digital \
+         throughout and the finding above — an analogue stick beside a switched throttle — is not \
+         what this file shows",
+        stick_bytes.len(),
+    );
+    assert_eq!(
+        held_part, 54,
+        "the 125's rate limit leaves part throttle on {held_part} of {ticks} ticks, not 54 — three \
+         ticks either side of each of the {edges} edges: either the limit, the step or the recording \
+         is not the one this was measured on"
+    );
+    assert_eq!(held_pinned, 1_276, "and full throttle on the rest of the time the button was down");
+}
+
 // ---------------------------------------------------------------------------------------------------
 // A5 — one whole frame of the original's bike, compared against the port's same frame
 // ---------------------------------------------------------------------------------------------------
