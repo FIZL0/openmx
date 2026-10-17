@@ -246,6 +246,13 @@ pub struct Chassis {
     /// Every node's transform as the last [`Chassis::frame`] left it — the pose, the drives and the
     /// tree, composed. Empty until the first frame.
     pub world: Vec<M4>,
+    /// The last frame's blend named a clip, so the live pose is a pose and not a leftover.
+    ///
+    /// Not [`crate::anim::Stance::drawn`], which is narrower: a clip that has *run out* writes nothing
+    /// and still holds the pose it ended on, and that pose must be kept. This is the other case — a
+    /// state with no clip behind it at all, which every grounded row of a bike's table is
+    /// ([`crate::chassis::poses_the_chassis`]).
+    pub posing: bool,
 }
 
 impl Chassis {
@@ -283,6 +290,7 @@ impl Chassis {
             front_roll: Roll::default(),
             rear_roll: Roll::default(),
             world: Vec::new(),
+            posing: false,
         })
     }
 
@@ -296,6 +304,7 @@ impl Chassis {
     /// back `None`.
     pub fn frame(&mut self, dt: F, want: i32, r: &Request, drive: Drive) -> va::Frame {
         let frame = self.stance.frame(dt, want, r);
+        self.posing = crate::chassis::poses_the_chassis(frame.blend, &self.stance.player);
         self.drive(dt.0, drive);
         frame
     }
@@ -307,7 +316,18 @@ impl Chassis {
     /// the chassis' nodes after the blend, and they run whether or not the blend wrote anything. A
     /// bike whose every clip is missing still has a working suspension.
     pub fn drive(&mut self, dt: f32, d: Drive) {
-        let mut local = self.stance.set.skeleton.locals(&self.stance.set.pose);
+        // The pose buffer is only a pose when a clip wrote one. A bike's table has no clip for any
+        // grounded state, so the rows a ride spends its life in name nothing and write nothing — and
+        // what stays in the buffer is the last airborne clip, root channel and all. Drawing the
+        // drives over *that* puts the whole bike wherever the crossup threw it and leaves it there
+        // (V20). With no clip behind the frame the chassis is the shape it was modelled in, and the
+        // drives are the only thing that moves it.
+        let rest = crate::skin::Pose::new(self.stance.set.skeleton.len());
+        let live = match self.posing {
+            true => &self.stance.set.pose,
+            false => &rest,
+        };
+        let mut local = self.stance.set.skeleton.locals(live);
         let front = self.front_roll.step(dt, d.front_spin);
         let rear = self.rear_roll.step(dt, d.rear_spin);
         let shape = self.shape;

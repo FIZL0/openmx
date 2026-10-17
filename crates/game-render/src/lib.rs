@@ -17,6 +17,7 @@
 //!   scene.rs     `.scn` scenes (start point, fog, lights, 1506 placed props) and `.psm` materials
 //!   world.rs     a track in memory: models, materials and textures matched up by name, and drawn
 //!   rider.rs     the rider: its `.sub`, the `.mcf` it names, its skeleton and how it bolts on
+//!   chassis.rs   where the renderer put the bike, measured against where the solver put it
 //!   raster.rs    a depth-buffered, perspective-correct, textured triangle rasteriser
 //!   png.rs       a PNG writer, so a frame can be looked at
 //!   mat.rs       vectors and 4x4 transforms in the files' own convention
@@ -27,6 +28,7 @@
 //! where a field is still unexplained the doc says so rather than inventing a name for it.
 
 pub mod anim;
+pub mod chassis;
 pub mod disc;
 pub mod ini;
 pub mod mat;

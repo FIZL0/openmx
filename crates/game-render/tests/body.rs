@@ -12,7 +12,11 @@ use game_render::rider::{
     AIR_POSES, Body, FOOT_ANCHORS, HAND_ANCHORS, HOLD_WITHIN, LET_GO_AT, LIMBS, Sex, Skeleton,
     anchors_of, hold_on, stunt_name,
 };
+use game_render::chassis::{grips, limb_names, measure};
+use game_render::ini;
+use game_render::scene::Vehicle;
 use game_render::skin::skin;
+use game_render::vehicle::{Chassis, Drive, FRONT, REAR, params};
 use game_render::mat::v3;
 use game_render::world::{Camera, vertical_fov};
 use game_sim::ride::Controls;
@@ -956,3 +960,181 @@ fn a_frame_of_the_shells_own_driving_poses_the_body_on_the_bike() {
         r.ride.chassis.speed.0 * 0.681_818
     );
 }
+
+// ---------------------------------------------------------------------------------------------------
+// V20: the drawn bike against the solved one
+// ---------------------------------------------------------------------------------------------------
+
+/// One copy of the bike's archive, for the chassis' own animation set.
+fn bike_res(disc: &mut Disc) -> Res {
+    let name = member(disc, &format!("{A_BIKE}.res")).expect("the disc has no bike archive");
+    disc.res(&name).expect("the bike archive does not open")
+}
+
+/// The bike's build, which is where the chassis' animation set is named.
+fn sub(disc: &mut Disc) -> Vehicle {
+    let res = bike_res(disc);
+    let bytes = res.read_suffix(&format!("{A_BIKE}.sub")).expect("the bike archive has no .sub");
+    Vehicle::parse(&ini::text(&bytes))
+}
+
+/// The chassis' geometry: the `.psg` the set names, which is `bike.psg` on every bike on this disc.
+fn chassis_model(disc: &mut Disc) -> Model {
+    let res = bike_res(disc);
+    let bytes = res.read_suffix("bike.psg").expect("the bike archive has no chassis");
+    Model::parse(&bytes).expect("the chassis parses")
+}
+
+/// **V20.** A frame of the shell's own ride draws the wheels on the ground the solver found and the
+/// rider's hands on the bars.
+///
+/// Three things the drawing side has to agree with the ground step about, and until this test none
+/// of the three was checked: the drawn chassis origin against `Ride::position`, each drawn wheel's
+/// lowest vertex against the contact the suspension's own ray found under it, and the posed body's
+/// four anchors against the chassis' own. Two of the three were wrong at once, which is why the bike
+/// was buried to its seat with a rider standing above it while the solver's own numbers said it was
+/// sitting on its springs.
+///
+/// The fixture drops the bike in from `DROP` on purpose. A ride that starts on the ground never
+/// shows the first bug: the bike's table names a clip for the *airborne* states and nothing at all
+/// for the grounded ones, so the pose buffer is only ever poisoned by a bike that has been in the air
+/// — and then every grounded frame afterwards draws the chassis wherever the last airborne clip's
+/// root channel left it. Four seconds is the brief's own number and is long enough to land and settle.
+#[test]
+fn a_frame_of_the_shells_own_ride_draws_the_bike_where_the_solver_put_it() {
+    let Some(mut disc) = disc() else { return };
+    let model = chassis_model(&mut disc);
+    let mcf = sub(&mut disc).mcf;
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let mut body = body(&mut disc, &set, &p);
+    let mut chassis =
+        match Chassis::load(vec![bike_res(&mut disc)], &mcf, "bike_", &set.stunts, params()) {
+            Ok(c) => c,
+            Err(why) => panic!("the chassis did not load: {why}"),
+        };
+
+    // The shell's own wheel mounts: the chassis model's `TireFront` and `TireRear` nodes, which is
+    // what `bike_attach_nodes` writes into the simulation's wheels. Taking the `.phy`'s positions
+    // instead would hand the solver a bike of a different size from the one being drawn.
+    let at = |name: &str, fallback: Vf| match chassis.node_rest(name) {
+        Some(v) => Vf::new(v.x, v.y, v.z, 1.0),
+        None => fallback,
+    };
+    let mounts = (
+        at(FRONT, p.front.body_tire_force_position),
+        at(REAR, p.rear.body_tire_force_position),
+    );
+    let mut r = rider::Rider::new(
+        &p,
+        mounts,
+        Vf::new(0.0, DROP, 0.0, 1.0),
+        Vf::new(0.0, 0.0, 1.0, 0.0),
+        set.clone(),
+    );
+    r.sense.wrecks_enabled = false;
+    r.body_rates = game_render::vehicle::params();
+
+    // Four seconds of the shell's loop with the window taken off, in the shell's own order: the ride,
+    // then the body off what the ride wrote, then the chassis off the same.
+    let mut floor = Flat::default();
+    let hands = Controls { gas: F::ONE, ..Controls::default() };
+    let mut was_airborne = false;
+    for _ in 0..4 * 60 {
+        r.frame(&p, &tables, &hands, FRAME, &mut floor);
+        body.ride(FRAME, &mut r, &hands, rider::Gate::default());
+        let want = Chassis::want(&r.ride, &r.tricks);
+        let request = Chassis::request(&r.ride, &r.tricks);
+        chassis.frame(FRAME, want, &request, Drive::of(&r.ride));
+        was_airborne |= !r.ride.air.on_ground;
+    }
+    assert!(was_airborne, "the bike never left the ground, so the stale pose was never written");
+    assert!(r.state.wreck.is_none(), "the ride wrecked, so there is no ridden frame to measure");
+    assert!(r.ride.air.on_ground, "the bike is still in the air four seconds in");
+    assert!(body.posed, "four seconds of riding never posed the body");
+
+    let seat = measure(&chassis, &model, &r.ride, Some(&body));
+    println!(
+        "four seconds in: origin {:.4} ft off, front {:?}, rear {:?}, held {:?}",
+        seat.origin,
+        seat.tyres[0].map(|t| t.clearance),
+        seat.tyres[1].map(|t| t.clearance),
+        seat.held,
+    );
+
+    // 1 — the drawn chassis origin is the ride's. Not a tolerance: the two are the same number put
+    // through the same matrix, and anything else is the pose buffer leaking into the placement.
+    assert!(seat.origin < 1e-3, "the drawn chassis is {:.3} ft from where the solver put it", seat.origin);
+
+    // 2 — each loaded wheel's lowest drawn vertex is on the ground the solver found under it.
+    for (which, tyre) in ["front", "rear"].iter().zip(seat.tyres) {
+        let tyre = tyre.unwrap_or_else(|| panic!("the {which} wheel is not in contact"));
+        assert!(
+            tyre.clearance.abs() < ON_THE_GROUND,
+            "the {which} wheel is {:.3} ft off the contact at {:?} (drawn at {:?})",
+            tyre.clearance,
+            tyre.contact,
+            tyre.lowest,
+        );
+    }
+
+    // 3 — the body's hands are on the bars and its feet on the pegs, on this frame, against the
+    // chassis as this frame posed it.
+    for (name, held) in limb_names().iter().zip(seat.held) {
+        let held = held.unwrap_or_else(|| panic!("the limb at {name} was not solved"));
+        assert!(held < AN_INCH / 3.0, "{name} ended {held:.4} ft from the chassis' own anchor");
+    }
+
+    // 4 — and the targets have to be *this* frame's. The shell read the four anchors once, at load,
+    // off the bind pose. `Dummy_Hand_L` and `Dummy_Hand_R` hang off `Handlebars`, which the steering
+    // drive turns, so a turned bar moves both grips out from under a rider still aimed at the bind
+    // pose — and `hold_on` will happily put the hands exactly on the stale target, which is why the
+    // residual above cannot catch it and the gap itself has to be measured.
+    //
+    // The bars are turned by hand here rather than by the ride. `Wheel::steer_angle` is only ever
+    // written by the hinge integration, which runs on the frames the bike is being balanced on
+    // (`game_sim::wheel::integrate`); the commanded angle the ground step works out is carried in
+    // `mv.steer_command` and nothing in the port copies it across, so a ride like this one hands the
+    // drive a zero. That is a gap in the ported steering and not in the drawing, and what is being
+    // measured here is the drawing: the drive is given the lock angle off the bike's own `.phy`,
+    // which is what the shell will hand it the day the hinge is finished.
+    let lock = p.front.max_steer_angle.0;
+    assert!(lock > 0.0, "the bike's .phy has no steering lock to turn the bars with");
+    chassis.drive(FRAME.0, Drive { steer_angle: lock, ..Drive::of(&r.ride) });
+    let bind = anchors_of(&chassis.stance.set.skeleton, &[]);
+    let live = grips(&chassis);
+    let mut drift = 0.0f32;
+    for (i, name) in limb_names().iter().enumerate() {
+        let (Some(bind), Some(live)) = (bind[i], live[i]) else {
+            panic!("{name} is not on the chassis")
+        };
+        let off = live.sub(bind).len();
+        println!("  {name}: bars over, the live anchor is {off:.4} ft from the bind pose's");
+        drift = drift.max(off);
+    }
+    assert!(
+        drift > AN_INCH,
+        "with the bars at the lock the chassis' anchors are still within {drift:.4} ft of their \
+         bind places: this frame cannot tell a live read from the read-once the shell used to do"
+    );
+    // The hands are on them all the same, which is the whole point of reading them live. Within an
+    // inch rather than the thousandth of a foot the straight-ahead frame gets: half a foot is far
+    // enough for `rider::holding` to start easing the hold off, which is it doing its job — an arm
+    // at full stretch is pulled towards the grip and not snapped onto it.
+    let steered = measure(&chassis, &model, &r.ride, Some(&body));
+    for (name, held) in limb_names().iter().zip(steered.held) {
+        let held = held.unwrap_or_else(|| panic!("the limb at {name} was not solved"));
+        println!("  {name}: bars over, the limb ends {held:.4} ft from it");
+        assert!(held < AN_INCH, "with the bars over, {name} ended {held:.4} ft off its anchor");
+    }
+}
+
+/// How close a drawn wheel has to be to the contact the solver found under it.
+///
+/// Not zero, and the reason is in the two models rather than in either being wrong. The suspension
+/// solves a ray **down the flattened ground normal** and reports where it met the ground; the fork
+/// the renderer slides the wheel up is raked back some degrees from vertical, so a compressed front
+/// wheel is drawn a little behind where a vertical slide would put it and meets a sloped ground a
+/// little lower. Half an inch covers it on the flat and the rake is what is left.
+const ON_THE_GROUND: f32 = AN_INCH;
