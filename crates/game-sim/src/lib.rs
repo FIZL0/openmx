@@ -221,6 +221,16 @@ impl Sim {
         self.frame(dt, reports, &mut Flat::default())
     }
 
+    /// [`Sim::tick`] over a world the caller owns: the fixed 30 Hz step and a fixture's own
+    /// [`Input`], but the ground under the wheels is whatever was handed in.
+    ///
+    /// This is the step [`replay::verify_in`] drives, and the difference between replaying a
+    /// *recording* and replaying a ride: a recording of the original is a minute over a track at
+    /// some height, and over [`Flat`]'s floor at y = 0 the same input free-falls instead (S28).
+    pub fn tick_in(&mut self, input: Input, world: &mut dyn World) -> crate::rider::Frame {
+        self.frame(F(tick::DeltaTime::CAP_30), &Sim::reports(input), world)
+    }
+
     /// A fixture's [`Input`] as the pad reports the game would have read.
     ///
     /// Lossy in the direction that matters and exact in the direction a fixture is used: a digital

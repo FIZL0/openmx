@@ -67,6 +67,19 @@
 //!   no capture session in it at all — somebody rode for a minute, and the recording is replayable on
 //!   the original whenever the port changes.
 //!
+//! # The world under it
+//!
+//! A fixture is the *rider's* half of a session: a start state, the input, and what the state was. The
+//! other half is the ground it was ridden over, and that cannot be in a fixture — the world is a
+//! track's terrain and its collision meshes borrowed out of the user's own disc ([`crate::world`]), not
+//! a value a file can carry. So a fixture *names* it ([`Fixture::world`], [`Where`]) and the caller
+//! hands the thing itself to [`verify_in`]. [`verify`] is the flat-floor replay, which is right for a
+//! fixture the port recorded against itself and wrong for a recording of the original: the acceptance
+//! run spent S8 to S28 diverging at tick 1 because the original's bike was riding Free09 at a ground
+//! height of 208 and the replay was free-falling towards [`crate::world::Flat`]'s floor at y = 0. A
+//! fixture that names a world and is replayed by `verify` is refused for that reason
+//! ([`Reason::WrongWorld`]) rather than quietly dropped 208 units.
+//!
 //! A fixture is a text file ([`Fixture::parse`], [`Fixture::to_text`]) so a recorded session can be
 //! stored and replayed later. Those files hold values read out of the game, so they are game data:
 //! they live in the git-ignored `context/`, never in the repository — see `tests/replay.rs` for how a
@@ -113,6 +126,39 @@ pub struct Fixture {
     pub hashes: Vec<u64>,
     /// Named fields of the state with the values they were sampled at. Any number, any ticks.
     pub watches: Vec<Watch>,
+    /// **Which world the recording was ridden on**, when it was ridden on one: the disc's own names
+    /// for the track and the area, resolved into a [`crate::world::World`] by whoever has the disc
+    /// open and handed to [`verify_in`].
+    ///
+    /// `None` is a fixture with no ground of its own — every fixture the port records against itself,
+    /// which rides [`crate::world::Flat`] because what is being replayed there is the rider and not
+    /// the track. A fixture that names one cannot be replayed by [`verify`] at all: see the module's
+    /// own note on the world, and [`Reason::WrongWorld`].
+    ///
+    /// Not expressible in the text format yet, for the same reason [`Fixture::start`] is not.
+    pub world: Option<Where>,
+}
+
+/// Which world a session was ridden on, in the disc's own spelling: a track's container and one area
+/// inside it.
+///
+/// Two names rather than one because a track archive can hold more than one scene, and the scene is
+/// what carries the terrain's layout, the props and the start line — the area, in the game's own
+/// vocabulary. Names and not file contents: a fixture is data a test can hold, and a world is
+/// megabytes of somebody's disc.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Where {
+    /// The track's container as `MX.PSR` spells it: `Tracks\free09.res`.
+    pub track: String,
+    /// The area's scene member inside that container, as the archive spells it:
+    /// `tracks\free09\free09.scn`.
+    pub area: String,
+}
+
+impl fmt::Display for Where {
+    fn fmt(&self, w: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(w, "{} ({})", self.area, self.track)
+    }
 }
 
 impl Fixture {
@@ -297,6 +343,12 @@ pub enum Reason {
     /// frame, samples out of tick order, or more hashes than there are frames. A fixture that quietly
     /// checks less than it claims is the one failure mode a passing test cannot show you.
     Unreached { what: String, tick: u64 },
+    /// The fixture was ridden on a named world ([`Fixture::world`]) and the replay was handed a flat
+    /// floor. The caller's problem, not the port's, and reported at tick 0 because none of the run
+    /// means anything: a recording of a ride over a track at a height of 208 replayed over
+    /// [`crate::world::Flat`] is a bike in free fall from the first frame. Call [`verify_in`] with the
+    /// world the fixture names.
+    WrongWorld { want: Where },
 }
 
 impl fmt::Display for Divergence {
@@ -318,13 +370,18 @@ impl fmt::Display for Divergence {
             Reason::Unreached { what, tick } => {
                 write!(w, "the run ended with {what} at tick {tick} unchecked")
             }
+            Reason::WrongWorld { want } => write!(
+                w,
+                "this recording was ridden on {want} and the replay was given a flat floor — \
+                 `verify_in` takes the world, `verify` is the flat one",
+            ),
         }
     }
 }
 
 impl std::error::Error for Divergence {}
 
-/// **Replay a fixture.** Returns the final state, or the first tick that disagreed.
+/// **Replay a fixture over a flat floor.** Returns the final state, or the first tick that disagreed.
 ///
 /// Every tick of the fixture is checked: the watches that cover it (which name their field when they
 /// differ) and then its hash. A tick with neither is simulated and not examined — which is normal,
@@ -332,7 +389,33 @@ impl std::error::Error for Divergence {}
 ///
 /// Cost: one [`Dump`] on the ticks that have watch samples, nothing but the hash on the rest, so a
 /// fixture with four watched fields and a hash per frame runs at a few hundred thousand ticks a second.
+///
+/// A fixture that names the world it was ridden on ([`Fixture::world`]) is **refused** here with
+/// [`Reason::WrongWorld`] — replay it with [`verify_in`] and the world it names.
 pub fn verify(f: &Fixture) -> Result<Sim, Divergence> {
+    if let Some(want) = &f.world {
+        return Err(Divergence {
+            tick: 0,
+            reason: Reason::WrongWorld { want: want.clone() },
+        });
+    }
+    verify_in(f, &mut crate::world::Flat::default())
+}
+
+/// **Replay a fixture over a world.** [`verify`]'s own body, with the ground the recording was ridden
+/// over instead of a level floor at y = 0.
+///
+/// The world is an argument and not part of the fixture because it is the one thing in a ride that
+/// cannot be a snapshot ([`Sim::frame`] says the same): the ride asks it where the surface under each
+/// wheel is and what the sweep hits, and the answers come out of a track's terrain and its collision
+/// meshes, borrowed from the user's own disc. The fixture carries the *name* of it
+/// ([`Fixture::world`]) so that a reader with the disc open can produce the right one, and so that a
+/// recording of the original cannot be replayed over the wrong ground by accident.
+///
+/// It takes `&mut dyn World` rather than a generic because the two worlds in this project are not
+/// interchangeable in size — a flat floor is two fields and a track is a heightfield and three hundred
+/// collision meshes — and because the ride's own frame already takes it that way.
+pub fn verify_in(f: &Fixture, world: &mut dyn crate::world::World) -> Result<Sim, Divergence> {
     let mut sim = f.initial();
     // One cursor per watch into its samples, advanced as the run passes them. Keeps the per-tick cost
     // proportional to the watches, not to the length of the recording.
@@ -340,7 +423,7 @@ pub fn verify(f: &Fixture) -> Result<Sim, Divergence> {
 
     check_watches(f, &mut cursor, 0, &sim)?;
     for (k, &input) in f.inputs.iter().enumerate() {
-        sim.tick(input);
+        sim.tick_in(input, world);
         let tick = k as u64 + 1;
         check_watches(f, &mut cursor, tick, &sim)?;
         if let Some(&want) = f.hashes.get(k) {
@@ -437,9 +520,16 @@ fn check_watches(
 /// }
 /// ```
 pub fn state_at(f: &Fixture, tick: u64) -> Sim {
+    state_at_in(f, tick, &mut crate::world::Flat::default())
+}
+
+/// [`state_at`] over the world the fixture was ridden on, which is the one that answers the question
+/// for a recording of the original: the same re-run [`verify_in`] does, stopped at `tick` and
+/// checking nothing.
+pub fn state_at_in(f: &Fixture, tick: u64, world: &mut dyn crate::world::World) -> Sim {
     let mut sim = f.initial();
     for &input in f.inputs.iter().take(tick as usize) {
-        sim.tick(input);
+        sim.tick_in(input, world);
     }
     sim
 }
@@ -528,6 +618,9 @@ fn record_at(
         inputs: inputs.to_vec(),
         hashes,
         watches,
+        // The port riding its own flat floor, which is what the loop above stepped: a regression
+        // fixture has no track in it and must not claim one.
+        world: None,
     })
 }
 
