@@ -1507,20 +1507,24 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
     assert_eq!(wrecks(&jump), 0, "the jump wrecked");
 }
 
-/// The brake is pinned for ten seconds and the bike does not stop.
+/// The brake is pinned for ten seconds and the bike stops, and stays stopped.
 ///
-/// **Why it is ignored.** It slows hard and then holds about 26 ft/s for ever, which is the road speed
-/// of the engine's idle through first gear: with the clutch locked up, `mv::engine_update` sets the
-/// revs to `road_rpm` and then clamps them up into `min_rpm..rev_limit`, so below about 18 mph the
-/// engine is *driving* the rear wheel against the brake instead of being dragged by it. The one rule
-/// that would let the clutch out is `ride.rs`'s `if s.speed < IDLE_SPEED && s.gas_rate_limited == 0`,
-/// and `IDLE_SPEED` is 7.33 ft/s — a speed this bike can no longer reach. The original's own recording
-/// comes to a stop thirty-nine times, so this is the port and not the bike.
+/// This test was ignored until P13, and the reason it gave was wrong in an instructive way. It read
+/// the bike's hold at about 26 ft/s as a *locked* clutch idling the rear wheel along through first
+/// gear, and so as `mv::engine_update`'s MinRPM clamp against `ride.rs`'s `IDLE_SPEED` rule. The
+/// clutch is in fact slipping the whole way down, and what pinned the speed was a servo: a slipping
+/// clutch passes `ClutchKinetic × ratio` in whichever direction the revs and the road disagree, so
+/// the moment the road's revs fell under the clamped idle the engine started pushing back with more
+/// than the brake was taking off. The reason it could win is that the brake was not braking — the
+/// port's `ride::surface_drag` took `MaxBrakingTorque` off the rear wheel's *spin*, which
+/// `spin_integrate` overwrites from the road on every substep for a wheel in contact, so the pad
+/// never reached the chassis. The original puts it on the wheel's drive-torque accumulator instead,
+/// where it becomes a force at the contact patch. One line, and the engine's hold disappears with
+/// it: nothing in `mv::engine_update` or the idle rule had to change, and neither did.
 ///
-/// What this asserts when it is paid: the brake takes the speed off at a rate the human managed, the
+/// What it asserts: the brake takes the speed off at a rate the human managed and no faster, the
 /// bike actually stops, and it stays stopped with nobody touching the pad.
 #[test]
-#[ignore = "braking cannot stop the bike: a locked clutch re-drives the rear wheel at the idle road speed"]
 fn it_brakes_to_a_stop() {
     let m = ride_the_minute(&ridden_bike());
     let brake = m.leg("the brake");

@@ -668,16 +668,14 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
     assert_eq!(wrecks(&jump), 0, "the jump wrecked");
 }
 
-/// The brake is pinned for ten seconds and the bike does not stop: it slows hard and then holds about
-/// 26 ft/s for ever.
+/// The brake is pinned for ten seconds and the bike stops, through the shell's own bike and tables.
 ///
-/// **Why it is ignored.** That speed is the engine's idle through first gear. With the clutch locked,
-/// `mv::engine_update` sets the revs from the road and then clamps them up into `min_rpm`, so under
-/// about 18 mph the engine drives the rear wheel against the brake; the one rule that lets the clutch
-/// out wants the speed under `IDLE_SPEED`, 7.33 ft/s, which the bike can no longer reach. The sibling
-/// file's version has the long version. Not this file's to fix.
+/// It used to hold about 26 ft/s for ever, and until P13 both this file and the sibling blamed a
+/// locked clutch idling through first gear. The real cause was that `ride::surface_drag` took the
+/// brake off the rear wheel's spin, which the road overwrites every substep, so the pad never
+/// reached the chassis at all; the clutch was slipping and merely out-pushing a brake that was not
+/// there. The sibling file's version has the long version.
 #[test]
-#[ignore = "braking cannot stop the bike: a locked clutch re-drives the rear wheel at the idle road speed"]
 fn it_brakes_to_a_stop() {
     let m = ride_the_minute();
     let brake = m.leg("the brake");
