@@ -94,6 +94,9 @@ const REPORT_LEFT_Y: usize = 3;
 /// otherwise read as half-braking for ever.
 const TRIGGER_DEAD: f32 = 0.12;
 
+/// Where a trigger axis sits when the trigger is not pulled: the bottom of its travel.
+const TRIGGER_REST: i16 = i16::MIN + 1;
+
 /// How long a held direction key takes to push its stick all the way over, and how long a stick
 /// takes to come back to centre once the keys are let go, in seconds.
 ///
@@ -144,10 +147,19 @@ impl Pads {
     /// No pad is not an error — the keyboard is a pad in this shell — so this always returns a
     /// `Pads`, with `name` saying whether a device was found.
     pub fn open(named: Option<&str>) -> Pads {
+        // A stick and a hat rest in the middle of their range, but a trigger rests at the bottom of
+        // its: zero on a trigger axis is the trigger pulled half way, which on a machine with no pad
+        // at all is a permanent 43% of clutch and of front brake. A device that opens sends an
+        // initial event for every axis and overwrites both within a frame; a machine with no device
+        // never does, so the rest position is what they start at. (Found with P6's overlay, which is
+        // what it is for.)
+        let mut axis = [0i16; AXES];
+        axis[AXIS_L2] = TRIGGER_REST;
+        axis[AXIS_R2] = TRIGGER_REST;
         let mut pads = Pads {
             device: None,
             name: None,
-            axis: [0; AXES],
+            axis,
             button: [false; BUTTONS],
             key_stick: [KeyAxis::CENTRED; KEY_STICKS.len()],
             clock: None,

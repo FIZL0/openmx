@@ -66,6 +66,11 @@
 //! or closing the window quits. The same controls are on the keyboard for a machine with no pad:
 //! X/Space, Z, the arrow keys, C/V/D for the three trick buttons, Q+E for the reset, Return.
 //!
+//! **H** draws the riding overlay ([`hud`]), which `--hud` starts on: the sixteen controls as the
+//! port's own input manager holds them, both sticks where its dead zone put them, and beside them
+//! the numbers the ride is running on. It is debugging furniture and matches nothing on the disc,
+//! which is why it is behind a flag and why with the flag off it draws nothing at all.
+//!
 //! Which host button is which is this file's and [`game_sim::ride::Controls::from_pad`]'s own choice
 //! and not the disc's — the original's binding table is in its front end and is not ported. What *is*
 //! the disc's is the order of the three trick buttons, because that order is what numbers the six
@@ -74,6 +79,7 @@
 #![forbid(unsafe_code)]
 
 mod ground;
+mod hud;
 mod moment;
 mod pad;
 mod window;
@@ -102,6 +108,7 @@ use game_sim::{Input, track, world as sim_world};
 use ps2_float::{F, Vf};
 
 use ground::Ground;
+use hud::Hud;
 use moment::{Moment, Shot};
 use pad::Pads;
 use window::{Window, key};
@@ -222,6 +229,14 @@ struct Args {
     display: String,
     /// Write the first frame here and keep riding — how an unattended run proves what it drew.
     shot: Option<std::path::PathBuf>,
+    /// Which frame `--shot` writes. The first frame of a ride is the one frame where nothing has
+    /// happened yet — the bike is on the start line, every number is zero and the rider is still in
+    /// its bind pose (V8) — so a shot meant to show the ride, or the overlay with anything in it,
+    /// has to be taken a little later.
+    shot_frame: u32,
+    /// Draw the riding overlay (P6): the pad as the simulation reads it and the numbers beside it.
+    /// Off by default and off is free, because it is debugging furniture and not part of the game.
+    hud: bool,
     /// Draw one frame posed from a moment of the original (V2) instead of riding: the moment file
     /// and the path to write that frame to.
     moment: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -671,6 +686,14 @@ fn run() -> Result<(), String> {
         None => Default::default(),
     };
 
+    // The riding overlay (P6). It is the shell's own furniture, so it is created here beside the
+    // window rather than inside the simulation's `World`, and it reads the port's own values at draw
+    // time instead of being fed them.
+    let mut hud = Hud::new(args.hud);
+    // H toggles it, on its own edge: the window keeps key state and not key events, so the shell
+    // remembers last frame's to tell a press from a hold.
+    let mut hud_key = false;
+
     let mut shot = args.shot.clone();
     let started = Instant::now();
     let mut window_of_frames = (Instant::now(), 0u32, 0usize);
@@ -682,6 +705,11 @@ fn run() -> Result<(), String> {
             break;
         }
         world.reports = [pads.report(&window), Report::missing()];
+        let hud_now = window.held(key::H);
+        if hud_now && !hud_key {
+            hud.on = !hud.on;
+        }
+        hud_key = hud_now;
 
         // One frame of the game's own fixed update, which calls `World::simulate` inside itself.
         let step = engine.step(wall(started), engine_input(&world.reports[0]), &mut world);
@@ -718,12 +746,15 @@ fn run() -> Result<(), String> {
         // started, landed or put the rider down, and by which of the original's reason codes.
         if let Some(t) = world.said.started {
             println!("trick: {}", table.display_name(0, t));
+            hud.note_trick(table.display_name(0, t));
         }
         if let Some(t) = world.said.landed {
             println!("landed: {}", table.display_name(0, t));
+            hud.note_trick(&format!("{} landed", table.display_name(0, t)));
         }
         if let Some(why) = world.said.wreck {
             println!("wreck: reason {} — L3 and R3 together to get back on", why.0);
+            hud.note_wreck(why);
         }
         if world.said.respawned {
             println!("back on the start line");
@@ -837,10 +868,14 @@ fn run() -> Result<(), String> {
             }
         }
         drawn += draw_scene(&mut frame, &look, &assets, &actor, &camera);
+        // And the overlay over the top of it, after everything with a depth test and before anything
+        // that reads the frame: what the window shows and what `--shot` writes are the same picture.
+        hud.draw(&mut frame, world.input.pad(0), &world.rider, world.riding);
         window.present(&frame.color, frame.width, frame.height)?;
 
-        // The first frame, on paper, for a run nobody is watching.
-        if let Some(path) = shot.take() {
+        // One frame, on paper, for a run nobody is watching: the first by default, or the one
+        // `--shot-frame` asks for, which is how a shot catches a ride in progress.
+        if let Some(path) = shot.take_if(|_| engine.frame >= args.shot_frame) {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             }
@@ -985,6 +1020,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         seconds: None,
         pad: None,
         shot: None,
+        shot_frame: 0,
+        hud: false,
         moment: None,
         wrecks: true,
         trace: None,
@@ -1001,6 +1038,12 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--rider" => args.rider = next("a rider name, like thq1, or none")?,
             "--pad" => args.pad = Some(next("a device, like /dev/input/js0")?),
             "--shot" => args.shot = Some(next("a path for the first frame")?.into()),
+            "--shot-frame" => {
+                args.shot_frame = next("which frame to write")?
+                    .parse()
+                    .map_err(|_| "--shot-frame: not a frame number")?;
+            }
+            "--hud" => args.hud = true,
             "--moment" => {
                 let file: std::path::PathBuf = next("a moment file")?.into();
                 let out: std::path::PathBuf = next("a path for the frame")?.into();
@@ -1052,7 +1095,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                     "openmx [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--hud]\n\
+                            [--shot-frame N]\n\
                      \n\
                      Rides the freeride area from the disc named in kit.toml.\n\
                      Cross throttle, Square brake, R2 front brake, L2 clutch, left stick steers\n\
@@ -1061,6 +1105,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      A trick is a gesture: hold Circle, Triangle and/or R1 and push the d-pad.\n\
                      L3 and R3 clicked together put the bike back on the start line.\n\
                      On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, Q+E reset.\n\
+                     H toggles the riding overlay, which --hud starts on.\n\
                      --no-wrecks turns the session's wrecks off; --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\
                      nobody on the pad and prints the solver's own numbers."
