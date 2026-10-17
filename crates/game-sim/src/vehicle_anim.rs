@@ -524,6 +524,12 @@ impl Blend {
     /// `clip` is the clip behind the handle [`Blend::clock_clip`] names. A blend whose first handle is
     /// missing does nothing here — the original hands the entry point a null handle and the entry
     /// dereferences it, so the port diverges on a frame the original crashes on.
+    ///
+    /// The answer is worth keeping on the free-running arm: a clip-to-clip transition is stepped
+    /// inside the advance and reset there as well, so [`Played::fade`] is the only place a caller
+    /// can still see the one this frame was posed with (V17, and see
+    /// `game_render::anim::Set::apply_vehicle_crossed`). Nothing this machine selects *starts* one —
+    /// [`Player::play`] does, which the played-once groups reach through [`Frame::play`].
     pub fn run(self, player: &mut Player, dt: F, clip: &Clip) -> Played {
         match self.driven() {
             None => player.advance(dt, clip),

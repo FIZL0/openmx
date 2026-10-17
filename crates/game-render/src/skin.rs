@@ -372,6 +372,56 @@ impl Clip {
         self.lay(time, mixed, map, Some((fade, under)), out);
     }
 
+    /// The clip-to-clip transition, which is the original's *other* pair of blend entries: this clip
+    /// — the one that was just put on — weighted `weight`, over what the transition is coming out of
+    /// ([`OutOf`]). `weight` is 0 at the start of the transition and 1 at its end, the opposite way
+    /// round from the cross-fade ramp of the six entries above.
+    ///
+    /// It is not [`Clip::lay`] with a mirrored ramp, for two reasons. The rotation is
+    /// `slerp(weight, out_of, this)` rather than `slerp(1 - weight, this, out_of)`, and the port's
+    /// shortest-path slerp negates its *second* argument, so the two are not the same quaternion.
+    /// And the clip arm pairs the two clips' channels **by position**, like the mixing entries, while
+    /// the joint it writes always comes from this clip's map — so a transition out of a clip with a
+    /// different channel list is the original's own mismatch, not something to resolve by name.
+    ///
+    /// Every channel of this clip that the map names a joint for is written, and nothing else is
+    /// touched: a joint the new clip does not animate holds what it had, transition or no transition.
+    pub fn pose_crossed(&self, time: f32, map: &[u8], weight: f32, out_of: OutOf, out: &mut Pose) {
+        for (i, c) in self.rotation.iter().enumerate() {
+            let Some(j) = joint(map, c.name, out.rot.len()) else { continue };
+            let Some(q) = c.sample(time) else { continue };
+            let was = match out_of {
+                OutOf::Clip { clip, at } => match clip.rotation.get(i).and_then(|o| o.sample(at)) {
+                    Some(was) => was,
+                    None => continue,
+                },
+                OutOf::Snapshot(under) => match under.rot.get(j) {
+                    Some(&was) => was,
+                    None => continue,
+                },
+            };
+            out.rot[j] = slerp(weight, was, q, true);
+            out.turned[j] = true;
+        }
+        for (i, c) in self.position.iter().enumerate() {
+            let Some(j) = joint(map, c.name, out.pos.len()) else { continue };
+            let Some(p) = c.sample(time) else { continue };
+            let was = match out_of {
+                OutOf::Clip { clip, at } => match clip.position.get(i).and_then(|o| o.sample(at)) {
+                    Some(was) => was,
+                    None => continue,
+                },
+                OutOf::Snapshot(under) => match under.pos.get(j) {
+                    Some(&was) => was,
+                    None => continue,
+                },
+            };
+            // the original's grouping: this clip's sample, plus what is left of the difference
+            out.pos[j] = add4(p, scale4(sub4(was, p), 1.0 - weight));
+            out.moved[j] = true;
+        }
+    }
+
     /// The body of all six entries: the channel walk every one of the original's blend entry points
     /// shares, with [`Mixed`] standing for what each of them adds to it.
     fn lay(&self, time: f32, mixed: Mixed, map: &[u8], faded: Option<(f32, &Pose)>, out: &mut Pose) {
@@ -463,6 +513,22 @@ impl Clip {
             out.moved[j] = true;
         }
     }
+}
+
+/// What a clip-to-clip transition is coming *out* of ([`Clip::pose_crossed`]), which is the one thing
+/// the original's two transition entries disagree about.
+///
+/// Which of the two it is the simulation decides, not the renderer: a transition started on top of
+/// nothing — or on top of another transition, whose clip is itself half-way into a blend — has no
+/// clip to come out of and fades out of the pose snapshot instead
+/// (`game_sim::motion::Cross::from`).
+#[derive(Clone, Copy)]
+pub enum OutOf<'a> {
+    /// The clip that was playing, at the transition's own clock — which starts at the clip time that
+    /// clip had reached, so it keeps playing through the cross.
+    Clip { clip: &'a Clip, at: f32 },
+    /// The pose the rider was in when the transition started, joint by joint ([`Pose`]).
+    Snapshot(&'a Pose),
 }
 
 /// What a blend entry point adds to [`Clip::lay`]'s channel walk: nothing, one more clip, three more,
