@@ -29,6 +29,13 @@ const PUT_IMAGE: u8 = 72;
 const ATOM_WM_NAME: u32 = 39;
 const ATOM_STRING: u32 = 31;
 
+/// How far apart the two halves of an auto-repeat may be stamped, in milliseconds. The server
+/// generates both from one operation and gives them the same timestamp, so this is slack and not a
+/// window: it costs nothing, because no finger lets go of a key and presses it again inside two
+/// milliseconds, and it means a server that stamped the pair a millisecond apart would still be read
+/// correctly rather than falling back to the flicker.
+const REPEAT_MS: u32 = 2;
+
 /// Event codes. The window selects three of these.
 const KEY_PRESS: u8 = 2;
 const KEY_RELEASE: u8 = 3;
@@ -91,8 +98,8 @@ pub struct Window {
     depth: u8,
     /// The largest request the server will take, in bytes — the image is banded to fit it.
     max_request: usize,
-    /// Which keys are down, by keycode.
-    keys: [bool; KEYCODES],
+    /// Which keys are down, by keycode, with auto-repeat filtered out of the stream.
+    keys: Keyboard,
     /// The server took the window away, or the connection went.
     closed: bool,
     /// Requests being assembled, likewise.
@@ -124,7 +131,7 @@ impl Window {
             scale,
             depth: 24,
             max_request: 0,
-            keys: [false; KEYCODES],
+            keys: Keyboard::new(),
             closed: false,
             out: Vec::new(),
         };
@@ -246,19 +253,26 @@ impl Window {
 
     /// Whether a key is down now.
     pub fn held(&self, code: u8) -> bool {
-        self.keys[code as usize]
+        self.keys.held(code)
     }
 
     /// Read everything the server has said since the last call: keys, and whether the window is gone.
     ///
     /// Never blocks, so a frame that nobody touches costs one `read` that returns `WouldBlock`.
+    ///
+    /// The key state settles when the stream runs dry rather than on each event, because a release
+    /// is only believed once the event after it has been seen ([`Keyboard`]).
     pub fn poll(&mut self) {
         let mut event = [0u8; 32];
         loop {
             match read_exact_nb(&mut self.stream, &mut event) {
                 Ok(true) => self.handle(&event),
-                Ok(false) => return,
+                Ok(false) => {
+                    self.keys.settle();
+                    return;
+                }
                 Err(_) => {
+                    self.keys.settle();
                     self.closed = true;
                     return;
                 }
@@ -277,8 +291,7 @@ impl Window {
                     event[1], event[10], event[9]
                 );
             }
-            KEY_PRESS => self.keys[event[1] as usize] = true,
-            KEY_RELEASE => self.keys[event[1] as usize] = false,
+            KEY_PRESS | KEY_RELEASE => self.keys.saw(event),
             DESTROY_NOTIFY | UNMAP_NOTIFY => self.closed = true,
             _ => {}
         }
@@ -357,6 +370,81 @@ impl Window {
             }
         }
         Ok(())
+    }
+}
+
+/// Which keys are down, as the key events say — with X11's auto-repeat taken back out of them.
+///
+/// While a key is held, the server does not simply leave it down: about thirty times a second it
+/// delivers a `KeyRelease` immediately followed by a `KeyPress` of the same keycode, both bearing the
+/// same timestamp. Believed literally that is a key going up and down thirty times a second, which is
+/// what a held key used to look like here — [`Window::held`] blinked false for a frame on every
+/// repeat, and the simulation's press and release edges saw dozens of taps where a person held one
+/// button down.
+///
+/// So a release is not applied when it arrives. It waits for the event after it, and if that is the
+/// press of the same key at the same timestamp (give or take [`REPEAT_MS`]), the pair was a repeat
+/// and the key never came up. A
+/// release with anything else behind it — or nothing, which is what [`Keyboard::settle`] says — is a
+/// person letting go.
+///
+/// The other way out would be `ChangeKeyboardControl` (opcode 102, no reply, which would suit this
+/// module), but `auto-repeat-mode` is a property of the server's keyboard rather than of one window:
+/// turning it off would stop the whole session repeating, including in the terminal the shell was
+/// started from, and would leave it off if the shell died before putting it back. Reading the stream
+/// correctly costs one `Option` and changes nothing outside this struct.
+struct Keyboard {
+    /// Which keys are down, by keycode.
+    down: [bool; KEYCODES],
+    /// A release that has arrived but is not believed yet: its keycode and its timestamp.
+    pending: Option<(u8, u32)>,
+}
+
+impl Keyboard {
+    const fn new() -> Keyboard {
+        Keyboard {
+            down: [false; KEYCODES],
+            pending: None,
+        }
+    }
+
+    /// Whether a key is down now.
+    fn held(&self, code: u8) -> bool {
+        self.down[code as usize]
+    }
+
+    /// One `KeyPress` or `KeyRelease` event, as its 32 bytes: the keycode is the event's `detail` and
+    /// the timestamp its first four-byte field.
+    fn saw(&mut self, event: &[u8; 32]) {
+        let press = event[0] & 0x7f == KEY_PRESS;
+        let code = event[1];
+        let time = le32(event, 4);
+        match self.pending.take() {
+            // The second half of a repeat: the key was never up, so neither event happened. The
+            // subtraction wraps, which is also what rules out a press stamped *before* the release.
+            Some((held, at)) if press && held == code && time.wrapping_sub(at) <= REPEAT_MS => {
+                self.down[code as usize] = true;
+                return;
+            }
+            // Something else followed the release, so the release was real. Apply it first: the
+            // event in hand is later than it, even when it is a press of the same key.
+            Some((held, _)) => self.down[held as usize] = false,
+            None => {}
+        }
+        if press {
+            self.down[code as usize] = true;
+        } else {
+            self.pending = Some((code, time));
+        }
+    }
+
+    /// The server has said everything it had to say, so a release still being held back is a real
+    /// one. The two halves of a repeat are written to the socket together, so the stream does not run
+    /// dry between them.
+    fn settle(&mut self) {
+        if let Some((code, _)) = self.pending.take() {
+            self.down[code as usize] = false;
+        }
     }
 }
 
@@ -475,5 +563,89 @@ mod tests {
         assert_eq!(display_number(":1.0"), Ok(1));
         assert_eq!(display_number("unix:3"), Ok(3));
         assert!(display_number("0").is_err());
+    }
+
+    /// A key event as the server writes it: the code, the keycode in `detail`, and the timestamp in
+    /// the event's first four-byte field. The rest is windows and coordinates the shell never reads.
+    fn event(kind: u8, code: u8, time: u32) -> [u8; 32] {
+        let mut e = [0u8; 32];
+        e[0] = kind;
+        e[1] = code;
+        e[4..8].copy_from_slice(&time.to_le_bytes());
+        e
+    }
+
+    /// Feed a whole poll's worth of events, as `poll` does: every event, then the settle at the end.
+    fn stream(keys: &mut Keyboard, events: &[[u8; 32]]) {
+        for e in events {
+            keys.saw(e);
+        }
+        keys.settle();
+    }
+
+    #[test]
+    fn an_auto_repeat_pair_leaves_the_key_held() {
+        let mut keys = Keyboard::new();
+        // Down, then five frames' worth of repeats at thirty a second — the stream a held key makes.
+        stream(&mut keys, &[event(KEY_PRESS, key::X, 1000)]);
+        assert!(keys.held(key::X));
+        for frame in 0..5 {
+            let at = 1033 + frame * 33;
+            stream(
+                &mut keys,
+                &[event(KEY_RELEASE, key::X, at), event(KEY_PRESS, key::X, at)],
+            );
+            assert!(keys.held(key::X), "the repeat at {at} dropped the key");
+        }
+        // A pair a millisecond apart is a repeat too, which is the slack in `REPEAT_MS`.
+        stream(
+            &mut keys,
+            &[
+                event(KEY_RELEASE, key::X, 1200),
+                event(KEY_PRESS, key::X, 1201),
+            ],
+        );
+        assert!(keys.held(key::X));
+        // And it still comes up when the person lets go.
+        stream(&mut keys, &[event(KEY_RELEASE, key::X, 1233)]);
+        assert!(!keys.held(key::X));
+    }
+
+    #[test]
+    fn a_repeat_does_not_blink_even_part_way_through_the_stream() {
+        let mut keys = Keyboard::new();
+        keys.saw(&event(KEY_PRESS, key::LEFT, 1));
+        // The release half on its own, with the press half still in the socket: nothing has settled,
+        // so the key must not have moved. This is the frame the old reader lost.
+        keys.saw(&event(KEY_RELEASE, key::LEFT, 34));
+        assert!(keys.held(key::LEFT));
+        keys.saw(&event(KEY_PRESS, key::LEFT, 34));
+        keys.settle();
+        assert!(keys.held(key::LEFT));
+    }
+
+    #[test]
+    fn a_release_is_believed_whatever_follows_it() {
+        // Another key's press behind it, which is two fingers and not a repeat.
+        let mut keys = Keyboard::new();
+        stream(
+            &mut keys,
+            &[event(KEY_PRESS, key::A, 10), event(KEY_PRESS, key::S, 11)],
+        );
+        stream(
+            &mut keys,
+            &[event(KEY_RELEASE, key::A, 20), event(KEY_PRESS, key::D, 20)],
+        );
+        assert!(!keys.held(key::A), "a release is not a repeat of another key");
+        assert!(keys.held(key::S));
+        assert!(keys.held(key::D));
+
+        // And a real tap of the same key, which the server stamps with a later time: up, then down.
+        let mut keys = Keyboard::new();
+        stream(&mut keys, &[event(KEY_PRESS, key::Z, 10)]);
+        stream(&mut keys, &[event(KEY_RELEASE, key::Z, 90)]);
+        assert!(!keys.held(key::Z));
+        stream(&mut keys, &[event(KEY_PRESS, key::Z, 150)]);
+        assert!(keys.held(key::Z));
     }
 }

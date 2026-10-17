@@ -15,7 +15,10 @@
 //!   shoulders, then select/start); see [`BUTTONS`].
 //! * **The keyboard**, through the window's key state, so the shell is playable on a laptop. A key is
 //!   a digital control, which the game's own binding reads as a full pressure byte — exactly what
-//!   [`game_sim::input::Report::from_buttons`] does, and what the kit's virtual pad sends.
+//!   [`game_sim::input::Report::from_buttons`] does, and what the kit's virtual pad sends. The two
+//!   sticks are where that stops being enough: a switch has no travel, so the keyboard's stick axes
+//!   are ramped toward the edge while a key is held and let back to centre when it is not
+//!   ([`KeyAxis`]), which is the difference between leaning and slamming.
 //!
 //! The report is built the way a DualShock 2 would have reported it, not the way the game sees it:
 //! raw stick bytes, the button word active-low, and a pressure byte per analogue control. Whether an
@@ -91,6 +94,32 @@ const REPORT_LEFT_Y: usize = 3;
 /// otherwise read as half-braking for ever.
 const TRIGGER_DEAD: f32 = 0.12;
 
+/// How long a held direction key takes to push its stick all the way over, and how long a stick
+/// takes to come back to centre once the keys are let go, in seconds.
+///
+/// A key is a switch and a stick is not, so these two numbers are the keyboard's whole analogue
+/// feel, and there is no original behaviour to match: the disc's input is a pad. What they are
+/// chosen against is the one measured number in the area, I2's stick curve: a fifth of the travel either side of centre is
+/// dead, so the first ~35 ms of a held key is the stick crossing the dead zone and the lean, the
+/// steer and the preload grow from nothing after it rather than slamming to full on frame one.
+/// Coming back is quicker than going out, because a rider who lets go of a key has already decided.
+const KEY_TO_EDGE: f32 = 0.18;
+const KEY_TO_CENTRE: f32 = 0.10;
+
+/// The longest step a keyboard stick will take in one frame, in seconds. A frame that stalled — the
+/// first one after a level load, or a window dragged across a workspace — would otherwise hand the
+/// ramp a tenth of a second of travel at once, which is the slam this is here to stop.
+const KEY_STEP_MAX: f32 = 1.0 / 15.0;
+
+/// Which two keys drive which stick axis, and where that axis goes in the report. The low key is the
+/// one at the low end of the byte, which is up or left — the hardware's own sense (see [`stick_byte`]).
+const KEY_STICKS: [(usize, u8, u8); 4] = [
+    (REPORT_LEFT_X, key::LEFT, key::RIGHT),
+    (REPORT_LEFT_Y, key::UP, key::DOWN),
+    (REPORT_RIGHT_X, key::J, key::L),
+    (REPORT_RIGHT_Y, key::I, key::K),
+];
+
 /// The host's pad and keyboard, as one report a frame.
 pub struct Pads {
     /// The joystick device, if one opened.
@@ -101,6 +130,12 @@ pub struct Pads {
     axis: [i16; AXES],
     /// Which pad buttons are down.
     button: [bool; BUTTONS],
+    /// The four keyboard stick axes, in [`KEY_STICKS`]' order, each part way to its edge.
+    key_stick: [KeyAxis; KEY_STICKS.len()],
+    /// When the last report was built, so the ramps travel at a rate in seconds rather than one a
+    /// frame: the shell paces itself to 60 Hz but a heavy frame overruns, and a keyboard that leans
+    /// further when the picture is cheap would be its own bug.
+    clock: Option<std::time::Instant>,
 }
 
 impl Pads {
@@ -114,6 +149,8 @@ impl Pads {
             name: None,
             axis: [0; AXES],
             button: [false; BUTTONS],
+            key_stick: [KeyAxis::CENTRED; KEY_STICKS.len()],
+            clock: None,
         };
         let candidates: Vec<String> = match named {
             Some(path) => vec![path.to_string()],
@@ -179,18 +216,14 @@ impl Pads {
         report.set_axis(REPORT_LEFT_Y, stick_byte(self.axis[AXIS_LEFT_Y]));
         report.set_axis(REPORT_RIGHT_X, stick_byte(self.axis[AXIS_RIGHT_X]));
         report.set_axis(REPORT_RIGHT_Y, stick_byte(self.axis[AXIS_RIGHT_Y]));
-        // The keyboard moves the left stick too, since half of riding is on it.
-        if let Some(byte) = key_axis(window, key::LEFT, key::RIGHT) {
-            report.set_axis(REPORT_LEFT_X, byte);
-        }
-        if let Some(byte) = key_axis(window, key::UP, key::DOWN) {
-            report.set_axis(REPORT_LEFT_Y, byte);
-        }
-        if let Some(byte) = key_axis(window, key::J, key::L) {
-            report.set_axis(REPORT_RIGHT_X, byte);
-        }
-        if let Some(byte) = key_axis(window, key::I, key::K) {
-            report.set_axis(REPORT_RIGHT_Y, byte);
+        // The keyboard moves both sticks too, since half of riding is on them: the arrows are the
+        // left stick and `IJKL` the right one, each ramped toward its edge for as long as the key is
+        // held and let back to centre when it is not ([`KeyAxis`]).
+        let seconds = self.since_the_last_report();
+        for (axis, (slot, low, high)) in self.key_stick.iter_mut().zip(KEY_STICKS) {
+            if let Some(byte) = axis.step(seconds, window.held(low), window.held(high)) {
+                report.set_axis(slot, byte);
+            }
         }
 
         // The analogue triggers, which are a pressure and not a bit: a pad's L2 and R2 travel, and
@@ -208,6 +241,16 @@ impl Pads {
             }
         }
         report
+    }
+
+    /// How long since the last report was built, in seconds, capped at [`KEY_STEP_MAX`]. The first
+    /// report of a run gets nothing, which leaves the sticks where they start: at centre.
+    fn since_the_last_report(&mut self) -> f32 {
+        let now = std::time::Instant::now();
+        match self.clock.replace(now) {
+            Some(then) => now.duration_since(then).as_secs_f32().min(KEY_STEP_MAX),
+            None => 0.0,
+        }
     }
 
     /// Read every joystick event waiting, updating the axis and button state.
@@ -304,14 +347,51 @@ fn keyboard(window: &Window) -> u16 {
     mask
 }
 
-/// Two keys as one stick axis, or `None` while neither is held, so that a pad's own stick keeps the
-/// axis when the keyboard is not touching it.
-fn key_axis(window: &Window, low: u8, high: u8) -> Option<u8> {
-    match (window.held(low), window.held(high)) {
-        (true, false) => Some(0),
-        (false, true) => Some(255),
-        (true, true) => Some(AXIS_CENTRE),
-        (false, false) => None,
+/// Two keys as one stick axis, ramped: where the stick has got to, as a fraction of full deflection
+/// from −1 at the low key's edge to 1 at the high key's edge.
+///
+/// A key has nothing between off and on, so answering 0 or 255 the frame it goes down — which is what
+/// this module used to do — pushes the stick to the stop instantly and holds it there. Everything the
+/// sticks feed is then all-or-nothing: the lean is full lean, the steer is full lock, and a preload is
+/// either nothing or a bottomed-out suspension, with I2's dead zone and its two segments crossed in a
+/// single frame. So the axis travels instead, at [`KEY_TO_EDGE`] to the stop and [`KEY_TO_CENTRE`]
+/// back, and a tap is a nudge rather than a slam.
+#[derive(Clone, Copy)]
+struct KeyAxis {
+    /// Where the stick is, −1 to 1, 0 at centre.
+    at: f32,
+}
+
+impl KeyAxis {
+    /// A stick nobody has touched.
+    const CENTRED: KeyAxis = KeyAxis { at: 0.0 };
+
+    /// One frame of `seconds` with the two keys as they are, as the stick byte a DualShock 2 would
+    /// have reported — or `None` once the axis has settled at centre with neither key down, so that a
+    /// pad's own stick keeps the axis when the keyboard is not touching it.
+    fn step(&mut self, seconds: f32, low: bool, high: bool) -> Option<u8> {
+        let target = match (low, high) {
+            (true, false) => -1.0,
+            (false, true) => 1.0,
+            // Both keys, or neither: centre. Both at once is a rider changing their mind, and the
+            // stick comes back the way it would if they had simply let go.
+            _ => 0.0,
+        };
+        // Anything that reduces the deflection — letting go, or pushing the other way through
+        // centre — happens at the return rate. Only travel further out is a ramp.
+        let homeward = target == 0.0 || (self.at != 0.0 && (target < 0.0) != (self.at < 0.0));
+        let step = seconds / if homeward { KEY_TO_CENTRE } else { KEY_TO_EDGE };
+        self.at = if target > self.at {
+            (self.at + step).min(target)
+        } else {
+            (self.at - step).max(target)
+        };
+        if self.at == 0.0 && target == 0.0 {
+            return None;
+        }
+        // The same conversion the pad's own sticks go through, so a key and a stick at the same
+        // deflection report the same byte.
+        Some(stick_byte((self.at * 32767.0) as i16))
     }
 }
 
@@ -336,6 +416,101 @@ mod tests {
         assert_eq!(trigger_pressure(-30000), 0);
         assert_eq!(trigger_pressure(32767), 255);
         assert!(trigger_pressure(0) > 100 && trigger_pressure(0) < 160);
+    }
+
+    /// One frame of the shell's loop, for a ramp: 60 Hz is what it paces itself to.
+    const FRAME: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn a_held_direction_reaches_the_edge_over_several_frames() {
+        let mut axis = KeyAxis::CENTRED;
+        // The frame the key goes down: off centre, and nowhere near the stop.
+        let first = axis.step(FRAME, false, true).expect("a held key moves the stick");
+        assert!(
+            first > AXIS_CENTRE && first < 200,
+            "the first frame of a held key reads {first}, which is a slam and not a lean"
+        );
+        // And from there, up to the edge and no further, climbing every frame.
+        let mut last = first;
+        let mut frames = 1;
+        while last < 255 {
+            let byte = axis.step(FRAME, false, true).expect("still held");
+            assert!(byte > last, "frame {frames} did not travel: {last} then {byte}");
+            last = byte;
+            frames += 1;
+            assert!(frames < 60, "a held key never reached the edge");
+        }
+        assert!(
+            (8..=15).contains(&frames),
+            "full deflection took {frames} frames, which is not about {KEY_TO_EDGE} s"
+        );
+        assert_eq!(axis.step(FRAME, false, true), Some(255), "and it stays there");
+
+        // Let go: back to centre, quicker, and then out of the way altogether so that a pad's own
+        // stick has the axis again.
+        let mut frames = 0;
+        while let Some(byte) = axis.step(FRAME, false, false) {
+            assert!(byte < 255);
+            frames += 1;
+            assert!(frames < 60, "a released key never came back to centre");
+        }
+        assert!(
+            (4..=9).contains(&frames),
+            "the return took {frames} frames, which is not about {KEY_TO_CENTRE} s"
+        );
+        assert_eq!(axis.step(FRAME, false, false), None, "and it stays out");
+    }
+
+    #[test]
+    fn the_low_key_goes_the_other_way_and_the_two_together_come_home() {
+        let mut axis = KeyAxis::CENTRED;
+        for _ in 0..20 {
+            axis.step(FRAME, true, false);
+        }
+        assert_eq!(axis.step(FRAME, true, false), Some(0), "the low key's edge");
+        // Both keys at once is a rider changing their mind: the stick comes home rather than
+        // sticking at the stop, and it does it at the return rate.
+        let both = axis.step(FRAME, true, true).expect("not home yet");
+        assert!(both > 0 && both < AXIS_CENTRE, "{both} is not on the way home");
+        // The other key, from the far stop: through centre and out the other side.
+        let mut axis = KeyAxis::CENTRED;
+        for _ in 0..20 {
+            axis.step(FRAME, true, false);
+        }
+        let mut frames = 0;
+        while axis.step(FRAME, false, true).unwrap_or(0) <= AXIS_CENTRE {
+            frames += 1;
+            assert!(frames < 60, "a reversed stick never crossed centre");
+        }
+        assert!(frames >= 5, "a stick at full left crossed centre in {frames} frames");
+    }
+
+    /// What the task is for: one frame of a key press is a nudge the game's own dead zone still
+    /// swallows, where the old all-or-nothing byte was full lock on the frame the key went down.
+    #[test]
+    fn a_tap_no_longer_slams_the_game_s_own_axis() {
+        let mut axis = KeyAxis::CENTRED;
+        let read = |byte: u8| {
+            let mut report = Report::idle();
+            report.set_axis(REPORT_LEFT_X, byte);
+            let mut manager = Manager::connected();
+            manager.tick(F(1.0 / 60.0), &[report; PADS]);
+            manager.pad(0).axis(game_sim::input::Axis::LeftX)
+        };
+        // Frame one: inside I2's dead zone, so the lean, the steer and the preload all still read
+        // nothing. The byte the module used to answer here was 255, which is `STICK.hi`.
+        let first = axis.step(FRAME, false, true).unwrap();
+        assert_eq!(read(first), F(0.0), "frame one of a tap is not a steering input");
+        assert_eq!(read(255), AxisRange::STICK.hi, "what frame one used to be");
+        // Three frames in it is out of the dead zone but nowhere near the stop.
+        for _ in 0..2 {
+            axis.step(FRAME, false, true);
+        }
+        let third = read(axis.step(FRAME, false, true).unwrap());
+        assert!(
+            third > F(0.0) && third < F(0.5),
+            "three frames of a held key reads {third:?}"
+        );
     }
 
     /// The point of the whole module: the bytes it builds go through the port's own poll and come out
