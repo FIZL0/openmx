@@ -55,12 +55,12 @@
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
-use crate::motion::{Clip, ClipId, Player, Put, remap};
+use crate::motion::{Clip, ClipId, Played, Player, Put, remap};
 use crate::rng::Rng;
 use crate::trick::SLOTS;
 use crate::vehicle_anim::{
-    self, AIR, BACKFLIP, Frame, GET_READY, HOLD, Library, NO_HANDER, Play, REVERSE_L, REVERSE_R,
-    START_POS, TURN_RIDING,
+    self, AIR, AXIS_START, BACKFLIP, Frame, GET_READY, HOLD, Lag, Library, MIX_TAU, NO_HANDER,
+    PHASE_TAU, Play, REVERSE_L, REVERSE_R, START_POS, TURN_RIDING,
 };
 use ps2_float::F;
 
@@ -276,11 +276,35 @@ pub struct Body {
     pub settled: bool,
 }
 
+/// What a frame of the body's animation left in its motion object that the frame itself does not
+/// carry: the two answers [`Body::frame_clocked`] keeps and [`Body::frame`] throws away.
+///
+/// Both are the renderer's, and both are gone by the time the step has returned — which is why they
+/// are carried out rather than read off the motion object afterwards:
+///
+/// * the clip-to-clip transition is wiped by the advance's own end-of-frame reset on the frame it
+///   ends on, so a renderer that looked at the object would draw the new clip alone (V17);
+/// * whether a put had nothing to fade from is a *return value* of
+///   [`crate::motion::Player::play`], written nowhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Clocked {
+    /// What the frame's advance did, including the transition that posed it
+    /// ([`crate::motion::Played::fade`]).
+    pub played: Played,
+    /// The clip the step put on had nothing to fade out of, so whoever draws the body owes it a pose
+    /// snapshot before the pose is written — the same debt [`Frame::restart`] carries.
+    pub snapshot: bool,
+}
+
 impl Default for Body {
-    /// The body as the actor's constructor leaves it. Two of its fields are not zero: the state asked
-    /// for, the state running and the state before it are all the riding pose, and the added-record
+    /// The body as the actor's constructor leaves it. Four of its fields are not zero: the state asked
+    /// for, the state running and the state before it are all the riding pose, the added-record
     /// index is negative, which is what "play the state machine rather than a record" is — a body
-    /// built with a zero there plays record zero of an empty list, which is no clip at all.
+    /// built with a zero there plays record zero of an empty list, which is no clip at all — and the
+    /// two eased axes are the two records the build allocates beside the object, centred and with
+    /// their own time constants ([`vehicle_anim::MIX_TAU`]). A body built with zeroes there divides by
+    /// a time constant of none and puts `-FLT_MAX` on both axes on its first frame, which is a pose
+    /// grid stuck in one corner (V18 found it from the shell).
     fn default() -> Body {
         Body {
             veh: vehicle_anim::Driver {
@@ -288,6 +312,8 @@ impl Default for Body {
                 state: TURN_RIDING,
                 prev: TURN_RIDING,
                 extra: -1,
+                mix: Lag { value: AXIS_START, tau: MIX_TAU, ratio: F::ZERO },
+                phase: Lag { value: AXIS_START, tau: PHASE_TAU, ratio: F::ZERO },
                 ..Default::default()
             },
             player: Player::default(),
@@ -424,20 +450,41 @@ impl Body {
         self_placed: bool,
         clips: &impl Fn(ClipId) -> Clip,
     ) -> Frame {
+        self.frame_clocked(dt, p, vp, r, a, lib, pool, clock, self_placed, clips).0
+    }
+
+    /// The same frame, with what its two calls into the motion object answered ([`Clocked`]).
+    ///
+    /// [`Body::frame`] is this and then the answer thrown away, which is what the original does: both
+    /// calls return into a frame that ignores them. A *renderer* cannot ignore them — the pose it
+    /// draws is sampled out of the same two answers — and neither can be read back off the motion
+    /// object once the step has returned, so whoever is going to draw the body calls this one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn frame_clocked(
+        &mut self,
+        dt: F,
+        p: &Params,
+        vp: &mut vehicle_anim::Params,
+        r: &mut vehicle_anim::Request,
+        a: &Ask,
+        lib: &Library,
+        pool: &mut Pool,
+        clock: Clock,
+        self_placed: bool,
+        clips: &impl Fn(ClipId) -> Clip,
+    ) -> (Frame, Clocked) {
         self.select(dt, p, vp, r, a, pool, clock);
         let frame = self.veh.frame(dt, vp, r, lib, self_placed, |c| clips(c).duration);
-        if let Some(play) = frame.play {
-            self.put_on(play);
-        }
+        let snapshot = frame.play.is_some_and(|play| self.put_on(play));
         // The clip the library entry drives its clock off, which is the blend's first one or the one
         // already playing.
         let clip = match frame.blend.clock_clip(&self.player) {
             Some(id) => clips(id),
             None => Clip::new(F::ZERO, false),
         };
-        frame.blend.run(&mut self.player, dt, &clip);
+        let played = frame.blend.run(&mut self.player, dt, &clip);
         self.latch(vp, r);
-        frame
+        (frame, Clocked { played, snapshot })
     }
 
     /// Put the step's clip on, including the case its slot in the table is empty.
@@ -447,16 +494,21 @@ impl Body {
     /// it stops whatever was playing. [`Put`] cannot carry a missing clip, so the port plays a handle
     /// and takes it back off: the same fields in the same order, because the clip the transition fades
     /// *from* is read before the new one is stored.
-    fn put_on(&mut self, play: Play) {
+    ///
+    /// Answers the one thing the play decides and the step does not look at: whether the transition it
+    /// started had no clip to come out of, so that the pose it fades out of is the snapshotted one
+    /// ([`Clocked::snapshot`]).
+    fn put_on(&mut self, play: Play) -> bool {
         let (put, keep) = match play.put() {
             Some(put) => (put, true),
             None => (Put::clip(ClipId(0), play.duration, play.length), false),
         };
         // The duration of the clip already on, which only a keep-phase play reads and this one never
         // asks for.
-        self.player.play(put, F::ZERO);
+        let snapshot = self.player.play(put, F::ZERO);
         if !keep {
             self.player.clip = None;
         }
+        snapshot
     }
 }

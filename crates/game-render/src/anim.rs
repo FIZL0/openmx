@@ -666,19 +666,11 @@ impl Rig {
 // the sixty-state machine's own rig
 // ---------------------------------------------------------------------------------------------------
 
-/// The time constant the mix axis is eased in with, as the body's build writes it, and the phase
-/// axis'.
-///
-/// They are not in [`vehicle_anim::Params`] because in the original they are not on the object: each
-/// axis is a five-word record of its own ({value, time constant, 1.0, FLT_MAX, -FLT_MAX}) that the
-/// build allocates beside it, and the step walks both. V12 read the two taus off the running game and
-/// they are the same two numbers the build writes.
-pub const MIX_TAU: F = F(0.125);
-pub const PHASE_TAU: F = F(0.15);
-
-/// Where both axes start: the middle of a row, which is what makes a body that is not being steered
-/// sit in the middle of each row of the pose grid rather than snap in from a column.
-pub const AXIS_START: F = F(0.5);
+/// The two time constants the eased axes carry and the value both start at, as the body's build
+/// writes them — [`vehicle_anim::MIX_TAU`], [`vehicle_anim::PHASE_TAU`] and
+/// [`vehicle_anim::AXIS_START`], where the actor that owns them keeps them (V18 moved them there, so
+/// that the simulation's own body is built with them too).
+pub use vehicle_anim::{AXIS_START, MIX_TAU, PHASE_TAU};
 
 /// One animation set driven by the **sixty-state** machine ([`game_sim::vehicle_anim`]) — which is
 /// the rider's body, not the bike.

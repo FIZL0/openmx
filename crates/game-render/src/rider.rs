@@ -71,8 +71,11 @@ use crate::ini;
 use crate::mat::{M4, V3, v3};
 use crate::skin::{rotation, skin};
 use crate::world::Loaded;
-use game_sim::motion::{Animations, Library, Params, Played};
+use game_sim::motion::{Animations, Clip, ClipId, Library, Params, Played};
+use game_sim::rider::Gate;
+use game_sim::ride::Controls;
 use game_sim::trick::{SLOTS, Stunt};
+use game_sim::vehicle_anim;
 use ps2_float::F;
 
 /// Which body a `.sub`'s `MCF = rider.mcf` means. Only [`Sex::Male`] is on this disc.
@@ -640,11 +643,15 @@ pub const AIR_POSES: [&str; 3] = ["air_Fwd", "air_Mid", "air_Bck"];
 /// pose the last frame left on it.
 ///
 /// This is [`crate::anim::Rig`] with a rider's clip table instead of a bike's, and without a driver
-/// of its own. The driving is the simulation's: [`game_sim::rider::Rider`] runs one
-/// [`game_sim::motion::Driver`] per frame for the crossup its landing test reads, and what that
-/// driver answers — which clip, at what phase, faded by how much — is what poses the body here
-/// ([`Body::pose`]). Running a second driver beside it would be two state machines where the
-/// original has one, and the second one would be guessing at the first one's inputs.
+/// of its own. The driving is the simulation's, and **it is the body's own machine**: the sixty-state
+/// one ([`game_sim::rider_anim`], S27), stepped by [`game_sim::rider::Rider::body_frame`] and drawn
+/// here by [`Body::ride`]. Running a driver of its own beside that would be two state machines where
+/// the original has one, and the second one would be guessing at the first one's inputs.
+///
+/// V8 posed it from the other machine — the 28-slot [`game_sim::motion::Driver`] the rider's frame
+/// runs for the crossup its landing test reads, which is the *bike's* ([`Body::pose`]) — and what
+/// that drew was a body stood upright on a bike being ridden, because every row of the grid the
+/// grounded rider is posed out of is a clip only the sixty-state table names. V18 is the swap back.
 ///
 /// ## Where the body sits
 ///
@@ -659,6 +666,14 @@ pub struct Body {
     pub rider: Rider,
     /// The clips, the clip table, the clock and the live pose.
     pub rig: Rig,
+    /// The **sixty-state** machine's clip table over the same clips: the 24 gesture slots under the
+    /// rider's own names and [`vehicle_anim::POSE_CLIPS`] bare, which is the table
+    /// [`game_sim::rider::Rider::body_frame`] selects out of ([`Body::ride`]).
+    ///
+    /// Beside [`Rig::lib`] and not instead of it, because the two tables are two actors' and the set
+    /// underneath is one: the clips are read and bound once, and which table names them decides
+    /// which machine can play them. [`Rig::lib`]'s 28 slots are the bike's.
+    pub pose_lib: vehicle_anim::Library,
     /// Whether any frame has written a pose yet. Until one has, the live pose is the bind pose the
     /// body was modelled in, and a shell that drew it then would draw a rider with its arms out.
     /// A frame writes nothing when the blend it carries has no clip behind it — the
@@ -708,15 +723,96 @@ impl Body {
         lib.air_fwd = set.bound(AIR_POSES[0]);
         lib.air_mid = set.bound(AIR_POSES[1]);
         lib.air_bck = set.bound(AIR_POSES[2]);
-        Ok(Body { rider, rig: Rig::bound(set, lib, params), posed: false })
+        // And the other machine's table over the same clips (V18). The 24 gesture slots are already
+        // loaded, under the same names this table wants — `rider_<stunt>` is what both loaders ask
+        // for, one through `stunt_name` and one through `Library::stunt_name` with `rider_` in the
+        // prefix — so these two passes only bind. The 36 pose clips come off the `.mcf`'s own list
+        // and are looked up bare; one the list leaves out is asked for by name rather than left
+        // empty, which is `crate::anim::Stance::new`'s last pass and this disc's rider needs none of
+        // it.
+        let mut pose_lib = vehicle_anim::Library::default();
+        for (slot, stunt) in stunts.iter().take(SLOTS).enumerate() {
+            if !stunt.name.is_empty() {
+                pose_lib.clip[slot] = set.bound(&stunt_name(prefix, &stunt.name));
+            }
+        }
+        for (i, name) in vehicle_anim::POSE_CLIPS.iter().enumerate() {
+            if set.bound(name).is_none() {
+                set.load(name);
+            }
+            pose_lib.clip[SLOTS + i] = set.bound(name);
+        }
+        Ok(Body { rider, rig: Rig::bound(set, lib, params), pose_lib, posed: false })
     }
 
-    /// Pose the body from a frame of the simulation's own animation driving
+    /// Pose the body from a frame of the **bike's** animation driving
     /// ([`game_sim::rider::Rider::animation`]), at the same `dt` the simulation stepped with.
+    ///
+    /// This is V8's wiring and it is not what poses a rider: the frame it takes is the 28-slot
+    /// machine's, which drives the vehicle (see [`crate::anim::Stance`]'s table, and V13 on the two
+    /// being crossed over). A body posed from it stands upright on a bike that is being ridden.
+    /// [`Body::ride`] is the rider's own machine; what this one is still good for is measuring that
+    /// driving against this set, which is what `tests/body.rs` does with it.
     pub fn pose(&mut self, dt: F, frame: game_sim::motion::Frame) -> Played {
         let (played, posed) = self.rig.driven(dt, frame);
         self.posed |= posed;
         played
+    }
+
+    /// **One frame of the rider on the bike** (V18): the body's own sixty-state machine chooses, and
+    /// the pose it chose is written onto this skeleton.
+    ///
+    /// The selection and the clock are the simulation's — [`game_sim::rider::Rider::body_frame`] is
+    /// the entry point, and it is documented as the one the holder of the clip table calls, which is
+    /// this type. So the two halves are this: the sim's machine is run against [`Body::pose_lib`]
+    /// and this set's clip lengths, and then [`Body::posed_by`] samples what it asked for.
+    ///
+    /// `c` is the same controls the ride's own frame was stepped with and `gate` the two inputs the
+    /// body has that the rider does not hold ([`Gate`]). Answers the frame, for a caller that wants
+    /// to know which state the body is in.
+    pub fn ride(&mut self, dt: F, rider: &mut game_sim::rider::Rider, c: &Controls, gate: Gate)
+    -> vehicle_anim::Frame {
+        let frame = {
+            let lib = &self.pose_lib;
+            let set = &self.rig.set;
+            rider.body_frame(dt, c, gate, lib, &|id| set.timing(Some(id)))
+        };
+        self.posed_by(frame, &rider.body.player, rider.body_clocked);
+        frame
+    }
+
+    /// Write the pose a frame of the body's own machine asked for, from the clock the simulation
+    /// already ran.
+    ///
+    /// The sixty-state half of [`Rig::driven`], and shorter than it by the clock: the simulation's
+    /// body *is* the motion object ([`game_sim::rider_anim::Body::player`]), so the advance has
+    /// happened and sampling it again here would run the clip at twice the rate. What is left is the
+    /// snapshot the restart and the put owe the cross-fade, and the sample itself — the same
+    /// `apply_vehicle_crossed` [`crate::anim::Stance::frame`] ends in, with the transition the step
+    /// answered (V17).
+    ///
+    /// Answers whether the frame wrote a pose at all: a blend whose clips are not all in this set
+    /// leaves the one that was already there, which before anything has posed it is the bind pose
+    /// ([`Body::posed`]).
+    pub fn posed_by(
+        &mut self,
+        frame: vehicle_anim::Frame,
+        player: &game_sim::motion::Player,
+        clocked: game_sim::rider_anim::Clocked,
+    ) -> bool {
+        if frame.restart || clocked.snapshot {
+            let Body { rig, .. } = self;
+            rig.set.rewind(&mut rig.snapshot);
+        }
+        let drawn = self.rig.set.apply_vehicle_crossed(frame.blend, player, clocked.played.fade);
+        self.posed |= drawn;
+        drawn
+    }
+
+    /// How long a clip of this set is, which is the one thing the body's machine asks its holder
+    /// ([`game_sim::rider::Rider::body_frame`]'s `clip` argument).
+    pub fn timing(&self, id: ClipId) -> Clip {
+        self.rig.set.timing(Some(id))
     }
 
     /// The model name to load and to draw this body as: `mrider` for a player, `airider` for one of

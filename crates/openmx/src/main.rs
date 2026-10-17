@@ -207,6 +207,9 @@ struct World<'a> {
     riding: bool,
     /// What the rider did this frame, kept so the loop can print it after the pass.
     said: rider::Frame,
+    /// The hands this pass was stepped with, kept for the body's own animation frame — which runs
+    /// after the pass, off the same controls and the same `dt` (V18).
+    hands: Controls,
     /// `--record`: the tape this session is being written to, one frame per simulation pass.
     tape: Option<Recorder>,
     /// `--play`: the frame length the tape says this pass is, which replaces the one the engine
@@ -244,6 +247,7 @@ impl Game for World<'_> {
         if self.riding {
             self.said = self.sim.step(dt, &controls, &mut self.place);
         }
+        self.hands = controls;
         true
     }
 }
@@ -499,6 +503,18 @@ fn run() -> Result<(), String> {
                 .count(),
             if drawn { "" } else { ", no body to draw" }
         );
+        // And the table the body is actually posed out of (V18): the sixty-state machine's, which is
+        // the rider's own. Sixty of sixty on a rider's set and twelve on a bike's, which is how a set
+        // paired with the wrong machine shows up before anything is drawn.
+        let gestures = body.pose_lib.clip[..game_sim::trick::SLOTS].iter().filter(|c| c.is_some());
+        let poses = body.pose_lib.clip[game_sim::trick::SLOTS..].iter().filter(|c| c.is_some());
+        println!(
+            "rider: {} of {} gesture slots and {} of {} pose clips for its own machine",
+            gestures.count(),
+            game_sim::trick::SLOTS,
+            poses.count(),
+            game_sim::vehicle_anim::POSE_CLIPS.len(),
+        );
         for m in body.rig.set.missing.iter().take(3) {
             println!("  {m:?}");
         }
@@ -589,6 +605,12 @@ fn run() -> Result<(), String> {
     );
     let mut rider = Rider::new(&phy, mounts, at, heading, stunts);
     rider.sense.wrecks_enabled = args.wrecks;
+    // The eight numbers the body's *step* reads, which `Rider::new` leaves at zero and says a shell
+    // is expected to fill: the five fade rates, the stunt cross-fade's cap and the pose grid's three
+    // speed thresholds, as V12 measured them off the body's own object in the running original. With
+    // them at zero every fade is a hard cut and the grid's rows all meet at zero, so a grounded body
+    // takes the top row at walking pace (V18).
+    rider.body_rates = vehicle_params();
     // The wreck's own parameters, if the disc had them: the part the bike becomes, the rider's
     // throw-and-roll set, and the tumbling body's inertia tensor, which is neither file's — it comes
     // off the wreck model's own box ([`ride::WRECK_INERTIA`]).
@@ -778,6 +800,7 @@ fn run() -> Result<(), String> {
         sim: Sim::with_rider(0, Arc::new(tables), phy, rider),
         riding: true,
         said: rider::Frame::default(),
+        hands: Controls::default(),
         tape: recorder,
         played_dt: None,
     };
@@ -843,12 +866,20 @@ fn run() -> Result<(), String> {
         // What the simulation was actually handed, which the pose and the camera below step with too.
         let dt = world.played_dt.unwrap_or(step.dt);
 
-        // The body on the bike, posed from the frame the simulation's own animation driving just
-        // answered: the clip it asked for, at the phase its clock reached, faded by its ramp. A
-        // frozen ride does not step the driver, so the pose is left where it was.
+        // The body on the bike, posed by the body's own sixty-state machine (V18): one call that runs
+        // the rider's animation actor off the fields the ride just wrote and writes the pose it chose
+        // onto the body's 22 joints. It is a second entry point of the simulation rather than a step
+        // of `Rider::frame` — the body is an actor of its own in the original — and it is called from
+        // here because the clip table it selects out of is the renderer's. A frozen ride does not
+        // call it, so the pose is left where it was.
+        //
+        // The gate is the two inputs the body has that no ride holds: a start-line clock, which this
+        // shell has none of, and the wall clock the idle pool seeds itself from. Both zero, so the
+        // body's start sequence is the full breathe-and-wait and two runs of the same tape draw the
+        // same idles.
         if let Some(body) = &mut body {
             if world.riding {
-                body.pose(dt, world.sim.rider.animation);
+                body.ride(dt, &mut world.sim.rider, &world.hands, rider::Gate::default());
             }
         }
 
