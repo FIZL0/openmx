@@ -4,10 +4,12 @@
 //! Needs the user's own disc, so every test skips with the reason when it is not there — a fresh
 //! checkout stays green.
 
+use game_render::anim::{Set, Stance};
 use game_render::disc::{Disc, Res};
 use game_render::ini;
 use game_render::mat::{M4, V3, v3};
 use game_render::psg::Model;
+use game_render::rider as gear;
 use game_render::scene::Vehicle;
 use game_render::skin::skin;
 use game_render::vehicle::{BARS, Chassis, Drive, FRONT, REAR, ROOT, SHOCKS, SWINGARM, params};
@@ -182,20 +184,20 @@ fn a_minute_of_riding_poses_the_chassis_every_frame() {
         ..Controls::default()
     };
 
-    let joints = c.set.skeleton.len();
+    let joints = c.stance.set.skeleton.len();
     let mut states = std::collections::BTreeSet::new();
     let mut modes = [0usize; 6];
     for k in 0..A_MINUTE {
         r.frame(&p, &tables, if k == 2 { &ask } else { &hands }, FRAME, &mut world);
         let f = frame(&mut c, &r);
-        states.insert(c.driver.state);
+        states.insert(c.stance.driver.state);
         modes[f.blend.mode() as usize] += 1;
         assert_eq!(c.world.len(), joints, "a transform per node, frame {k}");
         for (j, m) in c.world.iter().enumerate() {
             assert!(
                 m.0.iter().flatten().all(|v| v.is_finite()),
                 "node {j} ({}) is not finite on frame {k}: {m:?}",
-                c.set.skeleton.bones[j].name
+                c.stance.set.skeleton.bones[j].name
             );
         }
         // Skinning every frame is the shell's job; a tenth of a second apart proves the triangles
@@ -205,7 +207,7 @@ fn a_minute_of_riding_poses_the_chassis_every_frame() {
             assert!(!tris.is_empty(), "the chassis skinned to nothing on frame {k}");
         }
     }
-    assert!(c.posed, "no state of the minute found a clip to pose the chassis with");
+    assert!(c.stance.posed, "no state of the minute found a clip to pose the chassis with");
     println!(
         "a minute of riding: {A_MINUTE} frames, states {states:?}, blend modes \
          free/one/two/_/four/pair {modes:?}"
@@ -228,10 +230,10 @@ fn the_fork_node_travels_with_the_ported_compression() {
     let build = sub(&mut disc);
     let mut c = chassis(&mut disc, &set, &build.mcf);
 
-    let root = c.set.skeleton.find(ROOT).expect("the chassis has a Bike node");
-    let shocks = c.set.skeleton.find(SHOCKS).expect("the chassis has a Shocks node");
-    let bars = c.set.skeleton.find(BARS).expect("the chassis has a Handlebars node");
-    assert_eq!(c.set.skeleton.bones[shocks].parent, Some(bars), "Shocks hangs off Handlebars");
+    let root = c.stance.set.skeleton.find(ROOT).expect("the chassis has a Bike node");
+    let shocks = c.stance.set.skeleton.find(SHOCKS).expect("the chassis has a Shocks node");
+    let bars = c.stance.set.skeleton.find(BARS).expect("the chassis has a Handlebars node");
+    assert_eq!(c.stance.set.skeleton.bones[shocks].parent, Some(bars), "Shocks hangs off Handlebars");
 
     let mut r = ride(&p, &c, &set);
     let mut world = Flat::default();
@@ -286,12 +288,12 @@ fn the_wheel_node_angle_integrates_its_own_spin() {
     let mut c = chassis(&mut disc, &set, &build.mcf);
 
     let wheels = [
-        (FRONT, SHOCKS, c.set.skeleton.find(FRONT), c.set.skeleton.find(SHOCKS)),
-        (REAR, SWINGARM, c.set.skeleton.find(REAR), c.set.skeleton.find(SWINGARM)),
+        (FRONT, SHOCKS, c.stance.set.skeleton.find(FRONT), c.stance.set.skeleton.find(SHOCKS)),
+        (REAR, SWINGARM, c.stance.set.skeleton.find(REAR), c.stance.set.skeleton.find(SWINGARM)),
     ];
     for (tire, parent, j, k) in wheels {
         assert!(j.is_some() && k.is_some(), "the chassis has a {tire} under a {parent}");
-        assert_eq!(c.set.skeleton.bones[j.unwrap()].parent, k, "{tire} hangs off {parent}");
+        assert_eq!(c.stance.set.skeleton.bones[j.unwrap()].parent, k, "{tire} hangs off {parent}");
     }
 
     let mut r = ride(&p, &c, &set);
@@ -375,7 +377,7 @@ fn a_stunts_first_and_last_frames_differ_in_the_bikes_pose() {
     let mut r = ride(&p, &c, &set);
     let mut world = Flat::default();
 
-    let posed = |c: &Chassis| c.set.skeleton.world(&c.set.pose);
+    let posed = |c: &Chassis| c.stance.set.skeleton.world(&c.stance.set.pose);
     let (mut first, mut last) = (None, None);
     let mut frames = 0usize;
     let mut modes = std::collections::BTreeSet::new();
@@ -397,7 +399,7 @@ fn a_stunts_first_and_last_frames_differ_in_the_bikes_pose() {
         }
         if first.is_some() && r.tricks.in_progress {
             modes.insert(f.blend.mode());
-            states.insert(c.driver.state);
+            states.insert(c.stance.driver.state);
             last = Some(posed(&c));
             frames += 1;
         }
@@ -443,7 +445,7 @@ fn shortest_bike_stunt(c: &Chassis, set: &Stunts24) -> (usize, game_sim::trick::
                 && *k != set.throwaway
                 && s.duration > F::ZERO
                 && *k < SLOTS
-                && c.lib.clip[*k].is_some()
+                && c.stance.lib.clip[*k].is_some()
         })
         .min_by(|a, b| a.1.duration.0.total_cmp(&b.1.duration.0))
         .map(|(k, s)| (k, s.clone()))
@@ -492,3 +494,278 @@ fn gesture_for(slot: usize) -> (u8, Dir) {
 const _: () = {
     assert!(va::AIR == 35 && va::TURN_RIDING == 30);
 };
+
+// ---------------------------------------------------------------------------------------------
+// V13: the other side of the pairing — the sixty-state machine's own skeleton.
+// ---------------------------------------------------------------------------------------------
+
+/// The stock gear, and the body V12's capture watched the sixty-state step run on.
+const A_RIDER: &str = "thq1";
+/// What the *body's* loader puts in front of a gesture slot's stunt name. The race copy of the set;
+/// the freestyle one is `ff_rider_` out of the same archive.
+const RIDER_PREFIX: &str = "rider_";
+/// The directory a rider's `.mcf` names, which is where the sixty clips come from.
+const RIDER_ANIM: &str = "rider\\anim\\";
+/// How many joints the body has.
+const RIDER_JOINTS: usize = 22;
+
+/// One copy of the rider's archive, opened the same way the bike's is.
+fn rider_res(disc: &mut Disc) -> Res {
+    let name = member(disc, &format!("{A_RIDER}.res")).expect("the disc has no rider archive");
+    disc.res(&name).expect("the rider archive does not open")
+}
+
+/// The rider's body with the sixty-state machine bound to it: the pairing V12's capture proves,
+/// built out of the same pieces [`Chassis::load`] builds the bike's from.
+fn rider_stance(disc: &mut Disc, set: &Stunts24) -> Stance {
+    let chain = rider_res(disc);
+    let gear = gear::Rider::load(&[chain], A_RIDER, gear::Sex::Male).expect("the rider loads");
+    let res = rider_res(disc);
+    let anim = match Set::load(vec![res], &gear.mcf) {
+        Ok(s) => s,
+        Err(why) => panic!("the rider's animation set did not load: {why}"),
+    };
+    Stance::new(anim, RIDER_PREFIX, &set.stunts, params())
+}
+
+/// **V13.** The sixty-state machine's clip table is the *rider's*: every one of its sixty slots
+/// binds against the body's set, and the bike's set — paired with it until now — has twelve.
+///
+/// This is V12's capture restated as a test. The 24 gesture slots come out prefixed and the 36 pose
+/// names bare, which is the loader's own split, and the clips land on a 22-joint skeleton out of
+/// `Rider\Anim\`.
+#[test]
+fn the_sixty_state_tables_clips_are_the_riders() {
+    let Some(mut disc) = disc() else { return };
+    let set = stunts(&mut disc);
+    let body = rider_stance(&mut disc, &set);
+
+    assert_eq!(body.set.skeleton.len(), RIDER_JOINTS, "the body's joints");
+    assert_eq!(
+        body.set.set.directory.to_ascii_lowercase(),
+        RIDER_ANIM,
+        "the set's clips come out of the rider's own directory"
+    );
+    assert_eq!(body.bound_slots(), va::STATES, "every state of the machine found its clip");
+
+    // The loader's split, slot by slot: prefixed stunt names in the gesture slots, bare pose names
+    // after them, and each clip's channels landing on joints of the skeleton it was bound to.
+    for (slot, id) in body.lib.clip.iter().enumerate() {
+        let id = id.unwrap_or_else(|| panic!("state {slot} bound no clip"));
+        let bound = body.set.get(id).expect("a bound clip is in the set");
+        let want = if slot < SLOTS {
+            va::Library::stunt_name(RIDER_PREFIX, &set.stunts[slot].name)
+        } else {
+            va::POSE_CLIPS[slot - SLOTS].to_string()
+        };
+        assert_eq!(bound.name, want, "state {slot}");
+        assert!(bound.named() > 0, "state {slot} ({want}) is a clip for another skeleton");
+    }
+
+    // And the other side of the swap: the bike's set, asked for the same sixty, answers for the
+    // twelve V9 found — its 9 `UsedForBike` gestures and the three airborne poses — and for none of
+    // the nine rows of the grounded grid, which is why V9's grid drew nothing.
+    let build = sub(&mut disc);
+    let bike = chassis(&mut disc, &set, &build.mcf);
+    let grid: Vec<usize> = (va::TURN_STOP..va::TURN_RIDING + 3).map(|s| s as usize).collect();
+    assert!(
+        grid.iter().all(|&s| bike.stance.lib.clip[s].is_none()),
+        "a bike archive has none of the grounded grid"
+    );
+    assert!(
+        grid.iter().all(|&s| body.lib.clip[s].is_some()),
+        "the rider's set has every row of the grounded grid"
+    );
+    // What the bike's set *does* answer for, by name, so the twelve clips V9 found are accounted
+    // for against the sixty slots asked of them.
+    let on_the_bike: Vec<String> = bike
+        .stance
+        .lib
+        .clip
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, id)| id.map(|id| (slot, id)))
+        .map(|(slot, id)| format!("{slot}:{}", bike.stance.set.get(id).unwrap().name))
+        .collect();
+    println!(
+        "the sixty-state table: {} of {} slots on the rider's {} joints out of {:?}; {} of {} on \
+         the bike's {} joints out of {:?} — {}",
+        body.bound_slots(),
+        va::STATES,
+        body.set.skeleton.len(),
+        body.set.set.directory,
+        bike.stance.bound_slots(),
+        va::STATES,
+        bike.stance.set.skeleton.len(),
+        bike.stance.set.set.directory,
+        on_the_bike.join(" ")
+    );
+    println!(
+        "the bike's set holds {} clips: {}",
+        bike.stance.set.clips.len(),
+        bike.stance.set.clips.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" ")
+    );
+}
+
+/// **V13.** A minute of riding poses the rider's own skeleton from the machine, every frame — and
+/// the same minute on the bike's set leaves frames with nothing to draw.
+///
+/// The wants and the request block are the shell's own reading off the ride ([`Chassis::want`]), so
+/// both sets are asked for exactly the same states in the same order: the only difference is which
+/// skeleton and which clips are on the other end of the machine.
+#[test]
+fn a_minute_of_riding_poses_the_riders_own_skeleton() {
+    let Some(mut disc) = disc() else { return };
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let build = sub(&mut disc);
+    let mut c = chassis(&mut disc, &set, &build.mcf);
+    let mut body = rider_stance(&mut disc, &set);
+
+    let mut r = ride(&p, &c, &set);
+    let mut world = Flat::default();
+    // The same fixture V9's minute rides: a stunt on the way down, then hands on, so the gesture
+    // arm, the airborne row and the grounded grid are all asked for.
+    let (slot, _) = shortest_bike_stunt(&c, &set);
+    let gesture = gesture_for(slot);
+    let hands = Controls { gas: F::ONE, stick: (F(0.4), F(-0.2)), ..Controls::default() };
+    let ask = Controls {
+        trick: buttons_for(gesture.0),
+        dpad: dpad_for(gesture.1),
+        ..Controls::default()
+    };
+
+    let joints = body.set.skeleton.len();
+    let mut states = std::collections::BTreeSet::new();
+    let mut modes = [0usize; 6];
+    let (mut rider_blank, mut bike_blank) = (0usize, 0usize);
+    // The number the grid cuts up, in feet per second: the thresholds are 5, 10 and 15 mph.
+    let mut fastest = f32::MIN;
+    let mut first = Vec::new();
+    let mut last = Vec::new();
+    for k in 0..A_MINUTE {
+        r.frame(&p, &tables, if k == 2 { &ask } else { &hands }, FRAME, &mut world);
+        let want = Chassis::want(&r.ride, &r.tricks);
+        let request = Chassis::request(&r.ride, &r.tricks);
+        fastest = fastest.max(request.band.0);
+        let f = body.frame(FRAME, want, &request);
+        let _ = c.frame(FRAME, want, &request, Drive::of(&r.ride));
+        states.insert(body.driver.state);
+        modes[f.blend.mode() as usize] += 1;
+        rider_blank += usize::from(!body.drawn);
+        bike_blank += usize::from(!c.stance.drawn);
+
+        let posed = body.world();
+        assert_eq!(posed.len(), joints, "a transform per joint, frame {k}");
+        for (j, m) in posed.iter().enumerate() {
+            assert!(
+                m.0.iter().flatten().all(|v| v.is_finite()),
+                "joint {j} ({}) is not finite on frame {k}: {m:?}",
+                body.set.skeleton.bones[j].name
+            );
+        }
+        if k == 0 {
+            first = posed.clone();
+        }
+        last = posed;
+    }
+
+    println!(
+        "a minute on the rider: {A_MINUTE} frames, states {states:?}, blend modes \
+         free/one/two/_/four/pair {modes:?}, {rider_blank} frames with nothing to draw on the \
+         rider's set and {bike_blank} on the bike's, fastest band {fastest:.3} ft/s"
+    );
+    assert!(body.posed, "the machine never posed the body");
+    assert_eq!(rider_blank, 0, "the rider's set had nothing to draw on {rider_blank} frames");
+    assert!(
+        bike_blank > 0,
+        "the bike's set drew every frame of the minute, so this proves nothing about the pairing"
+    );
+    assert!(states.contains(&va::TURN_RIDING), "the grounded grid never ran");
+    assert!(modes[4] > 0, "the grid's interpolating bands never ran");
+    let apart = furthest(&first, &last);
+    assert!(apart > 0.01, "the body held one pose for the whole minute: {apart}");
+}
+
+/// **V13.** Every row of the grounded pose grid draws on the rider's set, across all four regions
+/// the three thresholds cut the band into and from one end of the fore/aft axis to the other.
+///
+/// V9's minute could not reach this: a bike archive has none of the nine `turn_*` clips, and the
+/// one fixture that rides never leaves the lowest band anyway (5.3 ft/s of 7.3333). So the band and
+/// the mix axis are driven here instead of ridden — the request block is the step's only input for
+/// both — and what is checked is that each setting finds its clips and that the grid actually moves
+/// the body: between the two ends of a row, and between one row and the next. The one row the
+/// fore/aft axis cannot move is the stopped one, whose three columns V14 found aliased to a single
+/// `.MOT` on this disc; that is asserted too.
+#[test]
+fn the_grounded_pose_grid_draws_across_every_band() {
+    let Some(mut disc) = disc() else { return };
+    let set = stunts(&mut disc);
+    let mut body = rider_stance(&mut disc, &set);
+
+    // Two in each of the four regions the thresholds make: under 5 mph, 5 to 10, 10 to 15, over 15.
+    let bands = [F(0.0), F(5.0), F(7.3333), F(12.0), F(14.6666), F(18.0), F(22.0), F(30.0)];
+    let ends = [F::ZERO, F(0.5), F::ONE];
+    // Half a second at each setting, which is four time constants of the slower axis.
+    const SETTLE: usize = 30;
+
+    let mut modes = std::collections::BTreeSet::new();
+    let mut poses = std::collections::BTreeMap::new();
+    for (b, band) in bands.iter().enumerate() {
+        for (e, axis) in ends.iter().enumerate() {
+            let r = va::Request {
+                band: *band,
+                mix_axis: *axis,
+                phase_axis: F(0.5),
+                seq: 1,
+                ..va::Request::default()
+            };
+            for _ in 0..SETTLE {
+                let f = body.frame(FRAME, va::TURN_RIDING, &r);
+                modes.insert(f.blend.mode());
+                assert!(
+                    body.drawn,
+                    "the grid drew nothing at {} ft/s with the axis at {}",
+                    band.0, axis.0
+                );
+            }
+            poses.insert((b, e), body.world());
+        }
+    }
+
+    // Across a row, measured on a row whose three columns really are three clips. The lowest
+    // setting is not one: at a band of zero `w3` is one, so the grid plays the `turn_stop` row
+    // alone — and V14 measured that the `.mcf` whose claims win on this disc aliases *both*
+    // `turn_stop_Fwd` and `turn_stop_Bck` to `turn_stop_Mid.MOT`, so all three of that row's
+    // columns are the same clip and the axis cannot move it. That is the original's own behaviour
+    // (V14's variant B, which left those two columns spelled out, missed the capture by 3.6e-4 in
+    // this exact arm), so it is asserted here rather than worked around.
+    let across = furthest(&poses[&(3, 0)], &poses[&(3, 2)]);
+    let across_riding = furthest(&poses[&(7, 0)], &poses[&(7, 2)]);
+    let stopped = furthest(&poses[&(0, 0)], &poses[&(0, 2)]);
+    let rows = furthest(&poses[&(0, 1)], &poses[&(3, 1)]);
+    println!(
+        "the grounded grid on the rider: {} settings drawn, blend modes {modes:?}, the furthest \
+         joint moves {across:.3} across the standing-still row and {across_riding:.3} across the \
+         riding row, {stopped:.2e} across the stopped row (whose three columns are one clip), and \
+         {rows:.3} between the first band's row and the third's",
+        poses.len()
+    );
+    assert_eq!(
+        modes,
+        [2u8, 4].into_iter().collect(),
+        "the grid's two arms are the interpolating one and the single pair"
+    );
+    assert!(across > 0.01, "the fore/aft axis does not move the body: {across}");
+    assert!(
+        across_riding > 0.01,
+        "the fore/aft axis does not move the body on the riding row: {across_riding}"
+    );
+    assert!(
+        stopped < 1e-5,
+        "the stopped row's three columns all resolve to turn_stop_Mid.MOT on this disc, so the \
+         fore/aft axis has nothing to move the body between: {stopped}"
+    );
+    assert!(rows > 0.01, "the band does not move the body between rows: {rows}");
+}

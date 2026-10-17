@@ -67,7 +67,7 @@ use game_sim::motion::{
     Animations, Blend, ClipId, Driver, Frame, Library, Params, Played, Player, Request, Slot,
     Snapshot,
 };
-use game_sim::trick::Stunt;
+use game_sim::trick::{SLOTS, Stunt};
 use game_sim::vehicle_anim;
 use ps2_float::F;
 
@@ -609,6 +609,204 @@ impl Rig {
     }
 
     /// Every joint's transform under the frame's pose.
+    pub fn world(&self) -> Vec<M4> {
+        self.set.world()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// the sixty-state machine's own rig
+// ---------------------------------------------------------------------------------------------------
+
+/// The time constant the mix axis is eased in with, as the body's build writes it, and the phase
+/// axis'.
+///
+/// They are not in [`vehicle_anim::Params`] because in the original they are not on the object: each
+/// axis is a five-word record of its own ({value, time constant, 1.0, FLT_MAX, -FLT_MAX}) that the
+/// build allocates beside it, and the step walks both. V12 read the two taus off the running game and
+/// they are the same two numbers the build writes.
+pub const MIX_TAU: F = F(0.125);
+pub const PHASE_TAU: F = F(0.15);
+
+/// Where both axes start: the middle of a row, which is what makes a body that is not being steered
+/// sit in the middle of each row of the pose grid rather than snap in from a column.
+pub const AXIS_START: F = F(0.5);
+
+/// One animation set driven by the **sixty-state** machine ([`game_sim::vehicle_anim`]) — which is
+/// the rider's body, not the bike.
+///
+/// This is [`Rig`]'s sibling: the same join of a set, a clip table, a clock and a driver, for the
+/// other of the two animation machines the game runs. The two are not interchangeable and the port
+/// had them crossed over until V13:
+///
+/// | | the machine | its clip table | the skeleton it poses |
+/// |---|---|---|---|
+/// | [`Rig`] | [`game_sim::motion`], 28 slots | `bike_<stunt>` ×24 and `bike_air_Fwd/Mid/Bck` | the bike's |
+/// | [`Stance`] | [`game_sim::vehicle_anim`], 60 states | `<prefix><stunt>` ×24 and [`vehicle_anim::POSE_CLIPS`] ×36 | the rider's 22 joints |
+///
+/// V12's capture settles it from the running game: the object the sixty-state step runs on has 22
+/// joints, reads its clips out of `Rider\Anim\`, and binds **all sixty** of its table's slots — the
+/// 24 `rider_<Stunt>` gestures and the 36 bare pose names. The 12 `bike_*` clips a bike archive
+/// ships are the *other* machine's, which is why V9's grounded pose grid drew nothing: every
+/// `turn_*` row of the grid is a rider clip and a bike set has none of them.
+///
+/// Nothing here decides which state runs. The chooser is the body's own update
+/// ([`vehicle_anim::Update`], V11) and the caller hands its answer to [`Stance::frame`], the same way
+/// [`crate::vehicle::Chassis`] hands it the reading it makes off the ride.
+pub struct Stance {
+    /// The clips, the skeleton they are bound to and the live pose.
+    pub set: Set,
+    /// The sixty-state clip table, as [`Stance::new`] filled it.
+    pub lib: vehicle_anim::Library,
+    /// The machine: the latched state, the cross-fade ramp, the two eased axes.
+    pub driver: vehicle_anim::Driver,
+    /// The motion object's clock, which is the same clock [`Rig`] runs on — one engine underneath.
+    pub player: Player,
+    /// The pose a cross-fade fades from, as the simulation records it.
+    pub snapshot: Snapshot,
+    /// The machine's own numbers ([`crate::vehicle::params`]).
+    pub params: vehicle_anim::Params,
+    /// A clip has written a pose. Until one has, the live pose is the bind pose — which for a rider
+    /// is a body with its arms out, and for a bike is the bike.
+    pub posed: bool,
+    /// The *last* frame wrote a pose: the blend it asked for found every clip it needed. A frame
+    /// that comes back false is a row of the table the set does not have — which is how a set
+    /// paired with the wrong machine shows up.
+    pub drawn: bool,
+}
+
+impl Stance {
+    /// The machine as the object's constructor builds it, for a set whose table is already filled.
+    ///
+    /// Three of these are the constructor's own numbers rather than a zeroed default, and each one
+    /// shows up on the first frame:
+    ///
+    /// * the state, the latched state and the previous state all start at
+    ///   [`vehicle_anim::TURN_RIDING`] — the body starts in the pose grid, so a first frame that asks
+    ///   for the grid is not a restart and does not cross-fade out of the bind pose;
+    /// * `extra` is "which added record the selection takes instead of the state machine" and
+    ///   **negative is none**, where a zeroed driver would ask for record 0 on its first frame;
+    /// * both axes start centred ([`AXIS_START`]) with the two time constants above.
+    pub fn bound(set: Set, lib: vehicle_anim::Library, params: vehicle_anim::Params) -> Stance {
+        Stance {
+            set,
+            lib,
+            driver: vehicle_anim::Driver {
+                want: vehicle_anim::TURN_RIDING,
+                state: vehicle_anim::TURN_RIDING,
+                prev: vehicle_anim::TURN_RIDING,
+                extra: -1,
+                mix: vehicle_anim::Lag { value: AXIS_START, tau: MIX_TAU, ratio: F::ZERO },
+                phase: vehicle_anim::Lag { value: AXIS_START, tau: PHASE_TAU, ratio: F::ZERO },
+                ..vehicle_anim::Driver::default()
+            },
+            player: Player::default(),
+            snapshot: Snapshot::default(),
+            params,
+            posed: false,
+            drawn: false,
+        }
+    }
+
+    /// Read a set's clip table the way the body's loader fills it, and bind every clip it names.
+    ///
+    /// `prefix` is what goes in front of a gesture slot's stunt name and nothing else: the original's
+    /// spawn hands the body `"rider_"`, or `"ff_rider_"` for the freestyle copy of the same archive,
+    /// and the 36 pose clips are looked up bare. Three passes, in the loader's own order:
+    ///
+    /// 1. the set's own `[MOTION n]` list, which is where a rider's 36 pose clips and a bike's three
+    ///    airborne ones come from ([`Set::load_listed`]);
+    /// 2. the 24 gesture slots, loaded and bound as `<prefix><stunt name>` — every slot, with no
+    ///    `UsedForBike` gate, which is the one place this loader differs from the bike's;
+    /// 3. the 36 pose names, asked for bare ([`vehicle_anim::Library::load`] does 2 and 3).
+    ///
+    /// Then one pass this port adds for a set that names its own clips after its actor: a bike's
+    /// `.mcf` spells the airborne row `NAME=bike_air_Mid`, so a pose slot still empty is asked for a
+    /// second time with the prefix in front. Only the empty ones, so a set that answered to the bare
+    /// name keeps what it bound. On a rider's set nothing reaches it — all 36 answer bare — and it is
+    /// this port's own reading of a seam the decompilation was not re-read for; see V9's journal.
+    pub fn new(
+        mut set: Set,
+        prefix: &str,
+        stunts: &[Stunt],
+        params: vehicle_anim::Params,
+    ) -> Stance {
+        set.load_listed();
+        let mut lib = vehicle_anim::Library::load(prefix, stunts, &mut set);
+        for (i, name) in vehicle_anim::POSE_CLIPS.iter().enumerate() {
+            let slot = SLOTS + i;
+            if lib.clip[slot].is_none() {
+                let prefixed = format!("{prefix}{name}");
+                set.load(&prefixed);
+                lib.clip[slot] = set.bound(&prefixed);
+            }
+        }
+        Stance::bound(set, lib, params)
+    }
+
+    /// How many of the sixty states found a clip — 60 on a rider's set, 12 on a bike's.
+    pub fn bound_slots(&self) -> usize {
+        self.lib.clip.iter().filter(|c| c.is_some()).count()
+    }
+
+    /// One frame of the machine: the selection, the restart's snapshot, the clock, the pose.
+    ///
+    /// The original's own order, which is [`vehicle_anim::Driver::frame`] and then the motion
+    /// library's entry point the frame names:
+    ///
+    /// ```text
+    ///   Driver::frame        the ramp, the restart, the latch, the two lags, the selection
+    ///   Set::rewind          on a restart: the pose the cross-fade fades from
+    ///   Player::play         a played-once group putting its clip on, with a cross out of the last
+    ///   Blend::run           the clock: a dt advance, or a phase-driven sample
+    ///   Set::apply_vehicle   that blend's clips sampled on this skeleton              -> a Pose
+    /// ```
+    ///
+    /// `want` is the state to run and `r` the request block. The placement is left to the caller —
+    /// the shell already puts the bike and the body on it where the simulation says — so the step is
+    /// run as a self-placing actor and [`vehicle_anim::Frame::place`] comes back `None`.
+    pub fn frame(&mut self, dt: F, want: i32, r: &vehicle_anim::Request) -> vehicle_anim::Frame {
+        // The machine is `Copy`, which is what lets the clip-length closure borrow the set while the
+        // step runs.
+        let mut driver = self.driver;
+        driver.want = want;
+        let frame = {
+            let set = &self.set;
+            driver.frame(dt, &self.params, r, &self.lib, true, |id| set.timing(Some(id)).duration)
+        };
+        self.driver = driver;
+
+        if frame.restart {
+            self.set.rewind(&mut self.snapshot);
+        }
+        // The two played-once groups put a clip on with a cross out of whatever was playing. A state
+        // of those groups with no clip of its own still reaches the engine's play in the original,
+        // which stores the null handle — and a null handle in the clock is "nothing is playing".
+        if let Some(play) = frame.play {
+            match play.put() {
+                Some(put) => {
+                    let playing = self.set.timing(self.player.clip).duration;
+                    if self.player.play(put, playing) {
+                        self.set.rewind(&mut self.snapshot);
+                    }
+                }
+                None => {
+                    self.player.clip = None;
+                    self.player.finished = false;
+                    self.player.fade.on = false;
+                    self.player.time = F::ZERO;
+                }
+            }
+        }
+        let clip = self.set.timing(frame.blend.clock_clip(&self.player));
+        frame.blend.run(&mut self.player, dt, &clip);
+        self.drawn = self.set.apply_vehicle(frame.blend, &self.player);
+        self.posed |= self.drawn;
+        frame
+    }
+
+    /// Every joint's transform under the live pose — one matrix per joint, which is what places a
+    /// vertex.
     pub fn world(&self) -> Vec<M4> {
         self.set.world()
     }
