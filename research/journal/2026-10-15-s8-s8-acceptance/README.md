@@ -42,3 +42,18 @@ now checks against a minute somebody rode. One casualty, repaired: PCSX2 switche
 end of a movie and kept appending to the human's `.p2m2`; a test caught it, four worktree copies restored
 it byte for byte, and the file is read-only now. The entry is PART, not READY: nothing in S8 needs a
 person any more except a *longer* recording.
+
+**Fourth session (4-s8-acceptance-PART.md).** The run compares a simulation instead of two spawns. P5 left
+two questions and both are answered: the capture lives in `context/capture/acceptance/` and the reader now
+looks there first and in the recorder's default directory second (nothing moved, and a test asserts both),
+and the fixture's start state is seeded from the capture's own first row — the bike's whole world transform
+as a quaternion, so a leaning bike stays leaning, plus the body's velocity quad. **Tick 0 agrees on all
+eight lanes, bit for bit**, where this morning it was `bike.pos[0] 4309.563 vs 0`; `bike.pos[3]` and
+`bike.vel[3]` (both 1.0 in the original) agree on all 1,810 recorded ticks, through both crashes, and
+`bike.pos[0]` holds for thirty. The third question — whether the gate panics or reports — is answered as a
+ratchet: it reports down to `ACCEPTANCE_AGREES_THROUGH` and fails below it, because a divergence here is the
+status of the port and not a regression, and a panic reddens every unrelated task's `./kit check`. The run
+parts at tick 1, and the reason is measured and is not the physics: the port's bike loses height at a flat
+31.8 units/s² — `phy::G` and nothing else — because `replay::verify` replays over a flat floor at y = 0 and
+the recording is a ride over Free09 at y ≈ 208. **A fixture has a start state now and still has no ground.**
+That is the new **S28**, with D7 beside it, and it is why S8 stays open.
