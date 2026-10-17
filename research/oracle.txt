@@ -2308,3 +2308,70 @@ anim_mcf_motion boot 0x00142220 (set in a0, the motion-set object in a1, the ini
 #   initial byte). anim_find_or_load 0x00142430 builds "<+0x1e0><name>" and forces ".MOT" the same
 #   way, and never reads `VUE=` at all -- which is why the 36 bare pose names of vehicle_load_clips
 #   ignore aliases entirely
+
+# ---------------------------------------------------------------------------------------------------
+# V19 — the body's *mode* machine: the other slot of the rider body actor's vtable, and the only
+# writer of the settle flag the S27 selection reads. The port is the Mode/Thrown/Machine additions in
+# crates/game-sim/src/rider_anim.rs plus the two-line wiring in Rider::body_frame, the proof is the
+# fifth test of crates/game-sim/tests/rider_anim.rs, and the entry is
+# research/journal/2026-10-17-v19-a-wreck-that-settles.
+rider_body_mode boot 0x0024c7e0 (3592 bytes; dt in f12, the actor in a1) one frame of what is *posing*
+#                               the rider's body, run from the body actor's update (boot 0x0024e640,
+#                               its one caller) before the selection. Picks one of five modes into
+#                               +0x47c, runs the entry of whichever it has just changed into (+0x480
+#                               is the previous one), and in the wreck mode runs the clocks and the
+#                               test that decides a thrown body has come to rest.
+#   the five modes, in the order the chain tests them: 0 the request's own +0xc placement flag is set
+#   (whoever owns the request is placing the body), 2 the request's wreck reason +0x104 is non-zero,
+#   3 the step's from_table/holding (a backflip raises the second), 1 riding (the request's cut flag
+#   +0x140 clear and no look-around idle), 4 the start line or a look-around. The entry chain is
+#   `if 0 / else if 4 / else if 2 / else if (2 || prev != 2) { if 3 / else if 1 } / else <cleanup>`,
+#   so the arm that cleans a wreck up is the last else and a body leaving the wreck for 0 or 4 is
+#   cleaned up by neither -- those two match first
+#   the wreck entry is boot 0x0024ad90 (5504 bytes), handed the reason: it puts the ragdoll where the
+#   bike is, hands every bone the bike's velocity and the limp damping, and draws five numbers out of
+#   the throw -- the spin's three lanes, then +0x6bc, then +0x6c0, each `base + delta * (2u - 1)`
+#   the body's wreck fields, by offset (a test may say where these live; the port may not):
+#     +0x48c  something of the ragdoll is touching    +0x490  how long this roll has lasted, seconds
+#     +0x6b4  the body has come to rest (S27's flag)  +0x6b8  it was flung off the ground again
+#     +0x6bc  what is left of the throw's ForceTime   +0x6c0  ... of its HandHoldTime
+#     +0x6d0  the randomised spin, as a quaternion    +0x6e0  the orientation it is thrown at
+#     +0x6a8/+0x6ac  which frame that is taken in     +0x6b0  the bones are off the bike
+#     +0x648  a clock counted down in the wreck       +0x620/+0x624 the bone count and array
+#     +0x8c0  the damping record handed to the main bone's vtable +0x54 on the settle
+#   the rider file's [Wrecks] lives on this actor at +0x700: seven 0x40-stride throw records
+#   (ForceTime +0x00, HandHoldTime +0x04, Force +0x10, ForceTimeDelta +0x20, HandHoldTimeDelta +0x24,
+#   ForceDelta +0x30), then +0x8c0 GroundAngularRateDamping as a quadword, +0x8d0 RiderFlailHeight,
+#   +0x8d4 RiderRollTime, +0x8d8 RiderRollSpeed -- which is exactly game_sim::phy::Wrecks
+#   **the settle test**, after the ragdoll step (boot 0x001dc960) and with the main bone at
+#   [[+0x2f4]+0xa4] (+0x64 its height, +0x70/+0x74/+0x78 its velocity):
+#     if (roll != 0 || 0 < loose || 0 < thrown || flung || height - height_before_the_step <= 0x8d0)
+#        if (roll <= 0 || !flung)
+#           if ((0x8d4 < roll || |velocity| < 0x8d8) && !settled)  settled = 1, the bones take the
+#              stiffer damping (boot 0x0024c310 with a1 = 1, set in a delay slot) and the main bone is
+#              handed +0x8c0
+#        else  the bones go limp (0x0024c310 with a1 = 0) and flung clears
+#     else  the bones go stiff, flung = 1 and settled = 0
+#   so a wrecked body settles the frame its roll has lasted RiderRollTime *or* its speed has dropped
+#   below RiderRollSpeed, guarded by an outer "not still being thrown about" and an inner condition
+#   that separates a landed body from a just-flung one. The square root is taken inside the second
+#   test only, which is why the port takes it lazily
+#   its ten callees, named here so a test can hook them: the five the entries reach and the five the
+#   wreck arm does. The wreck frame proved in crates/game-sim/tests/rider_anim.rs hooks all of them
+#   and lets only the mode chain and the settle test run
+rider_body_wreck_enter boot 0x0024ad90 (5504 bytes) the wreck's entry: the ragdoll is put where the
+#                                      bike is and the throw's five numbers are drawn
+rider_body_damping boot 0x0024c310 (372 bytes, the actor in a0 and which set in a1) hands every bone
+#                                  one of the two damping records stored beside it -- a1 = 1 is the
+#                                  stiffer set, 0 the limp one
+rider_body_look_reset boot 0x0024d5f0 (240 bytes) the look-around and placement reset the Held, Gate
+#                                     and Posed entries run
+rider_body_ride_enter boot 0x0024c490 (836 bytes) the riding mode's own entry
+rider_ragdoll_step boot 0x001dc960 (1300 bytes) one step of the ragdoll, run in the middle of the
+#                                  wreck arm -- which is why the rise the settle test reads is
+#                                  measured either side of it
+rider_bone_follow boot 0x00218b80 (976 bytes) points a dummy at a bone
+rider_bone_post boot 0x001f6840 (20 bytes) the per-bone call of the arm's tail
+rider_bone_detach boot 0x0011aed0 (72 bytes) takes one bone off the bike it was following
+rand_raw boot 0x0040fd40 (100 bytes) the generator behind every draw, as an int
+quat_axes boot 0x0013f380 (132 bytes) a quaternion's axes, which the look arm reads
