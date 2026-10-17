@@ -70,7 +70,6 @@ shell, with the numbers a reader can reproduce from a `--trace` or a `--shot`.
 
 The same two rules: a number that reaches the simulation is proved against the original, a number that
 only reaches the picture matches by eye. Ordered by what stops you riding first.
-- [ ] **P11** the clutch never comes back out, so the bike in the shell cannot pull away. ride.rs:1255 sets ride.clutch_in = F::ONE whenever the speed is under mv::IDLE_SPEED with the rate-limited throttle at exactly zero, and nothing anywhere clears it - the field is a latch, and engine_update is handed a fully-in clutch for the rest of the session. One frame at rest off the throttle is enough: measured on P10's fixture, ten seconds of full throttle after a single such frame reaches 0.0 ft/s with the engine at 7474 rpm. This is the shell's own start state, since openmx spawns the rider standing still and the player reaches for the throttle some frames later, so the cost is that the bike never moves at all. Decide where the clutch is let back out (the original's rider lets it out as the revs cross the road's) and make P10's it_pulls_away_after_a_frame_off_the_throttle pass; take its #[ignore] off in both crates/game-sim/tests/ride.rs and crates/openmx/tests/ride.rs — crates/game-sim/src/ride.rs and crates/game-sim/src/move.rs | t: it_pulls_away_after_a_frame_off_the_throttle in crates/game-sim/tests/ride.rs (ignored today) | j: the-clutch-that-never-comes-out
 
 ### Stretch
 

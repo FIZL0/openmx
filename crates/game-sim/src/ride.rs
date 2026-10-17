@@ -1247,7 +1247,11 @@ impl Ride {
             lean: held.stick.0,
             gas: held.gas,
             brake: held.brake,
-            clutch: held.clutch,
+            // The clutch here is the rider's *lever* and not the rate-limited copy the engine
+            // reads: the launch ramp is the only thing that looks at this field, and the original's
+            // ramp reads the lever (`+0x644`), not `+0x65c`. Keeping the two apart is what stops the
+            // idle rule below — which writes `+0x65c` — from rearming or stalling that ramp.
+            clutch: c.clutch,
             gas_rate_limited: held.gas,
             reverse: c.reverse,
             balancing: c.balance,
@@ -1348,19 +1352,28 @@ impl Ride {
         ride.g_peak = mv::NOTHING;
         mvc.accel = mv::NOTHING;
         mvc.ang_accel = mv::NOTHING;
-        // The float the engine reads through its own pointer (`bike+0x65c`) is the input layer's
-        // rate-limited clutch, and the input layer writes it every frame — see
-        // [`mv::Ride::clutch_in`]. Only the idle rule below writes it inside the ground step, so
-        // without this line the lever the rider is holding never reaches the engine at all and a
-        // clutch pulled in once at a standstill is never let out again: the bike idles for ever with
-        // the throttle pinned. P8 found it that way.
-        ride.clutch_in = held.clutch;
         // Rolling to a stop off the throttle: pull the clutch in for the rider so the engine does not
         // stall. The *rate-limited* throttle is what is tested, so this does not fire the instant the
         // rider lets go.
+        //
+        // **Where the clutch comes back out.** This writes the same word the input layer's rate
+        // limit walks — the engine's own rate-limited clutch, [`Held::clutch`] — and that word
+        // persists across the frame boundary, so letting it out is not a separate rule: next frame's
+        // [`Held::step`] walks it from here back down to the rider's lever at `ClutchOutRateLimit`,
+        // a lever's worth of travel in a quarter of a second on a bike whose file says 4. The rider
+        // feeds the clutch out as the engine picks the bike up, which is what a rider does.
+        //
+        // The port used to keep two copies of that word — one walked by the input layer, one the
+        // idle rule wrote — and pulling the clutch in wrote only the second. With nothing walking
+        // *it*, a bike that had spent one frame at rest with the throttle shut had a clutch that
+        // was fully in for ever (P10's `it_pulls_away_after_a_frame_off_the_throttle`); patching
+        // that by copying the lever over the top every frame (P8) cured the latch but let the
+        // clutch out in a single frame instead of feeding it. One word has neither fault.
         if s.speed < F(mv::IDLE_SPEED) && s.gas_rate_limited == F::ZERO {
-            ride.clutch_in = F::ONE;
+            held.clutch = F::ONE;
         }
+        // The float the engine reads through its own pointer (`bike+0x65c`).
+        ride.clutch_in = held.clutch;
         let rpm = mv::road_rpm(engine, &rear.mv, s.speed);
         mv::shift(mvp, engine, rpm);
         mv::clutch(mvp, ride, &mut mvc, engine, s);

@@ -40,8 +40,13 @@
 //! never reaching the front wheel, which P11 and P12 between them paid, and the brake never reaching
 //! the chassis, which P13 paid. Each was repeated here as well as in the sibling file, because a leg
 //! of a minute is not proved by a leg of another minute, and because this is the file whose failure
-//! would be a player's complaint. The one leg still owed a rider — `clutch_in` latching, so the bike
-//! will not pull away — is only in the sibling file, which is where its defect lives.
+//! would be a player's complaint.
+//!
+//! **And one test that is not a leg of the minute**, for the same reason:
+//! `it_pulls_away_after_a_frame_off_the_throttle` starts from an idle pad rather than from `down
+//! cross` on frame zero, which is the state a session actually begins in. The clutch the idle rule
+//! pulls in there was a second copy of the engine's clutch word that nothing walked back out, so
+//! the bike in the shell would not move at any throttle; P11 paid it.
 
 use game_sim::collide::{Bundle, Record};
 use game_sim::input::{AXIS_CENTRE, CONTROL_MAP, Control, PADS, Report};
@@ -725,6 +730,89 @@ fn it_brakes_to_a_stop() {
     let stopped = m.leg("stopped");
     assert!(fastest(&stopped) < 2.0, "it rolled away again at {} ft/s", fastest(&stopped));
     assert_eq!(wrecks(&brake) + wrecks(&stopped), 0, "stopping wrecked");
+}
+
+/// A bike that has been sitting on the start line pulls away when the player reaches the throttle —
+/// through the pad, which is the state the shell actually starts a session in.
+///
+/// The sibling file's `it_pulls_away_after_a_frame_off_the_throttle` has the long version. The short
+/// one: `ride.rs`'s idle rule pulls the clutch in for a rider at rest off the throttle, and until
+/// P11 it wrote that to a copy of the engine's clutch word that nothing walked back out, so one
+/// frame of a shut throttle — which is every session before the player's thumb arrives — left the
+/// clutch fully in and the bike would not move at any throttle. The minute above never caught it
+/// because its script has `down cross` on the very first frame.
+///
+/// This file's version is here rather than only in the sibling because the throttle in question is
+/// the one that comes out of a report's pressure byte: the frames this test spends waiting are
+/// frames the input layer sees an idle pad, and `gas_rate_limited` being exactly zero on them is
+/// what arms the rule.
+#[test]
+fn it_pulls_away_after_a_frame_off_the_throttle() {
+    let gas = Hands { buttons: Control::Cross.mask(), ..Hands::default() };
+
+    for (what, wait) in [("one frame", 1usize), ("a second", 60)] {
+        let tables = Arc::new(Tables::build());
+        let phy = Phy::read_bytes(ridden_bike().as_bytes(), &tables.ride.curve);
+        let geom = Phy::read_bytes(stock::BIKE.as_bytes(), &tables.ride.curve);
+        let rider = game_sim::rider::Rider::new(
+            &phy,
+            stock::mounts(&geom),
+            stock::SPAWN,
+            stock::FACING,
+            Set::default(),
+        );
+        let mut sim = Sim::with_rider(0, tables, phy, rider);
+        let mut world = Jump::nothing();
+
+        let mut ride = |sim: &mut Sim, hands: &Hands| {
+            let reports: [Report; PADS] = [hands.report(), Report::missing()];
+            let controls = sim.poll(DT, &reports);
+            let frame = sim.step(DT, &controls, &mut world);
+            assert!(frame.wreck.is_none(), "the bike wrecked on the start line");
+        };
+
+        for _ in 0..wait {
+            ride(&mut sim, &Hands::default());
+        }
+        // An idle pad at a standstill is what pulls the clutch in, and it is all the way in.
+        assert_eq!(
+            sim.rider.ride.mv.clutch_in.0, 1.0,
+            "after {what} on an idle pad the clutch is {} and not in",
+            sim.rider.ride.mv.clutch_in.0
+        );
+
+        let mut top = 0.0f32;
+        let mut clutch = Vec::with_capacity(600);
+        for _ in 0..600 {
+            ride(&mut sim, &gas);
+            top = top.max(sim.rider.ride.chassis.speed.0);
+            clutch.push(sim.rider.ride.mv.clutch_in.0);
+        }
+
+        // The clutch is fed back out over the file's `ClutchOutRateLimit` — a quarter of a second
+        // on this bike — rather than dropped in the first frame on the throttle.
+        assert!(
+            clutch[0] > 0.9 && clutch[0] < 1.0,
+            "after {what}, the first frame on the throttle took the clutch from in to {} — it was \
+             dropped, not fed",
+            clutch[0]
+        );
+        let out = clutch.iter().position(|&c| c == 0.0).unwrap_or_else(|| {
+            panic!("after {what} on an idle pad, the clutch never came out: {:?}", &clutch[..8])
+        });
+        let quarter = (0.25 / DT.0).round() as usize;
+        assert!(
+            out >= quarter - 2 && out <= quarter + 2,
+            "after {what}, the clutch was out {out} frames in, not the file's quarter second \
+             ({quarter} frames)"
+        );
+
+        // And the bike goes.
+        assert!(
+            top > 20.0,
+            "after {what} on an idle pad, ten seconds of `down cross` reached {top} ft/s"
+        );
+    }
 }
 
 #[test]

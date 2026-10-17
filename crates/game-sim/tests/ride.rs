@@ -993,19 +993,23 @@ fn the_two_captured_wrecks_match_their_lengths() {
 // loose on purpose. The point is the legs, not the tolerances: this is a test that should be loud when
 // the bike stops being drivable and silent about everything else.
 //
-// **One leg does not pass, and ships `#[ignore]`d with the defect named in the test.** It is not
-// aspirational: it fails today for a reason traced to a line, the reason is a bike a rider cannot
-// ride, and it is not this task's file to fix (it lives in `ride.rs` and `move.rs`).
-// Deleting it would lose the finding; leaving it failing would redden `./kit check` for every
-// other task in flight. Ignored, it is what the port still owes a rider, and the day it is
-// paid the `#[ignore]` comes off.
+// **Every leg passes now.** Three of them shipped `#[ignore]`d with the defect named in the test —
+// not aspirational: each failed for a reason traced to a line, each reason was a bike a rider could
+// not ride, and none of them lived in this file. All three are paid.
 //
-//     `it_pulls_away_after_a_frame_off_the_throttle`  `clutch_in` latches and is never cleared
-//
-// The other two are paid. `it_turns_the_way_the_stick_is_pushed` — the steering command never
-// reached the hinge — was P12's. `it_brakes_to_a_stop` was P13's, and the reason written here for it
-// was wrong: the clutch was slipping, not locked, and the brake torque was being thrown away before
-// it became a force at all.
+//     `it_turns_the_way_the_stick_is_pushed`          P12 — the steering command never reached
+//                                                     the front wheel's hinge
+//     `it_brakes_to_a_stop`                           P13 — the brake torque went on the rear
+//                                                     wheel's spin, which the road overwrites
+//                                                     every substep, so it never became a force.
+//                                                     The reason written here before was wrong:
+//                                                     the clutch was slipping, not locked.
+//     `it_pulls_away_after_a_frame_off_the_throttle`  P11 — the clutch the idle rule pulled in was
+//                                                     a second copy of the engine's clutch word
+//                                                     that nothing walked back out, and the test's
+//                                                     own bike took its wheel mounts off the
+//                                                     patched file and so rode on a 1.6 ft
+//                                                     wheelbase
 //
 // The rest pass, and `the_minute_notices_a_bike_that_loops_out` rides the same minute on a bike geared
 // four times too tall to show the asserts are not vacuous.
@@ -1570,47 +1574,96 @@ fn it_brakes_to_a_stop() {
     assert_eq!(wrecks(&brake) + wrecks(&stopped), 0, "stopping wrecked");
 }
 
-/// A bike that spends one frame at a standstill with the throttle shut can never pull away again.
+/// A bike that has been sitting on the start line pulls away when the throttle does.
 ///
-/// **Why it is ignored.** `ride.rs`'s frame sets `ride.clutch_in = 1` whenever the speed is under
-/// `IDLE_SPEED` and the rate-limited throttle is exactly zero, and nothing anywhere clears it: the
-/// field is a latch. One frame of a closed throttle on the start line is enough, and from then on
-/// `mv::engine_update` is handed a clutch that is fully in, so the engine revs to 7000 and the rear
-/// wheel gets nothing. The minute above only moves because its throttle is down on tick zero.
+/// **The defect this was written for.** `ride.rs`'s idle rule pulls the clutch in for a rider whose
+/// speed is under `IDLE_SPEED` with the rate-limited throttle shut, and until P11 it wrote that to a
+/// copy of the engine's clutch word that nothing else walked — so one frame of a closed throttle on
+/// the start line left the clutch fully in, the engine revved to 7000 and the rear wheel got
+/// nothing. (P8 had already taken the worst of it off by copying the rider's lever over that field
+/// every frame, which cured the latch but let the clutch out in a single frame instead of feeding
+/// it.) The minute above only ever moved because its throttle is down on tick zero; this is the
+/// shell's own start state, where `openmx` spawns the rider standing still and the player reaches
+/// for the throttle some frames later.
 ///
-/// This is the shell's own start state — `openmx` spawns the rider standing still and the player
-/// reaches for the throttle some frames later — so the measured cost of this latch is that the bike
-/// in the shell cannot be ridden at all, which is what P10 is about.
+/// **The fixture this was written with.** P10 took the wheel mounts off the *patched* bike, whose
+/// `BodyTireForcePosition` section (8) moves to a tuning arm — so the bike it rode had a 1.6 ft
+/// wheelbase with its wheels hung below the body, and it wrecked at 18 ft/s however good the
+/// clutch was. It takes them off the unpatched file now, the way [`ride_the_minute`] does and for
+/// the reason that function's comment gives, and it carries a wreck body so that a wreck shows up
+/// as a failed assertion rather than as a rider frozen mid-frame.
 ///
-/// What this asserts when it is paid: a bike that has been sitting there goes when the throttle does.
+/// What it asserts: the clutch is in while the bike sits there, it is fed back out over about the
+/// `ClutchOutRateLimit` the file asks for once the throttle opens rather than being dropped in one
+/// frame, the bike goes, and none of it wrecks.
 #[test]
-#[ignore = "ride.clutch_in latches: one frame at rest off the throttle and the clutch is never let out again"]
 fn it_pulls_away_after_a_frame_off_the_throttle() {
     let tables = rider::Tables::build();
     let text = ridden_bike();
     let p = Phy::read_bytes(text.as_bytes(), &tables.ride.curve);
+    // The mounts come from the unpatched file, as in section (8) and in `ride_the_minute`.
+    let geom = Phy::read_bytes(BIKE.as_bytes(), &tables.ride.curve);
     let at = Vf::new(0.0, 1.0, 0.0, 1.0);
-    let mut world = Jump::nothing();
     let gas = Controls { gas: F::ONE, ..Controls::default() };
 
-    // One second of sitting on the start line, then ten of full throttle — a rider arriving at a
-    // bike, in other words, rather than a drag racer already on the rev limiter.
+    // One frame and then one second of sitting on the start line, then ten of full throttle — a
+    // rider arriving at a bike, in other words, rather than a drag racer already on the limiter.
     for (what, wait) in [("one frame", 1usize), ("a second", 60)] {
-        let mut r = Rider::new(&p, mounts(&p), at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+        let mut world = Jump::nothing();
+        let mut r =
+            Rider::new(&p, mounts(&geom), at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+        let part = phy::Part::read_bytes(WRECK_PART.as_bytes(), "PhysicsPart1");
+        let wrecks = phy::Wrecks::read_bytes(RIDER_WRECKS.as_bytes());
+        r.carries_wreck(part, wrecks, part.inertia(WRECK_BOX));
+
+        let mut wrecked = 0;
         for _ in 0..wait {
-            r.frame(&p, &tables, &Controls::default(), DT, &mut world);
+            wrecked += r.frame(&p, &tables, &Controls::default(), DT, &mut world).wreck.is_some()
+                as usize;
         }
+        // Sitting there with the throttle shut is what pulls the clutch in, and it is all the way
+        // in: that is the state the rest of this test is about.
+        assert_eq!(
+            r.ride.mv.clutch_in.0, 1.0,
+            "after {what} at rest off the throttle the clutch is {} and not in",
+            r.ride.mv.clutch_in.0
+        );
+
         let mut top = 0.0f32;
+        let mut clutch = Vec::with_capacity(600);
         for _ in 0..600 {
-            r.frame(&p, &tables, &gas, DT, &mut world);
+            wrecked += r.frame(&p, &tables, &gas, DT, &mut world).wreck.is_some() as usize;
             top = top.max(r.ride.chassis.speed.0);
+            clutch.push(r.ride.mv.clutch_in.0);
         }
+
+        // The clutch comes back out, and it is fed out rather than dropped: `ClutchOutRateLimit`
+        // is 4 a second on this bike, so a lever's worth of travel is a quarter of a second — about
+        // fifteen frames of these, and not one.
+        assert!(
+            clutch[0] > 0.9 && clutch[0] < 1.0,
+            "after {what}, the first frame on the throttle took the clutch from in to {} — it was \
+             dropped, not fed",
+            clutch[0]
+        );
+        let out = clutch.iter().position(|&c| c == 0.0).unwrap_or_else(|| {
+            panic!("after {what}, the clutch never came out: {:?}", &clutch[..8])
+        });
+        let quarter = (0.25 / DT.0).round() as usize;
+        assert!(
+            out >= quarter - 2 && out <= quarter + 2,
+            "after {what}, the clutch was out {out} frames in, not the file's quarter second \
+             ({quarter} frames)"
+        );
+
+        // And then the bike goes.
         assert!(
             top > 20.0,
             "after {what} off the throttle, ten seconds of full throttle reached {top} ft/s \
              (clutch_in {})",
             r.ride.mv.clutch_in.0
         );
+        assert_eq!(wrecked, 0, "pulling away after {what} wrecked {wrecked} times");
     }
 }
 
@@ -2393,4 +2446,5 @@ fn the_lean_goes_the_way_the_originals_does() {
         steady.iter().map(|p| p.lean.abs()).fold(0.0, f32::max)
     );
 }
+
 

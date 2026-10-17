@@ -248,8 +248,12 @@ pub struct Ride {
     pub clutch_timer: F,
     pub clutch_scale_start: F,
     pub clutch_cofg_weight: F,
-    /// The rate-limited clutch the input layer maintains — written here only by the one rule that
-    /// pulls the clutch in for a rider who is rolling to a stop off the throttle.
+    /// The rate-limited clutch the input layer maintains (`bike+0x65c`), as the engine reads it
+    /// through its own pointer. It is a copy and not the original of that word: the word itself is
+    /// the input layer's, which walks it toward the rider's lever every frame, and the ground step's
+    /// one writer of it — the rule that pulls the clutch in for a rider rolling to a stop off the
+    /// throttle — writes the input layer's copy so that the same walk feeds the clutch back *out*
+    /// afterwards. See `ride.rs`' idle rule.
     pub clutch_in: F,
     /// The collision record's "something is close" flag, set from the bike's own node once a frame
     /// after the substep loop.
@@ -516,7 +520,9 @@ pub struct Step {
     pub stick_angle: F,
     pub deflection: F,
     pub lean: F,
-    /// Throttle, brake and clutch, as the rider is holding them.
+    /// Throttle, brake and clutch, as the rider is holding them. The clutch is the rider's lever
+    /// itself (`+0x644`) rather than the rate-limited copy at `+0x65c`: [`clutch`], the only thing
+    /// in this module that reads it, is what the original reads the lever for.
     pub gas: F,
     pub brake: F,
     pub clutch: F,
