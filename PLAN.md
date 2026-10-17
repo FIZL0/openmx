@@ -265,6 +265,9 @@ added beside them:
     writer · `mat.rs` vectors and 4x4 transforms in the files' own convention ·
     `bin/first-draw.rs` the whole chain: disc in, one frame of a track out
   - `rider.rs` the rider: its `.sub`, the `.mcf` it names, its suit and how it bolts onto the chassis ·
+    `chassis.rs` where the renderer put the bike, against where the solver put it: the one placement
+    builder the shell and the tests share, the live read of the chassis' four grip anchors, and the
+    per-wheel measurement of the drawn tire against the contact the suspension found (V20) ·
     `skin.rs` `.mot` motion clips and the one `Skeleton` a model is read into: the channels, the
     quaternion blend, the joint map a clip is bound through, and the pose on a model (V4, V5)
   - `anim.rs` — **the animation seam**: the port's one implementation of `game_sim::motion::Animations`.

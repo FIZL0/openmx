@@ -119,6 +119,7 @@ mod window;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use game_render::chassis::{grips as chassis_grips, placed as chassis_at};
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, V3, v3};
 use game_render::raster::Frame;
@@ -853,14 +854,6 @@ fn run() -> Result<(), String> {
         played_dt: None,
     };
 
-    // Where the chassis wants the body's hands and feet: the four dummy anchors at its grips and its
-    // pegs, read once, because nothing in the shell animates the chassis. The body's limbs are solved
-    // onto these on every frame it is drawn.
-    let grips = match assets.models.get(CHASSIS) {
-        Some(chassis) => anchors_of(&Skeleton::of(&chassis.model), &[]),
-        None => Default::default(),
-    };
-
     // The riding overlay (P6). It is the shell's own furniture, so it is created here beside the
     // window rather than inside the simulation's `World`, and it reads the port's own values at draw
     // time instead of being fed them.
@@ -1015,7 +1008,6 @@ fn run() -> Result<(), String> {
             ))
         };
         let bike_look = vector(forward);
-        let bike_up = vector(up);
         let pos = vector(bike_pos);
         let camera = match &view {
             Some(view) => Camera {
@@ -1033,7 +1025,7 @@ fn run() -> Result<(), String> {
         // The picture: the dirt, then the scene's props and the bike standing on them.
         clear(&mut frame, look.fog_color);
         let mut drawn = ground.draw(&mut frame, &camera, &light, pos, GROUND_RADIUS);
-        let bike_at = M4::placement(pos, bike_look, bike_up);
+        let bike_at = chassis_at(&world.sim.rider.ride);
         // Each part rides on one node of the chassis, so its transform is that node's place in the
         // chassis followed by the chassis's place in the world.
         let mut actor: Vec<(&str, M4)> = vec![(CHASSIS, bike_at)];
@@ -1054,6 +1046,18 @@ fn run() -> Result<(), String> {
             };
             actor.push((part.model.as_str(), at));
         }
+        // Where the chassis wants the body's hands and feet *this* frame: the four dummy anchors at
+        // its grips and its pegs, off the live pose. They were read once, at load, from the bind
+        // pose — but `Dummy_Hand_L` and `Dummy_Hand_R` hang off `Handlebars`, which the steering
+        // drive turns, so a rider aimed at the bind pose lets go of the bars the moment the bike is
+        // steered (V20). Falls back to the bind pose before the bike has a frame of its own.
+        let grips = match &chassis {
+            Some(chassis) => chassis_grips(chassis),
+            None => match assets.models.get(CHASSIS) {
+                Some(loaded) => anchors_of(&Skeleton::of(&loaded.model), &[]),
+                None => Default::default(),
+            },
+        };
         // And the rider, at the bike's own transform: the clips put the body on the bike
         // themselves, so there is nothing to bolt (`game_render::rider`). Not before a frame has
         // posed it, though: a blend with no clip behind it leaves the bind pose, which is the one
