@@ -70,6 +70,7 @@ pub mod key {
     pub const S: u8 = 39;
     pub const D: u8 = 40;
     pub const F: u8 = 41;
+    pub const H: u8 = 43;
     pub const Z: u8 = 52;
     pub const X: u8 = 53;
     pub const C: u8 = 54;
