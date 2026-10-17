@@ -43,15 +43,21 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use game_sim::archive::{Psr, Res};
 use game_sim::hash::Leaf;
 use game_sim::input::{Control, Report, CONTROL_MAP, CONTROLS as PORT_CONTROLS};
 use game_sim::math::{self, Mat4};
 use game_sim::motion::{Clips, Driver, Params, Pose, Request};
+use game_sim::phy::Phy as BikePhy;
 use game_sim::replay::{
-    self, Capture, Fixture, PadFrame, PadTape, Playback, Reason, Sample, Value, Watch,
+    self, Capture, Fixture, PadFrame, PadTape, Playback, Reason, Sample, Value, Watch, Where,
 };
-use game_sim::trick::Trick;
+use game_sim::rider::Tables as RiderTables;
+use game_sim::track::{Scene, Terrain};
+use game_sim::trick::{Set, Trick};
+use game_sim::world::{Ground, Place, Props, World};
 use game_sim::{Input, Sim};
 use ps2_float::{Acc, F, Vf};
 
@@ -944,6 +950,20 @@ fn inputs_from_capture(cap: &Capture) -> Result<Vec<Input>, String> {
 /// variable `dt` (the original integrated a frame the port's fixed step cannot reproduce), and a gap in
 /// the frames. None of them can be left to the eye: they are all invisible in a CSV of 9,000 rows.
 fn acceptance_fixture(cap: &Capture) -> Result<Fixture, String> {
+    acceptance_fixture_on(cap, None)
+}
+
+/// [`acceptance_fixture`] on a bike read off the disc instead of [`game_sim::stock`]'s stand-in: the
+/// one seam S28 needed on this side, since the `.phy` decides the suspension's rates, the tire forces
+/// and the mass, and the wheel mounts are taken off it as well.
+///
+/// `None` is the stand-in, which is what every synthetic capture in this file is built and checked
+/// against; a real acceptance capture passes the Race 125 the human rode
+/// ([`the_bike_the_human_rode`]).
+fn acceptance_fixture_on(
+    cap: &Capture,
+    bike: Option<(Arc<RiderTables>, BikePhy)>,
+) -> Result<Fixture, String> {
     let inputs = inputs_from_capture(cap)?;
 
     let (kind, player) = (column(cap, "bike_type")?, column(cap, "bike_player")?);
@@ -1020,7 +1040,7 @@ fn acceptance_fixture(cap: &Capture) -> Result<Fixture, String> {
         // Where the run starts, read off the capture's own first row rather than fallen back to
         // `Sim::new`'s spawn — see [`acceptance_start`], and S8's journal entry for the verdict that
         // made it necessary.
-        start: Some(acceptance_start(cap, state as u32)?),
+        start: Some(acceptance_start(cap, state as u32, bike)?),
         inputs,
         watches,
         ..Default::default()
@@ -1053,7 +1073,11 @@ fn acceptance_fixture(cap: &Capture) -> Result<Fixture, String> {
 /// Each of those is a real difference from the original's state at tick 0 and each of them is a
 /// reason the replay diverges a few ticks in rather than at tick 0; the journal entry lists them
 /// against what would close them.
-fn acceptance_start(cap: &Capture, seed: u32) -> Result<Sim, String> {
+fn acceptance_start(
+    cap: &Capture,
+    seed: u32,
+    bike: Option<(Arc<RiderTables>, BikePhy)>,
+) -> Result<Sim, String> {
     // Read through `Capture::float`, which is the same parse the watches get, so the start state's
     // position and velocity are bit-identical to the tick-0 samples they are compared against.
     let lane = |column: &str| -> Result<f32, String> {
@@ -1080,7 +1104,18 @@ fn acceptance_start(cap: &Capture, seed: u32) -> Result<Sim, String> {
     // (`Ride::axes`). `place` is called for its clean slate — the derived fields, the wheels, the air
     // and the ground step's accumulators all zeroed together — and then the parts of the pose the
     // capture actually measured are put in over the top of it.
-    let mut sim = Sim::new(seed);
+    let mut sim = match bike {
+        // The bike off the disc, placed where the capture starts. `Sim::ride` is the shell's own
+        // constructor and the rest of this function is the same whichever bike arrived; the wreck
+        // test is left where `Sim::new` leaves it, off, which is a difference from the original and
+        // is written down in S28's journal entry rather than guessed at here.
+        Some((tables, phy)) => {
+            let mut sim = Sim::ride(seed, tables, phy, origin, m.0[2], Set::default());
+            sim.rider.sense.wrecks_enabled = false;
+            sim
+        }
+        None => Sim::new(seed),
+    };
     let ride = &mut sim.rider.ride;
     ride.place(origin, m.0[2]);
     ride.spawn = ride.origin;
@@ -1440,7 +1475,9 @@ fn the_acceptance_gate_fails_when_a_run_stops_starting_where_its_capture_does() 
     let cap = Capture::parse(&acceptance_csv(60, played)).unwrap();
     let mut f = acceptance_fixture(&cap).unwrap();
     f.start = None; // what every acceptance fixture was before S8
-    acceptance_verdict(&f);
+    // A synthetic capture is the port's own run over the flat floor, so the flat floor is the world
+    // this verdict is taken over — there is no disc in it and nothing to identify.
+    acceptance_verdict(&f, &mut game_sim::world::Flat::default());
 }
 
 /// The acceptance capture is looked for in its own folder first and in the recorder's default output
@@ -1815,38 +1852,57 @@ fn a_long_fixture_round_trips_as_a_file() {
 #[test]
 fn the_acceptance_run() {
     let fixture = private_dir("fixtures").join("slow").join(format!("{ACCEPTANCE}.fixture"));
-
-    let f = if fixture.exists() {
-        let text = std::fs::read_to_string(&fixture).expect("a readable fixture");
-        Fixture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", fixture.display()))
-    } else if let Some((capture, cap)) = acceptance_capture() {
+    let announce = |f: &Fixture| {
         println!(
-            "{}: {} rows x {} columns, frames {}..{}",
-            capture.display(),
-            cap.frames.len(),
-            cap.columns.len(),
-            cap.frames[0],
-            cap.frames[cap.frames.len() - 1],
+            "{}: {} frames, {} checks, seed 0x{:08x}",
+            f.name,
+            f.inputs.len(),
+            f.checks(),
+            f.seed,
         );
-        acceptance_fixture(&cap).unwrap_or_else(|e| panic!("{}: {e}", capture.display()))
-    } else {
-        return;
+        assert!(
+            f.inputs.len() >= 60 * 29,
+            "{} frames is not an acceptance run: the point is minutes of play, where the hundredth \
+             awkward landing is",
+            f.inputs.len(),
+        );
     };
 
+    // A fixture *file*, which carries neither a start state nor a world: the gate below says so in as
+    // many words, and the flat floor is the only world it can be replayed over.
+    if fixture.exists() {
+        let text = std::fs::read_to_string(&fixture).expect("a readable fixture");
+        let f = Fixture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", fixture.display()));
+        announce(&f);
+        acceptance_verdict(&f, &mut game_sim::world::Flat::default());
+        return;
+    }
+
+    let Some((capture, cap)) = acceptance_capture() else { return };
     println!(
-        "{}: {} frames, {} checks, seed 0x{:08x}",
-        f.name,
-        f.inputs.len(),
-        f.checks(),
-        f.seed,
+        "{}: {} rows x {} columns, frames {}..{}",
+        capture.display(),
+        cap.frames.len(),
+        cap.columns.len(),
+        cap.frames[0],
+        cap.frames[cap.frames.len() - 1],
     );
-    assert!(
-        f.inputs.len() >= 60 * 29,
-        "{} frames is not an acceptance run: the point is minutes of play, where the hundredth \
-         awkward landing is",
-        f.inputs.len(),
-    );
-    acceptance_verdict(&f);
+    // The world the capture was recorded on and the bike it was recorded with, both off the disc
+    // (S28). Without them this is a minute of Free09 replayed over a floor at y = 0 on a stand-in
+    // 250, which is the run S8 left diverging at tick 1.
+    let taken = in_the_world_of(&cap, |world, named, bike| {
+        let f = acceptance_fixture_on(&cap, bike)
+            .unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+        let f = Fixture { world: Some(named.clone()), ..f };
+        announce(&f);
+        acceptance_verdict(&f, world);
+    });
+    if taken.is_none() {
+        println!(
+            "— so there is no acceptance verdict in this worktree: the capture is here and the \
+             world it was ridden on is not. The ratchet is unchecked, not met.",
+        );
+    }
 }
 
 // ===================================================================================================
@@ -2790,10 +2846,16 @@ fn the_human_recording_in_context_drives_the_port() {
 //     row: the bike's whole world transform and the body's velocity, bit for bit. Tick 0 agrees on all
 //     eight lanes now, and `bike.pos[3]` and `bike.vel[3]` — the quads' `w` lanes, 1.0 in the original
 //     — agree on all 1,810 recorded ticks, through both crashes.
+//   * **And the ground is under it** (S28): a fixture can name the track and the area it was recorded
+//     on ([`Where`]) and [`replay::verify_in`] replays it over any [`World`], so the acceptance run is
+//     a minute of Free09 on the disc's own Race 125 rather than a minute of nothing at y = 0. Nothing
+//     in the capture says which area it was, so it is read off the ride itself
+//     ([`recorded_on`]): of the disc's five freeride areas, exactly one keeps the recorded bike above
+//     its dirt all the way along and lets it touch down.
 //   * **And the gate reports rather than panics, down to a recorded tick**
-//     ([`ACCEPTANCE_AGREES_THROUGH`]), which is the decision P5 left to S8. The run parts from the
-//     original at tick 1 and the reason is not the physics: a fixture has no ground in it, so the
-//     port's bike free-falls 208 units towards `Flat`'s floor while the original's rides Free09's.
+//     ([`ACCEPTANCE_AGREES_THROUGH`]), which is the decision P5 left to S8. The run still parts from
+//     the original at tick 1 — over the right ground it is the bike's own ride height that parts now,
+//     and the constant's own note has the measurement.
 //     That is the status of the port, not a regression, and a gate that panics on it reddens every
 //     unrelated task's `./kit check` in any checkout holding the data — which is how the captures came
 //     to be parked out of the readers' way to begin with. So the agreement is a constant the run must
@@ -2898,20 +2960,34 @@ fn acceptance_capture_text() -> Option<(PathBuf, String)> {
 /// velocity, bit for bit — is what [`acceptance_start`] bought. It was `NoSuchField` before P5 and a
 /// 4,309-unit teleport before S8.
 ///
-/// Tick 1 is where it stops, and the reason is measured rather than guessed: `bike.pos[1]` is
-/// 208.02884 in the original and 207.98192 in the port. Over the first eight ticks the port's bike
-/// loses 0.0475, 0.0809, 0.1165, 0.1519… units a tick — second differences of a flat 0.0353, which at
-/// the 30 Hz step is an acceleration of 31.8 units/s², i.e. [`game_sim::phy::G`] and nothing else.
-/// **The port's bike is in free fall and the original's is on the ground**, losing 0.00058 a tick down
-/// a gentle slope. The recording is a ride over Free09 at a ground height of about 208 and
-/// [`replay::verify`] replays over [`game_sim::world::Flat`] at y = 0, so the port's wheels find
-/// nothing 208 units below them.
+/// Tick 1 is where it stops, and the reason has moved once already. Over a flat floor — all a fixture
+/// could carry through S8 — the port's bike was in free fall: `bike.pos[1]` 207.98192 against the
+/// original's 208.02884, losing 0.0475, 0.0809, 0.1165, 0.1519… units a tick, second differences of a
+/// flat 0.0353, which at the 30 Hz step is an acceleration of 31.8 units/s², i.e.
+/// [`game_sim::phy::G`] and nothing else; the original's bike lost 0.00058 a tick down a gentle slope.
 ///
-/// So the first thing between this gate and the acceptance run passing is **the world, not the
-/// physics**: a fixture carries a start state now and still carries no ground, and until it carries
-/// the track the rider was on there is no tick 1 to agree about. After that, in the order they will
-/// bite: the bike is a stand-in 250 and the recording is a Race125 (D7), and S3's movement and S10's
-/// air are not yet 1:1.
+/// S28 put the ground under it — the capture is made to name the area it was recorded on and the
+/// fixture to carry it ([`Where`], [`in_the_world_of`]), and the bike is the Race 125 the human rode,
+/// read off the disc instead of a stand-in 250 (D7) — and the run stopped falling. `bike.pos[0]` holds
+/// to tick 29 now, and to 32 on the shorter `acceptance-ride` capture, where every lane used to part at
+/// 1: that is what the world bought.
+///
+/// **Tick 1's `bike.pos[1]` still parts, and now it parts upwards**: 208.10735 against 208.02884, a
+/// shove rather than a fall. The recorded body origin rides 0.49 units *below* Free09's surface as this
+/// port reads it and the wheel mounts hang 0.25 below the origin, so on the first tick both wheels are
+/// underground and the suspension is pinned at its stop — compression 1.0 of 1.0, 186 and 193 units of
+/// spring force. A flat floor 1.42 units lower reproduces the original's tick 1 to within 0.0005, so
+/// one of two numbers is wrong by about that much and the capture cannot say which: the wheel mounts,
+/// which the port takes off the `.phy`'s `body_tire_force_position` where the original reads the bike
+/// model's own tire nodes (S22), or the height [`game_sim::world::Ground::at`] blends out of the
+/// heightfield (D6 — on Free09 the scene's own collision shapes sit a median 66 units above that height
+/// and a cluster of them 1.98 below it, which is worth a reader's second look). S28's journal entry has
+/// the measurements.
+///
+/// After that, in the order they will bite: the start state is only the eight lanes the capture holds,
+/// so the suspension's compression, the wheels' spin, the engine's revs and the trick state all start
+/// at zero where the original's were a minute into a ride; and S3's movement and S10's air are not yet
+/// 1:1.
 const ACCEPTANCE_AGREES_THROUGH: u64 = 0;
 
 /// What a replay of the real acceptance fixture means today, in one line, and what makes it fail.
@@ -2938,8 +3014,8 @@ const ACCEPTANCE_AGREES_THROUGH: u64 = 0;
 ///   bike lanes of [`BIKE`] are all fields of the state the harness drives, so this means a fixture
 ///   file older than the walk, or a capture carrying a column the reader aims somewhere the walk does
 ///   not go. Printed: the port is not what is wrong in that case.
-fn acceptance_verdict(f: &Fixture) {
-    let d = match replay::verify(f) {
+fn acceptance_verdict(f: &Fixture, world: &mut dyn World) {
+    let d = match replay::verify_in(f, world) {
         Ok(end) => {
             println!(
                 "the port agrees with every recorded tick of {}: {} ticks, {} checks",
@@ -2973,7 +3049,7 @@ fn acceptance_verdict(f: &Fixture) {
         d.tick,
         f.last_tick(),
     );
-    for (path, tick) in first_divergence_per_lane(f) {
+    for (path, tick) in first_divergence_per_lane(f, world) {
         match tick {
             Some(tick) => println!("  {path}: agrees through tick {}, parts at {tick}", tick - 1),
             None => println!("  {path}: agrees on every recorded tick"),
@@ -2995,14 +3071,412 @@ fn acceptance_verdict(f: &Fixture) {
 /// the first disagreement of any kind: the run's own first divergence says *a* lane and this says all
 /// eight. A lane that never disagrees is `None`, which on a divergent run is the interesting answer —
 /// it means the lane the whole-fixture verdict named is the only one that moved.
-fn first_divergence_per_lane(f: &Fixture) -> Vec<(String, Option<u64>)> {
+fn first_divergence_per_lane(f: &Fixture, world: &mut dyn World) -> Vec<(String, Option<u64>)> {
     f.watches
         .iter()
         .map(|w| {
             let one = Fixture { watches: vec![w.clone()], hashes: Vec::new(), ..f.clone() };
-            (w.path.clone(), replay::verify(&one).err().map(|d| d.tick))
+            (w.path.clone(), replay::verify_in(&one, world).err().map(|d| d.tick))
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------------------------------
+// S28 — the ground the recording was ridden over, and the bike it was ridden on
+// ---------------------------------------------------------------------------------------------------
+//
+// A fixture is the rider's half of a session; the other half is the world under it, and until S28 the
+// acceptance run was replayed over `world::Flat`'s floor at y = 0 while the recording is a minute over
+// Free09 at a ground height of about 208. That is why it parted from the original at tick 1 with the
+// port's bike free-falling at a flat 31.8 units/s² (`phy::G`) where the original's lost 0.00058 a tick
+// down a slope: no wheel could reach the ground, so nothing in the ride's ground step ever ran.
+//
+// What this section adds is the seam and the two things that go through it:
+//
+//   * **the world**, borrowed out of the user's own disc — the area's terrain for the suspension's ray
+//     ([`game_sim::world::Ground`], D6) and its collision meshes for the sweep ([`Props`], S4) — handed
+//     to [`replay::verify_in`] by the caller, because a track is not a value a fixture can carry;
+//   * **the bike**, `Bike\Race125P.phy` off the same disc rather than [`game_sim::stock`]'s stand-in
+//     250 (D7 settled which file a freeride boot loads, and `tests/phy.rs` proves the port's read of it
+//     is the bike the human's own save state was carrying, word for word).
+//
+// And **which** world, which the capture has to say or the seam is a guess. `watch/acceptance.toml`
+// records no track name — the chain that would read one was not in the spec when the human's minute was
+// played back, and re-recording it needs the GUI again — so the area is identified from the capture
+// itself, which needs no emulator and works for any future capture of any area: of the disc's five
+// freeride areas, exactly one has ground the recorded bike is never *under* and does come down *on*
+// ([`recorded_on`]). The others bury it by 18 to 149 units on hundreds of rows, and the one that does
+// not is Free09, whose start line is 3.7 units from the capture's own first row.
+
+/// The freeride areas on the disc, as `MX.PSR` spells their containers. Every one of them is a
+/// candidate for a capture of freeride play until the capture's own bike says otherwise
+/// ([`recorded_on`]); the `_ss` containers beside them are the same tracks' supercross stadiums, which
+/// a freeride session is not in.
+const FREERIDE_TRACKS: [&str; 5] = [
+    "Tracks\\free06.res",
+    "Tracks\\free07.res",
+    "Tracks\\free09.res",
+    "Tracks\\free10.res",
+    "Tracks\\free11.res",
+];
+
+/// How far under an area's ground the recorded bike may be before that area is not the one it was
+/// ridden on, in world units.
+///
+/// The same margin both ways, because it is the same quantity: no single row where the bike is above an
+/// area's ground says anything — a minute of freeride is half air — so an area is refused for the rows
+/// that bury the bike and for coming no closer than this to it on any row at all. The margin is for the
+/// two ways a point on a bike is not a point on the terrain: the recorded lane
+/// is the chassis transform's origin rather than a contact patch, and it sits about half a unit below
+/// [`Ground::at`]'s surface while the bike is standing still on it (208.0294 against 208.5231 on the
+/// capture's first row — and that blend is this port's own arithmetic, not the game's). Two units
+/// leaves that alone and still refuses the wrong area by a factor of ten.
+const BURIED: F = F(2.0);
+
+/// The bike a freeride boot loads, as D7 proved the loader asks for it. Named here as the archives
+/// spell their members, which is lowercased and without the `Bike\` the loader prepends.
+const FREERIDE_PHY: &str = "race125p.phy";
+
+/// The user's own disc, open: `MX.PSR`'s directory and a reader for one member at a time.
+///
+/// The same two steps `tests/track.rs` and `tests/phy.rs` each take — the front of the file is the
+/// directory, and a member is a seek and a read — kept here rather than shared because a test reading
+/// the disc should be readable on its own, and because this one has to decide *which* member to read.
+struct Disc {
+    file: std::fs::File,
+    psr: Psr,
+}
+
+impl Disc {
+    /// The disc, or `None` with the command that produces it: game data, so absent in a fresh
+    /// checkout and in every worktree that has not extracted it.
+    fn open() -> Option<Disc> {
+        let at = private_dir("iso").join("MX.PSR");
+        let mut file = match std::fs::File::open(&at) {
+            Ok(f) => f,
+            Err(_) => {
+                println!(
+                    "no {} — `./kit extract MX.PSR` writes it; the acceptance run needs the disc \
+                     for the ground the recording was ridden over and for the bike it was ridden on",
+                    at.display(),
+                );
+                return None;
+            }
+        };
+        let mut front = vec![0u8; 64 << 10];
+        std::io::Read::read_exact(&mut file, &mut front).expect("the front of MX.PSR");
+        let psr = Psr::parse(&front).expect("MX.PSR's directory");
+        Some(Disc { file, psr })
+    }
+
+    /// One member's bytes, by the name the directory spells.
+    fn member(&mut self, name: &str) -> Option<Vec<u8>> {
+        let e = self.psr.find(name)?;
+        std::io::Seek::seek(&mut self.file, std::io::SeekFrom::Start(e.at)).expect("seek");
+        let mut bytes = vec![0u8; e.size as usize];
+        std::io::Read::read_exact(&mut self.file, &mut bytes).expect("read");
+        Some(bytes)
+    }
+
+    /// Every `Bike\*.res` on the disc, which is where the physics files live (D7: a track's own second
+    /// archive carries the 250 pair, and the pairs ship inside the bike *models*).
+    fn bike_archives(&self) -> Vec<String> {
+        self.psr
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|n| {
+                let n = n.to_ascii_lowercase();
+                n.starts_with("bike\\") && n.ends_with(".res")
+            })
+            .collect()
+    }
+}
+
+/// A member by the name whoever asks for it spells, which is a leaf where the archive's own is a path
+/// and either case: the lookup the app layer does, folded the same way.
+fn by_suffix<'a>(res: &'a Res, want: &str) -> Option<&'a game_sim::archive::Entry> {
+    let want = want.to_ascii_lowercase();
+    res.entries.iter().find(|e| {
+        let name = e.name.to_ascii_lowercase();
+        name == want || name.ends_with(&format!("\\{want}"))
+    })
+}
+
+/// One area of one track, with the bytes its world is borrowed out of.
+///
+/// The terrain stays as bytes because [`Terrain`] borrows them and [`Ground`] borrows the `Terrain`:
+/// the two have to be locals at the call site, in that order, so that both outlive the [`Place`] the
+/// replay rides.
+struct Area {
+    named: Where,
+    scene: Scene,
+    terrain: Vec<u8>,
+}
+
+impl Area {
+    /// Every area of one track container: one per scene, which on each of the disc's freeride tracks
+    /// is exactly one. An area whose terrain member is missing is skipped — there is no world to ride.
+    fn all_of(disc: &mut Disc, track: &str) -> Vec<Area> {
+        let Some(bytes) = disc.member(track) else { return Vec::new() };
+        let Ok(res) = Res::parse(&bytes) else { return Vec::new() };
+        let scenes: Vec<String> = res
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".scn"))
+            .collect();
+        let mut out = Vec::new();
+        for name in scenes {
+            let entry = res.entries.iter().find(|e| e.name == name).expect("the scene listed");
+            let Ok(scene_bytes) = res.read(&bytes, entry) else { continue };
+            let Ok(scene) = Scene::parse(&scene_bytes) else { continue };
+            // The scene names its terrain `Free09.trn` and the disc stores the platform's own copy of
+            // it beside that name, which is what the shell loads too.
+            let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+            let Some(te) = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(&leaf))
+            else {
+                continue;
+            };
+            let Ok(terrain) = res.read(&bytes, te) else { continue };
+            out.push(Area {
+                named: Where { track: track.to_string(), area: name.clone() },
+                scene,
+                terrain,
+            });
+        }
+        out
+    }
+
+    /// Everything solid the scene stands on this area's ground, read out of the track's own two
+    /// archives the way the shell reads them: the second one carries the vehicles' collision.
+    ///
+    /// A mesh the archives do not have is counted and skipped, because a track is rideable without one
+    /// of its fences and a world that refuses to load is worse than a world missing a sign post.
+    fn props(&self, disc: &mut Disc) -> (Props, Vec<String>) {
+        let mut parts = Vec::new();
+        for name in [self.named.track.clone(), self.named.track.replace(".res", "_2.res")] {
+            if let Some(bytes) = disc.member(&name) {
+                if let Ok(res) = Res::parse(&bytes) {
+                    parts.push((bytes, res));
+                }
+            }
+        }
+        Props::load(&self.scene, |want| {
+            parts
+                .iter()
+                .find_map(|(bytes, res)| {
+                    by_suffix(res, want).and_then(|e| res.read(bytes, e).ok())
+                })
+                .ok_or_else(|| "no archive of this track has it".to_string())
+        })
+    }
+}
+
+/// **Which area a capture of freeride play was recorded on, decided from the capture itself.**
+///
+/// The capture carries the bike's world position on every row and the disc carries five freeride
+/// areas' heightfields, and a ride stays *above* its ground and comes down on it: an area that puts
+/// the recorded bike metres underneath its dirt is not the area the recording was made on, and nor is
+/// an area whose dirt the bike never comes within a wheel of. Both halves are needed — a bike in the
+/// air is a bike doing what a freeride recording is for, so no single row decides anything, and a ride
+/// that is in the air over an area from end to end is a ride somewhere else.
+///
+/// On the acceptance capture the first half is decisive on its own: Free09 never buries the bike by
+/// more than 1.53 units and buries it by more than one on 8 of 1,811 rows, where the other four areas
+/// bury it by 18, 77, 84 and 149 units on 206 to 1,160 rows each. On the shorter `acceptance-ride`
+/// capture it is not — that ride also stays over ground Free11 has, and Free11 has it 60 units below
+/// the wheels the whole way, which is what the second half throws out. A third signal agrees with both
+/// and is not used: Free09's own start line is 3.7 units from the acceptance capture's first row, where
+/// the nearest of the others is 320.
+///
+/// Returns the area and the lines of the measurement, for printing next to the verdict.
+fn recorded_on(cap: &Capture, disc: &mut Disc) -> Option<(Area, Vec<String>)> {
+    let rows = bike_rows(cap)?;
+    let mut candidates = Vec::new();
+    let mut lines = Vec::new();
+    for track in FREERIDE_TRACKS {
+        for area in Area::all_of(disc, track) {
+            let terrain = match Terrain::parse(&area.terrain) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let ground = Ground::new(&terrain, &area.scene.terrain);
+            let (mut buried, mut deepest, mut off_field) = (0usize, F::ZERO, 0usize);
+            // How close the recorded bike ever came to this area's dirt, which is the other half of
+            // the test: a ride that never comes within a wheel of an area's ground was not ridden
+            // there either, however much air it leaves above it.
+            let mut nearest: Option<F> = None;
+            for &(x, y, z) in &rows {
+                match ground.at(x, z) {
+                    Some(hit) => {
+                        let under = hit.y - y;
+                        if under > BURIED {
+                            buried += 1;
+                        }
+                        if under > deepest {
+                            deepest = under;
+                        }
+                        nearest = Some(match nearest {
+                            Some(n) if n < y - hit.y => n,
+                            _ => y - hit.y,
+                        });
+                    }
+                    None => off_field += 1,
+                }
+            }
+            let landed = nearest.is_some_and(|n| n < BURIED);
+            lines.push(format!(
+                "  {}: {buried} of {} rows more than {BURIED:?} under the ground (deepest \
+                 {deepest:?}, closest {:?} over it, {off_field} off the field)",
+                area.named,
+                rows.len(),
+                nearest.unwrap_or(F::ZERO),
+            ));
+            if buried == 0 && off_field == 0 && landed {
+                candidates.push(area);
+            }
+        }
+    }
+    for line in &lines {
+        println!("{line}");
+    }
+    assert!(
+        candidates.len() <= 1,
+        "{} of the disc's freeride areas could be the one this capture was recorded on, so the \
+         capture does not say which world to replay it over:\n{}",
+        candidates.len(),
+        lines.join("\n"),
+    );
+    let area = candidates.pop()?;
+    println!("the capture was recorded on {}", area.named);
+    Some((area, lines))
+}
+
+/// The bike's recorded world position, row by row: the three lanes [`recorded_on`] compares against a
+/// heightfield. `None` when the capture has no bike in it, which is an input-only capture.
+fn bike_rows(cap: &Capture) -> Option<Vec<(F, F, F)>> {
+    let lane = |column: &str| -> Option<Vec<F>> {
+        let w = cap.float(column, column).ok()?;
+        Some(
+            w.samples
+                .iter()
+                .map(|s| match s.value {
+                    Value::Float(bits) => F(f32::from_bits(bits)),
+                    _ => F::ZERO,
+                })
+                .collect(),
+        )
+    };
+    let (x, y, z) =
+        (lane("bike_xform.m30")?, lane("bike_xform.m31")?, lane("bike_xform.m32")?);
+    if x.len() != cap.rows.len() || y.len() != x.len() || z.len() != x.len() {
+        return None;
+    }
+    Some((0..x.len()).map(|k| (x[k], y[k], z[k])).collect())
+}
+
+/// **The bike the human rode, off the disc**: `Bike\Race125P.phy`, read by the port's own loader.
+///
+/// D7 settled that a freeride boot loads the Race 125 pair and nothing else, and `tests/phy.rs`
+/// settled that this port's read of that file is bit-for-bit the bike the original's loader had built
+/// in the save state the recording starts from. Every bike model's archive carries the whole set of
+/// physics files and the copies are identical (`tests/phy.rs` dedupes them to prove it), so the first
+/// archive that has it is the file.
+///
+/// Without it the fixture rides [`game_sim::stock`]'s stand-in — a 250 assembled out of this crate's
+/// own numbers — whose spring rates, tire forces and mass are not the recording's, so no amount of
+/// right ground would make the suspension agree.
+fn the_bike_the_human_rode(disc: &mut Disc, tables: &RiderTables) -> Option<BikePhy> {
+    for archive in disc.bike_archives() {
+        let Some(bytes) = disc.member(&archive) else { continue };
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        if let Some(phy) = by_suffix(&res, FREERIDE_PHY).and_then(|e| res.read(&bytes, e).ok()) {
+            println!("the bike: {FREERIDE_PHY} out of {archive}, {} bytes", phy.len());
+            return Some(BikePhy::read_bytes(&phy, &tables.ride.curve));
+        }
+    }
+    println!("no {FREERIDE_PHY} in any Bike\\*.res on this disc");
+    None
+}
+
+/// **Everything the disc's side of an acceptance run is**, handed to `then`: the world the capture was
+/// recorded on, the name of it for the fixture to carry, and the bike it was ridden on.
+///
+/// A callback rather than a return value because the three things a world is made of borrow each other
+/// in order — the archive's bytes, the [`Terrain`] parsed out of them, the [`Ground`] that reads the
+/// terrain — so all three have to be locals of one stack frame. `None` means the disc is not in this
+/// worktree, and then there is no acceptance verdict to take at all: replaying a ride over a flat floor
+/// is what S8 measured and S28 is here to stop.
+fn in_the_world_of<R>(
+    cap: &Capture,
+    then: impl FnOnce(&mut dyn World, &Where, Option<(Arc<RiderTables>, BikePhy)>) -> R,
+) -> Option<R> {
+    let mut disc = Disc::open()?;
+    let (area, _) = recorded_on(cap, &mut disc)?;
+    let (props, missed) = area.props(&mut disc);
+    let terrain = Terrain::parse(&area.terrain).ok()?;
+    let ground = Ground::new(&terrain, &area.scene.terrain);
+    let (wide, long) = ground.extent();
+    println!(
+        "the world: {} x {} ground samples {:?} apart ({wide:?} x {long:?} of it), {} of {} \
+         collision meshes",
+        ground.samples_x,
+        ground.samples_z,
+        ground.spacing,
+        props.props.len(),
+        area.scene.collision.len(),
+    );
+    for line in missed.iter().take(3) {
+        println!("  {line}");
+    }
+    // One table built here and shared by the `.phy` read and the state that runs on it: the loader
+    // folds the game's own {cos, sin} curve into half a dozen parameters, so a bike read against one
+    // table and ridden against another is a different bike.
+    let tables = Arc::new(RiderTables::build());
+    let bike = the_bike_the_human_rode(&mut disc, &tables).map(|phy| (Arc::clone(&tables), phy));
+    let mut place = Place { ground, props };
+    Some(then(&mut place, &area.named, bike))
+}
+
+/// **The acceptance recording was made on Free09, on the Race 125 the loader builds for a freeride
+/// boot** — the two halves of S28's answer to "replayed over what?", each stated on its own so that a
+/// failure says which one moved.
+///
+/// Neither comes from a column in the capture: the watch spec records the bike, not the level, and
+/// re-recording the minute to add one needs the human and the GUI. The area comes out of the ride's own
+/// geometry ([`recorded_on`]) and the bike out of the loader's rule for a freeride boot (D7:
+/// `Bike\Race125P.phy`, the `P` half of the Race 125 pair, which is the class
+/// [`game_sim::track::FREERIDE_ENGINE`] names). Skipped with a line, not failed, where the disc is not
+/// in the worktree.
+#[test]
+fn the_acceptance_recording_was_made_on_free09_on_the_race_125() {
+    let Some((_, cap)) = acceptance_capture() else { return };
+    let Some(mut disc) = Disc::open() else {
+        println!("no MX.PSR in this worktree: which world the capture was recorded on is unchecked");
+        return;
+    };
+    let (area, lines) = recorded_on(&cap, &mut disc)
+        .unwrap_or_else(|| panic!("the capture's own rows fit none of the disc's freeride areas"));
+    assert_eq!(
+        (area.named.track.as_str(), area.named.area.as_str()),
+        ("Tracks\\free09.res", "tracks\\free09\\free09.scn"),
+        "the capture's rows fit a different area than the one S28 measured:\n{}",
+        lines.join("\n"),
+    );
+    let tables = RiderTables::build();
+    let phy = the_bike_the_human_rode(&mut disc, &tables)
+        .unwrap_or_else(|| panic!("no {FREERIDE_PHY} in any of the disc's bike archives"));
+    // Not an assertion about the numbers — `tests/phy.rs` proves this file against the live bike in the
+    // recording, word for word. This is the statement that the fixture is built on *that* read: a
+    // `.phy` that parsed to nothing would leave a bike with no suspension and no tires.
+    assert!(
+        phy.front.spring > F::ZERO
+            && phy.rear.spring > F::ZERO
+            && phy.front.tire_radius > F::ZERO
+            && phy.mass.mass > F::ZERO,
+        "{FREERIDE_PHY} read as a bike with no springs, no wheels or no mass",
+    );
 }
 
 /// **Every acceptance capture in `context/capture/` is the original at a step the port can match.**
@@ -3082,7 +3556,20 @@ fn every_acceptance_capture_is_the_original_at_a_step_the_port_can_match() {
         assert_eq!(f.watches.len(), BIKE.len(), "every bike column became a watch");
         assert_eq!(f.checks(), BIKE.len() * cap.rows.len(), "no empty cell in any of them");
 
-        acceptance_verdict(&f);
+        // The verdict itself is taken over the ground this capture was recorded on and on the bike
+        // it was recorded with, both off the disc (S28); `f` above is the same fixture over the flat
+        // floor, which is enough for the shape assertions and not for the ride.
+        let taken = in_the_world_of(&cap, |world, named, bike| {
+            let on_it = acceptance_fixture_on(&cap, bike)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            acceptance_verdict(&Fixture { world: Some(named.clone()), ..on_it }, world);
+        });
+        if taken.is_none() {
+            println!(
+                "  — and the world it was ridden on is not in this worktree, so there is no \
+                 verdict for it here: the ratchet is unchecked, not met",
+            );
+        }
     }
     if found == 0 {
         println!("{}", acceptance_recipe(&dirs[0].join(format!("{ACCEPTANCE}.csv"))));
@@ -4122,7 +4609,9 @@ fn freeride_fixture(frames: usize) -> Fixture {
         .zip(samples)
         .map(|(path, samples)| Watch::new(*path, samples))
         .collect();
-    Fixture { name: "freeride".into(), seed: 0, start: None, inputs, hashes, watches }
+    // No world: the floor these numbers were taken over is the flat one `verify` rides, which is the
+    // whole point of the section — what is being replayed is the rider, not the track.
+    Fixture { name: "freeride".into(), seed: 0, start: None, inputs, hashes, watches, world: None }
 }
 
 /// Replay a freeride fixture: ride its inputs and compare every hash and every sample, reporting the

@@ -376,6 +376,7 @@ fn fixture_with(pos_y: &[(u64, u32)], vel_y: &[(u64, u32)]) -> Fixture {
         inputs: canonical_inputs(),
         hashes: Vec::new(), // the hashes are checked by tick below, where a sparse list is allowed
         watches: vec![watch("bike.pos[1]", pos_y), watch("bike.vel[1]", vel_y)],
+        world: None, // the port against its own flat floor, which is what these hashes were taken over
     }
 }
 
