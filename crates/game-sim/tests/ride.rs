@@ -956,3 +956,734 @@ fn the_two_captured_wrecks_match_their_lengths() {
         chord.back.unwrap()
     );
 }
+
+// ---------------------------------------------------------------------------------------------------
+// (7) a minute you can ride
+// ---------------------------------------------------------------------------------------------------
+//
+// Everything above this line proves the ride does not do anything *wrong*: the callees come in the
+// right order, the same inputs hash the same twice, a wall stops the bike, a bike nobody is touching
+// stands still, a bike dropped on its head wrecks and gets up. None of it says the bike can be
+// **ridden** — a bike that never moves passes all of it.
+//
+// So this section sits a rider on it for a minute and asserts what a rider would notice. One scripted
+// minute, ten legs, 3600 ticks of [`DT`], over a floor with one take-off ramp on it:
+//
+//     the launch                 2 s   full throttle from a standstill
+//     flat out                  20 s   held there until the speed stops climbing
+//     turning right              4 s   the stick hard over, throttle still pinned
+//     straight after the right   2 s
+//     turning left               4 s   the stick hard the other way
+//     straight after the left    2 s
+//     the run-up                 3 s   a ramp is put 250 ft ahead, along the bike's own heading
+//     the jump                   5 s   over it, through the air, and down
+//     the brake                 10 s   the brake pinned, the throttle shut
+//     stopped                    8 s   hands off the pad
+//
+// The same minute is ridden through the shell's own pad in `crates/openmx/tests/ride.rs`, which is
+// where the script is written in the kit's pad notation; this file rides it through the [`Controls`]
+// that notation produces, so the two cannot drift.
+//
+// **Where the numbers come from.** The bike is this directory's hand-written `.phy` (see the file's
+// head) with two keys patched in [`ridden_bike`], so the only absolute numbers worth asserting are
+// the ones the recording has: the top speed, the sharpest turn rate and the hardest braking the human
+// managed in `context/capture/acceptance/`. Those three are consts below, checked back against the
+// capture by `the_minutes_numbers_are_the_originals` in a checkout that has it. Everything else is a
+// leg's own shape — "it moved", "it kept the speed", "it came down on its wheels" — with tolerances
+// loose on purpose. The point is the legs, not the tolerances: this is a test that should be loud when
+// the bike stops being drivable and silent about everything else.
+//
+// **Three legs do not pass, and ship `#[ignore]`d with the defect named in the test.** They are not
+// aspirational: each one fails today for a reason traced to a line, each reason is a bike a rider
+// cannot ride, and none of them is this task's file to fix (they live in `ride.rs` and `move.rs`).
+// Deleting them would lose the finding; leaving them failing would redden `./kit check` for every
+// other task in flight. Ignored, they are a list of what the port owes a rider, and the day one is
+// paid the `#[ignore]` comes off.
+//
+//     `it_turns_the_way_the_stick_is_pushed`        the steering command never reaches the hinge
+//     `it_brakes_to_a_stop`                         a locked clutch re-drives the rear wheel at idle
+//     `it_pulls_away_after_a_frame_off_the_throttle`  `clutch_in` latches and is never cleared
+//
+// The rest pass, and `the_minute_notices_a_bike_that_loops_out` rides the same minute on a bike geared
+// four times too tall to show the asserts are not vacuous.
+
+/// The wreck limits the minute is judged against, appended to [`BIKE`] the way [`WRECK_LIMITS`] is —
+/// and unlike that block, these are the limits of a bike being *ridden*: a rider may land hard, lean
+/// hard and take a jump without the machine deciding it has crashed, and still wrecks if it comes
+/// down on its side or loops out. Plausible numbers, not the disc's.
+const RIDE_LIMITS: &str = "
+[Wrecks]
+MaxWreckTime = 2
+CannonballWreckTime = 5
+FrontWreckSpeedLimit = 60
+BackWreckSpeedLimit = 60
+SideWreckSpeedLimit = 40
+RacingDownWreckSpeedLimit = 40
+FreestyleDownWreckSpeedLimit = 40
+GroundPitchDownWreckAngle = 60
+GroundPitchUpWreckAngle = 60
+AirbornePitchDownWreckAngle = 120
+AirbornePitchUpWreckAngle = 120
+AirborneRollWreckAngle = 100
+NoHanderWreckSpeedLimit = 400
+NoHanderMaxRollAngle = 45
+JoustWreckHeight = 2
+CrossupWreck = 1
+CrossupWreckTime = 0.3
+";
+
+/// [`BIKE`], made rideable — two patches, in memory, because the file itself is four other tasks'
+/// fixture and moving a number in it would move their tests.
+///
+/// 1. **The `[Joystick]` steering keys.** `freeride-bike.phy.txt` has the rate limits but none of
+///    `SteerScale1/2` or `SteerSpeed1/2`, so [`phy`]'s loader leaves the steering scale at zero and
+///    `mv::steer_command` multiplies the rider's lean by nothing: on that bike the stick is not
+///    connected to the front wheel at all, whatever `ride.rs` does with the command. A bike the
+///    original would ship has them, so the minute rides one that does — full lock at walking pace
+///    falling to a quarter of it at 50 mph, which is the shape every road vehicle's is.
+/// 2. **`Drag`.** 0.5 holds the hand-written bike to about 48 ft/s flat out, well under the 75.78 the
+///    human's recording reaches, and a minute whose top speed is nothing like the original's cannot
+///    be compared against it. 0.06 puts this bike's terminal speed within half a foot a second of the
+///    recording's, which is what makes [`CAPTURED_TOP_SPEED`] an assertable number here.
+///
+/// Neither patch is a claim about the disc's file: the first is a shape, the second is a calibration,
+/// and `the_minutes_numbers_are_the_originals` is what keeps the second honest.
+fn ridden_bike() -> String {
+    let mut out = BIKE.to_string();
+    let patches = [
+        (
+            "XAxisRateLimit = 6\n",
+            "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.25\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
+        ),
+        ("Drag = 0.5", "Drag = 0.06"),
+    ];
+    for (key, with) in patches {
+        assert!(out.contains(key), "freeride-bike.phy.txt no longer has `{}`", key.trim_end());
+        out = out.replace(key, with);
+    }
+    format!("{out}{RIDE_LIMITS}")
+}
+
+/// The same bike geared four times too tall: a first gear no rider could feed out, which stands the
+/// bike up and loops it over on the launch. `the_minute_notices_a_bike_that_loops_out` rides the
+/// minute on this one so that the legs above are known to be asserting something.
+fn looping_out() -> String {
+    let out = ridden_bike();
+    let key = "FinalGearRatio = 3.6";
+    assert!(out.contains(key), "freeride-bike.phy.txt no longer has `{key}`");
+    out.replace(key, "FinalGearRatio = 14.4")
+}
+
+/// Flat ground with one take-off ramp laid across the rider's path: a plane, rising at `slope` for
+/// `length` feet starting `start` feet along `dir` from `origin`, and level again after it.
+///
+/// It is a ramp rather than [`Flat`] because a jump is the one leg of a minute flat ground cannot
+/// produce, and a ramp is the shortest world that produces one: the bike leaves the lip because the
+/// ground stops rising under it, not because anything in the test tells it to.
+struct Jump {
+    origin: Vf,
+    dir: Vf,
+    start: f32,
+    slope: f32,
+    length: f32,
+}
+
+impl Jump {
+    /// Nowhere near the ramp: what the minute rides over until the run-up puts one in front of it.
+    fn nothing() -> Self {
+        Jump {
+            origin: Vf::default(),
+            dir: Vf::new(0.0, 0.0, 1.0, 0.0),
+            start: 0.0,
+            slope: 0.0,
+            length: 0.0,
+        }
+    }
+
+    /// How far along the ramp's own direction a point is, measured on the ground plane.
+    fn along(&self, at: Vf) -> f32 {
+        (at.x() - self.origin.x()) * self.dir.x() + (at.z() - self.origin.z()) * self.dir.z()
+    }
+}
+
+impl World for Jump {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        let t = self.along(at) - self.start;
+        let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+        if self.length <= 0.0 || t < 0.0 || t > self.length {
+            return (Vf::new(at.x(), 0.0, at.z(), 1.0), up);
+        }
+        // The face's normal: the slope tilted back about the ramp's own across-axis, normalised the
+        // way a surface query's has to be or the contact solves against a stretched one.
+        let n = 1.0 / (1.0 + self.slope * self.slope).sqrt();
+        (
+            Vf::new(at.x(), t * self.slope, at.z(), 1.0),
+            Vf::new(-self.slope * self.dir.x() * n, n, -self.slope * self.dir.z() * n, 0.0),
+        )
+    }
+
+    fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
+        false
+    }
+}
+
+/// One leg of the minute: a name to fail by, how many ticks of [`DT`] it lasts, and the hands.
+struct Leg {
+    name: &'static str,
+    ticks: usize,
+    hands: Controls,
+}
+
+/// What the rider sees out of one tick. Angles in radians, speeds in feet a second, `y` in feet.
+struct Seat {
+    speed: f32,
+    heading: f32,
+    /// The transform's up, down its own `y`: 1 upright, 0 on its side, negative upside down. The one
+    /// number "it landed on its wheels" is.
+    up_y: f32,
+    y: f32,
+    on_ground: bool,
+    wreck: bool,
+}
+
+/// The minute, leg by leg, as it was ridden.
+struct Minute {
+    legs: Vec<(&'static str, Vec<Seat>)>,
+}
+
+impl Minute {
+    /// One leg's ticks, by name.
+    fn leg(&self, name: &str) -> Vec<&Seat> {
+        let found = self.legs.iter().find(|(n, _)| *n == name);
+        found.unwrap_or_else(|| panic!("the minute has no leg called '{name}'")).1.iter().collect()
+    }
+
+    /// Two legs' ticks end to end, for the one thing that straddles a boundary: the jump, which
+    /// leaves the ground in `the run-up` or in `the jump` depending on how fast the bike got there.
+    fn span(&self, first: &str, last: &str) -> Vec<&Seat> {
+        let at = |name: &str| {
+            self.legs
+                .iter()
+                .position(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("the minute has no leg called '{name}'"))
+        };
+        self.legs[at(first)..=at(last)].iter().flat_map(|(_, ticks)| ticks).collect()
+    }
+
+    fn all(&self) -> Vec<&Seat> {
+        self.legs.iter().flat_map(|(_, ticks)| ticks).collect()
+    }
+}
+
+fn fastest(ticks: &[&Seat]) -> f32 {
+    ticks.iter().map(|t| t.speed).fold(0.0, f32::max)
+}
+
+fn slowest(ticks: &[&Seat]) -> f32 {
+    ticks.iter().map(|t| t.speed).fold(f32::MAX, f32::min)
+}
+
+/// The furthest from upright the bike got: the minimum of the transform's own up.
+fn flattest(ticks: &[&Seat]) -> f32 {
+    ticks.iter().map(|t| t.up_y).fold(f32::MAX, f32::min)
+}
+
+fn highest(ticks: &[&Seat]) -> f32 {
+    ticks.iter().map(|t| t.y).fold(f32::MIN, f32::max)
+}
+
+fn airborne(ticks: &[&Seat]) -> usize {
+    ticks.iter().filter(|t| !t.on_ground).count()
+}
+
+fn wrecks(ticks: &[&Seat]) -> usize {
+    ticks.iter().filter(|t| t.wreck).count()
+}
+
+/// A signed angle brought back into ±π, so a heading that walks past the branch cut does not read as
+/// a turn the other way.
+fn wrap(a: f32) -> f32 {
+    let turn = std::f32::consts::TAU;
+    let mut a = a % turn;
+    if a > std::f32::consts::PI {
+        a -= turn;
+    }
+    if a < -std::f32::consts::PI {
+        a += turn;
+    }
+    a
+}
+
+/// How far round the bike came over these ticks, and how fast on average — signed the way the stick
+/// is: positive is to the right, which is the way `heading` grows.
+fn turned(ticks: &[&Seat]) -> f32 {
+    wrap(ticks[ticks.len() - 1].heading - ticks[0].heading)
+}
+
+fn turn_rate(ticks: &[&Seat]) -> f32 {
+    turned(ticks) / (ticks.len() as f32 * DT.0)
+}
+
+/// The minute itself: the legs, in order, with the hands for each.
+///
+/// Two things about the hands are deliberate. The throttle is **down on the first tick**, not fed in
+/// after a settle, because `ride.rs`'s clutch latch makes those two different rides and only one of
+/// them moves — see `it_pulls_away_after_a_frame_off_the_throttle`. And the turns keep the throttle
+/// pinned, because a rider holding a turn at speed is the case the steering has to survive; a turn
+/// off the throttle would also be a deceleration and the leg would prove less.
+fn minute() -> Vec<Leg> {
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let right = Controls { stick: (F::ONE, F::ZERO), ..gas.clone() };
+    let left = Controls { stick: (F(-1.0), F::ZERO), ..gas.clone() };
+    let brake = Controls { brake: F::ONE, ..Controls::default() };
+    let off = Controls::default();
+    [
+        ("the launch", 120, gas.clone()),
+        ("flat out", 1200, gas.clone()),
+        ("turning right", 240, right),
+        ("straight after the right", 120, gas.clone()),
+        ("turning left", 240, left),
+        ("straight after the left", 120, gas.clone()),
+        ("the run-up", 180, gas.clone()),
+        ("the jump", 300, gas),
+        ("the brake", 600, brake),
+        ("stopped", 480, off),
+    ]
+    .into_iter()
+    .map(|(name, ticks, hands)| Leg { name, ticks, hands })
+    .collect()
+}
+
+/// How far ahead of the bike the ramp is put, and its shape: far enough that the run-up is over
+/// before the lip, short and shallow enough that a bike at the top speed clears it rather than
+/// climbing it. Feet, and a rise over the run.
+const RAMP: (f32, f32, f32) = (250.0, 0.3, 15.0);
+
+/// Ride [`minute`] on `phy` and keep what the rider saw.
+///
+/// The rider is the whole one — [`Rider`], not [`Ride`] — because three of the minute's assertions are
+/// about the rider and not the bike: that nothing wrecks, that the landing is on the wheels, and that
+/// the machine never decides it has crashed. It carries the same wreck body section 6 drops.
+fn ride_the_minute(phy: &str) -> Minute {
+    let tables = rider::Tables::build();
+    let p = Phy::read_bytes(phy.as_bytes(), &tables.ride.curve);
+    let at = Vf::new(0.0, 1.0, 0.0, 1.0);
+    let mut r = Rider::new(&p, mounts(&p), at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let part = phy::Part::read_bytes(WRECK_PART.as_bytes(), "PhysicsPart1");
+    let wrecks = phy::Wrecks::read_bytes(RIDER_WRECKS.as_bytes());
+    r.carries_wreck(part, wrecks, part.inertia(WRECK_BOX));
+
+    let mut world = Jump::nothing();
+    let mut out = Minute { legs: Vec::new() };
+    for Leg { name, ticks, hands } in minute() {
+        // The ramp is laid when the run-up starts, ahead of wherever the bike actually is and along
+        // whatever heading it actually has: the jump has to work on the bike's own line, not on a
+        // line the test assumed six legs ago.
+        if name == "the run-up" {
+            let m = r.ride.transform();
+            world = Jump {
+                origin: r.ride.position(),
+                dir: Vf::new(m.0[2].x(), 0.0, m.0[2].z(), 0.0),
+                start: RAMP.0,
+                slope: RAMP.1,
+                length: RAMP.2,
+            };
+        }
+        let mut seen = Vec::with_capacity(ticks);
+        for _ in 0..ticks {
+            let frame = r.frame(&p, &tables, &hands, DT, &mut world);
+            let m = r.ride.transform();
+            seen.push(Seat {
+                speed: r.ride.chassis.speed.0,
+                heading: f32::atan2(m.0[2].x(), m.0[2].z()),
+                up_y: m.0[1].y(),
+                y: r.ride.position().y(),
+                on_ground: r.ride.air.on_ground,
+                wreck: frame.wreck.is_some(),
+            });
+        }
+        out.legs.push((name, seen));
+    }
+    out
+}
+
+/// The top speed the human's recording reaches, in feet a second, off its `bike_vel` columns and the
+/// rows the bike is upright for. [`ridden_bike`]'s drag is set so this bike's terminal speed is this,
+/// which is what lets the two legs below assert a number instead of a shape.
+const CAPTURED_TOP_SPEED: f32 = 75.78;
+
+/// The sharpest the human ever turned and the hardest they ever slowed, as the 99th and 1st
+/// percentiles of the recording's own frame-to-frame differences — percentiles and not extremes
+/// because a respawn moves the bike across the map in one row and the extremes are those rows.
+/// Radians a second, and feet a second a second.
+const CAPTURED_TURN_RATE: f32 = 2.40;
+const CAPTURED_SLOWING: f32 = 70.9;
+
+/// The human's ridden minute, in a subdirectory of `context/capture/` for the reason
+/// [`IDLE_CAPTURE`]'s comment gives: a CSV directly in that directory is read by `replay.rs` as an
+/// acceptance candidate.
+const RIDDEN_CAPTURE: [&str; 2] = ["capture/acceptance", "acceptance-freeride.csv"];
+
+#[test]
+fn it_launches_from_a_standstill() {
+    let m = ride_the_minute(&ridden_bike());
+    let launch = m.leg("the launch");
+    assert!(launch[0].speed < 1.0, "the launch did not start from rest: {} ft/s", launch[0].speed);
+
+    // Half a second: a rider who pins the throttle on a 250 is moving by now, and the bike that
+    // prompted this test is not.
+    let half = launch[(0.5 / DT.0) as usize].speed;
+    assert!(half > 3.0, "half a second of full throttle moved the bike at {half} ft/s");
+
+    // Two seconds: a useful fraction of the top speed, which is as much as a hand-written engine's
+    // numbers can be asked for. The recording's own launch is slower than this and that is the
+    // human feathering a real clutch, not a bound on the port.
+    let two = launch[launch.len() - 1].speed;
+    assert!(two > 20.0, "two seconds of full throttle only reached {two} ft/s");
+
+    // And it went forward on its wheels rather than standing up or sliding away sideways.
+    assert!(flattest(&launch) > 0.9, "the launch leant to up {}", flattest(&launch));
+    assert_eq!(wrecks(&launch), 0, "the launch wrecked");
+}
+
+#[test]
+fn it_reaches_the_top_speed_and_holds_it() {
+    let m = ride_the_minute(&ridden_bike());
+    let flat_out = m.leg("flat out");
+    let top = fastest(&flat_out);
+    assert!(
+        top > CAPTURED_TOP_SPEED * 0.9,
+        "twenty seconds of full throttle reached {top} ft/s, against the original's {CAPTURED_TOP_SPEED}"
+    );
+    assert!(
+        top < CAPTURED_TOP_SPEED * 1.1,
+        "the bike runs away to {top} ft/s, past the original's {CAPTURED_TOP_SPEED}"
+    );
+
+    // And *keeps* it: over the last quarter of the leg the speed never falls away from the peak. This
+    // is the half of "reaches a speed" a bike that surges and dies would pass without.
+    let tail = &flat_out[flat_out.len() * 3 / 4..];
+    assert!(
+        slowest(tail) > top * 0.97,
+        "the speed fell to {} ft/s after topping out at {top}",
+        slowest(tail)
+    );
+    assert_eq!(wrecks(&flat_out), 0, "the bike wrecked flat out");
+}
+
+/// The stick is pushed and the bike does not turn — not a little, not slowly, not at all.
+///
+/// **Why it is ignored.** `mv::steer_command` works the commanded angle out every substep and nothing
+/// ever puts it on the hinge: `ride.rs`'s `patch` reads `wheel.w.steer_angle`, and the only writer of
+/// that field is `wheel::steer_integrate`, which `wheel::integrate` runs when the wheel is
+/// `balancing` and otherwise skips with a comment that the commanded angle stands. Nothing commands
+/// it, so it stands at zero for the whole minute and the yaw rate below is `0.000` in both
+/// directions. Fixing it means deciding where the command meets the hinge, which is `ride.rs`'s and
+/// `move.rs`'s business, not this test's.
+///
+/// What this asserts when it is paid: the bike comes round the way the stick is pushed, at a rate the
+/// human managed with the same stick, without falling over or losing the speed that makes a turn a
+/// turn.
+#[test]
+#[ignore = "the steering command never reaches the hinge: nothing writes wheel.steer_angle from mv::steer_command"]
+fn it_turns_the_way_the_stick_is_pushed() {
+    let m = ride_the_minute(&ridden_bike());
+    for (leg, sign) in [("turning right", 1.0), ("turning left", -1.0)] {
+        let ticks = m.leg(leg);
+        let rate = turn_rate(&ticks) * sign;
+        assert!(rate > 0.1, "{leg}: the bike turned at {rate} rad/s the way the stick was pushed");
+        assert!(
+            rate < CAPTURED_TURN_RATE,
+            "{leg}: {rate} rad/s is sharper than the original's {CAPTURED_TURN_RATE}"
+        );
+        assert!(
+            turned(&ticks).abs() > 0.2,
+            "{leg}: four seconds of full lock came round {} rad",
+            turned(&ticks)
+        );
+        assert!(
+            slowest(&ticks) > CAPTURED_TOP_SPEED * 0.4,
+            "{leg}: the turn dropped the bike to {} ft/s",
+            slowest(&ticks)
+        );
+        assert!(flattest(&ticks) > 0.5, "{leg}: the bike leant to up {}", flattest(&ticks));
+        assert_eq!(wrecks(&ticks), 0, "{leg}: the turn wrecked");
+    }
+
+    // And the two turns go opposite ways, which a bike that merely drifts one way would fail.
+    let (right, left) = (m.leg("turning right"), m.leg("turning left"));
+    assert!(
+        turned(&right) > 0.0 && turned(&left) < 0.0,
+        "both turns went the same way: {} rad and {} rad",
+        turned(&right),
+        turned(&left)
+    );
+}
+
+#[test]
+fn it_takes_the_jump_and_lands_on_its_wheels() {
+    let m = ride_the_minute(&ridden_bike());
+    let jump = m.span("the run-up", "the jump");
+    let air = airborne(&jump);
+    assert!(air > 30, "the ramp only put the bike in the air for {air} ticks");
+    assert!(
+        highest(&jump) > RAMP.1 * RAMP.2 + 1.0,
+        "the jump's highest point was {} ft, which is no higher than the lip",
+        highest(&jump)
+    );
+
+    // Through the air the right way up — a bike that leaves a lip rotating is a bike that lands on
+    // its head, and the port's own wreck test is what would catch it afterwards rather than here.
+    assert!(flattest(&jump) > 0.6, "in the air the bike got to up {}", flattest(&jump));
+
+    // And down: on the ground at the end of the leg, upright, still rolling, never having wrecked.
+    let landed = &jump[jump.len() - 60..];
+    assert!(landed.iter().all(|t| t.on_ground), "the bike was still in the air a second later");
+    assert!(flattest(landed) > 0.9, "it came down to up {}", flattest(landed));
+    assert!(
+        slowest(landed) > CAPTURED_TOP_SPEED * 0.4,
+        "the landing left the bike at {} ft/s",
+        slowest(landed)
+    );
+    assert_eq!(wrecks(&jump), 0, "the jump wrecked");
+}
+
+/// The brake is pinned for ten seconds and the bike does not stop.
+///
+/// **Why it is ignored.** It slows hard and then holds about 26 ft/s for ever, which is the road speed
+/// of the engine's idle through first gear: with the clutch locked up, `mv::engine_update` sets the
+/// revs to `road_rpm` and then clamps them up into `min_rpm..rev_limit`, so below about 18 mph the
+/// engine is *driving* the rear wheel against the brake instead of being dragged by it. The one rule
+/// that would let the clutch out is `ride.rs`'s `if s.speed < IDLE_SPEED && s.gas_rate_limited == 0`,
+/// and `IDLE_SPEED` is 7.33 ft/s — a speed this bike can no longer reach. The original's own recording
+/// comes to a stop thirty-nine times, so this is the port and not the bike.
+///
+/// What this asserts when it is paid: the brake takes the speed off at a rate the human managed, the
+/// bike actually stops, and it stays stopped with nobody touching the pad.
+#[test]
+#[ignore = "braking cannot stop the bike: a locked clutch re-drives the rear wheel at the idle road speed"]
+fn it_brakes_to_a_stop() {
+    let m = ride_the_minute(&ridden_bike());
+    let brake = m.leg("the brake");
+    let from = brake[0].speed;
+
+    // The first two seconds: real braking, and no harder than the human ever braked.
+    let after = brake[(2.0 / DT.0) as usize].speed;
+    assert!(after < from * 0.5, "two seconds of brake took {from} ft/s to {after}");
+    let hardest = (from - after) / 2.0;
+    assert!(
+        hardest < CAPTURED_SLOWING,
+        "the brake slows the bike at {hardest} ft/s^2, past the original's {CAPTURED_SLOWING}"
+    );
+
+    // And then it stops. "Stopped" is the speed the port's own idle is allowed to creep at, not zero.
+    let end = brake[brake.len() - 1].speed;
+    assert!(end < 1.0, "ten seconds of brake left the bike doing {end} ft/s");
+
+    // And stays stopped for the eight seconds the rider's hands are off the pad.
+    let stopped = m.leg("stopped");
+    assert!(fastest(&stopped) < 2.0, "it rolled away again at {} ft/s", fastest(&stopped));
+    assert_eq!(wrecks(&brake) + wrecks(&stopped), 0, "stopping wrecked");
+}
+
+/// A bike that spends one frame at a standstill with the throttle shut can never pull away again.
+///
+/// **Why it is ignored.** `ride.rs`'s frame sets `ride.clutch_in = 1` whenever the speed is under
+/// `IDLE_SPEED` and the rate-limited throttle is exactly zero, and nothing anywhere clears it: the
+/// field is a latch. One frame of a closed throttle on the start line is enough, and from then on
+/// `mv::engine_update` is handed a clutch that is fully in, so the engine revs to 7000 and the rear
+/// wheel gets nothing. The minute above only moves because its throttle is down on tick zero.
+///
+/// This is the shell's own start state — `openmx` spawns the rider standing still and the player
+/// reaches for the throttle some frames later — so the measured cost of this latch is that the bike
+/// in the shell cannot be ridden at all, which is what P10 is about.
+///
+/// What this asserts when it is paid: a bike that has been sitting there goes when the throttle does.
+#[test]
+#[ignore = "ride.clutch_in latches: one frame at rest off the throttle and the clutch is never let out again"]
+fn it_pulls_away_after_a_frame_off_the_throttle() {
+    let tables = rider::Tables::build();
+    let text = ridden_bike();
+    let p = Phy::read_bytes(text.as_bytes(), &tables.ride.curve);
+    let at = Vf::new(0.0, 1.0, 0.0, 1.0);
+    let mut world = Jump::nothing();
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+
+    // One second of sitting on the start line, then ten of full throttle — a rider arriving at a
+    // bike, in other words, rather than a drag racer already on the rev limiter.
+    for (what, wait) in [("one frame", 1usize), ("a second", 60)] {
+        let mut r = Rider::new(&p, mounts(&p), at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+        for _ in 0..wait {
+            r.frame(&p, &tables, &Controls::default(), DT, &mut world);
+        }
+        let mut top = 0.0f32;
+        for _ in 0..600 {
+            r.frame(&p, &tables, &gas, DT, &mut world);
+            top = top.max(r.ride.chassis.speed.0);
+        }
+        assert!(
+            top > 20.0,
+            "after {what} off the throttle, ten seconds of full throttle reached {top} ft/s \
+             (clutch_in {})",
+            r.ride.mv.clutch_in.0
+        );
+    }
+}
+
+#[test]
+fn none_of_the_minute_wrecks() {
+    let m = ride_the_minute(&ridden_bike());
+
+    // The minute, leg by leg, for a human reading a failure rather than for the assert.
+    for (name, ticks) in &m.legs {
+        let ticks: Vec<&Seat> = ticks.iter().collect();
+        println!(
+            "{name:24} {:4} ticks | speed {:6.2}..{:6.2} | came round {:6.3} rad | up {:5.3} \
+             | peak y {:6.2} | air {:4} | wrecks {}",
+            ticks.len(),
+            slowest(&ticks),
+            fastest(&ticks),
+            turned(&ticks),
+            flattest(&ticks),
+            highest(&ticks),
+            airborne(&ticks),
+            wrecks(&ticks),
+        );
+    }
+
+    let all = m.all();
+    assert_eq!(
+        wrecks(&all),
+        0,
+        "the minute wrecked {} of its {} ticks",
+        wrecks(&all),
+        all.len()
+    );
+    // Nothing in the minute asks the machine for a stunt, so nothing in it should separate the rider
+    // from the bike either — and the bike should still be on the ground at the end of it.
+    assert!(all[all.len() - 1].on_ground, "the minute ended in the air");
+}
+
+/// The minute, on a bike geared four times too tall: it loops out on the launch, and the legs above
+/// say so.
+///
+/// This is here because every assertion in this section is of the form "the bike did something", and a
+/// test like that can rot into one that passes on anything. A final drive of 14.4 is a first gear no
+/// clutch could feed out: the rear wheel makes far more torque than the contact patch can hold, the
+/// bike stands up, and `air.rs` calls it a wreck. If the legs above ever stop noticing *this*, they
+/// are no longer a drivability test.
+#[test]
+fn the_minute_notices_a_bike_that_loops_out() {
+    let m = ride_the_minute(&looping_out());
+    let launch = m.leg("the launch");
+    assert!(
+        wrecks(&launch) > 0 || flattest(&launch) < 0.9,
+        "the over-geared bike launched cleanly: up {}, {} wrecks",
+        flattest(&launch),
+        wrecks(&launch)
+    );
+    // And it is the gearing that did it, not the fixture falling over on its own: the same minute on
+    // the rideable bike is the test above.
+    let whole = m.all();
+    assert!(
+        wrecks(&whole) > 0,
+        "the over-geared bike rode the whole minute without a wreck"
+    );
+}
+
+/// The three numbers this section asserts against, read back out of the human's recording.
+///
+/// None of the legs above need the capture to run — they are bounds a rider would recognise, and a
+/// checkout with no `context/` still fails if the bike stops being drivable. What the capture decides
+/// is whether those bounds are the *original's*: whether [`ridden_bike`]'s drag still puts this bike's
+/// top speed where the recording's is, and whether the minute's turning and braking stay inside what
+/// the human's thumbs actually did. Edit the `.phy`'s drag or gearing and this is what goes red.
+///
+/// Skipped, with a line saying so, in a checkout without the recording: it is game data and cannot be
+/// committed (`AGENT.md`).
+///
+/// One thing the recording will not settle: its `bike_vel` columns and its own positions disagree
+/// about the speed by a steady factor of 1.254, so one of the two is scaled by something this test
+/// cannot see. The columns are used here, because they are the recorder's value for the quantity the
+/// port calls `chassis.speed` — and because the port's terminal speed lands within half a foot a
+/// second of them, which the positions' 95 ft/s would make nonsense of.
+#[test]
+fn the_minutes_numbers_are_the_originals() {
+    let path = private_dir(RIDDEN_CAPTURE[0]).join(RIDDEN_CAPTURE[1]);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no ridden capture at {} — skipped", path.display());
+        return;
+    };
+    let cap = game_sim::replay::Capture::parse(&text).expect("the ridden capture parses");
+    let col = |name: &str| {
+        cap.columns
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("no column '{name}' in {}", path.display()))
+    };
+    let at = |row: usize, name: &str| -> f32 {
+        cap.rows[row][col(name)].parse().unwrap_or_else(|_| {
+            panic!("{}: row {row}'s '{name}' is not a number", path.display())
+        })
+    };
+
+    // Only the rows the bike is upright for: the wrecks and the respawns in between are not riding,
+    // and a respawn's own row is a teleport with a frame-to-frame difference of hundreds.
+    let upright: Vec<usize> =
+        (0..cap.rows.len()).filter(|&row| at(row, "bike_xform.m11") > 0.7).collect();
+    assert!(
+        upright.len() > 500,
+        "{}: only {} of {} rows are upright",
+        path.display(),
+        upright.len(),
+        cap.rows.len()
+    );
+    let speed = |row: usize| {
+        let (x, z) = (at(row, "bike_vel.x"), at(row, "bike_vel.z"));
+        (x * x + z * z).sqrt()
+    };
+    let head = |row: usize| f32::atan2(at(row, "bike_xform.m20"), at(row, "bike_xform.m22"));
+
+    let top = upright.iter().map(|&row| speed(row)).fold(0.0, f32::max);
+    let pairs: Vec<usize> =
+        upright.iter().copied().filter(|&row| upright.contains(&(row + 1))).collect();
+    let mut slowing: Vec<f32> =
+        pairs.iter().map(|&row| (speed(row) - speed(row + 1)) / CAPTURE_DT).collect();
+    let mut turning: Vec<f32> =
+        pairs.iter().map(|&row| wrap(head(row + 1) - head(row)).abs() / CAPTURE_DT).collect();
+    slowing.sort_by(f32::total_cmp);
+    turning.sort_by(f32::total_cmp);
+    let pct = |sorted: &[f32], f: f32| sorted[((sorted.len() - 1) as f32 * f) as usize];
+    let (slowed, turn) = (pct(&slowing, 0.99), pct(&turning, 0.99));
+    println!(
+        "{}: top {top:.2} ft/s, slowing p99 {slowed:.2} ft/s^2, turning p99 {turn:.3} rad/s \
+         over {} upright rows",
+        path.display(),
+        upright.len()
+    );
+
+    // A percent either way on each: these are consts in a test file, not a checksum, and the point of
+    // reading them back is to catch a recording or a fixture that has moved, not a rounding.
+    let near = |ours: f32, theirs: f32| (ours - theirs).abs() <= theirs.abs() * 0.01 + 0.01;
+    assert!(near(CAPTURED_TOP_SPEED, top), "CAPTURED_TOP_SPEED is {CAPTURED_TOP_SPEED}, the recording's is {top}");
+    assert!(near(CAPTURED_SLOWING, slowed), "CAPTURED_SLOWING is {CAPTURED_SLOWING}, the recording's is {slowed}");
+    assert!(near(CAPTURED_TURN_RATE, turn), "CAPTURED_TURN_RATE is {CAPTURED_TURN_RATE}, the recording's is {turn}");
+
+    // And the minute really is ridden inside that envelope, which is the half of the comparison the
+    // legs above cannot make without the recording in front of them.
+    let m = ride_the_minute(&ridden_bike());
+    let all = m.all();
+    assert!(
+        fastest(&all) < top * 1.05,
+        "the minute reaches {} ft/s where the original reaches {top}",
+        fastest(&all)
+    );
+    let worst = all
+        .windows(2)
+        .map(|w| (w[0].speed - w[1].speed) / DT.0)
+        .fold(f32::MIN, f32::max);
+    assert!(
+        worst < slowed.max(1.0) * 2.0,
+        "the minute sheds speed at {worst} ft/s^2 where the original's p99 is {slowed}"
+    );
+}
