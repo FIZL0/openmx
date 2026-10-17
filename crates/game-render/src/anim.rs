@@ -131,7 +131,8 @@ pub struct Set {
     /// The live pose: what the last [`Set::apply`] wrote, and the one buffer of joint poses in the
     /// port. The simulation reads it through [`game_sim::motion::Joints`] and never holds it.
     pub pose: Pose,
-    /// The pose a cross-fade fades *from*, which [`Set::rewind`] copies out of `pose`.
+    /// The pose a cross-fade fades *from*, which [`Set::rewind`] reads out of the node tree
+    /// `pose` leaves behind ([`Skeleton::nodes`]) rather than out of `pose` itself.
     pub under: Pose,
     /// Every name that was asked for and could not be bound, in the order they were asked for.
     pub missing: Vec<Missing>,
@@ -282,19 +283,19 @@ impl Set {
     }
 
     /// Take the snapshot a restarted motion fades from: the simulation's record of the pose, and the
-    /// renderer's copy of it, from the one live pose and in one call so the two cannot drift.
+    /// renderer's copy of it, from the one node tree and in one call so the two cannot drift.
     ///
     /// The original asks the motion object for this from two places — a restart in the frame's
     /// header, and [`Player::play`] when a transition has no clip to come out of — and both end in
     /// the same joint-by-joint copy, which is [`Snapshot::take`].
+    ///
+    /// **What it copies is the node tree, not the blend buffer** ([`Skeleton::nodes`]). The original
+    /// reads each joint record's transform node, so a joint the playing clip has no translation
+    /// channel for is snapshotted at the `.psg`'s own local translation and not at the zero the
+    /// blend buffer holds for it. On this disc's rider that is 21 joints of 22.
     pub fn rewind(&mut self, snapshot: &mut Snapshot) {
-        snapshot.take(&self.pose, None, 0);
-        self.under.rot.clone_from(&self.pose.rot);
-        self.under.pos.clone_from(&self.pose.pos);
-        self.under.turned.clear();
-        self.under.turned.resize(self.pose.rot.len(), true);
-        self.under.moved.clear();
-        self.under.moved.resize(self.pose.pos.len(), true);
+        self.under = self.skeleton.nodes(&self.pose);
+        snapshot.take(&self.under, None, 0);
     }
 
     /// Load and bind every motion the `.mcf` itself lists, in its own order.

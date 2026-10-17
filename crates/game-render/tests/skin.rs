@@ -33,8 +33,8 @@ use game_render::disc::Disc;
 use game_render::mat::M4;
 use game_render::psg::{Model, Node};
 use game_render::skin::{
-    self, Clip, NarrowKey, PosChannel, PosKey, Pose, RotChannel, RotKey, RotKeys, SKIP, Skeleton,
-    tables,
+    self, Bone, Clip, NarrowKey, PosChannel, PosKey, Pose, RotChannel, RotKey, RotKeys, SKIP,
+    Skeleton, tables,
 };
 use ps2_oracle::{Ee, Kit, addr, game_or_skip, skip};
 
@@ -48,6 +48,9 @@ const KEY: u32 = 0x0110_0000;
 const FROM: u32 = 0x0110_0100;
 const TO: u32 = 0x0110_0110;
 const OUT: u32 = 0x0110_0120;
+/// The pose snapshot's two reads of one node, a quadword each.
+const SNAP_ROT: u32 = 0x0110_0130;
+const SNAP_POS: u32 = 0x0110_0140;
 /// A channel record and its key array.
 const CHAN: u32 = 0x0110_0200;
 const KEYS: u32 = 0x0111_0000;
@@ -524,6 +527,98 @@ fn the_quaternion_matrix_matches_the_original() {
     }
     println!("{SAMPLES} quaternions as matrices, three rows each; worst element off by {:e} ({})",
              worst.by, worst.at);
+}
+
+/// One joint of the pose snapshot: the node's rotation and its translation, read the way the
+/// original's restart hook reads them.
+///
+/// The hook walks the joint records and takes each one's transform node at +0x34 through these two
+/// accessors — the rotation out of the node's matrix at +0x40, the translation out of that matrix'
+/// last row with `1` written into the fourth lane. [`Skeleton::nodes`] is the port of that read, and
+/// what it is read *out of* here is the game's own matrix: the rows are laid down by
+/// `transform_set_rotation`, proved above, so neither side is reading a matrix the other built.
+#[test]
+fn the_pose_snapshot_reads_a_node_the_way_the_original_does() {
+    let Some(mut ee) = game_or_skip() else { return };
+    install_tables(&mut ee);
+    ee.hooks.insert(addr("transform_dirty").unwrap(), Box::new(|_| {}));
+    let set = addr("transform_set_rotation").unwrap();
+    let joint_rot = addr("anim_joint_rotation").unwrap();
+    let joint_pos = addr("anim_joint_translation").unwrap();
+    let mut rng = Rng(0x5eed_0006);
+    let (mut turn, mut shift) = (Worst::default(), Worst::default());
+    for n in 1..=SAMPLES {
+        let q = {
+            let d = skin::decode(&rng.key(0.0));
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] + d[3] * d[3]).sqrt();
+            if len < 1e-6 { [0.0, 0.0, 0.0, 1.0] } else { [0, 1, 2, 3].map(|k| d[k] / len) }
+        };
+        for k in 0..4 {
+            ee.set_f32(FROM + 4 * k as u32, q[k]);
+        }
+        ee.call(set, &[XFORM as u64, FROM as u64, 0], &[], BUDGET);
+        // The node's own place, and a fourth lane that is not 1 — the accessor writes that lane
+        // rather than reading it, and a bone whose matrix carries something else there must still
+        // be snapshotted with 1.
+        let at = [0, 1, 2].map(|_| rng.coord(64));
+        for k in 0..3 {
+            ee.set_f32(XFORM + 0x70 + 4 * k as u32, at[k]);
+        }
+        ee.set_f32(XFORM + 0x7c, rng.coord(4));
+        ee.call(joint_rot, &[XFORM as u64, SNAP_ROT as u64], &[], BUDGET);
+        ee.call(joint_pos, &[XFORM as u64, SNAP_POS as u64], &[], BUDGET);
+
+        // The same node as a one-bone skeleton, with nothing written over it: the joint a clip has
+        // no channel for, which is what the snapshot is 21 of 22 joints of on this disc's rider.
+        let local = M4([0, 1, 2, 3].map(|row| {
+            [0, 1, 2, 3].map(|k| ee.f32_at(XFORM + 0x40 + 0x10 * row as u32 + 4 * k as u32))
+        }));
+        let bone = Bone { name: "node".into(), parent: None, local, rest: local };
+        let ours = Skeleton { bones: vec![bone] }.nodes(&Pose::new(1));
+
+        let mut bad = Vec::new();
+        // The rotation goes through the matrix and back on both sides, so it rounds; the
+        // translation is a copy on both sides and nothing may move it.
+        turn.quad(&ee, SNAP_ROT, ours.rot[0], 1e-5, &mut bad);
+        shift.quad(&ee, SNAP_POS, ours.pos[0], 0.0, &mut bad);
+        assert!(bad.is_empty(), "node {n} (rotation {q:?}, at {at:?}):\n  {}", bad.join("\n  "));
+    }
+    println!("{SAMPLES} nodes snapshotted, a rotation and a translation each; worst rotation lane off \
+              by {:e} ({}), worst translation lane off by {:e} ({})",
+             turn.by, turn.at, shift.by, shift.at);
+}
+
+/// The other half of [`Skeleton::nodes`], which is the port's own: a joint the clip *did* write is
+/// the blend buffer's, not the node's.
+///
+/// There is no accessor to compare this against — in the original the blend is pushed into the node
+/// tree before the snapshot reads it back, and the node tree it is pushed into is a transform chain
+/// this harness does not build. What is checked is that the written value is taken straight through,
+/// with the fourth lane of the translation still the accessor's written `1`.
+#[test]
+fn a_written_joint_is_snapshotted_from_the_pose() {
+    let skeleton = Skeleton {
+        bones: vec![Bone {
+            name: "node".into(),
+            parent: None,
+            local: M4::IDENTITY,
+            rest: M4::IDENTITY,
+        }],
+    };
+    let mut pose = Pose::new(1);
+    pose.rot[0] = [0.5, -0.5, 0.5, 0.5];
+    pose.pos[0] = [1.0, 2.0, 3.0, 0.0];
+    pose.turned[0] = true;
+    pose.moved[0] = true;
+    let out = skeleton.nodes(&pose);
+    assert_eq!(out.rot[0], pose.rot[0]);
+    assert_eq!(out.pos[0], [1.0, 2.0, 3.0, 1.0]);
+    // And with nothing written it is the bone's own, which here is the identity's origin.
+    let bare = skeleton.nodes(&Pose::new(1));
+    assert_eq!(bare.rot[0], [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(bare.pos[0], [0.0, 0.0, 0.0, 1.0]);
+    // Every joint of a snapshot counts as written, whichever side it came from.
+    assert!(out.turned[0] && out.moved[0] && bare.turned[0] && bare.moved[0]);
 }
 
 // --- the two tables, against the game's own copies ---------------------------------------------------

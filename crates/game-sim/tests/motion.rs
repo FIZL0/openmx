@@ -2659,6 +2659,9 @@ const JOINT_CAPTURE: [&str; 2] = ["capture/v12", "rider-joints.csv"];
 /// `rider\anim\mrider.psg`'s node count, which is the length of the original's joint array.
 const JOINTS: usize = 22;
 
+/// The one joint of this model any clip of the rider's set translates, and the root of its tree.
+const PELVIS: usize = 0;
+
 /// The rider whose gear the recording was ridden in, and the archive its stunt table is in.
 const A_RIDER: &str = "thq1";
 const STUNT_ARCHIVE: &str = "appstart.res";
@@ -3339,6 +3342,36 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
     let mut joint = (0.0f32, 0usize, 0u64, String::new());
     let mut fade_worst = (0.0f32, 0u64, 0usize, "");
     let mut snapshot = game_sim::motion::Snapshot::default();
+    // V16's own numbers: the port's `Set::rewind` against the original's two buffers, split three
+    // ways because the three parts of the snapshot are not the same question. `snap_rest` is the
+    // one that is asserted — the 21 joints no clip of this set translates, where the port used to
+    // hold 0 and the original holds the node's own local translation.
+    let mut restarts = 0usize;
+    let mut snap_seen = 0usize;
+    // Of those, the ticks the port took its own snapshot on, which are the ones that carry the
+    // comparison: on every other tick `Set::under` is the seeding below, a copy of the original's
+    // own buffer, and agrees with it by construction.
+    let mut snap_fresh = 0usize;
+    // The root's translation and the rotations on those ticks alone, which is the sharpest the
+    // recording gets at the two parts of the snapshot this task does not match. On the joints the
+    // clip *does* write the two sides are close but not equal — this recording's five are 0.33 to
+    // 0.84 of root translation and 0.05 to 0.17 of rotation once a whole-quaternion sign flip is
+    // folded out, with the previous tick's pose agreeing to 1e-6 — so what the original's hook
+    // reads for a written joint is not the blend buffer of the tick before it either. Measured and
+    // printed; the entry's not-verified list says what is open.
+    let mut fresh_root = 0.0f32;
+    let mut fresh_turn = 0.0f32;
+    let mut snap_rest = (0.0f32, 0u64, 0usize);
+    let mut snap_root = 0.0f32;
+    let mut snap_turn = 0.0f32;
+    // The same three after the recording's first wreck, which is where the port's node tree stops
+    // being the original's: something outside this animation object writes the rider's nodes while
+    // it is being put back on, and the translations it leaves there outlive the wreck.
+    let mut after_seen = 0usize;
+    let mut after_rest = 0.0f32;
+    let mut after_root = 0.0f32;
+    let mut after_turn = 0.0f32;
+    let mut wrecked = false;
     let mut diag: std::collections::BTreeMap<(i32, u8), (f32, usize, f32, usize, usize)> = Default::default();
 
     // The stretch of the recording the recorder's sample phase slipped on, from the first row it
@@ -3361,6 +3394,10 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
 
     for pair in rows.windows(2) {
         let (before, now) = (&pair[0], &pair[1]);
+        // Latched before any of the skips below, because the frame a wreck is declared on is one
+        // of them: from here on something outside this animation object has written the rider's
+        // node tree, and the port's snapshot of it is measured rather than asserted.
+        wrecked |= before.wreck != 0 || now.wreck != 0;
         if in_slip(before.tick) || in_slip(now.tick) {
             slipped += 1;
             *not_posed
@@ -3499,6 +3536,16 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                 end: F(before.fade_end),
             },
         };
+        // The restart the step itself asks for, and then the played-once groups' own — the same two
+        // rewinds and the same two arms the renderer's own chassis has, in its order, so this is
+        // its code. V15 handed the renderer the original's snapshot buffers instead of running
+        // these; V16 runs them, which is what puts `Set::rewind` under this comparison.
+        let mut rewound = false;
+        if frame.restart {
+            set.rewind(&mut snapshot);
+            restarts += 1;
+            rewound = true;
+        }
         // A played-once group puts its clip on with a cross out of whatever was playing — the same
         // two arms the renderer's own chassis has, so this is its code.
         if let Some(play) = frame.play {
@@ -3507,6 +3554,8 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                     let playing = set.timing(player.clip).duration;
                     if player.play(put, playing) {
                         set.rewind(&mut snapshot);
+                        restarts += 1;
+                        rewound = true;
                     }
                 }
                 None => {
@@ -3542,14 +3591,66 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
 
         // --- the pose -------------------------------------------------------------------------
         modes[usize::from(frame.blend.mode())] += 1;
+        // --- the port's own pose snapshot against the original's (V16) -----------------------
+        //
+        // `Set::rewind` used to copy the live blend buffer; it now reads the node tree the blend
+        // buffer is pushed into (`Skeleton::nodes`), which is where the original's restart hook
+        // reads it from. The difference is the joints no clip of the rider's set translates: the
+        // blend buffer holds 0 for them and the node holds the `.psg`'s own local translation.
+        // That is 21 of this model's 22 joints, and it is what is asserted here.
+        //
+        // The other three parts of the snapshot are measured and printed rather than asserted,
+        // because the original's node tree has a writer this object is not: see the breakdown
+        // below and the entry's not-verified list.
+        if restarts > 0 && !now.under_rot.is_empty() {
+            let mut rest = 0.0f32;
+            let mut at = 0usize;
+            let mut root = 0.0f32;
+            for j in 0..JOINTS {
+                let w = (0..3)
+                    .map(|l| (set.under.pos[j][l] - now.under_pos[j][l]).abs())
+                    .fold(0.0f32, f32::max);
+                if j == PELVIS {
+                    root = w;
+                } else if w > rest {
+                    rest = w;
+                    at = j;
+                }
+            }
+            let turn = (0..JOINTS)
+                .flat_map(|j| (0..4).map(move |l| (j, l)))
+                .map(|(j, l)| (set.under.rot[j][l] - now.under_rot[j][l]).abs())
+                .fold(0.0f32, f32::max);
+            if wrecked {
+                after_seen += 1;
+                after_rest = after_rest.max(rest);
+                after_root = after_root.max(root);
+                after_turn = after_turn.max(turn);
+            } else {
+                snap_seen += 1;
+                snap_root = snap_root.max(root);
+                snap_turn = snap_turn.max(turn);
+                if rewound {
+                    snap_fresh += 1;
+                    fresh_root = fresh_root.max(root);
+                    fresh_turn = fresh_turn.max(turn);
+                }
+                if rest > snap_rest.0 {
+                    snap_rest = (rest, now.tick, at);
+                }
+            }
+        }
+
         // What the ramp fades *from* is the pose snapshot, and V15 widened the spec to carry it:
         // the original's own two buffers, read off the same object on the same tick. Handing them
         // to the renderer as the pose under the blend is the same seeding the machine gets above —
         // the comparison stays one step of one tick, and these ticks are posed like any other.
         //
-        // Whatever the port's own restart would have put there is overwritten here on purpose,
-        // including `Set::rewind`'s copy of the live pose a moment ago: the question this test asks
-        // is whether the port's *blend* is the original's, not whether its snapshot is.
+        // **V16 kept this seeding**, against what the task that wrote `Skeleton::nodes` set out to
+        // do. The port's own snapshot is now the node tree and not the blend buffer, which is the
+        // 21 joints asserted above; what it still is not is the original's *whole* node tree, and
+        // the fade is against the whole of it. The difference is measured and printed at the end of
+        // this test, and the entry says what writes the rest.
         if now.under_rot.is_empty() {
             if now.ramp != 0.0 {
                 *not_posed
@@ -3736,6 +3837,29 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
          port steps every frame",
     );
 
+    // **V16.** The joints no clip of the rider's set translates, in the port's own snapshot against
+    // the original's: bit-equal, because both sides are reading the same `.psg` node's own local
+    // translation and neither does any arithmetic to it. Before V16 the port held 0 on all 21 and
+    // this number was 0.96.
+    assert!(
+        snap_rest.0 == 0.0,
+        "the port's pose snapshot holds a different translation from the original's on joint {} \
+         ({}), off by {:e} at tick {} — the {} joints no clip of this set translates are the \
+         `.psg` node's own local translation on both sides and nothing rounds them",
+        snap_rest.2,
+        set.skeleton.bones[snap_rest.2].name,
+        snap_rest.0,
+        snap_rest.1,
+        JOINTS - 1
+    );
+    assert!(
+        snap_seen >= 300 && restarts >= 15 && snap_fresh >= 5,
+        "the port's own pose snapshot was compared against the original's on only {snap_seen} \
+         ticks of {}, over {restarts} restarts, {snap_fresh} of them ticks the port took its own \
+         snapshot on — which is too little of the recording to call `Set::rewind` measured",
+        rows.len() - 1
+    );
+
     // V15's own floor. The ticks with the ramp up are the ones the capture was widened for, and
     // 104 of this recording's 218 are drawn by an entry that fades; if that collapses, the snapshot
     // stopped reaching the renderer and the fade is no longer being proved at all.
@@ -3758,6 +3882,23 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
             ramped - faded
         );
     }
+    println!(
+        "  the port's own pose snapshot (`Set::rewind`) against the original's two buffers, \
+         {restarts} restarts in the recording: before its first wreck, {snap_seen} ticks \
+         ({snap_fresh} of them a tick the port snapshotted on) with the {} joints no clip \
+         translates off by {:e}, the root's translation by {:e} ({:e} on the {snap_fresh}) and \
+         the rotations by {:e} ({:e}); after it, {after_seen} ticks at {:e} / \
+         {:e} / {:e}, where the node tree has a writer this object is not",
+        JOINTS - 1,
+        snap_rest.0,
+        snap_root,
+        fresh_root,
+        snap_turn,
+        fresh_turn,
+        after_rest,
+        after_root,
+        after_turn
+    );
     println!(
         "the port's machine against the original's, one tick ahead each time: {} ticks, every \
          state, ramp, axis and clip time within tolerance (worst: {})\n  blend modes \
