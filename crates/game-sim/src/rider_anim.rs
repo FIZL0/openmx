@@ -45,6 +45,16 @@
 //!   the throttle is opened -> the cut flag is cleared and the body rides
 //! ```
 //!
+//! ## The mode machine
+//!
+//! [`Body::mode`] is the body's *other* vtable slot, reached through the actor's own update rather
+//! than through the animation (V19). It decides which of five things is posing the body — the
+//! request holding it, riding, the wreck, a pose off the clip table, or the gate — and it is the
+//! writer of [`Body::settled`]: inside the wreck it runs the throw's two clocks and the roll's own,
+//! and the frame the roll has lasted `RiderRollTime` or the body has slowed below `RiderRollSpeed`
+//! it says the body has come to rest. Nothing else in the program writes that flag, which is why a
+//! port without this machine has a wrecked body that flails for ever.
+//!
 //! ## Chance
 //!
 //! Four of the arms draw a random number, and every one of them sits behind the same lazily-installed
@@ -56,13 +66,14 @@
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::motion::{Clip, ClipId, Played, Player, Put, remap};
+use crate::phy;
 use crate::rng::Rng;
 use crate::trick::SLOTS;
 use crate::vehicle_anim::{
     self, AIR, AXIS_START, BACKFLIP, Frame, GET_READY, HOLD, Lag, Library, MIX_TAU, NO_HANDER,
     PHASE_TAU, Play, REVERSE_L, REVERSE_R, START_POS, TURN_RIDING,
 };
-use ps2_float::F;
+use ps2_float::{Acc, F, Vf};
 
 // ---------------------------------------------------------------------------------------------------
 // the states this machine, and only this machine, asks for
@@ -271,9 +282,11 @@ pub struct Body {
     /// A look-around idle is playing, which is what stops the idle arm asking for the riding pose
     /// instead. Cleared when that idle ends.
     pub looking: bool,
-    /// The wrecked body has come to rest. Written by the body's *mode* machine, which is not ported —
-    /// the selection only reads it, to tell flailing from holding a limb.
+    /// The wrecked body has come to rest. Written by the body's own *mode* machine ([`Body::mode`],
+    /// ported in V19) and read here, to tell flailing from holding a limb.
     pub settled: bool,
+    /// The mode machine's own state: what is posing the body, and the wreck's clocks ([`Machine`]).
+    pub machine: Machine,
 }
 
 /// What a frame of the body's animation left in its motion object that the frame itself does not
@@ -322,6 +335,7 @@ impl Default for Body {
             look: F::ZERO,
             looking: false,
             settled: false,
+            machine: Machine::default(),
         }
     }
 }
@@ -510,5 +524,298 @@ impl Body {
             self.player.clip = None;
         }
         snapshot
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// the mode machine: what is posing the body, and when a wrecked one has come to rest
+// ---------------------------------------------------------------------------------------------------
+
+/// Which of five things the body is being posed by, as the mode machine decides it each frame.
+///
+/// The original keeps this as an `int` and compares it against literals; the five values are exactly
+/// these five and nothing ever writes another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Mode {
+    /// Whoever owns the request is placing the body (the request's `held`). The value the actor's
+    /// constructor leaves behind, which is why it is the default here.
+    #[default]
+    Held,
+    /// On the bike and riding.
+    Riding,
+    /// Off the bike.
+    Wrecked,
+    /// A pose off the clip table is in charge: the step's own `from_table` or `holding`, which a
+    /// backflip in progress also raises (below).
+    Posed,
+    /// The start line, or a look-around idle.
+    Gate,
+}
+
+/// What the wreck in progress tells the mode machine, which is everything its settle test reads.
+///
+/// **The three sensors are the port's stand-ins and the journal says what for.** The original reads
+/// them off a ragdoll this crate has no port of: a bone array whose every bone has a contact flag,
+/// and a main bone with a height and a velocity. This port's wrecked rider is one point
+/// ([`crate::ride::Crash`]), so `touching` is that point having reached the dirt, and `vel` and
+/// `height` are its own — and the settle test below is the original's, run on them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Thrown {
+    /// The throw the wreck's reason picked, which the entry randomises its two clocks out of. Handed
+    /// in because the wreck's own entry has already chosen it ([`crate::ride::Crash::throw`]) and it
+    /// is the same `Wrecks::throw` of the same hit the original's entry switch picks.
+    pub throw: phy::Throw,
+    /// Something of the body is on the ground.
+    pub touching: bool,
+    /// How fast the body is going, as a velocity: the machine takes the length itself, with the same
+    /// four FPU instructions and at the same point in the test as the original.
+    pub vel: Vf,
+    /// How high the body is. The machine keeps last frame's and the rise between the two is what the
+    /// settle test reads ([`Machine::height`]).
+    pub height: F,
+}
+
+/// **The body's mode machine**: the state behind [`Body::mode`].
+///
+/// Five of its fields are the wreck's, and they are the reason this is ported at all — the last of
+/// them is the writer of [`Body::settled`] that the port did not have before V19.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Machine {
+    /// What is posing the body this frame.
+    pub mode: Mode,
+    /// What was posing it the last time the mode changed, which is what makes every arm below an
+    /// entry rather than a per-frame call.
+    pub prev: Mode,
+    /// The body places itself, which the wreck's entry raises and entering `Held`, `Gate` or `Posed`
+    /// clears. The original copies it into one of the two flags the step's placement reads; this port
+    /// tells the step `true` either way (see [`crate::rider::Rider::body_frame`]), so for now nothing
+    /// reads it.
+    pub places_itself: bool,
+    /// What is left of the throw's own clock, in seconds: `ForceTime`, give or take its delta. While
+    /// it runs the original holds the thrown body at an orientation of its own; the port has no
+    /// ragdoll to orient, so what is kept is the clock, which the settle test reads.
+    pub thrown: F,
+    /// The second of the entry's two clocks: `HandHoldTime`, give or take its delta. While it runs
+    /// two of the wreck's render dummies stay on. Kept for the same reason as `thrown`.
+    pub loose: F,
+    /// The throw's own force, randomised lane by lane out of `Force` and `ForceDelta` — which the
+    /// original multiplies onto the body's rotation as a quaternion rather than applying as a force
+    /// (S26 measured that the force is loaded and *not* applied). Kept because the three draws it
+    /// costs are in the middle of the entry's five and the generator is shared.
+    pub spin: Vf,
+    /// How long something of the body has been on the ground, in seconds. Thrown away the moment
+    /// nothing is touching, so it is the length of *this* roll and not of the wreck.
+    pub roll: F,
+    /// Something of the body is on the ground.
+    pub touching: bool,
+    /// The body left the ground again after the throw: it rose, in one step, by more than
+    /// `RiderFlailHeight`. Cleared the next time it is rolling.
+    pub flung: bool,
+    /// The bones are holding the stiffer of the two damping records stored beside them rather than
+    /// the limp one. The port has no bones; this is the flag the original keeps beside them, and
+    /// which of the two sets is chosen, so that the arm that switches them is not a no-op.
+    pub stiff: bool,
+    /// How high the body was last frame. **The port's own:** the original reads the height either
+    /// side of its own ragdoll step, inside one call; this port's rider point is stepped by
+    /// [`crate::ride::Crash::step`], a call earlier, so the machine remembers the height instead and
+    /// the rise it tests is what that step did.
+    pub height: F,
+}
+
+impl Body {
+    /// **One call of the body's mode machine** — the function that writes [`Body::settled`].
+    ///
+    /// A second entry point and not a step of [`Body::frame`], because that is what it is in the
+    /// original: the selection and the step are one slot of the body actor's vtable and this is
+    /// another, reached through the actor's own update. A shell that draws a wrecked body calls both,
+    /// this one first ([`crate::rider::Rider::body_frame`] does).
+    ///
+    /// It decides which of five things is posing the body, runs the entry of whichever mode it has
+    /// just changed into, and — in the wreck — runs the clocks and the test that decides the body has
+    /// come to rest. `t` is the wreck in progress, or `None` for a rider who is not down, or who is
+    /// down with no wreck files under them: that one never settles, which is the same rider S26 left
+    /// lying there until the hand chord.
+    ///
+    /// # What is not ported, and why
+    ///
+    /// The original's own function is most of four kilobytes and the greater part of it is the
+    /// renderer's: the head and look-around dummies it switches and eases, the quaternion it holds the
+    /// thrown body at, the bones it detaches from the bike's collider once the body is clear of it,
+    /// the ragdoll step itself, the per-bone damping records, and a long tail that copies the
+    /// request's vectors into the body's own IK fields. None of that is simulation and none of it is
+    /// here. What is here is the mode selection, the entries, and the wreck's clocks and settle test;
+    /// the journal entry lists the rest line by line.
+    pub fn mode(
+        &mut self,
+        dt: F,
+        r: &vehicle_anim::Request,
+        a: &Ask,
+        w: &phy::Wrecks,
+        t: Option<Thrown>,
+        pool: &mut Pool,
+        clock: Clock,
+    ) -> Mode {
+        // A flip in progress holds the pose, and this is where that is written: the step lets a hold
+        // go when its cross-fade ramp runs out, on every state but the backflip, and the backflip
+        // keeps it because this machine puts it back every frame.
+        if a.backflip {
+            self.veh.holding = true;
+        }
+        // The five modes, as the original's chain of else-ifs: the first that matches is the mode.
+        let mode = if r.held {
+            Mode::Held
+        } else if a.wreck {
+            Mode::Wrecked
+        } else if self.veh.from_table || self.veh.holding {
+            Mode::Posed
+        } else if !r.cut && !self.looking {
+            Mode::Riding
+        } else {
+            Mode::Gate
+        };
+        self.machine.mode = mode;
+
+        // The entries. This is the original's chain and its order, including the quirk in it: the arm
+        // that cleans the wreck up is the chain's last `else`, so a body that leaves the wreck for
+        // `Held` or `Gate` is cleaned up by neither arm — those two match first — and one that leaves
+        // it for `Riding` or `Posed` is cleaned up *instead* of running that mode's own entry.
+        let prev = self.machine.prev;
+        if mode == Mode::Held && prev != Mode::Held {
+            self.machine.places_itself = false;
+            self.machine.prev = Mode::Held;
+        } else if mode == Mode::Gate && prev != Mode::Gate {
+            self.machine.places_itself = false;
+            // The gate starts again: no idle drawn, and a fresh breathe of up to half a second in
+            // front of the one it will draw.
+            self.picked = false;
+            self.ready = pool.unit(clock) * F(0.5);
+            self.machine.prev = mode;
+        } else if mode == Mode::Wrecked && prev != Mode::Wrecked {
+            self.enter_wreck(t, pool, clock);
+            self.machine.prev = mode;
+        } else if mode == Mode::Wrecked || prev != Mode::Wrecked {
+            if mode == Mode::Posed && prev != Mode::Posed {
+                self.machine.places_itself = false;
+                self.machine.prev = mode;
+            } else if mode == Mode::Riding && prev != Mode::Riding {
+                self.machine.prev = mode;
+            }
+        } else {
+            // Up again: the wreck's flags and its roll go, the settle with them, and the thrown
+            // clock is left negative rather than zero.
+            self.machine.flung = false;
+            self.settled = false;
+            self.machine.roll = F::ZERO;
+            self.machine.thrown = F(-1.0);
+            self.machine.prev = mode;
+        }
+
+        if mode == Mode::Wrecked {
+            if let Some(t) = t {
+                self.wreck_frame(dt, w, t);
+            }
+        }
+        mode
+    }
+
+    /// The entry of the wreck mode: the three flags it clears and the five numbers it draws.
+    ///
+    /// **Only the entry's own half.** The original's is five and a half kilobytes — it puts the
+    /// ragdoll where the bike is, hands every bone the bike's velocity and the limp damping, turns the
+    /// wreck's dummies on and the rider's own collision off — and the port's half of all that is
+    /// [`crate::ride::Crash::begin`], which the rider's frame has already run by the time this is
+    /// called. What is left for here is the body actor's own state: the flags, and the two clocks and
+    /// the spin the entry randomises out of the throw.
+    ///
+    /// The draws are the original's five, in the original's order — the spin's three lanes, then the
+    /// two clocks — because they come out of a generator this body shares with its own idle pool
+    /// ([`Pool`]) and with every other draw in the program.
+    fn enter_wreck(&mut self, t: Option<Thrown>, pool: &mut Pool, clock: Clock) {
+        self.machine.places_itself = true;
+        self.machine.stiff = false;
+        self.machine.flung = false;
+        self.settled = false;
+        self.machine.roll = F::ZERO;
+        self.machine.touching = false;
+        let Some(t) = t else { return };
+        // `base + delta * (2u - 1)`: a number inside `base ± delta`, drawn once per lane. The w lane
+        // is the original's — it adds a one to whatever the file's own fourth lane was.
+        let about = |pool: &mut Pool, base: F, delta: F| base + delta * (F(2.0) * pool.unit(clock) - F::ONE);
+        let f = t.throw.force;
+        let d = t.throw.force_delta;
+        let x = about(pool, F(f.x()), F(d.x()));
+        let y = about(pool, F(f.y()), F(d.y()));
+        let z = about(pool, F(f.z()), F(d.z()));
+        self.machine.spin = Vf::new(x.0, y.0, z.0, (F(f.w()) + F::ONE).0);
+        self.machine.thrown = about(pool, t.throw.force_time, t.throw.force_time_delta);
+        self.machine.loose = about(pool, t.throw.hand_hold_time, t.throw.hand_hold_time_delta);
+        self.machine.height = t.height;
+    }
+
+    /// One frame of the wreck mode: the two clocks, the roll, and the test that decides the body has
+    /// come to rest.
+    ///
+    /// The test is the original's, in its own shape — an outer condition that says the body is not
+    /// still being thrown about, an inner one that separates a body which has landed from one which
+    /// has just been flung, and then the two limits off the rider's file that end a roll: it has
+    /// rolled for `RiderRollTime`, or it has slowed below `RiderRollSpeed`. Either one, once, and the
+    /// body has settled; [`Body::select`]'s wreck arm reads that and lets go of the flail.
+    fn wreck_frame(&mut self, dt: F, w: &phy::Wrecks, t: Thrown) {
+        let m = &mut self.machine;
+        // The throw's clock, and the second one behind it. What they gate in the original is the
+        // orientation and the dummies; what they gate here is the test below.
+        if F::ZERO < m.thrown {
+            m.thrown = m.thrown - dt;
+        }
+        if F::ZERO < m.loose {
+            m.loose = m.loose - dt;
+        }
+        // The roll's own clock runs while something is touching and is thrown away when nothing is.
+        if t.touching {
+            m.touching = true;
+            m.roll = m.roll + dt;
+        } else {
+            m.touching = false;
+            m.roll = F::ZERO;
+        }
+        // What the step that moved the body did to its height. The original measures this across its
+        // own ragdoll step; this port measures it across the frame (see [`Machine::height`]).
+        let rise = t.height - m.height;
+        m.height = t.height;
+        if m.roll != F::ZERO
+            || F::ZERO < m.loose
+            || F::ZERO < m.thrown
+            || m.flung
+            || rise <= w.rider_flail_height
+        {
+            if !(F::ZERO < m.roll) || !m.flung {
+                // The length is taken here and only here, which is where the original takes it:
+                // the roll's own limit is tested first and branches past the square root.
+                let slow = || {
+                    Acc::mula(t.vel.x(), t.vel.x())
+                        .madda(t.vel.y(), t.vel.y())
+                        .madd(t.vel.z(), t.vel.z())
+                        .sqrt()
+                        < w.rider_roll_speed
+                };
+                if (w.rider_roll_time < m.roll || slow()) && !self.settled {
+                    // **The one write of `settled` in the program.** The bones take the stiffer
+                    // damping again and the main one takes the file's own `GroundAngularRateDamping`,
+                    // which this port has no bones to give it to.
+                    self.settled = true;
+                    m.stiff = true;
+                }
+            } else {
+                // It has landed out of a fling: the bones go limp and the fling is over.
+                m.stiff = false;
+                m.flung = false;
+            }
+        } else {
+            // Nothing touching, both clocks run out, and it has risen further than the flail height
+            // in one step: it has been thrown up again, and whatever it had settled into is off.
+            m.stiff = true;
+            m.flung = true;
+            self.settled = false;
+        }
     }
 }

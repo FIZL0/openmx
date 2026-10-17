@@ -18,12 +18,23 @@
 //!    [`game_sim::rider::Rider`] on the hand-written test bike: the request block published by
 //!    [`game_sim::rider::Rider::body_frame`] off the rider's own fields, and the player's six-step
 //!    update running in between every pair of body frames without touching the body's state.
+//! 5. **a wreck that settles** — a whole rider with wreck files under it, dropped onto flat ground
+//!    hard enough to come off: the body's *mode* machine (V19) is the only thing that writes
+//!    `settled`, so a wrecked body flails while it is thrown about, settles the tick its roll runs
+//!    past `RiderRollTime`, holds one of its five limbs and keeps that one, and has the settle
+//!    cleared again when the machine puts the rider back.
+//! 6. **the wreck arm of the mode machine** — six thousand generated frames of the original's *other*
+//!    vtable slot (V19), its ten callees hooked away so that only the mode chain and the wreck's own
+//!    clocks, roll and settle test run. Compared per frame: the mode and the previous mode, the settle
+//!    and flung flags, the contact flag, all three clocks, and which of the two bone damping sets the
+//!    frame asked for. The ragdoll's hook is not a no-op — it moves the body by the rise the case
+//!    asks for, which is how the condition that reads a rise across the step is reached from a test.
 //!
-//! The last three need no disc: they are the task's behavioural test and they run everywhere.
+//! The middle four need no disc: they are the task's behavioural tests and they run everywhere.
 //! What is not proved here, and why, is in the journal entry's last section.
 
 use game_sim::motion::{Clip, ClipId, Player};
-use game_sim::phy::Phy;
+use game_sim::phy::{self, Phy};
 use game_sim::ride::Controls;
 use game_sim::rider::{self, Rider};
 use game_sim::rider_anim::{
@@ -35,6 +46,9 @@ use game_sim::world::Flat;
 use game_sim::vehicle_anim::{
     self, AIR, BACKFLIP, GET_READY, HOLD, Library, REVERSE_L, START_POS, STATES, TURN_RIDING,
 };
+use std::cell::Cell;
+use std::rc::Rc;
+
 use ps2_float::{F, Vf};
 use ps2_oracle::{addr, game_or_skip, skip};
 
@@ -484,6 +498,9 @@ fn the_selection_matches_over_thirty_thousand_frames() {
             look: F(look0),
             looking: looking0,
             settled: settled0,
+            // The mode machine's own state, which this oracle does not drive: the selection reads
+            // none of it (it reads `settled`, which the machine writes, and that is set above).
+            machine: Default::default(),
         };
         let p = Params { stopped: F(stopped), look_min: F(look_min), look_max: F(look_max) };
         let mut vp = vehicle_anim::Params {
@@ -831,5 +848,563 @@ fn the_rider_publishes_the_body_its_own_request() {
     println!(
         "the wiring: {asked:?} then riding, through a whole rider on the flat, band {:?}",
         rider.ride.chassis.speed
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 5. a wreck that settles
+// ---------------------------------------------------------------------------------------------------
+
+/// The wreck limits a clean drop onto flat ground is judged against, appended to [`BIKE`]: sideways
+/// and fore-and-aft are out of reach and both pitch limits are generous, so the only wreck this drop
+/// can get is the vertical one, and `MaxWreckTime` is how long the settled wreck lies there before the
+/// machine puts the rider back. The same block `tests/ride.rs` wrecks on, and like it these are
+/// plausible numbers and not the disc's.
+const WRECK_LIMITS: &str = "
+[Wrecks]
+MaxWreckTime = 2
+CannonballWreckTime = 5
+FrontWreckSpeedLimit = 400
+BackWreckSpeedLimit = 400
+SideWreckSpeedLimit = 400
+RacingDownWreckSpeedLimit = 400
+FreestyleDownWreckSpeedLimit = 5
+GroundPitchDownWreckAngle = 85
+GroundPitchUpWreckAngle = 85
+AirbornePitchDownWreckAngle = 175
+AirbornePitchUpWreckAngle = 175
+AirborneRollWreckAngle = 175
+NoHanderWreckSpeedLimit = 400
+NoHanderMaxRollAngle = 45
+JoustWreckHeight = 2
+CrossupWreck = 1
+CrossupWreckTime = 0.3
+";
+
+/// The bike the rider leaves behind: one rigid-body part in the shape of the game's own
+/// `Wreckbike.phy`. `tests/ride.rs`'s, not the disc's.
+const WRECK_PART: &str = "
+[PhysicsPart1]
+Type = RigidBody
+Name = wreck_physics
+Weight = 250.0
+CollisionWeight = 0.0001
+GravityScale = 1.0
+InertiaScale = 1.0, 1.0, 1.0
+SpringStiffness = 5.0
+SpringDamping = 0.4
+MaxPenetration = 0.5
+CofG = 0.0, 1.5, 0.0
+SpringMomentScale = 1.0, 1.0, 1.0
+FrictionMomentScale = 1.0, 1.0, 1.0
+FrictionZone1 = 0.5
+Radius = 1.0
+AccelerationThreshold = 0.01
+AngularAccelerationThreshold = 0.01
+";
+
+/// The rider's own half of a wreck, in the shape of the rider file's `[Wrecks]`. The three numbers
+/// the mode machine reads are the last three: a body is thrown about while it is rising faster than
+/// `RiderFlailHeight`, and its roll ends after `RiderRollTime` **or** below `RiderRollSpeed`. With the
+/// speed limit at zero the only way out is the clock, which is what makes the tick the settle lands on
+/// a number this test can predict. `tests/ride.rs`'s block, kept the same so the two measure the same
+/// wreck.
+const RIDER_WRECKS: &str = "
+[Wrecks]
+HitBottomForceTime = 0.1
+HitBottomHandHoldTime = 0.3
+HitBottomForce = 0.0, 800.0, 0.0
+GroundAngularRateDamping = 1.0
+RiderFlailHeight = 3.0
+RiderRollTime = 0.75
+RiderRollSpeed = 0.0
+";
+
+/// Reason 5 as the state machine carries it: landing too hard, which is the only wreck the limits
+/// above leave this drop, and the one the human's capture hit twice.
+const FLAT: game_sim::trick::Wreck = game_sim::trick::Wreck(game_sim::air::Wreck::Flat as u8);
+
+/// The box the wreck body's inertia is built out of, and how high the bike is dropped from, in feet —
+/// far enough that it comes down past the vertical wreck limit and the rider goes over the bars.
+const WRECK_BOX: Vf = Vf([2.5, 4.0, 7.0, 1.0]);
+const DROP: f32 = 30.0;
+
+/// The frame this one steps at: the human recording's own `dt`, which is what the wreck's tick counts
+/// in `tests/ride.rs` are counted in.
+const WRECK_DT: F = F(0.03333);
+
+/// `RiderRollTime` in ticks of [`WRECK_DT`]: how many frames of roll the limit takes to pass.
+/// 23 × 0.03333 = 0.766 > 0.75, and 22 × 0.03333 = 0.733 is not. The tick the body is first seen on
+/// the ground has already had one of them — the rider point is stepped by the rider's own frame,
+/// which runs in front of the body's — so the settle lands `ROLL_TICKS - 1` ticks after that one.
+const ROLL_TICKS: usize = 23;
+
+/// **V19.** A wrecked body settles by itself, and a settled body holds one limb and keeps it.
+///
+/// The whole point is what is *not* in the loop: nothing writes [`Body::settled`]. The wreck arm of
+/// the selection used to be unreachable past its first state because the only writer of that flag was
+/// the body's mode machine, which was not ported — so this drops a whole [`Rider`] with wreck files
+/// under it, wrecks it on the floor, and lets [`Rider::body_frame`] run both of the body actor's slots
+/// per frame. What the body does is then the machine's own doing: it flails while it is being thrown
+/// about, it settles the tick its roll runs past `RiderRollTime`, it grabs one of five limbs and stays
+/// on that one, and when the rider is put back the settle is cleared again.
+#[test]
+fn a_wrecked_body_settles_and_then_holds_still() {
+    let tables = rider::Tables::build();
+    let p = Phy::read_bytes(format!("{BIKE}{WRECK_LIMITS}").as_bytes(), &tables.ride.curve);
+    let hubs = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+    let at = Vf::new(0.0, DROP, 0.0, 1.0);
+    let mut rider =
+        Rider::new(&p, hubs, at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    // The rider's wreck files: the bike it leaves behind and the throw it is thrown with. Without
+    // these the wreck has no numbers and the machine is handed nothing to settle on.
+    let part = phy::Part::read_bytes(WRECK_PART.as_bytes(), "PhysicsPart1");
+    let wrecks = phy::Wrecks::read_bytes(RIDER_WRECKS.as_bytes());
+    rider.carries_wreck(part, wrecks, part.inertia(WRECK_BOX));
+    rider.body_rates = numbers().1;
+    // Not at a gate: this rider is dropped onto a field, so the selection's start-line arm is not to
+    // outrank the wreck. (The mode machine puts the wreck above the gate either way; the selection
+    // does not, and it is the selection that picks the clip.)
+    rider.body_request.cut = false;
+
+    let (lib, clips) = table();
+    // The dirt, the same plane `tests/ride.rs` wrecks on.
+    let mut world = Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let hands = Controls::default();
+    let gate = rider::Gate {
+        countdown: F::ZERO,
+        clock: Clock { second: 0x19, minute: 0x27, hour: 0x14, day: 0x17 },
+    };
+
+    // The three ticks this test is about, all counted in frames of the loop.
+    let mut reason = None;
+    let mut wrecked_at = None;
+    let mut grounded_at = None;
+    let mut settled_at = None;
+    let mut back_at = None;
+    // The limb the settled body grabbed, and the state it flailed in before it did.
+    let mut held = None;
+    for k in 0..1200 {
+        let f = rider.frame(&p, &tables, &hands, WRECK_DT, &mut world);
+        // Nobody but the machine writes the flag: the rider's own six-step update does not, and the
+        // test itself never assigns it.
+        let before = rider.body.settled;
+        rider.body_frame(WRECK_DT, &hands, gate, &lib, &clips);
+        if let Some(w) = f.wreck {
+            if wrecked_at.is_none() {
+                wrecked_at = Some(k);
+                reason = Some(w);
+            }
+        }
+        if wrecked_at.is_none() {
+            continue;
+        }
+        if f.respawned {
+            back_at = Some(k);
+            break;
+        }
+        // On the ground, as the port's stand-in sensor has it: the rider point has reached the dirt.
+        if rider.crash.as_ref().is_some_and(|c| c.landed) && grounded_at.is_none() {
+            grounded_at = Some(k);
+        }
+        match (rider.body.settled, settled_at) {
+            (true, None) => {
+                settled_at = Some(k);
+                held = Some(rider.body.veh.want);
+            }
+            // Once settled, it stays settled for the rest of the wreck, and the limb does not change.
+            (settled, Some(_)) => {
+                assert!(settled, "tick {k}: the settle was dropped mid-wreck");
+                assert_eq!(rider.body.veh.want, held.unwrap(), "tick {k}: it changed limb");
+                assert_eq!(
+                    rider.body.player.clip,
+                    Some(handle(held.unwrap())),
+                    "tick {k}: and the clip with it"
+                );
+            }
+            // Before it settles it flails, which is the one state the wreck arm could reach before
+            // this task.
+            (false, None) => {
+                assert!(!before, "tick {k}: something cleared a settle nothing had written");
+                assert_eq!(rider.body.veh.want, HOLD, "tick {k}: an unsettled wreck flails");
+                assert_eq!(
+                    rider.body.player.clip,
+                    Some(handle(HOLD)),
+                    "tick {k}: in the flail clip"
+                );
+            }
+        }
+    }
+
+    let wrecked_at = wrecked_at.expect("the drop wrecked");
+    assert_eq!(reason, Some(FLAT), "the drop wrecked for the wrong reason");
+    let grounded_at = grounded_at.expect("the thrown rider reached the ground");
+    let settled_at = settled_at.expect("the wrecked body settled, with nothing writing the flag");
+    let back_at = back_at.expect("and the machine put the rider back by itself");
+    // The settle is the roll's own clock running out, on the tick the numbers say.
+    assert_eq!(
+        settled_at - grounded_at,
+        ROLL_TICKS - 1,
+        "the body settled {} ticks after it landed, not RiderRollTime's {}",
+        settled_at - grounded_at,
+        ROLL_TICKS - 1
+    );
+    // And it settled while it was still down, not on the way back up.
+    assert!(settled_at < back_at, "it settled after the respawn");
+    let held = held.expect("a settled body holds a limb");
+    assert!(
+        (HOLD_LIMB..HOLD_LIMB + HOLD_LIMBS).contains(&held),
+        "a settled body holds one of its five limbs, not {held}"
+    );
+    // Back on the bike: the mode machine's own leaving-the-wreck arm clears the settle, so the next
+    // wreck starts flailing again rather than inheriting this one's rest.
+    assert!(!rider.body.settled, "the respawn left the body settled");
+    assert!(!rider.body.machine.flung, "and left it flung");
+    assert_eq!(rider.body.machine.roll, F::ZERO, "and left the roll running");
+    println!(
+        "the wreck: reason {reason:?} down at {wrecked_at}, on the ground at {grounded_at}, settled at {settled_at} \
+         holding state {held}, back up at {back_at} with the settle cleared"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 6. the mode machine's wreck frame, against the original
+// ---------------------------------------------------------------------------------------------------
+
+/// The other objects the body's mode machine reaches through, in the same unused RAM as the body.
+const RAG: u32 = 0x0120_4000;
+const MAIN: u32 = 0x0120_4100;
+const VTABLE: u32 = 0x0120_4300;
+const BONES: u32 = 0x0120_4400;
+const BONE: u32 = 0x0120_4500;
+const NIL: u32 = 0x0120_4600;
+
+/// The mode machine's own fields, by the offsets the original uses — the five the wreck arm is made of
+/// and the pointers it reaches the ragdoll through. A test may say where these live; the port may not.
+const B_MODE: u32 = 0x47c;
+const B_PREV: u32 = 0x480;
+const B_TOUCHING: u32 = 0x48c;
+const B_ROLL: u32 = 0x490;
+const B_RAGDOLL: u32 = 0x2bc;
+const B_MAIN: u32 = 0x2f4;
+const B_SCENE: u32 = 0x420;
+const B_HEAD_A: u32 = 0x5d0;
+const B_HEAD_B: u32 = 0x5d4;
+const B_PART_COUNT: u32 = 0x620;
+const B_PARTS: u32 = 0x624;
+const B_FOLLOW: u32 = 0x628;
+const B_HANDS: u32 = 0x62c;
+const B_SPIN_FRAME: u32 = 0x6a8;
+const B_OFF_BIKE: u32 = 0x6b0;
+const B_FLUNG: u32 = 0x6b8;
+const B_THROWN: u32 = 0x6bc;
+const B_LOOSE: u32 = 0x6c0;
+const B_DAMPING: u32 = 0x8c0;
+const B_FLAIL_HEIGHT: u32 = 0x8d0;
+const B_ROLL_TIME: u32 = 0x8d4;
+const B_ROLL_SPEED: u32 = 0x8d8;
+/// The main bone: how high it is, how fast it is going, and the vtable whose damping slot the settle
+/// hands the body's own damping record to.
+const M_HEIGHT: u32 = 0x64;
+const M_VEL: u32 = 0x70;
+const M_VTABLE: u32 = 0x100;
+const M_SET_DAMPING: u32 = 0x54;
+/// One bone: the contact flag the roll's clock is driven by, and the handle its follower is given.
+const BONE_TOUCH: u32 = 0x14;
+const BONE_FOLLOW: u32 = 0x88;
+
+/// Whether the body settled this frame, and everything it decided on the way there — read the same way
+/// off both sides.
+#[derive(Debug, PartialEq)]
+struct Rest {
+    mode: i32,
+    prev: i32,
+    settled: bool,
+    flung: bool,
+    touching: bool,
+    roll: f32,
+    thrown: f32,
+    loose: f32,
+    /// What the damping call was handed this frame, or `None` for a frame that made no call: the
+    /// stiffer set (`true`) or the limp one.
+    stiff: Option<bool>,
+}
+
+/// **V19.** The wreck arm of the body's mode machine, frame by frame against the original.
+///
+/// The original's own function is run with its ten callees hooked away — the ragdoll's step, the
+/// bone followers, the damping setter — so what is left running is the mode chain and the wreck's own
+/// clocks, roll and settle test, which is the whole of what this task ported. The ragdoll's hook is
+/// *not* a no-op: it moves the main bone by the rise the case asks for, which is how the condition
+/// that reads a body's rise across the step is reached from a test.
+///
+/// Compared per frame: the mode and the previous mode, the settle flag, the flung flag, the contact
+/// flag, all three clocks, and which of the two damping sets the frame asked for — the last one off a
+/// recording hook, because in the original it is inside the bones and not a field.
+#[test]
+fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let Some(at) = named(&[
+        "rider_body_mode",
+        "rider_body_wreck_enter",
+        "rider_body_damping",
+        "rider_ragdoll_step",
+        "rider_bone_follow",
+        "rider_bone_post",
+        "rider_bone_detach",
+        "rider_body_look_reset",
+        "rider_body_ride_enter",
+        "rand_raw",
+        "quat_axes",
+    ]) else {
+        return;
+    };
+    let (mode_at, damping_at, ragdoll_at) = (at[0], at[2], at[3]);
+    // The main bone's own damping slot is a *virtual* call, so the test gives the bone a vtable of its
+    // own and points that slot at another hooked address — one the wreck arm cannot otherwise reach —
+    // which is how the record it is handed becomes visible here.
+    let sink_at = at[6];
+
+    // The rise the ragdoll's step is to produce, and what the damping setter was handed. Shared with
+    // the hooks, which is the only way a hook can carry anything in or out.
+    let rise = Rc::new(Cell::new(0.0f32));
+    let stiff = Rc::new(Cell::new(None));
+    let record = Rc::new(Cell::new(None));
+    {
+        let rise = Rc::clone(&rise);
+        ee.hooks.insert(
+            ragdoll_at,
+            Box::new(move |ee: &mut ps2_oracle::Ee| {
+                let was = ee.f32_at(MAIN + M_HEIGHT);
+                ee.set_f32(MAIN + M_HEIGHT, was + rise.get());
+            }),
+        );
+        let stiff = Rc::clone(&stiff);
+        ee.hooks.insert(
+            damping_at,
+            Box::new(move |ee: &mut ps2_oracle::Ee| stiff.set(Some(ee.r(5) & 1 != 0))),
+        );
+        let record = Rc::clone(&record);
+        ee.hooks.insert(
+            sink_at,
+            Box::new(move |ee: &mut ps2_oracle::Ee| record.set(Some(ee.r(5) as u32))),
+        );
+        // Everything else the function calls, and nothing of it is this task's: the wreck's entry (the
+        // frames below never enter, so it is only hooked so that a generated case cannot reach it), the
+        // bone followers, the two other modes' entries, the generator and the quaternion helper.
+        for &a in &[at[1], at[4], at[5], at[7], at[8], at[9], at[10]] {
+            ee.hooks.insert(a, Box::new(|_| {}));
+        }
+    }
+
+    let mut pick = Pick(0x9e37_79b9_7f4a_7c15);
+    let (mut settles, mut flings, mut rolls, mut held) = (0, 0, 0, 0);
+    for k in 0..6_000u32 {
+        // The frame's own numbers. Each one is pinned often enough that every branch of the test is
+        // reached, and generated otherwise.
+        let dt = match pick.upto(4) {
+            0 => 1.0 / 60.0,
+            1 => 0.03333,
+            2 => 0.0,
+            _ => pick.float(0.2).abs(),
+        };
+        let roll0 = match pick.upto(4) {
+            0 => 0.0,
+            1 => 0.74,
+            2 => 0.76,
+            _ => pick.float(2.0).abs(),
+        };
+        let thrown0 = match pick.upto(3) {
+            0 => 0.0,
+            1 => -1.0,
+            _ => pick.float(0.5),
+        };
+        let loose0 = match pick.upto(3) {
+            0 => 0.0,
+            1 => 0.3,
+            _ => pick.float(0.5),
+        };
+        let flung0 = pick.upto(2) == 1;
+        let settled0 = pick.upto(4) == 0;
+        let touching = pick.upto(3) != 0;
+        // The step's own rise, and the limit it is tested against — which is sometimes negative, so
+        // that the arm which decides a body has been flung off the ground again is reachable here.
+        let rise_k = match pick.upto(4) {
+            0 => 0.0,
+            1 => 4.0,
+            2 => -1.0,
+            _ => pick.float(6.0),
+        };
+        let flail_height = match pick.upto(4) {
+            0 => 3.0,
+            1 => -1.0,
+            2 => 0.0,
+            _ => pick.float(5.0),
+        };
+        let roll_time = match pick.upto(3) {
+            0 => 0.75,
+            1 => 0.0,
+            _ => pick.float(2.0).abs(),
+        };
+        let roll_speed = match pick.upto(3) {
+            0 => 0.0,
+            1 => 5.0,
+            _ => pick.float(20.0).abs(),
+        };
+        let height0 = pick.float(50.0);
+        let vel = [pick.float(30.0), pick.float(30.0), pick.float(30.0)];
+
+        // The body, its request and the five objects the wreck arm reaches through.
+        ee.load(BODY, &vec![0u8; 0xb00]);
+        ee.load(REQ, &vec![0u8; 0x200]);
+        for &a in &[RAG, MAIN, VTABLE, BONES, BONE, NIL] {
+            ee.load(a, &vec![0u8; 0x200]);
+        }
+        ee.set_u32(BODY + B_REQUEST, REQ);
+        // Off the bike: a wreck reason in the request is what the chain picks mode 2 on, and a previous
+        // mode of 2 is what makes this a frame of the wreck and not an entry into it.
+        ee.set_u32(REQ + R_WRECK, 5);
+        ee.set_u32(BODY + B_PREV, 2);
+        // The ragdoll, and the main bone the settle test reads.
+        ee.set_u32(BODY + B_RAGDOLL, RAG);
+        ee.set_u32(BODY + B_MAIN, RAG);
+        ee.set_u32(RAG + 0xa4, MAIN);
+        ee.set_u32(MAIN + M_VTABLE, VTABLE);
+        ee.set_u32(VTABLE + M_SET_DAMPING, sink_at);
+        ee.set_f32(MAIN + M_HEIGHT, height0);
+        for (i, &v) in vel.iter().enumerate() {
+            ee.set_f32(MAIN + M_VEL + 4 * i as u32, v);
+        }
+        // One bone, with the contact flag the roll runs on.
+        ee.set_u32(BODY + B_PART_COUNT, 1);
+        ee.set_u32(BODY + B_PARTS, BONES);
+        ee.set_u32(BONES, BONE);
+        ee.set_u32(BONE + BONE_TOUCH, u32::from(touching));
+        ee.set_u32(BONE + BONE_FOLLOW, NIL);
+        ee.set_u32(BODY + B_FOLLOW, NIL);
+        // The three pointers the arm reads and this frame wants nothing from: the hand dummies (a zero
+        // first word turns the block off), the two head dummies, and the scene (its mode is not the one
+        // the placement block runs in).
+        ee.set_u32(BODY + B_HANDS, NIL);
+        ee.set_u32(BODY + B_HEAD_A, NIL);
+        ee.set_u32(BODY + B_HEAD_B, NIL);
+        ee.set_u32(BODY + B_SCENE, NIL);
+        // Already off the bike and past the frame the thrown orientation is chosen in: two blocks of
+        // renderer work this port has no answer for, and both are skipped by a flag the original keeps.
+        ee.set_u32(BODY + B_OFF_BIKE, 1);
+        ee.set_u32(BODY + B_SPIN_FRAME, 1);
+        // The frame's own state.
+        ee.set_f32(BODY + B_ROLL, roll0);
+        ee.set_f32(BODY + B_THROWN, thrown0);
+        ee.set_f32(BODY + B_LOOSE, loose0);
+        ee.set_u32(BODY + B_FLUNG, u32::from(flung0));
+        ee.set_u32(BODY + B_SETTLED, u32::from(settled0));
+        ee.set_u32(BODY + B_TOUCHING, u32::from(pick.upto(2) == 1));
+        ee.set_f32(BODY + B_FLAIL_HEIGHT, flail_height);
+        ee.set_f32(BODY + B_ROLL_TIME, roll_time);
+        ee.set_f32(BODY + B_ROLL_SPEED, roll_speed);
+
+        rise.set(rise_k);
+        stiff.set(None);
+        record.set(None);
+        ee.call(mode_at, &[u64::from(BODY)], &[dt], BUDGET);
+        let theirs = Rest {
+            mode: ee.u32_at(BODY + B_MODE) as i32,
+            prev: ee.u32_at(BODY + B_PREV) as i32,
+            settled: ee.u32_at(BODY + B_SETTLED) != 0,
+            flung: ee.u32_at(BODY + B_FLUNG) != 0,
+            touching: ee.u32_at(BODY + B_TOUCHING) != 0,
+            roll: ee.f32_at(BODY + B_ROLL),
+            thrown: ee.f32_at(BODY + B_THROWN),
+            loose: ee.f32_at(BODY + B_LOOSE),
+            stiff: stiff.get(),
+        };
+
+        // The same frame through the port. Its machine is handed the same state, and the rise is handed
+        // to it the way its own caller hands it over: last frame's height, and this frame's.
+        let mut body = Body::default();
+        body.settled = settled0;
+        body.machine.prev = game_sim::rider_anim::Mode::Wrecked;
+        body.machine.roll = F(roll0);
+        body.machine.thrown = F(thrown0);
+        body.machine.loose = F(loose0);
+        body.machine.flung = flung0;
+        body.machine.touching = ee.u32_at(BODY + B_TOUCHING) != 0;
+        body.machine.height = F(height0);
+        body.machine.stiff = false;
+        let mut wrecks = game_sim::phy::Wrecks::default();
+        wrecks.rider_flail_height = F(flail_height);
+        wrecks.rider_roll_time = F(roll_time);
+        wrecks.rider_roll_speed = F(roll_speed);
+        let thrown = game_sim::rider_anim::Thrown {
+            throw: game_sim::phy::Throw::default(),
+            touching,
+            vel: Vf::new(vel[0], vel[1], vel[2], 0.0),
+            height: F(height0 + rise_k),
+        };
+        let (mut r, mut a) = resting();
+        r.held = false;
+        a.wreck = true;
+        let mut pool = Pool::default();
+        let clock = Clock { second: 0, minute: 0, hour: 0, day: 0 };
+        let before = body.machine.stiff;
+        let mode =
+            body.mode(F(dt), &r, &a, &wrecks, Some(thrown), &mut pool, clock);
+        let ours = Rest {
+            mode: match mode {
+                game_sim::rider_anim::Mode::Wrecked => 2,
+                other => panic!("case {k}: the port left the wreck for {other:?}"),
+            },
+            prev: 2,
+            settled: body.settled,
+            flung: body.machine.flung,
+            touching: body.machine.touching,
+            roll: body.machine.roll.0,
+            thrown: body.machine.thrown.0,
+            loose: body.machine.loose.0,
+            // The port keeps the choice as a flag; the original makes a call. A frame that changed
+            // neither made no call.
+            stiff: if body.machine.stiff == before && theirs.stiff.is_none() {
+                None
+            } else {
+                Some(body.machine.stiff)
+            },
+        };
+        assert_eq!(
+            ours, theirs,
+            "case {k}: dt {dt}, roll {roll0}, thrown {thrown0}, loose {loose0}, flung {flung0}, \
+             settled {settled0}, touching {touching}, rise {rise_k}, flail {flail_height}, \
+             time {roll_time}, speed {roll_speed}, vel {vel:?}"
+        );
+        // The port's own latch of the height, which the original takes across its ragdoll step.
+        assert_eq!(
+            body.machine.height.0,
+            ee.f32_at(MAIN + M_HEIGHT),
+            "case {k}: the height the next frame measures its rise against"
+        );
+        if theirs.settled && !settled0 {
+            // The one thing the settle does besides raising the flag: the main bone is handed the
+            // body's own `GroundAngularRateDamping` record, which is where the rider file's quadword
+            // sits on this actor.
+            assert_eq!(
+                record.get(),
+                Some(BODY + B_DAMPING),
+                "case {k}: the settle did not hand the main bone the damping record"
+            );
+            settles += 1;
+        }
+        if theirs.flung && !flung0 {
+            flings += 1;
+        }
+        if theirs.roll > roll0 {
+            rolls += 1;
+        }
+        if theirs.settled && settled0 {
+            held += 1;
+        }
+    }
+    println!(
+        "the wreck arm: 6000 frames, {settles} settled, {flings} flung, {rolls} rolling, \
+         {held} already at rest"
     );
 }

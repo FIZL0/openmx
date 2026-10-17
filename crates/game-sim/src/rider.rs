@@ -514,10 +514,20 @@ impl Rider {
     /// | the band the grid's rows are cut out of | the chassis's speed |
     /// | the progress and the request count | the trick clocks' |
     ///
-    /// One input has no answer here: [`rider_anim::Body::settled`], which decides whether a wrecked
-    /// body flails or holds a limb, is written by a different function of the original (the wreck's
-    /// own mode machine, which is not ported — its address is in the journal) — so a body wrecked by
-    /// this port flails until a shell says it has settled.
+    /// # The body's other machine
+    ///
+    /// The body actor has a second update of its own — its *mode* machine, which decides what is
+    /// posing the body and is the one writer of [`rider_anim::Body::settled`] — and this is its
+    /// caller too (V19): [`rider_anim::Body::mode`] runs first, on the wreck in progress, and then
+    /// the selection and the step. So a body this port wrecks now settles by itself, which is what
+    /// lets go of the flail, and `settled` is no longer an input a shell has to write.
+    ///
+    /// The three sensors the settle test reads come off [`Crash`], and they are **the port's own
+    /// stand-ins** for a ragdoll this crate has no port of: the original asks its bone array whether
+    /// any bone is touching and reads the main bone's height and velocity, and this hands over
+    /// [`Crash::landed`] and the rider point's own height and velocity. A rider who is down with no
+    /// wreck files under them has no [`Crash`] at all, so nothing settles and nothing changes for
+    /// them: they lie there until the hand chord, exactly as before.
     pub fn body_frame(
         &mut self,
         dt: F,
@@ -537,6 +547,8 @@ impl Rider {
             body_request,
             body_clocked,
             idles,
+            crash,
+            wreckage,
             ..
         } = self;
         let ask = rider_anim::Ask {
@@ -553,6 +565,16 @@ impl Rider {
             reversing: c.reverse,
             gesture: tricks.requested.slot().map_or(trick::SLOTS as i32, |s| s as i32),
         };
+        // The mode machine, in front of the animation: in the original the two are different slots
+        // of the body actor's vtable, and the wreck mode is what writes `settled` for the selection
+        // below to read.
+        let thrown = crash.as_ref().map(|down| rider_anim::Thrown {
+            throw: down.throw,
+            touching: down.landed,
+            vel: down.rider_vel,
+            height: F(down.rider.y()),
+        });
+        let wrecks = wreckage.as_ref().map_or_else(phy::Wrecks::default, |w| w.wrecks);
         // Every field the rider derives. `cut` and `offset` are left as they are: the body's own
         // selection is the only writer of the first and nothing here wants the second.
         body_request.held = false;
@@ -564,6 +586,7 @@ impl Rider {
         body_request.band = ride.chassis.speed;
         body_request.progress = tricks.progress;
         body_request.seq = tricks.seq;
+        body.mode(dt, body_request, &ask, &wrecks, thrown, idles, gate.clock);
         let (frame, clocked) = body.frame_clocked(
             dt,
             body_numbers,
