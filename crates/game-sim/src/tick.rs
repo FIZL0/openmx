@@ -770,14 +770,23 @@ impl Engine {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// The example simulation, wired to the real frame.
+// The simulation, wired to the real frame.
 // ---------------------------------------------------------------------------------------------------
 
-/// The crate's example state, plugged into the fixed update so that there is one worked path from the
-/// frame to a subsystem. Replace it with the scene tree's root when there is one.
+/// The simulation itself, plugged into the fixed update: one [`Engine::step`] reads the pads and
+/// rides the bike, with the frame length the clock measured.
+///
+/// This is the whole path from the frame to the ride, and it is the same [`crate::Sim`] that
+/// `replay::verify` drives — the harness and a live loop differ in where the pad bytes come from and
+/// in what is under the wheels, not in what is stepped. A shell with a track loaded implements
+/// [`Game`] itself, on a value that holds one of these and a world; see `crates/openmx`.
+///
+/// The pads: the fixed update's own `input` is one sampled [`Input`], which is what a fixture
+/// carries, so that is what this path rebuilds a pad report out of ([`crate::Sim::reports`]). A
+/// shell that has the real 32-byte reports hands them over itself rather than through here.
 impl Game for crate::Sim {
-    fn simulate(&mut self, _dt: F, input: Input, _rng: &mut Rng) -> bool {
-        self.tick(input);
+    fn simulate(&mut self, dt: F, input: Input, _rng: &mut Rng) -> bool {
+        self.tick_at(dt, input);
         true
     }
 }

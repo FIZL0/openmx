@@ -70,9 +70,10 @@ use ps2_float::{F, Vf, libm};
 
 /// The fixture's seed: not a value from the game, just a constant nobody will change by accident.
 const SEED: u32 = 0x4d58_554e;
-/// How many input frames the run is. Long enough for the ball's spin to decay into the denormal range
-/// and be flushed, and for its position to grow past the point where the EE's short adder starts
-/// dropping the low bits of the increment — both places where a host-float port drifts.
+/// How many input frames the run is. Long enough for the whole of the state to be in it: the bike is
+/// dropped onto a level floor, the suspension takes the landing, the wreck machine puts the rider
+/// down and the reset clock runs — a few thousand multiplies and a dozen of the game's own
+/// transcendentals per tick, every one of which is a place a host-float port drifts.
 const FRAMES: usize = 256;
 
 /// One input frame per tick, from an integer sequence: the inputs are part of what crosses machines, so
@@ -108,85 +109,96 @@ fn canonical_trace() -> Vec<u64> {
 
 /// `(tick, Sim::hash at that tick)`, every sixteenth tick of the canonical run.
 const HASHES: &[(u64, u64)] = &[
-    (16, 0x06f4dbafc07da686),
-    (32, 0x3d930de2199294a9),
-    (48, 0xadb3167c9392b8e9),
-    (64, 0xbcfaddde2eeaf0d8),
-    (80, 0xeddc551f169a0a0e),
-    (96, 0xd2697437f3211f73),
-    (112, 0xbc7d24939920c555),
-    (128, 0xd6187926ede1ba73),
-    (144, 0xb6ce284ff2a5fa74),
-    (160, 0x455ab32f484e334e),
-    (176, 0xa79bb699f527735d),
-    (192, 0x56d4fc7ea11bb9a8),
-    (208, 0x7a9212c37caac534),
-    (224, 0x825c474a2cc74172),
-    (240, 0x978210e79ac114fc),
-    (256, 0x1ec8cf84b9d836ea),
+    (16, 0x7bb15899aaa1d671),
+    (32, 0x33916a1ef3a70179),
+    (48, 0x0d9f658f97008327),
+    (64, 0x9172fb58a442d0e7),
+    (80, 0x651fc65d792cd3b8),
+    (96, 0x38c69764a2cabd71),
+    (112, 0x560824001c196a4f),
+    (128, 0xac1ae3a4ed2491e7),
+    (144, 0xb3fa3edaf7ab44e1),
+    (160, 0x98b9dd5c3b398437),
+    (176, 0xb8fc07ed388f9025),
+    (192, 0x5a99017d60fdc132),
+    (208, 0x52732dcdf7bd5c58),
+    (224, 0x4b1add50bd809044),
+    (240, 0x1ca024e87b0bd512),
+    (256, 0x6ad19f36bd0143c5),
 ];
 
 /// FNV-1a over all 256 of the run's hashes, little-endian: the one number that covers every tick.
-const TRACE_DIGEST: u64 = 0x4456a6484ffc4a30;
+const TRACE_DIGEST: u64 = 0x53897a38955ea6ba;
 
-/// `(tick, ball.pos[1] as a bit pattern)` on the same ticks — a watched field rather than a whole-state
+/// `(tick, bike.pos[1] as a bit pattern)` on the same ticks — a watched field rather than a whole-state
 /// hash, which is the shape an acceptance fixture of the original has.
 const POS_Y: &[(u64, u32)] = &[
-    (16, 0x41dcccc2),
-    (32, 0x41866649),
-    (48, 0xc20199a8),
-    (64, 0xc2effffa),
-    (80, 0xc375ffec),
-    (96, 0xc3cd331a),
-    (112, 0xc4194cb5),
-    (128, 0xc4559972),
-    (144, 0xc48dbfe2),
-    (160, 0xc4b57fd5),
-    (176, 0xc4e20c95),
-    (192, 0xc509b30d),
-    (208, 0xc524c633),
-    (224, 0xc5423fc0),
-    (240, 0xc5621fb3),
-    (256, 0xc5823304),
+    (16, 0x3f800000),
+    (32, 0x3f5f6408),
+    (48, 0x3e493fb8),
+    (64, 0xbeac4984),
+    (80, 0x3f1ae5ac),
+    (96, 0x3f1ae5ac),
+    (112, 0xbead4ae8),
+    (128, 0x3f41aed8),
+    (144, 0xbeae85f0),
+    (160, 0x3f1ae5ac),
+    (176, 0x3f800000),
+    (192, 0xbe89396c),
+    (208, 0x3e493fb8),
+    (224, 0x3f5f6424),
+    (240, 0x3f1ae644),
+    (256, 0xbeab56ec),
 ];
 
-/// `(tick, ball.spin as a bit pattern)`: the field that decays, flushes to zero and stays there.
-const SPIN: &[(u64, u32)] = &[
-    (16, 0x3f394acc),
-    (32, 0x3f061d2f),
-    (48, 0x3ec2248c),
-    (64, 0x3e8c8521),
-    (80, 0x3e4b6a87),
-    (96, 0x3e133b69),
-    (112, 0x3dd521e5),
-    (128, 0x3d9a43c3),
-    (144, 0x3d5f5014),
-    (160, 0x3d21a21b),
-    (176, 0x3ce9fabd),
-    (192, 0x3ca95a8f),
-    (208, 0x3c7527d6),
-    (224, 0x3c31716a),
-    (240, 0x3c006ecc),
-    (256, 0x3bb9eb2e),
+/// `(tick, bike.vel[1] as a bit pattern)`: the lane the suspension and gravity fight over, which is
+/// where a rounding difference shows up first.
+const VEL_Y: &[(u64, u32)] = &[
+    (16, 0x00000000),
+    (32, 0xc01a72ac),
+    (48, 0xc0d4ef63),
+    (64, 0xbeb62b40),
+    (80, 0xc0917843),
+    (96, 0xc0917843),
+    (112, 0xbeb84102),
+    (128, 0xc05ed758),
+    (144, 0xbec91f86),
+    (160, 0xc0917843),
+    (176, 0x00000000),
+    (192, 0x3edba49a),
+    (208, 0xc0d4ef63),
+    (224, 0xc01a71cd),
+    (240, 0xc091773a),
+    (256, 0xbea78309),
 ];
 
-/// Every leaf of the state at the last tick, as [`hash::Dump`] prints it.
-const FINAL_DUMP: &str = "\
+/// The head of the state at the last tick, as [`hash::Dump`] prints it: the two counters and the
+/// eight fields a capture of the original names by column.
+///
+/// Only the head, because the state behind it is the input manager and the whole rider — some
+/// hundreds of leaves, which as a pasted literal would be unreadable and unreviewable. What covers
+/// the rest is [`FINAL_DUMP_LEAVES`] and [`FINAL_DUMP_DIGEST`] below: a leaf count and a fold over
+/// every line, so a field that differs between two machines still fails here, and
+/// `hash::first_difference` is what then names it.
+const FINAL_DUMP_HEAD: &str = "\
 ticks = 256\n\
 rng = 1297634638\n\
-ball.pos[0] = 128 (0x43000000)\n\
-ball.pos[1] = -4166.377 (0xc5823304)\n\
-ball.pos[2] = 0 (0x00000000)\n\
-ball.pos[3] = 0 (0x00000000)\n\
-ball.vel[0] = 0.5 (0x3f000000)\n\
-ball.vel[1] = -35.399876 (0xc20d9979)\n\
-ball.vel[2] = 0 (0x00000000)\n\
-ball.vel[3] = 0 (0x00000000)\n\
-ball.spin = 0.0056737876 (0x3bb9eb2e)";
+bike.pos[0] = -0.000000009956657 (0xb22b0dd7)\n\
+bike.pos[1] = -0.33464754 (0xbeab56ec)\n\
+bike.pos[2] = 0.19132867 (0x3e43ebaa)\n\
+bike.pos[3] = 1 (0x3f800000)\n\
+bike.vel[0] = -0.00000011520583 (0xb3f76713)\n\
+bike.vel[1] = -0.3271716 (0xbea78309)\n\
+bike.vel[2] = 1.0348057 (0x3f847483)\n\
+bike.vel[3] = 0 (0x00000000)";
+
+/// How many leaves the walk of the state has, and FNV-1a over the whole of its printed form.
+const FINAL_DUMP_LEAVES: usize = 810;
+const FINAL_DUMP_DIGEST: u64 = 0x3ab9e69cd48e0948;
 
 /// FNV-1a over the bytes of the fixture's text form: a fixture file written on one machine must be the
 /// same bytes on another, or a recording cannot be shared.
-const FIXTURE_TEXT_DIGEST: u64 = 0xe37344a06ac59d03;
+const FIXTURE_TEXT_DIGEST: u64 = 0x4589ebebc9da73a9;
 
 /// The hash of [`Every`], the state below that holds one of every leaf kind the walker can emit.
 const EVERY_LEAF_HASH: u64 = 0xa228ffa8409c01f8;
@@ -342,12 +354,12 @@ const POW_IN: &[(f32, f32)] = &[
 /// Built from the constants above rather than from a run, which is what makes [`replay::verify`] a
 /// real comparison here instead of the port agreeing with itself.
 fn pinned_fixture() -> Fixture {
-    fixture_with(POS_Y, SPIN)
+    fixture_with(POS_Y, VEL_Y)
 }
 
 /// The same fixture from a given set of samples, so that `print_the_vectors` can build it from the
 /// values it has just computed rather than from the (stale) constants it is about to replace.
-fn fixture_with(pos_y: &[(u64, u32)], spin: &[(u64, u32)]) -> Fixture {
+fn fixture_with(pos_y: &[(u64, u32)], vel_y: &[(u64, u32)]) -> Fixture {
     let watch = |path: &str, pairs: &[(u64, u32)]| {
         Watch::new(
             path,
@@ -363,7 +375,7 @@ fn fixture_with(pos_y: &[(u64, u32)], spin: &[(u64, u32)]) -> Fixture {
         start: None,
         inputs: canonical_inputs(),
         hashes: Vec::new(), // the hashes are checked by tick below, where a sparse list is allowed
-        watches: vec![watch("ball.pos[1]", pos_y), watch("ball.spin", spin)],
+        watches: vec![watch("bike.pos[1]", pos_y), watch("bike.vel[1]", vel_y)],
     }
 }
 
@@ -397,7 +409,7 @@ fn the_canonical_run_hashes_to_its_pinned_vectors() {
 #[test]
 fn the_canonical_run_matches_its_pinned_fields_through_the_replay_harness() {
     let f = pinned_fixture();
-    assert_eq!(f.checks(), POS_Y.len() + SPIN.len());
+    assert_eq!(f.checks(), POS_Y.len() + VEL_Y.len());
     assert!(f.checks() >= 32, "a fixture that checks little proves little");
     if let Err(d) = replay::verify(&f) {
         panic!("the pinned fields are not what this machine computes: {d}");
@@ -410,7 +422,7 @@ fn the_canonical_run_matches_its_pinned_fields_through_the_replay_harness() {
     bad.watches[0].samples[POS_Y.len() / 2].value = Value::Float(bits ^ 1);
     let d = replay::verify(&bad).expect_err("a one-bit change must be caught");
     assert_eq!(d.tick, tick);
-    assert!(d.to_string().contains("ball.pos[1]"), "{d}");
+    assert!(d.to_string().contains("bike.pos[1]"), "{d}");
 }
 
 #[test]
@@ -419,7 +431,11 @@ fn the_final_state_dumps_to_its_pinned_text() {
     for i in canonical_inputs() {
         sim.tick(i);
     }
-    assert_eq!(hash::Dump::of(&sim).to_string(), FINAL_DUMP);
+    let text = hash::Dump::of(&sim).to_string();
+    let head: String = text.lines().take(FINAL_DUMP_HEAD.lines().count()).collect::<Vec<_>>().join("\n");
+    assert_eq!(head, FINAL_DUMP_HEAD);
+    assert_eq!(text.lines().count(), FINAL_DUMP_LEAVES, "the walk's leaf count");
+    assert_eq!(state_hash(text.as_bytes(), 0), FINAL_DUMP_DIGEST, "every leaf, folded");
 }
 
 #[test]
@@ -574,7 +590,7 @@ fn a_length_in_the_hash_is_eight_bytes_wide_whatever_a_usize_is() {
     for _ in 0..100 {
         sim.tick(Input::default());
     }
-    assert_eq!(sim.hash(), 0x7bbf_5ca2_d10e_b072);
+    assert_eq!(sim.hash(), 0xa63d_0020_237a_2864);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -930,7 +946,7 @@ fn print_the_vectors() {
     let _ = writeln!(o, "const TRACE_DIGEST: u64 = 0x{digest:016x};");
 
     let mut watched: Vec<Vec<(u64, u32)>> = Vec::new();
-    for (name, path) in [("POS_Y", "ball.pos[1]"), ("SPIN", "ball.spin")] {
+    for (name, path) in [("POS_Y", "bike.pos[1]"), ("VEL_Y", "bike.vel[1]")] {
         let mut samples = Vec::new();
         let _ = writeln!(o, "const {name}: &[(u64, u32)] = &[");
         for &t in &sampled {
@@ -945,7 +961,15 @@ fn print_the_vectors() {
         watched.push(samples);
     }
 
-    let _ = writeln!(o, "const FINAL_DUMP: &str = \"\\\n{}\";", escape(&dump.to_string()));
+    let text = dump.to_string();
+    let head: String = text.lines().take(10).collect::<Vec<_>>().join("\n");
+    let _ = writeln!(o, "const FINAL_DUMP_HEAD: &str = \"\\\n{}\";", escape(&head));
+    let _ = writeln!(o, "const FINAL_DUMP_LEAVES: usize = {};", text.lines().count());
+    let _ = writeln!(
+        o,
+        "const FINAL_DUMP_DIGEST: u64 = 0x{:016x};",
+        state_hash(text.as_bytes(), 0)
+    );
     let mut f = fixture_with(&watched[0], &watched[1]);
     f.hashes = trace;
     let _ = writeln!(

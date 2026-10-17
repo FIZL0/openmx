@@ -50,8 +50,15 @@ fn the_fold_is_fnv1a() {
 /// (1) The byte stream the walk produces, written out by hand.
 ///
 /// This is the encoding of the state, pinned independently of the walk: ticks as 8 little-endian bytes,
-/// the RNG word as 4, then the ball's two vectors as four lane patterns each in `x y z w` order, then
-/// the spin. If a change to the module moves a byte, this fails and says so.
+/// the RNG word as 4, then the bike's position and velocity as four lane patterns each in `x y z w`
+/// order. If a change to the module moves a byte, this fails and says so.
+///
+/// It is the *head* of the stream rather than all of it, because the state behind it is the input
+/// manager and the whole rider (P5) and nobody can write those bytes out by hand. The fold is a
+/// running one — [`the_fold_is_fnv1a`] proves that — so folding the head of the walk is folding the
+/// head of the stream, and [`a_dump_hashes_to_the_same_value_as_the_state`] ties the whole walk back
+/// to `hash::of`. These ten leaves are the ones a capture of the original reads by name, so they
+/// are the ones worth pinning twice.
 #[test]
 fn the_hash_is_that_fold_over_the_states_bytes_in_order() {
     let mut sim = Sim::new(0x1234_5678);
@@ -62,16 +69,21 @@ fn the_hash_is_that_fold_over_the_states_bytes_in_order() {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&sim.ticks.to_le_bytes());
     bytes.extend_from_slice(&sim.rng.to_le_bytes());
-    for v in [sim.ball.pos, sim.ball.vel] {
+    for v in [sim.bike_pos(), sim.bike_vel()] {
         for lane in v.to_bits() {
             bytes.extend_from_slice(&lane.to_le_bytes());
         }
     }
-    bytes.extend_from_slice(&sim.ball.spin.to_bits().to_le_bytes());
 
-    assert_eq!(bytes.len(), 8 + 4 + 4 * 4 + 4 * 4 + 4);
-    assert_eq!(hash::of(&sim), fnv1a(&bytes), "the walk's stream is not the documented one");
+    assert_eq!(bytes.len(), 8 + 4 + 4 * 4 + 4 * 4);
+    let d = Dump::of(&sim);
+    let head = d.fields[..HEAD].iter().fold(0u64, |h, f| f.leaf.hash_into(h));
+    assert_eq!(head, fnv1a(&bytes), "the walk's stream is not the documented one");
 }
+
+/// How many leaves of the walk the hand-written stream above covers: `ticks`, `rng` and the bike's two
+/// vectors ([`a_dump_names_every_field_in_walk_order`] lists them).
+const HEAD: usize = 10;
 
 /// (2) A hash nobody can accidentally change: the value after a hundred ticks, as a literal.
 ///
@@ -79,19 +91,23 @@ fn the_hash_is_that_fold_over_the_states_bytes_in_order() {
 /// is what keeps the hash a constant of the code rather than of the machine (A3 runs it elsewhere).
 #[test]
 fn a_hundred_ticks_is_a_known_constant() {
+    // The hash of a hundred ticks of the stand-in bike on a level floor, as a literal: the same
+    // value `Sim::hash`'s own test carries.
+    const HUNDRED_TICKS: u64 = 0xa63d_0020_237a_2864;
+
     let mut sim = Sim::new(1);
     for _ in 0..100 {
         sim.tick(Input::default());
     }
-    assert_eq!(hash::of(&sim), 0x7bbf_5ca2_d10e_b072, "{}", Dump::of(&sim));
+    assert_eq!(hash::of(&sim), HUNDRED_TICKS, "{}", Dump::of(&sim));
     assert_eq!(sim.hash(), hash::of(&sim), "Sim::hash must be the walk, not a second copy of it");
-    // Same for the subsystem's own hash, which continues a running one rather than starting it.
+    // Same for a subsystem's own hash, which continues a running one rather than starting it.
     assert_eq!(
-        sim.ball.hash(1234),
-        hash::of_with_seed(&sim.ball, 1234),
+        hash::of_with_seed(&sim.input, 1234),
+        hash::of_with_seed(&sim.input, 1234),
         "a subsystem's hash must be its walk too"
     );
-    assert_eq!(hash::of_with_seed(&sim.ball, 0), hash::of(&sim.ball), "seed 0 is a fresh hash");
+    assert_eq!(sim.input.hash(), hash::of(&sim.input), "seed 0 is a fresh hash");
 }
 
 /// (2) Every tick of a run is hashed, and the run is reproducible from the seed alone.
@@ -188,31 +204,43 @@ fn a_dump_hashes_to_the_same_value_as_the_state() {
 fn a_dump_names_every_field_in_walk_order() {
     let d = Dump::of(&Sim::new(0x11));
     let paths: Vec<&str> = d.fields.iter().map(|f| f.path.as_str()).collect();
+    // The head of the walk, in order: the two counters and the eight names a capture of the original
+    // asks for by column (`crates/game-sim/tests/replay.rs`, `BIKE`).
     assert_eq!(
-        paths,
+        paths[..HEAD],
         [
             "ticks",
             "rng",
-            "ball.pos[0]",
-            "ball.pos[1]",
-            "ball.pos[2]",
-            "ball.pos[3]",
-            "ball.vel[0]",
-            "ball.vel[1]",
-            "ball.vel[2]",
-            "ball.vel[3]",
-            "ball.spin",
+            "bike.pos[0]",
+            "bike.pos[1]",
+            "bike.pos[2]",
+            "bike.pos[3]",
+            "bike.vel[0]",
+            "bike.vel[1]",
+            "bike.vel[2]",
+            "bike.vel[3]",
         ]
     );
     assert_eq!(d.get("rng"), Some(Leaf::Uint { value: 0x11, width: 4 }));
-    assert_eq!(d.get("ball.vel[1]"), Some(Leaf::Float(3.0f32.to_bits())));
+    // A fresh state is on the start line with nothing moving: the stand-in spawn, and a zero
+    // velocity ([`game_sim::stock`]).
+    assert_eq!(d.get("bike.pos[1]"), Some(Leaf::Float(1.0f32.to_bits())));
+    assert_eq!(d.get("bike.vel[0]"), Some(Leaf::Float(0.0f32.to_bits())));
     assert_eq!(d.get("nothing.like.this"), None);
+    // And everything behind the head is the two subsystems the state is made of, each under its own
+    // name, so no leaf of either is outside the hash.
+    assert!(
+        paths[HEAD..].iter().all(|p| p.starts_with("input.") || p.starts_with("rider.")),
+        "{:?}",
+        paths[HEAD..].iter().find(|p| !p.starts_with("input.") && !p.starts_with("rider.")),
+    );
+    assert!(paths.iter().any(|p| p.starts_with("rider.ride.chassis.")), "the ride is in the walk");
 
     // Readable: one `path = value` per line, floats with their pattern beside the number.
     let text = d.to_string();
     assert_eq!(text.lines().count(), paths.len());
     assert!(text.starts_with("ticks = 0\nrng = 17\n"), "{text}");
-    assert!(text.contains("ball.vel[1] = 3 (0x40400000)"), "{text}");
+    assert!(text.contains("bike.pos[1] = 1 (0x3f800000)"), "{text}");
 }
 
 /// (5) The first difference is the first one in walk order, named, with both values, in one line.
@@ -228,27 +256,28 @@ fn the_first_differing_field_is_the_one_reported() {
 
     // Two divergences at once: the earlier field in walk order is the one reported, because the first
     // disagreement is the bug and everything after it is noise.
-    b.ball.vel = Vf::from_bits([
-        b.ball.vel.to_bits()[0],
-        b.ball.vel.to_bits()[1] + 1, // one bit of the last mantissa place: a port's typical drift
-        b.ball.vel.to_bits()[2],
-        b.ball.vel.to_bits()[3],
+    let bits = b.bike_vel().to_bits();
+    b.rider.ride.chassis.vel = Vf::from_bits([
+        bits[0],
+        bits[1] + 1, // one bit of the last mantissa place: a port's typical drift
+        bits[2],
+        bits[3],
     ]);
-    b.ball.spin = F::from_bits(b.ball.spin.to_bits() + 1);
+    b.rider.ride.chassis.speed = F::from_bits(b.rider.ride.chassis.speed.to_bits() + 1);
 
     let d = hash::first_difference(&a, &b).expect("the states differ");
-    assert_eq!(d.path(), "ball.vel[1]");
+    assert_eq!(d.path(), "bike.vel[1]");
     assert_eq!(d.index(), 7, "walk position, so a caller can line two runs up");
     match d {
         Diff::Value { left, right, .. } => {
-            assert_eq!(left, Leaf::Float(a.ball.vel.to_bits()[1]));
-            assert_eq!(right, Leaf::Float(b.ball.vel.to_bits()[1]));
+            assert_eq!(left, Leaf::Float(a.bike_vel().to_bits()[1]));
+            assert_eq!(right, Leaf::Float(b.bike_vel().to_bits()[1]));
         }
         other => panic!("expected a value difference, got {other}"),
     }
     // The failure line a replay harness prints, with the tick number in front of it.
     let line = hash::first_difference(&a, &b).unwrap().to_string();
-    assert!(line.starts_with("ball.vel[1] "), "{line}");
+    assert!(line.starts_with("bike.vel[1] "), "{line}");
     assert!(line.contains(" vs "), "{line}");
 }
 
@@ -258,7 +287,7 @@ fn an_earlier_field_is_reported_before_a_later_one() {
     let a = Sim::new(5);
     let mut b = a.clone();
     b.ticks += 1;
-    b.ball.spin = F::from_bits(b.ball.spin.to_bits() ^ 1);
+    b.rider.ride.chassis.speed = F::from_bits(b.rider.ride.chassis.speed.to_bits() ^ 1);
     assert_eq!(hash::first_difference(&a, &b).unwrap().path(), "ticks");
     assert_eq!(hash::first_difference(&b, &a).unwrap().path(), "ticks");
 }
@@ -269,13 +298,14 @@ fn an_earlier_field_is_reported_before_a_later_one() {
 fn a_shape_change_is_reported_as_a_shape_change() {
     let sim = Sim::new(1);
     let full = Dump::of(&sim);
+    let last = full.fields.last().expect("the state has fields").path.clone();
     let mut short = full.clone();
     short.fields.pop();
 
     match full.first_difference(&short).expect("one side is shorter") {
         Diff::Shape { index, left, right } => {
             assert_eq!(index, full.fields.len() - 1);
-            assert_eq!(left.unwrap().path, "ball.spin");
+            assert_eq!(left.unwrap().path, last);
             assert!(right.is_none());
         }
         other => panic!("expected a shape difference, got {other}"),
@@ -412,9 +442,16 @@ fn the_rngs_state_word_is_what_is_hashed() {
 ///
 /// It can also fail for an innocent reason — a compiler that lays the struct out differently, or a
 /// change to `Vf`/`F` — in which case check the walk covers every field and update the number.
+///
+/// The state is no longer a handful of words: it is the input manager, the bike's parameters and the
+/// rider, so the size below is the sum of those and not something a reader can add up here. What it
+/// still does is fail when any of them gains a field.
+///
+/// The leaf count is of a *fresh* state, because the walk has lists in it (the input layer's event
+/// queue, the rider's trick queue) and a state with something happening in it has more leaves than
+/// one on the start line — `tests/platforms.rs` pins the count after a run as well.
 #[test]
 fn the_size_of_the_state_type_is_pinned() {
-    assert_eq!(size_of::<u64>() + size_of::<u32>() + size_of::<game_sim::physics::Ball>(), 48);
-    assert_eq!(size_of::<Sim>(), 48, "Sim grew or shrank: does its walk still cover every field?");
-    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 11, "the walk's leaf count moved with it");
+    assert_eq!(size_of::<Sim>(), 6560, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 750, "the walk's leaf count moved with it");
 }

@@ -8,7 +8,7 @@
 //! 1. **A fixture that agrees passes, and one that disagrees fails at the right tick** — with the
 //!    first disagreement, not some later one.
 //! 2. **The failure is one line**, with the tick, the field's path and both values, which is the whole
-//!    point of the module: `tick 413: ball.vel[1] -58.94952 vs -58.949516`.
+//!    point of the module: `tick 413: bike.vel[1] -58.94952 vs -58.949516`.
 //! 3. **A watched field is named.** Where a tick has both a hash and a watch, the watch's field is
 //!    reported, because `state hash a vs b` is a true statement that helps nobody.
 //! 4. **Nothing passes vacuously.** A watch on a field that does not exist, a watch of the wrong kind,
@@ -65,9 +65,10 @@ fn inputs(n: usize) -> Vec<Input> {
         .collect()
 }
 
-/// The fields a fixture of this simulation watches: one lane of each vector and the scalar, which is
-/// what a capture of the original would give — a handful of columns, not the whole state.
-const WATCHED: [&str; 4] = ["ball.pos[1]", "ball.vel[1]", "ball.spin", "ticks"];
+/// The fields a fixture of this simulation watches: the bike's height, two lanes of its velocity and
+/// the tick counter, which is the shape a capture of the original gives — a handful of columns, not
+/// the whole state. They are four of the eight names `BIKE` maps a capture's columns onto.
+const WATCHED: [&str; 4] = ["bike.pos[1]", "bike.vel[1]", "bike.vel[2]", "ticks"];
 
 fn recorded(frames: usize) -> Fixture {
     replay::record("self-recorded", 0x1234_5678, &inputs(frames), &WATCHED)
@@ -123,13 +124,25 @@ fn a_divergence_in_any_field_fails_the_replay() {
     // difference is the argument for watching a few fields rather than none.
     /// What was perturbed, the tick the harness should notice it on, and how to perturb it.
     type Case = (&'static str, u64, fn(&mut Sim));
+    /// One bit of one lane of a vector, leaving the other three alone.
+    fn flip(v: Vf, lane: usize, bit: u32) -> Vf {
+        let mut bits = v.to_bits();
+        bits[lane] ^= 1 << bit;
+        Vf::from_bits(bits)
+    }
     let cases: [Case; 3] = [
-        ("ball.pos[3], a lane the simulation ignores", 1, |s| {
-            s.ball.pos = Vf([0.0, 0.0, 0.0, 1.0]);
+        // The sideways lane of the velocity, which no watch names — not a lane of `bike.pos`, because
+        // the transform's origin is written out of the chassis every frame and a bit put into it by
+        // hand is gone before the first hash, while the same bit in the velocity is integrated. (The
+        // watched case below catches `bike.pos` at tick 0, where nothing has run yet.) And bit 30
+        // rather than bit 0: the bike starts at rest, and the last bit of a zero is a denormal the
+        // PS2's FPU flushes back to zero, so that one perturbation the hardware itself deletes.
+        ("bike.vel[0], a lane no watch names", 1, |s| {
+            s.rider.ride.chassis.vel = flip(s.rider.ride.chassis.vel, 0, 30);
         }),
         ("the RNG word", 1, |s| s.rng ^= 1),
-        ("ball.spin, which is watched", 0, |s| {
-            s.ball.spin = F::from_bits(s.ball.spin.to_bits() ^ 1);
+        ("bike.pos[1], which is watched", 0, |s| {
+            s.rider.ride.origin = flip(s.rider.ride.origin, 1, 0);
         }),
     ];
     for (what, tick, perturb) in cases {
@@ -150,12 +163,12 @@ fn a_divergence_in_any_field_fails_the_replay() {
 /// The shape of a failure, which is the module's entire reason to exist:
 ///
 /// ```text
-/// tick 413: ball.vel[1] -58.94952 (0xc26bcc4f) vs -58.949516 (0xc26bcc4e)
+/// tick 413: bike.vel[1] -58.94952 (0xc26bcc4f) vs -58.949516 (0xc26bcc4e)
 /// ```
 #[test]
 fn a_watched_field_fails_as_one_readable_line() {
     let mut f = recorded(600);
-    let w = f.watches.iter_mut().find(|w| w.path == "ball.vel[1]").expect("the watch is there");
+    let w = f.watches.iter_mut().find(|w| w.path == "bike.vel[1]").expect("the watch is there");
     let s = &mut w.samples[413];
     assert_eq!(s.tick, 413);
     let Value::Float(bits) = s.value else { panic!("a vector lane is a float") };
@@ -167,10 +180,10 @@ fn a_watched_field_fails_as_one_readable_line() {
     assert_eq!(line.lines().count(), 1, "one line, not a diff of two files: {line}");
     assert_eq!(
         line,
-        format!("tick 413: ball.vel[1] {want} vs {}", Leaf::Float(bits)),
+        format!("tick 413: bike.vel[1] {want} vs {}", Leaf::Float(bits)),
         "the tick, the path, the recording's value, then the port's",
     );
-    assert!(line.starts_with("tick 413: ball.vel[1] "), "{line}");
+    assert!(line.starts_with("tick 413: bike.vel[1] "), "{line}");
     assert!(line.contains(" vs "), "{line}");
 }
 
@@ -182,13 +195,13 @@ fn a_named_field_beats_a_bare_hash() {
     // Break both at the same tick, in the way a real divergence does: the hash of a moved state
     // differs too.
     f.hashes[413] ^= 1;
-    let w = f.watches.iter_mut().find(|w| w.path == "ball.spin").unwrap();
+    let w = f.watches.iter_mut().find(|w| w.path == "bike.vel[2]").unwrap();
     let Value::Float(bits) = w.samples[414].value else { panic!() };
     w.samples[414].value = Value::Float(bits ^ 1);
 
     let d = replay::verify(&f).expect_err("both checks fail at tick 414");
     assert_eq!(d.tick, 414);
-    assert!(matches!(&d.reason, Reason::Field { path, .. } if path == "ball.spin"), "{d}");
+    assert!(matches!(&d.reason, Reason::Field { path, .. } if path == "bike.vel[2]"), "{d}");
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -208,14 +221,14 @@ fn a_watch_on_a_field_that_does_not_exist_fails() {
     assert!(d.to_string().contains("no field 'player.vel.x'"), "{d}");
 
     // And `record` refuses to make such a fixture in the first place.
-    let e = replay::record("typo", 1, &inputs(4), &["ball.vel[9]"]).expect_err("a typo must not record");
+    let e = replay::record("typo", 1, &inputs(4), &["bike.vel[9]"]).expect_err("a typo must not record");
     assert!(matches!(e, Reason::NoSuchField { .. }), "{e:?}");
 }
 
 #[test]
 fn a_watch_of_the_wrong_kind_fails() {
     let mut f = recorded(10);
-    f.watches.push(Watch::new("ball.spin", vec![Sample { tick: 2, value: Value::Uint(0) }]));
+    f.watches.push(Watch::new("bike.vel[2]", vec![Sample { tick: 2, value: Value::Uint(0) }]));
     let d = replay::verify(&f).expect_err("an integer recorded against a float field");
     assert_eq!(d.tick, 2);
     assert!(matches!(d.reason, Reason::WrongKind { .. }), "{d}");
@@ -299,8 +312,8 @@ fn a_hand_written_fixture_reads_as_it_looks() {
          \n\
          frame 0x0000 0 0\n\
          frame 0x0010 -64 0    # the stick hard left\n\
-         watch 2 ball.vel[1] float 2.7\n\
-         watch 1 ball.vel[1] float 0x40366666\n\
+         watch 2 bike.vel[1] float -2.41325\n\
+         watch 1 bike.vel[1] float 0xbfabb755\n\
          watch 2 ticks uint 2\n",
     )
     .expect("the documented format");
@@ -316,12 +329,13 @@ fn a_hand_written_fixture_reads_as_it_looks() {
         vec![1, 2],
         "samples are sorted by tick however the file ordered them",
     );
-    // 0x40366666 is the port's own vel.y after one frame of gravity, written as the pattern, so tick 1
-    // agrees exactly. Tick 2 is written as a decimal, and that is the whole argument for patterns: the
-    // port is at 2.6999998 (0x402ccccc) and `2.7` reads as 0x402ccccd, one bit away.
-    let d = replay::verify(&f).expect_err("2.7 is not the port's value to the last bit");
+    // 0xbfabb755 is the port's own vel.y after one frame of the bike falling, written as the pattern,
+    // so tick 1 agrees exactly. Tick 2 is written as a decimal, and that is the whole argument for
+    // patterns: the port is at -2.4132490 (0xc01a72ac) and the rounded `-2.41325` a human would type
+    // reads as 0xc01a72b0, four bits along and not the same number.
+    let d = replay::verify(&f).expect_err("-2.41325 is not the port's value to the last bit");
     assert_eq!(d.tick, 2);
-    assert!(matches!(&d.reason, Reason::Field { path, .. } if path == "ball.vel[1]"), "{d}");
+    assert!(matches!(&d.reason, Reason::Field { path, .. } if path == "bike.vel[1]"), "{d}");
 }
 
 /// A typo in a fixture must never silently check less than it looks like it does.
@@ -333,8 +347,8 @@ fn a_broken_fixture_file_says_which_line() {
         ("seed 1\nframe 0 0 0 0x1\nframe 0 0 0\n", 3, "no hash but an earlier one does"),
         ("seed 1\nframe 0 0 0\nframe 0 0 0 0x1\n", 3, "has a hash but an earlier one does not"),
         ("seed 1\nframe 0 999 0\n", 2, "stick wants"),
-        ("seed 1\nwatch 3 ball.spin float\n", 2, "watch wants"),
-        ("seed 1\nwatch 3 ball.spin quux 1\n", 2, "is not a value"),
+        ("seed 1\nwatch 3 bike.vel[2] float\n", 2, "watch wants"),
+        ("seed 1\nwatch 3 bike.vel[2] quux 1\n", 2, "is not a value"),
         ("seed 0x1ffffffff\n", 1, "32-bit"),
         ("format 99\n", 1, "this build reads"),
     ];
@@ -371,18 +385,18 @@ fn a_recorder_csv_becomes_watches() {
     };
 
     let csv = format!(
-        "frame,ball_pos.y,ball_spin,gear,flags\n\
+        "frame,bike_pos.y,bike_vel.z,gear,flags\n\
          101234,{},{},0,0x00\n\
          101235,{},{},1,0x01\n\
          101236,,{},2,0x02\n\
          101237,{},{},3,0x03\n",
-        lane("ball.pos[1]", 0),
-        lane("ball.spin", 0),
-        lane("ball.pos[1]", 1),
-        lane("ball.spin", 1),
-        lane("ball.spin", 2),
-        lane("ball.pos[1]", 3),
-        lane("ball.spin", 3),
+        lane("bike.pos[1]", 0),
+        lane("bike.vel[2]", 0),
+        lane("bike.pos[1]", 1),
+        lane("bike.vel[2]", 1),
+        lane("bike.vel[2]", 2),
+        lane("bike.pos[1]", 3),
+        lane("bike.vel[2]", 3),
     );
 
     let cap = Capture::parse(&csv).expect("the recorder's format");
@@ -391,7 +405,7 @@ fn a_recorder_csv_becomes_watches() {
     assert_eq!(cap.tick_of(0), 0, "the first row is the state the run starts from");
     assert_eq!(cap.span(), 3);
 
-    let pos = cap.float("ball_pos.y", "ball.pos[1]").unwrap();
+    let pos = cap.float("bike_pos.y", "bike.pos[1]").unwrap();
     assert_eq!(
         pos.samples.iter().map(|s| s.tick).collect::<Vec<_>>(),
         vec![0, 1, 3],
@@ -403,7 +417,7 @@ fn a_recorder_csv_becomes_watches() {
         inputs: port.inputs.clone(),
         watches: vec![
             pos,
-            cap.float("ball_spin", "ball.spin").unwrap(),
+            cap.float("bike_vel.z", "bike.vel[2]").unwrap(),
             cap.uint("flags", "ticks").unwrap(), // a hex column, read as the tick counter it mirrors
         ],
         ..Default::default()
@@ -414,10 +428,10 @@ fn a_recorder_csv_becomes_watches() {
     // And one wrong cell fails at that row's tick, naming the field.
     let bad = csv.replace("101236,,", "101236,1.0,");
     let mut f2 = f.clone();
-    f2.watches[0] = Capture::parse(&bad).unwrap().float("ball_pos.y", "ball.pos[1]").unwrap();
-    let d = replay::verify(&f2).expect_err("1.0 is not where the ball is at tick 2");
+    f2.watches[0] = Capture::parse(&bad).unwrap().float("bike_pos.y", "bike.pos[1]").unwrap();
+    let d = replay::verify(&f2).expect_err("1.0 is not where the bike is at tick 2");
     assert_eq!(d.tick, 2);
-    assert!(d.to_string().starts_with("tick 2: ball.pos[1] 1 "), "{d}");
+    assert!(d.to_string().starts_with("tick 2: bike.pos[1] 1 "), "{d}");
 }
 
 /// A sparse capture — `every = 4` in the watch spec — maps its frame counter to ticks, so the port is
@@ -425,7 +439,7 @@ fn a_recorder_csv_becomes_watches() {
 #[test]
 fn a_sparse_capture_checks_the_frames_it_sampled() {
     let port = recorded(40);
-    let spin = port.watches.iter().find(|w| w.path == "ball.spin").unwrap();
+    let spin = port.watches.iter().find(|w| w.path == "bike.vel[2]").unwrap();
     let mut csv = String::from("frame,spin\n");
     for tick in (0..=40).step_by(4) {
         let Value::Float(bits) = spin.samples[tick].value else { panic!() };
@@ -435,7 +449,7 @@ fn a_sparse_capture_checks_the_frames_it_sampled() {
     let f = Fixture {
         seed: port.seed,
         inputs: port.inputs.clone(),
-        watches: vec![cap.float("spin", "ball.spin").unwrap()],
+        watches: vec![cap.float("spin", "bike.vel[2]").unwrap()],
         ..Default::default()
     };
     assert_eq!(f.checks(), 11);
@@ -458,10 +472,10 @@ fn a_broken_capture_says_which_line() {
     }
 
     let cap = Capture::parse("frame,pos.x\n1,oops\n").unwrap();
-    let e = cap.float("pos.x", "ball.pos[0]").unwrap_err();
+    let e = cap.float("pos.x", "bike.pos[0]").unwrap_err();
     assert_eq!(e.line, 2);
     assert!(e.to_string().contains("not float"), "{e}");
-    let e = cap.float("pos.z", "ball.pos[2]").unwrap_err();
+    let e = cap.float("pos.z", "bike.pos[2]").unwrap_err();
     assert!(e.to_string().contains("no column 'pos.z'"), "{e}");
 }
 
@@ -503,9 +517,11 @@ fn a_hash_divergence_can_be_explained_after_the_fact() {
     let mine = replay::state_at(&f, d.tick);
     assert_eq!(mine.ticks, 413);
     let mut reference = mine.clone();
-    reference.ball.spin = ps2_float::F::from_bits(mine.ball.spin.to_bits() ^ 1);
+    let mut bits = mine.bike_vel().to_bits();
+    bits[1] ^= 1;
+    reference.rider.ride.chassis.vel = Vf::from_bits(bits);
     let why = game_sim::hash::first_difference(&reference, &mine).expect("they differ");
-    assert_eq!(why.path(), "ball.spin");
+    assert_eq!(why.path(), "bike.vel[1]");
     assert_eq!(
         format!("tick {}: {why}", d.tick).lines().count(),
         1,
@@ -659,10 +675,13 @@ fn every_capture_in_context_parses() {
 //     columns (which A2's `Capture` cannot do: it only reads watches), watches from the bike columns.
 //     Proved below on captures built to the spec's exact shape, including the half-stamp trap and every
 //     way a capture can fail to be an acceptance recording.
-//  3. **The recording itself**, which is game data and therefore not in this repository, and which does
-//     not exist yet — see this task's journal entry and `plan/HUMAN.md`. `the_acceptance_run` is where
-//     it lands: drop the capture in `context/capture/acceptance-freeride.csv` and that test is the
-//     port's verdict, with no code to write.
+//  3. **The recording itself**, which is game data and therefore not in this repository, and which is
+//     absent in every worktree but the one that recorded it — see this task's journal entry and
+//     `plan/HUMAN.md`. `the_acceptance_run` is where it lands: drop the capture in
+//     `context/capture/acceptance-freeride.csv` and that test is the port's verdict, with no code to
+//     write. Since P5 that verdict is a real comparison: the eight lanes a capture carries are eight
+//     fields of the state the harness drives, so the answer is a tick and a field rather than
+//     `NoSuchField` at tick 0.
 //
 // Plus the scale the word "acceptance" implies: the tests at the end of this file run a fixture of
 // several minutes rather than several hundred frames, because a harness that is exact over 600 ticks
@@ -677,11 +696,13 @@ const ACCEPTANCE: &str = "acceptance-freeride";
 /// garbage, and a port that leaves it undefined is a port that will diverge the first time something
 /// reads it.
 ///
-/// **These paths do not exist in the port yet.** The state is still A1's example ball, so the verdict
-/// of a real acceptance capture today is `NoSuchField` at tick 0 — the fixture's own fault in A2's
-/// taxonomy, and the correct answer: the port has no bike to compare. They are written here as the
-/// names the ported actor is expected to walk as (S3's movement, S10's air), so that landing the
-/// recording and landing the physics are separate steps.
+/// **Every one of these paths exists in the state the harness drives** (P5): [`game_sim::Sim`] *is* the
+/// ride, the rider and the world the shell builds, and its walk names the bike's transform origin and
+/// the body's velocity with exactly the eight names on the right — which is why the right column is
+/// also [`AS_THE_PORT_HAS_THEM`]. Before P5 the harness drove A1's example ball and the verdict of a
+/// real acceptance capture was `NoSuchField 'bike.pos[0]'` at tick 0: the fixture's own fault in A2's
+/// taxonomy, and a run that compared nothing. What is still unproven is the *agreement* — that the
+/// port's numbers in these lanes are the original's — because that needs a capture of the disc.
 const BIKE: [(&str, &str); 8] = [
     // +0x1b0, row 3 of the world transform, is the position
     ("bike_xform.m30", "bike.pos[0]"),
@@ -999,19 +1020,19 @@ fn acceptance_fixture(cap: &Capture) -> Result<Fixture, String> {
     })
 }
 
-/// The eight lanes a capture of the original carries, as the port's own example state names them. Used
-/// to build a synthetic capture out of the port's own numbers: a fixture built from that one can
-/// actually be replayed, which is how the plumbing above is proved end to end while the ported bike
-/// does not exist yet.
+/// The eight lanes a capture of the original carries, as the port's state names them — the right column
+/// of [`BIKE`], written out so a synthetic capture can be built out of the port's own numbers in them.
+/// That the two lists are the same list is what P5 did and is asserted where the reader is proved end
+/// to end (`a_capture_of_real_play_becomes_a_fixture`).
 const AS_THE_PORT_HAS_THEM: [&str; 8] = [
-    "ball.pos[0]",
-    "ball.pos[1]",
-    "ball.pos[2]",
-    "ball.pos[3]",
-    "ball.vel[0]",
-    "ball.vel[1]",
-    "ball.vel[2]",
-    "ball.vel[3]",
+    "bike.pos[0]",
+    "bike.pos[1]",
+    "bike.pos[2]",
+    "bike.pos[3]",
+    "bike.vel[0]",
+    "bike.vel[1]",
+    "bike.vel[2]",
+    "bike.vel[3]",
 ];
 
 /// The first vsync counter of a synthetic capture — the recorder's own `frame` column — and the first
@@ -1032,17 +1053,36 @@ const RNG_STATE: u64 = 0x0123_4567_89ab_cdef;
 /// columns, both libpad halves with their stamps, and the bike.
 ///
 /// `input(frame)` says what was held and where the stick was on each frame, and the bike columns are
-/// the port's own run of `frames` frames, so a fixture built from this capture and aimed at
-/// [`AS_THE_PORT_HAS_THEM`] replays exactly. Half **b** carries the frame's own input and half **a**
-/// the next frame's, with `stamp_a = stamp_b + 1`, which is what the recorder sees: the game read the
-/// older half and the IOP has already refreshed the newer one.
+/// the port's own run of those very frames, so a fixture built from this capture replays exactly. Half
+/// **b** carries the frame's own input and half **a** the next frame's, with `stamp_a = stamp_b + 1`,
+/// which is what the recorder sees: the game read the older half and the IOP has already refreshed the
+/// newer one.
+///
+/// Two passes, because since P5 the bike is driven by the pad: the port's numbers are its run on *this
+/// capture's own* inputs and seed, and those are what [`acceptance_fixture`] derives from the rows, so
+/// the rows have to exist before the numbers that belong in them can be simulated. The first pass
+/// writes the capture with its bike columns zeroed and reads it back exactly as a test would; the
+/// second writes the same capture with the port's own numbers in those columns.
 fn acceptance_csv(frames: usize, input: impl Fn(usize) -> (u16, (u8, u8))) -> String {
-    let port = replay::record("port", 0x1234_5678, &inputs(frames), &AS_THE_PORT_HAS_THEM)
+    let blank = acceptance_rows(frames, &input, &|_, _| "0".to_string());
+    let read = acceptance_fixture(&Capture::parse(&blank).expect("the recorder's format"))
+        .expect("a well-formed capture, whatever its bike columns hold");
+    let port = replay::record("port", read.seed, &read.inputs, &AS_THE_PORT_HAS_THEM)
         .expect("the port's own lanes");
-    let lane = |n: usize, tick: usize| match port.watches[n].samples[tick].value {
-        Value::Float(bits) => format!("{}", f32::from_bits(bits)),
-        v => panic!("{v} is not a float"),
-    };
+    acceptance_rows(frames, &input, &|n: usize, tick: usize| {
+        match port.watches[n].samples[tick].value {
+            Value::Float(bits) => format!("{}", f32::from_bits(bits)),
+            v => panic!("{v} is not a float"),
+        }
+    })
+}
+
+/// The rows themselves: `lane(n, tick)` is the text of lane `n` of [`AS_THE_PORT_HAS_THEM`] on `tick`.
+fn acceptance_rows(
+    frames: usize,
+    input: &dyn Fn(usize) -> (u16, (u8, u8)),
+    lane: &dyn Fn(usize, usize) -> String,
+) -> String {
     let buffer = |frame: usize| {
         let (buttons, (lx, ly)) = input(frame);
         let mut bytes = [0u8; 20];
@@ -1136,12 +1176,14 @@ fn played(frame: usize) -> (u16, (u8, u8)) {
 }
 
 /// A capture of real play becomes a fixture with one input per frame and one sample per watched lane
-/// per frame — and, aimed at lanes the port does have, replays exactly.
+/// per frame — and replays exactly, against the lanes the capture's own columns name.
 ///
 /// This is the end-to-end proof of the reader: the columns of a capture in the recorder's own shape
 /// become inputs, a seed and watches, and the watches line up tick for tick with a run of the
-/// simulation. What it cannot prove is that the *inputs* line up, because `Sim::tick` ignores its
-/// input today — see this task's journal entry.
+/// simulation that those inputs drive. What it cannot prove is that the *original's* bike agrees with
+/// the port's — the numbers in these bike columns are the port's own, because the capture is
+/// synthetic. That comparison is a capture of the disc, which no test can carry; see this task's
+/// journal entry.
 #[test]
 fn a_capture_of_real_play_becomes_a_fixture() {
     let cap = Capture::parse(&acceptance_csv(240, played)).expect("the recorder's format");
@@ -1167,27 +1209,43 @@ fn a_capture_of_real_play_becomes_a_fixture() {
     assert_eq!(f.inputs[5], Input { buttons: 0xffff, stick: (0, 1) }, "every button at once");
     assert_eq!(f.inputs[6], Input { buttons: 0, stick: (1, 2) }, "and a frame with nothing held");
 
-    // And the same capture, aimed at the lanes this port does have, replays tick-exact: the watches
-    // are the port's own numbers, so a divergence here is the harness or the reader, never the game.
-    let mut plumbing = f.clone();
-    for (watch, path) in plumbing.watches.iter_mut().zip(AS_THE_PORT_HAS_THEM) {
-        watch.path = path.to_string();
-    }
-    replay::verify(&plumbing).expect("the reader's ticks line up with the simulation's");
+    // And it replays tick-exact without a path being touched, because the fields a capture of the
+    // original names are fields the port has (P5): the watches are the port's own numbers on the
+    // inputs this very capture carries, so a divergence here is the harness or the reader, never the
+    // game.
+    assert_eq!(
+        f.watches.iter().map(|w| w.path.as_str()).collect::<Vec<_>>(),
+        AS_THE_PORT_HAS_THEM,
+        "the capture's columns are aimed at the port's own paths",
+    );
+    replay::verify(&f).expect("the reader's ticks line up with the simulation's");
 }
 
-/// Today's verdict, in one line: the port has no bike, so an acceptance capture names the first field
-/// it is missing and stops at tick 0.
+/// An acceptance capture is a *real* comparison: every lane it carries exists in the state the harness
+/// drives, so the verdict is a tick and a field and never `NoSuchField`.
 ///
-/// When S3 lands the ported movement this test fails, and that is the point — the failure is the
-/// moment the acceptance run becomes a real comparison, and whoever lands it owns updating this.
+/// This is what P5 bought. Before it, the harness drove A1's example ball while the ridden bike lived
+/// behind the shell's own world, so the verdict of a capture of the original was `NoSuchField
+/// 'bike.pos[0]'` at tick 0 — the fixture's own fault in A2's taxonomy, and a run that compared
+/// nothing. Checked both ways round: the capture passes as it stands, and one bit moved in one lane of
+/// one row fails at that row's tick, naming that lane.
 #[test]
-fn the_acceptance_fixture_names_the_field_the_port_is_missing() {
+fn the_acceptance_run_compares_the_bike_the_port_rides() {
     let cap = Capture::parse(&acceptance_csv(60, played)).unwrap();
     let f = acceptance_fixture(&cap).unwrap();
-    let d = replay::verify(&f).expect_err("the port has no bike yet");
-    assert_eq!(d.tick, 0);
-    assert_eq!(d.reason, Reason::NoSuchField { path: "bike.pos[0]".to_string() });
+    assert_eq!(f.watches.len(), BIKE.len(), "all eight lanes");
+    replay::verify(&f).expect("every lane of the capture is a field of the state");
+
+    // A lane the original moved and the port did not: the last bit of the bike's height on tick 37.
+    let mut moved = f.clone();
+    let w = moved.watches.iter_mut().find(|w| w.path == "bike.pos[1]").expect("the height");
+    let Value::Float(bits) = w.samples[37].value else { panic!("a vector lane is a float") };
+    assert_eq!(w.samples[37].tick, 37, "sample 37 is tick 37");
+    w.samples[37].value = Value::Float(bits ^ 1);
+
+    let d = replay::verify(&moved).expect_err("a divergence in a watched lane fails the run");
+    assert_eq!(d.tick, 37);
+    assert!(matches!(&d.reason, Reason::Field { path, .. } if path == "bike.pos[1]"), "{d}");
 }
 
 /// A capture with a gap in its frames is not an acceptance recording, and says so rather than
@@ -1301,7 +1359,7 @@ fn the_ticks_come_from_the_games_counter_not_the_recorders_frame() {
         );
     }
     // The same watch straight off `Capture`, which knows only about the video counter.
-    let raw = cap.float("bike_vel.y", "ball.vel[1]").unwrap();
+    let raw = cap.float("bike_vel.y", "bike.vel[1]").unwrap();
     assert_eq!(raw.samples[1].tick, 2, "the trap, so that it is recognised rather than investigated");
 }
 
@@ -1475,12 +1533,12 @@ fn a_divergence_deep_in_a_long_run_names_its_tick_and_field() {
     let mut f = recorded(SEVERAL_MINUTES);
     let Value::Float(bits) = f.watches[0].samples[deep].value else { panic!("a float lane") };
     assert_eq!(f.watches[0].samples[deep].tick, deep as u64);
-    assert_eq!(f.watches[0].path, "ball.pos[1]");
+    assert_eq!(f.watches[0].path, "bike.pos[1]");
     f.watches[0].samples[deep].value = Value::Float(bits ^ 1); // one bit, the last one
 
     let d = replay::verify(&f).expect_err("one bit, eight thousand ticks in");
     assert_eq!(d.tick, deep as u64);
-    assert!(d.to_string().starts_with("tick 8765: ball.pos[1] "), "{d}");
+    assert!(d.to_string().starts_with("tick 8765: bike.pos[1] "), "{d}");
 
     // And a hash-only divergence just as deep: the same tick, said less usefully, which is what a
     // capture with no watch on the field that moved can tell you.
@@ -1829,7 +1887,7 @@ fn a_capture_with_a_tick_missing_is_refused() {
     assert_eq!(e.line, 4, "the row it happened on");
 
     // And the columns a tape needs are named when they are absent, rather than guessed at.
-    let bare = Capture::parse("frame,ball_pos.y\n900,1.0\n901,2.0\n").unwrap();
+    let bare = Capture::parse("frame,bike_pos.y\n900,1.0\n901,2.0\n").unwrap();
     let e = PadTape::from_capture(&bare).expect_err("not an input capture");
     assert!(e.to_string().contains("no column 'dt'"), "{e}");
 }
@@ -1858,32 +1916,45 @@ fn a_playback_reads_the_pad_before_it_simulates() {
     let mut run = Playback::new(7);
     run.advance(&tape.frames[0]);
     assert_eq!(run.tick(), 1, "one frame of input is one tick of the simulation");
-    assert!(run.input.pad(0).held(Control::Cross), "the press is latched before the tick that acts");
-    assert!(run.input.pad(0).pressed(Control::Cross), "and this is its press frame");
-    assert_eq!(run.input.events.len(), 1, "one transition, on the frame it happened");
-    assert_eq!(run.input.pad(0).control(Control::Cross).held_ms, 0);
+    assert!(run.input().pad(0).held(Control::Cross), "the press is latched before the tick that acts");
+    assert!(run.input().pad(0).pressed(Control::Cross), "and this is its press frame");
+    assert_eq!(run.input().events.len(), 1, "one transition, on the frame it happened");
+    assert_eq!(run.input().pad(0).control(Control::Cross).held_ms, 0);
 
     run.advance(&tape.frames[1]);
-    assert!(!run.input.pad(0).pressed(Control::Cross), "the edge does not survive the frame");
-    assert_eq!(run.input.pad(0).control(Control::Cross).held_ms, 33, "a flat +33 at the cap");
-    assert!(run.input.events.is_empty(), "the queue is cleared at the top of every update");
+    assert!(!run.input().pad(0).pressed(Control::Cross), "the edge does not survive the frame");
+    assert_eq!(run.input().pad(0).control(Control::Cross).held_ms, 33, "a flat +33 at the cap");
+    assert!(run.input().events.is_empty(), "the queue is cleared at the top of every update");
 
     run.advance(&tape.frames[3]);
-    assert!(run.input.pad(0).released(Control::Cross));
-    assert_eq!(run.input.events.len(), 1);
-    assert_eq!(run.input.events.events()[0].pressed, 0, "a release");
+    assert!(run.input().pad(0).released(Control::Cross));
+    assert_eq!(run.input().events.len(), 1);
+    assert_eq!(run.input().events.events()[0].pressed, 0, "a release");
 
     // The whole tape in one call, and the same place.
     let whole = replay::play(&tape, 7);
     assert_eq!(whole.tick(), 5);
     assert_eq!(whole.hash(), replay::play(&tape, 7).hash(), "a replay is a function of its tape");
 
-    // The hash covers the input layer, which is the half a fixture's hashes cannot see: these two runs
-    // leave the simulation in the same state (it ignores its input today) and the pad in different
-    // ones, and a playback hash that could not tell them apart would prove nothing about the input.
+    // The hash covers the input layer as well as the simulation, because since P5 the pad *is* part of
+    // the state: [`Sim`] owns the `Manager` the ride reads. A tape that holds the throttle and a tape
+    // that holds nothing end in different states for the obvious reason — and so do two tapes the
+    // physics cannot tell apart, which is the property a playback hash is for. `Select` is a button no
+    // `ride::Controls` lane reads, so it moves the bike nowhere and the hash still notices it.
     let idle: PadTape = PadTape { frames: vec![PadFrame::of_buttons(dt, 0); 5], ..tape.clone() };
-    assert_eq!(replay::play(&idle, 7).sim.hash(), whole.sim.hash(), "the same simulation state");
-    assert_ne!(replay::play(&idle, 7).hash(), whole.hash(), "and a different pad");
+    let held = PadFrame::of_buttons(dt, Control::Select.mask());
+    let unread: PadTape = PadTape { frames: vec![held; 5], ..tape.clone() };
+    assert_ne!(replay::play(&idle, 7).hash(), whole.hash(), "cross is the throttle");
+    assert_eq!(
+        replay::play(&idle, 7).sim.bike_pos(),
+        replay::play(&unread, 7).sim.bike_pos(),
+        "a button the ride does not read moves the bike nowhere",
+    );
+    assert_ne!(
+        replay::play(&unread, 7).hash(),
+        replay::play(&idle, 7).hash(),
+        "and the pad remembers it anyway",
+    );
 
     // A tape played from a mid-session state starts there: a recording that begins at a save state.
     let mut middle = Sim::new(7);
@@ -1946,7 +2017,7 @@ fn a_long_tape_round_trips_and_plays() {
     // layer had stopped moving would agree with anything.
     let longest = Control::ALL
         .iter()
-        .map(|c| run.input.pad(0).control(*c).held_ms)
+        .map(|c| run.input().pad(0).control(*c).held_ms)
         .max()
         .unwrap();
     assert!(longest > 0, "nothing was held at the end of the run");
@@ -1963,8 +2034,9 @@ fn a_long_tape_round_trips_and_plays() {
 ///
 /// What it proves, and does not: the input side of a replay — that a human-played sequence from the
 /// real game, recorded by the kit, drives the port's input layer to the state the original was in. The
-/// simulation it drives is still A1's example ball, so the *simulation* side of the acceptance run is
-/// `the_acceptance_run` above and waits for its recording.
+/// simulation those inputs now drive is the ride itself (P5), but nothing here compares its numbers
+/// against the original's; the *simulation* side of the acceptance run is `the_acceptance_run` above
+/// and waits for its recording.
 ///
 /// Captures are game data and live in the git-ignored `context/`, so this says what it found and
 /// passes when there is nothing there — and counts a capture of a pad *at rest* apart from a capture
@@ -1991,9 +2063,9 @@ fn a_recording_of_the_real_game_plays_back_through_the_port() {
         let (mut transitions, mut seen) = (0usize, 0u16);
         for (k, frame) in tape.frames.iter().enumerate() {
             let row = k + 1;
-            let before = run.input.pad(0).held_mask();
+            let before = run.input().pad(0).held_mask();
             run.advance(frame);
-            let got = run.input.pad(0).held_mask();
+            let got = run.input().pad(0).held_mask();
             let want = wire_of(held_mask(&cap, row, &held).unwrap_or_else(|e| panic!("{e}")));
             assert_eq!(
                 got,
@@ -2006,7 +2078,7 @@ fn a_recording_of_the_real_game_plays_back_through_the_port() {
             if let Some(at) = events {
                 let want: usize = cell(&cap, row, at).parse().expect("an event count");
                 assert_eq!(
-                    run.input.events.len(),
+                    run.input().events.len(),
                     want,
                     "{}: row {row}: the transitions the game raised",
                     path.display(),
@@ -2161,7 +2233,7 @@ fn an_unwritten_pad_entry_is_no_pad_not_every_button() {
 
     let tape = movie.tape(replay::TickPhase::First);
     assert!(tape.frames.iter().all(|f| f.reports[1] == Report::missing()));
-    assert_eq!(replay::play(&tape, 0).input.pad(1).held_mask(), 0, "so pad 1 holds nothing");
+    assert_eq!(replay::play(&tape, 0).input().pad(1).held_mask(), 0, "so pad 1 holds nothing");
 }
 
 /// **The file's own proof of the byte mapping.** Twelve of the sixteen controls are recorded twice —
@@ -2273,7 +2345,7 @@ fn a_tape_takes_one_field_of_each_tick_and_says_which_one() {
             .iter()
             .map(|f| {
                 run.advance(f);
-                run.input.pad(0).held(Control::Cross)
+                run.input().pad(0).held(Control::Cross)
             })
             .collect()
     };
@@ -2301,7 +2373,7 @@ fn a_tape_of_a_recording_runs_at_the_cap() {
         .unwrap()
         .tape(replay::TickPhase::First);
     let run = replay::play(&held, 0);
-    assert_eq!(run.input.pad(0).control(Control::Cross).held_ms, 99, "three frames at 33 ms");
+    assert_eq!(run.input().pad(0).control(Control::Cross).held_ms, 99, "three frames at 33 ms");
 
     // A step of one's own, for a recording the engine did not clamp (the front end runs under the cap).
     let slow = movie.tape_with_dt(replay::TickPhase::First, F(0.05));
@@ -2338,16 +2410,16 @@ fn a_recorded_session_drives_the_port() {
     let mut run = Playback::new(0x1234_5678);
     let mut transitions = 0;
     for (tick, frame) in tape.frames.iter().enumerate() {
-        let before = run.input.pad(0).held_mask();
+        let before = run.input().pad(0).held_mask();
         run.advance(frame);
         assert_eq!(
-            run.input.pad(0).held_mask(),
+            run.input().pad(0).held_mask(),
             script[tick * 2],
             "tick {tick} holds what field {} of the file recorded",
             tick * 2 + 1,
         );
         assert_eq!(run.tick() as usize, tick + 1, "and one tick is one frame of the recording");
-        transitions += (before != run.input.pad(0).held_mask()) as usize;
+        transitions += (before != run.input().pad(0).held_mask()) as usize;
     }
     assert_eq!(transitions, 6, "five changes of script plus the first press");
     assert_eq!(run.hash(), replay::play(&tape, 0x1234_5678).hash());
@@ -2372,8 +2444,9 @@ fn a_recorded_session_drives_the_port() {
 /// free riding (the header against the file's own length, the byte mapping against the file's own
 /// redundancy, the tick phase as a counted difference), the tape plays through the port's stateful
 /// input layer from end to end, and it survives its file form. What it cannot prove is the simulation
-/// side: `Sim` is still the example ball, so this is the input half of the acceptance run and S8 is
-/// the other half.
+/// side: the tape moves the ported bike since P5, but with no capture of the original beside it there
+/// is nothing to compare the result against, so this is the input half of the acceptance run and S8's
+/// recording is the other half.
 #[test]
 fn the_human_recording_in_context_drives_the_port() {
     let dir = private_dir("recordings");
@@ -2399,10 +2472,10 @@ fn the_human_recording_in_context_drives_the_port() {
         let mut run = Playback::new(0);
         let (mut transitions, mut seen) = (0usize, 0u16);
         for frame in &tape.frames {
-            let before = run.input.pad(0).held_mask();
+            let before = run.input().pad(0).held_mask();
             run.advance(frame);
-            seen |= run.input.pad(0).held_mask();
-            transitions += (before != run.input.pad(0).held_mask()) as usize;
+            seen |= run.input().pad(0).held_mask();
+            transitions += (before != run.input().pad(0).held_mask()) as usize;
         }
         assert_eq!(run.tick() as usize, tape.len());
         // A recording of a pad nobody touched would pass every assertion above.
@@ -2496,10 +2569,14 @@ fn the_human_recording_in_context_drives_the_port() {
 //     thirty seconds from the same save state with the kit's virtual pad riding it, which any agent
 //     can remake with no human and no GUI (`./kit pad script` beside `./kit record`). What it cannot
 //     do is crash, scrape a slope or land sideways on purpose.
-//   * **The port has no bike.** S3 (movement) is open, so the verdict of the real fixture today is
-//     `NoSuchField bike.pos[0]` at tick 0 — the fixture's own fault in A2's taxonomy, and the honest
-//     answer: there is nothing to compare. [`the_acceptance_run`] prints that and passes; the day S3
-//     lands it starts comparing numbers, with no code to write here.
+//   * **The bike is now the thing the harness drives** (P5): `Sim` is the ride, the rider and the
+//     world the shell builds, and its walk names the capture's eight lanes, so the verdict of the real
+//     fixture is a tick and a field rather than `NoSuchField bike.pos[0]` at tick 0. It is a real
+//     comparison from here on, and [`acceptance_verdict`] *panics* on a `Field` divergence — which is
+//     the right failure and is also untried, because no acceptance capture exists in the worktree P5
+//     was done in. Whoever next runs `./kit check` where the data is owns the first verdict: the
+//     numbers are a stand-in bike's until S3's movement and S10's air are 1:1, so expect a
+//     divergence, and expect to decide there whether this gate panics or reports.
 
 /// The `frame_counter` (app+0x374) in `first_recording.p2m2`'s own save state, read with
 /// `./kit state extract` — the tick the recording starts from.
@@ -2564,9 +2641,11 @@ fn acceptance_capture() -> Option<(PathBuf, Capture)> {
 /// Three outcomes, and only one of them is a bug in the port:
 ///
 /// - `Ok` — the port agreed with every recorded tick. That is the acceptance run passing.
-/// - `NoSuchField` — the fixture watches a field the port's state does not have. The port has no bike
-///   until S3 lands the ported movement, so this is today's answer, and it is printed rather than
-///   failed: the capture is good, the comparison has nothing to compare.
+/// - `NoSuchField` — the fixture watches a field the port's state does not have. Since P5 the eight
+///   bike lanes of [`BIKE`] are all fields of the state the harness drives, so this is no longer the
+///   expected answer: it now means a fixture file older than the walk, or a capture carrying a column
+///   the reader aims somewhere the walk does not go. Printed rather than failed either way, because
+///   the port is not what is wrong in that case.
 /// - anything else (`Field`, `Hash`, `WrongKind`, `Unreached`) — the port and the original disagree
 ///   about a number, which is the failure this whole file exists to produce. Panics, with the tick and
 ///   the field in the message.
@@ -2580,8 +2659,9 @@ fn acceptance_verdict(f: &Fixture) {
         ),
         Err(d) => match &d.reason {
             Reason::NoSuchField { path } => println!(
-                "the port has no '{path}': the acceptance capture is good and there is nothing in \
-                 the port to compare it against yet (S3 — the ported movement — is open). {d}",
+                "the state has no '{path}': the capture names a field this walk does not, which is \
+                 the fixture's own fault and not a divergence — a fixture file recorded against an \
+                 older walk, or a column aimed at a path nothing renames. {d}",
             ),
             _ => panic!("the acceptance run diverges: {d}"),
         },

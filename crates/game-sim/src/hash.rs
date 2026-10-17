@@ -11,6 +11,7 @@
 //!
 //! ```
 //! use game_sim::{Input, Sim, hash};
+//! use ps2_float::Vf;
 //!
 //! let mut a = Sim::new(1);
 //! let mut b = Sim::new(1);
@@ -21,9 +22,10 @@
 //! assert_eq!(hash::of(&a), hash::of(&b));          // fast mode: 64 bits, per tick
 //! assert!(hash::first_difference(&a, &b).is_none());
 //!
-//! b.ball.spin = b.ball.spin + 0.5; // a divergence, as a port would produce one
+//! // A divergence, as a port would produce one: half a unit of sideways drift on the bike.
+//! b.rider.ride.chassis.vel = Vf::new(0.5, 0.0, 0.0, 0.0);
 //! let why = hash::first_difference(&a, &b).expect("the hashes no longer agree");
-//! assert_eq!(why.path(), "ball.spin");             // dump mode: which field, and both values
+//! assert_eq!(why.path(), "bike.vel[0]");           // dump mode: which field, and both values
 //! println!("{why}");
 //! ```
 //!
@@ -121,7 +123,7 @@ impl fmt::Display for Leaf {
     }
 }
 
-/// One step of a field's path: `ball.vel[2]` is `[Name("ball"), Name("vel"), Index(2)]`.
+/// One step of a field's path: `bike.vel[2]` is `[Name("bike"), Name("vel"), Index(2)]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Seg {
     Name(&'static str),
@@ -420,7 +422,7 @@ impl Diff {
 }
 
 impl fmt::Display for Diff {
-    /// `ball.vel[1] 2.85 (0x4036...) vs 2.8500001 (0x4036...)` — the whole failure, on one line, which
+    /// `bike.vel[1] 2.85 (0x4036...) vs 2.8500001 (0x4036...)` — the whole failure, on one line, which
     /// is what a replay harness prints with the tick number in front of it.
     fn fmt(&self, w: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -464,10 +466,23 @@ pub fn trace(sim: &mut Sim, inputs: &[Input]) -> Vec<u64> {
 // ---------------------------------------------------------------------------------------------------
 
 impl State for Sim {
+    /// The simulation's own walk, which is what every fixture in the project is compared through.
+    ///
+    /// `bike.pos` and `bike.vel` are first because they are the two quads a capture of the original
+    /// records — row 3 of the vehicle's world transform and the body's velocity — and a watch spec
+    /// written against a CSV cannot be asked to know where in the ride they live. They are
+    /// deliberately the *same words* the ride's own walk carries further down
+    /// (`rider.ride.origin` and `rider.ride.chassis.vel`): two leaves of the walk read one field of
+    /// the state, which costs two FNV rounds and buys a name a recording can be written against.
     fn walk(&self, w: &mut Walk<'_>) {
         w.u64("ticks", self.ticks);
         w.u32("rng", self.rng);
-        w.field("ball", &self.ball);
+        w.group("bike", |w| {
+            w.vf("pos", self.bike_pos());
+            w.vf("vel", self.bike_vel());
+        });
+        w.field("input", &self.input);
+        w.field("rider", &self.rider);
     }
 }
 
