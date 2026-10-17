@@ -3704,3 +3704,183 @@ fn a_diverging_freeride_fails_at_the_tick_it_diverged_on() {
     assert!(why.starts_with("tick 180:"), "{why}");
     assert!(why.contains("chassis."), "the failure names the field: {why}");
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The shell's own tape: what `--record` writes, and what `--play` rides (P7)
+// ---------------------------------------------------------------------------------------------------
+//
+// The playable shell can now write every frame's pad to a tape and ride a tape instead of a pad. The
+// file is the same `PadTape` a capture of the original and a human's `.p2m2` become, which is the
+// point: one reader, one writer, and a tape of the port and a tape of the original are the same kind
+// of file.
+//
+// Two things have to be true for that to be worth anything, and they are what this section proves:
+//
+//   * what the shell wrote reads back **frame for frame** — every report byte and every bit of every
+//     `dt`, because a tape that rounds a frame length is a tape of a different run;
+//   * a tape **plays the same every time** — the pad and the frame length both come off the tape and
+//     nothing else reaches the simulation, so riding one twice lands on the same state hash.
+//
+// The shell's half (the window, the file, the loop) is not here; what is here is the recorder and the
+// playback head it drives, so the discipline is testable without a disc, a window or a pad.
+
+use game_sim::replay::{Head, Recorder};
+
+/// A session as the shell would have recorded one: the frame lengths an engine actually hands out
+/// (zero on the first frame, then the averaged ones, with the odd long frame the 30 fps clamp lets
+/// through) and a pad somebody is using — the stick wandering, and the throttle picked up part way in
+/// at a strength a button mask could not hold.
+fn shell_session(frames: usize) -> Recorder {
+    let mut tape = Recorder::new("thq1 on free06 / 125sx");
+    for i in 0..frames {
+        // The engine's first frame has no previous frame to measure against, so its dt is exactly
+        // zero; after that the average, with a long frame every so often.
+        let dt = match i {
+            0 => F::ZERO,
+            _ if i % 97 == 0 => F(0.041532),
+            _ if i % 3 == 0 => F(0.03283332),
+            _ => replay::CAPPED_DT,
+        };
+        let mut bytes = Report::idle().0;
+        bytes[6] = (0x7f + (i as i32 % 61) - 30) as u8;
+        bytes[7] = (0x7f - (i as i32 % 41) + 20) as u8;
+        if i > frames / 3 {
+            // Cross held: its bit in the active-low word, and the pressure the game reads it from.
+            let low = !Control::Cross.mask();
+            bytes[2] = (low >> 8) as u8;
+            bytes[3] = low as u8;
+            bytes[CONTROL_MAP[Control::Cross.index()].pressure as usize] = 0x40 + (i % 0x80) as u8;
+        }
+        tape.frame(dt, &[Report::from_bytes(bytes), Report::missing()]);
+    }
+    tape
+}
+
+/// A tape written by the shell's own writer reads back frame for frame.
+///
+/// Byte for byte and bit for bit: the reports as the pad library left them, the `dt` each frame was
+/// handed, and the name the session was recorded under. The three things that would quietly survive a
+/// weaker check are each asserted on a frame that has them — a `dt` that is not the 30 fps clamp, an
+/// analogue strength that is neither zero nor full, and a stick that is off centre in both axes.
+#[test]
+fn a_tape_the_shell_wrote_reads_back_frame_for_frame() {
+    let written = shell_session(300);
+    assert_eq!(written.len(), 300, "one entry per simulation pass");
+    assert!(!written.is_empty());
+
+    let text = written.to_text();
+    let back = PadTape::parse(&text).expect("the shell's own writer");
+    assert_eq!(back.len(), written.len(), "a frame was dropped or invented");
+    assert_eq!(back.name, written.tape.name, "what the session was");
+    for (i, (read, wrote)) in back.frames.iter().zip(&written.tape.frames).enumerate() {
+        assert_eq!(read, wrote, "frame {i}");
+    }
+    assert_eq!(back, written.tape);
+    assert_eq!(back.to_text(), text, "and writing it again gives the same bytes");
+
+    // Not vacuously: the frames differ from each other, and the three lossy things survived.
+    assert_eq!(back.frames[0].dt(), F::ZERO, "the engine's first frame measures nothing");
+    assert_eq!(back.frames[97].dt().to_bits(), F(0.041532).to_bits(), "a long frame, exactly");
+    assert_eq!(back.frames[3].dt().to_bits(), F(0.03283332).to_bits(), "and an averaged one");
+    assert_eq!(back.frames[200].reports[0].axis(2), written.tape.frames[200].reports[0].axis(2));
+    assert_ne!(back.frames[200].stick(0), (0, 0), "the stick was off centre");
+    let pressure = CONTROL_MAP[Control::Cross.index()].pressure as usize;
+    let held = back.frames[200].reports[0].0[pressure];
+    assert!(held > 0 && held < 0xff, "a throttle part way down, which a mask cannot hold: {held}");
+    assert_eq!(back.frames[200].held_mask(0), Control::Cross.mask());
+    assert_eq!(back.frames[0].held_mask(0), 0, "and nothing held before it was picked up");
+}
+
+/// The playback head hands a tape out in order, one frame per call, exactly once each.
+///
+/// This is the whole of what a live loop needs that [`replay::play`] does not give it: a frame at a
+/// time, and a way to know the ride is over.
+#[test]
+fn a_playback_head_hands_out_every_frame_once() {
+    let tape = shell_session(5).tape;
+    let mut head = Head::new(tape.clone());
+    assert_eq!(head.len(), 5);
+    assert!(!head.done(), "a tape with frames in it is not over");
+    assert_eq!(head.at(), 0);
+
+    let mut out = Vec::new();
+    while let Some(frame) = head.next() {
+        out.push(frame);
+    }
+    assert_eq!(out, tape.frames, "in order, and all of them");
+    assert_eq!(head.at(), 5);
+    assert!(head.done(), "the loop's cue to stop");
+    assert_eq!(head.next(), None, "and it stays stopped");
+
+    // An empty tape is over before it starts, rather than hanging a loop that waits for a frame.
+    let mut empty = Head::new(PadTape::new("nothing"));
+    assert!(empty.done() && empty.is_empty() && empty.next().is_none());
+}
+
+/// A played tape produces the same state hash twice.
+///
+/// Both the pad and the frame length come off the tape, and nothing else in a playback reaches the
+/// simulation, so riding one is a function of the file: same tape, same run, every tick of it. Two
+/// rides are compared tick by tick rather than only at the end, so a pair that diverged in the middle
+/// and came back could not pass.
+#[test]
+fn a_played_tape_is_the_same_run_every_time() {
+    let tape = shell_session(240).tape;
+
+    let hashes = |tape: &PadTape| -> Vec<u64> {
+        let mut run = Playback::new(11);
+        let mut head = Head::new(tape.clone());
+        let mut out = Vec::new();
+        while let Some(frame) = head.next() {
+            run.advance(&frame);
+            out.push(run.hash());
+        }
+        out
+    };
+
+    let first = hashes(&tape);
+    assert_eq!(first.len(), 240);
+    assert_eq!(first, hashes(&tape), "tick for tick, twice");
+    assert_eq!(
+        *first.last().unwrap(),
+        replay::play(&tape, 11).hash(),
+        "and a head-driven ride is the whole-tape call, frame for frame",
+    );
+
+    // Through the file, which is the case that matters: somebody else's copy of the tape.
+    let copy = PadTape::parse(&tape.to_text()).expect("the writer's own file");
+    assert_eq!(hashes(&copy), first, "a tape off disc rides the same as the tape in hand");
+
+    // Not vacuously: the hash moves while the run goes on, and one different frame changes it.
+    assert!(first.iter().collect::<std::collections::BTreeSet<_>>().len() > 100);
+    let mut nudged = tape.clone();
+    nudged.frames[120] = PadFrame::new(nudged.frames[120].dt(), [Report::idle(), Report::missing()]);
+    assert_ne!(hashes(&nudged), first, "a tape with one frame changed is a different ride");
+}
+
+/// Riding a tape while recording one writes the tape that was ridden.
+///
+/// The shell's `--play t --record t2` case, which is the check that its two halves agree: a recorder
+/// fed from inside the simulation pass sees exactly the `dt` and the reports the head handed out, so
+/// `t2` is `t` — byte for byte as a file, and frame for frame as a tape. If the playback took its
+/// frame length from the wall clock instead of the tape, this is the test that would fail.
+#[test]
+fn a_tape_ridden_and_recorded_at_once_is_the_tape_that_was_ridden() {
+    let ridden = shell_session(120).tape;
+
+    // The shell's loop, with the window, the drawing and the clock taken out: pull a frame, hand its
+    // own dt and reports to the simulation, and write down what the simulation was handed.
+    let mut again = Recorder::new(ridden.name.clone());
+    let mut run = Playback::new(3);
+    let mut head = Head::new(ridden.clone());
+    while let Some(frame) = head.next() {
+        let dt = frame.dt();
+        again.frame(dt, &frame.reports);
+        run.advance(&PadFrame::new(dt, frame.reports));
+    }
+
+    assert_eq!(again.tape, ridden, "frame for frame");
+    assert_eq!(again.to_text(), ridden.to_text(), "and byte for byte as a file");
+    assert_eq!(run.tick(), 120, "one tick per frame of the tape");
+    assert_eq!(run.hash(), replay::play(&ridden, 3).hash());
+}

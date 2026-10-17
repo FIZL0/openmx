@@ -132,7 +132,9 @@ added beside them:
   - `replay.rs` — the replay harness: a fixture of inputs and expectations replayed tick by tick (A2),
     plus the pad tape — a recorded session as the report bytes and measured `dt` of each frame, which
     `Playback` plays back through the input layer so a human-played sequence drives the port (I3), and
-    the reader for a human's PCSX2 input recording (`.p2m2` → `PadTape`, I4).
+    the reader for a human's PCSX2 input recording (`.p2m2` → `PadTape`, I4), and the two ends a live
+    loop rides one with: `Recorder`, which writes a tape down a simulation pass at a time, and `Head`,
+    the playback head it is read back through (P7).
   - `rng.rs` — the C library's 64-bit LCG the whole game calls, plus the random float and the uniform
     list index its call sites wrap it in. Proved bit-exact in `tests/rng.rs` (R5).
   - `track.rs` — one track as the disc stores it: the `.scn` scene (spawn, terrain layout, every model and
@@ -278,7 +280,9 @@ added beside them:
     the spawn, the terrain and the collision placements, the renderer's for props, lights and fog),
     then a frame of `tick::Engine::step` — which polls the pad through `input::Manager` and steps
     `game_sim::ride::Ride` on the disc's own `.phy` — followed by `game_sim::camera`'s follow camera,
-    the draw, the present and the pace to 60 Hz (P2).
+    the draw, the present and the pace to 60 Hz (P2). `--record` writes every simulated frame's pad to
+    a tape and `--play` rides one — a tape of the shell or a human's `.p2m2` — at the tape's own frame
+    lengths, so a control complaint is a file somebody else can ride (P7).
   - `window.rs` — a window with no dependencies: the X11 wire protocol over the display's unix socket,
     a window, a graphics context, keyboard events, and the frame pushed across as one `PutImage` a band.
   - `pad.rs` — the host's pad: Linux's joystick events and the keyboard, folded into the 32-byte
