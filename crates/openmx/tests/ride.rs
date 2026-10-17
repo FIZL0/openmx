@@ -35,12 +35,13 @@
 //! `openmx` has no library target for them to live in and neither crate may `include_str!` the other's
 //! fixtures (`game_sim::stock`'s own head says why).
 //!
-//! **One leg does not pass, and ships `#[ignore]`d with the defect named in the test** — a locked
-//! clutch re-drives the rear wheel at idle, so the bike will not stop. It is the simulation's and is
-//! written up at length in the sibling file; it is repeated here because a leg of a minute is not
-//! proved by a leg of another minute, and because this is the file whose failure would be a player's
-//! complaint. The other was the steering command never reaching the front wheel, which P11 and
-//! P12 between them paid.
+//! **Every leg of the minute passes here now.** Two of them shipped `#[ignore]`d with the defect
+//! named in the test, and both were the simulation's rather than this file's: the steering command
+//! never reaching the front wheel, which P11 and P12 between them paid, and the brake never reaching
+//! the chassis, which P13 paid. Each was repeated here as well as in the sibling file, because a leg
+//! of a minute is not proved by a leg of another minute, and because this is the file whose failure
+//! would be a player's complaint. The one leg still owed a rider — `clutch_in` latching, so the bike
+//! will not pull away — is only in the sibling file, which is where its defect lives.
 
 use game_sim::collide::{Bundle, Record};
 use game_sim::input::{AXIS_CENTRE, CONTROL_MAP, Control, PADS, Report};
@@ -702,16 +703,14 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
     assert_eq!(wrecks(&jump), 0, "the jump wrecked");
 }
 
-/// The brake is pinned for ten seconds and the bike does not stop: it slows hard and then holds about
-/// 26 ft/s for ever.
+/// The brake is pinned for ten seconds and the bike stops, through the shell's own bike and tables.
 ///
-/// **Why it is ignored.** That speed is the engine's idle through first gear. With the clutch locked,
-/// `mv::engine_update` sets the revs from the road and then clamps them up into `min_rpm`, so under
-/// about 18 mph the engine drives the rear wheel against the brake; the one rule that lets the clutch
-/// out wants the speed under `IDLE_SPEED`, 7.33 ft/s, which the bike can no longer reach. The sibling
-/// file's version has the long version. Not this file's to fix.
+/// It used to hold about 26 ft/s for ever, and until P13 both this file and the sibling blamed a
+/// locked clutch idling through first gear. The real cause was that `ride::surface_drag` took the
+/// brake off the rear wheel's spin, which the road overwrites every substep, so the pad never
+/// reached the chassis at all; the clutch was slipping and merely out-pushing a brake that was not
+/// there. The sibling file's version has the long version.
 #[test]
-#[ignore = "braking cannot stop the bike: a locked clutch re-drives the rear wheel at the idle road speed"]
 fn it_brakes_to_a_stop() {
     let m = ride_the_minute();
     let brake = m.leg("the brake");

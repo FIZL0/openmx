@@ -2505,6 +2505,13 @@ fn a_ride_reaches_the_four_clip_blend_and_the_pair() {
         "the body waits on the gate in one of the ten idles: {start_line:?}"
     );
 
+    // A band the ride only touched for a single frame is dropped first. The bike's speed ripples by
+    // a hundredth of a foot a second as the suspension works, so a threshold it is crossing can be
+    // crossed back over for one frame on the way — which it does at the second one, since P13 gave
+    // the start line's brake something to hold on to and moved the whole climb. The bands it *rode*
+    // are the ones that lasted, and those are what the grid is being read for here.
+    stages.retain(|s| s.frames > 1);
+
     // The grid, in the order the hill reached it: a four-clip blend of the stopped and the standing
     // rows, one row on its own, and a four-clip blend of the standing and the riding rows. The
     // stick is leaned to a quarter, which is below the middle of the mix axis, so each row is

@@ -71,6 +71,11 @@ const PROBES: usize = 4;
 /// The deflection past which the stick counts as held, for the stick-hold clock `air.rs` reads.
 const STICK_HELD: f32 = 0.5;
 
+/// The rate the surface's two torques fade in at, per foot a second of the contact's own slide:
+/// `wheel_surface_drag`'s own literal, which makes the brake and the rolling torque whole above
+/// 3⅓ ft/s and nothing at a standstill. See [`surface_drag`].
+const BRAKE_FADE_RATE: f32 = 0.3;
+
 /// The integrator's speed limits, which the original takes from a vehicle setup this port does not
 /// have. Wide enough that no ride reaches them: what they are for here is to keep
 /// [`chassis::integrate`]'s clamp from reading a zero limit as a standstill.
@@ -840,33 +845,63 @@ fn push(c: &mut wheel::Chassis, m: &Mat4, force: Vf, arm: Vf) {
     c.torque = add_xyz(c.torque, cross(arm, local_force));
 }
 
-/// The wheel's surface drag: what the surface under it takes out of it — the rolling
-/// resistance against the patch's slide, and the brake's torque against the spin.
+/// The wheel's surface drag: what the surface under it takes out of it — the rolling resistance
+/// against the patch's slide, the surface's own constant rolling torque, and the brake.
 ///
-/// **A stand-in.** Every number in it is the disc's: `WheelDrag` and `MaxBrakingTorque` out of the
-/// tire's own per-surface table, and the load out of the suspension. The *shape* is this module's —
-/// the original's own version is named in `research/oracle.txt` and is not ported. Two things it is careful about: the
-/// resistance is proportional to the slide only up to one unit a second, so a stopped wheel is not
-/// shoved by it; and the brake cannot turn the wheel backwards inside one substep.
+/// **The two torques are the original's; the resistance force is still a stand-in.** The original's
+/// own version is `wheel_surface_drag` in `research/oracle.txt`, and what it does with its three
+/// per-surface numbers was read off it for P13:
+///
+/// - it builds one **signed fade** first, and both torques below are that fade times a number out
+///   of the table: on the ground `0.3 * the patch's own forward slide`, in the air the wheel's
+///   spin, each clamped to ±1. So a wheel rolling faster than 3⅓ feet a second — or spinning faster
+///   than one radian a second in the air — gets the table's number whole, and under that it gets a
+///   share of it that falls to nothing as the wheel stops. Nothing here can push a stopped wheel
+///   backwards, which is the whole reason the fade is there;
+/// - `MaxBrakingTorque` times the brake lever is that fade's number, whenever the lever is off its
+///   stop;
+/// - and it goes onto the **driven-wheel torque accumulator** — the same one the engine adds to
+///   through `wheel_add_drive_torque` — and not onto the spin. That is what P13 came for: a torque in
+///   that accumulator becomes a force at the contact patch in [`spin_integrate`], capped by the grip
+///   the load allows, and *that* is what slows the bike down. Taken off the spin instead it did
+///   nothing at all, because a wheel on the ground has its spin overwritten by the road in the same
+///   substep: the brake could not stop the bike, and the only thing decelerating it was whatever the
+///   engine's own braking happened to put through the clutch.
+///
+/// **`WheelFriction`'s own torque is still not applied.** The original takes `-fade * WheelFriction`
+/// off the same accumulator, unconditionally, and that is one line. It is left out here on purpose:
+/// this crate reads that key as the tire's *grip* limit (P4's stand-in in [`spin_integrate`]), and
+/// the test bike's value was written for that reading, so applying it as a torque as well spends a
+/// number twice. On the test bike it costs seven feet a second of top speed and moves the minute's
+/// jump, which is a recalibration of P10's fixture and not this task's. The journal entry says so.
 ///
 /// ## The resistance is a force and not a couple
 ///
 /// The original's own version adds its drag to the chassis' force accumulator and **never touches
-/// the torque accumulator** — the only two writes it makes outside the wheel are that one force and
-/// the brake's torque on the spin (P8's journal entry has the address and the read). So the drag
-/// does not pitch the bike at all, whatever the slide is, and this does not either.
-fn surface_drag(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, brake: F, dt: F,
-                c: &mut wheel::Chassis) {
+/// the torque accumulator** — the only writes it makes outside the wheel are that one force and the
+/// two torques above (P8's journal entry has the address and the read). So the drag does not pitch
+/// the bike at all, whatever the slide is, and this does not either. Its *shape* is still this
+/// module's: the original's is `WheelDrag * v²` and is not scaled by the load, where this is
+/// proportional to the load and to the slide up to one unit a second. Changing that is a
+/// recalibration of every speed in the tests and not P13's; the journal entry says so.
+fn surface_drag(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, brake: F, c: &mut wheel::Chassis) {
+    // The fade, and with it the sign: everything the surface takes out of the wheel opposes
+    // whichever way the wheel is going.
+    let fade = if wh.w.contact {
+        clamp_unit(F(BRAKE_FADE_RATE) * pt.roll)
+    } else {
+        clamp_unit(wh.mv.spin)
+    };
+    if brake > F::ZERO {
+        let torque = (brake * surf.max_braking_torque) * fade;
+        wh.mv.drive_torque = wh.mv.drive_torque - torque;
+    }
+
     if !wh.w.contact {
         return;
     }
     let drag = surf.wheel_drag * pt.load * clamp_unit(pt.roll);
     c.force = add_xyz(c.force, scale(pt.forward, -drag));
-
-    let spin = wh.mv.spin;
-    let torque = brake * surf.max_braking_torque;
-    let step = (torque * wh.inv_inertia * dt).min(spin.abs());
-    wh.mv.spin = if spin < F::ZERO { spin + step } else { spin - step };
 }
 
 /// The wheel's spin integration: the wheel's own spin, and what the tire puts through its
@@ -1147,7 +1182,7 @@ fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, body: &Body, mvc:
         cofg: mvc.cofg,
         vel: mvc.vel,
     };
-    surface_drag(wh, &pt, &surf, brake, dt, &mut wc);
+    surface_drag(wh, &pt, &surf, brake, &mut wc);
     spin_integrate(wh, &pt, &surf, body, dt, &mut wc, m, tire.body_tire_force_position);
     let calls = wheel::integrate(&mut wh.w, dt);
     mvc.force = wc.force;
