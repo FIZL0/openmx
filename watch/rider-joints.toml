@@ -1,0 +1,233 @@
+# rider-joints.toml — the original's own posed rider, joint by joint, while the human's recording plays
+# back. V12's spec: the one capture in this project that watches *animation* rather than physics.
+#
+#   ./kit record --dry-run watch/rider-joints.toml                     # check the spec, no emulator
+#   ./kit pcsx2 with -- bash -c '
+#       python3 research/play_recording.py <a copy of the .p2m2>        # AT-SPI: Tools -> Input
+#       sleep 4                                                        #   Recording -> Play
+#       ./kit record watch/rider-joints.toml -n 1500 \
+#           -o context/capture/v12/rider-joints.csv'
+#
+# Play a **copy** of the recording: PCSX2 switches to record mode at the end of a movie and writes over
+# the file (the human's own is read-only now, and `plan/HUMAN.md` says so).
+#
+# ## What it watches, and why those offsets
+#
+# The human's own rider has three animated objects behind it and this spec watches the one the player
+# actually looks at: the **rider's body**. Its animation object is the one the vehicle's animation step
+# drives — the sixty-state machine S25 ported as `game_sim::vehicle_anim`, whose address V12's journal
+# entry gives — and it sits **0x400 in front of** the
+# type-4 actor the acceptance capture already reaches, as a C++ secondary base does. Three things in it
+# say so on every row and the test checks all three: the content directory at +0x1e0 reads
+# `Rider\Anim\`, the joint count at +0x230 reads 22 (which is `rider\anim\mrider.psg`'s node count, V4),
+# and the sixty-entry clip table at +0x900 holds the rider's own clips (`rider_<stunt>`, then
+# `turn_*`/`air_*`/`hold_*`/`get_ready_*`).
+#
+# The pose itself is the joint array at +0x234: one 0x60-byte record per joint, the blended translation
+# at +0x40 and the blended quaternion at +0x50, which is what the library's blend entries write before
+# the original pushes them into the node tree and skins the model in VU0 (V5). Those two quadwords per
+# joint are the port's `game_render::skin::Pose`, field for field.
+#
+# Everything else here is the state that pose came out of, so the port can be stepped from the
+# original's own clock rather than from its own guess at it: the motion object's clock (+0x48..+0x94),
+# the machine's own fields (+0x680..+0x6a4, +0x8dc..+0x8fc, +0x9f0, +0xa3c), the two axis lags behind
+# +0x630/+0x634, and the request block behind +0x488. Each column's offset is named in its comment; the
+# port's own field names for them are in `game_sim::vehicle_anim::{Driver, Request, Params}`.
+#
+# ## Why there is no [setup] state
+#
+# The playback loads the recording's own save state when it starts, so the capture must *not* load one:
+# it is started a few seconds after the movie is playing and records from wherever the game then is.
+# V12's comparison is per-tick — each row is stepped from the row before it — so it needs consecutive
+# ticks and does not care which tick is first. `every = 1` is therefore as load-bearing as it is in
+# `acceptance.toml`: a row that is not the next tick cannot be compared against the row before it, and
+# the test drops any pair of rows whose frame counters are not one apart.
+
+[watch]
+name        = "rider-joints"
+description = "the original's rider: its 22 posed joints and the animation state they came out of"
+every       = 1          # one row per tick: the test steps the port from one row to the next
+frames      = 1500       # the driven part of the human's minute; --frames overrides
+
+[setup]
+warmup = 0               # no state load, so nothing to settle: the movie is already playing
+
+# --- when the frame was, and how long the game thought it was ---------------------------------------
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+# --- the actor the chain lands on, so a changed actor list cannot pass unnoticed ---------------------
+# R6's chain, as `acceptance.toml` explains it: the GameManager -> the actor manager (+0x34) -> its list
+# head (+0x34) -> eight `next` hops (+0x8) -> that node's item -> a field of the actor.
+[[field]]
+name = "actor_type"              # +0x00: must read 4
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "actor_ctl_src"           # +0x20 -> +0x34: 1 = the local human, 2 = an AI
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+required = true
+
+[[field]]
+name = "actor_xform"             # +0x180: where the body is drawn; row 3 is the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+
+# --- the human's rider, two hops in: the state machine's own window ---------------------------------
+[[field]]
+name = "rider_type"              # +0x00: 2 = a rider
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "rider_ctl_src"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+required = true
+
+[[field]]
+name = "wreck_reason"            # +0x748: 0 while riding, the reason while being put back on
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+# --- the rider body's animation object: the guards --------------------------------------------------
+# Every offset below is written as `<field> - 0x400`, which is the animation object's own offset less
+# the 0x400 the actor pointer sits past its base. The arithmetic is the spec's, not a reader's.
+[[field]]
+name = "anim_dir"                # +0x1e0: the content directory, "Rider\Anim\"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x1e0 - 0x400"
+type = "bytes:12"
+
+[[field]]
+name = "joint_count"             # +0x230: 22 for this model
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x230 - 0x400"
+type = "u32"
+required = true
+
+[[field]]
+name = "joint_array"             # +0x234: where the pose below was read from
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x234 - 0x400"
+type = "u32"
+
+# The sixty-entry clip table at +0x900, as bytes: one column instead of sixty, and the only thing the
+# test does with it is turn the clip the clock is playing into the state whose clip it is. It is
+# constant for the whole run — a clip is bound when the level loads — so it is also a self-check.
+[[field]]
+name = "clip_table"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x900 - 0x400"
+type = "bytes:240"
+
+# --- the motion object's clock (`game_sim::motion::Player`) -----------------------------------------
+[[field]]
+name = "m_finished"              # +0x3c: the clip has run out and the dt path does nothing
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x3c - 0x400"
+type = "u32"
+
+[[field]]
+name = "m_clock"                 # +0x48 the playing clip, +0x4c what a transition comes out of,
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x48 - 0x400"
+type = "bytes:80"                # +0x50 the last clip, +0x54 its time, +0x80..+0x94 the fade
+
+# --- the machine (`game_sim::vehicle_anim::Driver`) -------------------------------------------------
+[[field]]
+name = "d_flags"                 # +0x680 from_table, +0x684 holding, +0x688 started, +0x68c ramp,
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x680 - 0x400"
+type = "bytes:40"                # +0x690 rate, +0x694 ready, +0x698 hold, +0x69c default, +0x6a0 pose,
+                                 # +0x6a4 stunt — the five rates are `vehicle_anim::Params`
+
+[[field]]
+name = "d_cross"                 # +0x8dc cross, +0x8e0 cross_prev, +0x8e4 cross_start, +0x8e8 the cap,
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8dc - 0x400"
+type = "bytes:36"                # +0x8ec prev, +0x8f0 state, +0x8f4 want, +0x8f8 the start phase,
+                                 # +0x8fc the sequence byte
+
+[[field]]
+name = "d_extra"                 # +0x9f0 which added record to play, or negative for none
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x9f0 - 0x400"
+type = "s32"
+
+[[field]]
+name = "d_extra_count"           # +0x9f4: how many added records the list holds
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x9f4 - 0x400"
+type = "u32"
+
+[[field]]
+name = "d_bands"                 # +0xa14/+0xa18/+0xa1c: the pose grid's three thresholds
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa14 - 0x400"
+type = "f32x3"
+
+[[field]]
+name = "d_reverse"               # +0xa3c: the reverse pair's own phase clock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa3c - 0x400"
+type = "f32"
+
+# The two axis lags, each a record of {value, time constant, the ratio the last step left} behind its
+# own pointer. +0x630 is the mix axis and +0x634 the phase axis, and the step runs them in that order.
+[[field]]
+name = "lag_mix"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x630 - 0x400 -> 0x0"
+type = "f32x3"
+
+[[field]]
+name = "lag_phase"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x634 - 0x400 -> 0x0"
+type = "f32x3"
+
+# --- the request block behind +0x488 (`game_sim::vehicle_anim::Request`) ----------------------------
+[[field]]
+name = "req_at_base"             # +0x08: take the position from the base
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x8"
+type = "u32"
+
+[[field]]
+name = "req_held"                # +0x0c: holding a pose
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0xc"
+type = "u32"
+
+[[field]]
+name = "req_cut"                 # +0x140: cut the start-line group short
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x140"
+type = "u32"
+
+[[field]]
+name = "req_axes"                # +0x170 the phase axis' target, +0x174 the mix axis', +0x178 the
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x170"
+type = "f32x3"                   # number the pose grid cuts up
+
+[[field]]
+name = "req_progress"            # +0x1a4: how far through the gesture
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1a4"
+type = "f32"
+
+[[field]]
+name = "req_seq"                 # +0x1a8: the request count the restart test compares against
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1a8"
+type = "u32"
+
+# --- the pose: 22 joint records of 0x60 bytes, the translation and the quaternion out of each --------
+[[array]]
+name   = "j"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x234 - 0x400 -> 0x0"
+count  = 22
+stride = 0x60
+
+[[array.field]]
+name = "t"                       # +0x40: the blended translation, the `w` lane included
+off  = 0x40
+type = "f32x4"
+
+[[array.field]]
+name = "q"                       # +0x50: the blended quaternion
+off  = 0x50
+type = "f32x4"

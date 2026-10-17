@@ -15,6 +15,7 @@ dependencies = [
 name = "game-sim"
 version = "1.0.0"
 dependencies = [
+ "game-render",
  "ps2-float",
  "ps2-oracle",
 ]
