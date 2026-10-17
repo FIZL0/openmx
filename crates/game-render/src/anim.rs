@@ -61,7 +61,7 @@ use crate::disc::Res;
 use crate::ini;
 use crate::mat::M4;
 use crate::psg::Model;
-use crate::rider::MotionSet;
+use crate::rider::{Motion, MotionSet};
 use crate::skin::{Clip, Pose, SKIP, Skeleton};
 use game_sim::motion::{
     Animations, Blend, ClipId, Driver, Frame, Library, Params, Played, Player, Request, Slot,
@@ -120,6 +120,10 @@ pub enum Missing {
 pub struct Set {
     /// The `.mcf` the set was built from: its motion list, its content directory, its geometry.
     pub set: MotionSet,
+    /// Which file each clip *name* means, for every `.mcf` in these archives that animates the same
+    /// content directory, in the archives' own member order and first claim winning. See
+    /// [`Set::claims`] for why a set's own `.mcf` is not the only one that has a say.
+    pub claimed: Vec<Motion>,
     /// The model's node tree, which is what a clip's channel names are resolved against.
     pub skeleton: Skeleton,
     /// The clips bound so far, in the order they were bound. A [`ClipId`] is an index into this.
@@ -138,8 +142,10 @@ impl Set {
     /// An animation set from an already-read `.mcf` and an already-read model.
     pub fn new(set: MotionSet, skeleton: Skeleton, archives: Vec<Res>) -> Set {
         let joints = skeleton.len();
+        let claimed = Set::claims(&archives, &set);
         Set {
             set,
+            claimed,
             skeleton,
             clips: Vec::new(),
             pose: Pose::new(joints),
@@ -173,12 +179,80 @@ impl Set {
         Ok(Set::new(set, Skeleton::of(&model), archives))
     }
 
+    /// Every `[MOTION n]` of every `.mcf` in these archives that names the same content directory,
+    /// in the archives' own member order, with the first claim of a name kept and later ones dropped.
+    ///
+    /// **Why another `.mcf` gets a say in what this one's clips are.** The original has *one*
+    /// animation set for the whole game, and it is keyed by clip *name*: a `.mcf` walk loads each
+    /// `NAME=` from the file its own `VUE=` points at, but only if no set has claimed that name yet,
+    /// and a name already in the set is handed over as it is — whatever file it came from. So the
+    /// first `.mcf` loaded decides what a name means for every motion object built after it, and a
+    /// later `.mcf`'s `VUE=` for that name is never read. (The other way into the set, the
+    /// load-on-demand path a clip table takes for a name no `.mcf` lists, does not read `VUE=` at
+    /// all: it opens `<ContentDirectory><name>.MOT`.)
+    ///
+    /// On this disc that is the difference between the right pose and the wrong one on three clips.
+    /// Every rider archive ships two sets — `airider.mcf` for the AI bodies and `mrider.mcf` for the
+    /// player's — and they disagree about exactly three of their forty motions:
+    ///
+    /// | name | `airider.mcf` | `mrider.mcf` |
+    /// | --- | --- | --- |
+    /// | `turn_stop_Fwd` | `turn_stop_Mid.MOT` | `turn_stop_Fwd.MOT` |
+    /// | `turn_stop_Bck` | `turn_stop_Mid.MOT` | `turn_stop_Bck.MOT` |
+    /// | `turn_still_Bck` | `turn_still_Bck.MOT` | `turn_still_Mid.MOT` (its own line is commented out) |
+    ///
+    /// V12's capture of the original posing the *player's* rider — with NPC riders on the track, so
+    /// the AI set was built first — agrees with the `airider.mcf` column on all three and with
+    /// `mrider.mcf` on none of them, which is what says the AI set's claims are the ones that
+    /// survive. Taking the archive's `.mcf`s in member order reproduces that, because `airider`
+    /// sorts before `mrider` in every one of the 162 rider archives. V14's journal entry has the
+    /// measurements and what this does not prove.
+    fn claims(archives: &[Res], set: &MotionSet) -> Vec<Motion> {
+        let mut out: Vec<Motion> = Vec::new();
+        let members: Vec<(usize, String)> = archives
+            .iter()
+            .enumerate()
+            .flat_map(|(i, res)| {
+                res.entries()
+                    .iter()
+                    .filter(|e| e.name.to_ascii_lowercase().ends_with(".mcf"))
+                    .map(move |e| (i, e.name.clone()))
+            })
+            .collect();
+        for (i, member) in members {
+            let Ok(bytes) = archives[i].read(&member) else { continue };
+            let other = MotionSet::parse(&ini::text(&bytes));
+            // A name only means a file *under the claimant's own content directory*, and this set
+            // builds its paths out of its own; a set that animates something else — a bike's `.mcf`
+            // beside a rider's in the same archive list — is none of this set's business.
+            if !other.directory.eq_ignore_ascii_case(&set.directory) {
+                continue;
+            }
+            for motion in other.motions {
+                if !out.iter().any(|m| m.name.eq_ignore_ascii_case(&motion.name)) {
+                    out.push(motion);
+                }
+            }
+        }
+        out
+    }
+
+    /// The entry that claimed a clip name, which is what says which file it is and whether it loops:
+    /// the first `.mcf` of the archives to name it, and this set's own entry when the archives have
+    /// no `.mcf` at all (a set built by hand, which is every fixture in the tests).
+    fn claim(&self, name: &str) -> Option<&Motion> {
+        self.claimed
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(name))
+            .or_else(|| self.set.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name)))
+    }
+
     /// The archive members a clip of this name could be, in the order the loader tries them. See the
     /// module's own docs for why there are three.
     pub fn member(&self, name: &str) -> Vec<String> {
         let dir = &self.set.directory;
         let mut out = Vec::new();
-        if let Some(vue) = self.set.clip(name) {
+        if let Some(vue) = self.claim(name).map(|m| m.clip.as_str()).filter(|v| !v.is_empty()) {
             let stem = vue.rsplit_once('.').map_or(vue, |(stem, _)| stem);
             out.push(format!("{dir}{stem}.mot"));
         }
@@ -438,8 +512,10 @@ impl Animations for Set {
                 return;
             }
         };
-        // The loop flag is the animation set's and not the file's: a `.mot` does not carry one.
-        clip.timing.looping = self.set.motions.iter().any(|m| m.name.eq_ignore_ascii_case(name) && m.looping);
+        // The loop flag is the animation set's and not the file's, and it belongs to whoever claimed
+        // the name — the original writes it into the clip when it creates it, and a later `.mcf`
+        // that names the same clip never gets to change it.
+        clip.timing.looping = self.claim(name).is_some_and(|m| m.looping);
         let joints = clip.joints(&self.skeleton);
         self.clips.push(Bound { name: name.to_string(), member: member_name, clip, joints });
     }

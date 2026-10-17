@@ -3160,6 +3160,11 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
     let mut modes = [0usize; 6];
     let mut not_posed: std::collections::BTreeMap<&'static str, usize> = Default::default();
     let mut posed = 0usize;
+    // V12 skipped every tick of this shape — the pose grid's middle row with the mix axis past
+    // centre, the back half of the one row this disc's player `.mcf` aliases to its middle column —
+    // and V14 poses them. Counted so the assert below can say the shape is still in the recording:
+    // a capture that no longer reached it would make the loader fix look proved when it was only
+    // never exercised.
     let mut gap = 0usize;
     let mut joint = (0.0f32, 0usize, 0u64, String::new());
     let mut snapshot = game_sim::motion::Snapshot::default();
@@ -3328,35 +3333,6 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
             *not_posed.entry("a clip-to-clip transition was running").or_default() += 1;
             continue;
         }
-        // The one shape of tick whose *pose* the port does not reproduce: the pose grid's middle
-        // row (`turn_still`, the three fore/aft columns) with the mix axis past centre, so the
-        // blend's pair is the row's *back* column against its middle one.
-        //
-        // The reason is in the data, and the entry works it out. On this disc `turn_still_Bck` and
-        // `turn_still_Mid` are the same animation — sampled twenty times over their length they
-        // agree to the bit in every lane of every joint — while `turn_stop` and `turn_riding` both
-        // have a genuinely different back column (0.49 and 0.80 of rotation away from their own
-        // middle). So the port's back half of this one row collapses to the middle clip alone, and
-        // the original plainly poses something else there: 0.61 of rotation and 1.17 of translation
-        // away. It is not the weight and not the pairing — the *front* half of the same row is
-        // compared below and agrees to 6e-7, and no clip of the 63 in the rider's set, at any time,
-        // mixed against `turn_still_Mid` at any weight, comes within 0.19 of the original on these
-        // ticks. Whatever the original's third column points at is not in the set this port loads,
-        // which is a loader question and not this test's.
-        //
-        // Skipped with its reason counted, and its shape asserted below, so a port that gets a pose
-        // wrong *anywhere else* — including the front half of this very row — still fails.
-        if now.state == va::TURN_RIDING
-            && now.band >= now.bands[0]
-            && now.band <= now.bands[1]
-            && now.mix[0] > 0.5
-        {
-            gap += 1;
-            *not_posed
-                .entry("the pose grid's middle row past centre, where this disc's back column is a duplicate")
-                .or_default() += 1;
-            continue;
-        }
         if !set.apply_vehicle(frame.blend, &player) {
             // Mode 4 is the one entry point the port deliberately does not draw (V9 says so); a
             // blend whose clips did not bind would land here too, and the assert above rules that
@@ -3409,6 +3385,13 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
             }
         }
         posed += 1;
+        if now.state == va::TURN_RIDING
+            && now.band >= now.bands[0]
+            && now.band <= now.bands[1]
+            && now.mix[0] > 0.5
+        {
+            gap += 1;
+        }
     }
 
     // Each number its own tolerance, because they are not the same kind of number: a state's rate
@@ -3459,13 +3442,16 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
         joint.3,
         joint.0
     );
-    // The gap is 27 ticks of 1499 and its shape is pinned above. If a later change makes it wider
-    // the shape has moved and this test should say so rather than keep skipping quietly.
+    // V12's gap, now posed and compared like every other tick: 26 ticks of this recording are the
+    // pose grid's middle row past centre, which is the back half of the row whose back column the
+    // player's own `.mcf` aliases to its middle one. They are in the `posed` count above and under
+    // the same tolerance; this asserts only that the recording still *has* them, because the proof
+    // of V14's loader fix is that these ticks agree, and ticks that never happened agree trivially.
     assert!(
-        gap <= 40,
-        "{gap} ticks of {} fell in the pose grid's middle band with the mix axis at an end, where \
-         the port's pose is known not to match. That is wider than the 27 the entry measured, so \
-         the shape of the gap has changed and wants looking at again.",
+        gap >= 20,
+        "only {gap} ticks of {} were the pose grid's middle row past centre, where the port's back \
+         column comes from the AI set's `.mcf` rather than the player's own (V14). The recording \
+         measured 26 of them; with fewer than that this capture no longer proves that clip.",
         rows.len() - 1
     );
     assert!(
@@ -3478,7 +3464,9 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
         "the port's machine against the original's, one tick ahead each time: {} ticks, every \
          state, ramp, axis and clip time within tolerance (worst: {})\n  blend modes \
          free/one/two/_/four/pair = {:?}\n  posed and compared joint by joint: {posed} ticks, \
-         worst joint {} ({}) at tick {}, off by {:e} — {}\n  not posed: {not_posed:?}",
+         worst joint {} ({}) at tick {}, off by {:e} — {}\n  not posed: {not_posed:?}\n  of \
+         those ticks {gap} were the pose grid's middle row past centre, the back column V14 \
+         loads from the AI set's `.mcf`",
         rows.len() - 1,
         worst
             .iter()
