@@ -28,6 +28,25 @@
 # the original pushes them into the node tree and skins the model in VU0 (V5). Those two quadwords per
 # joint are the port's `game_render::skin::Pose`, field for field.
 #
+# ## The pose the cross-fade fades *from* (V15)
+#
+# A blend entry does not only sample its clips: whenever the machine's ramp at +0x68c is above zero it
+# fades the sample back towards the **pose snapshot**, the joints as they stood the moment the motion
+# was restarted. That snapshot is two heap buffers hanging off the same motion object, one quadword per
+# joint in joint order, written by the restart hook (named in research/oracle.txt) out of each
+# joint record's own transform node at +0x34:
+#
+#   * +0x248 — a pointer to `joint_count` quaternions, stride 0x10;
+#   * +0x24c — a pointer to `joint_count` translations, stride 0x10, the `w` lane written as 1;
+#   * +0x250 / +0x254 — the tag buffer and whether the last snapshot used one. Every call site in this
+#     image passes a null tag array, so both stay 0 and the test asserts it.
+#
+# Both buffers are allocated on the first restart and reused for good, so their two pointers are
+# constant for a run and the capture carries them as a check that nothing moved underneath it.
+#
+# Without those two arrays every tick with the ramp up is a pose the port cannot reproduce — it has
+# nothing to fade against — which was 248 of V12's 1499 ticks. They are the `ur`/`ut` arrays below.
+#
 # Everything else here is the state that pose came out of, so the port can be stepped from the
 # original's own clock rather than from its own guess at it: the motion object's clock (+0x48..+0x94),
 # the machine's own fields (+0x680..+0x6a4, +0x8dc..+0x8fc, +0x9f0, +0xa3c), the two axis lags behind
@@ -118,6 +137,25 @@ required = true
 [[field]]
 name = "joint_array"             # +0x234: where the pose below was read from
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x234 - 0x400"
+type = "u32"
+
+# The pose snapshot's own two buffers, as pointers: where the `ur`/`ut` arrays below were read from,
+# and a check that the restart hook allocated them once and never moved them.
+[[field]]
+name = "snap_rot_buf"            # +0x248: one quaternion per joint
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x248 - 0x400"
+type = "u32"
+required = true
+
+[[field]]
+name = "snap_pos_buf"            # +0x24c: one translation per joint
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x24c - 0x400"
+type = "u32"
+required = true
+
+[[field]]
+name = "snap_tagged"             # +0x254: whether the last snapshot carried tags — 0 in this image
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x254 - 0x400"
 type = "u32"
 
 # The sixty-entry clip table at +0x900, as bytes: one column instead of sixty, and the only thing the
@@ -230,4 +268,30 @@ type = "f32x4"
 [[array.field]]
 name = "q"                       # +0x50: the blended quaternion
 off  = 0x50
+type = "f32x4"
+
+# --- the pose the ramp fades from: the snapshot's two buffers, one quadword per joint -------------
+# Two arrays and not one, because the original keeps the rotations and the translations in two
+# separate allocations and the blend entries read them in two separate passes. Both are indexed by
+# the same joint index as `j` above, and `anim_rewind` fills them in that order.
+[[array]]
+name   = "ur"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x248 - 0x400 -> 0x0"
+count  = 22
+stride = 0x10
+
+[[array.field]]
+name = "q"                       # the joint's rotation when the snapshot was taken
+off  = 0x0
+type = "f32x4"
+
+[[array]]
+name   = "ut"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x24c - 0x400 -> 0x0"
+count  = 22
+stride = 0x10
+
+[[array.field]]
+name = "t"                       # the joint's translation at the same moment, `w` written as 1
+off  = 0x0
 type = "f32x4"
