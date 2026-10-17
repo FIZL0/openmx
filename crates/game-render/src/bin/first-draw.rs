@@ -12,7 +12,7 @@ use game_render::anim::Set;
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, v3};
 use game_render::raster::Frame;
-use game_render::rider::{FOOT_ANCHORS, Rider, Sex, Skeleton, bolt_onto};
+use game_render::rider::{FOOT_ANCHORS, Rider, Sex, Skeleton, anchors_of, bolt_onto, hold_on};
 use game_render::scene::{Preset, Scene, Vehicle};
 use game_render::skin::{Pose, skin};
 use game_render::terrain::{Terrain, draw_terrain};
@@ -35,6 +35,10 @@ fn run() -> Result<(), String> {
     let mut rider_name = "thq1".to_string();
     // Empty means the bind pose, bolted to the pegs. A clip name poses the body instead.
     let mut pose_spec = String::new();
+    // Which of the body's levels of detail to draw it from, and whether to solve its limbs onto the
+    // bike's anchors. Both default to off, so a still of a pose is the one it always was.
+    let mut lod = 0usize;
+    let mut hold = false;
     let mut out = std::path::PathBuf::from("context/shots/first-draw.png");
     let mut width = 640usize;
     let mut height = 448usize;
@@ -46,6 +50,12 @@ fn run() -> Result<(), String> {
             "--bike" => bike = next("a bike name, like 250sx")?,
             "--rider" => rider_name = next("a rider name, like thq1, or none")?,
             "--pose" => pose_spec = next("a clip name, like backflip, or NAME:PHASE")?,
+            "--lod" => {
+                lod = next("a group number, 0 being the finest")?
+                    .parse()
+                    .map_err(|_| "--lod: not a group number")?
+            }
+            "--hold" => hold = true,
             "--out" => out = next("a path")?.into(),
             "--size" => {
                 let v = next("WIDTHxHEIGHT")?;
@@ -56,7 +66,7 @@ fn run() -> Result<(), String> {
             "--help" | "-h" => {
                 println!(
                     "first-draw [--track sx01] [--bike 250sx] [--rider thq1|none] \
-                     [--pose NAME[:PHASE]] [--size 640x448] [--out PATH]\n\
+                     [--pose NAME[:PHASE]] [--lod 0] [--hold] [--size 640x448] [--out PATH]\n\
                      Draws one frame of a track from the disc named in kit.toml."
                 );
                 return Ok(());
@@ -195,7 +205,16 @@ fn run() -> Result<(), String> {
     // bike's own space — its clips put it there — so it wants no bolt, and the skinned triangles
     // replace the bind pose's in the model the draw already knows about.
     let posed = match (&rider, pose_spec.is_empty()) {
-        (Some(r), false) => match pose_body(&mut disc, &rider_member, r, &mut assets, &pose_spec) {
+        (Some(r), false) => match pose_body(
+            &mut disc,
+            &rider_member,
+            r,
+            &mut assets,
+            &pose_spec,
+            chassis_name,
+            lod,
+            hold,
+        ) {
             Ok(what) => {
                 println!("pose: {what}");
                 true
@@ -249,6 +268,21 @@ fn run() -> Result<(), String> {
         }
         None => Camera::behind(stand, dir),
     };
+    // What the engine's own level-of-detail test would pick for the body from where this camera
+    // stands, which is what the shell draws it from. The still draws whatever `--lod` asked for, so
+    // the two can be compared.
+    if let Some(r) = &rider {
+        if let Some(body) = assets.models.get(&r.geometry) {
+            let away = stand.sub(camera.eye).len();
+            let focal = camera.focal(height);
+            println!(
+                "lod: {:.0} feet away at a focal length of {focal:.1} picks group {} of {}",
+                away,
+                body.model.group_for(away, body.radius, focal),
+                body.model.groups
+            );
+        }
+    }
     let mut frame = Frame::new(width, height, scene.fog_color);
     let mut drawn = 0;
     if let Some(t) = &terrain {
@@ -313,6 +347,9 @@ fn pose_body(
     rider: &Rider,
     assets: &mut Assets,
     spec: &str,
+    chassis: &str,
+    group: usize,
+    hold: bool,
 ) -> Result<String, String> {
     let (name, phase) = match spec.split_once(':') {
         Some((name, phase)) => (name, phase.parse::<f32>().map_err(|_| "--pose: not a phase")?),
@@ -326,11 +363,39 @@ fn pose_body(
     let time = phase * bound.clip.timing.duration.0;
     let mut pose = Pose::new(set.skeleton.len());
     bound.clip.pose(time, &bound.joints, &mut pose);
-    let world = set.skeleton.world(&pose);
+    let mut world = set.skeleton.world(&pose);
+    // `--hold` solves the four limbs onto the chassis's own anchors, which is what the game does to
+    // keep a hand on the bar through a stunt the arm would otherwise swing off it.
+    let held = match hold {
+        true => {
+            let chassis = assets
+                .models
+                .get(chassis)
+                .ok_or("--hold: the chassis is not loaded")?;
+            let targets = anchors_of(&Skeleton::of(&chassis.model), &[]);
+            hold_on(&set.skeleton, &mut world, &targets, 1.0)
+        }
+        false => [None; 4],
+    };
     let loaded = assets.models.get_mut(&rider.geometry).ok_or("the body is not loaded")?;
-    loaded.tris = skin(&loaded.model, &world, 0);
+    loaded.tris = skin(&loaded.model, &world, group);
     let whole = bound.clip.timing.duration.0;
-    Ok(format!("{name} at {time:.3}s of {whole:.3}s, {} triangles", loaded.tris.len()))
+    let mut said = format!(
+        "{name} at {time:.3}s of {whole:.3}s, group {group} of {}, {} triangles",
+        loaded.model.groups,
+        loaded.tris.len()
+    );
+    if hold {
+        let inches: Vec<String> = held
+            .iter()
+            .map(|d| match d {
+                Some(off) => format!("{:.1}", off * 12.0),
+                None => "-".to_string(),
+            })
+            .collect();
+        said += &format!(", anchors {} inches out", inches.join("/"));
+    }
+    Ok(said)
 }
 
 /// The terrain file a scene asks for. Most scenes name it `SX02.trn`, but what the archive holds is

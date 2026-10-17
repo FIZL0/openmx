@@ -83,7 +83,7 @@ use std::time::{Duration, Instant};
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, V3, v3};
 use game_render::raster::Frame;
-use game_render::rider::{Body, Sex};
+use game_render::rider::{Body, Sex, Skeleton, anchors_of};
 use game_render::scene::Vehicle;
 use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
 use game_render::{ini, png, scene as view};
@@ -621,6 +621,14 @@ fn run() -> Result<(), String> {
         said: rider::Frame::default(),
     };
 
+    // Where the chassis wants the body's hands and feet: the four dummy anchors at its grips and its
+    // pegs, read once, because nothing in the shell animates the chassis. The body's limbs are solved
+    // onto these on every frame it is drawn.
+    let grips = match assets.models.get(CHASSIS) {
+        Some(chassis) => anchors_of(&Skeleton::of(&chassis.model), &[]),
+        None => Default::default(),
+    };
+
     let mut shot = args.shot.clone();
     let started = Instant::now();
     let mut window_of_frames = (Instant::now(), 0u32, 0usize);
@@ -645,9 +653,6 @@ fn run() -> Result<(), String> {
         if let Some(body) = &mut body {
             if world.riding {
                 body.pose(step.dt, world.rider.animation);
-                if let Some(loaded) = assets.models.get_mut(body.geometry()) {
-                    body.skin_into(loaded);
-                }
             }
         }
 
@@ -758,6 +763,15 @@ fn run() -> Result<(), String> {
         // pose the game never draws.
         if let Some(body) = &body {
             if body.posed {
+                // Which of the body's five levels of detail this camera has earned, and the hands and
+                // feet put back where the chassis wants them. Both read the camera, so the skinning
+                // is here rather than beside the pose above.
+                let away = pos.sub(camera.eye).len();
+                let focal = camera.focal(frame.height);
+                if let Some(loaded) = assets.models.get_mut(body.geometry()) {
+                    let group = loaded.model.group_for(away, loaded.radius, focal);
+                    body.skin_into_at(loaded, group, Some(&grips));
+                }
                 actor.push((body.geometry(), bike_at));
             }
         }

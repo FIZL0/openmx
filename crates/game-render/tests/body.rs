@@ -9,9 +9,12 @@ use game_render::anim::Set;
 use game_render::disc::{Disc, Res};
 use game_render::psg::Model;
 use game_render::rider::{
-    AIR_POSES, Body, FOOT_ANCHORS, HAND_ANCHORS, Sex, Skeleton, stunt_name,
+    AIR_POSES, Body, FOOT_ANCHORS, HAND_ANCHORS, HOLD_WITHIN, LET_GO_AT, LIMBS, Sex, Skeleton,
+    anchors_of, hold_on, stunt_name,
 };
 use game_render::skin::skin;
+use game_render::mat::v3;
+use game_render::world::{Camera, vertical_fov};
 use game_sim::ride::Controls;
 use game_sim::trick::{Dir, SLOTS, Set as Stunts24, Stunts, Trick, slot_of};
 use game_sim::world::Flat;
@@ -456,4 +459,374 @@ fn the_first_frame_of_a_ride_fades_out_of_the_bind_pose() {
     );
     assert!(at_first < 0.001, "the first frame is not the bind pose: {at_first} away");
     assert!(settled > 3.0, "the fade never got out of the bind pose: {settled} away");
+}
+
+/// **V10.** The body falls back through its own five levels of detail as the camera pulls away, and
+/// the triangles it costs fall with it.
+///
+/// V8 drew the body from group 0 at every distance, so a rider two hundred feet away cost what the
+/// one on your bike cost. The rule that picks between the five is the engine's own
+/// (`Model::group_for`): the term it tests is a focal length over a distance — how big the model is
+/// on screen — so the hand-over distances below are this camera's, and a narrower field of view or a
+/// taller window moves all of them.
+#[test]
+fn the_level_of_detail_falls_back_as_the_camera_pulls_away() {
+    let Some(mut disc) = disc() else { return };
+    let res = rider_res(&mut disc);
+    let body = Model::parse(&res.read_suffix("mrider.psg").expect("the body's geometry"))
+        .expect("the body's geometry parses");
+    assert_eq!(body.groups, 5, "the body's .psg holds five levels of detail");
+    assert_eq!(body.group_distance.len(), body.groups, "a threshold per group");
+    let last = body.group_distance[body.groups - 1];
+    assert!(last > 1e30, "the coarsest group's threshold is the FLT_MAX sentinel, not {last}");
+
+    // What each group costs, which is the point of having them.
+    let cost: Vec<usize> = (0..body.groups).map(|g| body.triangles(g).len()).collect();
+    println!("the body's five groups cost {cost:?} triangles");
+    for g in 1..4 {
+        assert!(cost[g] < cost[g - 1], "group {g} ({}) is no cheaper than {}", cost[g], cost[g - 1]);
+    }
+    // The coarsest group is the odd one out in this file: it is the catch-all past every threshold
+    // and the artists left it dearer than the group before it, 417 triangles against 156. It is
+    // still a fifth of the finest, which is what a group being drawn at all is for.
+    assert!(cost[4] < cost[0] / 2, "even the catch-all is cheaper than the body: {cost:?}");
+
+    // The camera the game rides with: `Preset1`'s 85 degrees across, in a 4:3 frame of the disc's
+    // own height.
+    let camera = Camera {
+        eye: v3(0.0, 0.0, 0.0),
+        at: v3(0.0, 0.0, 1.0),
+        fov: vertical_fov(85.0, 4.0 / 3.0),
+        near: 0.05,
+        far: 4000.0,
+    };
+    let focal = camera.focal(448);
+    let radius = body
+        .triangles(0)
+        .iter()
+        .flat_map(|t| t.v.iter())
+        .map(|v| v.pos.len())
+        .fold(0.0f32, f32::max);
+    println!(
+        "a focal length of {focal:.1} pixels and a body reaching {radius:.2} feet: the groups hand \
+         over at {:?} feet",
+        body.group_distance
+            .iter()
+            .take(body.groups - 1)
+            .map(|t| (t * focal + radius).round() as i32)
+            .collect::<Vec<_>>()
+    );
+
+    // Pulling away, a foot at a time to a quarter of a mile: the group may only ever get coarser and
+    // the cost may only ever fall.
+    let mut was = (0usize, cost[0]);
+    let mut falls = 0;
+    for feet in 1..=1320 {
+        let group = body.group_for(feet as f32, radius, focal);
+        assert!(group < body.groups, "group {group} is not one of the five, at {feet} feet");
+        assert!(group >= was.0, "the body got finer at {feet} feet: group {group} after {}", was.0);
+        if group != was.0 {
+            let now = cost[group];
+            println!("at {feet} feet it falls to group {group}, {now} triangles");
+            // Every hand-over but the last is cheaper than the group it came from. The last is the
+            // catch-all this file left dearer than the group before it (above), and the camera does
+            // not reach it until the rider is a hundred yards off and four pixels tall.
+            if group + 1 < body.groups {
+                assert!(now < was.1, "falling to group {group} at {feet} feet cost more: {now}");
+            } else {
+                assert!(feet > 300, "the catch-all group should not be drawn {feet} feet away");
+                assert!(now < cost[0] / 4, "the catch-all costs {now} of the body's {}", cost[0]);
+            }
+            falls += 1;
+            was = (group, now);
+        }
+    }
+    assert_eq!(falls, body.groups - 1, "every group should get its turn inside a quarter mile");
+
+    // The two ends the task asks about, and the one term the window has in it: the same rider at the
+    // same distance is drawn finer into a taller frame, which is the rule's own shape rather than a
+    // distance table.
+    let close = body.group_for(8.0, radius, focal);
+    let far = body.group_for(200.0, radius, focal);
+    assert_eq!(close, 0, "the rider on your bike is drawn from the finest group");
+    assert!(far > close, "a rider two hundred feet away is still group {far}");
+    assert!(
+        cost[far] * 4 < cost[close],
+        "two hundred feet away still costs {} of {}",
+        cost[far],
+        cost[close]
+    );
+    let tall = body.group_for(200.0, radius, camera.focal(1792));
+    assert!(tall < far, "a frame four times as tall drew the same rider from group {tall}");
+}
+
+
+/// A twelfth of a world unit. The disc's unit is a foot — a terrain quad is three of them, a bike's
+/// wheelbase five and a quarter, this body five and a half tall — so an inch is a twelfth.
+const AN_INCH: f32 = 1.0 / 12.0;
+
+/// **V10.** A gesture that takes one limb off the bike leaves the others holding on: solved against
+/// the chassis's own anchors, every hand that is on the bars is on the grip to within an inch and
+/// every foot that is on the pegs is on the peg, while the limb the stunt lets go of is left exactly
+/// where the clip put it.
+///
+/// This is what the four dummy anchors are for, and why the original keeps a controller per limb and
+/// aims it at the vehicle's own anchors every frame. A clip is a recording made against one pose of
+/// one bike: played on a bike whose bars are turned, at a lean the animator did not finish on, or
+/// through a cross-fade out of something else, the hand drifts off the grip and the stunt reads as a
+/// clip playing rather than a rider holding on. Every gesture this rider has, at nine phases of each,
+/// and nothing excluded.
+///
+/// The weight each limb holds on with is [`game_render::rider::holding`], which is the port's own
+/// rule and not the original's — see the module and the journal. What is being tested here is both
+/// halves of it: the limbs it holds land on the bike, and the limbs it does not are untouched.
+#[test]
+fn a_solved_hand_stays_on_the_grip_through_a_gesture() {
+    let Some(mut disc) = disc() else { return };
+    let bike = member(&disc, &format!("{A_BIKE}.res")).expect("the disc has no bike archive");
+    let chassis = disc.res(&bike).and_then(|r| r.read_suffix("bike.psg")).expect("the chassis");
+    let chassis = Skeleton::of(&Model::parse(&chassis).expect("the chassis parses"));
+    // The targets, read off the chassis the way the vehicle hands them to the rider.
+    let targets = anchors_of(&chassis, &[]);
+    assert!(targets.iter().all(|t| t.is_some()), "the chassis has all four of the rider's anchors");
+
+    let table = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let body = body(&mut disc, &table, &p);
+    let skel = body.rig.set.skeleton.clone();
+    // The joints the solve has no business touching.
+    let still: Vec<usize> = ["Pelvis", "LwrTorso", "UprTorso", "Head"]
+        .iter()
+        .map(|n| skel.find(n).unwrap_or_else(|| panic!("the body has no {n}")))
+        .collect();
+    let at = |world: &[game_render::mat::M4], j: usize| {
+        let m = world[j].0[3];
+        v3(m[0], m[1], m[2])
+    };
+
+    let mut held = [0usize; 4];
+    let mut let_go = [0usize; 4];
+    let mut stretched = 0usize;
+    let mut worst_held = (0.0f32, String::new());
+    let mut worst_fixed = (0.0f32, String::new());
+    for stunt in table.stunts.iter().filter(|s| !s.name.is_empty()) {
+        let name = stunt_name("", &stunt.name);
+        let id = body.rig.set.id(&name).unwrap_or_else(|| panic!("no clip named {name}"));
+        let bound = body.rig.set.get(id).expect("a found id is in the set");
+        for step in 0..=8 {
+            let phase = step as f32 / 8.0;
+            let mut pose = game_render::skin::Pose::new(skel.len());
+            bound.clip.pose(phase * bound.clip.timing.duration.0, &bound.joints, &mut pose);
+            let before = skel.world(&pose);
+            let mut after = before.clone();
+            let ended = hold_on(&skel, &mut after, &targets, 1.0);
+
+            for (i, limb) in LIMBS.iter().enumerate() {
+                let target = targets[i].expect("every anchor has a target here");
+                let (root, bend, anchor) = (
+                    skel.find(limb.root).expect("the body has this joint"),
+                    skel.find(limb.bend).expect("the body has this joint"),
+                    skel.find(limb.anchor).expect("the body has this anchor"),
+                );
+                let was = at(&before, anchor).sub(target).len();
+                let now = ended[i].unwrap_or_else(|| panic!("{} was not solved", limb.anchor));
+                let where_it_is = at(&after, anchor).sub(target).len();
+                assert!(
+                    (where_it_is - now).abs() < 1e-3,
+                    "the solve's answer for {} ({now:.4}) is not where it left the joint \
+                     ({where_it_is:.4})",
+                    limb.anchor
+                );
+                // What the limb is made of, and whether the anchor was ever within its reach: the
+                // two lengths the solve works in, off the pose it started from.
+                let (upper, lower) = (
+                    at(&before, bend).sub(at(&before, root)).len(),
+                    at(&before, anchor).sub(at(&before, bend)).len(),
+                );
+                let span = target.sub(at(&before, root)).len();
+                let short = span - (upper + lower);
+                let where_ = format!("{} in {name} at {phase}", limb.anchor);
+
+                if was >= LET_GO_AT {
+                    // The stunt let go. Nothing may move at all — not the limb, not its anchor.
+                    let_go[i] += 1;
+                    assert!(
+                        (now - was).abs() < 1e-6,
+                        "{where_}: the stunt let go {was:.2} feet back and the solve moved it to \
+                         {now:.2}"
+                    );
+                    for j in [root, bend, anchor] {
+                        assert!(
+                            at(&after, j).sub(at(&before, j)).len() < 1e-6,
+                            "{where_}: a let-go limb's joints moved"
+                        );
+                    }
+                } else if was <= HOLD_WITHIN && short < -AN_INCH {
+                    // Holding on, and the anchor is inside the limb's reach: it goes on the bike.
+                    held[i] += 1;
+                    assert!(now < AN_INCH, "{where_}: ended {now:.4} out, from {was:.4}");
+                    if was > worst_fixed.0 {
+                        worst_fixed = (was, where_.clone());
+                    }
+                } else if was <= HOLD_WITHIN {
+                    // Holding on, but the clip has the limb at or past full stretch. The best it can
+                    // do is straighten at the anchor, and it may not end further out than that.
+                    stretched += 1;
+                    assert!(
+                        now <= was + 1e-3 && now < short.max(0.0) + AN_INCH,
+                        "{where_}: {now:.4} out with {short:.4} of stretch to make up, from {was:.4}"
+                    );
+                } else {
+                    // In between: the limb is faded on, so the anchor moves towards the bike without
+                    // reaching it. The fade is the point — an edge here would pop the frame it
+                    // crossed — so what is checked is the direction and the bound.
+                    assert!(
+                        now <= was + 1e-3,
+                        "{where_}: a faded limb went further out, {was:.3} to {now:.3}"
+                    );
+                }
+                if was > worst_held.0 {
+                    worst_held = (was, where_);
+                }
+                // Turned, not stretched: both of the limb's lengths survive the solve.
+                let (upper_now, lower_now) = (
+                    at(&after, bend).sub(at(&after, root)).len(),
+                    at(&after, anchor).sub(at(&after, bend)).len(),
+                );
+                assert!(
+                    (upper_now - upper).abs() < 1e-3 && (lower_now - lower).abs() < 1e-3,
+                    "{name} at {phase}: {} came out of the solve a different length",
+                    limb.root
+                );
+            }
+            for &j in &still {
+                assert!(
+                    at(&after, j).sub(at(&before, j)).len() < 1e-4,
+                    "{name} at {phase}: the solve moved {}",
+                    skel.bones[j].name
+                );
+            }
+        }
+    }
+    println!(
+        "{} gestures at nine phases: {} limbs held onto the bike, {} were let go of, {} were at \
+         full stretch; the furthest an anchor started out was {:.2} feet ({}), and the furthest one \
+         that was pulled back on was {:.2} feet ({})",
+        table.stunts.iter().filter(|s| !s.name.is_empty()).count(),
+        held.iter().sum::<usize>(),
+        let_go.iter().sum::<usize>(),
+        stretched,
+        worst_held.0,
+        worst_held.1,
+        worst_fixed.0,
+        worst_fixed.1
+    );
+    println!(
+        "held: {held:?} and let go of: {let_go:?}, in the order of LIMBS — foot L, foot R, hand L,          hand R"
+    );
+    // The test proves nothing unless the gestures really do take limbs off the bike and put others
+    // back on it.
+    assert!(held.iter().sum::<usize>() > 400, "barely any limb was held: {held:?}");
+    assert!(let_go[0] + let_go[1] > 0, "no gesture let go of a foot");
+    assert!(let_go[2] + let_go[3] > 0, "no gesture let go of a hand");
+    assert!(worst_fixed.0 > 0.5, "nothing more than half a foot out was ever pulled back on");
+    assert!(held[2] + held[3] > 100, "hardly any hand was put back on the bars: {held:?}");
+}
+
+/// **V10.** The one-hander, by name: the hand the stunt keeps on the bars ends on the grip and the
+/// hand it throws stays thrown.
+///
+/// The general test above sweeps every gesture and holds the rule to both halves of itself. This one
+/// is the sentence the task asks for, on the three stunts that say it plainest — a one-hander, a
+/// can-can and a superman — so that a later change to the rule has to argue with the stunts by name.
+#[test]
+fn a_one_hander_keeps_the_other_hand_on_the_bars() {
+    let Some(mut disc) = disc() else { return };
+    let bike = member(&disc, &format!("{A_BIKE}.res")).expect("the disc has no bike archive");
+    let chassis = disc.res(&bike).and_then(|r| r.read_suffix("bike.psg")).expect("the chassis");
+    let chassis = Skeleton::of(&Model::parse(&chassis).expect("the chassis parses"));
+    let targets = anchors_of(&chassis, &[]);
+    let table = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let body = body(&mut disc, &table, &p);
+    let skel = body.rig.set.skeleton.clone();
+
+    // Which limbs each of the three is still holding the bike with at the phase the stunt is being
+    // held at — the hold time is the stunt table's own (`Stunt::hold_time`) — in the order of
+    // `LIMBS`: left foot, right foot, left hand, right hand. The rest are thrown, and the rider is
+    // not getting them back until the stunt is over: a one-handed indian air is both feet forward
+    // off the pegs and the left hand off the bars, a can-can swings the right leg over the seat, and
+    // a superman is both feet off with both hands on.
+    for (stunt, holding) in [
+        ("onehandindianair", &[3][..]),
+        ("cancan", &[0, 2, 3][..]),
+        ("superman", &[2, 3][..]),
+    ] {
+        let record = table
+            .stunts
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(stunt))
+            .unwrap_or_else(|| panic!("this rider cannot do {stunt}"));
+        let name = stunt_name("", &record.name);
+        let id = body.rig.set.id(&name).unwrap_or_else(|| panic!("no clip named {name}"));
+        let bound = body.rig.set.get(id).expect("a found id is in the set");
+        let mut pose = game_render::skin::Pose::new(skel.len());
+        let hold = record.hold_time.0.min(bound.clip.timing.duration.0);
+        bound.clip.pose(hold, &bound.joints, &mut pose);
+        let before = skel.world(&pose);
+        let mut after = before.clone();
+        let ended = hold_on(&skel, &mut after, &targets, 1.0);
+
+        for (i, limb) in LIMBS.iter().enumerate() {
+            let target = targets[i].expect("the chassis has this anchor");
+            let anchor = skel.find(limb.anchor).expect("the body has this anchor");
+            let m = before[anchor].0[3];
+            let was = v3(m[0], m[1], m[2]).sub(target).len();
+            let now = ended[i].expect("every limb of this body is solved");
+            // How much limb there is between the swing joint and the anchor, and how far the anchor
+            // has to go: a holding limb the clip has left stretched past its own length cannot be put
+            // on the bike, and what it can do instead is straighten at it.
+            let g = |w: &[game_render::mat::M4], j: usize| {
+                let m = w[j].0[3];
+                v3(m[0], m[1], m[2])
+            };
+            let (ro, be) = (
+                skel.find(limb.root).expect("the body has this joint"),
+                skel.find(limb.bend).expect("the body has this joint"),
+            );
+            let reach = g(&before, be).sub(g(&before, ro)).len()
+                + g(&before, anchor).sub(g(&before, be)).len();
+            let short = target.sub(g(&before, ro)).len() - reach;
+            println!(
+                "{stunt} held at {hold:.2}s: {} {was:.3} -> {now:.3}                  (a reach of {reach:.3} and {short:+.3} to make up)",
+                limb.anchor
+            );
+            if !holding.contains(&i) {
+                assert!(
+                    was > LET_GO_AT && (now - was).abs() < 1e-6,
+                    "{stunt} throws {}, and the solve put it back: {was:.3} -> {now:.3}",
+                    limb.anchor
+                );
+            } else if short < -AN_INCH {
+                assert!(
+                    now < AN_INCH,
+                    "{stunt} holds on with {}, which ended {now:.3} out (from {was:.3})",
+                    limb.anchor
+                );
+            } else {
+                // `onehandindianair` is the one gesture of the twenty-four where this happens: at the
+                // pose it is held in, the grip is two and a half inches past the end of the arm the
+                // rider is holding on with, so the solve straightens the arm at it and the hand ends
+                // three inches out instead of one. Whether the original reaches it — a third joint
+                // at the collar bone, a wrist that turns — is unproved; see the journal.
+                assert!(
+                    now < short + AN_INCH && now <= was + 1e-3,
+                    "{stunt} holds on with {} at full stretch, {short:+.3} short, and the solve                      left it {now:.3} out (from {was:.3})",
+                    limb.anchor
+                );
+            }
+        }
+    }
 }

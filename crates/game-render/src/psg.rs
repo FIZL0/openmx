@@ -91,6 +91,10 @@ pub struct Model {
     pub meshes: Vec<Mesh>,
     /// How many levels of detail the file holds.
     pub groups: usize,
+    /// One term per group, in the file's own order, finest first: the group's own threshold in the
+    /// original's level-of-detail test ([`Model::group_for`]), which is not a distance but a
+    /// distance over a focal length. The last is `FLT_MAX`, which that test never reads.
+    pub group_distance: Vec<f32>,
 }
 
 /// A triangle ready to draw: three vertices already in model space.
@@ -158,10 +162,11 @@ impl Model {
         at += 36;
 
         let mut meshes = Vec::new();
+        let mut group_distance = Vec::with_capacity(groups);
         let mut next_index = 0usize;
         for group in 0..groups {
             need(d, at, 8)?;
-            let _group_distance = f32_at(d, at)?;
+            group_distance.push(f32_at(d, at)?);
             let mesh_count = le32(d, at + 4)? as usize;
             at += 8;
             for _ in 0..mesh_count {
@@ -207,6 +212,7 @@ impl Model {
             materials,
             meshes,
             groups,
+            group_distance,
         })
     }
 
@@ -255,6 +261,41 @@ impl Model {
             }
         }
         out
+    }
+
+    /// Which of the model's levels of detail the original would draw it from: the group its own
+    /// thresholds pick for a camera `distance` away from the model's centre, where the model reaches
+    /// `radius` from that centre and the camera's focal length is `focal` pixels
+    /// ([`crate::world::Camera::focal`]).
+    ///
+    /// The rule is the engine's own (`research/oracle.txt`). It is not written in distances: the term
+    /// it compares is a focal length over a distance, which is how big the model is on screen, so the
+    /// same file falls back sooner through a narrow field of view and later into a taller window. For
+    /// group `i`,
+    ///
+    /// ```text
+    ///   scale * (focal / max(distance - radius, 0.1)) * group_distance[i] < 1
+    /// ```
+    ///
+    /// and the group drawn is one past the last `i` that passes — which comes to the finest group
+    /// whose threshold still reaches the model's near surface, and the coarsest group when none of
+    /// them do. `scale` is a per-model term times two global tuning ones, and this disc leaves all
+    /// three at 1, so none of them are arguments here.
+    ///
+    /// The last group's own threshold is never read: the walk stops one short of it. That is what the
+    /// `FLT_MAX` the files put there says — it is a sentinel and not a distance, and a model can no
+    /// more fall past its coarsest group than it can fall short of its finest.
+    ///
+    /// A model with no groups at all answers 0, as the original's walk does.
+    pub fn group_for(&self, distance: f32, radius: f32, focal: f32) -> usize {
+        let metric = focal / (distance - radius).max(0.1);
+        let mut chosen = 0;
+        for i in 0..self.group_distance.len().saturating_sub(1) {
+            if metric * self.group_distance[i] < 1.0 {
+                chosen = i + 1;
+            }
+        }
+        chosen
     }
 }
 
@@ -450,6 +491,7 @@ mod tests {
                 strips: vec![strip],
             }],
             groups: 1,
+            group_distance: vec![f32::MAX],
         };
         // Six vertices make four triangles; the one ending at the flagged fourth vertex is dropped.
         assert_eq!(model.triangles(0).len(), 3);

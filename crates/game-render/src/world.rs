@@ -177,6 +177,17 @@ impl Camera {
         }
     }
 
+    /// The camera's focal length in pixels, for a frame this many pixels tall: the distance at which
+    /// something one pixel across subtends the same angle as the frame's own height does at 1.
+    ///
+    /// This is the term the original keeps beside its projection and the only camera term its level
+    /// of detail test reads ([`Model::group_for`]) — which is why that test follows the window: the
+    /// same model in the same place is drawn finer into a taller frame, and coarser through a wider
+    /// field of view.
+    pub fn focal(&self, height: usize) -> f32 {
+        (height as f32 / 2.0) / (self.fov / 2.0).tan()
+    }
+
     /// World to clip, for a frame of the given shape.
     pub fn view_projection(&self, width: usize, height: usize) -> M4 {
         let aspect = width as f32 / height as f32;
