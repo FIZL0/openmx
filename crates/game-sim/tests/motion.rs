@@ -2642,8 +2642,10 @@ fn a_ride_reaches_the_four_clip_blend_and_the_pair() {
 //   * no clip-to-clip transition running (the motion object's `+0x80` is 0), and
 //   * the state's own arm is a single-clip one — the gesture slots crossing out of a non-gesture
 //     (mode 1), or the played-once groups after their clip is on (the free-running advance) — and
-//   * the cross-fade ramp against the pose snapshot has run out (`+0x68c` is 0), because the pose it
-//     fades from is a buffer the capture does not carry either.
+//   * the cross-fade ramp against the pose snapshot has run out (`+0x68c` is 0), because a tick
+//     with the ramp up is a *fade* between the sample and the snapshotted pose and not a sample.
+//     Those ticks are the second test's: **V15** widened the spec to carry the snapshot, so the
+//     test below hands the original's own two buffers to the renderer and compares the fade too.
 //
 // On one of those the original's 22 joints are one clip at one time, and so are the port's: the clip
 // the capture names, at the second the capture names. That is the whole comparison, and it is also
@@ -2671,10 +2673,17 @@ const RIDER_PREFIX: &str = "rider_";
 /// of the same arithmetic on both sides — the clip's packed channels decoded, two keys
 /// interpolated, and for a two-clip row a slerp between them — so the only thing between them is
 /// the order the multiplies happen in and the one rounding the PS2's multiply-add does that an
-/// `f32` multiply then add does not. Measured: over the 1117 ticks of the recording the port draws,
-/// the worst lane anywhere is **2.2e-5**, on joint 3 (`UprLegR`)'s quaternion during
-/// `rider_lazyboy`; every state the port poses on a single row agrees to 1e-6 or better and only
-/// the slerped rows reach 1e-5. So 1e-4 is about five times over the measured noise.
+/// `f32` multiply then add does not. Measured: over the 1117 ticks V12's recording drew, the worst
+/// lane anywhere is **2.2e-5**, on joint 3 (`UprLegR`)'s quaternion during `rider_lazyboy`; every
+/// state the port poses on a single row agrees to 1e-6 or better and only the slerped rows reach
+/// 1e-5. So 1e-4 is about five times over the measured noise.
+///
+/// **V15.** With the pose snapshot in the capture the second test draws 1322 ticks instead of 1117,
+/// and the worst lane over the wider set is **8.5e-5** — still under the bar, but by a factor of
+/// 1.2 and no longer by 5. It is on the wreck's own clips, in the free-running arm, a millisecond
+/// from the clip's end (joint 6 `ShoulderL` at 0.9999s of a one-second clip), which is the one
+/// place the two decoders' last key is reached from opposite sides. Every other arm of the machine
+/// is still at 2.2e-5 or better. The bar has not moved; the headroom has, and the entry says so.
 ///
 /// The other side: a joint in the *wrong place* is nowhere near this. Over the same minute the
 /// fastest-moving joint of a tick moves a median **0.0378** in one tick and its quietest tick
@@ -2724,9 +2733,39 @@ struct Captured {
     fade_length: f32,
     /// `+0x3c`, the playing clip has run out.
     finished: bool,
+    /// The rider's own `+0x748`: 0 while riding, the reason while it is being put back on. Read for
+    /// the one exception below — the frame a wreck is declared on, which is the one frame the game
+    /// leaves the animation unstepped.
+    wreck: u32,
+    /// Whether the animation object moved at all between the row before this one and this one.
+    ///
+    /// Two stepped frames of this recording are never identical — the clip clock, the ramp or a lag
+    /// axis moves on every one of 1489 of them — so a row the object held still on is a frame the
+    /// game did not step the animation on. This recording has one: tick 3259, the frame the wreck
+    /// is declared on, where `+0x748` goes from 0 to 5 and the request block moves while the
+    /// machine, both clocks, both lag records and all 22 joints hold still to the bit. The port's
+    /// step of that frame has nothing to be compared against.
+    fresh: bool,
+    /// Whether this row is the row before it *in every field*, the recorder's own bookkeeping aside.
+    ///
+    /// The recorder reads the object once per frame counter tick, as soon as PINE answers the
+    /// counter's change, and when the frames run long — this recording's first wreck makes a
+    /// hundred of them do that — the read can land before that frame's animation step and take the
+    /// frame before's work a second time. The frame's own work then turns up in a later row on top
+    /// of its own, so a pair with two steps in it and no repeated row to find it by is the price of
+    /// a slip that is not repaid on the very next frame. Nine rows of this recording are rereads,
+    /// and the stretch that holds them is not compared: see the stepping test.
+    reread: bool,
     /// The 22 joints: the blended quaternion at `+0x50` of each record and the translation at `+0x40`.
     rot: Vec<[f32; 4]>,
     pos: Vec<[f32; 4]>,
+    /// **V15.** The pose the cross-fade ramp fades *from*: the snapshot buffers behind `+0x248`
+    /// (one quaternion a joint) and `+0x24c` (one translation a joint), in the same joint order.
+    ///
+    /// Empty on a capture taken before the spec carried the two arrays, and then every tick with
+    /// the ramp up goes back to being a pose the port has nothing to fade against.
+    under_rot: Vec<[f32; 4]>,
+    under_pos: Vec<[f32; 4]>,
     /// The rest of the machine's own state, in the order [`game_sim::vehicle_anim::Driver`] holds it:
     /// `+0x8f4` the asked-for state, `+0x680` from_table, `+0x684` holding, `+0x688` started,
     /// `+0x690` the rate, `+0x8dc`/`+0x8e0`/`+0x8e4` the three cross-fade phases, `+0xa3c` the
@@ -2832,6 +2871,43 @@ fn captured_joints() -> Option<(Vec<Captured>, [u32; 60])> {
         );
     }
 
+    // The pose snapshot's two arrays (V15). A capture taken before the spec carried them reads
+    // without them — the ramp ticks are then skipped the way V12 skipped them — so this is a
+    // question about the file and not an assert.
+    let has_under = cap.columns.iter().any(|c| c == "ur0.q.x");
+    if !has_under {
+        println!(
+            "NOTE: {} has no pose-snapshot columns, so it predates V15 and the ticks with the \
+             cross-fade ramp up cannot be posed. Re-record it: see watch/rider-joints.toml",
+            path.display()
+        );
+    } else {
+        // Both buffers are allocated on the first restart and reused for good, so a pointer that
+        // moved means the object moved and the two arrays are not this object's snapshot.
+        for (what, name) in [("rotations", "snap_rot_buf"), ("translations", "snap_pos_buf")] {
+            let first = int(0, name);
+            assert!(first != 0, "the snapshot's {what} buffer is null: the original never restarted \
+                                 a motion on this object, so there is no snapshot to fade from");
+            for row in 1..cap.rows.len() {
+                assert_eq!(
+                    int(row, name), first,
+                    "row {row}: the snapshot's {what} buffer moved, so the capture's two arrays are \
+                     not one object's snapshot"
+                );
+            }
+        }
+        // `anim_rewind`'s tag argument is null at all five of its call sites in this image, so the
+        // tag buffer is never made and the snapshot is never tagged. A capture that says otherwise
+        // is a capture of something this port does not model.
+        for row in 0..cap.rows.len() {
+            assert_eq!(
+                int(row, "snap_tagged"), 0,
+                "row {row}: the original's pose snapshot carries tags, which no call site in this \
+                 image asks for"
+            );
+        }
+    }
+
     // The clip table is filled when the level loads and never written again, so one row's is every
     // row's — and a capture where that is not true is a capture of two different riders.
     let table = hex(0, "clip_table");
@@ -2842,6 +2918,75 @@ fn captured_joints() -> Option<(Vec<Captured>, [u32; 60])> {
     for row in 1..cap.rows.len() {
         assert_eq!(hex(row, "clip_table"), table, "row {row}: the clip table changed under us");
     }
+
+    // Which rows moved the animation object — see `Captured::fresh`. The columns that count are the
+    // object's own: the machine, both clocks, the two lag records and the 66 joint and snapshot
+    // quadwords. The recorder's bookkeeping, the chain's guards, the two buffer pointers, the wreck
+    // reason and the request block — which the *vehicle* writes in front of the step — are all left
+    // out, because the question is whether the animation stepped and not whether anything did.
+    let housekeeping = ["frame", "frame_counter", "time", "wall", "dt"];
+    let not_the_object = [
+        "actor_type",
+        "actor_ctl_src",
+        "rider_type",
+        "rider_ctl_src",
+        "joint_count",
+        "anim_dir",
+        "clip_table",
+        "snap_rot_buf",
+        "snap_pos_buf",
+        "snap_tagged",
+        "wreck_reason",
+    ];
+    let watched: Vec<usize> = (0..cap.columns.len())
+        .filter(|&i| {
+            let name = cap.columns[i].as_str();
+            !housekeeping.contains(&name)
+                && !not_the_object.contains(&name)
+                && !name.starts_with("req_")
+        })
+        .collect();
+    // If a rename ever empties that set, every row would read as a frame the game did not step and
+    // the comparison would quietly stop comparing anything.
+    assert!(
+        watched.len() >= 300,
+        "only {} of the capture's {} columns were taken for the animation object's own state, so \
+         the spec's column names have moved and this can no longer tell a frame that stepped from \
+         one that did not",
+        watched.len(),
+        cap.columns.len()
+    );
+    let fresh: Vec<bool> = (0..cap.rows.len())
+        .map(|row| row == 0 || watched.iter().any(|&i| cap.rows[row][i] != cap.rows[row - 1][i]))
+        .collect();
+    // A reread is the stronger thing: not one watched field of the row moved, the request block and
+    // the wreck reason included, which is the recorder having read one frame's work twice.
+    let everything: Vec<usize> = (0..cap.columns.len())
+        .filter(|&i| !housekeeping.contains(&cap.columns[i].as_str()))
+        .collect();
+    let reread: Vec<bool> = (0..cap.rows.len())
+        .map(|row| {
+            row > 0 && everything.iter().all(|&i| cap.rows[row][i] == cap.rows[row - 1][i])
+        })
+        .collect();
+    let (held, twice) = (
+        fresh.iter().filter(|&&f| !f).count() - reread.iter().filter(|&&r| r).count(),
+        reread.iter().filter(|&&r| r).count(),
+    );
+    if held + twice > 0 {
+        println!(
+            "NOTE: this capture has {held} rows the animation object held still on and {twice} the \
+             recorder read twice, of {}; neither is compared against one step of the port",
+            cap.rows.len()
+        );
+    }
+    assert!(
+        (held + twice) * 20 <= cap.rows.len(),
+        "on {} of {} rows the animation object did not move, which is too much of this capture to \
+         be long frames and a wreck. Re-record it, slower if need be: see watch/rider-joints.toml",
+        held + twice,
+        cap.rows.len()
+    );
 
     let mut out = Vec::with_capacity(cap.rows.len());
     for row in 0..cap.rows.len() {
@@ -2866,6 +3011,9 @@ fn captured_joints() -> Option<(Vec<Captured>, [u32; 60])> {
             fade_delay: float(&clock, 0x90 - 0x48),
             fade_length: float(&clock, 0x94 - 0x48),
             finished: int(row, "m_finished") != 0,
+            wreck: int(row, "wreck_reason") as u32,
+            fresh: fresh[row],
+            reread: reread[row],
             want: word(&cross, 0x8f4 - 0x8dc) as i32,
             from_table: word(&flags, 0x680 - 0x680) != 0,
             holding: word(&flags, 0x684 - 0x680) != 0,
@@ -2899,6 +3047,12 @@ fn captured_joints() -> Option<(Vec<Captured>, [u32; 60])> {
                 .map(|j| {
                     ["x", "y", "z", "w"].map(|lane| num(row, &format!("j{j}.t.{lane}")))
                 })
+                .collect(),
+            under_rot: (0..if has_under { JOINTS } else { 0 })
+                .map(|j| ["x", "y", "z", "w"].map(|lane| num(row, &format!("ur{j}.q.{lane}"))))
+                .collect(),
+            under_pos: (0..if has_under { JOINTS } else { 0 })
+                .map(|j| ["x", "y", "z", "w"].map(|lane| num(row, &format!("ut{j}.t.{lane}"))))
                 .collect(),
         });
     }
@@ -3137,9 +3291,12 @@ fn the_originals_posed_rider_and_the_ports_agree_joint_by_joint() {
 ///      an error cannot hide by accumulating.
 ///   2. **the clock** — the clip the blend drove and the second it drove it to, against the motion
 ///      object's own `+0x50`/`+0x54`. This is the part that tells a wrong clip from a right clip at
-///      the wrong phase, and it is checked on all 1500 ticks, including the blends of two and four
-///      clips whose pose the port cannot reproduce.
-///   3. **the pose** — the 22 joints, wherever the port draws the blend it picked.
+///      the wrong phase, and it is checked on all 1500 ticks, including the ticks whose pose the
+///      port does not draw.
+///   3. **the pose** — the 22 joints, wherever the port draws the blend it picked. **V15** seeds
+///      the renderer's pose snapshot from the capture's own two buffers, so the ticks with the
+///      cross-fade ramp up — a fifth of the recording, and all four of the blends that fade — are
+///      posed and compared here too instead of being skipped for want of a pose to fade from.
 #[test]
 fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
     use game_sim::vehicle_anim as va;
@@ -3160,13 +3317,70 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
     let mut modes = [0usize; 6];
     let mut not_posed: std::collections::BTreeMap<&'static str, usize> = Default::default();
     let mut posed = 0usize;
+    // How many of the posed ticks were the ones V15 widened the capture for: the ramp against the
+    // pose snapshot still running. `faded` is the subset whose blend entry actually fades — the
+    // free-running advance draws its clip alone whatever `+0x68c` says, which this recording's
+    // wrecks are the proof of, so a mode-0 tick with the ramp up is not a fade and does not count
+    // towards what the snapshot bought.
+    let mut ramped = 0usize;
+    let mut faded = 0usize;
+    // Pairs the game did not step the animation between, and pairs inside the stretch the
+    // recorder's sample phase slipped on. Neither is one step of the port; both are bounded below.
+    let mut held_still = 0usize;
+    let mut slipped = 0usize;
     let mut gap = 0usize;
     let mut joint = (0.0f32, 0usize, 0u64, String::new());
+    let mut fade_worst = (0.0f32, 0u64, 0usize, "");
     let mut snapshot = game_sim::motion::Snapshot::default();
     let mut diag: std::collections::BTreeMap<(i32, u8), (f32, usize, f32, usize, usize)> = Default::default();
 
+    // The stretch of the recording the recorder's sample phase slipped on, from the first row it
+    // read twice to the last (`Captured::reread`): ticks 3603..=3706 here, the hundred frames after
+    // the first wreck, where the frames ran long enough for the read to land before the animation
+    // step. Inside it a row can be one step behind its label with nothing in the data to say so —
+    // the slip is repaid a frame or three later, and the pair it is repaid on has two steps in it
+    // and is not a reread — so the unit that can be trusted here is the stretch and not the row,
+    // and the whole stretch is left out. Outside it every pair is compared.
+    let slip = rows
+        .iter()
+        .filter(|r| r.reread)
+        .fold(None::<(u64, u64)>, |range, r| {
+            Some(match range {
+                None => (r.tick, r.tick),
+                Some((lo, hi)) => (lo.min(r.tick), hi.max(r.tick)),
+            })
+        });
+    let in_slip = |tick: u64| slip.is_some_and(|(lo, hi)| (lo..=hi).contains(&tick));
+
     for pair in rows.windows(2) {
         let (before, now) = (&pair[0], &pair[1]);
+        if in_slip(before.tick) || in_slip(now.tick) {
+            slipped += 1;
+            *not_posed
+                .entry("inside the stretch the recorder's sample phase slipped on")
+                .or_default() += 1;
+            continue;
+        }
+        // A pair the game did not step the animation between (`Captured::fresh`) — the wreck's own
+        // first frame — and the pair after it, which then carries that frame's work on top of its
+        // own. One step of the port is neither, so neither is compared.
+        if !now.fresh || !before.fresh {
+            // Every frame this recording leaves unstepped is a wreck being declared: `+0x748` is
+            // already the reason on the row that held still.
+            let held = if now.fresh { before } else { now };
+            assert_ne!(
+                held.wreck, 0,
+                "tick {} held the whole animation object still and no wreck was declared on it, \
+                 so the game skips the animation step for some other reason as well — that \
+                 reason wants finding before these ticks are written off",
+                held.tick
+            );
+            held_still += 1;
+            *not_posed
+                .entry("the game did not step the animation between this pair of rows")
+                .or_default() += 1;
+            continue;
+        }
         let mut note = |name: &'static str, mine: f32, theirs: f32| {
             let off = (mine - theirs).abs();
             let seen = worst.entry(name).or_insert((0.0, 0, 0.0, 0.0));
@@ -3235,6 +3449,10 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
             "tick {}: the port's machine latched state {} and the original ran {}",
             now.tick, d.state, now.state
         );
+        // The state it came out of. The one frame of this recording that disagrees about it is the
+        // wreck's first, where the original latched twice inside a frame the capture reads once
+        // (35 -> 30 -> 40, with `+0x8ec` left on the intermediate 30) — and that is a frame the
+        // game did not step the animation on, so the pair is already out above.
         assert_eq!(
             d.prev, now.prev,
             "tick {}: the port came out of state {} and the original came out of {}",
@@ -3317,20 +3535,54 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
 
         // --- the pose -------------------------------------------------------------------------
         modes[usize::from(frame.blend.mode())] += 1;
-        if now.ramp != 0.0 {
-            // What the ramp fades *from* is a snapshot buffer the capture does not carry, so the
-            // port has nothing to fade against on these ticks.
-            *not_posed.entry("the cross-fade against the pose snapshot had not run out").or_default() += 1;
-            continue;
+        // What the ramp fades *from* is the pose snapshot, and V15 widened the spec to carry it:
+        // the original's own two buffers, read off the same object on the same tick. Handing them
+        // to the renderer as the pose under the blend is the same seeding the machine gets above —
+        // the comparison stays one step of one tick, and these ticks are posed like any other.
+        //
+        // Whatever the port's own restart would have put there is overwritten here on purpose,
+        // including `Set::rewind`'s copy of the live pose a moment ago: the question this test asks
+        // is whether the port's *blend* is the original's, not whether its snapshot is.
+        if now.under_rot.is_empty() {
+            if now.ramp != 0.0 {
+                *not_posed
+                    .entry("the cross-fade ramp was up and this capture carries no pose snapshot")
+                    .or_default() += 1;
+                continue;
+            }
+        } else {
+            for j in 0..JOINTS {
+                set.under.rot[j] = now.under_rot[j];
+                set.under.pos[j] = now.under_pos[j];
+            }
+            if now.ramp != 0.0 {
+                ramped += 1;
+            }
         }
-        if now.fading {
-            // Same again for the clip-to-clip transition's own second clip.
-            *not_posed.entry("a clip-to-clip transition was running").or_default() += 1;
+        if now.fading || before.fading {
+            // Same again for the clip-to-clip transition's own second clip — and for the frame the
+            // transition *ends* on, which V15's capture is the first to compare. `+0x80` is 0 by
+            // the time the row is read there, but the pose in the same row is still the
+            // transition's: on all three of this recording's endings the original's joints are the
+            // free-running clip's own pose 2.6e-3 away with every lane's sign flipped, which is
+            // the outgoing clip's quaternion still in the mix and not a frame of the clip alone.
+            // The port has no second clip here at all, so the frame is skipped like the rest.
+            *not_posed
+                .entry("a clip-to-clip transition was running, or ended inside this frame")
+                .or_default() += 1;
             continue;
         }
         // The one shape of tick whose *pose* the port does not reproduce: the pose grid's middle
         // row (`turn_still`, the three fore/aft columns) with the mix axis past centre, so the
         // blend's pair is the row's *back* column against its middle one.
+        //
+        // **V15** widened this by one band. V12's capture only ever reached the row through the
+        // two-clip blend of the band *between* `band[0]` and `band[1]`; this one also reaches it
+        // through the four-clip blend of the two interpolating bands either side, where the same
+        // back column comes in with the weight the interpolation gives it — and the port is off by
+        // that weight times the same distance, from 1.7e-4 where the mix axis is barely past centre
+        // to 1.17 where it is all the way over. One cause, three bands, so the skip is the three
+        // bands that pair the row (everything but the fastest, which pairs `turn_riding` instead).
         //
         // The reason is in the data, and the entry works it out. On this disc `turn_still_Bck` and
         // `turn_still_Mid` are the same animation — sampled twenty times over their length they
@@ -3346,11 +3598,7 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
         //
         // Skipped with its reason counted, and its shape asserted below, so a port that gets a pose
         // wrong *anywhere else* — including the front half of this very row — still fails.
-        if now.state == va::TURN_RIDING
-            && now.band >= now.bands[0]
-            && now.band <= now.bands[1]
-            && now.mix[0] > 0.5
-        {
+        if now.state == va::TURN_RIDING && now.band <= now.bands[2] && now.mix[0] > 0.5 {
             gap += 1;
             *not_posed
                 .entry("the pose grid's middle row past centre, where this disc's back column is a duplicate")
@@ -3391,6 +3639,12 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                     (set.pose.pos[j][lane], now.pos[j][lane], "the translation"),
                 ] {
                     let off = (mine - theirs).abs();
+                    // V15's own number: the worst lane on the ticks that are a *fade* out of the
+                    // original's pose snapshot rather than a sample, which is what widening the
+                    // capture bought and the only thing the floor below can be read against.
+                    if now.ramp != 0.0 && frame.blend.mode() != 0 && off > fade_worst.0 {
+                        fade_worst = (off, now.tick, j, what);
+                    }
                     if off > joint.0 {
                         joint = (
                             off,
@@ -3407,6 +3661,9 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
                     }
                 }
             }
+        }
+        if now.ramp != 0.0 && frame.blend.mode() != 0 {
+            faded += 1;
         }
         posed += 1;
     }
@@ -3459,12 +3716,13 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
         joint.3,
         joint.0
     );
-    // The gap is 27 ticks of 1499 and its shape is pinned above. If a later change makes it wider
-    // the shape has moved and this test should say so rather than keep skipping quietly.
+    // The gap is 59 ticks of 1499 — V12 measured 27 of it, through the one band its capture
+    // reached — and its shape is pinned above. If a later change makes it wider the shape has
+    // moved and this test should say so rather than keep skipping quietly.
     assert!(
-        gap <= 40,
-        "{gap} ticks of {} fell in the pose grid's middle band with the mix axis at an end, where \
-         the port's pose is known not to match. That is wider than the 27 the entry measured, so \
+        gap <= 90,
+        "{gap} ticks of {} fell on the pose grid's middle row with the mix axis past centre, where \
+         the port's pose is known not to match. That is wider than the 59 the entry measured, so \
          the shape of the gap has changed and wants looking at again.",
         rows.len() - 1
     );
@@ -3474,11 +3732,54 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
          this a proof of the pose; what the rest were: {not_posed:?}",
         rows.len() - 1
     );
+
+    // What the capture's own sampling cost this comparison: 105 pairs of 1499 inside the slipped
+    // stretch and two either side of the wreck's own held frame. A capture that loses much more
+    // than that stretch is a capture to take again, slower.
+    assert!(
+        slipped * 8 <= rows.len(),
+        "{slipped} of {} pairs fall in the stretch the recorder's sample phase slipped on, which \
+         is too much of this recording to compare nothing on: re-record it with the emulator \
+         slowed down (see watch/rider-joints.toml)",
+        rows.len() - 1
+    );
+    assert!(
+        held_still <= 6,
+        "the game left the animation unstepped on enough frames of this recording to cost \
+         {held_still} pairs. One wreck's first frame costs two; this is something else, and the \
+         port steps every frame",
+    );
+
+    // V15's own floor. The ticks with the ramp up are the ones the capture was widened for, and
+    // 104 of this recording's 218 are drawn by an entry that fades; if that collapses, the snapshot
+    // stopped reaching the renderer and the fade is no longer being proved at all.
+    if !rows[0].under_rot.is_empty() {
+        assert!(
+            faded >= 80,
+            "only {faded} of the {ramped} ticks the port posed with the cross-fade ramp up were \
+             drawn by an entry that fades, and this capture carries the pose snapshot for every \
+             tick — the fade against it is what V15 widened the capture to prove, so this is not \
+             proving it"
+        );
+        println!(
+            "  fading out of the original's own pose snapshot: {faded} ticks of the {ramped} with \
+             the ramp up, worst lane {:e} ({} of joint {} at tick {}); the other {} are the \
+             free-running advance, which draws its clip alone whatever the ramp says",
+            fade_worst.0,
+            fade_worst.3,
+            fade_worst.2,
+            fade_worst.1,
+            ramped - faded
+        );
+    }
     println!(
         "the port's machine against the original's, one tick ahead each time: {} ticks, every \
          state, ramp, axis and clip time within tolerance (worst: {})\n  blend modes \
-         free/one/two/_/four/pair = {:?}\n  posed and compared joint by joint: {posed} ticks, \
-         worst joint {} ({}) at tick {}, off by {:e} — {}\n  not posed: {not_posed:?}",
+         free/one/two/_/four/pair = {:?}\n  posed and compared joint by joint: {posed} ticks \
+         ({ramped} of them with the cross-fade ramp up), worst joint {} ({}) at \
+         tick {}, off by {:e} — {}\n  not posed: {not_posed:?}\n  pairs the \
+         original did not step the animation on: {held_still}\n  pairs inside the stretch the \
+         recorder's sample phase slipped on: {slipped}",
         rows.len() - 1,
         worst
             .iter()
