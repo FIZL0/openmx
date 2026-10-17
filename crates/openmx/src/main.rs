@@ -527,13 +527,13 @@ fn run() -> Result<(), String> {
         }
     };
     if let Some(chassis) = &chassis {
-        let slots = chassis.lib.clip[..game_sim::trick::SLOTS].iter().filter(|c| c.is_some()).count();
-        let poses = chassis.lib.clip[game_sim::trick::SLOTS..].iter().filter(|c| c.is_some()).count();
+        let slots = chassis.stance.lib.clip[..game_sim::trick::SLOTS].iter().filter(|c| c.is_some()).count();
+        let poses = chassis.stance.lib.clip[game_sim::trick::SLOTS..].iter().filter(|c| c.is_some()).count();
         println!(
             "chassis: {} -> {}.psg, {} clips bound, {slots} of {} gesture slots, {poses} of {}              pose clips, nodes {:?}",
             vehicle.mcf,
             chassis.geometry,
-            chassis.set.clips.len(),
+            chassis.stance.set.clips.len(),
             game_sim::trick::SLOTS,
             game_sim::vehicle_anim::POSE_CLIPS.len(),
             chassis.nodes,

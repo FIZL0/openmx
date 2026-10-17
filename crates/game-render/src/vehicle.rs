@@ -5,13 +5,18 @@
 //! *bind* transform, read once per frame off the model the archive shipped
 //! (`chassis.model.world(i)`), so the forks never compressed although the ground step prints their
 //! travel every frame, the wheels never turned although their angular velocity is right there, the
-//! front end never steered with the stick and the swingarm never moved. And S25 — the vehicle's own
-//! sixty-state animation machine — asked for the bike's clips every frame with nothing to consume
-//! the pose it answered.
+//! front end never steered with the stick and the swingarm never moved. And S25 — the sixty-state
+//! animation machine — asked for the bike's clips every frame with nothing to consume the pose it
+//! answered.
 //!
-//! [`Chassis`] is the other side of both. It is [`crate::anim::Set`] with the *vehicle's* driver,
-//! clip table and clock beside it, exactly as [`crate::rider::Body`] is that set with the rider's —
-//! and then the half a rider does not have.
+//! [`Chassis`] is the other side of both. It is a [`crate::anim::Stance`] — one animation set with a
+//! machine, a clip table and a clock beside it — and then the half a rider does not have.
+//!
+//! **Whose machine that is, is not the bike's.** V12 proved the sixty-state machine is the *rider's
+//! body*: 22 joints, clips out of `Rider\Anim\`, all sixty slots bound. The 12 `bike_*` clips a
+//! bike archive ships are the other machine's ([`crate::anim::Rig`]). V13 pointed the sixty-state
+//! machine at the set it belongs to and left the bike stepping a stance of its own; what is left of
+//! the re-pairing is in [`Chassis`]' own docs and in V13's journal.
 //!
 //! ## Two halves, because the original has two
 //!
@@ -56,15 +61,14 @@
 //! move them away from. A different bike with a different rake gets different numbers from the same
 //! code, which is the point.
 
-use crate::anim::Set;
+use crate::anim::{Set, Stance};
 use crate::disc::Res;
 use crate::mat::{M4, V3, v3};
 use crate::skin::{Skeleton, skin};
 use crate::world::Loaded;
 use game_sim::ride::Ride;
 use game_sim::trick::{SLOTS, Stunt, Tricks};
-use game_sim::vehicle_anim::{self as va, Driver, Library, Params, Request};
-use game_sim::motion::{Animations, Player, Snapshot};
+use game_sim::vehicle_anim::{self as va, Params, Request};
 use ps2_float::F;
 
 /// The name every `.sub` on this disc places its unmoving parts at, and the chassis skeleton's root.
@@ -210,29 +214,25 @@ impl Drive {
     }
 }
 
-/// A chassis ready to be drawn: the bike's clips bound to its own skeleton, the vehicle's animation
-/// machine, and the transforms the last frame left on every node.
+/// A chassis ready to be drawn: the bike's clips bound to its own skeleton, an animation machine
+/// stepping them, and the transforms the last frame left on every node.
 ///
 /// This is to the bike what [`crate::rider::Body`] is to the rider, with two differences. The
 /// driving is *not* the simulation's — nothing in the ported ride runs a
-/// [`game_sim::vehicle_anim::Driver`], because the function that decides its state is the vehicle's
+/// [`game_sim::vehicle_anim::Driver`], because the function that decides its state is the actor's
 /// own update and is not ported (see [`Chassis::want`]) — and the pose a clip writes is not the last
 /// word, because the drives come after it.
+///
+/// **Which machine this is, is V13's unfinished half.** [`Stance`] is the *body's* sixty-state
+/// machine, and the 12 `bike_*` clips a bike archive ships belong to the other one
+/// ([`crate::anim::Rig`], whose table is named `bike_<stunt>` and `bike_air_Fwd/Mid/Bck` — exactly
+/// those 12). V13 gave the sixty-state machine the set it belongs to, which is the rider's; the bike
+/// is still stepped by a stance of its own, because moving it onto the simulation's own
+/// [`game_sim::motion`] frame moves what poses the body with it. See the journal's **Not verified**
+/// list.
 pub struct Chassis {
-    /// The clips, the chassis skeleton and the live pose.
-    pub set: Set,
-    /// The sixty-state clip table, as [`Library::load`] filled it.
-    pub lib: Library,
-    /// The vehicle's animation machine.
-    pub driver: Driver,
-    /// The motion object's clock — the same one the rider's animation runs on, because it is the
-    /// same library underneath.
-    pub player: Player,
-    /// The pose a cross-fade fades from, as the simulation records it.
-    pub snapshot: Snapshot,
-    /// The machine's own numbers. See [`Chassis::load`] for where they come from, which is not the
-    /// disc.
-    pub params: Params,
+    /// The bike's clips, the chassis skeleton, the live pose and the machine stepping them.
+    pub stance: Stance,
     /// The model to load and to draw the chassis as: the `.mcf`'s own `SLTFile`, which is `bike` for
     /// every bike on this disc.
     pub geometry: String,
@@ -246,25 +246,19 @@ pub struct Chassis {
     /// Every node's transform as the last [`Chassis::frame`] left it — the pose, the drives and the
     /// tree, composed. Empty until the first frame.
     pub world: Vec<M4>,
-    /// A clip has written a pose. Unlike the rider's ([`crate::rider::Body::posed`]) this is not
-    /// what decides whether the chassis can be drawn — a bike's bind pose is the bike, where a
-    /// rider's is a body with its arms out — so the shell draws [`Chassis::world`] from the first
-    /// frame either way. It is kept because "no clip of the sixty states bound" and "the state
-    /// machine is asking for a clip that is not on this disc" look identical on screen otherwise.
-    pub posed: bool,
 }
 
 impl Chassis {
-    /// Read a bike's animation set and bind every clip its sixty states name.
+    /// Read a bike's animation set and bind every clip of it a state names.
     ///
     /// `mcf` is the `.sub`'s own `[Objects] MCF` (`bike.mcf`), which names the chassis `.psg` as its
     /// `SLTFile` — so the skeleton the clips are bound to is the one the shell draws. `prefix` is
-    /// what goes in front of a stunt's name: the vehicle's loader bakes **no** actor word in, unlike
-    /// the rider's, so a bike's is `bike_` and that is what puts `bike_nacnac` in the table.
+    /// what goes in front of a stunt's name: this machine's loader bakes **no** actor word in, so a
+    /// bike's is `bike_` and that is what puts `bike_nacnac` in the table.
     ///
-    /// Three passes, in the loader's own order: the `.mcf`'s own motions (the airborne poses), then
-    /// the 24 gesture slots with no `UsedForBike` gate, then the 36 named pose clips — the last two
-    /// being [`Library::load`] through this crate's [`Set`].
+    /// The three passes are [`Stance::new`]'s, which is the body's loader; what a bike's set answers
+    /// with is the difference. The geometry is read before the table is filled because the set is
+    /// moved into the stance.
     pub fn load(
         archives: Vec<Res>,
         mcf: &str,
@@ -272,51 +266,23 @@ impl Chassis {
         stunts: &[Stunt],
         params: Params,
     ) -> Result<Chassis, String> {
-        let mut set = Set::load(archives, mcf)?;
-        set.load_listed();
-        let mut lib = Library::load(prefix, stunts, &mut set);
-        // The 36 pose clips, by the prefix the gesture slots already use.
-        //
-        // [`Library::load`] asks for them by bare name — `air_Mid`, `turn_riding_Fwd` — and a bike's
-        // `.mcf` names its own motions with the actor's word in front: `NAME=bike_air_Mid`. So the
-        // ported loader's `bound("air_Mid")` finds nothing on a bike set, and the airborne row, which
-        // is the one row of the grid this disc *has* clips for, comes out empty. The prefix is the
-        // difference and it is the same `bike_` the gesture slots are named with
-        // ([`Library::stunt_name`] bakes no actor word in, which is why the vehicle's prefix carries
-        // one), so each empty slot is asked for a second time with it. Only the empty ones: a set
-        // that answered to the bare name keeps what it bound.
-        //
-        // This is the port's own reading of a seam the decompilation was not re-read for; see the
-        // journal's **Not verified** list.
-        for (i, name) in va::POSE_CLIPS.iter().enumerate() {
-            let slot = SLOTS + i;
-            if lib.clip[slot].is_none() {
-                let prefixed = format!("{prefix}{name}");
-                set.load(&prefixed);
-                lib.clip[slot] = set.bound(&prefixed);
-            }
-        }
+        let set = Set::load(archives, mcf)?;
         let geometry = set.set.geometry();
-        let nodes = Nodes::of(&set.skeleton);
-        let shape = Geometry::of(&set.skeleton, nodes);
+        // The table is filled the body's way, prefix retry and all ([`Stance::new`]): on a bike's set
+        // that binds the 9 gesture clips the archive ships and the three `bike_air_*` poses, and
+        // leaves the grid's 36 `turn_*`, `hold_*`, `get_ready_*` slots empty — they are the rider's
+        // clips and no bike archive has one.
+        let stance = Stance::new(set, prefix, stunts, params);
+        let nodes = Nodes::of(&stance.set.skeleton);
+        let shape = Geometry::of(&stance.set.skeleton, nodes);
         Ok(Chassis {
-            set,
-            lib,
-            // `extra` is "which added record the selection takes instead of the state machine", and
-            // **negative is none** — so a zeroed driver asks for record 0 on its very first frame and
-            // the machine never makes a selection at all. The original's vehicle constructor sets
-            // this; `Driver::default()` cannot, because `Default` for an `i32` is zero.
-            driver: Driver { extra: -1, ..Driver::default() },
-            player: Player::default(),
-            snapshot: Snapshot::default(),
-            params,
+            stance,
             geometry,
             nodes,
             shape,
             front_roll: Roll::default(),
             rear_roll: Roll::default(),
             world: Vec::new(),
-            posed: false,
         })
     }
 
@@ -329,44 +295,7 @@ impl Chassis {
     /// the request is run as a self-placing actor and [`game_sim::vehicle_anim::Frame::place`] comes
     /// back `None`.
     pub fn frame(&mut self, dt: F, want: i32, r: &Request, drive: Drive) -> va::Frame {
-        // The machine is `Copy`, which is what lets the clip-length closure borrow the set while the
-        // step runs.
-        let mut driver = self.driver;
-        driver.want = want;
-        let frame = {
-            let set = &self.set;
-            driver.frame(dt, &self.params, r, &self.lib, true, |id| {
-                set.timing(Some(id)).duration
-            })
-        };
-        self.driver = driver;
-
-        if frame.restart {
-            self.set.rewind(&mut self.snapshot);
-        }
-        // The two played-once groups put a clip on with a cross out of whatever was playing. A state
-        // of those groups with no clip of its own still reaches the engine's play in the original,
-        // which stores the null handle — and a null handle in the clock is "nothing is playing".
-        if let Some(play) = frame.play {
-            match play.put() {
-                Some(put) => {
-                    let playing = self.set.timing(self.player.clip).duration;
-                    if self.player.play(put, playing) {
-                        self.set.rewind(&mut self.snapshot);
-                    }
-                }
-                None => {
-                    self.player.clip = None;
-                    self.player.finished = false;
-                    self.player.fade.on = false;
-                    self.player.time = F::ZERO;
-                }
-            }
-        }
-        let clip = self.set.timing(frame.blend.clock_clip(&self.player));
-        frame.blend.run(&mut self.player, dt, &clip);
-        let posed = self.set.apply_vehicle(frame.blend, &self.player);
-        self.posed |= posed;
+        let frame = self.stance.frame(dt, want, r);
         self.drive(dt.0, drive);
         frame
     }
@@ -378,7 +307,7 @@ impl Chassis {
     /// the chassis' nodes after the blend, and they run whether or not the blend wrote anything. A
     /// bike whose every clip is missing still has a working suspension.
     pub fn drive(&mut self, dt: f32, d: Drive) {
-        let mut local = self.set.skeleton.locals(&self.set.pose);
+        let mut local = self.stance.set.skeleton.locals(&self.stance.set.pose);
         let front = self.front_roll.step(dt, d.front_spin);
         let rear = self.rear_roll.step(dt, d.rear_spin);
         let shape = self.shape;
@@ -432,14 +361,14 @@ impl Chassis {
                 }
             }
         }
-        self.world = self.set.skeleton.compose(&local);
+        self.world = self.stance.set.skeleton.compose(&local);
     }
 
     /// A node's live transform by name, for a `.sub` part to be placed at — the whole point of the
     /// drives on the drawing side. `Bike` answers with the chassis' own root, which is what an
     /// unmoving part asks for.
     pub fn node(&self, name: &str) -> Option<M4> {
-        let j = self.set.skeleton.find(name)?;
+        let j = self.stance.set.skeleton.find(name)?;
         self.world.get(j).copied()
     }
 
@@ -452,7 +381,7 @@ impl Chassis {
     /// to read its mounts from the same place the shell does, so the set that owns the skeleton
     /// answers for them.
     pub fn node_rest(&self, name: &str) -> Option<V3> {
-        self.set.skeleton.at(name)
+        self.stance.set.skeleton.at(name)
     }
 
     /// Write this frame's pose into the loaded chassis model, as the triangles the scene draw reads
@@ -466,8 +395,10 @@ impl Chassis {
     /// Which animation state to run, read off the ride and the trick machine.
     ///
     /// **This is the port's own reading and not a port.** The function that writes
-    /// [`game_sim::vehicle_anim::Driver::want`] is the vehicle's own update, which S25 explicitly did
-    /// not port — the module is handed the state and answers with the call. Three of the machine's
+    /// [`game_sim::vehicle_anim::Driver::want`] is the body's own update — ported since V11 as
+    /// [`game_sim::vehicle_anim::Update`], which needs the half of the request block nothing in the
+    /// port writes (the gate's clock, the wreck, the commanded throttle), so the shell still reads
+    /// the state off the ride instead. Three of the machine's
     /// sixty states are reachable from what the ported simulation does keep, which is what this
     /// answers with:
     ///
@@ -535,37 +466,46 @@ impl Geometry {
     }
 }
 
-/// The animation machine's own numbers, as the port runs them.
+/// The sixty-state machine's own numbers, **measured off the running original** (V12).
 ///
-/// **None of these is off the disc and none is read out of the original.** They are the vehicle
-/// constructor's, and the vehicle's constructor is not ported — S25 ports the step and is handed its
-/// `Params`. What they do and why these values:
+/// V9 had to guess every one of these: the five fade rates were the rider constructor's own 3.0, the
+/// stunt cross-fade cap a quarter second, and the pose grid's three thresholds zero because no
+/// `turn_*` clip is on a bike archive. V12 recorded the body's own object over PINE for 1500 frames
+/// of the human's recording and read them off; all seven are constant for the whole recording.
 ///
-/// * the five fade rates are how fast the cross-fade ramp falls, per second, and they are all the
-///   rider constructor's own `3` ([`game_sim::motion::Params::blend_rate`]) — the one rate in the
-///   ported animation code that *was* read. A rate of zero would be worse than a wrong rate: the ramp
-///   is put to 1 on every restart and only the rate brings it down, so a zero leaves every state
-///   showing all of the pose it started from and the bike would never animate at all.
-/// * `cross_cap` caps the stunt cross-fade at a quarter second. It must be above zero: the arm
-///   divides by `min(cross_cap, half the clip)`, and a zero makes that weight a non-number.
-/// * `start_phase` is where the clip being crossed out of is picked up on the frame the cross starts,
-///   and zero is its beginning.
-/// * the three `band` thresholds cut forward speed up for the grounded pose grid. They are left at
-///   zero because **no `turn_*` clip is on this disc** — every row of that grid is empty on every
-///   bike archive, so the thresholds cannot change what is drawn, and inventing three speeds would
-///   be three numbers nobody could check.
+/// | field | what it does | measured | V9's guess |
+/// |---|---|---|---|
+/// | `rate_ready` | the start-line group's fade rate, per second | 0.25 | 3.0 |
+/// | `rate_hold` | the wreck-and-hold group's | 0.25 | 3.0 |
+/// | `rate_default` | everything with no rate of its own | 4.0 | 3.0 |
+/// | `rate_pose` | the airborne row's and the backflip's | 3.25 | 3.0 |
+/// | `rate_stunt` | a gesture slot's, and `nohandedlander`'s | 4.0 | 3.0 |
+/// | `cross_cap` | the longest a stunt cross-fade may take, in seconds | 1.0 | 0.25 |
+/// | `band` | the pose grid's three thresholds on the forward speed | 7.3333, 14.6666, 21.9999 | 0, 0, 0 |
 ///
-/// Every one of these is in the journal's **Not verified** list.
+/// The three thresholds are feet per second — `1/1.46666` is the `0.681818` the shell turns a chassis
+/// speed into mph with — so the grid's rows change over at 5, 10 and 15 mph exactly. With them at
+/// zero every grounded frame took the row's top region; with them measured, the two regions below
+/// `band[1]` are the four-clip blend that interpolates between two rows, which is the arm V11 ported
+/// and nothing had yet asked for.
+///
+/// `start_phase` is the one field here that is still not read off the original. V12 found that
+/// `+0x8f8`, which S25 read as this constant, is *last frame's progress through the gesture* and
+/// takes 135 distinct values over the recording — so whatever the configured start phase is, it is
+/// not that field. Zero is the clip's beginning, and the arm that reads it (the stunt cross-fade)
+/// never ran in the recording, so nothing has measured it. The two time constants the two eased axes
+/// carry are not here either, because the original does not keep them here: they are
+/// [`crate::anim::MIX_TAU`] and [`crate::anim::PHASE_TAU`].
 pub fn params() -> Params {
     Params {
-        rate_stunt: F(3.0),
-        rate_default: F(3.0),
-        rate_pose: F(3.0),
-        rate_hold: F(3.0),
-        rate_ready: F(3.0),
-        cross_cap: F(0.25),
+        rate_stunt: F(4.0),
+        rate_default: F(4.0),
+        rate_pose: F(3.25),
+        rate_hold: F(0.25),
+        rate_ready: F(0.25),
+        cross_cap: F(1.0),
         start_phase: F::ZERO,
-        band: [F::ZERO; 3],
+        band: [F(7.3333), F(14.6666), F(21.9999)],
     }
 }
 
