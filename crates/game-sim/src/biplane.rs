@@ -24,8 +24,14 @@
 //!
 //! What the original hands each of them — the plane's attitude, its airspeed and its angles, the body's
 //! rates — is measured by the plane's measure listener after every integration and read here as given.
-//! The rigid body, the world that steps it, the tires, the measure and the crash test are not in this
-//! module; see the journal entry for what is ported and what is still the original's.
+//!
+//! Below those four, the wheels: each of the three [`Tire`]s has a preforce listener ([`Tire::clear`])
+//! and two force listeners ([`Tire::probe`], which asks the [`World`] where the ground is, then
+//! [`Tire::force`], the strut and the friction), pushing on the body through the [`Body`] trait. Then
+//! the plane's [`collision_force`] (gravity, and the collision object's contact resolution, handed in)
+//! and the [`Crash`] test that sets the wreck reason. The rigid body, the world that steps it, the
+//! measure and the contact resolution are not in this module; see the journal entries for what is
+//! ported and what is still the original's.
 //!
 //! Every field is named by the `biplane.phy` key it is loaded from, where it has one. The loader is
 //! S33's; until it lands the proofs read the values off a save state's live plane.
