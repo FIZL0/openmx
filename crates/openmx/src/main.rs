@@ -147,11 +147,14 @@ use ground::Ground;
 use hud::Hud;
 use moment::{Moment, Shot};
 use pad::{Pads, Throttle, Wiring};
-use window::{Window, key};
+use window::{Window, fit_frame, key};
 
 /// The game's own frame rate. The simulation is not fixed to it — it is handed the wall clock's own
 /// delta — but this is the rate the loop aims at, and the rate the original's video mode flips at.
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
+/// The PS2's own frame, which `--size 640x448` asks for and which a drawing with no window to fit
+/// (`--moment`) is made at.
+const PS2_FRAME: (usize, usize) = (640, 448);
 
 /// How far around the rider the ground is drawn, in terrain samples.
 ///
@@ -282,8 +285,9 @@ struct Args {
     /// Which rider archive to put on the bike, or `none` to ride an empty bike. Nothing on the disc
     /// names a rider — the choice is a menu's, and this shell has no menus.
     rider: String,
-    width: usize,
-    height: usize,
+    /// The frame's size, from `--size`: the PS2-native 640x448 path and the tests. `None` draws at
+    /// the window's own pixels — a window the size of the screen, and a frame that follows it.
+    size: Option<(usize, usize)>,
     scale: usize,
     /// Quit after this long, which is how the acceptance run is made to end by itself.
     seconds: Option<f32>,
@@ -696,8 +700,9 @@ fn run() -> Result<(), String> {
             ));
         }
         let shot = Shot {
-            width: args.width,
-            height: args.height,
+            // No window to fit, so the PS2's own frame unless `--size` says otherwise.
+            width: args.size.unwrap_or(PS2_FRAME).0,
+            height: args.size.unwrap_or(PS2_FRAME).1,
             ground_radius: GROUND_RADIUS,
             chassis: CHASSIS,
         };
@@ -840,13 +845,7 @@ fn run() -> Result<(), String> {
     });
 
     // ---- the window and the pad ---------------------------------------------------------------
-    let mut window = Window::open(
-        &args.display,
-        args.width,
-        args.height,
-        args.scale,
-        "openmx — freeride",
-    )?;
+    let mut window = Window::open(&args.display, args.size, args.scale, "openmx — freeride")?;
     let mut pads = Pads::open(args.pad.as_deref(), args.wiring.clone());
     match &pads.name {
         Some(name) => println!("pad: {name}"),
@@ -874,7 +873,18 @@ fn run() -> Result<(), String> {
 
     // ---- the loop ------------------------------------------------------------------------------
     let light = Lighting::of(&look);
-    let mut frame = Frame::new(args.width, args.height, look.fog_color);
+    // The frame: `--size`'s, which stays put whatever the window does, or the largest 4:3 one inside
+    // the window, which is re-made whenever the window changes size (below).
+    let frame_size = |window: &Window| match args.size {
+        Some(size) => size,
+        None => fit_frame((window.width, window.height), window.scale),
+    };
+    let (width, height) = frame_size(&window);
+    println!(
+        "window {}x{} (screen {}x{}), drawing {width}x{height} at scale {}",
+        window.width, window.height, window.screen.0, window.screen.1, window.scale
+    );
+    let mut frame = Frame::new(width, height, look.fog_color);
     let mut engine = Engine::new();
     let mut world = World {
         place: sim,
@@ -907,6 +917,19 @@ fn run() -> Result<(), String> {
         window.poll();
         if window.closed() || window.held(key::ESCAPE) {
             break;
+        }
+        // A window that changed size gets a frame of its new size rather than the old one stretched
+        // over it — and with it the aspect the camera's field of view and its viewport test read,
+        // which stays 4:3 because that is the shape `fit_frame` keeps.
+        if window.resized() {
+            let (width, height) = frame_size(&window);
+            if (width, height) != (frame.width, frame.height) {
+                frame = Frame::new(width, height, look.fog_color);
+                println!(
+                    "window {}x{}, drawing {width}x{height}",
+                    window.width, window.height
+                );
+            }
         }
         // The pad this frame: the tape's, if one is being ridden, and the host's otherwise. A tape
         // that has run out ends the session — there is no pad behind it to carry on with.
@@ -1308,8 +1331,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         bike: "125sx".to_string(),
         // The stock gear. Every other rider archive on the disc is a repaint of the same body.
         rider: "thq1".to_string(),
-        width: 640,
-        height: 448,
+        size: None,
         scale: 1,
         seconds: None,
         pad: None,
@@ -1408,11 +1430,12 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--size" => {
                 let v = next("WIDTHxHEIGHT")?;
                 let (w, h) = v.split_once('x').ok_or("--size wants WIDTHxHEIGHT")?;
-                args.width = w.parse().map_err(|_| "--size: not a width")?;
-                args.height = h.parse().map_err(|_| "--size: not a height")?;
-                if args.width == 0 || args.height == 0 {
+                let w: usize = w.parse().map_err(|_| "--size: not a width")?;
+                let h: usize = h.parse().map_err(|_| "--size: not a height")?;
+                if w == 0 || h == 0 {
                     return Err("--size: a window has to have some pixels in it".into());
                 }
+                args.size = Some((w, h));
             }
             "--help" | "-h" => {
                 println!(
@@ -1437,6 +1460,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      giving up that trigger's own control, and --pad-pressure says which joystick\n\
                      axes a pad reports its buttons' own pressures on.\n\
                      H toggles the riding overlay, which --hud starts on.\n\
+                     The window opens at the screen's size and the frame is the largest 4:3 one\n\
+                     inside it, re-made when the window is resized; --size draws a fixed frame\n\
+                     instead (640x448 is the PS2's), and --scale draws each frame pixel N times\n\
+                     across and down.\n\
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
                      rider, tumbles the bike and puts you back on it); --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\
