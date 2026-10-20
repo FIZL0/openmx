@@ -1,4 +1,4 @@
-# 2 — s53 the ragdoll in the ride (PART)
+# 2 — s53 the ragdoll in the ride (FINAL)
 
 Task S53. 2026-10-20. S51 and S52 have now landed, so this part does the rest of the task that part 1
 left blocked.
