@@ -26,6 +26,12 @@
 //! `--shot` of each is taken. The settings are kept in `settings.txt` and `controls.txt` beside the
 //! disc; a flag given on the command line wins over the file for the session.
 //!
+//! The main menu has a press-start splash before it (P46): whichever device presses Cross or Start
+//! (Enter or Space on the keyboard) is Player 1, the one device that drives the menus — with the
+//! keyboard, which always may — and the first seat; an idle or virtual pad moves nothing. Circle or
+//! Escape there asks to quit, Back on the main menu goes back to it, and so does 1P's pad being
+//! pulled out.
+//!
 //! # What is the port and what is the shell
 //!
 //! The shell is the thin part. Each piece of the frame below is a proved port, and this file only wires

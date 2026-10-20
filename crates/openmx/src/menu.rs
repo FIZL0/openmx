@@ -1041,8 +1041,7 @@ const FACES: [(Face, &str); 4] = [
 ];
 
 /// The textures, by their name under `ui\tex\`.
-const TEXTURES: [&str; 17] = [
-    "titlescreen",
+const TEXTURES: [&str; 16] = [
     "background",
     "frontend_background_radial",
     "mainmenu_background",
@@ -1072,7 +1071,7 @@ const CHOSEN: [u8; 4] = [255, 255, 255, 255];
 /// The orange the grey background gradient is drawn in. The original tints it from a colour
 /// animator this does not read; this is the main menu's colour off `plan/HUMAN.md`'s screenshot.
 const ORANGE: [u8; 4] = [210, 112, 52, 255];
-/// The splash's title screen, dimmed to a backdrop the logo and the prompt read over.
+/// The splash's still, dimmed to a backdrop the logo and the prompt read over.
 const SPLASH_DIM: [u8; 4] = [110, 110, 110, 255];
 /// Who 1P is, on the splash once someone has pressed: the main menu's orange, lighter, for text.
 const ORANGE_TEXT: [u8; 4] = [255, 170, 90, 255];
@@ -1414,11 +1413,15 @@ impl Painter<'_> {
         self.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Ride")]);
     }
 
-    /// The splash (P46): the disc's own title screen, still and dimmed, the logo over it, and what to
+    /// The splash (P46): a track's still from the disc, dimmed, the logo over it, and what to
     /// press — or, once someone has, who 1P is — and the Quit popup when Back asked for it.
     fn splash(&mut self, menu: &Menu) {
         self.fill(rect(0.0, 0.0, 640.0, 448.0), BLACK);
-        if let Some(t) = self.art.textures.get("titlescreen") {
+        // The last track ridden's first still. (The disc's own `titlescreen` has its logo and a
+        // block of small print baked in, which the prompt would sit on.)
+        let track = menu.settings.track_index();
+        let still = self.art.stills.get(track).and_then(|s| s.first());
+        if let Some(t) = still {
             // Cover the screen with the picture's middle, keeping its shape.
             let (w, h) = (t.width as f32, t.height as f32);
             let fit = LAYOUT.0 / LAYOUT.1;
@@ -1431,8 +1434,12 @@ impl Painter<'_> {
             };
             self.blit(t, src, rect(0.0, 0.0, 640.0, 448.0), SPLASH_DIM);
         }
-        self.tex("mainmenu_logo_shadow", rect(74.0, 110.0, 512.0, 64.0), [0, 0, 0, 90]);
-        self.tex("mainmenu_logo", rect(64.0, 100.0, 512.0, 64.0), CHOSEN);
+        // The logo a quarter up on the main menu's, its lettering (the left 0.68 of the texture)
+        // centred.
+        let (w, h) = (512.0 * 1.25, 64.0 * 1.25);
+        let x = 320.0 - w * 0.68 / 2.0;
+        self.tex("mainmenu_logo_shadow", rect(x + 10.0, 100.0, w, h), [0, 0, 0, 90]);
+        self.tex("mainmenu_logo", rect(x, 90.0, w, h), CHOSEN);
         if menu.claimed.is_some() || menu.p1.is_some() {
             let who = format!("Player 1  {}", menu.p1_name);
             self.text(Face::Title, &who, 320.0, 270.0, Align::Centre, ORANGE_TEXT);
@@ -1456,7 +1463,9 @@ impl Painter<'_> {
             self.text(Face::Small, "Enter or Space on the keyboard", 320.0, 316.0, Align::Centre, ITEM);
             self.text(Face::Small, "Whoever presses it rides as Player 1", 320.0, 338.0, Align::Centre, ITEM);
         }
-        self.legend(&[("nav_circle_off", "Quit"), ("nav_x_off", "Start")]);
+        if menu.p1.is_none() {
+            self.legend(&[("nav_circle_off", "Quit"), ("nav_x_off", "Start")]);
+        }
         if let Some(row) = menu.quitting() {
             self.fill(rect(0.0, 0.0, 640.0, 448.0), [0, 0, 0, 150]);
             self.fill(rect(170.0, 150.0, 300.0, 140.0), [0, 0, 0, 220]);
