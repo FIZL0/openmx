@@ -13,7 +13,7 @@ pub const HOST: &str = "host";
 
 /// One local player's pick in the garage: the rider (model and gear, `--rider`'s names, like thq1) and the bike set
 /// (the `.phy` the simulation loads, like race125p: what the handshake compares).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pick {
     pub rider: String,
     pub bike: String,

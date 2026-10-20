@@ -17,9 +17,17 @@
 //!
 //! The state machine reads nothing but the pad, so `tests/menu.rs` walks every screen with reports
 //! alone, and the drawing is a separate half that needs the disc.
+//!
+//! **Online** (N3) is opentennis's `main_menu/online.rs` flow cut to a ride's needs: Quickplay, Host,
+//! Find Games and Join by Code, then the lobby — the players with their riders and bikes, the host's
+//! track and wrecks, Ready, Start, chat on the same keyboard as the name — and back to the lobby when
+//! a peer drops out of a ride. The menu does not touch the network: what it asks for queues up in
+//! [`Lobby::out`] as `openmx_net` commands for the shell to send, and what the network says comes in
+//! through [`Menu::heard`], so the tests drive the screens with reports and events alone.
 
 use game_render::{Disc, Frame, Texture};
 use game_sim::input::{AXIS_CENTRE, Control, Report};
+use openmx_net::{Cmd, Event, HOST, Listing, Pick, Room};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -385,16 +393,25 @@ pub enum Screen {
     Controls,
     Keyboard,
     Pause,
+    /// Quickplay, Host, Find Games, Join by Code (N3).
+    Online,
+    /// The lobbies Find Games turned up.
+    Games,
+    /// The lobby: its players, the ride, Ready and Start.
+    Lobby,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 6] = [
+    pub const ALL: [Screen; 9] = [
         Screen::Main,
         Screen::Tracks,
         Screen::Settings,
         Screen::Controls,
         Screen::Keyboard,
         Screen::Pause,
+        Screen::Online,
+        Screen::Games,
+        Screen::Lobby,
     ];
 
     fn index(self) -> usize {
@@ -410,6 +427,9 @@ impl Screen {
             Screen::Controls => "controls",
             Screen::Keyboard => "keyboard",
             Screen::Pause => "pause",
+            Screen::Online => "online",
+            Screen::Games => "games",
+            Screen::Lobby => "lobby",
         }
     }
 
@@ -425,12 +445,15 @@ impl Screen {
             Screen::Controls => "Controls",
             Screen::Keyboard => "Rider Name",
             Screen::Pause => "Paused",
+            Screen::Online => "Online",
+            Screen::Games => "Find Games",
+            Screen::Lobby => "Lobby",
         }
     }
 }
 
 /// The main menu's rows. P37's garage and P38's join screen go in here.
-const MAIN: [&str; 3] = ["Free Ride", "Settings", "Quit"];
+const MAIN: [&str; 4] = ["Free Ride", "Online", "Settings", "Quit"];
 const PAUSE: [&str; 5] = ["Resume", "Restart", "Settings", "Main Menu", "Quit"];
 const SETTINGS_ROWS: usize = 4;
 const CONTROLS_ROWS: usize = 1 + LAYOUT_ROWS;
@@ -452,11 +475,13 @@ pub enum Act {
     /// Leave the ride for the main menu.
     MainMenu,
     Quit,
+    /// The lobby's ride starts: [`Lobby::start`] says on what.
+    Online,
 }
 
 /// The front end's state: which screens are open, where each one's cursor is, and the settings it
 /// edits.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Menu {
     pub settings: Settings,
     pub controls: Controls,
@@ -464,8 +489,9 @@ pub struct Menu {
     stack: Vec<Screen>,
     /// Each screen's row, in [`Screen::ALL`]'s order.
     cursor: [usize; Screen::ALL.len()],
-    /// The keyboard's text while it is being typed, and its cursor (row, column).
+    /// The keyboard's text while it is being typed, what it is for, and its cursor (row, column).
     typing: String,
+    typing_for: Typing,
     key: (usize, usize),
     /// Frames shown, for the track stills' slideshow.
     pub tick: u32,
@@ -473,6 +499,8 @@ pub struct Menu {
     changed: bool,
     /// A line for the ticker, which is how a ride that could not start says why.
     pub note: Option<String>,
+    /// Online play's side of the menu (N3).
+    pub lobby: Lobby,
 }
 
 impl Menu {
@@ -485,10 +513,12 @@ impl Menu {
             stack: vec![Screen::Main],
             cursor,
             typing: String::new(),
+            typing_for: Typing::Name,
             key: (0, 0),
             tick: 0,
             changed: false,
             note: None,
+            lobby: Lobby::default(),
         }
     }
 
@@ -524,6 +554,7 @@ impl Menu {
                 self.stack = vec![Screen::Main, Screen::Settings];
                 self.open_keyboard();
             }
+            Screen::Games | Screen::Lobby => self.stack = vec![Screen::Main, Screen::Online, screen],
             s => self.stack = vec![Screen::Main, s],
         }
     }
@@ -551,6 +582,9 @@ impl Menu {
             Screen::Controls => CONTROLS_ROWS,
             Screen::Keyboard => KEY_ROWS.len() + 1,
             Screen::Pause => PAUSE.len(),
+            Screen::Online => ONLINE.len() + 1,
+            Screen::Games => self.lobby.found.len() + 1,
+            Screen::Lobby => self.lobby.items().len(),
         }
     }
 
@@ -563,7 +597,15 @@ impl Menu {
     }
 
     fn open_keyboard(&mut self) {
-        self.typing = self.settings.name.clone();
+        self.type_for(Typing::Name);
+    }
+
+    fn type_for(&mut self, purpose: Typing) {
+        self.typing = match purpose {
+            Typing::Name => self.settings.name.clone(),
+            _ => String::new(),
+        };
+        self.typing_for = purpose;
         self.key = (0, 0);
         self.push(Screen::Keyboard);
     }
@@ -582,7 +624,9 @@ impl Menu {
             return self.keyboard(p);
         }
         let rows = self.rows(screen);
-        let at = self.cursor(screen);
+        // The lobby's and the list's rows come and go with what the network says.
+        let at = self.cursor(screen).min(rows - 1);
+        self.cursor[screen.index()] = at;
         // Up and down walk the rows, wrapping, except on the track pick where left and right do.
         let (prev, next) = match screen {
             Screen::Tracks => (p.left || p.up, p.right || p.down),
@@ -604,7 +648,8 @@ impl Menu {
                     self.tick = 0;
                     self.push(Screen::Tracks);
                 }
-                (true, _, 1) => self.push(Screen::Settings),
+                (true, _, 1) => self.push(Screen::Online),
+                (true, _, 2) => self.push(Screen::Settings),
                 (true, _, _) => return Act::Quit,
                 _ => {}
             },
@@ -681,6 +726,9 @@ impl Menu {
                     }
                 }
             }
+            Screen::Online => self.online(p, at),
+            Screen::Games => self.games(p, at),
+            Screen::Lobby => self.in_lobby(p, at),
             Screen::Keyboard => unreachable!(),
         }
         Act::Stay
@@ -707,19 +755,26 @@ impl Menu {
         } else if p.back {
             self.pop();
         } else if p.start {
-            self.finish_name();
+            self.finish_typing();
         } else if p.ok {
+            let max = self.typing_for.max();
             if row < last {
-                if self.typing.chars().count() < NAME_MAX {
+                if self.typing.chars().count() < max {
                     let c = KEY_ROWS[row].chars().nth(col).unwrap();
-                    // The first letter of each word in capitals, as the original's name entry.
+                    // The first letter of each word in capitals, as the original's name entry; a room
+                    // code is all capitals.
                     let word_start = self.typing.is_empty() || self.typing.ends_with(' ');
-                    self.typing.push(if word_start { c.to_ascii_uppercase() } else { c });
+                    let upper = match self.typing_for {
+                        Typing::Name => word_start,
+                        Typing::Code => true,
+                        Typing::Chat => false,
+                    };
+                    self.typing.push(if upper { c.to_ascii_uppercase() } else { c });
                 }
             } else {
                 match col {
                     0 => {
-                        if !self.typing.is_empty() && self.typing.chars().count() < NAME_MAX {
+                        if !self.typing.is_empty() && self.typing.chars().count() < max {
                             self.typing.push(' ');
                         }
                     }
@@ -727,11 +782,33 @@ impl Menu {
                         self.typing.pop();
                     }
                     2 => self.typing.clear(),
-                    _ => self.finish_name(),
+                    _ => self.finish_typing(),
                 }
             }
         }
         Act::Stay
+    }
+
+    fn finish_typing(&mut self) {
+        match self.typing_for {
+            Typing::Name => self.finish_name(),
+            Typing::Code => {
+                let code = self.typing.trim().to_string();
+                self.pop();
+                if !code.is_empty() {
+                    self.lobby.join(&code);
+                    self.push(Screen::Lobby);
+                }
+            }
+            Typing::Chat => {
+                let text = self.typing.trim().to_string();
+                self.pop();
+                if !text.is_empty() {
+                    self.lobby.out.push(Cmd::Chat(text.clone()));
+                    self.lobby.said(&self.settings.name, &text);
+                }
+            }
+        }
     }
 
     fn finish_name(&mut self) {
@@ -746,6 +823,348 @@ impl Menu {
     /// The keyboard's text as it stands.
     pub fn typing(&self) -> &str {
         &self.typing
+    }
+
+    // ---- online (N3) ----
+
+    /// The online menu: Quickplay, Host, Find Games, Join by Code, and the network it uses.
+    fn online(&mut self, p: Press, at: usize) {
+        let side = p.left || p.right;
+        if p.back {
+            self.pop();
+        } else if at == ONLINE.len() && (p.ok || side) {
+            self.lobby.lan = !self.lobby.lan;
+            self.lobby.network_changed = true;
+        } else if p.ok || p.start {
+            let room = self.lobby.room_for(&self.settings);
+            match at {
+                0 => {
+                    self.lobby.begin("Looking for a game...");
+                    self.lobby.out.push(Cmd::Quick(room));
+                    self.push(Screen::Lobby);
+                }
+                1 => {
+                    self.lobby.begin("Opening the lobby...");
+                    self.lobby.out.push(Cmd::Host(room));
+                    self.push(Screen::Lobby);
+                }
+                2 => {
+                    self.lobby.found.clear();
+                    self.lobby.status = "Looking for games...".into();
+                    self.lobby.out.push(Cmd::Find);
+                    self.push(Screen::Games);
+                }
+                _ => self.type_for(Typing::Code),
+            }
+        }
+    }
+
+    /// The lobbies found: OK on one joins it, on the last row looks again.
+    fn games(&mut self, p: Press, at: usize) {
+        if p.back {
+            self.pop();
+        } else if p.ok || p.start {
+            match self.lobby.found.get(at).cloned() {
+                Some(l) => {
+                    self.lobby.join(&l.id);
+                    self.pop();
+                    self.push(Screen::Lobby);
+                }
+                None => {
+                    self.lobby.found.clear();
+                    self.lobby.status = "Looking for games...".into();
+                    self.lobby.out.push(Cmd::Find);
+                }
+            }
+        }
+    }
+
+    /// The lobby's rows: the host sets the ride and starts it, a guest says it is ready, and anyone
+    /// changes their bike, chats or leaves.
+    fn in_lobby(&mut self, p: Press, at: usize) {
+        if p.back {
+            self.leave_lobby();
+            return;
+        }
+        let side = p.left || p.right;
+        let by = if p.left { -1 } else { 1 };
+        let Some(&item) = self.lobby.items().get(at) else { return };
+        let l = &mut self.lobby;
+        match item {
+            Item::Track if p.ok || side => {
+                if let Some(room) = &l.room {
+                    let i = TRACKS.iter().position(|t| t.0 == room.track).unwrap_or(0) as i32;
+                    let n = TRACKS.len() as i32;
+                    let track = TRACKS[(i + by).rem_euclid(n) as usize].0.to_string();
+                    l.out.push(Cmd::Ride { track, wrecks: room.wrecks, biplane: false });
+                }
+            }
+            Item::Wrecks if p.ok || side => {
+                if let Some(room) = &l.room {
+                    l.out.push(Cmd::Ride { track: room.track.clone(), wrecks: !room.wrecks, biplane: false });
+                }
+            }
+            Item::Bike if (p.ok || side) && !l.bikes.is_empty() => {
+                let i = l.bikes.iter().position(|b| b.0 == l.pick.bike).unwrap_or(0) as i32;
+                let n = l.bikes.len() as i32;
+                l.pick.bike = l.bikes[(i + by).rem_euclid(n) as usize].0.clone();
+                l.out.push(Cmd::Picks(vec![l.pick.clone()]));
+            }
+            Item::Private if p.ok || side => {
+                if let Some(room) = &l.room {
+                    l.out.push(Cmd::Private(!room.private));
+                }
+            }
+            Item::Chat if p.ok => self.type_for(Typing::Chat),
+            Item::Start if p.ok || p.start => {
+                l.status = "Starting...".into();
+                l.out.push(Cmd::Start);
+            }
+            Item::Ready if p.ok => {
+                l.ready = !l.ready;
+                l.out.push(Cmd::Prepared(l.ready));
+            }
+            Item::Leave if p.ok => self.leave_lobby(),
+            _ => {}
+        }
+    }
+
+    fn leave_lobby(&mut self) {
+        self.lobby.out.push(Cmd::Leave);
+        self.lobby.room = None;
+        self.lobby.ready = false;
+        self.lobby.status.clear();
+        self.pop();
+    }
+
+    /// What the network said. `Act::Online` when the lobby's ride starts.
+    pub fn heard(&mut self, e: Event) -> Act {
+        let l = &mut self.lobby;
+        match e {
+            Event::Status(s) => l.status = s,
+            Event::Hosting => l.status = "No game to join: hosting one.".into(),
+            Event::Code(_) => {}
+            Event::Short(code) => l.code = code,
+            Event::Me(me) => l.me = me,
+            Event::Found(found) => {
+                l.status = match found.len() {
+                    0 => "No open games found.".into(),
+                    n => format!("{n} found"),
+                };
+                l.found = found;
+            }
+            Event::Room(room) => {
+                if !room.short.is_empty() {
+                    l.code = room.short.clone();
+                }
+                l.ready = room.ready.contains(&l.me);
+                l.room = Some(room);
+            }
+            Event::Start(room, me) => {
+                l.me = me.clone();
+                l.room = Some(room.clone());
+                l.start = Some((room, me));
+                l.status.clear();
+                self.stack.clear();
+                return Act::Online;
+            }
+            Event::Dropped(why) => {
+                l.status = why.clone();
+                self.note = Some(why);
+            }
+            Event::Failed(why) => {
+                l.room = None;
+                l.ready = false;
+                l.status = why.clone();
+                self.note = Some(why);
+                if self.screen() == Some(Screen::Lobby) {
+                    self.pop();
+                }
+            }
+            Event::Chat { name, text, .. } => l.said(&name, &text),
+            Event::Ride(..) | Event::Datagram(..) => {}
+        }
+        Act::Stay
+    }
+
+    /// Back from an online ride: the lobby if this machine is still in one, else the online menu.
+    pub fn back_from_online(&mut self) {
+        self.lobby.start = None;
+        self.stack = vec![Screen::Main, Screen::Online];
+        if self.lobby.room.is_some() {
+            self.stack.push(Screen::Lobby);
+        }
+    }
+}
+
+// ---- online (N3) ---------------------------------------------------------------------------------
+
+/// The online menu's rows; a last one switches the network.
+const ONLINE: [&str; 4] = ["Quickplay", "Host", "Find Games", "Join by Code"];
+
+/// The players a lobby this machine opens has seats for.
+pub const LOBBY_SEATS: usize = 4;
+
+/// The chat lines the lobby keeps.
+const CHAT_LINES: usize = 5;
+
+/// What the keyboard is typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Typing {
+    Name,
+    Code,
+    Chat,
+}
+
+impl Typing {
+    fn max(self) -> usize {
+        match self {
+            Typing::Name => NAME_MAX,
+            // A code is four; a little over lets a slip be seen and deleted.
+            Typing::Code => 8,
+            Typing::Chat => 40,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Typing::Name => "Rider Name",
+            Typing::Code => "Room Code",
+            Typing::Chat => "Chat",
+        }
+    }
+}
+
+/// A row of the lobby.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Item {
+    Track,
+    Wrecks,
+    Bike,
+    Private,
+    Chat,
+    Start,
+    Ready,
+    Leave,
+}
+
+impl Item {
+    fn label(self, l: &Lobby) -> String {
+        let room = l.room.as_ref();
+        let on = |b: bool| if b { "On" } else { "Off" };
+        match self {
+            Item::Track => {
+                let t = room.map_or("", |r| r.track.as_str());
+                format!("Track  {}", TRACKS.iter().find(|x| x.0 == t).map_or(t, |x| x.1))
+            }
+            Item::Wrecks => format!("Wrecks  {}", on(room.is_some_and(|r| r.wrecks))),
+            Item::Bike => format!("Bike  {}", l.bike_label(&l.pick.bike)),
+            Item::Private => format!("Private  {}", on(room.is_some_and(|r| r.private))),
+            Item::Chat => "Chat".into(),
+            Item::Start => "Start".into(),
+            Item::Ready => if l.ready { "Not Ready" } else { "Ready" }.into(),
+            Item::Leave => "Leave".into(),
+        }
+    }
+}
+
+/// Online play's side of the menu: what the network last said, and what the menu asks of it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lobby {
+    /// Commands for the shell to hand the network, oldest first.
+    pub out: Vec<Cmd>,
+    /// The lobby as the host last sent it; none when not in one.
+    pub room: Option<Room>,
+    /// This machine's peer name in the seats ([`HOST`] when it hosts).
+    pub me: String,
+    /// The room code to pass on.
+    pub code: String,
+    pub found: Vec<Listing>,
+    /// The network's last word, for the lobby's ticker.
+    pub status: String,
+    /// The last few chat lines, `name: text`.
+    pub chat: Vec<String>,
+    /// This machine's player's rider and bike set.
+    pub pick: Pick,
+    /// The bike sets the lobby offers, as (`race125p`, `125 Race P`); the shell fills it from the
+    /// garage's sixteen.
+    pub bikes: Vec<(String, String)>,
+    /// Said ready.
+    pub ready: bool,
+    /// The LAN only: no relays, no board, no code servers — nothing leaves the network it is on.
+    pub lan: bool,
+    /// [`Lobby::lan`] changed, which the shell writes to `online.txt` and starts the network over for.
+    pub network_changed: bool,
+    /// The line-up and this machine's peer name, once the host has started the ride.
+    pub start: Option<(Room, String)>,
+}
+
+impl Lobby {
+    /// The rows: the host's, a guest's, or only Leave while there is no lobby yet.
+    pub fn items(&self) -> Vec<Item> {
+        match &self.room {
+            None => vec![Item::Leave],
+            Some(_) if self.hosting() => {
+                vec![Item::Track, Item::Wrecks, Item::Bike, Item::Private, Item::Chat, Item::Start, Item::Leave]
+            }
+            Some(_) => vec![Item::Bike, Item::Chat, Item::Ready, Item::Leave],
+        }
+    }
+
+    pub fn hosting(&self) -> bool {
+        self.me == HOST
+    }
+
+    /// A lobby for this machine's player to open: the last free-ride track, the settings' wrecks.
+    fn room_for(&self, settings: &Settings) -> Room {
+        let mut room = Room::new(&settings.name, &settings.track, LOBBY_SEATS);
+        room.wrecks = settings.wrecks;
+        room.take(HOST, std::slice::from_ref(&self.pick));
+        room
+    }
+
+    fn begin(&mut self, status: &str) {
+        self.room = None;
+        self.me.clear();
+        self.ready = false;
+        self.code.clear();
+        self.chat.clear();
+        self.status = status.into();
+    }
+
+    fn join(&mut self, code: &str) {
+        self.begin(&format!("Joining {code}..."));
+        self.out.push(Cmd::Join(code.to_string(), vec![self.pick.clone()]));
+    }
+
+    fn said(&mut self, name: &str, text: &str) {
+        self.chat.push(format!("{name}: {text}"));
+        if self.chat.len() > CHAT_LINES {
+            self.chat.remove(0);
+        }
+    }
+
+    fn bike_label(&self, set: &str) -> String {
+        self.bikes.iter().find(|b| b.0 == set).map_or(set.to_string(), |b| b.1.clone())
+    }
+
+    /// A seat's line: its player, their rider and bike, ready or not, and their ping.
+    fn seat_line(&self, room: &Room, i: usize) -> String {
+        let Some(seat) = room.seats.get(i).and_then(|s| s.as_ref()) else {
+            return format!("{}  open", i + 1);
+        };
+        let name = room.names.get(&seat.peer).cloned().unwrap_or_else(|| {
+            if seat.peer == HOST { room.name.clone() } else { seat.peer.chars().take(6).collect() }
+        });
+        let state = if seat.peer == HOST {
+            "Host"
+        } else if room.ready.contains(&seat.peer) {
+            "Ready"
+        } else {
+            "Not ready"
+        };
+        let ping = room.ping.get(&seat.peer).map_or(String::new(), |ms| format!("  {ms} ms"));
+        format!("{}  {name}  {}  {}  {state}{ping}", i + 1, seat.pick.rider, self.bike_label(&seat.pick.bike))
     }
 }
 
@@ -1032,10 +1451,24 @@ impl Art {
             }
             Screen::Tracks => p.tracks(menu),
             Screen::Keyboard => p.keyboard(menu),
+            Screen::Online => {
+                let network = if menu.lobby.lan { "LAN only" } else { "Internet and LAN" };
+                let rows: Vec<String> =
+                    ONLINE.iter().map(|s| s.to_string()).chain([format!("Network  {network}")]).collect();
+                p.logo();
+                p.column(107.0, 1.75);
+                p.list(242.0, 1.75, &rows, menu.cursor(screen));
+                p.title(screen.title());
+                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
+            }
+            Screen::Games => p.games(menu),
+            Screen::Lobby => p.lobby(menu),
         }
-        // The ticker: a note when there is one, the rider's name otherwise.
+        // The ticker: a note when there is one, the network's word online, the rider's name otherwise.
+        let online = matches!(screen, Screen::Online | Screen::Games | Screen::Lobby);
         let ticker = match &menu.note {
             Some(n) => n.clone(),
+            None if online && !menu.lobby.status.is_empty() => menu.lobby.status.clone(),
             None => format!("Riding as {}", menu.settings.name),
         };
         p.text(Face::Small, &ticker, 50.0, 415.0, Align::Left, ITEM);
@@ -1254,12 +1687,71 @@ impl Painter<'_> {
             let face = if on { Face::Chosen } else { Face::Item };
             self.text(face, label, x + 50.0, y, Align::Centre, if on { CHOSEN } else { ITEM });
         }
-        self.title(Screen::Keyboard.title());
+        self.title(menu.typing_for.title());
         self.legend(&[
             ("nav_square_off", "Delete"),
             ("nav_circle_off", "Cancel"),
             ("nav_x_off", "Type"),
         ]);
+    }
+}
+
+impl Painter<'_> {
+    /// The lobbies Find turned up, a row each, and Refresh under them.
+    fn games(&mut self, menu: &Menu) {
+        let found = &menu.lobby.found;
+        let rows: Vec<String> = found
+            .iter()
+            .map(|l| {
+                let track = TRACKS.iter().find(|t| t.0 == l.track).map_or(l.track.as_str(), |t| t.1);
+                let build = if l.same_build() { "" } else { "  (another version)" };
+                format!("{}  {track}  {}/{}{build}", l.name, l.taken, l.seats)
+            })
+            .chain(["Refresh".to_string()])
+            .collect();
+        self.logo();
+        self.column(107.0, 1.75);
+        self.list(242.0, 1.75, &rows, menu.cursor(Screen::Games));
+        if found.is_empty() {
+            self.text(Face::Small, "No games listed yet: Refresh to look again.", 242.0, item_y(2), Align::Centre, ITEM);
+        }
+        self.title(Screen::Games.title());
+        self.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Join")]);
+    }
+
+    /// The lobby: its rows on the left, the code, the seats and the chat on the right.
+    fn lobby(&mut self, menu: &Menu) {
+        let l = &menu.lobby;
+        let rows: Vec<String> = l.items().iter().map(|i| i.label(l)).collect();
+        self.logo();
+        self.column(27.0, 1.0);
+        self.list(155.0, 1.25, &rows, menu.cursor(Screen::Lobby));
+        self.fill(rect(300.0, 92.0, 330.0, 262.0), [0, 0, 0, 170]);
+        let code = match (&l.room, l.code.as_str()) {
+            (None, _) => "Not in a lobby yet".to_string(),
+            (Some(_), "") => "Room code: waiting".to_string(),
+            (Some(_), code) => format!("Room code  {code}"),
+        };
+        self.text(Face::Item, &code, 312.0, 98.0, Align::Left, CHOSEN);
+        if let Some(room) = &l.room {
+            for i in 0..room.seats.len() {
+                let line = l.seat_line(room, i);
+                let colour = if room.seats[i].as_ref().is_some_and(|s| s.peer == l.me) { CHOSEN } else { ITEM };
+                self.text(Face::Small, &line, 312.0, 128.0 + 20.0 * i as f32, Align::Left, colour);
+            }
+        }
+        for (i, line) in l.chat.iter().enumerate() {
+            self.text(Face::Small, line, 312.0, 254.0 + 18.0 * i as f32, Align::Left, ITEM);
+        }
+        self.title(Screen::Lobby.title());
+        let ok = match l.items().get(menu.cursor(Screen::Lobby)) {
+            Some(Item::Start) => "Start",
+            Some(Item::Ready) => "Ready",
+            Some(Item::Leave) => "Leave",
+            Some(Item::Chat) => "Chat",
+            _ => "Change",
+        };
+        self.legend(&[("nav_circle_off", "Leave"), ("nav_x_off", ok)]);
     }
 }
 

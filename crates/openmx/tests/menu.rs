@@ -202,7 +202,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
 #[test]
 fn what_the_pad_sets_is_what_the_file_says() {
     let (mut m, mut r) = fresh();
-    // Settings, the name: clear it and type "Mx" on the keyboard, then Done.
+    // Settings (under Online), the name: clear it and type "Mx" on the keyboard, then Done.
+    tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Settings));
