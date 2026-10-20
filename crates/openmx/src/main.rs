@@ -343,8 +343,8 @@ struct Args {
     /// position, heading, how upright, on the ground, wrecked — in the columns P15 measured the
     /// original's captures by, so both rides go through one script.
     trace_feel: bool,
-    /// `--phy NAME`: ride the bike archive's member ending in `NAME` (`race125p.phy`) instead of its
-    /// first `.phy`.
+    /// `--phy NAME`: ride the bike archive's member ending in `NAME` (`pro125a.phy`) instead of the
+    /// freeride's own `Bike\Race125P.phy`.
     phy: Option<String>,
     /// `--trace-at X,Z,DEG`: put the bike on the ground at `x, z` facing `DEG` instead of on the start
     /// line.
@@ -493,8 +493,14 @@ fn run() -> Result<(), String> {
 
     // The bike's own physics, off the disc, by the ported loader (S18) — every number the ride runs
     // on comes from here, and a bike whose file is missing is not rideable.
+    // By default that is the file the original's vehicle loader asks for on a freeride boot,
+    // `Bike\Race125P.phy` (D7: class 125, Race tier, the `P` of the pair), whichever bike model is
+    // drawn — the loader builds the name from the event, not from the model. Every 125 archive
+    // carries it; the disc's first `.phy` member, which the shell used to fall back to, is
+    // `pro125a.phy` (P25). Another bike's archive without it falls back to the model's own name and
+    // then to the first `.phy`, and says so.
     // `--phy` names another of the archive's members instead: every bike archive carries the whole
-    // set, and the freeride's own `race125p.phy` (D7) is not the first one (P15).
+    // set of its class (P15).
     let (phy_bytes, phy_member) = match &args.phy {
         Some(name) => {
             let e = archives[1]
@@ -503,15 +509,17 @@ fn run() -> Result<(), String> {
             (archives[1].read_suffix(name)?, e.name.clone())
         }
         None => {
-            let member = archives[1]
-                .find_suffix(&format!("{}.phy", args.bike))
-                .or_else(|| archives[1].find_suffix(".phy"))
-                .map_or_else(|| "?".to_string(), |e| e.name.clone());
-            let bytes = archives[1]
-                .read_suffix(&format!("{}.phy", args.bike))
-                .or_else(|_| archives[1].read_suffix(".phy"))
-                .map_err(|e| format!("the bike archive has no .phy: {e}"))?;
-            (bytes, member)
+            let freeride =
+                track::physics_file(track::FREERIDE_ENGINE, track::FREERIDE_PRO, track::Tuning::P);
+            let wanted = [freeride.clone(), format!("{}.phy", args.bike), ".phy".to_string()];
+            let (want, e) = wanted
+                .iter()
+                .find_map(|w| archives[1].find_suffix(w).map(|e| (w, e)))
+                .ok_or("the bike archive has no .phy")?;
+            if *want != freeride {
+                println!("phy: the bike archive has no {freeride}; riding {} instead", e.name);
+            }
+            (archives[1].read_suffix(want)?, e.name.clone())
         }
     };
     let phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
@@ -1576,7 +1584,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      holds the stick over and --trace-feel prints a short line a frame instead;\n\
                      --trace-switch N rides the throttle alone for N frames first;\n\
                      --trace-at X,Z,DEG starts the bike there instead of the start line, and\n\
-                     --phy NAME rides the bike archive's NAME (race125p.phy) for the bike's .phy.\n\
+                     --phy NAME rides the bike archive's NAME (pro125a.phy) instead of Race125P.phy.\n\
                      --record writes every simulated frame's pad to a tape (under context/,\n\
                      it is game data); --play rides one instead of the pad, at the tape's own\n\
                      frame lengths, and quits when it runs out. A human's PCSX2 recording\n\
