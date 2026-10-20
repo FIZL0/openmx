@@ -426,6 +426,13 @@ impl Rider {
         // **The settle gate.** The machine's one input the port could not fill in before: the rider,
         // having let go of the bars, is on the ground. See [`Crash`] for what was measured.
         sense.settles = crash.as_ref().is_some_and(Crash::settles);
+        // The wreck test's last clause reads the collision record's contact list: what the bike's
+        // body rays hit. The port's is its head ray, swept at the frame's end (`ride::hits`). The
+        // chassis' mass is not held, only its reciprocal; it is read only for an actor, and the
+        // port's world has none.
+        let hits = if state.wreck.is_none() { ride::hits(ride, world) } else { Vec::new() };
+        let touched = ride.touching || !hits.is_empty();
+        let (mass, height) = (F::ONE / ride.chassis.inv_mass, F(ride.chassis.cofg_world.y()));
         let air = &mut ride.air;
         let verdict = state.step(
             dt,
@@ -438,7 +445,14 @@ impl Rider {
                 if !allowed.wrecks || !allowed.landing {
                     return None;
                 }
-                air::wreck_test(&p.air, air, &chassis, &step, &loads).map(Wreck::from)
+                // Both can enter a wreck on one substep, and the entry stores its reason without
+                // looking, so the hit's — asked second — is the one that stays.
+                let landed = air::wreck_test(&p.air, air, &chassis, &step, &loads);
+                // Never a 50cc bike's lower limit: the original's flag is the bike's name containing
+                // "Race50" or "Pro50" (`track::physics_file`'s), and the rider is not told which file
+                // it was built from — nor does `ride::hits` sweep the two shoulder rays it would add.
+                let hit = air::hit_wreck(&p.air, air, touched, false, mass, height, &hits);
+                hit.or(landed).map(Wreck::from)
             },
             // No wreck page: this shell has no front end to put one on.
             || false,

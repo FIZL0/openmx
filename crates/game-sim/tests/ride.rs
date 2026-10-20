@@ -2946,3 +2946,165 @@ fn race125p_tops_out_where_the_original_does() {
         "race125p tops out at {got} ft/s on the flat, against the original's {want}"
     );
 }
+
+
+// ---------------------------------------------------------------------------------------------------
+// S37: a hard hit on the scenery
+// ---------------------------------------------------------------------------------------------------
+
+/// The reason the head ray wrecks with.
+const SCENERY: game_sim::trick::Wreck = game_sim::trick::Wreck(game_sim::air::Wreck::Scenery as u8);
+
+/// A beam across the rider's path, sloping up and away from them: from four feet up at `z` to eight
+/// feet up four feet further on. The bike's body passes under it, and only a ray reaching up from the
+/// bike can find it — which the head ray does over a few feet of travel, so a frame's step cannot jump
+/// it. Wound to face down at the rider, so that the sweep, which takes a back face as no hit, sees it
+/// from below.
+fn beam(z: f32) -> Prop {
+    let mesh = Mesh {
+        version: 0,
+        surface: None,
+        transform: [
+            [F::ONE, F::ZERO, F::ZERO],
+            [F::ZERO, F::ONE, F::ZERO],
+            [F::ZERO, F::ZERO, F::ONE],
+            [F::ZERO, F::ZERO, F::ZERO],
+        ],
+        vertices: Points::Wide(vec![
+            [F(-10.0), F(5.0), F(z)],
+            [F(10.0), F(5.0), F(z)],
+            [F(10.0), F(9.0), F(z + 4.0)],
+            [F(-10.0), F(9.0), F(z + 4.0)],
+        ]),
+        normals: None,
+        nodes: vec![Node {
+            volume: F::ZERO,
+            centre: [F::ZERO, F(7.0), F(z + 2.0)],
+            half_extent: [F(10.0), F(2.0), F(2.0)],
+            children: [0x8000, 0x8001],
+        }],
+        triangles: vec![
+            Triangle { distance: F::ZERO, normal: [F::ZERO; 3], vertices: [0, 1, 2] },
+            Triangle { distance: F::ZERO, normal: [F::ZERO; 3], vertices: [0, 2, 3] },
+        ],
+    };
+    Prop::place(mesh, &Placement::default())
+}
+
+/// The first wreck a rider thrown at `prop` comes off with, if any.
+fn thrown_at(prop: Prop) -> Option<game_sim::trick::Wreck> {
+    let tables = rider::Tables::build();
+    let p = Phy::read_bytes(format!("{BIKE}{WRECK_LIMITS}").as_bytes(), &tables.ride.curve);
+    let mut r = Rider::new(&p, mounts(&p), Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    r.ride.chassis.vel = Vf::new(0.0, 0.0, 60.0, 0.0);
+    let mut yard = Yard { floor: floor(), props: Props { props: vec![prop] } };
+    (0..120).find_map(|_| r.frame(&p, &tables, &Controls::default(), DT, &mut yard).wreck)
+}
+
+/// What the original's own collision record holds in a RAM image, and what both wreck tests make of
+/// it: the contact list its collide pass builds, read into the port's [`game_sim::air::Contact`]s;
+/// the port's [`game_sim::air::hit_wreck`] over that list; and every reason the original's own wreck
+/// test enters over the same image, the entry hooked so that it only writes the reason down.
+struct Window {
+    frame: u32,
+    list: Vec<game_sim::air::Contact>,
+    port: Option<game_sim::air::Wreck>,
+    original: Vec<u32>,
+}
+
+fn window(image: &str) -> Option<Window> {
+    use game_sim::air::{self, Contact, Other};
+    use ps2_oracle::{Ee, Kit, addr, skip};
+    let kit = Kit::load().map_err(|why| skip(&why)).ok()?;
+    // The slot's own `context/` first: a worktree's `kit.toml` points `[paths] context` at the main
+    // checkout's, and the images are made in the slot.
+    let path = [kit.root.join("context/states").join(image), kit.ctx("states").join(image)]
+        .into_iter()
+        .find(|p| p.exists())
+        .unwrap_or_else(|| kit.ctx("states").join(image));
+    let mut ee = Ee::from_ram(path).map_err(|why| skip(&why)).ok()?;
+    let u = |ee: &Ee, a: u32| ee.u32_at(a);
+    let f = |ee: &Ee, a: u32| F(ee.f32_at(a));
+    // The human's bike: the game manager's actor list, two lists in and two items along.
+    let mut a = u(&ee, addr("game_manager").unwrap());
+    for off in [0x34, 0x34, 0x8, 0x8] {
+        a = u(&ee, a + off);
+    }
+    let bike = u(&ee, a);
+    let (record, chassis) = (u(&ee, bike + 0x7d0), u(&ee, bike + 0x7a4));
+    ee.call(addr("collision_record_collide").unwrap(), &[record as u64], &[], 50_000_000);
+
+    let list = u(&ee, record + 0x108);
+    let list: Vec<Contact> = (0..u(&ee, record + 0x100))
+        .map(|i| {
+            let e = list + 0x80 * i;
+            let other = match u(&ee, e + 0x74) {
+                0 => Other::Scenery,
+                o if u(&ee, o + 0xf0) != 0 => {
+                    let body = u(&ee, o + 0xf0);
+                    Other::Rider { height: f(&ee, body + 0x64), vel: Vf(core::array::from_fn(|k| ee.f32_at(body + 0x260 + 4 * k as u32))) }
+                }
+                o => {
+                    let body = u(&ee, o + 0xf4);
+                    Other::Object { mass: f(&ee, body + 0xc), vel: Vf(core::array::from_fn(|k| ee.f32_at(body + 0x70 + 4 * k as u32))) }
+                }
+            };
+            Contact { mirrored: u(&ee, e) != 0, reach: f(&ee, e + 0x24), other }
+        })
+        .collect();
+    let tables = Tables::build();
+    let mut p = self::bike(&tables).air;
+    p.joust_wreck_height = f(&ee, bike + 0x784);
+    let mut state = air::Air::default();
+    let port = air::hit_wreck(&p, &mut state, u(&ee, record + 0x40) != 0, u(&ee, bike + 0x588) != 0,
+                              f(&ee, chassis + 0x210), f(&ee, chassis + 0x64), &list);
+
+    let entry = u(&ee, u(&ee, bike + 0x48) + 0xfc);
+    let codes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = codes.clone();
+    ee.hooks.insert(entry, Box::new(move |ee| seen.borrow_mut().push(ee.r(5) as u32)));
+    ee.call(addr("bike_wreck_test").unwrap(), &[bike as u64, 0], &[], 50_000_000);
+    let original = codes.borrow().clone();
+    Some(Window { frame: u(&ee, addr("frame_counter").unwrap()), list, port, original })
+}
+
+/// **S37.** A rider who hits the world hard wrecks at reason 6.
+///
+/// Two halves. The original's, at the window S29 found in recording2 — the reason-6 wreck at capture
+/// row 1750 (`frame_counter` 4124): two EE images saved during the playback, at the tick boundaries
+/// before it, with the bike's own collision record run over each. On the last one the record finds
+/// one contact, the head ray, against no actor; the port's clause wrecks on it at reason 6, and the
+/// original's whole wreck test leaves 6 as the reason. On the one before the list is empty
+/// and neither does anything. The images are `context/`'s and are not committed: the journal's
+/// `live/save.sh` makes them again, and without them this half says so and passes.
+///
+/// The port's: a rider thrown under a beam at head height wrecks at reason 6 — the head ray
+/// [`game_sim::ride::hits`] sweeps finds it — and the same throw at a wall does not, whatever else it
+/// does to the rider: the bike's nose meets a wall long before the rider's head can, in the original
+/// as much as here, because the head ray stands almost straight up over the seat.
+#[test]
+fn a_hard_hit_on_scenery_wrecks_at_reason_six() {
+    use game_sim::air::{Contact, Other, Wreck};
+    if let Some(w) = window("s37-9.ee.bin") {
+        assert_eq!(w.frame, 4123, "the image is not the boundary before the wreck");
+        assert_eq!(
+            w.list,
+            [Contact { mirrored: false, reach: F(6.6743364), other: Other::Scenery }],
+            "the record's list"
+        );
+        assert_eq!(F(6.6743364), F(game_sim::air::HEAD.1.y()), "the head ray is the one that hit");
+        assert_eq!(w.port, Some(Wreck::Scenery), "the port");
+        // The reason that stays is the last one entered. Over this image the landing clauses enter one
+        // first — a tail wreck, off whatever attitude the bike was left in at the boundary — and the
+        // hit enters 6 over it, which is the reason the capture shows.
+        assert_eq!(w.original.last(), Some(&(Wreck::Scenery as u32)), "the original: {:?}", w.original);
+        assert_eq!(w.original.iter().filter(|&&c| c == Wreck::Scenery as u32).count(), 1);
+    }
+    if let Some(w) = window("s37-8.ee.bin") {
+        assert_eq!(w.frame, 4122);
+        assert_eq!((w.list.len(), w.port, w.original.len()), (0, None, 0), "the tick before");
+    }
+
+    assert_eq!(thrown_at(beam(30.0)), Some(SCENERY), "a rider thrown under a beam");
+    assert_ne!(thrown_at(wall(30.0)), Some(SCENERY), "a wall the bike's nose meets first");
+}

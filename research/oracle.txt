@@ -2422,3 +2422,25 @@ bike_build boot 0x00252ff0 the bike's setup: the chassis via 0x0015c2c0 into bik
 # +0x244: the yaw window. The port reads the key (phy.rs yaw_rate_limit) and nothing uses it (P27).
 # The actor's velocity (@game_manager->0x34->0x34->0x8x8->0x0 +0x130, every capture's bike_vel) is
 # 0.8 x the chassis' own (+0x260) on every row of P21's capture: bike_vel is not chassis.vel.
+# S37 — the wreck test's contact clause (reason 6). bike_wreck_test's last loop reads the bike's
+# collision record (bike+0x7d0): +0x40 "anything touched" (the word air::Step::touching is), +0x100
+# the contact count, +0x104 the capacity (11 on a bike, one per body ray), +0x108 the list, 0x80 bytes
+# an entry: +0x00 kind (0 = found by this record's own rays, 1 = mirrored in by another record's),
+# +0x10 the ray's start and +0x20 its end in the bike's model space (so +0x24 is how high the ray
+# reaches), +0x30 normal, +0x40 point, +0x70 a word the writer is handed, +0x74 the other actor's
+# record (0 = scenery), +0x78 another. The first own entry reaching above 6 (4 with bike+0x588) is the
+# only one read: scenery enters reason 6; an actor with a chassis (+0xf0, height at +0x64, velocity
+# at +0x260) enters 7 if that chassis is over bike+0x784 higher; one without (+0xf4 its rigid body,
+# mass +0xc, velocity +0x70) enters 7 if heavier than the bike's chassis (+0x210). Either 7 copies the
+# velocity to bike+0x560 first. The loop runs after the landing clauses and is not gated by bike+0x748,
+# so it can enter a second wreck on the same call; the entry stores its reason without looking.
+# bike+0x588 is set by the bike constructor when its name contains "Race50" or "Pro50" (strstr).
+# The bike's eleven body rays: record+0x1f0's object, +0x168 count, +0x170 (start, end) pairs, all
+# from one hub at (0, 4.0637, -0.0968); ray 8 ends at (0, 6.6743, 0.1712), the only end above 6, and
+# rays 0 and 1 at y 4.58, the other two above 4.
+collision_record_collide boot 0x002708a0 (record) -> fills the record's contact list from its rays;
+#                                         vtable 0x00454a00 slot +0x7c
+collision_record_clear boot 0x002702e0 (record) -> count, +0x40..+0x4c zeroed; vtable slot +0x74
+collision_record_add boot 0x00270240 (record, ...) -> writes one 0x80-byte list entry
+collision_record_resolve boot 0x00270dc0 (record) -> vtable slot +0x80, run by the ground step
+#                                         every substep

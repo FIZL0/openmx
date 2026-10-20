@@ -766,6 +766,141 @@ fn the_wreck_test_is_the_originals() {
     }
 }
 
+// --- S37: the hits -----------------------------------------------------------------------------------
+
+/// Where the hits proof puts the contact list, and the actors its entries point at: one 0x100-byte
+/// record per entry, then that actor's chassis or rigid body.
+const LIST: u32 = 0x0120_7000;
+const OTHERS: u32 = 0x0120_8000;
+const BODIES: u32 = 0x0120_a000;
+
+/// The part of a generated substep the wreck test's last clause reads, besides the record's "touched"
+/// word, which is [`Step::touching`] and already in the state.
+#[derive(Clone, Debug)]
+struct Hits {
+    fifty: bool,
+    mass: F,
+    height: F,
+    list: Vec<air::Contact>,
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn hits(&mut self) -> Hits {
+        let mass = self.f(5.0, 20.0);
+        let height = self.f(-50.0, 300.0);
+        let n = (self.bits() % 12) as usize;
+        let mut list = Vec::new();
+        for _ in 0..n {
+            // The reaches the bike's eleven rays end at, the two limits themselves, and anything.
+            let reach = match self.bits() % 7 {
+                0 => F(6.6743364),
+                1 => F(4.580028),
+                2 => F(3.0401340),
+                3 => F(6.0),
+                4 => F(4.0),
+                _ => self.f(0.0, 8.0),
+            };
+            let other = match self.bits() % 3 {
+                0 => air::Other::Scenery,
+                1 => air::Other::Rider { height: F(height.0 + self.f(-6.0, 8.0).0), vel: self.vec(-40.0, 40.0) },
+                _ => air::Other::Object { mass: F(mass.0 + self.f(-8.0, 8.0).0), vel: self.vec(-40.0, 40.0) },
+            };
+            list.push(air::Contact { mirrored: self.one_in(4), reach, other });
+        }
+        Hits { fifty: self.one_in(3), mass, height, list }
+    }
+}
+
+/// Lay the hits into the object graph: the 50cc flag, the chassis' mass and height, and the record's
+/// list, each entry pointing at an actor record of its own (or at none, for scenery).
+fn lay(ee: &mut Ee, h: &Hits) {
+    put_b(ee, OBJ + 0x588, h.fifty);
+    put_f(ee, CHASSIS + 0x210, h.mass);
+    put_f(ee, CHASSIS + 0x64, h.height);
+    ee.set_u32(COLL + 0x100, h.list.len() as u32);
+    ee.set_u32(COLL + 0x104, 11);
+    ee.set_u32(COLL + 0x108, LIST);
+    for (i, c) in h.list.iter().enumerate() {
+        let (e, other, body) = (LIST + 0x80 * i as u32, OTHERS + 0x100 * i as u32, BODIES + 0x400 * i as u32);
+        for o in (0..0x80).step_by(4) {
+            ee.set_u32(e + o, 0);
+        }
+        ee.set_u32(e, c.mirrored as u32);
+        put_f(ee, e + 0x24, c.reach);
+        match c.other {
+            air::Other::Scenery => ee.set_u32(e + 0x74, 0),
+            air::Other::Rider { height, vel } => {
+                ee.set_u32(e + 0x74, other);
+                ee.set_u32(other + 0xf0, body);
+                put_f(ee, body + 0x64, height);
+                put_v(ee, body + 0x260, vel);
+            }
+            air::Other::Object { mass, vel } => {
+                ee.set_u32(e + 0x74, other);
+                ee.set_u32(other + 0xf0, 0);
+                ee.set_u32(other + 0xf4, body);
+                put_f(ee, body + 0xc, mass);
+                put_v(ee, body + 0x70, vel);
+            }
+        }
+    }
+}
+
+/// The wreck test's contact clause, over 10000 generated substeps with a contact list in the record:
+/// the original's whole wreck test against [`air::wreck_test`] then [`air::hit_wreck`], every call
+/// to the "came off" slot in order — the first test and the hits can both enter a wreck on one
+/// substep — and every word of the object graph after.
+#[test]
+fn the_hits_are_the_originals() {
+    let Some((mut ee, codes)) = harness(&AcosTable::build()) else { return };
+    let mut g = Gen(0x0537);
+    let mut tally = std::collections::BTreeMap::new();
+    for k in 0..10_000 {
+        let s = g.state();
+        let h = g.hits();
+        reset(&mut ee);
+        poke(&mut ee, &s);
+        lay(&mut ee, &h);
+        codes.borrow_mut().clear();
+        ee.call(addr("bike_wreck_test").unwrap(), &[OBJ as u64, 0], &[s.st.dt.0], 40_000);
+        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("hits, state {k}: {e}\n{s:#?}\n{h:#?}"));
+        let was = snap(&ee);
+        let wrecked = codes.borrow().clone();
+
+        let mut t = s.clone();
+        let landed = air::wreck_test(&t.p, &mut t.air, &t.ch, &t.st, &t.lo);
+        let hit = air::hit_wreck(&t.p, &mut t.air, t.st.touching, h.fifty, h.mass, h.height, &h.list);
+        let calls: Vec<u32> = landed.into_iter().chain(hit).map(|w| w as u32).collect();
+        assert_eq!(wrecked, calls, "hits, state {k}: the original's calls against the port's\n{s:#?}\n{h:#?}");
+        reset(&mut ee);
+        poke(&mut ee, &t);
+        lay(&mut ee, &h);
+        let now = snap(&ee);
+        if let Some(i) = was.iter().zip(&now).position(|(a, b)| a != b) {
+            panic!("hits, state {k}: {} is {:#010x} in the original and {:#010x} in the port\n{s:#?}\n{h:#?}",
+                   where_is(i), was[i], now[i]);
+        }
+        let path = match hit {
+            Some(w) => format!("{w:?}"),
+            None if !t.st.touching => "untouched".into(),
+            None if h.list.iter().any(|c| !c.mirrored && c.reach > F(4.0)) => "an actor let off".into(),
+            None => "nothing reaching".into(),
+        };
+        *tally.entry(path).or_insert(0u32) += 1;
+        if h.fifty && h.list.iter().find(|c| !c.mirrored && c.reach > F(4.0)).is_some_and(|c| c.reach <= F(6.0)) {
+            *tally.entry("a 50cc's shoulder".into()).or_insert(0u32) += 1;
+        }
+        if landed.is_some() && hit.is_some() {
+            *tally.entry("both".into()).or_insert(0u32) += 1;
+        }
+    }
+    for path in ["Scenery", "Joust", "untouched", "an actor let off", "nothing reaching", "a 50cc's shoulder", "both"] {
+        let n = tally.get(path).copied().unwrap_or(0);
+        assert!(n >= 50, "only {n} state(s) went down the {path:?} path; the tally is {tally:?}");
+    }
+}
+
 // --- P17: a rotation is a row ------------------------------------------------------------------------
 
 /// The default set is the disc's: the backflip alone. The invented rows only come in with the flag.

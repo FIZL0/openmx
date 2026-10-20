@@ -264,6 +264,9 @@ pub enum Wreck {
     Back = 4,
     /// Landed too hard.
     Flat = 5,
+    /// Hit the scenery with the rider: one of the body's rays found something that is not another
+    /// actor, and the ray reaches high enough on the bike to be the rider's head ([`hit_wreck`]).
+    Scenery = 6,
     /// Hit another rider, or landed on one.
     Joust = 7,
     /// Nose-dived out of the air.
@@ -1007,4 +1010,84 @@ pub fn wreck_test(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, loa
         return Some(Wreck::Joust);
     }
     Some(Wreck::NoHander)
+}
+
+// --- 5b: the hits ------------------------------------------------------------------------------------
+
+/// How far up the bike a body ray has to reach before something it hits throws the rider off: above
+/// this, and only the head ray does ([`HEAD`]).
+pub const HIT_REACH: F = F(6.0);
+/// The same on a 50cc bike, whose two shoulder rays reach above it too.
+pub const HIT_REACH_FIFTY: F = F(4.0);
+
+/// The bike's head ray, in the bike's model space: from the hub all eleven of its body rays start at,
+/// up through the rider's helmet. The only one of the eleven that ends above [`HIT_REACH`].
+///
+/// **Measured, not loaded.** The rays come out of the bike's model, which the port does not load; these
+/// two points are the ones the running game's collision object held at the reason-6 wreck of
+/// recording2 (`research/journal/2026-10-20-s37-s-reason-six`), to the float.
+pub const HEAD: (Vf, Vf) = (
+    Vf([-1.7404556e-05, 4.063743, -0.09676063, 1.0]),
+    Vf([2.9802322e-08, 6.6743364, 0.17120028, 1.0]),
+);
+
+/// What a body ray hit, as far as the wreck test asks about it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Other {
+    /// Nothing that is an actor: the track, a prop, a wall.
+    Scenery,
+    /// Another vehicle, by its chassis' height and velocity.
+    Rider { height: F, vel: Vf },
+    /// An actor with a rigid body and no chassis — a barrel, a cone — by that body's mass and velocity.
+    Object { mass: F, vel: Vf },
+}
+
+/// One entry of the collision record's contact list, the three things the wreck test reads off it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Contact {
+    /// The entry was written by another record's sweep and mirrored into this one, rather than found
+    /// by the bike's own rays. The wreck test skips these.
+    pub mirrored: bool,
+    /// How high the ray that hit reaches: its end's height in the bike's own model space — the ray's,
+    /// not the hit point's, so it says *which* ray hit and not where.
+    pub reach: F,
+    pub other: Other,
+}
+
+/// The wreck test's last clause: the bike's body rays hitting something hard. The first contact the
+/// bike's own rays found ([`Contact::mirrored`] clear) with a ray reaching above [`HIT_REACH`] — or
+/// [`HIT_REACH_FIFTY`] on a 50cc bike — is the only one looked at, and it decides by what it hit:
+///
+/// - scenery is a [`Wreck::Scenery`], always;
+/// - another rider is a [`Wreck::Joust`] if their chassis is higher than this one's by more than
+///   [`Params::joust_wreck_height`] — landed on from above — and their velocity is the throw;
+/// - any other actor is a [`Wreck::Joust`] if it is heavier than the bike's chassis, its velocity the
+///   throw.
+///
+/// An actor that does not pass its test still ends the search, so a rider brushed by a lighter object
+/// first is not wrecked by scenery further down the list. `touched` is the record's own "anything at
+/// all", without which the list is not read. `mass` and `height` are the bike's chassis'.
+///
+/// The original runs this after the rest of [`wreck_test`] and not instead of it: both can enter a
+/// wreck on one substep, and the entry stores its reason unconditionally, so when both answer, this
+/// one's is the reason that stays. [`wreck_test`]'s caller composes them that way.
+pub fn hit_wreck(p: &Params, air: &mut Air, touched: bool, fifty: bool, mass: F, height: F,
+                 contacts: &[Contact]) -> Option<Wreck> {
+    if !touched {
+        return None;
+    }
+    let limit = if fifty { HIT_REACH_FIFTY } else { HIT_REACH };
+    let c = contacts.iter().find(|c| !c.mirrored && c.reach > limit)?;
+    match c.other {
+        Other::Scenery => Some(Wreck::Scenery),
+        Other::Object { mass: theirs, vel } if mass < theirs => {
+            air.wreck_impact = vel;
+            Some(Wreck::Joust)
+        }
+        Other::Rider { height: theirs, vel } if p.joust_wreck_height < theirs - height => {
+            air.wreck_impact = vel;
+            Some(Wreck::Joust)
+        }
+        _ => None,
+    }
 }
