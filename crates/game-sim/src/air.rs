@@ -362,11 +362,11 @@ impl AcosTable {
 /// calls, and the narrowing one chops. Rounding to nearest instead would put 18595 of the 30001 arc
 /// cosine entries one ulp too high.
 #[allow(clippy::float_arithmetic)]
-fn widen(x: f32) -> f64 {
+pub(crate) fn widen(x: f32) -> f64 {
     x as f64
 }
 #[allow(clippy::float_arithmetic)]
-fn narrow(x: f64) -> f32 {
+pub(crate) fn narrow(x: f64) -> f32 {
     let near = x as f32;
     let back = near as f64;
     let away = (back > x && near > 0.0) || (back < x && near < 0.0);
@@ -382,7 +382,7 @@ fn narrow(x: f64) -> f32 {
 /// `sqrt` are specified exactly by IEEE-754 and give the same bits on every host, which is what makes
 /// this reproducible, and nothing else here would reproduce the game's table.
 #[allow(clippy::float_arithmetic)]
-fn acos(x: f64) -> f64 {
+pub(crate) fn acos(x: f64) -> f64 {
     const PS: [u64; 6] = [
         0x3FC5555555555555,
         0xBFD4D61203EB6F7C,

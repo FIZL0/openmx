@@ -2530,6 +2530,60 @@ bike_box_solve boot 0x001f5b40 (this) the type-4 constraint's solve (vtable 0x00
 #                             else p < -h -> -h, and that axis' local velocity zeroed. Live: centre
 #                             (0, 4.3, -1.5), half (0.45, 0.6, 1.75) -- not mrider.phy's [Bike
 #                             Constraint] BoxPosition/BoxSize (0,1.9,-0.25 / 0.5,1.75,2.5)
+# S51 — the ragdoll's step (crates/game-sim/src/ragdoll.rs, proved in tests/ragdoll.rs)
+pin_solve boot 0x001f49b0 (pin) the pin constraint's vt +0x18: off (+4) does nothing. Both bodies
+#                         there and enabled: hit (+0xa0) = (0,0,0,1), the twist limit when +0x70, then
+#                         pin_two_body through the table. Else the first alone (if enabled): hit
+#                         cleared, the turn limit against body+0x160 when +0x70, the target (+0x40)
+#                         from *(+0x60) and the velocity (+0x50) from *(+0x64), or the target = +0x30
+#                         when +0x60 is null, then pin_one_body (table +0x1c). A lane past +0x90 (upper) or under
+#                         +0x80 (lower) is set onto it, +0xa0 and +0xb0 (sticky) = +-1
+pin_two_body boot 0x001f3d40 (pin) the two-bone position and velocity impulses; +0x100 = (inv mass 1,
+#                            inv mass 2, gain, c), c summed into every length
+pin_one_body boot 0x001f4550 (pin) the same against the target and its velocity
+pin_vtable boot 0x00451df0 the pin's table (at pin +0x10); +0x10 = 0x001f7750 writes a1 to +4
+throw_force boot 0x001f2e00 (listener) the throw's force listener: on (+0): the force *(+0xc) (the
+#                           actor's +0x6e0; +0x10 inline when null) to the body +0x24 if enabled, else
+#                           to every enabled body of the group +0x20 (null here). Table 0x00451ec0,
+#                           +0x10 = 0x001f77a0 writes a1 to +0
+ragdoll_force_listener boot 0x0024d6e0 (actor) the ragdoll world's first force listener (relay
+#                           0x001f7770 -> actor+0x2a0's thunk 0x0024f390): per part force.y -=
+#                           32.2 * (actor+0x2d0 * mass); riding (+0x2a4): the pose spring/damper
+#                           (+0x650/+0x660) to the skeleton pose point (orientation_transform_point),
+#                           carried by the request's rows and spin (+0xa8); stiff && +0x2b8: every
+#                           type-2 constraint owned by the actor (list_get order): the torque spring,
+#                           in mode 2 (+0x47c) faded by +0x648/+0x644 and halved, pushed back on b1
+list_get boot 0x001f82a0 (list, i) -> the i-th element of a dynamics world list
+quat_axis_angle boot 0x0013f110 (q*, angle*, axis*) acos-table half angle, doubled; axis = v / the curve
+#                               table's uncorrected sine. The no-turn branch (axis (1,0,0,1)) needs
+#                               the acos table to give 0 at w = 1; the game's gives 2^-11
+body_moment_world boot 0x001f7b60 (body, vec4*) vt +0x6c: the moment turned into the body by +0x170,
+#                                 then vt +0x5c (body_moment_local)
+fine_acos_table boot 0x0046a6c0 25 x {base, scale, ptr}: acos(1 - x) in pieces doubling from 2^-24,
+#                               401 floats each (the last a copy); the twist limit's angle
+fine_acos_build boot 0x0012e390 () fills fine_acos_table with the acos_table_build routines
+rider_physics_update boot 0x0030f6e0 (actor, dt in f12) the rider body actor's update: app_pointer's
+#                           +0x325 bit 3 skips to 0x00149270; else vt +0xb0, +0x70/+0x74 = !(placed
+#                           +0x2ac && active +0x2b0 && !riding && !repose +0x2a8), riding: 0x001b2640
+#                           per part, vt +0xa8 (rider_animation), placed && active && !repose:
+#                           dynamics_world_step on +0x2cc then vt +0xac (0x0024df80), repose: vt
+#                           +0xa4(.., 1), vt +0xa0, repose = 0; transform_touch, 0x00149270
+throw_clock boot 0x0024cf98 a block in rider_animation's wreck mode ($s2 actor, $f20 dt), to
+#                           throw_clock_end: force time +0x6bc > 0: the pull +0x6e0 = +0x6d0 as it is
+#                           (+0x6a8), turned by the main bone (+0x6ac) or by the request's +0x190,
+#                           time -= dt; else if throwing, pull = (0,0,0,1), throw off. Hand hold
+#                           +0x6c0 > 0: -= dt; else both hand holds off if either is on
+throw_clock_end boot 0x0024d118 where the throw clock block ends
+rider_part_sync boot 0x001b2640 (node, quad*) the physics update's per-part call while riding (parts
+#                               1..); not decoded, hooked out in S51's proofs
+actor_update_tail boot 0x00149270 the physics update's last call (also its whole body under the
+#                                 debug bit); not decoded, hooked out in S51's proofs
+#   the ragdoll world (+0x2cc): +0x50 bodies (18), +0x68 force listeners (the actor's, the throw),
+#     +0x80 constraints: holds 0-3 (bones 11, 7, 17, 14; following +0x4d0.. and +0x530), bone
+#     collisions 0-1, the 17 joints, collisions 2-8, the box
+#   pin: +0x20/+0x30 anchors, +0x40 target, +0x50 its velocity, +0x60/+0x64 what they follow, +0x80
+#     lower, +0x90 upper, +0xa0 hit, +0xb0 sticky (the torque reads and clears it), +0x100 gains
+#   rest of bone b: *(actor+0x234) + 0x60 * part[body+8].+0x40 + 0x50
 # P22 -- what the captured bike_vel is, and R6's two readings of it.
 # rider_body_mode (boot 0x0024c7e0, above) also writes the owner's +0x530 -- the type-4 actor record at
 #   owner+0x400, its +0x130, which is what `./kit record` captures as bike_vel -- as the request
