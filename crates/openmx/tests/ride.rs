@@ -56,6 +56,13 @@
 //! ramp, which is why this file compiles that module and its window in by path. The keyboard is the
 //! control most of this shell's players have, and a flip the pad can do and the keys cannot is the
 //! complaint P16 was opened for.
+//!
+//! **And the biplane switch** (P19), at the bottom: the shell's `--vehicle` and its swap key go
+//! through `src/vehicle.rs`'s `Garage`, and the three things it must do are asserted on the same pad
+//! script — a session that starts in the plane has the plane up and leaves the bike alone, a swap
+//! mid-session moves the controller and back, and a default session rides the bike bit for bit as it
+//! did before there was a garage. Whether the plane then *flies* is S34's flight, which is not ported;
+//! that test is here, ignored, with S34's name on it.
 
 use game_sim::collide::{Bundle, Record};
 use game_sim::input::{AXIS_CENTRE, CONTROL_MAP, Control, PADS, Report};
@@ -78,6 +85,10 @@ mod window;
 #[allow(dead_code)]
 #[path = "../src/pad.rs"]
 mod pad;
+// And the shell's machine switch (P19), for the same reason and in the same way.
+#[allow(dead_code)]
+#[path = "../src/vehicle.rs"]
+mod vehicle;
 
 /// The minute, in the kit's pad notation. A file rather than a string const so that a human can send
 /// the same ride to a real machine with `./kit pad script`.
@@ -1044,4 +1055,188 @@ fn none_of_the_minute_wrecks() {
     let all = m.all();
     assert_eq!(wrecks(&all), 0, "the minute wrecked {} of its {} frames", wrecks(&all), all.len());
     assert!(all[all.len() - 1].on_ground, "the minute ended in the air");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// the biplane switch (P19)
+// ---------------------------------------------------------------------------------------------------
+
+use vehicle::{Garage, Kind, Plane, Spawn};
+
+/// A plane parked on the floor somewhere off the bike's line, nose along −z: numbers of this file's
+/// own, because the test has no disc and a track's `machine.txt` is the disc's.
+fn parked_plane() -> Plane {
+    Plane::parked(Spawn { at: Vf::new(400.0, 0.0, -300.0, 1.0), facing: Vf::new(0.0, 0.0, -1.0, 0.0) })
+}
+
+/// The bike [`ride_the_minute`] rides, on its start line.
+fn the_minutes_bike() -> Sim {
+    let tables = Arc::new(Tables::build());
+    let phy = Phy::read_bytes(ridden_bike().as_bytes(), &tables.ride.curve);
+    let geom = Phy::read_bytes(stock::BIKE.as_bytes(), &tables.ride.curve);
+    let rider = game_sim::rider::Rider::new(
+        &phy,
+        stock::mounts(&geom),
+        stock::SPAWN,
+        stock::FACING,
+        Set::default(),
+    );
+    Sim::with_rider(0, tables, phy, rider)
+}
+
+/// The minute's first `n` frames, as the reports the shell's pad would have built.
+fn first_frames(n: usize) -> Vec<Report> {
+    script(MINUTE).into_iter().flat_map(|(_, reports)| reports).take(n).collect()
+}
+
+/// One pass of the shell's fixed update through the garage: the poll, then whichever machine is up.
+fn pass(sim: &mut Sim, garage: &mut Garage, report: Report, world: &mut Jump) {
+    let reports: [Report; PADS] = [report, Report::missing()];
+    let controls = sim.poll(DT, &reports);
+    garage.step(sim, DT, &controls, world);
+}
+
+/// The ride's own hash: the bike and the rider, not the pads, which are polled whichever machine is up.
+fn bike_hash(sim: &Sim) -> u64 {
+    game_sim::hash::of(&sim.rider.ride)
+}
+
+/// `--vehicle bike` is the shell as it was: the whole minute through a garage with the bike up hashes
+/// the same, frame for frame, as the minute through `Sim::step` alone — and the garage's plane, which
+/// a bike session still carries, never moves.
+#[test]
+fn a_default_session_rides_the_bike_exactly_as_before() {
+    let mut before = the_minutes_bike();
+    let mut after = the_minutes_bike();
+    let mut garage = Garage::new(Kind::Bike, Some(parked_plane())).unwrap();
+    let (mut a, mut b) = (Jump::nothing(), Jump::nothing());
+    let mut frames = 0;
+    for (name, reports) in script(MINUTE) {
+        let ramp = match name.as_str() {
+            "the run-up" => Some(RAMP),
+            "the flip" => Some(FLIP_RAMP),
+            _ => None,
+        };
+        if let Some((start, slope, length)) = ramp {
+            let m = before.rider.ride.transform();
+            a = Jump {
+                origin: before.rider.ride.position(),
+                dir: Vf::new(m.0[2].x(), 0.0, m.0[2].z(), 0.0),
+                start,
+                slope,
+                length,
+            };
+            b = a.clone();
+        }
+        for report in reports {
+            let reports: [Report; PADS] = [report, Report::missing()];
+            let controls = before.poll(DT, &reports);
+            before.step(DT, &controls, &mut a);
+            pass(&mut after, &mut garage, report, &mut b);
+            assert_eq!(after.hash(), before.hash(), "{name}: the garage's bike left the bare one at frame {frames}");
+            frames += 1;
+        }
+    }
+    assert_eq!(frames, 4020);
+    assert_eq!(garage.up, Kind::Bike);
+    assert_eq!(garage.plane, Some(parked_plane()), "a bike session moved the parked plane");
+    // And the bike went somewhere, or the comparison above was of two bikes standing still.
+    assert!(before.rider.ride.position().z().abs() + before.rider.ride.position().x().abs() > 100.0);
+}
+
+/// `--vehicle biplane` starts with the plane up, where its `machine.txt` parked it, and the bike is
+/// left alone: the minute's launch and first seconds flat out on the throttle reach the plane's
+/// controller and not the bike, which does not move a bit.
+#[test]
+fn a_biplane_session_starts_in_the_plane_and_leaves_the_bike_alone() {
+    let mut sim = the_minutes_bike();
+    let mut garage = Garage::new(Kind::Biplane, Some(parked_plane())).unwrap();
+    assert_eq!(garage.up, Kind::Biplane);
+    assert_eq!(garage.plane.as_ref().unwrap().at, parked_plane().spawn.at);
+
+    let parked = bike_hash(&sim);
+    let mut world = Jump::nothing();
+    for report in first_frames(5 * 60) {
+        pass(&mut sim, &mut garage, report, &mut world);
+        assert_eq!(bike_hash(&sim), parked, "the bike moved with the plane up");
+    }
+    assert_eq!(sim.ticks, 0, "the bike was stepped with the plane up");
+    // The pad still reached the port's input manager: the throttle is down on it.
+    assert!(sim.input.pad(0).held(Control::Cross), "the plane's pad was never polled");
+}
+
+/// A session that starts in the plane flies it: the minute's throttle, held from a standstill for the
+/// launch and its twenty seconds flat out, takes the plane off the ground.
+///
+/// It cannot yet. The plane's per-tick update is S34's (`crates/game-sim/src/biplane.rs`), on S33's
+/// `biplane.phy` and I6's pad mapping, and none of the three is ported: `Plane::step` is the hook S34
+/// fills, and until then the plane stands where it was parked. S34 un-ignores this.
+#[test]
+#[ignore = "S34: the biplane's flight is not ported, so the plane stands where it was parked"]
+fn a_biplane_session_flies() {
+    let mut sim = the_minutes_bike();
+    let mut garage = Garage::new(Kind::Biplane, Some(parked_plane())).unwrap();
+    let mut world = Jump::nothing();
+    for report in first_frames(22 * 60) {
+        pass(&mut sim, &mut garage, report, &mut world);
+    }
+    let plane = garage.plane.as_ref().unwrap();
+    let spawn = plane.spawn.at;
+    let gone = (plane.at.x() - spawn.x()).hypot(plane.at.z() - spawn.z());
+    assert!(gone > 100.0, "the plane moved {gone:.1} ft on twenty-two seconds of throttle");
+    assert!(!plane.on_ground(), "the plane never left the ground");
+    assert!(plane.at.y() > spawn.y() + 10.0, "the plane is at {:.1} ft, parked at {:.1}", plane.at.y(), spawn.y());
+}
+
+/// A swap mid-session swaps, the way the original's swap does (R8): ride the bike off its start
+/// line, swap, and the plane has the controller from where it was parked while the bike stands
+/// exactly where it was left; swap back and the bike carries on from there rather than from its
+/// start line, and a second swap into the plane puts the plane back where it was parked.
+#[test]
+fn a_swap_mid_session_swaps() {
+    let mut sim = the_minutes_bike();
+    let mut garage = Garage::new(Kind::Bike, Some(parked_plane())).unwrap();
+    let mut world = Jump::nothing();
+    let frames = first_frames(10 * 60);
+    let (bike, plane, back) = (&frames[..4 * 60], &frames[4 * 60..7 * 60], &frames[7 * 60..]);
+
+    for &report in bike {
+        pass(&mut sim, &mut garage, report, &mut world);
+    }
+    let start = stock::SPAWN;
+    let left_at = sim.rider.ride.position();
+    let left = bike_hash(&sim);
+    let ridden = (left_at.x() - start.x()).hypot(left_at.z() - start.z());
+    assert!(ridden > 20.0, "four seconds of the minute rode the bike only {ridden:.1} ft");
+    let speed = sim.rider.ride.chassis.speed.0;
+    assert!(speed > 10.0, "the bike is doing {speed:.1} ft/s when it is left");
+
+    // Into the plane, at speed: the pause menu's swap has no 40 mph gate (only the prompt does).
+    assert_eq!(garage.swap(), Ok(Kind::Biplane));
+    assert_eq!(garage.plane.as_ref().unwrap().at, parked_plane().spawn.at, "the plane was not reset to its spawn");
+    let ticks = sim.ticks;
+    for &report in plane {
+        pass(&mut sim, &mut garage, report, &mut world);
+        assert_eq!(bike_hash(&sim), left, "the bike moved after it was left");
+    }
+    assert_eq!(sim.ticks, ticks);
+
+    // And back: the bike picks up where it was left, still rolling, and the throttle reaches it.
+    assert_eq!(garage.swap(), Ok(Kind::Bike));
+    pass(&mut sim, &mut garage, back[0], &mut world);
+    let first = sim.rider.ride.position();
+    let step = (first.x() - left_at.x()).hypot(first.z() - left_at.z());
+    assert!(step < 5.0, "the bike's first frame back is {step:.2} ft from where it was left");
+    assert_ne!(bike_hash(&sim), left, "the bike did not move once it was back");
+    for &report in &back[1..] {
+        pass(&mut sim, &mut garage, report, &mut world);
+    }
+    let end = sim.rider.ride.position();
+    let further = (end.x() - left_at.x()).hypot(end.z() - left_at.z());
+    assert!(further > 20.0, "three seconds back on the bike rode it only {further:.1} ft");
+
+    // A plane taken again is put back where it was parked, whatever had moved it.
+    garage.plane.as_mut().unwrap().at = Vf::new(0.0, 500.0, 0.0, 1.0);
+    assert_eq!(garage.swap(), Ok(Kind::Biplane));
+    assert_eq!(garage.plane.as_ref().unwrap().at, parked_plane().spawn.at);
 }

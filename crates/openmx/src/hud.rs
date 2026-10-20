@@ -47,6 +47,10 @@ pub struct Hud {
     wreck: String,
     /// The camera preset the follow camera is on, by its file's name for it.
     camera: String,
+    /// Which machine has the controller, the bike or the biplane (P19). With the plane up the
+    /// numbers beside it are still the bike's — where it was left — because the plane's flight is
+    /// not ported and has no numbers of its own yet.
+    vehicle: String,
 }
 
 impl Hud {
@@ -56,12 +60,18 @@ impl Hud {
             trick: "-".to_string(),
             wreck: "-".to_string(),
             camera: "-".to_string(),
+            vehicle: "bike".to_string(),
         }
     }
 
     /// Which camera preset is up, latched the same way: the shell switches presets, not the overlay.
     pub fn note_camera(&mut self, name: &str) {
         self.camera = name.to_string();
+    }
+
+    /// Which machine is up, latched the same way: the shell swaps machines, not the overlay.
+    pub fn note_vehicle(&mut self, name: &str) {
+        self.vehicle = name.to_string();
     }
 
     /// What the rider just did, latched for the overlay to show until the next one.
@@ -256,7 +266,7 @@ impl Hud {
                     if ride.air.on_ground { "yes" } else { "no" },
                     if ride.touching { "touching" } else { "" }
                 ),
-                String::new(),
+                format!("vehicle {}", self.vehicle),
             ],
             [
                 format!("roll{:>8.1}   pitch{:>6.1}", deg(euler.z()), deg(euler.x())),

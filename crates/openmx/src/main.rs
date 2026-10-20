@@ -86,6 +86,11 @@
 //! the numbers the ride is running on. It is debugging furniture and matches nothing on the disc,
 //! which is why it is behind a flag and why with the flag off it draws nothing at all.
 //!
+//! **M** swaps between the bike and the track's biplane, and `--vehicle biplane` starts in the plane
+//! ([`vehicle`], P19): the swap is the original's own — the bike is left where it stands, hidden and
+//! not stepped, and the plane is put back where the track's `machine.txt` parked it, with its own
+//! camera file. The plane's flight is not ported yet (S34), so the plane stands where it is parked.
+//!
 //! # Tapes
 //!
 //! `--record FILE` writes down the pad of every frame the simulation ran — the reports as the pad
@@ -117,6 +122,7 @@ mod ground;
 mod hud;
 mod moment;
 mod pad;
+mod vehicle;
 mod window;
 
 use std::sync::Arc;
@@ -149,6 +155,7 @@ use ground::Ground;
 use hud::Hud;
 use moment::{Moment, Shot};
 use pad::{Pads, Throttle, Wiring};
+use vehicle::{Garage, Kind, Plane, Spawn};
 use window::{Window, fit_frame, key};
 
 /// The game's own frame rate. The simulation is not fixed to it — it is handed the wall clock's own
@@ -184,6 +191,21 @@ const NEAR_CLIP: f32 = 2.4;
 /// save state has the follow camera on preset 0 of 11, whose record is named `Race Cam 1` — the
 /// race's camera and not `Freestyle Cam` (P14). L1 walks on from it.
 const START_CAMERA: &str = "Race Cam 1";
+
+/// The camera preset a session in the biplane starts on: the first record of
+/// `AppStart\BiplaneCPresets.ini`, which is the plane's own camera file (R8). Which of the five the
+/// original is on in the air was not read off a save state; the first is the one a camera object
+/// applies to itself when it is built, which is how the bike's `Race Cam 1` was found (P14).
+const PLANE_CAMERA: &str = "Flight Cam 1";
+/// The plane's camera file. The game names it `AppStart\BiplaneCPresets.ini`, but the disc ships it
+/// in each freeride track's second archive (`free06_2.res`'s `appstart\biplanecpresets.ini`), not in
+/// `appstart.res`.
+const PLANE_PRESETS: &str = "biplanecpresets.ini";
+/// The plane's model, as the disc names it (R8). Drawing it properly — its textures, the pilot, the
+/// prop and the effects — is V21's; the shell only puts what the loader makes of it where the plane is.
+const PLANE_MODEL: &str = "biplane";
+/// The archive the vehicle loader reads the machines' own files out of, `biplane.phy` among them.
+const MACHINE_ARCHIVE: &str = "machine.res";
 
 /// The race camera's reverse threshold: the constant its setup hands the base camera's initialiser.
 const REVERSE_SPEED: f32 = 5.0;
@@ -230,6 +252,9 @@ struct World<'a> {
     /// same value `game_sim::replay::verify` drives, so a tape of this shell and a replay fixture
     /// are a frame of the same thing (P5).
     sim: Sim,
+    /// Which machine has the controller, and the track's biplane beside the bike (P19). With the bike
+    /// up a pass is `sim.step` and nothing else; with the plane up the bike is not stepped.
+    garage: Garage,
     /// Whether the ride is moving. Start toggles it: the original's pause is a whole front-end page
     /// and this shell has no pages, so freezing the ride is the shell's own stand-in for it.
     riding: bool,
@@ -273,7 +298,7 @@ impl Game for World<'_> {
 
         self.said = rider::Frame::default();
         if self.riding {
-            self.said = self.sim.step(dt, &controls, &mut self.place);
+            self.said = self.garage.step(&mut self.sim, dt, &controls, &mut self.place);
         }
         self.hands = controls;
         true
@@ -367,6 +392,9 @@ struct Args {
     /// facts about the device in somebody's hands — whether its face buttons travel, and which axis
     /// a driver publishes each button's pressure on — so neither can be guessed from here.
     wiring: Wiring,
+    /// `--vehicle bike|biplane`: which machine the session starts on (P19). The bike by default,
+    /// and a default session is the shell exactly as it was before there was a choice.
+    vehicle: Kind,
 }
 
 fn run() -> Result<(), String> {
@@ -673,6 +701,68 @@ fn run() -> Result<(), String> {
     // cap the ratio — aims hundreds of feet up the track and loses the bike off the screen (P14).
     camera.cam.speed_reference = F(SPEED_REFERENCE);
 
+    // ---- the biplane beside the bike (P19) -----------------------------------------------------
+    // Where the track parks it: its own `machine.txt`, `[Biplane1]` for the first player, which is
+    // what the original's machine placement reads when that player's machine is the plane (R8). The
+    // file is the machines' archive's, `tracks\<track>\machine.txt`, beside the plane's own model
+    // and physics. A track with no such section has no plane, and `--vehicle biplane` on it is an
+    // error.
+    let machine_res = match member_ending(&disc, MACHINE_ARCHIVE) {
+        Ok(name) => Some(disc.res(&name)?),
+        Err(_) => None,
+    };
+    let machines = machine_res.as_ref().and_then(|res| {
+        let e = res.find_suffix(&format!("{}\\machine.txt", args.track))?;
+        Some((e.name.clone(), res.read(&e.name).ok()?))
+    });
+    let plane = machines.as_ref().and_then(|(_, b)| Spawn::biplane(b, 0)).map(Plane::parked);
+    match (&machines, &plane) {
+        (Some((name, _)), Some(p)) => println!(
+            "biplane: parked by {name} at {:.0}, {:.0}, {:.0} facing {:.0} degrees",
+            p.at.x(),
+            p.at.y(),
+            p.at.z(),
+            p.facing.x().atan2(p.facing.z()).to_degrees()
+        ),
+        (Some((name, _)), None) => println!("biplane: {name} parks none"),
+        (None, _) => println!("biplane: the track has no machine.txt"),
+    }
+    let garage = Garage::new(args.vehicle, plane)?;
+    // The plane's own camera, which the swap hands the player with it: one camera-preset object per
+    // machine kind, and the plane's reads `AppStart\BiplaneCPresets.ini` rather than the track's
+    // bike presets (R8). The same derived camera and the same two constants the bike's has, because
+    // the plane's camera is built by the same constructor; that the original holds the same speed
+    // reference for it was not read.
+    let mut plane_camera = match &garage.plane {
+        None => None,
+        Some(_) => {
+            let presets: Vec<Preset> = archives
+                .iter()
+                .find_map(|a| a.read_suffix(PLANE_PRESETS).ok())
+                .map(|b| Preset::read_bytes(&b, ""))
+                .unwrap_or_default();
+            println!("biplane: {} camera presets in {PLANE_PRESETS}", presets.len());
+            let mut cam = Race::new(presets, reverse_speed);
+            if let Some(start) = Preset::find(&cam.cam.presets, PLANE_CAMERA) {
+                cam.cam.set_preset(start);
+            }
+            cam.cam.snap = true;
+            cam.cam.speed_reference = F(SPEED_REFERENCE);
+            Some(cam)
+        }
+    };
+    // Its model, as far as the shared loader takes it: out of the machines' archive, where its
+    // textures are too. V21 draws it properly.
+    let plane_drawn = match (&garage.plane, machine_res) {
+        (Some(_), Some(res)) => {
+            let own = vec![res];
+            let drawn = assets.load(&own, PLANE_MODEL);
+            println!("biplane: {}", if drawn { "model loaded" } else { "no model to draw" });
+            drawn
+        }
+        _ => false,
+    };
+
     // The scene's own start line and start direction, as the simulation's reader read them.
     let spawn = point(place.start);
     let facing = point(place.start_direction).norm();
@@ -740,6 +830,11 @@ fn run() -> Result<(), String> {
     // dirt says so before the window opens.
     let (on, _) = sim_world::World::ground(&mut sim, at);
     println!("the dirt under the start line is at {:.1} feet", on.y());
+    // And under the plane, which `machine.txt` gives a height of its own (P19).
+    if let Some(plane) = &garage.plane {
+        let (on, _) = sim_world::World::ground(&mut sim, plane.at);
+        println!("the dirt under the biplane is at {:.1} feet", on.y());
+    }
 
     // ---- one frame of the original, posed from a save state (V2) -------------------------------
     // Everything the picture needs is loaded by now, and nothing a window or a pad gives is wanted:
@@ -971,6 +1066,7 @@ fn run() -> Result<(), String> {
         place: sim,
         reports: [Report::missing(); PADS],
         sim: Sim::with_rider(0, Arc::new(tables), phy, rider),
+        garage,
         riding: true,
         said: rider::Frame::default(),
         hands: Controls::default(),
@@ -982,12 +1078,20 @@ fn run() -> Result<(), String> {
     // window rather than inside the simulation's `World`, and it reads the port's own values at draw
     // time instead of being fed them.
     let mut hud = Hud::new(args.hud);
-    if !camera.cam.presets.is_empty() {
-        hud.note_camera(&camera.cam.preset().name);
+    hud.note_vehicle(world.garage.up.name());
+    let first = match (world.garage.up, &plane_camera) {
+        (Kind::Biplane, Some(cam)) => &cam.cam,
+        _ => &camera.cam,
+    };
+    if !first.presets.is_empty() {
+        hud.note_camera(&first.preset().name);
     }
+    println!("vehicle: {}", world.garage.up.name());
     // H toggles it, on its own edge: the window keeps key state and not key events, so the shell
     // remembers last frame's to tell a press from a hold.
     let mut hud_key = false;
+    // M swaps machines, on its edge the same way (P19).
+    let mut swap_key = false;
 
     let mut shot = args.shot.clone();
     let started = Instant::now();
@@ -1032,6 +1136,29 @@ fn run() -> Result<(), String> {
             hud.on = !hud.on;
         }
         hud_key = hud_now;
+        // The swap, between frames, which is where the original's pause menu and prompt run it: the
+        // controller moves and the machine taken gets its own camera, which starts where it is
+        // rather than lagging in from wherever it was last. A played tape is the ride it recorded,
+        // and the tape has no swap in it, so the key is not read while one is being ridden.
+        let swap_now = window.held(key::M);
+        if swap_now && !swap_key && head.is_none() {
+            match world.garage.swap() {
+                Ok(up) => {
+                    let cam = match (up, &mut plane_camera) {
+                        (Kind::Biplane, Some(cam)) => &mut cam.cam,
+                        _ => &mut camera.cam,
+                    };
+                    cam.snap = true;
+                    if !cam.presets.is_empty() {
+                        hud.note_camera(&cam.preset().name);
+                    }
+                    hud.note_vehicle(up.name());
+                    println!("vehicle: {}", up.name());
+                }
+                Err(e) => println!("vehicle: {e}"),
+            }
+        }
+        swap_key = swap_now;
 
         // One frame of the game's own fixed update, which calls `World::simulate` inside itself.
         let step = engine.step(wall(started), engine_input(&world.reports[0]), &mut world);
@@ -1058,8 +1185,10 @@ fn run() -> Result<(), String> {
         // shell has none of, and the wall clock the idle pool seeds itself from. Both zero, so the
         // body's start sequence is the full breathe-and-wait and two runs of the same tape draw the
         // same idles.
+        // Neither moves while the plane is up: the bike was left with no controller and nothing steps it.
+        let bike_up = world.garage.up == Kind::Bike;
         if let Some(body) = &mut body {
-            if world.riding {
+            if world.riding && bike_up {
                 body.ride(dt, &mut world.sim.rider, &world.hands, rider::Gate::default());
             }
         }
@@ -1069,7 +1198,7 @@ fn run() -> Result<(), String> {
         // over that pose from the ride's own numbers — the fork travel, the steering angle and the two
         // wheels' spin, which are not in any clip because no clip could have them.
         if let Some(chassis) = &mut chassis {
-            if world.riding {
+            if world.riding && bike_up {
                 let ride = &world.sim.rider.ride;
                 let want = Chassis::want(ride, &world.sim.rider.tricks);
                 let request = Chassis::request(ride, &world.sim.rider.tricks);
@@ -1100,32 +1229,53 @@ fn run() -> Result<(), String> {
 
         // The camera, after the frame, which is where the original's viewport updates it: the shell
         // picks the preset, the ported camera does everything else.
-        let presets = camera.cam.presets.len();
+        // Whichever machine has the controller has the camera: the bike's, on the track's presets, or
+        // the plane's, on its own file's.
+        let follow = match (world.garage.up, &mut plane_camera) {
+            (Kind::Biplane, Some(cam)) => cam,
+            _ => &mut camera,
+        };
+        let presets = follow.cam.presets.len();
         if presets > 1 {
             let pad = world.sim.input.pad(0);
             // L1 only: R1 is the third of the trick decoder's buttons now. The walk is the
             // original's next-camera routine: on to the next preset the file lets the player cycle to.
             // An L1 pressed with R1 already down is the second half of the reset chord, not a camera.
             if pad.pressed(Control::L1) && !pad.held(Control::R1) {
-                camera.cam.next_preset();
-                println!("camera: {}", camera.cam.preset().name);
-                hud.note_camera(&camera.cam.preset().name);
+                follow.cam.next_preset();
+                println!("camera: {}", follow.cam.preset().name);
+                hud.note_camera(&follow.cam.preset().name);
             }
         }
         let (forward, up) = world.sim.rider.ride.axes();
         let bike_pos = world.sim.rider.ride.position();
         // The grounded flag and the speed are read off the actor by the frame rather than worked
         // out from the velocity; the ride's own two fields are what the actor's are written from.
-        let rider = Ridden {
-            target: Target {
-                body_point: bike_pos,
-                forward,
-                up,
-                vel: world.sim.rider.ride.chassis.vel,
-                lean: world.sim.rider.ride.held.stick.0,
+        let rider = match (world.garage.up, &world.garage.plane) {
+            // The plane, as the camera's target: where it is, its nose, world up, and no lean — a
+            // plane has no rider's stick to lean on. S34 gives it an attitude and a speed.
+            (Kind::Biplane, Some(plane)) => Ridden {
+                target: Target {
+                    body_point: plane.at,
+                    forward: plane.facing,
+                    up: Vf::new(0.0, 1.0, 0.0, 0.0),
+                    vel: plane.vel,
+                    lean: F::ZERO,
+                },
+                grounded: plane.on_ground(),
+                speed: plane.speed(),
             },
-            grounded: world.sim.rider.ride.air.on_ground,
-            speed: world.sim.rider.ride.chassis.speed,
+            _ => Ridden {
+                target: Target {
+                    body_point: bike_pos,
+                    forward,
+                    up,
+                    vel: world.sim.rider.ride.chassis.vel,
+                    lean: world.sim.rider.ride.held.stick.0,
+                },
+                grounded: world.sim.rider.ride.air.on_ground,
+                speed: world.sim.rider.ride.chassis.speed,
+            },
         };
         let view = if presets == 0 {
             None
@@ -1134,7 +1284,7 @@ fn run() -> Result<(), String> {
             // the track answers (S23). Without it the view sinks into the dirt on the first dip.
             // This frame has no obstacle push-out — the base class's did, and the base class's
             // frame is not the one the disc runs.
-            Some(camera.update(
+            Some(follow.update(
                 dt,
                 &rider,
                 F(NEAR_CLIP),
@@ -1150,8 +1300,8 @@ fn run() -> Result<(), String> {
                 &mut world.place,
             ))
         };
-        let bike_look = vector(forward);
-        let pos = vector(bike_pos);
+        let bike_look = vector(rider.target.forward);
+        let pos = vector(rider.target.body_point);
         let camera = match &view {
             Some(view) => Camera {
                 eye: vector(view.position),
@@ -1219,6 +1369,16 @@ fn run() -> Result<(), String> {
                 actor.push((body.geometry(), bike_at));
             }
         }
+        // With the plane up the bike is hidden, as the swap hides its model, and the rider is the
+        // plane's pilot — whom V21 seats. The plane stands in the world either way: parked until it
+        // is taken, wherever it was left after.
+        if !bike_up {
+            actor.clear();
+        }
+        if let (true, Some(plane)) = (plane_drawn, &world.garage.plane) {
+            let at = M4::placement(vector(plane.at), vector(plane.facing), v3(0.0, 1.0, 0.0));
+            actor.push((PLANE_MODEL, at));
+        }
         drawn += draw_scene(&mut frame, &look, &assets, &actor, &camera);
         // And the overlay over the top of it, after everything with a depth test and before anything
         // that reads the frame: what the window shows and what `--shot` writes are the same picture.
@@ -1246,9 +1406,10 @@ fn run() -> Result<(), String> {
                 frames as f32 / since.elapsed().as_secs_f32(),
                 triangles / frames.max(1) as usize,
                 // Feet a second to miles an hour, for a number a rider can read.
-                world.sim.rider.ride.chassis.speed.0 * 0.681_818,
+                rider.speed.0 * 0.681_818,
                 match (world.riding, world.sim.rider.phase()) {
                     (false, _) => " (frozen)",
+                    _ if !bike_up => " (biplane)",
                     (_, Phase::Riding) => "",
                     (_, Phase::Down) => " (down)",
                     (_, Phase::Resetting) => " (getting up)",
@@ -1436,6 +1597,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         play: None,
         phase: TickPhase::default(),
         wiring: Wiring::default(),
+        vehicle: Kind::Bike,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
     };
     let mut argv = std::env::args().skip(1);
@@ -1502,6 +1664,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let [x, z, deg] = v[..] else { return Err("--trace-at: x,z,degrees".into()) };
                 args.trace_at = Some((x, z, deg));
             }
+            "--vehicle" => args.vehicle = Kind::parse(&next("a vehicle, bike or biplane")?)?,
             "--phy" => args.phy = Some(next("a .phy on the disc, like race125p.phy")?),
             "--trace-stick" => {
                 args.trace_stick = Some(
@@ -1555,7 +1718,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--hud] [--camera NAME]\n\
-                            [--shot-frame N]\n\
+                            [--shot-frame N] [--vehicle bike|biplane]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                      \n\
@@ -1572,6 +1735,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      giving up that trigger's own control, and --pad-pressure says which joystick\n\
                      axes a pad reports its buttons' own pressures on.\n\
                      H toggles the riding overlay, which --hud starts on.\n\
+                     --vehicle biplane starts in the track's biplane, where its machine.txt\n\
+                     parks one, and M swaps between the bike and the plane the way the\n\
+                     original's \"Switch To Machine\" does. The plane's flight is not ported\n\
+                     yet (S34), so the plane stands where it was parked.\n\
                      The window opens at the screen's size and the frame is the largest 4:3 one\n\
                      inside it, re-made when the window is resized; --size draws a fixed frame\n\
                      instead (640x448 is the PS2's), and --scale draws each frame pixel N times\n\
