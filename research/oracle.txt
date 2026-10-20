@@ -3039,3 +3039,30 @@ plane_probe_hit_listener boot 0x0015acf0 the plane's listener on its ray probe (
 plane_probe_sound_listener boot 0x003ea8a0 the ray probe's second listener (a global at 0x0062e324,
 #                              thunk 0x003eb620): two sound calls and 0x002fffe0, presentation only
 bike_struck_listener boot 0x0025a480 a bike's listener on its collidable, vt +0xc (thunk 0x0025a6e0)
+# S46 — the ray probe's narrow phase (ray_collide_pair against a mesh or a group), ported as ray_probe.
+# The result record (probe +0x6c): +0 / +0x10 the nearest contact's segment, +0x20 its normal, +0x30
+# its point, +0x40 push = low + high, +0x50 low, +0x60 high, +0x70 the pair's nearest point, +0x80 its
+# fraction, +0x84 the last group part struck, +0x88 capacity, +0x8c count, +0x90 rays (two quads each;
+# 0 = no list), +0x94 normals, +0x98 points, +0x9c objects, +0xa0 placed words, +0xa8 fractions,
+# +0xac segment words, +0xb0 nearest fraction, +0xb4 flags (1 placed, 2 smooth), +0xb8 one per ray.
+collision_record_make_current boot 0x0011c110 (record) the global the record writers use = record
+current_collision_record boot 0x00468258 the record ray_collide_pair and the leaf step write into
+ray_tree_pair boot 0x00109130 (probe root, mesh root, &{probe nodes, segments}, &{mesh nodes, facets},
+#                              probe T, mesh T, 1, mesh descriptor; stack: probe +0x178) the frames
+#                              (mesh to probe behind 0x0041da30, its inverse 0x0041da40, magnitudes
+#                              0x0041da50) and the tree globals 0x00468a70..0x00468a88, then descends
+ray_tree_descend boot 0x00108980 (probe word, mesh word) both leaves: the leaf/leaf; one: the step then
+#                              the node's two children (both tried); else the boxes, then the side
+#                              whose key is larger (the mesh's on <=) opens
+ray_box_box boot 0x00106000 (a centre, a half, b centre, b half) b through 0x0041da40 into a's frame:
+#                              the fifteen axes, a's x z y first, each cross passed early on a's share
+ray_leaf_step boot 0x001079d0 (probe word, mesh word) a segment against a mesh node (ray_segment_box),
+#                              or a probe node against a triangle (thirteen axes, in the probe's frame)
+ray_segment_box boot 0x00106820 (centre, half, from, to, frame) the segment's midpoint and half-span
+ray_segment_triangle_pair boot 0x00108340 (segment word, facet word) the segment into the mesh's frame,
+#                              then ray_segment_triangle; the record's contact, low/high, nearest
+ray_segment_triangle boot 0x0010b980 the segment test; with smooth normals off it is collide::test
+ray_group_gate boot 0x001eb340 (probe, other) the probe's node 0 box (or its first segment) against a
+#                              group's +0x120 / +0x130 box through ray_group_boxes, or a mesh's node 0
+ray_group_boxes boot 0x00109330 (other centre, other half, probe centre, probe half, other, probe) the
+#                              frame probe to other+0x1a0 into 0x0041da40, then ray_box_box
