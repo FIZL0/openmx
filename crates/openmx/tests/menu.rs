@@ -11,7 +11,7 @@
 mod menu;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
-use menu::{Act, Controls, Gas, Layout, Menu, Reader, Screen, Settings};
+use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Menu, Reader, Readers, Screen, Settings};
 use std::collections::{HashSet, VecDeque};
 
 /// The buttons a hand can press on a menu.
@@ -280,4 +280,179 @@ fn every_screen_draws_from_the_disc() {
         let drawn = frame.color.chunks(3).filter(|p| *p != RIDE).count();
         assert!(drawn > frame.width * frame.height * 9 / 10, "{s:?} drew over {drawn} pixels");
     }
+}
+
+// ---- the splash (P46) ----------------------------------------------------------------------------
+
+/// One frame of every device's report through their readers, the menu stepping on it.
+fn devices(menu: &mut Menu, readers: &mut Readers, reports: &[(Dev, Report)]) -> Act {
+    menu.step_devices(&readers.read(reports))
+}
+
+fn pad(name: &str) -> Dev {
+    Dev::Pad(name.to_string())
+}
+
+/// A pad sat idle with its stick drifting: the left stick wandering round the centre, never
+/// quite home, and on some frames well past the menus' lean — a worn stick, or a virtual pad
+/// some program left with its axes anywhere.
+fn drifting(frame: u32) -> Report {
+    let mut r = Report::idle();
+    let wander = |f: u32, k: u32| (AXIS_CENTRE as i32 + (((f * k) % 160) as i32 - 80)).clamp(0, 255) as u8;
+    r.set_axis(2, wander(frame, 7));
+    r.set_axis(3, wander(frame, 13));
+    r
+}
+
+/// A second pad's stick pushed round all four ways, a direction for ten frames each.
+fn circling(frame: u32) -> Report {
+    let mut r = Report::idle();
+    let (x, y) = [(0xff, AXIS_CENTRE), (AXIS_CENTRE, 0xff), (0, AXIS_CENTRE), (AXIS_CENTRE, 0)][(frame / 10 % 4) as usize];
+    r.set_axis(2, x);
+    r.set_axis(3, y);
+    r
+}
+
+fn cross() -> Report {
+    Report::from_buttons(Control::Cross.mask())
+}
+
+fn on_the_splash() -> (Menu, Readers) {
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    m.splash();
+    (m, Readers::new())
+}
+
+/// Frames until the "Player 1" card hands over to the main menu, every device at rest.
+fn past_the_card(m: &mut Menu, r: &mut Readers, rest: &[(Dev, Report)]) {
+    for _ in 0..CLAIMED_FRAMES {
+        devices(m, r, rest);
+    }
+    assert_eq!(m.screen(), Some(Screen::Main));
+}
+
+#[test]
+fn on_the_splash_an_idle_pad_s_drift_and_a_second_pad_s_stick_move_nothing() {
+    let (mut m, mut r) = on_the_splash();
+    for f in 0..600 {
+        let act = devices(
+            &mut m,
+            &mut r,
+            &[(Dev::Keys, Report::idle()), (pad("idle"), drifting(f)), (pad("second"), circling(f))],
+        );
+        assert_eq!(act, Act::Stay);
+        assert_eq!(m.screen(), Some(Screen::Splash), "frame {f}");
+        assert_eq!(m.p1(), None, "frame {f}");
+        assert_eq!(m.quitting(), None, "frame {f}");
+    }
+}
+
+#[test]
+fn the_device_that_presses_cross_is_1p_and_the_only_one_driving_the_main_menu() {
+    let rest = |a: Report, b: Report| [(Dev::Keys, Report::idle()), (pad("a"), a), (pad("b"), b)];
+    let (mut m, mut r) = on_the_splash();
+    devices(&mut m, &mut r, &rest(Report::idle(), Report::idle()));
+    // Pad b's Cross: b is 1P; a's Cross the frame after is nobody's.
+    devices(&mut m, &mut r, &rest(Report::idle(), cross()));
+    assert_eq!(m.p1(), Some(&pad("b")));
+    devices(&mut m, &mut r, &rest(cross(), Report::idle()));
+    assert_eq!(m.p1(), Some(&pad("b")));
+    past_the_card(&mut m, &mut r, &rest(Report::idle(), Report::idle()));
+    assert_eq!(m.cursor(Screen::Main), 0);
+
+    // Pad a, idle or drifting, and its Cross, move nothing on the main menu.
+    for f in 0..300 {
+        devices(&mut m, &mut r, &rest(drifting(f), Report::idle()));
+        devices(&mut m, &mut r, &rest(circling(f), Report::idle()));
+    }
+    devices(&mut m, &mut r, &rest(cross(), Report::idle()));
+    assert_eq!((m.screen(), m.cursor(Screen::Main)), (Some(Screen::Main), 0));
+
+    // 1P's d-pad does.
+    let down = Report::from_buttons(Control::Down.mask());
+    devices(&mut m, &mut r, &rest(Report::idle(), down));
+    devices(&mut m, &mut r, &rest(Report::idle(), Report::idle()));
+    assert_eq!(m.cursor(Screen::Main), 1);
+    // And the keyboard still works the menus whoever has 1P.
+    let keys = [(Dev::Keys, Report::from_buttons(Control::Up.mask())), (pad("a"), Report::idle()), (pad("b"), Report::idle())];
+    devices(&mut m, &mut r, &keys);
+    assert_eq!(m.cursor(Screen::Main), 0);
+    devices(&mut m, &mut r, &rest(Report::idle(), Report::idle()));
+    devices(&mut m, &mut r, &rest(Report::idle(), cross()));
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+}
+
+#[test]
+fn the_keyboard_s_enter_or_space_takes_1p_and_then_no_pad_drives() {
+    // Enter is the keyboard's Start and Space its Cross (pad.rs's bindings): both take 1P.
+    for key in [Control::Start, Control::Cross] {
+        let rest = [(Dev::Keys, Report::idle()), (pad("a"), Report::idle())];
+        let (mut m, mut r) = on_the_splash();
+        devices(&mut m, &mut r, &rest);
+        let press = [(Dev::Keys, Report::from_buttons(key.mask())), (pad("a"), Report::idle())];
+        devices(&mut m, &mut r, &press);
+        assert_eq!(m.p1(), Some(&Dev::Keys), "{key:?}");
+        past_the_card(&mut m, &mut r, &rest);
+        let down = [(Dev::Keys, Report::idle()), (pad("a"), Report::from_buttons(Control::Down.mask()))];
+        devices(&mut m, &mut r, &down);
+        devices(&mut m, &mut r, &rest);
+        assert_eq!(m.cursor(Screen::Main), 0, "a pad moved the keyboard's menus");
+    }
+}
+
+#[test]
+fn an_unplug_of_1p_s_device_brings_the_splash_back() {
+    let (mut m, mut r) = on_the_splash();
+    let both = |a: Report| [(Dev::Keys, Report::idle()), (pad("a"), a), (pad("b"), Report::idle())];
+    devices(&mut m, &mut r, &both(Report::idle()));
+    devices(&mut m, &mut r, &both(cross()));
+    past_the_card(&mut m, &mut r, &both(Report::idle()));
+    // Another pad going changes nothing; 1P's going is the splash, with nobody 1P.
+    assert!(!m.lost(&["a".to_string()]));
+    assert_eq!(m.screen(), Some(Screen::Main));
+    assert!(m.lost(&["b".to_string()]));
+    assert_eq!((m.screen(), m.p1()), (Some(Screen::Splash), None));
+    // And the next press is the new 1P.
+    let only_b = |b: Report| [(Dev::Keys, Report::idle()), (pad("b"), b)];
+    devices(&mut m, &mut r, &only_b(Report::idle()));
+    devices(&mut m, &mut r, &only_b(cross()));
+    assert_eq!(m.p1(), Some(&pad("b")));
+    // Over a ride the seat waits for its pad (P35) instead: the pause is left alone.
+    past_the_card(&mut m, &mut r, &only_b(Report::idle()));
+    m.pause();
+    assert!(!m.lost(&[]));
+    assert_eq!(m.screen(), Some(Screen::Pause));
+}
+
+#[test]
+fn back_on_the_splash_asks_to_quit_and_only_the_asker_answers() {
+    let circle = Report::from_buttons(Control::Circle.mask());
+    let rest = |a: Report, b: Report| [(Dev::Keys, Report::idle()), (pad("a"), a), (pad("b"), b)];
+    let (mut m, mut r) = on_the_splash();
+    devices(&mut m, &mut r, &rest(Report::idle(), Report::idle()));
+    devices(&mut m, &mut r, &rest(circle, Report::idle()));
+    assert_eq!(m.quitting(), Some(1), "it opens on Stay");
+    // Pad b's stick and Cross answer nothing.
+    for f in 0..40 {
+        devices(&mut m, &mut r, &rest(Report::idle(), circling(f)));
+    }
+    assert_eq!(devices(&mut m, &mut r, &rest(Report::idle(), cross())), Act::Stay);
+    assert_eq!((m.quitting(), m.p1()), (Some(1), None));
+    // Stay closes it; asked again, up and Cross quit.
+    devices(&mut m, &mut r, &rest(cross(), Report::idle()));
+    assert_eq!(m.quitting(), None);
+    devices(&mut m, &mut r, &rest(circle, Report::idle()));
+    devices(&mut m, &mut r, &rest(Report::from_buttons(Control::Up.mask()), Report::idle()));
+    assert_eq!(m.quitting(), Some(0));
+    devices(&mut m, &mut r, &rest(Report::idle(), Report::idle()));
+    assert_eq!(devices(&mut m, &mut r, &rest(cross(), Report::idle())), Act::Quit);
+    // Back on the main menu is the splash again, 1P free.
+    let (mut m, mut r) = on_the_splash();
+    devices(&mut m, &mut r, &rest(Report::idle(), Report::idle()));
+    devices(&mut m, &mut r, &rest(cross(), Report::idle()));
+    past_the_card(&mut m, &mut r, &rest(Report::idle(), Report::idle()));
+    devices(&mut m, &mut r, &rest(Report::idle(), circle));
+    assert_eq!(m.screen(), Some(Screen::Main), "only 1P and the keyboard go back");
+    devices(&mut m, &mut r, &rest(circle, Report::idle()));
+    assert_eq!((m.screen(), m.p1()), (Some(Screen::Splash), None));
 }

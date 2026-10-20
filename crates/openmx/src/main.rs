@@ -190,9 +190,9 @@ use ps2_float::{F, Vf};
 
 use ground::Ground;
 use hud::Hud;
-use menu::{Act, Art, Menu, Reader};
+use menu::{Act, Art, Dev, Menu, Reader, Readers};
 use moment::{Moment, Shot};
-use pad::{Bindings, Pads, SEATS, Scheme, SeatInput, Seats, Throttle, Wiring};
+use pad::{Bindings, Device, Pads, SEATS, Scheme, SeatInput, Seats, Throttle, Wiring};
 
 // `controls.txt` holds a layout for every seat the pad layer has.
 const _: () = assert!(menu::SEATS == SEATS);
@@ -558,7 +558,11 @@ struct Shell {
 /// The front end's own half of [`Shell`].
 struct Front {
     menu: Menu,
+    /// The pause's reader, of 1P's seat, and the keyboard's beside it when a pad is 1P (P46).
     reader: Reader,
+    keys_reader: Reader,
+    /// The menus' readers, a device each, so the splash can tell who pressed (P46).
+    readers: Readers,
     art: Art,
     /// Where the settings files are.
     dir: std::path::PathBuf,
@@ -649,6 +653,8 @@ fn front_end(args: Args) -> Result<(), String> {
     let mut front = Front {
         menu: Menu::new(settings, controls),
         reader: Reader::new(),
+        keys_reader: Reader::new(),
+        readers: Readers::new(),
         art,
         dir,
         args_wiring: args.wiring.clone(),
@@ -661,8 +667,10 @@ fn front_end(args: Args) -> Result<(), String> {
         Some(name) => println!("pad: {name}"),
         None => println!("pad: none found — the menus are on the keyboard (arrows, X, C, Return)"),
     }
-    if let Some(screen) = args.screen {
-        front.menu.open(screen);
+    // The splash first (P46), unless `--screen` asks for a screen.
+    match args.screen {
+        Some(screen) => front.menu.open(screen),
+        None => front.menu.splash(),
     }
     let mut shell = Shell { window: Some(window), seats: Some(seats), front };
 
@@ -683,6 +691,8 @@ fn front_end(args: Args) -> Result<(), String> {
     let mut escape = false;
     loop {
         if let Act::Ride(track) = &act {
+            shell.front.reader.reset();
+            shell.front.keys_reader.reset();
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
@@ -706,6 +716,15 @@ fn front_end(args: Args) -> Result<(), String> {
             }
             shell.front.menu.main();
             shell.front.reader.reset();
+            shell.front.readers.reset();
+            // The keyboard took the ride over from 1P's pulled-out pad: it is 1P now.
+            if let Some(seats) = &shell.seats
+                && seats.first() == Some(&Device::Keys)
+                && matches!(shell.front.menu.p1(), Some(Dev::Pad(_)))
+            {
+                shell.front.menu.set_p1(Dev::Keys);
+                shell.front.menu.p1_name = dev_name(seats, &Dev::Keys);
+            }
         }
 
         let top = Instant::now();
@@ -720,23 +739,61 @@ fn front_end(args: Args) -> Result<(), String> {
                 frame = Frame::new(width, height, [0, 0, 0]);
             }
         }
-        // The menus are the first seat's, the keyboard's when no pad holds it (P38 adds the others).
+        // The menus are 1P's and the keyboard's (P46): every device read on its own, so the splash
+        // can tell who pressed, and past it only those two move anything.
         let seats = shell.seats.as_mut().expect("the front end has seats");
-        let now = seats.frame(&|code| window.held(code));
+        let devices = seats.devices(&|code| window.held(code));
         for line in seats.said() {
             println!("{line}");
         }
-        let mut press = shell.front.reader.read(&now[0].report());
-        // Escape is Back, on its edge, and the main menu's way out.
+        let plugged: Vec<String> = devices
+            .iter()
+            .filter_map(|(d, _)| match d {
+                Device::Pad(id) => Some(id.clone()),
+                Device::Keys => None,
+            })
+            .collect();
+        if shell.front.menu.lost(&plugged) {
+            println!("1P: the pad is gone — the splash is back for a new Player 1");
+            shell.front.menu.note = Some("Player 1's controller was unplugged".to_string());
+            seats.set_first(None);
+        }
+        let reports: Vec<(Dev, Report)> = devices
+            .into_iter()
+            .map(|(d, r)| match d {
+                Device::Keys => (Dev::Keys, r),
+                Device::Pad(id) => (Dev::Pad(id), r),
+            })
+            .collect();
+        let mut presses = shell.front.readers.read(&reports);
+        // Escape is the keyboard's Back, on its edge: on the main menu the splash, on the splash
+        // the Quit popup.
         let esc = window.held(key::ESCAPE);
-        if esc && !escape {
-            if shell.front.menu.screen() == Some(menu::Screen::Main) {
-                break;
-            }
-            press.back = true;
+        if esc
+            && !escape
+            && let Some((_, p)) = presses.iter_mut().find(|(d, _)| *d == Dev::Keys)
+        {
+            p.back = true;
         }
         escape = esc;
-        act = shell.front.menu.step(press);
+        let before = shell.front.menu.p1().cloned();
+        act = shell.front.menu.step_devices(&presses);
+        let after = shell.front.menu.p1().cloned();
+        if after != before {
+            match &after {
+                Some(dev) => {
+                    let name = dev_name(seats, dev);
+                    println!("1P: {name} — the menus and the first seat are its");
+                    shell.front.menu.p1_name = name;
+                    shell.front.menu.note = None;
+                    seats.set_first(Some(match dev {
+                        Dev::Keys => Device::Keys,
+                        Dev::Pad(id) => Device::Pad(id.clone()),
+                    }));
+                }
+                None => seats.set_first(None),
+            }
+        }
         if shell.front.menu.changed() {
             seats.set_wiring(shell.front.wiring());
             shell.front.save();
@@ -768,6 +825,17 @@ fn front_end(args: Args) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// What the splash calls a device: the keyboard, or a pad by its name without its node.
+fn dev_name(seats: &Seats, dev: &Dev) -> String {
+    match dev {
+        Dev::Keys => "Keyboard".to_string(),
+        Dev::Pad(id) => {
+            let name = seats.device_name(id).unwrap_or(id);
+            name.split(" (/").next().unwrap_or(name).to_string()
+        }
+    }
 }
 
 impl Front {
@@ -1866,6 +1934,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // nothing. What it changes is applied at once, and saved.
         if let Some(front) = front.as_deref_mut() {
             let mut press = front.reader.read(&world.seats[0].reports[0]);
+            // The keyboard pauses and works the pause whoever has 1P (P46), from no seat of its own.
+            if let Some(keys) = pad_seats.as_ref().and_then(|s| s.keyboard_alone()) {
+                press = press.or(front.keys_reader.read(&keys));
+            }
             let esc = held(window, key::ESCAPE);
             if esc && !escape {
                 if front.menu.riding() {
