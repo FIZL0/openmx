@@ -870,3 +870,289 @@ fn a_flat_spin_is_a_row_the_flag_adds() {
     assert!(!t.air.flip_torque_applied && !t.air.flipping);
     assert_eq!((t.ch.moment.x(), t.ch.moment.y(), t.ch.moment.z()), (1.0, 2.0, 3.0));
 }
+
+// ---------------------------------------------------------------------------------------------------
+// S31 — the human's backflips, against the original's own run of them
+// ---------------------------------------------------------------------------------------------------
+
+/// One of the backflips the human's second recording asks for, as the original rode it. Every number
+/// is a frame counter read off `recording2-backflips.csv` (see [`the_humans_backflips`] for the
+/// recipe), kept here so the measurement is in the repository and checked back against the capture
+/// whenever the capture is present.
+struct Flip {
+    /// The first tick the lip is open at the end of (on the ground, chassis `vel.y` past 5, contact
+    /// speed past 30, no brake), and the last.
+    lip: (u64, u64),
+    /// The tick `flip_armed` goes up, and the tick the flip fires (`flip_active` up, torque chosen).
+    arm: u64,
+    fire: u64,
+    /// The stick `y` the human pushed through on the way from below `-HELD` to above `+HELD`: the
+    /// last row below, every row between, and the first row above — from the first of them.
+    cross: (u64, &'static [f32]),
+    /// The torque chosen at the fire, and the stick hold it came from.
+    torque: f32,
+    hold: f32,
+    /// The first tick with both wheels off, the first tick the rotation is over (`flipping` down),
+    /// and the tick the wheels are back — or, for a flip the rider does not come out of, the tick of
+    /// the wreck.
+    takeoff: u64,
+    over: Option<u64>,
+    down: u64,
+    landed: bool,
+    /// The rotation from takeoff to `down`: the chassis' body pitch rate summed over the ticks, in
+    /// turns, and the fastest the body pitched, rad/s. Negative is the backflip's way.
+    turns: f32,
+    peak_rate: f32,
+}
+
+const HUMANS_FLIPS: [Flip; 3] = [
+    Flip {
+        lip: (2493, 2510),
+        arm: 2500,
+        fire: 2506,
+        cross: (2504, &[-0.8767, 1.0]),
+        torque: -1400.0,
+        hold: 469.4456,
+        takeoff: 2511,
+        over: Some(2580),
+        down: 2595,
+        landed: true,
+        turns: -1.043,
+        peak_rate: -3.111,
+    },
+    Flip {
+        lip: (3281, 3299),
+        arm: 3284,
+        fire: 3292,
+        cross: (3288, &[-1.0, -0.3277, 0.8431]),
+        torque: -1215.5457,
+        hold: 32.3319,
+        takeoff: 3300,
+        over: Some(3379),
+        down: 3417,
+        landed: true,
+        turns: -1.000,
+        peak_rate: -2.761,
+    },
+    Flip {
+        lip: (4065, 4084),
+        arm: 4069,
+        fire: 4077,
+        cross: (4074, &[-1.0, 0.5742, 1.0]),
+        torque: -1360.3353,
+        hold: 54.0503,
+        takeoff: 4085,
+        over: None,
+        down: 4124,
+        landed: false,
+        turns: -0.600,
+        peak_rate: -3.111,
+    },
+];
+
+/// The ticks the port does not reproduce from the original's end-of-tick state, and what it does
+/// there instead. All four are the stick's timing, not the gesture's logic. On each, the stick moved
+/// through the middle of its travel inside the tick, and the original's two substeps saw stick values
+/// that no end-of-tick row holds. At 3291 and 3518 the row before shows the stick past `HELD` (0.8) by
+/// less than 0.05, so the port acts a tick early and the original waits one more. At 2553 and 2572 the
+/// original's torque moved by what one substep at a stick of about -0.37 (and -0.04) gives, where the
+/// row before says -0.43 (and -0.15). Which pad sample each substep really reads is not settled (see the
+/// S31 journal). The gesture itself is a line-for-line read of the original's, proved by
+/// `the_backflip_step_is_the_originals`.
+const HUMANS_MISSED: [(u64, &str); 4] = [(2553, "turns"), (2572, "turns"), (3291, "fires"), (3518, "arms")];
+
+/// A capture's cells by column name.
+struct Cells {
+    cap: game_sim::replay::Capture,
+    at: std::collections::HashMap<String, usize>,
+}
+
+impl Cells {
+    fn f(&self, row: usize, col: &str) -> F {
+        let cell = &self.cap.rows[row][self.at[col]];
+        F(cell.parse::<f64>().unwrap_or_else(|_| panic!("{col} row {row}: '{cell}'")) as f32)
+    }
+    fn v(&self, row: usize, col: &str) -> Vf {
+        let l = |c: &str| self.f(row, &format!("{col}.{c}")).0;
+        Vf::new(l("x"), l("y"), l("z"), l("w"))
+    }
+    fn on(&self, row: usize, col: &str) -> bool {
+        self.cap.rows[row][self.at[col]] != "0"
+    }
+    fn fc(&self, row: usize) -> u64 {
+        self.cap.rows[row][self.at["frame_counter"]].parse().unwrap()
+    }
+}
+
+/// The flip state at the end of a row, in the port's terms.
+fn flip_state(c: &Cells, r: usize) -> Air {
+    Air {
+        on_ground: c.on(r, "on_ground"),
+        both_wheels: c.on(r, "both_wheels"),
+        airborne: c.on(r, "airborne"),
+        contact_vel: c.v(r, "s31_contact_vel"),
+        authority: c.f(r, "s31_auth.x"),
+        flip_torque_applied: c.on(r, "flip_torqued"),
+        flipping: c.on(r, "flip_ramp"),
+        flip_active: c.on(r, "flip_on"),
+        flip_armed: c.on(r, "flip_arm"),
+        flip_grace: c.f(r, "flip_grace"),
+        flip_torque: c.v(r, "flip_torque"),
+        ..Air::default()
+    }
+}
+
+/// S31: the human's three backflips in `recording2`, measured on the original and replayed through
+/// [`air::backflip`].
+///
+/// The capture is the human's second recording played back in PCSX2 with the bike object's flip
+/// state, stick, contact speed and chassis (velocity, Euler angles, both angular velocities) recorded
+/// every tick from frame counter 2374 to 4267 — 1894 rows, no gaps. It is game data, so it lives in
+/// `context/capture/acceptance/recording2-backflips.csv` and this test skips without it; the spec and
+/// the playback recipe are in the S31 journal.
+///
+/// Three things are checked, all against the capture:
+///
+/// 1. **The measurements.** Every number in [`HUMANS_FLIPS`] is read back off the capture: the lip's
+///    first and last tick, the arm and the fire, the stick's crossing, the torque and the hold it came
+///    from, takeoff, the end of the rotation, the landing or the wreck, the turns and the peak rate.
+/// 2. **The gesture, tick by tick.** For every tick, the port is given the original's
+///    flip state at the end of the tick before, that tick's inputs (on the ground, contact speed,
+///    chassis velocity and angles, stick, hold, d-pad, brake, touching), and runs the original's two
+///    substeps of half a tick each. Its flip state must be the original's at the end of the tick —
+///    armed, fired, grace, the torque to the bit, turning, applied. It is, except on the four ticks of
+///    [`HUMANS_MISSED`], and the test insists on exactly those four so that a fifth shows up. Ticks
+///    after a wreck are left out: the original stops running the step there (flip 3's `flipping` stays
+///    up through the whole crash).
+/// 3. **The flight.** Over each flight the port turns the bike with the original's torque, to the bit,
+///    on every tick but the two turning ticks above, and the rotation ends on the original's tick.
+#[test]
+fn the_humans_backflips() {
+    let path = match std::env::var_os("GAME_SIM_FIXTURES") {
+        Some(dir) => std::path::PathBuf::from(dir).join("capture"),
+        None => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/capture"),
+    }
+    .join("acceptance/recording2-backflips.csv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!(
+            "skipped: no {} — play recording2 back with the S31 spec (journal \
+             2026-10-20-s31-s31-the-humans-backflips) and record frame counters 2374..4267",
+            path.display()
+        );
+        return;
+    };
+    let cap = game_sim::replay::Capture::parse(&text).expect("the recorder's format");
+    let at = cap.columns.iter().enumerate().map(|(i, c)| (c.clone(), i)).collect();
+    let c = Cells { cap, at };
+    let n = c.cap.rows.len();
+    assert_eq!((c.fc(0), c.fc(n - 1), n), (2374, 4267, 1894), "the capture is the one measured");
+    let row = |fc: u64| (fc - 2374) as usize;
+
+    // The tuning, read out of the bike object rather than assumed: only the backflip's fields and the
+    // two angles its ending reads are used, the rest of `Params` is whatever the generator gives.
+    let mut p = Gen(0x531).state().p;
+    let (ta, tb, wa) = (c.v(0, "s31_tune_a"), c.v(0, "s31_tune_b"), c.v(0, "s31_wreck_ang"));
+    p.min_backflip_time = F(ta.y());
+    p.max_backflip_time = F(ta.z());
+    p.min_backflip_torque = F(tb.x());
+    p.max_backflip_torque = F(tb.y());
+    p.backflip_torque_rate_increase = F(tb.z());
+    p.backflip_torque_rate_decrease = F(tb.w());
+    p.airborne_pitch_down_wreck_angle = F(wa.x());
+    p.airborne_pitch_up_wreck_angle = F(wa.y());
+    p.control_authority_time = c.f(0, "s31_auth.y");
+    assert_eq!(
+        (ta.y(), ta.z(), tb.x(), tb.y(), tb.z(), tb.w()),
+        (0.0, 60.0, 800.0, 1400.0, 500.0, 2000.0),
+        "the bike's backflip tuning"
+    );
+
+    let lip = |r: usize| {
+        c.on(r, "on_ground")
+            && c.f(r, "s31_ch_vel.y") > 5.0
+            && c.f(r, "s31_contact_vel.z") > 30.0
+            && c.f(r, "s31_brake.x") == 0.0
+    };
+
+    // 1. The measurements.
+    for (k, fl) in HUMANS_FLIPS.iter().enumerate() {
+        let (a, b) = (row(fl.lip.0), row(fl.lip.1));
+        assert!(!lip(a - 1) && (a..=b).all(lip) && !lip(b + 1), "flip {k}: the lip is open {:?}", fl.lip);
+        let up = |col: &str, fc: u64| !c.on(row(fc) - 1, col) && c.on(row(fc), col);
+        assert!(up("flip_arm", fl.arm) && !c.on(row(fl.arm), "flip_on"), "flip {k}: arms at {}", fl.arm);
+        assert!(up("flip_on", fl.fire), "flip {k}: fires at {}", fl.fire);
+        let from = row(fl.cross.0);
+        let cross: Vec<f32> = (from..from + fl.cross.1.len()).map(|r| c.f(r, "s31_stick.w").0).collect();
+        assert!(cross.iter().zip(fl.cross.1).all(|(a, b)| (a - b).abs() < 1e-4), "flip {k}: the stick {cross:?}");
+        assert!(cross[0] < -0.8 && cross[1..cross.len() - 1].iter().all(|s| s.abs() <= 0.8) && cross[cross.len() - 1] > 0.8);
+        assert!((c.f(row(fl.fire), "flip_torque.x").0 - fl.torque).abs() < 1e-3, "flip {k}: the torque chosen");
+        assert!((c.f(row(fl.fire), "s31_hold.x").0 - fl.hold).abs() < 1e-3, "flip {k}: the hold");
+        assert!((row(fl.fire)..=row(fl.lip.1)).all(|r| c.on(r, "on_ground")), "flip {k}: fired on the ground");
+        assert!(c.on(row(fl.takeoff), "airborne") && !c.on(row(fl.takeoff) - 1, "airborne"), "flip {k}: takeoff");
+        match fl.over {
+            Some(o) => assert!(c.on(row(o) - 1, "flip_ramp") && !c.on(row(o), "flip_ramp"), "flip {k}: over at {o}"),
+            None => assert!((row(fl.takeoff) + 1..=row(fl.down)).all(|r| c.on(r, "flip_ramp")), "flip {k}: still turning"),
+        }
+        let wreck = c.f(row(fl.down), "wreck_reason").0 != 0.0;
+        if fl.landed {
+            assert!(c.on(row(fl.down), "on_ground") && !c.on(row(fl.down) - 1, "on_ground"), "flip {k}: lands at {}", fl.down);
+            assert!((row(fl.fire)..row(fl.down) + 30).all(|r| c.f(r, "wreck_reason").0 == 0.0), "flip {k}: no wreck");
+        } else {
+            assert!(wreck && c.f(row(fl.down) - 1, "wreck_reason").0 == 0.0, "flip {k}: wrecks at {}", fl.down);
+        }
+        let dt = c.f(row(fl.takeoff), "dt").0;
+        let rates: Vec<f32> = (row(fl.takeoff)..row(fl.down)).map(|r| c.f(r, "s31_ch_wb.x").0).collect();
+        let turns = rates.iter().map(|w| w * dt).sum::<f32>() / std::f32::consts::TAU;
+        let peak = rates.iter().cloned().fold(0.0, f32::min);
+        println!("flip {k}: lip {} ticks, {:+.3} turns, peak body pitch rate {peak:.3} rad/s", b - a + 1, turns);
+        assert!((turns - fl.turns).abs() < 1e-3, "flip {k}: {turns} turns");
+        assert!((peak - fl.peak_rate).abs() < 1e-3, "flip {k}: peak rate {peak}");
+    }
+
+    // 2 and 3. Every tick, from the original's state at the end of the one before.
+    let mut early = Vec::new();
+    let mut turned = [0u32; 3];
+    for r in 1..n {
+        if c.f(r, "wreck_reason").0 != 0.0 {
+            continue;
+        }
+        let mut air = flip_state(&c, r - 1);
+        let e = c.v(r - 1, "s31_ch_euler");
+        let mut ch = Chassis { vel: c.v(r - 1, "s31_ch_vel"), pitch: F(e.x()), roll: F(e.z()), ..Chassis::default() };
+        let stick = c.v(r - 1, "s31_stick");
+        let st = Step {
+            dt: c.f(r, "dt") * F(0.5),
+            stick: (F(stick.z()), F(stick.w())),
+            stick_hold: c.f(r - 1, "s31_hold.x"),
+            dpad_dir: c.f(r - 1, "trick_group").0 as i32,
+            brake: c.f(r - 1, "s31_brake.x"),
+            touching: c.on(r - 1, "s31_touch"),
+            ..Step::default()
+        };
+        for _ in 0..2 {
+            air::backflip(&p, &mut air, &mut ch, &st);
+        }
+        let want = flip_state(&c, r);
+        let got = (air.flip_armed, air.flip_active, air.flipping, air.flip_torque_applied, air.flip_grace.0, air.flip_torque.x());
+        let orig = (want.flip_armed, want.flip_active, want.flipping, want.flip_torque_applied, want.flip_grace.0, want.flip_torque.x());
+        let fc = c.fc(r);
+        if got != orig {
+            let what = match () {
+                _ if air.flip_active && !want.flip_active => "fires",
+                _ if air.flip_armed && !want.flip_armed => "arms",
+                _ if air.flip_torque_applied && want.flip_torque_applied => "turns",
+                _ => "?",
+            };
+            println!("tick {fc}: port {got:?}, original {orig:?}");
+            early.push((fc, what));
+        }
+        if want.flip_torque_applied {
+            if let Some(k) = HUMANS_FLIPS.iter().position(|fl| (fl.takeoff..=fl.down).contains(&fc)) {
+                turned[k] += 1;
+            }
+        }
+    }
+    println!("turning ticks per flight {turned:?}");
+    assert_eq!(early, HUMANS_MISSED, "the ticks the port does not reproduce");
+    assert!(turned.iter().all(|&t| t > 30), "every flight turned: {turned:?}");
+}
