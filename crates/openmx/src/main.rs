@@ -141,6 +141,8 @@ mod ground;
 mod hud;
 mod menu;
 mod moment;
+mod net;
+mod online;
 mod pad;
 mod split;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
@@ -514,6 +516,11 @@ struct Args {
     screen: Option<menu::Screen>,
     /// Which wiring flags were given, so the front end's `controls.txt` fills in only the others.
     wiring_flags: (bool, bool),
+    /// `--online NAME@HOST:PORT`, `--peer NAME@HOST:PORT` (each other machine) and `--seats
+    /// NAME,NAME,-,...`: ride online (N2, [`net`]) as `NAME`, from that address, with these seats.
+    online: Option<String>,
+    peers: Vec<String>,
+    seats: Option<String>,
 }
 
 fn run() -> Result<(), String> {
@@ -1686,6 +1693,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut swap_key = false;
     let held = |window: &Option<Window>, code: u8| window.as_ref().is_some_and(|w| w.held(code));
 
+    // Online (N2): the session, every seat starting where this ride starts.
+    let mut online = match &args.online {
+        None => None,
+        Some(me) => {
+            if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike {
+                return Err("--online rides the bike and no tape: drop --play, --record and --vehicle".into());
+            }
+            // One local player and no front end: the session's other local seats stand idle until
+            // P35's seats ride them, and the pause and the menus do not run online yet.
+            if args.players != 1 || front.is_some() {
+                return Err("--online rides one local player and no menu: drop --players and --menu".into());
+            }
+            Some(online::Online::start(me, &args.peers, args.seats.as_deref(), &world.seats[0].sim)?)
+        }
+    };
+
     let mut shot = args.shot.clone();
     let started = Instant::now();
     let mut window_of_frames = (Instant::now(), 0u32, 0usize);
@@ -1785,7 +1808,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // and the tape has no swap in it, so the key is not read while one is being ridden.
         // It is the first player's key, and the first player's plane.
         let swap_now = held(&window, key::M);
-        if swap_now && !swap_key && head.is_none() {
+        if swap_now && !swap_key && head.is_none() && online.is_none() {
             match world.seats[0].garage.swap() {
                 Ok(up) => {
                     let rig = &mut rigs[0];
@@ -1847,6 +1870,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
 
+        // Online (N2) the session steps the ride instead — every seat, a rollback's ticks again, the
+        // body's frame inside each — at its one fixed frame length, and this machine's seat comes back
+        // as the first seat's `sim`.
+        let (dt, simulated) = if let Some(on) = &mut online {
+            if let Err(end) = on.frame(world.seats[0].reports[0], &mut world.place, rigs[0].body.as_mut(), &mut world.seats[0].sim) {
+                println!("{end}");
+                break;
+            }
+            world.seats[0].hands = on.hands;
+            world.seats[0].said = rider::Frame::default();
+            (on.dt(), true)
+        } else {
         // One frame of the game's own fixed update, which calls `World::simulate` inside itself.
         let step = engine.step(wall(started), engine_input(&world.seats[0].reports[0]), &mut world);
         if step.outcome == Outcome::Quit {
@@ -1860,7 +1895,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             return Err("the engine skipped a frame while a tape was being ridden".into());
         }
         // What the simulation was actually handed, which the pose and the camera below step with too.
-        let dt = world.played_dt.unwrap_or(step.dt);
+        (world.played_dt.unwrap_or(step.dt), step.simulated)
+        };
 
         cameras.clear();
         let mut ridden: Vec<Ridden> = Vec::with_capacity(args.players);
@@ -1885,9 +1921,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // Neither moves while the plane is up: the bike was left with no controller and nothing steps it.
             let bike_up = seat.garage.up == Kind::Bike;
             // A pass the engine skipped (a seat's pad is out) moves neither.
-            let moving = seat.riding && step.simulated;
+            let moving = seat.riding && simulated;
             if let Some(body) = &mut rig.body {
-                if moving && bike_up {
+                // Online the body's frame is the session's, inside the tick (N2).
+                if moving && bike_up && online.is_none() {
                     body.ride(dt, &mut seat.sim.rider, &seat.hands, rider::Gate::default());
                 }
             }
@@ -2098,7 +2135,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                 _ => None,
             };
-            rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && step.simulated);
+            rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
             if let Some(view) = view_frames.get(v) {
                 split::put(&mut frame, view, *at);
             }
@@ -2135,7 +2172,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 triangles / frames.max(1) as usize,
                 // Feet a second to miles an hour, for a number a rider can read.
                 ridden[0].speed.0 * 0.681_818,
-                match (world.seats[0].riding && step.simulated, world.seats[0].sim.rider.phase()) {
+                match (world.seats[0].riding && simulated, world.seats[0].sim.rider.phase()) {
                     (false, _) => " (frozen)",
                     _ if !bike_up => " (biplane)",
                     (_, Phase::Riding) => "",
@@ -2228,6 +2265,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         println!("ride hash {:#018x}", game_sim::hash::of(&world.seats[0].sim.rider.ride));
     }
 
+    if let Some(on) = &online {
+        println!("{}", on.summary());
+    }
     println!(
         "ridden for {:.1}s over {} frames",
         started.elapsed().as_secs_f32(),
@@ -2454,6 +2494,9 @@ fn parse_args() -> Result<Option<Args>, String> {
         aspect: Aspect::default(),
         headless: false,
         frames: None,
+        online: None,
+        peers: Vec::new(),
+        seats: None,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         ride_flag: false,
@@ -2467,7 +2510,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         if matches!(
             a.as_str(),
             "--track" | "--play" | "--record" | "--moment" | "--vehicle" | "--phy" | "--ride" | "--headless"
-                | "--players" | "--frames"
+                | "--players" | "--frames" | "--online"
         ) || a.starts_with("--trace")
         {
             args.ride_flag = true;
@@ -2574,6 +2617,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                     next("a number of frames")?.parse().map_err(|_| "--frames: not a number of frames")?,
                 )
             }
+            "--online" => args.online = Some(next("this machine, like host@0.0.0.0:7000")?),
+            "--peer" => args.peers.push(next("another machine, like g@192.168.1.20:7000")?),
+            "--seats" => args.seats = Some(next("who sits where, like host,g,g")?),
             "--phy" => args.phy = Some(next("a .phy on the disc, like race125p.phy")?),
             "--trace-stick" => {
                 args.trace_stick = Some(
@@ -2685,7 +2731,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                      it is game data); --play rides one instead of the pad, at the tape's own\n\
                      frame lengths, and quits when it runs out. A human's PCSX2 recording\n\
                      of the original (.p2m2) is a tape too and rides the same; --phase says\n\
-                     which of a tick's two video fields that recording's game read."
+                     which of a tick's two video fields that recording's game read.\n\
+                     \n\
+                     Online: --online NAME@HOST:PORT --peer NAME@HOST:PORT ... --seats NAME,NAME,-\n\
+                     rides with the other machines over UDP, one bike a seat (up to eight; the\n\
+                     first named is the host). This machine's pad rides its first seat, and its\n\
+                     other seats stand idle until there are more local pads. Online there is no\n\
+                     freeze, no swap and no tape; a desync is written under context/net."
                 );
                 return Ok(None);
             }

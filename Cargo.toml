@@ -9,6 +9,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/ps2-float", "crates/ps2-oracle", "crates/game-sim", "crates/game-render", "crates/openmx", "crates/openmx-net"]
+# Vendored crates (ggrs: `crates/openmx`'s online play, N2) build as path dependencies and are not ours to test.
+exclude = ["third_party"]
 
 [workspace.package]
 edition = "2024"
