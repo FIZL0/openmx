@@ -56,7 +56,7 @@ const UNIT_SCALE: f32 = 4.656_613e-10;
 /// numbers be" can be asked without disturbing anything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Rng {
-    state: u64,
+    pub(crate) state: u64,
 }
 
 impl Default for Rng {

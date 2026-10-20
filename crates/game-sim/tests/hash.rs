@@ -459,6 +459,10 @@ fn the_size_of_the_state_type_is_pinned() {
     // smooth noise. 10256 since P33: each wheel's steering axis and its tire's three slip flags,
     // seven leaves a wheel. 10280 since S54: `Sim::others`, the players after the first, which the
     // walk names under `players` only when there are any, so the fresh one-player state's leaves stay.
-    assert_eq!(size_of::<Sim>(), 10280, "Sim grew or shrank: does its walk still cover every field?");
+    // 8984 since N1: the bike's parameters behind an `Arc` the snapshots share, which the walk still
+    // reads through, so nothing left it. The size is a 64-bit one: on wasm32 every `Vec` and `usize`
+    // is half as wide, and the leaf count below is what holds on every target.
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(size_of::<Sim>(), 8984, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 835, "the walk's leaf count moved with it");
 }

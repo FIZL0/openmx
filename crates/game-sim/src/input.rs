@@ -466,8 +466,8 @@ pub const MAX_EVENTS: usize = PADS * CONTROLS;
 /// tick, so an event is visible for exactly one frame and a non-empty queue *is* an edge frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EventQueue {
-    count: usize,
-    events: [Event; MAX_EVENTS],
+    pub(crate) count: usize,
+    pub(crate) events: [Event; MAX_EVENTS],
 }
 
 impl Default for EventQueue {

@@ -3934,7 +3934,7 @@ fn stacked(n: usize, rise: f32) -> game_sim::Sim {
         let at = Vf::new(SPAWN.x(), SPAWN.y() + rise * i as f32, SPAWN.z(), 1.0);
         let mut r = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Set::default());
         r.ride.chassis.vel = Vf::new(i as f32, 0.0, 2.0 * i as f32, 0.0);
-        let phy = sim.phy.clone();
+        let phy = (*sim.phy).clone();
         assert_eq!(sim.add_player(phy, r), i);
     }
     sim
@@ -4041,7 +4041,7 @@ fn stacked_riders_joust() {
     let mounts = game_sim::stock::mounts(&sim.phy);
     let at = Vf::new(SPAWN.x() + 1.0, SPAWN.y(), SPAWN.z(), 1.0);
     let r = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Set::default());
-    let phy = sim.phy.clone();
+    let phy = (*sim.phy).clone();
     sim.add_player(phy, r);
     let hits = game_sim::ride::hits_among(&sim.rider.ride, &mut Flat::default(), &[sim.others[0].rider.ride.rival()]);
     assert!(matches!(hits[..], [game_sim::air::Contact { other: game_sim::air::Other::Rider { .. }, .. }]));

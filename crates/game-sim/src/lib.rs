@@ -99,8 +99,9 @@ pub struct Sim {
     /// cosine is not something a per-tick snapshot should copy, and a shared *immutable* table is
     /// not the hidden mutable state rule 3 is about.
     pub tables: Arc<Tables>,
-    /// The bike's own parameters, off its `.phy`.
-    pub phy: Phy,
+    /// The bike's own parameters, off its `.phy`: shared by every clone of this state like the
+    /// tables, because nothing in a ride writes them ([`snapshot`]).
+    pub phy: Arc<Phy>,
     /// The input layer, read once a frame *before* the simulation — which is where the original
     /// reads it ([`tick`]). It is state and not a parameter: the press and release timers and the
     /// one-frame event queue are what a gesture is decoded out of.
@@ -180,7 +181,7 @@ impl Sim {
         // Pad 0 plugged in and pad 1 not, which is the shape every capture of this game was taken
         // in and the shape a one-player session has.
         input.pad_mut(0).connected = true;
-        Sim { ticks: 0, rng: seed, tables, phy, input, rider, plane: None, others: Vec::new() }
+        Sim { ticks: 0, rng: seed, tables, phy: Arc::new(phy), input, rider, plane: None, others: Vec::new() }
     }
 
     /// **One frame of the simulation**, in the original's order: the pads are read, and then the
@@ -381,14 +382,14 @@ impl Sim {
 }
 
 impl Clone for Sim {
-    /// A snapshot. The tables are shared rather than copied — they are immutable — so this is a copy
-    /// of the bike, the rider and the pads and nothing else.
+    /// A snapshot. The tables and the bike's parameters are shared rather than copied — they are
+    /// immutable — so this is a copy of the bike, the rider and the pads and nothing else.
     fn clone(&self) -> Sim {
         Sim {
             ticks: self.ticks,
             rng: self.rng,
             tables: Arc::clone(&self.tables),
-            phy: self.phy.clone(),
+            phy: Arc::clone(&self.phy),
             input: self.input,
             rider: self.rider.clone(),
             plane: self.plane.clone(),
@@ -627,6 +628,10 @@ pub mod ragdoll_pose;
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.
 pub mod rng;
+
+/// The whole ride saved, put back and sent to another machine: what online play's rollback copies
+/// every tick and a resync carries. The constants stay shared and out of the bytes.
+pub mod snapshot;
 
 /// The main actor's state machine: riding, down after a wreck, waiting, put back — the one axis the
 /// rest of the actor hangs off, since a down rider's physics does not step at all. The reasons a rider
