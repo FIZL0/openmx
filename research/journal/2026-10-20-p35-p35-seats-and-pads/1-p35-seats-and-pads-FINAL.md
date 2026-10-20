@@ -1,4 +1,4 @@
-# 1 — p35 seats and pads (PART)
+# 1 — p35 seats and pads (FINAL)
 
 Task P35. 2026-10-20.
 
