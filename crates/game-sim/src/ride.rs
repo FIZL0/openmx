@@ -159,7 +159,7 @@ impl Controls {
     /// the rate limit from the `.phy`. It lives here rather than in the shell so that a replay fixture
     /// and the shell derive the rider's hands from a pad the same way.
     pub fn from_pad(pad: &crate::input::Pad) -> Controls {
-        use crate::input::{Axis, Control};
+        use crate::input::{Axis, AxisRange, Control};
         let dpad = [Control::Up, Control::Right, Control::Down, Control::Left];
         Controls {
             gas: pad.strength(Control::Cross),
@@ -168,7 +168,10 @@ impl Controls {
             rear_brake: F::ZERO,
             clutch: pad.strength(Control::L2),
             reverse: if pad.held(Control::R3) { F::ONE } else { F::ZERO },
-            stick: (pad.axis(Axis::LeftX), pad.axis(Axis::LeftY)),
+            // Through the player's own range, ±0.3, which is what the ride's stick consumers carry
+            // in the original (I7, proved on a playback of the human's recording) — not the main
+            // menu's ±0.2 that [`crate::input::Pad::axis`] hands out.
+            stick: (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER)),
             dpad_y: pad.held(Control::Up) || pad.held(Control::Down),
             // The eight-way code the trick table reads: odd for a single direction, and the game's
             // own order round the d-pad. A diagonal is not derived, because which of two held

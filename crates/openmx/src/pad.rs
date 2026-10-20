@@ -245,8 +245,9 @@ pub fn control_named(name: &str) -> Option<Control> {
 ///
 /// A key is a switch and a stick is not, so these two numbers are the keyboard's whole analogue
 /// feel, and there is no original behaviour to match: the disc's input is a pad. What they are
-/// chosen against is the one measured number in the area, I2's stick curve: a fifth of the travel either side of centre is
-/// dead, so the first ~35 ms of a held key is the stick crossing the dead zone and the lean, the
+/// chosen against is the one measured number in the area, the ride's stick curve (I7's ±0.3, the
+/// player's own range): 30% of the travel either side of centre is
+/// dead, so the first ~54 ms of a held key is the stick crossing the dead zone and the lean, the
 /// steer and the preload grow from nothing after it rather than slamming to full on frame one.
 /// Coming back is quicker than going out, because a rider who lets go of a key has already decided.
 ///
@@ -611,7 +612,7 @@ fn keyboard(held: &dyn Fn(u8) -> bool) -> u16 {
 /// A key has nothing between off and on, so answering 0 or 255 the frame it goes down — which is what
 /// this module used to do — pushes the stick to the stop instantly and holds it there. Everything the
 /// sticks feed is then all-or-nothing: the lean is full lean, the steer is full lock, and a preload is
-/// either nothing or a bottomed-out suspension, with I2's dead zone and its two segments crossed in a
+/// either nothing or a bottomed-out suspension, with the ride's dead zone and its two segments crossed in a
 /// single frame. So the axis travels instead, at [`KEY_TO_EDGE`] to the stop and [`KEY_TO_CENTRE`]
 /// back, and a tap is a nudge rather than a slam.
 #[derive(Clone, Copy)]
@@ -664,7 +665,7 @@ impl KeyAxis {
 /// ([`game_sim::input::Pad::strength`]).
 ///
 /// The first few frames of a press are below the game's own pressure threshold, exactly as the first
-/// few frames of a held direction are inside I2's dead zone: a stab that short is not a throttle
+/// few frames of a held direction are inside the ride's dead zone: a stab that short is not a throttle
 /// input at all, which is the same thing a real button does on its way down.
 #[derive(Clone, Copy)]
 struct KeyRamp {
@@ -794,21 +795,23 @@ mod tests {
             report.set_axis(REPORT_LEFT_X, byte);
             let mut manager = Manager::connected();
             manager.tick(F(1.0 / 60.0), &[report; PADS]);
-            manager.pad(0).axis(game_sim::input::Axis::LeftX)
+            // What the ride's hands read: the player's range (I7), not the main menu's.
+            game_sim::ride::Controls::from_pad(manager.pad(0)).stick.0
         };
-        // Frame one: inside I2's dead zone, so the lean, the steer and the preload all still read
-        // nothing. The byte the module used to answer here was 255, which is `STICK.hi`.
+        // Frame one: inside the ride's dead zone, so the lean, the steer and the preload all still
+        // read nothing. The byte the module used to answer here was 255, which is `PLAYER.hi`.
         let first = axis.step(FRAME, false, true).unwrap();
         assert_eq!(read(first), F(0.0), "frame one of a tap is not a steering input");
-        assert_eq!(read(255), AxisRange::STICK.hi, "what frame one used to be");
-        // Three frames in it is out of the dead zone but nowhere near the stop.
+        assert_eq!(read(255), AxisRange::PLAYER.hi, "what frame one used to be");
+        // Four frames in it is out of the ±0.3 dead zone (three are 0.28 of the travel, still in
+        // it) but nowhere near the stop.
         for _ in 0..2 {
             axis.step(FRAME, false, true);
         }
-        let third = read(axis.step(FRAME, false, true).unwrap());
+        let fourth = read(axis.step(FRAME, false, true).unwrap());
         assert!(
-            third > F(0.0) && third < F(0.5),
-            "three frames of a held key reads {third:?}"
+            fourth > F(0.0) && fourth < F(0.5),
+            "four frames of a held key reads {fourth:?}"
         );
     }
 
