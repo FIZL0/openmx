@@ -5558,11 +5558,12 @@ fn nearest_opponent(
 // plane's lanes in place of the bike's: a fixture out of the capture, seeded from its first row, ridden
 // over the ground it was flown over, against a ratchet of its own.
 //
-// The ratchet starts at 0 and stays there until the plane's body moves. The capture's plane is creeping
-// across the dirt on its first row (0.64 ft/s along the nose, throttle at idle), so tick 1 moves its
-// position, and the port's plane has no rigid body, world step or wheels yet (S38, S39): what
-// [`Flight::frame`](game_sim::flight::Flight::frame) runs is the controls' preforce half alone. The
-// per-lane lines under the verdict say which of the plane's lanes already hold, and for how long.
+// The ratchet starts at 0. The capture's plane is creeping across the dirt on its first row (0.64 ft/s
+// along the nose, throttle at idle), so tick 1 moves its position. Since P31
+// [`Flight::frame`](game_sim::flight::Flight::frame) is the whole frame (the world step, the body, the
+// wheels, the measure and the crash test), but the run was not raised with it: the capture is not in
+// the worktree P31 was done in (`context/` is per-worktree), so the run skipped there. The per-lane
+// lines under the verdict say which of the plane's lanes hold, and for how long, wherever it is.
 
 /// The capture's file name in [`acceptance_dirs`] — C7's playback of `biplane.p2m2`.
 const BIPLANE_ACCEPTANCE: &str = "biplane";
@@ -5687,10 +5688,11 @@ fn biplane_start(
 ) -> Result<Sim, String> {
     let at = |name: &str| plane_float(cap, 0, name);
     let mut f = game_sim::flight::Flight::new(plane);
-    f.body.pos = plane_vec(cap, 0, "body_pos")?;
-    f.body.vel = plane_vec(cap, 0, "body_vel")?;
+    f.body.position = plane_vec(cap, 0, "body_pos")?;
+    f.body.velocity = plane_vec(cap, 0, "body_vel")?;
     f.body.quat = plane_vec(cap, 0, "body_quat")?;
-    f.body.rate = plane_vec(cap, 0, "body_rate")?;
+    f.body.rates = plane_vec(cap, 0, "body_rate")?;
+    (f.body.last_position, f.body.last_quat) = (f.body.position, f.body.quat);
     let s = &mut f.surfaces;
     s.throttle = at("throttle")?;
     s.brake = at("thr_braking")?;
@@ -5736,9 +5738,15 @@ fn biplane_start(
     air.rudder = f.surfaces.rudder;
     air.rates = plane_vec(cap, 0, "local_rate")?;
     let crash = cell(cap, 0, column(cap, "crash")?);
-    f.crash = crash.parse().map_err(|_| format!("row 0: crash '{crash}' is not a number"))?;
-    f.crash_time = at("crash_time")?;
+    f.crash.reason = crash.parse().map_err(|_| format!("row 0: crash '{crash}' is not a number"))?;
+    f.crash.clock = at("crash_time")?;
     let mut sim = Sim::new(seed);
+    // The measure off the seeded body, so the first frame's wheels stand where the plane does; the
+    // attitude and the air the capture recorded go back over the measure's own.
+    let (attitude, air) = (f.attitude, f.air);
+    f.remeasure(&sim.tables.ride.acos);
+    f.measure.grounded = attitude.grounded;
+    (f.attitude, f.air) = (attitude, air);
     sim.plane = Some(f);
     Ok(sim)
 }

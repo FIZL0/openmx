@@ -41,8 +41,8 @@ pub struct Hud {
     /// it touches a pixel.
     pub on: bool,
     /// Whether the rider is in the biplane: the control list is then the plane's eight commands over
-    /// the controls they are bound to, and the ramps beside it are the plane's five numbers. Nothing in the shell flies the plane
-    /// yet, so nothing sets it; the vehicle switch does.
+    /// the controls they are bound to, and the ramps beside it are the plane's five numbers. The shell
+    /// sets it every frame from which machine is up.
     pub plane: bool,
     /// The last trick the rider started or landed, as the stunt table spells it — the shell's own
     /// line, because the table lives in the shell and not in the overlay.
@@ -52,9 +52,12 @@ pub struct Hud {
     /// The camera preset the follow camera is on, by its file's name for it.
     camera: String,
     /// Which machine has the controller, the bike or the biplane (P19). With the plane up the
-    /// numbers beside it are still the bike's — where it was left — because the plane's flight is
-    /// not ported and has no numbers of its own yet.
+    /// numbers beside it are the bike's — where it was left — but for [`Hud::flight`]'s two.
     vehicle: String,
+    /// The plane's throttle (`0..1`) and airspeed (feet a second), as its flight holds them, while
+    /// the plane is up and flying (P31). The first column's top two lines show these instead of the
+    /// bike's speed and engine.
+    pub flight: Option<(f32, f32)>,
 }
 
 impl Hud {
@@ -66,6 +69,7 @@ impl Hud {
             wreck: "-".to_string(),
             camera: "-".to_string(),
             vehicle: "bike".to_string(),
+            flight: None,
         }
     }
 
@@ -322,10 +326,20 @@ impl Hud {
             ),
             false => self.trick.clone(),
         };
-        let columns = [
-            [
+        let (first, second) = match self.flight.filter(|_| self.plane) {
+            Some((throttle, airspeed)) => (
+                format!("air  {airspeed:>7.1} f/s{:>6.1} mph", airspeed * FEET_TO_MPH),
+                format!("throttle{:>5.0}%", throttle * 100.0),
+            ),
+            None => (
                 format!("speed{speed:>7.1} f/s{:>6.1} mph", speed * FEET_TO_MPH),
                 format!("rpm{:>9.0}   gear{gear:>7}", ride.engine.rpm.0),
+            ),
+        };
+        let columns = [
+            [
+                first,
+                second,
                 format!(
                     "clutch{:>6.2}   {}",
                     ride.held.clutch.0,

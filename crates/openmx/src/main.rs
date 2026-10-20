@@ -89,7 +89,11 @@
 //! **M** swaps between the bike and the track's biplane, and `--vehicle biplane` starts in the plane
 //! ([`vehicle`], P19): the swap is the original's own — the bike is left where it stands, hidden and
 //! not stepped, and the plane is put back where the track's `machine.txt` parked it, with its own
-//! camera file. The plane's flight is not ported yet (S34), so the plane stands where it is parked.
+//! camera file. With the plane up it flies (P31): its own simulation steps every frame on the seat's
+//! pad, the model is drawn at its body's pose with the prop at the engine's angle, the plane's camera
+//! follows it, and the overlay shows its throttle and airspeed. It flies over the terrain's
+//! heightfield alone — the props are not in its world, because the original's contact search is not
+//! ported — so it wrecks only off the map's edge, never on a hard landing or a tree.
 //!
 //! # Tapes
 //!
@@ -138,7 +142,9 @@ use game_render::scene::Vehicle;
 use game_render::vehicle::{Chassis, Drive, params as vehicle_params};
 use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
 use game_render::{ini, png, scene as view};
+use game_sim::biplane::Area;
 use game_sim::camera::{Preset, Race, Ridden, Switches, Target};
+use game_sim::flight::Flight;
 use game_sim::input::{Control, PADS, Report};
 use game_sim::phy::{self, Phy};
 use game_sim::replay::{Head, PadTape, Recorder, TickPhase};
@@ -202,9 +208,6 @@ const PLANE_CAMERA: &str = "Flight Cam 1";
 /// in each freeride track's second archive (`free06_2.res`'s `appstart\biplanecpresets.ini`), not in
 /// `appstart.res`.
 const PLANE_PRESETS: &str = "biplanecpresets.ini";
-/// The plane's model, as the disc names it (R8). Drawing it properly — its textures, the pilot, the
-/// prop and the effects — is V21's; the shell only puts what the loader makes of it where the plane is.
-const PLANE_MODEL: &str = "biplane";
 /// The archive the vehicle loader reads the machines' own files out of, `biplane.phy` among them.
 const MACHINE_ARCHIVE: &str = "machine.res";
 
@@ -725,7 +728,26 @@ fn run() -> Result<(), String> {
         let e = res.find_suffix(&format!("{}\\machine.txt", args.track))?;
         Some((e.name.clone(), res.read(&e.name).ok()?))
     });
-    let plane = machines.as_ref().and_then(|(_, b)| Spawn::biplane(b, 0)).map(Plane::parked);
+    // And its flight (P31): the plane's own `biplane.phy`, from the same archive, built the way the
+    // original builds it. Without the file the plane is parked and stays parked. The flyable area is
+    // the terrain's extent, which only the map-edge throw reads; the pairing of the layout's four
+    // fields with the area's is S37's reading, not checked against this track.
+    let plane_phy = machine_res.as_ref().and_then(|res| {
+        let e = res.find_suffix(phy::BIPLANE_PHY)?;
+        res.read(&e.name).ok()
+    });
+    let plane = machines.as_ref().and_then(|(_, b)| Spawn::biplane(b, 0)).map(|spawn| match &plane_phy {
+        Some(bytes) => {
+            let mut flight = Flight::new(&phy::Plane::read_bytes(bytes));
+            let t = &place.terrain;
+            flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
+            Plane::flying(spawn, flight)
+        }
+        None => Plane::parked(spawn),
+    });
+    if machines.is_some() {
+        println!("biplane: {}", if plane_phy.is_some() { "flies on its biplane.phy" } else { "no biplane.phy, parked" });
+    }
     match (&machines, &plane) {
         (Some((name, _)), Some(p)) => println!(
             "biplane: parked by {name} at {:.0}, {:.0}, {:.0} facing {:.0} degrees",
@@ -761,16 +783,15 @@ fn run() -> Result<(), String> {
             Some(cam)
         }
     };
-    // Its model, as far as the shared loader takes it: out of the machines' archive, where its
-    // textures are too. V21 draws it properly.
+    // Its model and both prop cones, out of the machines' archive, where its textures are too (V21).
     let plane_drawn = match (&garage.plane, machine_res) {
         (Some(_), Some(res)) => {
             let own = vec![res];
-            let drawn = assets.load(&own, PLANE_MODEL);
-            println!("biplane: {}", if drawn { "model loaded" } else { "no model to draw" });
+            let drawn = Biplane::load(&mut assets, &own, 0);
+            println!("biplane: {}", if drawn.is_some() { "model loaded" } else { "no model to draw" });
             drawn
         }
-        _ => false,
+        _ => None,
     };
 
     // The scene's own start line and start direction, as the simulation's reader read them.
@@ -1333,13 +1354,14 @@ fn run() -> Result<(), String> {
         // The grounded flag and the speed are read off the actor by the frame rather than worked
         // out from the velocity; the ride's own two fields are what the actor's are written from.
         let rider = match (world.garage.up, &world.garage.plane) {
-            // The plane, as the camera's target: where it is, its nose, world up, and no lean — a
-            // plane has no rider's stick to lean on. S34 gives it an attitude and a speed.
+            // The plane, as the camera's target: where it is, its nose, its up, and no lean — a
+            // plane has no rider's stick to lean on. Which of the plane's fields the original's plane
+            // camera reads was not traced; these are its body's.
             (Kind::Biplane, Some(plane)) => Ridden {
                 target: Target {
                     body_point: plane.at,
                     forward: plane.facing,
-                    up: Vf::new(0.0, 1.0, 0.0, 0.0),
+                    up: plane.up,
                     vel: plane.vel,
                     lean: F::ZERO,
                 },
@@ -1456,13 +1478,20 @@ fn run() -> Result<(), String> {
         if !bike_up {
             actor.clear();
         }
-        if let (true, Some(plane)) = (plane_drawn, &world.garage.plane) {
-            let at = M4::placement(vector(plane.at), vector(plane.facing), v3(0.0, 1.0, 0.0));
-            actor.push((PLANE_MODEL, at));
+        // At its body's pose, nose and up off the plane's own measure, with the prop at the engine's
+        // angle (S35) — or the bent cone, unturned, once it is wrecked.
+        if let (Some(drawn), Some(plane)) = (&plane_drawn, &world.garage.plane) {
+            let at = M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up));
+            actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
         }
         drawn += draw_scene(&mut frame, &look, &assets, &actor, &camera);
         // And the overlay over the top of it, after everything with a depth test and before anything
         // that reads the frame: what the window shows and what `--shot` writes are the same picture.
+        hud.plane = !bike_up;
+        hud.flight = match (bike_up, &world.garage.plane) {
+            (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
+            _ => None,
+        };
         hud.draw(&mut frame, world.sim.input.pad(0), &world.sim.rider, world.riding);
         window.present(&frame.color, frame.width, frame.height)?;
 
@@ -1496,6 +1525,21 @@ fn run() -> Result<(), String> {
                     (_, Phase::Resetting) => " (getting up)",
                 }
             );
+            // And the plane's own numbers while it flies: its height, the gauges and whether a
+            // wheel is down.
+            if let (false, Some(plane)) = (bike_up, &world.garage.plane)
+                && let Some((throttle, air)) = plane.gauges()
+            {
+                println!(
+                    "     plane at {:.0}, {:.0}, {:.0}: throttle {:.0}%, airspeed {:.1} mph, {}",
+                    plane.at.x(),
+                    plane.at.y(),
+                    plane.at.z(),
+                    throttle.0 * 100.0,
+                    air.0 * 0.681_818,
+                    if plane.on_ground() { "on the ground" } else { "in the air" }
+                );
+            }
             window_of_frames = (Instant::now(), 0, 0);
         }
 
@@ -1860,8 +1904,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      H toggles the riding overlay, which --hud starts on.\n\
                      --vehicle biplane starts in the track's biplane, where its machine.txt\n\
                      parks one, and M swaps between the bike and the plane the way the\n\
-                     original's \"Switch To Machine\" does. The plane's flight is not ported\n\
-                     yet (S34), so the plane stands where it was parked.\n\
+                     original's \"Switch To Machine\" does. The plane flies over the terrain\n\
+                     alone: Cross opens the throttle and Square closes it.\n\
                      The window opens at the screen's size and the frame is the largest 4:3 one\n\
                      inside it, re-made when the window is resized; --size draws a fixed frame\n\
                      instead (640x448 is the PS2's), and --scale draws each frame pixel N times\n\
