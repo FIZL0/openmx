@@ -811,7 +811,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The same file parsed twice, because the two sides of it are owned by different crates: the
     // shell's `Ground` draws it in host floats, the port's answers the ride's ray in the game's.
     let ground = Ground::new(track::Terrain::parse(&terrain_bytes)?, &place.terrain);
+    let ground = {
+        let extent = ground.extent();
+        ground.painted(game_render::splat::Splat::load(&archives, &args.track, extent))
+    };
     let sim_terrain = track::Terrain::parse(&terrain_bytes)?;
+    // The sky the scene names, behind everything (V25); the fog colour where it has none.
+    let sky = game_render::sky::Sky::load(&archives, &ini::text(&scn_bytes));
     let (extent_x, extent_z) = ground.extent();
     println!(
         "{}: {} props, {} collision shapes, ground {:.0} x {:.0} feet in {} x {} samples",
@@ -1275,7 +1281,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             plane: plane.as_ref(),
             pilot,
         };
-        return moment::draw(&moment, out, &shot, &ground, &assets, &vehicle, &look).map(|()| Leave::Quit);
+        return moment::draw(&moment, out, &shot, &ground, sky.as_ref(), &assets, &vehicle, &look).map(|()| Leave::Quit);
     }
 
     // ---- `--trace`: the solver's own numbers, with nobody on the pad (S22) -----------------------
@@ -2058,6 +2064,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let pos = vector(ridden[v].target.body_point);
             // The picture: the dirt, then the scene's props and the bikes standing on them.
             clear(target, look.fog_color);
+            if let Some(sky) = &sky {
+                sky.draw(target, camera);
+            }
             let mut tris = ground.draw(target, camera, &light, pos, GROUND_RADIUS);
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {

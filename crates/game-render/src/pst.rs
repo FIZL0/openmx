@@ -73,6 +73,23 @@ impl Texture {
         })
     }
 
+    /// Decode the first frame of an `.atm`, an animated texture: a 12-byte header (`1`, the frame
+    /// count, `0`) and then that many whole `.pst` files of one size, back to back. The frames are
+    /// the flag's wave or the crowd's bob; a still picture gets the first.
+    pub fn parse_animation(d: &[u8]) -> Result<Texture, String> {
+        if d.len() < 12 || le32(d, 0) != 1 {
+            return Err("not an .atm: no header".to_string());
+        }
+        let frames = le32(d, 4) as usize;
+        if frames == 0 || (d.len() - 12) % frames != 0 {
+            return Err(format!(
+                "not an .atm: {} bytes do not split into {frames} frames",
+                d.len() - 12
+            ));
+        }
+        Texture::parse(&d[12..12 + (d.len() - 12) / frames])
+    }
+
     /// The texel at wrapped texture coordinates. Nearest neighbour: close enough for a still frame, and
     /// the hardware's bilinear filter is a separate argument.
     pub fn sample(&self, u: f32, v: f32) -> [u8; 4] {
@@ -94,11 +111,35 @@ impl Texture {
             self.rgba[at + 3],
         ]
     }
+
+    /// The texel at wrapped texture coordinates, mixed from the four nearest: the hardware's bilinear
+    /// filter, for a texture seen up close, where nearest neighbour shows its squares.
+    pub fn sample_smooth(&self, u: f32, v: f32) -> [u8; 4] {
+        if self.width == 0 || self.height == 0 {
+            return [255, 0, 255, 255];
+        }
+        let (x, y) = (u * self.width as f32 - 0.5, v * self.height as f32 - 0.5);
+        let (fx, fy) = (x - x.floor(), y - y.floor());
+        let (x0, y0) = (x.floor() as i64, y.floor() as i64);
+        let at = |dx: i64, dy: i64| {
+            let px = (x0 + dx).rem_euclid(self.width as i64) as usize;
+            let py = (y0 + dy).rem_euclid(self.height as i64) as usize;
+            4 * (py * self.width + px)
+        };
+        let corners = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
+        let weights = [(1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy];
+        let mut out = [0u8; 4];
+        for (k, slot) in out.iter_mut().enumerate() {
+            let mixed: f32 = corners.iter().zip(weights).map(|(&c, w)| self.rgba[c + k] as f32 * w).sum();
+            *slot = (mixed + 0.5).min(255.0) as u8;
+        }
+        out
+    }
 }
 
 /// The second header word of a sixteen-colour `.pst`, which is most of the menus' art (`ui\tex\*`)
 /// and the fonts: every track texture has `0x28` there instead.
-const FOUR_BIT: u32 = 0x2e;
+pub(crate) const FOUR_BIT: u32 = 0x2e;
 
 impl Texture {
     /// Decode the largest mip of a sixteen-colour `.pst`: the same layout with a 16-entry palette,
