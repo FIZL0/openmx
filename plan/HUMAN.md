@@ -207,7 +207,7 @@ Two things that bite:
 - [ ] **How far past the bike to go** — one track and one bike riding correctly is the near goal; whether
       this becomes the whole game, a mod platform, or a research record changes which tasks are worth
       doing after that.
-- [ ] **A bail the original does not have (S29).** MX Unleashed has no bail: no wreck entry reads the pad,
+- [x] **A bail the original does not have (S29).** Answered 2026-10-20: match the original — no bail; S29 closed. MX Unleashed has no bail: no wreck entry reads the pad,
       and recording2's three wrecks (reasons 8, 12, 6) follow no press (research/journal/2026-10-20-s29-bail).
       Either S29 closes as "matches the original by having none", or you name the bail you want — the
       button, the wreck reason (and so the throw), ground, air or both — and it goes in as an addition
