@@ -1,6 +1,6 @@
 [package]
 name = "game-render"
-description = "Draws the game's own models: disc -> meshes and textures -> pixels, with no engine and no dependencies"
+description = "Draws the game's own models: disc -> meshes and textures -> pixels, on the GPU through wgpu or in software"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
@@ -11,6 +11,18 @@ game-sim = { path = "../game-sim" }
 # Not for arithmetic — this crate draws in host `f32`. A clip's timing record is the simulation's
 # own (`game_sim::motion::Clip`), and its fields are `F`, so the type has to be nameable here.
 ps2-float = { path = "../ps2-float" }
+
+# The GPU renderer (P44, `src/gpu.rs`): wgpu, which is Vulkan, Metal, DX12, GL and — in a browser —
+# WebGPU or WebGL2 behind one API, with `bytemuck` to hand it plain-old-data and `pollster` to wait
+# for its few async calls on the desktop. A feature so a build that cannot take them (the browser's
+# hand-instantiated module, N4) leaves them out; on by default, so the crate's own tests draw with it.
+wgpu = { version = "30", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+pollster = { version = "1", optional = true }
+
+[features]
+default = ["gpu"]
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 
 [dev-dependencies]
 # The oracle is a *test* dependency: the port must not need the game's code to draw a frame.

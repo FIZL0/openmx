@@ -856,6 +856,18 @@ impl Body {
         held
     }
 
+    /// The pose as the GPU draws it (P44): the node matrices [`Body::skin_into_at`] skins with, held
+    /// on to the bike the same way, with nothing skinned — the vertex shader places each vertex by its
+    /// node's matrix itself.
+    pub fn palette(&self, hold: Option<&Anchors>) -> (Vec<M4>, [Option<f32>; 4]) {
+        let mut world = self.rig.world();
+        let held = match hold {
+            Some(targets) => hold_on(&self.rig.set.skeleton, &mut world, targets, 1.0),
+            None => [None; 4],
+        };
+        (world, held)
+    }
+
     /// Which of the body's levels of detail to draw, for a camera `distance` from the bike whose
     /// focal length is `focal` pixels ([`crate::world::Camera::focal`]).
     ///
@@ -956,6 +968,12 @@ impl Body {
         bones: &[game_sim::math::Mat4],
         at: M4,
     ) {
+        loaded.tris = skin(&loaded.model, &self.ragdoll_palette(doll, bones, at), group);
+    }
+
+    /// The ragdoll's pose as the GPU draws it (P44): the node matrices [`Body::skin_ragdoll_into`]
+    /// skins with, in the space of `at`.
+    pub fn ragdoll_palette(&self, doll: &Ragdolled, bones: &[game_sim::math::Mat4], at: M4) -> Vec<M4> {
         let skeleton = &self.rig.set.skeleton;
         let locals = skeleton.locals(&self.rig.set.pose);
         let back = rigid_inverse(at);
@@ -967,8 +985,7 @@ impl Body {
         for j in 0..skeleton.len() {
             placed_under(j, skeleton, &locals, &fallback, &mut world, 0);
         }
-        let world: Vec<M4> = world.into_iter().map(|m| m.unwrap_or(M4::IDENTITY)).collect();
-        loaded.tris = skin(&loaded.model, &world, group);
+        world.into_iter().map(|m| m.unwrap_or(M4::IDENTITY)).collect()
     }
 }
 

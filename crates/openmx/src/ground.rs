@@ -20,6 +20,8 @@
 use game_render::mat::{V3, v3};
 use game_render::raster::{Frame, Look, Shade};
 use game_render::splat::Splat;
+#[cfg(not(target_arch = "wasm32"))]
+use game_render::gpu::{GroundChunk, GroundVertex};
 use game_render::world::{Camera, Lighting};
 use game_sim::track::{Terrain, TerrainLayout};
 
@@ -33,7 +35,7 @@ const LEAF_SAMPLES: u32 = 16;
 /// takes and how the cell's corners index into one is not decoded (V1 says so too), so the ground is
 /// one dirt colour with the file's own normals doing all the shaping. It reads as dirt and it is
 /// honest about being flat.
-const DIRT: [f32; 3] = [150.0, 118.0, 86.0];
+pub const DIRT: [f32; 3] = [150.0, 118.0, 86.0];
 
 /// The terrain, and what the scene says about how big it is.
 pub struct Ground<'a> {
@@ -76,6 +78,61 @@ impl<'a> Ground<'a> {
             (self.samples_x - 1) as f32 * self.spacing,
             (self.samples_z - 1) as f32 * self.spacing,
         )
+    }
+
+    /// The whole field as the GPU draws it (P44): square chunks of `cells` cells a side, each a grid
+    /// of its cells' corners with their stored normals and two triangles a cell, wound and split as
+    /// [`Ground::draw`] splits them. Built once; the GPU culls the chunks by its frusta and the fog.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn chunks(&self, cells: u32) -> Vec<GroundChunk> {
+        let cells = cells.max(1);
+        let (across, along) = (self.samples_x - 1, self.samples_z - 1);
+        let mut out = Vec::new();
+        for z0 in (0..along).step_by(cells as usize) {
+            for x0 in (0..across).step_by(cells as usize) {
+                let (w, h) = (cells.min(across - x0), cells.min(along - z0));
+                let row = w + 1;
+                let mut vertices = vec![GroundVertex::default(); (row * (h + 1)) as usize];
+                let mut indices = Vec::new();
+                let (mut lo, mut hi) = (v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN));
+                for j in 0..h {
+                    for i in 0..w {
+                        let (sx, sz) = (x0 + i, z0 + j);
+                        let Some(quad) = self.terrain.cell(sx, sz, 1) else {
+                            continue;
+                        };
+                        for (k, dx, dz) in [(0, 0, 0), (1, 1, 0), (3, 1, 1), (2, 0, 1)] {
+                            let pos = v3(
+                                (sx + dx) as f32 * self.spacing,
+                                self.spacing * quad.height[k].0,
+                                (sz + dz) as f32 * self.spacing,
+                            );
+                            let n = quad.normal[k];
+                            let normal = v3(n[0].0, n[1].0, n[2].0).norm();
+                            vertices[((j + dz) * row + i + dx) as usize] = GroundVertex {
+                                pos: [pos.x, pos.y, pos.z],
+                                normal: [normal.x, normal.y, normal.z],
+                            };
+                            lo = v3(lo.x.min(pos.x), lo.y.min(pos.y), lo.z.min(pos.z));
+                            hi = v3(hi.x.max(pos.x), hi.y.max(pos.y), hi.z.max(pos.z));
+                        }
+                        let at = |dx: u32, dz: u32| (j + dz) * row + i + dx;
+                        indices.extend([at(0, 0), at(1, 0), at(1, 1), at(0, 0), at(1, 1), at(0, 1)]);
+                    }
+                }
+                if indices.is_empty() {
+                    continue;
+                }
+                let centre = lo.add(hi).scale(0.5);
+                out.push(GroundChunk {
+                    vertices,
+                    indices,
+                    centre,
+                    radius: hi.sub(centre).len(),
+                });
+            }
+        }
+        out
     }
 
     /// Draw the ground around a point: every cell within `radius` samples of it, as two triangles.
