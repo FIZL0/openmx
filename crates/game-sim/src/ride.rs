@@ -39,7 +39,7 @@
 //! This module's own, each marked where it is written and listed in the journal: the wheel's spin and
 //! the forces the tire puts through its contact ([`spin_integrate`], [`surface_drag`]), the steering
 //! hinge ([`hinge_force`]), the input layer's rate limiter ([`Held::step`]), the smooth noise the
-//! balance controller's rider-wobble reads ([`noise`]), the node's Gram-Schmidt ([`set_axes`]), the
+//! balance controller's rider-wobble reads ([`noise`]), the
 //! quaternion from an axis and an angle the integrator's correction needs, the collision bundle the
 //! sweep is handed and how a sweep hit becomes a contact, and the terrain blend inside a cell
 //! (`world.rs`). Nothing here invents a *constant*: every number comes off the disc through
@@ -398,8 +398,11 @@ pub struct Ride {
     /// The chassis transform's origin, as the integrator leaves it: the body's frame is `quat` about
     /// this. Held because the transform is the engine's object and the port does not have one.
     pub origin: Vf,
-    /// The bike's own scene node — three axis rows — which [`mv::no_hander`] rolls about its forward
-    /// axis so the rider can let go of the bars.
+    /// The chassis' transform's three rotation rows, as the last frame left them. The original's bike
+    /// node *is* the chassis' transform — one object, which [`mv::no_hander`] rolls about its forward
+    /// axis and the chassis' integration reads its orientation back from — so between the no-hander
+    /// and the next integration these rows are ahead of [`chassis::Chassis::quat`] by the no-hander's
+    /// roll, and they are what is drawn (P32).
     pub node: [Vf; 3],
     /// The controls after the rate limit.
     pub held: Held,
@@ -522,7 +525,7 @@ impl Ride {
 
     /// The chassis' transform as a matrix, built from the quaternion it carries.
     pub fn transform(&self) -> Mat4 {
-        math::quat_to_mat4(self.chassis.quat, self.origin)
+        held_transform(&self.node, self.chassis.quat, self.origin)
     }
 
     /// The bike's forward and up axes, as the original's `orientation_axes` reads them off the
@@ -557,25 +560,27 @@ impl Tables {
 
 /// What [`mv::step`]'s controllers ask the engine for, answered here.
 ///
-/// Three of the four are arithmetic the port can do — the transpose, a matrix row, a Gram-Schmidt —
+/// Three of the four are arithmetic the port can do — the transpose, a matrix row, an orthonormal basis —
 /// and the fourth, the smooth noise, is a table the engine builds at start-up that this port does not
-/// have. The two frames are the chassis' orientation, which is a copy taken at the top of the frame
-/// and refreshed after every integration, and the bike's node, which is the array the ride carries.
-struct Out<'a> {
+/// have.
+///
+/// **The two frames are one transform** (P32). The original hangs the chassis off the bike's own
+/// node — the bike's setup hands the chassis that node as its transform — so the no-hander's
+/// [`mv::Outside::set_axes`] rolls the very transform the chassis integrates from, and the next
+/// [`integrate`] reads the roll back into the body's quaternion. Both frames therefore answer from
+/// `chassis`, which is taken at the top of the frame, refreshed after every integration, and written
+/// by the no-hander between them; [`Ride::node`] carries it over to the next frame.
+struct Out {
     chassis: Mat4,
-    node: &'a mut [Vf; 3],
 }
 
-impl Out<'_> {
-    fn mat3(&self, frame: Frame) -> Mat3 {
-        match frame {
-            Frame::Chassis => Mat3::new(self.chassis.0[0], self.chassis.0[1], self.chassis.0[2]),
-            Frame::Node => Mat3::new(self.node[0], self.node[1], self.node[2]),
-        }
+impl Out {
+    fn mat3(&self, _frame: Frame) -> Mat3 {
+        Mat3::new(self.chassis.0[0], self.chassis.0[1], self.chassis.0[2])
     }
 }
 
-impl mv::Outside for Out<'_> {
+impl mv::Outside for Out {
     fn unrotate(&mut self, frame: Frame, v: Vf) -> Vf {
         chassis::unrotate(&self.mat3(frame), v)
     }
@@ -597,28 +602,27 @@ impl mv::Outside for Out<'_> {
     }
 
     fn set_axes(&mut self, forward: Vf, up: Vf) {
-        *self.node = set_axes(forward, up);
+        self.chassis = set_axes(self.chassis.0[3], forward, up);
     }
 }
 
-/// The transform helper that sets a frame's axes: its three rows from a forward and an up axis, by
-/// Gram-Schmidt — row0 is `up × forward`, row1 the up and row2 the forward, which is the pair
-/// `orientation_axes` reads back out.
-///
-/// **The arrangement of the cross products is the port's; the handedness is not.** The original hands
-/// five more registers to an orthonormalising callee that is not ported, so which of the three rows it
-/// trusts and which it rebuilds is not proved; what is proved (S17) is the two axes it is handed and
-/// in what order. Taking the forward as given and rebuilding the up is the arrangement that keeps the
-/// bike pointing where the no-hander aimed it. Which way row0 points is *not* free: [`math::basis`]
-/// is the original's own VU0 orthonormaliser and it builds `right = up × forward`, so that is the
-/// cross taken here. The other order makes a reflection — determinant −1, the bike's right row
-/// pointing left — and then every frame-relative read of the node comes back with its roll negated,
-/// which is what left the no-hander's lean stuck at a twentieth of its command (P11).
-fn set_axes(forward: Vf, up: Vf) -> [Vf; 3] {
-    let f = normalize(forward.merge(Dest::W, Vf::ZERO));
-    let r = normalize(cross(up, f).merge(Dest::W, Vf::ZERO));
-    let u = cross(f, r);
-    [r, u, f]
+/// The chassis' transform out of what the ride carries: the rows the last frame left in
+/// [`Ride::node`] at `origin`, or — for a ride that has never been placed — the body's own quaternion.
+fn held_transform(node: &[Vf; 3], quat: Vf, origin: Vf) -> Mat4 {
+    if node[1].to_bits() == Vf::ZERO.to_bits() {
+        return math::quat_to_mat4(quat, origin);
+    }
+    Mat4([node[0], node[1], node[2], origin])
+}
+
+/// The transform helper that sets a frame's axes, keeping where the frame is: the original hands its
+/// forward and up straight to the orthonormaliser [`math::basis`] with both of that function's flags
+/// set — orthogonalise, and keep the forward — and the frame's own position as the origin (P32, read
+/// off the helper's disassembly; the call sites are in `research/oracle.txt`). So the forward axis the
+/// no-hander hinges on survives exactly and the up is the axis that moves; row0 is `up × forward`,
+/// which is the handedness P11 had to find by hand when this was the port's own Gram-Schmidt.
+fn set_axes(at: Vf, forward: Vf, up: Vf) -> Mat4 {
+    math::basis(at, forward, up, true, true)
 }
 
 /// The engine's shared one-dimensional smooth noise, which while the bike is
@@ -689,8 +693,12 @@ const GIVEN_PASSES: usize = 4;
 /// *before* it sets the orientation (both call sites are in `research/oracle.txt`'s P2 block), so
 /// the origin the transform ends up at is built from the *previous* rotation. The last two calls are after the set and so are answered
 /// against the new one.
-fn integrate(ch: &mut chassis::Chassis, dt: F, origin: &mut Vf) -> Vec<chassis::Call> {
-    let entry = math::quat_to_mat4(ch.quat, *origin);
+///
+/// `entry` is the transform the step is entered with — the body's own orientation as the last
+/// integration set it, unless the no-hander has rolled it since, in which case the turn it made is
+/// the difference [`chassis::integrate`] carries onto the quaternion (P32).
+fn integrate(ch: &mut chassis::Chassis, dt: F, entry: &Mat4, origin: &mut Vf) -> Vec<chassis::Call> {
+    let entry = *entry;
     let mut given = chassis::Given::default();
     for _ in 0..GIVEN_PASSES {
         let mut probe = ch.clone();
@@ -1253,14 +1261,11 @@ impl Ride {
         let euler = math::quat_to_euler(chassis.quat, &tables.acos);
         chassis::measure(chassis, dt, euler);
 
-        // The bike's node follows the body's heading but keeps its own roll, which is the no-hander's
-        // one piece of state. **The port's own:** in the original the attachment walk puts the node
-        // where the body is, and that walk runs after the ground step (`research/oracle.txt`, A5) and
-        // is not ported.
-        let body = math::quat_to_mat4(chassis.quat, *origin);
-        *node = set_axes(body.0[2], if node[1].to_bits() == Vf::ZERO.to_bits() { body.0[1] } else { node[1] });
+        // The chassis' transform as the last frame left it — the no-hander's roll included, which the
+        // body's quaternion only takes in at its next integration (P32).
+        let body = held_transform(node, chassis.quat, *origin);
 
-        let mut out = Out { chassis: body, node };
+        let mut out = Out { chassis: body };
 
         // What the ground step takes as given: the chassis' transform's work, at the top of the frame.
         // Two of the three are frame constants, because the transform only moves when the body is
@@ -1512,7 +1517,7 @@ impl Ride {
             chassis.vel = mvc.vel;
             chassis.ang_vel = mvc.ang_vel;
             chassis::set_flags(chassis, mvc.flags.0, mvc.flags.1, mvc.flags.2);
-            integrate(chassis, h, origin);
+            integrate(chassis, h, &out.chassis, origin);
             out.chassis = math::quat_to_mat4(chassis.quat, *origin);
             mvc.force = chassis.force;
             mvc.torque = chassis.torque;
@@ -1528,6 +1533,9 @@ impl Ride {
                 mv::no_hander(mvp, &mut bike!(), s, &tables.mv(), &mut out, h);
             }
         }
+        // The transform is the engine's object and outlives the frame; the rows are what of it the
+        // ride has to carry, the origin being `origin` already.
+        *node = [out.chassis.0[0], out.chassis.0[1], out.chassis.0[2]];
 
         ride.collision_near = s.node_distance <= F(mv::COLLISION_NEAR);
         calls.push(mv::Call::SearchReset);
@@ -2097,7 +2105,8 @@ impl Crash {
         // The body: its own gravity, the dirt under it, and the ported integrator.
         self.body.force = add_xyz(self.body.force, part.gravity);
         self.contact(dt, part, world);
-        integrate(&mut self.body, dt, &mut self.origin);
+        let entry = math::quat_to_mat4(self.body.quat, self.origin);
+        integrate(&mut self.body, dt, &entry, &mut self.origin);
         self.resting = length(self.body.vel) <= part.speed_threshold
             && length(self.body.ang_vel) <= part.angular_rate_threshold;
 

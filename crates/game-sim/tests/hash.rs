@@ -93,7 +93,7 @@ const HEAD: usize = 10;
 fn a_hundred_ticks_is_a_known_constant() {
     // The hash of a hundred ticks of the stand-in bike on a level floor, as a literal: the same
     // value `Sim::hash`'s own test carries.
-    const HUNDRED_TICKS: u64 = 0x7a14_2684_3663_4bc9;
+    const HUNDRED_TICKS: u64 = 0xc1d1_a452_16f7_61a6;
 
     let mut sim = Sim::new(1);
     for _ in 0..100 {
