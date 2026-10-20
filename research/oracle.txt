@@ -2444,3 +2444,57 @@ collision_record_clear boot 0x002702e0 (record) -> count, +0x40..+0x4c zeroed; v
 collision_record_add boot 0x00270240 (record, ...) -> writes one 0x80-byte list entry
 collision_record_resolve boot 0x00270dc0 (record) -> vtable slot +0x80, run by the ground step
 #                                         every substep
+# --- S33: the biplane's .phy loader, and where it leaves the plane -------------------------------
+# (for R8: names found here, not by R8. The class is MXBiplane, "MXBiplane.cpp" at 0x0043f410.)
+biplane_init boot 0x00350a70 (plane, ...) -> builds the plane: the prop models ("propblur",
+#                                "propconebent"), then operator new for its parts — plane+0x400 the
+#                                engine (0x78 bytes, ctor 0x003500a0), +0x404 the wing (0x100, ctor
+#                                0x0034fa90), +0x408/+0x40c/+0x410 the FrontLeft/FrontRight/Rear gear
+#                                (0x1d0 each, ctor 0x0034eb40, init 0x0034ecd0) — then formats
+#                                "%sbiplane.phy" (0x0043ed78) with path_prefix "Biplane\" into
+#                                plane+0x230, opens it and calls vtable slot +0x194 on it
+biplane_phy_read boot 0x003511f0 (plane, reader) -> the base loader, vtable 0x0045b050 slot +0x194:
+#                                [Mass Properties] through physics_part_read (0x0015a500) on
+#                                plane+0x50 (so the body is plane+0x160, the collision record +0x170);
+#                                [Engine] MaxPower +0x4c, MaxAltitude +0x54, MinPropEfficiency +0x3c,
+#                                MinPropEfficiencySpeed +0x40 (x MPH) of the engine; [Aerodynamics]
+#                                Chord/Span/SurfaceArea/AspectRatio/DefaultAngleOfAttack (x DEG) to
+#                                biplane_wing_geometry, then CLRoundOff..CMde at wing+0x54..+0xac (23
+#                                floats, CM0 at +0xa0), CmBreakAngleOfAttack +0x4c (x DEG), CMstall,
+#                                Cnbeta, Cnp, Cnr, Cndr, Cnda at +0xb0..+0xc4; MaxElevator +0x37c,
+#                                MaxAileron +0x380, MaxRudder +0x384, ElevatorRampOffRollAngle +0x38c,
+#                                ElevatorOffRollAngle +0x390 (all x DEG), MinElevator +0x394 (as read)
+#                                on the plane; each Tire section to the three gear setters below;
+#                                [Autopilot] AileronDeadZone +0x398, MaxPitchRate +0x39c, MaxRollAngle
+#                                +0x3a0 (x DEG), PitchRateFeedForwardscale +0x3a4, PitchRateGain
+#                                +0x3a8, PitchRateIntegratorGain +0x3ac; [Joystick] ThrottleIncrement
+#                                +0x368, ReverseThrottle +0x36c, Aileron/Elevator/RudderControlRateLimit
+#                                +0x370/+0x374/+0x378; [Wrecks] WreckTime +0x3c0, MinWreckSpeed +0x3b8
+#                                (x MPH), WreckGravity +0x3c4, WreckDamping +0x3d0, WreckInertia +0x3e0
+#                                (quadwords). Then copies the body's inertia (body+0x110) to
+#                                plane+0x3f0. Every float getter is ini_float_default: 0, except the
+#                                gear's first six (1.0)
+mxbiplane_phy_read boot 0x00355210 (plane, reader) -> MXBiplane's override, vtable 0x0045b250 slot
+#                                +0x194: biplane_phy_read, then [Animation] PelvisBoxPosition +0xe70,
+#                                PelvisBoxSize +0xe80
+biplane_wing_geometry boot 0x0034fc40 (chord, span, area, ratio, aoa in f12..f16, wing) -> +0x38..+0x48;
+#                                a zero chord with a positive ratio becomes span / ratio
+biplane_gear_springs boot 0x0034ee10 (StrutCompression, MaxDecompressionRate, SpringCoefficient,
+#                                Bounce-, ReboundDampingRatio in f12..f16, gear) -> +0x3c, +0x40, the
+#                                rate |coef * mass * 32.2| at +0x44 and ratio * 2 * sqrt(mass * rate) at
+#                                +0x48/+0x4c; the mass is the body's (gear+0x12c -> +0xc)
+biplane_gear_tire boot 0x0034ee90 (TireRadius, SideForce, BrakeFriction, MaxBrakingForce,
+#                                SteeringMoment in f12..f16, gear) -> +0x150, 1/r at +0x154 when r > 0,
+#                                +0x15c, +0x158, +0x160, +0x164. The front legs get a literal 0 moment
+biplane_gear_contact boot 0x0034eee0 (gear) -> +0xa0 = BodyTireCenter (+0x60) one radius lower; the
+#                                running gear rewrites it as the strut works
+# physics_part_read (0x0015a500), shared with Wreckbike.phy, leaves on the plane: GravityScale
+# part+0x140, CollisionEnabled +0x54, DetectCollisionsWhenDisabled +0x6c, ResetOffEdgeOfWorld +0x70,
+# ResetTime..BodyAngularSpeedImpulseThreshold +0x1c0..+0x1d8, gravity +0xf0; the body gets the mass
+# at +0xc (1/m at +0x10, inertia +0x110). Collision record: mass +0x64, CofG offset +0x90, high-speed
+# flag +0x3c, ray offset +0xb0, scale/distance +0xc0/+0xc4, MaxPenetration/SpringStiffness/
+# SpringDamping +0x118/+0x11c/+0x120, rate/damping +0x124/+0x128, moment scales +0x150/+0x160/+0x170,
+# FrictionZone1/BodyFriction +0x190/+0x194, the sixteen surface frictions +0x198.
+# In the biplane recording's state (biplane.p2m2_SaveState.p2s) the plane is at 0x00c44a40.
+# AeroSurfaceArea (0x004437d0) is NOT a biplane key: it is read by 0x00394450, another vehicle's
+# loader (clutch, NumberOfWings, "Wing %d") — which vehicle is R8's to say.

@@ -27,7 +27,7 @@
 
 use game_sim::archive::{Entry, Psr, Res};
 use game_sim::camera::{CURVE_ENTRIES, CurveTable};
-use game_sim::phy::{self, Ini, Phy};
+use game_sim::phy::{self, Ini, Phy, Plane};
 use game_sim::track::{FREERIDE_ENGINE, FREERIDE_PRO, Tuning, physics_file};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, game_or_skip, skip};
@@ -1481,4 +1481,265 @@ fn the_ground_step_gets_the_controller_keys_off_the_disc() {
         assert!(seen, "{key} is zero in every file on the disc, so its copy proves nothing");
     }
     println!("{} .phy files on the disc, 25 controller keys each, bit-exact", files.len());
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 6. The biplane
+
+/// The plane in the save state beside the biplane recording, and where its own file name sits in it:
+/// the name the plane's loader formats (`Biplane\` and the leaf) into its own buffer before opening
+/// the file, which is how the image is known to be the one this proof is about.
+const LIVE_PLANE: u32 = 0x00c44a40;
+const PLANE_NAME: u32 = 0x230;
+const PLANE_STATE: &str = "biplane.p2m2_SaveState.eeMemory.bin";
+
+/// Where the loader keeps the plane's parts: the rigid body and the collision record (both set
+/// through the shared part loader), the engine, the wing, and the three gear legs.
+const PLANE_BODY: u32 = 0x160;
+const PLANE_COLLISION: u32 = 0x170;
+const PLANE_ENGINE: u32 = 0x400;
+const PLANE_AERO: u32 = 0x404;
+const PLANE_GEAR: [u32; 3] = [0x408, 0x40c, 0x410];
+/// The part loader's object is the plane's base, this far in.
+const PLANE_PART: u32 = 0x50;
+
+/// The two archives the plane's file ships in that this proof reads: the menu's and the recording's
+/// own freeride track's second one. Every copy on the disc is the same 3,060 bytes.
+const PLANE_ARCHIVES: [&str; 2] = ["machine.res", "Tracks\\free06_2.res"];
+
+/// Every word of the plane's parameters as the loader left them in the human's biplane session,
+/// against the port's parse of `Biplane\biplane.phy` off the disc. No interpreter: the image is the
+/// original's answer, and every comparison names its key.
+#[test]
+fn biplane_phy_matches_the_loaded_struct() {
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    let at = kit.ctx("states").join(PLANE_STATE);
+    let img = match Ee::from_ram(&at) {
+        Ok(ee) => ee,
+        Err(why) => {
+            skip(&format!(
+                "{why} — `./kit state ram context/recordings/biplane.p2m2_SaveState.p2s` writes it"
+            ));
+            return;
+        }
+    };
+    let b = LIVE_PLANE;
+    let name = read_str(&img, b + PLANE_NAME);
+    if name != phy::BIPLANE_PHY {
+        skip(&format!(
+            "the object at {b:#010x} in {} is carrying {name:?}, not {:?} — a different moment, or a \
+             different build",
+            at.display(),
+            phy::BIPLANE_PHY
+        ));
+        return;
+    }
+
+    // The file, through the same two containers the bike's takes: MX.PSR, then a `.res` inside it.
+    let Some(mut f) = container() else { return };
+    let psr = directory(&mut f);
+    let copies: Vec<Vec<u8>> = PLANE_ARCHIVES
+        .iter()
+        .map(|archive| {
+            let bytes = member(&mut f, &psr, archive);
+            let res = Res::parse(&bytes).unwrap_or_else(|why| panic!("{archive}: {why}"));
+            // The archives spell their members lowercased and the loader does not, so the lookup folds.
+            let e = res
+                .entries
+                .iter()
+                .find(|e| e.name.eq_ignore_ascii_case(phy::BIPLANE_PHY))
+                .unwrap_or_else(|| panic!("{archive} has no {}", phy::BIPLANE_PHY));
+            res.read(&bytes, e).unwrap_or_else(|why| panic!("{archive}: {why}"))
+        })
+        .collect();
+    assert_eq!(copies[0], copies[1], "the two copies of the plane's file differ");
+    let p = Plane::read_bytes(&copies[0]);
+
+    let ptr = |o: u32| {
+        let at = img.u32_at(b + o);
+        assert_ne!(at, 0, "the live plane has nothing at +{o:#x}");
+        at
+    };
+    let (body, coll, engine, aero) = (ptr(PLANE_BODY), ptr(PLANE_COLLISION), ptr(PLANE_ENGINE), ptr(PLANE_AERO));
+    let mut want: Vec<(String, u32, u32)> = Vec::new();
+    let mut f1 = |what: &str, at: u32, v: F| want.push((what.to_string(), at, v.to_bits()));
+    let m = &p.mass_properties;
+    let part = b + PLANE_PART;
+
+    // [Mass Properties] — what the part loader keeps on the plane itself.
+    f1("GravityScale", part + 0x140, m.gravity_scale);
+    f1("ResetTime", part + 0x1c0, m.reset_time);
+    f1("SpeedThreshold", part + 0x1c4, m.speed_threshold);
+    f1("AngularRateThreshold", part + 0x1c8, m.angular_rate_threshold);
+    f1("AccelerationThreshold", part + 0x1cc, m.acceleration_threshold);
+    f1("AngularAccelerationThreshold", part + 0x1d0, m.angular_acceleration_threshold);
+    f1("SpeedImpulseThreshold", part + 0x1d4, m.speed_impulse_threshold);
+    f1("BodyAngularSpeedImpulseThreshold", part + 0x1d8, m.body_angular_speed_impulse_threshold);
+    // ... what it hands the rigid body: the mass every gear leg's spring is scaled by.
+    f1("Weight, as the body's mass", body + 0xc, m.mass);
+    // ... and what it hands the collision record.
+    f1("CollisionWeight, as the collision mass", coll + 0x64, m.collision_mass);
+    f1("MaxPenetration", coll + 0x118, m.max_penetration);
+    f1("SpringStiffness", coll + 0x11c, m.spring_stiffness);
+    f1("SpringDamping", coll + 0x120, m.spring_damping);
+    let rate = phy::spring_rate(m.spring_stiffness, m.mass);
+    f1("SpringStiffness, as the contact's rate", coll + 0x124, rate);
+    f1("SpringDamping, as the contact's damping", coll + 0x128, phy::damping(m.spring_damping, m.mass, rate));
+    f1("HighSpeedRaySpeedScale", coll + 0xc0, m.high_speed_ray_speed_scale);
+    f1("HighSpeedUnpenetrationDistance", coll + 0xc4, m.high_speed_unpenetration_distance);
+    f1("FrictionZone1", coll + 0x190, m.friction_zone1);
+    f1("BodyFriction", coll + 0x194, m.body_friction);
+    for k in 0..16 {
+        f1(&format!("FrictionZone1, as surface {k}'s friction"), coll + 0x198 + 4 * k, m.friction_zone1);
+    }
+
+    // [Engine]
+    f1("MaxPower", engine + 0x4c, p.engine.max_power);
+    f1("MaxAltitude", engine + 0x54, p.engine.max_altitude);
+    f1("MinPropEfficiency", engine + 0x3c, p.engine.min_prop_efficiency);
+    f1("MinPropEfficiencySpeed", engine + 0x40, p.engine.min_prop_efficiency_speed);
+
+    // [Aerodynamics]: the wing's geometry, then its derivatives in the loader's order.
+    let a = &p.aero;
+    for (k, (key, v)) in [
+        ("Chord", a.chord),
+        ("Span", a.span),
+        ("SurfaceArea", a.surface_area),
+        ("AspectRatio", a.aspect_ratio),
+        ("DefaultAngleOfAttack", a.default_angle_of_attack),
+        ("CmBreakAngleOfAttack", a.cm_break_angle_of_attack),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        f1(key, aero + 0x38 + 4 * k as u32, v);
+    }
+    for (k, (key, v)) in [
+        ("CLRoundOff", a.cl_round_off),
+        ("CLDropOff", a.cl_drop_off),
+        ("CLScale", a.cl_scale),
+        ("CLAngleScale", a.cl_angle_scale),
+        ("CLq", a.cl_q),
+        ("CLde", a.cl_de),
+        ("CD0", a.cd0),
+        ("CD1", a.cd1),
+        ("CDde", a.cd_de),
+        ("CYbeta", a.cy_beta),
+        ("CYda", a.cy_da),
+        ("CYdr", a.cy_dr),
+        ("CYp", a.cy_p),
+        ("CYr", a.cy_r),
+        ("Clbeta", a.cl_beta),
+        ("Clp", a.cl_p),
+        ("Clr", a.cl_r),
+        ("Clda", a.cl_da),
+        ("Cldr", a.cl_dr),
+        ("CM0", a.cm0),
+        ("CMalpha", a.cm_alpha),
+        ("CMq", a.cm_q),
+        ("CMde", a.cm_de),
+        ("CMstall", a.cm_stall),
+        ("Cnbeta", a.cn_beta),
+        ("Cnp", a.cn_p),
+        ("Cnr", a.cn_r),
+        ("Cndr", a.cn_dr),
+        ("Cnda", a.cn_da),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        f1(key, aero + 0x54 + 4 * k as u32, v);
+    }
+    // ... and the six surface limits it keeps on the plane, with a gap where nothing is read.
+    let s = &p.surfaces;
+    f1("MaxElevator", b + 0x37c, s.max_elevator);
+    f1("MaxAileron", b + 0x380, s.max_aileron);
+    f1("MaxRudder", b + 0x384, s.max_rudder);
+    f1("ElevatorRampOffRollAngle", b + 0x38c, s.elevator_ramp_off_roll_angle);
+    f1("ElevatorOffRollAngle", b + 0x390, s.elevator_off_roll_angle);
+    f1("MinElevator", b + 0x394, s.min_elevator);
+
+    // The three gear legs.
+    for (leg, (&o, g)) in ["FrontLeft", "FrontRight", "Rear"].iter().zip(PLANE_GEAR.iter().zip(&p.gear)) {
+        let t = ptr(o);
+        let mut key = |k: &str, at: u32, v: F| f1(&format!("[{leg} Tire] {k}"), t + at, v);
+        key("StrutCompression", 0x3c, g.strut_compression);
+        key("MaxDecompressionRate", 0x40, g.max_decompression_rate);
+        key("SpringCoefficient, as the strut's rate", 0x44, g.spring_rate);
+        key("BounceDampingRatio, as a damping rate", 0x48, g.bounce_damping);
+        key("ReboundDampingRatio, as a damping rate", 0x4c, g.rebound_damping);
+        key("TireRadius", 0x150, g.tire_radius);
+        key("TireRadius, inverted", 0x154, g.inv_tire_radius);
+        key("BrakeFriction", 0x158, g.brake_friction);
+        key("SideForce", 0x15c, g.side_force);
+        key("MaxBrakingForce", 0x160, g.max_braking_force);
+        key("SteeringMoment", 0x164, g.steering_moment);
+    }
+
+    // [Autopilot], [Joystick], [Wrecks]: all on the plane.
+    let (ap, j, w) = (&p.autopilot, &p.joystick, &p.wrecks);
+    f1("AileronDeadZone", b + 0x398, ap.aileron_dead_zone);
+    f1("MaxPitchRate", b + 0x39c, ap.max_pitch_rate);
+    f1("MaxRollAngle", b + 0x3a0, ap.max_roll_angle);
+    f1("PitchRateFeedForwardscale", b + 0x3a4, ap.pitch_rate_feed_forward_scale);
+    f1("PitchRateGain", b + 0x3a8, ap.pitch_rate_gain);
+    f1("PitchRateIntegratorGain", b + 0x3ac, ap.pitch_rate_integrator_gain);
+    f1("ThrottleIncrement", b + 0x368, j.throttle_increment);
+    f1("ReverseThrottle", b + 0x36c, j.reverse_throttle);
+    f1("AileronControlRateLimit", b + 0x370, j.aileron_control_rate_limit);
+    f1("ElevatorControlRateLimit", b + 0x374, j.elevator_control_rate_limit);
+    f1("RudderControlRateLimit", b + 0x378, j.rudder_control_rate_limit);
+    f1("WreckTime", b + 0x3c0, w.wreck_time);
+    f1("MinWreckSpeed", b + 0x3b8, w.min_wreck_speed);
+    f1("WreckGravity", b + 0x3c4, w.wreck_gravity);
+
+    // The quadwords, lane by lane, and the three flags as the words the getter writes.
+    let mut quads: Vec<(String, u32, Vf)> = vec![
+        ("CollisionCofGOffset".into(), coll + 0x90, m.collision_cofg_offset),
+        ("HighSpeedRayOffset".into(), coll + 0xb0, m.high_speed_ray_offset),
+        ("ImpulseAngularRateScale".into(), coll + 0x150, m.impulse_angular_rate_scale),
+        ("SpringMomentScale".into(), coll + 0x160, m.spring_moment_scale),
+        ("FrictionMomentScale".into(), coll + 0x170, m.friction_moment_scale),
+        ("WreckDamping".into(), b + 0x3d0, w.wreck_damping),
+        ("WreckInertia".into(), b + 0x3e0, w.wreck_inertia),
+        ("PelvisBoxPosition".into(), b + 0xe70, p.pelvis_box.position),
+        ("PelvisBoxSize".into(), b + 0xe80, p.pelvis_box.size),
+    ];
+    for (leg, (&o, g)) in ["FrontLeft", "FrontRight", "Rear"].iter().zip(PLANE_GEAR.iter().zip(&p.gear)) {
+        quads.push((format!("[{leg} Tire] BodyTireCenter"), img.u32_at(b + o) + 0x60, g.body_tire_center));
+    }
+    for (what, at, v) in quads {
+        for (k, lane) in lanes(v).into_iter().enumerate() {
+            want.push((format!("{what}.{}", ["x", "y", "z", "w"][k]), at + 4 * k as u32, lane));
+        }
+    }
+    for (what, at, v) in [
+        ("CollisionEnabled", part + 0x54, m.collision_enabled),
+        ("DetectCollisionsWhenDisabled", part + 0x6c, m.detect_collisions_when_disabled),
+        ("ResetOffEdgeOfWorld", part + 0x70, m.reset_off_edge_of_world),
+        ("CheckForHighSpeedCollisions", coll + 0x3c, m.check_for_high_speed_collisions),
+    ] {
+        want.push((what.to_string(), at, v as u32));
+    }
+
+    let mut bad = 0;
+    for (what, at, ours) in &want {
+        let theirs = img.u32_at(*at);
+        if theirs != *ours {
+            println!(
+                "{what}: the human's plane {theirs:#010x} ({}) ours {ours:#010x} ({})",
+                f32::from_bits(theirs),
+                f32::from_bits(*ours)
+            );
+            bad += 1;
+        }
+    }
+    assert_eq!(bad, 0, "{bad} of {} words differ from the plane the human flew", want.len());
+    println!("the human's plane: {} words off {}, bit-exact", want.len(), phy::BIPLANE_PHY);
 }

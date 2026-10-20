@@ -1344,3 +1344,365 @@ impl Wrecks {
         }
     }
 }
+
+// --- the biplane's file ------------------------------------------------------------------------------
+
+/// The name the plane's loader builds: the vehicle prefix the engine fills in at startup for the plane
+/// (`Biplane\`) and the file's own leaf. Like the bike's, the archives spell the member lowercased
+/// (`biplane\biplane.phy`) — it ships in `machine.res` and in every freeride track's second archive.
+pub const BIPLANE_PHY: &str = "Biplane\\biplane.phy";
+
+/// **The biplane's `.phy`**, as the plane's own loader reads it: a different loader from the bike's
+/// [`Phy::read`], with its own sections and keys, reading the same INI format through the same six
+/// getters.
+///
+/// The loader walks nine sections in this order, and so does [`Plane::read`]:
+///
+/// | Section | Here | Where the original puts it |
+/// |---|---|---|
+/// | `[Mass Properties]` | [`Plane::mass_properties`] | the shared rigid-body part loader — the one `Wreckbike.phy` goes through, so it is a [`Part`] |
+/// | `[Engine]` | [`Plane::engine`] | the plane's engine object |
+/// | `[Aerodynamics]` | [`Plane::aero`] and [`Plane::surfaces`] | the aerodynamics object, and the plane itself for the six surface limits |
+/// | `[FrontLeft Tire]`, `[FrontRight Tire]`, `[Rear Tire]` | [`Plane::gear`] | the three gear objects, through three setters each |
+/// | `[Autopilot]` | [`Plane::autopilot`] | the plane |
+/// | `[Joystick]` | [`Plane::joystick`] | the plane |
+/// | `[Wrecks]` | [`Plane::wrecks`] | the plane |
+/// | `[Animation]` | [`Plane::pelvis_box`] | the plane, read by the derived class's override after the base loader |
+///
+/// Every float getter the plane's loader calls is the one with a default, so unlike the bike's
+/// nothing is "left alone": a missing key is zero, except the gear's six that default to one (see
+/// [`Gear::read`]).
+///
+/// # What the retail file has that nothing reads
+///
+/// `biplane.phy` is a hand-edited file and carries keys the loader never asks for. They are listed
+/// here because a port that honoured them would fly a different plane from the disc's:
+///
+/// * `[Mass Properties]` `Inertia` and `Damping` — the part loader's keys are `InertiaScale` and
+///   `SpringDamping`, so the plane's inertia scale is the default two and its contact damping the
+///   default 0.7, not the 1.0 and 0.5 the file seems to say.
+/// * `[Engine]` `MinAltitude` — the loader reads `MaxAltitude` only. (The string `MinAltitude` is in
+///   the executable, but in a different vehicle's loader.)
+/// * `AeroSurfaceArea` is **not** a biplane key: it belongs to that same other loader, beside
+///   `NumberOfWings`. The plane's area is `[Aerodynamics]` `SurfaceArea`.
+///
+/// # What the loader works out on the way
+///
+/// Degrees become radians ([`DEG`]) for `DefaultAngleOfAttack`, `CmBreakAngleOfAttack`,
+/// `MaxElevator`, `MaxAileron`, `MaxRudder`, the two `Elevator…RollAngle`s and `MaxRollAngle` — but
+/// **not** `MinElevator`, which is stored as written. Miles per hour become speeds ([`MPH`]) for
+/// `MinPropEfficiencySpeed` and `MinWreckSpeed`. A zero `Chord` with a positive `AspectRatio` becomes
+/// `Span / AspectRatio`, which is the retail file's case. And each gear works its spring and dampers
+/// out against the part's mass, and its contact point from its centre and radius.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Plane {
+    /// `[Mass Properties]`, through the rigid-body part loader.
+    pub mass_properties: Part,
+    pub engine: PlaneEngine,
+    pub aero: Aero,
+    pub surfaces: Surfaces,
+    /// `[FrontLeft Tire]`, `[FrontRight Tire]`, `[Rear Tire]`, in that order.
+    pub gear: [Gear; 3],
+    pub autopilot: Autopilot,
+    pub joystick: PlaneJoystick,
+    pub wrecks: PlaneWrecks,
+    pub pelvis_box: PelvisBox,
+}
+
+/// `[Engine]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlaneEngine {
+    /// `MaxPower`, as written.
+    pub max_power: F,
+    /// `MaxAltitude`, as written.
+    pub max_altitude: F,
+    /// `MinPropEfficiency`, and `MinPropEfficiencySpeed` scaled by [`MPH`].
+    pub min_prop_efficiency: F,
+    pub min_prop_efficiency_speed: F,
+}
+
+/// `[Aerodynamics]`' wing and its stability derivatives. The names are the file's: `CL*` lift, `CD*`
+/// drag, `CY*` side force, `Cl*` roll, `CM*` pitch and `Cn*` yaw moment, against `beta` (sideslip),
+/// `p`/`q`/`r` (roll, pitch and yaw rate) and `da`/`de`/`dr` (aileron, elevator, rudder).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Aero {
+    /// `Chord` — or `Span / AspectRatio` when the file gives zero and a positive ratio, which the
+    /// wing's geometry setter works out.
+    pub chord: F,
+    pub span: F,
+    pub surface_area: F,
+    pub aspect_ratio: F,
+    /// `DefaultAngleOfAttack` and `CmBreakAngleOfAttack`, in radians.
+    pub default_angle_of_attack: F,
+    pub cm_break_angle_of_attack: F,
+    /// The lift curve's shape: `CLRoundOff`, `CLDropOff`, `CLScale`, `CLAngleScale`.
+    pub cl_round_off: F,
+    pub cl_drop_off: F,
+    pub cl_scale: F,
+    pub cl_angle_scale: F,
+    pub cl_q: F,
+    pub cl_de: F,
+    pub cd0: F,
+    pub cd1: F,
+    pub cd_de: F,
+    pub cy_beta: F,
+    pub cy_da: F,
+    pub cy_dr: F,
+    pub cy_p: F,
+    pub cy_r: F,
+    pub cl_beta: F,
+    pub cl_p: F,
+    pub cl_r: F,
+    pub cl_da: F,
+    pub cl_dr: F,
+    /// `CM0` — absent from the retail file, so zero.
+    pub cm0: F,
+    pub cm_alpha: F,
+    pub cm_q: F,
+    pub cm_de: F,
+    pub cm_stall: F,
+    pub cn_beta: F,
+    pub cn_p: F,
+    pub cn_r: F,
+    pub cn_dr: F,
+    pub cn_da: F,
+}
+
+/// The six control-surface limits `[Aerodynamics]` ends with, which the loader keeps on the plane
+/// rather than on the wing. All in radians except `MinElevator`, which the loader does not convert.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Surfaces {
+    pub max_elevator: F,
+    pub max_aileron: F,
+    pub max_rudder: F,
+    pub elevator_ramp_off_roll_angle: F,
+    pub elevator_off_roll_angle: F,
+    pub min_elevator: F,
+}
+
+/// One landing-gear leg: a tire section, and what the gear's three setters work out from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Gear {
+    pub strut_compression: F,
+    pub max_decompression_rate: F,
+    pub tire_radius: F,
+    /// `1 / TireRadius`, which the setter only writes for a positive radius; otherwise the zero the
+    /// gear's constructor left.
+    pub inv_tire_radius: F,
+    pub side_force: F,
+    pub brake_friction: F,
+    pub max_braking_force: F,
+    /// `SteeringMoment` — read in `[Rear Tire]` only. The two front legs are handed a literal zero.
+    pub steering_moment: F,
+    pub spring_coefficient: F,
+    pub bounce_damping_ratio: F,
+    pub rebound_damping_ratio: F,
+    /// `SpringCoefficient` per unit of the plane's weight, made a rate: [`spring_rate`] against the
+    /// part's mass. And the two damping ratios made rates against it ([`damping`]).
+    pub spring_rate: F,
+    pub bounce_damping: F,
+    pub rebound_damping: F,
+    /// `BodyTireCenter`, in the plane's frame, and the contact point the gear keeps beside it: the
+    /// centre one radius lower.
+    pub body_tire_center: Vf,
+    pub contact: Vf,
+}
+
+/// `[Autopilot]`: the stick's dead zone and the pitch-rate loop that flies the plane between inputs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Autopilot {
+    pub aileron_dead_zone: F,
+    pub max_pitch_rate: F,
+    /// `MaxRollAngle`, in radians.
+    pub max_roll_angle: F,
+    /// The file's own spelling is `PitchRateFeedForwardscale`.
+    pub pitch_rate_feed_forward_scale: F,
+    pub pitch_rate_gain: F,
+    pub pitch_rate_integrator_gain: F,
+}
+
+/// `[Joystick]`: how fast the throttle and the three surfaces follow the pad.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlaneJoystick {
+    pub throttle_increment: F,
+    pub reverse_throttle: F,
+    pub aileron_control_rate_limit: F,
+    pub elevator_control_rate_limit: F,
+    pub rudder_control_rate_limit: F,
+}
+
+/// `[Wrecks]`: the plane's crash limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlaneWrecks {
+    pub wreck_time: F,
+    /// `MinWreckSpeed`, scaled by [`MPH`].
+    pub min_wreck_speed: F,
+    pub wreck_gravity: F,
+    /// `WreckDamping` and `WreckInertia`, per axis, defaulting to `(0, 0, 0, 1)`.
+    pub wreck_damping: Vf,
+    pub wreck_inertia: Vf,
+}
+
+/// `[Animation]`: the box the pilot's pelvis sits in, read by the derived plane class after the base
+/// loader has run. Both default to `(0, 0, 0, 1)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PelvisBox {
+    pub position: Vf,
+    pub size: Vf,
+}
+
+impl Plane {
+    /// Read the plane out of its file's bytes.
+    pub fn read_bytes(bytes: &[u8]) -> Plane {
+        Plane::read(&Ini::parse_bytes(bytes))
+    }
+
+    /// Load a parsed file, in the loader's order. The order matters once: the part's mass is set
+    /// before the gear, and each leg's spring and dampers are worked out against it.
+    pub fn read(ini: &Ini) -> Plane {
+        let mass_properties = Part::read(ini.section("Mass Properties"));
+
+        let s = ini.section("Engine");
+        let engine = PlaneEngine {
+            max_power: s.float_or("MaxPower", F::ZERO),
+            max_altitude: s.float_or("MaxAltitude", F::ZERO),
+            min_prop_efficiency: s.float_or("MinPropEfficiency", F::ZERO),
+            min_prop_efficiency_speed: s.float_or("MinPropEfficiencySpeed", F::ZERO) * MPH,
+        };
+
+        let s = ini.section("Aerodynamics");
+        let f = |key: &str| s.float_or(key, F::ZERO);
+        let (chord, span, surface_area, aspect_ratio) =
+            (f("Chord"), f("Span"), f("SurfaceArea"), f("AspectRatio"));
+        let default_angle_of_attack = f("DefaultAngleOfAttack") * DEG;
+        let aero = Aero {
+            // The geometry setter's one piece of arithmetic.
+            chord: if chord == F::ZERO && aspect_ratio > F::ZERO { span / aspect_ratio } else { chord },
+            span,
+            surface_area,
+            aspect_ratio,
+            default_angle_of_attack,
+            cl_round_off: f("CLRoundOff"),
+            cl_drop_off: f("CLDropOff"),
+            cl_scale: f("CLScale"),
+            cl_angle_scale: f("CLAngleScale"),
+            cl_q: f("CLq"),
+            cl_de: f("CLde"),
+            cd0: f("CD0"),
+            cd1: f("CD1"),
+            cd_de: f("CDde"),
+            cy_beta: f("CYbeta"),
+            cy_da: f("CYda"),
+            cy_dr: f("CYdr"),
+            cy_p: f("CYp"),
+            cy_r: f("CYr"),
+            cl_beta: f("Clbeta"),
+            cl_p: f("Clp"),
+            cl_r: f("Clr"),
+            cl_da: f("Clda"),
+            cl_dr: f("Cldr"),
+            cm0: f("CM0"),
+            cm_alpha: f("CMalpha"),
+            cm_q: f("CMq"),
+            cm_de: f("CMde"),
+            cm_break_angle_of_attack: f("CmBreakAngleOfAttack") * DEG,
+            cm_stall: f("CMstall"),
+            cn_beta: f("Cnbeta"),
+            cn_p: f("Cnp"),
+            cn_r: f("Cnr"),
+            cn_dr: f("Cndr"),
+            cn_da: f("Cnda"),
+        };
+        let surfaces = Surfaces {
+            max_elevator: f("MaxElevator") * DEG,
+            max_aileron: f("MaxAileron") * DEG,
+            max_rudder: f("MaxRudder") * DEG,
+            elevator_ramp_off_roll_angle: f("ElevatorRampOffRollAngle") * DEG,
+            elevator_off_roll_angle: f("ElevatorOffRollAngle") * DEG,
+            min_elevator: f("MinElevator"),
+        };
+
+        let mass = mass_properties.mass;
+        let gear = [
+            Gear::read(ini.section("FrontLeft Tire"), mass, false),
+            Gear::read(ini.section("FrontRight Tire"), mass, false),
+            Gear::read(ini.section("Rear Tire"), mass, true),
+        ];
+
+        let s = ini.section("Autopilot");
+        let autopilot = Autopilot {
+            aileron_dead_zone: s.float_or("AileronDeadZone", F::ZERO),
+            max_pitch_rate: s.float_or("MaxPitchRate", F::ZERO),
+            max_roll_angle: s.float_or("MaxRollAngle", F::ZERO) * DEG,
+            pitch_rate_feed_forward_scale: s.float_or("PitchRateFeedForwardscale", F::ZERO),
+            pitch_rate_gain: s.float_or("PitchRateGain", F::ZERO),
+            pitch_rate_integrator_gain: s.float_or("PitchRateIntegratorGain", F::ZERO),
+        };
+
+        let s = ini.section("Joystick");
+        let joystick = PlaneJoystick {
+            throttle_increment: s.float_or("ThrottleIncrement", F::ZERO),
+            reverse_throttle: s.float_or("ReverseThrottle", F::ZERO),
+            aileron_control_rate_limit: s.float_or("AileronControlRateLimit", F::ZERO),
+            elevator_control_rate_limit: s.float_or("ElevatorControlRateLimit", F::ZERO),
+            rudder_control_rate_limit: s.float_or("RudderControlRateLimit", F::ZERO),
+        };
+
+        let s = ini.section("Wrecks");
+        let wrecks = PlaneWrecks {
+            wreck_time: s.float_or("WreckTime", F::ZERO),
+            min_wreck_speed: s.float_or("MinWreckSpeed", F::ZERO) * MPH,
+            wreck_gravity: s.float_or("WreckGravity", F::ZERO),
+            wreck_damping: s.vector("WreckDamping", UNIT_W),
+            wreck_inertia: s.vector("WreckInertia", UNIT_W),
+        };
+
+        let s = ini.section("Animation");
+        let pelvis_box =
+            PelvisBox { position: s.vector("PelvisBoxPosition", UNIT_W), size: s.vector("PelvisBoxSize", UNIT_W) };
+
+        Plane { mass_properties, engine, aero, surfaces, gear, autopilot, joystick, wrecks, pelvis_box }
+    }
+}
+
+impl Gear {
+    /// One tire section, against the plane's mass. `rear` says whether the leg reads
+    /// `SteeringMoment`: only the rear one does.
+    pub fn read(s: Section, mass: F, rear: bool) -> Gear {
+        let strut_compression = s.float_or("StrutCompression", F::ONE);
+        let max_decompression_rate = s.float_or("MaxDecompressionRate", F::ONE);
+        let tire_radius = s.float_or("TireRadius", F::ONE);
+        let side_force = s.float_or("SideForce", F::ONE);
+        let brake_friction = s.float_or("BrakeFriction", F::ONE);
+        let max_braking_force = s.float_or("MaxBrakingForce", F::ONE);
+        let spring_coefficient = s.float_or("SpringCoefficient", F::ZERO);
+        let bounce_damping_ratio = s.float_or("BounceDampingRatio", F::ZERO);
+        let rebound_damping_ratio = s.float_or("ReboundDampingRatio", F::ZERO);
+        let steering_moment = if rear { s.float_or("SteeringMoment", F::ZERO) } else { F::ZERO };
+        let body_tire_center = s.vector("BodyTireCenter", UNIT_W);
+        let rate = spring_rate(spring_coefficient, mass);
+        Gear {
+            strut_compression,
+            max_decompression_rate,
+            tire_radius,
+            inv_tire_radius: if tire_radius > F::ZERO { F::ONE / tire_radius } else { F::ZERO },
+            side_force,
+            brake_friction,
+            max_braking_force,
+            steering_moment,
+            spring_coefficient,
+            bounce_damping_ratio,
+            rebound_damping_ratio,
+            spring_rate: rate,
+            bounce_damping: damping(bounce_damping_ratio, mass, rate),
+            rebound_damping: damping(rebound_damping_ratio, mass, rate),
+            body_tire_center,
+            contact: Vf::new(
+                body_tire_center.x(),
+                (F(body_tire_center.y()) - tire_radius).0,
+                body_tire_center.z(),
+                body_tire_center.w(),
+            ),
+        }
+    }
+}
