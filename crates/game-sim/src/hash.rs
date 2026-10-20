@@ -483,6 +483,11 @@ impl State for Sim {
         });
         w.field("input", &self.input);
         w.field("rider", &self.rider);
+        // Only a plane ride has this group, so a bike ride's walk — and every hash pinned on one — is
+        // what it was before the plane was a lane.
+        if let Some(plane) = &self.plane {
+            w.field("plane", plane);
+        }
     }
 }
 

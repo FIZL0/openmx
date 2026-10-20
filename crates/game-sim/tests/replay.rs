@@ -5547,3 +5547,332 @@ fn nearest_opponent(
     Ok((nearest.ok_or("no row of the opponents' capture is in the window")?, bikes))
 }
 
+
+// ---------------------------------------------------------------------------------------------------
+// S40 — the biplane acceptance run: C7's minute of the human flying the plane over Free06
+// ---------------------------------------------------------------------------------------------------
+//
+// `biplane.p2m2` is the human in the freeride biplane: two takeoffs, two crashes and a respawn, played
+// back on the original and captured with `watch/biplane.toml` (C7). The plane is a ride of its own
+// ([`game_sim::flight::Flight`] in [`Sim::plane`]), so this run is the bike's acceptance run with the
+// plane's lanes in place of the bike's: a fixture out of the capture, seeded from its first row, ridden
+// over the ground it was flown over, against a ratchet of its own.
+//
+// The ratchet starts at 0 and stays there until the plane's body moves. The capture's plane is creeping
+// across the dirt on its first row (0.64 ft/s along the nose, throttle at idle), so tick 1 moves its
+// position, and the port's plane has no rigid body, world step or wheels yet (S38, S39): what
+// [`Flight::frame`](game_sim::flight::Flight::frame) runs is the controls' preforce half alone. The
+// per-lane lines under the verdict say which of the plane's lanes already hold, and for how long.
+
+/// The capture's file name in [`acceptance_dirs`] — C7's playback of `biplane.p2m2`.
+const BIPLANE_ACCEPTANCE: &str = "biplane";
+
+/// **The last tick of the biplane recording the port is known to agree with the original on.** The
+/// same contract as [`ACCEPTANCE_AGREES_THROUGH`]: further prints a line asking for it to be raised,
+/// short of it fails. 0 is the start state [`biplane_start`] seeds from row 0.
+const BIPLANE_AGREES_THROUGH: u64 = 0;
+
+/// The container of the area the plane was flown over. Not found by [`recorded_on`]: that fits a
+/// *bike's* rows, and a plane's minute is mostly air. Named instead, and checked against the plane's own
+/// first row, which is standing on the ground ([`over_free06`]).
+const BIPLANE_TRACK: &str = "Tracks\\free06.res";
+
+/// The plane's lanes, capture column to the port's path, with the leaf each one is. The same object
+/// the four listeners read and write (C7's columns; the offsets are in `watch/biplane.toml`): the body
+/// the world integrates, the controls' surfaces, the engine's outputs, the measure's angles, and the
+/// wreck.
+const PLANE: [(&str, &str, Kind); 29] = [
+    ("body_pos.x", "plane.body.pos[0]", Kind::Float),
+    ("body_pos.y", "plane.body.pos[1]", Kind::Float),
+    ("body_pos.z", "plane.body.pos[2]", Kind::Float),
+    ("body_vel.x", "plane.body.vel[0]", Kind::Float),
+    ("body_vel.y", "plane.body.vel[1]", Kind::Float),
+    ("body_vel.z", "plane.body.vel[2]", Kind::Float),
+    ("body_quat.x", "plane.body.quat[0]", Kind::Float),
+    ("body_quat.y", "plane.body.quat[1]", Kind::Float),
+    ("body_quat.z", "plane.body.quat[2]", Kind::Float),
+    ("body_quat.w", "plane.body.quat[3]", Kind::Float),
+    ("body_rate.x", "plane.body.rate[0]", Kind::Float),
+    ("body_rate.y", "plane.body.rate[1]", Kind::Float),
+    ("body_rate.z", "plane.body.rate[2]", Kind::Float),
+    ("throttle", "plane.surfaces.throttle", Kind::Float),
+    ("thr_braking", "plane.surfaces.brake", Kind::Float),
+    ("pitch_cmd", "plane.surfaces.elevator", Kind::Float),
+    ("elevator", "plane.surfaces.elevator_command", Kind::Float),
+    ("aileron", "plane.surfaces.aileron", Kind::Float),
+    ("rudder", "plane.surfaces.rudder", Kind::Float),
+    ("nose_steer", "plane.surfaces.steer", Kind::Float),
+    ("pitch_int", "plane.surfaces.pitch_integral", Kind::Float),
+    ("eng_power", "plane.engine.power", Kind::Float),
+    ("prop_rpm", "plane.engine.rpm", Kind::Float),
+    ("eng_thrust", "plane.engine.thrust", Kind::Float),
+    ("prop_angle", "plane.engine.prop_angle", Kind::Float),
+    ("alpha", "plane.air.alpha", Kind::Float),
+    ("beta", "plane.air.beta", Kind::Float),
+    ("on_ground", "plane.attitude.grounded", Kind::Bool),
+    ("crash", "plane.crash", Kind::Uint),
+];
+
+/// What a [`PLANE`] lane's cells are.
+#[derive(Clone, Copy)]
+enum Kind {
+    Float,
+    Uint,
+    Bool,
+}
+
+/// The biplane capture, from the first of [`acceptance_dirs`] that holds it — or `None`, with where it
+/// comes from printed.
+fn biplane_capture() -> Option<(PathBuf, Capture)> {
+    for dir in acceptance_dirs() {
+        let path = dir.join(format!("{BIPLANE_ACCEPTANCE}.csv"));
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            return Some((path, cap));
+        }
+    }
+    println!(
+        "no {BIPLANE_ACCEPTANCE}.csv in {}: the biplane acceptance run is C7's playback of \
+         context/recordings/biplane.p2m2 captured with watch/biplane.toml, so there is no biplane \
+         verdict in this worktree",
+        acceptance_dirs()[0].display(),
+    );
+    None
+}
+
+/// `Biplane\biplane.phy`, out of `machine.res` where the plane's loader reads it.
+fn the_plane_the_human_flew(disc: &mut Disc) -> Option<game_sim::phy::Plane> {
+    let bytes = disc.member("machine.res")?;
+    let res = Res::parse(&bytes).ok()?;
+    let e = by_suffix(&res, game_sim::phy::BIPLANE_PHY)
+        .or_else(|| by_suffix(&res, "biplane.phy"))?;
+    Some(game_sim::phy::Plane::read_bytes(&res.read(&bytes, e).ok()?))
+}
+
+/// Row `row`'s cell of `name` as a float.
+fn plane_float(cap: &Capture, row: usize, name: &str) -> Result<F, String> {
+    let text = cell(cap, row, column(cap, name)?);
+    text.parse::<f32>().map(F).map_err(|_| format!("row {row}: {name} '{text}' is not a float"))
+}
+
+fn plane_vec(cap: &Capture, row: usize, name: &str) -> Result<Vf, String> {
+    let [x, y, z, w] =
+        ["x", "y", "z", "w"].map(|c| plane_float(cap, row, &format!("{name}.{c}")).map(F::to_f32));
+    Ok(Vf::new(x?, y?, z?, w?))
+}
+
+/// **Where the biplane run starts**: the plane built off the disc's file ([`Flight::new`], proved
+/// word for word in `tests/flight.rs`) and put in the state the capture's first row records.
+///
+/// Every lane [`PLANE`] watches is seeded, because tick 0 has to agree, and so is everything the
+/// listeners read that the capture carries: the measure's attitude (the roll is the third Euler angle,
+/// the nose's `y` is row 2 of the drawn matrix, which is where the measure copies it from), and the
+/// airspeed along the nose. What it does not carry is left at the build's value and listed in the
+/// journal: the engine's noise clock, the pad's last commands (the pad lanes are this tick's, and
+/// [`Flight::frame`](game_sim::flight::Flight::frame) overwrites them), the crash timer's companions.
+///
+/// The bike is [`Sim::new`]'s, parked: a plane ride does not step it.
+///
+/// [`Flight::new`]: game_sim::flight::Flight::new
+fn biplane_start(
+    cap: &Capture,
+    seed: u32,
+    plane: &game_sim::phy::Plane,
+) -> Result<Sim, String> {
+    let at = |name: &str| plane_float(cap, 0, name);
+    let mut f = game_sim::flight::Flight::new(plane);
+    f.body.pos = plane_vec(cap, 0, "body_pos")?;
+    f.body.vel = plane_vec(cap, 0, "body_vel")?;
+    f.body.quat = plane_vec(cap, 0, "body_quat")?;
+    f.body.rate = plane_vec(cap, 0, "body_rate")?;
+    let s = &mut f.surfaces;
+    s.throttle = at("throttle")?;
+    s.brake = at("thr_braking")?;
+    s.elevator = at("pitch_cmd")?;
+    s.elevator_command = at("elevator")?;
+    s.aileron = at("aileron")?;
+    s.rudder = at("rudder")?;
+    s.steer = at("nose_steer")?;
+    s.pitch_integral = at("pitch_int")?;
+    let p = &mut f.pad;
+    p.forward = at("thr_up")?;
+    p.back = at("thr_down")?;
+    p.elevator = at("elev_cmd")?;
+    p.aileron = at("ail_cmd")?;
+    p.rudder = at("rud_cmd")?;
+    let e = &mut f.engine;
+    e.power = at("eng_power")?;
+    e.rpm = at("prop_rpm")?;
+    e.thrust = at("eng_thrust")?;
+    e.prop_angle = at("prop_angle")?;
+    e.note = at("eng_sound")?;
+    if at("prop_turn")?.to_bits() != e.prop_rpm.to_bits() {
+        return Err(format!(
+            "the capture's prop_turn is {:?} where the engine's constructor writes {:?}: the column \
+             is not the engine object the spec says it is",
+            at("prop_turn")?,
+            e.prop_rpm,
+        ));
+    }
+    let a = &mut f.attitude;
+    a.flown = cell(cap, 0, column(cap, "plane_flown")?) == "1";
+    a.grounded = cell(cap, 0, column(cap, "on_ground")?) == "1";
+    a.nose_y = at("plane_xform.m21")?;
+    a.roll = at("plane_euler.z")?;
+    a.speed = at("local_vel.z")?;
+    a.pitch_rate = at("body_rate.x")?;
+    let air = &mut f.air;
+    air.alpha = at("alpha")?;
+    air.beta = at("beta")?;
+    air.speed = at("local_vel.z")?;
+    air.elevator = f.surfaces.elevator_command;
+    air.aileron = f.surfaces.aileron;
+    air.rudder = f.surfaces.rudder;
+    air.rates = plane_vec(cap, 0, "local_rate")?;
+    let crash = cell(cap, 0, column(cap, "crash")?);
+    f.crash = crash.parse().map_err(|_| format!("row 0: crash '{crash}' is not a number"))?;
+    f.crash_time = at("crash_time")?;
+    let mut sim = Sim::new(seed);
+    sim.plane = Some(f);
+    Ok(sim)
+}
+
+/// **The biplane fixture**: C7's capture as a [`Fixture`] — the recorded pad, the original's RNG
+/// state, [`biplane_start`], and every [`PLANE`] lane re-ticked off the game's own counter.
+///
+/// Refused, with the reason, where a row is not the human flying the plane: the capture's object must
+/// be a plane (`plane_type` 1), the local human's (`plane_ctl_src` 1), and flown (`plane_flown` 1) on
+/// every row, or its motion is not the recorded input's doing.
+fn biplane_fixture(cap: &Capture, plane: &game_sim::phy::Plane) -> Result<Fixture, String> {
+    let inputs = inputs_from_capture(cap)?;
+    for (name, want, what) in [
+        ("plane_type", "1", "a plane (machine kind 1)"),
+        ("plane_ctl_src", "1", "the local human's machine"),
+        ("plane_flown", "1", "flown"),
+    ] {
+        let at = column(cap, name)?;
+        if let Some(row) = (0..cap.rows.len()).find(|&r| cell(cap, r, at) != want) {
+            return Err(format!(
+                "frame {}: {name} is '{}', not {want} — the object watch/biplane.toml points at is \
+                 not {what} on this row",
+                cap.frames[row],
+                cell(cap, row, at),
+            ));
+        }
+    }
+    let (least, most) = dt_spread(cap)?;
+    let rng = column(cap, "rng_state")?;
+    let state: u64 = cell(cap, 0, rng)
+        .parse()
+        .map_err(|_| format!("rng_state '{}' is not a number", cell(cap, 0, rng)))?;
+    let ticks = ticks_of(cap)?;
+    let mut watches = Vec::new();
+    for (name, path, kind) in PLANE {
+        let w = match kind {
+            Kind::Float => cap.float(name, path),
+            Kind::Uint => cap.uint(name, path),
+            Kind::Bool => cap.bool(name, path),
+        };
+        let mut w = w.map_err(|e| e.to_string())?;
+        if w.samples.len() != cap.rows.len() {
+            return Err(format!(
+                "column '{name}' has {} samples for {} rows: an empty cell is a pointer chain that \
+                 went null, and a fixture cannot be built across one",
+                w.samples.len(),
+                cap.rows.len(),
+            ));
+        }
+        for (sample, &tick) in w.samples.iter_mut().zip(&ticks) {
+            sample.tick = tick;
+        }
+        watches.push(w);
+    }
+    Ok(Fixture {
+        name: format!(
+            "{BIPLANE_ACCEPTANCE} ({} ticks of real flight, rng 0x{state:016x}, dt {least}..{most})",
+            inputs.len(),
+        ),
+        seed: state as u32,
+        start: Some(biplane_start(cap, state as u32, plane)?),
+        inputs,
+        watches,
+        ..Default::default()
+    })
+}
+
+/// Free06's world, and the plane's first row checked against it: the run is replayed over the area
+/// only if the plane the capture starts with, which says it is on the ground, is standing on this
+/// area's dirt. `None`, with a line, where the disc or the area is not to be had.
+fn over_free06<R>(
+    cap: &Capture,
+    disc: &mut Disc,
+    then: impl FnOnce(&mut dyn World, &Where) -> R,
+) -> Option<R> {
+    let mut areas = Area::all_of(disc, BIPLANE_TRACK);
+    if areas.len() != 1 {
+        println!("{BIPLANE_TRACK} has {} areas on this disc, not one", areas.len());
+        return None;
+    }
+    let area = areas.pop()?;
+    let terrain = Terrain::parse(&area.terrain).ok()?;
+    let ground = Ground::new(&terrain, &area.scene.terrain);
+    // The drawn matrix's origin is where the plane stands; the body's is its centre of mass, higher.
+    let (x, y, z) = (
+        plane_float(cap, 0, "plane_xform.m30").ok()?,
+        plane_float(cap, 0, "plane_xform.m31").ok()?,
+        plane_float(cap, 0, "plane_xform.m32").ok()?,
+    );
+    let Some(hit) = ground.at(x, z) else {
+        println!("the plane's first row ({x:?}, {z:?}) is off {}'s field", area.named);
+        return None;
+    };
+    let over = y - hit.y;
+    println!("the plane starts {over:?} over {}'s ground at ({x:?}, {z:?})", area.named);
+    assert!(
+        over.abs() < BURIED,
+        "the plane's first row says it is on the ground, and it is {over:?} from {}'s: this is not \
+         the area it was flown over",
+        area.named,
+    );
+    let (props, _) = area.props(disc);
+    let mut place = Place { ground, props };
+    Some(then(&mut place, &area.named))
+}
+
+/// **The biplane acceptance run** — C7's flight replayed over Free06 on the disc's own plane, against
+/// [`BIPLANE_AGREES_THROUGH`].
+///
+/// The same verdict the bike's two runs print ([`acceptance_verdict_against`]), on every `./kit check`
+/// in a worktree that has the capture and the disc, and the same skip with a line where either is
+/// missing.
+///
+/// ```sh
+/// cargo test -p game-sim --test replay -- --nocapture the_biplane_acceptance_run
+/// ```
+#[test]
+fn the_biplane_acceptance_run() {
+    let Some((capture, cap)) = biplane_capture() else { return };
+    println!(
+        "{}: {} rows x {} columns, frames {}..{}",
+        capture.display(),
+        cap.frames.len(),
+        cap.columns.len(),
+        cap.frames[0],
+        cap.frames[cap.frames.len() - 1],
+    );
+    let Some(mut disc) = Disc::open() else { return };
+    let Some(plane) = the_plane_the_human_flew(&mut disc) else {
+        println!("no {} in this disc's machine.res: there is no plane to fly", game_sim::phy::BIPLANE_PHY);
+        return;
+    };
+    let f = biplane_fixture(&cap, &plane).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+    let taken = over_free06(&cap, &mut disc, |world, named| {
+        let f = Fixture { world: Some(named.clone()), ..f };
+        println!("{}: {} frames, {} checks, seed 0x{:08x}", f.name, f.inputs.len(), f.checks(), f.seed);
+        assert!(f.inputs.len() >= 30 * 20, "{} frames of flight is not an acceptance run", f.inputs.len());
+        acceptance_verdict_against(&f, world, BIPLANE_AGREES_THROUGH, "BIPLANE_AGREES_THROUGH");
+    });
+    if taken.is_none() {
+        println!("— so there is no biplane verdict in this worktree, and the ratchet is unchecked, not met");
+    }
+}
