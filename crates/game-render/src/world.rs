@@ -15,6 +15,10 @@ use crate::scene::{Material, Preset, Scene};
 use std::collections::HashMap;
 
 /// A model with its triangles already expanded and its textures already resolved.
+///
+/// Cloned for a split screen's second rider and on (V22): a skinned model's triangles are its
+/// pose, so each rider on the screen needs a copy of its own to be posed into.
+#[derive(Clone)]
 pub struct Loaded {
     pub model: Model,
     /// The finest level of detail, in model space.

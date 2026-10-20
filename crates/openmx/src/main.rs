@@ -126,6 +126,7 @@ mod ground;
 mod hud;
 mod moment;
 mod pad;
+mod split;
 mod vehicle;
 mod window;
 
@@ -162,6 +163,7 @@ use ground::Ground;
 use hud::Hud;
 use moment::{Moment, Shot};
 use pad::{Pads, Throttle, Wiring};
+use split::{Layout, Split};
 use vehicle::{Garage, Kind, Plane, Spawn};
 use window::{Window, fit_frame, key};
 
@@ -218,6 +220,10 @@ const REVERSE_SPEED: f32 = 5.0;
 /// freeride: 80 mph in feet a second. Nothing in the camera's own code was found writing it (P14).
 const SPEED_REFERENCE: f32 = 117.332_8;
 
+/// How far apart the local players stand on the start line, in feet: the port's own (V22), a bike's
+/// length or so, so that nobody starts inside anybody else.
+const SEAT_SPACING: f32 = 6.0;
+
 /// The chassis model every bike is built on, which is the name the parts in a `.sub` hang off.
 const CHASSIS: &str = "bike";
 /// What the vehicle's own clip loader puts in front of a name: the actor's word, which its
@@ -239,17 +245,30 @@ fn main() {
 }
 
 /// Everything the frame needs that is not the renderer's: the ride, the pad and the port's own input
-/// manager.
+/// manager, once for each local player.
 ///
 /// This is what [`Game`] is implemented on, so the only thing that happens inside a simulation pass is
-/// what the game would do in one — reading the pad and moving the world.
+/// what the game would do in one — reading the pads and moving the world.
 struct World<'a> {
     /// What the ride asks about the world: the ported terrain query and the scene's collision
     /// placements, swept by S4's own sweep. The *drawn* ground is the loop's own [`Ground`], which
-    /// reads the same file for triangles instead.
+    /// reads the same file for triangles instead. Every player rides the one world.
     place: Place<'a>,
+    /// The local players, the first of them the one a one-player session has always had (V22).
+    seats: Vec<Seat>,
+    /// `--record`: the tape this session is being written to, one frame per simulation pass. It is
+    /// the first player's pad: a tape holds the two ports a PS2 has, and the first is that player's.
+    tape: Option<Recorder>,
+    /// `--play`: the frame length the tape says this pass is, which replaces the one the engine
+    /// measured. The recorded session simulated with the tape's own `dt`, so a playback that used the
+    /// wall clock would reproduce the buttons and not the ride.
+    played_dt: Option<F>,
+}
+
+/// One local player's half of a simulation pass: their pad, their ride and their machine.
+struct Seat {
     /// This frame's reports, written by the app layer before the step the way the original's device
-    /// manager fills its buffers before the frame reads them.
+    /// manager fills its buffers before the frame reads them. The player's own pad is the first.
     reports: [Report; PADS],
     /// Everything a frame of the simulation reads and writes that is not the world: the port's input
     /// manager, the bike's `.phy`, the tables the step reads, and the rider on the bike. This is the
@@ -267,30 +286,11 @@ struct World<'a> {
     /// The hands this pass was stepped with, kept for the body's own animation frame — which runs
     /// after the pass, off the same controls and the same `dt` (V18).
     hands: Controls,
-    /// `--record`: the tape this session is being written to, one frame per simulation pass.
-    tape: Option<Recorder>,
-    /// `--play`: the frame length the tape says this pass is, which replaces the one the engine
-    /// measured. The recorded session simulated with the tape's own `dt`, so a playback that used the
-    /// wall clock would reproduce the buttons and not the ride.
-    played_dt: Option<F>,
 }
 
-impl Game for World<'_> {
-    /// One simulation pass: the pad, then the bike.
-    ///
-    /// `input` is the engine's own sampled pad, which this shell does not use — the full 32-byte
-    /// reports are in `self.reports` and the port's manager is what reads them. Nothing here draws
-    /// from `rng`: the only thing that moves is the bike, and the rider decides where it goes.
-    fn simulate(&mut self, dt: F, _input: Input, _rng: &mut Rng) -> bool {
-        // Riding a tape: the frame is as long as the tape says it was, not as long as this machine
-        // took to draw the last one. Everything below reads this `dt` and nothing reads the engine's.
-        let dt = self.played_dt.unwrap_or(dt);
-        // Writing one: the pass's own `dt` and the reports it is about to read, which is what a
-        // replay of this tape will be handed (`game_sim::replay::Recorder`).
-        if let Some(tape) = &mut self.tape {
-            tape.frame(dt, &self.reports);
-        }
-
+impl Seat {
+    /// One player's pass: the pad, then the bike.
+    fn pass(&mut self, dt: F, place: &mut Place) {
         // The game's poll, with the frame's dt: this is what turns report bytes into held controls,
         // press and release edges, and stick axes with the game's own dead zone — and then the
         // rider's hands off it, because which button means what lives in the ride and not here.
@@ -302,9 +302,63 @@ impl Game for World<'_> {
 
         self.said = rider::Frame::default();
         if self.riding {
-            self.said = self.garage.step(&mut self.sim, dt, &controls, &mut self.place);
+            self.said = self.garage.step(&mut self.sim, dt, &controls, place);
         }
         self.hands = controls;
+    }
+}
+
+/// One local player's half of the picture (V22): the body and bike posed for them, the cameras that
+/// follow them, their overlay, and the models their pose is skinned into — the first player's are the
+/// ones the archives loaded, every other player's a copy under a name of its own.
+struct Rig {
+    body: Option<Body>,
+    chassis: Option<Chassis>,
+    camera: Race,
+    plane_camera: Option<Race>,
+    hud: Hud,
+    bike_model: String,
+    body_model: Option<String>,
+}
+
+impl Rig {
+    /// The camera the machine `up` is followed by: the plane's own, if this player has one, or the
+    /// bike's.
+    fn follow(&self, up: Kind) -> &Race {
+        match (up, &self.plane_camera) {
+            (Kind::Biplane, Some(cam)) => cam,
+            _ => &self.camera,
+        }
+    }
+
+    fn follow_mut(&mut self, up: Kind) -> &mut Race {
+        match (up, &mut self.plane_camera) {
+            (Kind::Biplane, Some(cam)) => cam,
+            _ => &mut self.camera,
+        }
+    }
+}
+
+impl Game for World<'_> {
+    /// One simulation pass: each player's pad, then their bike, in player order.
+    ///
+    /// `input` is the engine's own sampled pad, which this shell does not use — the full 32-byte
+    /// reports are in each seat and the port's manager is what reads them. Nothing here draws
+    /// from `rng`: the only thing that moves is the bikes, and the riders decide where they go.
+    /// The riders do not touch each other (the original's rider-on-rider wreck is not ported), so
+    /// the order the seats run in does not reach any of them.
+    fn simulate(&mut self, dt: F, _input: Input, _rng: &mut Rng) -> bool {
+        // Riding a tape: the frame is as long as the tape says it was, not as long as this machine
+        // took to draw the last one. Everything below reads this `dt` and nothing reads the engine's.
+        let dt = self.played_dt.unwrap_or(dt);
+        // Writing one: the pass's own `dt` and the reports it is about to read, which is what a
+        // replay of this tape will be handed (`game_sim::replay::Recorder`).
+        if let Some(tape) = &mut self.tape {
+            tape.frame(dt, &self.seats[0].reports);
+        }
+        for seat in &mut self.seats {
+            seat.pass(dt, &mut self.place);
+        }
         true
     }
 }
@@ -408,6 +462,16 @@ struct Args {
     /// `--vehicle bike|biplane`: which machine the session starts on (P19). The bike by default,
     /// and a default session is the shell exactly as it was before there was a choice.
     vehicle: Kind,
+    /// `--players N`: how many local players share the screen, one view each (V22). One by default,
+    /// and one is the shell exactly as it was before there was a split.
+    players: usize,
+    /// `--split h|v`: which of the original's two layouts two players get.
+    split: Split,
+    /// `--headless`: no window and no host pad — every seat rides an idle pad, or the first rides
+    /// `--play`'s tape — and the frame is drawn all the same, for `--shot` and for the tests.
+    headless: bool,
+    /// `--frames N`: quit after N frames, which unlike `--seconds` is the same run on any machine.
+    frames: Option<u32>,
 }
 
 fn run() -> Result<(), String> {
@@ -650,7 +714,7 @@ fn run() -> Result<(), String> {
     // frame off the model the archive shipped, so nothing on it moved. With it the forks compress,
     // the wheels turn, the front end steers and the swingarm follows the rear axle, all from the
     // simulation's own numbers, and the chassis skeleton is posed from the vehicle's own driver.
-    let mut chassis = match vehicle.mcf.is_empty() {
+    let chassis = match vehicle.mcf.is_empty() {
         true => None,
         false => {
             let own = vec![disc.res(&bike_member)?];
@@ -680,10 +744,16 @@ fn run() -> Result<(), String> {
     // The follow cameras the track carries, in the file's own order, read by S7's own reader. L1
     // walks the ones the file lets the player cycle to. `reverse_speed` is a constructor argument in the original and the call site was
     // not read; the preset's own switch speed is the closest number the disc has.
-    let presets: Vec<Preset> = archives
-        .iter()
-        .find_map(|a| a.read_suffix("cpresets.ini").ok())
-        .map(|b| Preset::read_bytes(&b, ""))
+    //
+    // A split screen reads its layout's own copy of every preset (V22): `Preset1h` for two views one
+    // above the other, `Preset1v` for two side by side, `Preset1q` for the port's own layouts, the
+    // copy the original's loader reads by viewport index. A file without that copy is read as the full
+    // screen's, and the shell says so.
+    let layout = Layout::for_players(args.players, args.split)?;
+    let cpresets = archives.iter().find_map(|a| a.read_suffix("cpresets.ini").ok());
+    let presets: Vec<Preset> = cpresets
+        .as_ref()
+        .map(|b| layout_presets(b, layout, "cpresets.ini"))
         .unwrap_or_default();
     // The reverse threshold is the race camera's setup's own constant: it hands the base camera's
     // initialiser 5, and the original's camera holds 5 in both freeride save states read (P14).
@@ -765,13 +835,13 @@ fn run() -> Result<(), String> {
     // bike presets (R8). The same derived camera and the same two constants the bike's has, because
     // the plane's camera is built by the same constructor; that the original holds the same speed
     // reference for it was not read.
-    let mut plane_camera = match &garage.plane {
+    let plane_camera = match &garage.plane {
         None => None,
         Some(_) => {
             let presets: Vec<Preset> = archives
                 .iter()
                 .find_map(|a| a.read_suffix(PLANE_PRESETS).ok())
-                .map(|b| Preset::read_bytes(&b, ""))
+                .map(|b| layout_presets(&b, layout, PLANE_PRESETS))
                 .unwrap_or_default();
             println!("biplane: {} camera presets in {PLANE_PRESETS}", presets.len());
             let mut cam = Race::new(presets, reverse_speed);
@@ -831,23 +901,46 @@ fn run() -> Result<(), String> {
         node_at("TireFront").unwrap_or(phy.front.body_tire_force_position),
         node_at("TireRear").unwrap_or(phy.rear.body_tire_force_position),
     );
-    let mut rider = Rider::new(&phy, mounts, at, heading, stunts);
-    rider.sense.wrecks_enabled = args.wrecks;
-    // The eight numbers the body's *step* reads, which `Rider::new` leaves at zero and says a shell
-    // is expected to fill: the five fade rates, the stunt cross-fade's cap and the pose grid's three
-    // speed thresholds, as V12 measured them off the body's own object in the running original. With
-    // them at zero every fade is a hard cut and the grid's rows all meet at zero, so a grounded body
-    // takes the top row at walking pace (V18).
-    rider.body_rates = vehicle_params();
-    // The wreck's own parameters, if the disc had them: the part the bike becomes, the rider's
-    // throw-and-roll set, and the tumbling body's inertia tensor, which is neither file's — it comes
-    // off the wreck model's own box ([`ride::WRECK_INERTIA`]).
-    if let Some((bike, body)) = &wreckage {
-        rider.carries_wreck(
-            phy::Part::read_bytes(bike, "PhysicsPart1"),
-            phy::Wrecks::read_bytes(body),
-            ride::WRECK_INERTIA,
-        );
+    let new_rider = |at: Vf, heading: Vf| -> Rider {
+        let mut rider = Rider::new(&phy, mounts, at, heading, stunts.clone());
+        rider.sense.wrecks_enabled = args.wrecks;
+        // The eight numbers the body's *step* reads, which `Rider::new` leaves at zero and says a shell
+        // is expected to fill: the five fade rates, the stunt cross-fade's cap and the pose grid's three
+        // speed thresholds, as V12 measured them off the body's own object in the running original. With
+        // them at zero every fade is a hard cut and the grid's rows all meet at zero, so a grounded body
+        // takes the top row at walking pace (V18).
+        rider.body_rates = vehicle_params();
+        // The wreck's own parameters, if the disc had them: the part the bike becomes, the rider's
+        // throw-and-roll set, and the tumbling body's inertia tensor, which is neither file's — it comes
+        // off the wreck model's own box ([`ride::WRECK_INERTIA`]).
+        if let Some((bike, body)) = &wreckage {
+            rider.carries_wreck(
+                phy::Part::read_bytes(bike, "PhysicsPart1"),
+                phy::Wrecks::read_bytes(body),
+                ride::WRECK_INERTIA,
+            );
+        }
+        rider
+    };
+    let mut rider = new_rider(at, heading);
+    // The other local players (V22), beside the first on the start line: where the original puts a
+    // second rider was not read (R9), so this is the port's own — every SEAT_SPACING feet along the
+    // start line's own right and left in turn, each stood on the ground under it, all facing the
+    // way the first does. The first player is where a one-player session has always started.
+    let right = Vf::new(heading.z(), 0.0, -heading.x(), 0.0);
+    let (under_first, _) = sim_world::World::ground(&mut sim, at);
+    let others: Vec<Rider> = (1..args.players)
+        .map(|i| {
+            let side = if i % 2 == 1 { 1.0 } else { -1.0 };
+            let off = side * SEAT_SPACING * i.div_ceil(2) as f32;
+            let (x, z) = (at.x() + right.x() * off, at.z() + right.z() * off);
+            let (on, _) = sim_world::World::ground(&mut sim, Vf::new(x, 1.0e4, z, 1.0));
+            new_rider(Vf::new(x, at.y() + (on.y() - under_first.y()), z, 1.0), heading)
+        })
+        .collect();
+    for (i, r) in others.iter().enumerate() {
+        let p = r.ride.position();
+        println!("player {}: starts at {:.0}, {:.0}, {:.0}", i + 2, p.x(), p.y(), p.z());
     }
     println!(
         "start: {:.0}, {:.0}, {:.0} facing {:.0} degrees, {} camera presets",
@@ -1121,11 +1214,37 @@ fn run() -> Result<(), String> {
     });
 
     // ---- the window and the pad ---------------------------------------------------------------
-    let mut window = Window::open(&args.display, args.size, args.scale, "openmx — freeride")?;
-    let mut pads = Pads::open(args.pad.as_deref(), args.wiring.clone());
+    // `--headless` opens neither: no window to show the frame in and no host pad to read, so every
+    // seat rides an idle pad or the tape, and the frame is drawn all the same for `--shot`.
+    let mut window = match args.headless {
+        true => None,
+        false => Some(Window::open(&args.display, args.size, args.scale, "openmx — freeride")?),
+    };
+    let mut pads = match args.headless {
+        true => Pads::unplugged(args.wiring.clone()),
+        false => Pads::open(args.pad.as_deref(), args.wiring.clone()),
+    };
     match &pads.name {
         Some(name) => println!("pad: {name}"),
         None => println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)"),
+    }
+    // The other players' pads (V22): each the next joystick nobody else has, or an idle pad. The
+    // keyboard is the first player's.
+    let mut taken: Vec<String> = pads.path().into_iter().collect();
+    let mut seat_pads: Vec<Pads> = Vec::new();
+    for i in 1..args.players {
+        let p = match args.headless {
+            true => Pads::unplugged(args.wiring.clone()),
+            false => Pads::open_another(&taken, args.wiring.clone()),
+        };
+        match (&p.name, p.path()) {
+            (Some(name), Some(path)) => {
+                println!("player {}: pad {name}", i + 1);
+                taken.push(path);
+            }
+            _ => println!("player {}: no pad of their own — an idle pad, standing on the start line", i + 1),
+        }
+        seat_pads.push(p);
     }
     // How the throttle is wired, when it is not the plain binding: a session's own log should say,
     // because a rider who mapped the wrong axis sees a bike that will not pull and no reason why.
@@ -1147,82 +1266,177 @@ fn run() -> Result<(), String> {
         println!("pad pressures: {}", pressures.join(" "));
     }
 
+    // ---- the other players' bodies and bikes (V22) ---------------------------------------------
+    // Each rider on the screen is posed into a model of its own, because a skinned model's triangles
+    // are its pose: the first player's are the models the archives loaded, and every other player's
+    // a copy under a name of its own. Their bodies and chassis are loaded again for the same reason
+    // the first's are opened twice — each animation set reads members as its own machine asks.
+    let mut rigs: Vec<Rig> = Vec::with_capacity(args.players);
+    let body_model = body.as_ref().map(|b| b.geometry().to_string());
+    for i in 1..args.players {
+        let body = match &rider_member {
+            None => None,
+            Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
+        };
+        let chassis = match vehicle.mcf.is_empty() {
+            true => None,
+            false => Chassis::load(vec![disc.res(&bike_member)?], &vehicle.mcf, BIKE_PREFIX, &table.stunts, vehicle_params()).ok(),
+        };
+        let copy = |assets: &mut Assets, name: &str| -> Option<String> {
+            let own = format!("{name}@{}", i + 1);
+            let loaded = assets.models.get(name)?.clone();
+            assets.models.insert(own.clone(), loaded);
+            Some(own)
+        };
+        let bike_model = copy(&mut assets, CHASSIS).unwrap_or_else(|| CHASSIS.to_string());
+        let own_body = body_model.as_deref().and_then(|name| copy(&mut assets, name));
+        rigs.push(Rig {
+            body,
+            chassis,
+            camera: Race { cam: camera.cam.clone() },
+            plane_camera: None,
+            hud: Hud::new(args.hud),
+            bike_model,
+            body_model: own_body,
+        });
+    }
+    rigs.insert(
+        0,
+        Rig {
+            body,
+            chassis,
+            camera,
+            plane_camera,
+            // The riding overlay (P6). It is the shell's own furniture, so it is created here beside
+            // the window rather than inside the simulation's `World`, and it reads the port's own
+            // values at draw time instead of being fed them.
+            hud: Hud::new(args.hud),
+            bike_model: CHASSIS.to_string(),
+            body_model,
+        },
+    );
+
     // ---- the loop ------------------------------------------------------------------------------
     let light = Lighting::of(&look);
     // The frame: `--size`'s, which stays put whatever the window does, or the largest 4:3 one inside
-    // the window, which is re-made whenever the window changes size (below).
-    let frame_size = |window: &Window| match args.size {
-        Some(size) => size,
-        None => fit_frame((window.width, window.height), window.scale),
+    // the window, which is re-made whenever the window changes size (below). With no window, the
+    // PS2's own unless `--size` says otherwise.
+    let frame_size = |window: &Option<Window>| match (args.size, window) {
+        (Some(size), _) => size,
+        (None, Some(window)) => fit_frame((window.width, window.height), window.scale),
+        (None, None) => PS2_FRAME,
     };
     let (width, height) = frame_size(&window);
-    println!(
-        "window {}x{} (screen {}x{}), drawing {width}x{height} at scale {}",
-        window.width, window.height, window.screen.0, window.screen.1, window.scale
-    );
+    match &window {
+        Some(window) => println!(
+            "window {}x{} (screen {}x{}), drawing {width}x{height} at scale {}",
+            window.width, window.height, window.screen.0, window.screen.1, window.scale
+        ),
+        None => println!("headless, drawing {width}x{height}"),
+    }
     let mut frame = Frame::new(width, height, look.fog_color);
+    // The views (V22): where each player's goes in the frame, and a frame of its own size for each to
+    // be drawn into. A full screen has none — its one view is drawn straight into the frame, as it
+    // always has been.
+    let views_of = |width: usize, height: usize| {
+        let rects = layout.rects(width, height);
+        let frames: Vec<Frame> = match layout {
+            Layout::Full => Vec::new(),
+            _ => rects.iter().take(args.players).map(|r| Frame::new(r.w, r.h, look.fog_color)).collect(),
+        };
+        (rects, frames)
+    };
+    let (mut rects, mut view_frames) = views_of(width, height);
+    if layout != Layout::Full {
+        println!(
+            "views: {} players, {}, {}x{} each",
+            args.players,
+            layout.name(),
+            rects[0].w,
+            rects[0].h
+        );
+    }
     let mut engine = Engine::new();
-    let mut world = World {
-        place: sim,
+    let tables = Arc::new(tables);
+    let mut seats = vec![Seat {
         reports: [Report::missing(); PADS],
-        sim: Sim::with_rider(0, Arc::new(tables), phy, rider),
+        sim: Sim::with_rider(0, tables.clone(), phy.clone(), rider),
         garage,
         riding: true,
         said: rider::Frame::default(),
         hands: Controls::default(),
-        tape: recorder,
-        played_dt: None,
-    };
-
-    // The riding overlay (P6). It is the shell's own furniture, so it is created here beside the
-    // window rather than inside the simulation's `World`, and it reads the port's own values at draw
-    // time instead of being fed them.
-    let mut hud = Hud::new(args.hud);
-    hud.note_vehicle(world.garage.up.name());
-    let first = match (world.garage.up, &plane_camera) {
-        (Kind::Biplane, Some(cam)) => &cam.cam,
-        _ => &camera.cam,
-    };
-    if !first.presets.is_empty() {
-        hud.note_camera(&first.preset().name);
+    }];
+    for rider in others {
+        seats.push(Seat {
+            reports: [Report::missing(); PADS],
+            sim: Sim::with_rider(0, tables.clone(), phy.clone(), rider),
+            // The track's plane is the first player's: `machine.txt` parks one per player, and the
+            // shell draws one.
+            garage: Garage::new(Kind::Bike, None)?,
+            riding: true,
+            said: rider::Frame::default(),
+            hands: Controls::default(),
+        });
     }
-    println!("vehicle: {}", world.garage.up.name());
+    let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
+
+    for (seat, rig) in world.seats.iter().zip(&mut rigs) {
+        rig.hud.note_vehicle(seat.garage.up.name());
+        let first = rig.follow(seat.garage.up);
+        if !first.cam.presets.is_empty() {
+            let name = first.cam.preset().name.clone();
+            rig.hud.note_camera(&name);
+        }
+    }
+    println!("vehicle: {}", world.seats[0].garage.up.name());
     // H toggles it, on its own edge: the window keeps key state and not key events, so the shell
     // remembers last frame's to tell a press from a hold.
     let mut hud_key = false;
     // M swaps machines, on its edge the same way (P19).
     let mut swap_key = false;
+    let held = |window: &Option<Window>, code: u8| window.as_ref().is_some_and(|w| w.held(code));
 
     let mut shot = args.shot.clone();
     let started = Instant::now();
     let mut window_of_frames = (Instant::now(), 0u32, 0usize);
+    // Each view's triangles over the session, for the line a split session ends on.
+    let mut view_triangles = vec![0usize; args.players];
+    let mut cameras: Vec<Camera> = Vec::with_capacity(args.players);
     loop {
         let top = Instant::now();
 
-        window.poll();
-        if window.closed() || window.held(key::ESCAPE) {
-            break;
+        if let Some(window) = &mut window {
+            window.poll();
+            if window.closed() || window.held(key::ESCAPE) {
+                break;
+            }
         }
         // A window that changed size gets a frame of its new size rather than the old one stretched
         // over it — and with it the aspect the camera's field of view and its viewport test read,
         // which stays 4:3 because that is the shape `fit_frame` keeps.
-        if window.resized() {
+        if window.as_mut().is_some_and(|w| w.resized()) {
             let (width, height) = frame_size(&window);
             if (width, height) != (frame.width, frame.height) {
                 frame = Frame::new(width, height, look.fog_color);
-                println!(
-                    "window {}x{}, drawing {width}x{height}",
-                    window.width, window.height
-                );
+                (rects, view_frames) = views_of(width, height);
+                if let Some(window) = &window {
+                    println!("window {}x{}, drawing {width}x{height}", window.width, window.height);
+                }
             }
         }
         // The pad this frame: the tape's, if one is being ridden, and the host's otherwise. A tape
         // that has run out ends the session — there is no pad behind it to carry on with.
         match &mut head {
-            None => world.reports = [pads.report(&window), Report::missing()],
+            None => {
+                let report = match &window {
+                    Some(window) => pads.report(window),
+                    None => pads.report_without_keys(),
+                };
+                world.seats[0].reports = [report, Report::missing()];
+            }
             Some(head) => match head.next() {
                 Some(frame) => {
-                    world.reports = frame.reports;
+                    world.seats[0].reports = frame.reports;
                     world.played_dt = Some(frame.dt());
                 }
                 None => {
@@ -1231,28 +1445,39 @@ fn run() -> Result<(), String> {
                 }
             },
         }
-        let hud_now = window.held(key::H);
+        // And everybody else's, off their own pads. A tape is the first player's ride, so while one
+        // is ridden the others stand idle and the session stays a function of its file.
+        for (seat, p) in world.seats[1..].iter_mut().zip(&mut seat_pads) {
+            let report = match head {
+                Some(_) => Report::idle(),
+                None => p.report_without_keys(),
+            };
+            seat.reports = [report, Report::missing()];
+        }
+        let hud_now = held(&window, key::H);
         if hud_now && !hud_key {
-            hud.on = !hud.on;
+            for rig in &mut rigs {
+                rig.hud.on = !rig.hud.on;
+            }
         }
         hud_key = hud_now;
         // The swap, between frames, which is where the original's pause menu and prompt run it: the
         // controller moves and the machine taken gets its own camera, which starts where it is
         // rather than lagging in from wherever it was last. A played tape is the ride it recorded,
         // and the tape has no swap in it, so the key is not read while one is being ridden.
-        let swap_now = window.held(key::M);
+        // It is the first player's key, and the first player's plane.
+        let swap_now = held(&window, key::M);
         if swap_now && !swap_key && head.is_none() {
-            match world.garage.swap() {
+            match world.seats[0].garage.swap() {
                 Ok(up) => {
-                    let cam = match (up, &mut plane_camera) {
-                        (Kind::Biplane, Some(cam)) => &mut cam.cam,
-                        _ => &mut camera.cam,
-                    };
+                    let rig = &mut rigs[0];
+                    let cam = &mut rig.follow_mut(up).cam;
                     cam.snap = true;
-                    if !cam.presets.is_empty() {
-                        hud.note_camera(&cam.preset().name);
+                    let name = (!cam.presets.is_empty()).then(|| cam.preset().name.clone());
+                    if let Some(name) = name {
+                        rig.hud.note_camera(&name);
                     }
-                    hud.note_vehicle(up.name());
+                    rig.hud.note_vehicle(up.name());
                     println!("vehicle: {}", up.name());
                 }
                 Err(e) => println!("vehicle: {e}"),
@@ -1261,7 +1486,7 @@ fn run() -> Result<(), String> {
         swap_key = swap_now;
 
         // One frame of the game's own fixed update, which calls `World::simulate` inside itself.
-        let step = engine.step(wall(started), engine_input(&world.reports[0]), &mut world);
+        let step = engine.step(wall(started), engine_input(&world.seats[0].reports[0]), &mut world);
         if step.outcome == Outcome::Quit {
             break;
         }
@@ -1274,226 +1499,274 @@ fn run() -> Result<(), String> {
         // What the simulation was actually handed, which the pose and the camera below step with too.
         let dt = world.played_dt.unwrap_or(step.dt);
 
-        // The body on the bike, posed by the body's own sixty-state machine (V18): one call that runs
-        // the rider's animation actor off the fields the ride just wrote and writes the pose it chose
-        // onto the body's 22 joints. It is a second entry point of the simulation rather than a step
-        // of `Rider::frame` — the body is an actor of its own in the original — and it is called from
-        // here because the clip table it selects out of is the renderer's. A frozen ride does not
-        // call it, so the pose is left where it was.
-        //
-        // The gate is the two inputs the body has that no ride holds: a start-line clock, which this
-        // shell has none of, and the wall clock the idle pool seeds itself from. Both zero, so the
-        // body's start sequence is the full breathe-and-wait and two runs of the same tape draw the
-        // same idles.
-        // Neither moves while the plane is up: the bike was left with no controller and nothing steps it.
-        let bike_up = world.garage.up == Kind::Bike;
-        if let Some(body) = &mut body {
-            if world.riding && bike_up {
-                body.ride(dt, &mut world.sim.rider, &world.hands, rider::Gate::default());
-            }
-        }
-
-        // And the bike under it (V9). Two halves in one call: the chassis skeleton posed from the
-        // vehicle's own animation machine, and then the suspension, steering and wheel nodes written
-        // over that pose from the ride's own numbers — the fork travel, the steering angle and the two
-        // wheels' spin, which are not in any clip because no clip could have them.
-        if let Some(chassis) = &mut chassis {
-            if world.riding && bike_up {
-                let ride = &world.sim.rider.ride;
-                let want = Chassis::want(ride, &world.sim.rider.tricks);
-                // The rider's two axes and not zeros: in the air they are the crossup sweep the
-                // chassis' clip is played at, and zero is the sweep's far end (P29).
-                let request = Chassis::riding(&world.sim.rider);
-                chassis.frame(dt, want, &request, Drive::of(ride));
-                if let Some(loaded) = assets.models.get_mut(CHASSIS) {
-                    chassis.skin_into(loaded);
-                }
-            }
-        }
-
-        // What the rider did, as a line: a run nobody is watching still says whether a trick
-        // started, landed or put the rider down, and by which of the original's reason codes.
-        if let Some(t) = world.said.started {
-            println!("trick: {}", table.display_name(0, t));
-            hud.note_trick(table.display_name(0, t));
-        }
-        if let Some(t) = world.said.landed {
-            println!("landed: {}", table.display_name(0, t));
-            hud.note_trick(&format!("{} landed", table.display_name(0, t)));
-        }
-        if let Some(why) = world.said.wreck {
-            println!("wreck: reason {} — L3 and R3 together to get back on", why.0);
-            hud.note_wreck(why);
-        }
-        if world.said.respawned {
-            println!("back on the start line");
-        }
-
-        // The camera, after the frame, which is where the original's viewport updates it: the shell
-        // picks the preset, the ported camera does everything else.
-        // Whichever machine has the controller has the camera: the bike's, on the track's presets, or
-        // the plane's, on its own file's.
-        let follow = match (world.garage.up, &mut plane_camera) {
-            (Kind::Biplane, Some(cam)) => cam,
-            _ => &mut camera,
-        };
-        let presets = follow.cam.presets.len();
-        if presets > 1 {
-            let pad = world.sim.input.pad(0);
-            // L1 only: R1 is the third of the trick decoder's buttons now. The walk is the
-            // original's next-camera routine: on to the next preset the file lets the player cycle to.
-            // An L1 pressed with R1 already down is the second half of the reset chord, not a camera.
-            if pad.pressed(Control::L1) && !pad.held(Control::R1) {
-                follow.cam.next_preset();
-                println!("camera: {}", follow.cam.preset().name);
-                hud.note_camera(&follow.cam.preset().name);
-            }
-        }
-        let (forward, up) = world.sim.rider.ride.axes();
-        let bike_pos = world.sim.rider.ride.position();
-        // The grounded flag and the speed are read off the actor by the frame rather than worked
-        // out from the velocity; the ride's own two fields are what the actor's are written from.
-        let rider = match (world.garage.up, &world.garage.plane) {
-            // The plane, as the camera's target: where it is, its nose, its up, and no lean — a
-            // plane has no rider's stick to lean on. Which of the plane's fields the original's plane
-            // camera reads was not traced; these are its body's.
-            (Kind::Biplane, Some(plane)) => Ridden {
-                target: Target {
-                    body_point: plane.at,
-                    forward: plane.facing,
-                    up: plane.up,
-                    vel: plane.vel,
-                    lean: F::ZERO,
-                },
-                grounded: plane.on_ground(),
-                speed: plane.speed(),
-            },
-            _ => Ridden {
-                target: Target {
-                    body_point: bike_pos,
-                    forward,
-                    up,
-                    vel: world.sim.rider.ride.chassis.vel,
-                    lean: world.sim.rider.ride.held.lean.0,
-                },
-                grounded: world.sim.rider.ride.air.on_ground,
-                speed: world.sim.rider.ride.chassis.speed,
-            },
-        };
-        let view = if presets == 0 {
-            None
-        } else {
-            // The camera's one question about the world: the ground under the look-at point, which
-            // the track answers (S23). Without it the view sinks into the dirt on the first dip.
-            // This frame has no obstacle push-out — the base class's did, and the base class's
-            // frame is not the one the disc runs.
-            Some(follow.update(
-                dt,
-                &rider,
-                F(NEAR_CLIP),
-                &world.sim.tables.ride.curve,
-                Switches {
-                    // Nothing in the shell sets the engine bit that stops the look-ahead, and the
-                    // window is one view: the split-screen pitch trim wants a window less than
-                    // 0.55 as tall as it is wide, which is the same test the original makes of its
-                    // own viewport's two extents.
-                    no_look_ahead: false,
-                    short_viewport: (frame.height as f32) / (frame.width as f32) < 0.55,
-                },
-                &mut world.place,
-            ))
-        };
-        let bike_look = vector(rider.target.forward);
-        let pos = vector(rider.target.body_point);
-        let camera = match &view {
-            Some(view) => Camera {
-                eye: vector(view.position),
-                at: vector(view.look_at),
-                // The file's field of view is the horizontal one; the rasteriser wants the vertical
-                // one in radians, which depends on the shape of the window it is drawing into.
-                fov: vertical_fov(view.fov.0, aspect(&frame)),
-                near: NEAR_CLIP,
-                far: 4000.0,
-            },
-            None => Camera::behind(pos, bike_look),
-        };
-
-        // The picture: the dirt, then the scene's props and the bike standing on them.
-        clear(&mut frame, look.fog_color);
-        let mut drawn = ground.draw(&mut frame, &camera, &light, pos, GROUND_RADIUS);
-        let bike_at = chassis_at(&world.sim.rider.ride);
-        // Each part rides on one node of the chassis, so its transform is that node's place in the
-        // chassis followed by the chassis's place in the world.
-        let mut actor: Vec<(&str, M4)> = vec![(CHASSIS, bike_at)];
-        // The node's *live* transform where a frame has posed the chassis, and its bind transform
-        // where nothing has: the front fender and the number plate hang off `Handlebars`, so a part
-        // placed at a bind pose is a part that does not steer with the bike it is bolted to.
-        let node_now = |name: &str| -> Option<M4> {
-            chassis.as_ref().and_then(|c| c.node(name)).or_else(|| {
-                let model = &assets.models.get(CHASSIS)?.model;
-                let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
-                Some(model.world(i))
-            })
-        };
-        for part in &vehicle.parts {
-            let at = match node_now(&part.placement) {
-                Some(node) => node.mul(bike_at),
-                None => bike_at,
+        cameras.clear();
+        let mut ridden: Vec<Ridden> = Vec::with_capacity(args.players);
+        for (i, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
+            // How a player other than the first is named in the lines below; the first's lines are
+            // the ones a one-player session has always printed.
+            let who = match i {
+                0 => String::new(),
+                _ => format!("player {}: ", i + 1),
             };
-            actor.push((part.model.as_str(), at));
-        }
-        // Where the chassis wants the body's hands and feet *this* frame: the four dummy anchors at
-        // its grips and its pegs, off the live pose. They were read once, at load, from the bind
-        // pose — but `Dummy_Hand_L` and `Dummy_Hand_R` hang off `Handlebars`, which the steering
-        // drive turns, so a rider aimed at the bind pose lets go of the bars the moment the bike is
-        // steered (V20). Falls back to the bind pose before the bike has a frame of its own.
-        let grips = match &chassis {
-            Some(chassis) => chassis_grips(chassis),
-            None => match assets.models.get(CHASSIS) {
-                Some(loaded) => anchors_of(&Skeleton::of(&loaded.model), &[]),
-                None => Default::default(),
-            },
-        };
-        // And the rider, at the bike's own transform: the clips put the body on the bike
-        // themselves, so there is nothing to bolt (`game_render::rider`). Not before a frame has
-        // posed it, though: a blend with no clip behind it leaves the bind pose, which is the one
-        // pose the game never draws.
-        if let Some(body) = &body {
-            if body.posed {
-                // Which of the body's five levels of detail this camera has earned, and the hands and
-                // feet put back where the chassis wants them. Both read the camera, so the skinning
-                // is here rather than beside the pose above.
-                let away = pos.sub(camera.eye).len();
-                let focal = camera.focal(frame.height);
-                if let Some(loaded) = assets.models.get_mut(body.geometry()) {
-                    let group = loaded.model.group_for(away, loaded.radius, focal);
-                    body.skin_into_at(loaded, group, Some(&grips));
+            // The body on the bike, posed by the body's own sixty-state machine (V18): one call that runs
+            // the rider's animation actor off the fields the ride just wrote and writes the pose it chose
+            // onto the body's 22 joints. It is a second entry point of the simulation rather than a step
+            // of `Rider::frame` — the body is an actor of its own in the original — and it is called from
+            // here because the clip table it selects out of is the renderer's. A frozen ride does not
+            // call it, so the pose is left where it was.
+            //
+            // The gate is the two inputs the body has that no ride holds: a start-line clock, which this
+            // shell has none of, and the wall clock the idle pool seeds itself from. Both zero, so the
+            // body's start sequence is the full breathe-and-wait and two runs of the same tape draw the
+            // same idles.
+            // Neither moves while the plane is up: the bike was left with no controller and nothing steps it.
+            let bike_up = seat.garage.up == Kind::Bike;
+            if let Some(body) = &mut rig.body {
+                if seat.riding && bike_up {
+                    body.ride(dt, &mut seat.sim.rider, &seat.hands, rider::Gate::default());
                 }
-                actor.push((body.geometry(), bike_at));
             }
+
+            // And the bike under it (V9). Two halves in one call: the chassis skeleton posed from the
+            // vehicle's own animation machine, and then the suspension, steering and wheel nodes written
+            // over that pose from the ride's own numbers — the fork travel, the steering angle and the two
+            // wheels' spin, which are not in any clip because no clip could have them.
+            if let Some(chassis) = &mut rig.chassis {
+                if seat.riding && bike_up {
+                    let ride = &seat.sim.rider.ride;
+                    let want = Chassis::want(ride, &seat.sim.rider.tricks);
+                    // The rider's two axes and not zeros: in the air they are the crossup sweep the
+                    // chassis' clip is played at, and zero is the sweep's far end (P29).
+                    let request = Chassis::riding(&seat.sim.rider);
+                    chassis.frame(dt, want, &request, Drive::of(ride));
+                    if let Some(loaded) = assets.models.get_mut(&rig.bike_model) {
+                        chassis.skin_into(loaded);
+                    }
+                }
+            }
+
+            // What the rider did, as a line: a run nobody is watching still says whether a trick
+            // started, landed or put the rider down, and by which of the original's reason codes.
+            if let Some(t) = seat.said.started {
+                println!("{who}trick: {}", table.display_name(0, t));
+                rig.hud.note_trick(table.display_name(0, t));
+            }
+            if let Some(t) = seat.said.landed {
+                println!("{who}landed: {}", table.display_name(0, t));
+                rig.hud.note_trick(&format!("{} landed", table.display_name(0, t)));
+            }
+            if let Some(why) = seat.said.wreck {
+                println!("{who}wreck: reason {} — L3 and R3 together to get back on", why.0);
+                rig.hud.note_wreck(why);
+            }
+            if seat.said.respawned {
+                println!("{who}back on the start line");
+            }
+
+            // The camera, after the frame, which is where the original's viewport updates it: the shell
+            // picks the preset, the ported camera does everything else.
+            // Whichever machine has the controller has the camera: the bike's, on the track's presets, or
+            // the plane's, on its own file's.
+            let follow = match (seat.garage.up, &mut rig.plane_camera) {
+                (Kind::Biplane, Some(cam)) => cam,
+                _ => &mut rig.camera,
+            };
+            let presets = follow.cam.presets.len();
+            if presets > 1 {
+                let pad = seat.sim.input.pad(0);
+                // L1 only: R1 is the third of the trick decoder's buttons now. The walk is the
+                // original's next-camera routine: on to the next preset the file lets the player cycle to.
+                // An L1 pressed with R1 already down is the second half of the reset chord, not a camera.
+                if pad.pressed(Control::L1) && !pad.held(Control::R1) {
+                    follow.cam.next_preset();
+                    println!("{who}camera: {}", follow.cam.preset().name);
+                    rig.hud.note_camera(&follow.cam.preset().name);
+                }
+            }
+            let (forward, up) = seat.sim.rider.ride.axes();
+            let bike_pos = seat.sim.rider.ride.position();
+            // The grounded flag and the speed are read off the actor by the frame rather than worked
+            // out from the velocity; the ride's own two fields are what the actor's are written from.
+            let rider = match (seat.garage.up, &seat.garage.plane) {
+                // The plane, as the camera's target: where it is, its nose, its up, and no lean — a
+                // plane has no rider's stick to lean on. Which of the plane's fields the original's plane
+                // camera reads was not traced; these are its body's.
+                (Kind::Biplane, Some(plane)) => Ridden {
+                    target: Target {
+                        body_point: plane.at,
+                        forward: plane.facing,
+                        up: plane.up,
+                        vel: plane.vel,
+                        lean: F::ZERO,
+                    },
+                    grounded: plane.on_ground(),
+                    speed: plane.speed(),
+                },
+                _ => Ridden {
+                    target: Target {
+                        body_point: bike_pos,
+                        forward,
+                        up,
+                        vel: seat.sim.rider.ride.chassis.vel,
+                        lean: seat.sim.rider.ride.held.lean.0,
+                    },
+                    grounded: seat.sim.rider.ride.air.on_ground,
+                    speed: seat.sim.rider.ride.chassis.speed,
+                },
+            };
+            // The shape of the view this camera draws into (V22), which on a full screen is the frame.
+            let (view_w, view_h) = (rects[i].w, rects[i].h);
+            let view = if presets == 0 {
+                None
+            } else {
+                // The camera's one question about the world: the ground under the look-at point, which
+                // the track answers (S23). Without it the view sinks into the dirt on the first dip.
+                // This frame has no obstacle push-out — the base class's did, and the base class's
+                // frame is not the one the disc runs.
+                Some(follow.update(
+                    dt,
+                    &rider,
+                    F(NEAR_CLIP),
+                    &seat.sim.tables.ride.curve,
+                    Switches {
+                        // Nothing in the shell sets the engine bit that stops the look-ahead. The
+                        // split-screen pitch trim wants a view less than 0.55 as tall as it is wide,
+                        // which is the same test the original makes of its own viewport's two extents:
+                        // each view's own, so the stacked split's two strips have it and a full
+                        // screen, the side-by-side halves and the quarters do not.
+                        no_look_ahead: false,
+                        short_viewport: (view_h as f32) / (view_w as f32) < 0.55,
+                    },
+                    &mut world.place,
+                ))
+            };
+            let bike_look = vector(rider.target.forward);
+            let pos = vector(rider.target.body_point);
+            cameras.push(match &view {
+                Some(view) => Camera {
+                    eye: vector(view.position),
+                    at: vector(view.look_at),
+                    // The file's field of view is the horizontal one; the rasteriser wants the vertical
+                    // one in radians, which depends on the shape of the view it is drawing into.
+                    fov: vertical_fov(view.fov.0, view_w as f32 / view_h as f32),
+                    near: NEAR_CLIP,
+                    far: 4000.0,
+                },
+                None => Camera::behind(pos, bike_look),
+            });
+            ridden.push(rider);
         }
-        // With the plane up the bike is hidden, as the swap hides its model, and the rider is the
-        // plane's pilot — whom V21 seats. The plane stands in the world either way: parked until it
-        // is taken, wherever it was left after.
-        if !bike_up {
-            actor.clear();
+
+        // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
+        // own shape and put into the window's frame; a full screen's one view is the frame itself.
+        // Each player's body is skinned at the level of detail the camera drawing it has earned, so
+        // a rider is re-skinned for a view only where that differs from the view before.
+        let mut skinned: Vec<Option<usize>> = vec![None; rigs.len()];
+        let mut drawn = 0;
+        for (v, at) in rects.iter().enumerate() {
+            if v >= world.seats.len() {
+                // A layout with room for more players than there are: the spare views are black.
+                split::blank(&mut frame, *at, [0, 0, 0]);
+                continue;
+            }
+            let target = match view_frames.get_mut(v) {
+                Some(view) => view,
+                None => &mut frame,
+            };
+            let camera = &cameras[v];
+            let pos = vector(ridden[v].target.body_point);
+            // The picture: the dirt, then the scene's props and the bikes standing on them.
+            clear(target, look.fog_color);
+            let mut tris = ground.draw(target, camera, &light, pos, GROUND_RADIUS);
+            let mut actor: Vec<(&str, M4)> = Vec::new();
+            for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
+                // With the plane up the bike is hidden, as the swap hides its model, and the rider is the
+                // plane's pilot — whom V21 seats.
+                if seat.garage.up != Kind::Bike {
+                    continue;
+                }
+                let bike_at = chassis_at(&seat.sim.rider.ride);
+                // Each part rides on one node of the chassis, so its transform is that node's place in the
+                // chassis followed by the chassis's place in the world.
+                actor.push((rig.bike_model.as_str(), bike_at));
+                // The node's *live* transform where a frame has posed the chassis, and its bind transform
+                // where nothing has: the front fender and the number plate hang off `Handlebars`, so a part
+                // placed at a bind pose is a part that does not steer with the bike it is bolted to.
+                let node_now = |name: &str| -> Option<M4> {
+                    rig.chassis.as_ref().and_then(|c| c.node(name)).or_else(|| {
+                        let model = &assets.models.get(CHASSIS)?.model;
+                        let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
+                        Some(model.world(i))
+                    })
+                };
+                for part in &vehicle.parts {
+                    let at = match node_now(&part.placement) {
+                        Some(node) => node.mul(bike_at),
+                        None => bike_at,
+                    };
+                    actor.push((part.model.as_str(), at));
+                }
+                // Where the chassis wants the body's hands and feet *this* frame: the four dummy anchors at
+                // its grips and its pegs, off the live pose. They were read once, at load, from the bind
+                // pose — but `Dummy_Hand_L` and `Dummy_Hand_R` hang off `Handlebars`, which the steering
+                // drive turns, so a rider aimed at the bind pose lets go of the bars the moment the bike is
+                // steered (V20). Falls back to the bind pose before the bike has a frame of its own.
+                let grips = match &rig.chassis {
+                    Some(chassis) => chassis_grips(chassis),
+                    None => match assets.models.get(CHASSIS) {
+                        Some(loaded) => anchors_of(&Skeleton::of(&loaded.model), &[]),
+                        None => Default::default(),
+                    },
+                };
+                // And the rider, at the bike's own transform: the clips put the body on the bike
+                // themselves, so there is nothing to bolt (`game_render::rider`). Not before a frame has
+                // posed it, though: a blend with no clip behind it leaves the bind pose, which is the one
+                // pose the game never draws.
+                if let (Some(body), Some(model)) = (&rig.body, &rig.body_model) {
+                    if body.posed {
+                        // Which of the body's five levels of detail this camera has earned, and the hands and
+                        // feet put back where the chassis wants them. Both read the camera, so the skinning
+                        // is here rather than beside the pose above.
+                        let away = vector(seat.sim.rider.ride.position()).sub(camera.eye).len();
+                        let focal = camera.focal(target.height);
+                        if let Some(loaded) = assets.models.get_mut(model.as_str()) {
+                            let group = loaded.model.group_for(away, loaded.radius, focal);
+                            if skinned[p] != Some(group) {
+                                body.skin_into_at(loaded, group, Some(&grips));
+                                skinned[p] = Some(group);
+                            }
+                        }
+                        actor.push((model.as_str(), bike_at));
+                    }
+                }
+            }
+            // The plane stands in the world either way: parked until it is taken, wherever it was
+            // left after. At its body's pose, nose and up off the plane's own measure, with the prop
+            // at the engine's angle (S35) — or the bent cone, unturned, once it is wrecked.
+            if let (Some(drawn), Some(plane)) = (&plane_drawn, &world.seats[0].garage.plane) {
+                let at = M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up));
+                actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
+            }
+            tris += draw_scene(target, &look, &assets, &actor, camera);
+            // And the overlay over the top of it, after everything with a depth test and before anything
+            // that reads the frame: what the window shows and what `--shot` writes are the same picture.
+            let (seat, rig) = (&world.seats[v], &mut rigs[v]);
+            let bike_up = seat.garage.up == Kind::Bike;
+            rig.hud.plane = !bike_up;
+            rig.hud.flight = match (bike_up, &seat.garage.plane) {
+                (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
+                _ => None,
+            };
+            rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding);
+            if let Some(view) = view_frames.get(v) {
+                split::put(&mut frame, view, *at);
+            }
+            view_triangles[v] += tris;
+            drawn += tris;
         }
-        // At its body's pose, nose and up off the plane's own measure, with the prop at the engine's
-        // angle (S35) — or the bent cone, unturned, once it is wrecked.
-        if let (Some(drawn), Some(plane)) = (&plane_drawn, &world.garage.plane) {
-            let at = M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up));
-            actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
+        if let Some(window) = &mut window {
+            window.present(&frame.color, frame.width, frame.height)?;
         }
-        drawn += draw_scene(&mut frame, &look, &assets, &actor, &camera);
-        // And the overlay over the top of it, after everything with a depth test and before anything
-        // that reads the frame: what the window shows and what `--shot` writes are the same picture.
-        hud.plane = !bike_up;
-        hud.flight = match (bike_up, &world.garage.plane) {
-            (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
-            _ => None,
-        };
-        hud.draw(&mut frame, world.sim.input.pad(0), &world.sim.rider, world.riding);
-        window.present(&frame.color, frame.width, frame.height)?;
 
         // One frame, on paper, for a run nobody is watching: the first by default, or the one
         // `--shot-frame` asks for, which is how a shot catches a ride in progress.
@@ -1506,28 +1779,33 @@ fn run() -> Result<(), String> {
         }
 
         // A line a second, so a run that is not being watched still says what it did.
+        let bike_up = world.seats[0].garage.up == Kind::Bike;
         window_of_frames.1 += 1;
         window_of_frames.2 += drawn;
         if window_of_frames.0.elapsed() >= Duration::from_secs(1) {
             let (since, frames, triangles) = window_of_frames;
             println!(
-                "{:>3.0}s {:>4.1} fps, {:>6} triangles a frame, {:>5.1} mph{}",
+                "{:>3.0}s {:>4.1} fps, {:>6} triangles a frame, {:>5.1} mph{}{}",
                 started.elapsed().as_secs_f32(),
                 frames as f32 / since.elapsed().as_secs_f32(),
                 triangles / frames.max(1) as usize,
                 // Feet a second to miles an hour, for a number a rider can read.
-                rider.speed.0 * 0.681_818,
-                match (world.riding, world.sim.rider.phase()) {
+                ridden[0].speed.0 * 0.681_818,
+                match (world.seats[0].riding, world.seats[0].sim.rider.phase()) {
                     (false, _) => " (frozen)",
                     _ if !bike_up => " (biplane)",
                     (_, Phase::Riding) => "",
                     (_, Phase::Down) => " (down)",
                     (_, Phase::Resetting) => " (getting up)",
+                },
+                match args.players {
+                    1 => String::new(),
+                    n => format!(", {n} views"),
                 }
             );
             // And the plane's own numbers while it flies: its height, the gauges and whether a
             // wheel is down.
-            if let (false, Some(plane)) = (bike_up, &world.garage.plane)
+            if let (false, Some(plane)) = (bike_up, &world.seats[0].garage.plane)
                 && let Some((throttle, air)) = plane.gauges()
             {
                 println!(
@@ -1548,10 +1826,39 @@ fn run() -> Result<(), String> {
                 break;
             }
         }
+        if args.frames.is_some_and(|n| engine.frame >= n) {
+            break;
+        }
         // Pace to 60 Hz. A frame that overran does not sleep, and the engine's own clock is what the
         // simulation sees, so a slow frame becomes a longer step rather than a slower game.
         if let Some(rest) = FRAME.checked_sub(top.elapsed()) {
             std::thread::sleep(rest);
+        }
+    }
+
+    // A split session's last word on each view: whose it was, how often that player's simulation
+    // ran, where they and their camera ended up, and what their view drew — what a run nobody
+    // watched says about whether every player rode and every view followed its own rider.
+    if args.players > 1 {
+        for (i, (seat, at)) in world.seats.iter().zip(&rects).enumerate() {
+            let (p, eye) = (seat.sim.rider.ride.position(), cameras.get(i).map(|c| c.eye));
+            println!(
+                "player {}: {} ticks, at {:.1}, {:.1}, {:.1}; view {}x{} at {},{}, camera at {}, {} triangles a frame",
+                i + 1,
+                seat.sim.ticks,
+                p.x(),
+                p.y(),
+                p.z(),
+                at.w,
+                at.h,
+                at.x,
+                at.y,
+                match eye {
+                    Some(e) => format!("{:.1}, {:.1}, {:.1}", e.x, e.y, e.z),
+                    None => "none".to_string(),
+                },
+                view_triangles[i] / (engine.frame.max(1) as usize),
+            );
         }
     }
 
@@ -1574,7 +1881,7 @@ fn run() -> Result<(), String> {
     // different one. It is only printed for a taped session: a live ride is paced by the wall clock
     // and its hash would be a different number every time, which is a number worth nothing.
     if head.is_some() || args.record.is_some() {
-        println!("ride hash {:#018x}", game_sim::hash::of(&world.sim.rider.ride));
+        println!("ride hash {:#018x}", game_sim::hash::of(&world.seats[0].sim.rider.ride));
     }
 
     println!(
@@ -1631,10 +1938,23 @@ fn vector(v: Vf) -> V3 {
     v3(v.x(), v.y(), v.z())
 }
 
-/// The shape of the frame being drawn into, which is the shape of the window: what
-/// [`vertical_fov`] divides by, and what the rasteriser's own projection uses.
-fn aspect(frame: &Frame) -> f32 {
-    frame.width as f32 / frame.height as f32
+/// A camera file's presets as a view in `layout` reads them: the layout's own copy of each record
+/// (`Preset1h`, `Preset1v`, `Preset1q`), or the full screen's where the file has no such copy. The
+/// full screen reads exactly what it always has.
+fn layout_presets(bytes: &[u8], layout: Layout, file: &str) -> Vec<Preset> {
+    let own = Preset::read_bytes(bytes, layout.suffix());
+    if layout == Layout::Full {
+        return own;
+    }
+    // A record the file does not have reads as a preset with no name and no distance, which is what
+    // a missing copy looks like.
+    let has = own.iter().filter(|p| !p.name.is_empty()).count();
+    if has == 0 {
+        println!("camera: {file} has no Preset1{} copies for {}; riding the full screen's", layout.suffix(), layout.name());
+        return Preset::read_bytes(bytes, "");
+    }
+    println!("camera: {file}'s Preset{{n}}{} copies, {has} of {}, for {}", layout.suffix(), own.len(), layout.name());
+    own
 }
 
 /// The terrain file a scene asks for. Most scenes name it `SX02.trn`, but what the archive holds is
@@ -1756,6 +2076,10 @@ fn parse_args() -> Result<Option<Args>, String> {
         phase: TickPhase::default(),
         wiring: Wiring::default(),
         vehicle: Kind::Bike,
+        players: 1,
+        split: Split::default(),
+        headless: false,
+        frames: None,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
     };
     let mut argv = std::env::args().skip(1);
@@ -1832,6 +2156,18 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.trace_at = Some((x, z, deg));
             }
             "--vehicle" => args.vehicle = Kind::parse(&next("a vehicle, bike or biplane")?)?,
+            "--players" => {
+                let n = next("a number of players, 1 to 8")?;
+                args.players = n.parse().map_err(|_| format!("--players: {n:?} is not a number"))?;
+                Layout::for_players(args.players, args.split)?;
+            }
+            "--split" => args.split = Split::parse(&next("h or v")?)?,
+            "--headless" => args.headless = true,
+            "--frames" => {
+                args.frames = Some(
+                    next("a number of frames")?.parse().map_err(|_| "--frames: not a number of frames")?,
+                )
+            }
             "--phy" => args.phy = Some(next("a .phy on the disc, like race125p.phy")?),
             "--trace-stick" => {
                 args.trace_stick = Some(
@@ -1886,6 +2222,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--hud] [--camera NAME]\n\
                             [--shot-frame N] [--vehicle bike|biplane]\n\
+                            [--players 1..8] [--split h|v] [--headless] [--frames N]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                      \n\
@@ -1906,6 +2243,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                      parks one, and M swaps between the bike and the plane the way the\n\
                      original's \"Switch To Machine\" does. The plane flies over the terrain\n\
                      alone: Cross opens the throttle and Square closes it.\n\
+                     --players N splits the screen between N local players (up to 8), each on\n\
+                     a pad of their own with a camera and an overlay of their own: two one above\n\
+                     the other (--split h, the default) or side by side (--split v), the\n\
+                     original's two layouts, and three to eight in quarters or eighths. The first\n\
+                     player has the keyboard, the plane and the tape. --headless draws with no\n\
+                     window and no pad, and --frames N quits after N frames.\n\
                      The window opens at the screen's size and the frame is the largest 4:3 one\n\
                      inside it, re-made when the window is resized; --size draws a fixed frame\n\
                      instead (640x448 is the PS2's), and --scale draws each frame pixel N times\n\

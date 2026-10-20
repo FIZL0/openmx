@@ -355,6 +355,36 @@ impl Pads {
         pads
     }
 
+    /// The pad for a seat after the first (V22): the first of `/dev/input/js*` that no other seat
+    /// has (`taken`, the devices' paths as [`Pads::path`] holds them) and that opens, or no device
+    /// at all. A seat with no device rides an idle pad: plugged in, nothing held.
+    pub fn open_another(taken: &[String], wiring: Wiring) -> Pads {
+        let free = |p: &&&str| !taken.iter().any(|t| t == **p) && std::path::Path::new(**p).exists();
+        for path in PAD_DEVICES.iter().filter(free) {
+            let pads = Pads::open(Some(path), wiring.clone());
+            if pads.device.is_some() {
+                return pads;
+            }
+        }
+        Pads::unplugged(wiring)
+    }
+
+    /// The device this pad reads, if one opened.
+    pub fn path(&self) -> Option<String> {
+        let name = self.name.as_ref()?;
+        Some(match name.rsplit_once(" (") {
+            Some((_, path)) => path.trim_end_matches(')').to_string(),
+            None => name.clone(),
+        })
+    }
+
+    /// This frame's report with no keyboard behind it: a seat after the first, whose player has a
+    /// pad of their own and not the keys (V22).
+    pub fn report_without_keys(&mut self) -> Report {
+        let seconds = self.since_the_last_report();
+        self.build(seconds, &|_| false)
+    }
+
     /// A `Pads` with no device: the keyboard on a machine with no pad, and what this module's own
     /// tests ride, since a test that opened `/dev/input/js0` would read whatever is plugged in.
     /// `pub(crate)` for `tests/ride.rs`, which compiles this file in to ride a flip on the keys.
