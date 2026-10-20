@@ -24,10 +24,21 @@ game-render = { path = "../game-render" }
 ps2-float = { path = "../ps2-float" }
 # Online play (N2, `src/net`): ggrs' rollback core as opentennis vendors it (third_party/ggrs, with its
 # thread-drivable clock), its messages as bincode, and serde for the session's own messages. The
-# shell's only dependencies from outside the workspace (N3's transport is crates/openmx-net's): the
-# simulation takes none. Desktop only: the browser's build (N4) has no online play yet, and ggrs'
-# rand cannot build for wasm32-unknown-unknown.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# shell's only dependencies from outside the workspace: the simulation takes none. N3's transport
+# (iroh, crates/openmx-net) carries the session's datagrams for `src/peer.rs`, on both builds (N4).
 ggrs = { path = "../../third_party/ggrs" }
 bincode = "1.3"
 serde = { version = "1.0", features = ["derive"] }
+openmx-net = { path = "../openmx-net" }
+
+# The browser's build (N4), as opentennis's is: wasm-bindgen for the page's calls, and ggrs' clock and
+# random numbers from the page (its `wasm-bindgen` feature).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ggrs = { path = "../../third_party/ggrs", features = ["wasm-bindgen"] }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+[dev-dependencies]
+# tests/netplay_browser.rs's local relay: iroh's own relay server, as crates/openmx-net's tests run it
+iroh-relay = { version = "1.3", features = ["server"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }

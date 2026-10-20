@@ -8,15 +8,27 @@
 //!   network with no internet; a host puts its listing (with its room code) in the mDNS record's user data, and
 //!   Find and a code's lookup read those first.
 
+// In a browser (N4) there is no DHT and no mDNS, so their halves go unused there.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports, unused_variables, unreachable_code))]
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iroh::endpoint_info::UserData;
 use iroh::{EndpointId, SecretKey, Signature};
+#[cfg(not(target_arch = "wasm32"))]
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
+#[cfg(not(target_arch = "wasm32"))]
 use n0_future::StreamExt;
+#[cfg(not(target_arch = "wasm32"))]
 use n0_mainline::{Dht, Id, MutableItem, SigningKey};
+
+#[cfg(target_arch = "wasm32")]
+use crate::codes::Dht;
+/// A browser has no multicast (N4): no LAN lobbies there. A stand-in nobody can make.
+#[cfg(target_arch = "wasm32")]
+pub enum MdnsAddressLookup {}
 
 use crate::codes::STALE;
 use crate::room::{Listing, Room, now};
@@ -59,11 +71,18 @@ pub fn lobby_number(id: EndpointId) -> u16 {
 }
 
 /// The open lobbies on the DHT board now.
+#[cfg(target_arch = "wasm32")]
+pub async fn find(dht: &Dht) -> Vec<Listing> {
+    match *dht {}
+}
+
+/// The open lobbies on the DHT board now.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn find(dht: &Dht) -> Vec<Listing> {
     let mut ports = std::collections::BTreeSet::new();
     if let Ok(mut s) = dht.get_peers(Id::from_bytes(TOPIC).unwrap()).await {
         // the query ends by itself once the closest nodes answered; a cap in case it doesn't
-        let _ = tokio::time::timeout(Duration::from_secs(30), async {
+        let _ = n0_future::time::timeout(Duration::from_secs(30), async {
             while let Some(batch) = s.next().await {
                 ports.extend(batch.iter().map(|a| a.port()));
             }
@@ -84,6 +103,13 @@ pub async fn find(dht: &Dht) -> Vec<Listing> {
 
 /// Puts `room`'s listing on the DHT board under this host's lobby number (a private lobby lists as full, which
 /// Find and Quickplay skip).
+#[cfg(target_arch = "wasm32")]
+pub async fn announce(dht: &Dht, _: &SecretKey, _: &Room) -> Result<(), String> {
+    match *dht {}
+}
+
+/// Puts `room`'s listing on the DHT board (as above).
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn announce(dht: &Dht, key: &SecretKey, room: &Room) -> Result<(), String> {
     let n = lobby_number(key.public());
     let value = seal(key, n, &Listing::of(&key.public().to_string(), room));
@@ -114,7 +140,15 @@ pub type Lan = Arc<Mutex<BTreeMap<EndpointId, Listing>>>;
 pub fn watch_lan(mdns: Option<MdnsAddressLookup>) -> Lan {
     let lan = Lan::default();
     let Some(mdns) = mdns else { return lan };
-    let l = lan.clone();
+    #[cfg(target_arch = "wasm32")]
+    match mdns {}
+    #[cfg(not(target_arch = "wasm32"))]
+    watch(mdns, lan.clone());
+    lan
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn watch(mdns: MdnsAddressLookup, l: Lan) {
     tokio::spawn(async move {
         let mut events = mdns.subscribe().await;
         while let Some(e) = events.next().await {
@@ -129,7 +163,6 @@ pub fn watch_lan(mdns: Option<MdnsAddressLookup>) -> Lan {
             };
         }
     });
-    lan
 }
 
 /// The open lobbies on the LAN.

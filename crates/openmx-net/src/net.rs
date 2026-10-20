@@ -18,19 +18,28 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
 
+#[cfg(not(target_arch = "wasm32"))]
 use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey};
+#[cfg(not(target_arch = "wasm32"))]
 use iroh_mainline_address_lookup::DhtAddressLookup;
+#[cfg(not(target_arch = "wasm32"))]
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use iroh_tickets::endpoint::EndpointTicket;
+#[cfg(not(target_arch = "wasm32"))]
 use n0_mainline::Dht;
+// tokio's natively, the page's clock and timers in a browser (N4)
+use n0_future::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc as amp;
 
+#[cfg(target_arch = "wasm32")]
+use crate::board::MdnsAddressLookup;
 use crate::board::{self, Lan};
+#[cfg(target_arch = "wasm32")]
+use crate::codes::Dht;
 use crate::codes::{self, Codes};
 use crate::handshake::{self, Disc, Handshake};
 use crate::room::{HOST, Listing, Pick, Room, quick_pick};
@@ -198,7 +207,7 @@ struct Link(amp::UnboundedSender<Msg>);
 impl Link {
     fn new(mut tx: SendStream) -> Link {
         let (s, mut r) = amp::unbounded_channel::<Msg>();
-        tokio::spawn(async move {
+        n0_future::task::spawn(async move {
             while let Some(m) = r.recv().await {
                 if send(&mut tx, &m).await.is_err() {
                     break;
@@ -223,7 +232,7 @@ struct Inbox {
 /// a `select!`).
 fn quic(conn: &Connection, tx: SendStream, mut rx: RecvStream) -> (Link, Inbox) {
     let (mt, msgs) = amp::unbounded_channel();
-    tokio::spawn(async move {
+    n0_future::task::spawn(async move {
         loop {
             let m = recv(&mut rx).await;
             let end = m.is_err();
@@ -234,7 +243,7 @@ fn quic(conn: &Connection, tx: SendStream, mut rx: RecvStream) -> (Link, Inbox) 
     });
     let (dt, dgrams) = amp::unbounded_channel();
     let c = conn.clone();
-    tokio::spawn(async move {
+    n0_future::task::spawn(async move {
         while let Ok(d) = c.read_datagram().await {
             if dt.send(d.to_vec()).is_err() {
                 return;
@@ -345,10 +354,14 @@ pub struct Net {
 }
 
 impl Net {
-    /// Starts the network on its own thread; `disc` hashes what this machine's disc holds for the handshake.
+    /// Starts the network on its own thread; `disc` hashes what this machine's disc holds for the handshake. In a
+    /// browser (N4) on the page's event loop instead, which runs it between the page's frames.
     pub fn start(cfg: Online, disc: Arc<dyn Disc>) -> Net {
         let (cmd, cmd_rx) = amp::unbounded_channel();
         let (ev, events) = mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
+        n0_future::task::spawn(run(cfg, cmd_rx, ev, disc));
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::Builder::new()
             .name("net".into())
             .spawn(move || {
@@ -368,7 +381,8 @@ impl Net {
         self.events.lock().unwrap().try_iter().collect()
     }
 
-    /// The next event, waiting up to `wait` (the terminal lobby and the tests).
+    /// The next event, waiting up to `wait` (the terminal lobby and the tests; a browser cannot wait).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn next(&self, wait: Duration) -> Option<Event> {
         self.events.lock().unwrap().recv_timeout(wait).ok()
     }
@@ -394,6 +408,7 @@ impl Ctx {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn dht_builder(board: &Board) -> Option<n0_mainline::DhtBuilder> {
     let mut b = Dht::builder();
     match board {
@@ -406,7 +421,32 @@ fn dht_builder(board: &Board) -> Option<n0_mainline::DhtBuilder> {
     Some(b)
 }
 
+/// The DHT for the board and the codes, as `board` says; none in a browser, which has no UDP socket (N4).
+fn dht(board: &Board) -> Result<Option<Dht>, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = board;
+        Ok(None)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    dht_builder(board).map(|b| b.build()).transpose().map_err(|e| format!("DHT: {e}"))
+}
+
+/// A browser's endpoint (N4): relay-only, as opentennis's is there — the page has no UDP socket, so every packet
+/// goes through the relay over a WebSocket, and nothing is looked up but by its ticket or room code.
+#[cfg(target_arch = "wasm32")]
+pub async fn endpoint(cfg: &Online) -> Result<(Endpoint, Option<MdnsAddressLookup>), String> {
+    let mode = match &cfg.relay {
+        Relay::N0 => RelayMode::Default,
+        Relay::Own(url) => RelayMode::Custom(url.parse::<RelayUrl>().map_err(|e| format!("relay_url {url}: {e}"))?.into()),
+        Relay::Off => return Err("a browser reaches other players only through a relay: relay off leaves it none".into()),
+    };
+    let b = Endpoint::builder(presets::Minimal).secret_key(SecretKey::generate()).alpns(vec![ALPN.to_vec()]).relay_mode(mode);
+    Ok((b.bind().await.map_err(|e| e.to_string())?, None))
+}
+
 /// This machine's endpoint, with its address lookups (the DHT's, mDNS's) as `cfg` has them.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn endpoint(cfg: &Online) -> Result<(Endpoint, Option<MdnsAddressLookup>), String> {
     let mode = match &cfg.relay {
         Relay::N0 => RelayMode::Default,
@@ -442,13 +482,12 @@ async fn run(cfg: Online, mut cmds: amp::UnboundedReceiver<Cmd>, ev: mpsc::Sende
             return;
         }
     };
-    let dht = match dht_builder(&cfg.board).map(|b| b.build()) {
-        Some(Ok(d)) => Some(d),
-        Some(Err(e)) => {
-            let _ = ev.send(Event::Failed(format!("DHT: {e}")));
+    let dht = match dht(&cfg.board) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = ev.send(Event::Failed(e));
             return;
         }
-        None => None,
     };
     let lan_on = mdns.is_some();
     let mut cx = Ctx { ep, codes: Codes::new(dht, cfg.servers()), lan: board::watch_lan(mdns), lan_on, ev, name: cfg.name.clone(), disc, relays: cfg.relay != Relay::Off };
@@ -518,7 +557,7 @@ async fn find(cx: &Ctx, mut out: impl FnMut(Vec<Listing>)) {
         }
     };
     tokio::pin!(board);
-    let wait = tokio::time::sleep(if cx.lan_on { LAN_WAIT } else { Duration::ZERO });
+    let wait = n0_future::time::sleep(if cx.lan_on { LAN_WAIT } else { Duration::ZERO });
     tokio::pin!(wait);
     let mut dht: Option<Vec<Listing>> = None;
     let mut waited = false;
@@ -544,13 +583,13 @@ fn ticket(ep: &Endpoint) -> String {
 /// Waits (bounded) for the address a ticket needs: a home relay with the relays on, else a direct address.
 async fn addressed(ep: &Endpoint, relays: bool) {
     if relays {
-        let _ = tokio::time::timeout(Duration::from_secs(10), ep.online()).await;
+        let _ = n0_future::time::timeout(Duration::from_secs(10), ep.online()).await;
     }
     for _ in 0..50 {
         if ep.addr().ip_addrs().next().is_some() || ep.addr().relay_urls().next().is_some() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        n0_future::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -586,8 +625,8 @@ async fn guest(gtx: amp::UnboundedSender<Guest>, peer: String, conn: Connection,
 /// Refuses a guest (`why`), closing once the refusal has had time to arrive.
 fn refuse(link: &Link, conn: Connection, why: String) {
     link.send(&Msg::Refused(why));
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    n0_future::task::spawn(async move {
+        n0_future::time::sleep(Duration::from_secs(2)).await;
         conn.close(0u32.into(), b"refused");
     });
 }
@@ -614,7 +653,7 @@ struct Shaking {
     waiting: Vec<String>,
     own: Handshake,
     refused: Vec<String>,
-    until: tokio::time::Instant,
+    until: n0_future::time::Instant,
 }
 
 async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) {
@@ -637,7 +676,7 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
     if online {
         cx.say(Event::Status("Putting the code online...".into()));
         let (codes, ev, t, rtx) = (cx.codes.clone(), cx.ev.clone(), ticket(&ep), rtx.clone());
-        tokio::spawn(async move {
+        n0_future::task::spawn(async move {
             let r = codes.roll(first, &t, |c| drop(ev.send(Event::Short(c.into())))).await;
             let _ = rtx.send(r);
         });
@@ -646,8 +685,8 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
     }
     let (gtx, mut guests) = amp::unbounded_channel::<Guest>();
     let mut joined: Vec<Joined> = Vec::new();
-    let mut republish = tokio::time::interval(REPUBLISH);
-    let mut ping = tokio::time::interval(Duration::from_secs(2));
+    let mut republish = n0_future::time::interval(REPUBLISH);
+    let mut ping = n0_future::time::interval(Duration::from_secs(2));
     let t0 = Instant::now();
     let mut dirty = true;
     let mut listed: Option<Instant> = None;
@@ -662,14 +701,14 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
             ep.set_user_data_for_address_lookup(if room.private { None } else { board::lan_data(&listing) });
             if let Some(dht) = cx.codes.dht.clone().filter(|_| !room.private) {
                 let (key, r) = (ep.secret_key().clone(), room.clone());
-                tokio::spawn(async move { board::announce(&dht, &key, &r).await.inspect_err(|e| eprintln!("{e}")) });
+                n0_future::task::spawn(async move { board::announce(&dht, &key, &r).await.inspect_err(|e| eprintln!("{e}")) });
             }
         }
-        let shake_end = shaking.as_ref().map_or_else(|| tokio::time::Instant::now() + REPUBLISH, |s| s.until);
+        let shake_end = shaking.as_ref().map_or_else(|| n0_future::time::Instant::now() + REPUBLISH, |s| s.until);
         tokio::select! {
             Some(inc) = ep.accept() => {
                 let gtx = gtx.clone();
-                tokio::spawn(async move {
+                n0_future::task::spawn(async move {
                     let Ok(accepting) = inc.accept() else { return };
                     let Ok(conn) = accepting.await else { return };
                     let peer = conn.remote_id().to_string();
@@ -689,10 +728,10 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                     if online {
                         // republished with the listing from now on
                         let (codes, code, t) = (cx.codes.clone(), room.short.clone(), ticket(&ep));
-                        let mut every = tokio::time::interval(REPUBLISH);
+                        let mut every = n0_future::time::interval(REPUBLISH);
                         every.tick().await;
                         let rtx = rtx.clone();
-                        tokio::spawn(async move {
+                        n0_future::task::spawn(async move {
                             loop {
                                 every.tick().await;
                                 if rtx.is_closed() {
@@ -835,7 +874,7 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                     }
                     room.seed = seed();
                     let waiting: Vec<String> = room.peers().into_iter().filter(|p| p != HOST).collect();
-                    shaking = Some(Shaking { waiting, own: Handshake::of(&room, &*cx.disc), refused: Vec::new(), until: tokio::time::Instant::now() + SHAKE_WAIT });
+                    shaking = Some(Shaking { waiting, own: Handshake::of(&room, &*cx.disc), refused: Vec::new(), until: n0_future::time::Instant::now() + SHAKE_WAIT });
                     broadcast(&joined, &Msg::Start(room.clone()));
                     cx.say(Event::Status("Starting: checking the ride with everyone...".into()));
                 }
@@ -855,7 +894,7 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                 }
                 Some(_) => {}
             },
-            _ = tokio::time::sleep_until(shake_end), if shaking.is_some() => {
+            _ = n0_future::time::sleep_until(shake_end), if shaking.is_some() => {
                 let s = shaking.as_mut().unwrap();
                 for peer in std::mem::take(&mut s.waiting) {
                     s.refused.push(format!("{}: no handshake in {} s", room.names.get(&peer).cloned().unwrap_or_default(), SHAKE_WAIT.as_secs()));
@@ -930,13 +969,13 @@ async fn resolve(cx: &Ctx, code: &str) -> Result<EndpointAddr, String> {
     let (tx, mut rx) = amp::unbounded_channel();
     if online {
         let (codes, c) = (cx.codes.clone(), code.clone());
-        tokio::spawn(async move {
+        n0_future::task::spawn(async move {
             loop {
-                let r = tokio::time::timeout(Duration::from_secs(20), codes.lookup(&c)).await.unwrap_or_else(|_| Err("no answer in 20 s".into()));
+                let r = n0_future::time::timeout(Duration::from_secs(20), codes.lookup(&c)).await.unwrap_or_else(|_| Err("no answer in 20 s".into()));
                 if tx.send(r).is_err() {
                     return;
                 }
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                n0_future::time::sleep(Duration::from_secs(3)).await;
             }
         });
     }
@@ -956,7 +995,7 @@ async fn resolve(cx: &Ctx, code: &str) -> Result<EndpointAddr, String> {
                 }
                 last = r.map(|o| o.map(|(_, seq)| seq));
             }
-            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            _ = n0_future::time::sleep(Duration::from_millis(250)) => {}
         }
     }
 }
@@ -975,7 +1014,7 @@ async fn connect(cx: &Ctx, code: &str) -> Option<(Connection, Link, Inbox)> {
         return None;
     }
     cx.say(Event::Status(format!("Joining {}...", codes::code_in(code).unwrap_or_else(|| short(&addr.id.to_string()).into()))));
-    let conn = match tokio::time::timeout(Duration::from_secs(30), cx.ep.connect(addr, ALPN)).await {
+    let conn = match n0_future::time::timeout(Duration::from_secs(30), cx.ep.connect(addr, ALPN)).await {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
             cx.say(Event::Failed(format!("Couldn't reach the host: {e}")));
@@ -997,7 +1036,7 @@ async fn connect(cx: &Ctx, code: &str) -> Option<(Connection, Link, Inbox)> {
 /// Joins by code; true once seated (the lobby then runs until this machine leaves or the host goes).
 async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedReceiver<Cmd>) -> bool {
     if cx.relays {
-        let _ = tokio::time::timeout(Duration::from_secs(10), cx.ep.online()).await;
+        let _ = n0_future::time::timeout(Duration::from_secs(10), cx.ep.online()).await;
     }
     let Some((conn, link, inbox)) = connect(cx, code).await else { return false };
     let me = cx.ep.id().to_string();
@@ -1006,7 +1045,7 @@ async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedR
     let Inbox { mut msgs, mut dgrams } = inbox;
     let mut seated = false;
     let mut riding = false;
-    let hello = tokio::time::sleep(Duration::from_secs(20));
+    let hello = n0_future::time::sleep(Duration::from_secs(20));
     tokio::pin!(hello);
     cx.say(Event::Status("Connected: waiting for the host's lobby...".into()));
     loop {
@@ -1063,7 +1102,7 @@ async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedR
                 Some(Cmd::Datagram(to, data)) => drop(conn.send_datagram(datagram(&to, &data).into())),
                 Some(Cmd::Leave) | None => {
                     // a moment for what was queued to go out first
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    n0_future::time::sleep(Duration::from_millis(100)).await;
                     conn.close(0u32.into(), b"left");
                     return true;
                 }

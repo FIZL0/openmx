@@ -49,12 +49,20 @@ fn save<S: Clone + 'static>(np: &mut Netplay<S>, why: &str) -> String {
     if let Some(at) = &np.report {
         return at.display().to_string();
     }
+    #[cfg(not(target_arch = "wasm32"))]
     let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    // std's clock and process id panic in a browser (N4): the page's clock, and no id
+    #[cfg(target_arch = "wasm32")]
+    let unix = (js_sys::Date::now() / 1000.0) as u64;
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let me: String = np.me.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
     // two sessions in one process (the tests) or one second must not share a file
-    let path = np.dumps.join(format!("desync-{unix}-{}-{n}-{me}.txt", std::process::id()));
+    #[cfg(not(target_arch = "wasm32"))]
+    let pid = std::process::id();
+    #[cfg(target_arch = "wasm32")]
+    let pid = 0;
+    let path = np.dumps.join(format!("desync-{unix}-{pid}-{n}-{me}.txt"));
     let report = Report { why: why.to_string(), me: np.me.clone(), lineup: np.lineup.clone(), pads: np.log.clone() };
     let saved = std::fs::create_dir_all(&np.dumps).and_then(|()| std::fs::write(&path, report.text()));
     match saved {

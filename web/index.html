@@ -3,6 +3,11 @@
   openmx in a browser (N4). The game runs in worker.js and draws into this page's canvas; this page only asks for the
   disc, shows how the copy is going, and keeps the picture scaled to the window. Build the module with tools/web.sh
   and serve this folder on localhost (or https: OPFS needs a secure context).
+
+  Online (N4): `?join=<code or ticket>` or `?host=<seats>`, with `&relay=<url>` (n0's relays when absent),
+  `&codes=<servers>`, `&name=`, `&bike=`, `&ticks=<n>`, rides against other machines through a relay instead of
+  starting the disc's game; the lobby's state shows in the corner and in `body[data-online]`, and `window.openmxOnline`
+  holds the last of it (`window.openmxTicks` the ticks' lines when `ticks` was asked).
 -->
 <html lang="en">
 <head>
@@ -24,6 +29,7 @@
     font-weight: bold; text-transform: uppercase; cursor: pointer; transform: skew(-12deg); }
   #disc input { display: none; }
   #status { margin-top: 1em; min-height: 1.4em; color: #aaa; }
+  #online { position: fixed; left: 1em; top: 1em; white-space: pre; color: #f2b600; }
 </style>
 </head>
 <body>
@@ -37,11 +43,12 @@
     <p id="status"></p>
   </div>
 </section>
-<script>
+<p id="online"></p>
+<script type="module">
   const screen = document.getElementById('screen');
   const disc = document.getElementById('disc');
   const status = document.getElementById('status');
-  const worker = new Worker('worker.js');
+  const worker = new Worker('worker.js', { type: 'module' });
 
   // `body[data-state]` says where the page is (asking, copying, started, failed): crates/openmx/tests/web/chromium.mjs
   // waits on it.
@@ -57,6 +64,15 @@
     } else if (data.started) {
       disc.classList.remove('up');
       state('started');
+    } else if (data.online) {
+      const o = data.online;
+      window.openmxOnline = o;
+      document.body.dataset.online = o.failed ? 'failed' : o.riding ? 'riding' : o.code ? 'lobby' : 'joining';
+      document.getElementById('online').textContent =
+        `${o.status}\n${o.code ? `room ${o.code}` : ''}  ${o.taken} seated  ${o.riding ? `tick ${o.tick}` : ''}${
+          o.failed ? `\n${o.failed}` : ''}`;
+    } else if (data.ticks) {
+      window.openmxTicks = data.ticks;
     } else if (data.error) {
       disc.classList.add('up');
       status.textContent = data.error;
@@ -64,9 +80,15 @@
     }
   };
 
-  // The canvas belongs to the worker from here on; the page only scales it.
-  const offscreen = screen.transferControlToOffscreen();
-  worker.postMessage({ start: { canvas: offscreen } }, [offscreen]);
+  const ask = new URLSearchParams(location.search);
+  if (ask.has('join') || ask.has('host')) {
+    const o = Object.fromEntries(['name', 'relay', 'codes', 'join', 'host', 'bike', 'ticks'].map(k => [k, ask.get(k)]));
+    worker.postMessage({ online: o });
+  } else {
+    // The canvas belongs to the worker from here on; the page only scales it.
+    const offscreen = screen.transferControlToOffscreen();
+    worker.postMessage({ start: { canvas: offscreen } }, [offscreen]);
+  }
 
   document.getElementById('pick').onchange = async ({ target }) => {
     const file = target.files[0];
