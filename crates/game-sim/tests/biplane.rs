@@ -17,9 +17,23 @@
 //! 4. **the aerodynamics**, the whole `[Aerodynamics]` section generated around the shipped values,
 //!    the force and the moment recorded at the body's two entries.
 //!
-//! What is not proved here, and why, is in the journal entry's last section.
+//! S38 adds the body the plane flies on, the same way, on the plane's own body in the same state:
+//!
+//! 5. **the integrator**, **the end of a substep**, **the local force and moment** and **gravity**,
+//!    each with the whole body generated (a pinned body, a clear inverse inertia and signed zeros
+//!    included) and every field compared after;
+//! 6. **the pose** the wrapper hands the model after the substeps, with the actor's virtuals hooked;
+//! 7. **the measure**, with the surfaces' animation and the crash test hooked out;
+//! 8. **the world step**, on a world built in scratch memory whose listeners and bodies are hooks
+//!    that log their calls and now and then grow their own lists.
+//!
+//! What is not proved here, and why, is in the journal entries' last sections.
 
-use game_sim::biplane::{Aero, Air, Attitude, Autopilot, Engine, Joystick, Pad, Surfaces, autopilot, controls};
+use game_sim::air::AcosTable;
+use game_sim::biplane::{
+    Aero, Air, Attitude, Autopilot, Body, Dynamics, Engine, Joystick, List, Measure, Pad, Surfaces, World, autopilot,
+    controls,
+};
 use game_sim::camera::{CURVE_ENTRIES, CurveTable};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
@@ -552,4 +566,701 @@ fn the_aerodynamics_match_the_original() {
         same_vector("the moment", case, moment, pushed[1]);
     }
     println!("the aerodynamics: {CASES} cases, bit-exact");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// S38 — the rigid body, the world step and the measure
+// ---------------------------------------------------------------------------------------------------
+
+/// The body's fields, all of them quadwords but the first two.
+mod body_at {
+    pub const ENABLED: u32 = 0x00;
+    pub const INV_MASS: u32 = 0x10;
+    pub const DAMPING: u32 = 0x20;
+    pub const LAST_POSITION: u32 = 0x50;
+    pub const POSITION: u32 = 0x60;
+    pub const VELOCITY: u32 = 0x70;
+    pub const LAST_FORCE: u32 = 0x80;
+    pub const FORCE: u32 = 0x90;
+    pub const ACCEL: u32 = 0xa0;
+    pub const SHOCK_PEAK: u32 = 0xb0;
+    pub const SHOCK: u32 = 0xc0;
+    pub const LISTENERS: u32 = 0xd0;
+    pub const STEP: u32 = 0xf0;
+    pub const INV_INERTIA: u32 = 0x120;
+    pub const ANG_DAMPING: u32 = 0x130;
+    pub const LAST_QUAT: u32 = 0x150;
+    pub const QUAT: u32 = 0x170;
+    pub const COFG: u32 = 0x180;
+    pub const MOMENT: u32 = 0x190;
+    pub const LAST_MOMENT: u32 = 0x1a0;
+    pub const RATES: u32 = 0x1b0;
+    pub const ANG_ACCEL: u32 = 0x1c0;
+    pub const TWIST_PEAK: u32 = 0x1d0;
+    pub const TWIST: u32 = 0x1e0;
+    /// The body's vtable slots.
+    pub const END_SUBSTEP: u32 = 0x30;
+    pub const INTEGRATE: u32 = 0x44;
+}
+/// The plane's wrapper round the body (its actor), and the wrapper's fields.
+const WRAPPER: u32 = 0x50;
+const WRAPPER_BODY: u32 = 0x110;
+const WRAPPER_GRAVITY: u32 = 0xf0;
+const WRAPPER_COLLISION: u32 = 0x120;
+const WRAPPER_ACTOR_VTABLE: u32 = 0x38;
+/// The plane's own vtable, and the measure's fields past S34's.
+const PLANE_VTABLE: u32 = 0x48;
+const PLANE_COLLISION: u32 = 0x170;
+const PLANE_WHEELS: u32 = 0x408;
+const PLANE_SOUND: u32 = 0x67c;
+
+fn quad(ee: &Ee, a: u32) -> Vf {
+    Vf([0, 4, 8, 12].map(|k| ee.f32_at(a + k)))
+}
+
+fn set_quad(ee: &mut Ee, a: u32, v: Vf) {
+    for k in 0..4 {
+        ee.set_f32(a + 4 * k as u32, v[k]);
+    }
+}
+
+fn the_body(ee: &Ee) -> u32 {
+    ee.u32_at(PLANE + at::BODY)
+}
+
+/// The body as the port holds it, off the original's fields.
+fn body_of(ee: &Ee, b: u32) -> Body {
+    use body_at::*;
+    Body {
+        enabled: ee.u32_at(b + ENABLED) != 0,
+        inv_mass: F(ee.f32_at(b + INV_MASS)),
+        damping: quad(ee, b + DAMPING),
+        last_position: quad(ee, b + LAST_POSITION),
+        position: quad(ee, b + POSITION),
+        velocity: quad(ee, b + VELOCITY),
+        last_force: quad(ee, b + LAST_FORCE),
+        force: quad(ee, b + FORCE),
+        accel: quad(ee, b + ACCEL),
+        shock_peak: quad(ee, b + SHOCK_PEAK),
+        shock: quad(ee, b + SHOCK),
+        step: quad(ee, b + STEP),
+        inv_inertia: quad(ee, b + INV_INERTIA),
+        ang_damping: quad(ee, b + ANG_DAMPING),
+        last_quat: quad(ee, b + LAST_QUAT),
+        quat: quad(ee, b + QUAT),
+        cofg: quad(ee, b + COFG),
+        moment: quad(ee, b + MOMENT),
+        last_moment: quad(ee, b + LAST_MOMENT),
+        rates: quad(ee, b + RATES),
+        ang_accel: quad(ee, b + ANG_ACCEL),
+        twist_peak: quad(ee, b + TWIST_PEAK),
+        twist: quad(ee, b + TWIST),
+    }
+}
+
+fn write_body(ee: &mut Ee, b: u32, body: &Body) {
+    use body_at::*;
+    ee.set_u32(b + ENABLED, u32::from(body.enabled));
+    ee.set_f32(b + INV_MASS, body.inv_mass.to_f32());
+    for (at, v) in [
+        (DAMPING, body.damping),
+        (LAST_POSITION, body.last_position),
+        (POSITION, body.position),
+        (VELOCITY, body.velocity),
+        (LAST_FORCE, body.last_force),
+        (FORCE, body.force),
+        (ACCEL, body.accel),
+        (SHOCK_PEAK, body.shock_peak),
+        (SHOCK, body.shock),
+        (STEP, body.step),
+        (INV_INERTIA, body.inv_inertia),
+        (ANG_DAMPING, body.ang_damping),
+        (LAST_QUAT, body.last_quat),
+        (QUAT, body.quat),
+        (COFG, body.cofg),
+        (MOMENT, body.moment),
+        (LAST_MOMENT, body.last_moment),
+        (RATES, body.rates),
+        (ANG_ACCEL, body.ang_accel),
+        (TWIST_PEAK, body.twist_peak),
+        (TWIST, body.twist),
+    ] {
+        set_quad(ee, b + at, v);
+    }
+}
+
+/// Every field of the port's body against the original's. The two accelerations' `w` lanes are what
+/// the vector registers held (the integrator stores whole quadwords), so they are compared only where
+/// `w` says.
+fn check_body(case: usize, ee: &Ee, b: u32, got: &Body, accel_w: bool, ang_accel_w: bool) {
+    let want = body_of(ee, b);
+    assert_eq!(got.enabled, want.enabled, "case {case}: enabled");
+    same("the inverse mass", case, got.inv_mass, want.inv_mass.to_f32());
+    for (name, g, w, lanes) in [
+        ("the damping", got.damping, want.damping, 4),
+        ("the last position", got.last_position, want.last_position, 4),
+        ("the position", got.position, want.position, 4),
+        ("the velocity", got.velocity, want.velocity, 4),
+        ("the last force", got.last_force, want.last_force, 4),
+        ("the force", got.force, want.force, 4),
+        ("the acceleration", got.accel, want.accel, if accel_w { 4 } else { 3 }),
+        ("the shock peak", got.shock_peak, want.shock_peak, 4),
+        ("the shock", got.shock, want.shock, 4),
+        ("the step", got.step, want.step, 4),
+        ("the inverse inertia", got.inv_inertia, want.inv_inertia, 4),
+        ("the angular damping", got.ang_damping, want.ang_damping, 4),
+        ("the last orientation", got.last_quat, want.last_quat, 4),
+        ("the orientation", got.quat, want.quat, 4),
+        ("the centre of mass", got.cofg, want.cofg, 4),
+        ("the moment", got.moment, want.moment, 4),
+        ("the last moment", got.last_moment, want.last_moment, 4),
+        ("the rates", got.rates, want.rates, 4),
+        ("the angular acceleration", got.ang_accel, want.ang_accel, if ang_accel_w { 4 } else { 3 }),
+        ("the twist peak", got.twist_peak, want.twist_peak, 4),
+        ("the twist", got.twist, want.twist, 4),
+    ] {
+        for k in 0..lanes {
+            assert_eq!(g[k].to_bits(), w[k].to_bits(),
+                       "case {case}: {name}[{k}] is {:e} in the game, {:e} in the port ({w:?} / {g:?})", w[k], g[k]);
+        }
+    }
+}
+
+impl Pick {
+    fn vector(&mut self, scale: f32, w: f32) -> Vf {
+        Vf::new(self.range(-scale, scale), self.range(-scale, scale), self.range(-scale, scale), w)
+    }
+    /// A vector with any `w`: the lanes the original carries along without reading.
+    fn loose(&mut self, scale: f32) -> Vf {
+        let w = self.range(-2.0, 2.0);
+        self.vector(scale, w)
+    }
+    /// A unit quaternion as the host rounds it, now and then a little off the sphere or an axis one.
+    fn quat(&mut self) -> Vf {
+        match self.next() % 12 {
+            0 => Vf::new(0.0, 0.0, 0.0, 1.0),
+            1 => Vf::new(0.0, 1.0, 0.0, 0.0),
+            _ => {
+                let q = [0; 4].map(|_| self.range(-1.0, 1.0));
+                let n = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-3) * self.range(0.999, 1.001);
+                Vf(q.map(|x| x / n))
+            }
+        }
+    }
+    /// One lane value from a small set, so that equal magnitudes, signed zeros and sign flips come up.
+    fn lane(&mut self, near: f32) -> f32 {
+        match self.next() % 7 {
+            0 => 0.0,
+            1 => -0.0,
+            2 => near,
+            3 => -near,
+            _ => self.range(-1000.0, 1000.0),
+        }
+    }
+}
+
+/// A body around the plane's own: the live values each scaled, with the edges (a pinned body, a
+/// clear inverse inertia, zero damping) mixed in.
+fn random_body(pick: &mut Pick, live: &Body) -> Body {
+    let inv_mass = match pick.next() % 8 {
+        0 => 0.0,
+        1 => -0.0,
+        _ => pick.around(live.inv_mass.to_f32()),
+    };
+    let inv_inertia = match pick.next() % 8 {
+        0 => Vf::new(0.0, 0.0, 0.0, 1.0),
+        1 => Vf::new(-0.0, 0.0, 0.0, 1.0),
+        _ => Vf::new(pick.around(live.inv_inertia[0]), pick.around(live.inv_inertia[1]),
+                     pick.around(live.inv_inertia[2]), if pick.one_in(8) { 0.0 } else { 1.0 }),
+    };
+    let damping = |pick: &mut Pick| if pick.one_in(3) { Vf::splat(1.0) } else { pick.vector(1.0, 1.0) };
+    Body {
+        enabled: !pick.one_in(8),
+        inv_mass: F(inv_mass),
+        damping: damping(pick),
+        last_position: pick.vector(500.0, 1.0),
+        position: pick.loose(2000.0),
+        velocity: pick.loose(80.0),
+        last_force: pick.vector(5000.0, 1.0),
+        force: pick.loose(30_000.0),
+        accel: pick.vector(10.0, 1.0),
+        shock_peak: pick.vector(100.0, 1.0),
+        shock: pick.vector(100.0, 1.0),
+        step: Vf::new(pick.range(0.0, 0.05), pick.range(0.0, 0.01), pick.range(0.0, 0.1), pick.range(-2.0, 2.0)),
+        inv_inertia,
+        ang_damping: damping(pick),
+        last_quat: pick.quat(),
+        quat: pick.quat(),
+        cofg: if pick.one_in(2) { live.cofg } else { pick.vector(5.0, 1.0) },
+        moment: pick.loose(20_000.0),
+        last_moment: pick.vector(100.0, 1.0),
+        rates: pick.loose(4.0),
+        ang_accel: pick.loose(10.0),
+        twist_peak: pick.vector(100.0, 1.0),
+        twist: pick.vector(100.0, 1.0),
+    }
+}
+
+/// A substep length: mostly a 30 Hz frame cut by the game's rate, sometimes anything, sometimes 0.
+fn substep(pick: &mut Pick) -> f32 {
+    match pick.next() % 8 {
+        0 => 0.0,
+        1 => 1.0 / 120.0,
+        2 => pick.range(0.0, 0.2),
+        _ => pick.range(0.002, 0.02),
+    }
+}
+
+#[test]
+fn the_body_integrates_like_the_original() {
+    let Some(mut ee) = plane() else { return };
+    let b = the_body(&ee);
+    let live = body_of(&ee, b);
+    let integrate = ee.u32_at(ee.u32_at(b + BODY_VTABLE) + body_at::INTEGRATE);
+    assert_eq!(ee.i32_at(b + body_at::LISTENERS), 0, "the plane's body has listeners in this state");
+    let mut pick = Pick(0x3c6e_f372_fe94_f82b);
+    for case in 0..CASES {
+        let mut port = random_body(&mut pick, &live);
+        write_body(&mut ee, b, &port);
+        let h = substep(&mut pick);
+        ee.call(integrate, &[u64::from(b)], &[h], BUDGET);
+        port.integrate(F(h));
+        // the linear acceleration's w is a register nothing loads; the angular one's is the position's
+        // w only when the linear half ran
+        check_body(case, &ee, b, &port, false, port.inv_mass != 0.0);
+    }
+    println!("the integrator: {CASES} cases, bit-exact");
+}
+
+#[test]
+fn the_body_ends_a_substep_like_the_original() {
+    let Some(mut ee) = plane() else { return };
+    let b = the_body(&ee);
+    let live = body_of(&ee, b);
+    let end = ee.u32_at(ee.u32_at(b + BODY_VTABLE) + body_at::END_SUBSTEP);
+    let mut pick = Pick(0xa54f_f53a_5f1d_36f1);
+    for case in 0..CASES {
+        let mut port = random_body(&mut pick, &live);
+        let near = pick.range(-100.0, 100.0);
+        for v in [&mut port.shock, &mut port.shock_peak, &mut port.twist, &mut port.twist_peak] {
+            for k in 0..4 {
+                v[k] = pick.lane(near);
+            }
+        }
+        write_body(&mut ee, b, &port);
+        ee.call(end, &[u64::from(b)], &[], BUDGET);
+        port.end_substep();
+        check_body(case, &ee, b, &port, true, true);
+    }
+    println!("the end of a substep: {CASES} cases, bit-exact");
+}
+
+#[test]
+fn local_forces_and_moments_match_the_original() {
+    let Some(mut ee) = plane() else { return };
+    let b = the_body(&ee);
+    let live = body_of(&ee, b);
+    let vtable = ee.u32_at(b + BODY_VTABLE);
+    let (force, moment) = (ee.u32_at(vtable + FORCE_SLOT), ee.u32_at(vtable + MOMENT_SLOT));
+    assert_eq!((force, moment), (addr("body_force_local").unwrap(), addr("body_moment_local").unwrap()));
+    let v = ee.scratch(0);
+    let mut pick = Pick(0x510e_527f_ade6_82d1);
+    for case in 0..CASES {
+        let mut port = random_body(&mut pick, &live);
+        write_body(&mut ee, b, &port);
+        let x = pick.loose(30_000.0);
+        set_quad(&mut ee, v, x);
+        if pick.one_in(2) {
+            ee.call(force, &[u64::from(b), u64::from(v)], &[], BUDGET);
+            port.add_force_local(x);
+        } else {
+            ee.call(moment, &[u64::from(b), u64::from(v)], &[], BUDGET);
+            port.add_moment_local(x);
+        }
+        check_body(case, &ee, b, &port, true, true);
+    }
+    println!("the local force and moment: {CASES} cases, bit-exact");
+}
+
+#[test]
+fn gravity_is_pushed_like_the_original() {
+    let Some(mut ee) = plane() else { return };
+    let b = the_body(&ee);
+    let live = body_of(&ee, b);
+    let w = PLANE + WRAPPER;
+    assert_eq!(ee.u32_at(w + WRAPPER_BODY), b, "the wrapper does not hold the plane's body");
+    let shipped = quad(&ee, w + WRAPPER_GRAVITY);
+    assert_eq!(shipped.to_bits(), Vf::new(0.0, -1499.9999, 0.0, 1.0).to_bits(), "the plane's gravity moved");
+    let listener = addr("body_wrapper_force").unwrap();
+    let collision = ee.u32_at(w + WRAPPER_COLLISION);
+    let response = ee.u32_at(ee.u32_at(collision + 8) + 0x80);
+    let responded = Rc::new(RefCell::new(0));
+    let r = responded.clone();
+    ee.hooks.insert(response, Box::new(move |_| *r.borrow_mut() += 1));
+    let mut pick = Pick(0x9b05_688c_2b3e_6c1f);
+    for case in 0..CASES {
+        let mut port = random_body(&mut pick, &live);
+        write_body(&mut ee, b, &port);
+        let g = if pick.one_in(4) { shipped } else { pick.loose(3000.0) };
+        set_quad(&mut ee, w + WRAPPER_GRAVITY, g);
+        ee.set_u32(w + 0x1b0, 7);
+        *responded.borrow_mut() = 0;
+        ee.call(listener, &[u64::from(w)], &[substep(&mut pick)], BUDGET);
+        port.push_gravity(g);
+        check_body(case, &ee, b, &port, true, true);
+        let n = u32::from(port.enabled);
+        assert_eq!(*responded.borrow(), n, "case {case}: the collision response ran {} times", responded.borrow());
+        assert_eq!(ee.u32_at(w + 0x1b0), if port.enabled { 0 } else { 7 }, "case {case}: wrapper+0x1b0");
+    }
+    println!("gravity: {CASES} cases, bit-exact");
+}
+
+#[test]
+fn the_pose_is_put_like_the_original() {
+    let Some(mut ee) = plane() else { return };
+    let b = the_body(&ee);
+    let live = body_of(&ee, b);
+    let w = PLANE + WRAPPER;
+    let post = addr("body_wrapper_post").unwrap();
+    // the actor's virtuals do the transform's work; the pose they are handed is what is compared
+    let actor = ee.u32_at(w + WRAPPER_ACTOR_VTABLE);
+    let put = Rc::new(RefCell::new(Vec::<(u32, [f32; 4])>::new()));
+    let say_yes = Rc::new(RefCell::new(true));
+    let yes = say_yes.clone();
+    ee.hooks.insert(ee.u32_at(actor + 0x10c), Box::new(move |ee| ee.set(2, u64::from(*yes.borrow()))));
+    for slot in [0x128, 0xdc, 0xd8, 0x110] {
+        ee.hooks.insert(ee.u32_at(actor + slot), Box::new(|_| {}));
+    }
+    ee.hooks.insert(addr("transform_touch").unwrap(), Box::new(|_| {}));
+    let p = put.clone();
+    ee.hooks.insert(addr("transform_set_pose").unwrap(), Box::new(move |ee| {
+        let at = ee.r(7) as u32;
+        p.borrow_mut().push((ee.r(6) as u32, [0, 4, 8, 12].map(|k| ee.f32_at(at + k))));
+    }));
+    let mut pick = Pick(0x1f83_d9ab_fb41_bd6b);
+    for case in 0..CASES {
+        let port = random_body(&mut pick, &live);
+        write_body(&mut ee, b, &port);
+        *say_yes.borrow_mut() = !pick.one_in(8);
+        put.borrow_mut().clear();
+        ee.call(post, &[u64::from(w)], &[substep(&mut pick)], BUDGET);
+        let put = put.borrow();
+        if !port.enabled || !*say_yes.borrow() {
+            assert!(put.is_empty(), "case {case}: posed while disabled or refused");
+            continue;
+        }
+        assert_eq!(put.len(), 1, "case {case}");
+        let (quat, origin) = port.pose();
+        assert_eq!(put[0].0, b + body_at::LAST_QUAT, "case {case}: not the last orientation");
+        same_vector("the orientation", case, quat, [0, 1, 2, 3].map(|k| ee.f32_at(b + body_at::LAST_QUAT + 4 * k)));
+        same_vector("the origin", case, origin, put[0].1);
+    }
+    println!("the pose: {CASES} cases, bit-exact");
+}
+
+#[test]
+fn the_measure_matches_the_original() {
+    let Some(mut ee) = plane() else { return };
+    let b = the_body(&ee);
+    let live = body_of(&ee, b);
+    let measure = addr("biplane_measure").unwrap();
+    let table = AcosTable::build();
+    // the pose (proved above), the surfaces' animation (S35's) and the crash test (S39's) are not
+    // the measure's own: they do nothing here, so the body the measure reads is the one written
+    let vtable = ee.u32_at(PLANE + PLANE_VTABLE);
+    for at in [addr("body_wrapper_post").unwrap(), ee.u32_at(vtable + 0x1b8), ee.u32_at(vtable + 0x1bc),
+               addr("sound_trigger").unwrap()] {
+        ee.hooks.insert(at, Box::new(|_| {}));
+    }
+    let sounded = Rc::new(RefCell::new(0));
+    let s = sounded.clone();
+    ee.hooks.insert(addr("touchdown_sound").unwrap(), Box::new(move |_| *s.borrow_mut() += 1));
+    let sound = ee.u32_at(PLANE + PLANE_SOUND);
+    let collision = ee.u32_at(PLANE + PLANE_COLLISION);
+    let aero = ee.u32_at(PLANE + at::AERO);
+    let wheels = [0, 4, 8].map(|k| ee.u32_at(PLANE + PLANE_WHEELS + k));
+    let mut pick = Pick(0x5be0_cd19_137e_2179);
+    for case in 0..CASES {
+        let mut body = random_body(&mut pick, &live);
+        if pick.one_in(3) {
+            // slow, or straight along an axis: the clamps and the table's ends
+            body.velocity = match pick.next() % 4 {
+                0 => Vf::new(0.0, 0.0, 0.0, 1.0),
+                1 => Vf::new(0.0, 0.0, pick.range(-50.0, 50.0), 1.0),
+                2 => pick.vector(1e-3, 1.0),
+                _ => Vf::new(pick.range(-50.0, 50.0), 0.0, 0.0, 1.0),
+            };
+        }
+        write_body(&mut ee, b, &body);
+        let was = pick.one_in(2);
+        ee.set_u32(PLANE + at::GROUNDED, u32::from(was));
+        let down = [0; 3].map(|_| match pick.next() % 4 {
+            0 => 1,
+            1 => 5,
+            _ => 0,
+        });
+        for (w, d) in wheels.iter().zip(down) {
+            ee.set_u32(w + 0x88, d);
+        }
+        let touching = pick.one_in(4);
+        ee.set_u32(collision + 0x40, u32::from(touching));
+        let has_sound = !pick.one_in(4);
+        ee.set_u32(PLANE + PLANE_SOUND, if has_sound { sound } else { 0 });
+        *sounded.borrow_mut() = 0;
+
+        let mut port = Measure {
+            grounded: was,
+            forward: quad(&ee, PLANE + 0x5d0),
+            up: quad(&ee, PLANE + 0x5e0),
+            ..Measure::default()
+        };
+        ee.call(measure, &[u64::from(PLANE)], &[substep(&mut pick)], BUDGET);
+        let (touchdown, true_speed) = port.contacts(down.map(|d| d != 0), touching);
+        port.flight(&body, &table);
+
+        assert_eq!(ee.u32_at(PLANE + at::GROUNDED), u32::from(port.grounded), "case {case}: grounded");
+        assert_eq!(ee.u32_at(PLANE + 0x594), u32::from(port.was_grounded), "case {case}: was grounded");
+        assert_eq!(ee.u32_at(aero + 0x30), u32::from(true_speed), "case {case}: the true speed flag");
+        assert_eq!(*sounded.borrow(), u32::from(touchdown && has_sound), "case {case}: the touchdown sound");
+        same("the airspeed", case, port.airspeed, ee.f32_at(PLANE + 0x598));
+        same("alpha", case, port.alpha, ee.f32_at(PLANE + at::ALPHA));
+        same("beta", case, port.beta, ee.f32_at(PLANE + at::BETA));
+        for (name, got, at) in [
+            ("the world rates", port.world_rates, 0x5b0),
+            ("the body velocity", port.velocity, 0x5c0),
+            ("the forward row", port.forward, 0x5d0),
+            ("the up row", port.up, 0x5e0),
+            ("the Euler angles", port.euler, 0x5f0),
+            ("the matrix row 0", port.matrix.0[0], 0x600),
+            ("the matrix row 1", port.matrix.0[1], 0x610),
+            ("the matrix row 2", port.matrix.0[2], 0x620),
+            ("the matrix row 3", port.matrix.0[3], 0x630),
+        ] {
+            same_vector(name, case, got, quad(&ee, PLANE + at).0);
+        }
+        // and what S34's functions read is what the measure left
+        let flown = pick.one_in(2);
+        ee.set_u32(PLANE + at::FLOWN, u32::from(flown));
+        assert_eq!(port.attitude(flown, &body), attitude_of(&ee), "case {case}: the attitude");
+        let s = surfaces_of(&ee);
+        let air = port.air(&s, &body);
+        same("Air::speed", case, air.speed, ee.f32_at(PLANE + at::SPEED));
+        same_vector("Air::rates", case, air.rates, quad(&ee, b + body_at::RATES).0);
+    }
+    println!("the measure: {CASES} cases, bit-exact");
+}
+
+/// The world step against the original on a world built in scratch memory: five lists of fake
+/// elements whose virtuals are hooks that log `(what, which, argument)`, against the port driving a
+/// [`Dynamics`] that logs the same. Listeners grow their own lists now and then, which is what the
+/// re-read counts are for.
+mod world_at {
+    pub const ITERATIONS: u32 = 0x00;
+    pub const RATE: u32 = 0x04;
+    /// Each list is `{count, _, array}` at these.
+    pub const LISTS: [u32; 5] = [0x50, 0x68, 0x80, 0x98, 0xb0];
+    /// Where each list's element keeps its virtual table, and the slot called.
+    pub const TABLE_AT: [u32; 5] = [0x100, 0x08, 0x10, 0x00, 0x00];
+    pub const SLOT: [u32; 5] = [0x44, 0x0c, 0x18, 0x08, 0x08];
+    pub const END_SLOT: u32 = 0x30;
+    pub const ID: u32 = 0x20;
+}
+const CAPACITY: usize = 6;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ev {
+    Pre(u32, u32),
+    Force(u32, u32),
+    Integrate(u32, u32),
+    End(u32),
+    Constrain(u32, bool),
+    Post(u32, u32),
+}
+
+/// Which call on each list grows it by one (counted from 0 over the whole frame).
+#[derive(Clone, Copy, Default)]
+struct Growth {
+    at: [Option<usize>; 5],
+    calls: [usize; 5],
+}
+
+impl Growth {
+    /// One call on `list`: whether it is the one that grows it.
+    fn call(&mut self, list: usize) -> bool {
+        let now = self.calls[list];
+        self.calls[list] += 1;
+        self.at[list] == Some(now)
+    }
+}
+
+struct Fake {
+    counts: [i32; 5],
+    enabled: Vec<bool>,
+    growth: Growth,
+    log: Vec<Ev>,
+}
+
+fn index(list: List) -> usize {
+    match list {
+        List::Bodies => 0,
+        List::Force => 1,
+        List::Constraints => 2,
+        List::Preforce => 3,
+        List::Post => 4,
+    }
+}
+
+impl Fake {
+    fn grow(&mut self, list: usize) {
+        if self.growth.call(list) && (self.counts[list] as usize) < CAPACITY {
+            self.counts[list] += 1;
+        }
+    }
+}
+
+impl Dynamics for Fake {
+    fn count(&self, list: List) -> i32 {
+        self.counts[index(list)]
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        self.log.push(Ev::Pre(i as u32, dt.to_bits()));
+        self.grow(3);
+    }
+    fn force(&mut self, i: i32, h: F) {
+        self.log.push(Ev::Force(i as u32, h.to_bits()));
+        self.grow(1);
+    }
+    fn enabled(&self, body: i32) -> bool {
+        self.enabled[body as usize]
+    }
+    fn integrate(&mut self, body: i32, h: F) {
+        self.log.push(Ev::Integrate(body as u32, h.to_bits()));
+        self.grow(0);
+    }
+    fn end_substep(&mut self, body: i32) {
+        self.log.push(Ev::End(body as u32));
+    }
+    fn constrain(&mut self, i: i32, first: bool) {
+        self.log.push(Ev::Constrain(i as u32, first));
+        self.grow(2);
+    }
+    fn post(&mut self, i: i32, dt: F) {
+        self.log.push(Ev::Post(i as u32, dt.to_bits()));
+        self.grow(4);
+    }
+}
+
+#[test]
+fn the_world_steps_like_the_original() {
+    let Some(mut ee) = plane() else { return };
+    use world_at::*;
+    // the game's own world: what the port's numbers are, and that nothing constrains anything
+    let game = addr("dynamics_world").unwrap();
+    assert_eq!(ee.i32_at(game + ITERATIONS), 1);
+    assert_eq!(ee.f32_at(game + RATE).to_bits(), 115.0f32.to_bits());
+    assert_eq!(ee.i32_at(game + LISTS[2]), 0, "the state has constraints");
+    let bodies = ee.u32_at(game + LISTS[0] + 8);
+    let n = ee.i32_at(game + LISTS[0]) as u32;
+    assert!((0..n).any(|k| ee.u32_at(bodies + 4 * k) == the_body(&ee)), "the plane's body is not in the world");
+
+    let step = addr("dynamics_world_step").unwrap();
+    // scratch: the world, then per list an array and its elements, then the virtual tables
+    let world = ee.scratch(0);
+    let mut next = world + 0x100;
+    let mut alloc = |size: u32| {
+        let at = next;
+        next += size;
+        at
+    };
+    let arrays: [u32; 5] = [0; 5].map(|_| alloc(4 * CAPACITY as u32 + 12));
+    let elements: Vec<Vec<u32>> =
+        (0..5).map(|l| (0..CAPACITY).map(|_| alloc(if l == 0 { 0x110 } else { 0x30 })).collect()).collect();
+    let tables: [u32; 5] = [0; 5].map(|_| alloc(0x50));
+    for l in 0..5 {
+        ee.set_u32(world + LISTS[l] + 8, arrays[l]);
+        for (k, &e) in elements[l].iter().enumerate() {
+            ee.set_u32(arrays[l] + 4 * k as u32, e);
+            ee.set_u32(e + TABLE_AT[l], tables[l]);
+            ee.set_u32(e + ID, k as u32);
+        }
+    }
+    let log = Rc::new(RefCell::new(Vec::<Ev>::new()));
+    let growth = Rc::new(RefCell::new(Growth::default()));
+    let hook = |l: usize| 0x0000_1000 + 0x10 * l as u32;
+    for l in 0..5 {
+        ee.set_u32(tables[l] + SLOT[l], hook(l));
+        let (log, growth) = (log.clone(), growth.clone());
+        let count_at = world + LISTS[l];
+        ee.hooks.insert(hook(l), Box::new(move |ee| {
+            let id = ee.u32_at(ee.r(4) as u32 + ID);
+            let arg = ee.f(12).to_bits();
+            log.borrow_mut().push(match l {
+                0 => Ev::Integrate(id, arg),
+                1 => Ev::Force(id, arg),
+                2 => Ev::Constrain(id, ee.r(5) != 0),
+                3 => Ev::Pre(id, arg),
+                _ => Ev::Post(id, arg),
+            });
+            let count = ee.i32_at(count_at);
+            if growth.borrow_mut().call(l) && (count as usize) < CAPACITY {
+                ee.set_u32(count_at, (count + 1) as u32);
+            }
+        }));
+    }
+    let end = hook(5);
+    ee.set_u32(tables[0] + END_SLOT, end);
+    let l = log.clone();
+    ee.hooks.insert(end, Box::new(move |ee| {
+        let id = ee.u32_at(ee.r(4) as u32 + ID);
+        l.borrow_mut().push(Ev::End(id));
+    }));
+
+    let mut pick = Pick(0x6295_8d5e_c0ba_0df1);
+    for case in 0..CASES {
+        let port = World {
+            iterations: match pick.next() % 8 {
+                0 => 0,
+                1 => -1,
+                2 => 2,
+                3 => 3,
+                _ => 1,
+            },
+            rate: F(if pick.one_in(4) { pick.range(1.0, 300.0) } else { 115.0 }),
+        };
+        let dt = match pick.next() % 8 {
+            0 => 0.0,
+            1 => 1.0 / 60.0,
+            2 => pick.range(0.0, 0.1),
+            _ => 1.0 / 30.0,
+        };
+        let count = |pick: &mut Pick| match pick.next() % 8 {
+            0 => 0,
+            1 => -1,
+            _ => (pick.next() % 4) as i32,
+        };
+        let counts = [0; 5].map(|_| count(&mut pick));
+        let enabled: Vec<bool> = (0..CAPACITY).map(|_| !pick.one_in(4)).collect();
+        let mut g = Growth::default();
+        for at in g.at.iter_mut() {
+            if pick.one_in(3) {
+                *at = Some((pick.next() % 6) as usize);
+            }
+        }
+        ee.set_u32(world + ITERATIONS, port.iterations as u32);
+        ee.set_f32(world + RATE, port.rate.to_f32());
+        for l in 0..5 {
+            ee.set_u32(world + LISTS[l], counts[l] as u32);
+        }
+        for (k, &e) in elements[0].iter().enumerate() {
+            ee.set_u32(e, u32::from(enabled[k]));
+        }
+        *growth.borrow_mut() = g;
+        log.borrow_mut().clear();
+        ee.call(step, &[u64::from(world)], &[dt], 4_000_000);
+
+        let mut fake = Fake { counts, enabled, growth: g, log: Vec::new() };
+        port.step(F(dt), &mut fake);
+        assert_eq!(*log.borrow(), fake.log, "case {case}: {port:?} dt {dt} counts {counts:?}");
+    }
+    println!("the world step: {CASES} cases, the same calls in the same order with the same arguments");
 }

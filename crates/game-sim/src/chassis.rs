@@ -195,7 +195,7 @@ fn div_xyz(v: Vf, s: F) -> Vf {
 /// A quaternion back onto the unit sphere: the sum of all four squares through the adder's `w` lane,
 /// then `vrsqrt` — an approximate reciprocal square root, so it is not a square root and a divide,
 /// and all four lanes are scaled by it.
-fn normalize(q: Vf) -> Vf {
+pub(crate) fn normalize(q: Vf) -> Vf {
     let sq = q.mul(q);
     let len2 = vu::madd(vu::add(sq.w(), sq.x()), 1.0, sq.y());
     let len2 = vu::madd(len2, 1.0, sq.z());

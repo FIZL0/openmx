@@ -2805,3 +2805,33 @@ dynamics_world_step boot 0x001f29a0 (world, dt in f12): preforce listeners (+0x9
 #                                   (integrate) and +0x30, the constraints (+0x80) world+0 times;
 #                                   then the post listeners (+0xb0). World node 0x0060b200, step at
 #                                   +0x78, called from 0x0026f800 after the collision clear/collide
+# S38 — the rigid body the plane flies on, the world step and the measure (journal
+# research/journal/2026-10-20-s38-the-biplanes-body). Body vtable 0x00451f10: +0x30 end substep,
+# +0x38 add force, +0x44 integrate, +0x58 force local, +0x5c moment local, +0x64 -> +0x38.
+body_integrate_linear boot 0x001f20d0 (body, h in f12): +0x50 = +0x60; unless +0x10 inv mass == 0.0,
+#                                     +0xf0 = (h, 0.5*h*h, inv mass), a = +0x90 * inv mass, +0x60 +=
+#                                     a h^2/2 + v h, +0x70 = a h + +0x20 * v, +0xa0 = a (w stale)
+body_integrate boot 0x001f2340 (body, h in f12) vt +0x44: linear, +0x150 = +0x170; unless +0x120 ==
+#                              (0,0,0,1) bitwise: second-order quaternion step from +0x1b0 rates and
+#                              +0x120 * +0x190, vrsqrt normalise, rates += alpha h with +0x130 damping
+body_end_substep boot 0x001f77c0 (body) vt +0x30: +0xb0/+0x1d0 keep the larger |+0xc0|/|+0x1e0| per
+#                                axis; +0x80 = +0x90, +0x1a0 = +0x190; +0x90 +0xc0 +0x190 +0x1e0 cleared
+body_add_force boot 0x0015afc0 (body, vec4*) vt +0x38: +0x90.xyz += v, then the +0xd0 listeners
+body_wrapper_force boot 0x0015af40 (wrapper, h) force listener: if the body is enabled, vt +0x64 with
+#                                  wrapper+0xf0 (the plane's gravity), then wrapper+0x120's vt +0x80
+#                                  with 1 (collision response 0x00270dc0), wrapper+0x1b0 = 0
+body_wrapper_preforce boot 0x0015b050 (wrapper, dt): body+0xb0 = (0,0,0,1)
+body_wrapper_post boot 0x0015b070 (wrapper, dt): if enabled, origin = body+0x50 - turn(+0x150, +0x180)
+#                                 to transform_set_pose (wrapper+0x13c, 0, body+0x150, &origin)
+#                                 when actor vt +0x10c says so, then actor vt +0xd8, transform_touch if
+#                                 wrapper+0x74, vt +0x110; wrapper+0x78 = 0
+dynamics_world boot 0x0060b278 the world dynamics_world_step runs (embedded at world node +0x78): in
+#                              the save state iterations 1, rate 115.0, 3 bodies, 3 force, 0
+#                              constraints, 3 preforce, 3 post listeners
+mxbiplane_post boot 0x00355290 (plane, dt) the post listener: biplane_measure, then 0x00354e00,
+#                              0x00355000, 0x00355170 (the MX record/rider copies)
+touchdown_sound boot 0x001b30e0 (out, +0x18c, body+0xb0 shock peak) then 0x003dd0a0 (+0x67c, 0, out)
+transform_set_pose boot 0x001b21d0 (transform, 0, quat*, origin*) a sibling of orientation_set; the
+#                                  plane's pose goes through it after every world step
+sound_trigger boot 0x003dd0a0 (sound object, 0, position*) what the plane's touchdown calls after
+#                             touchdown_sound
