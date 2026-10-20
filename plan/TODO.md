@@ -29,7 +29,6 @@ The first four phases are tooling and feel like a detour from the port. They are
 port that converges and one that is 90 % done forever: every task after them is proved with what they
 build. Do them in order; inside a later phase, tasks that touch different files can go in any order.
 
-- [ ] **S41** the biplane flies with its hands off and its body still (after S38, S39, I6). `Flight::frame` (crates/game-sim/src/flight.rs) runs only the controls' preforce half: wire the rest into it in the original's order — the tires' preforce, then n = (int)(dt*115)+1 substeps of collision force, autopilot, engine (with the smooth noise ported), aero and the two tire force listeners per wheel, the body integrator pair and the constraint list (S38, S39), then the measure (S38) that writes `attitude` and `air`, and the crash test (S39); replace `Sim::step`'s hands-off `Pad::default()` with I6's mapping of the recorded pad; then raise BIPLANE_AGREES_THROUGH in crates/game-sim/tests/replay.rs (0 since S40: the capture's plane creeps from tick 1) as far as it goes, up to the first crash at tick 693 → crates/game-sim/src/flight.rs · crates/game-sim/src/lib.rs · crates/game-sim/tests/replay.rs | t: the_biplane_acceptance_run | j: the-biplane-flies-under-its-own-power — split from S40 (2026-10-20): S40 made the lane, the fixture and the ratchet — S38 and S39 are merged (e665ce5, c625123): fill Flight::frame now — P31 needs it for the plane to take gas in the shell
 ### Phase 2 — a decompilation you can read
 
 
