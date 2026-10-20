@@ -234,6 +234,27 @@ impl Library {
             .and_then(|i| self.extra.get(i).copied())
             .unwrap_or_default()
     }
+
+    /// The engine's "add an animation" call: a record under `key` with clip `a` and clip `b`, each
+    /// loaded and then bound by name — `a` first — or left empty for an empty name.
+    ///
+    /// Nothing happens unless `enabled`, the body's own "takes added records" bit, or when a record
+    /// under `key` is already there: the first registration of a key is the one that stays.
+    pub fn add(&mut self, enabled: bool, key: i32, a: &str, b: &str, anim: &mut impl Animations) {
+        if !enabled || self.extra.iter().any(|rec| rec.key == key) {
+            return;
+        }
+        let mut clip = |name: &str| {
+            if name.is_empty() {
+                return None;
+            }
+            anim.load(name);
+            anim.bound(name)
+        };
+        let a = clip(a);
+        let b = clip(b);
+        self.extra.push(Extra { key, a, b });
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------

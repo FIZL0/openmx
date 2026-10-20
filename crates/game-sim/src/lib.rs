@@ -515,6 +515,11 @@ pub mod wheel;
 /// bike's, and the bigger of the two.
 pub mod vehicle_anim;
 
+/// The biplane's moving parts and its pilot: the plane's request block, which turns a rider's body
+/// into a pilot leaning with the stick, and the flaps, rudder and prop posed from the controls. Here
+/// rather than in alphabetical order, beside the step it drives.
+pub mod biplane_anim;
+
 /// The world outside the bike, as the ride asks about it: where the ground is under a point, and the
 /// scene's collision meshes stood where the scene puts them, with the sweep against the lot.
 pub mod world;

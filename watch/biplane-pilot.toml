@@ -1,0 +1,231 @@
+# biplane-pilot.toml — the human's biplane recording (C7's playback, re-recorded for S35): what the
+# plane hands its pilot to animate with, what the pilot's body makes of it, and how the plane's moving
+# parts are posed.
+#
+#   ./kit record --dry-run watch/biplane-pilot.toml
+#   ./kit pcsx2 with -- bash <C7's playback/play_capture.sh, with this spec in place of watch/biplane.toml> \
+#       PID context/recordings/biplane.p2m2 10971 1718 context/capture/biplane/pilot.csv
+#
+# Same chains as watch/biplane.toml (C7), measured on the recording's own state and on nothing else:
+# the plane is the first entry of the manager's actor list, and the pilot's body is the *eighth*
+# entry's actor less 0x400 — the object whose request pointer (+0x488) is the plane's +0x690. If
+# `plane_type` is not 1 or `body_req` is not `plane + 0x690`, the list moved.
+#
+# Where every offset comes from (research/oracle.txt, the S35 block, and the journal entry):
+#   the plane's measure step writes its request block at +0x690 (+0x698 at-base, +0x69c holding,
+#   +0x788 airborne, +0x800 the phase axis' target, +0x804 the mix axis', +0x808 the band);
+#   the pilot's body is the vehicle-animation object (+0x488 its request, +0x630/+0x634 the two lag
+#   records, +0x68c the ramp, +0x8ec..+0x8f4 the states, +0x9f0 the added record it plays);
+#   the surface step poses the bones at +0x418..+0x434 (each bone's local matrix at +0x40).
+
+[watch]
+name        = "biplane-pilot"
+description = "the human flying the biplane on Free06: the pilot's clip selection and the moving parts"
+every       = 1          # one row per tick
+frames      = 1718       # the tape is 3,437 fields = 1,718 ticks after the state's own
+
+[setup]
+warmup = 0               # the playback script loads the state through PCSX2's Play, not the kit
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"             # the C library's LCG (R5): the pilot's idle fidgets draw from it
+addr = "@rand_state"
+type = "u64"
+
+[[field]]
+name = "plane_type"            # +0x00: 1 for the plane
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "plane_addr"            # the plane itself, to check the body's request pointer against
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0"
+type = "u32"
+
+# --- what the measure step reads -------------------------------------------------------------------
+
+[[field]]
+name = "elev_cmd"              # +0x340: -sign(y)|y|^3, or +1 Up / -1 Down
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x340"
+type = "f32"
+
+[[field]]
+name = "ail_cmd"               # +0x344: -sign(x)|x|^3, or +1 Left / -1 Right
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x344"
+type = "f32"
+
+[[field]]
+name = "just_reset"            # +0x588: set by the reset, let go of by the second frame step after it
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x588"
+type = "u32"
+
+[[field]]
+name = "reset_seen"            # +0x58c: +0x588 as the last frame step left it
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x58c"
+type = "u32"
+
+[[field]]
+name = "on_ground"             # +0x590: any of the three tyres touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x590"
+type = "u32"
+
+[[field]]
+name = "speed"                 # +0x598: |velocity|
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x598"
+type = "f32"
+
+[[field]]
+name = "crash"                 # +0x3b0: 0 flying, else the wreck reason
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x3b0"
+type = "u32"
+
+# --- the request block it writes, at +0x690 ---------------------------------------------------------
+
+[[field]]
+name = "req_at_base"           # +0x698 (request +0x8): 1 from the constructor, 0 from the first measure on
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x698"
+type = "u32"
+
+[[field]]
+name = "req_held"              # +0x69c (request +0xc): the reset flag, copied
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x69c"
+type = "u32"
+
+[[field]]
+name = "req_airborne"          # +0x788 (request +0xf8): no tyre down
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x788"
+type = "u32"
+
+[[field]]
+name = "req_phase"             # +0x800 (request +0x170): (1 - ail_cmd) * 0.5
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x800"
+type = "f32"
+
+[[field]]
+name = "req_mix"               # +0x804 (request +0x174): (elev_cmd + 1) * 0.5
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x804"
+type = "f32"
+
+[[field]]
+name = "req_band"              # +0x808 (request +0x178): the speed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x808"
+type = "f32"
+
+# --- the pilot's body: the eighth actor, less 0x400 ---------------------------------------------------
+
+[[field]]
+name = "body_req"              # body +0x488: should be plane_addr + 0x690
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x88"
+type = "u32"
+
+[[field]]
+name = "body_extra"            # body +0x9f0: the added record played instead of the state machine
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5f0"
+type = "u32"
+
+[[field]]
+name = "body_records"          # body +0x9f4: how many added records there are
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5f4"
+type = "u32"
+
+[[field]]
+name = "body_prev"             # body +0x8ec
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x4ec"
+type = "u32"
+
+[[field]]
+name = "body_state"            # body +0x8f0: the state running
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x4f0"
+type = "u32"
+
+[[field]]
+name = "body_want"             # body +0x8f4: the state asked for
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x4f4"
+type = "u32"
+
+[[field]]
+name = "body_ramp"             # body +0x68c: the cross-fade ramp
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x28c"
+type = "f32"
+
+[[field]]
+name = "body_rate"             # body +0x690: the rate the ramp falls at
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x290"
+type = "f32"
+
+[[field]]
+name = "mix_lag"               # body +0x630 -> {value, tau, ratio}: eased towards request +0x174
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x230 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "phase_lag"             # body +0x634 -> {value, tau, ratio}: eased towards request +0x170
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x234 -> 0x0"
+type = "f32x4"
+
+# --- the moving parts, as the surface step leaves them ----------------------------------------------
+
+[[field]]
+name = "pitch_cmd"             # +0x354: the elevator the rear flaps show, times MaxElevator
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x354"
+type = "f32"
+
+[[field]]
+name = "aileron"               # +0x35c: the wing flaps' angle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x35c"
+type = "f32"
+
+[[field]]
+name = "rudder"                # +0x360: the rudder's angle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x360"
+type = "f32"
+
+[[field]]
+name = "max_elevator"          # +0x37c: MaxElevator, radians
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x37c"
+type = "f32"
+
+[[field]]
+name = "prop_angle"            # engine +0x48: the drawn prop's angle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x400 -> 0x48"
+type = "f32"
+
+[[field]]
+name = "bone_top_left"         # TopLeftFlap's local matrix (+0x41c -> +0x40)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x41c -> 0x40"
+type = "mat4"
+
+[[field]]
+name = "rest_top_left"         # TopLeftFlap's rest matrix as the bone finder kept it (+0x480)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x480"
+type = "mat4"
+
+[[field]]
+name = "bone_top_right"        # TopRightFlap's local matrix (+0x424 -> +0x40)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x424 -> 0x40"
+type = "mat4"
+
+[[field]]
+name = "bone_rear_left"        # RearLeftFlap's local matrix (+0x42c -> +0x40)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x42c -> 0x40"
+type = "mat4"
+
+[[field]]
+name = "bone_rudder"           # Rudder's local matrix (+0x434 -> +0x40)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x434 -> 0x40"
+type = "mat4"
+
+[[field]]
+name = "bone_prop"             # PropDummy's local matrix (+0x428 -> +0x40)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x428 -> 0x40"
+type = "mat4"
