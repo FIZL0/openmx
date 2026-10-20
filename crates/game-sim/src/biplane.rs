@@ -35,6 +35,7 @@
 use crate::camera::CurveTable;
 use crate::math::basis;
 use crate::motion::remap;
+use crate::rng::Rng;
 use crate::world::World;
 use ps2_float::fpu::{self, Acc};
 use ps2_float::{Dest, F, Field, Vf, libm, vu};
@@ -805,4 +806,161 @@ pub fn collision_force<B: Body>(body: &mut B, gravity: Vf, resolve: impl FnOnce(
     body.add_force(gravity);
     resolve(body);
     true
+}
+
+// --- the crash test ---------------------------------------------------------------------------------
+
+/// How close to the terrain's edge the plane may fly before it is thrown back.
+pub const EDGE: f32 = 150.0;
+/// The crash reasons the test sets: a contact, and the edge of the map.
+pub const CRASHED: u32 = 1;
+pub const THROWN: u32 = 13;
+/// The throw: a fall of this many feet sets its time, the speed toward the centre is capped here, and
+/// the upward part is `16.1·k + 240/k` for `k = 2·sqrt(fall)`.
+const THROW_FALL: f32 = f32::from_bits(0x416e_8262);
+const THROW_CAP: f32 = f32::from_bits(0x4501_9999);
+const THROW_UP: f32 = f32::from_bits(0x4180_cccd);
+const THROW_LIFT: f32 = 240.0;
+/// The random spins a thrown plane is given, per axis, times a draw in `[0, 1)`.
+const THROW_SPIN: [f32; 3] = [0.5, f32::from_bits(0x3ecc_cccd), f32::from_bits(0x3f33_3333)];
+/// How long a thrown plane flies before it may count as landed, and what is left of its velocity when it
+/// is put back.
+const THROWN_FOR: f32 = 2.5;
+const RECOVER_KEEP: f32 = f32::from_bits(0x3e99_999a);
+
+/// The flyable area: the terrain's extent in `x` and `z`, each 256 times a count times a size (the
+/// terrain's four floats, in that pairing).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Area {
+    pub width: F,
+    pub depth: F,
+}
+
+impl Area {
+    pub fn new(x_count: F, z_count: F, x_size: F, z_size: F) -> Area {
+        Area { width: F(256.0) * x_count * x_size, depth: F(256.0) * z_count * z_size }
+    }
+
+    /// Whether a point is within `margin` of an edge, or past it. `NaN` counts as outside.
+    pub fn outside(&self, at: Vf, margin: F) -> bool {
+        let inside = |v: f32, extent: F| !(v < margin) && v <= extent - margin;
+        !(inside(at.x(), self.width) && inside(at.z(), self.depth))
+    }
+}
+
+/// What the crash test reads off the plane and its collision object.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Contact {
+    /// The collision object has a contact this frame.
+    pub touching: bool,
+    /// The contact's surface is one the plane's crash mask ignores for the speed test.
+    pub ignored: bool,
+    /// The measure's on-the-ground flag.
+    pub grounded: bool,
+    /// `|velocity|`, and the `y` of the plane's up row.
+    pub speed: F,
+    pub up_y: F,
+}
+
+/// The plane's crash state.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Crash {
+    /// 0 flying, [`CRASHED`] or [`THROWN`].
+    pub reason: u32,
+    /// A thrown plane has come down.
+    pub landed: bool,
+    /// `MinWreckSpeed`, and `WreckTime`.
+    pub min_wreck_speed: F,
+    pub wreck_time: F,
+    /// Time since the crash.
+    pub clock: F,
+}
+
+/// What a crash-test call asked the plane to do: wreck itself (S36's), and then perhaps recover.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Crashed {
+    pub wreck: Option<u32>,
+    pub recover: bool,
+}
+
+impl Crash {
+    /// The wreck's own bookkeeping, the part this module needs: the reason, and not landed. The rest of
+    /// the wreck (the body's inertia and damping, the engine) is the caller's.
+    fn wreck(&mut self, reason: u32, out: &mut Crashed) {
+        self.reason = reason;
+        self.landed = false;
+        out.wreck = Some(reason);
+    }
+
+    /// The crash test, once a frame after the measure.
+    ///
+    /// Near the edge of the area a plane is thrown back: a velocity toward the centre (at the body's own
+    /// height) and up, the gravity scale halved, three random spins, and the [`THROWN`] wreck. Then, for
+    /// a plane still flying, a contact is a [`CRASHED`] wreck when it is faster than `MinWreckSpeed` on
+    /// a surface that counts, or upside down on any. A crashed plane's clock runs; a thrown one first has
+    /// to have been in the air 2.5 s and then be on something, and when the clock passes `WreckTime` it
+    /// keeps 0.3 of its velocity and recovers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step(
+        &mut self,
+        c: &Contact,
+        area: &Area,
+        position: Vf,
+        velocity: &mut Vf,
+        rates: &mut Vf,
+        gravity_scale: &mut F,
+        rng: &mut Rng,
+        dt: F,
+    ) -> Crashed {
+        let mut out = Crashed::default();
+        if self.reason != THROWN && area.outside(position, F(EDGE)) {
+            let half_width = F(0.5) * area.width;
+            let target = Vf::new(half_width.to_f32(), position.y(), (F(0.5) * area.depth).to_f32(), 1.0);
+            let mut toward = minus(target, position);
+            let length = dot(toward, toward);
+            if F::ZERO == length {
+                toward = Vf::VF0;
+            } else {
+                let r = F::ONE.rsqrt(length);
+                toward = Vf::new((F(toward.x()) * r).to_f32(), (F(toward.y()) * r).to_f32(), (F(toward.z()) * r).to_f32(), toward.w());
+            }
+            let k = F(2.0) * F(THROW_FALL).sqrt();
+            let speed = F(THROW_CAP).min(half_width) / k;
+            let lift = F(THROW_UP) * k + F(THROW_LIFT) / k;
+            *velocity = scaled(toward, speed);
+            velocity[1] = (F(velocity.y()) + lift).to_f32();
+            *gravity_scale = *gravity_scale * 0.5;
+            for (lane, spin) in THROW_SPIN.into_iter().enumerate() {
+                rates[lane] = (F(spin) * rng.unit()).to_f32();
+            }
+            rates[3] = 1.0;
+            self.wreck(THROWN, &mut out);
+        }
+        if self.reason == 0 {
+            if c.touching {
+                if !c.ignored && !(c.speed <= self.min_wreck_speed) {
+                    self.wreck(CRASHED, &mut out);
+                    return out;
+                }
+                if c.up_y < 0.0 {
+                    self.wreck(CRASHED, &mut out);
+                }
+            }
+            return out;
+        }
+        self.clock = self.clock + dt;
+        if self.reason == THROWN {
+            if !self.landed && !(self.clock <= THROWN_FOR) && (c.grounded || c.touching) {
+                self.landed = true;
+                self.clock = F::ZERO;
+            }
+            if self.landed && !(self.clock <= self.wreck_time) {
+                *velocity = scaled(*velocity, F(RECOVER_KEEP));
+                out.recover = true;
+            }
+        } else if self.reason == CRASHED && !(self.clock <= self.wreck_time) {
+            out.recover = true;
+        }
+        out
+    }
 }

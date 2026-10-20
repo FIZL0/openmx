@@ -20,8 +20,10 @@
 //! What is not proved here, and why, is in the journal entry's last section.
 
 use game_sim::biplane::{
-    Aero, Air, Attitude, Autopilot, Body, Engine, Joystick, Mount, Pad, Surfaces, Tire, autopilot, collision_force, controls,
+    Aero, Air, Area, Attitude, Autopilot, Body, Contact, Crash, Engine, Joystick, Mount, Pad, Surfaces, Tire, autopilot,
+    collision_force, controls,
 };
+use game_sim::rng::Rng;
 use game_sim::collide::{Bundle, Record};
 use game_sim::world::World;
 use game_sim::camera::{CURVE_ENTRIES, CurveTable};
@@ -1008,4 +1010,205 @@ fn the_tire_forces_match_the_original() {
     assert!(touching > CASES / 5, "only {touching} of {CASES} cases touched");
     assert!(over > CASES / 50, "only {over} of {CASES} cases bottomed the strut");
     println!("the tire forces: {CASES} cases, bit-exact ({touching} touching, {over} bottomed, {steered} steering)");
+}
+
+/// The plane's collision component, and in it the gravity, the collision object and the word the
+/// force clears.
+const COLLISION: u32 = 0x50;
+const GRAVITY: u32 = 0x140;
+const COLLIDER: u32 = 0x170;
+const PENDING: u32 = 0x200;
+
+#[test]
+fn the_collision_force_matches_the_original() {
+    let Some(mut ee) = plane() else { return };
+    let f = addr("biplane_collision_force").unwrap();
+    let body = ee.u32_at(PLANE + at::BODY);
+    assert_eq!(ee.u32_at(PLANE + COLLISION + 0x110), body, "the collision component is not on the plane's body");
+    let seen = log_body(&mut ee, body);
+    let collider = ee.u32_at(PLANE + COLLIDER);
+    assert_ne!(collider, 0, "no collision object on the plane");
+    let resolved = Rc::new(RefCell::new(Vec::new()));
+    let r = resolved.clone();
+    let resolve = ee.u32_at(ee.u32_at(collider + 8) + 0x80);
+    ee.hooks.insert(resolve, Box::new(move |ee| r.borrow_mut().push((ee.r(4) as u32, ee.r(5) as u32))));
+    let mut pick = Pick(0x510e_527f_ade6_82d1);
+    let mut ran = 0;
+    for case in 0..CASES {
+        let enabled = match pick.next() % 8 {
+            0 => 0,
+            1 => 7,
+            _ => 1,
+        };
+        ee.set_u32(body, enabled);
+        let with_collider = !pick.one_in(8);
+        ee.set_u32(PLANE + COLLIDER, if with_collider { collider } else { 0 });
+        let gravity = Vf::new(pick.range(-50.0, 50.0), pick.around(-1500.0), pick.range(-50.0, 50.0), if pick.one_in(2) { 1.0 } else { 0.0 });
+        put(&mut ee, PLANE + GRAVITY, gravity);
+        let force = Vf::new(pick.range(-3000.0, 3000.0), pick.range(-3000.0, 3000.0), pick.range(-3000.0, 3000.0), 1.0);
+        put(&mut ee, body + BODY_FORCE, force);
+        let pending = pick.next() as u32 | 1;
+        ee.set_u32(PLANE + PENDING, pending);
+        seen.borrow_mut().clear();
+        resolved.borrow_mut().clear();
+        ee.call(f, &[u64::from(PLANE + COLLISION)], &[], BUDGET);
+
+        let mut port = Logged { enabled: enabled != 0, pos: Vf::VF0, vel: Vf::VF0, force, quat: Vf::VF0, log: Vec::new() };
+        let mut called = false;
+        let went = collision_force(&mut port, gravity, |_| called = with_collider);
+        same_pushes(case, &port.log, &seen.borrow());
+        same_vector("body force", case, port.force, vector(&ee, body + BODY_FORCE).0);
+        let want: Vec<(u32, u32)> = if called { vec![(collider, 1)] } else { vec![] };
+        assert_eq!(*resolved.borrow(), want, "case {case}: the contact resolution");
+        assert_eq!(ee.u32_at(PLANE + PENDING), if went { 0 } else { pending }, "case {case}: the pending word");
+        ran += usize::from(went);
+    }
+    ee.set_u32(PLANE + COLLIDER, collider);
+    println!("the collision force: {CASES} cases, bit-exact ({ran} on an enabled body)");
+}
+
+/// The crash test's fields on the plane.
+mod crash {
+    pub const VTABLE: u32 = 0x48;
+    pub const WRECK_SLOT: u32 = 0x1c0;
+    pub const RECOVER_SLOT: u32 = 0x1c4;
+    pub const GRAVITY_SCALE: u32 = 0x194;
+    pub const REASON: u32 = 0x3b0;
+    pub const LANDED: u32 = 0x3b4;
+    pub const MIN_WRECK_SPEED: u32 = 0x3b8;
+    pub const CLOCK: u32 = 0x3bc;
+    pub const WRECK_TIME: u32 = 0x3c0;
+    pub const SCENE: u32 = 0x414;
+    pub const MASK: u32 = 0x580;
+    pub const SPEED: u32 = 0x598;
+    pub const UP_Y: u32 = 0x5e4;
+    /// In the collision object: this frame's contact, and its surface (whose flags are at +0x84).
+    pub const CONTACT: u32 = 0x40;
+    pub const SURFACE: u32 = 0x1fc;
+    pub const FLAGS: u32 = 0x84;
+    /// The terrain, from the scene; its four extent floats.
+    pub const TERRAIN: u32 = 0x3b4;
+    pub const EXTENT: u32 = 0x530;
+}
+
+#[derive(Debug, PartialEq)]
+enum Asked {
+    Wreck(u32),
+    Recover,
+}
+
+#[test]
+fn the_crash_test_matches_the_original() {
+    let Some(mut ee) = plane() else { return };
+    let f = addr("biplane_wreck_check").unwrap();
+    let state = addr("rand_state").unwrap();
+    let vt = ee.u32_at(PLANE + crash::VTABLE);
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let a = asked.clone();
+    ee.hooks.insert(ee.u32_at(vt + crash::WRECK_SLOT), Box::new(move |ee| {
+        let (plane, reason) = (ee.r(4) as u32, ee.r(5) as u32);
+        ee.set_u32(plane + crash::REASON, reason);
+        ee.set_u32(plane + crash::LANDED, 0);
+        a.borrow_mut().push(Asked::Wreck(reason));
+    }));
+    let a = asked.clone();
+    ee.hooks.insert(ee.u32_at(vt + crash::RECOVER_SLOT), Box::new(move |ee| a.borrow_mut().push(Asked::Recover)));
+    let body = ee.u32_at(PLANE + at::BODY);
+    let collider = ee.u32_at(PLANE + COLLIDER);
+    let terrain = ee.u32_at(ee.u32_at(PLANE + crash::SCENE) + crash::TERRAIN);
+    let shipped_extent: Vec<f32> = (0..4).map(|k| ee.f32_at(terrain + crash::EXTENT + 4 * k)).collect();
+    let surface = ee.u32_at(PLANE + TIRES[0]); // any object with room: its +0x84 is the stand-in surface's flags
+    let mut pick = Pick(0x9b05_688c_2b3e_6c1f);
+    let (mut thrown, mut crashed, mut recovered) = (0, 0, 0);
+    for case in 0..CASES {
+        let extent: Vec<f32> = shipped_extent.iter().map(|&x| if pick.one_in(2) { x } else { x * pick.range(0.5, 2.0) }).collect();
+        for (k, x) in extent.iter().enumerate() {
+            ee.set_f32(terrain + crash::EXTENT + 4 * k as u32, *x);
+        }
+        let (w, d) = (256.0 * extent[0] * extent[2], 256.0 * extent[1] * extent[3]);
+        let mut coord = |extent: f32, pick: &mut Pick| match pick.next() % 4 {
+            0 => pick.range(-200.0, 400.0),
+            1 => extent + pick.range(-400.0, 200.0),
+            2 => [150.0, extent - 150.0, 0.5 * extent][(pick.next() % 3) as usize],
+            _ => pick.range(0.0, extent),
+        };
+        let pos = Vf::new(coord(w, &mut pick), pick.range(-100.0, 2000.0), coord(d, &mut pick), 1.0);
+        let pos = if pick.one_in(200) { Vf::new(0.5 * w, pos.y(), 0.5 * d, 1.0) } else { pos };
+        let mut vel = Vf::new(pick.range(-200.0, 200.0), pick.range(-100.0, 100.0), pick.range(-200.0, 200.0), 1.0);
+        let mut rates = Vf::new(pick.range(-3.0, 3.0), pick.range(-3.0, 3.0), pick.range(-3.0, 3.0), 0.0);
+        put(&mut ee, body + BODY_POS, pos);
+        put(&mut ee, body + BODY_VEL, vel);
+        put(&mut ee, body + BODY_RATES, rates);
+
+        let reason = match pick.next() % 8 {
+            0..=3 => 0,
+            4 | 5 => 1,
+            6 => 13,
+            _ => 2,
+        };
+        let mut port = Crash {
+            reason,
+            landed: pick.one_in(2),
+            min_wreck_speed: F(pick.around(60.0)),
+            wreck_time: F(if pick.one_in(16) { -1.0 } else { pick.range(0.0, 6.0) }),
+            clock: F(if pick.one_in(8) { 0.0 } else { pick.range(0.0, 7.0) }),
+        };
+        ee.set_u32(PLANE + crash::REASON, port.reason);
+        ee.set_u32(PLANE + crash::LANDED, u32::from(port.landed));
+        ee.set_f32(PLANE + crash::MIN_WRECK_SPEED, port.min_wreck_speed.to_f32());
+        ee.set_f32(PLANE + crash::WRECK_TIME, port.wreck_time.to_f32());
+        ee.set_f32(PLANE + crash::CLOCK, port.clock.to_f32());
+        let mut gravity_scale = F(pick.around(1.0));
+        ee.set_f32(PLANE + crash::GRAVITY_SCALE, gravity_scale.to_f32());
+
+        let touching = pick.one_in(2);
+        let has_surface = pick.one_in(2);
+        let (flags, mask) = (1u32 << (pick.next() % 4), 1u32 << (pick.next() % 4));
+        let c = Contact {
+            touching,
+            ignored: has_surface && flags & mask != 0,
+            grounded: pick.one_in(3),
+            speed: F(pick.range(0.0, 150.0)),
+            up_y: F(pick.range(-1.0, 1.0)),
+        };
+        ee.set_u32(collider + crash::CONTACT, u32::from(touching));
+        ee.set_u32(collider + crash::SURFACE, if has_surface { surface } else { 0 });
+        ee.set_u32(surface + crash::FLAGS, flags);
+        ee.set_u32(PLANE + crash::MASK, mask);
+        ee.set_u32(PLANE + at::GROUNDED, u32::from(c.grounded));
+        ee.set_f32(PLANE + crash::SPEED, c.speed.to_f32());
+        ee.set_f32(PLANE + crash::UP_Y, c.up_y.to_f32());
+
+        let seed = pick.next();
+        ee.set_u32(state, seed as u32);
+        ee.set_u32(state + 4, (seed >> 32) as u32);
+        let mut rng = Rng::from_state(seed);
+        let dt = F(if pick.one_in(16) { 0.0 } else { pick.range(0.01, 0.05) });
+
+        asked.borrow_mut().clear();
+        ee.call(f, &[u64::from(PLANE)], &[dt.to_f32()], BUDGET);
+        let area = Area::new(F(extent[0]), F(extent[1]), F(extent[2]), F(extent[3]));
+        let out = port.step(&c, &area, pos, &mut vel, &mut rates, &mut gravity_scale, &mut rng, dt);
+
+        let mut want = Vec::new();
+        want.extend(out.wreck.map(Asked::Wreck));
+        if out.recover {
+            want.push(Asked::Recover);
+        }
+        assert_eq!(*asked.borrow(), want, "case {case}: what the crash test asked for");
+        assert_eq!(ee.u32_at(PLANE + crash::REASON), port.reason, "case {case}: the reason");
+        assert_eq!(ee.u32_at(PLANE + crash::LANDED), u32::from(port.landed), "case {case}: landed");
+        same("the clock", case, port.clock, ee.f32_at(PLANE + crash::CLOCK));
+        same("the gravity scale", case, gravity_scale, ee.f32_at(PLANE + crash::GRAVITY_SCALE));
+        same_vector("the velocity", case, vel, vector(&ee, body + BODY_VEL).0);
+        same_vector("the rates", case, rates, vector(&ee, body + BODY_RATES).0);
+        let left = u64::from(ee.u32_at(state)) | u64::from(ee.u32_at(state + 4)) << 32;
+        assert_eq!(rng.state(), left, "case {case}: the generator");
+        thrown += usize::from(out.wreck == Some(13));
+        crashed += usize::from(out.wreck == Some(1));
+        recovered += usize::from(out.recover);
+    }
+    assert!(thrown > CASES / 10 && crashed > CASES / 20 && recovered > CASES / 20,
+            "{thrown} thrown, {crashed} crashed, {recovered} recovered: the cases miss a branch");
+    println!("the crash test: {CASES} cases, bit-exact ({thrown} thrown, {crashed} crashed, {recovered} recovered)");
 }
