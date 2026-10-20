@@ -2490,6 +2490,7 @@ dependencies = [
  "game-render",
  "game-sim",
  "ggrs",
+ "openmx-net",
  "ps2-float",
  "serde",
 ]

@@ -31,3 +31,6 @@ ps2-float = { path = "../ps2-float" }
 ggrs = { path = "../../third_party/ggrs" }
 bincode = "1.3"
 serde = { version = "1.0", features = ["derive"] }
+# Finding and joining a game (N3): the lobby's transport, room codes, the board and the handshake, which
+# the front end's online screens drive and an online ride from the lobby rides over.
+openmx-net = { path = "../openmx-net" }

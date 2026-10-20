@@ -223,7 +223,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
 #[test]
 fn what_the_pad_sets_is_what_the_file_says() {
     let (mut m, mut r) = fresh();
-    // Settings, the name: clear it and type "Mx" on the keyboard, then Done.
+    // Settings (under Garage and Online), the name: clear it and type "Mx" on the keyboard, then Done.
+    tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Cross);
@@ -499,7 +500,10 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                         menu::Part::Logo(b) => assert!((b[2] / b[3] - 8.0).abs() < 0.01, "{screen:?} at {w}x{h}"),
                     }
                 }
-                let lists = matches!(screen, Screen::Main | Screen::Pause | Screen::Settings | Screen::Controls);
+                let lists = matches!(
+                    screen,
+                    Screen::Main | Screen::Pause | Screen::Settings | Screen::Controls | Screen::Online | Screen::Games | Screen::Lobby
+                );
                 if lists {
                     assert_eq!(logos.len(), 1, "{screen:?} at {w}x{h}: no logo");
                 }
@@ -512,8 +516,8 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
             }
         }
     }
-    // Four list screens and the keyboard, twelve looks each, at four shapes.
-    assert_eq!(pills, 5 * 12 * 4);
+    // Four list screens, the three online ones (N3) and the keyboard, twelve looks each, at four shapes.
+    assert_eq!(pills, 8 * 12 * 4);
 }
 
 /// [`tap`] on another seat's pad, which only the garage hears.
