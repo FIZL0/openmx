@@ -238,6 +238,24 @@ pad_axis_read_one           boot 0x0011d3d0 the single-axis reader: its own sceP
 #                                           the same arithmetic inline. Not an oracle candidate — it
 #                                           reads the pad through libpad
 pad_poll_axes_centre        boot 0x0016aa40 centre every axis and release every control (pad closed)
+# I6 -- the biplane's controls (R8 and C7 map the class; these are the names the input test calls).
+#   In a ride the player's own four stick consumers (left x, left y, right x, right y: the player
+#   record's +0x88..+0x94) carry centre 0, lo -1, hi 1, dead +-0.3 -- not I2's +-0.2, which is the main
+#   menu's. Both gameplay states (first_recording on the bike, biplane on the plane) register those four
+#   and no others. The port's AxisRange::PLAYER.
+biplane_input               boot 0x00351e20 (x in f12, y in f13, plane a0, control table a1, pad a2):
+#                                           +0x338/+0x33c = the values of commands 0x0e/0x0f; +0x340
+#                                           = -sign(y)|y*(y*y)|, +0x344 the same of x; +0x348 = -1 for
+#                                           0x14, else +1 for 0x15, else 0; then 0 (+1) / 1 (-1) over
+#                                           +0x344 and 2 (+1) / 3 (-1) over +0x340. "Held" is value != 0.
+#                                           Oracle-proved over the biplane state's RAM (tests/biplane.rs).
+#                                           MXBiplane's own input slot (0x00355f40) is a bare j to it
+#   The commands reach it through pad_control_index (named below): the binding map at manager+0x648,
+#   kind 2 reads +0x138 + pad*0x138 + cmd*4 (+0x3a8 when sub is 6), kind 1 +0x618, kind 0x10 +0; -1 out
+#   of range. Shipped table, both pads: 0x0e Cross, 0x0f Square, 0x14 L1, 0x15 R1, 0x00 Left, 0x01
+#   Right, 0x02 Up, 0x03 Down.
+pad_control_copy            boot 0x00134cc0 the pad's vtable +0x1c: memcpy of its control record
+#                                           (pad+0x328 + slot*0x18, 0x18 bytes) into the player's table
 
 # ---------------------------------------------------------------------------------------------------
 # O2 — the arithmetic carriers. No shipped game has a function that is one `div.s` and a `jr`, so the

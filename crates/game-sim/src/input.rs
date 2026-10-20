@@ -555,6 +555,11 @@ pub struct Pad {
     /// pad, and hands every consumer of an axis the same number, so one per axis is what there is to
     /// keep; see [`AxisRange`].
     pub axis_value: [F; AXES],
+    /// The last poll took the bad-read branch, which hands every consumer a centred axis and leaves
+    /// [`Pad::axis_raw`] stale. [`Pad::axis_through`] needs it to give a consumer of its own range
+    /// what that branch would have handed it. Derived from the poll and not hashed: it is the same
+    /// fact as the consumers' values, which [`Pad::axis_value`] already carries into the hash.
+    pub axes_centred: bool,
 }
 
 impl Default for Pad {
@@ -575,6 +580,7 @@ impl Pad {
             controls: [ControlState::default(); CONTROLS],
             axis_raw: [AXIS_CENTRE_RAW; AXES],
             axis_value: [F::ZERO; AXES],
+            axes_centred: false,
         }
     }
 
@@ -614,6 +620,23 @@ impl Pad {
     /// 0 to 255 as a float, 127.0 for an axis with nothing bound to it.
     pub fn raw_axis(&self, axis: Axis) -> F {
         self.axis_raw[axis.index()]
+    }
+
+    /// One axis as a consumer carrying `range` is handed it: the same byte, inversion and arithmetic
+    /// as [`Pad::axis`], through a range of the caller's own.
+    ///
+    /// The game's consumers do not all carry the same range: the main menu's carry
+    /// [`AxisRange::STICK`] (I2), and the player's four in a ride carry [`AxisRange::PLAYER`] (I6).
+    /// After a bad read the poll hands every consumer a centred axis, which this repeats.
+    pub fn axis_through(&self, axis: Axis, range: &AxisRange) -> F {
+        let i = axis.index();
+        let out = match (self.axes_centred, i == AXIS_INVERTED) {
+            (true, true) => AXIS_CENTRE_RAW_INVERTED,
+            (true, false) => AXIS_CENTRE_RAW,
+            (false, true) => AXIS_FULL - self.axis_raw[i],
+            (false, false) => self.axis_raw[i],
+        };
+        range.apply(out, AXIS_FULL)
     }
 
     /// Everything held, back in the game's own bitmask.
@@ -758,6 +781,7 @@ impl Pad {
     /// The byte goes to float through the *unsigned* conversion the original uses, which for a value a
     /// report byte can hold is the plain one.
     fn read_axes(&mut self, report: Option<&Report>) {
+        self.axes_centred = false;
         for i in 0..AXES {
             self.axis_raw[i] = match report {
                 Some(r) if AXIS_MAP[i] != 0 => F::from(r.0[AXIS_MAP[i] as usize] as i32),
@@ -776,6 +800,7 @@ impl Pad {
     /// hands the consumers a centred axis — the constants its own code carries, 127.0 and the inverted
     /// axis's 128.0 — and leaves the stored bytes exactly as they were, stale.
     fn centre_axes(&mut self) {
+        self.axes_centred = true;
         for i in 0..AXES {
             let raw = if i == AXIS_INVERTED {
                 AXIS_CENTRE_RAW_INVERTED
@@ -938,6 +963,22 @@ impl AxisRange {
         hi: F(1.0),
         dead_hi: F(0.2),
         dead_lo: F(-0.2),
+    };
+
+    /// What the player's own four stick consumers carry once a ride is up — left x, left y, right x
+    /// and right y, the ones the player record copies into its sticks every tick and hands to the
+    /// vehicle it controls: the same −1..1 as [`AxisRange::STICK`] with a dead zone of **±0.3**, so
+    /// report bytes 90..=165 read exactly zero and the rest is 1/0.7 steeper than the byte.
+    ///
+    /// Read out of two gameplay save states' RAM (first_recording on the bike, biplane on the plane),
+    /// where these four are the only consumers registered, and proved against the biplane capture's
+    /// sticks tick by tick (`the_biplane_reads_the_pad`). I2's ±0.2 is the main menu's.
+    pub const PLAYER: AxisRange = AxisRange {
+        centre: F(0.0),
+        lo: F(-1.0),
+        hi: F(1.0),
+        dead_hi: F(0.3),
+        dead_lo: F(-0.3),
     };
 
     /// One axis byte through the dead zone and the two segments, in the original's own arithmetic:
@@ -1115,5 +1156,141 @@ impl Manager {
     /// The input layer's whole state in 64 bits, the same on every platform.
     pub fn hash(&self) -> u64 {
         hash::of(self)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The biplane's eight commands
+// ---------------------------------------------------------------------------------------------------
+
+/// The eight game commands the biplane reads, numbered as the binding table numbers them.
+///
+/// The original never asks the pad for a button: the plane's input step looks each command up in the
+/// front end's binding table (pad, command → control) and reads that control's strength out of the
+/// player record's copy of the sixteen control records. The numbers are the table's; which control
+/// each is bound to is [`PlaneCommand::control`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum PlaneCommand {
+    BankLeft = 0x00,
+    BankRight = 0x01,
+    Dive = 0x02,
+    Climb = 0x03,
+    ThrottleUp = 0x0e,
+    ThrottleDown = 0x0f,
+    RudderLeft = 0x14,
+    RudderRight = 0x15,
+}
+
+impl PlaneCommand {
+    /// The eight, in the order the help screen lists them and the overlay draws them.
+    pub const ALL: [PlaneCommand; 8] = {
+        use PlaneCommand::*;
+        [ThrottleUp, ThrottleDown, Climb, Dive, BankLeft, BankRight, RudderLeft, RudderRight]
+    };
+
+    /// The control the shipped binding table puts this command on, for pad 0 and pad 1 alike (read
+    /// out of two save states' RAM, R8 and C7). The table is the front end's and a remapped profile
+    /// would differ; the port carries the shipped one, as [`CONTROL_MAP`] carries the shipped pad.
+    pub const fn control(self) -> Control {
+        match self {
+            PlaneCommand::BankLeft => Control::Left,
+            PlaneCommand::BankRight => Control::Right,
+            PlaneCommand::Dive => Control::Up,
+            PlaneCommand::Climb => Control::Down,
+            PlaneCommand::ThrottleUp => Control::Cross,
+            PlaneCommand::ThrottleDown => Control::Square,
+            PlaneCommand::RudderLeft => Control::L1,
+            PlaneCommand::RudderRight => Control::R1,
+        }
+    }
+
+    /// The name the project calls it, as the freeride's info screen does (`STR_FREE_INFO_PLANE_*`).
+    pub const fn name(self) -> &'static str {
+        match self {
+            PlaneCommand::BankLeft => "bank left",
+            PlaneCommand::BankRight => "bank right",
+            PlaneCommand::Dive => "dive",
+            PlaneCommand::Climb => "climb",
+            PlaneCommand::ThrottleUp => "throttle up",
+            PlaneCommand::ThrottleDown => "throttle down",
+            PlaneCommand::RudderLeft => "rudder left",
+            PlaneCommand::RudderRight => "rudder right",
+        }
+    }
+}
+
+/// What the biplane's input step makes of the pad: the five numbers it writes into the plane, which
+/// the joystick step then rate-limits into the throttle and the three control surfaces.
+///
+/// | field | from |
+/// |---|---|
+/// | `throttle_up` | [`PlaneCommand::ThrottleUp`]'s strength, as it is — so a pressure, not a switch |
+/// | `throttle_down` | [`PlaneCommand::ThrottleDown`]'s strength |
+/// | `elevator` | `-sign(y)·|y|³` of the left stick's y; +1 while [`PlaneCommand::Dive`] is held, else −1 while [`PlaneCommand::Climb`] is |
+/// | `aileron` | `-sign(x)·|x|³` of the left stick's x; +1 while [`PlaneCommand::BankLeft`] is held, else −1 while [`PlaneCommand::BankRight`] is |
+/// | `rudder` | −1 while [`PlaneCommand::RudderLeft`] is held, else +1 while [`PlaneCommand::RudderRight`] is, else 0 |
+///
+/// So the stick is analogue and cubed, the d-pad is digital and overrides it, the rudder is digital
+/// and left wins a tie, and the two throttle commands are analogue (their pressure bytes). "Held" is
+/// the original's own test, a strength that is not 0.0. Stick forward (y < 0) is +elevator, a dive;
+/// stick left (x < 0) is +aileron, a bank to the left.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlaneInput {
+    pub throttle_up: F,
+    pub throttle_down: F,
+    pub elevator: F,
+    pub aileron: F,
+    pub rudder: F,
+}
+
+impl PlaneInput {
+    /// The input step, given the player's two stick values and a command's strength.
+    ///
+    /// In the original order and arithmetic: the two throttle commands, the stick's cubes (`y·(y·y)`,
+    /// its absolute value, times the negated sign as a converted integer — so a centred stick is −0.0),
+    /// the rudder, then the d-pad over the aileron and the elevator.
+    pub fn from_sticks(stick: (F, F), value: impl Fn(PlaneCommand) -> F) -> PlaneInput {
+        let held = |c: PlaneCommand| value(c) != F::ZERO;
+        let cube = |v: F| {
+            let sign = if v < F::ZERO { -1 } else { 1 };
+            F::from(-sign) * (v * (v * v)).abs()
+        };
+        let (x, y) = stick;
+        let mut out = PlaneInput {
+            throttle_up: value(PlaneCommand::ThrottleUp),
+            throttle_down: value(PlaneCommand::ThrottleDown),
+            elevator: cube(y),
+            aileron: cube(x),
+            rudder: F::ZERO,
+        };
+        if held(PlaneCommand::RudderLeft) {
+            out.rudder = -F::ONE;
+        } else if held(PlaneCommand::RudderRight) {
+            out.rudder = F::ONE;
+        }
+        if held(PlaneCommand::BankLeft) {
+            out.aileron = F::ONE;
+        } else if held(PlaneCommand::BankRight) {
+            out.aileron = -F::ONE;
+        }
+        if held(PlaneCommand::Dive) {
+            out.elevator = F::ONE;
+        } else if held(PlaneCommand::Climb) {
+            out.elevator = -F::ONE;
+        }
+        out
+    }
+
+    /// The input step on one pad through the shipped bindings: the player's sticks are the left
+    /// stick through [`AxisRange::PLAYER`], and a command's value is its control's strength.
+    ///
+    /// The player record also merges a second pad bound to the same player (its sticks where they
+    /// are further out, its controls where the first's are 0); a player with one pad, which is every
+    /// player the port has, is this.
+    pub fn from_pad(pad: &Pad) -> PlaneInput {
+        let stick =
+            (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
+        PlaneInput::from_sticks(stick, |c| pad.strength(c.control()))
     }
 }

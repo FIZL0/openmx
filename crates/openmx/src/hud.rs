@@ -28,7 +28,7 @@
 //! of a millisecond), and with the flag off it is one `if` and no pixels at all.
 
 use game_render::raster::Frame;
-use game_sim::input::{AXIS_FULL, Axis, Control, Pad};
+use game_sim::input::{AXIS_FULL, Axis, AxisRange, Control, Pad, PlaneCommand, PlaneInput};
 use game_sim::ride::Controls;
 use game_sim::rider::Rider;
 use game_sim::state::Phase;
@@ -40,6 +40,11 @@ pub struct Hud {
     /// Whether to draw at all. `--hud` sets it and H toggles it; off, [`Hud::draw`] returns before
     /// it touches a pixel.
     pub on: bool,
+    /// Whether the rider is in the biplane: the control list is then the plane's eight commands over
+    /// the controls they are bound to, the left stick is drawn through the plane's ±0.3 dead zone,
+    /// and the ramps beside it are the plane's five numbers. Nothing in the shell flies the plane
+    /// yet, so nothing sets it; the vehicle switch does.
+    pub plane: bool,
     /// The last trick the rider started or landed, as the stunt table spells it — the shell's own
     /// line, because the table lives in the shell and not in the overlay.
     trick: String,
@@ -53,6 +58,7 @@ impl Hud {
     pub fn new(on: bool) -> Hud {
         Hud {
             on,
+            plane: false,
             trick: "-".to_string(),
             wreck: "-".to_string(),
             camera: "-".to_string(),
@@ -97,9 +103,17 @@ impl Hud {
         // three commands that ramp beside them.
         let (x, y) = (x + PAD, y + PAD);
         self.numbers(frame, x, y, rider, riding);
-        self.controls(frame, x, y + CONTROLS_Y, pad);
+        if self.plane {
+            self.plane_controls(frame, x, y + CONTROLS_Y, pad);
+        } else {
+            self.controls(frame, x, y + CONTROLS_Y, pad);
+        }
         self.sticks(frame, x, y + STICKS_Y, pad);
-        self.commands(frame, x + 2 * (STICK + 6), y + STICKS_Y, pad, rider);
+        if self.plane {
+            self.plane_commands(frame, x + 2 * (STICK + 6), y + STICKS_Y, pad);
+        } else {
+            self.commands(frame, x + 2 * (STICK + 6), y + STICKS_Y, pad, rider);
+        }
     }
 
     /// The sixteen controls, in the order the game's own map holds them — which is the order the
@@ -129,6 +143,62 @@ impl Hud {
         }
     }
 
+    /// The plane's eight commands in the top row, as [`PlaneInput::from_pad`] reads them, and under
+    /// each the control the shipped table binds it to, as the pad holds it.
+    ///
+    /// The top row is what the plane gets, so it is not the bottom row again: a stick half over fills
+    /// a bank cell by the cube of half (an eighth), the d-pad fills its cell whatever the stick says,
+    /// and with both rudder buttons down only the left one fills, because left wins the original's
+    /// test. A command cell fills by how much of the command the input step wrote — a throttle's
+    /// pressure, a surface's deflection on its side of centre — and never by a number of its own.
+    fn plane_controls(&self, frame: &mut Frame, x: i32, y: i32, pad: &Pad) {
+        let asked = PlaneInput::from_pad(pad);
+        for (i, command) in PlaneCommand::ALL.iter().enumerate() {
+            let cx = x + i as i32 * (CELL_W + 2);
+            let amount = plane_amount(&asked, *command);
+            fill(frame, cx, y, CELL_W, CELL_H, EMPTY);
+            if amount > 0.0 {
+                let w = ((CELL_W - 2) as f32 * amount.min(1.0)).round().max(1.0) as i32;
+                fill(frame, cx + 1, y + 1, w, CELL_H - 2, HELD);
+            }
+            let ink = if amount > 0.0 { INK } else { DIM };
+            text(frame, cx + 2, y + 3, plane_label(*command), ink, 1);
+
+            let control = command.control();
+            let cy = y + CELL_H + 2;
+            let held = pad.held(control);
+            fill(frame, cx, cy, CELL_W, CELL_H, EMPTY);
+            if held {
+                let strength = pad.strength(control).0.clamp(0.0, 1.0);
+                let w = ((CELL_W - 2) as f32 * strength).round().max(1.0) as i32;
+                fill(frame, cx + 1, cy + 1, w, CELL_H - 2, HELD);
+            }
+            if pad.pressed(control) {
+                outline(frame, cx, cy, CELL_W, CELL_H, PRESSED);
+            }
+            text(frame, cx + 2, cy + 3, control.name(), if held { INK } else { DIM }, 1);
+        }
+    }
+
+    /// The plane's five numbers as its input step wrote them this frame. The rate limits and the
+    /// throttle's integration are the joystick step's, which the shell does not run yet, so there is
+    /// no "holding" bar beside them as there is for the bike.
+    fn plane_commands(&self, frame: &mut Frame, x: i32, y: i32, pad: &Pad) {
+        let asked = PlaneInput::from_pad(pad);
+        let rows = [
+            ("thr+", asked.throttle_up.0),
+            ("thr-", asked.throttle_down.0),
+            ("elev", asked.elevator.0),
+            ("ail", asked.aileron.0),
+            ("rud", asked.rudder.0),
+        ];
+        for (i, (name, v)) in rows.iter().enumerate() {
+            let ry = y + i as i32 * 8;
+            text(frame, x, ry + 1, name, DIM, 1);
+            text(frame, x + 26, ry + 1, &format!("{v:>6.3}"), INK, 1);
+        }
+    }
+
     /// The two sticks, each twice over: the blue dot is the report byte and the white cross is what
     /// [`Pad::axis`] hands the game after the dead zone and the two segments.
     ///
@@ -151,7 +221,9 @@ impl Hud {
             // travel either side of centre.
             fill(frame, bx + 1, mid_y, STICK - 2, 1, GRID);
             fill(frame, mid_x, y + 1, 1, STICK - 2, GRID);
-            let dead = (STICK / 2) / 5;
+            // The plane's left stick goes through the player's range, whose dead zone is 0.3.
+            let plane_stick = self.plane && i == 0;
+            let dead = if plane_stick { (STICK / 2) * 3 / 10 } else { (STICK / 2) / 5 };
             outline(frame, mid_x - dead, mid_y - dead, 2 * dead + 1, 2 * dead + 1, GRID);
 
             // The report byte, on −1..1, with the one axis the poll inverts put back the way the
@@ -170,7 +242,10 @@ impl Hud {
             // The cross is what the game reads and the dot is where the stick is, the dot on top:
             // the two sit on each other while the stick is inside the dead zone, and the dot is the
             // half of that pair a rider needs to be able to see.
-            let (vx, vy) = (pad.axis(*ax).0, pad.axis(*ay).0);
+            let (vx, vy) = match plane_stick {
+                true => (pad.axis_through(*ax, &AxisRange::PLAYER).0, pad.axis_through(*ay, &AxisRange::PLAYER).0),
+                false => (pad.axis(*ax).0, pad.axis(*ay).0),
+            };
             let (px, py) = at(vx, vy);
             fill(frame, px - 3, py, 7, 1, INK);
             fill(frame, px, py - 3, 1, 7, INK);
@@ -273,6 +348,36 @@ impl Hud {
                 text(frame, x + c as i32 * NUMBERS_COL, y + i as i32 * NUMBERS_LINE, line, INK, 2);
             }
         }
+    }
+}
+
+/// How much of one plane command the input step wrote, 0..1: a throttle command's own value, a
+/// surface's deflection on that command's side of centre (dive and bank left are the positive sides),
+/// and the rudder's sign.
+fn plane_amount(asked: &PlaneInput, command: PlaneCommand) -> f32 {
+    match command {
+        PlaneCommand::ThrottleUp => asked.throttle_up.0,
+        PlaneCommand::ThrottleDown => asked.throttle_down.0,
+        PlaneCommand::Dive => asked.elevator.0.max(0.0),
+        PlaneCommand::Climb => (-asked.elevator.0).max(0.0),
+        PlaneCommand::BankLeft => asked.aileron.0.max(0.0),
+        PlaneCommand::BankRight => (-asked.aileron.0).max(0.0),
+        PlaneCommand::RudderLeft => (-asked.rudder.0).max(0.0),
+        PlaneCommand::RudderRight => asked.rudder.0.max(0.0),
+    }
+}
+
+/// A plane command's name, short enough for a cell: [`PlaneCommand::name`]'s words, abbreviated.
+fn plane_label(command: PlaneCommand) -> &'static str {
+    match command {
+        PlaneCommand::ThrottleUp => "thr up",
+        PlaneCommand::ThrottleDown => "thr dn",
+        PlaneCommand::Climb => "climb",
+        PlaneCommand::Dive => "dive",
+        PlaneCommand::BankLeft => "bank l",
+        PlaneCommand::BankRight => "bank r",
+        PlaneCommand::RudderLeft => "rud l",
+        PlaneCommand::RudderRight => "rud r",
     }
 }
 
@@ -633,11 +738,64 @@ mod tests {
         assert_eq!(at(x + 2, y + 1), RAW, "the byte's dot is off to the side");
     }
 
+    /// With the plane up, the top row is what the plane's input step read and the row under it the
+    /// controls: both rudder buttons down fill both control cells but only the left rudder, because
+    /// left wins the original's test; and Cross fills the throttle.
+    #[test]
+    fn the_plane_shows_its_eight_over_the_controls_they_are_bound_to() {
+        let cell = |i: i32, row: i32| {
+            let x = PAD + PAD + i * (CELL_W + 2);
+            let y = 448 - PANEL_H - PAD + PAD + CONTROLS_Y + row * (CELL_H + 2);
+            ((x + 2) as usize, (y + 1) as usize)
+        };
+        let at = |frame: &Frame, (x, y): (usize, usize)| {
+            let i = (y * frame.width + x) * 3;
+            [frame.color[i], frame.color[i + 1], frame.color[i + 2]]
+        };
+        let slot = |c: PlaneCommand| PlaneCommand::ALL.iter().position(|&p| p == c).unwrap() as i32;
+        let mut hud = Hud::new(true);
+        hud.plane = true;
+        let buttons = Control::L1.mask() | Control::R1.mask() | Control::Cross.mask();
+        let manager = polled(Report::from_buttons(buttons));
+        let mut frame = blank();
+        hud.draw(&mut frame, manager.pad(0), &rider(), true);
+        let left = slot(PlaneCommand::RudderLeft);
+        let right = slot(PlaneCommand::RudderRight);
+        assert_eq!(at(&frame, cell(left, 1)), HELD, "l1 is held");
+        assert_eq!(at(&frame, cell(right, 1)), HELD, "r1 is held");
+        assert_eq!(at(&frame, cell(left, 0)), HELD, "the plane reads left rudder");
+        assert_eq!(at(&frame, cell(right, 0)), EMPTY, "and not right: left wins the tie");
+        assert_eq!(at(&frame, cell(slot(PlaneCommand::ThrottleUp), 0)), HELD, "cross is the throttle");
+        assert_eq!(at(&frame, cell(slot(PlaneCommand::Climb), 0)), EMPTY, "nobody touched the stick");
+    }
+
+    /// The plane's stick goes through the player's ±0.3 range, not the bike's ±0.2: a quarter of the
+    /// travel moves the bike's cross and leaves the plane's dead centre.
+    #[test]
+    fn the_planes_stick_has_the_players_dead_zone() {
+        let mut report = Report::idle();
+        const REPORT_LEFT_X: usize = 2;
+        report.set_axis(REPORT_LEFT_X, AXIS_CENTRE + 32);
+        let manager = polled(report);
+        let pad = manager.pad(0);
+        assert!(pad.axis(Axis::LeftX) > F::ZERO, "past the bike's dead zone");
+        assert_eq!(pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), F::ZERO, "inside the plane's");
+
+        let mut hud = Hud::new(true);
+        hud.plane = true;
+        let mut frame = blank();
+        hud.draw(&mut frame, pad, &rider(), true);
+        let x = PAD + PAD + STICK / 2;
+        let y = 448 - PANEL_H - PAD + PAD + STICKS_Y + STICK / 2;
+        let i = (y as usize * frame.width + x as usize) * 3;
+        assert_eq!([frame.color[i], frame.color[i + 1], frame.color[i + 2]], INK, "the cross is dead centre");
+    }
+
     /// The font is what the numbers are read off, so a glyph missing from it is a number nobody can
     /// read. Everything the overlay formats comes out of this set.
     #[test]
     fn the_font_has_a_shape_for_everything_the_overlay_writes() {
-        let used = "abcdefghijklmnopqrstuvwxyz0123456789./-";
+        let used = "abcdefghijklmnopqrstuvwxyz0123456789./-+";
         for c in used.chars() {
             assert!(glyph(c).is_some(), "no glyph for {c:?}");
         }

@@ -575,6 +575,14 @@ fn hat(value: i16, low: Control, high: Control) -> u16 {
 ///
 /// The throttle keys (`X` and the space bar) are not in this table: they are a pressure and not a
 /// bit, and [`KeyRamp`] answers both the byte and the bit for them.
+///
+/// The same keys fly the biplane, with nothing added, because the plane reads the same pad through
+/// the shipped binding table ([`game_sim::input::PlaneCommand::control`]): `X`/space is Cross, the
+/// throttle up; `Z` is Square, the throttle down; `A` and `D` are L1 and R1, the rudder (and both
+/// together are the plane's own reset chord); and the arrows are the left stick, the elevator and the
+/// aileron. The plane's dive, climb and bank commands sit on the d-pad, which the keyboard does not
+/// have, but they write the same ±1 a stick at its stop does, and a held arrow is a stick at its stop
+/// in [`KEY_TO_EDGE`].
 fn keyboard(held: &dyn Fn(u8) -> bool) -> u16 {
     let mut mask = 0;
     for (code, control) in [
@@ -835,6 +843,36 @@ mod tests {
             AxisRange::STICK.hi,
             "a stick pushed all the way reads all the way"
         );
+    }
+
+    /// I6: the keyboard flies the plane. Through the port's own poll and the plane's own input step,
+    /// a held up arrow is a full dive and a held down arrow a full climb, left and right are a full
+    /// bank, `X` opens the throttle, `Z` closes it, and `A` and `D` are the rudder.
+    #[test]
+    fn the_keyboard_reaches_all_eight_of_the_planes_commands() {
+        use game_sim::input::PlaneInput;
+        // A second of `keys` held, through the shell's report and the game's poll.
+        let fly = |keys: &[u8]| {
+            let mut pads = Pads::unplugged(Wiring::default());
+            let mut manager = Manager::connected();
+            let held = |code: u8| keys.contains(&code);
+            for _ in 0..60 {
+                manager.tick(F(FRAME), &[pads.build(FRAME, &held); PADS]);
+            }
+            PlaneInput::from_pad(manager.pad(0))
+        };
+        assert_eq!(fly(&[key::UP]).elevator, F::ONE, "up is stick forward: a dive");
+        assert_eq!(fly(&[key::DOWN]).elevator, -F::ONE, "down is a climb");
+        assert_eq!(fly(&[key::LEFT]).aileron, F::ONE, "left banks left");
+        assert_eq!(fly(&[key::RIGHT]).aileron, -F::ONE, "right banks right");
+        assert_eq!(fly(&[key::X]).throttle_up, F::ONE, "x opens the throttle, all the way");
+        assert_eq!(fly(&[key::Z]).throttle_down, F::ONE, "z closes it");
+        assert_eq!(fly(&[key::A]).rudder, -F::ONE, "a is left rudder");
+        assert_eq!(fly(&[key::D]).rudder, F::ONE, "d is right rudder");
+        // And nothing held is nothing asked: a centred stick's cube is the original's −0.0.
+        let idle = fly(&[]);
+        assert_eq!([idle.throttle_up, idle.throttle_down, idle.rudder], [F::ZERO; 3]);
+        assert_eq!([idle.elevator.to_bits(), idle.aileron.to_bits()], [0x8000_0000; 2]);
     }
 
     /// Nobody's hands on anything, for a test that only cares about one control.
