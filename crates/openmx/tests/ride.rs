@@ -1165,27 +1165,83 @@ fn a_biplane_session_starts_in_the_plane_and_leaves_the_bike_alone() {
     assert!(sim.input.pad(0).held(Control::Cross), "the plane's pad was never polled");
 }
 
-/// A session that starts in the plane flies it: the minute's throttle, held from a standstill for the
-/// launch and its twenty seconds flat out, takes the plane off the ground.
+/// The disc's `biplane.phy`, out of `machine.res`, or `None` (and a note) with no disc configured.
+fn the_discs_plane() -> Option<game_sim::phy::Plane> {
+    use game_render::disc::Disc;
+    let mut disc = match Disc::open_configured() {
+        Ok(disc) => disc,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return None;
+        }
+    };
+    let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res"))?.name.clone();
+    let res = disc.res(&name).expect("machine.res");
+    let bytes = res.read_suffix(game_sim::phy::BIPLANE_PHY).expect("machine.res carries biplane.phy");
+    Some(game_sim::phy::Plane::read_bytes(&bytes))
+}
+
+/// A session that starts in the plane flies it (P31), the way the shell flies it: the garage with the
+/// plane up, its flight built off the disc's `biplane.phy`, stepped at the shell's 60 Hz on the seat's
+/// pad. Throttle held (Cross), it gains airspeed and leaves the ground; throttle closed (Square), it
+/// loses height.
 ///
-/// It cannot yet. The plane's per-tick update is S34's (`crates/game-sim/src/biplane.rs`), on S33's
-/// `biplane.phy` and I6's pad mapping, and none of the three is ported: `Plane::step` is the hook S34
-/// fills, and until then the plane stands where it was parked. S34 un-ignores this.
+/// Over this file's flat floor, not a track: the original's contact search (S45/S46/S48) is not
+/// ported, so the plane's world is the ground alone anywhere. The plane is parked with its lowest
+/// wheel on the floor. The thresholds are what any plane that flies does; nothing of the original's
+/// was flown here to compare with.
 #[test]
-#[ignore = "S34: the biplane's flight is not ported, so the plane stands where it was parked"]
 fn a_biplane_session_flies() {
+    let Some(file) = the_discs_plane() else { return };
+    let flight = game_sim::flight::Flight::new(&file);
+    let lowest = flight.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min);
+    let spawn = Spawn { at: Vf::new(400.0, -lowest, -300.0, 1.0), facing: Vf::new(0.0, 0.0, -1.0, 0.0) };
     let mut sim = the_minutes_bike();
-    let mut garage = Garage::new(Kind::Biplane, Some(parked_plane())).unwrap();
+    let mut garage = Garage::new(Kind::Biplane, Some(Plane::flying(spawn, flight))).unwrap();
     let mut world = Jump::nothing();
-    for report in first_frames(22 * 60) {
-        pass(&mut sim, &mut garage, report, &mut world);
+    let mut fly = |sim: &mut Sim, garage: &mut Garage, report: Report, seconds: usize| {
+        for _ in 0..seconds * 60 {
+            pass(sim, garage, report, &mut world);
+        }
+        garage.plane.clone().unwrap()
+    };
+
+    let rest = fly(&mut sim, &mut garage, Report::from_buttons(0), 2);
+    assert!(rest.on_ground(), "the parked plane is not on its wheels");
+    let (throttle, still) = rest.gauges().unwrap();
+    assert_eq!(throttle, F::ZERO);
+    assert!(still.0 < 1.0, "the parked plane is rolling at {} ft/s", still.0);
+
+    let gas = Report::from_buttons(Control::Cross.mask());
+    let mut fast = still;
+    let mut left = None;
+    let mut top = rest.at.y();
+    for s in 1..=30 {
+        let plane = fly(&mut sim, &mut garage, gas, 1);
+        fast = fast.max(plane.gauges().unwrap().1);
+        if left.is_none() && !plane.on_ground() && plane.at.y() > rest.at.y() + 10.0 {
+            left = Some(s);
+        }
+        top = top.max(plane.at.y());
     }
     let plane = garage.plane.as_ref().unwrap();
-    let spawn = plane.spawn.at;
-    let gone = (plane.at.x() - spawn.x()).hypot(plane.at.z() - spawn.z());
-    assert!(gone > 100.0, "the plane moved {gone:.1} ft on twenty-two seconds of throttle");
-    assert!(!plane.on_ground(), "the plane never left the ground");
-    assert!(plane.at.y() > spawn.y() + 10.0, "the plane is at {:.1} ft, parked at {:.1}", plane.at.y(), spawn.y());
+    assert!(plane.gauges().unwrap().0 > F(0.9), "thirty seconds of Cross did not open the throttle");
+    assert!(fast.0 > 50.0, "thirty seconds of throttle and the airspeed is {} ft/s", fast.0);
+    let left = left.expect("thirty seconds of throttle and the plane never left the ground");
+    assert!(top > rest.at.y() + 100.0, "off the ground at {left} s, but only {top:.1} ft up");
+    assert_eq!(sim.ticks, 0, "the bike was stepped with the plane up");
+
+    let high = fly(&mut sim, &mut garage, Report::from_buttons(Control::Square.mask()), 5);
+    // Closed, not zero: held back, the control law puts a negative throttle back to zero and closes
+    // it one step again, so it alternates between zero and one step under.
+    assert!(high.gauges().unwrap().0 <= F::ZERO, "five seconds of Square did not close the throttle");
+    let low = fly(&mut sim, &mut garage, Report::from_buttons(0), 10);
+    assert!(
+        low.at.y() < high.at.y() - 50.0,
+        "the throttle is shut and the plane went from {:.1} to {:.1} ft",
+        high.at.y(),
+        low.at.y()
+    );
 }
 
 /// A swap mid-session swaps, the way the original's swap does (R8): ride the bike off its start

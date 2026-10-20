@@ -116,6 +116,8 @@ pub struct Plane {
     pub at: Vf,
     pub facing: Vf,
     pub quat: Vf,
+    /// Its up, the orientation's second row: world up while it is parked.
+    pub up: Vf,
     /// Its velocity, feet a second.
     pub vel: Vf,
     /// The plane's own simulation, when the disc's `biplane.phy` was there to build it.
@@ -133,6 +135,7 @@ impl Plane {
             at: spawn.at,
             facing: spawn.facing,
             quat: Vf::new(0.0, 0.0, 0.0, 1.0),
+            up: Vf::new(0.0, 1.0, 0.0, 0.0),
             vel: Vf::new(0.0, 0.0, 0.0, 0.0),
             flight: None,
             placed: false,
@@ -167,6 +170,8 @@ impl Plane {
         let nose = f.measure.forward;
         (self.quat, self.at) = (quat, Vf::new(origin.x(), origin.y(), origin.z(), 1.0));
         self.facing = Vf::new(nose.x(), nose.y(), nose.z(), 0.0);
+        let up = f.measure.up;
+        self.up = Vf::new(up.x(), up.y(), up.z(), 0.0);
         let v = f.body.velocity;
         self.vel = Vf::new(v.x(), v.y(), v.z(), 0.0);
     }
@@ -187,9 +192,13 @@ impl Plane {
         self.flight.as_ref().map(|f| (f.surfaces.throttle, f.measure.airspeed))
     }
 
-    /// The prop's angle, radians, as the engine turns it.
-    pub fn prop_angle(&self) -> F {
-        self.flight.as_ref().map_or(F::ZERO, |f| f.engine.prop_angle)
+    /// The prop's angle, radians, as the engine turns it, or `None` once the plane is wrecked and
+    /// the prop is not turned (S35). A parked plane's prop stands at zero.
+    pub fn prop_angle(&self) -> Option<F> {
+        match &self.flight {
+            None => Some(F::ZERO),
+            Some(f) => (f.crash.reason == 0).then_some(f.engine.prop_angle),
+        }
     }
 }
 

@@ -123,6 +123,26 @@ impl Biplane {
         out
     }
 
+    /// [`Biplane::parts`] with the prop turned (P31): `prop` is the engine's prop angle, or `None`
+    /// once the plane is wrecked, as `game_sim::biplane_anim::Surfaces::prop` gives it. The surface
+    /// step replaces `PropDummy`'s rotation with one about z by the angle and keeps its position
+    /// (S35), and the blur is stood there; a wrecked prop is the bent cone at the bind transform.
+    ///
+    /// The replacement is made on the node's model-space transform, which is its local one only
+    /// while its parents have no rotation of their own; that was not checked on the model.
+    pub fn turned_parts(&self, at: M4, prop: Option<f32>) -> Vec<(&str, M4)> {
+        let Some(angle) = prop else {
+            return self.parts(at, true);
+        };
+        let mut out = vec![(self.model.as_str(), at)];
+        if let Some(bind) = self.prop {
+            let (s, c) = angle.sin_cos();
+            let turned = M4([[c, s, 0.0, 0.0], [-s, c, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], bind.0[3]]);
+            out.push((PROP, turned.mul(at)));
+        }
+        out
+    }
+
     /// Where to draw the pilot for a plane placed at `at`: its root in the seat, turned with the
     /// plane.
     pub fn pilot(&self, at: M4) -> M4 {
