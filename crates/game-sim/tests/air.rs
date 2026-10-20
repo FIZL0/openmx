@@ -1453,6 +1453,13 @@ mod flight {
             .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
             .unwrap_or_default();
         csvs.retain(|p| p.extension().is_some_and(|x| x == "csv"));
+        // C7's biplane capture (watch/biplane.toml) is parked here too: the human flies the plane and
+        // the bike stands parked, so it has no bike flight to fit.
+        csvs.retain(|p| {
+            std::fs::read_to_string(p)
+                .map(|t| !t.lines().next().unwrap_or("").split(',').any(|c| c == "plane_type"))
+                .unwrap_or(true)
+        });
         csvs.sort();
         if csvs.is_empty() {
             return skip(&format!("no captures in {}", dir.display()));
