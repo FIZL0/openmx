@@ -513,6 +513,14 @@ stunt_clocks                boot 0x002593e0 (obj in a0, run the motion prologue 
 #                                           the safe flag at +0xa10 against SafeTime and HoldTime
 smooth_noise                boot 0x0013e810 (t in f12) -> the engine's shared 1-D smooth noise, from
 #                                           tables built at start-up. Only perturbs the hold's phase
+smooth_noise_build          boot 0x0013e900 () the tables smooth_noise reads, built off rand() on the
+#                                           first sample (S41): per knot g1 (1 draw), g2 (2), g3 (3),
+#                                           each (rand()%512-256)/256, g2/g3 normalised; then perm
+#                                           shuffled i=255..1 with rand()%256; then 258 entries copied
+#                                           up by 256. 1,791 draws. Port: game_sim::noise
+smooth_noise_unbuilt        boot 0x0041f728 word: nonzero until the first sample builds the tables
+smooth_noise_perm           boot 0x00476120 int[514]: the knots' permutation
+smooth_noise_g1             boot 0x00479160 float[514]: the 1-D gradients
 stunt_landing               boot 0x002522c0 (obj in a0, the thing it hit in a1, or 0) the wreck test: the attitude limits first, then the
 #                                           trick's clause (reason 12 mid-trick, 7 for a throw-away
 #                                           taken past 95%, 12 for a no-hander landed too slowly)
