@@ -125,9 +125,10 @@ pub const MAX_PLAYERS: usize = 8;
 /// wreck and recovery all inside the [`Rider`].
 #[derive(Clone, Debug)]
 pub struct Player {
-    /// The bike this player rides, off its `.phy`. A parameter of the run like [`Sim::phy`], and
-    /// left out of the walk for the same reason.
-    pub phy: Phy,
+    /// The bike this player rides, off its `.phy`. A parameter of the run like [`Sim::phy`], left
+    /// out of the walk for the same reason, and shared by every clone of the state the same way
+    /// ([`snapshot`]).
+    pub phy: Arc<Phy>,
     pub rider: Rider,
 }
 
@@ -247,7 +248,7 @@ impl Sim {
     /// [`Sim::input`], because a player may as well be somebody on the other end of a connection.
     pub fn add_player(&mut self, phy: Phy, rider: Rider) -> usize {
         assert!(self.players() < MAX_PLAYERS, "a session holds at most {MAX_PLAYERS} riders");
-        self.others.push(Player { phy, rider });
+        self.others.push(Player { phy: Arc::new(phy), rider });
         self.others.len()
     }
 
