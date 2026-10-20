@@ -2623,3 +2623,38 @@ machine_swap boot 0x00210b90 (world, controller, &current, old, new, player, ...
 #                            gets the controller (+0x14 = 1) and the player's camera from its list
 #                            entry; a biplane is unwrecked (vt +0x1c4), +0xe50 = 0, and
 #                            0x00200f00(app, player, 0) runs
+
+# S35 — the biplane's pilot and moving parts. Port: crates/game-sim/src/biplane_anim.rs (plus
+# Library::add in vehicle_anim.rs); proofs: crates/game-sim/tests/biplane_anim.rs against
+# context/capture/biplane/pilot.csv (watch/biplane-pilot.toml, journal 2026-10-20-s35-s35-the-biplane-moves).
+biplane_pilot_request boot 0x00355000 the fourth step of MXBiplane's measure (0x00355290 = 0x00352960,
+#                                     0x00354e00, this, 0x00355170), gated on (+0x8 & +0x694). Writes the
+#                                     request block at +0x690 (built by 0x002450c0 in the ctor 0x00353d10):
+#                                     +0x698 at_base = 0, +0x69c held = +0x588, +0x780 offset ptr =
+#                                     &PelvisBoxPosition (+0xe70), +0x784 = &PelvisBoxSize (+0xe80), +0x788
+#                                     airborne = !+0x590, +0x800 phase target = 0.5*(1 - +0x344), +0x804
+#                                     mix target = 0.5*(1 + +0x340) (sub.s/add.s then mul.s, 0.5 first),
+#                                     +0x808 band = +0x598, +0x810 base = body +0x50, +0x820 rotation = body
+#                                     +0x150, +0x83c = +0x178, and the hand/foot dummies. Never written:
+#                                     wrecked +0x794, gesture +0x830 (24), progress +0x834, seq +0x838,
+#                                     cut +0x7d0, settle +0x7d4, commanded +0x7f0 -- the ctor's values.
+#                                     The step reads the offset through the pointer (0x0024934c lw 0xf0).
+body_mount boot 0x0024ea70 (body, mask, request) a body vtable slot (0x00454544, 0x00458fe4), not a
+#                          Ghidra function: returns if +0x488 is set or (mask & +0x484) == 0; else +0x488
+#                          = request, vt +0x140, +0x9f0 = -1 then the FIRST record i with key ==
+#                          **request (the owner's type word), 0x001b7020(+0xa74, req+0x180, req+0x120),
+#                          +0xa74 +0x240 = request.
+#   rider_machine_clips (0x00248150): bit 0 of +0x9f8 gates it (the list ctor 0x0024ed90 clears it, the
+#   setter is not located; every body on the biplane state has it set); a key already present is
+#   skipped; the record is appended before its clips are looked up; per name load (0x00142430,
+#   0x001445b0) then bind (0x001426a0, 0x00146370), a first; an empty name leaves 0.
+biplane_reset_latch boot 0x00352910 the frame step's two lines: if (+0x588 && +0x58c) +0x588 = 0;
+#                                   +0x58c = +0x588. The reset 0x00351df0 sets +0x588 = 1.
+# Tick order the capture shows (1717 ticks): reset -> measure (request from the previous tick's sticks)
+# -> latch, surfaces -> wreck test; the pilot's body eases its lags (+0x630 -> mix, +0x634 -> phase)
+# towards this tick's block. The pilot's body is actor-list entry 7's actor - 0x400 on biplane.p2m2's
+# state (0x009ffc50, request 0x00c450d0 = plane 0x00c44a40 + 0x690, one record {1, 0x0195c4f0,
+# 0x00835640}); the plane's type word is 1. Axes of the surface step: 0x00426da0 (1,0,0), 0x00426db0
+# (0,1,0), 0x00426dc0 (0,0,1); bone names 0x0043f2c0..0x0043f330; 0x001b2e50 replaces the rotation and
+# keeps the position, 0x001b2c20 turns the restored rest matrix about the kept hinge (+0x540..+0x570)
+# on the left (row-vector order).
