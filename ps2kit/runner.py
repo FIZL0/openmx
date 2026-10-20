@@ -1195,7 +1195,13 @@ def cmd_run(argv: list[str]) -> int:
     if queued():
         master(branch, a.slots)  # reports a previous run left; otherwise it starts when a merge needs it
 
-    # branches a previous run never merged (it was stopped, or a session ended while nothing watched)
+    for n, (p, task) in adopt(a.slots, branch).items():
+        procs[n], running[n] = p, task
+    for n in free_at:  # idle slots must let go of old task/<ID> branches, or start() cannot take them
+        if n not in procs and (SLOTS_DIR / f's{n}').is_dir():
+            git('checkout', '-q', '--detach', cwd=SLOTS_DIR / f's{n}')
+    # branches a previous run never merged (it was stopped, or a session ended while nothing watched); after
+    # the detach above, or a slot whose session ended would still hold its finished branch and hide it
     held = {l.removeprefix('branch refs/heads/') for l in
             git('worktree', 'list', '--porcelain').stdout.splitlines() if l.startswith('branch ')}
     open_ids = {m.group(1) for l in plan_text(branch) if (m := TASK.match(l))}
@@ -1205,7 +1211,8 @@ def cmd_run(argv: list[str]) -> int:
         tid = b.removeprefix('task/')
         if b in held or tid not in open_ids:
             continue
-        if f'{tid}: queued for the master' in handed_before or f'{tid}: handed to the master' in handed_before:
+        # finish() logs "<tid>: the runner could not merge it (...); queued for the master"
+        if re.search(rf'^=== \S+ {tid}: .*(queued for|handed to) the master', handed_before, re.M):
             HANDED.setdefault(tid, False)  # it has it, or it left it alone: either way not ours to retry
             continue
         if git('log', '--format=%s', f'{branch}..{b}').stdout.strip():
@@ -1216,11 +1223,6 @@ def cmd_run(argv: list[str]) -> int:
             merging.append(t)
     with MERGE:  # blocks freed by merges made while no run was up
         reopen_landed(branch, 'a merge before this run')
-    for n, (p, task) in adopt(a.slots, branch).items():
-        procs[n], running[n] = p, task
-    for n in free_at:  # idle slots must let go of old task/<ID> branches, or start() cannot take them
-        if n not in procs and (SLOTS_DIR / f's{n}').is_dir():
-            git('checkout', '-q', '--detach', cwd=SLOTS_DIR / f's{n}')
 
     while True:
         for n in list(free_at):
