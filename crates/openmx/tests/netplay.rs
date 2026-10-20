@@ -10,10 +10,10 @@
 //!
 //! **The ride is the real one**: [`Rides`], one [`Sim`] a seat, which is what the shell steps online,
 //! on [`game_sim::stock`]'s bike over a flat floor (no disc), each seat mashing its own pad of the
-//! original's bytes — throttle pressure, steering, trick buttons. Two things need a ride that says its
-//! state in bytes, which [`Sim`] cannot until N1 lands: the resync and the restart. Those are proved on
-//! [`Tally`], a small game of the same pads that can, and on the ride the desync is proved caught and
-//! its report proved to ride again to the same hashes.
+//! original's bytes — throttle pressure, steering, trick buttons. The resync and the restart need
+//! the ride's state in bytes, every seat's [`Sim`] in N1's codec (N5): both are proved on the ride
+//! itself, and on [`Tally`], a small game of the same pads, which is quick enough to try them over
+//! more seats and a worse link.
 //!
 //! What "in sync" means here: every tick that every machine has every seat's pads for, every machine
 //! ran on the same pads (the logs) and had the same state before it (the per-tick hashes — every
@@ -410,23 +410,24 @@ fn a_one_way_outage() {
 
 /// The ride runs differently on one machine: both see it at the next checksum, both save every
 /// seat's pads, and the host's report, ridden again offline from a fresh start, is the host's own
-/// ride hash for hash. The ride cannot hand its state over until N1, so nobody mends it: it is said.
+/// ride hash for hash. Then the host's state — every seat's [`Sim`] in N1's codec, many pieces — goes
+/// over a lossy link, the guest takes it on, and from the tick it took it at every settled tick agrees
+/// again: one resync each side and nothing out of sync after.
 #[test]
-fn a_desync_on_the_ride_is_caught_and_its_inputs_saved() {
+fn a_desync_on_the_ride_is_caught_saved_and_resynced() {
     let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
-    let mut said = Vec::new();
-    let r = run("host,g", Timing::default(), Ride::new, &link, 0..480, |round, r, _| {
+    let r = run("host,g", Timing::default(), Ride::new, &link, 0..900, |round, r, _| {
         if round == 0 {
             r.games[1].glitch = true;
         }
-        for np in &r.nets {
-            said.extend(np.said.iter().cloned());
-        }
     });
+    let fresh = r.nets[1].resync.fresh as usize;
     for np in &r.nets {
         let first = np.desyncs.first().unwrap_or_else(|| panic!("{} saw no desync", np.me));
         assert_eq!(first.0, 330, "{}: the first checksum after the glitch", np.me);
-        assert!(np.desynced);
+        assert!(np.desyncs.iter().all(|d| d.0 == 330 || (d.0 as usize) < fresh.max(np.resync.fresh as usize)), "{}: {:?}", np.me, np.desyncs);
+        assert_eq!(np.resync.done, 1, "{}: resyncs", np.me);
+        assert!(!np.desynced, "{} still out of sync", np.me);
         let at = np.report.as_ref().expect("a report");
         let report = net::desync::Report::read(at).unwrap();
         assert_eq!((report.me.as_str(), &report.lineup), (np.me.as_str(), &np.lineup));
@@ -441,7 +442,50 @@ fn a_desync_on_the_ride_is_caught_and_its_inputs_saved() {
         }
         std::fs::remove_file(at).unwrap();
     }
-    assert!(r.nets[0].said.is_empty());
+    assert!(fresh > 330, "taken at {fresh}");
+    let n = r.agree(&[0, 1], fresh);
+    assert!(n > 300, "only {n} ticks agreed after the resync");
+    assert_eq!(r.nets[0].hashes[..320], r.nets[1].hashes[..320]);
+    assert_ne!(r.nets[0].hashes[330], r.nets[1].hashes[330]);
+}
+
+/// [`Rides`]' bytes: every seat's state goes over and comes back the same ride, the constants stay
+/// the machine's own, and a state for another number of seats or cut short is refused with nothing
+/// written.
+#[test]
+fn the_ride_says_every_seat_in_bytes() {
+    let mut world = Flat::default();
+    let mut there = sims(3);
+    let pads = |t: usize| (0..3).map(|s| mash(s, t)).collect::<Vec<_>>();
+    let mut game = Rides { sims: &mut there, world: &mut world, dt: rides::steady_dt(), after: None };
+    for t in 0..200 {
+        game.step(&pads(t));
+    }
+    let bytes = game.encode().expect("the ride has a codec");
+    let hash = game.hash();
+    let mut here = sims(3);
+    let mut world2 = Flat::default();
+    let mut mine = Rides { sims: &mut here, world: &mut world2, dt: rides::steady_dt(), after: None };
+    assert_ne!(mine.hash(), hash);
+    mine.decode(&bytes).unwrap();
+    assert_eq!(mine.hash(), hash);
+    assert_eq!(mine.encode().unwrap(), bytes);
+    // and they ride on as one
+    for t in 200..400 {
+        mine.step(&pads(t));
+        game.step(&pads(t));
+    }
+    assert_eq!(mine.hash(), game.hash());
+    let before = mine.hash();
+    let mut two = sims(2);
+    let mut world3 = Flat::default();
+    let mut other = Rides { sims: &mut two, world: &mut world3, dt: rides::steady_dt(), after: None };
+    let theirs = other.encode().unwrap();
+    assert!(mine.decode(&theirs).unwrap_err().contains("2 seats in the state, 3 here"));
+    let cut = mine.encode().unwrap();
+    assert!(mine.decode(&cut[..cut.len() - 1]).is_err());
+    assert!(mine.decode(&[cut.clone(), vec![0]].concat()).is_err());
+    assert_eq!(mine.hash(), before, "a refused state writes nothing");
 }
 
 /// The same on [`Tally`], which can say its state in bytes: caught at 330 on both, the host's state
@@ -542,20 +586,28 @@ fn a_silent_host_ends_the_ride() {
     assert_eq!(r.nets[1].end.as_deref(), Some("the host stopped answering: the ride is over"));
 }
 
-/// On the ride, which cannot hand its state over until N1: a peer that does not come back ends the
-/// ride for everyone, said, rather than a restart nobody could take.
+/// On the ride: `h` goes silent at round 300 for good, the others hold, and after the wait the host
+/// hands everyone its state and the new line-up — `h`'s seat empty, its bike left with an unplugged
+/// pad — and the two ride on in sync, every seat's state alike on both.
 #[test]
-fn on_the_ride_a_peer_that_does_not_come_back_ends_it() {
-    let link = Link { loss: 0.0, lag: 2, outage: 0..0, oneway: false };
-    let r = run("host,h,g", short(), Ride::new, &link, 0..900, |round, _, live| {
-        if round == 200 {
+fn on_the_ride_a_silent_peers_seat_empties_and_the_others_ride_on() {
+    let link = Link { loss: 0.1, lag: 3, outage: 0..0, oneway: false };
+    let r = run("host,h,g", short(), Ride::new, &link, 0..1500, |round, _, live| {
+        if round == 300 {
             live[1] = false;
         }
     });
     for i in [0, 2] {
-        let end = r.nets[i].end.as_deref().unwrap_or_else(|| panic!("{} rode on", r.names[i]));
-        assert!(end.starts_with("h went silent"), "{end}");
+        let np = &r.nets[i];
+        assert_eq!(np.lineup.text(), "host,-,g", "{}", np.me);
+        assert_eq!((np.recover.restarts, np.rb.round, np.end.as_deref()), (1, 1, None), "{}", np.me);
     }
+    let from = r.nets[0].rb.base;
+    let n = r.agree(&[0, 2], 0);
+    assert!(n > from + 300, "{n} settled, restarted at {from}");
+    assert_eq!(r.nets[0].log[from + 10][1], wire(&Report::missing()));
+    // the empty seat is still a bike on the track (its hash is in the agreeing ones above)
+    let a = &r.games[0];
+    assert!(a.sims[1].ticks > from as u64 + 300, "the empty seat rode on: {} ticks", a.sims[1].ticks);
     let _ = WINDOW;
-    let _ = r.games[0].hash();
 }

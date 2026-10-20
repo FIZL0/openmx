@@ -1,8 +1,9 @@
 //! The ride online: one [`Sim`] a seat, stepped in seat order over one world.
 //!
-//! Until S54 makes the simulation N riders, a seat is a whole [`Sim`] of its own — its own input
-//! manager, bike and rider — and the riders do not touch. Each reads its seat's pad as pad 0, the
-//! shape every one-player capture of the original has.
+//! A seat is a whole [`Sim`] of its own — its own input manager, bike and rider — and the riders do
+//! not touch: S54's one Sim of N riders (with the original's rider-on-rider contact) is not what the
+//! shell rides online yet. Each reads its seat's pad as pad 0, the shape every one-player capture of
+//! the original has. In bytes (a resync, a restart) each seat is [`game_sim::snapshot`]'s codec.
 //!
 //! The frame length is fixed: every machine must hand every tick the same `dt`, and a wall clock is
 //! a different number on each. It is [`steady_dt`], what the engine's own averaged frame time settles
@@ -59,14 +60,43 @@ impl Game for Rides<'_> {
         self.sims.iter().fold(0, |h, s| game_sim::state_hash(&s.hash().to_le_bytes(), h))
     }
 
-    /// Not yet: the simulation has no byte codec until N1 (`game_sim::snapshot`). Without one a desync
-    /// is caught and reported but not mended, and a silent peer ends the ride.
+    /// Every seat's state in [`game_sim::snapshot`]'s codec (N1): the seat count, then each seat's
+    /// bytes behind its length. What a resync sends a peer that fell out of step and a restart sends
+    /// everyone; the constants (tables, bike, the rider's disc files) stay each machine's own.
     fn encode(&self) -> Option<Vec<u8>> {
-        None
+        let mut out = (self.sims.len() as u32).to_le_bytes().to_vec();
+        for sim in self.sims.iter() {
+            let bytes = game_sim::snapshot::encode(sim);
+            out.extend((bytes.len() as u32).to_le_bytes());
+            out.extend(bytes);
+        }
+        Some(out)
     }
 
-    fn decode(&mut self, _bytes: &[u8]) -> Result<(), String> {
-        Err("the ride has no state codec yet (N1)".into())
+    /// [`Rides::encode`]'s bytes back, onto this machine's seats. Nothing is written unless every
+    /// seat decodes, so a broken state leaves the ride as it was.
+    fn decode(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let word = |at: usize, what: &str| -> Result<usize, String> {
+            let w = bytes.get(at..at + 4).ok_or(format!("the state ends before {what}"))?;
+            Ok(u32::from_le_bytes(w.try_into().unwrap()) as usize)
+        };
+        let seats = word(0, "its seat count")?;
+        if seats != self.sims.len() {
+            return Err(format!("{seats} seats in the state, {} here", self.sims.len()));
+        }
+        let mut at = 4;
+        let mut sims = self.sims.clone();
+        for (seat, sim) in sims.iter_mut().enumerate() {
+            let n = word(at, "a seat's length")?;
+            let one = bytes.get(at + 4..at + 4 + n).ok_or(format!("seat {}'s state is cut short", seat + 1))?;
+            game_sim::snapshot::decode(sim, one).map_err(|e| format!("seat {}: {e}", seat + 1))?;
+            at += 4 + n;
+        }
+        if at != bytes.len() {
+            return Err(format!("{} bytes left over after the seats", bytes.len() - at));
+        }
+        *self.sims = sims;
+        Ok(())
     }
 }
 

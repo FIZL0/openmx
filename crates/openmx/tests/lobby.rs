@@ -389,14 +389,13 @@ fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_ends_i
     let mut ho = online::Online::lobby(hn.clone(), &hroom, &hme, sims(&hroom)).unwrap();
     let mut go = online::Online::lobby(gn.clone(), &groom, &gme, sims(&groom)).unwrap();
     let (mut hw, mut gw) = (Flat::default(), Flat::default());
-    let (mut hs, mut gs) = (game_sim::Sim::new(1), game_sim::Sim::new(1));
     // Four seconds of riding at 60 Hz: the host on the gas, the guest leaning.
     let gas = Report::from_buttons(game_sim::input::Control::Cross.mask());
     let mut lean = Report::idle();
     lean.set_axis(2, 0xe0);
     for _ in 0..240 {
-        ho.frame(gas, &mut hw, None, &mut hs).unwrap();
-        go.frame(lean, &mut gw, None, &mut gs).unwrap();
+        ho.frame(gas, &mut hw, None).unwrap();
+        go.frame(lean, &mut gw, None).unwrap();
         std::thread::sleep(Duration::from_millis(16));
     }
     let ((ha, hd), (ga, gd)) = (ho.settled(), go.settled());
@@ -410,7 +409,7 @@ fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_ends_i
     let end = Instant::now() + Duration::from_secs(15);
     let why = loop {
         assert!(Instant::now() < end, "the host rode on after the guest left");
-        if let Err(why) = ho.frame(gas, &mut hw, None, &mut hs) {
+        if let Err(why) = ho.frame(gas, &mut hw, None) {
             break why;
         }
         std::thread::sleep(Duration::from_millis(16));

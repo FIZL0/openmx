@@ -1180,7 +1180,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // archive, and wears its own rider's gear. A player the garage has no pick for rides the first's.
     let mut other_phys: Vec<Phy> = Vec::new();
     let mut other_riders: Vec<Option<(String, String)>> = Vec::new();
-    for i in 1..args.players {
+    // Online every seat of `--seats` is a rider on this track, each machine's in the same places
+    // (N5): seat `s` starts where local player `s + 1` would, on the first's bike.
+    let riders = match &args.online {
+        Some(_) => online::Online::seats(args.seats.as_deref())?.max(args.players),
+        None => args.players,
+    };
+    for i in 1..riders {
         match args.others.get(i - 1) {
             Some(pick) => {
                 let res = disc.res(&member_ending(&disc, &format!("{}.res", pick.bike))?)?;
@@ -1530,7 +1536,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // way the first does. The first player is where a one-player session has always started.
     let right = Vf::new(heading.z(), 0.0, -heading.x(), 0.0);
     let (under_first, _) = sim_world::World::ground(&mut sim, at);
-    let others: Vec<Rider> = (1..args.players)
+    let others: Vec<Rider> = (1..riders)
         .map(|i| {
             let side = if i % 2 == 1 { 1.0 } else { -1.0 };
             let off = side * SEAT_SPACING * i.div_ceil(2) as f32;
@@ -1880,7 +1886,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // the first's are opened twice — each animation set reads members as its own machine asks.
     let mut rigs: Vec<Rig> = Vec::with_capacity(args.players);
     let body_model = body.as_ref().map(|b| b.geometry().to_string());
-    for i in 1..args.players {
+    for i in 1..riders {
         // Its own rider's archive when the garage picked one, the first player's otherwise.
         let motion = other_phys[i - 1].motion();
         let own_rider = other_riders[i - 1].as_ref();
@@ -2125,13 +2131,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             // One local player and no front end: the session's seats are `--seats`, and the pause
             // menu would freeze a ride the other machines go on with.
-            if world.seats.len() != 1 || front.is_some() {
+            if args.players != 1 || front.is_some() {
                 return Err("--online rides one local player outside the front end: drop --players and --menu".into());
             }
-            Some(online::Online::start(me, &args.peers, args.seats.as_deref(), &world.seats[0].sim)?)
+            let starts: Vec<Sim> = world.seats.iter().map(|s| s.sim.clone()).collect();
+            Some(online::Online::start(me, &args.peers, args.seats.as_deref(), &starts)?)
         }
     };
     let mut online_frames = 0u32;
+    // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
+    let mut seated = vec![true; world.seats.len()];
 
     let mut shot = args.shot.clone();
     let started = Instant::now();
@@ -2313,8 +2322,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
         // Online (N2) the session steps the ride instead — every seat, a rollback's ticks again, the
         // body's frame inside each — at its one fixed frame length, and this machine's seat comes back
-        // as the first seat's `sim` (the only local seat online). Its frames count toward `--frames`,
-        // the engine's not being run.
+        // as the first seat's `sim` (the only local seat online), every other seat as one of the
+        // seats after it (N5). Its frames count toward `--frames`, the engine's not being run.
         let (dt, simulated) = if let Some(on) = &mut online {
             online_frames += 1;
             // Paused, this machine's rider lets go: the others ride on.
@@ -2322,12 +2331,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 true => Report::idle(),
                 false => world.seats[0].reports[0],
             };
-            if let Err(end) = on.frame(pad, &mut world.place, rigs[0].body.as_mut(), &mut world.seats[0].sim) {
+            if let Err(end) = on.frame(pad, &mut world.place, rigs[0].body.as_ref()) {
                 println!("{end}");
                 if front.is_some() {
                     leave = Leave::Menu;
                 }
                 break;
+            }
+            // Every seat back into the shell's, this machine's first: the others are drawn beside it.
+            for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
+                seated[d] = on.show(d, &mut seat.sim, rig.body.as_mut());
             }
             world.seats[0].hands = on.hands;
             world.seats[0].said = rider::Frame::default();
@@ -2414,6 +2427,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             if seat.said.respawned {
                 println!("{who}back on the start line");
+            }
+            // Online, the other machines' riders past the local players have no view of their own:
+            // posed and drawn, no camera.
+            if i >= args.players {
+                continue;
             }
 
             // The camera, after the frame, which is where the original's viewport updates it: the shell
@@ -2521,7 +2539,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is hidden, as the swap hides its model, and the rider is the
                 // plane's pilot — whom V21 seats.
-                if seat.garage.up != Kind::Bike {
+                if seat.garage.up != Kind::Bike || !seated[p] {
                     continue;
                 }
                 // The bike where the wreck body has taken it while the rider is down (S53), and where
@@ -2632,7 +2650,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
         // One frame, on paper, for a run nobody is watching: the first by default, or the one
         // `--shot-frame` asks for, which is how a shot catches a ride in progress.
-        if let Some(path) = shot.take_if(|_| engine.frame >= args.shot_frame) {
+        if let Some(path) = shot.take_if(|_| engine.frame.max(online_frames) >= args.shot_frame) {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             }
