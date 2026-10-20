@@ -90,6 +90,11 @@ for comparison and not committed. They are `YAxisRateLimit` 3.5, `[Preload]` 0.2
 
 - **The lip length is the port's, not the original's.** S31, which measures the lip on the original, has
   not landed. The 16 ticks over P10's jump is the port's own `on_a_lip` on the stand-in bike.
+  - *Added by S31:* on the original, the human's three backflips in recording2 had the lip open for
+    **18, 19 and 20 ticks** (0.60–0.67 s), sampled the same way, at the end of each tick. Each cross
+    from below −0.8 to above +0.8 took the human 1–2 ticks. The flip fired 6, 8 and 8 ticks after it
+    armed, and 5, 8 and 8 ticks before takeoff. See
+    `research/journal/2026-10-20-s31-s31-the-humans-backflips/` for the full index.
 - **The lip is sampled at the end of each tick, not on each substep where `air.rs` evaluates it.** The
   test repeats `on_a_lip`'s four conditions on public fields because the function is private. The
   gestures firing "on the lip" is asserted against that sample.
