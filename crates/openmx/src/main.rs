@@ -1700,14 +1700,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike {
                 return Err("--online rides the bike and no tape: drop --play, --record and --vehicle".into());
             }
-            // One local player and no front end: the session's other local seats stand idle until
-            // P35's seats ride them, and the pause and the menus do not run online yet.
-            if args.players != 1 || front.is_some() {
-                return Err("--online rides one local player and no menu: drop --players and --menu".into());
+            // One local player and no front end: the session's seats are `--seats`, and the pause
+            // menu would freeze a ride the other machines go on with.
+            if world.seats.len() != 1 || front.is_some() {
+                return Err("--online rides one local player outside the front end: drop --players and --menu".into());
             }
             Some(online::Online::start(me, &args.peers, args.seats.as_deref(), &world.seats[0].sim)?)
         }
     };
+    let mut online_frames = 0u32;
 
     let mut shot = args.shot.clone();
     let started = Instant::now();
@@ -1872,8 +1873,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
         // Online (N2) the session steps the ride instead — every seat, a rollback's ticks again, the
         // body's frame inside each — at its one fixed frame length, and this machine's seat comes back
-        // as the first seat's `sim`.
+        // as the first seat's `sim` (the only local seat online). Its frames count toward `--frames`,
+        // the engine's not being run.
         let (dt, simulated) = if let Some(on) = &mut online {
+            online_frames += 1;
             if let Err(end) = on.frame(world.seats[0].reports[0], &mut world.place, rigs[0].body.as_mut(), &mut world.seats[0].sim) {
                 println!("{end}");
                 break;
@@ -1923,7 +1926,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // A pass the engine skipped (a seat's pad is out) moves neither.
             let moving = seat.riding && simulated;
             if let Some(body) = &mut rig.body {
-                // Online the body's frame is the session's, inside the tick (N2).
+                // Online the session posed it inside its ticks, so a rollback rolls the body back too.
                 if moving && bike_up && online.is_none() {
                     body.ride(dt, &mut seat.sim.rider, &seat.hands, rider::Gate::default());
                 }
@@ -2207,7 +2210,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 break;
             }
         }
-        if args.frames.is_some_and(|n| engine.frame >= n) {
+        if args.frames.is_some_and(|n| engine.frame.max(online_frames) >= n) {
             break;
         }
         // Pace to 60 Hz. A frame that overran does not sleep, and the engine's own clock is what the
