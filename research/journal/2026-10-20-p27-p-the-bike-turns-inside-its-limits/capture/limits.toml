@@ -1,0 +1,35 @@
+# P27: the live chassis' angular limits, one row. The bike chain is P21's (its capture/extra.toml).
+[watch]
+name        = "limits"
+description = "the bike chassis' speed and angular limits"
+every       = 1
+frames      = 3
+
+[setup]
+state  = 8
+warmup = 30
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "max_speed_sq"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x220"
+type = "f32"
+
+[[field]]
+name = "max_ang_speed_sq"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x224"
+type = "f32"
+
+[[field]]
+name = "ang_vel_max"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x230"
+type = "f32x4"
+
+[[field]]
+name = "ang_vel_min"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x240"
+type = "f32x4"

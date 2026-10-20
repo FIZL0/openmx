@@ -2419,7 +2419,8 @@ rigid_body_new boot 0x0015c2c0 calls rigid_body_ctor; the bike's chassis goes th
 bike_build boot 0x00252ff0 the bike's setup: the chassis via 0x0015c2c0 into bike+0x7a4, the
 #                          engine via engine_ctor into bike+0x7b8; nothing in it rewrites +0x220
 # bike_phy_load (0x002539e0) [Mass Properties] YawRateLimit writes chassis+0x234 and -YawRateLimit
-# +0x244: the yaw window. The port reads the key (phy.rs yaw_rate_limit) and nothing uses it (P27).
+# +0x244: the yaw window. +0x224 is not recomputed, so it stays the constructor's 1875 (live 125:
+#   windows (25, 3, 25), limit 1875). ride.rs bike_ang_limits wires both (P27).
 # The actor's velocity (@game_manager->0x34->0x34->0x8x8->0x0 +0x130, every capture's bike_vel) is
 # 0.8 x the chassis' own (+0x260) on every row of P21's capture: bike_vel is not chassis.vel.
 # S37 — the wreck test's contact clause (reason 6). bike_wreck_test's last loop reads the bike's

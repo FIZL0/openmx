@@ -91,6 +91,27 @@ const MAX_ANG_SPEED: f32 = 100.0;
 /// It is what a downhill or a launch off a ramp is held to.
 const BIKE_MAX_SPEED_SQ: f32 = 18225.0;
 
+/// **The rigid body's angular windows**: the constructor clamps each axis of the body-frame angular
+/// velocity to `[-25, 25]` rad/s, and its angular speed limit is the sum of the three windows'
+/// squares, 1875 — worked out there, before the `.phy` loader writes the yaw window over the middle
+/// one, so a bike's limit stays 1875 whatever its `YawRateLimit` is. The live 125's chassis holds
+/// `(25, 3, 25)` and 1875 (P21, P27).
+const ANG_WINDOW: f32 = 25.0;
+
+/// The chassis' angular windows and limit as the original's bike gets them: the constructor's, with
+/// the file's `YawRateLimit` on the yaw axis.
+///
+/// A file without the key leaves the constructor's 25: the original's loader writes an uninitialised
+/// stack word there instead, which no shipped bike reaches, and [`crate::phy`] reads the missing key
+/// as zero — which the window would read as "no yaw at all".
+fn bike_ang_limits(p: &Phy) -> (F, [F; 3], [F; 3]) {
+    let w = [ANG_WINDOW; 3];
+    let sq = F(w[2] * w[2] + w[1] * w[1] + w[0] * w[0]);
+    let yaw = if p.mass.yaw_rate_limit == F::ZERO { F(ANG_WINDOW) } else { p.mass.yaw_rate_limit };
+    let max = [F(w[0]), yaw, F(w[2])];
+    (sq, max, [-max[0], -max[1], -max[2]])
+}
+
 // --- what the rider asks for -----------------------------------------------------------------------
 
 /// What the pad says this frame, before the input layer's rate limit.
@@ -406,6 +427,7 @@ impl Ride {
         let mass = p.mass.mass;
         let inertia = p.mass.inertia;
         let inv = |v: f32| if v == 0.0 { F::ZERO } else { F::ONE / F(v) };
+        let ang = bike_ang_limits(p);
         let mut ride = Ride {
             mv: mv::Ride::default(),
             chassis: chassis::Chassis {
@@ -420,15 +442,12 @@ impl Ride {
                 quat: chassis::CLEAR,
                 free: [1; 3],
                 ang_free: [1; 3],
-                // The integrator's own limits. The speed is the original's (P21); the angular
-                // ones come from the vehicle's setup, which is not ported — a zero would pin the
-                // bike where it stands, because the clamp reads a zero as "no faster than nothing",
-                // so those are wide enough that they cannot fire on a bike: a stand-in, and listed
-                // as one.
+                // The integrator's own limits, the original's: the speed (P21), and the angular
+                // windows and limit (P27).
                 max_speed_sq: F(BIKE_MAX_SPEED_SQ),
-                max_ang_speed_sq: F(MAX_ANG_SPEED * MAX_ANG_SPEED),
-                ang_vel_max: [F(MAX_ANG_SPEED); 3],
-                ang_vel_min: [F(-MAX_ANG_SPEED); 3],
+                max_ang_speed_sq: ang.0,
+                ang_vel_max: ang.1,
+                ang_vel_min: ang.2,
                 ..chassis::Chassis::default()
             },
             // The engine as its own constructor leaves it, with the file's keys on top. Two of the

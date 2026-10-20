@@ -3661,3 +3661,36 @@ fn the_minute_on_the_discs_bike() {
     }
     assert!(missed.is_empty(), "the disc's bike misses the original on:\n{}", missed.join("\n"));
 }
+
+/// The live 125's chassis in the acceptance state (P27's `capture/limits.csv`, three rows, all the
+/// same): `+0x224`, then `+0x230..` and `+0x240..` without their `w`.
+const LIVE_ANG_SPEED_SQ: f32 = 1875.0;
+const LIVE_ANG_VEL_MAX: [f32; 3] = [25.0, 3.0, 25.0];
+const LIVE_ANG_VEL_MIN: [f32; 3] = [-25.0, -3.0, -25.0];
+
+/// **The bike turns inside the original's limits** (P27). The chassis `race125p` builds carries the
+/// rigid body's angular windows with the file's `YawRateLimit` on the yaw axis, and the
+/// constructor's angular limit — what the running original's chassis holds, word for word. A bike
+/// whose file has no `YawRateLimit` keeps the constructor's 25 there.
+#[test]
+fn the_chassis_race125p_builds_carries_the_originals_angular_limits() {
+    let bits = |v: [F; 3]| v.map(|x| x.0.to_bits());
+    let tables = Tables::build();
+    let p = bike(&tables);
+    assert_eq!(p.mass.yaw_rate_limit, F::ZERO, "the test bike has grown a YawRateLimit");
+    let c = rider(&p).chassis;
+    assert_eq!(c.max_ang_speed_sq.0.to_bits(), LIVE_ANG_SPEED_SQ.to_bits());
+    assert_eq!(bits(c.ang_vel_max), [25.0f32; 3].map(f32::to_bits));
+    assert_eq!(bits(c.ang_vel_min), [-25.0f32; 3].map(f32::to_bits));
+
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else {
+        println!("no race125p.phy or 125_faisst wheels on a disc in context/iso — skipped");
+        return;
+    };
+    assert_eq!(p.mass.yaw_rate_limit.0, 3.0, "race125p's YawRateLimit");
+    let c = Ride::new(&p, wheels, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0)).chassis;
+    assert_eq!(c.max_ang_speed_sq.0.to_bits(), LIVE_ANG_SPEED_SQ.to_bits());
+    assert_eq!(bits(c.ang_vel_max), LIVE_ANG_VEL_MAX.map(f32::to_bits));
+    assert_eq!(bits(c.ang_vel_min), LIVE_ANG_VEL_MIN.map(f32::to_bits));
+}
