@@ -3694,3 +3694,105 @@ fn the_chassis_race125p_builds_carries_the_originals_angular_limits() {
     assert_eq!(bits(c.ang_vel_max), LIVE_ANG_VEL_MAX.map(f32::to_bits));
     assert_eq!(bits(c.ang_vel_min), LIVE_ANG_VEL_MIN.map(f32::to_bits));
 }
+
+// (12) P29: straight in the air ------------------------------------------------------------------
+
+/// The chassis' yaw, pitch and roll in degrees, read off its transform's rows (0 right, 1 up, 2
+/// forward) the way `research/p29_air_attitude.py` reads the original's `bike_xform`, so the two are
+/// one measure.
+fn attitude(r: &Rider) -> (f32, f32, f32) {
+    let m = r.ride.transform();
+    let (right, up, forward) = (m.0[0], m.0[1], m.0[2]);
+    (
+        f32::atan2(forward.x(), forward.z()).to_degrees(),
+        forward.y().clamp(-1.0, 1.0).asin().to_degrees(),
+        f32::atan2(right.y(), up.y()).to_degrees(),
+    )
+}
+
+/// The original's squarest landings off recording2's straight jumps, in degrees: the least roll any
+/// of them came down with (−0.6, the jump at tick 2651) and the least the heading turned over a
+/// flight (−4.2, tick 3753). The human held the stick over in every one of them, so they are the
+/// envelope of a ridden landing; a flight nobody touches has no excuse to land outside them.
+const ORIGINAL_SQUAREST_ROLL: f32 = 0.6;
+const ORIGINAL_SQUAREST_YAW: f32 = 4.2;
+
+/// **P29.** Off a jump with the stick left alone, race125p lands as square as the original's
+/// squarest landing on recording2.
+///
+/// The ramp is laid 20° across the run-up, so the bike turns onto it and takes off with what a real
+/// lip hands the air step: a yaw rate the ground step left on the body, and a heading that is not the
+/// way it is travelling (the shell's `--trace-air` off free09's ramp shows the same, −0.14 rad/s and a
+/// crossup of 0.11 rad). From the first airborne frame on the controls are all zero. What the flight
+/// owes the rider is the auto-level: the roll pulled to level and the heading pulled onto the
+/// velocity, so the landing is square to where the bike is going.
+#[test]
+fn it_flies_straight_hands_off() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else {
+        println!("no race125p.phy or 125_faisst wheels on a disc in context/iso — skipped");
+        return;
+    };
+    let mut r = Rider::new(&p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let off = Controls::default();
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let mut world = floor();
+    for _ in 0..60 {
+        r.frame(&p, &tables, &off, DISC_DT, &mut world);
+    }
+    let across = 20f32.to_radians();
+    let mut jump = Jump {
+        origin: r.ride.position(),
+        dir: Vf::new(across.sin(), 0.0, across.cos(), 0.0),
+        start: 150.0,
+        slope: 0.5,
+        length: 20.0,
+    };
+
+    let (mut lip, mut landed) = (None, None);
+    let (mut flying, mut most_roll) = (0usize, 0f32);
+    let mut lip_rate = F::ZERO;
+    for k in 0..600 {
+        let hands = if lip.is_some() { &off } else { &gas };
+        let before = attitude(&r);
+        let rate = F(r.ride.chassis.ang_vel.y());
+        let f = r.frame(&p, &tables, hands, DISC_DT, &mut jump);
+        assert!(f.wreck.is_none(), "frame {k}: wrecked hands off: {:?}", f.wreck);
+        let air = !r.ride.air.on_ground;
+        if air && lip.is_none() {
+            lip = Some(before);
+            lip_rate = rate;
+        }
+        if air {
+            flying += 1;
+            most_roll = most_roll.max(attitude(&r).2.abs());
+        }
+        if !air && flying > 0 {
+            landed = Some((attitude(&r), r.ride.air.crossup));
+            break;
+        }
+    }
+    let lip = lip.expect("the bike never left the ramp");
+    let ((yaw, pitch, roll), crossup) = landed.expect("the bike never came down");
+    let turned = yaw - lip.0;
+    println!(
+        "hands off from the lip: {flying} frames in the air; lip yaw {:.2} pitch {:.2} roll {:.2} \
+         yaw rate {:.4} rad/s; landed yaw {yaw:.2} (turned {turned:+.2}) pitch {pitch:.2} roll \
+         {roll:.2}, crossup {:.4} rad, the most roll in the air {most_roll:.2}",
+        lip.0, lip.1, lip.2, lip_rate.0, crossup.0
+    );
+    // Measured: 63 frames up, a lip yaw rate of 0.2346 rad/s, landed rolled 0.00 deg with the
+    // heading turned −1.32 deg and a crossup of 0.0000, 0.83 deg the most roll on the way.
+    assert!(flying > 30, "not a jump: {flying} frames in the air");
+    assert!(lip_rate.abs() > F(0.05), "the lip handed the air step no yaw rate to take out: {}", lip_rate.0);
+    assert!(
+        roll.abs() <= ORIGINAL_SQUAREST_ROLL,
+        "landed rolled {roll} deg hands off; the original's squarest landing is {ORIGINAL_SQUAREST_ROLL}"
+    );
+    assert!(
+        turned.abs() <= ORIGINAL_SQUAREST_YAW,
+        "the heading turned {turned} deg over a hands-off flight; the original's least is {ORIGINAL_SQUAREST_YAW}"
+    );
+    assert!(crossup.abs() < F(0.01), "landed crossed up {} rad hands off", crossup.0);
+    assert!(most_roll < 2.0, "rolled {most_roll} deg in a hands-off flight");
+}

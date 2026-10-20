@@ -769,3 +769,74 @@ fn the_grounded_pose_grid_draws_across_every_band() {
     );
     assert!(rows > 0.01, "the band does not move the body between rows: {rows}");
 }
+
+/// **P29.** A hands-off flight draws the bike as square as the solver flies it.
+///
+/// The ride is dropped from [`DROP`] with nobody on the controls, so the solver's chassis stays level
+/// all the way down: the auto-level has nothing to correct. What the shell draws on top of that is the
+/// chassis' pose, and in the air the airborne row plays the `bike_air_*` sweep at the request's phase
+/// axis. This steps two chassis through the same flight — one from [`Chassis::request`], whose axes
+/// are zero, and one from [`Chassis::riding`], whose axes are the rider's own — and measures how far
+/// the `Bike` node is turned off its rest, which is the twist the screen shows on top of the solver.
+///
+/// The first is the shell before P29 and is asserted to twist, so that the second passing means
+/// something: the same flight, the same frames, and only the two axes differ.
+#[test]
+fn a_hands_off_flight_draws_the_bike_square() {
+    let Some(mut disc) = disc() else { return };
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let build = sub(&mut disc);
+    let mut zeroed = chassis(&mut disc, &set, &build.mcf);
+    let mut riding = chassis(&mut disc, &set, &build.mcf);
+    let root = riding.stance.set.skeleton.find(ROOT).expect("the chassis has a Bike node");
+
+    let mut r = ride(&p, &riding, &set);
+    let mut world = Flat::default();
+    // How far a node's axes are turned from the identity, in degrees: the rotation angle of its
+    // upper 3x3, which counts a yaw and a roll alike.
+    let turned = |m: &M4| -> f32 {
+        let len = |i: usize| (m.0[i][0] * m.0[i][0] + m.0[i][1] * m.0[i][1] + m.0[i][2] * m.0[i][2]).sqrt();
+        let trace = m.0[0][0] / len(0) + m.0[1][1] / len(1) + m.0[2][2] / len(2);
+        ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees()
+    };
+    let (mut air, mut most_zeroed, mut most_riding) = (0usize, 0f32, 0f32);
+    for k in 0..240 {
+        r.frame(&p, &tables, &Controls::default(), FRAME, &mut world);
+        let want = Chassis::want(&r.ride, &r.tricks);
+        let d = Drive::of(&r.ride);
+        zeroed.frame(FRAME, want, &Chassis::request(&r.ride, &r.tricks), d);
+        riding.frame(FRAME, want, &Chassis::riding(&r), d);
+        if want != va::AIR {
+            continue;
+        }
+        air += 1;
+        let (a, b) = (turned(&zeroed.world[root]), turned(&riding.world[root]));
+        most_zeroed = most_zeroed.max(a);
+        most_riding = most_riding.max(b);
+        if k % 10 == 0 {
+            println!(
+                "frame {k:3}: shown crossup {:.4} fore-aft {:.4}; the Bike node turned {a:6.2} deg \
+                 at zero axes, {b:6.2} deg at the rider's",
+                r.motion.pose.0, r.motion.fore_aft.0
+            );
+        }
+    }
+    println!(
+        "a hands-off drop: {air} airborne frames; the Bike node turned at most {most_zeroed:.2} deg \
+         from zero axes and {most_riding:.2} deg from the rider's"
+    );
+    assert!(air > 30, "the drop was not a flight: {air} airborne frames");
+    // Measured: 61.78 deg at zero axes (the sweep's far end, reached about half a second into the
+    // flight) against 1.56 deg at the rider's, which is `bike_air_Mid`'s own pose at its midpoint.
+    assert!(
+        most_zeroed > 30.0,
+        "zero axes no longer cross the bike up, so this test no longer shows what P29 fixed: \
+         {most_zeroed} deg"
+    );
+    assert!(
+        most_riding < 3.0,
+        "the chassis is drawn turned {most_riding} deg off a level hands-off flight"
+    );
+}

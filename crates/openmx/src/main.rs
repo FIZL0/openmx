@@ -369,6 +369,11 @@ struct Args {
     /// position, heading, how upright, on the ground, wrecked — in the columns P15 measured the
     /// original's captures by, so both rides go through one script.
     trace_feel: bool,
+    /// `--trace-air`: `--trace-feel`'s rides, but the line is the chassis' attitude — yaw, pitch and
+    /// roll off the transform in degrees, the body's own angular velocity, which wheels touch, the
+    /// crossup and the stick the bike is holding. P29's measuring stick for a bike that twists in the
+    /// air: one line a frame from the run-up, over the lip, to the landing.
+    trace_air: bool,
     /// `--phy NAME`: ride the bike archive's member ending in `NAME` (`pro125a.phy`) instead of the
     /// freeride's own `Bike\Race125P.phy`.
     phy: Option<String>,
@@ -899,8 +904,12 @@ fn run() -> Result<(), String> {
             dt.0, args.track, args.bike
         );
         println!("phy: {phy_member}");
-        if args.trace_feel {
-            println!("frame speed vel_x vel_y vel_z x y z heading up ground wreck");
+        if args.trace_feel || args.trace_air {
+            if args.trace_air {
+                println!("frame ground fr yaw pitch roll wx wy wz crossup stick_x stick_y speed wreck");
+            } else {
+                println!("frame speed vel_x vel_y vel_z x y z heading up ground wreck");
+            }
             let throttle = Controls { gas: F::ONE, ..Controls::default() };
             for i in 0..frames {
                 let now = match args.trace_switch {
@@ -910,6 +919,29 @@ fn run() -> Result<(), String> {
                 let f = rider.frame(&phy, &tables, now, dt, &mut sim);
                 let r = &rider.ride;
                 let (v, p, m) = (r.chassis.vel, r.position(), r.transform());
+                if args.trace_air {
+                    // Host floats: a diagnostic print. Yaw the way a capture's `atan2(m20, m22)`
+                    // reads it, pitch as the nose's rise, roll as the right axis' rise against the
+                    // up axis' height — `research/p29_air_attitude.py` reads the original's rows
+                    // the same way, so the two columns compare.
+                    let (right, up, fwd) = (m.0[0], m.0[1], m.0[2]);
+                    let w = r.chassis.ang_vel;
+                    println!(
+                        "{i} {} {}{} {:.3} {:.3} {:.3} {:.4} {:.4} {:.4} {:.4} {:.3} {:.3} {:.3} {}",
+                        if r.air.on_ground { 1 } else { 0 },
+                        if r.front.mv.contact { 1 } else { 0 },
+                        if r.rear.mv.contact { 1 } else { 0 },
+                        fwd[0].atan2(fwd[2]).to_degrees(),
+                        fwd[1].clamp(-1.0, 1.0).asin().to_degrees(),
+                        right[1].atan2(up[1]).to_degrees(),
+                        w.x(), w.y(), w.z(),
+                        r.air.crossup.0,
+                        r.held.stick.0 .0, r.held.stick.1 .0,
+                        r.chassis.speed.0,
+                        if f.wreck.is_some() { 1 } else { 0 },
+                    );
+                    continue;
+                }
                 println!(
                     "{i} {:.4} {:.4} {:.4} {:.4} {:.3} {:.3} {:.3} {:.5} {:.4} {} {}",
                     v.x().hypot(v.z()),
@@ -1219,7 +1251,9 @@ fn run() -> Result<(), String> {
             if world.riding && bike_up {
                 let ride = &world.sim.rider.ride;
                 let want = Chassis::want(ride, &world.sim.rider.tricks);
-                let request = Chassis::request(ride, &world.sim.rider.tricks);
+                // The rider's two axes and not zeros: in the air they are the crossup sweep the
+                // chassis' clip is played at, and zero is the sweep's far end (P29).
+                let request = Chassis::riding(&world.sim.rider);
                 chassis.frame(dt, want, &request, Drive::of(ride));
                 if let Some(loaded) = assets.models.get_mut(CHASSIS) {
                     chassis.skin_into(loaded);
@@ -1639,6 +1673,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace_gas: false,
         trace_stick: None,
         trace_feel: false,
+        trace_air: false,
         phy: None,
         trace_at: None,
         trace_switch: None,
@@ -1697,6 +1732,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--trace-brake" => args.trace_brake = true,
             "--trace-gas" => args.trace_gas = true,
             "--trace-feel" => args.trace_feel = true,
+            "--trace-air" => args.trace_air = true,
             "--trace-switch" => {
                 args.trace_switch = Some(
                     next("a frame to switch at")?
@@ -1798,6 +1834,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      nobody on the pad and prints the solver's own numbers, and --trace-brake\n\
                      or --trace-gas hold the brakes or the throttle while it does, --trace-stick X\n\
                      holds the stick over and --trace-feel prints a short line a frame instead;\n\
+                     --trace-air prints the chassis' attitude and its rates instead;\n\
                      --trace-switch N rides the throttle alone for N frames first;\n\
                      --trace-at X,Z,DEG starts the bike there instead of the start line, and\n\
                      --phy NAME rides the bike archive's NAME (pro125a.phy) instead of Race125P.phy.\n\
