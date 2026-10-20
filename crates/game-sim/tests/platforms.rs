@@ -434,8 +434,8 @@ const RIDERS_HASHES: &[(u64, u64)] = &[
 /// FNV-1a over every tick's hash of the run.
 const RIDERS_DIGEST: u64 = 0x039d790b5811d248;
 /// FNV-1a over the four riders' `snapshot::encode` bytes at the end, and how many bytes they were.
-const RIDERS_WIRE_DIGEST: u64 = 0x03ba62bf37183807;
-const RIDERS_WIRE_LEN: usize = 16862;
+const RIDERS_WIRE_DIGEST: u64 = 0x6d16d9e92b74226f;
+const RIDERS_WIRE_LEN: usize = 16930;
 
 /// The riders' run: every tick's hash, and the riders at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad guessed as held, the guess ridden, the save put back and the real

@@ -2226,25 +2226,25 @@ const WORD: [&str; 7] = ["w0", "w1", "w2", "w3", "w4", "w5", "w6"];
 /// a number of the port's own.
 pub const WRECK_INERTIA: Vf = Vf([56.111691, 46.036716, 27.289017, 1.0]);
 
-/// Which of `[Wrecks]`' seven throws a wreck reason uses.
+/// Which of `[Wrecks]`' seven throws a wreck reason uses, or none.
 ///
-/// **The port's own inference, and the one piece of this task with nothing behind it.** The names in
-/// [`phy::Hit`] are the file's and the reasons are [`air::Wreck`]'s, and the mapping between them is
-/// in neither: there is no string, no table and no key for it anywhere in the executable, and the
-/// ragdoll code that would read one is not ported. What is written here is what the names say, and
-/// only [`phy::Hit::Bottom`] — the reason the human's capture hit twice — is exercised by a test.
-pub fn hit_of(reason: trick::Wreck) -> phy::Hit {
+/// **The rider body actor's wreck entry is what decides it** (S53, `crate::ragdoll`'s
+/// `Ragdoll::wreck_enter`): its switch on the reason picks the throw, and this is that switch with
+/// the bones left out. Three reasons are thrown by no throw. A scenery hit and a joust (6, 7) let go
+/// of the bars at once and hand the bones the bike's velocity, and a cannonball (13) is a
+/// cartwheel. Every reason the switch does not know (0, 9, 10, 14 and up) does nothing past the
+/// common part. Before S53 this was inferred from the names, and 6, 13 and the unknown ones were
+/// given throws they do not have.
+pub fn hit_of(reason: trick::Wreck) -> Option<phy::Hit> {
     match reason.0 {
-        1 => phy::Hit::Front,          // air::Wreck::Front, thrown over the bars
-        2 | 3 => phy::Hit::Side,       // Left, Right
-        4 => phy::Hit::Back,           // Back
-        5 => phy::Hit::Bottom,         // Flat — landed too hard, and the only one proved
-        6 => phy::Hit::Front,          // Scenery — the rider's head into something, from in front
-        8 => phy::Hit::FallOffFront,   // NoseDive
-        0xb => phy::Hit::FallOffBack,  // Tail
-        7 | 0xc => phy::Hit::Stunt,    // Joust, NoHander — came off doing something
-        13 => phy::Hit::Front,         // state::Wreck::CANNONBALL, which is a hit from in front
-        _ => phy::Hit::Bottom,         // state::Wreck::NO_CONTROL and anything new: put down
+        1 => Some(phy::Hit::Front),
+        2 | 3 => Some(phy::Hit::Side),
+        4 => Some(phy::Hit::Back),
+        5 => Some(phy::Hit::Bottom),
+        8 => Some(phy::Hit::FallOffFront),
+        0xb => Some(phy::Hit::FallOffBack),
+        0xc => Some(phy::Hit::Stunt),
+        _ => None,
     }
 }
 
@@ -2283,7 +2283,8 @@ pub fn hit_of(reason: trick::Wreck) -> phy::Hit {
 pub struct Crash {
     /// The reason the machine entered with, and the throw it picks.
     pub reason: trick::Wreck,
-    pub hit: phy::Hit,
+    pub hit: Option<phy::Hit>,
+    /// The hit's throw, or all zeros for a reason with none: the hands are off at once.
     pub throw: phy::Throw,
     /// Seconds since the entry. The machine's own clock is restarted when its latch arms; this one
     /// is not, because the hand-hold time is measured from the entry.
@@ -2363,7 +2364,7 @@ impl Crash {
         Crash {
             reason,
             hit,
-            throw: wrecks.throw(hit),
+            throw: hit.map_or_else(phy::Throw::default, |h| wrecks.throw(h)),
             clock: F::ZERO,
             holding: true,
             throwing: F::ZERO,
@@ -2514,7 +2515,7 @@ fn normal_of(across: Vf, speed: F) -> Vf {
 impl State for Crash {
     fn walk(&self, w: &mut Walk<'_>) {
         w.u8("reason", self.reason.0);
-        w.i32("hit", self.hit as i32);
+        w.i32("hit", self.hit.map_or(-1, |h| h as i32));
         w.group("throw", |w| {
             w.f("force_time", self.throw.force_time);
             w.f("hand_hold_time", self.throw.hand_hold_time);

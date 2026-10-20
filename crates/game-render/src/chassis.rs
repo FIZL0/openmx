@@ -49,6 +49,15 @@ pub fn placed(ride: &Ride) -> M4 {
     M4::placement(at(ride.position()), at(forward), at(up))
 }
 
+/// **Where the wrecked bike is drawn** (S53): the wreck body's own pose, which is the bike's once a
+/// crash has taken it over. The ride is left where the wreck began and is not moved again until the
+/// rider is back on.
+pub fn wrecked(crash: &game_sim::ride::Crash) -> M4 {
+    let (forward, up) = game_sim::math::quat_axes(crash.body.quat);
+    let axis = |v: [ps2_float::F; 3]| v3(v[0].0, v[1].0, v[2].0);
+    M4::placement(at(crash.origin), axis(forward), axis(up))
+}
+
 /// A simulation vector as the renderer's own.
 fn at(v: Vf) -> V3 {
     v3(v.x(), v.y(), v.z())

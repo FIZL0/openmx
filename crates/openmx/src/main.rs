@@ -156,7 +156,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use game_render::biplane::{self, Biplane};
-use game_render::chassis::{grips as chassis_grips, placed as chassis_at};
+use game_render::chassis::{grips as chassis_grips, placed as chassis_at, wrecked as chassis_wrecked};
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, V3, v3};
 use game_render::raster::Frame;
@@ -980,6 +980,28 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
     }
 
+    // The rider's bones (S53): the riding skeleton the ragdoll is thrown from, read once off the body
+    // and its model, and the rider file's parts and pins on top. Every player's body is the same
+    // skeleton, so one kit serves them all. Without a body or the rider file a wreck is ridden out as
+    // the one point S26 had.
+    let ragdolled = match (body.as_mut(), &wreckage) {
+        (Some(body), Some((_, rider_file))) => {
+            let geometry = body.geometry().to_string();
+            assets.models.get(&geometry).and_then(|loaded| body.ragdoll_rig(&loaded.model, rider_file))
+        }
+        _ => None,
+    };
+    let ragdoll_kit = match (&ragdolled, &wreckage) {
+        (Some(doll), Some((_, rider_file))) => {
+            Some(Arc::new(game_sim::ragdoll_ride::Kit::new(rider_file, doll.rig.clone())))
+        }
+        _ => None,
+    };
+    match &ragdolled {
+        Some(doll) => println!("ragdoll: {} parts off the riding pose", doll.nodes.len()),
+        None => println!("ragdoll: none — a wreck is ridden out as one point"),
+    }
+
     // ---- the bike that moves (V9) ---------------------------------------------------------------
     // The chassis' own animation: the `.sub`'s `[Objects] MCF`, the clips the sixty-state machine
     // names, and the chassis skeleton they are bound to. The archive is opened a second time for the
@@ -1199,6 +1221,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 phy::Wrecks::read_bytes(body),
                 ride::WRECK_INERTIA,
             );
+        }
+        if let Some(kit) = &ragdoll_kit {
+            rider.carries_ragdoll(Arc::clone(kit));
         }
         rider
     };
@@ -1991,7 +2016,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The camera's target block, as the original's vehicle fills it once a frame (`chase.rs`).
             // The airborne flag is the one the camera heads along the velocity on: in the air the
             // backflip's upside-down forward row never reaches it (P34).
-            let rider = chase::ridden(&seat.garage, &seat.sim.rider.ride);
+            let rider = match (&seat.garage.up, &seat.sim.rider.crash) {
+                (Kind::Bike, Some(crash)) => chase::wrecked(crash),
+                _ => chase::ridden(&seat.garage, &seat.sim.rider.ride),
+            };
             // The shape of the view this camera draws into (V22), which on a full screen is the frame.
             let (view_w, view_h) = (rects[i].w, rects[i].h);
             let view = if presets == 0 {
@@ -2066,7 +2094,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 if seat.garage.up != Kind::Bike {
                     continue;
                 }
-                let bike_at = chassis_at(&seat.sim.rider.ride);
+                // The bike where the wreck body has taken it while the rider is down (S53), and where
+                // the ride has it otherwise.
+                let bike_at = match &seat.sim.rider.crash {
+                    Some(crash) => chassis_wrecked(crash),
+                    None => chassis_at(&seat.sim.rider.ride),
+                };
                 // Each part rides on one node of the chassis, so its transform is that node's place in the
                 // chassis followed by the chassis's place in the world.
                 actor.push((rig.bike_model.as_str(), bike_at));
@@ -2103,7 +2136,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // themselves, so there is nothing to bolt (`game_render::rider`). Not before a frame has
                 // posed it, though: a blend with no clip behind it leaves the bind pose, which is the one
                 // pose the game never draws.
-                if let (Some(body), Some(model)) = (&rig.body, &rig.body_model) {
+                // While the rider is down and the ride runs their bones (S53), the body is drawn from
+                // the bones: thrown off the bike, not sat on it.
+                let down = match (&seat.sim.rider.ragdoll, &seat.sim.rider.ragdoll_kit, &ragdolled) {
+                    (Some(doll), Some(kit), Some(rigged)) => Some((doll.nodes(kit), rigged)),
+                    _ => None,
+                };
+                if let (Some(body), Some(model), Some((bones, rigged))) = (&rig.body, &rig.body_model, &down) {
+                    let away = vector(seat.sim.rider.ride.position()).sub(camera.eye).len();
+                    let focal = camera.focal(target.height);
+                    if let Some(loaded) = assets.models.get_mut(model.as_str()) {
+                        let group = loaded.model.group_for(away, loaded.radius, focal);
+                        body.skin_ragdoll_into(loaded, group, rigged, bones, bike_at);
+                        skinned[p] = None;
+                    }
+                    actor.push((model.as_str(), bike_at));
+                } else if let (Some(body), Some(model)) = (&rig.body, &rig.body_model) {
                     if body.posed {
                         // Which of the body's five levels of detail this camera has earned, and the hands and
                         // feet put back where the chassis wants them. Both read the camera, so the skinning

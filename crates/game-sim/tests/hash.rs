@@ -462,7 +462,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // 8984 since N1: the bike's parameters behind an `Arc` the snapshots share, which the walk still
     // reads through, so nothing left it. The size is a 64-bit one: on wasm32 every `Vec` and `usize`
     // is half as wide, and the leaf count below is what holds on every target.
+    // 9472 since S53: the rider's ragdoll kit, the bones of a wreck and the wreck sounds' picks, which
+    // the walk names under `ragdoll` and `wreck_sounds` only when the rider carries a kit.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 8984, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 9472, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 835, "the walk's leaf count moved with it");
 }
