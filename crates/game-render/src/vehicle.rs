@@ -67,6 +67,7 @@ use crate::mat::{M4, V3, v3};
 use crate::skin::{Skeleton, skin};
 use crate::world::Loaded;
 use game_sim::ride::Ride;
+use game_sim::rider::Rider;
 use game_sim::trick::{SLOTS, Stunt, Tricks};
 use game_sim::vehicle_anim::{self as va, Params, Request};
 use ps2_float::F;
@@ -453,6 +454,27 @@ impl Chassis {
             progress: tricks.progress,
             seq: tricks.seq,
             ..Request::default()
+        }
+    }
+
+    /// [`Chassis::request`] with the two axes filled in: the request block a ridden bike's chassis is
+    /// stepped from, which is what the shell draws.
+    ///
+    /// **P29.** The airborne row plays `bike_air_Fwd/Mid/Bck` *at the phase axis* — the crossup sweep,
+    /// 0 crossed up one way, 1 the other, 0.5 square — and picks the pair by the mix axis. Left at
+    /// [`Chassis::request`]'s zeros, every flight eased the chassis' phase lag to one end of the sweep
+    /// and the clip's root channel drew the bike crossed up all the way, whatever the solver did: off
+    /// the lip square, down twisted, and square again on the first grounded frame, when the grounded
+    /// rows stop posing it. The numbers are the ones [`game_sim::rider::Rider`] already hands the
+    /// rider's body (its `body_request`): the motion driver's pose, which in the air is its shown
+    /// crossup, and its fore-and-aft. In the original the rider's body is mounted on the *bike's*
+    /// request block — the block's owner word is the bike, on every ridden body of the V21 save
+    /// states — so the bike and its rider read one pair of axes, which is this.
+    pub fn riding(rider: &Rider) -> Request {
+        Request {
+            phase_axis: rider.motion.pose,
+            mix_axis: rider.motion.fore_aft,
+            ..Chassis::request(&rider.ride, &rider.tricks)
         }
     }
 }
