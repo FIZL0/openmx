@@ -510,6 +510,10 @@ pub mod rider_anim;
 /// their records for riding and for the wreck, and the two entries that switch between them.
 pub mod ragdoll;
 
+/// The ragdoll's nine bone collisions: each bone's sphere pushed out of the ground and the scene,
+/// with an impulse at the contact that turns the bone as well as moving it.
+pub mod ragdoll_contact;
+
 /// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.

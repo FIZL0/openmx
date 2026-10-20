@@ -2460,6 +2460,29 @@ body_set_inertia boot 0x0015abf0 (body, vec4*) vt +0x50: writes 1.0 into the *so
 #     +0x5c0/+0x5c4 wreck/ride iterations (2/3), +0x5c8/+0x5cc rates (55/25), set by vehicle_anim_ctor
 #     +0x5d0..+0x5dc the four holds, +0x5f8 the bike box, +0x620/+0x624 the nine bone collisions
 #            (+4 on, +0x14 touching, +0x88 the collider), +0x62c the throw force (+0 on, +0x24 body)
+# S52 — the ragdoll's bone collisions (crates/game-sim/src/ragdoll_contact.rs, tests/ragdoll_contact.rs)
+bone_collision_new boot 0x001f6530 (220 bytes) the type-8 constraint's constructor (vtable 0x00451d90):
+#                                  +0x24 sweep on, +0x28 1/15 (0x3d888889), +0x2c/+0x30 1.0,
+#                                  +0x34 0, +0x38 0.7; +0x90..+0x9c zeroed. The rider loader
+#                                  (0x0030e250) then writes the file's four keys (defaults
+#                                  Restitution 0, the rest 1.0) and 0x001f66c0 wires +0x78 terrain,
+#                                  +0x7c/+0x80 the bone body twice, +0x88 sphere, +0x8c segment
+bone_collision_solve boot 0x001f7550 (vt +0x18; this, first) ground (only strictly inside the terrain's
+#                                    x/z box, +0x78 +0x30/+0x40), then the sphere collider, then the sweep
+#   the collision's fields: +4 on, +0x14 touched (set by every push-out), +0x18 ground, +0x1c scene,
+#   +0x20 swept (cleared each solve), +0x24 sweep on, +0x28 sweep back, +0x2c UnpenetrationScale,
+#   +0x30 RotationScale, +0x34 Restitution, +0x38 Friction, +0x3c ground record, +0x40 point,
+#   +0x50 normal, +0x60 dv, +0x70/+0x74 the contact's other side, +0x84 the actor's search pool,
+#   +0x90 the impulse's scratch (x = inv mass; w, always 0, starts every sum). Body +0x14 is Radius
+bone_collision_push_out boot 0x001f6c40 (this, point*, normal*) the static path is other == 0, or an
+#                                       other with neither a class-2 body (+0x7c) nor +0x80; the
+#                                       moving paths (0x001b2ff0/0x001b3180, vt +0xbc/+0xb8) are not
+#                                       ported. Swept or no body2: straight onto pos/vel
+bone_collision_impulse boot 0x001f6860 (this, arm*, shift*, kick*) the lever impulse; the shift's turn
+#                                      goes through the curve table (0x0046a7f0) into the quaternion
+bone_collision_sweep boot 0x001f7400 (this) the segment pos - vel*(+0x28) .. pos; a hit is point
+#                                    rec+0x30, normal rec+0x20, and sets scene and swept
+collider_set_position boot 0x001f0940 (collider, vec4*, 0) the sphere collider stood at the bone
 # P22 -- what the captured bike_vel is, and R6's two readings of it.
 # rider_body_mode (boot 0x0024c7e0, above) also writes the owner's +0x530 -- the type-4 actor record at
 #   owner+0x400, its +0x130, which is what `./kit record` captures as bike_vel -- as the request
