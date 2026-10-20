@@ -2448,3 +2448,178 @@ wheel_tire_drive_force boot 0x0025ca60 (wheel) wheel_spin_integrate's tire force
 #                                      past +MaxDriveForce*load it is SkidDriveForce*load with +0xe0
 #                                      (spinning) set, past -cap -SkidDriveForce*load with +0xe4 (locked);
 #                                      side force at +0x850, forward at +0x858. P23 read it
+
+# ---------------------------------------------------------------------------------------------------
+# R8 — the biplane (Biplane.cpp, with MXBiplane on top), read statically from the decompilation:
+# nothing here was run. Offsets are from the MXBiplane object (0xea0 bytes); its actor vtable is at
+# +0x48. The entry is research/journal/2026-10-20-r8-r8-the-biplane. Feeds S33-S36, I6, V21, P19.
+biplane_ctor boot 0x003505f0 the Biplane base: actor_record_ctor with "Biplane" (0x0043ed28), the
+#                            rigid body at +0x50 (0x001590e0), vtables +0x48 0x0045b050, +0x60
+#                            0x0045b0b4, +0x88 0x0045b0ac, +0x90..+0xa0 0x0045b12c/138/144/154/160;
+#                            +0x168 = 2, +0x230 the path buffer. Destructor 0x003509a0
+mxbiplane_ctor boot 0x00353d10 (1872 bytes) MXBiplane, vtable 0x0045b250, destructor 0x00354460
+vehicle_factory boot 0x0020eb10 (world, kind, skin, pos, dir, ...) new's the machine of a kind:
+#                               1 MXBiplane (MXWorld.cpp line 0x1396), 2 Kiowa helicopter (0xe90),
+#                               3 buggy (0xf90), 4 monster truck 0x003deca0 (0x1080), 5 baja
+#                               0x0039d310 (0xf90). Skin 0..3 picks "biplane", "biplane2",
+#                               "biplane_ss", "biplane2_ss" (0x0042eba8..0x0042ebd0). Calls vt +0x190
+#                               with the terrain *(world+0x6c)+0x428 (kept at +0x414), sets +0xd8c = 1,
+#                               copies the spawn transform to +0xe10..+0xe3c, adds the actor to the
+#                               world's machine list (+0x90) and clears bit 0x08 of the node's +0x135.
+#                               All five callers are in machine_placement
+# the actor vtable, Biplane 0x0045b050 / MXBiplane 0x0045b250 (same slots; MX overrides marked):
+#   +0x020 input      0x00351e20, MX 0x00355f40 (unanalysed by Ghidra; read with ./kit dis)
+#   +0x040            MX only 0x003560c0 (unanalysed)
+#   +0x190 init       0x00350a70, MX 0x00354600
+#   +0x194 phy        0x003511f0, MX 0x00355210
+#   +0x198 reset      0x00351df0, MX 0x00355b00
+#   +0x19c controls   0x00352160      +0x1a0 autopilot 0x00352460
+#   +0x1a4 frame      0x00352910, MX 0x00354b20 (also reached from the +0x60 thunk 0x00353c50)
+#   +0x1a8 preforce   0x003527f0      +0x1ac forces 0x00352850       +0x1b0 measure 0x00352960, MX 0x00355290
+#   +0x1b4 bones      0x00352e20      +0x1b8 surfaces 0x00352ff0     +0x1bc wreck check 0x00353180
+#   +0x1c0 wreck      0x003535d0, MX 0x00354aa0                       +0x1c4 unwreck 0x003536e0
+#   +0x1c8 reset chord MX 0x00355df0  +0x1f4 audio 0x00353a60, MX 0x003552d0
+#   the thunk block 0x00353c30..0x00353d00 adjusts by -0x58/-0x90/-0x94/-0x9c/-0x50
+biplane_init boot 0x00350a70 the loader: texture paths under "Biplane\" (path_prefix 0x004e2540),
+#                            rigid body 0x00159430(+0x50), two 0x1c0 models "propconeblur" -> +0x438
+#                            and "propconebent" -> +0x43c, position y += 10, engine 0x003500a0
+#                            (0x78 bytes) -> +0x400 bound to throttle +0x34c, aero 0x0034fa90 (0x100)
+#                            -> +0x404 bound to alpha/beta and the three surfaces, three tires
+#                            0x0034eb40 (0x1d0, BiplaneTireModel.cpp): +0x408/+0x40c front with the
+#                            brake +0x350, +0x410 rear with the steer +0x364. Then
+#                            "%sbiplane.phy" (0x0043ed78) into +0x230, ini_open, vt +0x194, vt +0x1b4,
+#                            and vt +0x1f4 when audio is wanted
+mxbiplane_init boot 0x00354600 base init, then +0x998 = 117.33, +0x900/904/908/90c = 0/3/-3/1, the
+#                              bones Dummy_Foot_L/R_pos and Dummy_Hand_L/R_pos -> +0xe58..+0xe64
+biplane_read_phy boot 0x003511f0 Biplane\biplane.phy, every key it reads:
+#   [Mass Properties]  the shared rigid-body reader 0x0015a500(+0x50)
+#   [Engine]           MaxPower e+0x4c, MaxAltitude e+0x54, MinPropEfficiency e+0x3c,
+#                      MinPropEfficiencySpeed e+0x40 (x1.46666, mph -> ft/s)
+#   [Aerodynamics]     Chord, Span, SurfaceArea, AspectRatio, DefaultAngleOfAttack (deg) -> 0x0034fc40;
+#                      a+0x54.. CLRoundOff CLDropOff CLScale CLAngleScale CLq CLde CD0 CD1 CDde CYbeta
+#                      CYda CYdr CYp CYr Clbeta Clp Clr Clda Cldr CM0(+0xa0) CMalpha CMq CMde;
+#                      CmBreakAngleOfAttack a+0x4c (deg); CMstall a+0xb0, Cnbeta +0xb4, Cnp +0xb8,
+#                      Cnr +0xbc, Cndr +0xc0, Cnda +0xc4; MaxElevator +0x37c, MaxAileron +0x380,
+#                      MaxRudder +0x384, ElevatorRampOffRollAngle +0x38c, ElevatorOffRollAngle +0x390
+#                      (all deg), MinElevator +0x394
+#   [FrontLeft Tire] [FrontRight Tire] [Rear Tire]  StrutCompression MaxDecompressionRate TireRadius
+#                      SideForce BrakeFriction MaxBrakingForce (default 1) SpringCoefficient
+#                      BounceDampingRatio ReboundDampingRatio SteeringMoment (rear only)
+#                      BodyTireCenter (t+0x60); applied by 0x0034ee10/0x0034ee90/0x0034eee0
+#   [Autopilot]        AileronDeadZone +0x398, MaxPitchRate +0x39c, MaxRollAngle +0x3a0 (deg),
+#                      PitchRateFeedForwardscale +0x3a4, PitchRateGain +0x3a8, PitchRateIntegratorGain +0x3ac
+#   [Joystick]         ThrottleIncrement +0x368, ReverseThrottle +0x36c, AileronControlRateLimit +0x370,
+#                      ElevatorControlRateLimit +0x374, RudderControlRateLimit +0x378
+#   [Wrecks]           WreckTime +0x3c0, MinWreckSpeed +0x3b8 (x1.46666), WreckGravity +0x3c4,
+#                      WreckDamping +0x3d0, WreckInertia +0x3e0; body +0x110 saved to +0x3f0
+#   the shipped file has MinAltitude, which nothing here reads; it has no CM0 (default 0)
+mxbiplane_read_phy boot 0x00355210 base, then [Animation] PelvisBoxPosition +0xe70, PelvisBoxSize +0xe80
+biplane_input boot 0x00351e20 (self, control table, pad, left stick x in f12, y in f13) -- the pad
+#                             as eight commands into five fields (pad_control_index 0x0011e2d0):
+#                             +0x338 = command 0x0e analogue (Cross shipped), +0x33c = 0x0f (Square),
+#                             +0x340 elevator = -sign(y)|y^3|, Up (2) -> +1, Down (3) -> -1,
+#                             +0x344 aileron = -sign(x)|x^3|, Left (0) -> +1, Right (1) -> -1,
+#                             +0x348 rudder = command 0x14 (L1) -1, 0x15 (R1) +1, else 0.
+#                             The help screen's eight labels (l_ui_eng.bin): Forward, Back, Climb,
+#                             Descend, Bank Left, Bank Right, Left Rudder, Right Rudder. The stick
+#                             floats are the controller's +0x324/+0x328, its first two axes, from
+#                             player_vehicle_tick 0x0025e910
+biplane_controls boot 0x00352160 the rate-limited surfaces: raw +0x338..+0x348 (gate +0x334), limits
+#                                +0x370/374/378, maxima +0x37c/380/384, the elevator rolled off over
+#                                +0x38c..+0x390 of roll (+0x5d4/+0x5f8), +0x590 grounded. Writes
+#                                +0x354 elevator, +0x35c aileron, +0x360 rudder, +0x364 tail-wheel
+#                                steer, +0x34c throttle (+0x368 step, +0x36c reverse), +0x350 brake
+biplane_autopilot boot 0x00352460 the pitch-rate loop: aileron raw +0x344 against +0x398, +0x39c,
+#                                 +0x3a0, gains +0x3a4/+0x3a8/+0x3ac, integrator +0x584 -> +0x358
+#                                 the elevator command, clamped by +0x37c
+biplane_preforce boot 0x003527f0 (self, dt in f12) body 0x0015b050, vt +0x19c, tire 0x0034ef80 x3
+biplane_forces boot 0x00352850 body 0x0015af40; unless wrecked (+0x3b0) vt +0x1a0, engine
+#                              0x003501b0, aero 0x0034fcb0; tires 0x0034ef90 x3 and 0x0034f150 x3
+biplane_measure boot 0x00352960 body 0x0015b070, +0x590 any tire down (tire +0x88), touchdown sound
+#                               +0x67c (0x003dd0a0), vt +0x1b8/+0x1bc, +0x598 airspeed, +0x59c alpha
+#                               and +0x5a0 beta (acos table 0x0046a688/0x0046a6a0), Euler +0x5f0
+#                               (quat_to_euler 0x0013fa60), matrix +0x600 (0x0013ebd0)
+biplane_find_bones boot 0x00352e20 BottomLeftFlap TopLeftFlap BottomRightFlap TopRightFlap PropDummy
+#                                  RearLeftFlap RearRightFlap Rudder -> +0x418..+0x434, rest
+#                                  matrices +0x440..+0x57c
+biplane_animate_surfaces boot 0x00352ff0 aileron +-(+0x35c) on the four wing flaps, elevator
+#                                        -(+0x354 * +0x37c) on the rear flaps, rudder -(+0x360), the
+#                                        prop turned by engine +0x48 and showing propconeblur, or
+#                                        propconebent once wrecked
+biplane_wreck_check boot 0x00353180 (self, dt). Reason 13, the map edge: within 150 of the terrain's
+#                                   edge (0x001a6e50) the plane is thrown back toward the centre
+#                                   (speed capped, +155.4 up, gravity scale +0x194 halved, a random
+#                                   spin from rand_raw x0.5/0.4/0.7) and wrecked. Reason 1: body
+#                                   contact (+0x170+0x40) on a surface whose flags miss +0x580 above
+#                                   MinWreckSpeed, or any contact upside down (+0x5e4 < 0). While
+#                                   wrecked +0x3bc counts; reason 13 waits 2.5 s on the ground first
+#                                   (+0x3b4), then after WreckTime vt +0x1c4
+biplane_wreck boot 0x003535d0 (self, reason) +0x3b0 = reason, WreckInertia/WreckDamping onto the body,
+#                             gravity -WreckGravity*mass*32.2, throttle and engine +0x70 zeroed, the
+#                             engine sound stopped. MX 0x00354aa0 adds a rumble (1.0, 200) for a
+#                             player and calls this
+biplane_unwreck boot 0x003536e0 undoes all of it (the halved gravity scale too for 13), restarts the
+#                               engine sound, then vt +0x198
+mxbiplane_reset boot 0x00355b00 back to the spawn transform +0xe10, throttle and surfaces zeroed,
+#                               +0xe50 = 0
+mxbiplane_reset_chord boot 0x00355df0 commands 0x4c and 0x4d together (L1+R1, binding_is_event
+#                                     0x0011ce10), on the owner's pad, latched by +0xe0c, only when
+#                                     grounded or wrecked -> vt +0x1c4
+mxbiplane_frame boot 0x00354b20 clears the latch +0xe0c, adds forward speed * dt to +0xe08, and runs
+#                               a respawn clock +0xe50 that, at zero, restores the spawn transform and
+#                               resets
+biplane_audio boot 0x00353a60 engine 0x003a5230/0x003a53d0 -> +0x674 (carengine.aud "biplane",
+#                             biplaneLoop1..7), 0x003dc490 -> +0x678 (biplaneTireParams), 0x003dcbf0
+#                             -> +0x67c (biplaneTireTouchdown). MX 0x003552d0 adds +0xe94 from
+#                             "Aud\event.aud" (0x0043f458) keyed by +0x3b0 (biplaneWreck in machine.aud)
+mxbiplane_particles boot 0x00354750 called from the per-kind asset loader 0x0020a640 (case 1): fills
+#                                   +0xab0..+0xad4 (tire fields, +0x34c, +0x598, +0x3b0), loads
+#                                   "biplaneparticles.dat" (0x0043f3c0) and "mxparticlezones.dat"
+#                                   (0x0043f3e0) from the track directory, manager -> +0xe90.
+#                                   The .dat (Tracks\free06/07/09/10/11 _2 and _ss_2 .res):
+#                                   Biplanewreckdust, wreckchunks, biplanesmoke (Biplane_Exhaust_L,
+#                                   off while wrecking), BiplaneExhaust x2 (Biplane_Exhaust_L/R,
+#                                   MaxSpeed 35), biplanetiredust x3 (biplane_FtireL/FtireR/
+#                                   Rtire_particles), Biplanedust (HelicopterDust type, PropDummy)
+# model and textures, machine.res and the freeride _2.res: biplane\anim\biplane{,2,_ss,2_ss}.psg,
+#   col\biplane{,2,_ss,2_ss}{m,f}.col, anim\propconeblur.psg (biplaneprop), propconebent.psg
+#   (biplanepropbroken); biplane\tex pitts_body01/02, pitts_wing01/02, pitts_panel01,
+#   pitts_windshield01, guns, biplaneprop, biplanepropbroken, specular04 (.psm/.pst)
+rider_machine_clips boot 0x00248150 (rider, machine, clip_a, clip_b) the rider build 0x0020e4f0 calls
+#                                   it for every kind 1 or 2 machine with "biplane_roll_bck",
+#                                   "biplane_roll_fwd" (kind 3 buggy_steer, 4/5 baja_steer); the
+#                                   rider pose 0x002492b0 blends the two by its +0x488's +0x170/+0x174
+camera_presets_by_kind boot 0x0020a1c0 freeride only (mode 5), from 0x0020a360: one camera-preset
+#                                      object per kind, kind 1 "AppStart\BiplaneCPresets.ini"
+#                                      (0x0042e2a0; 5 FourWheel 0x0042e280, 2 Helo, 4 MonsterTruck,
+#                                      3 Buggy), read by 0x001feea0 with "AppStart\CinemaCam.ini".
+#                                      The file: 5 presets, "Flight Cam 1" (AngleY 180, AngleX 65,
+#                                      FollowingDistance 13, FOV 85, LookAhead 20), "Flight Cam 2"
+#                                      (9, 15), "Slot Cam" (120/40, 14), "Lookback Cam", "1P Stunt";
+#                                      h/v/w/x variants for split screen and wide
+machine_placement boot 0x0020f6e0 "%s%s\machine.txt" [Machines] NumberOfMachines; for a player whose
+#                                 event vehicle kind (event +0x11c + i*0xc) is 1 it reads
+#                                 "Biplane%d" (i+1): Type, Position, Direction, HasPlayer, HasAI,
+#                                 MachineRacer, SetGroundHeight; else "Machine%d". free06:
+#                                 [Biplane1] 2304,135,2281 dir 0,0,-1
+freeride_near_machine boot 0x003a8330 the switch trigger, each frame for the HUD's player: for kinds
+#                                     0..5 ("MotocrossVehicle", "Biplane", "Helicopter", "MXBuggy",
+#                                     "MXMonsterTruck", "MXBaja"), unless the kind is locked in the
+#                                     "Machines" unlock list, the nearest such actor to the rider;
+#                                     within 30 ft and with no driver (+0x20), it goes to the HUD's
+#                                     +0x6d4[player] and the kind to +0x6dc[player]
+freeride_switch_prompt boot 0x003a7210 shows "Would you like to switch to the Biplane?"
+#                                      (STR_SWITCH_BIPLANE via 0x00360d30, which keeps the machine
+#                                      at +0x58 and kind at +0x5c) unless the rider is wrecked or
+#                                      above 58.667 ft/s (40 mph); clears +0x6d4 every frame
+freeride_switch_commit boot 0x003601b0 (prompt, player) the prompt's answer: machine_swap with the
+#                                      prompt's machine, then the camera and a kind-numbered
+#                                      message (biplane 0x13). The pause menu's "Switch To Machine:
+#                                      %s" (0x0028fcf0) calls the same swap
+machine_swap boot 0x00210b90 (world, controller, &current, old, new, player, ...) the old machine
+#                            loses the controller (+0x14 = 0); if it is the bike its model nodes are
+#                            hidden (0x0027d670 with 0 clears bit 0x40) and 0x0027b9f0 runs. No
+#                            transform is written: the bike stays where it was left. The new machine
+#                            gets the controller (+0x14 = 1) and the player's camera from its list
+#                            entry; a biplane is unwrecked (vt +0x1c4), +0xe50 = 0, and
+#                            0x00200f00(app, player, 0) runs
