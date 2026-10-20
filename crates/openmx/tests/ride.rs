@@ -108,18 +108,25 @@ const LEGS: [(&str, usize); 11] = [
 const RAMP: (f32, f32, f32) = (250.0, 0.3, 15.0);
 
 /// The flip's ramp, the same three numbers — the sibling file's `FLIP_RAMP`, which says why it is
-/// nearer, steeper and longer than [`RAMP`]: the jump's lip holds for 16 frames, and the flip is
-/// three stop-to-stop crosses of a stick this bike walks at 6 a second.
-const FLIP_RAMP: (f32, f32, f32) = (100.0, 0.5, 25.0);
+/// nearer, steeper and longer than [`RAMP`] (the jump's lip holds for 16 frames or fewer, and the
+/// flip is three stop-to-stop crosses of a stick this bike walks at 6 a second), and why it is 108 ft
+/// out and not the 100 it was before P28.
+const FLIP_RAMP: (f32, f32, f32) = (108.0, 0.5, 25.0);
 
-/// The top speed the human's recording of the original reaches, in feet a second — measured in
-/// `crates/game-sim/tests/ride.rs`, which is where the capture is read and this number is checked back
-/// against it. Here it is the scale the legs' own tolerances are written in.
-const CAPTURED_TOP_SPEED: f32 = 75.78;
+/// The top speed the human's recording of the original reaches, in feet a second of the chassis —
+/// measured in `crates/game-sim/tests/ride.rs`, which is where the capture is read and this number is
+/// checked back against it (75.78 until P28, which was the capture's 0.8x copy of the chassis'
+/// velocity read raw). Here it is the scale the legs' own tolerances are written in.
+const CAPTURED_TOP_SPEED: f32 = 94.73;
 
 /// The slowest of the original's four standing launches across both recordings, half a second and
-/// two seconds in — the sibling file's `ORIGINAL_LAUNCH`, with the measurement written up there (P15).
-const ORIGINAL_LAUNCH: (f32, f32) = (8.0, 32.0);
+/// two seconds in — the sibling file's `ORIGINAL_LAUNCH`, with the measurement written up there (P15,
+/// restated in the chassis' units by P28).
+const ORIGINAL_LAUNCH: (f32, f32) = (11.0, 42.75);
+
+/// How much of [`ORIGINAL_LAUNCH`] this bike is held to — the sibling file's `LAUNCH_SHARE`, which
+/// says why it is not all of it.
+const LAUNCH_SHARE: (f32, f32) = (0.85, 0.8);
 
 /// The wreck limits the minute is judged against, appended to the bike: the limits of a bike being
 /// *ridden*, so a hard landing and a hard lean are not crashes and coming down on its side still is.
@@ -169,7 +176,8 @@ MaxBackflipTime = 0.5
 /// Two patches, both explained at length by the sibling file's `ridden_bike`: the `[Joystick]` section
 /// has no `SteerScale*`/`SteerSpeed*` keys, so the steering scale loads as zero and the stick is not
 /// connected to anything at all; and `Drag = 0.5` holds this bike to about 48 ft/s, which is nothing
-/// like the 75.78 the human's recording reaches, so the minute's speeds would mean nothing. Neither
+/// like the 94.73 the human's recording reaches (0.037 meets it; P28 took it from 0.06, which met
+/// the recording's 0.8x copy of the speed), so the minute's speeds would mean nothing. Neither
 /// patch is a claim about the disc's file.
 ///
 /// **P12 moved two things, and both are the sibling file's `ridden_bike` catching up.** The steering
@@ -192,7 +200,7 @@ fn ridden_bike() -> String {
             "XAxisRateLimit = 6\n",
             "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.05\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
         ),
-        ("Drag = 0.5", "Drag = 0.06"),
+        ("Drag = 0.5", "Drag = 0.037"),
         ("BodyTireForcePosition = 0.0, 1.1, 2.1", "BodyTireForcePosition = 0.0, -0.3, 0.8"),
         ("BodyTireForcePosition = 0.0, 1.1, -2.1", "BodyTireForcePosition = 0.0, -0.3, -0.8"),
     ];
@@ -681,11 +689,19 @@ fn it_launches_from_a_standstill() {
 
     // Half a second of full throttle: a rider on a 250 is moving by now.
     let half = launch[(0.5 / DT.0) as usize].speed;
-    assert!(half > ORIGINAL_LAUNCH.0, "half a second of full throttle moved the bike at {half} ft/s");
+    assert!(
+        half > ORIGINAL_LAUNCH.0 * LAUNCH_SHARE.0,
+        "half a second of full throttle moved the bike at {half} ft/s, against the original's {}",
+        ORIGINAL_LAUNCH.0
+    );
 
-    // Two seconds: as fast as the original's slowest launch, and still on its wheels.
+    // Two seconds: most of the way to the original's slowest launch, and still on its wheels.
     let two = launch[launch.len() - 1].speed;
-    assert!(two > ORIGINAL_LAUNCH.1, "two seconds of full throttle only reached {two} ft/s");
+    assert!(
+        two > ORIGINAL_LAUNCH.1 * LAUNCH_SHARE.1,
+        "two seconds of full throttle only reached {two} ft/s, against the original's {}",
+        ORIGINAL_LAUNCH.1
+    );
     assert!(flattest(&launch) > 0.9, "the launch leant to up {}", flattest(&launch));
     assert_eq!(wrecks(&launch), 0, "the launch wrecked");
 }

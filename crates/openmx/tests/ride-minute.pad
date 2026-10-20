@@ -62,10 +62,10 @@ release
 sleep 480f
 
 # leg: the flip
-# P16. A second, bigger ramp goes in 100 ft ahead, and the bike rides at it flat out from the standstill
-# the last leg left it in. Across the lip the left stick crosses stop to stop three times: pulled back
-# as the lip arrives (the preload arms), pushed forward (it fires, and the backflip arms), pulled back
-# (the backflip fires). Centred in the air the bike keeps turning; a stab forward ends the turn about
+# P16. A second, bigger ramp goes in 108 ft ahead (100 until P28 took the drag down), and the bike
+# rides at it flat out from the standstill the last leg left it in. Across the lip the left stick
+# crosses stop to stop three times: pulled back as the lip arrives (the preload arms), pushed forward
+# (it fires, and the backflip arms), pulled back (the backflip fires). Centred in the air the bike keeps turning; a stab forward ends the turn about
 # three quarters of the way round, and it comes the rest of the way onto its wheels by itself. Each
 # cross is the bike's own rate limit, eighteen frames however fast the thumb is, which is why the
 # frames below are what they are: the sibling file's `the_flip` has them, and the reasons.
