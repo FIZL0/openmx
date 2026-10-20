@@ -122,6 +122,7 @@
 
 #![forbid(unsafe_code)]
 
+mod aspect;
 mod chase;
 mod ground;
 mod hud;
@@ -142,7 +143,7 @@ use game_render::raster::Frame;
 use game_render::rider::{Body, Sex, Skeleton, anchors_of};
 use game_render::scene::Vehicle;
 use game_render::vehicle::{Chassis, Drive, params as vehicle_params};
-use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
+use game_render::world::{Assets, Camera, Lighting, draw_scene};
 use game_render::{ini, png, scene as view};
 use game_sim::biplane::Area;
 use game_sim::camera::{Preset, Race, Ridden, Switches};
@@ -166,7 +167,8 @@ use moment::{Moment, Shot};
 use pad::{Pads, Throttle, Wiring};
 use split::{Layout, Split};
 use vehicle::{Garage, Kind, Plane, Spawn};
-use window::{Window, fit_frame, key};
+use window::{Window, key};
+use aspect::{Aspect, Display};
 
 /// The game's own frame rate. The simulation is not fixed to it — it is handed the wall clock's own
 /// delta — but this is the rate the loop aims at, and the rate the original's video mode flips at.
@@ -468,6 +470,9 @@ struct Args {
     players: usize,
     /// `--split h|v`: which of the original's two layouts two players get.
     split: Split,
+    /// `--aspect fill|4:3`: the frame at the window's own shape, or the largest 4:3 one inside it
+    /// with bars round it, which is the shell as it was before V24.
+    aspect: Aspect,
     /// `--headless`: no window and no host pad — every seat rides an idle pad, or the first rides
     /// `--play`'s tape — and the frame is drawn all the same, for `--shot` and for the tests.
     headless: bool,
@@ -754,7 +759,7 @@ fn run() -> Result<(), String> {
     let cpresets = archives.iter().find_map(|a| a.read_suffix("cpresets.ini").ok());
     let presets: Vec<Preset> = cpresets
         .as_ref()
-        .map(|b| layout_presets(b, layout, "cpresets.ini"))
+        .map(|b| layout_presets(b, layout, Display::Television, "cpresets.ini"))
         .unwrap_or_default();
     // The reverse threshold is the race camera's setup's own constant: it hands the base camera's
     // initialiser 5, and the original's camera holds 5 in both freeride save states read (P14).
@@ -836,13 +841,13 @@ fn run() -> Result<(), String> {
     // bike presets (R8). The same derived camera and the same two constants the bike's has, because
     // the plane's camera is built by the same constructor; that the original holds the same speed
     // reference for it was not read.
+    let plane_presets = garage.plane.as_ref().and_then(|_| archives.iter().find_map(|a| a.read_suffix(PLANE_PRESETS).ok()));
     let plane_camera = match &garage.plane {
         None => None,
         Some(_) => {
-            let presets: Vec<Preset> = archives
-                .iter()
-                .find_map(|a| a.read_suffix(PLANE_PRESETS).ok())
-                .map(|b| layout_presets(&b, layout, PLANE_PRESETS))
+            let presets: Vec<Preset> = plane_presets
+                .as_ref()
+                .map(|b| layout_presets(b, layout, Display::Television, PLANE_PRESETS))
                 .unwrap_or_default();
             println!("biplane: {} camera presets in {PLANE_PRESETS}", presets.len());
             let mut cam = Race::new(presets, reverse_speed);
@@ -1324,21 +1329,33 @@ fn run() -> Result<(), String> {
 
     // ---- the loop ------------------------------------------------------------------------------
     let light = Lighting::of(&look);
-    // The frame: `--size`'s, which stays put whatever the window does, or the largest 4:3 one inside
-    // the window, which is re-made whenever the window changes size (below). With no window, the
-    // PS2's own unless `--size` says otherwise.
+    // The frame: `--size`'s, which stays put whatever the window does, or the window's own shape
+    // — the largest 4:3 one inside it with `--aspect 4:3` — which is re-made whenever the window
+    // changes size (below). With no window, the PS2's own unless `--size` says otherwise.
     let frame_size = |window: &Option<Window>| match (args.size, window) {
         (Some(size), _) => size,
-        (None, Some(window)) => fit_frame((window.width, window.height), window.scale),
+        (None, Some(window)) => args.aspect.frame((window.width, window.height), window.scale),
         (None, None) => PS2_FRAME,
     };
     let (width, height) = frame_size(&window);
+    // Which of the original's two displays the frame stands for (V24): at 16:9 its cameras read the
+    // wide copies of their presets, as the original's loader does in its widescreen modes.
+    let mut display = Display::of(width, height, args.aspect);
     match &window {
         Some(window) => println!(
-            "window {}x{} (screen {}x{}), drawing {width}x{height} at scale {}",
-            window.width, window.height, window.screen.0, window.screen.1, window.scale
+            "window {}x{} (screen {}x{}), drawing {width}x{height} at scale {}, --aspect {}, a {} display",
+            window.width,
+            window.height,
+            window.screen.0,
+            window.screen.1,
+            window.scale,
+            args.aspect.name(),
+            display.name()
         ),
-        None => println!("headless, drawing {width}x{height}"),
+        None => println!("headless, drawing {width}x{height}, a {} display", display.name()),
+    }
+    if display != Display::Television {
+        set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
     }
     let mut frame = Frame::new(width, height, look.fog_color);
     // The views (V22): where each player's goes in the frame, and a frame of its own size for each to
@@ -1419,7 +1436,9 @@ fn run() -> Result<(), String> {
         }
         // A window that changed size gets a frame of its new size rather than the old one stretched
         // over it — and with it the aspect the camera's field of view and its viewport test read,
-        // which stays 4:3 because that is the shape `fit_frame` keeps.
+        // each view's own (V24). A resize across the middle of 4:3 and 16:9 changes the display the
+        // frame stands for, and the cameras reload their presets for it the way the original's do
+        // when their split changes: the same preset, re-set, from the other copy.
         if window.as_mut().is_some_and(|w| w.resized()) {
             let (width, height) = frame_size(&window);
             if (width, height) != (frame.width, frame.height) {
@@ -1427,6 +1446,12 @@ fn run() -> Result<(), String> {
                 (rects, view_frames) = views_of(width, height);
                 if let Some(window) = &window {
                     println!("window {}x{}, drawing {width}x{height}", window.width, window.height);
+                }
+                let now = Display::of(width, height, args.aspect);
+                if now != display {
+                    display = now;
+                    println!("display: {}", display.name());
+                    set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
                 }
             }
         }
@@ -1614,7 +1639,8 @@ fn run() -> Result<(), String> {
                         // each view's own, so the stacked split's two strips have it and a full
                         // screen, the side-by-side halves and the quarters do not.
                         no_look_ahead: false,
-                        short_viewport: (view_h as f32) / (view_w as f32) < 0.55,
+                        // Off the television, never: the original skips the test at 16:9.
+                        short_viewport: aspect::short_viewport(display, view_w, view_h),
                     },
                     &mut world.place,
                 ))
@@ -1627,7 +1653,9 @@ fn run() -> Result<(), String> {
                     at: vector(view.look_at),
                     // The file's field of view is the horizontal one; the rasteriser wants the vertical
                     // one in radians, which depends on the shape of the view it is drawing into.
-                    fov: vertical_fov(view.fov.0, view_w as f32 / view_h as f32),
+                    // Past the shapes the original ever drew, the angle along the short side holds
+                    // and the long side widens (`view_fov`).
+                    fov: aspect::fov(view.fov.0, view_w, view_h),
                     near: NEAR_CLIP,
                     far: 4000.0,
                 },
@@ -1917,23 +1945,50 @@ fn vector(v: Vf) -> V3 {
     v3(v.x(), v.y(), v.z())
 }
 
-/// A camera file's presets as a view in `layout` reads them: the layout's own copy of each record
-/// (`Preset1h`, `Preset1v`, `Preset1q`), or the full screen's where the file has no such copy. The
-/// full screen reads exactly what it always has.
-fn layout_presets(bytes: &[u8], layout: Layout, file: &str) -> Vec<Preset> {
-    let own = Preset::read_bytes(bytes, layout.suffix());
-    if layout == Layout::Full {
+/// A camera file's presets as a view in `layout` reads them on `display`: the layout's own copy of
+/// each record (`Preset1h`, `Preset1v`, `Preset1q`, or at 16:9 `Preset1w`, `Preset1x`, `Preset1z` —
+/// [`aspect::preset_suffix`]), or the full screen's where the file has no such copy. The full screen
+/// on the television reads exactly what it always has.
+fn layout_presets(bytes: &[u8], layout: Layout, display: Display, file: &str) -> Vec<Preset> {
+    let suffix = aspect::preset_suffix(layout, display);
+    let own = Preset::read_bytes(bytes, suffix);
+    if suffix.is_empty() {
         return own;
     }
     // A record the file does not have reads as a preset with no name and no distance, which is what
     // a missing copy looks like.
     let has = own.iter().filter(|p| !p.name.is_empty()).count();
+    let on = format!("{} on a {} display", layout.name(), display.name());
     if has == 0 {
-        println!("camera: {file} has no Preset1{} copies for {}; riding the full screen's", layout.suffix(), layout.name());
+        println!("camera: {file} has no Preset1{suffix} copies for {on}; riding the full screen's");
         return Preset::read_bytes(bytes, "");
     }
-    println!("camera: {file}'s Preset{{n}}{} copies, {has} of {}, for {}", layout.suffix(), own.len(), layout.name());
+    println!("camera: {file}'s Preset{{n}}{suffix} copies, {has} of {}, for {on}", own.len());
     own
+}
+
+/// Every player's cameras onto `display`'s copy of their presets (V24): the file read again for it,
+/// and the preset each camera is on re-set from the new copy — the original's own reload when a
+/// camera's split changes, which keeps the preset and clears the player's nudges.
+fn set_display(rigs: &mut [Rig], layout: Layout, display: Display, bike: Option<&[u8]>, plane: Option<&[u8]>) {
+    let reload = |cam: &mut Race, presets: &[Preset]| {
+        if presets.is_empty() || cam.cam.presets.is_empty() {
+            return;
+        }
+        let at = cam.cam.preset.min(presets.len() - 1);
+        cam.cam.presets = presets.to_vec();
+        cam.cam.preset = at;
+        cam.cam.previous = at;
+        cam.cam.set_preset(at);
+    };
+    let bike = bike.map(|b| layout_presets(b, layout, display, "cpresets.ini")).unwrap_or_default();
+    let plane = plane.map(|b| layout_presets(b, layout, display, PLANE_PRESETS)).unwrap_or_default();
+    for rig in rigs {
+        reload(&mut rig.camera, &bike);
+        if let Some(cam) = &mut rig.plane_camera {
+            reload(cam, &plane);
+        }
+    }
 }
 
 /// The terrain file a scene asks for. Most scenes name it `SX02.trn`, but what the archive holds is
@@ -2057,6 +2112,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         vehicle: Kind::Bike,
         players: 1,
         split: Split::default(),
+        aspect: Aspect::default(),
         headless: false,
         frames: None,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
@@ -2141,6 +2197,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 Layout::for_players(args.players, args.split)?;
             }
             "--split" => args.split = Split::parse(&next("h or v")?)?,
+            "--aspect" => args.aspect = Aspect::parse(&next("fill or 4:3")?)?,
             "--headless" => args.headless = true,
             "--frames" => {
                 args.frames = Some(
@@ -2228,10 +2285,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                      original's two layouts, and three to eight in quarters or eighths. The first\n\
                      player has the keyboard, the plane and the tape. --headless draws with no\n\
                      window and no pad, and --frames N quits after N frames.\n\
-                     The window opens at the screen's size and the frame is the largest 4:3 one\n\
-                     inside it, re-made when the window is resized; --size draws a fixed frame\n\
-                     instead (640x448 is the PS2's), and --scale draws each frame pixel N times\n\
-                     across and down.\n\
+                     The window opens at the screen's size and the frame fills it, re-made when\n\
+                     the window is resized, wider or taller as the original's own 16:9 mode\n\
+                     would draw it; --aspect 4:3 draws the largest 4:3 frame inside it instead,\n\
+                     with bars. --size draws a fixed frame (640x448 is the PS2's), and --scale\n\
+                     draws each frame pixel N times across and down.\n\
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
                      rider, tumbles the bike and puts you back on it); --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\

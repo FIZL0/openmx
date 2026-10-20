@@ -106,10 +106,7 @@ impl Hud {
         if !self.on {
             return;
         }
-        // Bottom left, out of the way of the bike, and clipped rather than moved on a frame too
-        // small to hold it.
-        let x = PAD;
-        let y = frame.height as i32 - PANEL_H - PAD;
+        let (x, y) = panel_at(frame.width, frame.height);
         panel(frame, x, y, PANEL_W, PANEL_H);
 
         // Three bands down the panel: the numbers, the sixteen controls, and the sticks with the
@@ -368,6 +365,15 @@ impl Hud {
             }
         }
     }
+}
+
+/// Where the panel goes in a view of `width` by `height` pixels: its top-left pixel. Pinned to the
+/// view's bottom-left corner (V24), out of the way of the bike, whatever the view's shape — so on a
+/// wide window it sits at the window's corner and not a 4:3 box's, and in a split it sits in its own
+/// player's view. It is drawn at its own size, never stretched with the view; a view too short to
+/// hold it keeps its top, the numbers, and clips the bottom.
+pub fn panel_at(width: usize, height: usize) -> (i32, i32) {
+    crate::aspect::corner((width, height), (PANEL_W, PANEL_H), crate::aspect::Corner::BottomLeft, PAD)
 }
 
 /// How much of one plane command the input step wrote, 0..1: a throttle command's own value, a
@@ -670,6 +676,37 @@ mod tests {
         assert_eq!(at(320, 100), [20, 60, 120], "the middle of the picture");
         assert_eq!(at(639, 447), [20, 60, 120], "the bottom right corner");
         assert_ne!(at(8, 448 - PANEL_H as usize / 2), [20, 60, 120], "inside the panel");
+    }
+
+    /// V24: in every view of a 4:3, 16:9, 21:9 and portrait window, alone and split two and four
+    /// ways, the panel is drawn at its own size pinned to that view's bottom-left corner — the
+    /// changed pixels are exactly the panel's rectangle there, wherever the view's corner is.
+    #[test]
+    fn the_panel_is_pinned_to_each_views_own_corner() {
+        use crate::aspect::Aspect;
+        use crate::split::{Layout, Split};
+        let pad = polled(Report::idle());
+        let hud = Hud::new(true);
+        let rider = rider();
+        for window in [(1440, 1080), (1920, 1080), (2560, 1080), (1080, 1920)] {
+            let (w, h) = Aspect::Fill.frame(window, 1);
+            for (players, split) in [(1, Split::Stacked), (2, Split::Stacked), (2, Split::SideBySide), (4, Split::Stacked)] {
+                let layout = Layout::for_players(players, split).unwrap();
+                let view = layout.rects(w, h)[players - 1];
+                let mut frame = Frame::new(view.w, view.h, [20, 60, 120]);
+                hud.draw(&mut frame, pad.pad(0), &rider, true);
+                let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+                for (i, p) in frame.color.chunks_exact(3).enumerate() {
+                    if p != [20, 60, 120] {
+                        let (x, y) = (i % view.w, i / view.w);
+                        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                    }
+                }
+                let what = format!("{window:?} {layout:?} view {}x{}", view.w, view.h);
+                assert_eq!((x0, y0), (PAD as usize, view.h - PANEL_H as usize - PAD as usize), "{what}");
+                assert_eq!((x1 + 1 - x0, y1 + 1 - y0), (PANEL_W as usize, PANEL_H as usize), "{what}");
+            }
+        }
     }
 
     /// The point of the thing: a control the pad reports is a control the overlay fills, and one it
