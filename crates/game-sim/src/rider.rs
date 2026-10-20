@@ -586,7 +586,7 @@ impl Rider {
             throw: down.throw,
             touching: down.landed,
             vel: down.rider_vel,
-            height: F(down.rider.y()),
+            clearance: down.clearance(),
         });
         let wrecks = wreckage.as_ref().map_or_else(phy::Wrecks::default, |w| w.wrecks);
         // Every field the rider derives. `cut` and `offset` are left as they are: the body's own

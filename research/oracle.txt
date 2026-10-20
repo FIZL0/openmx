@@ -2401,9 +2401,10 @@ rider_body_mode boot 0x0024c7e0 (3592 bytes; dt in f12, the actor in a1) one fra
 #   (ForceTime +0x00, HandHoldTime +0x04, Force +0x10, ForceTimeDelta +0x20, HandHoldTimeDelta +0x24,
 #   ForceDelta +0x30), then +0x8c0 GroundAngularRateDamping as a quadword, +0x8d0 RiderFlailHeight,
 #   +0x8d4 RiderRollTime, +0x8d8 RiderRollSpeed -- which is exactly game_sim::phy::Wrecks
-#   **the settle test**, after the ragdoll step (boot 0x001dc960) and with the main bone at
-#   [[+0x2f4]+0xa4] (+0x64 its height, +0x70/+0x74/+0x78 its velocity):
-#     if (roll != 0 || 0 < loose || 0 < thrown || flung || height - height_before_the_step <= 0x8d0)
+#   **the settle test**, after ground_query (boot 0x001dc960: world +0x2bc, a copy of the main bone's
+#   +0x60, no normal, flags or record) with the main bone at [[+0x2f4]+0xa4] (+0x64 its height,
+#   +0x70/+0x74/+0x78 its velocity), touching = any of the +0x620/+0x624 bone collisions' +0x14 (S52):
+#     if (roll != 0 || 0 < loose || 0 < thrown || flung || height - ground_y <= 0x8d0)
 #        if (roll <= 0 || !flung)
 #           if ((0x8d4 < roll || |velocity| < 0x8d8) && !settled)  settled = 1, the bones take the
 #              stiffer damping (boot 0x0024c310 with a1 = 1, set in a delay slot) and the main bone is
@@ -2428,8 +2429,9 @@ rider_body_ride_enter boot 0x0024c490 (836 bytes) the riding mode's own entry
 rider_ragdoll_step boot 0x001dc960 (1300 bytes) **misnamed by V19: this is ground_query** (above).
 #                                  The wreck arm copies the main bone's position, ground-queries the
 #                                  copy and tests main bone y - ground y <= RiderFlailHeight: a
-#                                  clearance above the ground, not a rise across a step (S50). The
-#                                  name is kept because tests/rider_anim.rs hooks it by name
+#                                  clearance above the ground, not a rise across a step (S50). Since
+#                                  S52 tests/rider_anim.rs hooks it as ground_query; the name is kept
+#                                  only so that older journals still resolve
 rider_bone_follow boot 0x00218b80 (976 bytes) points a dummy at a bone
 rider_bone_post boot 0x001f6840 (20 bytes) the per-bone call of the arm's tail
 rider_bone_detach boot 0x0011aed0 (72 bytes) takes one bone off the bike it was following
@@ -2438,10 +2440,33 @@ quat_axes boot 0x0013f380 (132 bytes) a quaternion's axes, which the look arm re
 # S50 — the ragdoll's two entries (crates/game-sim/src/ragdoll.rs, proved in tests/ragdoll.rs)
 rider_ragdoll_pose boot 0x0030f0c0 the body actor's vt +0xa4 (actor, a1, dt in f12): every bone body
 #                                  put at its skeleton bone's world transform, velocity from the bone's
-#                                  move over dt (zero when dt <= 0). Not ported: no skeleton pose in
-#                                  game-sim
+#                                  move over dt (zero when dt <= 0). S52 ported it, given the
+#                                  skeleton's pose (ragdoll_pose::pose): per part (+0x2f4, stride 0xb0)
+#                                  node +0xa0 -> node_world_position and orientation_axes (relative to
+#                                  null), q = axes_to_quat on the w >= 0 side, then (unless a1 or
+#                                  dt <= 0) velocity = (position - part +0x90..+0x98) / dt and rates
+#                                  = quat_axis_angle(unturn(q, rel(q, mat4_to_quat(part +0x60)))) as
+#                                  axis * angle / dt; body vt +0x10 (position + turn(q, body +0x180),
+#                                  velocity), vt +0x48 (q, rates), part +0x60 = mat4_basis(position,
+#                                  forward, up, 0, 1)
 rider_ragdoll_reset boot 0x0030f0b0 the actor's vt +0xa0: the world reset (0x001f28a0), each body's
 #                                  vt +0x2c (0x0015a3d0)
+# S52 -- the reset, ported in crates/game-sim/src/ragdoll_pose.rs (proved in tests/ragdoll_contact.rs)
+world_reset boot 0x001f28a0 (world) every body of the world (count +0x8, array +0x10), in order, through
+#                           its vt (at the body's +0x100) +0x2c
+body_reset boot 0x0015a3d0 (body) +0x50 and +0x60 = start position +0x30, +0x70 = start velocity +0x40,
+#                          +0x150 and +0x170 = start quat +0x160, +0x1b0 = start rates +0x140; +0x80,
+#                          +0x90, +0xa0, +0xb0, +0xc0, +0x190, +0x1a0, +0x1c0, +0x1d0, +0x1e0 = (0,0,0,1)
+body_set_start boot 0x00159f20 (body, pos*, vel*) vt +0x10: +0x30 = pos, +0x40 = vel (whole quads)
+body_set_start_turn boot 0x00159ee0 (body, quat*, rates*) vt +0x48: +0x160 = quat, +0x140 = rates
+node_world_position boot 0x001b2870 (node, relative_to, out) a skeleton node's world position (the
+#                                  pose's first read; hooked in tests/ragdoll_contact.rs)
+axes_to_quat boot 0x0013f9f0 (out, forward*, up*) mat4_to_quat of mat4_basis((0,0,0,1), forward, up,
+#                           0, 1)
+quat_axis_angle boot 0x0013f110 (q*, angle*, axis*) w clamped to -1..1 (a w that does not compare
+#                              is 1), a = the acos table at it; a == 0 -> axis (1,0,0,1). Otherwise
+#                              axis = q.xyz / the curve table's raw sin entry at wrap(wrap(a)), w = 1,
+#                              angle = 2a
 collider_ignore boot 0x0011ade0 (228 bytes; collider, other) adds other to the collider's ignore list
 #                               (+0xd4 array, +0xd8 count) once, into the first empty slot
 wreck_sound boot 0x0033e9c0 (524 bytes; emitter, a1) the wreck entry's last call, on actor +0xa74:
@@ -2470,6 +2495,41 @@ body_set_inertia boot 0x0015abf0 (body, vec4*) vt +0x50: writes 1.0 into the *so
 #     +0x5c0/+0x5c4 wreck/ride iterations (2/3), +0x5c8/+0x5cc rates (55/25), set by vehicle_anim_ctor
 #     +0x5d0..+0x5dc the four holds, +0x5f8 the bike box, +0x620/+0x624 the nine bone collisions
 #            (+4 on, +0x14 touching, +0x88 the collider), +0x62c the throw force (+0 on, +0x24 body)
+# S52 — the ragdoll's bone collisions (crates/game-sim/src/ragdoll_contact.rs, tests/ragdoll_contact.rs)
+bone_collision_new boot 0x001f6530 (220 bytes) the type-8 constraint's constructor (vtable 0x00451d90):
+#                                  +0x24 sweep on, +0x28 1/15 (0x3d888889), +0x2c/+0x30 1.0,
+#                                  +0x34 0, +0x38 0.7; +0x90..+0x9c zeroed. The rider loader
+#                                  (0x0030e250) then writes the file's four keys (defaults
+#                                  Restitution 0, the rest 1.0) and 0x001f66c0 wires +0x78 terrain,
+#                                  +0x7c/+0x80 the bone body twice, +0x88 sphere, +0x8c segment
+bone_collision_solve boot 0x001f7550 (vt +0x18; this, first) ground (only strictly inside the terrain's
+#                                    x/z box, +0x78 +0x30/+0x40), then the sphere collider, then the sweep
+#   the collision's fields: +4 on, +0x14 touched (set by every push-out), +0x18 ground, +0x1c scene,
+#   +0x20 swept (cleared each solve), +0x24 sweep on, +0x28 sweep back, +0x2c UnpenetrationScale,
+#   +0x30 RotationScale, +0x34 Restitution, +0x38 Friction, +0x3c ground record, +0x40 point,
+#   +0x50 normal, +0x60 dv, +0x70/+0x74 the contact's other side, +0x84 the actor's search pool,
+#   +0x90 the impulse's scratch (x = inv mass; w, always 0, starts every sum). Body +0x14 is Radius
+bone_collision_push_out boot 0x001f6c40 (this, point*, normal*) the static path is other == 0, or an
+#                                       other with neither a class-2 body (+0x7c) nor +0x80; the
+#                                       moving paths (0x001b2ff0/0x001b3180, vt +0xbc/+0xb8) are not
+#                                       ported. Swept or no body2: straight onto pos/vel
+bone_collision_impulse boot 0x001f6860 (this, arm*, shift*, kick*) the lever impulse; the shift's turn
+#                                      goes through the curve table (0x0046a7f0) into the quaternion
+bone_collision_sweep boot 0x001f7400 (this) the segment pos - vel*(+0x28) .. pos; a hit is point
+#                                    rec+0x30, normal rec+0x20, and sets scene and swept
+collider_set_position boot 0x001f0940 (collider, vec4*, 0) the sphere collider stood at the bone
+bike_box_solve boot 0x001f5b40 (this) the type-4 constraint's solve (vtable 0x00451dd0 +0x18), the
+#                             rider body actor's +0x5f8 on main bone 0 (+0x9c, the body). +0x4 on;
+#                             +0x14 another actor's transform (0 live; not ported). With +0x60 frame
+#                             mat4*, +0x90 centre*, +0x94 half*, +0x98 carried velocity* all set (live:
+#                             actor +0x580 drawn bike transform, +0x540, +0x550, +0x530 bike_vel) the
+#                             bone is held in centre +- half in that frame, relative to the carried
+#                             velocity; a null +0x98 there reads its velocity from address 0 (not
+#                             ported). Any of the first three null: the record's own frame +0x20..+0x5c,
+#                             centre +0x70, half +0x80, no carried velocity. Each axis: !(p <= h) -> h,
+#                             else p < -h -> -h, and that axis' local velocity zeroed. Live: centre
+#                             (0, 4.3, -1.5), half (0.45, 0.6, 1.75) -- not mrider.phy's [Bike
+#                             Constraint] BoxPosition/BoxSize (0,1.9,-0.25 / 0.5,1.75,2.5)
 # P22 -- what the captured bike_vel is, and R6's two readings of it.
 # rider_body_mode (boot 0x0024c7e0, above) also writes the owner's +0x530 -- the type-4 actor record at
 #   owner+0x400, its +0x130, which is what `./kit record` captures as bike_vel -- as the request

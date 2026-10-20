@@ -65,14 +65,17 @@
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
+use crate::biplane::Body as Bone;
 use crate::motion::{Clip, ClipId, Played, Player, Put, remap};
 use crate::phy;
+use crate::ragdoll_contact::Contact;
 use crate::rng::Rng;
 use crate::trick::SLOTS;
 use crate::vehicle_anim::{
     self, AIR, AXIS_START, BACKFLIP, Frame, GET_READY, HOLD, Lag, Library, MIX_TAU, NO_HANDER,
     PHASE_TAU, Play, REVERSE_L, REVERSE_R, START_POS, TURN_RIDING,
 };
+use crate::world::World;
 use ps2_float::{Acc, F, Vf};
 
 // ---------------------------------------------------------------------------------------------------
@@ -554,11 +557,11 @@ pub enum Mode {
 
 /// What the wreck in progress tells the mode machine, which is everything its settle test reads.
 ///
-/// **The three sensors are the port's stand-ins and the journal says what for.** The original reads
-/// them off a ragdoll this crate has no port of: a bone array whose every bone has a contact flag,
-/// and a main bone with a height and a velocity. This port's wrecked rider is one point
-/// ([`crate::ride::Crash`]), so `touching` is that point having reached the dirt, and `vel` and
-/// `height` are its own — and the settle test below is the original's, run on them.
+/// The original reads the three sensors off the ragdoll, which is what [`Thrown::from_bones`] does:
+/// any bone collision's contact flag, the main bone's velocity, and the main bone's height above the
+/// ground under it. The ride does not run the ragdoll yet (S53), so its caller still fills them from
+/// the one wrecked rider point ([`crate::ride::Crash`]) — and the settle test below is the original's,
+/// run on whichever it is handed.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Thrown {
     /// The throw the wreck's reason picked, which the entry randomises its two clocks out of. Handed
@@ -570,9 +573,20 @@ pub struct Thrown {
     /// How fast the body is going, as a velocity: the machine takes the length itself, with the same
     /// four FPU instructions and at the same point in the test as the original.
     pub vel: Vf,
-    /// How high the body is. The machine keeps last frame's and the rise between the two is what the
-    /// settle test reads ([`Machine::height`]).
-    pub height: F,
+    /// How far the body is above the ground straight under it: the main bone's height less the
+    /// ground query's answer, which the settle test holds against `RiderFlailHeight`.
+    pub clearance: F,
+}
+
+impl Thrown {
+    /// **The sensors off the ragdoll**, as the wreck arm reads them: touching while any of the bone
+    /// collisions has touched, the main bone's velocity as it is, and the main bone's height less the
+    /// ground query's answer for a copy of its position (the query moves the point it is handed).
+    pub fn from_bones(throw: phy::Throw, contacts: &[Contact], main: &Bone, world: &mut dyn World) -> Thrown {
+        let touching = contacts.iter().any(|c| c.touched);
+        let (ground, _) = world.ground(main.position);
+        Thrown { throw, touching, vel: main.velocity, clearance: F(main.position.y()) - F(ground.y()) }
+    }
 }
 
 /// **The body's mode machine**: the state behind [`Body::mode`].
@@ -608,18 +622,13 @@ pub struct Machine {
     pub roll: F,
     /// Something of the body is on the ground.
     pub touching: bool,
-    /// The body left the ground again after the throw: it rose, in one step, by more than
-    /// `RiderFlailHeight`. Cleared the next time it is rolling.
+    /// The body left the ground again after the throw: nothing touching, both clocks run out, and
+    /// more than `RiderFlailHeight` above the ground. Cleared the next time it is rolling.
     pub flung: bool,
     /// The bones are holding the stiffer of the two damping records stored beside them rather than
     /// the limp one. The port has no bones; this is the flag the original keeps beside them, and
     /// which of the two sets is chosen, so that the arm that switches them is not a no-op.
     pub stiff: bool,
-    /// How high the body was last frame. **The port's own:** the original reads the height either
-    /// side of its own ragdoll step, inside one call; this port's rider point is stepped by
-    /// [`crate::ride::Crash::step`], a call earlier, so the machine remembers the height instead and
-    /// the rise it tests is what that step did.
-    pub height: F,
 }
 
 impl Body {
@@ -749,7 +758,6 @@ impl Body {
         self.machine.spin = Vf::new(x.0, y.0, z.0, (F(f.w()) + F::ONE).0);
         self.machine.thrown = about(pool, t.throw.force_time, t.throw.force_time_delta);
         self.machine.loose = about(pool, t.throw.hand_hold_time, t.throw.hand_hold_time_delta);
-        self.machine.height = t.height;
     }
 
     /// One frame of the wreck mode: the two clocks, the roll, and the test that decides the body has
@@ -778,15 +786,12 @@ impl Body {
             m.touching = false;
             m.roll = F::ZERO;
         }
-        // What the step that moved the body did to its height. The original measures this across its
-        // own ragdoll step; this port measures it across the frame (see [`Machine::height`]).
-        let rise = t.height - m.height;
-        m.height = t.height;
+        // The last of the four: the body is within the flail height of the ground under it.
         if m.roll != F::ZERO
             || F::ZERO < m.loose
             || F::ZERO < m.thrown
             || m.flung
-            || rise <= w.rider_flail_height
+            || t.clearance <= w.rider_flail_height
         {
             if !(F::ZERO < m.roll) || !m.flung {
                 // The length is taken here and only here, which is where the original takes it:
@@ -811,8 +816,8 @@ impl Body {
                 m.flung = false;
             }
         } else {
-            // Nothing touching, both clocks run out, and it has risen further than the flail height
-            // in one step: it has been thrown up again, and whatever it had settled into is off.
+            // Nothing touching, both clocks run out, and it is higher than the flail height above
+            // the ground: it has been thrown up again, and whatever it had settled into is off.
             m.stiff = true;
             m.flung = true;
             self.settled = false;

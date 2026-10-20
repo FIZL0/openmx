@@ -2155,6 +2155,9 @@ pub struct Crash {
     pub rider: Vf,
     pub rider_vel: Vf,
     pub landed: bool,
+    /// The height of the ground under the rider point, as this frame's step found it: what the
+    /// wreck mode's settle test measures the rider's clearance from ([`Crash::clearance`]).
+    pub ground: F,
     /// The wreck body has stopped, by `Wreckbike.phy`'s own `SpeedThreshold` and
     /// `AngularRateThreshold`. Not what the machine waits for — see [`Crash::settles`] — but it is
     /// what says the place [`Crash::rest`] hands back has stopped moving.
@@ -2226,6 +2229,7 @@ impl Crash {
             rider: ride.origin,
             rider_vel: ride.chassis.vel,
             landed: false,
+            ground: F(ride.origin.y()),
             resting: false,
             facing: if length(flat) > F::ZERO { normalize(flat) } else { ride.spawn_facing },
         }
@@ -2261,6 +2265,7 @@ impl Crash {
             self.rider_vel = add_xyz(self.rider_vel, Vf::new(0.0, (g * dt).0, 0.0, 0.0));
             self.rider = add_xyz(self.rider, scale(self.rider_vel, dt));
             let (on, _) = world.ground(self.rider);
+            self.ground = F(on.y());
             if self.rider.y() <= on.y() {
                 self.rider = Vf::new(self.rider.x(), on.y(), self.rider.z(), 1.0);
                 self.rider_vel = Vf::ZERO;
@@ -2269,7 +2274,16 @@ impl Crash {
         } else if self.holding {
             self.rider = self.body.cofg_world;
             self.rider_vel = self.body.vel;
+            self.ground = F(world.ground(self.rider).0.y());
         }
+    }
+
+    /// How far the rider is above the ground under them: what the wreck mode's settle test reads.
+    ///
+    /// The original's test is the main bone's height above `ground_query`'s answer straight under
+    /// it; this port's rider is one point, so the point stands in for the bone.
+    pub fn clearance(&self) -> F {
+        F(self.rider.y()) - self.ground
     }
 
     /// The dirt under the wreck body, as a spring, a damper and a friction at one contact point.
@@ -2372,6 +2386,7 @@ impl State for Crash {
         w.vf("rider", self.rider);
         w.vf("rider_vel", self.rider_vel);
         w.bool("landed", self.landed);
+        w.f("ground", self.ground);
         w.bool("resting", self.resting);
         w.vf("facing", self.facing);
     }
