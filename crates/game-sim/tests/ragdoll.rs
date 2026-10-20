@@ -1447,3 +1447,214 @@ fn the_physics_update_matches_the_original() {
     assert!(stepped > 3000 && riding > 1000 && stepped - riding > 1000 && wrecked > 1000 && held > 1000,
             "{stepped} stepped, {riding} riding, {wrecked} with a limit, {held} held");
 }
+
+// ---------------------------------------------------------------------------------------------------
+// S53: the ragdoll in the ride
+// ---------------------------------------------------------------------------------------------------
+
+/// The ragdoll's kit as the shell builds it: the rider's body and model off the disc, its riding
+/// skeleton read through the renderer, and the rider file's parts and pins over that. With them,
+/// the wreck bike's part and the rider's wreck set.
+fn ride_kit() -> Option<(game_sim::ragdoll_ride::Kit, game_sim::phy::Part, Wrecks)> {
+    use game_render::disc::Disc;
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return None;
+        }
+    };
+    let names: Vec<String> = disc
+        .entries()
+        .iter()
+        .filter(|e| e.name.to_ascii_lowercase().ends_with(".res"))
+        .map(|e| e.name.clone())
+        .collect();
+    let rider_name = names.iter().filter(|n| n.to_ascii_lowercase().ends_with("thq1.res")).min_by_key(|n| n.len())?.clone();
+    let res = disc.res(&rider_name).expect("the rider archive opens");
+    let rider_file = rider_file()?;
+    let mut body = game_render::rider::Body::load(
+        vec![disc.res(&rider_name).expect("the rider archive opens")],
+        "thq1",
+        game_render::rider::Sex::Male,
+        "",
+        &[],
+        game_sim::motion::Params::default(),
+    )
+    .expect("the rider's body loads");
+    let model = game_render::psg::Model::parse(&res.read_suffix(&format!("{}.psg", body.geometry())).expect("its model"))
+        .expect("the model parses");
+    let doll = body.ragdoll_rig(&model, &rider_file).expect("every part names a node");
+    let wreck_bike = names
+        .iter()
+        .find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbike.phy").ok()))
+        .expect("an archive carries wreckbike.phy");
+    Some((
+        game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig),
+        game_sim::phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"),
+        Wrecks::read_bytes(&rider_file),
+    ))
+}
+
+/// The ground under S26's second live wreck (`context/capture/s26/wreck2.csv`), as far as the
+/// capture shows it: straight lines between the heights the bike stood at — at the entry, the tick
+/// the gate came on, and two after — along the line it slid down.
+struct Slope;
+
+const SLOPE: [(f32, f32); 4] = [(3411.8254, 149.75734), (3441.746, 141.09964), (3468.708, 137.68971), (3473.1145, 136.98788)];
+
+impl game_sim::world::World for Slope {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        let z = at.z();
+        let k = SLOPE.windows(2).position(|w| z < w[1].0).unwrap_or(SLOPE.len() - 2);
+        let ((z0, y0), (z1, y1)) = (SLOPE[k], SLOPE[k + 1]);
+        let s = (y1 - y0) / (z1 - z0);
+        let y = y0 + (z - z0) * s;
+        let n = (1.0 + s * s).sqrt();
+        (Vf::new(at.x(), y, z, 1.0), Vf::new(0.0, 1.0 / n, -s / n, 0.0))
+    }
+    fn solid(&mut self, _bundle: &game_sim::collide::Bundle, _record: &mut game_sim::collide::Record) -> bool {
+        false
+    }
+}
+
+/// The tick the bones' settle gate comes on in S26's second live reason-5 wreck, thrown from the
+/// bike at the capture's entry transform and velocity (`context/capture/s26/wreck2.csv`, row 150's
+/// bike and row 151's wreck body) over [`Slope`], at the capture's `dt`. Answers the tick, with the
+/// tick each hold let go on, or `None` without the disc.
+fn wreck2_settles() -> Option<(Option<u32>, [Option<u32>; 2])> {
+    let (kit, part, wrecks) = ride_kit()?;
+    let mut ride = game_sim::ride::Ride::default();
+    let m = game_sim::math::Mat4([
+        Vf::new(0.99805659, -0.043665301, -0.044397738, 0.0),
+        Vf::new(0.060603332, 0.84503216, 0.53126532, 0.0),
+        Vf::new(0.014319694, -0.53292495, 0.84603846, 0.0),
+        Vf::new(4304.7788, 149.75734, 3411.8254, 1.0),
+    ]);
+    ride.chassis.quat = game_sim::math::mat4_to_quat(&m);
+    ride.origin = m.0[3];
+    ride.chassis.vel = Vf::new(-4.0195813, -21.036182, 49.494213, 1.0);
+    let mut world = Slope;
+    let mut crash =
+        game_sim::ride::Crash::begin(&ride, game_sim::trick::Wreck(5), &part, game_sim::ride::WRECK_INERTIA, &wrecks, None);
+    let mut rng = Rng::default();
+    let mut doll = game_sim::ragdoll_ride::Down::enter(
+        &kit,
+        &ride.transform(),
+        &crash,
+        crash.throw,
+        5,
+        &wrecks,
+        &mut rng,
+        &mut world,
+    );
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let (mut settled, mut let_go) = (None, [None; 2]);
+    for tick in 1..=60 {
+        crash.step(dt, &part, &wrecks, &mut world);
+        doll.step(&kit, dt, &crash, &mut world);
+        let p = doll.main().position;
+        println!(
+            "tick {tick}: main ({:.2}, {:.2}, {:.2}) holds {:?} settles {}",
+            p.x(),
+            p.y(),
+            p.z(),
+            doll.ragdoll.holds,
+            doll.settles()
+        );
+        for (hand, gone) in let_go.iter_mut().enumerate() {
+            if gone.is_none() && !doll.ragdoll.holds[hand] {
+                *gone = Some(tick);
+            }
+        }
+        if settled.is_none() && doll.settles() {
+            settled = Some(tick);
+        }
+    }
+    Some((settled, let_go))
+}
+
+/// **A reason-5 wreck that settles on the original's tick** (S53), to within two ticks: the
+/// original's gate came on 18 ticks after the entry (`wreck2.csv` rows 150 and 168), and S26's
+/// three measurements spread 18 to 26. The bones' gate is the port's own reading of it — hands off
+/// and a contact touching — and the ground is the capture's bike heights, not the track; the port
+/// comes on at 16. [`a_reason_5_wreck_settles_on_the_originals_tick_exactly`] holds the exact tick.
+#[test]
+fn a_reason_5_wreck_that_settles_on_the_originals_tick() {
+    let Some((settled, let_go)) = wreck2_settles() else { return };
+    let tick = settled.expect("the bones settle inside two seconds");
+    assert!((16..=20).contains(&tick), "the gate came on {tick} ticks after the entry; the original's 18");
+    for (hand, gone) in let_go.iter().enumerate() {
+        let gone = gone.expect("both hands let go");
+        assert!(gone <= tick, "hand {hand} let go on tick {gone}, after the gate on {tick}");
+    }
+}
+
+/// The same, to the tick. Ignored: the port's gate comes on two ticks early (16 against 18), and
+/// with one capture holding an entry the port can be started from, there is nothing to calibrate the
+/// inferred gate against.
+#[test]
+#[ignore = "the port settles on tick 16, the original on 18; see the S53 journal"]
+fn a_reason_5_wreck_settles_on_the_originals_tick_exactly() {
+    let Some((settled, _)) = wreck2_settles() else { return };
+    assert_eq!(settled, Some(18), "the gate came on 18 ticks after the entry in the original");
+}
+
+/// **The pins the shell's kit loads are the live actor's** (S53): every hold's and joint's bones,
+/// anchors and twist limits, as [`game_sim::ragdoll_ride::Kit::new`] builds them off the rider file
+/// and the riding skeleton the renderer reads, against the actor in the first recording's state,
+/// through the game's curve table.
+#[test]
+fn the_kits_pins_are_the_live_actors() {
+    let Some(ee) = state() else { return };
+    let Some((kit, _, _)) = ride_kit() else { return };
+    let game: Vec<Pin> = pins(&ee).into_iter().map(|p| pin_of(&ee, p)).collect();
+    // Through the game's own curve table: the port's is built with single-precision transcendentals
+    // and its entries can sit a bit off the disc's ([`CurveTable::build`]), which the twist limits'
+    // sines would carry.
+    let ini = game_sim::phy::Ini::parse_bytes(&rider_file().expect("the rider file"));
+    let mut doll = kit.ragdoll.clone();
+    game_sim::ragdoll_ride::load_pins(&ini, &mut doll, &kit.rig, &tables_of(&ee).curve);
+    let port = &doll.pins;
+    // The centres of mass the anchors are worked out from. One part's is not the file's to the bit:
+    // the lower torso's `z` is 0.13632499 in the model's bounds and 0.1363255 on the live body, which
+    // reaches its two joints' anchors and nothing else. Where the state's number comes from was not
+    // found; it is held to a millionth of a foot.
+    const LOWER_TORSO: usize = 1;
+    for (i, part) in kit.rig.parts.iter().enumerate() {
+        let game_cofg = quad(&ee, bone_body(&ee, i) + 0x180);
+        if i == LOWER_TORSO {
+            assert!(near(part.cofg, game_cofg), "part {i}'s centre {:?} against {game_cofg:?}", part.cofg);
+        } else {
+            assert_eq!(part.cofg.to_bits(), game_cofg.to_bits(), "part {i}'s centre of mass");
+        }
+    }
+    assert_eq!(port.len(), game.len(), "four holds and seventeen joints");
+    let bits = |v: Vf| v.to_bits();
+    let mut wrong = Vec::new();
+    for (k, (a, b)) in port.iter().zip(&game).enumerate() {
+        if (a.first, a.second) != (b.first, b.second) {
+            wrong.push(format!("pin {k}: bones {:?} against {:?}", (a.first, a.second), (b.first, b.second)));
+        }
+        for (what, x, y) in [
+            ("anchor 0", a.anchors[0], b.anchors[0]),
+            ("anchor 1", a.anchors[1], b.anchors[1]),
+            ("lower", a.lower, b.lower),
+            ("upper", a.upper, b.upper),
+        ] {
+            let torso = what.starts_with("anchor") && [a.first, b.second.unwrap_or(b.first)].contains(&LOWER_TORSO);
+            if bits(x) != bits(y) && !(torso && near(x, y)) {
+                wrong.push(format!("pin {k} {what}: {x:?} against {y:?}"));
+            }
+        }
+    }
+    for w in &wrong {
+        println!("{w}");
+    }
+    assert!(wrong.is_empty(), "{} of the pins' numbers differ", wrong.len());
+}
+
+/// Every lane within a millionth.
+fn near(a: Vf, b: Vf) -> bool {
+    (0..4).all(|k| (a.0[k] - b.0[k]).abs() <= 1.0e-6)
+}

@@ -3539,3 +3539,16 @@ ridden_update_thunk     boot 0x00281950 this -= 0x50, then 0x0027c890, which cal
 # 0x0011a9d0) adds an own entry (kind 0) per ray hit with +0x74 = the struck collidable's +0x80, its
 # collision record, and when that is not 0 raises the struck record's +0x40/+0x44/+0x4c and adds a
 # mirrored entry (kind 1) to it with this record as the other. bike_wreck_test reads only kind 0.
+# S53 — the ragdoll in the ride (crates/game-sim/src/ragdoll_ride.rs, proved in tests/ragdoll.rs)
+physics_loader_pins boot 0x0030e250 (2072 bytes) the generic physics loader's PinToPart: with
+#                                   DefaultPinPositions = T, anchor 1 = the second part's node
+#                                   translation (0x001b2840) less the first part's cofg, anchor 2 =
+#                                   -(the second part's cofg); else PinPosition1/2. MinAngles/MaxAngles
+#                                   (degrees x 0.01745329, halved) go through 0x0030ea70 only when every
+#                                   lane's min <= max, lower w then zeroed; otherwise both stay -FLT_MAX.
+#                                   DefaultCG = T makes a part's cofg its psg node's bounding centre
+#                                   (body +0x180; RAM agrees bit for bit except LwrTorso z, 5e-7 off)
+curve_sine          boot 0x0030ea70 the engine's sine off the curve table (the port's CurveTable::sine);
+#                                   bit-exact only with the game's own table, not CurveTable::build()
+pin_set             boot 0x001f3cd0 a pin's setter: +0x20 anchor 1, +0x30 anchor 2, +0x68 body 1,
+#                                   +0x6c body 2

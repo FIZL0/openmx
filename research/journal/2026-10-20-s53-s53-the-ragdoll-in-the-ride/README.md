@@ -2,9 +2,18 @@
 
 2026-10-20. Task: `./kit plan S53`.
 
-This task is blocked on its two prerequisites. S51 (the step) and S52 (the contact and the settle
-test) were not merged, and S52 was editing the same files, so the ragdoll cannot run in the ride or
-be drawn yet. The one piece that stands alone is done: the wreck sound's random draw, in
-`crates/game-sim/src/wreck_sound.rs`. It is proved bit-exact by two 10 000-case oracles on the live
-emitter, but it is not yet wired into the ride. Details, the unproven parts, and the order to finish
-in are in 1-s53-the-ragdoll-in-the-ride-PART.md.
+**Part 1** (1-s53-the-ragdoll-in-the-ride-PART.md) was blocked on S51 and S52. It ported the wreck
+sound's random draw (`wreck_sound.rs`), proved bit-exact by two 10 000-case oracles.
+
+**Part 2** (2-s53-the-ragdoll-in-the-ride-PART.md), after S51/S52 landed, runs the ragdoll from
+`Rider` while the body is down (`ragdoll_ride.rs`):
+- the riding entry when the kit is built, the wreck entry and then the wreck sound on one generator
+  at the wreck, and the damping switch from the mode machine;
+- `hit_of` now matches the entry's per-reason switch;
+- the shell draws the rider from the bones and was checked by eye: the rider tumbles off the bike
+  and comes to rest.
+
+The kit's pins equal the live actor's bit for bit (lower torso within 5e-7). recording2's reason-5
+wreck settles on port tick 16 against the original's 18; the test holds 16..=20. Headless runs
+carry no kit and hash as before. Part 2's Not verified list says what is not 1:1, chiefly the fixed
+riding pose and the main bone, which the human's windows cannot be compared on.

@@ -576,6 +576,10 @@ pub struct Thrown {
     /// How far the body is above the ground straight under it: the main bone's height less the
     /// ground query's answer, which the settle test holds against `RiderFlailHeight`.
     pub clearance: F,
+    /// The ragdoll's throw, when the ride runs one (S53): its two clocks are the machine's, run down
+    /// by the ragdoll's own throw clock, and its force is the spin. The entry draws nothing then;
+    /// the ragdoll's own entry has drawn all five.
+    pub launch: Option<crate::ragdoll::Launch>,
 }
 
 impl Thrown {
@@ -585,7 +589,7 @@ impl Thrown {
     pub fn from_bones(throw: phy::Throw, contacts: &[Contact], main: &Bone, world: &mut dyn World) -> Thrown {
         let touching = contacts.iter().any(|c| c.touched);
         let (ground, _) = world.ground(main.position);
-        Thrown { throw, touching, vel: main.velocity, clearance: F(main.position.y()) - F(ground.y()) }
+        Thrown { throw, touching, vel: main.velocity, clearance: F(main.position.y()) - F(ground.y()), launch: None }
     }
 }
 
@@ -747,6 +751,12 @@ impl Body {
         self.machine.roll = F::ZERO;
         self.machine.touching = false;
         let Some(t) = t else { return };
+        if let Some(l) = t.launch {
+            self.machine.spin = l.force;
+            self.machine.thrown = l.force_time;
+            self.machine.loose = l.hand_hold;
+            return;
+        }
         // `base + delta * (2u - 1)`: a number inside `base ± delta`, drawn once per lane. The w lane
         // is the original's — it adds a one to whatever the file's own fourth lane was.
         let about = |pool: &mut Pool, base: F, delta: F| base + delta * (F(2.0) * pool.unit(clock) - F::ONE);
@@ -772,11 +782,16 @@ impl Body {
         let m = &mut self.machine;
         // The throw's clock, and the second one behind it. What they gate in the original is the
         // orientation and the dummies; what they gate here is the test below.
-        if F::ZERO < m.thrown {
-            m.thrown = m.thrown - dt;
-        }
-        if F::ZERO < m.loose {
-            m.loose = m.loose - dt;
+        if let Some(l) = t.launch {
+            m.thrown = l.force_time;
+            m.loose = l.hand_hold;
+        } else {
+            if F::ZERO < m.thrown {
+                m.thrown = m.thrown - dt;
+            }
+            if F::ZERO < m.loose {
+                m.loose = m.loose - dt;
+            }
         }
         // The roll's own clock runs while something is touching and is thrown away when nothing is.
         if t.touching {

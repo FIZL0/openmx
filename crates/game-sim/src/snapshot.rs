@@ -114,6 +114,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     rider.set = here.set.clone();
     rider.clips = here.clips;
     rider.wreckage = here.wreckage;
+    rider.ragdoll_kit = here.ragdoll_kit.clone();
     rider.body_numbers = here.body_numbers;
     if others_riders.len() != sim.others.len() {
         return Err(format!("{} players in the state, {} here", 1 + others_riders.len(), sim.players()));
@@ -123,6 +124,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.set = p.rider.set.clone();
         r.clips = p.rider.clips;
         r.wreckage = p.rider.wreckage;
+        r.ragdoll_kit = p.rider.ragdoll_kit.clone();
         r.body_numbers = p.rider.body_numbers;
         p.rider = r;
     }
@@ -373,6 +375,9 @@ impl Wire for Rider {
             racing,
             wreckage: _,
             crash,
+            ragdoll_kit: _,
+            ragdoll,
+            wreck_sounds,
             animation,
             body,
             body_numbers: _,
@@ -390,6 +395,8 @@ impl Wire for Rider {
         sense.put(out);
         racing.put(out);
         crash.put(out);
+        ragdoll.put(out);
+        wreck_sounds.put(out);
         animation.put(out);
         body.put(out);
         body_rates.put(out);
@@ -411,6 +418,9 @@ impl Wire for Rider {
             racing: Wire::take(r)?,
             wreckage: None,
             crash: Wire::take(r)?,
+            ragdoll_kit: None,
+            ragdoll: Wire::take(r)?,
+            wreck_sounds: Wire::take(r)?,
             animation: Wire::take(r)?,
             body: Wire::take(r)?,
             body_numbers: Default::default(),
@@ -425,6 +435,21 @@ impl Wire for Rider {
 }
 
 wire!(crate::Input { buttons, stick });
+wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed });
+wire!(crate::ragdoll::Ragdoll { records, bones, joints, collisions, world, holds, bike_box, throwing, launch, ignores_bike, entered, stiff, riding, off_bike, flung, settled, roll, pins, pull });
+wire!(crate::ragdoll::Records { parts, joints, collisions });
+wire!(crate::ragdoll::PartRecord { ride_mass, wreck_mass, ride_inertia, wreck_inertia, ride_angular_damping, settled_angular_damping, limp_angular_damping });
+wire!(crate::ragdoll::JointRecord { part1, part2, max_angle, ride_spring, ride_damping, wreck_spring, wreck_damping });
+wire!(crate::ragdoll::Bone { body, mass, inertia, reference });
+wire!(crate::ragdoll::Joint { wrecked, max_angle, spring, damping, critical });
+wire!(crate::ragdoll::Collision { bone, enabled, touching });
+wire!(crate::ragdoll::Launch { force, force_time, hand_hold, target, world_frame, other_frame });
+wire!(crate::ragdoll::Pin { first, second, anchors, target, target_velocity, lower, upper, hit, sticky, gains });
+wire!(crate::biplane::World { iterations, rate });
+wire!(crate::ragdoll_contact::Contact { touched, ground, scene, swept, point, normal, dv });
+wire!(crate::rider_anim::Thrown { throw, touching, vel, clearance, launch });
+wire!(crate::wreck_sound::Emitter { crash, fall });
+wire!(crate::wreck_sound::List { count, last });
 wire!(crate::rider_anim::Clocked { played, snapshot });
 wire!(crate::flight::Flight { joystick, autopilot, engine, aero, body, measure, tires, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng });
 wire!(crate::input::Manager { pads, events, time_ms });

@@ -60,8 +60,11 @@ use crate::hash::{self, State, Walk};
 use crate::motion;
 use crate::phy::{self, Phy};
 use crate::ride::{self, Controls, Crash, Ride};
+use crate::ragdoll_ride::{self, Down, Kit};
 use crate::rider_anim;
 use crate::state;
+use crate::wreck_sound;
+use std::sync::Arc;
 use crate::trick::{self, AngleTable, Set, Trick, Tricks, Wreck};
 use crate::vehicle_anim;
 use crate::world::World;
@@ -172,6 +175,16 @@ pub struct Rider {
     /// it ([`Crash`]). `None` whenever the rider is up, and `None` for a rider with no
     /// [`Wreckage`] — which is a rider who stays down until the chord, as before S26.
     pub crash: Option<Crash>,
+    /// The rider's ragdoll as they get on, once a shell has handed it over
+    /// ([`Rider::carries_ragdoll`]). A constant, like [`Rider::wreckage`].
+    pub ragdoll_kit: Option<Arc<Kit>>,
+    /// The ragdoll of the wreck being ridden out (S53): the rider's bones, thrown off the bike and
+    /// stepped while they are down. `None` when the rider is up, and for a rider with no kit or no
+    /// [`Wreckage`], who is down as one point of [`Crash`]'s as before.
+    pub ragdoll: Option<Down>,
+    /// The rider's wreck sounds, as far as the pick goes: which was played last, so that the next
+    /// wreck draws as the original does ([`wreck_sound`]).
+    pub wreck_sounds: wreck_sound::Emitter,
     /// What the animation driving asked for this frame: the one thing [`motion::Driver::frame`]
     /// answers, kept rather than dropped.
     ///
@@ -244,6 +257,9 @@ impl Rider {
             racing: false,
             wreckage: None,
             crash: None,
+            ragdoll_kit: None,
+            ragdoll: None,
+            wreck_sounds: wreck_sound::Emitter::retail(),
             animation: motion::Frame { blend: motion::Blend::Free, restart: false },
             body: rider_anim::Body::default(),
             body_numbers: rider_anim::Params::built(),
@@ -264,6 +280,7 @@ impl Rider {
     pub fn place(&mut self, at: Vf, facing: Vf) {
         self.ride.place(at, facing);
         self.crash = None;
+        self.ragdoll = None;
         self.tricks.reset();
         self.flight = Trick::NONE;
         self.airborne = false;
@@ -276,6 +293,13 @@ impl Rider {
     /// shell or a fixture does up to the first wreck is the same either way.
     pub fn carries_wreck(&mut self, part: phy::Part, wrecks: phy::Wrecks, inertia: Vf) {
         self.wreckage = Some(Wreckage { part, wrecks, inertia });
+    }
+
+    /// **Hand the rider their ragdoll** (S53): from then on a wreck throws the bones off the bike,
+    /// and they are what the settle gate and the body's mode machine read while the rider is down.
+    /// Needs [`Rider::carries_wreck`] too: the bones' hands are held to the wreck bike.
+    pub fn carries_ragdoll(&mut self, kit: Arc<Kit>) {
+        self.ragdoll_kit = Some(kit);
     }
 
     /// Which of the three states the rider is in.
@@ -296,7 +320,7 @@ impl Rider {
         let mut out = Frame::default();
         let Rider {
             ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
-            flight, airborne, ..
+            flight, airborne, ragdoll_kit, ragdoll, wreck_sounds, idles, ..
         } = self;
         let mut sense = *sense;
 
@@ -315,6 +339,12 @@ impl Rider {
             let held = down.holding;
             down.step(dt, &w.part, &w.wrecks, world);
             out.separated = held && !down.holding;
+            // The rider's bones, when there are any: they let go of the bars on their own clock.
+            if let (Some(kit), Some(doll)) = (ragdoll_kit.as_ref(), ragdoll.as_mut()) {
+                let held = doll.ragdoll.holds[0] || doll.ragdoll.holds[1];
+                doll.step(kit, dt, down, world);
+                out.separated = held && !(doll.ragdoll.holds[0] || doll.ragdoll.holds[1]);
+            }
         }
         *airborne = ride.air.airborne;
 
@@ -340,6 +370,7 @@ impl Rider {
                 };
                 ride.place(at, facing);
                 *crash = None;
+                *ragdoll = None;
                 tricks.reset();
                 *flight = Trick::NONE;
                 out.respawned = true;
@@ -433,7 +464,10 @@ impl Rider {
         };
         // **The settle gate.** The machine's one input the port could not fill in before: the rider,
         // having let go of the bars, is on the ground. See [`Crash`] for what was measured.
-        sense.settles = crash.as_ref().is_some_and(Crash::settles);
+        sense.settles = match ragdoll.as_ref() {
+            Some(doll) => doll.settles(),
+            None => crash.as_ref().is_some_and(Crash::settles),
+        };
         // The wreck test's last clause reads the collision record's contact list: what the bike's
         // body rays hit. The port's is its head ray, swept at the frame's end (`ride::hits`). The
         // chassis' mass is not held, only its reciprocal; it is read only for an actor, and the
@@ -473,6 +507,18 @@ impl Rider {
             *crash = wreckage
                 .as_ref()
                 .map(|w| Crash::begin(ride, reason, &w.part, w.inertia, &w.wrecks, None));
+            // The body actor's wreck entry: the bones off the bike, then the wreck sound picked.
+            // Both draw from the game's one generator, which is the idle pool's.
+            *ragdoll = match (ragdoll_kit.as_ref(), wreckage.as_ref(), crash.as_ref()) {
+                (Some(kit), Some(w), Some(down)) => {
+                    let rng = ragdoll_ride::generator(idles);
+                    let m = ride.transform();
+                    let doll = Down::enter(kit, &m, down, down.throw, i32::from(reason.0), &w.wrecks, rng, world);
+                    wreck_sounds.wreck(i32::from(reason.0), false, rng);
+                    Some(doll)
+                }
+                _ => None,
+            };
             // The caller's half of the entry, as far as this port goes: the running trick stops and
             // the queue is emptied, so a trick asked for on the way down does not fire on the way
             // out. The rest of the original's entry — the rider placed at the bike's rider point with
@@ -494,6 +540,7 @@ impl Rider {
             };
             ride.place(at, facing);
             *crash = None;
+            *ragdoll = None;
             tricks.reset();
             *flight = Trick::NONE;
             out.respawned = true;
@@ -571,6 +618,7 @@ impl Rider {
             idles,
             crash,
             wreckage,
+            ragdoll,
             ..
         } = self;
         let ask = rider_anim::Ask {
@@ -590,12 +638,17 @@ impl Rider {
         // The mode machine, in front of the animation: in the original the two are different slots
         // of the body actor's vtable, and the wreck mode is what writes `settled` for the selection
         // below to read.
-        let thrown = crash.as_ref().map(|down| rider_anim::Thrown {
-            throw: down.throw,
-            touching: down.landed,
-            vel: down.rider_vel,
-            clearance: down.clearance(),
-        });
+        // The sensors are the bones' when the ride runs a ragdoll (S53), with its clocks.
+        let thrown = match ragdoll.as_ref() {
+            Some(doll) => Some(doll.sensed),
+            None => crash.as_ref().map(|down| rider_anim::Thrown {
+                throw: down.throw,
+                touching: down.landed,
+                vel: down.rider_vel,
+                clearance: down.clearance(),
+                launch: None,
+            }),
+        };
         let wrecks = wreckage.as_ref().map_or_else(phy::Wrecks::default, |w| w.wrecks);
         // Every field the rider derives. `cut` and `offset` are left as they are: the body's own
         // selection is the only writer of the first and nothing here wants the second.
@@ -609,6 +662,13 @@ impl Rider {
         body_request.progress = tricks.progress;
         body_request.seq = tricks.seq;
         body.mode(dt, body_request, &ask, &wrecks, thrown, idles, gate.clock);
+        // The bones' damping switch: the settle test's stiff flag, handed to the ragdoll when it
+        // changes, as the original's mode machine does.
+        if let Some(doll) = ragdoll.as_mut() {
+            if body.machine.stiff != doll.ragdoll.stiff {
+                doll.ragdoll.damping(body.machine.stiff, doll.reason);
+            }
+        }
         let (frame, clocked) = body.frame_clocked(
             dt,
             body_numbers,
@@ -643,6 +703,17 @@ impl State for Rider {
         w.bool("crashing", self.crash.is_some());
         if let Some(down) = &self.crash {
             w.group("crash", |w| hash::State::walk(down, w));
+        }
+        // The bones, when the ride runs them (S53). A rider without a kit hashes as before.
+        if let Some(doll) = &self.ragdoll {
+            w.group("ragdoll", |w| hash::State::walk(doll, w));
+        }
+        // The wreck sounds' picks move only for a rider that runs a ragdoll (S53).
+        if self.ragdoll_kit.is_some() {
+            w.group("wreck_sounds", |w| {
+                w.i32("crash_last", self.wreck_sounds.crash.last);
+                w.i32("fall_last", self.wreck_sounds.fall.last);
+            });
         }
     }
 }

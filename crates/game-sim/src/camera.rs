@@ -289,6 +289,16 @@ impl CurveTable {
         (cos - leftover * sin, sin + leftover * cos)
     }
 
+    /// The sine of `angle`, as the engine's own sine helper takes it off the same table: the entry's
+    /// sine plus the step times its cosine times what is left over, multiplied in that order (S53).
+    pub fn sine(&self, angle: F) -> F {
+        let a = wrap_turn(wrap_turn(angle));
+        let s = (F(PI) + a) * CURVE_INV_STEP;
+        let i = s.to_i32();
+        let (cos, sin) = (F(self.0[i as usize][0]), F(self.0[i as usize][1]));
+        sin + F(CURVE_STEP) * cos * (s - F(fpu::from_i32(i)))
+    }
+
     /// The sine of `angle` off the entry below it, with no correction: the lookup the quaternion's
     /// axis and angle divides by.
     pub(crate) fn coarse_sin(&self, angle: F) -> F {

@@ -14,7 +14,7 @@
 //! in by path, because a binary crate has nothing a test can `use`.
 
 use game_sim::camera::{Ridden, Target};
-use game_sim::ride::Ride;
+use game_sim::ride::{Crash, Ride};
 use ps2_float::F;
 
 use crate::vehicle::{Garage, Kind};
@@ -57,5 +57,25 @@ pub fn bike(ride: &Ride) -> Ridden {
         },
         airborne: !ride.air.on_ground,
         speed: ride.chassis.speed,
+    }
+}
+
+/// The target block while the rider is down (S53): the wreck body's place and speed, so the camera
+/// follows the bike and the thrown rider rather than the spot the wreck began. The rows are the
+/// wreck's flat heading and the world's up, not the tumbling body's own: which rows the original's
+/// writer reads off a wrecked bike was not traced, and a camera turned by every tumble is unwatchable.
+pub fn wrecked(crash: &Crash) -> Ridden {
+    let v = crash.body.vel;
+    let speed = F((v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt());
+    Ridden {
+        target: Target {
+            body_point: crash.origin,
+            forward: crash.facing,
+            up: ps2_float::Vf::new(0.0, 1.0, 0.0, 0.0),
+            vel: v,
+            lean: F::ZERO,
+        },
+        airborne: false,
+        speed,
     }
 }

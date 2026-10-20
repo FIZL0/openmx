@@ -76,7 +76,7 @@ use game_sim::rider::Gate;
 use game_sim::ride::Controls;
 use game_sim::trick::{SLOTS, Stunt};
 use game_sim::vehicle_anim;
-use ps2_float::F;
+use ps2_float::{F, Vf};
 
 /// Which body a `.sub`'s `MCF = rider.mcf` means. Only [`Sex::Male`] is on this disc.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -865,6 +865,150 @@ impl Body {
     pub fn group_for(&self, loaded: &Loaded, distance: f32, focal: f32) -> usize {
         loaded.model.group_for(distance, loaded.radius, focal)
     }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// the ragdoll (S53)
+// ---------------------------------------------------------------------------------------------------
+
+/// The clip the ragdoll's riding pose is read from, at its first key: the rider sat square on a bike
+/// going straight on. The original reads the live pose at the moment the bones are built; the port
+/// builds them once ([`Ragdolled`]).
+pub const RAGDOLL_POSE: &str = "turn_riding_Mid";
+
+/// **A body's ragdoll**, as the shell keeps it: the riding skeleton the simulation's
+/// [`game_sim::ragdoll_ride::Kit`] is built from, and which skeleton node each of its parts is, for
+/// drawing the body from the bones while the rider is down.
+#[derive(Clone, Debug)]
+pub struct Ragdolled {
+    pub rig: game_sim::ragdoll_ride::Rig,
+    /// One skeleton node per part, in the rider file's order.
+    pub nodes: Vec<usize>,
+}
+
+impl Body {
+    /// **The riding skeleton, as the ragdoll reads it.** `model` is the body's geometry (whose
+    /// bounding centres are the parts' default centres of mass) and `rider_file` the rider's physics
+    /// file (`mrider.phy`), whose `[PartN]` sections name a node each.
+    ///
+    /// `None` when a part names a node the skeleton does not have, or the pose clip is missing: a body
+    /// whose bones would be drawn from the wrong place is better drawn as before.
+    pub fn ragdoll_rig(&mut self, model: &crate::psg::Model, rider_file: &[u8]) -> Option<Ragdolled> {
+        use game_sim::ragdoll_pose::Bone as Placed;
+        use game_sim::ragdoll_ride::{Rig, RigPart};
+        let set = &mut self.rig.set;
+        if set.bound(RAGDOLL_POSE).is_none() {
+            set.load(RAGDOLL_POSE);
+        }
+        let id = set.bound(RAGDOLL_POSE)?;
+        let bound = set.get(id)?;
+        let skeleton = &set.skeleton;
+        let mut pose = crate::skin::Pose::new(skeleton.len());
+        bound.clip.pose(0.0, &bound.joints, &mut pose);
+        let locals = skeleton.locals(&pose);
+        let world = skeleton.compose(&locals);
+        let row = |r: [f32; 4], w: f32| Vf::new(r[0], r[1], r[2], w);
+
+        let ini = game_sim::phy::Ini::parse_bytes(rider_file);
+        let count = ini.section("Physics").int("NumberOfParts").unwrap_or(0).max(0) as usize;
+        let mut parts = Vec::with_capacity(count);
+        let mut nodes = Vec::with_capacity(count);
+        for i in 1..=count {
+            let s = ini.section(&format!("Part{i}"));
+            let name = s.text("Name")?.trim();
+            let node = skeleton.find(name)?;
+            let default_cg = s.text("DefaultCG").is_none_or(|t| t.trim().starts_with(['T', 't']));
+            let cofg = match model.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(name)) {
+                Some(n) if default_cg => Vf::new(n.center.x, n.center.y, n.center.z, 1.0),
+                _ => {
+                    let v = s.vector("CG", Vf::ZERO);
+                    Vf::new(v.x(), v.y(), v.z(), 1.0)
+                }
+            };
+            let m = world[node].0;
+            let rows = locals[node].0.map(|r| row(r, r[3]));
+            let q = game_sim::math::mat4_to_quat(&game_sim::math::Mat4(rows));
+            let (x, y, z, w) = (q.x(), q.y(), q.z(), q.w());
+            let n = (x * x + y * y + z * z + w * w).sqrt();
+            let k = if w < 0.0 { -1.0 / n } else { 1.0 / n };
+            parts.push(RigPart {
+                local: row(locals[node].0[3], 1.0),
+                cofg,
+                bone: Placed { at: row(m[3], 1.0), forward: row(m[2], 0.0), up: row(m[1], 0.0) },
+                rest: Vf::new(x * k, y * k, z * k, w * k),
+            });
+            nodes.push(node);
+        }
+        let hand = |name: &str| skeleton.find(name).map_or(Vf::ZERO, |j| row(locals[j].0[3], 1.0));
+        let hands = [hand("Dummy_hand_L"), hand("Dummy_hand_R")];
+        Some(Ragdolled { rig: Rig { parts, hands }, nodes })
+    }
+
+    /// Write the body into `loaded` **from the ragdoll's bones**, as it is drawn while the rider is
+    /// down: each part's node at its bone ([`game_sim::ragdoll_ride::Down::nodes`], in the world),
+    /// every other node at its riding-pose place under its parent. The triangles are left in the
+    /// space of `at`, the transform the body is then drawn with.
+    pub fn skin_ragdoll_into(
+        &self,
+        loaded: &mut Loaded,
+        group: usize,
+        doll: &Ragdolled,
+        bones: &[game_sim::math::Mat4],
+        at: M4,
+    ) {
+        let skeleton = &self.rig.set.skeleton;
+        let locals = skeleton.locals(&self.rig.set.pose);
+        let back = rigid_inverse(at);
+        let mut world: Vec<Option<M4>> = vec![None; skeleton.len()];
+        for (&node, m) in doll.nodes.iter().zip(bones) {
+            world[node] = Some(M4(m.0.map(|r| [r.x(), r.y(), r.z(), r.w()])).mul(back));
+        }
+        let fallback = self.rig.world();
+        for j in 0..skeleton.len() {
+            placed_under(j, skeleton, &locals, &fallback, &mut world, 0);
+        }
+        let world: Vec<M4> = world.into_iter().map(|m| m.unwrap_or(M4::IDENTITY)).collect();
+        loaded.tris = skin(&loaded.model, &world, group);
+    }
+}
+
+/// A node not driven by a bone, under its parent; a root keeps the riding pose's place.
+fn placed_under(
+    j: usize,
+    skeleton: &crate::skin::Skeleton,
+    locals: &[M4],
+    fallback: &[M4],
+    world: &mut [Option<M4>],
+    depth: usize,
+) -> M4 {
+    if let Some(m) = world[j] {
+        return m;
+    }
+    let m = match skeleton.bones[j].parent {
+        Some(p) if p != j && p < world.len() && depth < world.len() => {
+            locals[j].mul(placed_under(p, skeleton, locals, fallback, world, depth + 1))
+        }
+        _ => fallback.get(j).copied().unwrap_or(M4::IDENTITY),
+    };
+    world[j] = Some(m);
+    m
+}
+
+/// The inverse of a rotation and a translation.
+fn rigid_inverse(m: M4) -> M4 {
+    let r = m.0;
+    let t = [r[3][0], r[3][1], r[3][2]];
+    let mut out = [[0.0f32; 4]; 4];
+    for i in 0..3 {
+        for k in 0..3 {
+            out[i][k] = r[k][i];
+        }
+    }
+    for k in 0..3 {
+        out[3][k] = -(t[0] * out[0][k] + t[1] * out[1][k] + t[2] * out[2][k]);
+    }
+    out[3][3] = 1.0;
+    M4(out)
 }
 
 #[cfg(test)]

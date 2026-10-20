@@ -45,6 +45,7 @@ use crate::biplane::{Body, Dynamics, List, World, unturn};
 use crate::camera::CurveTable;
 use crate::chassis::{normalize, turn};
 use crate::phy::{Ini, Section, Throw, Wrecks};
+use crate::ragdoll_contact::{BikeBox, Contact, Scene, Sphere, Terrain};
 use crate::rng::Rng;
 use ps2_float::vu::{Dest, Field, Vf};
 use ps2_float::{F, fpu, libm, vu};
@@ -1120,13 +1121,39 @@ const FIRST_COLLISIONS: usize = 2;
 
 /// The world's lists, for [`World::step`]: the bones, the two force listeners (the actor's, then
 /// the throw), and the constraints in the order the world holds them.
-struct Stepper<'a> {
+struct Stepper<'a, 'b, 'w> {
     ragdoll: &'a mut Ragdoll,
     drive: &'a Drive,
     tables: &'a Tables,
+    among: Option<Among<'b, 'w>>,
 }
 
-impl Dynamics for Stepper<'_> {
+/// **What the bone collisions and the bike box solve against** (S53): the nine spheres in the
+/// `Collision` sections' order, a contact record for each, the terrain and its box, the scene, and
+/// the box the riding body is held in. [`Ragdoll::step_among`] takes it; [`Ragdoll::step`] has
+/// none, and their places in the list do nothing.
+pub struct Among<'a, 'w> {
+    pub spheres: &'a [Sphere],
+    pub contacts: &'a mut [Contact],
+    /// The ground query and the terrain's box (`min`, `max`).
+    pub terrain: Option<(&'a mut (dyn crate::world::World + 'w), Vf, Vf)>,
+    pub scene: &'a mut dyn Scene,
+    pub bike_box: Option<BikeBox>,
+}
+
+/// The constraint at `i` is which bone collision: the first two sit in front of the joints, the
+/// other seven after them.
+fn collision_at(i: usize, joints: usize, collisions: usize) -> Option<usize> {
+    if (4..BEFORE_JOINTS).contains(&i) {
+        Some(i - 4)
+    } else if (BEFORE_JOINTS + joints..BEFORE_JOINTS + joints + collisions - FIRST_COLLISIONS).contains(&i) {
+        Some(i - joints - 4)
+    } else {
+        None
+    }
+}
+
+impl Dynamics for Stepper<'_, '_, '_> {
     fn count(&self, list: List) -> i32 {
         match list {
             List::Bodies => self.ragdoll.bones.len() as i32,
@@ -1161,8 +1188,18 @@ impl Dynamics for Stepper<'_> {
             let j = i - BEFORE_JOINTS;
             r.pins[4 + j].solve(true, r.joints[j].wrecked, None, &mut r.bones, self.tables);
         }
-        // The bone collisions and the bike box: S52.
-        let _ = FIRST_COLLISIONS;
+        let (joints, collisions) = (r.joints.len(), r.collisions.len());
+        let Some(among) = self.among.as_mut() else { return };
+        if let Some(k) = collision_at(i, joints, collisions) {
+            let (Some(s), Some(c)) = (among.spheres.get(k), among.contacts.get_mut(k)) else { return };
+            let terrain = among.terrain.as_mut().map(|(world, min, max)| Terrain { world: &mut **world, min: *min, max: *max });
+            c.solve(r.collisions[k].enabled, s, &mut r.bones[s.bone].body, terrain, &mut *among.scene, &self.tables.curve);
+            r.collisions[k].touching = c.touched;
+        } else if i == BEFORE_JOINTS + joints + collisions - FIRST_COLLISIONS {
+            if let Some(b) = among.bike_box {
+                b.hold(r.bike_box, &mut r.bones[MAIN].body);
+            }
+        }
     }
     fn post(&mut self, _: i32, _: F) {}
 }
@@ -1289,7 +1326,13 @@ impl Ragdoll {
     /// box are not ported (S52): their places in the list do nothing.
     pub fn step(&mut self, dt: F, drive: &Drive, tables: &Tables) {
         let world = self.world;
-        world.step(dt, &mut Stepper { ragdoll: self, drive, tables });
+        world.step(dt, &mut Stepper { ragdoll: self, drive, tables, among: None });
+    }
+
+    /// [`Ragdoll::step`] with the bone collisions and the bike box solved in their places (S53).
+    pub fn step_among(&mut self, dt: F, drive: &Drive, tables: &Tables, among: Among<'_, '_>) {
+        let world = self.world;
+        world.step(dt, &mut Stepper { ragdoll: self, drive, tables, among: Some(among) });
     }
 
     /// **The body actor's physics update**, the part of it that is the ragdoll's: the world is
