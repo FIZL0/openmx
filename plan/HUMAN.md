@@ -109,6 +109,19 @@ Two things that bite:
       state you will make, because a capture that needs a person playing cannot be repeated exactly, and
       a port can only be proved against something repeatable. Save it a few seconds *before* the
       interesting part starts, put the pad down, and note here how long it runs for and what ends it.
+- [ ] **Two players, split screen** (slots 6 and 7, new; add their rows to `plan/REFERENCE.md`). Asked by
+      R9 (research/journal/2026-10-20-r9-r9-two-players). R9 read from the decompilation how the original
+      splits the screen, gives out pads and loads a two-player world, but nothing of it has been seen
+      running. Two pads are needed, one in each controller port. Make two states, each saved on the
+      first frame the riders can move, before anyone has touched the throttle:
+      - **slot 6: two-player freeride, horizontal split** (one view above the other) — any freeride area.
+      - **slot 7: two-player race, vertical split** (side by side) — a supercross track if the game
+        offers one, with the AI riders left on.
+      Note here which split you picked in the options, which area or track, both bikes, and whether
+      the display was 4:3 or 16:9. Those two answer what the decompilation could not show: where the
+      second rider starts (in freeride and on a start gate), which camera preset each view really uses,
+      and the HUD as drawn. About ten minutes for both. If the front end has only one split option,
+      make both states in it and say so.
 - [x] **One longer recording of free riding** for the acceptance test (S8): start from the slot-4 state
       and just ride — no laps, no objectives. Include the awkward things, because they are what the port
       will get wrong: a jump taken too slow and one taken too fast, a trick landed clean, a trick landed
