@@ -54,6 +54,22 @@ pub struct Press {
     pub start: bool,
 }
 
+impl Press {
+    /// Both devices' presses as one, for the menus' two drivers (P46).
+    pub fn or(self, o: Press) -> Press {
+        Press {
+            up: self.up || o.up,
+            down: self.down || o.down,
+            left: self.left || o.left,
+            right: self.right || o.right,
+            ok: self.ok || o.ok,
+            back: self.back || o.back,
+            delete: self.delete || o.delete,
+            start: self.start || o.start,
+        }
+    }
+}
+
 /// How far the left stick has to lean before it counts as a direction, out of 127.
 const STICK_DIRECTION: i32 = 64;
 /// Frames a direction is held before it repeats, and then frames between repeats.
@@ -446,6 +462,8 @@ pub fn save(dir: &Path, settings: &Settings, controls: &Controls) -> Result<(), 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// Press start (P46): whichever device presses Cross or Start becomes 1P.
+    Splash,
     Main,
     Tracks,
     Settings,
@@ -462,7 +480,8 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const ALL: [Screen; 10] = [
+    pub const ALL: [Screen; 11] = [
+        Screen::Splash,
         Screen::Main,
         Screen::Tracks,
         Screen::Garage,
@@ -482,6 +501,7 @@ impl Screen {
     /// `--screen`'s word.
     pub fn word(self) -> &'static str {
         match self {
+            Screen::Splash => "splash",
             Screen::Main => "main",
             Screen::Tracks => "tracks",
             Screen::Settings => "settings",
@@ -501,6 +521,7 @@ impl Screen {
 
     fn title(self) -> &'static str {
         match self {
+            Screen::Splash => "",
             Screen::Main => "Main Menu",
             Screen::Tracks => "Free Ride",
             Screen::Settings => "Settings",
@@ -527,6 +548,53 @@ const CONTROLS_ROWS: usize = 1 + LAYOUT_ROWS;
 /// The on-screen keyboard: opentennis's four rows of ten, then a row of four commands.
 const KEY_ROWS: [&str; 4] = ["abcdefghij", "klmnopqrst", "uvwxyz0123", "456789-'.&"];
 const KEY_COMMANDS: [&str; 4] = ["Space", "Delete", "Clear", "Done"];
+
+/// A device that can press a menu (P46): the keyboard, or a pad by the name the seats know it by across an unplug (`pad.rs`'s `DeviceInfo::identity`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Dev {
+    Keys,
+    Pad(String),
+}
+
+/// A [`Reader`] per device, so each one's presses are its own edges: a second pad's held stick is
+/// not the first one's press, and a pad plugged in holding a button does not press it.
+#[derive(Clone, Debug, Default)]
+pub struct Readers(Vec<(Dev, Reader)>);
+
+impl Readers {
+    pub fn new() -> Readers {
+        Readers::default()
+    }
+
+    /// Forget every device's last report, so the next frame's are all first ones again.
+    pub fn reset(&mut self) {
+        self.0.clear();
+    }
+
+    /// This frame's reports, a device each, as presses. A device missing from them is forgotten.
+    pub fn read(&mut self, reports: &[(Dev, Report)]) -> Vec<(Dev, Press)> {
+        self.0.retain(|(d, _)| reports.iter().any(|(r, _)| r == d));
+        reports
+            .iter()
+            .map(|(dev, report)| {
+                let at = match self.0.iter().position(|(d, _)| d == dev) {
+                    Some(at) => at,
+                    None => {
+                        self.0.push((dev.clone(), Reader::new()));
+                        self.0.len() - 1
+                    }
+                };
+                (dev.clone(), self.0[at].1.read(report))
+            })
+            .collect()
+    }
+}
+
+/// Frames the "Player 1" card stays up after the press, before the main menu: opentennis's 1.2 s.
+pub const CLAIMED_FRAMES: u32 = 72;
+
+/// The splash's Quit popup's rows.
+const QUIT_ROWS: [&str; 2] = ["Quit", "Stay"];
 
 /// What a frame of the menu asks of the shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -589,6 +657,16 @@ pub struct Menu {
     picks_changed: bool,
     /// Online play's side of the menu (N3).
     pub lobby: Lobby,
+    /// 1P (P46): the device the splash's press came from, the one that drives the menus — with the
+    /// keyboard, which always may. `None` before anyone has pressed (or under `--screen`, which
+    /// skips the splash and lets every device drive, as before P46).
+    p1: Option<Dev>,
+    /// What 1P is called on the splash's card, which the shell knows and the menu does not.
+    pub p1_name: String,
+    /// Frames since 1P pressed, while the splash's card is up.
+    claimed: Option<u32>,
+    /// The splash's Quit popup: the device that asked, which alone answers it, and its row.
+    quit: Option<(Dev, usize)>,
 }
 
 impl Menu {
@@ -617,6 +695,10 @@ impl Menu {
             seated: 1,
             picks_changed: false,
             lobby: Lobby::default(),
+            p1: None,
+            p1_name: String::new(),
+            claimed: None,
+            quit: None,
         }
     }
 
@@ -686,6 +768,96 @@ impl Menu {
         }
     }
 
+    /// The splash, 1P free for the next press.
+    pub fn splash(&mut self) {
+        self.stack = vec![Screen::Splash];
+        self.p1 = None;
+        self.claimed = None;
+        self.quit = None;
+        self.tick = 0;
+    }
+
+    /// 1P's device, once the splash has one.
+    pub fn p1(&self) -> Option<&Dev> {
+        self.p1.as_ref()
+    }
+
+    /// Hand 1P to another device without the splash: the keyboard taking over a ride whose 1P pad
+    /// was pulled out (`pad.rs`'s `Seats::frame`).
+    pub fn set_p1(&mut self, dev: Dev) {
+        self.p1 = Some(dev);
+    }
+
+    /// Whether 1P's pad is gone from `plugged` (the pads plugged in, by name): then the splash
+    /// comes back for a new 1P, and this says so. Over a ride the seat waits for its pad instead
+    /// (P35), so a ride or its pause is left alone; the front end asks again when the ride is over.
+    pub fn lost(&mut self, plugged: &[String]) -> bool {
+        let gone = matches!(&self.p1, Some(Dev::Pad(id)) if !plugged.contains(id));
+        if gone && !self.riding() && !self.stack.contains(&Screen::Pause) {
+            self.splash();
+            return true;
+        }
+        false
+    }
+
+    /// Whether the splash's Quit popup is up, and the row it is on.
+    pub fn quitting(&self) -> Option<usize> {
+        self.quit.as_ref().map(|q| q.1)
+    }
+
+    /// Whether `dev` drives the menus: 1P's device and the keyboard, or anyone before there is a 1P.
+    pub fn hosts(&self, dev: &Dev) -> bool {
+        match &self.p1 {
+            None => true,
+            Some(p1) => p1 == dev || *dev == Dev::Keys,
+        }
+    }
+
+    /// One frame of every device's presses: on the splash the first Cross or Start (a pad's; Space
+    /// or Enter on the keyboard, which its bindings make the same two) is 1P, and anything else
+    /// moves nothing; past it, 1P's and the keyboard's presses together drive the screen.
+    pub fn step_devices(&mut self, presses: &[(Dev, Press)]) -> Act {
+        if self.screen() == Some(Screen::Splash) {
+            return self.splash_step(presses);
+        }
+        let p = presses.iter().filter(|(d, _)| self.hosts(d)).fold(Press::default(), |p, (_, q)| p.or(*q));
+        self.step(p)
+    }
+
+    /// The splash's frame.
+    fn splash_step(&mut self, presses: &[(Dev, Press)]) -> Act {
+        self.tick = self.tick.wrapping_add(1);
+        if let Some(n) = &mut self.claimed {
+            *n += 1;
+            if *n >= CLAIMED_FRAMES {
+                self.claimed = None;
+                self.stack = vec![Screen::Main];
+                self.cursor[Screen::Main.index()] = 0;
+            }
+            return Act::Stay;
+        }
+        if let Some((asked, row)) = self.quit.clone() {
+            let Some((_, p)) = presses.iter().find(|(d, _)| *d == asked) else {
+                return Act::Stay;
+            };
+            if p.up || p.down || p.left || p.right {
+                self.quit = Some((asked, 1 - row));
+            } else if p.ok && row == 0 {
+                return Act::Quit;
+            } else if p.ok || p.back || p.start {
+                self.quit = None;
+            }
+            return Act::Stay;
+        }
+        if let Some((dev, _)) = presses.iter().find(|(_, p)| p.ok || p.start) {
+            self.p1 = Some(dev.clone());
+            self.claimed = Some(0);
+        } else if let Some((dev, _)) = presses.iter().find(|(_, p)| p.back) {
+            self.quit = Some((dev.clone(), 1));
+        }
+        Act::Stay
+    }
+
     /// The screen shown, or none in a ride.
     pub fn screen(&self) -> Option<Screen> {
         self.stack.last().copied()
@@ -740,6 +912,7 @@ impl Menu {
     /// pause over a ride.
     pub fn open(&mut self, screen: Screen) {
         match screen {
+            Screen::Splash => self.splash(),
             Screen::Main => self.main(),
             Screen::Pause => self.pause(),
             Screen::Controls => self.stack = vec![Screen::Main, Screen::Settings, Screen::Controls],
@@ -773,6 +946,7 @@ impl Menu {
 
     fn rows(&self, screen: Screen) -> usize {
         match screen {
+            Screen::Splash => 1,
             Screen::Main => MAIN.len(),
             Screen::Tracks => TRACKS.len(),
             Screen::Settings => SETTINGS_ROWS,
@@ -838,8 +1012,11 @@ impl Menu {
         }
     }
 
-    /// One frame.
+    /// One frame of one device's presses, the keyboard's on the splash.
     pub fn step(&mut self, p: Press) -> Act {
+        if self.screen() == Some(Screen::Splash) {
+            return self.splash_step(&[(Dev::Keys, p)]);
+        }
         self.tick = self.tick.wrapping_add(1);
         let Some(screen) = self.screen() else {
             // In a ride the only thing the menu hears is Start.
@@ -881,6 +1058,9 @@ impl Menu {
         }
         let side = p.left || p.right;
         match screen {
+            // Back on the main menu is the splash again, 1P free for the next press (opentennis's
+            // B533); Quit is a row, and Back on the splash asks.
+            Screen::Main if p.back => self.splash(),
             Screen::Main => match (p.ok || p.start, p.back, at) {
                 (true, _, 0) => {
                     self.cursor[Screen::Tracks.index()] = self.settings.track_index();
@@ -987,7 +1167,7 @@ impl Menu {
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
-            Screen::Keyboard | Screen::Garage => unreachable!(),
+            Screen::Keyboard | Screen::Garage | Screen::Splash => unreachable!(),
         }
         Act::Stay
     }
@@ -1568,6 +1748,10 @@ const CHOSEN: [u8; 4] = [255, 255, 255, 255];
 /// The orange the grey background gradient is drawn in. The original tints it from a colour
 /// animator this does not read; this is the main menu's colour off `plan/HUMAN.md`'s screenshot.
 const ORANGE: [u8; 4] = [210, 112, 52, 255];
+/// The splash's still, dimmed to a backdrop the logo and the prompt read over.
+const SPLASH_DIM: [u8; 4] = [110, 110, 110, 255];
+/// Who 1P is, on the splash once someone has pressed: the main menu's orange, lighter, for text.
+const ORANGE_TEXT: [u8; 4] = [255, 170, 90, 255];
 /// The bar of the controller legend and the ticker under it.
 const BLACK: [u8; 4] = [0, 0, 0, 255];
 
@@ -1684,7 +1868,7 @@ impl Art {
         let mut p = Painter::new(self, frame);
         match screen {
             Screen::Pause => p.fill(p.whole(), [0, 0, 0, 140]),
-            Screen::Tracks => {}
+            Screen::Tracks | Screen::Splash => {}
             _ => p.background(),
         }
         match screen {
@@ -1766,11 +1950,14 @@ impl Art {
             }
             Screen::Games => p.games(menu),
             Screen::Lobby => p.lobby(menu),
+            Screen::Splash => p.splash(menu),
         }
-        // The ticker: a note when there is one, the network's word online, the rider's name otherwise.
+        // The ticker: a note when there is one, the network's word online, the rider's name otherwise
+        // (not on the splash, where nobody is riding as anyone yet).
         let online = matches!(screen, Screen::Online | Screen::Games | Screen::Lobby);
         let ticker = match &menu.note {
             Some(n) => n.clone(),
+            None if screen == Screen::Splash => return p.parts,
             None if online && !menu.lobby.status.is_empty() => menu.lobby.status.clone(),
             None => format!("Riding as {}", menu.settings.name),
         };
@@ -2140,6 +2327,79 @@ impl<'a> Painter<'a> {
         }
         self.title(Screen::Garage.title());
         self.legend(&[("nav_x_off", "Done")]);
+    }
+
+    /// The splash (P46): a track's still from the disc, dimmed, the logo over it, and what to
+    /// press — or, once someone has, who 1P is — and the Quit popup when Back asked for it.
+    fn splash(&mut self, menu: &Menu) {
+        // The picture covers the whole frame at any shape (V24); the rest is the layout's, centred.
+        self.anchor(Anchor::Centre);
+        let whole = self.whole();
+        self.fill(whole, BLACK);
+        // The last track ridden's first still. (The disc's own `titlescreen` has its logo and a
+        // block of small print baked in, which the prompt would sit on.)
+        let track = menu.settings.track_index();
+        let still = self.art.stills.get(track).and_then(|s| s.first());
+        if let Some(t) = still {
+            // Cover the screen with the picture's middle, keeping its shape.
+            let (w, h) = (t.width as f32, t.height as f32);
+            let fit = whole.w / whole.h;
+            let src = if w / h > fit {
+                let cw = h * fit;
+                [(w - cw) / 2.0, 0.0, (w + cw) / 2.0, h]
+            } else {
+                let ch = w / fit;
+                [0.0, (h - ch) / 2.0, w, (h + ch) / 2.0]
+            };
+            self.blit(t, src, whole, SPLASH_DIM);
+        }
+        // The logo a quarter up on the main menu's, its lettering (the left 0.68 of the texture)
+        // centred.
+        let (w, h) = (512.0 * 1.25, 64.0 * 1.25);
+        let x = 320.0 - w * 0.68 / 2.0;
+        self.tex("mainmenu_logo_shadow", rect(x + 10.0, 100.0, w, h), [0, 0, 0, 90]);
+        self.tex("mainmenu_logo", rect(x, 90.0, w, h), CHOSEN);
+        if menu.claimed.is_some() || menu.p1.is_some() {
+            let who = format!("Player 1  {}", menu.p1_name);
+            self.text(Face::Title, &who, 320.0, 270.0, Align::Centre, ORANGE_TEXT);
+        } else {
+            // The prompt breathes until it is answered.
+            let breath = (menu.tick as f32 * 2.6 / 60.0).cos().abs();
+            let a = (255.0 * (0.6 + 0.4 * breath)) as u8;
+            let colour = [255, 255, 255, a];
+            let font = &self.art.fonts[&Face::Title];
+            let (press, or) = (font.measure("Press"), font.measure("or"));
+            let w = press + 12.0 + 40.0 + 12.0 + or + 12.0 + 40.0;
+            let mut x = 320.0 - w / 2.0;
+            let y = 270.0;
+            self.text(Face::Title, "Press", x, y, Align::Left, colour);
+            x += press + 12.0;
+            self.tex("nav_start_off", rect(x - 12.0, y - 12.0, 64.0, 64.0), colour);
+            x += 40.0 + 12.0;
+            self.text(Face::Title, "or", x, y, Align::Left, colour);
+            x += or + 12.0;
+            self.tex("nav_x_off", rect(x - 12.0, y - 12.0, 64.0, 64.0), colour);
+            self.text(Face::Small, "Enter or Space on the keyboard", 320.0, 316.0, Align::Centre, ITEM);
+            self.text(Face::Small, "Whoever presses it rides as Player 1", 320.0, 338.0, Align::Centre, ITEM);
+        }
+        if menu.p1.is_none() {
+            self.legend(&[("nav_circle_off", "Quit"), ("nav_x_off", "Start")]);
+        }
+        if let Some(row) = menu.quitting() {
+            self.anchor(Anchor::Centre);
+            self.fill(self.whole(), [0, 0, 0, 150]);
+            self.fill(rect(170.0, 150.0, 300.0, 140.0), [0, 0, 0, 220]);
+            self.text(Face::Chosen, "Quit the game?", 320.0, 164.0, Align::Centre, CHOSEN);
+            for (i, label) in QUIT_ROWS.iter().enumerate() {
+                let y = 210.0 + 36.0 * i as f32;
+                if i == row {
+                    self.tex("mainmenu_highlight", rect(320.0 - 96.0, y - 5.0, 192.0, 32.0), CHOSEN);
+                    self.text(Face::Chosen, label, 320.0, y - 1.0, Align::Centre, CHOSEN);
+                } else {
+                    self.text(Face::Item, label, 320.0, y, Align::Centre, ITEM);
+                }
+            }
+        }
     }
 
     /// The on-screen keyboard, in the middle of the frame: the name being typed, the four rows of

@@ -711,6 +711,12 @@ pub struct DeviceInfo {
     /// from 6 on are one short of [`PAD_BUTTONS`]' (P40). A node with no sysfs entry is taken to
     /// number its buttons as a full gamepad does.
     pub no_select: bool,
+    /// The kernel made it for a program, not for hardware: its sysfs node is under
+    /// `/sys/devices/virtual/input/`, where uinput puts what it makes — a uinput pad (`ps2kit`'s,
+    /// which calls itself an Xbox 360 pad with the real one's ids, another slot's, a remapper's) or
+    /// Steam's own virtual pad (P46). A Bluetooth LE pad is under `/sys/devices/virtual/` too,
+    /// through BlueZ's uhid, but under `misc/uhid/`: it is hardware, and is not this.
+    pub virtual_device: bool,
 }
 
 /// The kernel's `BTN_SELECT` and `BTN_SOUTH`: a gamepad has the second, and the first if it has a
@@ -746,6 +752,8 @@ impl DeviceInfo {
                 let keys = text("capabilities/key");
                 has_key(&keys, BTN_SOUTH) && !has_key(&keys, BTN_SELECT)
             },
+            virtual_device: std::fs::canonicalize(sys.join(node))
+                .is_ok_and(|p| p.to_string_lossy().contains("/devices/virtual/input/")),
         }
     }
 
@@ -768,6 +776,12 @@ impl DeviceInfo {
 /// for in `SDL_GAMECONTROLLER_IGNORE_DEVICES` (`0xVID/0xPID,…`); those are skipped so only Steam's
 /// virtual pad, with the player's Steam layout, drives the game. Outside Steam Input, Steam's
 /// background virtual pads (Valve 0x28de/0x11ff) mirror real ones and are skipped instead.
+///
+/// And every other virtual pad is skipped either way (P46): a uinput device is somebody's program
+/// holding a pad open — the kit's own virtual pad for another slot's emulator, sat idle, is the one
+/// this machine had — and it borrows a real pad's ids, so the id check alone let it in. Under Steam
+/// Input, Steam's own (Valve's ids) is the one virtual pad read. `--pad` names a device outright and
+/// is read whatever it is.
 pub fn readable(info: &DeviceInfo) -> bool {
     static IGNORED: std::sync::OnceLock<Option<Vec<(u16, u16)>>> = std::sync::OnceLock::new();
     let ignored = IGNORED.get_or_init(|| {
@@ -779,6 +793,9 @@ pub fn readable(info: &DeviceInfo) -> bool {
 /// [`readable`] with the ignore list given, for the tests.
 fn readable_under(info: &DeviceInfo, ignored: Option<&[(u16, u16)]>) -> bool {
     let id = (info.vendor, info.product);
+    if info.virtual_device && !(ignored.is_some() && info.vendor == 0x28de) {
+        return false;
+    }
     match ignored {
         Some(list) => !list.contains(&id),
         None => id != (0x28de, 0x11ff),
@@ -815,11 +832,27 @@ pub struct PadSlots<P> {
     pub seats: Option<[Option<Seat>; SEATS]>,
     /// The pad each seat had last, kept while it is unplugged.
     last: [Option<P>; SEATS],
+    /// 1P (P46): the device the front end's splash took 1P from, which sits in the first seat and
+    /// alone (with no `--pads`) decides whether the keyboard rides there. `None` before the splash
+    /// and without the front end: the keyboard rides with 1P's pad, as before.
+    first: Option<Device<P>>,
+}
+
+/// A device a seat can be given: the keyboard or a pad.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Device<P> {
+    Keys,
+    Pad(P),
 }
 
 impl<P> Default for PadSlots<P> {
     fn default() -> PadSlots<P> {
-        PadSlots { held: std::array::from_fn(|_| None), seats: None, last: std::array::from_fn(|_| None) }
+        PadSlots {
+            held: std::array::from_fn(|_| None),
+            seats: None,
+            last: std::array::from_fn(|_| None),
+            first: None,
+        }
     }
 }
 
@@ -827,6 +860,27 @@ impl<P: Clone + PartialEq> PadSlots<P> {
     /// Seats set up by `--pads`.
     pub fn with_seats(seats: [Option<Seat>; SEATS]) -> PadSlots<P> {
         PadSlots { seats: Some(seats), ..PadSlots::default() }
+    }
+
+    /// The seats start from 1P (P46): every seat let go, then 1P's pad in the first seat — or the
+    /// first seat kept for the keyboard — and the other pads behind it in join order at the next
+    /// [`PadSlots::update`]. Seats set up by `--pads` stay as they were set up; `None` (the splash is
+    /// back) leaves the seats and lets the keyboard ride with 1P again.
+    pub fn set_first(&mut self, first: Option<Device<P>>) {
+        if self.seats.is_none() && first.is_some() {
+            self.held = std::array::from_fn(|_| None);
+            self.last = std::array::from_fn(|_| None);
+            if let Some(Device::Pad(p)) = &first {
+                self.held[0] = Some(p.clone());
+                self.last[0] = Some(p.clone());
+            }
+        }
+        self.first = first;
+    }
+
+    /// 1P's device, once the front end's splash has one.
+    pub fn first(&self) -> Option<&Device<P>> {
+        self.first.as_ref()
     }
 
     /// `present` is every pad plugged in, in the order they were found. Drop the pads gone from it
@@ -849,7 +903,11 @@ impl<P: Clone + PartialEq> PadSlots<P> {
                 self.held[i] = Some(p);
             }
         }
+        let keys_first = self.seats.is_none() && self.first == Some(Device::Keys);
         let wants = |i: usize| {
+            if i == 0 && keys_first {
+                return None;
+            }
             self.seats.map_or(Some(None), |seats| match seats[i] {
                 Some(Seat::Pad(n)) => Some(Some(n)),
                 _ => None,
@@ -905,7 +963,16 @@ impl<P: Clone + PartialEq> PadSlots<P> {
     /// The seat the keyboard drives: 1P without `--pads` (alongside 1P's pad), else its own seat if
     /// it has one; with none, 1P while 1P's pad is out, so the keyboard can play on (opentennis's
     /// B388).
+    ///
+    /// With a 1P from the splash and no `--pads` (P46): 1P when the keyboard is 1P, and otherwise no
+    /// seat — the keyboard does not move a pad's player — except 1P's while its pad is out, the same
+    /// take-over.
     pub fn keys(&self) -> Option<usize> {
+        if self.seats.is_none()
+            && let Some(Device::Pad(_)) = &self.first
+        {
+            return self.held[0].is_none().then_some(0);
+        }
         self.seats.map_or(Some(0), |seats| {
             seats.iter().position(|s| *s == Some(Seat::Keys)).or(
                 (matches!(seats[0], Some(Seat::Pad(_))) && self.held[0].is_none()).then_some(0),
@@ -1191,6 +1258,8 @@ pub struct Seats {
     was: [SeatKind; SEATS],
     /// Last frame's keyboard Start, so a take-over is a press and not a hold.
     start_key: bool,
+    /// The keyboard's own report when it drives no seat ([`Seats::keyboard_alone`]).
+    keyboard_alone: Option<Report>,
     /// What changed, for the shell to print: pads joining, going and coming back.
     said: Vec<String>,
 }
@@ -1236,6 +1305,7 @@ impl Seats {
             since_scan: None,
             was: [SeatKind::Empty; SEATS],
             start_key: false,
+            keyboard_alone: None,
             said: Vec::new(),
         };
         seats.scan();
@@ -1265,7 +1335,7 @@ impl Seats {
             }
             let node = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
             let info = DeviceInfo::read(&self.sys, node);
-            if !readable(&info) {
+            if self.only.is_none() && !readable(&info) {
                 continue;
             }
             use std::os::unix::fs::OpenOptionsExt;
@@ -1317,9 +1387,8 @@ impl Seats {
         std::mem::take(&mut self.said)
     }
 
-    /// This frame: read every pad, notice the ones that went and the ones that came, and build each
-    /// seat's report. `held` is the keyboard.
-    pub fn frame(&mut self, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
+    /// Read every pad, and notice the ones that went and the ones that came.
+    fn poll(&mut self) {
         for j in &mut self.joined {
             j.pads.drain();
         }
@@ -1329,6 +1398,48 @@ impl Seats {
         }
         let present: Vec<String> = self.joined.iter().map(|j| j.id.clone()).collect();
         self.slots.update(&present);
+    }
+
+    /// A menu frame (P46): every device's own report, the keyboard's first and then each pad
+    /// plugged in by name, so the front end can tell who pressed. It reads the pads as
+    /// [`Seats::frame`] does, and a frame is one or the other.
+    pub fn devices(&mut self, held: &dyn Fn(u8) -> bool) -> Vec<(Device<String>, Report)> {
+        self.poll();
+        self.keyboard_alone = None;
+        let mut out = vec![(Device::Keys, self.keys.report(held))];
+        for j in &mut self.joined {
+            out.push((Device::Pad(j.id.clone()), j.pads.report(&no_keys)));
+        }
+        out
+    }
+
+    /// The seats start from 1P, the device the splash took it from ([`PadSlots::set_first`]).
+    pub fn set_first(&mut self, first: Option<Device<String>>) {
+        self.slots.set_first(first);
+        self.was = [SeatKind::Empty; SEATS];
+    }
+
+    /// 1P's device, once the splash has one; the keyboard after it took a ride over from 1P's pad.
+    pub fn first(&self) -> Option<&Device<String>> {
+        self.slots.first()
+    }
+
+    /// A pad plugged in, by the name [`Seats::devices`] gives it, as the startup lines say it.
+    pub fn device_name(&self, id: &str) -> Option<&str> {
+        self.joined.iter().find(|j| j.id == id)?.pads.name.as_deref()
+    }
+
+    /// The keyboard's report this frame when it drives no seat — a pad is 1P — for the pause, which
+    /// the keyboard still opens and works whoever has 1P (P46). `None` when it rides in a seat,
+    /// whose report already has it.
+    pub fn keyboard_alone(&self) -> Option<Report> {
+        self.keyboard_alone
+    }
+
+    /// This frame: read every pad, notice the ones that went and the ones that came, and build each
+    /// seat's report. `held` is the keyboard.
+    pub fn frame(&mut self, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
+        self.poll();
 
         // The keyboard can take a waiting seat over: Start on its keys lets the seat's pad go and
         // rides on, as opentennis's keyboard plays on for a 1P whose pad is out.
@@ -1340,6 +1451,11 @@ impl Seats {
             && self.slots.waiting(i)
         {
             self.slots.forget(i);
+            if i == 0 && matches!(self.slots.first(), Some(Device::Pad(_))) {
+                // The keyboard is 1P now, and the pad, back, joins as anyone new does; the other
+                // seats stay as they are.
+                self.slots.first = Some(Device::Keys);
+            }
             self.said.push(format!("{}P: on the keyboard now", i + 1));
             self.was[i] = SeatKind::Playing;
             // Not this frame's Start as well: the same press would freeze the ride it just resumed.
@@ -1351,6 +1467,7 @@ impl Seats {
     }
 
     fn frame_reports(&mut self, keyboard: Option<usize>, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
+        self.keyboard_alone = keyboard.is_none().then(|| self.keys.report(held));
         let mut out = [SeatInput::Empty; SEATS];
         for (i, seat) in out.iter_mut().enumerate() {
             let keys: &dyn Fn(u8) -> bool = if keyboard == Some(i) { held } else { &no_keys };
@@ -2528,6 +2645,110 @@ mod tests {
         a.button(6, true);
         let now = playing(frame(&mut seats, &nothing)[0]);
         assert!(down(now, Control::Start) && !down(now, Control::Select));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// P46: a uinput pad is skipped though it wears a real pad's ids, as `ps2kit`'s does; a
+    /// Bluetooth LE pad, under BlueZ's uhid, is hardware and is read; under Steam Input, Steam's
+    /// own virtual pad is the one virtual pad read.
+    #[test]
+    fn virtual_pads_are_skipped_whatever_ids_they_wear() {
+        let root = scratch("virtual");
+        let sys = root.join("sys");
+        // The kernel's own layout: /sys/class/input/jsN is a link into /sys/devices.
+        let entry = |node: &str, under: &str, vendor: &str, product: &str| {
+            let real = root.join("devices").join(under).join(node);
+            std::fs::create_dir_all(real.join("device/id")).unwrap();
+            std::fs::write(real.join("device/name"), "Microsoft X-Box 360 pad\n").unwrap();
+            std::fs::write(real.join("device/id/vendor"), format!("{vendor}\n")).unwrap();
+            std::fs::write(real.join("device/id/product"), format!("{product}\n")).unwrap();
+            std::fs::create_dir_all(&sys).unwrap();
+            std::os::unix::fs::symlink(&real, sys.join(node)).unwrap();
+            DeviceInfo::read(&sys, node)
+        };
+        let kit = entry("js0", "virtual/input/input30", "045e", "028e");
+        let usb = entry("js1", "pci0000:00/0000:00:14.0/usb3/3-1/3-1:1.0/input/input31", "045e", "028e");
+        let ble = entry("js2", "virtual/misc/uhid/0005:045E:0B13.0001/input/input32", "045e", "0b13");
+        let steam = entry("js3", "virtual/input/input33", "28de", "11ff");
+        assert!(kit.virtual_device && !usb.virtual_device && !ble.virtual_device && steam.virtual_device);
+        assert_eq!((kit.vendor, kit.product), (usb.vendor, usb.product), "the same ids");
+        assert!(!readable_under(&kit, None) && readable_under(&usb, None) && readable_under(&ble, None));
+        assert!(!readable_under(&steam, None));
+        let list = [(0x045e, 0x028e)];
+        assert!(readable_under(&steam, Some(&list)) && !readable_under(&kit, Some(&list)));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// P46: the seats start from the splash's 1P — its pad in the first seat though it joined last,
+    /// the others behind it in join order — and the keyboard rides no pad's seat, except 1P's while
+    /// its pad is out. With the keyboard 1P, no pad takes the first seat.
+    #[test]
+    fn the_seats_start_from_1p() {
+        let mut s = PadSlots::<u32>::default();
+        s.update(&[5, 7, 8]);
+        s.set_first(Some(Device::Pad(8)));
+        s.update(&[5, 7, 8]);
+        assert_eq!(s.held[..4], [Some(8), Some(5), Some(7), None]);
+        assert_eq!(s.keys(), None);
+        s.update(&[5, 7]);
+        assert!(s.waiting(0));
+        assert_eq!(s.keys(), Some(0));
+        s.update(&[5, 7, 8]);
+        assert_eq!(s.held[0], Some(8));
+
+        let mut s = PadSlots::<u32>::default();
+        s.set_first(Some(Device::Keys));
+        s.update(&[5, 7]);
+        assert_eq!(s.held[..3], [None, Some(5), Some(7)]);
+        assert_eq!(s.keys(), Some(0));
+        // `--pads` seats stay as they were set up.
+        let mut s = PadSlots::<u32>::with_seats(Seat::parse_list("0,k").unwrap());
+        s.update(&[5]);
+        s.set_first(Some(Device::Keys));
+        s.update(&[5]);
+        assert_eq!((s.held[0], s.keys()), (Some(5), Some(1)));
+    }
+
+    /// P46 over devices: each device's own report for the menus; then 1P a pad that is not the
+    /// first one found, in the first seat on its own hands, and the keyboard's report on its own
+    /// for the pause; and the keyboard taking the ride over when 1P's pad is pulled out is 1P.
+    #[test]
+    fn devices_report_on_their_own_and_1p_takes_the_first_seat() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("first");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        sys_entry(&sys, "js0", "Pad A", "usb-1/input0");
+        sys_entry(&sys, "js1", "Pad B", "usb-2/input0");
+        let _a = FakePad::plug(&dev, "js0");
+        let mut b = FakePad::plug(&dev, "js1");
+        let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
+        b.button(0, true);
+        seats.since_scan = None;
+        let got = seats.devices(&|code| code == key::Z);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].0, Device::Keys);
+        assert!(down(got[0].1, Control::Square) && !down(got[0].1, Control::Cross));
+        assert!(!down(got[1].1, Control::Cross) && !down(got[1].1, Control::Square));
+        assert!(down(got[2].1, Control::Cross) && !down(got[2].1, Control::Square));
+        let Device::Pad(b_id) = got[2].0.clone() else { panic!("a pad") };
+        assert_eq!(seats.device_name(&b_id), Some(format!("Pad B ({})", dev.join("js1").display()).as_str()));
+
+        seats.set_first(Some(Device::Pad(b_id.clone())));
+        let now = frame(&mut seats, &|code| code == key::Z);
+        let one = playing(now[0]);
+        assert!(down(one, Control::Cross) && !down(one, Control::Square), "1P is B's alone");
+        assert!(matches!(now[1], SeatInput::Playing(_)));
+        let keys = seats.keyboard_alone().expect("the keyboard rides no seat");
+        assert!(down(keys, Control::Square));
+
+        // B out: 1P waits; the keyboard's Start rides on, and the keyboard is 1P.
+        b.unplug();
+        assert_eq!(frame(&mut seats, &nothing)[0], SeatInput::Waiting);
+        frame(&mut seats, &|code| code == key::RETURN);
+        assert_eq!(seats.first(), Some(&Device::Keys));
+        assert!(down(playing(frame(&mut seats, &|code| code == key::Z)[0]), Control::Square));
+        assert!(seats.keyboard_alone().is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

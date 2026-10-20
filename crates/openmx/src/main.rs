@@ -26,6 +26,12 @@
 //! `--shot` of each is taken. The settings are kept in `settings.txt` and `controls.txt` beside the
 //! disc; a flag given on the command line wins over the file for the session.
 //!
+//! The main menu has a press-start splash before it (P46): whichever device presses Cross or Start
+//! (Enter or Space on the keyboard) is Player 1, the one device that drives the menus — with the
+//! keyboard, which always may — and the first seat; an idle or virtual pad moves nothing. Circle or
+//! Escape there asks to quit, Back on the main menu goes back to it, and so does 1P's pad being
+//! pulled out.
+//!
 //! # What is the port and what is the shell
 //!
 //! The shell is the thin part. Each piece of the frame below is a proved port, and this file only wires
@@ -192,9 +198,9 @@ use ps2_float::{F, Vf};
 
 use ground::Ground;
 use hud::Hud;
-use menu::{Act, Art, Menu, Reader};
+use menu::{Act, Art, Dev, Menu, Reader, Readers};
 use moment::{Moment, Shot};
-use pad::{Bindings, Pads, SEATS, Scheme, SeatInput, Seats, Throttle, Wiring};
+use pad::{Bindings, Device, Pads, SEATS, Scheme, SeatInput, Seats, Throttle, Wiring};
 
 // `controls.txt` holds a layout for every seat the pad layer has.
 const _: () = assert!(menu::SEATS == SEATS);
@@ -630,9 +636,13 @@ struct Shell {
 /// The front end's own half of [`Shell`].
 struct Front {
     menu: Menu,
+    /// The pause's reader, of 1P's seat, and the keyboard's beside it when a pad is 1P (P46).
     reader: Reader,
     /// The other seats' readers, for the garage's columns (P37).
     seat_readers: Vec<Reader>,
+    keys_reader: Reader,
+    /// The menus' readers, a device each, so the splash can tell who pressed (P46).
+    readers: Readers,
     art: Art,
     /// Where the settings files are.
     dir: std::path::PathBuf,
@@ -743,6 +753,8 @@ fn front_end(args: Args) -> Result<(), String> {
         menu: Menu::new(settings, controls).with_garage(catalogue, picks),
         reader: Reader::new(),
         seat_readers: (0..roster::SEATS).map(|_| Reader::new()).collect(),
+        keys_reader: Reader::new(),
+        readers: Readers::new(),
         art,
         dir,
         args_wiring: args.wiring.clone(),
@@ -763,8 +775,10 @@ fn front_end(args: Args) -> Result<(), String> {
     }
     // The ride setup lists a machine for each player who will ride (P41).
     front.menu.riders = args.players;
-    if let Some(screen) = args.screen {
-        front.menu.open(screen);
+    // The splash first (P46), unless `--screen` asks for a screen.
+    match args.screen {
+        Some(screen) => front.menu.open(screen),
+        None => front.menu.splash(),
     }
     let mut shell = Shell { window: Some(window), seats: Some(seats), front };
 
@@ -785,6 +799,8 @@ fn front_end(args: Args) -> Result<(), String> {
     let mut escape = false;
     loop {
         if let Act::Ride(track) = &act {
+            shell.front.reader.reset();
+            shell.front.keys_reader.reset();
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
@@ -817,11 +833,22 @@ fn front_end(args: Args) -> Result<(), String> {
             }
             shell.front.menu.main();
             shell.front.reader.reset();
+            shell.front.readers.reset();
             shell.front.seat_readers.iter_mut().for_each(Reader::reset);
+            // The keyboard took the ride over from 1P's pulled-out pad: it is 1P now.
+            if let Some(seats) = &shell.seats
+                && seats.first() == Some(&Device::Keys)
+                && matches!(shell.front.menu.p1(), Some(Dev::Pad(_)))
+            {
+                shell.front.menu.set_p1(Dev::Keys);
+                shell.front.menu.p1_name = dev_name(seats, &Dev::Keys);
+            }
         }
         // The lobby's ride (N3): on its track and its wrecks, over the lobby's connection, and back to
         // the lobby after.
         if act == Act::Online {
+            shell.front.reader.reset();
+            shell.front.keys_reader.reset();
             if let Some((room, _)) = shell.front.menu.lobby.start.clone() {
                 let mut a = args.clone();
                 a.track = room.track.clone();
@@ -843,6 +870,7 @@ fn front_end(args: Args) -> Result<(), String> {
             }
             shell.front.menu.back_from_online();
             shell.front.reader.reset();
+            shell.front.readers.reset();
         }
 
         let top = Instant::now();
@@ -857,30 +885,78 @@ fn front_end(args: Args) -> Result<(), String> {
                 frame = Frame::new(width, height, [0, 0, 0]);
             }
         }
-        // The menus are the first seat's, the keyboard's when no pad holds it (P38 adds the others).
+        // The menus are 1P's and the keyboard's (P46): every device read on its own, so the splash
+        // can tell who pressed, and past it only those two move anything.
         let seats = shell.seats.as_mut().expect("the front end has seats");
-        let now = seats.frame(&|code| window.held(code));
+        let devices = seats.devices(&|code| window.held(code));
         for line in seats.said() {
             println!("{line}");
         }
-        let mut press = shell.front.reader.read(&now[0].report());
-        // Escape is Back, on its edge, and the main menu's way out.
+        let plugged: Vec<String> = devices
+            .iter()
+            .filter_map(|(d, _)| match d {
+                Device::Pad(id) => Some(id.clone()),
+                Device::Keys => None,
+            })
+            .collect();
+        if shell.front.menu.lost(&plugged) {
+            println!("1P: the pad is gone — the splash is back for a new Player 1");
+            shell.front.menu.note = Some("Player 1's controller was unplugged".to_string());
+            seats.set_first(None);
+        }
+        let reports: Vec<(Dev, Report)> = devices
+            .into_iter()
+            .map(|(d, r)| match d {
+                Device::Keys => (Dev::Keys, r),
+                Device::Pad(id) => (Dev::Pad(id), r),
+            })
+            .collect();
+        let mut presses = shell.front.readers.read(&reports);
+        // Escape is the keyboard's Back, on its edge: on the main menu the splash, on the splash
+        // the Quit popup.
         let esc = window.held(key::ESCAPE);
-        if esc && !escape {
-            if shell.front.menu.screen() == Some(menu::Screen::Main) {
-                break;
-            }
-            press.back = true;
+        if esc
+            && !escape
+            && let Some((_, p)) = presses.iter_mut().find(|(d, _)| *d == Dev::Keys)
+        {
+            p.back = true;
         }
         escape = esc;
-        // The garage hears every seat: a column for each up to the last one somebody sits in.
-        let seated = now.iter().take(roster::SEATS).rposition(|n| *n != SeatInput::Empty);
+        // The garage hears every seat: a column for each up to the last one somebody sits in, each
+        // walked by the device in that seat (P37) — read from P46's devices, a frame being one or the
+        // other of `Seats::devices` and `Seats::frame`.
+        let seat_dev = |i: usize| match &seats.slots.held[i] {
+            Some(id) => Some(Dev::Pad(id.clone())),
+            None if seats.slots.keys() == Some(i) => Some(Dev::Keys),
+            None => None,
+        };
+        let seated = (0..roster::SEATS).rposition(|i| seat_dev(i).is_some() || seats.slots.waiting(i));
         shell.front.menu.seated = seated.map_or(1, |i| i + 1);
         for (i, reader) in shell.front.seat_readers.iter_mut().enumerate().skip(1) {
-            let p = reader.read(&now[i].report());
+            let report = seat_dev(i)
+                .and_then(|d| reports.iter().find(|(r, _)| *r == d))
+                .map_or(Report::idle(), |(_, r)| *r);
+            let p = reader.read(&report);
             shell.front.menu.step_seat(i, p);
         }
-        act = shell.front.menu.step(press);
+        let before = shell.front.menu.p1().cloned();
+        act = shell.front.menu.step_devices(&presses);
+        let after = shell.front.menu.p1().cloned();
+        if after != before {
+            match &after {
+                Some(dev) => {
+                    let name = dev_name(seats, dev);
+                    println!("1P: {name} — the menus and the first seat are its");
+                    shell.front.menu.p1_name = name;
+                    shell.front.menu.note = None;
+                    seats.set_first(Some(match dev {
+                        Dev::Keys => Device::Keys,
+                        Dev::Pad(id) => Device::Pad(id.clone()),
+                    }));
+                }
+                None => seats.set_first(None),
+            }
+        }
         if shell.front.menu.take_picks_changed() {
             match shell.front.menu.picks.save(&shell.front.dir) {
                 Ok(()) => println!("garage: saved in {}", shell.front.dir.display()),
@@ -924,6 +1000,17 @@ fn front_end(args: Args) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// What the splash calls a device: the keyboard, or a pad by its name without its node.
+fn dev_name(seats: &Seats, dev: &Dev) -> String {
+    match dev {
+        Dev::Keys => "Keyboard".to_string(),
+        Dev::Pad(id) => {
+            let name = seats.device_name(id).unwrap_or(id);
+            name.split(" (/").next().unwrap_or(name).to_string()
+        }
+    }
 }
 
 impl Front {
@@ -2136,7 +2223,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if let Some(front) = front.as_deref_mut() {
             // Every player's press: another player's Start pauses for them, and while the pause is
             // theirs their pad drives it (P41). Escape is the keyboard's, and Back for whoever drives.
-            let mut presses = vec![front.reader.read(&world.seats[0].reports[0])];
+            let mut first = front.reader.read(&world.seats[0].reports[0]);
+            // The keyboard pauses and works 1P's pause whoever has 1P (P46), from no seat of its own.
+            if let Some(keys) = pad_seats.as_ref().and_then(|s| s.keyboard_alone()) {
+                first = first.or(front.keys_reader.read(&keys));
+            }
+            let mut presses = vec![first];
             for (seat, r) in world.seats[1..].iter().zip(&mut start_readers) {
                 presses.push(r.read(&seat.reports[0]));
             }
