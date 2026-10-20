@@ -17,9 +17,9 @@
 //!
 //! # The front end
 //!
-//! With no flag that picks a ride (`--track`, `--play`, `--record`, `--moment`, `--vehicle`, `--phy`,
+//! With no flag that picks a ride (`--track`, `--play`, `--record`, `--moment`, `--vehicle`, `--phy`, `--set`, `--garage`,
 //! any `--trace`, `--players`, `--headless`, `--frames`, or `--ride`) the shell opens on its main menu ([`menu`], P36): Free Ride and its
-//! track pick, Settings with the rider's name on an on-screen keyboard, the overlay, wrecks and the
+//! track pick, the Garage (P37: every seat's bike, set and rider), Settings with the rider's name on an on-screen keyboard, the overlay, wrecks and the
 //! throttle's wiring, and Quit. Start or Escape in a ride opens the pause — Resume, Restart, Settings,
 //! Main Menu, Quit — in place of the plain freeze Start is without the front end. `--menu` asks for
 //! the front end whatever else is given, and `--screen NAME` opens it on one screen, which is how a
@@ -346,6 +346,9 @@ struct Rig {
     hud: Hud,
     bike_model: String,
     body_model: Option<String>,
+    /// What bolts onto this player's chassis, each part under the model name it is drawn from: the
+    /// first player's `.sub`, or the garage pick's own bike's (P37).
+    parts: Vec<game_render::scene::Part>,
 }
 
 impl Rig {
@@ -521,6 +524,24 @@ struct Args {
     online: Option<String>,
     peers: Vec<String>,
     seats: Option<String>,
+    /// `--set WORD` (`race250a`) or the garage's pick (P37): which of the bike archive's sixteen
+    /// `.phy` names the first player rides, the freeride's `Race125P` when neither says.
+    set: Option<roster::Set>,
+    /// The garage's picks for the second player on, each ridden on its own bike's `.phy` and in its
+    /// own rider's gear. A player past the end rides the first player's.
+    others: Vec<roster::Pick>,
+    /// `--garage`: ride `garage.txt`'s picks without the front end, every seat its own.
+    garage: bool,
+}
+
+/// The garage's picks on a ride (P37): the first seat's bike, set and rider are the ride's own, and
+/// every other seat's go to that seat.
+fn apply_picks(args: &mut Args, picks: &[roster::Pick]) {
+    let Some((first, rest)) = picks.split_first() else { return };
+    args.bike = first.bike.clone();
+    args.rider = first.rider.clone();
+    args.set = Some(first.set);
+    args.others = rest.to_vec();
 }
 
 fn run() -> Result<(), String> {
@@ -529,6 +550,17 @@ fn run() -> Result<(), String> {
     };
     if args.menu || !args.ride_flag {
         return front_end(args);
+    }
+    let mut args = args;
+    if args.garage {
+        let mut disc = Disc::open_configured()?;
+        let catalogue = roster::Catalogue::read(&mut disc)?;
+        let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
+        println!("garage: picks from {}", dir.join(roster::GARAGE_FILE).display());
+        let menu = Menu::new(Default::default(), Default::default()).with_garage(catalogue, roster::Picks::load(&dir));
+        if let Some(picks) = menu.ride_picks(args.players) {
+            apply_picks(&mut args, &picks);
+        }
     }
     ride(args, None).map(|_| ())
 }
@@ -545,6 +577,8 @@ struct Shell {
 struct Front {
     menu: Menu,
     reader: Reader,
+    /// The other seats' readers, for the garage's columns (P37).
+    seat_readers: Vec<Reader>,
     art: Art,
     /// Where the settings files are.
     dir: std::path::PathBuf,
@@ -618,14 +652,31 @@ enum Leave {
 fn front_end(args: Args) -> Result<(), String> {
     let mut disc = Disc::open_configured()?;
     let art = Art::load(&mut disc)?;
+    let catalogue = match roster::Catalogue::read(&mut disc) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("garage: {e}");
+            roster::Catalogue::default()
+        }
+    };
     drop(disc);
     let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
     let (settings, controls) = menu::load(&dir);
     println!("front end: settings in {}", dir.display());
+    let picks = roster::Picks::load(&dir);
+    println!(
+        "garage: {} bikes, {} riders; seat 1 rides {} on {} as {}",
+        catalogue.bikes.len(),
+        catalogue.riders.len(),
+        picks.0[0].bike,
+        picks.0[0].set.word(),
+        picks.0[0].rider
+    );
     let pad = args.pad.clone().or_else(|| controls.pad.clone());
     let mut front = Front {
-        menu: Menu::new(settings, controls),
+        menu: Menu::new(settings, controls).with_garage(catalogue, picks),
         reader: Reader::new(),
+        seat_readers: (0..roster::SEATS).map(|_| Reader::new()).collect(),
         art,
         dir,
         args_wiring: args.wiring.clone(),
@@ -668,6 +719,10 @@ fn front_end(args: Args) -> Result<(), String> {
                 // The shot is the menu's unless it is of the pause, which is drawn over the ride.
                 a.shot = shot.take_if(|_| shell.front.menu.screen() == Some(menu::Screen::Pause));
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
+                // What every seat picked in the garage is what the ride loads (P37).
+                if let Some(picks) = shell.front.menu.ride_picks(args.players) {
+                    apply_picks(&mut a, &picks);
+                }
                 shell.front.note_clear();
                 match ride(a, Some(&mut shell)) {
                     Ok(Leave::Restart) => continue,
@@ -682,6 +737,7 @@ fn front_end(args: Args) -> Result<(), String> {
             }
             shell.front.menu.main();
             shell.front.reader.reset();
+            shell.front.seat_readers.iter_mut().for_each(Reader::reset);
         }
 
         let top = Instant::now();
@@ -712,7 +768,23 @@ fn front_end(args: Args) -> Result<(), String> {
             press.back = true;
         }
         escape = esc;
+        // The garage hears every seat: a column for each up to the last one somebody sits in.
+        let seated = now.iter().take(roster::SEATS).rposition(|n| *n != SeatInput::Empty);
+        shell.front.menu.seated = seated.map_or(1, |i| i + 1);
+        for (i, reader) in shell.front.seat_readers.iter_mut().enumerate().skip(1) {
+            let p = reader.read(&now[i].report());
+            shell.front.menu.step_seat(i, p);
+        }
         act = shell.front.menu.step(press);
+        if shell.front.menu.take_picks_changed() {
+            match shell.front.menu.picks.save(&shell.front.dir) {
+                Ok(()) => println!("garage: saved in {}", shell.front.dir.display()),
+                Err(e) => {
+                    println!("garage: {e}");
+                    shell.front.menu.note = Some(format!("Could not save the garage: {e}"));
+                }
+            }
+        }
         if shell.front.menu.changed() {
             seats.set_wiring(shell.front.wiring());
             shell.front.save();
@@ -892,10 +964,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 .ok_or_else(|| format!("the bike archive has no member ending in {name}"))?;
             (archives[1].read_suffix(name)?, e.name.clone())
         }
-        // The garage's lookup (P37), on the freeride's own set: a seat's pick is the same call with
-        // its set in place of the freeride constants.
+        // The garage's lookup (P37), on the seat's picked set, and the freeride's own without one.
         None => {
-            let (bytes, member, note) = roster::physics(&archives[1], roster::Set::FREERIDE, &args.bike)?;
+            let set = args.set.unwrap_or(roster::Set::FREERIDE);
+            let (bytes, member, note) = roster::physics(&archives[1], set, &args.bike)?;
             if let Some(note) = note {
                 println!("phy: {note}");
             }
@@ -903,6 +975,29 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
     };
     let phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
+    // The other players' own picks (P37): each rides the `.phy` its set names in its own bike's
+    // archive, and wears its own rider's gear. A player the garage has no pick for rides the first's.
+    let mut other_phys: Vec<Phy> = Vec::new();
+    let mut other_riders: Vec<Option<(String, String)>> = Vec::new();
+    for i in 1..args.players {
+        match args.others.get(i - 1) {
+            Some(pick) => {
+                let res = disc.res(&member_ending(&disc, &format!("{}.res", pick.bike))?)?;
+                let (bytes, member, note) = roster::physics(&res, pick.set, &pick.bike)?;
+                if let Some(note) = note {
+                    println!("player {}: phy: {note}", i + 1);
+                }
+                println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
+                other_phys.push(Phy::read_bytes(&bytes, &tables.ride.curve));
+                let rider = member_ending(&disc, &format!("{}.res", pick.rider)).ok();
+                other_riders.push(rider.map(|m| (pick.rider.clone(), m)));
+            }
+            None => {
+                other_phys.push(phy.clone());
+                other_riders.push(None);
+            }
+        }
+    }
 
     // The crash, which is two more files (S26). The bike the rider leaves behind is a rigid body of
     // its own — `wreckbike.phy`, shipped beside every bike's own file and read by nothing before now
@@ -1176,8 +1271,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         node_at("TireFront").unwrap_or(phy.front.body_tire_force_position),
         node_at("TireRear").unwrap_or(phy.rear.body_tire_force_position),
     );
-    let new_rider = |at: Vf, heading: Vf| -> Rider {
-        let mut rider = Rider::new(&phy, mounts, at, heading, stunts.clone());
+    let new_rider = |phy: &Phy, at: Vf, heading: Vf| -> Rider {
+        let mut rider = Rider::new(phy, mounts, at, heading, stunts.clone());
         // The fork the front wheel steers about, from the model's shocks to its handlebars, which is the
         // axis the bike's loader gives the front wheel (P33). Left straight up with no such nodes.
         if let (Some(h), Some(s)) = (node_at("Handlebars"), node_at("Shocks")) {
@@ -1202,7 +1297,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         rider
     };
-    let mut rider = new_rider(at, heading);
+    let mut rider = new_rider(&phy, at, heading);
     // The other local players (V22), beside the first on the start line: where the original puts a
     // second rider was not read (R9), so this is the port's own — every SEAT_SPACING feet along the
     // start line's own right and left in turn, each stood on the ground under it, all facing the
@@ -1215,7 +1310,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let off = side * SEAT_SPACING * i.div_ceil(2) as f32;
             let (x, z) = (at.x() + right.x() * off, at.z() + right.z() * off);
             let (on, _) = sim_world::World::ground(&mut sim, Vf::new(x, 1.0e4, z, 1.0));
-            new_rider(Vf::new(x, at.y() + (on.y() - under_first.y()), z, 1.0), heading)
+            new_rider(&other_phys[i - 1], Vf::new(x, at.y() + (on.y() - under_first.y()), z, 1.0), heading)
         })
         .collect();
     for (i, r) in others.iter().enumerate() {
@@ -1557,13 +1652,41 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut rigs: Vec<Rig> = Vec::with_capacity(args.players);
     let body_model = body.as_ref().map(|b| b.geometry().to_string());
     for i in 1..args.players {
-        let body = match &rider_member {
-            None => None,
-            Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
+        // Its own rider's archive when the garage picked one, the first player's otherwise.
+        let motion = other_phys[i - 1].motion();
+        let own_rider = other_riders[i - 1].as_ref();
+        let body = match (&rider_member, own_rider) {
+            (None, _) => None,
+            (Some(_), Some((name, member))) => {
+                Body::load(vec![disc.res(member)?], name, Sex::Male, "", &table.stunts, motion).ok()
+            }
+            (Some(member), None) => {
+                Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, motion).ok()
+            }
         };
-        let chassis = match vehicle.mcf.is_empty() {
+        // Its own bike when the garage picked one (P37): that archive's `.sub`, its chassis and parts
+        // loaded again under names of their own in that bike's paint.
+        let own_bike = match args.others.get(i - 1) {
+            Some(pick) if pick.bike != args.bike => {
+                let member = member_ending(&disc, &format!("{}.res", pick.bike))?;
+                let res = [disc.res(&member)?];
+                match res[0].read_suffix(&format!("{}.sub", pick.bike)) {
+                    Ok(bytes) => Some((member, Vehicle::parse(&ini::text(&bytes)), res)),
+                    Err(e) => {
+                        println!("player {}: bike: {e}", i + 1);
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let (own_member, own_vehicle) = match &own_bike {
+            Some((member, v, _)) => (member, v),
+            None => (&bike_member, &vehicle),
+        };
+        let chassis = match own_vehicle.mcf.is_empty() {
             true => None,
-            false => Chassis::load(vec![disc.res(&bike_member)?], &vehicle.mcf, BIKE_PREFIX, &table.stunts, vehicle_params()).ok(),
+            false => Chassis::load(vec![disc.res(own_member)?], &own_vehicle.mcf, BIKE_PREFIX, &table.stunts, vehicle_params()).ok(),
         };
         let copy = |assets: &mut Assets, name: &str| -> Option<String> {
             let own = format!("{name}@{}", i + 1);
@@ -1571,8 +1694,34 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             assets.models.insert(own.clone(), loaded);
             Some(own)
         };
-        let bike_model = copy(&mut assets, CHASSIS).unwrap_or_else(|| CHASSIS.to_string());
-        let own_body = body_model.as_deref().and_then(|name| copy(&mut assets, name));
+        let (bike_model, parts) = match &own_bike {
+            Some((_, v, res)) => {
+                let own = format!("{CHASSIS}@{}", i + 1);
+                let drawn = assets.load_repainted(res, CHASSIS, &own, &v.materials);
+                let parts = v
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        let name = format!("{}@{}", part.model, i + 1);
+                        assets.load_repainted(res, &part.model, &name, &v.materials);
+                        game_render::scene::Part { model: name, placement: part.placement.clone() }
+                    })
+                    .collect();
+                (if drawn { own } else { CHASSIS.to_string() }, parts)
+            }
+            None => (copy(&mut assets, CHASSIS).unwrap_or_else(|| CHASSIS.to_string()), vehicle.parts.clone()),
+        };
+        // A picked rider's body is loaded again under its own name with its own gear's renames, which
+        // is the only way a model gets other textures.
+        let own_gear = match (body_model.as_deref(), own_rider, &body) {
+            (Some(name), Some((_, member)), Some(b)) => {
+                let own = format!("{name}@{}", i + 1);
+                let res = [disc.res(member)?];
+                assets.load_repainted(&res, name, &own, &b.rider.suit.materials).then_some(own)
+            }
+            _ => None,
+        };
+        let own_body = own_gear.or_else(|| body_model.as_deref().and_then(|name| copy(&mut assets, name)));
         rigs.push(Rig {
             body,
             chassis,
@@ -1581,6 +1730,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             hud: Hud::new(args.hud),
             bike_model,
             body_model: own_body,
+            parts,
         });
     }
     rigs.insert(
@@ -1596,6 +1746,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             hud: Hud::new(args.hud),
             bike_model: CHASSIS.to_string(),
             body_model,
+            parts: vehicle.parts.clone(),
         },
     );
 
@@ -1662,10 +1813,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         said: rider::Frame::default(),
         hands: Controls::default(),
     }];
-    for rider in others {
+    for (rider, phy) in others.into_iter().zip(other_phys) {
         seats.push(Seat {
             reports: [Report::missing(); PADS],
-            sim: Sim::with_rider(0, tables.clone(), phy.clone(), rider),
+            sim: Sim::with_rider(0, tables.clone(), phy, rider),
             // The track's plane is the first player's: `machine.txt` parks one per player, and the
             // shell draws one.
             garage: Garage::new(Kind::Bike, None)?,
@@ -2080,7 +2231,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         Some(model.world(i))
                     })
                 };
-                for part in &vehicle.parts {
+                for part in &rig.parts {
                     let at = match node_now(&part.placement) {
                         Some(node) => node.mul(bike_at),
                         None => bike_at,
@@ -2500,6 +2651,9 @@ fn parse_args() -> Result<Option<Args>, String> {
         online: None,
         peers: Vec::new(),
         seats: None,
+        set: None,
+        others: Vec::new(),
+        garage: false,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         ride_flag: false,
@@ -2513,7 +2667,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         if matches!(
             a.as_str(),
             "--track" | "--play" | "--record" | "--moment" | "--vehicle" | "--phy" | "--ride" | "--headless"
-                | "--players" | "--frames" | "--online"
+                | "--players" | "--frames" | "--online" | "--set" | "--garage"
         ) || a.starts_with("--trace")
         {
             args.ride_flag = true;
@@ -2522,9 +2676,9 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--ride" => {}
             "--menu" => args.menu = true,
             "--screen" => {
-                let w = next("a screen: main, tracks, settings, controls, keyboard or pause")?;
+                let w = next("a screen: main, tracks, garage, settings, controls, keyboard or pause")?;
                 args.screen = Some(menu::Screen::from_word(&w).ok_or(format!(
-                    "--screen: main, tracks, settings, controls, keyboard or pause, not {w}"
+                    "--screen: main, tracks, garage, settings, controls, keyboard or pause, not {w}"
                 ))?);
                 args.menu = true;
             }
@@ -2624,6 +2778,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--peer" => args.peers.push(next("another machine, like g@192.168.1.20:7000")?),
             "--seats" => args.seats = Some(next("who sits where, like host,g,g")?),
             "--phy" => args.phy = Some(next("a .phy on the disc, like race125p.phy")?),
+            "--set" => {
+                let w = next("one of the sixteen sets, like race250a")?;
+                args.set = Some(roster::Set::from_word(&w).ok_or(format!("--set: like race125p or pro500a, not {w}"))?);
+            }
+            "--garage" => args.garage = true,
             "--trace-stick" => {
                 args.trace_stick = Some(
                     next("a stick position, -1 to 1")?
@@ -2729,7 +2888,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --trace-stick-y F:Y,... sets the stick's y from frame F on, each until\n\
                      the next, and adds the backflip's columns to --trace-feel's line;\n\
                      --trace-at X,Z,DEG starts the bike there instead of the start line, and\n\
-                     --phy NAME rides the bike archive's NAME (pro125a.phy) instead of Race125P.phy.\n\
+                     --phy NAME rides the bike archive's NAME (pro125a.phy) instead of Race125P.phy,\n\
+                     --set WORD the bike's own file of that set (race250a, pro500p) on its class,\n\
+                     and --garage rides every seat on what the front end's garage picked for it.\n\
                      --record writes every simulated frame's pad to a tape (under context/,\n\
                      it is game data); --play rides one instead of the pad, at the tape's own\n\
                      frame lengths, and quits when it runs out. A human's PCSX2 recording\n\

@@ -25,6 +25,7 @@ context/
 # The shell's front end keeps its settings beside the disc (P36): yours, not the repo's.
 /settings.txt
 /controls.txt
+/garage.txt
 
 # Build output
 /target/
