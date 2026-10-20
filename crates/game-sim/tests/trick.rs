@@ -1,7 +1,7 @@
 //! The trick machine against the original.
 //!
-//! Nine proofs: eight covering each of the four pieces, and one (P3) running the whole machine on a
-//! bike.
+//! Ten proofs: eight covering each of the four pieces, one (P3) running the whole machine on a bike,
+//! and one (S30) running it on a human's recording against the original's own fields.
 //!
 //! 1. **the table**, read off the disc through the same archive reader the app layer uses, so the 57
 //!    records and the default gesture map are the ones the game ships rather than ones typed in here.
@@ -28,15 +28,21 @@
 //!    ported ride, landing one trick and wrecking another. It proves the *wiring* P3 added — that a
 //!    gesture reaches the request, the clocks run on the stunt the disc's table names, and the
 //!    verdict reaches the ride state machine — and nothing about the clauses themselves.
+//! 10. **the human's tricks**: recording2's pad through the gesture, the request and the clocks,
+//!    driven by the capture's own ground and wreck columns and compared with the original's trick
+//!    fields on every tick of the playback — and, for every gesture in it, whether the shell's
+//!    keyboard can make it.
 //!
 //! Three things the original does that these stand in for: the queue's heap nodes, the library's
 //! `strcmp` (hand-written with quadword compares the interpreter does not implement), and the engine's
 //! shared smooth noise. What is not proved here, and why, is in the journal entry's last section.
 
 use game_sim::archive::{Psr, Res};
+use game_sim::input::{Control, Report};
 use game_sim::phy::Phy;
 use game_sim::ride::Controls;
 use game_sim::rider;
+use game_sim::replay;
 use game_sim::rng::Rng;
 use game_sim::trick::{
     AngleTable, Bike, Dir, Params, SLOTS, STUNTS, Set, Stunt, Stunts, Trick, Tricks, look, slot_of,
@@ -253,10 +259,11 @@ fn the_stunt_table_is_the_one_on_the_disc() {
     assert_eq!(stunts.stunts[30].name, "throwaway");
     assert_eq!(stunts.stunts[56].name, "backflip");
     // One record's clocks in full, so the three keys cannot be read into the wrong fields: the
-    // no-hander holds at a third of a second, is safe at one, and is over at one.
+    // no-hander holds at a third of a second, is safe at one, and is over at one. The `0.33` is the
+    // loader's, which truncates to the single below the nearest one (S30).
     let no_hander = &set.stunts[set.no_hander];
     assert_eq!(no_hander.display_name, "No Hander");
-    assert_eq!(no_hander.hold_time, F(0.33));
+    assert_eq!(no_hander.hold_time.to_bits(), 0.33f32.to_bits() - 1);
     assert_eq!(no_hander.safe_time, F::ONE);
     assert_eq!(no_hander.duration, F::ONE);
     assert!(!no_hander.for_bike, "the rider leaves the bike alone for this one");
@@ -1380,4 +1387,373 @@ fn a_scripted_pad_lands_one_trick_and_wrecks_another() {
     assert!(b.rider.tricks.queue.is_empty(), "and emptied the queue");
 
     println!("a scripted pad: {:?} landed from frame 2, wrecked from frame {late}", stunt.name);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// S30: the human's thumbs
+// ---------------------------------------------------------------------------------------------------
+
+/// The recording whose tricks are compared, and the counter in its own save state (read with
+/// `./kit state extract`): the capture's first row is the counter after it.
+const RECORDING2: &str = "recording2.p2m2";
+const RECORDING2_START: u64 = 2_373;
+
+/// The captures of that recording's playback with the trick columns in them, in the order they are
+/// looked for: C6's full index first, then the one S30 took for its own columns. Both are C6's watch
+/// spec, so either serves.
+const RECORDING2_CAPTURES: [&str; 2] = ["recording2-freeride.csv", "recording2-tricks.csv"];
+
+/// The bike the recording was ridden on, which is where the overlap comes from (D7: the freeride
+/// boot's Race 125).
+const RECORDING2_PHY: &str = "race125p.phy";
+
+/// The bike's `.phy` off the disc, by the leaf name, out of whichever `Bike\*.res` carries it.
+fn recording2_phy(tables: &rider::Tables) -> Option<Phy> {
+    let mut f = container()?;
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    for e in &psr.entries {
+        let n = e.name.to_ascii_lowercase();
+        if !(n.starts_with("bike\\") && n.ends_with(".res")) {
+            continue;
+        }
+        f.seek(SeekFrom::Start(e.at)).expect("seek");
+        let mut archive = vec![0u8; e.size as usize];
+        f.read_exact(&mut archive).expect("read");
+        let Ok(res) = Res::parse(&archive) else { continue };
+        let Some(m) = res.entries.iter().find(|m| m.name.to_ascii_lowercase().ends_with(RECORDING2_PHY)) else {
+            continue;
+        };
+        let bytes = res.read(&archive, m).expect("the bike's .phy");
+        return Some(Phy::read_bytes(&bytes, &tables.ride.curve));
+    }
+    None
+}
+
+/// One row's trick state, in the port's terms: the nine words the capture has a column for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Row {
+    group: u8,
+    dir: u8,
+    armed: bool,
+    requested: u8,
+    current: u8,
+    seq: i32,
+    running: bool,
+    safe: bool,
+    elapsed: u32,
+}
+
+/// The capture's names for [`Row`]'s fields, in its order.
+const ROW_COLUMNS: [&str; 9] = [
+    "trick_group",
+    "trick_dir",
+    "trick_armed",
+    "trick_req",
+    "trick_id",
+    "trick_count",
+    "trick_running",
+    "trick_safe",
+    "trick_elapsed",
+];
+
+impl Row {
+    fn of(t: &Tricks) -> Row {
+        Row {
+            group: t.gesture.group,
+            dir: t.gesture.dir as u8,
+            armed: t.gesture.armed,
+            requested: t.requested.0,
+            current: t.current.0,
+            seq: t.seq,
+            running: t.in_progress,
+            safe: t.safe,
+            elapsed: t.elapsed.0.to_bits(),
+        }
+    }
+
+    /// The columns that differ.
+    fn differs(&self, want: &Row) -> Vec<&'static str> {
+        let same = [
+            self.group == want.group,
+            self.dir == want.dir,
+            self.armed == want.armed,
+            self.requested == want.requested,
+            self.current == want.current,
+            self.seq == want.seq,
+            self.running == want.running,
+            self.safe == want.safe,
+            self.elapsed == want.elapsed,
+        ];
+        ROW_COLUMNS.iter().zip(same).filter(|(_, s)| !s).map(|(n, _)| *n).collect()
+    }
+}
+
+/// **S30. The tricks under a human's thumbs**: recording2's tape, read by I4's reader, through
+/// [`Gesture::read`](game_sim::trick::Gesture::read), [`Tricks::request`] and [`Tricks::update`],
+/// against the original's own trick fields captured from the same recording played back.
+///
+/// The trick layer is driven by the capture's own on-the-ground, wreck and fresh columns rather than
+/// the port's physics, so what is compared is the trick machine and nothing upstream of it: the slot
+/// each gesture names, the tick it is asked for, safe and over, and which touchdowns
+/// [`Tricks::landing`] turns into a wreck. Four things about the *caller* had to be read off the
+/// capture to drive it, and are the order this test calls the machine in (the S30 journal entry has
+/// the rows that show each):
+///
+/// - **the pad**: a row's pad is video field `2k - 2` of the recording, every row — the first field
+///   of the tick, on this playback;
+/// - **the request runs on the gesture read the tick before**: the original reads the pad after the
+///   clocks, so a gesture made on tick *k* is asked for on tick *k + 1*. `rider.rs` reads it first;
+/// - **the stick is the pad's own**, through the input layer but not the `[Joystick]` rate limit;
+/// - **a wreck keeps the trick running until it ends**, and a rider who gets back on without a
+///   respawn has the trick reset on that tick. `rider.rs` resets it when the wreck starts.
+///
+/// One difference is left and is allowed for by name: on twelve ticks the stick is half way between
+/// centre and the stop and the original's gesture reads no direction where the port's reads one. No
+/// trick button is down on any of them, so no slot differs; why is not known (the journal says what
+/// was ruled out). Skipped with a line where the recording, the capture or the disc is not here.
+#[test]
+fn the_humans_tricks() {
+    let Ok(kit) = Kit::load() else {
+        skip("no kit.toml: the human's tricks are unchecked");
+        return;
+    };
+    let rpath = kit.ctx("recordings").join(RECORDING2);
+    let Ok(bytes) = std::fs::read(&rpath) else {
+        println!("no {} — copy it from the main checkout's context/recordings/", rpath.display());
+        return;
+    };
+    let dir = kit.ctx("capture").join("acceptance");
+    let Some((cpath, text)) = RECORDING2_CAPTURES.iter().find_map(|n| {
+        let p = dir.join(n);
+        let text = std::fs::read_to_string(&p).ok()?;
+        text.lines().next()?.split(',').any(|c| c == "trick_req").then_some((p, text))
+    }) else {
+        println!(
+            "no capture of {RECORDING2}'s playback with the trick columns in {} — the recipe is in the \
+             S30 journal entry",
+            dir.display()
+        );
+        return;
+    };
+    let Some(table) = table_bytes() else { return };
+    let tables = rider::Tables::build();
+    let Some(phy) = recording2_phy(&tables) else {
+        println!("no {RECORDING2_PHY} in any bike archive on this disc: the human's tricks are unchecked");
+        return;
+    };
+    let cap = replay::Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", cpath.display()));
+    let col = |name: &str| {
+        cap.columns
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("no column {name} in {}", cpath.display()))
+    };
+    let int = |row: usize, at: usize| -> i64 {
+        cap.rows[row][at].parse().unwrap_or_else(|_| panic!("row {row}: {:?}", cap.rows[row][at]))
+    };
+    let float = |row: usize, at: usize| -> f32 {
+        cap.rows[row][at].parse().unwrap_or_else(|_| panic!("row {row}: {:?}", cap.rows[row][at]))
+    };
+    let (dt_at, ground_at, wreck_at, fresh_at) = (col("dt"), col("on_ground"), col("wreck_reason"), col("fresh"));
+    let at = ROW_COLUMNS.map(|n| col(n));
+    let want = |k: usize| Row {
+        group: int(k, at[0]) as u8,
+        dir: int(k, at[1]) as u8,
+        armed: int(k, at[2]) != 0,
+        requested: int(k, at[3]) as u8,
+        current: int(k, at[4]) as u8,
+        seq: int(k, at[5]) as i32,
+        running: int(k, at[6]) != 0,
+        safe: int(k, at[7]) != 0,
+        elapsed: float(k, at[8]).to_bits(),
+    };
+    let wreck = |k: usize| int(k, wreck_at);
+
+    // Where the capture sits in the recording, and the proof that its pad is the human's: row k's pad
+    // bytes are the recording's video field 2k - 2, buttons and both sticks, on every row. Under the
+    // reader's phases that is `First`, tick k - 1.
+    let first = int(0, col("frame_counter")) as u64;
+    assert_eq!(first, RECORDING2_START + 1, "the capture does not start on the recording's first tick");
+    let movie = replay::P2m2::parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", rpath.display()));
+    let tape = movie.tape(replay::TickPhase::First);
+    let from_ram = replay::PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{}: {e}", cpath.display()));
+    let rows = cap.rows.len().min(tape.len() + 1);
+    let off: Vec<usize> = (1..rows)
+        .filter(|&k| from_ram.frames[k - 1].reports[0].0[2..8] != tape.frames[k - 1].reports[0].0[2..8])
+        .collect();
+    assert!(off.is_empty(), "rows whose pad is not field 2k - 2: {:?}", &off[..off.len().min(10)]);
+
+    let stunts = Stunts::parse(&table).expect("the stunt table");
+    let set = Set::new(stunts.selection(0));
+    let params = Params {
+        overlap: phy.animation.stunt_overlap_time,
+        no_hander_speed: phy.air.no_hander_wreck_speed_limit,
+    };
+    let angles = AngleTable::build();
+
+    let mut manager = game_sim::input::Manager::connected();
+    let mut tricks = Tricks::default();
+    let mut fresh = int(0, fresh_at) != 0;
+    let mut bad: std::collections::BTreeMap<&str, Vec<usize>> = Default::default();
+    let mut halfway = Vec::new();
+    // The index: every request, with the gesture that made it; the first tick each became safe and
+    // the tick it was over; and every tick the landing clause called.
+    let mut asked: Vec<(usize, u8, Dir, Trick)> = Vec::new();
+    let (mut queued, mut dpad_ticks) = (0usize, 0usize);
+    let mut gestures: std::collections::BTreeMap<(u8, u8), usize> = Default::default();
+    let mut landings: Vec<(usize, Option<game_sim::trick::Wreck>, i64)> = Vec::new();
+    let mut lines = Vec::new();
+    for k in 0..rows {
+        let dt = F(float(k, dt_at));
+        let frame = if k == 0 { replay::PadFrame::default() } else { tape.frames[k - 1] };
+        manager.tick(dt, &frame.reports);
+        let hands = Controls::from_pad(manager.pad(0));
+        dpad_ticks += usize::from(hands.dpad.iter().any(|&d| d));
+        let was_wrecked = k > 0 && wreck(k - 1) != 0;
+        let respawned = k > 0 && int(k, fresh_at) != 0 && int(k - 1, fresh_at) == 0;
+        let before = Row::of(&tricks);
+        let gesture = tricks.gesture;
+        let waiting = tricks.queue.len();
+
+        // The update phase, on the gesture the last tick read.
+        let mut bike = Bike {
+            on_ground: int(k, ground_at) != 0,
+            contact: false,
+            wrecked: was_wrecked,
+            fresh,
+            speed: F::ZERO,
+        };
+        if bike.wrecked || !tricks.request(&set, bike, params) {
+            tricks.idle(&mut bike);
+        }
+        fresh = bike.fresh;
+        tricks.update(dt, &set, bike, false, game_sim::ride::noise);
+        if tricks.requested != Trick::NONE && (tricks.requested.0 != before.requested || tricks.seq != before.seq) {
+            asked.push((k, gesture.group, gesture.dir, tricks.requested));
+        }
+        queued += tricks.queue.len().saturating_sub(waiting);
+        // The wreck test, while the rider is still on: the trick's clause after the attitude ones.
+        if !was_wrecked {
+            let verdict = tricks.landing(&set, bike, params);
+            if verdict.is_some() || wreck(k) != 0 {
+                landings.push((k, verdict, wreck(k)));
+            }
+        }
+        // Back on without a respawn: the trick the wreck interrupted goes.
+        if was_wrecked && wreck(k) == 0 && !respawned {
+            tricks.reset();
+        }
+        // The input phase, after all of it: the pad this tick, and the rider still down on the tick a
+        // respawn puts it back.
+        let buttons = game_sim::trick::Buttons { trick: hands.trick, dpad: hands.dpad };
+        tricks.gesture.read(&angles, hands.stick, buttons, wreck(k) != 0 || respawned);
+        if tricks.gesture.group != 0 && tricks.gesture.dir != Dir::None {
+            *gestures.entry((tricks.gesture.group, tricks.gesture.dir as u8)).or_default() += 1;
+        }
+
+        let (got, wanted) = (Row::of(&tricks), want(k));
+        let mut d = got.differs(&wanted);
+        // The one difference allowed for: no direction in the original, one in the port, with no trick
+        // button down — so nothing could be asked for with it — and the stick moving through the
+        // half-way ring (the stick's bytes differ from the tick before).
+        let moving = k > 1 && tape.frames[k - 1].reports[0].0[6..8] != tape.frames[k - 2].reports[0].0[6..8];
+        if d == ["trick_dir"] && wanted.dir == 0 && wanted.group == 0 && moving {
+            halfway.push(k);
+            d.clear();
+        }
+        if !d.is_empty() && lines.len() < 12 {
+            lines.push(format!("row {k}: {d:?}\n  port     {got:?}\n  original {wanted:?}"));
+        }
+        for n in d {
+            bad.entry(n).or_default().push(k);
+        }
+    }
+
+    // The index, printed whatever the verdict.
+    println!(
+        "{}: {rows} rows, the pad field 2k - 2 on every one; {queued} queued",
+        cpath.display()
+    );
+    let wheelies: Vec<usize> = asked.iter().filter(|a| a.3 == Trick::WHEELIE).map(|a| a.0).collect();
+    println!("  the idle wheelie, one tick each: rows {wheelies:?}");
+    for &(k, group, dir, trick) in asked.iter().filter(|a| a.3 != Trick::WHEELIE) {
+        let name = set.stunt(trick).map(|s| s.name.as_str()).unwrap_or("?");
+        let over = (k + 1..rows).find(|&j| int(j, at[6]) == 0);
+        let safe = (k..over.unwrap_or(rows)).find(|&j| int(j, at[7]) != 0);
+        println!(
+            "  row {k}: group {group} {dir:?} -> slot {} {name:?}, safe at {safe:?}, over at {over:?}",
+            trick.0
+        );
+    }
+    for &(k, verdict, reason) in &landings {
+        println!("  row {k}: the trick clause says {verdict:?}, the original's reason is {reason}");
+    }
+    println!("  the stick half way with no button down, no direction in the original: rows {halfway:?}");
+
+    if !bad.is_empty() {
+        let counts: Vec<String> = bad.iter().map(|(n, ks)| format!("{n} on {} rows", ks.len())).collect();
+        panic!("the port's trick machine left the original's: {}\n{}", counts.join(", "), lines.join("\n"));
+    }
+    let slots: Vec<u8> = asked.iter().filter(|a| a.3 != Trick::WHEELIE).map(|a| a.3.0).collect();
+    assert_eq!(slots, [0, 2, 1, 0, 15, 2], "the human's six tricks, in order");
+    assert!(halfway.len() <= 12, "more half-way stick ticks than the twelve S30 measured: {halfway:?}");
+    // The landing clause and the original agree about every touchdown it was asked about: it says a
+    // trick wreck exactly where the original's reason turns 12, and nothing where the rider stayed on.
+    for &(k, verdict, reason) in &landings {
+        let new = k > 0 && wreck(k - 1) == 0 && reason != 0;
+        let trick = new && reason == i64::from(game_sim::trick::Wreck::TRICK.0);
+        assert_eq!(
+            verdict.is_some(),
+            trick,
+            "row {k}: the trick clause says {verdict:?} and the original's reason is {reason}"
+        );
+    }
+
+    // The human's gestures, and whether the shell's keyboard can make each. The keyboard binds no
+    // d-pad: the arrows are the left stick, ramped to the stop (0 or 255) in under a fifth of a
+    // second, and the three trick buttons are keys of their own. So a gesture is the keyboard's if
+    // the group's buttons and that stick at its stop read as the same slot.
+    assert_eq!(dpad_ticks, 0, "the human used the d-pad, which the keyboard does not have");
+    let mut cannot = Vec::new();
+    for (&(group, dir), &ticks) in &gestures {
+        // The trick buttons the group is made of, in the decoder's order, and the controls the
+        // shell's pad layer reads them from ([`Controls::from_pad`]).
+        let held = (0u8..8)
+            .map(|b| [b & 1 != 0, b & 2 != 0, b & 4 != 0])
+            .find(|&t| game_sim::trick::group(t) == group)
+            .expect("every group is some buttons");
+        let controls: Vec<Control> = [Control::Circle, Control::Triangle, Control::R1]
+            .into_iter()
+            .zip(held)
+            .filter_map(|(c, on)| on.then_some(c))
+            .collect();
+        let mask = game_sim::input::mask_of(&controls);
+        let mut report = Report::from_buttons(mask);
+        let (x, y) = match dir {
+            1 => (127, 0),
+            2 => (127, 255),
+            3 => (0, 127),
+            _ => (255, 127),
+        };
+        report.0[6] = x;
+        report.0[7] = y;
+        let mut keys = game_sim::input::Manager::connected();
+        keys.tick(replay::CAPPED_DT, &[report, Report::missing()]);
+        let c = Controls::from_pad(keys.pad(0));
+        let mut g = game_sim::trick::Gesture::default();
+        g.read(&angles, c.stick, game_sim::trick::Buttons { trick: c.trick, dpad: c.dpad }, false);
+        let same = g.group == group && g.dir as u8 == dir;
+        println!(
+            "  gesture group {group} x {:?}: {ticks} ticks, slot {:?}; the keyboard {}",
+            dir_of(u32::from(dir)),
+            slot_of(group, dir_of(u32::from(dir))),
+            if same { "makes it" } else { "cannot" }
+        );
+        if !same {
+            cannot.push((group, dir));
+        }
+    }
+    assert!(cannot.is_empty(), "gestures the keyboard cannot make: {cannot:?}");
 }
