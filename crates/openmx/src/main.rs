@@ -145,18 +145,22 @@
 
 mod aspect;
 mod chase;
+mod gpuwin;
 mod ground;
 mod hud;
 mod menu;
 mod moment;
+mod overlay;
 mod net;
 mod online;
 mod pad;
+mod perf;
 mod split;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
 #[allow(dead_code)]
 mod roster;
+mod screen;
 mod vehicle;
 mod window;
 
@@ -171,6 +175,7 @@ use game_render::raster::Frame;
 use game_render::rider::{Body, Sex, Skeleton, anchors_of};
 use game_render::scene::Vehicle;
 use game_render::vehicle::{Chassis, Drive, params as vehicle_params};
+use game_render::gpu::{Actor, Renderer, Scene3, Target, View, wgpu};
 use game_render::world::{Assets, Camera, Lighting, draw_scene};
 use game_render::{ini, png, scene as view};
 use game_sim::biplane::Area;
@@ -197,9 +202,11 @@ use pad::{Bindings, Pads, SEATS, Scheme, SeatInput, Seats, Throttle, Wiring};
 
 // `controls.txt` holds a layout for every seat the pad layer has.
 const _: () = assert!(menu::SEATS == SEATS);
+use perf::Stage;
 use split::{Layout, Split};
 use vehicle::{Garage, Kind, Plane, Spawn};
-use window::{Window, key};
+use screen::{Backend, Screen};
+use window::key;
 use aspect::{Aspect, Display};
 
 /// The game's own frame rate. The simulation is not fixed to it — it is handed the wall clock's own
@@ -215,6 +222,8 @@ const PS2_FRAME: (usize, usize) = (640, 448);
 /// than a software rasteriser can fill at 60 Hz, so the dirt fades out at a radius instead. Nine feet
 /// a sample makes this about a hundred and twenty yards of ground in every direction.
 const GROUND_RADIUS: u32 = 44;
+/// How many cells a side of the ground the GPU draws or culls at once (P44).
+const GROUND_CHUNK: u32 = 32;
 
 /// The near clip plane the frame is drawn with, in feet, and the number the follow camera is handed
 /// as its distance floor, because the original's call site hands its camera the near plane of the
@@ -559,6 +568,10 @@ struct Args {
     online: Option<String>,
     peers: Vec<String>,
     seats: Option<String>,
+    /// `--fps`: a line a second with the frame rate, the slow frames and each stage's time ([`perf`]).
+    fps: bool,
+    /// `--renderer gpu|software`: what draws the picture (P44); the GPU unless asked.
+    renderer: Backend,
 }
 
 fn run() -> Result<(), String> {
@@ -574,7 +587,7 @@ fn run() -> Result<(), String> {
 /// The window, the pad and the menu, which outlive a ride under the front end.
 struct Shell {
     /// Always open under the front end; an `Option` because a ride without one may be headless.
-    window: Option<Window>,
+    window: Option<Screen>,
     seats: Option<Seats>,
     front: Front,
 }
@@ -679,7 +692,7 @@ fn front_end(args: Args) -> Result<(), String> {
         wiring_flags: args.wiring_flags,
         scheme_flag: args.scheme_flag,
     };
-    let window = Window::open(&args.display, args.size, args.scale, "openmx")?;
+    let window = Screen::open(args.renderer, &args.display, args.size, args.scale, "openmx")?;
     let seats = open_seats(&args, pad.as_deref(), front.wiring());
     match seats.name(0) {
         Some(name) => println!("pad: {name}"),
@@ -692,7 +705,7 @@ fn front_end(args: Args) -> Result<(), String> {
     }
     let mut shell = Shell { window: Some(window), seats: Some(seats), front };
 
-    let frame_size = |window: &Window| match args.size {
+    let frame_size = |window: &Screen| match args.size {
         Some(size) => size,
         None => args.aspect.frame((window.width, window.height), window.scale),
     };
@@ -1558,14 +1571,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // `--headless` opens neither: no window to show the frame in and no host pad to read, so every
     // seat rides an idle pad or the tape, and the frame is drawn all the same for `--shot`. Under the
     // front end (P36) they are its own, opened once and kept across rides; without one, this ride's.
-    let mut own: (Option<Window>, Option<Seats>);
+    let mut own: (Option<Screen>, Option<Seats>);
     let (window, pad_seats, mut front) = match shell {
         Some(shell) => (&mut shell.window, &mut shell.seats, Some(&mut shell.front)),
         None => {
             own = match args.headless {
                 true => (None, None),
                 false => (
-                    Some(Window::open(&args.display, args.size, args.scale, "openmx — freeride")?),
+                    Some(Screen::open(args.renderer, &args.display, args.size, args.scale, "openmx — freeride")?),
                     Some(open_seats(&args, args.pad.as_deref(), args.wiring.clone())),
                 ),
             };
@@ -1613,6 +1626,25 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         println!("pad pressures: {}", pressures.join(" "));
     }
 
+    // ---- the GPU (P44) -------------------------------------------------------------------------
+    // What draws the picture: the window's own GPU, or with no window one drawing offscreen — unless
+    // `--renderer software`, or no GPU to be had, leaves it to the rasteriser.
+    let mut offscreen: Option<(Renderer, Option<wgpu::Texture>)> = match (&*window, args.renderer) {
+        (None, Backend::Gpu) => match Renderer::headless() {
+            Ok(r) => {
+                println!("gpu: {} offscreen", r.adapter);
+                Some((r, None))
+            }
+            Err(e) => {
+                println!("renderer: {e}; drawing in software");
+                None
+            }
+        },
+        _ => None,
+    };
+    let gpu_on = offscreen.is_some() || window.as_mut().is_some_and(|w| w.gpu().is_some());
+    println!("renderer: {}", if gpu_on { Backend::Gpu.name() } else { Backend::Software.name() });
+
     // ---- the other players' bodies and bikes (V22) ---------------------------------------------
     // Each rider on the screen is posed into a model of its own, because a skinned model's triangles
     // are its pose: the first player's are the models the archives loaded, and every other player's
@@ -1635,8 +1667,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             assets.models.insert(own.clone(), loaded);
             Some(own)
         };
-        let bike_model = copy(&mut assets, CHASSIS).unwrap_or_else(|| CHASSIS.to_string());
-        let own_body = body_model.as_deref().and_then(|name| copy(&mut assets, name));
+        // On the GPU a pose is node matrices and not the model's triangles (P44), so every player
+        // draws the one model.
+        let bike_model = match gpu_on {
+            true => None,
+            false => copy(&mut assets, CHASSIS),
+        }
+        .unwrap_or_else(|| CHASSIS.to_string());
+        let own_body = body_model.as_deref().and_then(|name| match gpu_on {
+            true => Some(name.to_string()),
+            false => copy(&mut assets, name),
+        });
         rigs.push(Rig {
             body,
             chassis,
@@ -1663,12 +1704,33 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         },
     );
 
+    // Everything the GPU draws, uploaded once: the props, the sky, the whole ground and every model.
+    if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
+        let at = Instant::now();
+        let chunks = ground.chunks(GROUND_CHUNK);
+        r.forget_assets();
+        r.set_scene(&look);
+        r.set_sky(sky.as_ref());
+        r.set_ground(&chunks, ground.paint.as_ref(), ground::DIRT)?;
+        r.upload_all(&assets);
+        let (models, materials, textures) = r.uploaded();
+        println!(
+            "gpu: {models} models, {materials} materials, {textures} textures and {} ground chunks uploaded in {:.2} s",
+            chunks.len(),
+            at.elapsed().as_secs_f32()
+        );
+    }
+    // The GPU's per-frame lists, kept to reuse their room: the poses, the overlay and its layers.
+    let mut gpu_poses: Vec<Vec<M4>> = Vec::new();
+    let mut gpu_patches = Vec::new();
+    let mut gpu_layers: Vec<overlay::Layer> = (0..=args.players).map(|_| overlay::Layer::new()).collect();
+
     // ---- the loop ------------------------------------------------------------------------------
     let light = Lighting::of(&look);
     // The frame: `--size`'s, which stays put whatever the window does, or the window's own shape
     // — the largest 4:3 one inside it with `--aspect 4:3` — which is re-made whenever the window
     // changes size (below). With no window, the PS2's own unless `--size` says otherwise.
-    let frame_size = |window: &Option<Window>| match (args.size, window) {
+    let frame_size = |window: &Option<Screen>| match (args.size, window) {
         (Some(size), _) => size,
         (None, Some(window)) => args.aspect.frame((window.width, window.height), window.scale),
         (None, None) => PS2_FRAME,
@@ -1772,7 +1834,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut hud_key = false;
     // M swaps machines, on its edge the same way (P19).
     let mut swap_key = false;
-    let held = |window: &Option<Window>, code: u8| window.as_ref().is_some_and(|w| w.held(code));
+    let held = |window: &Option<Screen>, code: u8| window.as_ref().is_some_and(|w| w.held(code));
 
     // Online (N2): the session, every seat starting where this ride starts.
     let mut online = match &args.online {
@@ -1800,8 +1862,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // How the ride ended, for the front end: anything but the pause's own two is a quit.
     let mut leave = Leave::Quit;
     let mut escape = held(window, key::ESCAPE);
+    let mut perf = perf::Perf::new(args.fps);
     loop {
         let top = Instant::now();
+        perf.begin();
 
         if let Some(window) = &mut *window {
             window.poll();
@@ -1962,6 +2026,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // body's frame inside each — at its one fixed frame length, and this machine's seat comes back
         // as the first seat's `sim` (the only local seat online). Its frames count toward `--frames`,
         // the engine's not being run.
+        let sim_at = Instant::now();
         let (dt, simulated) = if let Some(on) = &mut online {
             online_frames += 1;
             if let Err(end) = on.frame(world.seats[0].reports[0], &mut world.place, rigs[0].body.as_mut(), &mut world.seats[0].sim) {
@@ -1987,6 +2052,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // What the simulation was actually handed, which the pose and the camera below step with too.
         (world.played_dt.unwrap_or(step.dt), step.simulated)
         };
+        perf.add(Stage::Sim, sim_at.elapsed());
+        let (scene_at, spent) = (Instant::now(), perf.spent());
 
         cameras.clear();
         let mut ridden: Vec<Ridden> = Vec::with_capacity(args.players);
@@ -2015,7 +2082,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let Some(body) = &mut rig.body {
                 // Online the session posed it inside its ticks, so a rollback rolls the body back too.
                 if moving && bike_up && online.is_none() {
-                    body.ride(dt, &mut seat.sim.rider, &seat.hands, rider::Gate::default());
+                    perf.time(Stage::Animation, || {
+                        body.ride(dt, &mut seat.sim.rider, &seat.hands, rider::Gate::default())
+                    });
                 }
             }
 
@@ -2030,9 +2099,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // The rider's two axes and not zeros: in the air they are the crossup sweep the
                     // chassis' clip is played at, and zero is the sweep's far end (P29).
                     let request = Chassis::riding(&seat.sim.rider);
-                    chassis.frame(dt, want, &request, Drive::of(ride));
-                    if let Some(loaded) = assets.models.get_mut(&rig.bike_model) {
-                        chassis.skin_into(loaded);
+                    perf.time(Stage::Animation, || chassis.frame(dt, want, &request, Drive::of(ride)));
+                    if let Some(loaded) = assets.models.get_mut(&rig.bike_model).filter(|_| !gpu_on) {
+                        perf.time(Stage::Skinning, || chassis.skin_into(loaded));
                     }
                 }
             }
@@ -2128,6 +2197,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             });
             ridden.push(rider);
         }
+        perf.lap(Stage::Scene, scene_at, spent);
 
         // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
         // own shape and put into the window's frame; a full screen's one view is the frame itself.
@@ -2135,7 +2205,140 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // a rider is re-skinned for a view only where that differs from the view before.
         let mut skinned: Vec<Option<usize>> = vec![None; rigs.len()];
         let mut drawn = 0;
-        for (v, at) in rects.iter().enumerate() {
+        if gpu_on {
+            // The overlay first: each view's HUD, and the pause over the whole frame.
+            let draw_at = Instant::now();
+            gpu_patches.clear();
+            for (v, at) in rects.iter().enumerate().take(world.seats.len()) {
+                let (seat, rig) = (&world.seats[v], &mut rigs[v]);
+                let bike_up = seat.garage.up == Kind::Bike;
+                rig.hud.plane = !bike_up;
+                rig.hud.flight = match (bike_up, &seat.garage.plane) {
+                    (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
+                    _ => None,
+                };
+                if rig.hud.on {
+                    let hud = &rig.hud;
+                    let draw = |f: &mut Frame| hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
+                    gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
+                }
+            }
+            if let Some(front) = &front
+                && front.menu.screen().is_some()
+            {
+                let draw = |f: &mut Frame| front.art.draw(&front.menu, f);
+                gpu_patches.extend(gpu_layers[args.players].patch(frame.width, frame.height, (0, 0), draw));
+            }
+            perf.add(Stage::Draw, draw_at.elapsed());
+
+            // What stands in the world besides the props, once for every view: each bike, its parts
+            // and its rider, posed by node matrices the vertex shader skins with.
+            let (scene_at, spent) = (Instant::now(), perf.spent());
+            gpu_poses.clear();
+            let mut actors: Vec<Actor> = Vec::new();
+            for (seat, rig) in world.seats.iter().zip(&rigs) {
+                if seat.garage.up != Kind::Bike {
+                    continue;
+                }
+                let bike_at = chassis_at(&seat.sim.rider.ride);
+                let pose = rig.chassis.as_ref().filter(|c| !c.world.is_empty()).map(|c| {
+                    gpu_poses.push(c.world.clone());
+                    gpu_poses.len() - 1
+                });
+                actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None });
+                let node_now = |name: &str| -> Option<M4> {
+                    rig.chassis.as_ref().and_then(|c| c.node(name)).or_else(|| {
+                        let model = &assets.models.get(CHASSIS)?.model;
+                        let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
+                        Some(model.world(i))
+                    })
+                };
+                for part in &vehicle.parts {
+                    let at = match node_now(&part.placement) {
+                        Some(node) => node.mul(bike_at),
+                        None => bike_at,
+                    };
+                    actors.push(Actor { model: part.model.as_str(), at, pose: None, lod_from: None });
+                }
+                if let (Some(body), Some(model)) = (&rig.body, &rig.body_model)
+                    && body.posed
+                {
+                    let grips = match &rig.chassis {
+                        Some(chassis) => chassis_grips(chassis),
+                        None => match assets.models.get(CHASSIS) {
+                            Some(loaded) => anchors_of(&Skeleton::of(&loaded.model), &[]),
+                            None => Default::default(),
+                        },
+                    };
+                    let (pose, _) = perf.time(Stage::Skinning, || body.palette(Some(&grips)));
+                    gpu_poses.push(pose);
+                    actors.push(Actor {
+                        model: model.as_str(),
+                        at: bike_at,
+                        pose: Some(gpu_poses.len() - 1),
+                        lod_from: Some(vector(seat.sim.rider.ride.position())),
+                    });
+                }
+            }
+            if let (Some(drawn), Some(plane)) = (&plane_drawn, &world.seats[0].garage.plane) {
+                let at = M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up));
+                for (model, at) in drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)) {
+                    actors.push(Actor { model, at, pose: None, lod_from: None });
+                }
+            }
+            let views: Vec<View> = rects
+                .iter()
+                .zip(&cameras)
+                .take(world.seats.len())
+                .map(|(at, camera)| View { rect: [at.x as u32, at.y as u32, at.w as u32, at.h as u32], camera, actors: &actors })
+                .collect();
+            perf.lap(Stage::Scene, scene_at, spent);
+
+            let draw_at = Instant::now();
+            let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, light: &light };
+            let (fw, fh) = (frame.width as u32, frame.height as u32);
+            // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
+            let shooting = shot.is_some() && engine.frame >= args.shot_frame;
+            let mut waited = Duration::ZERO;
+            let out = match (&mut offscreen, window.as_mut().and_then(|w| w.gpu())) {
+                (Some((r, texture)), _) => {
+                    let t = texture.take().filter(|t| (t.width(), t.height()) == (fw, fh)).unwrap_or_else(|| r.offscreen(fw, fh));
+                    let view = t.create_view(&Default::default());
+                    let d = r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
+                    // Nothing else waits on a frame nobody sees: without this the queue runs ahead,
+                    // and the times would be the CPU's alone.
+                    let wait_at = Instant::now();
+                    r.finish();
+                    waited = wait_at.elapsed();
+                    if shooting {
+                        frame.color = r.read(&t);
+                    }
+                    *texture = Some(t);
+                    Some(d)
+                }
+                (None, Some(w)) => {
+                    let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
+                    waited = w.waited;
+                    if shooting {
+                        let t = w.renderer.offscreen(fw, fh);
+                        let view = t.create_view(&Default::default());
+                        w.renderer.render(&offscreen_target(&view, fw, fh), &assets, &scene);
+                        frame.color = w.renderer.read(&t);
+                    }
+                    d
+                }
+                _ => None,
+            };
+            perf.add(Stage::Draw, draw_at.elapsed().saturating_sub(waited));
+            perf.add(Stage::Present, waited);
+            if let Some(d) = out {
+                for (v, tris) in d.triangles.iter().enumerate() {
+                    view_triangles[v] += tris;
+                    drawn += tris;
+                }
+            }
+        }
+        for (v, at) in rects.iter().enumerate().filter(|_| !gpu_on) {
             if v >= world.seats.len() {
                 // A layout with room for more players than there are: the spare views are black.
                 split::blank(&mut frame, *at, [0, 0, 0]);
@@ -2148,11 +2351,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let camera = &cameras[v];
             let pos = vector(ridden[v].target.body_point);
             // The picture: the dirt, then the scene's props and the bikes standing on them.
+            let draw_at = Instant::now();
             clear(target, look.fog_color);
             if let Some(sky) = &sky {
                 sky.draw(target, camera);
             }
             let mut tris = ground.draw(target, camera, &light, pos, GROUND_RADIUS);
+            perf.add(Stage::Draw, draw_at.elapsed());
+            let (scene_at, spent) = (Instant::now(), perf.spent());
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is hidden, as the swap hides its model, and the rider is the
@@ -2207,7 +2413,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         if let Some(loaded) = assets.models.get_mut(model.as_str()) {
                             let group = loaded.model.group_for(away, loaded.radius, focal);
                             if skinned[p] != Some(group) {
-                                body.skin_into_at(loaded, group, Some(&grips));
+                                perf.time(Stage::Skinning, || body.skin_into_at(loaded, group, Some(&grips)));
                                 skinned[p] = Some(group);
                             }
                         }
@@ -2222,6 +2428,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let at = M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up));
                 actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
             }
+            perf.lap(Stage::Scene, scene_at, spent);
+            let draw_at = Instant::now();
             tris += draw_scene(target, &look, &assets, &actor, camera);
             // And the overlay over the top of it, after everything with a depth test and before anything
             // that reads the frame: what the window shows and what `--shot` writes are the same picture.
@@ -2238,12 +2446,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             view_triangles[v] += tris;
             drawn += tris;
+            perf.add(Stage::Draw, draw_at.elapsed());
         }
-        if let Some(front) = &front {
-            front.art.draw(&front.menu, &mut frame);
+        if let Some(front) = front.as_ref().filter(|_| !gpu_on) {
+            perf.time(Stage::Draw, || front.art.draw(&front.menu, &mut frame));
         }
-        if let Some(window) = &mut *window {
+        if let Some(window) = window.as_mut().filter(|_| !gpu_on) {
+            let present_at = Instant::now();
             window.present(&frame.color, frame.width, frame.height)?;
+            perf.add(Stage::Present, present_at.elapsed());
         }
 
         // One frame, on paper, for a run nobody is watching: the first by default, or the one
@@ -2307,6 +2518,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if args.frames.is_some_and(|n| engine.frame.max(online_frames) >= n) {
             break;
         }
+        perf.end(rects.len().min(world.seats.len()));
         // Pace to 60 Hz. A frame that overran does not sleep, and the engine's own clock is what the
         // simulation sees, so a slow frame becomes a longer step rather than a slower game.
         if let Some(rest) = FRAME.checked_sub(top.elapsed()) {
@@ -2365,6 +2577,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(on) = &online {
         println!("{}", on.summary());
     }
+    perf.summary();
     println!(
         "ridden for {:.1}s over {} frames",
         started.elapsed().as_secs_f32(),
@@ -2415,6 +2628,22 @@ fn point(p: [F; 3]) -> V3 {
 
 /// A quadword the simulation holds, as the renderer's own vector: the other half of [`point`], for a
 /// position or an axis the ride has already computed.
+/// The renderer that draws the ride (P44): the offscreen one with no window, the window's otherwise.
+fn renderer_of<'a>(
+    offscreen: &'a mut Option<(Renderer, Option<wgpu::Texture>)>,
+    window: &'a mut Option<Screen>,
+) -> Option<&'a mut Renderer> {
+    match offscreen {
+        Some((r, _)) => Some(r),
+        None => window.as_mut().and_then(|w| w.gpu()).map(|w| &mut w.renderer),
+    }
+}
+
+/// The whole of a `width` by `height` offscreen texture as a frame's target.
+fn offscreen_target(view: &wgpu::TextureView, width: u32, height: u32) -> Target<'_> {
+    Target { view, size: (width, height), frame: [0, 0, width, height], scale: 1 }
+}
+
 fn vector(v: Vf) -> V3 {
     v3(v.x(), v.y(), v.z())
 }
@@ -2600,6 +2829,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         ride_flag: false,
         screen: None,
         wiring_flags: (false, false),
+        fps: false,
+        renderer: Backend::default(),
     };
     let mut argv = std::env::args().skip(1);
     while let Some(a) = argv.next() {
@@ -2655,6 +2886,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .map_err(|_| "--shot-frame: not a frame number")?;
             }
             "--hud" => args.hud = true,
+            "--fps" => args.fps = true,
+            "--renderer" => args.renderer = Backend::parse(&next("gpu or software")?)?,
             "--camera" => args.camera = next("a camera preset's name, like \"Freestyle Cam\"")?,
             "--moment" => {
                 let file: std::path::PathBuf = next("a moment file")?.into();
@@ -2791,7 +3024,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
-                            [--bindings FILE]\n\
+                            [--bindings FILE] [--renderer gpu|software] [--fps]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
                      rides the freeride area from the disc named in kit.toml straight away.\n\

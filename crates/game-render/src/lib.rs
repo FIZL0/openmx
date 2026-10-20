@@ -21,6 +21,7 @@
 //!   world.rs     a track in memory: models, materials and textures matched up by name, and drawn
 //!   rider.rs     the rider: its `.sub`, the `.mcf` it names, its skeleton and how it bolts on
 //!   chassis.rs   where the renderer put the bike, measured against where the solver put it
+//!   gpu.rs       the same world through wgpu: uploaded once, skinned and batched on the GPU
 //!   raster.rs    a depth-buffered, perspective-correct, textured triangle rasteriser
 //!   png.rs       a PNG writer, so a frame can be looked at
 //!   mat.rs       vectors and 4x4 transforms in the files' own convention
@@ -34,6 +35,8 @@ pub mod anim;
 pub mod biplane;
 pub mod chassis;
 pub mod disc;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod ini;
 pub mod mat;
 pub mod png;

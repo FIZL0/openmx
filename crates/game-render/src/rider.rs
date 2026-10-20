@@ -856,6 +856,18 @@ impl Body {
         held
     }
 
+    /// The pose as the GPU draws it (P44): the node matrices [`Body::skin_into_at`] skins with, held
+    /// on to the bike the same way, with nothing skinned — the vertex shader places each vertex by its
+    /// node's matrix itself.
+    pub fn palette(&self, hold: Option<&Anchors>) -> (Vec<M4>, [Option<f32>; 4]) {
+        let mut world = self.rig.world();
+        let held = match hold {
+            Some(targets) => hold_on(&self.rig.set.skeleton, &mut world, targets, 1.0),
+            None => [None; 4],
+        };
+        (world, held)
+    }
+
     /// Which of the body's levels of detail to draw, for a camera `distance` from the bike whose
     /// focal length is `focal` pixels ([`crate::world::Camera::focal`]).
     ///
