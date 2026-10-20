@@ -7,13 +7,32 @@
 //! 1. [`contact`] — which wheels touch, how long since they left the ground, and the *crossup*: the
 //!    signed angle between where the bike points and where it is going.
 //! 2. [`preload`] — stick down then up off a lip: a one-shot force into the chassis.
-//! 3. [`backflip`] — stick up then down: a pitch torque that decays while it is held.
+//! 3. [`backflip`] — stick up then down: a pitch torque that decays while it is held. One row of
+//!    [`Rotations`]; see below.
 //! 4. [`airborne_control`] — the moment the stick commands in the air, damped or auto-levelled, plus
 //!    the lean force that drifts the bike sideways.
 //! 5. [`wreck_test`] — the g loads, the pitch and roll limits, and the landing crossup test.
 //!
 //! Only step 1 runs on the ground; steps 2 and 3 only *arm* on the ground; steps 4 and 5 are where
 //! riding in the air comes from.
+//!
+//! # Rotations: the disc's, and the port's
+//!
+//! The original has one rotating move, the backflip, with its gesture, axis and sign written into the
+//! step. Here a rotation is a [`Rotation`] row and [`rotate`] runs whichever row is asked for, so a
+//! frontflip or a 360 is a row someone adds and not a change to the step.
+//!
+//! *The disc's:* everything [`BACKFLIP`] holds — the gesture (stick `y` past `-HELD` then `+HELD`, on
+//! a lip), the negative pitch lane, the six `.phy` keys it reads through [`Params`], the 1.25 floor,
+//! the 0.6 s grace, the upright ending and the control-authority ramp — and every rule of the step
+//! itself: the lip, the three phases, the decay only while the d-pad is idle, the clamp, `w` set to 1.
+//!
+//! *The port's:* the shape (the row, [`Axis`], [`StickAxis`], [`Gesture`], [`Tuning`]); choosing
+//! among several rows (which one is armed, and asking "fire?" before "arm?", which is the same
+//! answer for one row); clearing the other rows' lanes on a fire; and every row in [`INVENTED`],
+//! which only joins a set through [`Rotations::new`]'s flag. With the flag off — the default — the
+//! set is [`BACKFLIP`] alone and the step is the original's to the bit, which is what the backflip
+//! oracle proof runs.
 //!
 //! # The two state structs
 //!
@@ -142,7 +161,8 @@ pub struct Air {
     pub flip_armed: bool,
     /// Counts down from [`FLIP_GRACE`] while a triggered backflip is still on the ground.
     pub flip_grace: F,
-    /// The torque the backflip adds to the chassis. Only `x` is ever set, and it is negative.
+    /// The torque the rotation adds to the chassis. The backflip only ever sets `x`, negative; another
+    /// row sets its own [`Axis`] lane with its own sign.
     pub flip_torque: Vf,
     /// The velocity a wreck throws the rider with, when the wreck came from landing on someone.
     pub wreck_impact: Vf,
@@ -536,40 +556,243 @@ pub fn preload(p: &Params, air: &mut Air, chassis: &mut Chassis, step: &Step) {
     }
 }
 
-// --- 3: the backflip --------------------------------------------------------------------------------
+// --- 3: the backflip, and any other rotation ---------------------------------------------------------
+
+/// Which of the moment's three lanes a rotation turns the bike about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    /// `x`: nose up or down — the backflip's.
+    Pitch,
+    /// `y`: about the vertical.
+    Yaw,
+    /// `z`: about the bike's own length.
+    Roll,
+}
+
+/// Which half of the left stick ([`Step::stick`]) a rotation is triggered and steered with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StickAxis {
+    /// `x`, the lean.
+    Lean,
+    /// `y`, the pitch — the backflip's.
+    Pitch,
+}
+
+/// How a rotation is asked for: the stick past [`HELD`] one way on the lip to arm it, then past it the
+/// other way to fire it. The same axis, read with the firing direction counted as positive, is what
+/// steers the torque while the rotation turns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gesture {
+    pub stick: StickAxis,
+    /// The direction that fires: `true` for past `+HELD` (the backflip's, after arming past `-HELD`).
+    pub fire_positive: bool,
+}
+
+/// The six numbers a rotation is tuned by, as a bike's `.phy` gives them: how long the stick may be
+/// held, the torque that maps onto, and the two rates it decays at — the first while the stick is
+/// pushed the firing way, the second otherwise.
+#[derive(Clone, Copy, Debug)]
+pub struct Tuning {
+    pub min_time: F,
+    pub max_time: F,
+    pub min_torque: F,
+    pub max_torque: F,
+    pub rate_increase: F,
+    pub rate_decrease: F,
+}
+
+/// One rotating move, as data. [`rotate`] is the one step that runs any of them, and the disc's
+/// backflip is [`BACKFLIP`]; a new rotation is a new row, not a change to the step.
+#[derive(Clone, Copy, Debug)]
+pub struct Rotation {
+    pub name: &'static str,
+    pub gesture: Gesture,
+    /// The lane of [`Air::flip_torque`] (and so of the chassis' moment) the torque goes into …
+    pub axis: Axis,
+    /// … and its sign there. The backflip's is negative.
+    pub negative: bool,
+    /// Where the six tuning numbers come from. A function of [`Params`] so that the backflip reads the
+    /// very fields it always has, and a new row can read others or hold constants.
+    pub tuning: fn(&Params) -> Tuning,
+    /// The fire torque's floor is the minimum torque times this — the backflip's 1.25.
+    pub floor: f32,
+    /// Seconds a fired rotation has to get the wheels off the ground — the backflip's [`FLIP_GRACE`].
+    pub grace: f32,
+    /// What gives control back: once the torque has stopped, is the bike the right way up? The wheels
+    /// touching gives it back regardless.
+    pub over: fn(&Params, &Air, &Chassis) -> bool,
+    /// The length of the control-authority ramp the end of the rotation starts.
+    pub authority: fn(&Params) -> F,
+}
+
+/// The disc's backflip, and the only rotation the original has: stick forward on the lip, then back,
+/// and a negative pitch torque.
+pub const BACKFLIP: Rotation = Rotation {
+    name: "backflip",
+    gesture: Gesture { stick: StickAxis::Pitch, fire_positive: true },
+    axis: Axis::Pitch,
+    negative: true,
+    tuning: |p| Tuning {
+        min_time: p.min_backflip_time,
+        max_time: p.max_backflip_time,
+        min_torque: p.min_backflip_torque,
+        max_torque: p.max_backflip_torque,
+        rate_increase: p.backflip_torque_rate_increase,
+        rate_decrease: p.backflip_torque_rate_decrease,
+    },
+    floor: 1.25,
+    grace: FLIP_GRACE,
+    over: upright,
+    authority: |p| p.control_authority_time,
+};
+
+/// **Not the original's.** A flat 360 about the vertical: lean left on the lip, then right. It borrows
+/// the backflip's tuning, grace and ending, because the disc has no numbers for a spin; only
+/// [`Rotations::new`] with its flag on lets it into a set.
+pub const FLAT_SPIN: Rotation = Rotation {
+    name: "flat spin",
+    gesture: Gesture { stick: StickAxis::Lean, fire_positive: true },
+    axis: Axis::Yaw,
+    negative: false,
+    ..BACKFLIP
+};
+
+/// The rotations the port adds on top of the disc's. None of them is the original's, and none of them
+/// is in a set unless [`Rotations::new`]'s flag asks for it.
+pub const INVENTED: &[Rotation] = &[FLAT_SPIN];
+
+/// The backflip's ending: roll under a quarter turn and pitch inside the airborne wreck angles, with
+/// no torque applied this substep.
+fn upright(p: &Params, air: &Air, chassis: &Chassis) -> bool {
+    !air.flip_torque_applied
+        && chassis.roll.abs() < HALF_PI
+        && chassis.pitch > -p.airborne_pitch_down_wreck_angle
+        && chassis.pitch < p.airborne_pitch_up_wreck_angle
+}
+
+/// The rotations a bike can do, and which of them [`Air`]'s flip state belongs to.
+///
+/// The default is the disc's set, the backflip alone, with which [`Rotations::step`] is the original's
+/// backflip step exactly. `active` is the port's: the original has one rotation and so nothing to
+/// remember about which.
+#[derive(Clone, Debug)]
+pub struct Rotations {
+    rows: Vec<Rotation>,
+    active: usize,
+}
+
+impl Default for Rotations {
+    fn default() -> Rotations {
+        Rotations::new(false)
+    }
+}
+
+impl Rotations {
+    /// The disc's set, plus [`INVENTED`] when `invented` is on. Off is the original.
+    pub fn new(invented: bool) -> Rotations {
+        let mut rows = vec![BACKFLIP];
+        if invented {
+            rows.extend_from_slice(INVENTED);
+        }
+        Rotations::of(rows)
+    }
+
+    /// Any set at all, for someone adding a row. The first row is the one an idle bike starts on.
+    pub fn of(rows: Vec<Rotation>) -> Rotations {
+        assert!(!rows.is_empty(), "a set of rotations needs at least one");
+        Rotations { rows, active: 0 }
+    }
+
+    pub fn rows(&self) -> &[Rotation] {
+        &self.rows
+    }
+
+    /// The rotation armed, turning, or last turned.
+    pub fn active(&self) -> &Rotation {
+        &self.rows[self.active]
+    }
+
+    /// One substep of whichever rotation is asked for. See [`rotate`].
+    pub fn step(&mut self, p: &Params, air: &mut Air, chassis: &mut Chassis, step: &Step) {
+        rotate(&self.rows, &mut self.active, p, air, chassis, step);
+    }
+}
+
+fn lane(v: Vf, axis: Axis) -> F {
+    F(match axis {
+        Axis::Pitch => v.x(),
+        Axis::Yaw => v.y(),
+        Axis::Roll => v.z(),
+    })
+}
+
+fn with_lane(v: Vf, axis: Axis, x: F) -> Vf {
+    match axis {
+        Axis::Pitch => Vf::new(x.0, v.y(), v.z(), v.w()),
+        Axis::Yaw => Vf::new(v.x(), x.0, v.z(), v.w()),
+        Axis::Roll => Vf::new(v.x(), v.y(), x.0, v.w()),
+    }
+}
+
+/// The stick along a gesture, with the firing direction positive. Negation is exact, so for the
+/// backflip this is the original's `stick.y` bit for bit.
+fn along(g: Gesture, step: &Step) -> F {
+    let s = match g.stick {
+        StickAxis::Lean => step.stick.0,
+        StickAxis::Pitch => step.stick.1,
+    };
+    if g.fire_positive { s } else { -s }
+}
 
 /// The backflip step: push the stick forward on the lip and pull it back, and the bike goes over
-/// backwards.
+/// backwards. The disc's set run through [`rotate`]; this is the function the oracle proves.
+pub fn backflip(p: &Params, air: &mut Air, chassis: &mut Chassis, step: &Step) {
+    rotate(&[BACKFLIP], &mut 0, p, air, chassis, step);
+}
+
+/// The rotation step, for any set of rows.
 ///
 /// It runs in three phases. *Triggered* — the torque is chosen from how long the stick was held,
-/// between 1.25 times the minimum and the maximum, and the bike has [`FLIP_GRACE`] to get airborne or
-/// the flip is cancelled. *Turning* — the torque goes into the chassis every substep and decays
-/// towards zero at a rate the stick controls (one rate pulling, another pushing), but only while the
-/// d-pad is not asking for a trick; it ends when a wheel touches, when the bike hits something, or
-/// when the torque has decayed below the minimum. *Over* — the control-authority ramp starts, either
-/// because the bike is back on the ground or because it is the right way up, which is how a flip that
-/// comes round cleanly gives the stick back sooner than one that does not.
-pub fn backflip(p: &Params, air: &mut Air, chassis: &mut Chassis, step: &Step) {
+/// between the floor times the minimum and the maximum, and the bike has the row's grace to get
+/// airborne or the rotation is cancelled. *Turning* — the torque goes into the chassis every substep
+/// and decays towards zero at a rate the stick controls (one rate pushing the firing way, another
+/// otherwise), but only while the d-pad is not asking for a trick; it ends when a wheel touches, when
+/// the bike hits something, or when the torque has decayed below the minimum. *Over* — the
+/// control-authority ramp starts, either because the bike is back on the ground or because the row's
+/// ending says so, which is how a flip that comes round cleanly gives the stick back sooner than one
+/// that does not.
+///
+/// With more than one row, an idle bike arms whichever row's gesture comes first in the set, and fires
+/// the row it armed. The original asks "arm?" before "fire?"; with one row the two cannot both hold
+/// (one wants the stick past `-HELD`, the other past `+HELD`), so asking "fire the armed row?" first is
+/// the same answer — and it is the order that lets two rows share a stick axis in opposite directions.
+fn rotate(rows: &[Rotation], active: &mut usize, p: &Params, air: &mut Air, chassis: &mut Chassis, step: &Step) {
     air.flip_torque_applied = false;
     if !air.flip_active {
+        let armed = &rows[*active];
         if !on_a_lip(air, chassis, step) {
             air.flip_active = false;
             air.flip_armed = false;
-        } else if step.stick.1 < -HELD {
-            air.flip_armed = true;
-        } else if step.stick.1 > HELD && air.flip_armed {
-            let (from, to) = (p.min_backflip_time, p.max_backflip_time);
-            let out0 = p.min_backflip_torque * 1.25;
+        } else if air.flip_armed && along(armed.gesture, step) > HELD {
+            let t = (armed.tuning)(p);
+            let out0 = t.min_torque * armed.floor;
             // An empty range gives the low end — not nothing, as the preload's does.
-            let torque = if from == to {
-                out0
-            } else {
-                map_clamp(step.stick_hold.abs(), from, to, out0, p.max_backflip_torque)
-            };
-            air.flip_torque = Vf::new((-torque).0, air.flip_torque.y(), air.flip_torque.z(), air.flip_torque.w());
+            let torque =
+                if t.min_time == t.max_time { out0 } else { map_clamp(step.stick_hold.abs(), t.min_time, t.max_time, out0, t.max_torque) };
+            // Only the row's own lane is written. Any other lane a row of this set turns about is
+            // cleared, so one rotation's leftover torque cannot ride along with the next; the disc's
+            // set has no other row, and so clears nothing.
+            let mut v = air.flip_torque;
+            for r in rows.iter().filter(|r| r.axis != armed.axis) {
+                v = with_lane(v, r.axis, F::ZERO);
+            }
+            air.flip_torque = with_lane(v, armed.axis, if armed.negative { -torque } else { torque });
             air.flip_armed = false;
             air.flip_active = true;
-            air.flip_grace = F(FLIP_GRACE);
+            air.flip_grace = F(armed.grace);
+        } else if let Some(k) = rows.iter().position(|r| along(r.gesture, step) < -HELD) {
+            air.flip_armed = true;
+            *active = k;
         }
     } else if !air.flip_armed {
         // Triggered, and still waiting for the wheels to leave the ground.
@@ -582,36 +805,36 @@ pub fn backflip(p: &Params, air: &mut Air, chassis: &mut Chassis, step: &Step) {
                 air.flip_armed = false;
             }
         }
-    } else if air.on_ground || step.touching || F(air.flip_torque.x()).abs() <= p.min_backflip_torque {
-        air.flip_active = false;
-        air.flip_armed = false;
     } else {
-        if step.dpad_dir == 0 {
-            let rate = if step.stick.1 > 0.0 {
-                p.backflip_torque_rate_increase
-            } else {
-                p.backflip_torque_rate_decrease
-            };
-            // The rate is scaled by the stick first and by the substep second, which is the
-            // original's order and so the one that gives the last bit.
-            let x = F(air.flip_torque.x()) - step.dt * (step.stick.1 * rate);
-            air.flip_torque = Vf::new(x.0, air.flip_torque.y(), air.flip_torque.z(), air.flip_torque.w());
+        let row = &rows[*active];
+        let t = (row.tuning)(p);
+        if air.on_ground || step.touching || lane(air.flip_torque, row.axis).abs() <= t.min_torque {
+            air.flip_active = false;
+            air.flip_armed = false;
+        } else {
+            let mut x = lane(air.flip_torque, row.axis);
+            if step.dpad_dir == 0 {
+                let input = along(row.gesture, step);
+                let rate = if input > 0.0 { t.rate_increase } else { t.rate_decrease };
+                // The rate is scaled by the stick first and by the substep second, which is the
+                // original's order and so the one that gives the last bit.
+                let d = step.dt * (input * rate);
+                x = if row.negative { x - d } else { x + d };
+            }
+            x = if row.negative { x.max(-t.max_torque) } else { x.min(t.max_torque) };
+            let v = with_lane(air.flip_torque, row.axis, x);
+            air.flip_torque = Vf::new(v.x(), v.y(), v.z(), F::ONE.0);
+            chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(air.flip_torque));
+            air.flip_torque_applied = true;
+            air.flipping = true;
         }
-        let x = F(air.flip_torque.x()).max(-p.max_backflip_torque);
-        air.flip_torque = Vf::new(x.0, air.flip_torque.y(), air.flip_torque.z(), F::ONE.0);
-        chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(air.flip_torque));
-        air.flip_torque_applied = true;
-        air.flipping = true;
     }
-    // The flip is over once a wheel is down, or once it is pointing the right way with no torque left
-    // in it. Either way the stick gets its authority back over [`Params::control_authority_time`].
-    let upright = !air.flip_torque_applied
-        && chassis.roll.abs() < HALF_PI
-        && chassis.pitch > -p.airborne_pitch_down_wreck_angle
-        && chassis.pitch < p.airborne_pitch_up_wreck_angle;
-    if air.flipping && (air.on_ground || upright) {
+    // The rotation is over once a wheel is down, or once the row says the bike is the right way up.
+    // Either way the stick gets its authority back over the row's ramp.
+    let row = &rows[*active];
+    if air.flipping && (air.on_ground || (row.over)(p, air, chassis)) {
         air.flipping = false;
-        air.authority = p.control_authority_time;
+        air.authority = (row.authority)(p);
     }
 }
 

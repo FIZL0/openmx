@@ -14,7 +14,7 @@
 //! that the port does not model shows up as a difference, which is exactly the bug a hand-written list
 //! of comparisons hides.
 
-use game_sim::air::{self, AcosTable, Air, Chassis, Loads, Params, STEEP_SINE, Step, Wreck};
+use game_sim::air::{self, AcosTable, Air, Axis, Chassis, Loads, Params, Rotations, STEEP_SINE, Step, Wreck};
 use ps2_float::{F, Vf, fpu};
 use ps2_oracle::{Ee, addr, game_or_skip};
 
@@ -764,4 +764,109 @@ fn the_wreck_test_is_the_originals() {
         let n = tally.get(&code).copied().unwrap_or(0);
         assert!(n >= 25, "only {n} of the states came out as {want:?}; the rest of the tally is {tally:?}");
     }
+}
+
+// --- P17: a rotation is a row ------------------------------------------------------------------------
+
+/// The default set is the disc's: the backflip alone. The invented rows only come in with the flag.
+#[test]
+fn the_default_set_of_rotations_is_the_discs() {
+    let names = |r: &Rotations| r.rows().iter().map(|r| r.name).collect::<Vec<_>>();
+    assert_eq!(names(&Rotations::default()), ["backflip"]);
+    assert_eq!(names(&Rotations::new(false)), ["backflip"]);
+    let more = Rotations::new(true);
+    assert_eq!(names(&more), ["backflip", "flat spin"]);
+    assert_eq!(more.rows()[1].axis, Axis::Yaw, "the invented row turns about another axis");
+}
+
+/// With the flag off, the set's step *is* [`air::backflip`], the function the oracle proves above; with
+/// it on, the lean inside the held threshold so that only the backflip's gesture can be made, and the
+/// yaw lane clear as [`Air::default`] starts it, it is still the same to the bit. 8000 generated states each, the same generator as the oracle proofs, so
+/// no emulator is needed.
+#[test]
+fn the_flag_off_leaves_the_backflip_the_discs() {
+    let mut g = Gen(0x0c17);
+    for k in 0..8000 {
+        let mut s = g.state();
+        if s.st.stick.0.abs() >= F(0.8) {
+            s.st.stick.0 = F(0.0);
+        }
+        for flag in [false, true] {
+            // With the flag on, a fire clears the flat spin's yaw lane so a spin's leftover cannot ride
+            // along with the backflip. The generator fills that lane with noise the disc never puts
+            // there (only the backflip writes `flip_torque`, and only `x`), so start it clear.
+            let mut s = s.clone();
+            if flag {
+                let v = s.air.flip_torque;
+                s.air.flip_torque = Vf::new(v.x(), 0.0, v.z(), v.w());
+            }
+            let mut want = s.clone();
+            air::backflip(&want.p, &mut want.air, &mut want.ch, &want.st);
+            let mut got = s.clone();
+            Rotations::new(flag).step(&got.p, &mut got.air, &mut got.ch, &got.st);
+            assert_eq!(
+                format!("{:?}", (got.air, got.ch)),
+                format!("{:?}", (want.air, want.ch)),
+                "state {k}, flag {flag}: the set's step is not the backflip's\n{s:#?}"
+            );
+        }
+    }
+}
+
+/// The invented flat spin: lean left on the lip, then right, and a positive yaw torque goes into the
+/// chassis with pitch untouched. The same stick with the flag off does nothing at all.
+#[test]
+fn a_flat_spin_is_a_row_the_flag_adds() {
+    let mut s = Gen(0x0c18).state();
+    s.p.min_backflip_time = F(0.0);
+    s.p.max_backflip_time = F(1.0);
+    s.p.min_backflip_torque = F(100.0);
+    s.p.max_backflip_torque = F(1000.0);
+    s.p.backflip_torque_rate_increase = F(200.0);
+    s.p.backflip_torque_rate_decrease = F(400.0);
+    s.air = Air {
+        on_ground: true,
+        contact_vel: Vf::new(0.0, 0.0, 40.0, 1.0),
+        flip_torque: Vf::new(-777.0, 0.0, 0.0, 1.0),
+        ..Air::default()
+    };
+    s.ch.vel = Vf::new(0.0, 8.0, 20.0, 1.0);
+    s.ch.moment = Vf::new(1.0, 2.0, 3.0, 4.0);
+    s.st = Step { dt: F(1.0 / 60.0), stick_hold: F(0.5), ..Step::default() };
+
+    let run = |flag: bool| {
+        let mut set = Rotations::new(flag);
+        let mut t = s.clone();
+        let mut go = |t: &mut State, stick: (f32, f32), on_ground: bool| {
+            t.st.stick = (F(stick.0), F(stick.1));
+            t.air.on_ground = on_ground;
+            set.step(&t.p, &mut t.air, &mut t.ch, &t.st);
+        };
+        go(&mut t, (-1.0, 0.0), true); // arm
+        let armed = t.air.flip_armed;
+        go(&mut t, (1.0, 0.0), true); // fire
+        let fired = (t.air.flip_active, t.air.flip_torque);
+        go(&mut t, (0.0, 0.0), false); // off the lip
+        go(&mut t, (0.0, 0.0), false); // turning
+        (armed, fired, t, set.active().name)
+    };
+
+    let (armed, (active, torque), t, name) = run(true);
+    assert!(armed, "leaning left on the lip arms the flat spin");
+    assert!(active, "leaning right fires it");
+    assert_eq!(name, "flat spin");
+    // Fired with 0.5 s held: 1.25 x 100 to 1000, half way, positive, in the yaw lane — and the
+    // backflip's leftover pitch torque cleared rather than carried along.
+    assert_eq!((torque.x(), torque.y(), torque.z()), (0.0, 562.5, 0.0));
+    assert!(t.air.flip_torque_applied && t.air.flipping);
+    assert_eq!(t.ch.moment.x(), 1.0, "a flat spin does not pitch the bike");
+    assert_eq!(t.ch.moment.y(), 2.0 + 562.5, "the yaw torque went into the chassis");
+    assert_eq!(t.ch.moment.z(), 3.0);
+
+    let (armed, (active, torque), t, name) = run(false);
+    assert!(!armed && !active, "with the flag off the lean is not a gesture");
+    assert_eq!(name, "backflip");
+    assert_eq!(torque.x(), -777.0, "nothing was written");
+    assert!(!t.air.flip_torque_applied && !t.air.flipping);
+    assert_eq!((t.ch.moment.x(), t.ch.moment.y(), t.ch.moment.z()), (1.0, 2.0, 3.0));
 }
