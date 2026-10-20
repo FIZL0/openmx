@@ -276,6 +276,10 @@ added beside them:
     that set with the simulation's driver, clip table and clock beside it, so one call is one frame:
     the selection, the clock, the sample, the pose, the bones. The simulation names a clip and knows
     nothing about where it comes from; this is the only thing in the chain that opens a file (V7).
+  - `biplane.rs` the biplane: one of its four liveries and both prop cones out of `machine.res`, the
+    cone its crashed flag calls for on `PropDummy`, the pilot's seat and its two roll clips, and the
+    emitter list it would attach (none drawn: there are no particles yet). Drawn through `--moment`
+    with `vehicle biplane` (V21)
 - `openmx` — the playable shell: the binary a person rides. A window, a real pad, the ported simulation
   at the game's own 60 Hz, and the freeride area drawn with the renderer, with no emulator, no fixture
   and no menu in the way (P1).

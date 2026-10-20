@@ -2448,3 +2448,38 @@ wheel_tire_drive_force boot 0x0025ca60 (wheel) wheel_spin_integrate's tire force
 #                                      past +MaxDriveForce*load it is SkidDriveForce*load with +0xe0
 #                                      (spinning) set, past -cap -SkidDriveForce*load with +0xe4 (locked);
 #                                      side force at +0x850, forward at +0x858. P23 read it
+
+# ---------------------------------------------------------------------------------------------------
+# V21 — the biplane, drawn. Names for R8, found while drawing it; none of these is ported as code, the
+# port is crates/game-render/src/biplane.rs (model, cones, seat, emitter list) and the entry is
+# research/journal/2026-10-20-v21-v21-the-biplane-drawn. "Biplane.cpp" is the string at 0x0043ed48,
+# "MXBiplane.cpp" at 0x0043f410 (used by 0x00354750 and 0x003552d0).
+vehicle_spawn       boot 0x0020eb10 (…, kind, livery, …) kind 1 is the biplane: model by livery 0 "biplane"
+#                                  0x0042eba8, 1 "biplane2", 2 "biplane_ss", 3 "biplane2_ss"; allocs 0xea0,
+#                                  runs mxbiplane_ctor, init through vtable +0x190, sets +0xd8c = 1,
+#                                  copies the spawn to +0xe10..+0xe3c and adds the actor to the manager
+mxbiplane_ctor      boot 0x00353d10 MXBiplane: biplane_ctor, then vtables 0x0045b250 at +0x48 and
+#                                  0x0045b2ac at +0x88 (base Biplane's are 0x0045b050 / 0x0045b0ac)
+biplane_ctor        boot 0x003505f0 the base Biplane constructor
+mxbiplane_load      boot 0x00354600 stores the spawn, runs biplane_load, on success writes (0, 3, -3, 1)
+#                                  to +0x900 (the pilot's seat offset, short of the measured 3.5 in y)
+#                                  and 0x42eaaa65 to +0x998; caches Dummy_Foot_L_pos/R_pos and
+#                                  Dummy_Hand_L_pos/R_pos (0x0043f340/360/380/3a0) at +0xe58..+0xe64
+biplane_load        boot 0x00350a70 reads "%sbiplane.phy" (0x0043ed78); loads propconeblur (0x0043ed58)
+#                                  into +0x438 and propconebent (0x0043ed68) into +0x43c
+biplane_pose_nodes  boot 0x00352ff0 per frame: the four wing flaps +0x418..+0x424 turned by the aileron
+#                                  +0x35c (opposite signs), the rear flaps +0x42c/+0x430 by +0x354,
+#                                  rudder +0x434 by -+0x360; while +0x3b0 (crashed) is 0 PropDummy
+#                                  (+0x428) is spun by the angle at *(+0x400)+0x48, propconeblur is put
+#                                  on it and shown, propconebent hidden — and the other way round once
+#                                  +0x3b0 is set
+biplane_find_prop   boot 0x00352e20 looks PropDummy (0x0043f300) up on the plane's model
+biplane_particles   boot 0x00354750 reads "biplaneparticles.dat" (0x0043f3c0)
+pilot_clips         boot 0x0020e4f0 names the pilot's biplane_roll_bck (0x0042eb50) / _fwd (0x0042eb70)
+node_find           boot 0x001b37b0 (root node, name) -> the node of that name in the tree
+node_show           boot 0x001b3870 (node) clears bit 6 of byte +3: drawn
+node_hide           boot 0x001b3850 (node) sets bit 6 of byte +3: not drawn
+# RAM on the biplane recording's states: the plane actor is type 1; its +0x180 is not a world
+# transform, *(plane+0x18c) is its model's root node and node+0x80 the world matrix (rows x, y, z,
+# position — the bike's convention). The pilot's root node sat at (0, 3.5, -3.0) in the plane's space,
+# with the plane's rotation, on all four states read (00, 12, 36, 52).

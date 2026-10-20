@@ -13,6 +13,7 @@
 //!   terrain.rs   `.trn` ground: a patched height field, its palette and its ground texture
 //!   skin.rs      `.mot` motion clips: the channels, the quaternion blend, and the joints on a model
 //!   anim.rs      the animation seam: the sim's driving on the disc's clips, bound to one skeleton
+//!   biplane.rs   the biplane: its model, the prop cone its state calls for, the pilot, its emitters
 //!   ini.rs       the plain-text format `.psm` and `.scn` share
 //!   scene.rs     `.scn` scenes (start point, fog, lights, 1506 placed props) and `.psm` materials
 //!   world.rs     a track in memory: models, materials and textures matched up by name, and drawn
@@ -28,6 +29,7 @@
 //! where a field is still unexplained the doc says so rather than inventing a name for it.
 
 pub mod anim;
+pub mod biplane;
 pub mod chassis;
 pub mod disc;
 pub mod ini;

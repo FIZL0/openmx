@@ -122,6 +122,7 @@ mod window;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use game_render::biplane::{self, Biplane};
 use game_render::chassis::{grips as chassis_grips, placed as chassis_at};
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, V3, v3};
@@ -752,12 +753,29 @@ fn run() -> Result<(), String> {
                 moment.track, args.track
             ));
         }
+        // A moment of the biplane (V21): the plane and its pilot instead of the bike and its parts.
+        let plane = match moment.vehicle.as_str() {
+            "biplane" => Some(load_biplane(&mut disc, &archives, &mut assets, moment.livery)?),
+            _ => None,
+        };
+        let mut pilot = None;
+        if let (Some(plane), Some(body)) = (&plane, &mut body) {
+            if !biplane::seat(&mut body.rig.set, 0.5, 0.0) {
+                println!("biplane: the rider's archive has no {:?}, no pilot", biplane::PILOT_CLIPS);
+            } else if let Some(loaded) = assets.models.get_mut(body.geometry()) {
+                let held = body.skin_into_at(loaded, 0, Some(&plane.anchors));
+                println!("biplane: pilot's feet and hands off their places by {held:.2?} feet");
+                pilot = Some(body.geometry());
+            }
+        }
         let shot = Shot {
             // No window to fit, so the PS2's own frame unless `--size` says otherwise.
             width: args.size.unwrap_or(PS2_FRAME).0,
             height: args.size.unwrap_or(PS2_FRAME).1,
             ground_radius: GROUND_RADIUS,
             chassis: CHASSIS,
+            plane: plane.as_ref(),
+            pilot,
         };
         return moment::draw(&moment, out, &shot, &ground, &assets, &vehicle, &look);
     }
@@ -1403,6 +1421,37 @@ fn member_ending(disc: &Disc, suffix: &str) -> Result<String, String> {
         .min_by_key(|e| e.name.len())
         .map(|e| e.name.clone())
         .ok_or_else(|| format!("MX.PSR has no member ending in {suffix}"))
+}
+
+/// The biplane (V21), loaded for a moment of it: the model, its two prop cones and their textures
+/// from `machine.res`, which is the one archive that has the textures. Says which emitters the plane
+/// would attach — the list is in the track's second archive — and that none are drawn.
+fn load_biplane(
+    disc: &mut Disc,
+    archives: &[Res],
+    assets: &mut Assets,
+    livery: usize,
+) -> Result<Biplane, String> {
+    let machine = [disc.res(&member_ending(disc, biplane::ARCHIVE)?)?];
+    let plane = Biplane::load(assets, &machine, livery)
+        .ok_or("biplane: no archive has the plane's model")?;
+    let seat = plane.anchors.iter().filter(|a| a.is_some()).count();
+    println!(
+        "biplane: {} with {} prop, {seat} of 4 seat anchors",
+        plane.model,
+        if plane.prop.is_some() { "a" } else { "no" }
+    );
+    let list = archives.iter().find_map(|a| a.read_suffix(biplane::PARTICLES).ok());
+    match list {
+        Some(bytes) => {
+            for e in biplane::emitters(&ini::text(&bytes)) {
+                let on = e.node.as_deref().unwrap_or("its collision model");
+                println!("  emitter {} ({}) on {on}: not drawn, the port has no particles", e.emitter, e.name);
+            }
+        }
+        None => println!("  no {} in these archives", biplane::PARTICLES),
+    }
+    Ok(plane)
 }
 
 /// The command line. `Ok(None)` means `--help` was asked for and the shell should not start.
