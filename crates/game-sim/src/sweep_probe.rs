@@ -29,7 +29,10 @@
 //!   segments of the wrong length. No shipped transform carries a scale.
 //!
 //! What is not here: the probe's third slot, the pass against a cell grid the nearby search can hand
-//! it, and the finite-plane case of the pair test — see the module's journal entry.
+//! it, the finite-plane case of the pair test, and the sweep with smoothed (per-vertex) normals that a
+//! probe field switches on. None of the three runs on this disc: no level has a grid and no collision
+//! file is a finite plane, and no write to the field was found and every save state has it clear —
+//! tests/sweep_probe_reach.rs re-proves what can be read from the disc and the states.
 
 #![deny(clippy::float_arithmetic)]
 
@@ -147,7 +150,8 @@ pub enum Shape<'a> {
     /// A hierarchy (1): its parts (`+0x200` and `+0x214`), each a mesh where it stands.
     Hierarchy(&'a [Placed<'a>]),
     /// Anything this test never strikes: another probe (2 the ray probe, 3 a sweep probe), or a kind
-    /// it has no case for. Not the finite plane (8), which it does strike and which is not ported.
+    /// it has no case for. Not the finite plane (8), which it does strike and which is not ported: only a
+    /// collision file of type 8 makes one, and the disc has none (tests/sweep_probe_reach.rs).
     Other,
 }
 

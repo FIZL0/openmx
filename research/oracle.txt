@@ -3060,3 +3060,39 @@ bike_struck_listener boot 0x0025a480 a bike's listener on its collidable, vt +0x
 # then fires the probe's listeners vt +8 and its hit bit / +0x10c callback. The plane's search+0x38 is
 # 0, so it does nothing in the ride. Kind 8 (a finite plane, 0x003dc030) keeps the nearest by fraction
 # below +0xb0 and copies point/normal to +0x30/+0x20. Neither is ported.
+
+# S49 — the sweep probe's grid pass, kind 8 and smoothed normals: none is reachable on this disc, so
+# none is ported; tests/sweep_probe_reach.rs re-proves it from the disc and the save states.
+# The grid: a search's +0x38 is zeroed by search_init and written only twice, by the physics-object
+# init 0x001597b0 (its own search at +0x11c, gated on +0x124) and by 0x001a5210, both copying the
+# level's +0x42c. That is written only by terrain_grid_load, called from the level load 0x001a2c30
+# when the level's .scn has a [SoultreeTerrain] section with a File (".tcg" put on its name). No .scn
+# on the disc has that section and no archive holds a .tcg, so +0x42c stays 0 and every search's +0x38
+# with it: sweep_probe_grid_pass (and the ray probe's +0xb0 0x001ebd20, and 0x001f1670) never runs.
+# The grid itself (0x003b4470 ctor, 0xa0 bytes) is built nowhere else. The plane's vtable is at
+# plane+0x48, so the init's +0x11c/+0x124/+0x12c are plane+0x164/+0x16c/+0x174; in biplane.p2m2's state
+# +0x16c is the collision object's own nearby search, which search_init built with +0x38 = 0.
+# Kind 8: finite_plane_init (vtable +0x38 finite_plane_class, +0x68 = 8, planes +0x120 x 0xd0, count
+# +0x124) is called only by collision_file_load, for a .col whose type word (+12, after 1234, "col",
+# version 1|2) is 8. Of the disc's 4220 .col files none is: 173 v1 type 0, 235 v1 type 2, 3198 v2 type
+# 0, 21 v2 type 1, 593 v2 type 2. (Its in-memory path reads the type at buffer+4 of the same file.)
+# finite_plane_sweep is the segment test sphere_collide_pair runs for kind 8; 0x00150190 is its other
+# caller. The 0x003dc490.. functions nearby are an unrelated sound emitter class (vtable 0x0045eb40).
+# Smoothed normals: probe_smooth_flag is stored only by sphere_probe_pair (from +0x164) and
+# ray_probe_pair (from +0x174) — a scan of every store in the code for its low half, and for $gp+0xae0.
+# A sweep probe's +0x164 is zeroed by its ctor 0x001e80f0; none of its 17 construction sites and none
+# of its class slots writes it again, and the 90 raw +0x164 stores in the code all belong to other
+# classes (fonts' glyph state, quads at +0x160, the collidable class of 0x001ea830, $sp slots).
+# In all six save states on disk every sweep probe's +0x164 (64 / 91) and every ray probe's +0x174
+# (47 / 54) is 0, as is the flag, the level's grid, and no finite plane exists.
+search_init boot 0x002188d0 (search) zeroes it; +0x38 the grid = 0
+sweep_probe_grid_pass boot 0x001e93e0 the sweep probe's class slot +0xb0 (= sphere_probe_prepare above)
+terrain_grid_load boot 0x001a33e0 (level, path, position) the .tcg into level+0x42c, or 0
+level_object boot 0x0048a568 the level; its +0x42c is the terrain grid every search copies
+sweep_probe_class boot 0x00451910 the sweep probe's class vtable, at a collidable's +0x38
+ray_probe_class boot 0x00451a90 the ray probe's class vtable, at a collidable's +0x38
+finite_plane_class boot 0x0045e9d0 the finite plane collidable's class vtable (kind 8)
+finite_plane_init boot 0x003db9e0 (collidable) kind 8
+collision_file_load boot 0x0011b230 (owner, name, ...) loads a .col by its type word; type 8 makes a finite plane
+finite_plane_sweep boot 0x003dc030 kind 8's segment test: nearest fraction below +0xb0, point/normal
+probe_smooth_flag boot 0x00468250 set from the probe's +0x164 (sweep) or +0x174 (ray) per pair test

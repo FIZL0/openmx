@@ -153,6 +153,10 @@ pub struct Candidate {
 
 /// The nearby search an object keeps (`+0x10c` of a collision object): what the broad phase gathered
 /// (`+0`, `+4`), and whether a probe searching it must be made ready first (`+0x38`).
+///
+/// `+0x38` is really the level's terrain cell grid, and the "preparation" a pass of the probe over it.
+/// A level only has one when its scene names a grid file, and no scene on the disc does, so it is
+/// always false in this game (tests/sweep_probe_reach.rs) and the pass is not ported.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Nearby {
     pub found: Vec<Candidate>,
