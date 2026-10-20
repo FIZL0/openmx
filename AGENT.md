@@ -32,9 +32,11 @@ Decide this per area once, write it here, and then stop relitigating it. A sensi
 - **Simulation: bit-exact.** Floating-point results must match the original bit for bit, which means
   going through `ps2-float`'s `F`/`Vf` types rather than host `f32`. Enable the float lint in those
   modules so a stray host-float operation cannot creep in.
-- **Rendering: looks right.** Match by eye or within a small tolerance against a screenshot. Do not
-  replay the GS's rasterisation to close the last few pixels, and do not open follow-up tasks to chase
-  bit-level render differences — note them and move on.
+- **Rendering: ours, and fast.** The original is a reference for what the world looks like, not a spec
+  for how it is drawn: match by eye, never 1:1, and choose the optimised way over the faithful one. The
+  GPU renderer is the default and must run well on desktop, in the browser (wasm) and later on phones;
+  the software rasteriser is a reference and fallback only. Do not replay the GS's rasterisation, and do
+  not open follow-up tasks to chase render differences — note them and move on (user, 2026-10-20).
 - **Menus and front-end: yours to design.** The original is a reference, not a spec.
 - **Presentation: feels right.** Cameras, cutaways, effects, audio cues — match by eye. Just check they
   do not touch the simulation's RNG or its timing.
