@@ -19,7 +19,11 @@
 //!
 //! What is not proved here, and why, is in the journal entry's last section.
 
-use game_sim::biplane::{Aero, Air, Attitude, Autopilot, Engine, Joystick, Pad, Surfaces, autopilot, controls};
+use game_sim::biplane::{
+    Aero, Air, Attitude, Autopilot, Body, Engine, Joystick, Mount, Pad, Surfaces, Tire, autopilot, collision_force, controls,
+};
+use game_sim::collide::{Bundle, Record};
+use game_sim::world::World;
 use game_sim::camera::{CURVE_ENTRIES, CurveTable};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
@@ -552,4 +556,456 @@ fn the_aerodynamics_match_the_original() {
         same_vector("the moment", case, moment, pushed[1]);
     }
     println!("the aerodynamics: {CASES} cases, bit-exact");
+}
+
+// --- S39: the wheels --------------------------------------------------------------------------------
+
+/// The plane's three tires (front left, front right, tail), its drawn frame, and the fields the
+/// wheels read off it.
+const TIRES: [u32; 3] = [0x408, 0x40c, 0x410];
+const FRAME: u32 = 0x600;
+const RATES: u32 = 0x5b0;
+const BRAKE: u32 = 0x350;
+const STEER: u32 = 0x364;
+/// The body's world force accumulator, and its other velocity copy the velocity entry also moves.
+const BODY_FORCE: u32 = 0x90;
+const BODY_VEL2: u32 = 0xc0;
+const BODY_QUAT: u32 = 0x170;
+const VELOCITY_SLOT: u32 = 0x3c;
+const PUSH_SLOT: u32 = 0x64;
+const FORCE_AT_SLOT: u32 = 0x68;
+
+fn vector(ee: &Ee, at: u32) -> Vf {
+    Vf::new(ee.f32_at(at), ee.f32_at(at + 4), ee.f32_at(at + 8), ee.f32_at(at + 12))
+}
+
+fn put(ee: &mut Ee, at: u32, v: Vf) {
+    for k in 0..4 {
+        ee.set_f32(at + 4 * k as u32, v[k]);
+    }
+}
+
+/// A tire as the port sees it, read off the original's object.
+fn tire_of(ee: &Ee, t: u32) -> Tire {
+    let f = |o: u32| F(ee.f32_at(t + o));
+    let v = |o: u32| vector(ee, t + o);
+    let b = |o: u32| ee.u32_at(t + o) != 0;
+    Tire {
+        max_compression: f(0x3c),
+        max_decompression_rate: f(0x40),
+        spring: f(0x44),
+        bounce: f(0x48),
+        rebound: f(0x4c),
+        center: v(0x60),
+        radius: f(0x150),
+        inv_radius: f(0x154),
+        max_braking: f(0x158),
+        side_force: f(0x15c),
+        brake_friction: f(0x160),
+        steering_moment: f(0x164),
+        braked: b(0x30),
+        steered: b(0x34),
+        offset: v(0x50),
+        below: b(0x80),
+        held: b(0x84),
+        touching: b(0x88),
+        compression: f(0x8c),
+        last_compression: f(0x90),
+        spring_force: f(0x94),
+        bottom: v(0xa0),
+        low: v(0x100),
+        surface: 0,
+        ground: v(0xc0),
+        normal: v(0xd0),
+        contact: v(0xe0),
+        hub: v(0xf0),
+        contact_velocity: v(0x110),
+        angle: f(0x120),
+        spin: f(0x124),
+        last_normal: v(0x140),
+        slip: v(0x170),
+        friction: v(0x180),
+        frame: [v(0x190), v(0x1a0), v(0x1b0)],
+    }
+}
+
+/// Every field the three listeners write, the original's against the port's.
+fn same_tire(ee: &Ee, case: usize, t: u32, port: &Tire) {
+    let flags = [("below", 0x80, port.below), ("held", 0x84, port.held), ("touching", 0x88, port.touching)];
+    for (what, o, got) in flags {
+        assert_eq!(ee.u32_at(t + o), u32::from(got), "case {case}: {what}");
+    }
+    for (what, o, got) in [
+        ("compression", 0x8c, port.compression),
+        ("last compression", 0x90, port.last_compression),
+        ("spring force", 0x94, port.spring_force),
+        ("angle", 0x120, port.angle),
+        ("spin", 0x124, port.spin),
+    ] {
+        same(what, case, got, ee.f32_at(t + o));
+    }
+    for (what, o, got) in [
+        ("offset", 0x50, port.offset),
+        ("bottom", 0xa0, port.bottom),
+        ("ground", 0xc0, port.ground),
+        ("normal", 0xd0, port.normal),
+        ("contact", 0xe0, port.contact),
+        ("hub", 0xf0, port.hub),
+        ("low", 0x100, port.low),
+        ("contact velocity", 0x110, port.contact_velocity),
+        ("last normal", 0x140, port.last_normal),
+        ("slip", 0x170, port.slip),
+        ("friction", 0x180, port.friction),
+        ("side row", 0x190, port.frame[0]),
+        ("up row", 0x1a0, port.frame[1]),
+        ("forward row", 0x1b0, port.frame[2]),
+    ] {
+        same_vector(what, case, got, vector(ee, t + o).0);
+    }
+}
+
+/// A sloped plane as the ground: `y = y0 + sx·x + sz·z`, one normal everywhere. The original's ground
+/// query is hooked to this, and the port's world is it.
+#[derive(Clone, Copy)]
+struct Slope {
+    y0: f32,
+    sx: f32,
+    sz: f32,
+    normal: Vf,
+}
+
+impl Slope {
+    fn y(&self, x: f32, z: f32) -> f32 {
+        self.y0 + self.sx * x + self.sz * z
+    }
+}
+
+impl World for Slope {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        (Vf::new(at.x(), self.y(at.x(), at.z()), at.z(), at.w()), self.normal)
+    }
+    fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
+        false
+    }
+}
+
+/// Every push the body is given, in order: which entry, and the vectors.
+#[derive(Clone, Debug, PartialEq)]
+enum Push {
+    Velocity(Vf),
+    Force(Vf),
+    At(Vf, Vf, Vf),
+    Moment(Vf),
+}
+
+fn bits(p: &Push) -> Vec<u32> {
+    let vs = match p {
+        Push::Velocity(v) | Push::Force(v) | Push::Moment(v) => vec![*v],
+        Push::At(f, p, m) => vec![*f, *p, *m],
+    };
+    vs.iter().flat_map(|v| v.to_bits()).collect()
+}
+
+/// The port's body: the fields the wheels read, and a log of the pushes, with the velocity and force
+/// entries doing what the original's do to the fields read back.
+struct Logged {
+    enabled: bool,
+    pos: Vf,
+    vel: Vf,
+    force: Vf,
+    quat: Vf,
+    log: Vec<Push>,
+}
+
+impl Body for Logged {
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+    fn position(&self) -> Vf {
+        self.pos
+    }
+    fn velocity(&self) -> Vf {
+        self.vel
+    }
+    fn force(&self) -> Vf {
+        self.force
+    }
+    fn orientation(&self) -> Vf {
+        self.quat
+    }
+    fn set_position(&mut self, at: Vf) {
+        self.pos = at;
+    }
+    fn add_velocity(&mut self, v: Vf) {
+        self.vel = self.vel.merge(ps2_float::Dest::XYZ, self.vel.add(v));
+        self.log.push(Push::Velocity(v));
+    }
+    fn add_force(&mut self, f: Vf) {
+        self.force = self.force.merge(ps2_float::Dest::XYZ, self.force.add(f));
+        self.log.push(Push::Force(f));
+    }
+    fn add_force_at(&mut self, f: Vf, at: Vf, mask: Vf) {
+        self.log.push(Push::At(f, at, mask));
+    }
+    fn add_moment_local(&mut self, m: Vf) {
+        self.log.push(Push::Moment(m));
+    }
+}
+
+/// Hooks the body's velocity, force, force-at-a-point and moment entries: each records what it is
+/// handed, and the first two add it into the fields the way the original's do (the listeners they
+/// would run are S38's).
+fn log_body(ee: &mut Ee, body: u32) -> Rc<RefCell<Vec<Push>>> {
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let vt = ee.u32_at(body + BODY_VTABLE);
+    let s = seen.clone();
+    ee.hooks.insert(ee.u32_at(vt + VELOCITY_SLOT), Box::new(move |ee| {
+        let (b, v) = (ee.r(4) as u32, vector(ee, ee.r(5) as u32));
+        for o in [BODY_VEL, BODY_VEL2] {
+            let w = vector(ee, b + o);
+            put(ee, b + o, w.merge(ps2_float::Dest::XYZ, w.add(v)));
+        }
+        s.borrow_mut().push(Push::Velocity(v));
+    }));
+    let s = seen.clone();
+    ee.hooks.insert(ee.u32_at(vt + PUSH_SLOT), Box::new(move |ee| {
+        let (b, v) = (ee.r(4) as u32, vector(ee, ee.r(5) as u32));
+        let w = vector(ee, b + BODY_FORCE);
+        put(ee, b + BODY_FORCE, w.merge(ps2_float::Dest::XYZ, w.add(v)));
+        s.borrow_mut().push(Push::Force(v));
+    }));
+    let s = seen.clone();
+    ee.hooks.insert(ee.u32_at(vt + FORCE_AT_SLOT), Box::new(move |ee| {
+        let at = |r: usize| vector(ee, ee.r(r) as u32);
+        s.borrow_mut().push(Push::At(at(5), at(6), at(7)));
+    }));
+    let s = seen.clone();
+    ee.hooks.insert(ee.u32_at(vt + MOMENT_SLOT), Box::new(move |ee| {
+        s.borrow_mut().push(Push::Moment(vector(ee, ee.r(5) as u32)));
+    }));
+    seen
+}
+
+fn same_pushes(case: usize, port: &[Push], game: &[Push]) {
+    let names = |l: &[Push]| l.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>();
+    assert_eq!(port.len(), game.len(), "case {case}: pushes\n game {:?}\n port {:?}", names(game), names(port));
+    for (k, (p, g)) in port.iter().zip(game).enumerate() {
+        assert!(std::mem::discriminant(p) == std::mem::discriminant(g) && bits(p) == bits(g),
+                "case {case}: push {k} is {g:?} in the game, {p:?} in the port");
+    }
+}
+
+/// A rotation from yaw, pitch and roll: the frame's three rows and the quaternion `(x, y, z, w)`.
+fn rotation(yaw: f64, pitch: f64, roll: f64) -> ([Vf; 3], Vf) {
+    let (cy, sy) = ((yaw / 2.0).cos(), (yaw / 2.0).sin());
+    let (cp, sp) = ((pitch / 2.0).cos(), (pitch / 2.0).sin());
+    let (cr, sr) = ((roll / 2.0).cos(), (roll / 2.0).sin());
+    // yaw about y, then pitch about x, then roll about z
+    let mul = |a: [f64; 4], b: [f64; 4]| {
+        [
+            a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+            a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+            a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+            a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+        ]
+    };
+    let q = mul(mul([0.0, sy, 0.0, cy], [sp, 0.0, 0.0, cp]), [0.0, 0.0, sr, cr]);
+    let [x, y, z, w] = q;
+    let r = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w)],
+        [2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w)],
+        [2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y)],
+    ];
+    let row = |k: usize| Vf::new(r[k][0] as f32, r[k][1] as f32, r[k][2] as f32, 0.0);
+    ([row(0), row(1), row(2)], Vf::new(x as f32, y as f32, z as f32, w as f32))
+}
+
+/// A unit-ish vector near `up`, now and then anywhere.
+fn normal_near_up(pick: &mut Pick) -> Vf {
+    let (x, y, z) = if pick.one_in(8) {
+        (pick.range(-1.0, 1.0), pick.range(-1.0, 1.0), pick.range(-1.0, 1.0))
+    } else {
+        (pick.range(-0.4, 0.4), 1.0, pick.range(-0.4, 0.4))
+    };
+    let l = (x * x + y * y + z * z).sqrt().max(1e-3);
+    Vf::new(x / l, y / l, z / l, if pick.one_in(4) { 0.0 } else { 1.0 })
+}
+
+/// One generated case for a tire: the plane's frame and wheel inputs, the tire's tuning and state, the
+/// body's fields, all written into the original, and the port's copies of the same.
+struct Wheel {
+    tire: u32,
+    mount: Mount,
+    body: Logged,
+    world: Slope,
+    dt: F,
+}
+
+fn wheel_case(ee: &mut Ee, pick: &mut Pick, case: usize, shipped: &[Tire; 3]) -> Wheel {
+    let k = case % 3;
+    let t = ee.u32_at(PLANE + TIRES[k]);
+    let s = shipped[k];
+    let (rows, quat) = rotation(
+        f64::from(pick.range(-3.2, 3.2)),
+        f64::from(if pick.one_in(6) { pick.range(-3.2, 3.2) } else { pick.range(-0.4, 0.4) }),
+        f64::from(if pick.one_in(6) { pick.range(-3.2, 3.2) } else { pick.range(-0.4, 0.4) }),
+    );
+    let pos = Vf::new(pick.range(0.0, 7000.0), pick.range(-50.0, 400.0), pick.range(0.0, 7000.0), 1.0);
+    let frame = [rows[0], rows[1], rows[2], pos];
+    for (r, v) in frame.iter().enumerate() {
+        put(ee, PLANE + FRAME + 16 * r as u32, *v);
+    }
+    let rates = Vf::new(pick.range(-2.0, 2.0), pick.range(-2.0, 2.0), pick.range(-2.0, 2.0), 1.0);
+    put(ee, PLANE + RATES, rates);
+    let speed = if pick.one_in(8) { 0.0 } else { pick.range(-30.0, 250.0) };
+    ee.set_f32(PLANE + at::SPEED, speed);
+    let brake = pick.stick(0.0);
+    let steer = pick.stick(-1.0);
+    ee.set_f32(PLANE + BRAKE, brake);
+    ee.set_f32(PLANE + STEER, steer);
+
+    // the tuning, around what ships
+    let scalars = [
+        (0x3c, s.max_compression),
+        (0x40, s.max_decompression_rate),
+        (0x44, s.spring),
+        (0x48, s.bounce),
+        (0x4c, s.rebound),
+        (0x158, s.max_braking),
+        (0x15c, s.side_force),
+        (0x160, s.brake_friction),
+        (0x164, s.steering_moment),
+    ];
+    for (o, x) in scalars {
+        let x = if pick.one_in(4) { x.to_f32() } else { x.to_f32() * pick.range(0.5, 1.5) };
+        ee.set_f32(t + o, x);
+    }
+    let radius = s.radius.to_f32() * pick.range(0.7, 1.3);
+    ee.set_f32(t + 0x150, radius);
+    ee.set_f32(t + 0x154, 1.0 / radius);
+    let c = s.center;
+    put(ee, t + 0x60, Vf::new(c.x() + pick.range(-0.2, 0.2), c.y() + pick.range(-0.2, 0.2), c.z() + pick.range(-0.2, 0.2), c.w()));
+
+    // the state the last substep left
+    ee.set_u32(t + 0x80, u32::from(pick.one_in(3)));
+    ee.set_u32(t + 0x84, u32::from(pick.one_in(12)));
+    ee.set_u32(t + 0x88, u32::from(pick.one_in(2)));
+    ee.set_f32(t + 0x90, if pick.one_in(4) { 0.0 } else { pick.range(0.0, 0.6) });
+    ee.set_f32(t + 0x120, pick.range(-3.2, 3.2));
+    let last = normal_near_up(pick);
+    put(ee, t + 0x140, last);
+    // the probe's lean, as a probe would have left it: one radius down the plane's up row, give or take
+    let lean = Vf::new(-0.0, -radius * pick.range(0.8, 1.0), radius * pick.range(-0.6, 0.6), 1.0);
+    put(ee, t + 0x50, lean);
+    for o in [0xe0, 0x190, 0x1a0, 0x1b0] {
+        put(ee, t + o, Vf::new(pick.range(-1.0, 1.0), pick.range(-1.0, 1.0), pick.range(-1.0, 1.0), 0.0));
+    }
+    put(ee, t + 0x180, Vf::new(pick.range(-9.0, 9.0), 0.0, pick.range(-9.0, 9.0), if pick.one_in(2) { 1.0 } else { 0.0 }));
+
+    // the ground: through the bottom of the tire, give or take its radius
+    let center = vector(ee, t + 0x60);
+    let local = [center.x() + lean.x(), center.y() + lean.y(), center.z() + lean.z()];
+    let low: Vec<f32> = (0..3).map(|i| pos[i] + rows[0][i] * local[0] + rows[1][i] * local[1] + rows[2][i] * local[2]).collect();
+    let normal = normal_near_up(pick);
+    let (sx, sz) = if normal.y().abs() > 0.05 { (-normal.x() / normal.y(), -normal.z() / normal.y()) } else { (0.0, 0.0) };
+    let (sx, sz) = (sx.clamp(-3.0, 3.0), sz.clamp(-3.0, 3.0));
+    let y_at_low = low[1] + radius * pick.range(-1.0, 2.5);
+    let world = Slope { y0: y_at_low - sx * low[0] - sz * low[2], sx, sz, normal };
+    put(ee, t + 0xd0, normal);
+    let ground = Vf::new(low[0] + pick.range(-0.5, 0.5), 0.0, low[2] + pick.range(-0.5, 0.5), 1.0);
+    put(ee, t + 0xc0, Vf::new(ground.x(), world.y(ground.x(), ground.z()), ground.z(), 1.0));
+
+    // the body
+    let b = ee.u32_at(t + 0x12c);
+    assert_eq!(b, ee.u32_at(PLANE + at::BODY), "tire {k} is not on the plane's body");
+    let body = Logged {
+        enabled: true,
+        pos: Vf::new(pos.x() + pick.range(-1.0, 1.0), pos.y() + pick.range(-1.0, 1.0), pos.z() + pick.range(-1.0, 1.0), 1.0),
+        vel: Vf::new(pick.range(-60.0, 60.0), pick.range(-30.0, 30.0), pick.range(-60.0, 60.0), 1.0),
+        force: Vf::new(pick.range(-3000.0, 3000.0), pick.range(-3000.0, 3000.0), pick.range(-3000.0, 3000.0), 1.0),
+        quat: if pick.one_in(8) { normal_near_up(pick) } else { quat },
+        log: Vec::new(),
+    };
+    put(ee, b + BODY_POS, body.pos);
+    put(ee, b + BODY_VEL, body.vel);
+    put(ee, b + BODY_FORCE, body.force);
+    put(ee, b + BODY_QUAT, body.quat);
+
+    let dt = if pick.one_in(8) { 0.0 } else { pick.range(0.001, 0.03) };
+    Wheel { tire: t, mount: Mount { frame, rates, speed: F(speed), brake: F(brake), steer: F(steer) }, body, world, dt: F(dt) }
+}
+
+/// The plane with every tire's ground query hooked to the case's slope (shared through the cell).
+fn wheels() -> Option<(Ee, Rc<RefCell<Vec<Push>>>, Rc<RefCell<Slope>>, [Tire; 3])> {
+    let mut ee = plane()?;
+    let body = ee.u32_at(PLANE + at::BODY);
+    let seen = log_body(&mut ee, body);
+    let slope = Rc::new(RefCell::new(Slope { y0: 0.0, sx: 0.0, sz: 0.0, normal: Vf::new(0.0, 1.0, 0.0, 1.0) }));
+    let s = slope.clone();
+    ee.hooks.insert(addr("ground_query").unwrap(), Box::new(move |ee| {
+        let (point, normal) = (ee.r(5) as u32, ee.r(6) as u32);
+        let s = *s.borrow();
+        let y = s.y(ee.f32_at(point), ee.f32_at(point + 8));
+        ee.set_f32(point + 4, y);
+        put(ee, normal, s.normal);
+        ee.set(2, 1);
+    }));
+    let shipped = TIRES.map(|o| tire_of(&ee, ee.u32_at(PLANE + o)));
+    assert!(shipped[0].braked && !shipped[0].steered && shipped[2].steered, "the tires are not wired the way S39 read them");
+    assert_eq!(ee.u32_at(ee.u32_at(PLANE + TIRES[0]) + 0x30), PLANE + BRAKE, "the brake is not the plane's");
+    assert_eq!(ee.u32_at(ee.u32_at(PLANE + TIRES[2]) + 0x34), PLANE + STEER, "the steer is not the plane's");
+    Some((ee, seen, slope, shipped))
+}
+
+#[test]
+fn the_tire_probe_matches_the_original() {
+    let Some((mut ee, seen, slope, shipped)) = wheels() else { return };
+    let (clear, probe) = (addr("biplane_tire_preforce").unwrap(), addr("biplane_tire_probe").unwrap());
+    let mut pick = Pick(0x3c6e_f372_fe94_f82b);
+    let mut below = 0;
+    for case in 0..CASES {
+        let mut w = wheel_case(&mut ee, &mut pick, case, &shipped);
+        *slope.borrow_mut() = w.world;
+        let mut port = tire_of(&ee, w.tire);
+        if pick.one_in(4) {
+            ee.call(clear, &[u64::from(w.tire)], &[], BUDGET);
+            port.clear();
+        }
+        seen.borrow_mut().clear();
+        ee.call(probe, &[u64::from(w.tire)], &[], BUDGET);
+        port.probe(&mut w.world, &w.mount);
+        same_tire(&ee, case, w.tire, &port);
+        assert!(seen.borrow().is_empty(), "case {case}: the probe pushed the body");
+        below += usize::from(port.below);
+    }
+    assert!(below > CASES / 5 && below < CASES * 4 / 5, "only {below} of {CASES} probes found the ground");
+    println!("the tire probe: {CASES} cases, bit-exact ({below} with the ground at the tire)");
+}
+
+#[test]
+fn the_tire_forces_match_the_original() {
+    let Some((mut ee, seen, slope, shipped)) = wheels() else { return };
+    let force = addr("biplane_tire_force").unwrap();
+    let mut pick = Pick(0xa54f_f53a_5f1d_36f1);
+    let (mut touching, mut over, mut steered) = (0, 0, 0);
+    for case in 0..CASES {
+        let mut w = wheel_case(&mut ee, &mut pick, case, &shipped);
+        *slope.borrow_mut() = w.world;
+        let mut port = tire_of(&ee, w.tire);
+        seen.borrow_mut().clear();
+        ee.call(force, &[u64::from(w.tire)], &[w.dt.to_f32()], BUDGET);
+        port.force(&mut w.body, &w.mount, w.dt);
+        same_tire(&ee, case, w.tire, &port);
+        same_pushes(case, &w.body.log, &seen.borrow());
+        let b = ee.u32_at(PLANE + at::BODY);
+        same_vector("body position", case, w.body.pos, vector(&ee, b + BODY_POS).0);
+        same_vector("body velocity", case, w.body.vel, vector(&ee, b + BODY_VEL).0);
+        same_vector("body force", case, w.body.force, vector(&ee, b + BODY_FORCE).0);
+        touching += usize::from(port.touching);
+        over += usize::from(w.body.log.iter().any(|p| matches!(p, Push::Velocity(_))));
+        steered += usize::from(w.body.log.iter().any(|p| matches!(p, Push::Moment(_))));
+    }
+    assert!(touching > CASES / 5, "only {touching} of {CASES} cases touched");
+    assert!(over > CASES / 50, "only {over} of {CASES} cases bottomed the strut");
+    println!("the tire forces: {CASES} cases, bit-exact ({touching} touching, {over} bottomed, {steered} steering)");
 }
