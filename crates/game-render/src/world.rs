@@ -175,7 +175,7 @@ impl Camera {
         Camera {
             eye,
             at: pos.add(dir.scale(preset.look_ahead)),
-            fov: vertical_fov(preset.fov, aspect),
+            fov: view_fov(preset.fov, aspect),
             near: 0.05,
             far: 4000.0,
         }
@@ -215,6 +215,28 @@ impl Camera {
 pub fn vertical_fov(horizontal_degrees: f32, aspect: f32) -> f32 {
     let horizontal = horizontal_degrees.to_radians();
     2.0 * (horizontal / 2.0).tan().atan2(aspect)
+}
+
+/// The narrowest view the original ever draws: the side-by-side split's half of a 4:3 television,
+/// two wide and three tall once the PS2's pixels are put back square.
+pub const NARROWEST_VIEW: f32 = 2.0 / 3.0;
+/// The widest: the stacked split's strip of a 16:9 one, which its widescreen mode rides on the full
+/// screen's own presets.
+pub const WIDEST_VIEW: f32 = 32.0 / 9.0;
+
+/// [`vertical_fov`] for a view of any shape (V24): the original's own rule over every shape it ever
+/// drew, and the angle along the view's short side held at that range's edge beyond it.
+///
+/// The disc has a widescreen mode of its own (its 480p widescreen, 720p and 1080i video modes), and
+/// that mode is the same rule as the television's: the viewport's shape term is its pixel shape times
+/// the display's aspect, 16:9 instead of 4:3, and the projection keeps the preset's horizontal angle.
+/// So a wider screen sees no further sideways and less up and down. Between a 2:3 view and a 32:9 one
+/// that is exactly what is drawn here. Past them the original has nothing to say, and the port widens
+/// rather than crops: a view wider than 32:9 keeps 32:9's vertical angle and grows sideways (Hor+), and
+/// one narrower than 2:3 — a portrait window — keeps 2:3's vertical angle and narrows sideways, rather
+/// than the vertical sweep opening towards a fish-eye.
+pub fn view_fov(horizontal_degrees: f32, aspect: f32) -> f32 {
+    vertical_fov(horizontal_degrees, aspect.clamp(NARROWEST_VIEW, WIDEST_VIEW))
 }
 
 /// How a scene's lights and fog are applied, pulled out of the `.scn` once.

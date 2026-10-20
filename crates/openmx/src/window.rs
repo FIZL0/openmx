@@ -119,7 +119,8 @@ pub struct Window {
 
 impl Window {
     /// Open a window for frames of `size` pixels, each drawn `scale` times across and down — or, with
-    /// no size, a window as big as the screen, whose frame is whatever fits it ([`fit_frame`]).
+    /// no size, a window as big as the screen, whose frame is its own shape or the largest 4:3 one inside
+    /// it, as `--aspect` says ([`crate::aspect::Aspect::frame`]).
     ///
     /// `display` is the usual `DISPLAY`, of which only the display number is used: this talks to the
     /// unix socket, never to TCP, and sends no authorisation — which is what a local X server (or the
@@ -334,9 +335,9 @@ impl Window {
     /// Put one frame on the window: RGB triples, row by row from the top, scaled up by
     /// [`Window::scale`], centred, and sent as however many bands the server's maximum request allows.
     ///
-    /// Only the picture's own rectangle is written. A window wider than the picture is shaped
-    /// differently from it — a 16:9 screen round a 4:3 frame — and what is left either side is the
-    /// window's background, which is black and which the server paints itself: the window has the
+    /// Only the picture's own rectangle is written. A window shaped differently from the picture —
+    /// a 16:9 screen round `--aspect 4:3`'s frame — leaves the rest to the window's background,
+    /// which is black and which the server paints itself: the window has the
     /// default bit gravity, so a resize clears it, and nothing of an older, larger picture is left
     /// in the bars.
     pub fn present(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<(), String> {
@@ -488,25 +489,6 @@ impl Keyboard {
             self.down[code as usize] = false;
         }
     }
-}
-
-/// The frame that fills a window of `window` pixels at `scale` window pixels to a frame pixel, at the
-/// picture's own shape: 4:3, the television's.
-///
-/// That is the shape the original draws for — the 68.997 degrees down that the human's save state was
-/// drawn with is [`vertical_fov`](game_render::world::vertical_fov) of the preset's 85 across at 4:3 —
-/// so a window of any other shape gets the largest 4:3 frame that fits inside it, and the rest is bars
-/// ([`Window::present`]). Drawing the frame at the window's own shape instead would hand the camera a
-/// wider aspect than the game ever had, which is widescreen, and widescreen is a task of its own.
-/// Never smaller than a pixel each way, so a window shrunk to nothing still has a frame to draw.
-pub fn fit_frame(window: (usize, usize), scale: usize) -> (usize, usize) {
-    let (w, h) = (window.0 / scale.max(1), window.1 / scale.max(1));
-    let (w, h) = if w * 3 > h * 4 {
-        (h * 4 / 3, h)
-    } else {
-        (w, w * 3 / 4)
-    };
-    (w.max(1), h.max(1))
 }
 
 /// Where a picture of `picture` pixels goes in a window of `window` pixels to sit in its middle: the
@@ -731,17 +713,7 @@ mod tests {
         w.handle(&sent);
         assert_eq!((w.width, w.height), (1280, 720));
         assert!(w.resized());
-        // And the frame that fits it is the 4:3 one, not the window's own shape.
-        assert_eq!(fit_frame((w.width, w.height), w.scale), (960, 720));
-    }
-
-    #[test]
-    fn the_frame_is_the_largest_four_by_three_inside_the_window() {
-        assert_eq!(fit_frame((1920, 1080), 1), (1440, 1080)); // pillarboxed
-        assert_eq!(fit_frame((640, 480), 1), (640, 480)); // exactly
-        assert_eq!(fit_frame((800, 1000), 1), (800, 600)); // letterboxed
-        assert_eq!(fit_frame((1920, 1080), 2), (720, 540)); // `--scale 2` draws half and doubles it
-        assert_eq!(fit_frame((0, 0), 1), (1, 1));
+        // The frame drawn for it is `--aspect`'s (`crate::aspect`, tests/aspect.rs).
     }
 
     #[test]
