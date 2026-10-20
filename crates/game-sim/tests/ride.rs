@@ -603,6 +603,13 @@ const IDLE_CAPTURE: [&str; 2] = ["capture/s8", "acceptance-freeride.csv"];
 /// one 1/30 tick and three hundred rows are the ten seconds the tests above run.
 const CAPTURE_DT: f32 = 1.0 / 30.0;
 
+/// What a capture's `bike_vel` columns are, as a fraction of the chassis velocity the port calls
+/// `chassis.vel`: they are the type-4 actor's copy at +0x130, which the vehicle-anim update writes as
+/// the body's velocity times 0.8 (`vmulx.xyz` by `0x3f4ccccd` at `0x0024d42c`, P22; P21 measured the
+/// ratio on 480 rows at 0.7999999 to 0.8000000). Every speed this file reads off those columns is
+/// divided by it, so that what is compared with the port is the body's speed and not 80% of it (P28).
+const BIKE_VEL_PER_BODY: f32 = 0.8;
+
 /// Ten seconds of the original idling, measured off the capture's columns the way [`idle`] measures the
 /// port off its transform. `None` when the capture is not in this checkout.
 fn captured_idle(rows: usize) -> Option<Idle> {
@@ -660,12 +667,13 @@ fn captured_idle(rows: usize) -> Option<Idle> {
         out.roll_peak = out.roll_peak.max(r.abs());
 
         // The bike's own right, which is row 0 of its transform, against its world velocity.
-        let side = at(row, "bike_vel.x") * at(row, "bike_xform.m00")
+        let side = (at(row, "bike_vel.x") * at(row, "bike_xform.m00")
             + at(row, "bike_vel.y") * at(row, "bike_xform.m01")
-            + at(row, "bike_vel.z") * at(row, "bike_xform.m02");
+            + at(row, "bike_vel.z") * at(row, "bike_xform.m02"))
+            / BIKE_VEL_PER_BODY;
         out.slide = out.slide.max(side.abs());
         let (vx, vz) = (at(row, "bike_vel.x"), at(row, "bike_vel.z"));
-        out.speed = out.speed.max((vx * vx + vz * vz).sqrt());
+        out.speed = out.speed.max((vx * vx + vz * vz).sqrt() / BIKE_VEL_PER_BODY);
     }
     out.roll_swing = hi - lo;
     let (dx, dz) = (
@@ -1087,10 +1095,12 @@ MaxBackflipTime = 0.5
 ///    slides, and sheds three quarters of its speed in a four-second turn. A twentieth keeps the
 ///    demand near one g at every speed the fade covers, which is what a rider can hold; it is this
 ///    file's number and not the disc's, like the rest of the bike.
-/// 2. **`Drag`.** 0.5 holds the hand-written bike to about 48 ft/s flat out, well under the 75.78 the
+/// 2. **`Drag`.** 0.5 holds the hand-written bike to about 48 ft/s flat out, well under the 94.73 the
 ///    human's recording reaches, and a minute whose top speed is nothing like the original's cannot
-///    be compared against it. 0.06 puts this bike's terminal speed within half a foot a second of the
-///    recording's, which is what makes [`CAPTURED_TOP_SPEED`] an assertable number here.
+///    be compared against it. 0.037 puts this bike's terminal speed on the recording's to the
+///    hundredth, which is what makes [`CAPTURED_TOP_SPEED`] an assertable number here. It was 0.06
+///    until P28, tuned to the 75.78 the capture's `bike_vel` columns read raw — the chassis' velocity
+///    times 0.8 ([`BIKE_VEL_PER_BODY`]), so the bike was 20% slower than the one it was matched to.
 ///
 /// 3. **`BodyTireForcePosition`**, through section (8)'s [`launch_bike`]. Added when P8 merged. P8
 ///    found that this key is the arm the original crosses the tire's force on, and that this file's
@@ -1110,7 +1120,7 @@ fn ridden_bike() -> String {
             "XAxisRateLimit = 6\n",
             "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.05\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
         ),
-        ("Drag = 0.5", "Drag = 0.06"),
+        ("Drag = 0.5", "Drag = 0.037"),
     ];
     for (key, with) in patches {
         assert!(out.contains(key), "freeride-bike.phy.txt no longer has `{}`", key.trim_end());
@@ -1361,14 +1371,15 @@ fn minute() -> Vec<Leg> {
 /// * centred in the air, the torque holds; **forward** once more ends it, at about three quarters
 ///   of the way round, and the airborne control's damping brings the rest round onto the wheels.
 ///
-/// The ticks are the bike's own. The ramp comes up at about tick 200 and holds the lip for about
-/// fifty, and each cross takes the bike's `YAxisRateLimit` of 6 a second eighteen ticks to fire
+/// The ticks are the bike's own. The ramp comes up at about tick 209 and holds the lip for about
+/// forty-five, and each cross takes the bike's `YAxisRateLimit` of 6 a second eighteen ticks to fire
 /// however fast the hand is — so the first reversal is at 212, after the preload has armed, and the
 /// second at 232, as the first one lands (the preload fires at 230). The flip fires at 249, with the
-/// lip a few ticks from its end. The
-/// last two moves are the rider's timing and have slack: the forward stab anywhere from 295 to 305
-/// lands it. At 290 the bike is a quarter of a turn short when it lands, at 310 nose-high enough to
-/// come down at up 0.4. The script stabs at the early end, 295, because the shell's arrow keys put
+/// lip five ticks from its end. The
+/// last two moves are the rider's timing and have slack: the forward stab anywhere from 290 to 298
+/// lands it (295 to 305 before P28's lower drag brought the bike to the lip quicker). At 285 the bike
+/// is a quarter of a turn short when it lands, at 305 nose-high enough to come down at up 0.4. The
+/// script stabs at 295, late in that window but where it always has, because the shell's arrow keys put
 /// the same stab past −0.8 about eight ticks after a stick does, and `crates/openmx/tests/ride.rs`
 /// rides this leg on the keys as well.
 fn the_flip() -> Leg {
@@ -1395,12 +1406,15 @@ fn the_flip() -> Leg {
 const RAMP: (f32, f32, f32) = (250.0, 0.3, 15.0);
 
 /// The flip's ramp, the same three numbers: nearer, steeper and longer than [`RAMP`], because the
-/// jump's ramp has no lip a flip fits on. At the 70 ft/s the minute takes it at, [`RAMP`]'s lip holds
-/// for 16 ticks (0.27 s), and one cross of the stick from −0.8 to +0.8 takes this bike's
-/// `YAxisRateLimit` 16 ticks on its own — the pump-and-flip is three stop-to-stop crosses. 100 ft
-/// from a standstill is about 42 ft/s at the foot of the ramp, and a 25 ft face at a half is a lip
-/// of about fifty ticks and a second and a quarter of air.
-const FLIP_RAMP: (f32, f32, f32) = (100.0, 0.5, 25.0);
+/// jump's ramp has no lip a flip fits on. At the 70 ft/s the minute took it at before P28, [`RAMP`]'s
+/// lip held for 16 ticks (0.27 s), and at today's 89 it is shorter still, where one cross of the
+/// stick from −0.8 to +0.8 takes this bike's `YAxisRateLimit` 16 ticks on its own — the
+/// pump-and-flip is three stop-to-stop crosses. 108 ft from a standstill is about 44 ft/s at the foot
+/// of the ramp, and a 25 ft face at a half is a lip of about forty-five ticks and a second and a
+/// quarter of air. It was 100 ft until P28 took the drag down: the bike then reached the lip three
+/// ticks sooner and left it six sooner, before the backflip fired, and 108 puts the lip back round
+/// the stick's ticks rather than moving the ticks, which the shell's pad script shares.
+const FLIP_RAMP: (f32, f32, f32) = (108.0, 0.5, 25.0);
 
 /// Ride [`minute`] on `phy` and keep what the rider saw.
 ///
@@ -1471,21 +1485,38 @@ fn ride_the_minute(phy: &str) -> Minute {
 }
 
 /// The top speed the human's recording reaches, in feet a second, off its `bike_vel` columns and the
-/// rows the bike is upright for. [`ridden_bike`]'s drag is set so this bike's terminal speed is this,
-/// which is what lets the two legs below assert a number instead of a shape.
-const CAPTURED_TOP_SPEED: f32 = 75.78;
+/// rows the bike is upright for, in the chassis' units: the columns' 75.78 over
+/// [`BIKE_VEL_PER_BODY`]. [`ridden_bike`]'s drag is set so this bike's terminal speed is this, which
+/// is what lets the two legs below assert a number instead of a shape.
+///
+/// **Until P28 this was 75.78**, the columns read raw, and the drag was tuned to put the port's
+/// `chassis.speed` there — a top speed 20% under the original's.
+const CAPTURED_TOP_SPEED: f32 = 94.73;
 
 /// The sharpest the human ever turned and the hardest they ever slowed, as the 99th and 1st
 /// percentiles of the recording's own frame-to-frame differences — percentiles and not extremes
 /// because a respawn moves the bike across the map in one row and the extremes are those rows.
-/// Radians a second, and feet a second a second.
+/// Radians a second, and feet a second a second — the slowing in the chassis' units, as
+/// [`CAPTURED_TOP_SPEED`] is (70.9 off the raw columns until P28).
 const CAPTURED_TURN_RATE: f32 = 2.40;
-const CAPTURED_SLOWING: f32 = 70.9;
+const CAPTURED_SLOWING: f32 = 88.6;
 
 /// The slowest of the original's four standing launches across both recordings, half a second and
-/// two seconds in, in feet a second, rounded down (P15: 8.8 and 34.2, against 20.2 and 56.9 for the
-/// quickest).
-const ORIGINAL_LAUNCH: (f32, f32) = (8.0, 32.0);
+/// two seconds in, in feet a second of the chassis: P15's 8.8 and 34.2 off the `bike_vel` columns
+/// (against 20.2 and 56.9 for the quickest), over [`BIKE_VEL_PER_BODY`].
+///
+/// **Until P28 this was (8.0, 32.0)** — P15's numbers rounded down, in the columns' units, so the
+/// port's chassis was held to 80% of the launch it was said to match and cleared it.
+const ORIGINAL_LAUNCH: (f32, f32) = (11.0, 42.75);
+
+/// How much of [`ORIGINAL_LAUNCH`] the hand-written bike is held to: it does not make the whole of it,
+/// and says so. It makes 9.54 and 35.77 ft/s (87% and 84%), and what holds it there is the clutch —
+/// a quarter more horsepower gains half a foot a second at two seconds and nothing at half a second,
+/// while half as much clutch friction again makes 14.3 and 38.4 but is then strong enough to drive
+/// the rear wheel against the pinned brake, and the brake leg never stops (P13's servo). The first
+/// does not reach it and the second breaks a leg that is right, so the bound is what the bike carries
+/// and the gap is written up in P28's journal.
+const LAUNCH_SHARE: (f32, f32) = (0.85, 0.8);
 
 /// The human's ridden minute, in a subdirectory of `context/capture/` for the reason
 /// [`IDLE_CAPTURE`]'s comment gives: a CSV directly in that directory is read by `replay.rs` as an
@@ -1501,13 +1532,21 @@ fn it_launches_from_a_standstill() {
     // Half a second: a rider who pins the throttle on a 250 is moving by now, and the bike that
     // prompted this test is not.
     let half = launch[(0.5 / DT.0) as usize].speed;
-    assert!(half > ORIGINAL_LAUNCH.0, "half a second of full throttle moved the bike at {half} ft/s");
+    assert!(
+        half > ORIGINAL_LAUNCH.0 * LAUNCH_SHARE.0,
+        "half a second of full throttle moved the bike at {half} ft/s, against the original's {}",
+        ORIGINAL_LAUNCH.0
+    );
 
-    // Two seconds: as fast as the original's slowest launch, which is as much as a hand-written
-    // engine's numbers can carry — this bike makes 10.2 and 35.0, and its 0 to 60 is 7.7 s against
-    // the original's 2.2 to 3.4 (P15).
+    // Two seconds: most of the way to the original's slowest launch, which is as much as a
+    // hand-written engine's numbers can carry ([`LAUNCH_SHARE`]) — and its 0 to 60 is 7.7 s against
+    // the original's 2.2 to 3.4 off the columns (P15), so quicker still in the chassis' units.
     let two = launch[launch.len() - 1].speed;
-    assert!(two > ORIGINAL_LAUNCH.1, "two seconds of full throttle only reached {two} ft/s");
+    assert!(
+        two > ORIGINAL_LAUNCH.1 * LAUNCH_SHARE.1,
+        "two seconds of full throttle only reached {two} ft/s, against the original's {}",
+        ORIGINAL_LAUNCH.1
+    );
 
     // And it went forward on its wheels rather than standing up or sliding away sideways.
     assert!(flattest(&launch) > 0.9, "the launch leant to up {}", flattest(&launch));
@@ -1578,7 +1617,7 @@ fn it_turns_the_way_the_stick_is_pushed() {
         // Still rolling at the end of it, rather than a speed floor: full lock with the throttle
         // pinned at this bike's top speed is about a g of lateral load, and the port has no lean to
         // carry it — `mv::pose` pins the body's roll rate on the ground, so the contact patch scrubs
-        // instead. The right turn comes in from 75 ft/s and winds itself down to a walking pace
+        // instead. The right turn comes in from 95 ft/s and winds itself down to a walking pace
         // before the lock starts pulling it round on the spot. How much of that is the original's
         // and how much is P4's tire stand-in is not something this test can say, so what it asserts
         // is that the bike is still being ridden at the end; the sustained turn at a speed a rider
@@ -1604,8 +1643,8 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
     let m = ride_the_minute(&ridden_bike());
     let jump = m.span("the run-up", "the jump");
     let air = airborne(&jump);
-    // 83 ticks (1.38 s) off this ramp at 70 ft/s; the original's lips at about 52 hang for 2.2 to 2.5 s,
-    // but they are not this ramp (P15).
+    // 104 ticks (1.73 s) off this ramp at 89 ft/s; the original's lips at about 65 hang for 2.2 to
+    // 2.5 s, but they are not this ramp (P15, its 52 over `BIKE_VEL_PER_BODY`).
     assert!(air > 70, "the ramp only put the bike in the air for {air} ticks");
     assert!(
         highest(&jump) > RAMP.1 * RAMP.2 + 1.0,
@@ -1654,8 +1693,9 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
         "a quarter of a second after it landed it was still at up {}",
         flattest(&landed[SETTLE..])
     );
-    // The original's clean landings cost it 4 to 8 ft/s off 52; this one comes down at 59 from 70 and
-    // bottoms out at 53, so 0.65 of the top speed is the floor this ramp carries (P15).
+    // The original's clean landings cost it 5 to 10 ft/s off 65 (P15's 4 to 8 off 52, in the
+    // columns' units); this one comes down at 75 from 89 and bottoms out at 68, 0.72 of the top
+    // speed, so 0.65 is still the floor this ramp carries.
     assert!(
         slowest(landed) > CAPTURED_TOP_SPEED * 0.65,
         "the landing left the bike at {} ft/s",
@@ -1762,7 +1802,7 @@ fn it_brakes_to_a_stop() {
     // And then it stops. "Stopped" is the speed the port's own idle is allowed to creep at, not zero.
     let end = brake[brake.len() - 1].speed;
     assert!(end < 1.0, "ten seconds of brake left the bike doing {end} ft/s");
-    // Within three seconds: this bike takes 2.1 from 62, and the disc's 125 in the shell 2.5 from 121.
+    // Within three seconds: this bike takes 2.5 from 84, and the disc's 125 in the shell 2.5 from 121.
     // Neither recording holds a brake to a stop, so the original's own time is not known (P15).
     let stop = brake.iter().position(|t| t.speed < 1.0).map_or(f32::MAX, |i| i as f32 * DT.0);
     assert!(stop < 3.0, "the brake took {stop} s to stop the bike from {from} ft/s");
@@ -1951,11 +1991,11 @@ fn the_minute_notices_a_bike_it_cannot_ride() {
 /// Skipped, with a line saying so, in a checkout without the recording: it is game data and cannot be
 /// committed (`AGENT.md`).
 ///
-/// One thing the recording will not settle: its `bike_vel` columns and its own positions disagree
-/// about the speed by a steady factor of 1.254, so one of the two is scaled by something this test
-/// cannot see. The columns are used here, because they are the recorder's value for the quantity the
-/// port calls `chassis.speed` — and because the port's terminal speed lands within half a foot a
-/// second of them, which the positions' 95 ft/s would make nonsense of.
+/// Its `bike_vel` columns and its own positions disagree about the speed by a steady factor of 1.25,
+/// and until P28 this test took the columns at their word and so held the port to 80% of the
+/// original. P22 found why: the columns are the actor's copy of the chassis' velocity, written times
+/// 0.8. They are read here over [`BIKE_VEL_PER_BODY`], which puts the top speed at the positions'
+/// 95-odd ft/s.
 #[test]
 fn the_minutes_numbers_are_the_originals() {
     let path = private_dir(RIDDEN_CAPTURE[0]).join(RIDDEN_CAPTURE[1]);
@@ -1989,7 +2029,7 @@ fn the_minutes_numbers_are_the_originals() {
     );
     let speed = |row: usize| {
         let (x, z) = (at(row, "bike_vel.x"), at(row, "bike_vel.z"));
-        (x * x + z * z).sqrt()
+        (x * x + z * z).sqrt() / BIKE_VEL_PER_BODY
     };
     let head = |row: usize| f32::atan2(at(row, "bike_xform.m20"), at(row, "bike_xform.m22"));
 
@@ -2280,7 +2320,7 @@ fn captured_launch() -> Option<(f32, f32)> {
     };
     let speed = |row: usize| {
         let (x, z) = (at(row, "bike_vel.x"), at(row, "bike_vel.z"));
-        (x * x + z * z).sqrt()
+        (x * x + z * z).sqrt() / BIKE_VEL_PER_BODY
     };
     let held = |row: usize, k: usize| at(row, &format!("ctl{k}.held")) != 0.0;
 
@@ -2593,7 +2633,7 @@ fn the_lean_goes_the_way_the_originals_does() {
     let lean = |row: usize| at(row, "bike_xform.m01").clamp(-1.0, 1.0).asin();
     let speed = |row: usize| {
         let (x, z) = (at(row, "bike_vel.x"), at(row, "bike_vel.z"));
-        (x * x + z * z).sqrt()
+        (x * x + z * z).sqrt() / BIKE_VEL_PER_BODY
     };
 
     // Upright, moving, and a row with a next row: the wrecks, the respawns and the standstills are
