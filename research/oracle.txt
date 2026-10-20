@@ -2052,14 +2052,14 @@ race_camera_split_mode      boot 0x004211a0 the word race_camera_aim's second tr
 #   4. heading = normalize(xz of (actor+0xb0 != 0 && actor+0xb4 > 20.0 ? actor+0x50 : actor+0x30));
 #      y zeroed with an integer store, w from the source row
 #   5. speed = actor+0xb4, *read off the actor*, where the base takes |velocity| every frame;
-#      grounded = actor+0xb0
+#      airborne = actor+0xb0 (S24 wrote "grounded"; it is on_ground == 0, P34)
 #   6. swing = (0.21 * -lean) * (fov / MaxFOV). No CameraSwing factor — the base has one here. The aim
 #      still multiplies the yaw by CameraSwing, so the preset is not ignored, only this share of it
 #   7. reverse: no acos, no ramps. if (speed > 4.0 && !IsLookBackCam) and heading.vel < 0 then the
 #      local velocity becomes the constant quad 0x00426d70 = (0,0,0,1) and speed becomes 0. The three
 #      reverse ramps are still read (by the distance and nothing else here) and never written
 #   8. race_camera_aim(swing, speed, actor+0x34, cam) — the rider's own forward.y, not the heading's
-#   9. direction basis = normalize(xz of ((grounded && speed > 5.0 && |speed - |vel.y|| > 0.01) ?
+#   9. direction basis = normalize(xz of ((airborne && speed > 5.0 && |speed - |vel.y|| > 0.01) ?
 #      vel : heading)) with w = 1.0 written as a literal
 #  10. sideways = cross(basis, UP); dir = rotate(wrap(yaw), UP, rotate(wrap(pitch), sideways, basis)) —
 #      both angles corrected into -pi..pi first, which the base's frame does not do
@@ -3420,3 +3420,22 @@ collision_sphere_collide    boot 0x00272ce0 the same two writes for a sphere-bod
 # than JoustWreckHeight (2.5 on race250p/race250a/pro250p) above ours is reason 7 for us, thrown with
 # their velocity — the rider underneath goes down, the one on top rides on. The mirrored entry only
 # tells the other bike it was touched.
+# P34, the camera's target block. race_camera_update's actor (cam+0x8c) is not the vehicle: it is a
+# component at MotocrossVehicle (the type-2 rider) + 0xdd0, built by actor_class_descriptor_ctor in
+# the type-2 ctor 0x00279ed0. Its fields, as rider offsets: +0xde0 point (actor+0x10), +0xe00
+# forward (+0x30), +0xe10 up (+0x40), +0xe20 velocity (+0x50), +0xe54 lean (+0x84), +0xe80 flag
+# (+0xb0), +0xe84 speed (+0xb4).
+vehicle_camera_target boot 0x0027c580 (rider) fills the block once a frame, gated on
+#                                     (rider+8) & (rider+0xdd4): point = rider+0x820 (the seat),
+#                                     rows = orientation_axes (0x001b24d0) of the node rider+0x18 (the
+#                                     chassis transform, P32), vel = rider+0x840, lean = rider+0x854,
+#                                     speed = max.s(rider+0x860, 0) (+0x860 = *(rider+0x7a4)+0x34), and
+#                                     flag = sltu/xori 1 of rider+0x93c, i.e. on_ground == 0: AIRBORNE.
+#                                     +0x93c is the snapshot of +0x574 (either wheel touches, V9). On
+#                                     the first airborne frame it also keeps the takeoff position and
+#                                     velocity at +0xe60/+0xe70 (no reader looked for)
+# Checked in RAM: first_recording's state (bike on the ground) +0x93c = 1, +0xe80 = 0; recording2's
+# biplane state (plane on its wheels) +0xe80 = 0. Captured through recording2's playback, frame_counter
+# 2375..3443 (1070 rows): +0xe80 == !(+0x574) on every row; through both backflips (2500..2610,
+# 3284..3430) render_camera's view stays within 1.5 deg of the velocity while 180 deg off the forward
+# row, and the eye stays 13.3 / 14.6 ft or more behind the bike.

@@ -66,6 +66,10 @@
 //! mid-session moves the controller and back, and a default session rides the bike bit for bit as it
 //! did before there was a garage. Whether the plane then *flies* is S34's flight, which is not ported;
 //! that test is here, ignored, with S34's name on it.
+//!
+//! **And the chase camera through the flip** (P34): `the_camera_stays_behind_the_backflip` rides the
+//! same flip with the shell's race camera on it, handed its target by `src/chase.rs` as the shell
+//! hands it, and holds the view behind the bike from the lip to the landing.
 
 use game_sim::collide::{Bundle, Record};
 use game_sim::input::{AXIS_CENTRE, CONTROL_MAP, Control, PADS, Report};
@@ -92,6 +96,9 @@ mod pad;
 #[allow(dead_code)]
 #[path = "../src/vehicle.rs"]
 mod vehicle;
+// And what the shell hands its chase camera (P34), which reads the garage above.
+#[path = "../src/chase.rs"]
+mod chase;
 
 /// The minute, in the kit's pad notation. A file rather than a string const so that a human can send
 /// the same ride to a real machine with `./kit pad script`.
@@ -920,7 +927,16 @@ fn the_disc_125(tables: &Tables) -> Option<(Phy, (Vf, Vf))> {
 /// own [`pad::Pads`] with the arrow keys held where the script has the stick — `up` where it is
 /// pushed forward, `down` where it is pulled back — which since P30 is the d-pad. `None` without the
 /// disc.
-fn ride_the_flip(mut keys: Option<&mut pad::Pads>) -> Option<Vec<Seat>> {
+fn ride_the_flip(keys: Option<&mut pad::Pads>) -> Option<Vec<Seat>> {
+    ride_the_flip_watched(keys, &mut |_, _| {})
+}
+
+/// [`ride_the_flip`], with `watch` handed the simulation and the ramp after every frame — which is
+/// where the shell runs its camera.
+fn ride_the_flip_watched(
+    mut keys: Option<&mut pad::Pads>,
+    watch: &mut dyn FnMut(&Sim, &mut Jump),
+) -> Option<Vec<Seat>> {
     let tables = Arc::new(Tables::build());
     let (phy, wheels) = the_disc_125(&tables)?;
     let at = Vf::new(0.0, 2.0, 0.0, 1.0);
@@ -957,6 +973,7 @@ fn ride_the_flip(mut keys: Option<&mut pad::Pads>) -> Option<Vec<Seat>> {
         let controls = sim.poll(DT, &reports);
         let frame = sim.step(DT, &controls, &mut world);
         seen.push(Seat::of(&sim, &controls, frame.wreck.is_some(), &world));
+        watch(&sim, &mut world);
     }
     Some(seen)
 }
@@ -993,6 +1010,128 @@ fn it_flips_off_the_lip() {
         by_keys.abs_diff(by_stick) <= 2,
         "the keys fired the backflip at frame {by_keys} and the stick at {by_stick}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// the chase camera through the flip (P34)
+// ---------------------------------------------------------------------------------------------------
+
+/// The shell's camera numbers (`src/main.rs`'s `NEAR_CLIP`, `REVERSE_SPEED`, `SPEED_REFERENCE` and
+/// `START_CAMERA`), repeated because a binary's consts cannot be imported; each says there why it is
+/// what it is.
+const NEAR_CLIP: f32 = 2.4;
+const REVERSE_SPEED: f32 = 5.0;
+const SPEED_REFERENCE: f32 = 117.332_8;
+const START_CAMERA: &str = "Race Cam 1";
+
+impl game_sim::camera::Surface for Jump {
+    /// The ramp, as the camera's ground probe asks it: the point moved onto the ground under it.
+    fn on_surface(&mut self, point: Vf) -> Vf {
+        let (ground, _) = self.ground(point);
+        Vf::new(point.x(), ground.y(), point.z(), point.w())
+    }
+}
+
+/// free06's follow cameras, read off the disc the way the shell reads them: the track's second
+/// archive's `cpresets.ini` — that file exactly, not `biplanecpresets.ini` beside it. `None` without
+/// the disc.
+fn the_disc_cameras() -> Option<Vec<game_sim::camera::Preset>> {
+    use game_sim::archive::{Psr, Res};
+    use std::io::{Read, Seek, SeekFrom};
+    let iso = match std::env::var_os("GAME_SIM_FIXTURES") {
+        Some(dir) => std::path::PathBuf::from(dir).join("iso"),
+        None => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/iso"),
+    };
+    let mut file = std::fs::File::open(iso.join("MX.PSR")).ok()?;
+    let mut front = vec![0u8; 64 << 10];
+    file.read_exact(&mut front).ok()?;
+    let psr = Psr::parse(&front).ok()?;
+    let e = psr.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with("free06_2.res"))?.clone();
+    file.seek(SeekFrom::Start(e.at)).ok()?;
+    let mut bytes = vec![0u8; e.size as usize];
+    file.read_exact(&mut bytes).ok()?;
+    let res = Res::parse(&bytes).ok()?;
+    let ini = res.entries.iter().find(|e| {
+        let n = e.name.to_ascii_lowercase();
+        n == "cpresets.ini" || n.ends_with("\\cpresets.ini")
+    })?;
+    let presets = game_sim::camera::Preset::read_bytes(&res.read(&bytes, ini).ok()?, "");
+    (!presets.is_empty()).then_some(presets)
+}
+
+/// One frame of the chase camera as the rider sees it: is the bike in the air, which side of it the
+/// eye is on along the way it is travelling, and how far the view has turned from the run-up's
+/// heading (+z), in degrees.
+struct Shot {
+    airborne: bool,
+    behind: f32,
+    turned: f32,
+}
+
+/// Ride the flip with the shell's race camera on it — `Race Cam 1`, snapped on the first frame, at
+/// the shell's speed reference — handed its target by `target`. `None` without the disc.
+fn film_the_flip(target: fn(&game_sim::ride::Ride) -> game_sim::camera::Ridden) -> Option<Vec<Shot>> {
+    use game_sim::camera::{Preset, Race, Switches};
+    let presets = the_disc_cameras()?;
+    let mut camera = Race::new(presets, F(REVERSE_SPEED));
+    let start = Preset::find(&camera.cam.presets, START_CAMERA).expect("free06 has no Race Cam 1");
+    camera.cam.set_preset(start);
+    camera.cam.snap = true;
+    camera.cam.speed_reference = F(SPEED_REFERENCE);
+    let mut shots = Vec::new();
+    ride_the_flip_watched(None, &mut |sim, world| {
+        let ride = &sim.rider.ride;
+        let rider = target(ride);
+        let switches = Switches { no_look_ahead: false, short_viewport: false };
+        let view = camera.update(DT, &rider, F(NEAR_CLIP), &sim.tables.ride.curve, switches, world);
+        let (at, vel) = (ride.position(), ride.chassis.vel);
+        let along = vel.x().hypot(vel.z()).max(1e-6);
+        let (dx, dz) = (view.position.x() - at.x(), view.position.z() - at.z());
+        let (lx, lz) = (view.look_at.x() - view.position.x(), view.look_at.z() - view.position.z());
+        shots.push(Shot {
+            airborne: !ride.air.on_ground,
+            behind: -(dx * vel.x() + dz * vel.z()) / along,
+            turned: lx.atan2(lz).to_degrees(),
+        });
+    })?;
+    Some(shots)
+}
+
+/// P34: the chase camera stays behind the bike through a backflip.
+///
+/// The original's camera heads along the velocity while the bike is in the air and along the bike's
+/// forward row only on the ground. The shell handed it the on-ground flag where it reads an airborne
+/// one, so it was the other way round: in the air the heading came off the forward row, which a
+/// backflip points straight up and then over backwards, and the view swung round to the front of the
+/// bike at the top of the flip. Here the flip is filmed through `src/chase.rs` as the shell films it,
+/// and from the lip to the landing the eye has to stay behind the bike and the view within a few
+/// degrees of the line the bike is travelling along. Then it is filmed again with the flag the wrong
+/// way round, which has to lose the bike, so the ride is known to be one that shows the fault.
+#[test]
+fn the_camera_stays_behind_the_backflip() {
+    let Some(shots) = film_the_flip(chase::bike) else { return };
+    // The bike is put down two feet up and drops onto the flat first; the jump is every frame in the
+    // air after it has stood on the ground.
+    let jump = |shots: &[Shot]| -> Vec<(usize, f32, f32)> {
+        let landed = shots.iter().position(|s| !s.airborne).unwrap_or(shots.len());
+        (landed..shots.len()).filter(|&i| shots[i].airborne).map(|i| (i, shots[i].behind, shots[i].turned)).collect()
+    };
+    let air = jump(&shots);
+    assert!(air.len() > 30, "the flip was only {} frames in the air", air.len());
+    let nearest = air.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
+    let widest = air.iter().map(|s| s.2.abs()).fold(0.0f32, f32::max);
+    assert!(nearest > 5.0, "in the air the eye came within {nearest:.1} ft of the bike's side, or ahead of it");
+    assert!(widest < 10.0, "in the air the view turned {widest:.1} degrees off the run-up's line");
+
+    let inverted = |ride: &game_sim::ride::Ride| {
+        let mut rider = chase::bike(ride);
+        rider.airborne = !rider.airborne;
+        rider
+    };
+    let shots = film_the_flip(inverted).expect("the disc went away between two rides");
+    let wrong = jump(&shots);
+    let lost = wrong.iter().map(|s| s.2.abs()).fold(0.0f32, f32::max);
+    assert!(lost > 90.0, "with the flag the wrong way round the view only turned {lost:.1} degrees");
 }
 
 /// The brake is pinned for ten seconds and the bike stops, through the shell's own bike and tables.
