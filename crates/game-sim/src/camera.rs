@@ -288,6 +288,14 @@ impl CurveTable {
         let (cos, sin) = (F(self.0[i as usize][0]), F(self.0[i as usize][1]));
         (cos - leftover * sin, sin + leftover * cos)
     }
+
+    /// The sine of `angle` off the entry below it, with no correction: the lookup the quaternion's
+    /// axis and angle divides by.
+    pub(crate) fn coarse_sin(&self, angle: F) -> F {
+        let a = wrap_turn(wrap_turn(angle));
+        let i = ((F(PI) + a) * CURVE_INV_STEP).to_i32();
+        F(self.0[i as usize][1])
+    }
 }
 
 /// `v` turned by `angle` about `axis`, which must be a unit vector: the rotation every part of the
