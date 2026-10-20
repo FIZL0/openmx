@@ -107,6 +107,10 @@ pub struct Sim {
     pub input: Manager,
     /// The bike and the rider on it.
     pub rider: Rider,
+    /// The biplane, when the ride is a plane's: with one here [`Sim::step`] flies it and leaves the
+    /// bike where it stands, as the original's Switch To Machine does. `None` is a bike ride, which
+    /// walks and hashes exactly as it did before the plane was a lane ([`flight`]).
+    pub plane: Option<flight::Flight>,
 }
 
 impl Sim {
@@ -159,7 +163,7 @@ impl Sim {
         // Pad 0 plugged in and pad 1 not, which is the shape every capture of this game was taken
         // in and the shape a one-player session has.
         input.pad_mut(0).connected = true;
-        Sim { ticks: 0, rng: seed, tables, phy, input, rider }
+        Sim { ticks: 0, rng: seed, tables, phy, input, rider, plane: None }
     }
 
     /// **One frame of the simulation**, in the original's order: the pads are read, and then the
@@ -191,6 +195,13 @@ impl Sim {
 
     /// The simulation half: one frame of the rider, and the tick counter behind it.
     pub fn step(&mut self, dt: F, controls: &Controls, world: &mut dyn World) -> crate::rider::Frame {
+        if let Some(plane) = &mut self.plane {
+            // The plane's input step (the pad's eight commands into its five fields) is I6's; until
+            // it lands the plane is flown with its hands off.
+            plane.frame(dt, biplane::Pad::default());
+            self.ticks += 1;
+            return crate::rider::Frame::default();
+        }
         let said = self.rider.frame(&self.phy, &self.tables, controls, dt, world);
         self.ticks += 1;
         said
@@ -279,6 +290,7 @@ impl Clone for Sim {
             phy: self.phy.clone(),
             input: self.input,
             rider: self.rider.clone(),
+            plane: self.plane.clone(),
         }
     }
 }
@@ -523,6 +535,10 @@ pub mod biplane_anim;
 /// The world outside the bike, as the ride asks about it: where the ground is under a point, and the
 /// scene's collision meshes stood where the scene puts them, with the sweep against the lot.
 pub mod world;
+
+/// The biplane as a ride: the state a plane session carries between ticks, built off `biplane.phy`,
+/// and the frame [`Sim::step`] runs while the plane has the controller.
+pub mod flight;
 
 #[cfg(test)]
 mod tests {
