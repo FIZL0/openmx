@@ -2444,3 +2444,7 @@ collision_record_clear boot 0x002702e0 (record) -> count, +0x40..+0x4c zeroed; v
 collision_record_add boot 0x00270240 (record, ...) -> writes one 0x80-byte list entry
 collision_record_resolve boot 0x00270dc0 (record) -> vtable slot +0x80, run by the ground step
 #                                         every substep
+wheel_tire_drive_force boot 0x0025ca60 (wheel) wheel_spin_integrate's tire force: forward = +0x210 * +0x838,
+#                                      past +MaxDriveForce*load it is SkidDriveForce*load with +0xe0
+#                                      (spinning) set, past -cap -SkidDriveForce*load with +0xe4 (locked);
+#                                      side force at +0x850, forward at +0x858. P23 read it

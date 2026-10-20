@@ -3108,3 +3108,171 @@ fn a_hard_hit_on_scenery_wrecks_at_reason_six() {
     assert_eq!(thrown_at(beam(30.0)), Some(SCENERY), "a rider thrown under a beam");
     assert_ne!(thrown_at(wall(30.0)), Some(SCENERY), "a wall the bike's nose meets first");
 }
+
+// ---------------------------------------------------------------------------------------------------
+// P23 — the brake bites as hard as the original's, on the disc's own bike
+// ---------------------------------------------------------------------------------------------------
+
+/// The original's speeds here are the chassis' own, which is not what the captures' `bike_vel`
+/// columns hold. Those run a steady 0.8 of it — P10's factor of 1.254, which P23 pinned down: the
+/// rigid body's velocity read live during the brake, the wheels' spin times their radius, and the
+/// capture's own positions over its `dt` all agree with each other and are 1.25 times the column. The
+/// port's [`Ride`] carries the rigid body's, so the captured speeds below are off the positions.
+///
+/// The speed `brake2` was going when the lever bit: its last row still gaining, ft/s.
+const BRAKE_FROM: f32 = 76.95;
+/// The original's flat brake decel, ft/s², from the first row under 60 ft/s to the first under 12:
+/// rows 24 to 53 of `brake2`, 58.85 to 11.72 in twenty-nine ticks of 0.03333 s.
+const CAPTURED_BRAKE_DECEL: f32 = 48.8;
+/// And its time from [`BRAKE_FROM`] to the first row under 1 ft/s: forty-nine ticks.
+const CAPTURED_BRAKE_STOP: f32 = 1.63;
+
+/// The disc's `race125p.phy` and the `125_faisst` model's two tire nodes (the bike the human rode,
+/// and the one P23's captures were braked on), or `None` with a line saying what is missing.
+///
+/// The same reads `tests/replay.rs` makes for its acceptance bike, kept here so that this file stays
+/// readable on its own: a member is a seek and a read, the physics file is in every bike archive, and
+/// the mounts are the model's `TireFront` and `TireRear` in the model's root frame.
+fn race125p(tables: &Tables) -> Option<(Phy, (Vf, Vf))> {
+    use game_sim::archive::{Psr, Res};
+    use std::io::{Read, Seek, SeekFrom};
+    let at = private_dir("iso").join("MX.PSR");
+    let Ok(mut file) = std::fs::File::open(&at) else {
+        println!("no {} — `./kit extract MX.PSR` writes it", at.display());
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    file.read_exact(&mut front).expect("the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let archives: Vec<String> = psr
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("bike\\") && n.ends_with(".res") && n.contains("125_faisst")
+        })
+        .collect();
+    let leaf = |res: &Res, want: &str| {
+        res.entries.iter().position(|e| {
+            let n = e.name.to_ascii_lowercase();
+            n == want || n.ends_with(&format!("\\{want}"))
+        })
+    };
+    for archive in archives {
+        let e = psr.find(&archive)?;
+        file.seek(SeekFrom::Start(e.at)).expect("seek");
+        let mut bytes = vec![0u8; e.size as usize];
+        file.read_exact(&mut bytes).expect("read");
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        let (Some(p), Some(m)) = (leaf(&res, "race125p.phy"), leaf(&res, "bike.psg")) else { continue };
+        let phy = Phy::read_bytes(&res.read(&bytes, &res.entries[p]).expect("race125p.phy"), &tables.curve);
+        let psg = res.read(&bytes, &res.entries[m]).expect("bike.psg");
+        let model = game_render::psg::Model::parse(&psg).expect("bike.psg");
+        let node = |name: &str| -> Option<Vf> {
+            let i = model.nodes.iter().position(|n| n.name == name)?;
+            let mut root = i;
+            while let Some(up) = model.nodes[root].parent {
+                root = up;
+            }
+            Some(Vf(model.place_in(i, root)))
+        };
+        if let (Some(f), Some(r)) = (node("TireFront"), node("TireRear")) {
+            return Some((phy, (f, r)));
+        }
+    }
+    println!("no 125_faisst archive with race125p.phy and both tire nodes on the disc");
+    None
+}
+
+/// The bike's forward speed: its world velocity along row 2 of its transform.
+fn forward_speed(r: &Ride) -> f32 {
+    let (v, m) = (r.chassis.vel, r.transform());
+    v.x() * m.0[2].x() + v.y() * m.0[2].y() + v.z() * m.0[2].z()
+}
+
+/// race125p on the level at the 30 Hz step the captures run at: settled, ridden up to
+/// [`BRAKE_FROM`] on the throttle, then square held with the stick centred until it stops. The speed
+/// on every braking frame, the first being the one the lever went in on.
+fn brake_race125p() -> Option<Vec<f32>> {
+    let tables = rider::Tables::build();
+    let (p, mounts) = race125p(&tables.ride)?;
+    for (name, t) in [("front", &p.front), ("rear", &p.rear)] {
+        let s = t.surfaces[0];
+        println!(
+            "{name}: radius {} inertia {} | MaxBrakingTorque {} MaxDriveForce {} SkidDriveForce {} \
+             WheelFriction {} WheelDrag {}",
+            t.tire_radius.0, t.tire_inertia.0, s.max_braking_torque.0, s.max_drive_force.0,
+            s.skid_drive_force.0, s.wheel_friction.0, s.wheel_drag.0,
+        );
+    }
+    println!("mass {}", p.mass.mass.0);
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let mut r = Rider::new(&p, mounts, Vf::new(0.0, 1.5, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let mut world = floor();
+    let still = Controls::default();
+    for _ in 0..60 {
+        r.frame(&p, &tables, &still, dt, &mut world);
+    }
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let mut k = 0;
+    while forward_speed(&r.ride) < BRAKE_FROM {
+        let f = r.frame(&p, &tables, &gas, dt, &mut world);
+        assert!(f.wreck.is_none(), "race125p wrecked on the throttle at {} ft/s", forward_speed(&r.ride));
+        k += 1;
+        assert!(k < 600, "race125p never reached {BRAKE_FROM} ft/s: {}", forward_speed(&r.ride));
+    }
+    let brake = Controls { brake: F::ONE, ..Controls::default() };
+    let mut speed = Vec::new();
+    for _ in 0..150 {
+        speed.push(forward_speed(&r.ride));
+        let f = r.frame(&p, &tables, &brake, dt, &mut world);
+        assert!(f.wreck.is_none(), "race125p wrecked braking at {} ft/s", forward_speed(&r.ride));
+    }
+    Some(speed)
+}
+
+/// **P23.** race125p's flat brake decel and its time to a stop are the original's, within 15%.
+///
+/// The original's are off P23's own capture (`brake2`: square held from full speed on a level
+/// stretch of Free09, stick centred), read in the chassis' own speed (see [`BRAKE_FROM`]). What the
+/// same playback showed live, and what this leans on:
+///
+/// - square puts the brake on *both* wheels, the two brake words ramped in together over three
+///   ticks — which is what [`Controls::brake`] does here too;
+/// - each wheel then puts `-(MaxBrakingTorque + WheelFriction) / TireRadius` through its patch —
+///   to the tenth of a pound of what that sum gives on the disc's numbers — with no lock flag set on
+///   the level. So the brake's own force is the port's to within the `WheelFriction` torque
+///   `surface_drag` leaves out (P23's journal entry has the pounds; they are the disc's and so are
+///   not written here);
+/// - and the body slows at 48.8 ft/s². The port's 46.7 is that torque short, a wheel.
+///
+/// The brief's "twice as hard" was the 0.8 between the capture's `bike_vel` and the body's speed,
+/// compared against a shell trace from 121 ft/s, where the engine's own braking through the clutch
+/// adds to the brake; on the same footing the two brakes are 4% apart.
+#[test]
+fn race125p_brakes_like_the_original() {
+    let Some(speed) = brake_race125p() else { return };
+    let dt = game_sim::tick::DeltaTime::CAP_30;
+    let under = |v: f32| {
+        speed
+            .iter()
+            .position(|&s| s < v)
+            .unwrap_or_else(|| panic!("race125p never got under {v} ft/s braking: {speed:?}"))
+    };
+    let (a, b) = (under(60.0), under(12.0));
+    let decel = (speed[a] - speed[b]) / ((b - a) as f32 * dt);
+    let stop = under(1.0) as f32 * dt;
+    println!(
+        "race125p brakes at {decel:.1} ft/s^2 (the original {CAPTURED_BRAKE_DECEL}) and stops in {stop:.2} s \
+         (the original {CAPTURED_BRAKE_STOP})"
+    );
+    assert!(
+        (decel - CAPTURED_BRAKE_DECEL).abs() <= 0.15 * CAPTURED_BRAKE_DECEL,
+        "race125p brakes at {decel:.1} ft/s^2 from 60 to 12 ft/s; the original at {CAPTURED_BRAKE_DECEL}"
+    );
+    assert!(
+        (stop - CAPTURED_BRAKE_STOP).abs() <= 0.15 * CAPTURED_BRAKE_STOP,
+        "race125p takes {stop:.2} s from {BRAKE_FROM} ft/s to under 1; the original {CAPTURED_BRAKE_STOP} s"
+    );
+}
