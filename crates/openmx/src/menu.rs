@@ -140,6 +140,51 @@ pub struct Settings {
     pub wrecks: bool,
     /// The last track ridden, which the track pick opens on.
     pub track: String,
+    /// The machine each seat's ride starts on, the ride setup's pick (P41), 1P's first.
+    pub machines: [Machine; SEATS_MAX],
+}
+
+/// The most players a ride seats, as P35's seats count them.
+pub const SEATS_MAX: usize = 8;
+
+/// The machines a player can be on: the bike, or the freeride's biplane (P19). The shell's
+/// `vehicle::Kind` is the same two; this one is the menu's, which knows words and labels and nothing
+/// of the simulation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Machine {
+    #[default]
+    Bike,
+    Biplane,
+}
+
+impl Machine {
+    pub const ALL: [Machine; 2] = [Machine::Bike, Machine::Biplane];
+
+    /// The file's word, which is also `--vehicle`'s.
+    pub fn word(self) -> &'static str {
+        match self {
+            Machine::Bike => "bike",
+            Machine::Biplane => "biplane",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Machine> {
+        Machine::ALL.into_iter().find(|m| m.word() == w)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Machine::Bike => "Bike",
+            Machine::Biplane => "Biplane",
+        }
+    }
+
+    pub fn other(self) -> Machine {
+        match self {
+            Machine::Bike => Machine::Biplane,
+            Machine::Biplane => Machine::Bike,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -149,6 +194,7 @@ impl Default for Settings {
             overlay: false,
             wrecks: true,
             track: TRACKS[0].0.into(),
+            machines: [Machine::Bike; SEATS_MAX],
         }
     }
 }
@@ -183,6 +229,14 @@ impl Settings {
                 "overlay" => s.overlay = v != "off",
                 "wrecks" => s.wrecks = v != "off",
                 "track" if TRACKS.iter().any(|t| t.0 == v) => s.track = v.to_string(),
+                // One word a seat, 1P's first; a seat the line does not reach rides the bike.
+                "machines" => {
+                    for (i, w) in v.split_whitespace().take(SEATS_MAX).enumerate() {
+                        if let Some(m) = Machine::from_word(w) {
+                            s.machines[i] = m;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -191,11 +245,12 @@ impl Settings {
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\n",
+            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\n",
             self.name,
             on_off(self.overlay),
             on_off(self.wrecks),
-            self.track
+            self.track,
+            self.machines.map(Machine::word).join(" ")
         )
     }
 
@@ -431,7 +486,10 @@ impl Screen {
 
 /// The main menu's rows. P37's garage and P38's join screen go in here.
 const MAIN: [&str; 3] = ["Free Ride", "Settings", "Quit"];
-const PAUSE: [&str; 5] = ["Resume", "Restart", "Settings", "Main Menu", "Quit"];
+/// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
+/// machine a switch would go to.
+const PAUSE: [&str; 6] = ["Resume", "Restart", "Switch To Machine", "Settings", "Main Menu", "Quit"];
+const PAUSE_SWITCH: usize = 2;
 const SETTINGS_ROWS: usize = 4;
 const CONTROLS_ROWS: usize = 1 + LAYOUT_ROWS;
 
@@ -451,6 +509,9 @@ pub enum Act {
     Restart,
     /// Leave the ride for the main menu.
     MainMenu,
+    /// Put this seat's player on their other machine, and carry on (P41). The shell answers with
+    /// [`Menu::switched`].
+    Switch(usize),
     Quit,
 }
 
@@ -473,6 +534,15 @@ pub struct Menu {
     changed: bool,
     /// A line for the ticker, which is how a ride that could not start says why.
     pub note: Option<String>,
+    /// The ride under the menu, as the shell tells it (P41): how many players ride, the machine each
+    /// one is on now, and which of them have a machine to switch to.
+    pub riders: usize,
+    pub up: [Machine; SEATS_MAX],
+    pub switchable: [bool; SEATS_MAX],
+    /// The seat whose Start opened the pause, whose machine its switch row is.
+    pauser: usize,
+    /// The seat whose machine the ride setup's machine row is picking.
+    setup_seat: usize,
 }
 
 impl Menu {
@@ -489,6 +559,11 @@ impl Menu {
             tick: 0,
             changed: false,
             note: None,
+            riders: 1,
+            up: [Machine::Bike; SEATS_MAX],
+            switchable: [false; SEATS_MAX],
+            pauser: 0,
+            setup_seat: 0,
         }
     }
 
@@ -505,12 +580,41 @@ impl Menu {
     /// Back to the main menu, with nothing under it.
     pub fn main(&mut self) {
         self.stack = vec![Screen::Main];
+        self.pauser = 0;
     }
 
-    /// The pause over a ride.
+    /// The pause over a ride, 1P's.
     pub fn pause(&mut self) {
+        self.pause_for(0);
+    }
+
+    /// The pause over a ride, opened by `seat`'s Start: its switch row is that player's machine.
+    pub fn pause_for(&mut self, seat: usize) {
         self.stack = vec![Screen::Pause];
         self.cursor[Screen::Pause.index()] = 0;
+        self.pauser = seat.min(SEATS_MAX - 1);
+    }
+
+    /// The shell's answer to [`Act::Switch`]: `seat` is on `up` now.
+    pub fn switched(&mut self, seat: usize, up: Machine) {
+        if let Some(m) = self.up.get_mut(seat) {
+            *m = up;
+        }
+    }
+
+    /// The pause's rows as drawn: the switch row names the machine it would go to, or says there is
+    /// none for this player.
+    pub fn pause_rows(&self) -> Vec<String> {
+        let seat = self.pauser;
+        PAUSE
+            .iter()
+            .enumerate()
+            .map(|(i, row)| match i {
+                PAUSE_SWITCH if self.switchable[seat] => format!("{row}: {}", self.up[seat].other().label()),
+                PAUSE_SWITCH => format!("{row}: None"),
+                _ => row.to_string(),
+            })
+            .collect()
     }
 
     /// Open `screen` the way the pad would reach it, for `--screen`: over the main menu, or for the
@@ -568,6 +672,36 @@ impl Menu {
         self.push(Screen::Keyboard);
     }
 
+    /// One frame of a ride's menu, with every rider's press, 1P's first (P41): while the ride runs any
+    /// player's Start opens the pause for them, 1P's winning a tie, and an open pause hears only the
+    /// player who opened it — their switch row, their pad.
+    pub fn step_seats(&mut self, presses: &[Press]) -> Act {
+        let first = presses.first().copied().unwrap_or_default();
+        if self.riding() {
+            if let Some(seat) = presses.iter().position(|p| p.start)
+                && seat > 0
+            {
+                self.tick = self.tick.wrapping_add(1);
+                self.pause_for(seat);
+                return Act::Stay;
+            }
+            return self.step(first);
+        }
+        let p = match self.stack.first() {
+            Some(Screen::Pause) => presses.get(self.pauser).copied().unwrap_or_default(),
+            _ => first,
+        };
+        self.step(p)
+    }
+
+    /// The seat whose press drives the menu this frame under [`Menu::step_seats`].
+    pub fn driver(&self) -> usize {
+        match self.stack.first() {
+            Some(Screen::Pause) => self.pauser,
+            _ => 0,
+        }
+    }
+
     /// One frame.
     pub fn step(&mut self, p: Press) -> Act {
         self.tick = self.tick.wrapping_add(1);
@@ -583,9 +717,10 @@ impl Menu {
         }
         let rows = self.rows(screen);
         let at = self.cursor(screen);
-        // Up and down walk the rows, wrapping, except on the track pick where left and right do.
+        // Up and down walk the rows, wrapping, except on the ride setup where left and right walk the
+        // tracks and up and down the players whose machine Square changes.
         let (prev, next) = match screen {
-            Screen::Tracks => (p.left || p.up, p.right || p.down),
+            Screen::Tracks => (p.left, p.right),
             _ => (p.up, p.down),
         };
         if prev || next {
@@ -609,6 +744,18 @@ impl Menu {
                 _ => {}
             },
             Screen::Tracks => {
+                let riders = self.riders.clamp(1, SEATS_MAX);
+                if p.up || p.down {
+                    let at = self.setup_seat.min(riders - 1);
+                    self.setup_seat = if p.up { (at + riders - 1) % riders } else { (at + 1) % riders };
+                    return Act::Stay;
+                }
+                if p.delete {
+                    let seat = self.setup_seat.min(riders - 1);
+                    self.settings.machines[seat] = self.settings.machines[seat].other();
+                    self.changed = true;
+                    return Act::Stay;
+                }
                 if p.ok || p.start {
                     let track = TRACKS[at].0.to_string();
                     if self.settings.track != track {
@@ -672,8 +819,14 @@ impl Menu {
                             self.stack.clear();
                             return Act::Restart;
                         }
-                        2 => self.push(Screen::Settings),
-                        3 => {
+                        PAUSE_SWITCH => {
+                            if self.switchable[self.pauser] {
+                                self.stack.clear();
+                                return Act::Switch(self.pauser);
+                            }
+                        }
+                        3 => self.push(Screen::Settings),
+                        4 => {
                             self.main();
                             return Act::MainMenu;
                         }
@@ -979,8 +1132,12 @@ impl Art {
             Screen::Pause => {
                 p.logo();
                 p.column(107.0, 1.0);
-                p.list(185.0, 1.0, &PAUSE.map(|s| s.to_string()), menu.cursor(screen));
-                p.title(screen.title());
+                p.list(185.0, 1.0, &menu.pause_rows(), menu.cursor(screen));
+                // With more than one rider the pause is one player's, and says whose.
+                match menu.riders > 1 {
+                    true => p.title(&format!("{}P {}", menu.pauser + 1, screen.title())),
+                    false => p.title(screen.title()),
+                }
                 p.legend(&[("nav_circle_off", "Resume"), ("nav_x_off", "Select")]);
             }
             Screen::Settings | Screen::Controls => {
@@ -1222,8 +1379,28 @@ impl Painter<'_> {
         self.tex("arrow_right_off", rect(320.0 + w / 2.0 + 12.0, 9.0, 32.0, 32.0), CHOSEN);
         let count = format!("Freeride {} of {}", at + 1, TRACKS.len());
         self.text(Face::Small, &count, 320.0, 330.0, Align::Centre, ITEM);
+        // The machine each player starts on (P41), in a panel over the stills' right: one line a
+        // rider, the one Square changes in the chosen colour between up and down arrows when there
+        // is more than one.
+        let riders = menu.riders.clamp(1, SEATS_MAX);
+        let seat = menu.setup_seat.min(riders - 1);
+        self.fill(rect(440.0, 60.0, 180.0, 12.0 + 22.0 * riders as f32), [0, 0, 0, 170]);
+        for i in 0..riders {
+            let y = 66.0 + 22.0 * i as f32;
+            let line = match riders {
+                1 => format!("Machine  {}", menu.settings.machines[i].label()),
+                _ => format!("{}P  {}", i + 1, menu.settings.machines[i].label()),
+            };
+            let colour = if i == seat { CHOSEN } else { ITEM };
+            self.text(Face::Small, &line, 456.0, y, Align::Left, colour);
+        }
+        if riders > 1 {
+            let y = 66.0 + 22.0 * seat as f32 - 6.0;
+            self.tex("arrow_up_off", rect(590.0, y - 8.0, 24.0, 24.0), CHOSEN);
+            self.tex("arrow_down_off", rect(590.0, y + 8.0, 24.0, 24.0), CHOSEN);
+        }
         self.title(Screen::Tracks.title());
-        self.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Ride")]);
+        self.legend(&[("nav_square_off", "Machine"), ("nav_circle_off", "Back"), ("nav_x_off", "Ride")]);
     }
 
     /// The on-screen keyboard: the name being typed, the four rows of ten and the commands.

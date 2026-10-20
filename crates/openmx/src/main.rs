@@ -106,8 +106,9 @@
 //! the numbers the ride is running on. It is debugging furniture and matches nothing on the disc,
 //! which is why it is behind a flag and why with the flag off it draws nothing at all.
 //!
-//! **M** swaps between the bike and the track's biplane, and `--vehicle biplane` starts in the plane
-//! ([`vehicle`], P19): the swap is the original's own — the bike is left where it stands, hidden and
+//! **M** swaps between the bike and the track's biplane, as does the pause's "Switch To Machine" for
+//! the player who opened it, and `--vehicle biplane` or the ride setup's machine pick starts in the
+//! plane ([`vehicle`], P19, P41): the swap is the original's own — the bike is left where it stands, hidden and
 //! not stepped, and the plane is put back where the track's `machine.txt` parked it, with its own
 //! camera file. With the plane up it flies (P31): its own simulation steps every frame on the seat's
 //! pad, the model is drawn at its body's pose with the prop at the engine's angle, the plane's camera
@@ -342,6 +343,29 @@ impl Seat {
             self.said = self.garage.step(&mut self.sim, dt, &controls, place);
         }
         self.hands = controls;
+    }
+}
+
+/// The swap (P19) for one player, from the M key or the pause's "Switch To Machine" (P41): the
+/// controller moves, and the machine taken gets its own camera, which starts where it is rather than
+/// lagging in from wherever it was last. The machine now up, or `None` (and no swap) with no plane.
+fn switch_machine(seat: &mut Seat, rig: &mut Rig) -> Option<Kind> {
+    match seat.garage.swap() {
+        Ok(up) => {
+            let cam = &mut rig.follow_mut(up).cam;
+            cam.snap = true;
+            let name = (!cam.presets.is_empty()).then(|| cam.preset().name.clone());
+            if let Some(name) = name {
+                rig.hud.note_camera(&name);
+            }
+            rig.hud.note_vehicle(up.name());
+            println!("vehicle: {}", up.name());
+            Some(up)
+        }
+        Err(e) => {
+            println!("vehicle: {e}");
+            None
+        }
     }
 }
 
@@ -661,6 +685,8 @@ fn front_end(args: Args) -> Result<(), String> {
         Some(name) => println!("pad: {name}"),
         None => println!("pad: none found — the menus are on the keyboard (arrows, X, C, Return)"),
     }
+    // The ride setup lists a machine for each player who will ride (P41).
+    front.menu.riders = args.players;
     if let Some(screen) = args.screen {
         front.menu.open(screen);
     }
@@ -689,6 +715,11 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.hud = args.hud || shell.front.menu.settings.overlay;
                 a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
                 a.wiring = shell.front.wiring();
+                // The ride setup's machine for 1P (P41), unless `--vehicle biplane` asked for the plane
+                // whatever the setup says. The other seats' picks are read where their garages are.
+                if args.vehicle == Kind::Bike {
+                    a.vehicle = Kind::parse(shell.front.menu.settings.machines[0].word())?;
+                }
                 // The shot is the menu's unless it is of the pause, which is drawn over the ride.
                 a.shot = shot.take_if(|_| shell.front.menu.screen() == Some(menu::Screen::Pause));
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
@@ -1695,12 +1726,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         said: rider::Frame::default(),
         hands: Controls::default(),
     }];
-    for rider in others {
+    for (i, rider) in others.into_iter().enumerate() {
+        // The track's plane is the first player's: `machine.txt` parks one per player, and the
+        // shell draws one. So a later seat's setup pick of the plane (P41) rides the bike, and says so.
+        let pick = front.as_ref().map_or(menu::Machine::Bike, |f| f.menu.settings.machines[i + 1]);
+        if pick != menu::Machine::Bike {
+            println!("vehicle: player {} picked the {}, but only player 1 has one; the bike", i + 2, pick.word());
+        }
         seats.push(Seat {
             reports: [Report::missing(); PADS],
             sim: Sim::with_rider(0, tables.clone(), phy.clone(), rider),
-            // The track's plane is the first player's: `machine.txt` parks one per player, and the
-            // shell draws one.
             garage: Garage::new(Kind::Bike, None)?,
             riding: front.as_ref().is_none_or(|f| f.menu.riding()),
             start_freezes: front.is_none(),
@@ -1719,6 +1754,19 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
     }
     println!("vehicle: {}", world.seats[0].garage.up.name());
+    // The pause's switch row reads which machine each player is on and whether they have another
+    // (P41), and any player's Start opens the pause for them: 1P's through the front end's reader,
+    // the others' through one each here, which only ever look for Start while the ride runs.
+    if let Some(front) = front.as_deref_mut() {
+        front.menu.riders = world.seats.len();
+        front.menu.up = [menu::Machine::Bike; menu::SEATS_MAX];
+        front.menu.switchable = [false; menu::SEATS_MAX];
+        for (i, seat) in world.seats.iter().enumerate().take(menu::SEATS_MAX) {
+            front.menu.up[i] = menu::Machine::from_word(seat.garage.up.name()).unwrap_or_default();
+            front.menu.switchable[i] = seat.garage.plane.is_some();
+        }
+    }
+    let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::new()).collect();
     // H toggles it, on its own edge: the window keeps key state and not key events, so the shell
     // remembers last frame's to tell a press from a hold.
     let mut hud_key = false;
@@ -1842,21 +1890,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // rather than lagging in from wherever it was last. A played tape is the ride it recorded,
         // and the tape has no swap in it, so the key is not read while one is being ridden.
         // It is the first player's key, and the first player's plane.
+        // The pause's "Switch To Machine" (P41) is the same swap for whichever player opened it; the
+        // key stays for the keyboard.
         let swap_now = held(&window, key::M);
         if swap_now && !swap_key && head.is_none() && online.is_none() {
-            match world.seats[0].garage.swap() {
-                Ok(up) => {
-                    let rig = &mut rigs[0];
-                    let cam = &mut rig.follow_mut(up).cam;
-                    cam.snap = true;
-                    let name = (!cam.presets.is_empty()).then(|| cam.preset().name.clone());
-                    if let Some(name) = name {
-                        rig.hud.note_camera(&name);
-                    }
-                    rig.hud.note_vehicle(up.name());
-                    println!("vehicle: {}", up.name());
-                }
-                Err(e) => println!("vehicle: {e}"),
+            let up = switch_machine(&mut world.seats[0], &mut rigs[0]);
+            if let (Some(up), Some(front)) = (up, front.as_deref_mut()) {
+                front.menu.switched(0, menu::Machine::from_word(up.name()).unwrap_or_default());
             }
         }
         swap_key = swap_now;
@@ -1865,17 +1905,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // frozen exactly as Start's own freeze leaves it, the pass polling the pad and stepping
         // nothing. What it changes is applied at once, and saved.
         if let Some(front) = front.as_deref_mut() {
-            let mut press = front.reader.read(&world.seats[0].reports[0]);
+            // Every player's press: another player's Start pauses for them, and while the pause is
+            // theirs their pad drives it (P41). Escape is the keyboard's, and Back for whoever drives.
+            let mut presses = vec![front.reader.read(&world.seats[0].reports[0])];
+            for (seat, r) in world.seats[1..].iter().zip(&mut start_readers) {
+                presses.push(r.read(&seat.reports[0]));
+            }
             let esc = held(window, key::ESCAPE);
             if esc && !escape {
                 if front.menu.riding() {
                     front.menu.pause();
-                } else {
-                    press.back = true;
+                } else if let Some(p) = presses.get_mut(front.menu.driver()) {
+                    p.back = true;
                 }
             }
             escape = esc;
-            let act = front.menu.step(press);
+            let act = front.menu.step_seats(&presses);
             if front.menu.changed() {
                 for rig in &mut rigs {
                     rig.hud.on = front.menu.settings.overlay;
@@ -1898,7 +1943,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     break;
                 }
                 Act::Quit => break,
-                Act::Stay | Act::Resume | Act::Ride(_) => {}
+                // A played tape has no swap in it, as the key's does not.
+                Act::Switch(i) if head.is_none() => {
+                    if let (Some(seat), Some(rig)) = (world.seats.get_mut(i), rigs.get_mut(i))
+                        && let Some(up) = switch_machine(seat, rig)
+                    {
+                        front.menu.switched(i, menu::Machine::from_word(up.name()).unwrap_or_default());
+                    }
+                }
+                Act::Stay | Act::Resume | Act::Ride(_) | Act::Switch(_) => {}
             }
             for seat in &mut world.seats {
                 seat.riding = front.menu.riding();
