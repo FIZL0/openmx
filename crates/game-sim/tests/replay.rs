@@ -5580,8 +5580,9 @@ const BIPLANE_TRACK: &str = "Tracks\\free06.res";
 /// The plane's lanes, capture column to the port's path, with the leaf each one is. The same object
 /// the four listeners read and write (C7's columns; the offsets are in `watch/biplane.toml`): the body
 /// the world integrates, the controls' surfaces, the engine's outputs, the measure's angles, and the
-/// wreck.
-const PLANE: [(&str, &str, Kind); 29] = [
+/// wreck — and the pad the input step made of the recorded controller (I6's mapping, read by
+/// [`Sim::step`] since S41).
+const PLANE: [(&str, &str, Kind); 34] = [
     ("body_pos.x", "plane.body.pos[0]", Kind::Float),
     ("body_pos.y", "plane.body.pos[1]", Kind::Float),
     ("body_pos.z", "plane.body.pos[2]", Kind::Float),
@@ -5611,6 +5612,11 @@ const PLANE: [(&str, &str, Kind); 29] = [
     ("beta", "plane.air.beta", Kind::Float),
     ("on_ground", "plane.attitude.grounded", Kind::Bool),
     ("crash", "plane.crash", Kind::Uint),
+    ("thr_up", "plane.pad.forward", Kind::Float),
+    ("thr_down", "plane.pad.back", Kind::Float),
+    ("elev_cmd", "plane.pad.elevator", Kind::Float),
+    ("ail_cmd", "plane.pad.aileron", Kind::Float),
+    ("rud_cmd", "plane.pad.rudder", Kind::Float),
 ];
 
 /// What a [`PLANE`] lane's cells are.

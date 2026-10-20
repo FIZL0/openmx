@@ -12,15 +12,16 @@
 //! the plane inside the engine's generic dynamics world: the controls once a frame, then a handful of
 //! substeps of the autopilot, the engine, the aerodynamics and the three tires, with the rigid body
 //! integrated between them and the measure listener deriving the next frame's attitude at the end.
-//! The world step, the body and the measure are S38's, the tires and the crash test S39's and the pad
-//! mapping into [`Pad`] I6's; until they land [`Flight::frame`] cannot run the substeps, and the body
-//! does not move. The acceptance run over C7's capture (`the_biplane_acceptance_run` in
+//! The world step, the body and the measure are S38's and the tires and the crash test S39's; until
+//! they land [`Flight::frame`] cannot run the substeps, and the body does not move. The pad it is
+//! handed is the recorded one, through I6's mapping ([`pad`]). The acceptance run over C7's capture (`the_biplane_acceptance_run` in
 //! `tests/replay.rs`) says so, lane by lane, on every `./kit check`.
 
 #![deny(clippy::float_arithmetic)]
 
 use crate::biplane::{Aero, Air, Attitude, Autopilot, Engine, Joystick, Pad, Surfaces, controls};
 use crate::hash::{State, Walk};
+use crate::input::{self, PlaneInput};
 use crate::phy;
 use ps2_float::{F, Vf};
 
@@ -171,6 +172,14 @@ impl Flight {
         self.pad = pad;
         controls(&mut self.pad, &mut self.surfaces, &self.joystick, &self.attitude, dt);
     }
+}
+
+/// The plane's input step on the player's pad: I6's [`PlaneInput::from_pad`], into the five fields
+/// the plane keeps it in (the two throttle commands, then the elevator, the aileron and the rudder,
+/// in the order the original stores them).
+pub fn pad(pad: &input::Pad) -> Pad {
+    let p = PlaneInput::from_pad(pad);
+    Pad { forward: p.throttle_up, back: p.throttle_down, elevator: p.elevator, aileron: p.aileron, rudder: p.rudder }
 }
 
 impl State for Body {

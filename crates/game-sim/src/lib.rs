@@ -196,9 +196,9 @@ impl Sim {
     /// The simulation half: one frame of the rider, and the tick counter behind it.
     pub fn step(&mut self, dt: F, controls: &Controls, world: &mut dyn World) -> crate::rider::Frame {
         if let Some(plane) = &mut self.plane {
-            // The plane's input step (the pad's eight commands into its five fields) is I6's; until
-            // it lands the plane is flown with its hands off.
-            plane.frame(dt, biplane::Pad::default());
+            // The plane's input step: the player's pad, through I6's mapping, into the five fields the
+            // controls read. The bike's `controls` are not the plane's: the plane reads the pad itself.
+            plane.frame(dt, flight::pad(self.input.pad(0)));
             self.ticks += 1;
             return crate::rider::Frame::default();
         }
@@ -539,6 +539,10 @@ pub mod world;
 /// The biplane as a ride: the state a plane session carries between ticks, built off `biplane.phy`,
 /// and the frame [`Sim::step`] runs while the plane has the controller.
 pub mod flight;
+
+/// The engine's shared smooth noise: 1-D gradient noise over tables the game builds off its own
+/// `rand()` on the first sample, which the plane's engine note and the rider's balance wobble read.
+pub mod noise;
 
 #[cfg(test)]
 mod tests {
