@@ -506,6 +506,10 @@ pub mod rider;
 /// step of is the rider's body, and this is the half of it that chooses.
 pub mod rider_anim;
 
+/// The rider's ragdoll: the eighteen bones and seventeen joints the rider is thrown off the bike as,
+/// their records for riding and for the wreck, and the two entries that switch between them.
+pub mod ragdoll;
+
 /// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
 /// later that involves chance reads this sequence, so it is ported before anything that uses it.

@@ -1050,7 +1050,7 @@ fn add_xyz(a: Vf, b: Vf) -> Vf {
 
 /// `v` turned into the body's frame by `q`: [`crate::chassis::turn`] with every pair of operands
 /// swapped, which is the conjugate's rotation without the conjugate. `w` is `v`'s.
-fn unturn(q: Vf, v: Vf) -> Vf {
+pub(crate) fn unturn(q: Vf, v: Vf) -> Vf {
     let acc = Vf::opmula(v, q);
     let acc = Vf::madd(acc, v, q.bc(Field::W));
     let t = Vf::opmsub(acc, q, v);
