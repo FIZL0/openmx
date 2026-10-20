@@ -1135,7 +1135,9 @@ camera_nudge                boot 0x001fc630 (stick x, stick y in f14/f15, cam, c
 camera_load_presets         boot 0x001fbf50 (cam, file): fills the 0xa0-byte preset records from the
 #                                           camera ini. Section [NumberOfPresets], then Preset%d (or
 #                                           Preset%dh/v/q by viewport index, or Preset%dw/x/z when the
-#                                           word at 0x004211a0 is 3). Keys, in record order: +0x00
+#                                           word at 0x004211a0 is 3). [R9: not an index — cam+0x174 is
+#                                           the split mode: 0 plain, 1 h, 2 v, else q; at 16:9 (0x004211a0
+#                                           == 3) 0 and 1 w, 2 x, else z. See the R9 section.] Keys, in record order: +0x00
 #                                           LookFilters, +0x10 PosFilters, +0x20 OffsetFromBodyPoint,
 #                                           +0x30 Name[32], +0x50 AngleY and +0x54 AngleX (degrees,
 #                                           times 0.01745329), +0x58 FollowingDistance, +0x5c FOV,
@@ -3224,3 +3226,137 @@ pair_distance boot 0x0011c1b0 (a, b) distance less both reaches, >= 0
 plane_refresh_search boot 0x0015b210 the plane collision owner's (plane+0x50) vt +0x108: marks its
 #                              probes moved, then collision_search_gather(+0x11c = plane+0x16c, the
 #                              ray probe +0x130, 3) -- what refills the plane's nearby search
+
+# ---------------------------------------------------------------------------------------------------
+# R9 — the two-player game, read statically from the decompilation and the disc: nothing here was run
+# (no two-player state exists; plan/HUMAN.md asks for one). Journal:
+# research/journal/2026-10-20-r9-r9-two-players. Feeds S37, V22 and P20.
+# Pointers: app = *(0x0041f770). app+0x3d4 settings: +0 NumberOfRacers, +8 the viewport-mode object
+# (+4 split mode 0 single / 1 horizontal / 2 vertical, +0x10 a flag forcing a 16:9 aspect), +0xc the
+# event (+0 league, +4 activity type, +0x10c bike class (R7), +0x114 human players, +0x116 (0: the AI made
+# by difficulty; else spawn_racers takes them from a list off app+0x3f4, not read), +0x117 AI difficulty, +0x134+i*4 player i's camera choice), +0x10 the per-player profiles.
+# app+0x3cc the scene, app+0x104 the input manager, app+0x108 the terrain query.
+#
+# The display: two globals, both set by display_mode_set.
+display_aspect              boot 0x004211a0 word: 0 None, 1 1x1, 2 4x3, 3 16x9 (names at 0x00420af0)
+display_video_mode          boot 0x00421198 word: 0 None, 1 480i, 2 480p, 3 480p_Widescreen, 4 720p,
+#                                           5 1080i, 6 PAL, 7 PAL60 (names at 0x00420ab0)
+display_mode_set            boot 0x00312410 (mode, params): modes 1/2/6/7 -> aspect 2, 3/4/5 -> 3,
+#                                           params[1] overrides; sets the frame buffer (640x448 at 480i)
+#                                           and the aspect ratios 0x004e2224/28/2c (1:1, 4:3, 16:9).
+#                                           Callers 0x0016a280 (probes 1, 2, 7, 6) and 0x00194f70 (1<->2)
+#
+# The camera presets. cpresets.ini is appstart\cpresets.ini in every Tracks\<track>_2.res (and an
+# identical copy in _ss_2.res): 11 presets x 5 layouts. Its own header names them, and camera_load_presets
+# (above, S7) picks by the camera's split mode cam+0x174 and the display aspect:
+#   aspect != 3:  mode 0 Preset%d (1 player) · 1 Preset%dh (2P horizontal) · 2 Preset%dv (2P vertical)
+#                 · else Preset%dq
+#   aspect == 3:  mode 0 and 1 Preset%dw (1P wide) · 2 Preset%dx (2P vertical wide) · else Preset%dz
+#   strings 0x0042d3b0 / 0x0042d3c0 h / 0x0042d3d0 v / 0x0042d3e0 q / 0x0042d380 w / 0x0042d390 x /
+#   0x0042d3a0 z. q and z (a four-way split, by the pattern) are in no file on the disc, and a missing
+#   section is skipped, leaving the record as it was; nothing sets a mode above 2. So: w and x are
+#   16:9, not quarters, and a 16:9 horizontal split rides the 1P-wide presets.
+#   Preset1 AngleX 65 FollowingDistance 13 MinFollowingDistance 5 FOV 85; Preset1h AngleX 30 Following 16
+#   MinFollowing 7 FOV 80 LookAhead 15 LowSpeedAngleXScaleFactor 0.75; Preset1v AngleX 65 Following 13
+#   MinFollowing 7 FOV 60 CameraSwing 2.5 LookSwing 2.0; Preset1w and Preset1x read as Preset1.
+mxgame_configure            boot 0x00203260 the boot config: key ViewportMode (0x0042da48) "Horizontal"
+#                                           -> players >= 2, event+0x114 = 2, viewport object +4 = 1;
+#                                           "Vertical" the same with +4 = 2
+race_camera_set_split       boot 0x0021f6e0 (cam, mode): cam+0x174 = mode, reloads the presets, re-sets
+#                                           the current one. The base class's 0x001fc8d0, vtable +0xe4
+player_set_split            boot 0x00200960 (player, mode): player+0x130 = mode, then the race camera's
+#                                           race_camera_set_split
+#
+# The split itself.
+viewport_build              boot 0x0020a7e0 (game): one viewport (0x360 bytes, ctor 0x00168ac0) per
+#                                           human player, at game+0x34+i*4; player i's camera from
+#                                           event+0x134+i*4 (1 the follow camera +0x54, else +0x5c);
+#                                           clears bit 3 of app+0x325; ends in viewport_arrange
+player_view_build           boot 0x0020a360 (game, i): the per-player view (0x158 bytes, ctor
+#                                           0x001feda0, init 0x001feea0) at game+0x64+i, its cameras at
+#                                           game+0x3c+i*0x14 (five slots)
+viewport_arrange            boot 0x0020aaa0 (game): mode = game+0x78 (copied from the viewport object
+#                                           by the world loader). Every mode calls player_set_split per
+#                                           player and sets each view's aspect through vtable +200
+#                                           (0x004e2220[aspect], or 16:9 with the wide flag or aspect 3).
+#                                           Rectangles by viewport_set_rect, w x h the frame buffer:
+#                                             0 one view (0, 0, w, h)
+#                                             1 horizontal: (0, 0, w, h/2) above (0, h/2, w, h/2)
+#                                             2 vertical:   (0, 0, w/2, h) beside (w/2, 0, w/2, h)
+#                                           Fog: with two views and league != 0 the far distance is the
+#                                           scene's MaximumFogDistance x 0.61 (supercross, league 0, keeps
+#                                           it); fog record scene+0x3b8 (+0x18 min, +0x1c max). Freestyle
+#                                           (activity 5) sets the near clip to 2.4 (0x00112a80)
+viewport_set_rect           boot 0x00113b40 (view, x, y, w, h) plus the centring offsets 0x004e2208 /
+#                                           0x004e2210
+fog_set                     boot 0x0012f940 world+0x6c far, +0x70 near, +0x74
+#
+# short_viewport (crates/game-sim camera::Switches): the race camera's aim, 0x0021f1bc..0x0021f2b0.
+# Skipped when aspect == 3, or when *(app+0x3cc)+0x78 != 0 (meaning not found); otherwise if the view's
+# pixel height over width (viewport+0x18c / +0x188) is under 0.55, pitch -= 0.33 x the preset's AngleX.
+# At 640x448 only the horizontal split's 640x224 (0.35) is under it: full screen is 0.7, the vertical
+# split's 320x448 is 1.4. So it is the 4:3 horizontal split's and nothing else's.
+#
+# What two views cut back.
+world_load                  boot 0x00205c40 two views (mode != 0) in a free area (league 2) loads the
+#                                           track as "%s_SS" (0x0042def0): Tracks\freeNN_ss.res + _ss_2.res.
+#                                           free06_ss against free06: no rut meshes (56) or rut texture,
+#                                           no crow and its animation, no loop_01.vue, no free06_detail.pst,
+#                                           its own terrain .trn and a smaller .scn (99,368 bytes against
+#                                           126,286, so fewer props). Supercross and nationals have no _ss
+shadow_ranges               boot 0x00208700 players < 2: shadow_set_range(100, 40); >= 2: (65, 10)
+shadow_set_range            boot 0x00250c60 (dist, fade): stores dist^2 and (dist - fade)^2 — 1P draws
+#                                           shadows to 100 ft, fading from 60; 2P to 65, fading from 55.
+#                                           shadows.res, one terrainShadowReceiver%d per racer, up to 8
+# The vehicle models' "_ss" skins (biplane_ss, Kiowa_ss, buggy_ss, ...) are picked by vehicle_factory's
+# skin index (R8, above); whether two views are what picks them was not read.
+#
+# Pads and riders.
+spawn_racers                boot 0x00207b20 (world, humans): humans first (player 0x6c8 bytes, ctor
+#                                           0x00369b00, vtable 0x0045bda0), each init'ed through vtable
+#                                           +0xb8 with kind 1 and pad index i; AI after with pad -1,
+#                                           NumberOfRacers - humans of them, their skill band from
+#                                           event+0x117. player+0x6b0 racer index, +0x6b4 the profile
+#                                           settings+0x10[i]
+player_init                 boot 0x0025d810 (player, kind, a2, pad, f12 0.3) (Player.cpp; vtable +0xb8
+#                                           is 0x00369bb0, a jump to it): +0x34 = kind; pad >= 0 binds
+#                                           input device i: +0x68 = input_mgr+0xc+i*4, +0x6c = +0x14+i*4,
+#                                           and builds the rumble objects. So human i is pad i, fixed
+# freeride_racer_count (S14, 0x002b0a20): NumberOfRacers = 4 with one player, else the player count —
+# a two-player freeride has no AI riders. A race keeps its AI.
+scene_info_read             boot 0x001a6f50 (out, file) [SceneInfo] DefaultStartPosition /
+#                                           DefaultStartDirection into out, out+0x10 (one per scene;
+#                                           sx01: 101.49,90.12,458.48 facing +z). Where the second rider
+#                                           is put relative to it, or on a gate, was not found
+scene_gates_read            boot 0x002af2e0 the scene's Funnel_Up / Funnel_Down / DropGate / LowerGate /
+#                                           RaiseGate sections into scene+0xb0/+0xac/+0xb4/+0xb8/+0xbc;
+#                                           no per-lane start positions in it
+#
+# The HUD. ui_load (0x0022a5a0) reads a layer's Viewport key as a mask: viewport_1 1, _2 2, _3 4, _4 8,
+# all 0xf, last/full 0x10 (the default). No in-game layer on the disc sets it: each player's HUD is a
+# layer of its own in full-screen coordinates. Layout sections are "%s %s %s Layouts" (language, video
+# mode, aspect). mxingame.lod groups: SinglePlayer, Ghost, MultiplayerVertical, MultiplayerHorizontal,
+# Freestyle*, FastLapAttack*. Per player (…1 and …2): InfoTextOverlay; RacingOverlays (Time, Lead, Lap,
+# Position, CountdownBoard, OffTrackCountdown/Warning, Best Lap, WhiteFlag, CheckerFlag);
+# StuntScoreOverlays (Score, Stunt, Stunt Combo); Speedometer (PreloadMeter, analog, digital); in
+# freestyle FreestyleOverlays, Radar, ActivityStartMenu, InfoDialog, PointList. Shared: one RacingMap
+# (Vertical/Horizontal), Alert, DebugOverlays, SplitScreenSeparator (splitscreenseparator.lyt, X 629
+# Y 27), HitLights (Player1..4HitLight), FreestyleFullScreenInfoDialog. Two-player groups drop
+# RaceLeagueFinalStandingsMenu, Demo and the ghost layers. Strings: RacingOverlaysHorizontal%d
+# 0x004354b0, RacingOverlaysVertical%d 0x00435500, Player%dHitLight 0x004403a0.
+#
+# Two riders touching. Nothing two-player about it: it is the same contact clause S37 ported
+# (air::hit_wreck), and AI riders meet it too. A record's sweep writes each actor it hits twice:
+collision_record_collide    boot 0x002708a0 (above, S37) after the terrain rays it runs the ray object's
+#                                           actor query (0x0011a150, or 0x0011a9d0 with record+0x10c set)
+#                                           and walks its hits (+0x6c: count +0x8c, rays +0x90, normals
+#                                           +0x94, points +0x98, hit +0x9c whose +0x80 is the other
+#                                           actor's record): an own entry (kind 0, other = theirs) and,
+#                                           when it is an actor, a mirrored one (kind 1, other = ours)
+#                                           into their record; both get +0x40/+0x44/+0x4c = 1
+collision_sphere_collide    boot 0x00272ce0 the same two writes for a sphere-bodied record (vtable
+#                                           0x004549ec), from the rigid body at +0x210
+# The wreck test then reads only the own entries: the head ray's hit on a rider whose chassis is more
+# than JoustWreckHeight (2.5 on race250p/race250a/pro250p) above ours is reason 7 for us, thrown with
+# their velocity — the rider underneath goes down, the one on top rides on. The mirrored entry only
+# tells the other bike it was touched.
