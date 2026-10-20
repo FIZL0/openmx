@@ -25,7 +25,8 @@
 
 use crate::biplane::{Body, unturn};
 use crate::camera::CurveTable;
-use crate::chassis::turn;
+use crate::chassis::{self, Mat3, turn};
+use crate::math::Mat4;
 use crate::phy::Ini;
 use crate::world::World;
 use ps2_float::fpu::{self, Acc};
@@ -226,6 +227,69 @@ impl Contact {
         let arm = unturn(body.quat, a);
         let flip = |v: Vf| Vf::new(fpu::neg(v.x()), fpu::neg(v.y()), fpu::neg(v.z()), v.w());
         impulse(body, arm, flip(corr), flip(self.dv), curve);
+    }
+}
+
+/// **The bike box**: what holds the main bone on the bike while the rider is riding it.
+///
+/// The constraint is a box in a frame: the bone's centre is taken into the frame, held inside
+/// `centre ± half` axis by axis, and taken back out. An axis it was held on also loses its velocity
+/// along that axis, in the frame. The rider body actor points the frame at the bike's drawn
+/// transform and `carried` at the bike's velocity (the captured `bike_vel`), which the bone's
+/// velocity is measured against so that a bone riding along with the bike is not stopped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BikeBox {
+    /// The frame the box is in: rows 0-2 its axes, row 3 its origin.
+    pub frame: Mat4,
+    /// The box's centre in that frame, and its half-size on each axis.
+    pub centre: Vf,
+    pub half: Vf,
+    /// The frame's own velocity, when it moves. `None` is the constraint's own still frame.
+    pub carried: Option<Vf>,
+}
+
+impl BikeBox {
+    /// **The solve**, on a bike box that is `on`. A disabled body is left alone.
+    pub fn hold(&self, on: bool, body: &mut Body) {
+        if !on || !body.enabled {
+            return;
+        }
+        let axes = Mat3::new(self.frame.0[0], self.frame.0[1], self.frame.0[2]);
+        let origin = self.frame.0[3];
+        let vel = match self.carried {
+            Some(c) => body.velocity.merge(Dest::XYZ, body.velocity.sub(c)),
+            None => body.velocity,
+        };
+        let p = body.position;
+        let p = chassis::unrotate(&axes, p.merge(Dest::XYZ, p.sub(origin)));
+        let mut p = p.merge(Dest::XYZ, p.sub(self.centre));
+        let mut v = chassis::unrotate(&axes, vel);
+        for (i, f) in [Field::X, Field::Y, Field::Z].into_iter().enumerate() {
+            let h = self.half.lane(f);
+            let at = p.lane(f);
+            let held = if !(F(at) <= F(h)) {
+                Some(h)
+            } else if F(at) < F(fpu::neg(h)) {
+                Some(fpu::neg(h))
+            } else {
+                None
+            };
+            if let Some(h) = held {
+                p[i] = h;
+                v[i] = 0.0;
+            }
+        }
+        let p = p.merge(Dest::XYZ, p.add(self.centre));
+        // Back out: the origin (plus `vf0.x`, a zero) first, then the three axes.
+        let acc = origin.add(Vf::VF0.bc(Field::X));
+        let acc = Vf::madd(acc, axes.rows[0], p.bc(Field::X));
+        let acc = Vf::madd(acc, axes.rows[1], p.bc(Field::Y));
+        body.position = p.merge(Dest::XYZ, Vf::madd(acc, axes.rows[2], p.bc(Field::Z)));
+        let v = chassis::rotate(&axes, v);
+        body.velocity = match self.carried {
+            Some(c) => v.merge(Dest::XYZ, v.add(c)),
+            None => v,
+        };
     }
 }
 

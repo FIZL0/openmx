@@ -2483,6 +2483,18 @@ bone_collision_impulse boot 0x001f6860 (this, arm*, shift*, kick*) the lever imp
 bone_collision_sweep boot 0x001f7400 (this) the segment pos - vel*(+0x28) .. pos; a hit is point
 #                                    rec+0x30, normal rec+0x20, and sets scene and swept
 collider_set_position boot 0x001f0940 (collider, vec4*, 0) the sphere collider stood at the bone
+bike_box_solve boot 0x001f5b40 (this) the type-4 constraint's solve (vtable 0x00451dd0 +0x18), the
+#                             rider body actor's +0x5f8 on main bone 0 (+0x9c, the body). +0x4 on;
+#                             +0x14 another actor's transform (0 live; not ported). With +0x60 frame
+#                             mat4*, +0x90 centre*, +0x94 half*, +0x98 carried velocity* all set (live:
+#                             actor +0x580 drawn bike transform, +0x540, +0x550, +0x530 bike_vel) the
+#                             bone is held in centre +- half in that frame, relative to the carried
+#                             velocity; a null +0x98 there reads its velocity from address 0 (not
+#                             ported). Any of the first three null: the record's own frame +0x20..+0x5c,
+#                             centre +0x70, half +0x80, no carried velocity. Each axis: !(p <= h) -> h,
+#                             else p < -h -> -h, and that axis' local velocity zeroed. Live: centre
+#                             (0, 4.3, -1.5), half (0.45, 0.6, 1.75) -- not mrider.phy's [Bike
+#                             Constraint] BoxPosition/BoxSize (0,1.9,-0.25 / 0.5,1.75,2.5)
 # P22 -- what the captured bike_vel is, and R6's two readings of it.
 # rider_body_mode (boot 0x0024c7e0, above) also writes the owner's +0x530 -- the type-4 actor record at
 #   owner+0x400, its +0x130, which is what `./kit record` captures as bike_vel -- as the request

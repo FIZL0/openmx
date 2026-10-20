@@ -9,13 +9,16 @@
 //!    contacts and sweep hits. The ground query, the scene's two collide calls and the sweep's
 //!    segment setters are hooked: the hooks answer what the case generated and log what they were
 //!    asked, and the port's [`Terrain`] and [`Scene`] answer the same and log the same. The push-out
-//!    and the impulse run for real on both sides.
+//!    and the impulse run for real on both sides;
+//! 3. **the bike box**, over generated frames, boxes, carried velocities and bones in and out of the
+//!    box, on both of its frames: the actor's moving one and the constraint's own.
 
 use game_sim::archive::{Psr, Res};
 use game_sim::biplane::Body;
 use game_sim::camera::{CURVE_ENTRIES, CurveTable};
 use game_sim::collide::{Bundle, Record};
-use game_sim::ragdoll_contact::{Contact, SWEEP_BACK, Scene, Sphere, Terrain};
+use game_sim::math::Mat4;
+use game_sim::ragdoll_contact::{BikeBox, Contact, SWEEP_BACK, Scene, Sphere, Terrain};
 use game_sim::world::World;
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
@@ -548,4 +551,160 @@ fn the_solve_matches_the_original() {
     }
     eprintln!("{seen:?}");
     assert!(seen.ground > 2000 && seen.scene > 1000 && seen.swept > 1000 && seen.off > 300, "{seen:?}");
+}
+
+/// The bike box's fields (research/oracle.txt, S52).
+mod box_at {
+    pub const ON: u32 = 0x04;
+    pub const OTHER: u32 = 0x14;
+    pub const FRAME: u32 = 0x20;
+    pub const CENTRE: u32 = 0x70;
+    pub const HALF: u32 = 0x80;
+    pub const FRAME_AT: u32 = 0x60;
+    pub const CENTRE_AT: u32 = 0x90;
+    pub const HALF_AT: u32 = 0x94;
+    pub const CARRIED_AT: u32 = 0x98;
+    pub const BODY: u32 = 0x9c;
+}
+
+/// A rotation's three rows out of a unit quaternion, and an origin.
+fn frame(pick: &mut Pick, origin: Vf) -> Mat4 {
+    let q = pick.quat();
+    let (x, y, z, w) = (q.x(), q.y(), q.z(), q.w());
+    let mut junk = || if pick.chance(2) { 0.0 } else { pick.float(2.0) };
+    Mat4([
+        Vf::new(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w), junk()),
+        Vf::new(2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w), junk()),
+        Vf::new(2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y), junk()),
+        origin,
+    ])
+}
+
+#[test]
+fn the_bike_box_matches_the_original() {
+    let Some(mut ee) = state() else { return };
+    let solve = addr("bike_box_solve").unwrap();
+    let r = ee.u32_at(ACTOR + 0x5f8);
+    assert_eq!(ee.u32_at(r), 4, "the bike box is a type-4 constraint");
+    assert_eq!(ee.u32_at(ee.u32_at(r + 0x10) + 0x18), solve);
+    assert_eq!(ee.u32_at(r + box_at::OTHER), 0);
+    let b = ee.u32_at(r + box_at::BODY);
+    assert_eq!(b, bone_body(&ee, 0), "the bike box holds the main bone");
+    // The actor's moving frame, as the game wired it.
+    let live = [box_at::FRAME_AT, box_at::CENTRE_AT, box_at::HALF_AT, box_at::CARRIED_AT].map(|k| ee.u32_at(r + k));
+    assert_eq!(live, [0x580, 0x540, 0x550, 0x530].map(|k| ACTOR + k));
+
+    let mut pick = Pick(0xb1_6e_b0_c5_52);
+    let (mut held, mut free, mut moving, mut still, mut off) = (0, 0, 0, 0, 0);
+    for case in 0..CASES {
+        let on = !pick.chance(30);
+        let enabled = !pick.chance(30);
+        let carried = !pick.chance(3);
+        ee.set_u32(r + box_at::ON, u32::from(on));
+        ee.set_u32(b + body_at::ENABLED, u32::from(enabled));
+
+        // Now and then a square frame on whole numbers and a box in sixteenths, with the bone exactly
+        // on one face: the frame then rounds nothing, so the two compares meet their equal case.
+        let face = pick.chance(6);
+        let sixteenths = |pick: &mut Pick, n: u64| (pick.upto(2 * n + 1) as f32 - n as f32) / 16.0;
+        let origin = if face {
+            Vf::new(pick.upto(6000) as f32, pick.upto(260) as f32, pick.upto(6000) as f32, 1.0)
+        } else {
+            Vf::new(pick.range(10.0, 6000.0), pick.range(-20.0, 260.0), pick.range(10.0, 6000.0), 1.0)
+        };
+        let m = if face {
+            Mat4([Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0), origin])
+        } else {
+            frame(&mut pick, origin)
+        };
+        let (centre, half) = if face {
+            let c = Vf::new(sixteenths(&mut pick, 48), sixteenths(&mut pick, 48), sixteenths(&mut pick, 48), 1.0);
+            let h = Vf::new(sixteenths(&mut pick, 32).abs(), sixteenths(&mut pick, 32).abs(), sixteenths(&mut pick, 32).abs(), 1.0);
+            (c, h)
+        } else if pick.chance(4) {
+            (Vf::new(0.0, 4.3, -1.5, 1.0), Vf::new(0.45, 0.6, 1.75, 1.0))
+        } else {
+            (pick.vector(3.0), Vf::new(pick.positive(1.0), pick.positive(1.0), pick.positive(1.5), pick.float(2.0)))
+        };
+        // The bone: somewhere about the box, often inside it and often a little way out of it.
+        let local = |pick: &mut Pick, c: f32, h: f32| c + h.abs() * pick.range(-1.6, 1.6) + pick.float(0.05);
+        let mut l = [local(&mut pick, centre.x(), half.x()), local(&mut pick, centre.y(), half.y()), local(&mut pick, centre.z(), half.z())];
+        if face {
+            let k = pick.upto(3) as usize;
+            l[k] = if pick.chance(2) { centre[k] + half[k] } else { centre[k] - half[k] };
+            for k in 0..3 {
+                if pick.chance(2) {
+                    l[k] = centre[k] + sixteenths(&mut pick, 40);
+                }
+            }
+        }
+        let row = |k: usize| m.0[k];
+        let pos = Vf::new(
+            origin.x() + row(0).x() * l[0] + row(1).x() * l[1] + row(2).x() * l[2],
+            origin.y() + row(0).y() * l[0] + row(1).y() * l[1] + row(2).y() * l[2],
+            origin.z() + row(0).z() * l[0] + row(1).z() * l[1] + row(2).z() * l[2],
+            pick.float(2.0),
+        );
+        let vel = pick.vector(60.0);
+        let bike_vel = pick.vector(60.0);
+        set_quad(&mut ee, b + body_at::POSITION, pos);
+        set_quad(&mut ee, b + body_at::VELOCITY, vel);
+
+        // Either the actor's frame through the four pointers, or the constraint's own.
+        if carried {
+            for (k, v) in m.0.iter().enumerate() {
+                set_quad(&mut ee, ACTOR + 0x580 + 0x10 * k as u32, *v);
+            }
+            set_quad(&mut ee, ACTOR + 0x540, centre);
+            set_quad(&mut ee, ACTOR + 0x550, half);
+            set_quad(&mut ee, ACTOR + 0x530, bike_vel);
+            for (k, a) in [box_at::FRAME_AT, box_at::CENTRE_AT, box_at::HALF_AT, box_at::CARRIED_AT].iter().zip(live) {
+                ee.set_u32(r + k, a);
+            }
+        } else {
+            for (k, v) in m.0.iter().enumerate() {
+                set_quad(&mut ee, r + box_at::FRAME + 0x10 * k as u32, *v);
+            }
+            set_quad(&mut ee, r + box_at::CENTRE, centre);
+            set_quad(&mut ee, r + box_at::HALF, half);
+            // Any of the first three pointers missing sends it to its own frame.
+            let gone = [box_at::FRAME_AT, box_at::CENTRE_AT, box_at::HALF_AT][pick.upto(3) as usize];
+            for (k, a) in [box_at::FRAME_AT, box_at::CENTRE_AT, box_at::HALF_AT, box_at::CARRIED_AT].iter().zip(live) {
+                ee.set_u32(r + k, if *k == gone || (pick.chance(2) && *k != box_at::CARRIED_AT) { 0 } else { a });
+            }
+            ee.set_u32(r + gone, 0);
+        }
+
+        let bike_box = BikeBox { frame: m, centre, half, carried: carried.then_some(bike_vel) };
+        let mut body = Body { enabled, position: pos, velocity: vel, ..Body::default() };
+        bike_box.hold(on, &mut body);
+
+        ee.call(solve, &[u64::from(r)], &[], BUDGET);
+        let ctx = || format!("case {case}: on {on}, enabled {enabled}, carried {carried}, local {l:?}, half {half:?}");
+        assert_eq!(bits(body.position), bits(quad(&ee, b + body_at::POSITION)), "{}: position", ctx());
+        assert_eq!(bits(body.velocity), bits(quad(&ee, b + body_at::VELOCITY)), "{}: velocity", ctx());
+
+        if !on || !enabled {
+            off += 1;
+        } else {
+            if carried {
+                moving += 1;
+            } else {
+                still += 1;
+            }
+            // Out of the box on some axis, as the case placed it (a bone right on a face may go
+            // either way through the frame's rounding, and is counted as the case meant it).
+            let out = (0..3).any(|k| {
+                let d = l[k] - centre[k];
+                !(d <= half[k]) || d < -half[k]
+            });
+            if out {
+                held += 1;
+            } else {
+                free += 1;
+            }
+        }
+    }
+    eprintln!("bike box: {held} held, {free} free, {moving} moving, {still} still, {off} off");
+    assert!(held > 3000 && free > 300 && moving > 3000 && still > 1500 && off > 300, "{held} {free} {moving} {still} {off}");
 }
