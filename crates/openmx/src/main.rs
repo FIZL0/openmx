@@ -118,6 +118,7 @@
 
 #![forbid(unsafe_code)]
 
+mod chase;
 mod ground;
 mod hud;
 mod moment;
@@ -138,7 +139,7 @@ use game_render::scene::Vehicle;
 use game_render::vehicle::{Chassis, Drive, params as vehicle_params};
 use game_render::world::{Assets, Camera, Lighting, draw_scene, vertical_fov};
 use game_render::{ini, png, scene as view};
-use game_sim::camera::{Preset, Race, Ridden, Switches, Target};
+use game_sim::camera::{Preset, Race, Switches};
 use game_sim::input::{Control, PADS, Report};
 use game_sim::phy::{self, Phy};
 use game_sim::replay::{Head, PadTape, Recorder, TickPhase};
@@ -1328,36 +1329,10 @@ fn run() -> Result<(), String> {
                 hud.note_camera(&follow.cam.preset().name);
             }
         }
-        let (forward, up) = world.sim.rider.ride.axes();
-        let bike_pos = world.sim.rider.ride.position();
-        // The grounded flag and the speed are read off the actor by the frame rather than worked
-        // out from the velocity; the ride's own two fields are what the actor's are written from.
-        let rider = match (world.garage.up, &world.garage.plane) {
-            // The plane, as the camera's target: where it is, its nose, world up, and no lean — a
-            // plane has no rider's stick to lean on. S34 gives it an attitude and a speed.
-            (Kind::Biplane, Some(plane)) => Ridden {
-                target: Target {
-                    body_point: plane.at,
-                    forward: plane.facing,
-                    up: Vf::new(0.0, 1.0, 0.0, 0.0),
-                    vel: plane.vel,
-                    lean: F::ZERO,
-                },
-                grounded: plane.on_ground(),
-                speed: plane.speed(),
-            },
-            _ => Ridden {
-                target: Target {
-                    body_point: bike_pos,
-                    forward,
-                    up,
-                    vel: world.sim.rider.ride.chassis.vel,
-                    lean: world.sim.rider.ride.held.lean.0,
-                },
-                grounded: world.sim.rider.ride.air.on_ground,
-                speed: world.sim.rider.ride.chassis.speed,
-            },
-        };
+        // The camera's target block, as the original's vehicle fills it once a frame (`chase.rs`).
+        // The airborne flag is the one the camera heads along the velocity on: in the air the
+        // backflip's upside-down forward row never reaches it (P34).
+        let rider = chase::ridden(&world.garage, &world.sim.rider.ride);
         let view = if presets == 0 {
             None
         } else {

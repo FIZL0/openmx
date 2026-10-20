@@ -1217,12 +1217,13 @@ impl Preset {
 /// viewport's 2.4 feet becomes a floor of ten and four fifths.
 pub const NEAR_CLIP_FLOOR: f32 = 4.5;
 
-/// Above this, and only while the rider is grounded, the heading comes off the velocity instead of
-/// the rider's forward axis — so a slide points the camera where the bike is going, not where it is
-/// facing.
+/// Above this, and only while the rider is in the air, the heading comes off the velocity instead of
+/// the rider's forward axis — so a flip or a whip in the air, which turns the bike's forward row
+/// over, does not turn the camera with it.  (See [`Ridden::airborne`]: on the ground the heading is
+/// the forward row at any speed.)
 const HEADING_FROM_VEL_SPEED: f32 = 20.0;
 
-/// Above this, and only while grounded, the *direction basis* comes off the velocity too. Lower than
+/// Above this, and only while airborne, the *direction basis* comes off the velocity too. Lower than
 /// the heading's cutoff: the two vectors disagree over the band between them.
 const BASIS_FROM_VEL_SPEED: f32 = 5.0;
 
@@ -1260,15 +1261,21 @@ const SHORT_VIEWPORT_PITCH: f32 = 0.33;
 /// What the race camera asks the rider for, beyond the [`Target`] the base class takes.
 ///
 /// The original reads all three off the one actor the camera holds a pointer to: the target rows at
-/// `+0x10`/`+0x30`/`+0x50`, the grounded flag at `+0xb0` and the speed at `+0xb4`. The speed is
+/// `+0x10`/`+0x30`/`+0x50`, the airborne flag at `+0xb0` and the speed at `+0xb4`. The speed is
 /// *read*, not computed — where the base class takes the length of the velocity every frame, this
 /// frame trusts the number the ride code already wrote, and the two are not the same whenever the
 /// ride's own speed is anything but the length of that vector.
 pub struct Ridden {
     /// The rows and the lean, exactly as the base class takes them.
     pub target: Target,
-    /// Is the rider on the ground. Gates both of the "use the velocity" switches.
-    pub grounded: bool,
+    /// Is the rider in the air: *no* wheel touching. Gates both of the "use the velocity" switches.
+    ///
+    /// The original's per-frame target writer stores `+0xb0` as `(on_ground == 0)` — `sltu` then
+    /// `xori 1` on the vehicle's on-ground word, which is the snapshot's copy of "either wheel
+    /// touches" — so the flag is the inverse of [`crate::air::Air::on_ground`]. S24 named it the
+    /// other way round, and a shell that handed it the on-ground flag took the heading off the
+    /// bike's forward row in the air, which a backflip turns upside down (P34).
+    pub airborne: bool,
     /// The rider's speed, off the actor rather than out of the velocity.
     pub speed: F,
 }
@@ -1303,8 +1310,8 @@ pub struct Switches {
 ///
 /// * the follow distance's floor is the near plane times [`NEAR_CLIP_FLOOR`], not the near plane;
 /// * the speed is read off the rider ([`Ridden::speed`]) rather than taken from the velocity, and
-///   the heading and the direction basis swing over to the velocity once the rider is grounded and
-///   fast — so the camera trails a slide;
+///   the heading and the direction basis swing over to the velocity once the rider is airborne and
+///   fast — so the camera follows the jump, not the bike's attitude through it;
 /// * the lean swing does not carry the preset's `CameraSwing` into the look-at (the aim still
 ///   applies it to the yaw);
 /// * reverse is one sign test on the velocity along the heading, which zeroes the velocity and the
@@ -1518,10 +1525,10 @@ impl Race {
         }
         let target_point = add3(t.body_point, offset);
 
-        // The heading: the velocity once the rider is grounded and fast, the forward axis otherwise;
+        // The heading: the velocity once the rider is airborne and fast, the forward axis otherwise;
         // flattened and normalised either way. `y` is zeroed with an integer store and `w` comes
         // through from whichever row was picked.
-        let from = if rider.grounded && rider.speed > HEADING_FROM_VEL_SPEED { t.vel } else { t.forward };
+        let from = if rider.airborne && rider.speed > HEADING_FROM_VEL_SPEED { t.vel } else { t.forward };
         let heading = normalize(Vf::new(from.x(), 0.0, from.z(), from.w()));
 
         let mut vel = t.vel;
@@ -1550,7 +1557,7 @@ impl Race {
         // The direction basis: the velocity again, but over a lower speed and only while it has a
         // horizontal part worth flattening. `w` is a literal one here, where the heading's came
         // through from the row.
-        let steer = rider.grounded
+        let steer = rider.airborne
             && !(speed <= BASIS_FROM_VEL_SPEED)
             && !((speed - F(vel.y()).abs()).abs() <= BASIS_DEGENERATE);
         let from = if steer { vel } else { heading };

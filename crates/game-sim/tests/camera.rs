@@ -1545,10 +1545,10 @@ fn poke_race(ee: &mut Ee, r: &Race) {
 }
 
 /// The rider, as the derived frame sees it: the base's five fields plus the two the derived class
-/// reads off the actor instead of working out — the grounded flag and the speed.
+/// reads off the actor instead of working out — the airborne flag and the speed.
 fn poke_rider(ee: &mut Ee, r: &Ridden) {
     poke_target(ee, &r.target);
-    ee.set_u32(ACTOR + 0xb0, r.grounded as u32);
+    ee.set_u32(ACTOR + 0xb0, r.airborne as u32);
     put_f(ee, ACTOR + 0xb4, r.speed);
 }
 
@@ -1587,7 +1587,7 @@ fn ridden(g: &mut Gen) -> Ridden {
         5 => g.f(19.0, 21.0),    // the heading's cutoff
         _ => g.f(0.0, 40.0),
     };
-    Ridden { target, grounded: !g.one_in(4), speed }
+    Ridden { target, airborne: !g.one_in(4), speed }
 }
 
 /// The derived aim: the base's yaw, a pitch with no reverse term in it, and the two trims the base
@@ -1918,7 +1918,7 @@ fn one_race_frame_is_the_games_own() {
             "case {case}: the point the ground probe was asked about"
         );
 
-        if rider.grounded && rider.speed > 20.0 {
+        if rider.airborne && rider.speed > 20.0 {
             from_vel += 1;
         }
         if switches.no_look_ahead || rider.speed < 0.0001 {
@@ -1929,7 +1929,7 @@ fn one_race_frame_is_the_games_own() {
             // The sign of the same dot product the frame takes, worked out on the host from the
             // unflattened row: normalising and zeroing `y` cannot change which side of zero it is
             // on, so this counts the arm that throws the velocity away without re-deriving it.
-            let src = if rider.grounded && rider.speed > 20.0 {
+            let src = if rider.airborne && rider.speed > 20.0 {
                 rider.target.vel
             } else {
                 rider.target.forward

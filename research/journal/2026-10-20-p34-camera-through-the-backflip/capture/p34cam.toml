@@ -1,0 +1,80 @@
+# P34: the original's chase camera through the human's backflips in recording2.
+# The render camera (V2's render_camera) and the rider's camera target block (+0xdd0, P34).
+[watch]
+name        = "p34cam"
+description = "the chase camera and its target through recording2's backflips"
+every       = 1          # one row a frame
+frames      = 1070
+
+[setup]
+state  = 8
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "rider_ctl_src"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+required = true
+
+[[field]]
+name = "on_ground"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x574"
+type = "u32"
+
+[[field]]
+name = "flip_on"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4fc"
+type = "u32"
+
+# the camera's target block, as the vehicle writes it once a frame
+[[field]]
+name = "tgt_point"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xde0"
+type = "f32x4"
+
+[[field]]
+name = "tgt_fwd"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe00"
+type = "f32x4"
+
+[[field]]
+name = "tgt_up"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe10"
+type = "f32x4"
+
+[[field]]
+name = "tgt_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe20"
+type = "f32x4"
+
+[[field]]
+name = "tgt_flag"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe80"
+type = "u32"
+
+[[field]]
+name = "tgt_speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe84"
+type = "f32"
+
+# the frame on screen: rows x/y/z, the eye at +0x30
+[[field]]
+name = "render_cam"
+addr = "0x0046a540"
+type = "mat4"
