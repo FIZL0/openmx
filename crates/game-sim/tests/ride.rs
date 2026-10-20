@@ -22,7 +22,9 @@
 //!
 //! The bike is a `.phy` written in this file rather than the disc's, because the disc's cannot be
 //! committed (`AGENT.md`). It is a plausible 250 cc four-stroke and nothing more: no number in it is
-//! claimed to be the game's, and no test here asserts a *value* the parameters decide.
+//! claimed to be the game's, and no test here asserts a *value* the parameters decide. The
+//! exceptions are the race125p tests after section (9) and section (11), which read the disc's own
+//! bike where the disc is present and skip where it is not.
 
 use game_sim::collide::{Bundle, Record};
 use game_sim::hash::{self, Dump};
@@ -3275,4 +3277,347 @@ fn race125p_brakes_like_the_original() {
         (stop - CAPTURED_BRAKE_STOP).abs() <= 0.15 * CAPTURED_BRAKE_STOP,
         "race125p takes {stop:.2} s from {BRAKE_FROM} ft/s to under 1; the original {CAPTURED_BRAKE_STOP} s"
     );
+}
+
+
+// ---------------------------------------------------------------------------------------------------
+// (11) the minute on the disc's own bike
+// ---------------------------------------------------------------------------------------------------
+//
+// Section (7)'s minute rides this directory's hand-written bike, and P15 raised its legs as far as that
+// bike carries them — which is short of the original at every leg: its 0 to 60 takes 7.7 s against the
+// original's 2.2 to 3.4, its turn comes round at 0.24 rad/s against 0.6 to 2.5. No calibration of the
+// fixture closes that, because the fixture is not the bike the human rode. This one is: the disc's own
+// `Bike\Race125P.phy` (D7), read by the port's loader, with its wheels where the `125_faisst` model
+// hangs them, the way `tests/replay.rs`'s acceptance fixture builds it — over a flat floor, at the
+// original's 30 Hz tick, judged against the bands P15 measured off the human's two rides.
+//
+// **It fails today, and it is meant to.** As P26 first rode it, the launch is inside the original's
+// bands at every mark (0.5, 1 and 2 s, 0 to 30 and 0 to 60) and so is the brake's first 0.4 s, but the
+// drive pulls a fifth to a quarter too hard in every 20 ft/s band, the bike tops out at 97.6 against the
+// original's 75.8 to 79.9, it coasts down at 9.4 ft/s² against 3.4 to 4.6, and a held turn keeps two
+// thirds of its speed where the original's kept 0.85 — the drive (P20's numbers), top-speed (P21),
+// brake (P23) and turn (P24) tasks. The test is `#[ignore]`d with that reason and comes off it when they
+// land; until then `./kit check -- -p game-sim --test ride -- --ignored --nocapture
+// the_minute_on_the_discs_bike` prints every leg against its band. It skips, with a line, where the
+// disc is not in the checkout.
+
+/// The original's tick: the captures' own `dt` column, which is what the bands below were measured at.
+const DISC_DT: F = F(0.03333);
+
+/// What a capture's `bike_vel` column holds, as a fraction of the chassis' own velocity: the rider
+/// body's mode method writes the actor's velocity as the chassis' scaled by 0.8 (one `vmulx` by the
+/// literal 0.8, read off the binary for this task), and the capture records the actor's. Every speed
+/// band below is in the capture's units, so the port's speed is put in them before it is compared.
+const BIKE_VEL_SCALE: f32 = 0.8;
+
+/// The bike a freeride boot loads (D7) and the model the human's wheels hang off (`tests/replay.rs`).
+const DISC_PHY: &str = "race125p.phy";
+const DISC_MODEL: &str = "125_faisst";
+
+/// The user's own `MX.PSR`, opened the way `tests/replay.rs`'s `Disc` opens it — copied rather than
+/// shared because a test file here reads on its own.
+struct DiscFile {
+    file: std::fs::File,
+    psr: game_sim::archive::Psr,
+}
+
+impl DiscFile {
+    fn open() -> Option<DiscFile> {
+        let at = private_dir("iso").join("MX.PSR");
+        let Ok(mut file) = std::fs::File::open(&at) else {
+            println!("no {} — `./kit extract MX.PSR` writes it; the disc's minute is unchecked", at.display());
+            return None;
+        };
+        let mut front = vec![0u8; 64 << 10];
+        std::io::Read::read_exact(&mut file, &mut front).expect("the front of MX.PSR");
+        let psr = game_sim::archive::Psr::parse(&front).expect("MX.PSR's directory");
+        Some(DiscFile { file, psr })
+    }
+
+    fn member(&mut self, name: &str) -> Option<Vec<u8>> {
+        let e = self.psr.find(name)?;
+        std::io::Seek::seek(&mut self.file, std::io::SeekFrom::Start(e.at)).expect("seek");
+        let mut bytes = vec![0u8; e.size as usize];
+        std::io::Read::read_exact(&mut self.file, &mut bytes).expect("read");
+        Some(bytes)
+    }
+
+    /// Every `Bike\*.res`'s member whose name ends in `leaf`, in the directory's order, with the
+    /// archive it came out of.
+    fn bike_members(&mut self, leaf: &str, archive_has: &str) -> Vec<(String, Vec<u8>)> {
+        let archives: Vec<String> = self
+            .psr
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|n| {
+                let n = n.to_ascii_lowercase();
+                n.starts_with("bike\\") && n.ends_with(".res") && n.contains(archive_has)
+            })
+            .collect();
+        let want = leaf.to_ascii_lowercase();
+        let mut out = Vec::new();
+        for archive in archives {
+            let Some(bytes) = self.member(&archive) else { continue };
+            let Ok(res) = game_sim::archive::Res::parse(&bytes) else { continue };
+            let found = res.entries.iter().find(|e| {
+                let name = e.name.to_ascii_lowercase();
+                name == want || name.ends_with(&format!("\\{want}"))
+            });
+            if let Some(member) = found.and_then(|e| res.read(&bytes, e).ok()) {
+                out.push((archive, member));
+            }
+        }
+        out
+    }
+}
+
+/// The disc's bike and its wheels: `Race125P.phy` out of the first bike archive that has it, and the
+/// `TireFront`/`TireRear` nodes of the `125_faisst`'s `bike.psg` placed in the model's root frame in
+/// the original's VU0 order — `tests/replay.rs`'s `the_bike_the_human_rode` and
+/// `the_wheels_the_human_rode`, which prove both against the recording's own save state.
+fn the_discs_bike(disc: &mut DiscFile, tables: &rider::Tables) -> Option<(Phy, (Vf, Vf))> {
+    let Some((archive, bytes)) = disc.bike_members(DISC_PHY, "").into_iter().next() else {
+        println!("no {DISC_PHY} in any Bike\\*.res on this disc");
+        return None;
+    };
+    println!("the bike: {DISC_PHY} out of {archive}");
+    let p = Phy::read_bytes(&bytes, &tables.ride.curve);
+    let wheels = disc.bike_members("bike.psg", DISC_MODEL).into_iter().find_map(|(_, psg)| {
+        let model = game_render::psg::Model::parse(&psg).ok()?;
+        let node = |name: &str| -> Option<Vf> {
+            let i = model.nodes.iter().position(|n| n.name == name)?;
+            let mut root = i;
+            while let Some(up) = model.nodes[root].parent {
+                root = up;
+            }
+            Some(Vf(model.place_in(i, root)))
+        };
+        Some((node("TireFront")?, node("TireRear")?))
+    });
+    let Some(wheels) = wheels else {
+        println!("no {DISC_MODEL} model with TireFront/TireRear nodes on this disc");
+        return None;
+    };
+    Some((p, wheels))
+}
+
+/// One leg of the disc's minute: its name, the hands, and how long — a fixed number of ticks, or
+/// until the bike is going `until` ft/s in the capture's units, whichever comes first.
+struct DiscLeg {
+    name: &'static str,
+    ticks: usize,
+    until: Option<f32>,
+    hands: Controls,
+}
+
+/// What one tick of the disc's minute came to. `speed` is in the capture's units ([`BIKE_VEL_SCALE`]).
+struct DiscSeat {
+    speed: f32,
+    heading: f32,
+    up_y: f32,
+    on_ground: bool,
+    wreck: bool,
+}
+
+/// The legs. Every measurement starts from something the original's own rides did:
+///
+/// * a standing launch, held flat out for twenty seconds — the launch, the 0 to 30 and 0 to 60, the
+///   acceleration in each 20 ft/s band, and where the speed tops out;
+/// * three seconds off the gas — the coasting decel;
+/// * the brake, from there, and a standstill;
+/// * up to 50 ft/s and a held right, two seconds of it with the gas pinned — the turn rate and the speed
+///   the turn keeps, entered at the speed the original's one long held turn was (61.4 there; 50 is the
+///   round number inside the original's 10 to 57 ft/s turn speeds);
+/// * the brake, a standstill, and the same to the left.
+fn disc_minute() -> Vec<DiscLeg> {
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let right = Controls { stick: (F::ONE, F::ZERO), ..gas.clone() };
+    let left = Controls { stick: (F(-1.0), F::ZERO), ..gas.clone() };
+    let brake = Controls { brake: F::ONE, ..Controls::default() };
+    let off = Controls::default();
+    let leg = |name, ticks, until, hands| DiscLeg { name, ticks, until, hands };
+    vec![
+        leg("settling", 90, None, off.clone()),
+        leg("the launch", 600, None, gas.clone()),
+        leg("the coast", 90, None, off.clone()),
+        leg("the brake", 150, None, brake.clone()),
+        leg("stopped", 60, None, off.clone()),
+        leg("up to the right", 300, Some(50.0), gas.clone()),
+        leg("turning right", 60, None, right),
+        leg("braking after the right", 150, None, brake.clone()),
+        leg("stopped after the right", 60, None, off.clone()),
+        leg("up to the left", 300, Some(50.0), gas),
+        leg("turning left", 60, None, left),
+        leg("braking after the left", 150, None, brake),
+        leg("stopped after the left", 60, None, off),
+    ]
+}
+
+/// Ride [`disc_minute`] on `p` over a flat floor, wrecks on, and keep what the rider saw.
+fn ride_the_discs_minute(p: &Phy, wheels: (Vf, Vf), tables: &rider::Tables) -> Vec<(&'static str, Vec<DiscSeat>)> {
+    // Dropped from two feet, so the model's mounts — which hang the wheels higher than the `.phy`'s
+    // own do — start clear of the floor, and the settle takes the drop out before the launch.
+    let mut r = Rider::new(p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let mut world = floor();
+    let mut out = Vec::new();
+    for DiscLeg { name, ticks, until, hands } in disc_minute() {
+        let mut seen = Vec::with_capacity(ticks);
+        for _ in 0..ticks {
+            let frame = r.frame(p, tables, &hands, DISC_DT, &mut world);
+            let m = r.ride.transform();
+            seen.push(DiscSeat {
+                speed: r.ride.chassis.speed.0 * BIKE_VEL_SCALE,
+                heading: f32::atan2(m.0[2].x(), m.0[2].z()),
+                up_y: m.0[1].y(),
+                on_ground: r.ride.air.on_ground,
+                wreck: frame.wreck.is_some(),
+            });
+            if until.is_some_and(|v| seen.last().unwrap().speed >= v) {
+                break;
+            }
+        }
+        out.push((name, seen));
+    }
+    out
+}
+
+/// One of the original's numbers: what it is, the band P15 measured it in, and the port's.
+struct Band {
+    what: &'static str,
+    lo: f32,
+    hi: f32,
+    port: Option<f32>,
+}
+
+/// The seconds into `ticks` that the speed first reaches `v`, if it does.
+fn first_reaches(ticks: &[DiscSeat], v: f32) -> Option<f32> {
+    ticks.iter().position(|t| t.speed >= v).map(|k| (k + 1) as f32 * DISC_DT.0)
+}
+
+/// The mean acceleration from `from` to `to` ft/s, in ft/s², off the first ticks the speed crosses each.
+fn band_accel(ticks: &[DiscSeat], from: f32, to: f32) -> Option<f32> {
+    let a = ticks.iter().position(|t| t.speed >= from)?;
+    let b = ticks.iter().position(|t| t.speed >= to)?;
+    (b > a).then(|| (ticks[b].speed - ticks[a].speed) / ((b - a) as f32 * DISC_DT.0))
+}
+
+/// The turn rate a held stick settles into: the heading's change, tick by tick, from a third of a
+/// second in (past the lean-in, which is where P15 starts the original's and the port's windows) to a
+/// second after that, in rad/s.
+fn held_rate(ticks: &[DiscSeat]) -> Option<f32> {
+    let window = ticks.get(10..=40)?;
+    let turned: f32 = window.windows(2).map(|w| wrap(w[1].heading - w[0].heading)).sum();
+    Some(turned / (30.0 * DISC_DT.0))
+}
+
+/// The speed a held turn keeps: 1.1 s in against the speed it came in at — the length of the
+/// original's one long held turn (P15: 61.4 to 52.4 over 1.1 s, recording2).
+fn kept_through(before: &[DiscSeat], turn: &[DiscSeat]) -> Option<f32> {
+    let entry = before.last()?.speed;
+    Some(turn.get(32)?.speed / entry)
+}
+
+/// The original's bands, beside the port's, for every leg the disc's minute rides.
+///
+/// Where the band comes from, all of it P15's table (`research/journal/2026-10-20-p15-p15-how-it-should-feel`),
+/// in the capture's units, at 30 Hz:
+///
+/// * **the launch** at 0.5, 1 and 2 s, and the 0 to 30 and 0 to 60, are the slowest and quickest of the
+///   original's four standing launches across both rides. P15 drops r1's 5.5 s 0 to 60, which had a
+///   flight in it, so the 0 to 60 band is the task's 2.2 to 3.4;
+/// * **the acceleration** in each 20 ft/s band is the two rides' flat, straight, full-gas figures, ten
+///   per cent either side of the two (two samples are not a spread);
+/// * **the top speed** is the two rides' maxima, ten per cent either side. Both were at the foot of a
+///   long drop with the bike still gaining, so this is the band P15's legs kept, not a terminal speed
+///   anyone has measured (P21);
+/// * **the coast** is the two rides' median flat decel off the gas, ten per cent either side;
+/// * **the brake** is the mean over its first 0.4 s, from r1's one flat brake (56.9 to 51.3 over ticks
+///   1036 to 1048, 14 ft/s², measured off the capture for this task) to r2's one brake on a 0.6
+///   up-slope (66.6 to 48.9 in 0.4 s, 44), ten per cent outside each;
+/// * **the turn rate** is the range of the original's held-stick rates after the lean-in, 0.6 to 2.5,
+///   by magnitude, with the sign the stick's;
+/// * **the speed a turn keeps** is a floor: recording2's held turn kept 0.853 of its speed over 1.1 s,
+///   less ten per cent. The original's turns were not all at full gas, so there is no ceiling.
+fn the_discs_bands(m: &[(&'static str, Vec<DiscSeat>)]) -> Vec<Band> {
+    let leg = |name: &str| -> &[DiscSeat] {
+        &m.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no leg '{name}'")).1
+    };
+    let at = |ticks: &[DiscSeat], s: f32| ticks.get((s / DISC_DT.0).round() as usize - 1).map(|t| t.speed);
+    let launch = leg("the launch");
+    let band = |what, lo, hi, port| Band { what, lo, hi, port };
+    let wide = |what, lo: f32, hi: f32, port| Band { what, lo: lo * 0.9, hi: hi * 1.1, port };
+
+    let coast = leg("the coast");
+    let mut decel: Vec<f32> = coast.windows(2).map(|w| (w[0].speed - w[1].speed) / DISC_DT.0).collect();
+    decel.sort_by(f32::total_cmp);
+    let brake = leg("the brake");
+    let bite = (brake.len() > 12)
+        .then(|| (coast.last().map_or(0.0, |t| t.speed) - brake[11].speed) / (12.0 * DISC_DT.0));
+    let upright: Vec<f32> = launch.iter().filter(|t| t.up_y > 0.9 && t.on_ground).map(|t| t.speed).collect();
+
+    vec![
+        band("launch, 0.5 s (ft/s)", 8.8, 20.2, at(launch, 0.5)),
+        band("launch, 1 s (ft/s)", 19.4, 32.3, at(launch, 1.0)),
+        band("launch, 2 s (ft/s)", 34.2, 56.9, at(launch, 2.0)),
+        band("0 to 30 (s)", 0.93, 1.53, first_reaches(launch, 30.0)),
+        band("0 to 60 (s)", 2.2, 3.4, first_reaches(launch, 60.0)),
+        wide("accel 0-20 (ft/s^2)", 25.3, 25.8, band_accel(launch, 0.0, 20.0)),
+        wide("accel 20-40 (ft/s^2)", 15.9, 22.1, band_accel(launch, 20.0, 40.0)),
+        wide("accel 40-60 (ft/s^2)", 16.4, 17.6, band_accel(launch, 40.0, 60.0)),
+        wide("top speed, upright (ft/s)", 75.78, 79.89, upright.iter().copied().reduce(f32::max)),
+        wide("coasting decel, median (ft/s^2)", 3.4, 4.6, decel.get(decel.len() / 2).copied()),
+        wide("brake, first 0.4 s (ft/s^2)", 14.0, 44.0, bite),
+        band("held right, rate (rad/s)", 0.6, 2.5, held_rate(leg("turning right"))),
+        band("held left, rate (rad/s)", -2.5, -0.6, held_rate(leg("turning left"))),
+        band(
+            "held right, speed kept over 1.1 s",
+            0.853 * 0.9,
+            f32::INFINITY,
+            kept_through(leg("up to the right"), leg("turning right")),
+        ),
+        band(
+            "held left, speed kept over 1.1 s",
+            0.853 * 0.9,
+            f32::INFINITY,
+            kept_through(leg("up to the left"), leg("turning left")),
+        ),
+    ]
+}
+
+/// **The minute on the disc's own bike, against the original's bands.** Every band is checked and the
+/// whole table printed before anything fails, so one run says how far each leg is — the drive, top
+/// speed, brake and turn tasks each read their own line of it.
+#[test]
+#[ignore = "fails until the drive, top-speed (P21), brake (P23) and turn (P24) tasks land: race125p \
+            pulls ~25% over the original in each 20 ft/s band, tops out at 97.6 against 75.8-79.9, \
+            coasts down at twice the original's rate and keeps 0.65 of its speed through a held turn \
+            against 0.85"]
+fn the_minute_on_the_discs_bike() {
+    let Some(mut disc) = DiscFile::open() else { return };
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_discs_bike(&mut disc, &tables) else { return };
+    let m = ride_the_discs_minute(&p, wheels, &tables);
+
+    let mut missed = Vec::new();
+    for b in the_discs_bands(&m) {
+        let ok = b.port.is_some_and(|v| v >= b.lo && v <= b.hi);
+        let port = b.port.map_or("never".to_string(), |v| format!("{v:.3}"));
+        let line = format!("{:<36} original {:>7.3} .. {:<7.3} port {port}", b.what, b.lo, b.hi);
+        println!("{} {line}", if ok { "  " } else { "!!" });
+        if !ok {
+            missed.push(line);
+        }
+    }
+    // The minute is riding, not stunting: nothing in it is a reason for the original to put the rider
+    // down, so a wreck anywhere is a leg the port cannot ride.
+    for (name, ticks) in &m {
+        let down = ticks.iter().filter(|t| t.wreck).count();
+        let flattest = ticks.iter().map(|t| t.up_y).fold(f32::MAX, f32::min);
+        if down > 0 || flattest < 0.5 {
+            missed.push(format!("{name}: {down} wreck ticks, flattest up {flattest:.2}"));
+        }
+    }
+    assert!(missed.is_empty(), "the disc's bike misses the original on:\n{}", missed.join("\n"));
 }
