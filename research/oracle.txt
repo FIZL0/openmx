@@ -3459,6 +3459,46 @@ scene_gates_read            boot 0x002af2e0 the scene's Funnel_Up / Funnel_Down 
 # RaceLeagueFinalStandingsMenu, Demo and the ghost layers. Strings: RacingOverlaysHorizontal%d
 # 0x004354b0, RacingOverlaysVertical%d 0x00435500, Player%dHitLight 0x004403a0.
 #
+# --- V26: the speedometer and the free-ride radar, read for crates/openmx/src/overlay.rs. Art and
+#     layouts are fstyleui.res's (ui\speedometer.lyt/.lyr, ui\freestyleradar.lyr); drawn by eye ---
+speedo_analog_init          boot 0x002abb10 the analog container (background, odometer plate and texts)
+speedo_init                 boot 0x002abbd0 builds the speedometer layer and its needle
+speedo_update               boot 0x002abcf0 per frame; two players or more force the digital readout
+speedo_mode                 boot 0x002ac020 setting value 1: digital only, the analog container hidden;
+#                                           otherwise analog shown and the digital text set to ""
+speedo_needle_update        boot 0x002ac400 mph = **(iface+0x1c) * 0.68182 (metric 1.08 when the options'
+#                                           +0x18 is set), floored at 0 and capped at 105.0 (0x42d20000)
+#                                           by bit selects, then speedo_needle_pose
+speedo_text_update          boot 0x002ac580 "%.0f" of the same mph; odometer = StatisticsTracker +0x78
+#                                           * 0.00018939393 (feet to miles), "%07.1f" from 0.1 up,
+#                                           else "00000.0"
+speedo_needle_ctor          boot 0x002ac960 needle object: +0x14 = 132.0, axes (0,0,1,0) and (-1,1,0,0)
+speedo_needle_setup         boot 0x002aca20 loads Speedometer_Needle (string 0x00436fd0), the
+#                                           {132.0, 0.4, 1.0, FLT_MAX, -FLT_MAX} block at +0x4c
+speedo_needle_pose          boot 0x002acbc0 (mph, needle): places the model in front of the camera
+#                                           (55 px wide, 100 away) and sets +0x50 = 132.0 - mph * 2.64,
+#                                           degrees: 0 mph at the dial's lower left, 50 up, 100 lower
+#                                           right. The model (ui\geom\speedometer_needle.psg): tip 40.4
+#                                           and tail 12.1 off the pivot, untextured, colour scale
+#                                           2.0,1.2,0.0. The speed pointer **(iface+0x1c) was not pinned
+#                                           in RAM (rec-start: iface+0x1c held rider+0x88c, 0.0, while
+#                                           +0x20/+0x34 held rider+0x860, the chassis +0x34 speed)
+radar_init                  boot 0x0035ce10 freestyleradar.lyr, RadarRadius 104.0
+radar_set_centre            boot 0x0035d330 the rose's and the arrow's centre (87,363; 87,155 in
+#                                           freestyleradarhorizontal1)
+radar_update                boot 0x0035d3e0 world W = max(terrain+0x538, +0x53c) * 192 (the sample
+#                                           spacings; terrain = *(*(*(game+0x3cc)+0x6c)+0x3b4)); heading
+#                                           h = acos(f.z/|f.xz|), 2pi-h when f.x < 0; rose turned 2pi-h;
+#                                           the forward is the target's forward row, or its normalised
+#                                           velocity under a flag not identified
+radar_place_riders          boot 0x0035e4d0 every rider but the viewer: rel = theirs - own (x,z),
+#                                           d = min(|rel|, W/2), r = d*104/W, a = angle(rel) - angle(f)
+#                                           wrapped to +-pi, mark at (cx + r sin a, cy - r cos a);
+#                                           map_icon_hit_freestyle 8x8, colour bytes 00 00 ff ff (AI) or
+#                                           00 ff ff ff when the rider's +0x34 player kind is 1 (human)
+radar_place_activities      boot 0x0035efa0 the H/R/S/M activity icons (37a66e/3399ff/cc7333/b53b81),
+#                                           scale clamp(0.3+(r-d)/r, 0.5, 0.8); not ported
+#
 # Two riders touching. Nothing two-player about it: it is the same contact clause S37 ported
 # (air::hit_wreck), and AI riders meet it too. A record's sweep writes each actor it hits twice:
 collision_record_collide    boot 0x002708a0 (above, S37) after the terrain rays it runs the ray object's
