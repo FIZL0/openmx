@@ -147,6 +147,8 @@ mod aspect;
 mod chase;
 mod ground;
 mod hud;
+// The join screen (P38's rules), which the front end's local game seats its players through (P43).
+mod join;
 mod menu;
 mod moment;
 mod net;
@@ -570,6 +572,16 @@ struct Args {
     others: Vec<roster::Pick>,
     /// `--garage`: ride `garage.txt`'s picks without the front end, every seat its own.
     garage: bool,
+    /// The pad seat each player reads, the front end's local game's (P43): player i rides seat
+    /// `pad_of[i]`'s controller. Empty is seat i for player i, which is every ride outside one.
+    pad_of: Vec<usize>,
+}
+
+impl Args {
+    /// The pad seat player `i` reads.
+    fn pad_seat(&self, i: usize) -> usize {
+        self.pad_of.get(i).copied().unwrap_or(i)
+    }
 }
 
 /// The garage's picks on a ride (P37): the first seat's bike, set and rider are the ride's own, and
@@ -736,8 +748,10 @@ fn front_end(args: Args) -> Result<(), String> {
         Some(name) => println!("pad: {name}"),
         None => println!("pad: none found — the menus are on the keyboard (arrows, X, C, Return)"),
     }
-    // The ride setup lists a machine for each player who will ride (P41).
+    // The ride setup lists a machine for each player who will ride (P41): a Free Ride's are
+    // `--players`, a local game's its join screen's (P43).
     front.menu.riders = args.players;
+    front.menu.free_riders = args.players;
     if let Some(screen) = args.screen {
         front.menu.open(screen);
     }
@@ -774,8 +788,21 @@ fn front_end(args: Args) -> Result<(), String> {
                 // The shot is the menu's unless it is of the pause, which is drawn over the ride.
                 a.shot = shot.take_if(|_| shell.front.menu.screen() == Some(menu::Screen::Pause));
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
+                // A local game (P43): one player a seat its join screen has in play, each on that seat's
+                // controller, drawn in the split layout it picked.
+                if let Some(party) = shell.front.menu.party() {
+                    a.players = party.players();
+                    a.split = party.split;
+                    a.pad_of = party.devices.clone();
+                    println!(
+                        "local game: {} players on pad seats {:?}, {}",
+                        a.players,
+                        party.devices.iter().map(|d| d + 1).collect::<Vec<_>>(),
+                        party.layout().name()
+                    );
+                }
                 // What every seat picked in the garage is what the ride loads (P37).
-                if let Some(picks) = shell.front.menu.ride_picks(args.players) {
+                if let Some(picks) = shell.front.menu.ride_picks(a.players) {
                     apply_picks(&mut a, &picks);
                 }
                 shell.front.note_clear();
@@ -826,6 +853,16 @@ fn front_end(args: Args) -> Result<(), String> {
         // The garage hears every seat: a column for each up to the last one somebody sits in.
         let seated = now.iter().take(roster::SEATS).rposition(|n| *n != SeatInput::Empty);
         shell.front.menu.seated = seated.map_or(1, |i| i + 1);
+        // The join screen's controllers (P43) are the pad seats: which are in, and what each is.
+        let present: Vec<usize> = (0..roster::SEATS).filter(|&i| matches!(now[i], SeatInput::Playing(_))).collect();
+        shell.front.menu.present(&present);
+        shell.front.menu.devices = (0..roster::SEATS)
+            .map(|i| match seats.name(i) {
+                Some(name) => name.to_string(),
+                None if seats.slots.keys() == Some(i) => "Keyboard".to_string(),
+                None => format!("Pad {}", i + 1),
+            })
+            .collect();
         for (i, reader) in shell.front.seat_readers.iter_mut().enumerate().skip(1) {
             let p = reader.read(&now[i].report());
             shell.front.menu.step_seat(i, p);
@@ -1683,7 +1720,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // an idle pad, standing on the start line, until a pad joins it.
     let mut idle_pads: Vec<Pads> = (0..args.players).map(|_| Pads::unplugged(args.wiring.clone())).collect();
     for i in 1..args.players {
-        match pad_seats.as_ref().and_then(|seats| seats.name(i)) {
+        match pad_seats.as_ref().and_then(|seats| seats.name(args.pad_seat(i))) {
             Some(name) => println!("player {}: pad {name}", i + 1),
             None => println!("player {}: no pad of their own — an idle pad, standing on the start line", i + 1),
         }
@@ -1994,16 +2031,19 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     for line in seats.said() {
                         println!("{line}");
                     }
-                    // Each through its seat's layout (P40): what the port reads is the original's.
+                    // Each through its seat's layout (P40): what the port reads is the original's. A
+                    // local game's player reads the pad seat its join screen gave it (P43).
                     for (i, (seat, idle)) in world.seats.iter_mut().zip(&mut idle_pads).enumerate() {
-                        let report = match now.get(i) {
+                        let from = args.pad_seat(i);
+                        let report = match now.get(from) {
                             Some(SeatInput::Empty) if i > 0 => idle.report(&pad::no_keys),
                             Some(input) => input.report(),
                             None => idle.report(&pad::no_keys),
                         };
-                        seat.reports = [seats.scheme(i).ride(report), Report::missing()];
+                        seat.reports = [seats.scheme(from).ride(report), Report::missing()];
                     }
-                    engine.frozen = now.iter().take(args.players).any(|n| *n == SeatInput::Waiting);
+                    engine.frozen =
+                        (0..args.players).any(|i| now.get(args.pad_seat(i)) == Some(&SeatInput::Waiting));
                 }
                 None => {
                     for (seat, idle) in world.seats.iter_mut().zip(&mut idle_pads) {
@@ -2223,7 +2263,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // Under the new layout (P40) it is Select, which the simulation passes through unread
                 // and which is in no chord; the layout is the seat's, or the command line's for a
                 // session with no seats.
-                let scheme = pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(i));
+                let scheme = pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(args.pad_seat(i)));
                 if scheme.changes_camera(pad) {
                     follow.cam.next_preset();
                     println!("{who}camera: {}", follow.cam.preset().name);
@@ -2749,6 +2789,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         set: None,
         others: Vec::new(),
         garage: false,
+        pad_of: Vec::new(),
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         ride_flag: false,
