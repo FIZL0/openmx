@@ -143,6 +143,7 @@
 
 #![forbid(unsafe_code)]
 
+mod audio;
 mod aspect;
 mod chase;
 mod ground;
