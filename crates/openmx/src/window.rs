@@ -36,17 +36,19 @@ const ATOM_STRING: u32 = 31;
 /// correctly rather than falling back to the flicker.
 const REPEAT_MS: u32 = 2;
 
-/// Event codes. The window selects three of these.
+/// Event codes. The window selects three masks' worth of these.
 const KEY_PRESS: u8 = 2;
 const KEY_RELEASE: u8 = 3;
 const DESTROY_NOTIFY: u8 = 17;
 const UNMAP_NOTIFY: u8 = 18;
+const CONFIGURE_NOTIFY: u8 = 22;
 
 /// `CreateWindow`'s value mask: the background pixel, then the event mask. Values go in the request in
 /// increasing bit order, which is the order they are listed here.
 const CW_BACK_PIXEL: u32 = 0x0000_0002;
 const CW_EVENT_MASK: u32 = 0x0000_0800;
-/// What the window asks to hear about: keys down, keys up, and being taken away.
+/// What the window asks to hear about: keys down, keys up, and its structure — which is being taken
+/// away, and being given a new size (`ConfigureNotify`).
 const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0002_0000;
 
 /// `PutImage`'s format: one byte per pixel channel in the server's own layout.
@@ -91,11 +93,18 @@ pub struct Window {
     stream: UnixStream,
     window: u32,
     gc: u32,
-    /// The window's size in pixels, which is the frame's size times [`Window::scale`].
+    /// The window's size in pixels: what it was opened at, and then whatever the last
+    /// `ConfigureNotify` said — a window manager that tiles or a person who drags an edge changes it,
+    /// and the frame follows ([`Window::resized`]) rather than being stretched over the difference.
     pub width: usize,
     pub height: usize,
     /// How many window pixels one frame pixel becomes, in both directions.
     pub scale: usize,
+    /// The screen's own size in pixels, out of the connection setup: what a window opened without a
+    /// size of its own is opened at.
+    pub screen: (usize, usize),
+    /// The window's size has changed since [`Window::resized`] last said so.
+    resized: bool,
     depth: u8,
     /// The largest request the server will take, in bytes — the image is banded to fit it.
     max_request: usize,
@@ -108,15 +117,15 @@ pub struct Window {
 }
 
 impl Window {
-    /// Open a window of `width x height` frame pixels, each drawn `scale` times across and down.
+    /// Open a window for frames of `size` pixels, each drawn `scale` times across and down — or, with
+    /// no size, a window as big as the screen, whose frame is whatever fits it ([`fit_frame`]).
     ///
     /// `display` is the usual `DISPLAY`, of which only the display number is used: this talks to the
     /// unix socket, never to TCP, and sends no authorisation — which is what a local X server (or the
     /// Xwayland a Wayland session runs) accepts from a client of the same user.
     pub fn open(
         display: &str,
-        width: usize,
-        height: usize,
+        size: Option<(usize, usize)>,
         scale: usize,
         title: &str,
     ) -> Result<Window, String> {
@@ -127,9 +136,11 @@ impl Window {
             stream,
             window: 0,
             gc: 0,
-            width: width * scale,
-            height: height * scale,
+            width: 0,
+            height: 0,
             scale,
+            screen: (0, 0),
+            resized: false,
             depth: 24,
             max_request: 0,
             keys: Keyboard::new(),
@@ -139,6 +150,11 @@ impl Window {
         let setup = w.handshake()?;
         w.depth = setup.root_depth;
         w.max_request = setup.max_request_bytes;
+        w.screen = (setup.screen_width, setup.screen_height);
+        (w.width, w.height) = match size {
+            Some((width, height)) => (width * scale, height * scale),
+            None => w.screen,
+        };
         // One pixel per 32 bits is what every modern server uses for depth 24, and it is the layout
         // the frame is converted into below. Anything else would need a different conversion, so say
         // so rather than draw a smear.
@@ -294,24 +310,48 @@ impl Window {
             }
             KEY_PRESS | KEY_RELEASE => self.keys.saw(event),
             DESTROY_NOTIFY | UNMAP_NOTIFY => self.closed = true,
+            // The structure mask also brings the window's moves and restacks, which carry the same
+            // size again, so only a size that differs counts as a resize. Width and height are the
+            // event's fifth and sixth fields, after the two windows, the sibling and the position.
+            CONFIGURE_NOTIFY => {
+                let (width, height) = (le16(event, 20) as usize, le16(event, 22) as usize);
+                if (width, height) != (self.width, self.height) && width > 0 && height > 0 {
+                    (self.width, self.height) = (width, height);
+                    self.resized = true;
+                }
+            }
             _ => {}
         }
     }
 
+    /// Whether the window has changed size since the last time this was asked — once per change, so
+    /// the shell re-sizes its frame on the frame after a resize and not on every frame.
+    pub fn resized(&mut self) -> bool {
+        std::mem::take(&mut self.resized)
+    }
+
     /// Put one frame on the window: RGB triples, row by row from the top, scaled up by
-    /// [`Window::scale`] and sent as however many bands the server's maximum request allows.
+    /// [`Window::scale`], centred, and sent as however many bands the server's maximum request allows.
+    ///
+    /// Only the picture's own rectangle is written. A window wider than the picture is shaped
+    /// differently from it — a 16:9 screen round a 4:3 frame — and what is left either side is the
+    /// window's background, which is black and which the server paints itself: the window has the
+    /// default bit gravity, so a resize clears it, and nothing of an older, larger picture is left
+    /// in the bars.
     pub fn present(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<(), String> {
         if rgb.len() < width * height * 3 {
             return Err("the frame is smaller than its own size".into());
         }
-        let row_bytes = self.width * 4;
+        let (across, down) = (width * self.scale, height * self.scale);
+        let (left, top) = centred((across, down), (self.width, self.height));
+        let row_bytes = across * 4;
         // The 24-byte header has to fit too, and a band of no rows would never finish.
         let rows_per_band = ((self.max_request - 24) / row_bytes).max(1);
         let mut band: Vec<u8> = Vec::with_capacity(row_bytes * rows_per_band);
 
         let mut y = 0;
-        while y < self.height {
-            let rows = rows_per_band.min(self.height - y);
+        while y < down {
+            let rows = rows_per_band.min(down - y);
             band.clear();
             for line in y..y + rows {
                 let source = line / self.scale;
@@ -331,11 +371,11 @@ impl Window {
                 .extend_from_slice(&(6u16 + (band.len() / 4) as u16).to_le_bytes());
             self.out.extend_from_slice(&self.window.to_le_bytes());
             self.out.extend_from_slice(&self.gc.to_le_bytes());
-            self.out
-                .extend_from_slice(&(self.width as u16).to_le_bytes());
+            self.out.extend_from_slice(&(across as u16).to_le_bytes());
             self.out.extend_from_slice(&(rows as u16).to_le_bytes());
-            self.out.extend_from_slice(&0i16.to_le_bytes()); // destination x
-            self.out.extend_from_slice(&(y as i16).to_le_bytes());
+            self.out.extend_from_slice(&(left as i16).to_le_bytes()); // destination x
+            self.out
+                .extend_from_slice(&((top + y as isize) as i16).to_le_bytes());
             self.out.push(0); // left pad
             self.out.push(self.depth);
             self.out.extend_from_slice(&0u16.to_le_bytes());
@@ -449,6 +489,34 @@ impl Keyboard {
     }
 }
 
+/// The frame that fills a window of `window` pixels at `scale` window pixels to a frame pixel, at the
+/// picture's own shape: 4:3, the television's.
+///
+/// That is the shape the original draws for — the 68.997 degrees down that the human's save state was
+/// drawn with is [`vertical_fov`](game_render::world::vertical_fov) of the preset's 85 across at 4:3 —
+/// so a window of any other shape gets the largest 4:3 frame that fits inside it, and the rest is bars
+/// ([`Window::present`]). Drawing the frame at the window's own shape instead would hand the camera a
+/// wider aspect than the game ever had, which is widescreen, and widescreen is a task of its own.
+/// Never smaller than a pixel each way, so a window shrunk to nothing still has a frame to draw.
+pub fn fit_frame(window: (usize, usize), scale: usize) -> (usize, usize) {
+    let (w, h) = (window.0 / scale.max(1), window.1 / scale.max(1));
+    let (w, h) = if w * 3 > h * 4 {
+        (h * 4 / 3, h)
+    } else {
+        (w, w * 3 / 4)
+    };
+    (w.max(1), h.max(1))
+}
+
+/// Where a picture of `picture` pixels goes in a window of `window` pixels to sit in its middle: the
+/// left and top offsets, negative where the picture is the larger (and the server clips it).
+fn centred(picture: (usize, usize), window: (usize, usize)) -> (isize, isize) {
+    (
+        (window.0 as isize - picture.0 as isize) / 2,
+        (window.1 as isize - picture.1 as isize) / 2,
+    )
+}
+
 /// Read exactly `buf.len()` bytes if that many are there: `Ok(false)` means nothing was waiting.
 ///
 /// Once the first byte of an event has arrived the rest is on its way, so a partial read spins rather
@@ -482,6 +550,9 @@ struct Setup {
     root_depth: u8,
     black_pixel: u32,
     bits_per_pixel: u8,
+    /// The first screen's size in pixels.
+    screen_width: usize,
+    screen_height: usize,
 }
 
 /// Pick the fields the shell needs out of the setup reply's body.
@@ -508,6 +579,10 @@ fn parse_setup(body: &[u8]) -> Result<Setup, String> {
     }
     let root = le32(body, at);
     let black_pixel = le32(body, at + 12);
+    // After the root, its colormap, the two pixels and the current input masks: the screen's width
+    // and height in pixels, then the same in millimetres.
+    let screen_width = le16(body, at + 20) as usize;
+    let screen_height = le16(body, at + 22) as usize;
     let root_visual = le32(body, at + 32);
     let root_depth = body[at + 38];
 
@@ -531,6 +606,8 @@ fn parse_setup(body: &[u8]) -> Result<Setup, String> {
         root_depth,
         black_pixel,
         bits_per_pixel,
+        screen_width,
+        screen_height,
     })
 }
 
@@ -557,6 +634,136 @@ fn display_number(display: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A setup reply's body as a server writes it: the fixed part, a vendor name that needs padding,
+    /// two pixel formats, and one screen of `width x height` pixels with no depths listed after it.
+    fn setup_body(width: u16, height: u16) -> Vec<u8> {
+        let vendor = b"Example X Server 11"; // 19 bytes, so one byte of pad
+        let mut b = vec![0u8; 32];
+        b[4..8].copy_from_slice(&0x0060_0000u32.to_le_bytes()); // resource id base
+        b[16..18].copy_from_slice(&(vendor.len() as u16).to_le_bytes());
+        b[18..20].copy_from_slice(&0xffffu16.to_le_bytes()); // maximum request, in words
+        b[20] = 1; // one screen
+        b[21] = 2; // two formats
+        b[22] = 0; // image byte order: little-endian
+        b.extend_from_slice(vendor);
+        b.push(0);
+        b.extend_from_slice(&[1, 1, 32, 0, 0, 0, 0, 0]); // depth 1, 1 bit per pixel
+        b.extend_from_slice(&[24, 32, 32, 0, 0, 0, 0, 0]); // depth 24, 32 bits per pixel
+        let mut screen = [0u8; 40];
+        screen[0..4].copy_from_slice(&0x0000_0123u32.to_le_bytes()); // root
+        screen[12..16].copy_from_slice(&0u32.to_le_bytes()); // black pixel
+        screen[20..22].copy_from_slice(&width.to_le_bytes());
+        screen[22..24].copy_from_slice(&height.to_le_bytes());
+        screen[24..26].copy_from_slice(&508u16.to_le_bytes()); // millimetres, which nothing reads
+        screen[26..28].copy_from_slice(&286u16.to_le_bytes());
+        screen[32..36].copy_from_slice(&0x0000_0021u32.to_le_bytes()); // root visual
+        screen[38] = 24; // root depth
+        b.extend_from_slice(&screen);
+        b
+    }
+
+    #[test]
+    fn the_setup_says_how_big_the_screen_is() {
+        let setup = parse_setup(&setup_body(1920, 1080)).unwrap();
+        assert_eq!((setup.screen_width, setup.screen_height), (1920, 1080));
+        // And the fields around it are where they were, so the extents did not come from a neighbour.
+        assert_eq!(setup.root, 0x123);
+        assert_eq!(setup.root_visual, 0x21);
+        assert_eq!(setup.root_depth, 24);
+        assert_eq!(setup.bits_per_pixel, 32);
+        assert_eq!(setup.max_request_bytes, 0xffff * 4);
+        let setup = parse_setup(&setup_body(2560, 1440)).unwrap();
+        assert_eq!((setup.screen_width, setup.screen_height), (2560, 1440));
+    }
+
+    /// A window with the far end of a socket pair standing in for the server: what the shell sends
+    /// can be read back, and events can be handed to it as the server's would be.
+    fn window_on_a_pair(width: usize, height: usize, scale: usize) -> (Window, UnixStream) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let w = Window {
+            stream: ours,
+            window: 0x0060_0001,
+            gc: 0x0060_0002,
+            width,
+            height,
+            scale,
+            screen: (1920, 1080),
+            resized: false,
+            depth: 24,
+            max_request: 0xffff * 4,
+            keys: Keyboard::new(),
+            closed: false,
+            out: Vec::new(),
+        };
+        (w, theirs)
+    }
+
+    /// A `ConfigureNotify` for a window now `width x height`.
+    fn configure(width: u16, height: u16) -> [u8; 32] {
+        let mut e = [0u8; 32];
+        e[0] = CONFIGURE_NOTIFY;
+        e[4..8].copy_from_slice(&0x0060_0001u32.to_le_bytes()); // event window
+        e[8..12].copy_from_slice(&0x0060_0001u32.to_le_bytes()); // window
+        e[16..18].copy_from_slice(&40i16.to_le_bytes()); // x
+        e[18..20].copy_from_slice(&30i16.to_le_bytes()); // y
+        e[20..22].copy_from_slice(&width.to_le_bytes());
+        e[22..24].copy_from_slice(&height.to_le_bytes());
+        e
+    }
+
+    #[test]
+    fn a_resize_is_read_and_said_once() {
+        let (mut w, _server) = window_on_a_pair(1920, 1080, 1);
+        assert!(!w.resized());
+        // The window manager tiles it to half the screen.
+        w.handle(&configure(958, 1046));
+        assert_eq!((w.width, w.height), (958, 1046));
+        assert!(w.resized());
+        assert!(!w.resized(), "a resize is said once, not every frame after it");
+        // A move carries the same size again, and is not a resize.
+        w.handle(&configure(958, 1046));
+        assert!(!w.resized());
+        // A sent event (the top bit of the code) is read the same.
+        let mut sent = configure(1280, 720);
+        sent[0] |= 0x80;
+        w.handle(&sent);
+        assert_eq!((w.width, w.height), (1280, 720));
+        assert!(w.resized());
+        // And the frame that fits it is the 4:3 one, not the window's own shape.
+        assert_eq!(fit_frame((w.width, w.height), w.scale), (960, 720));
+    }
+
+    #[test]
+    fn the_frame_is_the_largest_four_by_three_inside_the_window() {
+        assert_eq!(fit_frame((1920, 1080), 1), (1440, 1080)); // pillarboxed
+        assert_eq!(fit_frame((640, 480), 1), (640, 480)); // exactly
+        assert_eq!(fit_frame((800, 1000), 1), (800, 600)); // letterboxed
+        assert_eq!(fit_frame((1920, 1080), 2), (720, 540)); // `--scale 2` draws half and doubles it
+        assert_eq!(fit_frame((0, 0), 1), (1, 1));
+    }
+
+    #[test]
+    fn a_frame_goes_in_the_middle_of_a_wider_window() {
+        // A 4x3 frame at scale 2 is 8x6 window pixels; in a 16x6 window it starts 4 pixels in.
+        let (mut w, mut server) = window_on_a_pair(16, 6, 2);
+        let rgb: Vec<u8> = (0..4 * 3).flat_map(|i| [i as u8, 0x10, 0x20]).collect();
+        w.present(&rgb, 4, 3).unwrap();
+        let mut request = vec![0u8; 24 + 8 * 6 * 4];
+        server.read_exact(&mut request).unwrap();
+        assert_eq!(request[0], PUT_IMAGE);
+        assert_eq!(le16(&request, 2) as usize, request.len() / 4);
+        assert_eq!(le16(&request, 12), 8, "width: the picture's, not the window's");
+        assert_eq!(le16(&request, 14), 6);
+        assert_eq!(le16(&request, 16) as i16, 4, "destination x");
+        assert_eq!(le16(&request, 18) as i16, 0, "destination y");
+        // Each frame pixel twice across and twice down, blue first.
+        let pixel = |x: usize, y: usize| &request[24 + (y * 8 + x) * 4..][..4];
+        assert_eq!(pixel(0, 0), [0x20, 0x10, 0, 0]);
+        assert_eq!(pixel(1, 1), [0x20, 0x10, 0, 0]);
+        assert_eq!(pixel(2, 0), [0x20, 0x10, 1, 0]);
+        assert_eq!(pixel(7, 5), [0x20, 0x10, 11, 0]);
+    }
 
     #[test]
     fn a_display_name_gives_its_socket_number() {
