@@ -2918,3 +2918,39 @@ transform_set_pose boot 0x001b21d0 (transform, 0, quat*, origin*) a sibling of o
 #                                  plane's pose goes through it after every world step
 sound_trigger boot 0x003dd0a0 (sound object, 0, position*) what the plane's touchdown calls after
 #                             touchdown_sound
+
+# ---------------------------------------------------------------------------------------------------
+# S39 — the biplane's wheels and its crash test (crates/game-sim/src/biplane.rs, proofs in
+# tests/biplane.rs). A tire is 0x1d0 bytes (ctor 0x0034eb40, init 0x0034ecd0); the plane's three at
+# +0x408/+0x40c/+0x410. Tire fields: +0x30 -> brake (front: plane+0x350), +0x34 -> steer (tail:
+# plane+0x364), +0x3c StrutCompression, +0x40 MaxDecompressionRate, +0x44 SpringCoefficient, +0x48/+0x4c
+# damping closing/opening, +0x50 hub-to-bottom (plane frame), +0x60 BodyTireCenter, +0x80 ground at the
+# bottom, +0x84 held contact (only ever cleared), +0x88 touching, +0x8c compression, +0x90 last,
+# +0x94 spring force, +0xa0 bottom, +0xb0 the ground query's record, +0xc0 ground point, +0xd0 its
+# normal, +0xe0 contact, +0xf0 hub (world), +0x100 bottom (world), +0x110 contact velocity, +0x120
+# wheel angle, +0x124 spin, +0x128 plane, +0x12c body, +0x134 world, +0x140 last normal, +0x150
+# TireRadius, +0x154 1/radius, +0x158 MaxBrakingForce, +0x15c SideForce, +0x160 BrakeFriction, +0x164
+# SteeringMoment, +0x170 slip (tire frame), +0x180 friction (tire frame), +0x190 the tire frame.
+biplane_tire_preforce boot 0x0034ef80 (tire) +0x80 = +0x84 = 0
+biplane_tire_probe boot 0x0034ef90 (tire): the bottom of the tire one radius toward the last normal
+#                              (sideways part dropped), through the plane's frame +0x600, to
+#                              ground_query; +0x80 set unless the ground is below the bottom
+biplane_tire_force boot 0x0034f150 (tire, dt in f12): biplane_tire_strut then biplane_tire_friction
+biplane_tire_strut boot 0x0034f190 (tire, dt in f12): compression along hub-to-bottom, faded by the
+#                              slope in the body's frame (floor [0x00421300] = 0.5), clamped (the
+#                              push-out reads the clamped value: always 0), spring/damper, force at
+#                              the contact through the body's vt +0x68; decompression rate limit
+biplane_tire_friction boot 0x0034f7e0 (tire, dt in f12): side force, braking, tail wheel moment
+#                              (vt +0x5c), all x clamp(0.1 x speed, -1, 1); force through the tire
+#                              frame at the contact (vt +0x68); spin = slip.z / radius, angle wrapped
+biplane_tire_frame boot 0x0034f9d0 (tire) mat4_basis(+0x190, origin, plane forward row +0x620, normal,
+#                              1, 0); +0x170 = the contact velocity into it
+biplane_collision_force boot 0x0015af40 (plane+0x50): unless the body's first word is 0: gravity
+#                              (+0xf0, plane+0x140) through the body's vt +0x64, the collision object
+#                              (+0x120, plane+0x170) vtable +0x80 with 1, then +0x1b0 = 0
+body_push boot 0x0015afb0 (body, vec4*) vt +0x64: tail call of vt +0x38
+body_add_velocity boot 0x001f7ec0 (body, vec4*) body+0x70 and body+0xc0 += v.xyz, listeners; vt +0x3c
+body_force_at boot 0x001f7a70 (body, force*, point*, mask*) moment = q-rotated (point - pos) x force,
+#                              masked, through vt +0x5c, then the force through vt +0x38; vt +0x68
+collision_resolve boot 0x00270dc0 (collision, 1) the collision object's contact resolution (vtable
+#                              0x00454a00 +0x80): not ported, see S42
