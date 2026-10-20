@@ -65,14 +65,17 @@
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
+use crate::biplane::Body as Bone;
 use crate::motion::{Clip, ClipId, Played, Player, Put, remap};
 use crate::phy;
+use crate::ragdoll_contact::Contact;
 use crate::rng::Rng;
 use crate::trick::SLOTS;
 use crate::vehicle_anim::{
     self, AIR, AXIS_START, BACKFLIP, Frame, GET_READY, HOLD, Lag, Library, MIX_TAU, NO_HANDER,
     PHASE_TAU, Play, REVERSE_L, REVERSE_R, START_POS, TURN_RIDING,
 };
+use crate::world::World;
 use ps2_float::{Acc, F, Vf};
 
 // ---------------------------------------------------------------------------------------------------
@@ -554,11 +557,11 @@ pub enum Mode {
 
 /// What the wreck in progress tells the mode machine, which is everything its settle test reads.
 ///
-/// **The three sensors are the port's stand-ins and the journal says what for.** The original reads
-/// them off a ragdoll this crate has no port of: a bone array whose every bone has a contact flag,
-/// and a main bone with a height and a velocity. This port's wrecked rider is one point
-/// ([`crate::ride::Crash`]), so `touching` is that point having reached the dirt, and `vel` and
-/// `clearance` are its own — and the settle test below is the original's, run on them.
+/// The original reads the three sensors off the ragdoll, which is what [`Thrown::from_bones`] does:
+/// any bone collision's contact flag, the main bone's velocity, and the main bone's height above the
+/// ground under it. The ride does not run the ragdoll yet (S53), so its caller still fills them from
+/// the one wrecked rider point ([`crate::ride::Crash`]) — and the settle test below is the original's,
+/// run on whichever it is handed.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Thrown {
     /// The throw the wreck's reason picked, which the entry randomises its two clocks out of. Handed
@@ -573,6 +576,17 @@ pub struct Thrown {
     /// How far the body is above the ground straight under it: the main bone's height less the
     /// ground query's answer, which the settle test holds against `RiderFlailHeight`.
     pub clearance: F,
+}
+
+impl Thrown {
+    /// **The sensors off the ragdoll**, as the wreck arm reads them: touching while any of the bone
+    /// collisions has touched, the main bone's velocity as it is, and the main bone's height less the
+    /// ground query's answer for a copy of its position (the query moves the point it is handed).
+    pub fn from_bones(throw: phy::Throw, contacts: &[Contact], main: &Bone, world: &mut dyn World) -> Thrown {
+        let touching = contacts.iter().any(|c| c.touched);
+        let (ground, _) = world.ground(main.position);
+        Thrown { throw, touching, vel: main.velocity, clearance: F(main.position.y()) - F(ground.y()) }
+    }
 }
 
 /// **The body's mode machine**: the state behind [`Body::mode`].

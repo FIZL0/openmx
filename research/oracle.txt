@@ -2399,9 +2399,10 @@ rider_body_mode boot 0x0024c7e0 (3592 bytes; dt in f12, the actor in a1) one fra
 #   (ForceTime +0x00, HandHoldTime +0x04, Force +0x10, ForceTimeDelta +0x20, HandHoldTimeDelta +0x24,
 #   ForceDelta +0x30), then +0x8c0 GroundAngularRateDamping as a quadword, +0x8d0 RiderFlailHeight,
 #   +0x8d4 RiderRollTime, +0x8d8 RiderRollSpeed -- which is exactly game_sim::phy::Wrecks
-#   **the settle test**, after the ragdoll step (boot 0x001dc960) and with the main bone at
-#   [[+0x2f4]+0xa4] (+0x64 its height, +0x70/+0x74/+0x78 its velocity):
-#     if (roll != 0 || 0 < loose || 0 < thrown || flung || height - height_before_the_step <= 0x8d0)
+#   **the settle test**, after ground_query (boot 0x001dc960: world +0x2bc, a copy of the main bone's
+#   +0x60, no normal, flags or record) with the main bone at [[+0x2f4]+0xa4] (+0x64 its height,
+#   +0x70/+0x74/+0x78 its velocity), touching = any of the +0x620/+0x624 bone collisions' +0x14 (S52):
+#     if (roll != 0 || 0 < loose || 0 < thrown || flung || height - ground_y <= 0x8d0)
 #        if (roll <= 0 || !flung)
 #           if ((0x8d4 < roll || |velocity| < 0x8d8) && !settled)  settled = 1, the bones take the
 #              stiffer damping (boot 0x0024c310 with a1 = 1, set in a delay slot) and the main bone is

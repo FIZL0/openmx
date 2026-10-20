@@ -28,21 +28,25 @@
 //!    clocks, roll and settle test run. Compared per frame: the mode and the previous mode, the settle
 //!    and flung flags, the contact flag, all three clocks, and which of the two bone damping sets the
 //!    frame asked for. The ground query's hook is not a no-op — it answers with the ground height
-//!    the case asks for, which is how the settle test's clearance is reached from a test.
+//!    the case asks for, which is how the settle test's clearance is reached from a test — and the
+//!    port reads its three sensors off the same bones with `Thrown::from_bones` (S52).
 //!
 //! The middle four need no disc: they are the task's behavioural tests and they run everywhere.
 //! What is not proved here, and why, is in the journal entry's last section.
 
+use game_sim::biplane::Body as Bone;
+use game_sim::collide::{Bundle, Record};
 use game_sim::motion::{Clip, ClipId, Player};
 use game_sim::phy::{self, Phy};
+use game_sim::ragdoll_contact::Contact;
 use game_sim::ride::Controls;
 use game_sim::rider::{self, Rider};
 use game_sim::rider_anim::{
-    Ask, Body, Clock, HOLD_LIMB, HOLD_LIMBS, IDLE, IDLES, Params, Pool,
+    Ask, Body, Clock, Thrown, HOLD_LIMB, HOLD_LIMBS, IDLE, IDLES, Params, Pool,
 };
 use game_sim::rng::Rng;
 use game_sim::trick::{SLOTS, Set};
-use game_sim::world::Flat;
+use game_sim::world::{Flat, World};
 use game_sim::vehicle_anim::{
     self, AIR, BACKFLIP, GET_READY, HOLD, Library, REVERSE_L, START_POS, STATES, TURN_RIDING,
 };
@@ -1078,6 +1082,7 @@ const VTABLE: u32 = 0x0120_4300;
 const BONES: u32 = 0x0120_4400;
 const BONE: u32 = 0x0120_4500;
 const NIL: u32 = 0x0120_4600;
+const MORE_BONES: u32 = 0x0120_4a00;
 
 /// The mode machine's own fields, by the offsets the original uses — the five the wreck arm is made of
 /// and the pointers it reaches the ragdoll through. A test may say where these live; the port may not.
@@ -1113,6 +1118,22 @@ const M_SET_DAMPING: u32 = 0x54;
 const BONE_TOUCH: u32 = 0x14;
 const BONE_FOLLOW: u32 = 0x88;
 
+/// A ground at one height that remembers the point it was last asked about.
+struct Under {
+    y: f32,
+    asked: Option<Vf>,
+}
+
+impl World for Under {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.asked = Some(at);
+        (Vf::new(at.x(), self.y, at.z(), at.w()), Vf::new(0.0, 1.0, 0.0, 0.0))
+    }
+    fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
+        false
+    }
+}
+
 /// Whether the body settled this frame, and everything it decided on the way there — read the same way
 /// off both sides.
 #[derive(Debug, PartialEq)]
@@ -1137,6 +1158,9 @@ struct Rest {
 /// clocks, roll and settle test, which is the whole of what this task ported. The ground query's hook
 /// is *not* a no-op: it answers with the ground height the case asks for, which is what the settle
 /// test measures the main bone's clearance from (S52; V19 read it as a rise across a ragdoll step).
+/// The port's sensors come off the same bones the original reads: one to four collisions' contact
+/// flags, and the main bone's whole position and velocity, with the ground query's point and
+/// arguments compared.
 ///
 /// Compared per frame: the mode and the previous mode, the settle flag, the flung flag, the contact
 /// flag, all three clocks, and which of the two damping sets the frame asked for — the last one off a
@@ -1168,15 +1192,21 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
     // The ground height the query is to answer, and what the damping setter was handed. Shared with
     // the hooks, which is the only way a hook can carry anything in or out.
     let ground = Rc::new(Cell::new(0.0f32));
+    // What the ground query was handed: the point (all four lanes, read before the hook moves it) and
+    // the other four arguments.
+    let asked = Rc::new(Cell::new(None));
     let stiff = Rc::new(Cell::new(None));
     let record = Rc::new(Cell::new(None));
     {
         let ground = Rc::clone(&ground);
+        let asked = Rc::clone(&asked);
         ee.hooks.insert(
             ground_at,
             Box::new(move |ee: &mut ps2_oracle::Ee| {
                 // The point is moved onto the ground: only its height is read back.
                 let point = ee.r(5) as u32;
+                let at = [0, 4, 8, 12].map(|k| ee.u32_at(point + k));
+                asked.set(Some((at, [ee.r(4), ee.r(6), ee.r(7), ee.r(8)])));
                 ee.set_f32(point + 4, ground.get());
             }),
         );
@@ -1227,7 +1257,12 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         };
         let flung0 = pick.upto(2) == 1;
         let settled0 = pick.upto(4) == 0;
-        let touching = pick.upto(3) != 0;
+        // One to four bone collisions, each with its own contact flag: none touching a third of the
+        // time, and otherwise any of them.
+        let collisions = 1 + pick.upto(4) as usize;
+        let none = pick.upto(3) == 0;
+        let touched: Vec<bool> = (0..collisions).map(|_| !none && pick.upto(2) == 1).collect();
+        let touching = touched.iter().any(|&t| t);
         // The limit the clearance is tested against — which is sometimes negative, so that the arm
         // which decides a body has been flung off the ground again is reachable here.
         let flail_height = match pick.upto(4) {
@@ -1255,12 +1290,14 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
             2 => height0 + 1.0,
             _ => height0 - pick.float(6.0),
         };
-        let vel = [pick.float(30.0), pick.float(30.0), pick.float(30.0)];
+        let vel = [pick.float(30.0), pick.float(30.0), pick.float(30.0), pick.float(2.0)];
+        // The rest of the main bone's position, which the ground query is handed whole.
+        let (x0, z0, w0) = (pick.float(300.0), pick.float(300.0), pick.float(2.0));
 
         // The body, its request and the five objects the wreck arm reaches through.
         ee.load(BODY, &vec![0u8; 0xb00]);
         ee.load(REQ, &vec![0u8; 0x200]);
-        for &a in &[RAG, MAIN, VTABLE, BONES, BONE, NIL] {
+        for &a in &[RAG, MAIN, VTABLE, BONES, BONE, NIL, MORE_BONES] {
             ee.load(a, &vec![0u8; 0x200]);
         }
         ee.set_u32(BODY + B_REQUEST, REQ);
@@ -1274,15 +1311,22 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         ee.set_u32(RAG + 0xa4, MAIN);
         ee.set_u32(MAIN + M_VTABLE, VTABLE);
         ee.set_u32(VTABLE + M_SET_DAMPING, sink_at);
+        ee.set_f32(MAIN + M_HEIGHT - 4, x0);
         ee.set_f32(MAIN + M_HEIGHT, height0);
+        ee.set_f32(MAIN + M_HEIGHT + 4, z0);
+        ee.set_f32(MAIN + M_HEIGHT + 8, w0);
         for (i, &v) in vel.iter().enumerate() {
             ee.set_f32(MAIN + M_VEL + 4 * i as u32, v);
         }
-        // One bone, with the contact flag the roll runs on.
-        ee.set_u32(BODY + B_PART_COUNT, 1);
+        // The bone collisions, with the contact flags the roll runs on. Only the first one's follower
+        // is read.
+        ee.set_u32(BODY + B_PART_COUNT, collisions as u32);
         ee.set_u32(BODY + B_PARTS, BONES);
-        ee.set_u32(BONES, BONE);
-        ee.set_u32(BONE + BONE_TOUCH, u32::from(touching));
+        for (i, &t) in touched.iter().enumerate() {
+            let c = if i == 0 { BONE } else { MORE_BONES + 0x20 * i as u32 };
+            ee.set_u32(BONES + 4 * i as u32, c);
+            ee.set_u32(c + BONE_TOUCH, u32::from(t));
+        }
         ee.set_u32(BONE + BONE_FOLLOW, NIL);
         ee.set_u32(BODY + B_FOLLOW, NIL);
         // The three pointers the arm reads and this frame wants nothing from: the hand dummies (a zero
@@ -1308,6 +1352,7 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         ee.set_f32(BODY + B_ROLL_SPEED, roll_speed);
 
         ground.set(ground_k);
+        asked.set(None);
         stiff.set(None);
         record.set(None);
         ee.call(mode_at, &[u64::from(BODY)], &[dt], BUDGET);
@@ -1323,8 +1368,9 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
             stiff: stiff.get(),
         };
 
-        // The same frame through the port. Its machine is handed the same state, and the clearance the
-        // way its own caller works it out: the main bone's height less the ground's.
+        // The same frame through the port. Its machine is handed the same state, and its sensors are
+        // read off the same bones: the collisions' flags, the main bone, and a ground that answers the
+        // case's height and logs what it was asked.
         let mut body = Body::default();
         body.settled = settled0;
         body.machine.prev = game_sim::rider_anim::Mode::Wrecked;
@@ -1338,12 +1384,17 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         wrecks.rider_flail_height = F(flail_height);
         wrecks.rider_roll_time = F(roll_time);
         wrecks.rider_roll_speed = F(roll_speed);
-        let thrown = game_sim::rider_anim::Thrown {
-            throw: game_sim::phy::Throw::default(),
-            touching,
-            vel: Vf::new(vel[0], vel[1], vel[2], 0.0),
-            clearance: F(height0) - F(ground_k),
+        let contacts: Vec<Contact> = touched.iter().map(|&t| Contact { touched: t, ..Contact::default() }).collect();
+        let main = Bone {
+            position: Vf::new(x0, height0, z0, w0),
+            velocity: Vf::new(vel[0], vel[1], vel[2], vel[3]),
+            ..Bone::default()
         };
+        let mut under = Under { y: ground_k, asked: None };
+        let thrown = Thrown::from_bones(phy::Throw::default(), &contacts, &main, &mut under);
+        let (at, args) = asked.get().expect("the wreck arm queries the ground every frame");
+        assert_eq!(under.asked.map(|v| v.to_bits()), Some(at), "case {k}: the point the ground was asked about");
+        assert_eq!(args, [u64::from(RAG), 0, 0, 0], "case {k}: the world, and no normal, flags or record");
         let (mut r, mut a) = resting();
         r.held = false;
         a.wreck = true;
