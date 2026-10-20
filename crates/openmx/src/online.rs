@@ -189,6 +189,13 @@ impl Online {
         format!("online: {} ticks, {settled} settled, {} desyncs{hash}", self.net.tick(), self.net.desyncs.len())
     }
 
+    /// The hash of the state before each tick every machine has every pad for, from the first, and
+    /// how many desyncs were caught: what two machines' rides are held against each other by.
+    pub fn settled(&self) -> (&[u64], usize) {
+        let n = (self.net.confirmed().max(0) as usize).min(self.net.hashes.len());
+        (&self.net.hashes[..n], self.net.desyncs.len())
+    }
+
     /// The frame length every tick online is.
     pub fn dt(&self) -> F {
         self.dt

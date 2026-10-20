@@ -335,3 +335,91 @@ fn the_disc_s_hashes_are_of_what_the_ride_loads() {
     assert_eq!(files.track("nosuchtrack"), None);
     println!("race125p {:#018x}, free06 {:#018x}", files.bike("race125p").unwrap(), hashes[0]);
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The lobby's ride
+// ---------------------------------------------------------------------------------------------------
+
+#[path = "../src/net/mod.rs"]
+#[allow(dead_code)]
+mod net;
+
+#[path = "../src/online.rs"]
+#[allow(dead_code)]
+mod online;
+
+/// The `Event::Start` a network says, waiting up to 30 s.
+fn started(net: &Net, who: &str) -> (Room, String) {
+    let end = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end {
+        for e in net.poll() {
+            if let Event::Start(room, me) = e {
+                return (room, me);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("{who}: no start in 30 s");
+}
+
+#[test]
+fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_ends_it() {
+    use game_sim::world::Flat;
+    let (hn, gn) = (Arc::new(lan("Hosty", 1)), Arc::new(lan("Guesty", 1)));
+    let (mut h, mut hr) = fresh("Hosty", "thq1");
+    let (mut g, mut gr) = fresh("Guesty", "thq2");
+    host_and_join(&mut h, &mut hr, &hn, &mut g, &mut gr, &gn);
+    gn.send(Cmd::Prepared(true));
+    until((&mut h, &hn), (&mut g, &gn), "ready", |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| r.all_ready()));
+    hn.send(Cmd::Start);
+    let ((hroom, hme), (groom, gme)) = (started(&hn, "host"), started(&gn, "guest"));
+    assert_eq!((hroom.seed, &hroom.seats), (groom.seed, &groom.seats));
+    // A sim a seat, every seat on the room's seed, as the shell's ride from the lobby has them (the
+    // stock bike here: no disc).
+    let sims = |room: &Room| -> Vec<game_sim::Sim> {
+        let first = game_sim::Sim::new(1);
+        (0..room.seats.len())
+            .map(|_| {
+                let mut s = first.clone();
+                s.rng = room.seed;
+                s
+            })
+            .collect()
+    };
+    let mut ho = online::Online::lobby(hn.clone(), &hroom, &hme, sims(&hroom)).unwrap();
+    let mut go = online::Online::lobby(gn.clone(), &groom, &gme, sims(&groom)).unwrap();
+    let (mut hw, mut gw) = (Flat::default(), Flat::default());
+    let (mut hs, mut gs) = (game_sim::Sim::new(1), game_sim::Sim::new(1));
+    // Four seconds of riding at 60 Hz: the host on the gas, the guest leaning.
+    let gas = Report::from_buttons(game_sim::input::Control::Cross.mask());
+    let mut lean = Report::idle();
+    lean.set_axis(2, 0xe0);
+    for _ in 0..240 {
+        ho.frame(gas, &mut hw, None, &mut hs).unwrap();
+        go.frame(lean, &mut gw, None, &mut gs).unwrap();
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    let ((ha, hd), (ga, gd)) = (ho.settled(), go.settled());
+    let both = ha.len().min(ga.len());
+    println!("settled: host {} guest {} ticks; {}", ha.len(), ga.len(), ho.summary());
+    assert!(both >= 120, "only {both} ticks settled on both in 4 s");
+    assert_eq!(ha[..both], ga[..both], "the two machines' rides parted");
+    assert_eq!((hd, gd), (0, 0), "desyncs");
+    // The guest leaves from the pause: the host's ride ends, and what ended it is kept for its menu.
+    assert!(!go.leave(), "a guest is out of the lobby once it leaves");
+    let end = Instant::now() + Duration::from_secs(15);
+    let why = loop {
+        assert!(Instant::now() < end, "the host rode on after the guest left");
+        if let Err(why) = ho.frame(gas, &mut hw, None, &mut hs) {
+            break why;
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    };
+    println!("host's ride ended: {why}");
+    for e in ho.kept() {
+        h.heard(e);
+    }
+    until((&mut h, &hn), (&mut g, &gn), "the host's lobby back", |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| !r.riding && r.taken() == 1));
+    h.back_from_online();
+    assert_eq!(h.screen(), Some(Screen::Lobby));
+}
