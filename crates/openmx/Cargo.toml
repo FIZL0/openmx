@@ -9,6 +9,13 @@ publish.workspace = true
 name = "openmx"
 path = "src/main.rs"
 
+# The browser's build (N4): the part of the shell a web page runs, as a WebAssembly module with no
+# bindings crate (`tools/web.sh`). An rlib as well, so the desktop's tests can draw the same frame.
+[lib]
+name = "openmx_web"
+path = "src/web.rs"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 # The simulation (input layer, fixed update, track, collision) and the renderer. Nothing else: the
 # window, the pad and the frame pacing are all std, the same way the rest of this workspace has no

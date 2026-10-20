@@ -1,0 +1,13 @@
+{
+  "name": "openmx",
+  "short_name": "openmx",
+  "description": "openmx: MX Unleashed rewritten, played from your own disc image.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "landscape",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

@@ -17,9 +17,14 @@ use std::path::{Path, PathBuf};
 
 const SECTOR: u64 = 2048;
 
+/// Anything a disc image can be read out of by offset: a file on the desktop, or the browser's own
+/// storage behind the web shell's host calls (N4), where there is no file system to open a path in.
+pub trait Image: Read + Seek {}
+impl<T: Read + Seek> Image for T {}
+
 /// An opened disc image, with `MX.PSR`'s directory in memory.
 pub struct Disc {
-    file: std::fs::File,
+    file: Box<dyn Image>,
     /// Where `MX.PSR` starts in the image.
     psr_at: u64,
     psr: Psr,
@@ -28,15 +33,21 @@ pub struct Disc {
 impl Disc {
     /// Open an ISO 9660 image and find `MX.PSR` in its root directory.
     pub fn open(path: &Path) -> Result<Disc, String> {
-        let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Disc::read_from(Box::new(file)).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// The same, out of an image that is not a file: the browser hands the shell its copy of the disc
+    /// a read at a time.
+    pub fn read_from(mut file: Box<dyn Image>) -> Result<Disc, String> {
         let pvd = read_at(&mut file, 16 * SECTOR, SECTOR as usize)?;
-        if &pvd[1..6] != b"CD001" {
-            return Err(format!("{}: no CD001 at sector 16", path.display()));
+        if pvd.len() < 6 || &pvd[1..6] != b"CD001" {
+            return Err("no CD001 at sector 16".to_string());
         }
         let (root_extent, root_size) = (le32(&pvd[156 + 2..]), le32(&pvd[156 + 10..]) as usize);
         let root = read_at(&mut file, root_extent as u64 * SECTOR, root_size)?;
         let psr_at = find_in_directory(&root, "MX.PSR")
-            .ok_or_else(|| format!("{}: no MX.PSR in the root directory", path.display()))?;
+            .ok_or("no MX.PSR in the root directory")?;
         // 64 KiB covers the header and the whole directory; `Psr::parse` says so if it does not.
         let front = read_at(&mut file, psr_at, 64 << 10)?;
         let psr = Psr::parse(&front)?;
@@ -130,6 +141,13 @@ impl Res {
     }
 }
 
+/// Where [`Disc::open_configured`] looks: `[game] iso` from the nearest `kit.toml`, joined to the
+/// directory it was found in. The web shell's test hands this path to its stand-in for the browser.
+pub fn configured_image() -> Result<PathBuf, String> {
+    let (root, iso) = configured_iso()?;
+    Ok(root.join(iso))
+}
+
 /// Names on this disc are spelled with either slash and in any case; comparisons fold both.
 fn normalise(name: &str) -> String {
     name.replace('\\', "/").to_ascii_lowercase()
@@ -191,7 +209,7 @@ fn le32(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-fn read_at(file: &mut std::fs::File, at: u64, len: usize) -> Result<Vec<u8>, String> {
+fn read_at(file: &mut Box<dyn Image>, at: u64, len: usize) -> Result<Vec<u8>, String> {
     file.seek(SeekFrom::Start(at)).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; len];
     let mut got = 0;

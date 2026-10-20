@@ -1,0 +1,88 @@
+<!doctype html>
+<!--
+  openmx in a browser (N4). The game runs in worker.js and draws into this page's canvas; this page only asks for the
+  disc, shows how the copy is going, and keeps the picture scaled to the window. Build the module with tools/web.sh
+  and serve this folder on localhost (or https: OPFS needs a secure context).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>openmx</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<meta name="theme-color" content="#000000">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 16px/1.4 Arial, Helvetica, sans-serif; }
+  body { display: grid; place-items: center; overflow: hidden; }
+  canvas { width: 100vw; height: 100vh; object-fit: contain; image-rendering: auto; display: block; }
+  #disc { position: fixed; inset: 0; display: none; place-items: center; background: #000; }
+  #disc.up { display: grid; }
+  #disc div { max-width: 32em; padding: 2em; text-align: center; }
+  #disc h1 { font: 900 2.4em 'Arial Black', Arial, sans-serif; color: #f2b600; margin: 0 0 .4em; letter-spacing: .02em; }
+  #disc label { display: inline-block; margin-top: 1em; padding: .7em 1.6em; background: #f2b600; color: #000;
+    font-weight: bold; text-transform: uppercase; cursor: pointer; transform: skew(-12deg); }
+  #disc input { display: none; }
+  #status { margin-top: 1em; min-height: 1.4em; color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="screen" width="640" height="448"></canvas>
+<section id="disc">
+  <div>
+    <h1>openmx</h1>
+    <p>openmx plays from your own copy of <b>MX Unleashed</b> (PlayStation 2, USA). Pick the disc image you dumped;
+      it is copied into this browser's own storage for this site and never leaves your machine.</p>
+    <label>Pick disc image<input id="pick" type="file" accept=".iso,application/x-iso9660-image"></label>
+    <p id="status"></p>
+  </div>
+</section>
+<script>
+  const screen = document.getElementById('screen');
+  const disc = document.getElementById('disc');
+  const status = document.getElementById('status');
+  const worker = new Worker('worker.js');
+
+  // `body[data-state]` says where the page is (asking, copying, started, failed): crates/openmx/tests/web/chromium.mjs
+  // waits on it.
+  const state = s => (document.body.dataset.state = s);
+  worker.onmessage = ({ data }) => {
+    if (data.missing) {
+      disc.classList.add('up');
+      state('asking');
+    } else if (data.progress) {
+      const [done, total] = data.progress;
+      state('copying');
+      status.textContent = `Copying the disc: ${Math.floor((100 * done) / total)}%`;
+    } else if (data.started) {
+      disc.classList.remove('up');
+      state('started');
+    } else if (data.error) {
+      disc.classList.add('up');
+      status.textContent = data.error;
+      state('failed');
+    }
+  };
+
+  // The canvas belongs to the worker from here on; the page only scales it.
+  const offscreen = screen.transferControlToOffscreen();
+  worker.postMessage({ start: { canvas: offscreen } }, [offscreen]);
+
+  document.getElementById('pick').onchange = async ({ target }) => {
+    const file = target.files[0];
+    if (!file) return;
+    status.textContent = 'Reading the disc…';
+    // A browser that refuses OPFS (a private window) plays straight off the picked file instead, for this visit.
+    let opfs = false;
+    try {
+      await navigator.storage.getDirectory();
+      opfs = true;
+      await navigator.storage.persist?.();
+    } catch {}
+    worker.postMessage(opfs ? { import: file } : { start: { file } });
+  };
+
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>
