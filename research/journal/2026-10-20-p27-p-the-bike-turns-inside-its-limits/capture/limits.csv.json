@@ -1,0 +1,58 @@
+{
+ "kit": "ps2-decomp-kit 1.0",
+ "created": "2026-10-20T06:56:56+00:00",
+ "spec": {
+  "path": "research/journal/2026-10-20-p27-p-the-bike-turns-inside-its-limits/capture/limits.toml",
+  "name": "limits",
+  "sha256_16": "58dde3450d19c74d",
+  "text": "# P27: the live chassis' angular limits, one row. The bike chain is P21's (its capture/extra.toml).\n[watch]\nname        = \"limits\"\ndescription = \"the bike chassis' speed and angular limits\"\nevery       = 1\nframes      = 3\n\n[setup]\nstate  = 8\nwarmup = 30\n\n[[field]]\nname = \"rider_type\"\naddr = \"@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0\"\ntype = \"u32\"\n\n[[field]]\nname = \"max_speed_sq\"\naddr = \"@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x220\"\ntype = \"f32\"\n\n[[field]]\nname = \"max_ang_speed_sq\"\naddr = \"@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x224\"\ntype = \"f32\"\n\n[[field]]\nname = \"ang_vel_max\"\naddr = \"@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x230\"\ntype = \"f32x4\"\n\n[[field]]\nname = \"ang_vel_min\"\naddr = \"@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x240\"\ntype = \"f32x4\"\n"
+ },
+ "game": {
+  "name": "MX Unleashed",
+  "serial": "SLUS-20767",
+  "region": "US",
+  "version": "1.00"
+ },
+ "emulator": {
+  "pine_slot": 28011,
+  "vsync_addr": "0x479d04",
+  "speed": 1.0,
+  "game_id": "SLUS-20767",
+  "status": "running"
+ },
+ "setup": {
+  "state": 8,
+  "pad": null,
+  "warmup": 30
+ },
+ "format": "csv",
+ "columns": [
+  "frame",
+  "rider_type",
+  "max_speed_sq",
+  "max_ang_speed_sq",
+  "ang_vel_max.x",
+  "ang_vel_max.y",
+  "ang_vel_max.z",
+  "ang_vel_max.w",
+  "ang_vel_min.x",
+  "ang_vel_min.y",
+  "ang_vel_min.z",
+  "ang_vel_min.w"
+ ],
+ "capture": {
+  "frames": 3,
+  "skipped": 0,
+  "gaps": 0,
+  "dropped_frames": 0,
+  "null_samples": 0,
+  "frame_first": 2808,
+  "frame_last": 2810,
+  "every": 1,
+  "wall_seconds": 1.087,
+  "rate_hz": 2.76,
+  "ended": "frame budget reached (3)",
+  "suspect": false,
+  "warnings": []
+ }
+}

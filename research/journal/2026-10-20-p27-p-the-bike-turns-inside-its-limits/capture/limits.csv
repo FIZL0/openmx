@@ -1,0 +1,4 @@
+frame,rider_type,max_speed_sq,max_ang_speed_sq,ang_vel_max.x,ang_vel_max.y,ang_vel_max.z,ang_vel_max.w,ang_vel_min.x,ang_vel_min.y,ang_vel_min.z,ang_vel_min.w
+2808,2,18225.0,1875.0,25.0,3.0,25.0,1.0,-25.0,-3.0,-25.0,1.0
+2809,2,18225.0,1875.0,25.0,3.0,25.0,1.0,-25.0,-3.0,-25.0,1.0
+2810,2,18225.0,1875.0,25.0,3.0,25.0,1.0,-25.0,-3.0,-25.0,1.0
