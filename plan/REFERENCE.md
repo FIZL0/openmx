@@ -74,6 +74,10 @@ replays against nothing.
 |---|---|
 | `first_recording.p2m2` | 60.4 s (3621 frames at 59.94 Hz) of free riding on **Free09**, both pads recorded, PCSX2 2.9.127. Contains tricks and a collision with an NPC rider. The acceptance fixture for S8. |
 | `first_recording.p2m2_SaveState.p2s` | the state it starts from — 32 MiB of EE RAM, unpacked with `./kit state ram <path>` |
+| `recording2.p2m2` | 63.2 s (3788 frames at 59.94 Hz) on **Free09** with the same Race125, both pads, PCSX2 2.9.127, author `ryha`. Bailing, tricks, backflips and plain riding — C6 captures it and indexes them. Read-only: PCSX2 records over a movie it plays. |
+| `recording2.p2m2_SaveState.p2s` | the state it starts from |
+| `biplane.p2m2` | 57.3 s (3437 frames at 59.94 Hz) in the **biplane** on **Free06**, both pads, PCSX2 2.9.127, author `ryha`; the state also has a Race250 loaded. C7 captures it. Read-only. |
+| `biplane.p2m2_SaveState.p2s` | the state it starts from |
 
 What the state's RAM says, so nobody has to guess it again: the bike is a **125cc, Race tier**
 (`Bike\Race125A.phy` and `Bike\Race125P.phy` are the only bike physics pair resolved in RAM; the `%s`-
