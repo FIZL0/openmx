@@ -245,7 +245,43 @@ impl Gas {
     }
 }
 
-/// `controls.txt`: how the host's pad is wired, which is the device's and not the rider's.
+/// Which controls a seat rides on (P40), as `--controls` spells it: the shell's `pad::Scheme`, which
+/// this file cannot name because `tests/menu.rs` compiles it on its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layout {
+    /// R2 the gas, L2 the brake, Select the camera; Cross and Square kept free.
+    #[default]
+    New,
+    /// The original's: Cross the gas, Square the brake, L1 the camera.
+    Original,
+}
+
+impl Layout {
+    pub const ALL: [Layout; 2] = [Layout::New, Layout::Original];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Layout::New => "new",
+            Layout::Original => "original",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Layout::New => "New",
+            Layout::Original => "Original",
+        }
+    }
+}
+
+/// How many seats the file holds a layout for: the shell's `pad::SEATS`.
+pub const SEATS: usize = 8;
+
+/// The seats the Controls screen has a row for; the rest are the file's.
+pub const LAYOUT_ROWS: usize = 4;
+
+/// `controls.txt`: how the host's pad is wired, which is the device's and not the rider's, and which
+/// layout each seat rides on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Controls {
     pub throttle: Gas,
@@ -253,6 +289,8 @@ pub struct Controls {
     pub pad: Option<String>,
     /// `--pad-pressure`'s map of axes to controls, as its text; empty for none.
     pub pressure: String,
+    /// `--controls`' layout per seat, 1P first.
+    pub layouts: [Layout; SEATS],
 }
 
 impl Controls {
@@ -267,6 +305,20 @@ impl Controls {
                 }
                 "pad" => c.pad = (!v.is_empty() && v != "auto").then(|| v.to_string()),
                 "pressure" => c.pressure = if v == "none" { String::new() } else { v.to_string() },
+                // One word for every seat, or one per seat with the last carried on.
+                "layout" => {
+                    let words: Vec<Option<Layout>> = v
+                        .split(',')
+                        .map(|w| Layout::ALL.into_iter().find(|l| l.word() == w.trim()))
+                        .collect();
+                    if words.iter().all(Option::is_some) && words.len() <= SEATS {
+                        let mut last = Layout::default();
+                        for (i, slot) in c.layouts.iter_mut().enumerate() {
+                            last = words.get(i).copied().flatten().unwrap_or(last);
+                            *slot = last;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -276,12 +328,23 @@ impl Controls {
     pub fn text(&self) -> String {
         format!(
             "# openmx's pad wiring (P36): throttle is cross, r2 or l2; pad is a device or auto;\n\
-             # pressure is --pad-pressure's axis:control list, or none\n\
-             throttle = {}\npad = {}\npressure = {}\n",
+             # pressure is --pad-pressure's axis:control list, or none; layout is new or original,\n\
+             # or one per seat (new,original,...) — new is R2 gas, L2 brake, Select camera, with\n\
+             # Cross and Square kept free; original is the game's own (P40)\n\
+             throttle = {}\npad = {}\npressure = {}\nlayout = {}\n",
             self.throttle.word(),
             self.pad.as_deref().unwrap_or("auto"),
-            if self.pressure.is_empty() { "none" } else { &self.pressure }
+            if self.pressure.is_empty() { "none" } else { &self.pressure },
+            self.layout_text(),
         )
+    }
+
+    /// The `layout` line's value: one word when every seat agrees.
+    pub fn layout_text(&self) -> String {
+        if self.layouts.iter().all(|l| *l == self.layouts[0]) {
+            return self.layouts[0].word().to_string();
+        }
+        self.layouts.iter().map(|l| l.word()).collect::<Vec<_>>().join(",")
     }
 }
 
@@ -370,7 +433,7 @@ impl Screen {
 const MAIN: [&str; 3] = ["Free Ride", "Settings", "Quit"];
 const PAUSE: [&str; 5] = ["Resume", "Restart", "Settings", "Main Menu", "Quit"];
 const SETTINGS_ROWS: usize = 4;
-const CONTROLS_ROWS: usize = 1;
+const CONTROLS_ROWS: usize = 1 + LAYOUT_ROWS;
 
 /// The on-screen keyboard: opentennis's four rows of ten, then a row of four commands.
 const KEY_ROWS: [&str; 4] = ["abcdefghij", "klmnopqrst", "uvwxyz0123", "456789-'.&"];
@@ -586,6 +649,11 @@ impl Menu {
                     let n = Gas::ALL.len();
                     let i = if p.left { (i + n - 1) % n } else { (i + 1) % n };
                     self.controls.throttle = Gas::ALL[i];
+                    self.changed = true;
+                } else if (p.ok || side) && at <= LAYOUT_ROWS {
+                    // Two layouts, so either way is the other one.
+                    let seat = &mut self.controls.layouts[at - 1];
+                    *seat = if *seat == Layout::New { Layout::Original } else { Layout::New };
                     self.changed = true;
                 }
             }
@@ -923,7 +991,14 @@ impl Art {
                         format!("Wrecks  {}", if menu.settings.wrecks { "On" } else { "Off" }),
                         "Controls".to_string(),
                     ],
-                    _ => vec![format!("Throttle  {}", menu.controls.throttle.label())],
+                    _ => std::iter::once(format!("Original throttle  {}", menu.controls.throttle.label()))
+                        .chain(
+                            menu.controls.layouts[..LAYOUT_ROWS]
+                                .iter()
+                                .enumerate()
+                                .map(|(i, l)| format!("{}P controls  {}", i + 1, l.label())),
+                        )
+                        .collect(),
                 };
                 p.logo();
                 p.column(107.0, 1.75);
@@ -944,13 +1019,13 @@ impl Art {
                         Some(dev) => format!("Pad  {dev}"),
                         None => "Pad  the first one found".to_string(),
                     };
-                    p.text(Face::Small, &pad, 242.0, item_y(2), Align::Centre, ITEM);
+                    p.text(Face::Small, &pad, 242.0, item_y(CONTROLS_ROWS + 1), Align::Centre, ITEM);
                     let pressure = match menu.controls.pressure.as_str() {
                         "" => "Pressures  none".to_string(),
                         map => format!("Pressures  {map}"),
                     };
-                    p.text(Face::Small, &pressure, 242.0, item_y(3), Align::Centre, ITEM);
-                    p.text(Face::Small, "Pad and pressures: controls.txt", 242.0, item_y(4), Align::Centre, ITEM);
+                    p.text(Face::Small, &pressure, 242.0, item_y(CONTROLS_ROWS + 2), Align::Centre, ITEM);
+                    p.text(Face::Small, "Pad and pressures: controls.txt", 242.0, item_y(CONTROLS_ROWS + 3), Align::Centre, ITEM);
                 }
                 p.title(screen.title());
                 p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Change")]);

@@ -66,9 +66,10 @@ const BUTTONS: usize = 12;
 /// Which control each joystick button index is, in the order Linux reports a gamepad's buttons.
 ///
 /// The kernel orders them by keycode, so a pad with no `BTN_SELECT` — the kit's own virtual pad, for
-/// one — slides start down into index 6. Both 6 and 7 are therefore Start, which costs nothing: Select
-/// does nothing in this shell, and the one control the project has never been able to measure live is
-/// Select anyway (see I1).
+/// one — slides start down into index 6. Until P40 both 6 and 7 were therefore Start, which cost
+/// nothing while Select did nothing; under the new scheme Select is the camera, so 6 is Select and a
+/// pad whose sysfs entry says it has no `BTN_SELECT` has its buttons from 6 on moved up one as they
+/// are read ([`DeviceInfo::no_select`]), which puts its Start back on 7.
 const PAD_BUTTONS: [Option<Control>; BUTTONS] = [
     Some(Control::Cross),    // south
     Some(Control::Circle),   // east
@@ -76,7 +77,7 @@ const PAD_BUTTONS: [Option<Control>; BUTTONS] = [
     Some(Control::Triangle), // north
     Some(Control::L1),       // left shoulder
     Some(Control::R1),       // right shoulder
-    Some(Control::Start),    // select on a pad that has one, start on a pad that does not
+    Some(Control::Select),   // select (back)
     Some(Control::Start),
     None, // the guide button, which is the window manager's business and not the game's
     Some(Control::L3),
@@ -165,11 +166,125 @@ pub struct Wiring {
     pub throttle: Throttle,
     /// The control each joystick axis carries the pressure of, for a device that reports one.
     pub pressure: [Option<Control>; AXES],
+    /// Which layout each seat rides on (P40): the new one, or the original's.
+    pub schemes: [Scheme; SEATS],
 }
 
 impl Default for Wiring {
     fn default() -> Wiring {
-        Wiring { throttle: Throttle::default(), pressure: [None; AXES] }
+        Wiring { throttle: Throttle::default(), pressure: [None; AXES], schemes: [Scheme::default(); SEATS] }
+    }
+}
+
+/// Which controls a seat's pad is laid out as (P40).
+///
+/// The simulation reads the original's layout and nothing else — Cross the gas, Square the brake,
+/// R2 the front brake, L2 the clutch ([`game_sim::ride::Controls::from_pad`]) and L1 the shell's
+/// camera — so a scheme is a remap of the pad's report *before* the ride sees it ([`Scheme::ride`]),
+/// and what a tape records is the remapped report: the controls the simulation read, which replay
+/// the same whatever scheme replays them. Under [`Scheme::Original`] the remap is the identity, so a
+/// replay or an acceptance run is bit for bit what it was before there was a choice.
+///
+/// The menus read the pad as it is (Cross is OK there under either), because a scheme is about the
+/// ride and the front end is the port's own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scheme {
+    /// R2 the gas and L2 the brake, both on their trigger's travel; Select changes the camera.
+    /// Cross and Square do nothing in a ride, and are kept free for what comes later (more tricks,
+    /// other functions). The original's front brake and clutch, R2 and L2 there, have no control
+    /// in it yet.
+    #[default]
+    New,
+    /// The original's: the pad as the simulation reads it, and L1 the camera.
+    Original,
+}
+
+impl Scheme {
+    pub const ALL: [Scheme; 2] = [Scheme::New, Scheme::Original];
+
+    /// The word `--controls` and `controls.txt` spell it with.
+    pub fn word(self) -> &'static str {
+        match self {
+            Scheme::New => "new",
+            Scheme::Original => "original",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Scheme> {
+        Scheme::ALL.into_iter().find(|s| s.word() == w.trim())
+    }
+
+    /// `new`, `original`, or one per seat (`new,original,…`); seats past the list ride the last one.
+    pub fn parse_list(s: &str) -> Result<[Scheme; SEATS], String> {
+        let words: Vec<&str> = s.split(',').collect();
+        if words.len() > SEATS {
+            return Err(format!("{s}: at most {SEATS} seats"));
+        }
+        let mut out = [Scheme::default(); SEATS];
+        let mut last = Scheme::default();
+        for (i, slot) in out.iter_mut().enumerate() {
+            if let Some(w) = words.get(i) {
+                last = Scheme::from_word(w).ok_or_else(|| format!("{w}: new or original"))?;
+            }
+            *slot = last;
+        }
+        Ok(out)
+    }
+
+    /// [`Scheme::parse_list`]'s text back: one word when every seat agrees, for the line a ride
+    /// starts with.
+    pub fn list_text(schemes: &[Scheme; SEATS]) -> String {
+        if schemes.iter().all(|s| *s == schemes[0]) {
+            return schemes[0].word().to_string();
+        }
+        schemes.iter().map(|s| s.word()).collect::<Vec<_>>().join(",")
+    }
+
+    /// The control the shell changes the camera on, read off the remapped report: Select, which
+    /// the simulation reads nothing from and so passes through, or the original's L1.
+    pub fn camera(self) -> Control {
+        match self {
+            Scheme::New => Control::Select,
+            Scheme::Original => Control::L1,
+        }
+    }
+
+    /// Whether this frame of the port's own poll is a press of the camera button. L1 pressed with
+    /// R1 already down is the second half of the original's reset chord and not a camera; Select is
+    /// in no chord.
+    pub fn changes_camera(self, pad: &game_sim::input::Pad) -> bool {
+        let camera = self.camera();
+        pad.pressed(camera) && (camera != Control::L1 || !pad.held(Control::R1))
+    }
+
+    /// The report the simulation is handed for a pad that reported `report`.
+    ///
+    /// Under the new scheme R2 is moved onto Cross and L2 onto Square, bit and pressure byte
+    /// together — the game reads both from the pressure, so a trigger's travel is the original's
+    /// part throttle and part brake — and the pad's own Cross, Square, L2 and R2 are let go. Everything
+    /// else, Select among it, reaches the ride as the pad said it. A pad that is not there is left
+    /// as it is.
+    pub fn ride(self, report: Report) -> Report {
+        if self == Scheme::Original || report.status() == 0xff {
+            return report;
+        }
+        let mut out = report;
+        let was = report.buttons();
+        let mut held = was & !game_sim::input::mask_of(&[Control::Cross, Control::Square, Control::L2, Control::R2]);
+        for (to, from) in [(Control::Cross, Control::R2), (Control::Square, Control::L2)] {
+            if was & from.mask() != 0 {
+                held |= to.mask();
+            }
+        }
+        let low = !held;
+        out.0[2] = (low >> 8) as u8;
+        out.0[3] = low as u8;
+        let pressure = |c: Control| c.binding().pressure as usize;
+        out.0[pressure(Control::Cross)] = report.0[pressure(Control::R2)];
+        out.0[pressure(Control::Square)] = report.0[pressure(Control::L2)];
+        out.0[pressure(Control::R2)] = 0;
+        out.0[pressure(Control::L2)] = 0;
+        out
     }
 }
 
@@ -289,6 +404,8 @@ const KEY_STICKS: [(usize, u8, u8); 2] = [
 pub struct Pads {
     /// The joystick device, if one opened.
     device: Option<std::fs::File>,
+    /// The device has no Select, so its buttons from 6 on are read one up ([`DeviceInfo::no_select`]).
+    no_select: bool,
     /// Its name, for the line the shell prints when it joins.
     pub name: Option<String>,
     /// The device stopped answering — unplugged, or the read failed — and was closed.
@@ -305,6 +422,11 @@ pub struct Pads {
     wiring: Wiring,
     /// Which key and which pad button is which of the game's controls (`controls.txt`).
     bindings: Bindings,
+    /// The scheme of the seat this pad is reporting for (P40), which [`Seats`] sets each frame
+    /// because a pad's seat can change: it decides what a wired trigger and the throttle keys are.
+    /// A `Pads` on its own is the original's, so this module's tests and `tests/ride.rs` read the
+    /// report the simulation reads.
+    scheme: Scheme,
     /// When the last report was built, so the ramps travel at a rate in seconds rather than one a
     /// frame: the shell paces itself to 60 Hz but a heavy frame overruns, and a keyboard that leans
     /// further when the picture is cheap would be its own bug.
@@ -341,12 +463,14 @@ impl Pads {
         }
         Pads {
             device: None,
+            no_select: false,
             name: None,
             gone: false,
             axis,
             button: [false; BUTTONS],
             key_stick: [KeyAxis::CENTRED; KEY_STICKS.len()],
             key_gas: KeyRamp::SHUT,
+            scheme: Scheme::Original,
             wiring,
             bindings,
             clock: None,
@@ -429,11 +553,13 @@ impl Pads {
         // The analogue triggers, which are a pressure and not a bit: a pad's L2 and R2 travel, and
         // the game reads those two controls from their pressure byte alone. One of them is the
         // throttle instead when the session asked for that, and then it is not itself at all — a
-        // front brake that came on with the gas would be worse than no part throttle.
+        // front brake that came on with the gas would be worse than no part throttle. Under the new
+        // scheme the triggers are already the gas and the brake ([`Scheme::ride`]), so there they
+        // are only themselves.
         for (axis, control) in [(AXIS_L2, Control::L2), (AXIS_R2, Control::R2)] {
             let pressure = trigger_pressure(self.axis[axis]);
             let control = match self.wiring.throttle {
-                Throttle::Trigger(wired) if wired == control => Control::Cross,
+                Throttle::Trigger(wired) if wired == control && self.scheme == Scheme::Original => Control::Cross,
                 _ => control,
             };
             if pressure > 0 {
@@ -442,9 +568,14 @@ impl Pads {
         }
 
         // And the keyboard's throttle, which is the one control a key cannot do justice to: ramped
-        // ([`KeyRamp`]), so a stab is part throttle and a held key is still pinned.
+        // ([`KeyRamp`]), so a stab is part throttle and a held key is still pinned. It is Cross in the
+        // report whatever the scheme, which is the menus' OK, and under the new scheme R2 as well,
+        // which is what the ride takes the gas from there.
         if let Some(pressure) = self.key_gas.step(seconds, self.bindings.throttle_key(held)) {
             press(&mut report, Control::Cross, pressure);
+            if self.scheme == Scheme::New {
+                press(&mut report, Control::R2, pressure);
+            }
         }
         report
     }
@@ -471,7 +602,10 @@ impl Pads {
                 Ok(EVENT_BYTES) => {
                     let value = i16::from_le_bytes([event[4], event[5]]);
                     let kind = event[6] & !EVENT_INIT;
-                    let number = event[7] as usize;
+                    let mut number = event[7] as usize;
+                    if kind == EVENT_BUTTON && self.no_select && number >= 6 {
+                        number += 1;
+                    }
                     match kind {
                         EVENT_AXIS if number < AXES => self.axis[number] = value,
                         EVENT_BUTTON if number < BUTTONS => self.button[number] = value != 0,
@@ -573,6 +707,24 @@ pub struct DeviceInfo {
     pub uniq: String,
     /// Where it is plugged in: the USB port path, for a pad that has no serial.
     pub phys: String,
+    /// The device says which keys it has and Select is not among them, so its js button numbers
+    /// from 6 on are one short of [`PAD_BUTTONS`]' (P40). A node with no sysfs entry is taken to
+    /// number its buttons as a full gamepad does.
+    pub no_select: bool,
+}
+
+/// The kernel's `BTN_SELECT` and `BTN_SOUTH`: a gamepad has the second, and the first if it has a
+/// Select (or Back) button at all.
+const BTN_SELECT: usize = 0x13a;
+const BTN_SOUTH: usize = 0x130;
+
+/// Whether `bitmap` — a sysfs `capabilities/key`, hex words most significant first, each a C
+/// `long` — has bit `code` set.
+fn has_key(bitmap: &str, code: usize) -> bool {
+    let bits = usize::BITS as usize;
+    let words: Vec<&str> = bitmap.split_whitespace().collect();
+    let Some(at) = words.len().checked_sub(1 + code / bits) else { return false };
+    u64::from_str_radix(words[at], 16).is_ok_and(|w| w >> (code % bits) & 1 != 0)
 }
 
 impl DeviceInfo {
@@ -590,6 +742,10 @@ impl DeviceInfo {
             product: hex("id/product"),
             uniq: text("uniq"),
             phys: text("phys"),
+            no_select: {
+                let keys = text("capabilities/key");
+                has_key(&keys, BTN_SOUTH) && !has_key(&keys, BTN_SELECT)
+            },
         }
     }
 
@@ -909,7 +1065,11 @@ impl Bindings {
              # (PadSouth, PadEast, PadWest, PadNorth, PadL1, PadR1, PadBack, PadStart, PadL3, PadR3, or\n\
              # Pad0 to Pad11). cross's keys are the throttle, ramped; stick_* are the right stick's keys.\n\
              # The sticks, the triggers (l2, r2) and the d-pad hat are axes and always do what they do;\n\
-             # Escape quits, H the overlay and M the machine swap.\n",
+             # Escape quits, H the overlay and M the machine swap.\n\
+             # A ride reads these through the seat's scheme (--controls new|original, P40). Under the\n\
+             # new one r2 is the gas, l2 the brake and select the camera, and cross and square do\n\
+             # nothing in a ride: they are kept free for later. Under the original's, cross is the\n\
+             # gas, square the brake, r2 the front brake, l2 the clutch and l1 the camera.\n",
         );
         for (i, set) in self.0.iter().enumerate() {
             let names: Vec<_> = set.iter().map(|x| x.name()).collect();
@@ -1126,6 +1286,7 @@ impl Seats {
                 name => format!("{name} ({})", path.display()),
             });
             pads.device = Some(file);
+            pads.no_select = info.no_select;
             self.joined.push(Joined { path, id, pads });
         }
     }
@@ -1138,6 +1299,11 @@ impl Seats {
             j.pads.set_wiring(wiring.clone());
         }
         self.wiring = wiring;
+    }
+
+    /// Which scheme seat `seat` rides on.
+    pub fn scheme(&self, seat: usize) -> Scheme {
+        self.wiring.schemes[seat]
     }
 
     /// The pad holding each seat now, by name, for the startup lines and the overlay.
@@ -1188,13 +1354,18 @@ impl Seats {
         let mut out = [SeatInput::Empty; SEATS];
         for (i, seat) in out.iter_mut().enumerate() {
             let keys: &dyn Fn(u8) -> bool = if keyboard == Some(i) { held } else { &no_keys };
+            let scheme = self.wiring.schemes[i];
             *seat = match &self.slots.held[i] {
                 Some(id) => {
                     let j = self.joined.iter_mut().find(|j| &j.id == id).expect("a held pad is joined");
+                    j.pads.scheme = scheme;
                     SeatInput::Playing(j.pads.report(keys))
                 }
                 None if self.slots.waiting(i) => SeatInput::Waiting,
-                None if keyboard == Some(i) => SeatInput::Playing(self.keys.report(held)),
+                None if keyboard == Some(i) => {
+                    self.keys.scheme = scheme;
+                    SeatInput::Playing(self.keys.report(held))
+                }
                 None => SeatInput::Empty,
             };
         }
@@ -1945,7 +2116,9 @@ mod tests {
         assert_eq!(Bindings::parse(&b.text()).0, b);
         // The default is the shell's binding from before there was a file.
         assert_eq!(d.0[Control::Cross as usize], [Input::Key(key::X), Input::Key(key::SPACE), Input::Button(0)]);
-        assert_eq!(d.0[Control::Start as usize], [Input::Key(key::RETURN), Input::Button(6), Input::Button(7)]);
+        // Except that js button 6 is Select since P40 (a pad with none has its Start moved to 7).
+        assert_eq!(d.0[Control::Start as usize], [Input::Key(key::RETURN), Input::Button(7)]);
+        assert_eq!(d.0[Control::Select as usize], [Input::Key(key::TAB), Input::Button(6)]);
         assert_eq!(d.0[16..20], [[Input::Key(key::J)], [Input::Key(key::L)], [Input::Key(key::I)], [Input::Key(key::K)]]);
     }
 
@@ -2151,6 +2324,210 @@ mod tests {
         let now = frame(&mut seats, &|code| code == key::Z);
         assert_eq!(now[0], SeatInput::Waiting);
         assert!(down(playing(now[1]), Control::Square));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The ride's hands from one report, through the port's own poll.
+    fn ride_of(report: Report) -> Controls {
+        let mut manager = Manager::connected();
+        manager.tick(F(FRAME), &[report; PADS]);
+        Controls::from_pad(manager.pad(0))
+    }
+
+    /// P40: under the new layout R2's travel is the original's gas and L2's its brake — the same
+    /// fraction the original reads off Cross and Square at that pressure — and the pad's own Cross
+    /// and Square, and the original's front brake and clutch on the triggers, do nothing in a ride.
+    #[test]
+    fn under_the_new_layout_the_triggers_are_the_gas_and_the_brake() {
+        let mut pads = Pads::unplugged(Wiring::default());
+        let original = |control: Control, pressure: u8| {
+            let mut r = Report::idle();
+            press(&mut r, control, pressure);
+            ride_of(r)
+        };
+        for travel in [i16::MIN + 1, -20000, -5000, 0, 9000, 20000, i16::MAX] {
+            pads.axis[AXIS_R2] = travel;
+            pads.axis[AXIS_L2] = TRIGGER_REST;
+            let pressure = trigger_pressure(travel);
+            let c = ride_of(Scheme::New.ride(pads.build(FRAME, &nothing)));
+            assert_eq!(c.gas, original(Control::Cross, pressure).gas, "R2 at {travel}");
+            assert_eq!((c.brake, c.front_brake, c.clutch), (F::ZERO, F::ZERO, F::ZERO), "R2 at {travel}");
+            if pressure > PRESSURE_THRESHOLD {
+                assert!(c.gas > F::ZERO, "R2 at {travel}");
+            }
+
+            pads.axis[AXIS_R2] = TRIGGER_REST;
+            pads.axis[AXIS_L2] = travel;
+            let c = ride_of(Scheme::New.ride(pads.build(FRAME, &nothing)));
+            assert_eq!(c.brake, original(Control::Square, pressure).brake, "L2 at {travel}");
+            assert_eq!((c.gas, c.front_brake, c.clutch), (F::ZERO, F::ZERO, F::ZERO), "L2 at {travel}");
+        }
+        // Half way is part throttle, not a switch.
+        pads.axis[AXIS_L2] = TRIGGER_REST;
+        pads.axis[AXIS_R2] = 0;
+        let c = ride_of(Scheme::New.ride(pads.build(FRAME, &nothing)));
+        assert!(c.gas > F(0.3) && c.gas < F(0.7), "half a trigger reads {:?}", c.gas);
+
+        // The face buttons the original rides on are free: Cross and Square held, nothing.
+        pads.axis[AXIS_R2] = TRIGGER_REST;
+        pads.button[0] = true; // south: Cross
+        pads.button[2] = true; // west: Square
+        let report = Scheme::New.ride(pads.build(FRAME, &nothing));
+        let c = ride_of(report);
+        assert_eq!((c.gas, c.brake), (F::ZERO, F::ZERO));
+        assert!(!down(report, Control::Cross) && !down(report, Control::Square));
+        // And the same pad under the original's is the original's gas and brake.
+        let c = ride_of(Scheme::Original.ride(pads.build(FRAME, &nothing)));
+        assert_eq!((c.gas, c.brake), (F::ONE, F::ONE));
+    }
+
+    /// P40: Select changes the camera under the new layout — it reaches the port's poll as a press
+    /// — and L1 does not; under the original's it is L1, and not when R1 is already down (the reset
+    /// chord's second half).
+    #[test]
+    fn select_cycles_the_camera_under_the_new_layout() {
+        let presses = |scheme: Scheme, frames: &[&[Control]]| {
+            let mut manager = Manager::connected();
+            let mut out = Vec::new();
+            for held in frames {
+                let report = scheme.ride(Report::from_buttons(game_sim::input::mask_of(held)));
+                manager.tick(F(FRAME), &[report; PADS]);
+                out.push(scheme.changes_camera(manager.pad(0)));
+            }
+            out
+        };
+        let (none, select, l1) = (&[][..], &[Control::Select][..], &[Control::L1][..]);
+        assert_eq!(presses(Scheme::New, &[none, select, select, none, select]), [false, true, false, false, true]);
+        assert_eq!(presses(Scheme::New, &[none, l1, none]), [false, false, false]);
+        assert_eq!(presses(Scheme::Original, &[none, l1, l1, none, select]), [false, true, false, false, false]);
+        let r1 = &[Control::R1][..];
+        let chord = &[Control::R1, Control::L1][..];
+        assert_eq!(presses(Scheme::Original, &[none, r1, chord]), [false, false, false]);
+        // Select through a pad's own button 6, which a pad with a Select has there.
+        let mut pads = Pads::unplugged(Wiring::default());
+        pads.button[6] = true;
+        assert!(down(Scheme::New.ride(pads.build(FRAME, &nothing)), Control::Select));
+    }
+
+    /// P40: the original's layout is the identity — every report reaches the ride as it was built —
+    /// and a seat on it reports what a bare `Pads` (which is the original's) always did, so a replay
+    /// or an acceptance run is what it was. 20,000 generated reports, every byte random.
+    #[test]
+    fn the_original_layout_maps_exactly_as_before() {
+        let mut seed = 0x2545_f491_u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for _ in 0..20_000 {
+            let mut r = Report::idle();
+            for b in r.0.iter_mut() {
+                *b = next() as u8;
+            }
+            assert_eq!(Scheme::Original.ride(r), r);
+            // A pad that is not there is not remapped by either.
+            r.0[0] = 0xff;
+            assert_eq!(Scheme::New.ride(r), r);
+        }
+        // An idle pad is idle under either.
+        assert_eq!(Scheme::New.ride(Report::idle()), Report::idle());
+
+        // Through the seats: the keyboard on the original's with the throttle key and a trigger
+        // wired to gas is the same report a bare `Pads` built before there were layouts.
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("layouts");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        let wiring = Wiring {
+            throttle: Throttle::Trigger(Control::R2),
+            schemes: [Scheme::Original; SEATS],
+            ..Wiring::default()
+        };
+        // Each on the first frame, which both answer at no time gone.
+        for keys in [&[key::X][..], &[key::Z, key::F], &[key::S, key::TAB], &[key::A, key::D], &[]] {
+            let mut seats = Seats::in_dir(&dev, &sys, None, None, wiring.clone(), Bindings::default());
+            let mut bare = Pads::unplugged(wiring.clone());
+            let held = |code: u8| keys.contains(&code);
+            let seat = playing(frame(&mut seats, &held)[0]);
+            assert_eq!(Scheme::Original.ride(seat), bare.build(0.0, &held), "keys {keys:?}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// P40, the keyboard: under the new layout its throttle key is still the ramped gas (and still
+    /// Cross for the menus), and a trigger wired to the gas for the original's is only itself.
+    #[test]
+    fn the_keyboard_and_the_wiring_under_the_new_layout() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("new-keys");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        let wiring = Wiring { throttle: Throttle::Trigger(Control::L2), ..Wiring::default() };
+        assert_eq!(wiring.schemes, [Scheme::New; SEATS], "the new layout is the default");
+        let mut seats = Seats::in_dir(&dev, &sys, None, None, wiring, Bindings::default());
+        // A pad on a new-layout seat, a frame at a time: the ramp, and pinned after it.
+        let x = |code: u8| code == key::X;
+        let mut pads = Pads::unplugged(Wiring::default());
+        pads.scheme = Scheme::New;
+        let mut gas = Vec::new();
+        for _ in 0..30 {
+            let report = pads.build(FRAME, &x);
+            assert!(down(report, Control::Cross) || report.pressure(14) <= PRESSURE_THRESHOLD, "the menus' OK");
+            gas.push(ride_of(Scheme::New.ride(report)).gas);
+        }
+        assert!(gas.windows(2).all(|w| w[1] >= w[0]) && gas[0] < F::ONE, "ramped: {gas:?}");
+        assert_eq!(*gas.last().unwrap(), F::ONE);
+        // L2 on the keyboard (S) is the brake.
+        let s = |code: u8| code == key::S;
+        let c = ride_of(seats.scheme(0).ride(playing(frame(&mut seats, &s)[0])));
+        assert_eq!((c.gas, c.brake, c.clutch), (F::ZERO, F::ONE, F::ZERO));
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // And L2's travel on a pad is the brake, whatever --throttle said for the original's.
+        let mut pads = Pads::unplugged(Wiring { throttle: Throttle::Trigger(Control::L2), ..Wiring::default() });
+        pads.scheme = Scheme::New;
+        pads.axis[AXIS_L2] = i16::MAX;
+        let c = ride_of(Scheme::New.ride(pads.build(FRAME, &nothing)));
+        assert_eq!((c.gas, c.brake, c.clutch), (F::ZERO, F::ONE, F::ZERO));
+    }
+
+    #[test]
+    fn a_layout_list_reads_and_says_why_not() {
+        assert_eq!(Scheme::parse_list("original"), Ok([Scheme::Original; SEATS]));
+        let mut two = [Scheme::Original; SEATS];
+        two[0] = Scheme::New;
+        assert_eq!(Scheme::parse_list("new,original"), Ok(two));
+        assert_eq!(Scheme::parse_list(&Scheme::list_text(&two)), Ok(two));
+        assert_eq!(Scheme::list_text(&[Scheme::New; SEATS]), "new");
+        assert!(Scheme::parse_list("new,old").is_err());
+        assert!(Scheme::parse_list("context/controls.txt").is_err());
+        assert!(Scheme::parse_list(&["new"; SEATS + 1].join(",")).is_err());
+    }
+
+    /// A pad whose sysfs entry lists its keys and has no Select gets its Start on 7, as a full pad
+    /// has it, so its Start is not the new layout's camera.
+    #[test]
+    fn a_pad_with_no_select_keeps_its_start() {
+        // BTN_SOUTH (0x130) to BTN_START (0x13b) but not BTN_SELECT (0x13a), in the kernel's words.
+        let word = (0x0fffu64 << 48) & !(1 << 58);
+        let keys = format!("{word:x} 0 0 0 0");
+        assert!(has_key(&keys, BTN_SOUTH) && !has_key(&keys, BTN_SELECT) && has_key(&keys, 0x13b));
+        assert!(!has_key("", BTN_SOUTH) && !has_key("zz", BTN_SOUTH));
+
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("no-select");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        sys_entry(&sys, "js0", "Virtual pad", "usb-1");
+        std::fs::create_dir_all(sys.join("js0/device/capabilities")).unwrap();
+        std::fs::write(sys.join("js0/device/capabilities/key"), format!("{keys}\n")).unwrap();
+        let mut a = FakePad::plug(&dev, "js0");
+        let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
+        a.button(6, true);
+        let now = playing(frame(&mut seats, &nothing)[0]);
+        assert!(down(now, Control::Start) && !down(now, Control::Select));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
