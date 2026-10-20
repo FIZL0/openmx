@@ -967,7 +967,7 @@ fn the_two_captured_wrecks_match_their_lengths() {
 // **ridden** — a bike that never moves passes all of it.
 //
 // So this section sits a rider on it for a minute and asserts what a rider would notice. One scripted
-// minute, ten legs, 3600 ticks of [`DT`], over a floor with one take-off ramp on it:
+// minute, eleven legs, 4020 ticks of [`DT`], over a floor with a take-off ramp laid on it twice:
 //
 //     the launch                 2 s   full throttle from a standstill
 //     flat out                  20 s   held there until the speed stops climbing
@@ -979,6 +979,9 @@ fn the_two_captured_wrecks_match_their_lengths() {
 //     the jump                   5 s   over it, through the air, and down
 //     the brake                 10 s   the brake pinned, the throttle shut
 //     stopped                    8 s   hands off the pad
+//     the flip                   7 s   a bigger ramp 100 ft ahead: pump on the lip, flip, land
+//
+// (Sixty-seven seconds: P16 added the eleventh leg and the minute kept its name.)
 //
 // The same minute is ridden through the shell's own pad in `crates/openmx/tests/ride.rs`, which is
 // where the script is written in the kit's pad notation; this file rides it through the [`Controls`]
@@ -1039,6 +1042,33 @@ CrossupWreck = 1
 CrossupWreckTime = 0.3
 ";
 
+/// The preload and the backflip, appended to the bike the way [`RIDE_LIMITS`] is: `freeride-bike.phy.txt`
+/// has neither section, so every one of those keys loads as zero, and on a zero bike the gesture
+/// still *fires* — `air::backflip` arms and triggers on the stick alone — but with a torque of
+/// `1.25 × 0`, which the turning phase ends on its first substep. A bike with no flip in it cannot
+/// prove a flip can be done, so the minute rides one that has one.
+///
+/// **These are this file's numbers, not the disc's**, and chosen against this bike rather than copied
+/// from any other: the retail 125's backflip torques are written for its own inertia, and on this
+/// bike's `Inertia` of 22.4 about the pitch axis a torque in that range turns the bike over seven
+/// times in a second of air. These come round once off [`FLIP_RAMP`] with the stick let go, and the
+/// times are short enough that how long the stick was held moves the force at all — the stick spends
+/// a fraction of a second past 0.8 on a lip, not the tens of seconds a range of 0..60 would need.
+const RIDE_FLIP: &str = "
+[Preload]
+PreloadTime = 0.25
+MaxPreload = 600
+MinPreloadTime = 0
+MaxPreloadTime = 0.5
+[Backflip]
+MaxBackflipTorque = 300
+MinBackflipTorque = 160
+BackflipTorqueRateIncrease = 100
+BackflipTorqueRateDecrease = 1000
+MinBackflipTime = 0
+MaxBackflipTime = 0.5
+";
+
 /// [`BIKE`], made rideable — three patches, in memory, because the file itself is four other tasks'
 /// fixture and moving a number in it would move their tests.
 ///
@@ -1086,7 +1116,7 @@ fn ridden_bike() -> String {
         assert!(out.contains(key), "freeride-bike.phy.txt no longer has `{}`", key.trim_end());
         out = out.replace(key, with);
     }
-    format!("{}{RIDE_LIMITS}", launch_bike(&out))
+    format!("{}{RIDE_LIMITS}{RIDE_FLIP}", launch_bike(&out))
 }
 
 /// The same bike with a quarter of its final drive: gearing far too tall to pull away on, which is a
@@ -1162,11 +1192,13 @@ impl World for Jump {
     }
 }
 
-/// One leg of the minute: a name to fail by, how many ticks of [`DT`] it lasts, and the hands.
+/// One leg of the minute: a name to fail by, how many ticks of [`DT`] it lasts, and the hands — the
+/// hands it starts with, and any it changes to part way, as the tick of the leg they start on.
 struct Leg {
     name: &'static str,
     ticks: usize,
     hands: Controls,
+    then: Vec<(usize, Controls)>,
 }
 
 /// What the rider sees out of one tick. Angles in radians, speeds in feet a second, `y` in feet.
@@ -1179,6 +1211,18 @@ struct Seat {
     y: f32,
     on_ground: bool,
     wreck: bool,
+    /// The lip, as `air.rs`'s `on_a_lip` reads it — a wheel down, rising past 5 ft/s, over 30 ft/s at
+    /// the contact patch, no brake — sampled once at the end of the tick rather than on each substep.
+    /// The two thresholds are repeated here because the function is private, and they are the
+    /// disc's literals, which do not move.
+    lip: bool,
+    /// The preload is shoving, and a backflip has been triggered (from the tick it fires to the tick
+    /// it is over) — `Air::preload_firing` and `Air::flip_active`.
+    preload: bool,
+    flip: bool,
+    /// The nose's angle above the ground, in the vertical plane of the ramp the bike is riding at:
+    /// positive up, the full circle, so a backflip walks it once round.
+    pitch: f32,
 }
 
 /// The minute, leg by leg, as it was ridden.
@@ -1207,6 +1251,12 @@ impl Minute {
 
     fn all(&self) -> Vec<&Seat> {
         self.legs.iter().flat_map(|(_, ticks)| ticks).collect()
+    }
+
+    /// The minute up to its one stunt: every leg but `the flip`. What a rider does on a bike rather
+    /// than with one — the envelope the recording measures, and the slow bike's "never falls over".
+    fn riding(&self) -> Vec<&Seat> {
+        self.span("the launch", "stopped")
     }
 }
 
@@ -1263,6 +1313,11 @@ fn turn_rate(ticks: &[&Seat]) -> f32 {
     turned(ticks) / (ticks.len() as f32 * DT.0)
 }
 
+/// How far over the bike went, backwards positive: [`turned`] for the nose rather than the heading.
+fn came_over(ticks: &[&Seat]) -> f32 {
+    ticks.windows(2).map(|w| wrap(w[1].pitch - w[0].pitch)).sum()
+}
+
 /// The minute itself: the legs, in order, with the hands for each.
 ///
 /// Two things about the hands are deliberate. The throttle is **down on the first tick**, not fed in
@@ -1289,14 +1344,63 @@ fn minute() -> Vec<Leg> {
         ("stopped", 480, off),
     ]
     .into_iter()
-    .map(|(name, ticks, hands)| Leg { name, ticks, hands })
+    .map(|(name, ticks, hands)| Leg { name, ticks, hands, then: Vec::new() })
+    .chain([the_flip()])
     .collect()
+}
+
+/// The eleventh leg: from the standstill `stopped` leaves the bike in, flat out at [`FLIP_RAMP`], and
+/// one stick y crossed from stop to stop across its lip. `crates/openmx/tests/ride-minute.pad`'s leg
+/// of the same name is this one in the pad's notation, tick for tick.
+///
+/// `air.rs` reads two gestures off the stick's y while the lip holds, and they are one movement:
+///
+/// * held **back** (`y` above +0.8) as the lip arrives — the preload arms;
+/// * **forward** (below −0.8) — the preload fires, and the same tick arms the backflip;
+/// * **back** again (above +0.8) — the backflip fires, and has 0.6 s to get off the ground;
+/// * centred in the air, the torque holds; **forward** once more ends it, at about three quarters
+///   of the way round, and the airborne control's damping brings the rest round onto the wheels.
+///
+/// The ticks are the bike's own. The ramp comes up at about tick 200 and holds the lip for about
+/// fifty, and each cross takes the bike's `YAxisRateLimit` of 6 a second eighteen ticks to fire
+/// however fast the hand is — so the first reversal is at 212, after the preload has armed, and the
+/// second at 232, as the first one lands (the preload fires at 230). The flip fires at 249, with the
+/// lip a few ticks from its end. The
+/// last two moves are the rider's timing and have slack: the forward stab anywhere from 295 to 305
+/// lands it. At 290 the bike is a quarter of a turn short when it lands, at 310 nose-high enough to
+/// come down at up 0.4. The script stabs at the early end, 295, because the shell's arrow keys put
+/// the same stab past −0.8 about eight ticks after a stick does, and `crates/openmx/tests/ride.rs`
+/// rides this leg on the keys as well.
+fn the_flip() -> Leg {
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let at = |y: f32| Controls { stick: (F::ZERO, F(y)), ..gas.clone() };
+    Leg {
+        name: "the flip",
+        ticks: 420,
+        hands: gas.clone(),
+        then: vec![
+            (190, at(1.0)),
+            (212, at(-1.0)),
+            (232, at(1.0)),
+            (262, at(0.0)),
+            (295, at(-1.0)),
+            (305, at(0.0)),
+        ],
+    }
 }
 
 /// How far ahead of the bike the ramp is put, and its shape: far enough that the run-up is over
 /// before the lip, short and shallow enough that a bike at the top speed clears it rather than
 /// climbing it. Feet, and a rise over the run.
 const RAMP: (f32, f32, f32) = (250.0, 0.3, 15.0);
+
+/// The flip's ramp, the same three numbers: nearer, steeper and longer than [`RAMP`], because the
+/// jump's ramp has no lip a flip fits on. At the 70 ft/s the minute takes it at, [`RAMP`]'s lip holds
+/// for 16 ticks (0.27 s), and one cross of the stick from −0.8 to +0.8 takes this bike's
+/// `YAxisRateLimit` 16 ticks on its own — the pump-and-flip is three stop-to-stop crosses. 100 ft
+/// from a standstill is about 42 ft/s at the foot of the ramp, and a 25 ft face at a half is a lip
+/// of about fifty ticks and a second and a quarter of air.
+const FLIP_RAMP: (f32, f32, f32) = (100.0, 0.5, 25.0);
 
 /// Ride [`minute`] on `phy` and keep what the rider saw.
 ///
@@ -1317,31 +1421,48 @@ fn ride_the_minute(phy: &str) -> Minute {
 
     let mut world = Jump::nothing();
     let mut out = Minute { legs: Vec::new() };
-    for Leg { name, ticks, hands } in minute() {
+    for Leg { name, ticks, hands, then } in minute() {
         // The ramp is laid when the run-up starts, ahead of wherever the bike actually is and along
         // whatever heading it actually has: the jump has to work on the bike's own line, not on a
-        // line the test assumed six legs ago.
-        if name == "the run-up" {
+        // line the test assumed six legs ago. The flip's is laid the same way when its leg starts.
+        let ramp = match name {
+            "the run-up" => Some(RAMP),
+            "the flip" => Some(FLIP_RAMP),
+            _ => None,
+        };
+        if let Some((start, slope, length)) = ramp {
             let m = r.ride.transform();
             world = Jump {
                 origin: r.ride.position(),
                 dir: Vf::new(m.0[2].x(), 0.0, m.0[2].z(), 0.0),
-                start: RAMP.0,
-                slope: RAMP.1,
-                length: RAMP.2,
+                start,
+                slope,
+                length,
             };
         }
         let mut seen = Vec::with_capacity(ticks);
-        for _ in 0..ticks {
-            let frame = r.frame(&p, &tables, &hands, DT, &mut world);
+        let mut now = hands;
+        for tick in 0..ticks {
+            if let Some((_, next)) = then.iter().find(|(at, _)| *at == tick) {
+                now = next.clone();
+            }
+            let frame = r.frame(&p, &tables, &now, DT, &mut world);
             let m = r.ride.transform();
+            let (air, f) = (&r.ride.air, m.0[2]);
             seen.push(Seat {
                 speed: r.ride.chassis.speed.0,
                 heading: f32::atan2(m.0[2].x(), m.0[2].z()),
                 up_y: m.0[1].y(),
                 y: r.ride.position().y(),
-                on_ground: r.ride.air.on_ground,
+                on_ground: air.on_ground,
                 wreck: frame.wreck.is_some(),
+                lip: air.on_ground
+                    && r.ride.chassis.vel.y() > 5.0
+                    && air.contact_vel.z() > 30.0
+                    && r.ride.held.brake == F::ZERO,
+                preload: air.preload_firing,
+                flip: air.flip_active,
+                pitch: f32::atan2(f.y(), f.x() * world.dir.x() + f.z() * world.dir.z()),
             });
         }
         out.legs.push((name, seen));
@@ -1532,6 +1653,69 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
     assert_eq!(wrecks(&jump), 0, "the jump wrecked");
 }
 
+/// P16: a rider can pump a lip and flip off it. The eleventh leg runs at [`FLIP_RAMP`] from a
+/// standstill and crosses the stick back, forward, back across the lip ([`the_flip`]), and what the
+/// test holds it to is what a rider would see: the preload went off *on the lip*, the backflip was
+/// triggered *on the lip*, the bike left the ramp, came once round backwards, and rode away from
+/// the landing on its wheels.
+///
+/// The lip is the thing that was in doubt. Measured at the end of each tick over the jump's own ramp
+/// it holds for 16 ticks, and a stop-to-stop cross of the stick takes this bike's rate limit 18 —
+/// which is why the flip is ridden on a ramp of its own rather than off the jump's.
+#[test]
+fn it_flips_off_the_lip() {
+    let m = ride_the_minute(&ridden_bike());
+    let flip = m.leg("the flip");
+    let lip = flip.iter().filter(|t| t.lip).count();
+    assert!(lip > 30, "the flip's ramp only held the lip for {lip} ticks");
+
+    // Both gestures went off with the lip under the wheels: `air.rs` cannot fire either anywhere
+    // else, so these hold the minute to having reached the lip with the stick in the right place,
+    // not to a lucky flip of the bike off a bump.
+    let first = |on: fn(&Seat) -> bool| flip.iter().position(|t| on(*t));
+    let shoved = first(|t| t.preload).expect("the preload never fired");
+    assert!(flip[shoved].lip, "the preload fired at tick {shoved} of the leg, off the lip");
+    let fired = first(|t| t.flip).expect("the backflip never fired");
+    assert!(flip[fired].lip, "the backflip fired at tick {fired} of the leg, off the lip");
+    assert!(shoved < fired, "the backflip (tick {fired}) went before the preload (tick {shoved})");
+
+    // Off the ramp and once round, backwards: a whole turn of the nose in the ramp's plane, give or
+    // take a quarter. Less is a bike that landed on its back wheel half way through, more is one
+    // that is still turning when it lands.
+    let air = airborne(&flip[fired..]);
+    assert!(air > 30, "after the backflip fired the bike was only {air} ticks in the air");
+    let over = came_over(&flip[fired..]);
+    let turn = std::f32::consts::TAU;
+    assert!(
+        (over - turn).abs() < turn / 4.0,
+        "the bike came {:.2} turns over, not one",
+        over / turn
+    );
+
+    // Down, upright, and riding away — held to the same two-part landing as the jump's, for the
+    // same reason ([`it_takes_the_jump_and_lands_on_its_wheels`]).
+    const SETTLE: usize = 15;
+    let last_air = flip.iter().rposition(|t| !t.on_ground).expect("the bike never left the ground");
+    let landed = &flip[last_air + 1..];
+    assert!(
+        landed.len() > SETTLE + 30,
+        "the bike came down with only {} ticks of the leg left to settle in",
+        landed.len()
+    );
+    assert!(
+        flattest(&landed[..SETTLE]) > 0.6,
+        "it came down on its head, at up {}",
+        flattest(&landed[..SETTLE])
+    );
+    assert!(
+        flattest(&landed[SETTLE..]) > 0.9,
+        "a quarter of a second after it landed it was still at up {}",
+        flattest(&landed[SETTLE..])
+    );
+    assert!(slowest(landed) > 20.0, "the landing left the bike at {} ft/s", slowest(landed));
+    assert_eq!(wrecks(&flip), 0, "the flip wrecked");
+}
+
 /// The brake is pinned for ten seconds and the bike stops, and stays stopped.
 ///
 /// This test was ignored until P13, and the reason it gave was wrong in an instructive way. It read
@@ -1696,8 +1880,8 @@ fn none_of_the_minute_wrecks() {
         wrecks(&all),
         all.len()
     );
-    // Nothing in the minute asks the machine for a stunt, so nothing in it should separate the rider
-    // from the bike either — and the bike should still be on the ground at the end of it.
+    // The one stunt the minute asks for is the flip, and it lands, so nothing in it should separate
+    // the rider from the bike either — and the bike should still be on the ground at the end of it.
     assert!(all[all.len() - 1].on_ground, "the minute ended in the air");
 }
 
@@ -1729,8 +1913,10 @@ fn the_minute_notices_a_bike_it_cannot_ride() {
     );
 
     // And it is the gearing the legs caught, not the fixture falling over: this bike rides the whole
-    // minute upright and never wrecks. It is slow, which is the one thing wrong with it.
-    let whole = m.all();
+    // minute upright and never wrecks. It is slow, which is the one thing wrong with it. Up to the
+    // flip, that is — the flip's hands are timed to the ridden bike reaching its lip, and this one
+    // gets there late and is still in the air, upside down and turning, when the minute ends.
+    let whole = m.riding();
     assert_eq!(wrecks(&whole), 0, "the under-driven bike wrecked, so the legs caught the wrong thing");
     assert!(
         flattest(&whole) > 0.5,
@@ -1826,7 +2012,12 @@ fn the_minutes_numbers_are_the_originals() {
         "the minute reaches {} ft/s where the original reaches {top}",
         fastest(&all)
     );
-    let worst = all
+    // The slowing is the riding's alone. The flip lands off a twelve-foot face, and even when it comes
+    // down level the impact takes four or five ft/s off in a tick — 340 ft/s^2 and more, which no
+    // upright row of a free ride is, and which the recording has nothing to compare with (it has no
+    // flip in it that this test knows of). Its landing is held to `it_flips_off_the_lip`'s bounds.
+    let riding = m.riding();
+    let worst = riding
         .windows(2)
         .map(|w| (w[0].speed - w[1].speed) / DT.0)
         .fold(f32::MIN, f32::max);

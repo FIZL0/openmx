@@ -249,6 +249,12 @@ pub fn control_named(name: &str) -> Option<Control> {
 /// dead, so the first ~35 ms of a held key is the stick crossing the dead zone and the lean, the
 /// steer and the preload grow from nothing after it rather than slamming to full on frame one.
 /// Coming back is quicker than going out, because a rider who lets go of a key has already decided.
+///
+/// Neither is what limits a reversal on the bike. The ride walks stick y toward the hand at the
+/// `.phy`'s `YAxisRateLimit` (6 a second on the stand-in bike, 3.5 on the retail 125), and a key
+/// crossing from one stop to the other at 0.10 s home and 0.18 s out stays ahead of that walk all the
+/// way, so a pump-and-flip on the arrow keys fires on the same frames as one on a stick (P16,
+/// `tests/ride.rs`'s `it_flips_off_the_lip`).
 const KEY_TO_EDGE: f32 = 0.18;
 const KEY_TO_CENTRE: f32 = 0.10;
 
@@ -350,7 +356,8 @@ impl Pads {
 
     /// A `Pads` with no device: the keyboard on a machine with no pad, and what this module's own
     /// tests ride, since a test that opened `/dev/input/js0` would read whatever is plugged in.
-    fn unplugged(wiring: Wiring) -> Pads {
+    /// `pub(crate)` for `tests/ride.rs`, which compiles this file in to ride a flip on the keys.
+    pub(crate) fn unplugged(wiring: Wiring) -> Pads {
         let mut axis = [0i16; AXES];
         axis[AXIS_L2] = TRIGGER_REST;
         axis[AXIS_R2] = TRIGGER_REST;
@@ -384,8 +391,9 @@ impl Pads {
     ///
     /// The key state arrives as a function rather than as a [`Window`] so that the ramps — which are
     /// nothing but time and key state — can be ridden by a test: a window needs an X server, and the
-    /// whole point of a ramp is what it answers on the second frame of a press.
-    fn build(&mut self, seconds: f32, held: &dyn Fn(u8) -> bool) -> Report {
+    /// whole point of a ramp is what it answers on the second frame of a press — `tests/ride.rs`'s
+    /// flip among them.
+    pub(crate) fn build(&mut self, seconds: f32, held: &dyn Fn(u8) -> bool) -> Report {
         self.drain();
         let mut report = Report::idle();
         let mut buttons = 0u16;

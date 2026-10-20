@@ -1,6 +1,7 @@
 # A minute you can ride — P10, in the kit's own pad notation.
 #
-# Ten legs, 3600 frames of a 60 Hz ride. `crates/openmx/tests/ride.rs` reads this file frame by frame,
+# Eleven legs, 4020 frames of a 60 Hz ride — the minute is P10's, and P16's flip made it 67 s.
+# `crates/openmx/tests/ride.rs` reads this file frame by frame,
 # turns it into the DualShock 2 reports the shell's pad would have built, and rides it headless under
 # `./kit check`. The same file is a script for a real machine:
 #
@@ -59,3 +60,26 @@ sleep 600f
 # Hands off the pad: it should still be standing there eight seconds later.
 release
 sleep 480f
+
+# leg: the flip
+# P16. A second, bigger ramp goes in 100 ft ahead, and the bike rides at it flat out from the standstill
+# the last leg left it in. Across the lip the left stick crosses stop to stop three times: pulled back
+# as the lip arrives (the preload arms), pushed forward (it fires, and the backflip arms), pulled back
+# (the backflip fires). Centred in the air the bike keeps turning; a stab forward ends the turn about
+# three quarters of the way round, and it comes the rest of the way onto its wheels by itself. Each
+# cross is the bike's own rate limit, eighteen frames however fast the thumb is, which is why the
+# frames below are what they are: the sibling file's `the_flip` has them, and the reasons.
+down cross
+sleep 190f
+stick l 0 1
+sleep 22f
+stick l 0 -1
+sleep 20f
+stick l 0 1
+sleep 30f
+stick l 0 0
+sleep 33f
+stick l 0 -1
+sleep 10f
+stick l 0 0
+sleep 115f
