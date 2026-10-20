@@ -90,6 +90,10 @@ const RAMP: (f32, f32, f32) = (250.0, 0.3, 15.0);
 /// against it. Here it is the scale the legs' own tolerances are written in.
 const CAPTURED_TOP_SPEED: f32 = 75.78;
 
+/// The slowest of the original's four standing launches across both recordings, half a second and
+/// two seconds in — the sibling file's `ORIGINAL_LAUNCH`, with the measurement written up there (P15).
+const ORIGINAL_LAUNCH: (f32, f32) = (8.0, 32.0);
+
 /// The wreck limits the minute is judged against, appended to the bike: the limits of a bike being
 /// *ridden*, so a hard landing and a hard lean are not crashes and coming down on its side still is.
 /// The same block as the sibling file's `RIDE_LIMITS`, and plausible numbers rather than the disc's.
@@ -589,11 +593,11 @@ fn it_launches_from_a_standstill() {
 
     // Half a second of full throttle: a rider on a 250 is moving by now.
     let half = launch[(0.5 / DT.0) as usize].speed;
-    assert!(half > 3.0, "half a second of full throttle moved the bike at {half} ft/s");
+    assert!(half > ORIGINAL_LAUNCH.0, "half a second of full throttle moved the bike at {half} ft/s");
 
-    // Two seconds: a useful fraction of the top speed, and still on its wheels.
+    // Two seconds: as fast as the original's slowest launch, and still on its wheels.
     let two = launch[launch.len() - 1].speed;
-    assert!(two > 20.0, "two seconds of full throttle only reached {two} ft/s");
+    assert!(two > ORIGINAL_LAUNCH.1, "two seconds of full throttle only reached {two} ft/s");
     assert!(flattest(&launch) > 0.9, "the launch leant to up {}", flattest(&launch));
     assert_eq!(wrecks(&launch), 0, "the launch wrecked");
 }
@@ -637,7 +641,8 @@ fn it_turns_the_way_the_stick_is_pushed() {
     for (leg, sign) in [("turning right", 1.0), ("turning left", -1.0)] {
         let seen = m.leg(leg);
         let rate = turn_rate(&seen) * sign;
-        assert!(rate > 0.1, "{leg}: the bike turned at {rate} rad/s the way the stick was pushed");
+        // A floor at what the fixture carries, not the original's 0.6 to 2.5 (P15, the sibling file).
+        assert!(rate > 0.2, "{leg}: the bike turned at {rate} rad/s the way the stick was pushed");
         assert!(
             turned(&seen).abs() > 0.2,
             "{leg}: four seconds of full lock came round {} rad",
@@ -665,7 +670,7 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
     let m = ride_the_minute();
     let jump = m.span("the run-up", "the jump");
     let air = airborne(&jump);
-    assert!(air > 30, "the ramp only put the bike in the air for {air} frames");
+    assert!(air > 70, "the ramp only put the bike in the air for {air} frames");
     assert!(
         highest(&jump) > RAMP.1 * RAMP.2 + 1.0,
         "the jump's highest point was {} ft, which is no higher than the lip",
@@ -701,7 +706,7 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
         flattest(&landed[SETTLE..])
     );
     assert!(
-        slowest(landed) > CAPTURED_TOP_SPEED * 0.4,
+        slowest(landed) > CAPTURED_TOP_SPEED * 0.65,
         "the landing left the bike at {} ft/s",
         slowest(landed)
     );
@@ -721,10 +726,13 @@ fn it_brakes_to_a_stop() {
     let brake = m.leg("the brake");
     let from = brake[0].speed;
     let after = brake[(2.0 / DT.0) as usize].speed;
-    assert!(after < from * 0.5, "two seconds of brake took {from} ft/s to {after}");
+    assert!(after < from * 0.2, "two seconds of brake took {from} ft/s to {after}");
 
     let end = brake[brake.len() - 1].speed;
     assert!(end < 1.0, "ten seconds of brake left the bike doing {end} ft/s");
+    // Within three seconds, as in the sibling file (P15).
+    let stop = brake.iter().position(|t| t.speed < 1.0).map_or(f32::MAX, |i| i as f32 * DT.0);
+    assert!(stop < 3.0, "the brake took {stop} s to stop the bike from {from} ft/s");
 
     // And it stays stopped with the rider's hands off the pad.
     let stopped = m.leg("stopped");

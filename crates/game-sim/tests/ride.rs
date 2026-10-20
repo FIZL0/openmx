@@ -1361,6 +1361,11 @@ const CAPTURED_TOP_SPEED: f32 = 75.78;
 const CAPTURED_TURN_RATE: f32 = 2.40;
 const CAPTURED_SLOWING: f32 = 70.9;
 
+/// The slowest of the original's four standing launches across both recordings, half a second and
+/// two seconds in, in feet a second, rounded down (P15: 8.8 and 34.2, against 20.2 and 56.9 for the
+/// quickest).
+const ORIGINAL_LAUNCH: (f32, f32) = (8.0, 32.0);
+
 /// The human's ridden minute, in a subdirectory of `context/capture/` for the reason
 /// [`IDLE_CAPTURE`]'s comment gives: a CSV directly in that directory is read by `replay.rs` as an
 /// acceptance candidate.
@@ -1375,13 +1380,13 @@ fn it_launches_from_a_standstill() {
     // Half a second: a rider who pins the throttle on a 250 is moving by now, and the bike that
     // prompted this test is not.
     let half = launch[(0.5 / DT.0) as usize].speed;
-    assert!(half > 3.0, "half a second of full throttle moved the bike at {half} ft/s");
+    assert!(half > ORIGINAL_LAUNCH.0, "half a second of full throttle moved the bike at {half} ft/s");
 
-    // Two seconds: a useful fraction of the top speed, which is as much as a hand-written engine's
-    // numbers can be asked for. The recording's own launch is slower than this and that is the
-    // human feathering a real clutch, not a bound on the port.
+    // Two seconds: as fast as the original's slowest launch, which is as much as a hand-written
+    // engine's numbers can carry — this bike makes 10.2 and 35.0, and its 0 to 60 is 7.7 s against
+    // the original's 2.2 to 3.4 (P15).
     let two = launch[launch.len() - 1].speed;
-    assert!(two > 20.0, "two seconds of full throttle only reached {two} ft/s");
+    assert!(two > ORIGINAL_LAUNCH.1, "two seconds of full throttle only reached {two} ft/s");
 
     // And it went forward on its wheels rather than standing up or sliding away sideways.
     assert!(flattest(&launch) > 0.9, "the launch leant to up {}", flattest(&launch));
@@ -1437,7 +1442,9 @@ fn it_turns_the_way_the_stick_is_pushed() {
     for (leg, sign) in [("turning right", 1.0), ("turning left", -1.0)] {
         let ticks = m.leg(leg);
         let rate = turn_rate(&ticks) * sign;
-        assert!(rate > 0.1, "{leg}: the bike turned at {rate} rad/s the way the stick was pushed");
+        // 0.2 is what the fixture carries (0.24); the original's held stick comes round at 0.6 to
+        // 2.5 rad/s, so this is a floor and not the original's number (P15).
+        assert!(rate > 0.2, "{leg}: the bike turned at {rate} rad/s the way the stick was pushed");
         assert!(
             rate < CAPTURED_TURN_RATE,
             "{leg}: {rate} rad/s is sharper than the original's {CAPTURED_TURN_RATE}"
@@ -1476,7 +1483,9 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
     let m = ride_the_minute(&ridden_bike());
     let jump = m.span("the run-up", "the jump");
     let air = airborne(&jump);
-    assert!(air > 30, "the ramp only put the bike in the air for {air} ticks");
+    // 83 ticks (1.38 s) off this ramp at 70 ft/s; the original's lips at about 52 hang for 2.2 to 2.5 s,
+    // but they are not this ramp (P15).
+    assert!(air > 70, "the ramp only put the bike in the air for {air} ticks");
     assert!(
         highest(&jump) > RAMP.1 * RAMP.2 + 1.0,
         "the jump's highest point was {} ft, which is no higher than the lip",
@@ -1524,8 +1533,10 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
         "a quarter of a second after it landed it was still at up {}",
         flattest(&landed[SETTLE..])
     );
+    // The original's clean landings cost it 4 to 8 ft/s off 52; this one comes down at 59 from 70 and
+    // bottoms out at 53, so 0.65 of the top speed is the floor this ramp carries (P15).
     assert!(
-        slowest(landed) > CAPTURED_TOP_SPEED * 0.4,
+        slowest(landed) > CAPTURED_TOP_SPEED * 0.65,
         "the landing left the bike at {} ft/s",
         slowest(landed)
     );
@@ -1557,7 +1568,7 @@ fn it_brakes_to_a_stop() {
 
     // The first two seconds: real braking, and no harder than the human ever braked.
     let after = brake[(2.0 / DT.0) as usize].speed;
-    assert!(after < from * 0.5, "two seconds of brake took {from} ft/s to {after}");
+    assert!(after < from * 0.2, "two seconds of brake took {from} ft/s to {after}");
     let hardest = (from - after) / 2.0;
     assert!(
         hardest < CAPTURED_SLOWING,
@@ -1567,6 +1578,10 @@ fn it_brakes_to_a_stop() {
     // And then it stops. "Stopped" is the speed the port's own idle is allowed to creep at, not zero.
     let end = brake[brake.len() - 1].speed;
     assert!(end < 1.0, "ten seconds of brake left the bike doing {end} ft/s");
+    // Within three seconds: this bike takes 2.1 from 62, and the disc's 125 in the shell 2.5 from 121.
+    // Neither recording holds a brake to a stop, so the original's own time is not known (P15).
+    let stop = brake.iter().position(|t| t.speed < 1.0).map_or(f32::MAX, |i| i as f32 * DT.0);
+    assert!(stop < 3.0, "the brake took {stop} s to stop the bike from {from} ft/s");
 
     // And stays stopped for the eight seconds the rider's hands are off the pad.
     let stopped = m.leg("stopped");

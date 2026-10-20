@@ -314,6 +314,22 @@ struct Args {
     /// `--trace-gas`: pin the throttle through the trace, which is P8's own case — full throttle
     /// from a standstill on the start line.
     trace_gas: bool,
+    /// `--trace-stick X`: hold the left stick over at `x` (-1..1) through the trace — P15's turn at a
+    /// held speed and a held stick.
+    trace_stick: Option<f32>,
+    /// `--trace-feel`: one short line a frame instead of the solver's columns — speed, velocity,
+    /// position, heading, how upright, on the ground, wrecked — in the columns P15 measured the
+    /// original's captures by, so both rides go through one script.
+    trace_feel: bool,
+    /// `--phy NAME`: ride the bike archive's member ending in `NAME` (`race125p.phy`) instead of its
+    /// first `.phy`.
+    phy: Option<String>,
+    /// `--trace-at X,Z,DEG`: put the bike on the ground at `x, z` facing `DEG` instead of on the start
+    /// line.
+    trace_at: Option<(f32, f32, f32)>,
+    /// `--trace-switch N`: under `--trace-feel`, ride the first N frames on the throttle alone and only
+    /// then take the controls the other flags ask for — a full brake from top speed, or a turn at speed.
+    trace_switch: Option<u32>,
     /// `--record FILE`: write every simulated frame's pad to a tape, and the tape to this file when
     /// the session ends. A tape holds values read out of the game, so the file belongs under
     /// `context/`.
@@ -455,10 +471,27 @@ fn run() -> Result<(), String> {
 
     // The bike's own physics, off the disc, by the ported loader (S18) — every number the ride runs
     // on comes from here, and a bike whose file is missing is not rideable.
-    let phy_bytes = archives[1]
-        .read_suffix(&format!("{}.phy", args.bike))
-        .or_else(|_| archives[1].read_suffix(".phy"))
-        .map_err(|e| format!("the bike archive has no .phy: {e}"))?;
+    // `--phy` names another of the archive's members instead: every bike archive carries the whole
+    // set, and the freeride's own `race125p.phy` (D7) is not the first one (P15).
+    let (phy_bytes, phy_member) = match &args.phy {
+        Some(name) => {
+            let e = archives[1]
+                .find_suffix(name)
+                .ok_or_else(|| format!("the bike archive has no member ending in {name}"))?;
+            (archives[1].read_suffix(name)?, e.name.clone())
+        }
+        None => {
+            let member = archives[1]
+                .find_suffix(&format!("{}.phy", args.bike))
+                .or_else(|| archives[1].find_suffix(".phy"))
+                .map_or_else(|| "?".to_string(), |e| e.name.clone());
+            let bytes = archives[1]
+                .read_suffix(&format!("{}.phy", args.bike))
+                .or_else(|_| archives[1].read_suffix(".phy"))
+                .map_err(|e| format!("the bike archive has no .phy: {e}"))?;
+            (bytes, member)
+        }
+    };
     let phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
 
     // The crash, which is two more files (S26). The bike the rider leaves behind is a rigid body of
@@ -610,6 +643,16 @@ fn run() -> Result<(), String> {
     // lands at the wheel's `+0xb0`, which neither the suspension nor the tire step ever reads. The
     // original has no fallback here — a bike always has a model — so the one below is the port's own,
     // for a `.phy` whose model has no such node.
+    // `--trace-at`: start somewhere else on the ground, facing a heading in degrees the way a capture's
+    // `atan2(m20, m22)` reads it — P15's flat stretch, which the start line is not.
+    let (at, heading) = match args.trace_at {
+        None => (at, heading),
+        Some((x, z, deg)) => {
+            let (on, _) = sim_world::World::ground(&mut sim, Vf::new(x, 1.0e4, z, 1.0));
+            let h = deg.to_radians();
+            (Vf::new(x, on.y(), z, 1.0), Vf::new(h.sin(), 0.0, h.cos(), 0.0))
+        }
+    };
     let node_at = |name: &str| -> Option<Vf> {
         let chassis = assets.models.get(CHASSIS)?;
         let i = chassis.model.nodes.iter().position(|n| n.name == name)?;
@@ -686,11 +729,39 @@ fn run() -> Result<(), String> {
         if args.trace_gas {
             controls.gas = F::ONE;
         }
+        if let Some(x) = args.trace_stick {
+            controls.stick.0 = F(x);
+        }
         let controls = controls;
         println!(
             "trace: {frames} frames at dt {} on {} / {}",
             dt.0, args.track, args.bike
         );
+        println!("phy: {phy_member}");
+        if args.trace_feel {
+            println!("frame speed vel_x vel_y vel_z x y z heading up ground wreck");
+            let throttle = Controls { gas: F::ONE, ..Controls::default() };
+            for i in 0..frames {
+                let now = match args.trace_switch {
+                    Some(n) if i < n => &throttle,
+                    _ => &controls,
+                };
+                let f = rider.frame(&phy, &tables, now, dt, &mut sim);
+                let r = &rider.ride;
+                let (v, p, m) = (r.chassis.vel, r.position(), r.transform());
+                println!(
+                    "{i} {:.4} {:.4} {:.4} {:.4} {:.3} {:.3} {:.3} {:.5} {:.4} {} {}",
+                    v.x().hypot(v.z()),
+                    v.x(), v.y(), v.z(),
+                    p.x(), p.y(), p.z(),
+                    m.0[2][0].atan2(m.0[2][2]),
+                    m.0[1][1],
+                    if r.air.on_ground { 1 } else { 0 },
+                    if f.wreck.is_some() { 1 } else { 0 },
+                );
+            }
+            return Ok(());
+        }
         // The numbers behind the columns, so a trace in a journal entry carries the tuning it was
         // taken on rather than a bike's name.
         {
@@ -1284,6 +1355,11 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace_dt: None,
         trace_brake: false,
         trace_gas: false,
+        trace_stick: None,
+        trace_feel: false,
+        phy: None,
+        trace_at: None,
+        trace_switch: None,
         record: None,
         play: None,
         phase: TickPhase::default(),
@@ -1336,6 +1412,31 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--trace-brake" => args.trace_brake = true,
             "--trace-gas" => args.trace_gas = true,
+            "--trace-feel" => args.trace_feel = true,
+            "--trace-switch" => {
+                args.trace_switch = Some(
+                    next("a frame to switch at")?
+                        .parse()
+                        .map_err(|_| "--trace-switch: not a number of frames")?,
+                );
+            }
+            "--trace-at" => {
+                let v: Vec<f32> = next("x,z,degrees")?
+                    .split(',')
+                    .map(|w| w.trim().parse())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| "--trace-at: x,z,degrees")?;
+                let [x, z, deg] = v[..] else { return Err("--trace-at: x,z,degrees".into()) };
+                args.trace_at = Some((x, z, deg));
+            }
+            "--phy" => args.phy = Some(next("a .phy on the disc, like race125p.phy")?),
+            "--trace-stick" => {
+                args.trace_stick = Some(
+                    next("a stick position, -1 to 1")?
+                        .parse()
+                        .map_err(|_| "--trace-stick: not a number")?,
+                );
+            }
             "--trace-dt" => {
                 args.trace_dt = Some(
                     next("a frame length in seconds")?
@@ -1400,7 +1501,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                      rider, tumbles the bike and puts you back on it); --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\
                      nobody on the pad and prints the solver's own numbers, and --trace-brake\n\
-                     or --trace-gas hold the brakes or the throttle while it does.\n\
+                     or --trace-gas hold the brakes or the throttle while it does, --trace-stick X\n\
+                     holds the stick over and --trace-feel prints a short line a frame instead;\n\
+                     --trace-switch N rides the throttle alone for N frames first;\n\
+                     --trace-at X,Z,DEG starts the bike there instead of the start line, and\n\
+                     --phy NAME rides the bike archive's NAME (race125p.phy) for the bike's .phy.\n\
                      --record writes every simulated frame's pad to a tape (under context/,\n\
                      it is game data); --play rides one instead of the pad, at the tape's own\n\
                      frame lengths, and quits when it runs out. A human's PCSX2 recording\n\
