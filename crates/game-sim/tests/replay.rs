@@ -54,7 +54,7 @@ use game_sim::phy::Phy as BikePhy;
 use game_sim::replay::{
     self, Capture, Fixture, PadFrame, PadTape, Playback, Reason, Sample, Value, Watch, Where,
 };
-use game_sim::rider::Tables as RiderTables;
+use game_sim::rider::{Rider, Tables as RiderTables};
 use game_sim::track::{Scene, Terrain};
 use game_sim::trick::{Set, Trick};
 use game_sim::world::{Ground, Place, Props, World};
@@ -955,14 +955,15 @@ fn acceptance_fixture(cap: &Capture) -> Result<Fixture, String> {
 
 /// [`acceptance_fixture`] on a bike read off the disc instead of [`game_sim::stock`]'s stand-in: the
 /// one seam S28 needed on this side, since the `.phy` decides the suspension's rates, the tire forces
-/// and the mass, and the wheel mounts are taken off it as well.
+/// and the mass. The wheel mounts come with it but not off it: they are the bike model's tire nodes
+/// ([`Ridden`]).
 ///
 /// `None` is the stand-in, which is what every synthetic capture in this file is built and checked
 /// against; a real acceptance capture passes the Race 125 the human rode
 /// ([`the_bike_the_human_rode`]).
 fn acceptance_fixture_on(
     cap: &Capture,
-    bike: Option<(Arc<RiderTables>, BikePhy)>,
+    bike: Option<Ridden>,
 ) -> Result<Fixture, String> {
     let inputs = inputs_from_capture(cap)?;
 
@@ -1076,7 +1077,7 @@ fn acceptance_fixture_on(
 fn acceptance_start(
     cap: &Capture,
     seed: u32,
-    bike: Option<(Arc<RiderTables>, BikePhy)>,
+    bike: Option<Ridden>,
 ) -> Result<Sim, String> {
     // Read through `Capture::float`, which is the same parse the watches get, so the start state's
     // position and velocity are bit-identical to the tick-0 samples they are compared against.
@@ -1104,15 +1105,20 @@ fn acceptance_start(
     // (`Ride::axes`). `place` is called for its clean slate — the derived fields, the wheels, the air
     // and the ground step's accumulators all zeroed together — and then the parts of the pose the
     // capture actually measured are put in over the top of it.
+    let ridden = bike.is_some();
     let mut sim = match bike {
         // The bike off the disc, placed where the capture starts. `Sim::ride` is the shell's own
         // constructor and the rest of this function is the same whichever bike arrived; the wreck
         // test is left where `Sim::new` leaves it, off, which is a difference from the original and
         // is written down in S28's journal entry rather than guessed at here.
-        Some((tables, phy)) => {
-            let mut sim = Sim::ride(seed, tables, phy, origin, m.0[2], Set::default());
-            sim.rider.sense.wrecks_enabled = false;
-            sim
+        //
+        // Built the way the shell builds it rather than through `Sim::ride`, because the wheel mounts
+        // are the bike *model's* tire nodes ([`the_wheels_the_human_rode`]) and `Sim::ride` takes
+        // the `.phy`'s, which hang the wheels 1.48 units lower than the original's do.
+        Some(Ridden { tables, phy, mounts }) => {
+            let mut rider = Rider::new(&phy, mounts, origin, m.0[2], Set::default());
+            rider.sense.wrecks_enabled = false;
+            Sim::with_rider(seed, tables, phy, rider)
         }
         None => Sim::new(seed),
     };
@@ -1129,6 +1135,15 @@ fn acceptance_start(
     // integrator first writes one and a standing bike's zero is not what the original read there.
     ride.chassis.speed =
         Acc::mula(vel.x(), vel.x()).madda(vel.y(), vel.y()).madd(vel.z(), vel.z()).sqrt();
+    // The drivetrain the capture cannot carry, from the save state the capture was recorded out of.
+    // Left at `place`'s zeros, the clutch's launch ramp reads a timer of 0 and fires on tick 1 —
+    // three times the torque and the centre of gravity pulled 1.47 units back — on a bike the original
+    // had finished launching a second and a half earlier.
+    if ridden {
+        if let Some(d) = SaveState::open().filter(|s| s.leads(cap)).and_then(|s| s.drivetrain()) {
+            d.seed(ride);
+        }
+    }
     Ok(sim)
 }
 
@@ -2972,22 +2987,31 @@ fn acceptance_capture_text() -> Option<(PathBuf, String)> {
 /// to tick 29 now, and to 32 on the shorter `acceptance-ride` capture, where every lane used to part at
 /// 1: that is what the world bought.
 ///
-/// **Tick 1's `bike.pos[1]` still parts, and now it parts upwards**: 208.10735 against 208.02884, a
-/// shove rather than a fall. The recorded body origin rides 0.49 units *below* Free09's surface as this
-/// port reads it and the wheel mounts hang 0.25 below the origin, so on the first tick both wheels are
-/// underground and the suspension is pinned at its stop — compression 1.0 of 1.0, 186 and 193 units of
-/// spring force. A flat floor 1.42 units lower reproduces the original's tick 1 to within 0.0005, so
-/// one of two numbers is wrong by about that much and the capture cannot say which: the wheel mounts,
-/// which the port takes off the `.phy`'s `body_tire_force_position` where the original reads the bike
-/// model's own tire nodes (S22), or the height [`game_sim::world::Ground::at`] blends out of the
-/// heightfield (D6 — on Free09 the scene's own collision shapes sit a median 66 units above that height
-/// and a cluster of them 1.98 below it, which is worth a reader's second look). S28's journal entry has
-/// the measurements.
+/// S8 settled S28's question — the mounts were wrong, not the ground: the original hangs its wheels off
+/// the bike model's own tire nodes, 1.48 units higher than the `.phy`'s, and the port now does too, bit
+/// for bit ([`the_wheels_the_human_rode`]), and seeding the drivetrain from the save state
+/// ([`SaveState::drivetrain`]) took the clutch's spurious launch out of tick 1 as well. Tick 1's
+/// `bike.pos[1]` went from 208.10735 to 208.0297, against the original's 208.02884.
 ///
-/// After that, in the order they will bite: the start state is only the eight lanes the capture holds,
-/// so the suspension's compression, the wheels' spin, the engine's revs and the trick state all start
-/// at zero where the original's were a minute into a ride; and S3's movement and S10's air are not yet
-/// 1:1.
+/// **What holds it at 0 now is the capture itself**: its eight lanes are not the chassis. `bike_xform`
+/// is the transform of the bike as it is *drawn* — the model's root, posed off the chassis by about a
+/// degree and a half of roll and 0.065 units sideways on a bike resting on the rider's foot — and
+/// `bike_vel` is the chassis' velocity times 0.8
+/// ([`the_acceptance_capture_watches_the_drawn_bike_not_the_chassis`]). The port has a chassis and no
+/// drawn root, so it starts its chassis where the drawn root was and compares the chassis against it;
+/// no lane can agree past tick 0 that way except by not moving. `bike.pos[0]`'s 27-odd ticks are
+/// exactly that: x creeping by less than an ulp of 4309.
+///
+/// Measured against the chassis' own state instead (`watch/s8-start.toml`, which records it beside the
+/// drawn root), and started from the save state's chassis, the port still parts at its first step:
+/// the front wheel finds ground 0.036 higher than the original does, because
+/// [`game_sim::world::Ground::at`] blends the cell bilinearly where the original's height is the
+/// cell's triangle split along its (+x)-(+z) diagonal (208.45439 against the original's 208.45465 under
+/// the front tire; bilinear gives 208.4905). S8's journal entry has the numbers. In the order they will
+/// bite after that: the ground's in-cell arithmetic (D6), a fixture lane for the chassis rather than
+/// the drawn bike (a re-recording, or the drawn root's pose ported), the wheels' spin and compression
+/// and the trick state at row 0, which nothing in the capture carries; and S3's movement and S10's air
+/// are not yet 1:1.
 const ACCEPTANCE_AGREES_THROUGH: u64 = 0;
 
 /// What a replay of the real acceptance fixture means today, in one line, and what makes it fail.
@@ -3400,6 +3424,263 @@ fn the_bike_the_human_rode(disc: &mut Disc, tables: &RiderTables) -> Option<Bike
     None
 }
 
+/// The bike an acceptance fixture rides when the disc is here: the tables the `.phy` was read
+/// against, the `.phy` itself, and where its two wheels hang off the chassis.
+///
+/// The mounts travel with the `.phy` rather than being taken off it because they are not in it: the
+/// original's `bike_attach_nodes` looks the bike *model's* "TireFront" and "TireRear" nodes up by name
+/// and writes them into each wheel's `+0xa0` (S22), and the `.phy`'s `BodyTireForcePosition` lands
+/// at `+0xb0`, which no step reads.
+struct Ridden {
+    tables: Arc<RiderTables>,
+    phy: BikePhy,
+    mounts: (Vf, Vf),
+}
+
+/// The bike model the human's freeride was ridden on, as the archive names it. Not the `.phy`'s
+/// name: the physics file is a class (`Race125P`, D7) and the model is a make — the recording's own
+/// save state carries `125_faisst_engine` and `125_faisst_plasticsall` and no other 125's parts, and
+/// its wheels' mounts are this model's tire nodes to the bit
+/// (`the_acceptance_bike_hangs_its_wheels_where_the_original_does`).
+const FREERIDE_MODEL: &str = "125_faisst";
+
+/// **Where the human's wheels hang off the chassis**: the `TireFront` and `TireRear` nodes of the
+/// `125_faisst`'s `bike.psg`, each node's place in the model's root frame — the read the shell makes
+/// (`crates/openmx/src/main.rs`), but in the original's VU0 order ([`game_render::psg::Model::place_in`])
+/// rather than through the renderer's host-float `world`.
+///
+/// This is the number S28 measured and could not attribute: with the `.phy`'s mounts at
+/// `(0, -0.25, ±0.75)` both wheels start three quarters of a unit inside Free09 and tick 1 is shoved
+/// up, and a floor 1.42 units lower would have fitted. The model's nodes sit at y ≈ 1.23 and 1.19,
+/// 1.48 and 1.44 units higher — it was the mounts, and the ground is what D6 says it is.
+fn the_wheels_the_human_rode(disc: &mut Disc) -> Option<(Vf, Vf)> {
+    let archives: Vec<String> = disc
+        .bike_archives()
+        .into_iter()
+        .filter(|a| a.to_ascii_lowercase().contains(FREERIDE_MODEL))
+        .collect();
+    for archive in archives {
+        let Some(bytes) = disc.member(&archive) else { continue };
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        let Some(psg) = by_suffix(&res, "bike.psg").and_then(|e| res.read(&bytes, e).ok()) else {
+            continue;
+        };
+        let Ok(model) = game_render::psg::Model::parse(&psg) else { continue };
+        // The frame the place is asked in is the bike's own node — the model's root, which is what
+        // `bike+0x18` holds — and the arithmetic is the original's node lookup, not the renderer's
+        // `world`: the two differ in the last bit of the front mount's `z`.
+        let node = |name: &str| -> Option<Vf> {
+            let i = model.nodes.iter().position(|n| n.name == name)?;
+            let mut root = i;
+            while let Some(up) = model.nodes[root].parent {
+                root = up;
+            }
+            Some(Vf(model.place_in(i, root)))
+        };
+        if let (Some(front), Some(rear)) = (node("TireFront"), node("TireRear")) {
+            println!("the wheels: TireFront {front:?} and TireRear {rear:?} out of {archive}");
+            return Some((front, rear));
+        }
+    }
+    None
+}
+
+/// The EE image saved beside the human's recording, and the human's rider in it: the rider R6's chain
+/// lands on (the game manager's actor list, two hops in), the same chain `watch/s22-standing.toml` and
+/// `watch/s8-start.toml` record live. The addresses here are research addresses in a test that reads a
+/// RAM image — never in the port.
+///
+/// The image is the frame *before* the acceptance capture's first row: its frame counter is one short
+/// of row 0's, and the bike in it is one physics step behind row 0's. So it can only seed what the
+/// original holds still across that step, and [`SaveState::leads`] says whether a capture is the one
+/// it leads into.
+struct SaveState {
+    ram: Vec<u8>,
+    rider: u32,
+}
+
+impl SaveState {
+    /// The game manager singleton's slot (`@game_manager` in `kit.toml`).
+    const GAME_MANAGER: u32 = 0x004e_1e98;
+    /// The simulated-frame counter (`@frame_counter`).
+    const FRAME_COUNTER: u32 = 0x0047_9d04;
+
+    /// `None`, with a line saying why, when the image is not in this worktree or the chain does not
+    /// land on the human's rider.
+    fn open() -> Option<SaveState> {
+        let at = private_dir("states").join(format!("{RECORDING}_SaveState.eeMemory.bin"));
+        let Ok(ram) = std::fs::read(&at) else {
+            println!("no {} — `./kit state ram` of the recording's save state writes it", at.display());
+            return None;
+        };
+        let mut state = SaveState { ram, rider: 0 };
+        let mut a = state.word(Self::GAME_MANAGER)?;
+        for hop in [0x34, 0x34, 0x8, 0x8, 0x0] {
+            a = state.word(a + hop)?;
+        }
+        // A rider (type 2) and the local human's (control source 1), or the chain is pointing elsewhere.
+        if state.word(a)? != 2 || state.word(state.word(a + 0x20)? + 0x34)? != 1 {
+            println!("the chain in {} does not land on the human's rider", at.display());
+            return None;
+        }
+        state.rider = a;
+        Some(state)
+    }
+
+    fn word(&self, a: u32) -> Option<u32> {
+        let a = (a & 0x01ff_ffff) as usize;
+        Some(u32::from_le_bytes(self.ram.get(a..a + 4)?.try_into().ok()?))
+    }
+
+    fn float(&self, a: u32) -> Option<F> {
+        Some(F(f32::from_bits(self.word(a)?)))
+    }
+
+    fn quad(&self, a: u32) -> Option<[u32; 4]> {
+        Some([self.word(a)?, self.word(a + 4)?, self.word(a + 8)?, self.word(a + 12)?])
+    }
+
+    /// The rider's word at `+off`, followed as a pointer.
+    fn rider_at(&self, off: u32) -> Option<u32> {
+        self.word(self.rider + off)
+    }
+
+    /// The type-4 actor `watch/acceptance.toml` records as `bike_xform`/`bike_vel`: eight hops down
+    /// the same list.
+    fn vehicle(&self) -> Option<u32> {
+        let mut a = self.word(Self::GAME_MANAGER)?;
+        for hop in [0x34, 0x34, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x0] {
+            a = self.word(a + hop)?;
+        }
+        (self.word(a)? == 4).then_some(a)
+    }
+
+    /// This image is the frame just before `cap`'s first row.
+    fn leads(&self, cap: &Capture) -> bool {
+        let first = cap.uint("frame_counter", "frame_counter").ok().and_then(|w| match w.samples.first() {
+            Some(s) => match s.value {
+                Value::Uint(n) => Some(n),
+                _ => None,
+            },
+            None => None,
+        });
+        match (self.word(Self::FRAME_COUNTER), first) {
+            (Some(saved), Some(first)) => u64::from(saved) + 1 == first,
+            _ => false,
+        }
+    }
+
+    /// The human's two wheel mounts as the original held them: the front wheel at `+0x7b0` and the
+    /// rear at `+0x7b4`, each mount at the wheel's `+0xa0`.
+    fn wheels(&self) -> Option<[[u32; 4]; 2]> {
+        Some([self.quad(self.rider_at(0x7b0)? + 0xa0)?, self.quad(self.rider_at(0x7b4)? + 0xa0)?])
+    }
+
+    /// The part of the drivetrain the original holds still from this frame through the capture's
+    /// first row, read off the rider (`bike_clutch`'s `+0x6c0`/`+0x6c4`/`+0x6cc`, the rate-limited
+    /// throttle and clutch at `+0x658`/`+0x65c`) and its engine (`+0x7b8`: `+0x64` locked, `+0x68` the
+    /// gear, `+0x88` the launch multiplier, `+0x8c` the curve cursor, `+0xa8` the revs).
+    /// `watch/s8-start.toml` shows every one of them unchanged across the frames before the human
+    /// first touches the pad, which is what makes them fit to seed a run from row 0 with.
+    fn drivetrain(&self) -> Option<Drivetrain> {
+        let r = self.rider;
+        let e = self.rider_at(0x7b8)?;
+        Some(Drivetrain {
+            clutch_timer: self.float(r + 0x6c0)?,
+            clutch_scale_start: self.float(r + 0x6c4)?,
+            clutch_cofg_weight: self.float(r + 0x6cc)?,
+            gas: self.float(r + 0x658)?,
+            clutch: self.float(r + 0x65c)?,
+            locked: self.word(e + 0x64)? != 0,
+            gear: self.word(e + 0x68)? as i32,
+            launch: self.float(e + 0x88)?,
+            curve: (self.word(e + 0x8c)?, self.word(e + 0x90)?, self.float(e + 0x94)?),
+            rpm: self.float(e + 0xa8)?,
+        })
+    }
+}
+
+/// See [`SaveState::drivetrain`].
+#[derive(Clone, Copy, Debug)]
+struct Drivetrain {
+    clutch_timer: F,
+    clutch_scale_start: F,
+    clutch_cofg_weight: F,
+    gas: F,
+    clutch: F,
+    locked: bool,
+    gear: i32,
+    launch: F,
+    curve: (u32, u32, F),
+    rpm: F,
+}
+
+impl Drivetrain {
+    /// Puts it into a ride that has just been placed. The gear goes through `set_gear`, so its ratio
+    /// and reciprocal come with it.
+    fn seed(&self, ride: &mut game_sim::ride::Ride) {
+        ride.mv.clutch_timer = self.clutch_timer;
+        ride.mv.clutch_scale_start = self.clutch_scale_start;
+        ride.mv.clutch_cofg_weight = self.clutch_cofg_weight;
+        ride.held.gas = self.gas;
+        ride.held.clutch = self.clutch;
+        ride.mv.clutch_in = self.clutch;
+        game_sim::r#move::set_gear(&mut ride.engine, self.gear);
+        ride.engine.clutch_locked = self.locked;
+        ride.engine.clutch_torque_scale = self.launch;
+        ride.engine.curve = game_sim::r#move::Curve::at(self.curve.0, self.curve.1, self.curve.2);
+        ride.engine.rpm = self.rpm;
+    }
+}
+
+/// **The acceptance bike hangs its wheels where the original does, bit for bit.** The mounts the
+/// fixture is built with ([`the_wheels_the_human_rode`], off the disc) against the two the original's
+/// rider was carrying in the recording's own save state. The disc's answer is the one the run uses;
+/// the save state is the proof that it is the right model and the right read. Skipped with a line
+/// where either is missing.
+#[test]
+fn the_acceptance_bike_hangs_its_wheels_where_the_original_does() {
+    let Some(mut disc) = Disc::open() else { return };
+    let Some(saved) = SaveState::open().and_then(|s| s.wheels()) else { return };
+    let (front, rear) = the_wheels_the_human_rode(&mut disc)
+        .unwrap_or_else(|| panic!("no {FREERIDE_MODEL} bike.psg with TireFront/TireRear nodes"));
+    let bits = |v: Vf| [v.x().to_bits(), v.y().to_bits(), v.z().to_bits(), v.w().to_bits()];
+    assert_eq!(bits(front), saved[0], "the front mount: model {front:?}");
+    assert_eq!(bits(rear), saved[1], "the rear mount: model {rear:?}");
+}
+
+/// **The acceptance capture watches the bike as it is drawn, not the chassis the physics moves** — which
+/// is why no lane of it can be matched by the port's chassis alone, and why `ACCEPTANCE_AGREES_THROUGH`
+/// is held where it is. Proved on the recording's own save state:
+///
+/// - `bike_xform` (the type-4 actor's `+0x180`) is, word for word, the world transform of the node at
+///   rider `+0x964` — the *drawn* bike's root, whose children are the model's `Dummy_Foot_L`/`_R` —
+///   which the rider's frame-end copy (`+0xbd0`) hands the actor. The chassis' own node is rider
+///   `+0x18` (the chassis' `+0x254`), and the drawn root hangs off it through a pose of its own: about
+///   a degree and a half of roll and 0.065 units of sideways offset on a bike standing on the rider's
+///   foot, held rigid across `watch/s8-start.toml`'s 120 frames.
+/// - `bike_vel` (`+0x130`) is the chassis' velocity (`+0x260`) times 0.8, lane for lane.
+#[test]
+fn the_acceptance_capture_watches_the_drawn_bike_not_the_chassis() {
+    let Some(st) = SaveState::open() else { return };
+    let vehicle = st.vehicle().expect("eight hops down the actor list is the human's type-4 bike");
+    let drawn = st.rider_at(0x964).expect("the drawn bike's root node");
+    let body = st.rider_at(0x18).expect("the chassis' node");
+    let chassis = st.rider_at(0x7a4).expect("the chassis");
+    assert_eq!(st.rider_at(0x7a4).and_then(|c| st.word(c + 0x254)), Some(body), "the chassis' own node");
+    for row in 0..4 {
+        let at = |base: u32| st.quad(base + 16 * row).unwrap();
+        assert_eq!(at(vehicle + 0x180), at(drawn + 0x80), "bike_xform row {row} is the drawn root's");
+    }
+    let lane = |base: u32, i: u32| st.float(base + 4 * i).unwrap();
+    let apart = (0..3).map(|i| (lane(vehicle + 0x1b0, i).0 - lane(body + 0xb0, i).0).abs()).fold(0.0, f32::max);
+    assert!(apart > 0.05, "the drawn root and the chassis are {apart} apart: the capture would be the chassis");
+    for i in 0..3 {
+        let want = lane(chassis + 0x260, i) * F(0.8);
+        assert_eq!(lane(vehicle + 0x130, i).0.to_bits(), want.0.to_bits(), "bike_vel lane {i}");
+    }
+}
+
 /// **Everything the disc's side of an acceptance run is**, handed to `then`: the world the capture was
 /// recorded on, the name of it for the fixture to carry, and the bike it was ridden on.
 ///
@@ -3410,7 +3691,7 @@ fn the_bike_the_human_rode(disc: &mut Disc, tables: &RiderTables) -> Option<Bike
 /// is what S8 measured and S28 is here to stop.
 fn in_the_world_of<R>(
     cap: &Capture,
-    then: impl FnOnce(&mut dyn World, &Where, Option<(Arc<RiderTables>, BikePhy)>) -> R,
+    then: impl FnOnce(&mut dyn World, &Where, Option<Ridden>) -> R,
 ) -> Option<R> {
     let mut disc = Disc::open()?;
     let (area, _) = recorded_on(cap, &mut disc)?;
@@ -3434,7 +3715,17 @@ fn in_the_world_of<R>(
     // folds the game's own {cos, sin} curve into half a dozen parameters, so a bike read against one
     // table and ridden against another is a different bike.
     let tables = Arc::new(RiderTables::build());
-    let bike = the_bike_the_human_rode(&mut disc, &tables).map(|phy| (Arc::clone(&tables), phy));
+    let bike = the_bike_the_human_rode(&mut disc, &tables).map(|phy| {
+        let mounts = the_wheels_the_human_rode(&mut disc).unwrap_or_else(|| {
+            println!(
+                "no {FREERIDE_MODEL} model with TireFront/TireRear nodes on this disc: the wheels \
+                 hang off the .phy's BodyTireForcePosition instead, which is not where the \
+                 original hangs them, and the run will part at tick 1",
+            );
+            game_sim::stock::mounts(&phy)
+        });
+        Ridden { tables: Arc::clone(&tables), phy, mounts }
+    });
     let mut place = Place { ground, props };
     Some(then(&mut place, &area.named, bike))
 }

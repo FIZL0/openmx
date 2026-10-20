@@ -233,6 +233,64 @@ impl Model {
         m
     }
 
+    /// A node's transform all the way to the root **in the original's own arithmetic**: VU0, one
+    /// parent at a time from the root down, every product and every sum chopped.
+    ///
+    /// [`Model::world`] is host `f32` in a different order and is what the renderer draws with;
+    /// this is for the one place a node's position becomes a *simulation* number — the wheel mounts,
+    /// which the original reads off the bike model's tire nodes (S22) — where a last bit decides
+    /// whether a replay agrees with a recording. A rotation row of the child is `(P0·x + P1·y) +
+    /// P2·z` over the parent's rows; the translation row starts from the parent's origin (a
+    /// `vaddax` off `vf0`, i.e. `P3 + 0`) and then adds `P0·x`, `P1·y`, `P2·z` in that order. A
+    /// root's world is its local transform, copied.
+    pub fn world_vu(&self, node: usize) -> [[f32; 4]; 4] {
+        use ps2_float::vu::{add, madd, mul};
+        let mut chain = Vec::new();
+        let mut at = Some(node);
+        while let Some(i) = at {
+            let Some(n) = self.nodes.get(i) else { break };
+            if chain.len() > self.nodes.len() {
+                break; // a cycle in the tree
+            }
+            chain.push(i);
+            at = n.parent;
+        }
+        let Some(&root) = chain.last() else { return M4::IDENTITY.0 };
+        let mut w = self.nodes[root].local.0;
+        for &i in chain.iter().rev().skip(1) {
+            let l = self.nodes[i].local.0;
+            let p = w;
+            let row = |r: [f32; 4], start: Option<[f32; 4]>| -> [f32; 4] {
+                core::array::from_fn(|k| {
+                    let acc = match start {
+                        Some(o) => madd(add(o[k], 0.0), p[0][k], r[0]),
+                        None => mul(p[0][k], r[0]),
+                    };
+                    madd(madd(acc, p[1][k], r[1]), p[2][k], r[2])
+                })
+            };
+            w = [row(l[0], None), row(l[1], None), row(l[2], None), row(l[3], Some(p[3]))];
+        }
+        w
+    }
+
+    /// Where `node`'s origin sits in `frame`'s own coordinates, the way the original's node lookup
+    /// answers it: both worlds by [`Model::world_vu`], the difference of their origins (`vsub.xyz`),
+    /// then that through the transpose of the frame's rotation (`vmulax`/`vmadday`/`vmaddz`, `.xyz`
+    /// only). `w` is 1. With `frame == node` the answer is the node's own local translation.
+    pub fn place_in(&self, node: usize, frame: usize) -> [f32; 4] {
+        use ps2_float::vu::{madd, mul, sub};
+        if node == frame {
+            let t = self.nodes[node].local.0[3];
+            return [t[0], t[1], t[2], 1.0];
+        }
+        let p = self.world_vu(node)[3];
+        let f = self.world_vu(frame);
+        let d = [sub(p[0], f[3][0]), sub(p[1], f[3][1]), sub(p[2], f[3][2])];
+        let lane = |k: usize| madd(madd(mul(f[k][0], d[0]), f[k][1], d[1]), f[k][2], d[2]);
+        [lane(0), lane(1), lane(2), 1.0]
+    }
+
     /// Every triangle of one LOD group, with each vertex already placed by its node.
     ///
     /// Strips are expanded here rather than at draw time because the ADC flag makes the expansion
