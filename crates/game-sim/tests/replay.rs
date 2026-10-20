@@ -3015,6 +3015,12 @@ const ACCEPTANCE_AGREES_THROUGH: u64 = 0;
 ///   file older than the walk, or a capture carrying a column the reader aims somewhere the walk does
 ///   not go. Printed: the port is not what is wrong in that case.
 fn acceptance_verdict(f: &Fixture, world: &mut dyn World) {
+    acceptance_verdict_against(f, world, ACCEPTANCE_AGREES_THROUGH, "ACCEPTANCE_AGREES_THROUGH");
+}
+
+/// [`acceptance_verdict`] against a ratchet of the caller's: `agreed` is the constant, `gate` its
+/// name for the line that asks for it to be raised. S32's second run is the other caller.
+fn acceptance_verdict_against(f: &Fixture, world: &mut dyn World, agreed: u64, gate: &str) {
     let d = match replay::verify_in(f, world) {
         Ok(end) => {
             println!(
@@ -3036,9 +3042,9 @@ fn acceptance_verdict(f: &Fixture, world: &mut dyn World) {
         return;
     }
     assert!(
-        d.tick > ACCEPTANCE_AGREES_THROUGH,
-        "the acceptance run has gone backwards: it agreed through tick \
-         {ACCEPTANCE_AGREES_THROUGH} and now diverges at {d}. If this is tick 0 and the run came \
+        d.tick > agreed,
+        "the acceptance run has gone backwards: it agreed through tick {agreed} ({gate}) and now \
+         diverges at {d}. If this is tick 0 and the run came \
          from a `.fixture` file, that is the text format rather than the port: it cannot carry a \
          start state yet (`Fixture::start`), so an acceptance fixture written out with `to_text` \
          replays from the spawn — replay the capture instead",
@@ -3055,10 +3061,10 @@ fn acceptance_verdict(f: &Fixture, world: &mut dyn World) {
             None => println!("  {path}: agrees on every recorded tick"),
         }
     }
-    if d.tick > ACCEPTANCE_AGREES_THROUGH + 1 {
+    if d.tick > agreed + 1 {
         println!(
-            "  — further than ACCEPTANCE_AGREES_THROUGH ({ACCEPTANCE_AGREES_THROUGH}) says: raise \
-             it to {} and the gate holds the new ground",
+            "  — further than {gate} ({agreed}) says: raise it to {} and the gate holds the new \
+             ground",
             d.tick - 1,
         );
     }
@@ -3132,6 +3138,10 @@ const FREERIDE_TRACKS: [&str; 5] = [
 /// capture's first row — and that blend is this port's own arithmetic, not the game's). Two units
 /// leaves that alone and still refuses the wrong area by a factor of ten.
 const BURIED: F = F(2.0);
+
+/// How rarely [`recorded_on`] lets a row be [`BURIED`] in the area it was ridden on: one in this many.
+/// A suspension bottomed out on a hard landing puts the body origin under the ground for a tick (S32).
+const BURIED_ONE_IN: usize = 100;
 
 /// The bike a freeride boot loads, as D7 proved the loader asks for it. Named here as the archives
 /// spell their members, which is lowercased and without the `Bike\` the loader prepends.
@@ -3333,7 +3343,10 @@ fn recorded_on(cap: &Capture, disc: &mut Disc) -> Option<(Area, Vec<String>)> {
                 rows.len(),
                 nearest.unwrap_or(F::ZERO),
             ));
-            if buried == 0 && off_field == 0 && landed {
+            // A row or two in a hundred buried is a landing, not another area: recording2's hard
+            // landing at tick 342 (vy -32.5) bottoms the bike out 2.43 under Free09's blended
+            // heightfield for one tick, and the wrong areas bury it on 37 to 906 rows of 641 (S32).
+            if buried * BURIED_ONE_IN <= rows.len() && off_field == 0 && landed {
                 candidates.push(area);
             }
         }
@@ -4938,3 +4951,308 @@ fn a_tape_ridden_and_recorded_at_once_is_the_tape_that_was_ridden() {
     assert_eq!(run.tick(), 120, "one tick per frame of the tape");
     assert_eq!(run.hash(), replay::play(&ridden, 3).hash());
 }
+
+// ---------------------------------------------------------------------------------------------------
+// S32 — the second acceptance run: recording2, the human's second minute on Free09
+// ---------------------------------------------------------------------------------------------------
+//
+// `recording2.p2m2` is a second human minute on the same ground and the same bike as the first (C6),
+// played back on the original and captured with `watch/acceptance.toml`'s columns and more. It gets
+// what `the_acceptance_run` has: a fixture out of the capture, seeded from its first row by
+// [`acceptance_start`], ridden over the world [`recorded_on`] finds (S28), and a ratchet of its own.
+//
+// The difference is where it stops. S14's rule is that the tick-exact window ends at the first wreck or
+// contact with an opponent: past it the player's own path draws on the rand() stream the area's AI
+// riders draw from every tick, and the port has no opponents to keep that stream in step. The first
+// recording happens never to reach either. This one wrecks at tick 641, a nose-dive and not a contact,
+// and so the fixture is cut at 640 and the ratchet is over those ticks. The tick is read off the
+// capture's own `wreck_reason` column, not assumed ([`second_window`]), and the AI bikes are measured
+// as never coming near the human's before it.
+
+/// The capture's file name in [`acceptance_dirs`] — C6's playback of `recording2.p2m2`.
+const SECOND_ACCEPTANCE: &str = "recording2-freeride";
+
+/// **The last tick of recording2 the port is known to agree with the original on.** The second run's
+/// own ratchet, the same contract as [`ACCEPTANCE_AGREES_THROUGH`]: reaching further prints a line
+/// asking for it to be raised, falling short of it fails. 0 is the start state [`acceptance_start`]
+/// seeds from row 0.
+const SECOND_ACCEPTANCE_AGREES_THROUGH: u64 = 0;
+
+/// The last tick of recording2's tick-exact window: the tick before its first wreck. Measured off the
+/// capture by [`second_window`] and asserted against it, so a different capture says so.
+const SECOND_WINDOW_ENDS: u64 = 640;
+
+/// recording2's first wreck: the tick `wreck_reason` first reads nonzero, and the reason — 8, the
+/// nose-dive ([`game_sim::air::Wreck::NoseDive`]'s id). Not 7, the contact with another rider.
+const SECOND_FIRST_WRECK: (u64, u32) = (641, 8);
+
+/// The wreck id the original writes for a contact with another rider (`Wreck::Joust`).
+const CONTACT: u32 = 7;
+
+/// The second acceptance capture, from the first of [`acceptance_dirs`] that holds it — or `None`,
+/// with where it comes from printed.
+fn second_acceptance_capture() -> Option<(PathBuf, Capture)> {
+    for dir in acceptance_dirs() {
+        let path = dir.join(format!("{SECOND_ACCEPTANCE}.csv"));
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            return Some((path, cap));
+        }
+    }
+    println!(
+        "no {SECOND_ACCEPTANCE}.csv in {}: the second acceptance run is C6's playback of \
+         context/recordings/recording2.p2m2 (plan/HUMAN.md has the playback recipe) captured with \
+         watch/acceptance.toml, so there is no second verdict in this worktree",
+        acceptance_dirs()[0].display(),
+    );
+    None
+}
+
+/// **Where the tick-exact window ends, read off the capture**: the last tick before the first row
+/// whose `wreck_reason` is nonzero, with that tick and its reason. S14's rule closes the window at the
+/// first wreck *or* contact; a contact is a wreck too (reason [`CONTACT`]), so the first nonzero
+/// reason is whichever of the two comes first. A capture with no wreck in it is a window to its end.
+fn second_window(cap: &Capture) -> Result<(u64, Option<(u64, u32)>), String> {
+    let ticks = ticks_of(cap)?;
+    let at = column(cap, "wreck_reason")?;
+    for (row, &tick) in ticks.iter().enumerate() {
+        let reason: u32 = cell(cap, row, at)
+            .parse()
+            .map_err(|e| format!("row {row}: wreck_reason '{}': {e}", cell(cap, row, at)))?;
+        if reason != 0 {
+            if tick == 0 {
+                return Err("the capture starts mid-wreck: there is no window".into());
+            }
+            return Ok((tick - 1, Some((tick, reason))));
+        }
+    }
+    Ok((*ticks.last().ok_or("an empty capture")?, None))
+}
+
+/// The ticks on which a riding bike's eight lanes of [`BIKE`] are exactly the previous row's: a row
+/// read while the tick was still being simulated, carrying the last tick's bike under this tick's
+/// counter. A bike with any velocity moves every tick, so on a clean capture there are none. This is
+/// the detector S32 measured the five captures of recording2 with; it is a lower bound — a late row
+/// whose bike did change between the two reads is not caught — and a capture it flags is not one a
+/// tick-exact ratchet can be taken against.
+fn repeated_bike_rows(cap: &Capture) -> Result<Vec<u64>, String> {
+    let ticks = ticks_of(cap)?;
+    let lanes: Vec<usize> = BIKE.iter().map(|(c, _)| column(cap, c)).collect::<Result<_, _>>()?;
+    let wrecked = column(cap, "wreck_reason")?;
+    let riding = |row: usize| {
+        cell(cap, row, wrecked) == "0"
+            && lanes[4..7].iter().any(|&l| cell(cap, row, l).parse::<f32>().is_ok_and(|v| v != 0.0))
+    };
+    Ok((1..cap.rows.len())
+        .filter(|&r| riding(r) && riding(r - 1))
+        .filter(|&r| lanes.iter().all(|&l| cell(cap, r, l) == cell(cap, r - 1, l)))
+        .map(|r| ticks[r])
+        .collect())
+}
+
+/// The capture's rows through tick `end` — the window, as a capture of its own. Rows are one per tick
+/// from tick 0 ([`ticks_of`] refuses anything else), so that is the first `end + 1` of them. Both the
+/// fixture and the world are taken from this and not from the whole minute: past the window the bike
+/// wrecks three times, and one of those rows (a body origin 2.43 units under Free09's dirt) is enough
+/// for [`recorded_on`] to rule every area out.
+fn through_tick(cap: &Capture, end: u64) -> Capture {
+    let n = (end as usize + 1).min(cap.rows.len());
+    Capture {
+        columns: cap.columns.clone(),
+        frames: cap.frames[..n].to_vec(),
+        rows: cap.rows[..n].to_vec(),
+    }
+}
+
+/// **The second acceptance run** — recording2 replayed over Free09 on the Race 125, ticks 0 to
+/// [`SECOND_WINDOW_ENDS`], against [`SECOND_ACCEPTANCE_AGREES_THROUGH`].
+///
+/// The same verdict `the_acceptance_run` prints ([`acceptance_verdict_against`]), on every `./kit
+/// check` in a worktree that has the capture and the disc, and the same skip with a line where either
+/// is missing. A capture with repeated bike rows ([`repeated_bike_rows`]) is refused with a line rather
+/// than ridden: its late rows would be divergences of the recorder, not of the port.
+///
+/// ```sh
+/// cargo test -p game-sim --test replay -- --nocapture the_second_acceptance_run
+/// ```
+#[test]
+fn the_second_acceptance_run() {
+    let Some((capture, cap)) = second_acceptance_capture() else { return };
+    println!(
+        "{}: {} rows x {} columns, frames {}..{}",
+        capture.display(),
+        cap.frames.len(),
+        cap.columns.len(),
+        cap.frames[0],
+        cap.frames[cap.frames.len() - 1],
+    );
+    let late = repeated_bike_rows(&cap).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+    if !late.is_empty() {
+        println!(
+            "  — {} of its rows repeat the previous row's bike while it is moving (ticks {:?}…): \
+             they were read mid-tick, so this capture is not one to take a tick-exact verdict \
+             against. Re-capture it with the recorder waking on the pad stamp, as C6's was",
+            late.len(),
+            &late[..late.len().min(8)],
+        );
+        return;
+    }
+    let (end, first) = second_window(&cap).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+    match first {
+        Some((tick, reason)) => println!(
+            "the window: ticks 0..={end}, closed by wreck_reason {reason} at tick {tick}{}",
+            if reason == CONTACT { " (a contact with another rider)" } else { "" },
+        ),
+        None => println!("the window: ticks 0..={end}, the whole capture — it never wrecks"),
+    }
+    let window = through_tick(&cap, end);
+    let taken = in_the_world_of(&window, |world, named, bike| {
+        let f = acceptance_fixture_on(&window, bike)
+            .unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+        let f = Fixture {
+            name: f.name.replacen(ACCEPTANCE, SECOND_ACCEPTANCE, 1),
+            world: Some(named.clone()),
+            ..f
+        };
+        println!(
+            "{}: {} frames, {} checks, seed 0x{:08x}",
+            f.name,
+            f.inputs.len(),
+            f.checks(),
+            f.seed,
+        );
+        assert!(
+            f.inputs.len() >= 30 * 20,
+            "{} frames of window is not an acceptance run",
+            f.inputs.len(),
+        );
+        acceptance_verdict_against(
+            &f,
+            world,
+            SECOND_ACCEPTANCE_AGREES_THROUGH,
+            "SECOND_ACCEPTANCE_AGREES_THROUGH",
+        );
+    });
+    if taken.is_none() {
+        println!(
+            "— so there is no second acceptance verdict in this worktree: either the disc (MX.PSR) \
+             is not here to ride it over or none of its areas fits the window's rows (the lines \
+             above say which), and the ratchet is unchecked, not met",
+        );
+    }
+}
+
+/// **recording2's window ends at tick 640, at a nose-dive and not a contact** — found in the capture.
+///
+/// The first nonzero `wreck_reason` is at tick 641 and it is 8; no row of the whole capture reads
+/// [`CONTACT`]. And where S32's second capture of the same playback is in the worktree
+/// (`context/capture/s32/recording2-opponents.csv`, the acceptance columns plus the position of every
+/// actor in the area's list), the three AI bikes are measured never to come within
+/// [`OPPONENTS_KEEP_OFF`] of the human's through the window: they ride off the start line the other
+/// way, 19 units away at tick 0 and hundreds by the wreck. So nothing in the window is a contact the
+/// wreck column could have missed.
+#[test]
+fn the_second_recordings_window_ends_at_its_first_wreck_which_is_not_a_contact() {
+    let Some((capture, cap)) = second_acceptance_capture() else { return };
+    let (end, first) = second_window(&cap).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+    assert_eq!(
+        (end, first),
+        (SECOND_WINDOW_ENDS, Some(SECOND_FIRST_WRECK)),
+        "{}: the window is not where S32 measured it",
+        capture.display(),
+    );
+    let at = column(&cap, "wreck_reason").expect("the spec's own wreck column");
+    let contacts = (0..cap.rows.len()).filter(|&r| cell(&cap, r, at) == CONTACT.to_string()).count();
+    assert_eq!(contacts, 0, "{}: a contact with another rider is in this capture", capture.display());
+
+    let opponents = private_dir("capture").join("s32").join("recording2-opponents.csv");
+    let Ok(text) = std::fs::read_to_string(&opponents) else {
+        println!(
+            "{} is not in this worktree: the opponents' distance is unchecked here",
+            opponents.display(),
+        );
+        return;
+    };
+    let them = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", opponents.display()));
+    let counter = |c: &Capture, r: usize| -> u64 {
+        cell(c, r, column(c, "frame_counter").expect("a counter column")).parse().expect("a number")
+    };
+    let start = counter(&cap, 0);
+    let (nearest, bikes) = nearest_opponent(&them, |r| counter(&them, r).checked_sub(start), end)
+        .unwrap_or_else(|e| panic!("{}: {e}", opponents.display()));
+    println!(
+        "{} AI bikes; the nearest any comes to the human's through tick {end} is {:.2} units, at \
+         tick {}",
+        bikes, nearest.0, nearest.1,
+    );
+    assert_eq!(bikes, 3, "Free09 puts three AI riders in the area (S14)");
+    assert!(
+        nearest.0 > OPPONENTS_KEEP_OFF,
+        "an AI bike comes within {:.2} units of the human's at tick {}: a contact the wreck column \
+         may not show",
+        nearest.0,
+        nearest.1,
+    );
+}
+
+/// How far apart two bikes' origins have to stay for S32 to call it no contact: twice a Race 125's
+/// length or so. The measured nearest approach is 18.97, at tick 0.
+const OPPONENTS_KEEP_OFF: f64 = 12.0;
+
+/// The nearest any AI bike (`a{n}_type` 4, `a{n}_src` 2) comes to the human's (`a{n}_src` 1) through
+/// tick `end`, as (distance, tick), and how many AI bikes there are. `tick` maps a row to the
+/// acceptance capture's tick, `None` for a row before it.
+fn nearest_opponent(
+    cap: &Capture,
+    tick: impl Fn(usize) -> Option<u64>,
+    end: u64,
+) -> Result<((f64, u64), usize), String> {
+    let actors: Vec<usize> = (0..)
+        .take_while(|n| column(cap, &format!("a{n}_type")).is_ok())
+        .collect();
+    let int = |r: usize, name: String| -> Result<u32, String> {
+        cell(cap, r, column(cap, &name)?).parse().map_err(|e| format!("{name}: {e}"))
+    };
+    let pos = |r: usize, n: usize| -> Result<[f64; 3], String> {
+        let mut p = [0.0; 3];
+        for (k, c) in ["x", "y", "z"].iter().enumerate() {
+            let name = format!("a{n}_pos.{c}");
+            p[k] = cell(cap, r, column(cap, &name)?).parse().map_err(|e| format!("{name}: {e}"))?;
+        }
+        Ok(p)
+    };
+    let mut nearest: Option<(f64, u64)> = None;
+    let mut bikes = 0;
+    for r in 0..cap.rows.len() {
+        let Some(t) = tick(r) else { continue };
+        if t > end {
+            break;
+        }
+        let mut human = None;
+        let mut ai = Vec::new();
+        for &n in &actors {
+            // The list is shorter than the spec's sixteen entries: the chain past its end reads
+            // nothing, and an empty cell is no actor.
+            if cell(cap, r, column(cap, &format!("a{n}_type"))?).is_empty()
+                || int(r, format!("a{n}_type"))? != 4
+            {
+                continue;
+            }
+            match int(r, format!("a{n}_src"))? {
+                1 => human = Some(pos(r, n)?),
+                2 => ai.push(pos(r, n)?),
+                _ => {}
+            }
+        }
+        let human = human.ok_or_else(|| format!("row {r}: no human bike in the list"))?;
+        bikes = bikes.max(ai.len());
+        for p in ai {
+            let d = (0..3).map(|k| (p[k] - human[k]).powi(2)).sum::<f64>().sqrt();
+            if nearest.is_none_or(|(best, _)| d < best) {
+                nearest = Some((d, t));
+            }
+        }
+    }
+    Ok((nearest.ok_or("no row of the opponents' capture is in the window")?, bikes))
+}
+
