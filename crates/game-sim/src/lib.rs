@@ -416,6 +416,11 @@ pub mod chassis;
 /// sweep allows itself. The question every wheel, bale and rider asks once a substep.
 pub mod collide;
 
+/// The sweep probe's narrow phase: its segments stood in the world and wrapped in a sphere, then swept
+/// through a mesh or a hierarchy's meshes in their own space and taken back out — what a collision
+/// object's sweep back finds.
+pub mod sweep_probe;
+
 /// A dynamics body's collision object resolving its contacts every substep: the relative velocity at
 /// each contact, the damped spring or the impulse along the normal, the friction across it, and the
 /// damping a contact lowers. What makes the biplane stop at what it hits.
