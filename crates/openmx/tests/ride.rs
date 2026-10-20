@@ -1508,3 +1508,75 @@ fn a_swap_mid_session_swaps() {
     assert_eq!(garage.swap(), Ok(Kind::Biplane));
     assert_eq!(garage.plane.as_ref().unwrap().at, parked_plane().spawn.at);
 }
+
+/// A four-player session steps and draws four views (V22): the shell itself, run with no window for
+/// sixty frames, says on its last lines that every player's simulation ran every frame, that each of
+/// the four quarters drew triangles of its own, and that each view's camera sits where it follows its
+/// own rider from — the same place behind each of four riders who started six feet apart — rather
+/// than all four following the first. It writes its shot under the test's own directory, which is
+/// also how the frame was looked at by eye.
+///
+/// Off the disc, like every session of the shell; skipped without one.
+#[test]
+fn a_four_player_session_steps_and_draws_four_views() {
+    if let Err(e) = game_render::disc::Disc::open_configured() {
+        eprintln!("skipped: {e}");
+        return;
+    }
+    let shot = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("v22-four-views.png");
+    let _ = std::fs::remove_file(&shot);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_openmx"))
+        .current_dir(&root)
+        .args(["--headless", "--players", "4", "--size", "320x224", "--frames", "60", "--shot-frame", "59"])
+        .arg("--shot")
+        .arg(&shot)
+        .output()
+        .expect("the shell runs");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
+    assert!(said.contains("views: 4 players, quarters"), "{said}");
+    assert!(shot.exists(), "no shot written:\n{said}");
+
+    // "player N: T ticks, at x, y, z; view WxH at X,Y, camera at x, y, z, K triangles a frame"
+    let numbers = |s: &str| -> Vec<f32> {
+        s.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-')).filter_map(|w| w.parse().ok()).collect()
+    };
+    let players: Vec<Vec<f32>> = (1..=4)
+        .map(|n| {
+            let line = said
+                .lines()
+                .find(|l| l.starts_with(&format!("player {n}: ")) && l.contains(" ticks, at "))
+                .unwrap_or_else(|| panic!("no last line for player {n}:\n{said}"));
+            numbers(line)
+        })
+        .collect();
+    let mut views = Vec::new();
+    let mut behind = Vec::new();
+    for p in &players {
+        // [n, ticks, x, y, z, w, h, vx, vy, cx, cy, cz, triangles]
+        assert_eq!(p.len(), 13, "{p:?}");
+        assert!(p[1] >= 60.0, "player {} stepped {} ticks of 60 frames", p[0], p[1]);
+        assert_eq!((p[5], p[6]), (160.0, 112.0), "player {}'s view is not a quarter", p[0]);
+        assert!(p[12] > 0.0, "player {}'s view drew nothing", p[0]);
+        views.push((p[7] as usize, p[8] as usize));
+        behind.push([p[9] - p[2], p[10] - p[3], p[11] - p[4]]);
+    }
+    views.sort();
+    assert_eq!(views, vec![(0, 0), (0, 112), (160, 0), (160, 112)], "four views, one a quarter");
+    // Every camera is within a camera's distance of its own rider, and at the same place behind them.
+    for (i, d) in behind.iter().enumerate() {
+        let far = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        assert!(far > 1.0 && far < 40.0, "player {}'s camera is {far} ft from them", i + 1);
+        for k in 0..3 {
+            assert!((d[k] - behind[0][k]).abs() < 3.0, "player {}'s camera does not follow them: {d:?} against {:?}", i + 1, behind[0]);
+        }
+    }
+    // And four riders, not one drawn four times.
+    for i in 0..4 {
+        for j in i + 1..4 {
+            let (a, b) = (&players[i], &players[j]);
+            assert!((a[2] - b[2]).abs() + (a[4] - b[4]).abs() > 1.0, "players {} and {} are in one place", i + 1, j + 1);
+        }
+    }
+}
