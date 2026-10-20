@@ -165,13 +165,40 @@ impl Scene {
     }
 }
 
-/// A parsed `.psm`: what a mesh is painted with.
+/// A parsed `.psm`: what a mesh is painted with. Only the first shader pass is read; the passes
+/// after it are specular maps and the like, drawn over the first.
 #[derive(Clone, Debug, Default)]
 pub struct Material {
     /// The `.pst` this material samples, without its extension.
     pub texture: Option<String>,
-    /// The VU1 microprogram the original runs for it, kept for the record.
+    /// The VU1 microprogram the original runs for it, which is what decides how it is lit.
     pub microprogram: Option<String>,
+    /// `alphaTestOnOff`, and `alphaReferenceValue` in the GS's units (128 = opaque) where it has one.
+    pub alpha_test: Option<Option<f32>>,
+    /// `processingMethodWhenFailedInAlphaTest` of 1: a texel that fails the test still lands in the
+    /// colour buffer, only the depth buffer skips it.
+    pub fail_keeps_color: bool,
+    /// `alphaBlendingOnOff`, with `inputColorA`, `inputColorB` and `inputColorD` of the GS's
+    /// `(A - B) * C + D` (0 source, 1 frame, 2 zero); a missing one reads as the usual 0, 1, 1.
+    pub blend: Option<[u8; 3]>,
+    /// `zWriteDisabled`.
+    pub no_depth_write: bool,
+    /// `ShaderRGBA`, for the constant-colour microprograms, 128 meaning "unchanged".
+    pub rgba: Option<[f32; 4]>,
+    /// `TextureAnimation`: `unique` for the material's own `.atm`, or the name of another.
+    pub animation: Option<String>,
+}
+
+/// How a material's vertices are lit, by the family of microprogram it names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shading {
+    /// `Vu1StripDiffuse*`, and anything not recognised: the scene's sun and ambient on the normals,
+    /// times the vertex colour.
+    Diffuse,
+    /// `Vu1StripPrelit*`: the vertex colours are the light, baked; the sun is not applied.
+    Prelit,
+    /// `Vu1StripConstantColor*`: one colour, `ShaderRGBA`, over the whole mesh.
+    Constant([f32; 4]),
 }
 
 impl Material {
@@ -180,13 +207,42 @@ impl Material {
         let pass = sections
             .iter()
             .find(|s| s.name.to_ascii_lowercase().starts_with("shaderpass"));
+        let get = |k: &str| {
+            pass.and_then(|s| s.get(k))
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+        };
+        let flag = |k: &str| get(k).and_then(|v| v.parse::<f32>().ok()).map(|v| v != 0.0);
+        let number = |k: &str| get(k).and_then(|v| v.parse::<f32>().ok());
+        let input = |k: &str, usual: u8| number(k).map(|v| v as u8).unwrap_or(usual);
         Material {
-            texture: pass
-                .and_then(|s| s.get("TextureMap_1"))
-                .map(|t| t.to_string()),
-            microprogram: pass
-                .and_then(|s| s.get("microProgramName"))
-                .map(|t| t.to_string()),
+            texture: get("TextureMap_1").map(|t| t.to_string()),
+            microprogram: get("microProgramName").map(|t| t.to_string()),
+            alpha_test: flag("alphaTestOnOff")
+                .filter(|&on| on)
+                .map(|_| number("alphaReferenceValue")),
+            fail_keeps_color: number("processingMethodWhenFailedInAlphaTest") == Some(1.0),
+            blend: flag("alphaBlendingOnOff").filter(|&on| on).map(|_| {
+                [input("inputColorA", 0), input("inputColorB", 1), input("inputColorD", 1)]
+            }),
+            no_depth_write: flag("zWriteDisabled") == Some(true),
+            rgba: pass
+                .and_then(|s| s.numbers("ShaderRGBA"))
+                .filter(|v| v.len() >= 4)
+                .map(|v| [v[0], v[1], v[2], v[3]]),
+            animation: get("TextureAnimation").map(|t| t.to_string()),
+        }
+    }
+
+    /// How the vertices are lit, from the microprogram's name.
+    pub fn shading(&self) -> Shading {
+        let program = self.microprogram.as_deref().unwrap_or("").to_ascii_lowercase();
+        if program.contains("constantcolor") {
+            Shading::Constant(self.rgba.unwrap_or([128.0; 4]))
+        } else if program.contains("prelit") && !program.contains("diffuse") {
+            Shading::Prelit
+        } else {
+            Shading::Diffuse
         }
     }
 }
@@ -320,6 +376,33 @@ mod tests {
         );
         assert_eq!(m.texture.as_deref(), Some("bales_01_03"));
         assert_eq!(m.microprogram.as_deref(), Some("Vu1StripDiffuse.vuo"));
+        assert_eq!(m.shading(), Shading::Diffuse);
+        assert_eq!((m.alpha_test, m.blend, m.no_depth_write), (None, None, false));
+    }
+
+    #[test]
+    fn a_material_says_how_it_is_lit_and_laid_over_the_frame() {
+        // `seats_red.psm` from a supercross stadium, cut down.
+        let m = Material::parse(
+            "[General]\n[ShaderPass_1]  ;---\nmicroProgramName = Vu1StripPrelit.vuo\n\
+             TextureMap_1 = seats_red\nalphaBlendingOnOff = 1\nalphaTestOnOff = 1\n\
+             alphaTestMethod = 5\nalphaReferenceValue = 80\n\
+             processingMethodWhenFailedInAlphaTest = 1\nzWriteDisabled = 0\n\
+             TextureAnimation = unique\n[ShaderPass_1_Animator_1]\nanimatedMapFramesPerSecond = 15\n",
+        );
+        assert_eq!(m.shading(), Shading::Prelit);
+        assert_eq!(m.alpha_test, Some(Some(80.0)));
+        assert!(m.fail_keeps_color);
+        assert_eq!(m.blend, Some([0, 1, 1]));
+        assert!(!m.no_depth_write);
+        assert_eq!(m.animation.as_deref(), Some("unique"));
+        // An empty value is no value: `alphaTestOnOff =` is not "on".
+        let m = Material::parse(
+            "[ShaderPass_1]\nmicroProgramName = Vu1StripConstantColor.vuo\nalphaTestOnOff =\n\
+             ShaderRGBA = 64.0, 128.0, 128.0, 128.0\n",
+        );
+        assert_eq!(m.alpha_test, None);
+        assert_eq!(m.shading(), Shading::Constant([64.0, 128.0, 128.0, 128.0]));
     }
 
     #[test]

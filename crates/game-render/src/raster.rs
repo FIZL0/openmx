@@ -24,6 +24,34 @@ pub struct Shade {
     pub fog: f32,
 }
 
+/// How a triangle's pixels are coloured and laid over what is already in the frame.
+pub struct Look<'a> {
+    /// The texel at an interpolated texture coordinate, RGBA, before the vertex light.
+    pub paint: &'a dyn Fn(f32, f32) -> [u8; 4],
+    /// Texels with less alpha than this are not drawn at all: the material's alpha test.
+    pub cutoff: u8,
+    /// Mix over the frame by the texel's alpha rather than replacing it.
+    pub blend: bool,
+    /// With `blend`, add to the frame instead of mixing into it: `Cs * As + Cd`, glows and glints.
+    pub additive: bool,
+    /// Whether a drawn pixel hides what is drawn behind it later. Translucent materials say no.
+    pub depth_write: bool,
+}
+
+impl<'a> Look<'a> {
+    /// Opaque, with the cut-out every texture got before materials had their own alpha test: a
+    /// texel under 32 of 255 is a hole.
+    pub fn cut_out(paint: &'a dyn Fn(f32, f32) -> [u8; 4]) -> Look<'a> {
+        Look {
+            paint,
+            cutoff: 32,
+            blend: false,
+            additive: false,
+            depth_write: true,
+        }
+    }
+}
+
 /// A colour buffer and its depth buffer.
 pub struct Frame {
     pub width: usize,
@@ -53,6 +81,16 @@ impl Frame {
 
     /// Draw one triangle. `texture` of `None` paints flat white times the vertex light.
     pub fn triangle(&mut self, v: [Shade; 3], texture: Option<&Texture>, fog: [u8; 3]) {
+        let paint = |u: f32, v: f32| match texture {
+            Some(t) => t.sample(u, v),
+            None => [255, 255, 255, 255],
+        };
+        self.triangle_with(v, &Look::cut_out(&paint), fog);
+    }
+
+    /// Draw one triangle the way `look` says: its texels from a function of the interpolated `uv`
+    /// rather than from one texture, and its own alpha test and blend.
+    pub fn triangle_with(&mut self, v: [Shade; 3], look: &Look, fog: [u8; 3]) {
         // Clip against the near plane: a polygon of at most four vertices comes out.
         let mut poly: Vec<Shade> = Vec::with_capacity(4);
         for i in 0..3 {
@@ -66,11 +104,11 @@ impl Frame {
             }
         }
         for i in 2..poly.len() {
-            self.fill(&[poly[0], poly[i - 1], poly[i]], texture, fog);
+            self.fill(&[poly[0], poly[i - 1], poly[i]], look, fog);
         }
     }
 
-    fn fill(&mut self, v: &[Shade; 3], texture: Option<&Texture>, fog: [u8; 3]) {
+    fn fill(&mut self, v: &[Shade; 3], look: &Look, fog: [u8; 3]) {
         let (w, h) = (self.width as f32, self.height as f32);
         // To screen, keeping 1/w and attribute/w for the perspective-correct interpolation.
         let mut p = [[0.0f32; 3]; 3];
@@ -118,11 +156,8 @@ impl Frame {
                     (w0 * f(&v[0]) * iw[0] + w1 * f(&v[1]) * iw[1] + w2 * f(&v[2]) * iw[2]) * scale
                 };
                 let (u, vv) = (attr(&|s: &Shade| s.uv[0]), attr(&|s: &Shade| s.uv[1]));
-                let texel = match texture {
-                    Some(t) => t.sample(u, vv),
-                    None => [255, 255, 255, 255],
-                };
-                if texel[3] < 32 {
+                let texel = (look.paint)(u, vv);
+                if texel[3] < look.cutoff {
                     continue; // a cut-out texture: banners and fences are full of them
                 }
                 let fogged = attr(&|s: &Shade| s.fog).clamp(0.0, 1.0);
@@ -130,10 +165,23 @@ impl Frame {
                 for (k, slot) in rgb.iter_mut().enumerate() {
                     let light = attr(&|s: &Shade| s.light[k]);
                     let lit = texel[k] as f32 * light;
-                    *slot = (lit * (1.0 - fogged) + fog[k] as f32 * fogged).clamp(0.0, 255.0) as u8;
+                    let mut out = (lit * (1.0 - fogged) + fog[k] as f32 * fogged).clamp(0.0, 255.0);
+                    if look.blend {
+                        // The GS's usual `(Cs - Cd) * As + Cd`, with the decoder's 255 as its 128.
+                        let under = self.color[at * 3 + k] as f32;
+                        let a = texel[3] as f32 / 255.0;
+                        out = if look.additive {
+                            (under + out * a).min(255.0)
+                        } else {
+                            under + (out - under) * a
+                        };
+                    }
+                    *slot = out as u8;
                 }
                 self.color[at * 3..at * 3 + 3].copy_from_slice(&rgb);
-                self.depth[at] = inv_w;
+                if look.depth_write {
+                    self.depth[at] = inv_w;
+                }
             }
         }
     }

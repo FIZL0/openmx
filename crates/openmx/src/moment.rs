@@ -39,6 +39,7 @@ use game_render::mat::{M4, V3, v3};
 use game_render::png;
 use game_render::raster::Frame;
 use game_render::scene::Vehicle;
+use game_render::sky::Sky;
 use game_render::scene::Scene as ViewScene;
 use game_render::world::{Assets, Camera, Lighting, draw_scene};
 
@@ -147,6 +148,7 @@ pub fn draw(
     out: &std::path::Path,
     shot: &Shot,
     ground: &Ground,
+    sky: Option<&Sky>,
     assets: &Assets,
     vehicle: &Vehicle,
     look: &ViewScene,
@@ -158,6 +160,9 @@ pub fn draw(
         pixel.copy_from_slice(&look.fog_color);
     }
     frame.depth.fill(0.0);
+    if let Some(sky) = sky {
+        sky.draw(&mut frame, &camera);
+    }
 
     let mut drawn = ground.draw(
         &mut frame,

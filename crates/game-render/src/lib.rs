@@ -11,6 +11,8 @@
 //!   psg.rs       `.psg` geometry: nodes, materials, LOD groups, VIF streams -> triangle strips
 //!   pst.rs       `.pst` textures: a 256-colour palette in the GS's order, plus its mip chain
 //!   terrain.rs   `.trn` ground: a patched height field, its palette and its ground texture
+//!   sky.rs       `.cub` skies: a cube of vertex-coloured strips around the camera
+//!   splat.rs     the freeride ground's paint: masked layers, a detail map and a baked light map
 //!   skin.rs      `.mot` motion clips: the channels, the quaternion blend, and the joints on a model
 //!   anim.rs      the animation seam: the sim's driving on the disc's clips, bound to one skeleton
 //!   biplane.rs   the biplane: its model, the prop cone its state calls for, the pilot, its emitters
@@ -41,6 +43,8 @@ pub mod raster;
 pub mod rider;
 pub mod scene;
 pub mod skin;
+pub mod sky;
+pub mod splat;
 pub mod terrain;
 pub mod vehicle;
 pub mod world;

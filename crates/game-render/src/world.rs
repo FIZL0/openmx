@@ -10,8 +10,8 @@ use crate::disc::Res;
 use crate::mat::{M4, V3, v3};
 use crate::psg::{Model, Tri};
 use crate::pst::Texture;
-use crate::raster::{Frame, Shade};
-use crate::scene::{Material, Preset, Scene};
+use crate::raster::{Frame, Look, Shade};
+use crate::scene::{Material, Preset, Scene, Shading};
 use std::collections::HashMap;
 
 /// A model with its triangles already expanded and its textures already resolved.
@@ -26,8 +26,107 @@ pub struct Loaded {
     /// One texture index per material of the model; `None` where the material has no texture or the
     /// archive does not hold it.
     pub textures: Vec<Option<usize>>,
+    /// One surface per material of the model, in the same order: how it is lit and laid over the
+    /// frame (V25).
+    pub surfaces: Vec<Surface>,
     /// How far the model reaches from its own origin, for culling.
     pub radius: f32,
+}
+
+/// What a material's `.psm` says about drawing it, beyond which texture: the light, the alpha test
+/// and the blend of its first shader pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Surface {
+    pub shading: Shading,
+    /// Texels under this alpha (0..=255) are not drawn.
+    pub cutoff: u8,
+    /// Mixed over the frame by alpha; `additive` adds instead.
+    pub blend: bool,
+    pub additive: bool,
+    pub depth_write: bool,
+}
+
+impl Default for Surface {
+    /// A material with no `.psm`, or one that says nothing: lit by the sun, opaque, and with the
+    /// hole-punching cut-out every texture had before materials were read.
+    fn default() -> Surface {
+        Surface {
+            shading: Shading::Diffuse,
+            cutoff: 32,
+            blend: false,
+            additive: false,
+            depth_write: true,
+        }
+    }
+}
+
+impl Surface {
+    pub fn of(m: &Material) -> Surface {
+        let blend = m.blend.is_some();
+        // `(Cs - 0) * As + Cd`: the source is added rather than mixed.
+        let additive = matches!(m.blend, Some([0, 2, 1]));
+        let cutoff = match m.alpha_test {
+            // The reference is in the GS's units, where 128 is opaque; the decoder doubles alpha.
+            Some(Some(r)) => (r * 2.0).clamp(0.0, 255.0) as u8,
+            Some(None) => 1,
+            // A blended material with no test draws all but the empty texels, faintly.
+            None if blend => 1,
+            None => 32,
+        };
+        Surface {
+            shading: m.shading(),
+            cutoff,
+            blend,
+            additive,
+            // A texel that fails the test but still lands in colour must not hide what is behind it:
+            // the port has no "colour only" write, so the whole material skips depth instead.
+            depth_write: !m.no_depth_write && !(blend && m.fail_keeps_color && cutoff > 1),
+        }
+    }
+}
+
+/// The files a material's pixels may be in, in the order they are tried: its texture as a `.pst`,
+/// then as an `.atm`, then the `.atm` its `TextureAnimation` names (`unique` meaning its own name).
+pub fn texture_files(material: &str, m: &Material) -> Vec<String> {
+    let mut files = Vec::new();
+    if let Some(t) = &m.texture {
+        files.push(format!("{t}.pst"));
+        files.push(format!("{t}.atm"));
+    }
+    match m.animation.as_deref() {
+        Some(a) if a.eq_ignore_ascii_case("unique") => files.push(format!("{material}.atm")),
+        Some(a) => files.push(format!("{a}.atm")),
+        None => {}
+    }
+    files
+}
+
+/// A texture file decoded by its kind: a `.pst` whole, an `.atm` by its first frame.
+pub fn decode_texture(file: &str, bytes: &[u8]) -> Option<Texture> {
+    if file.to_ascii_lowercase().ends_with(".atm") {
+        Texture::parse_animation(bytes).ok()
+    } else {
+        Texture::parse(bytes).ok()
+    }
+}
+
+/// How one vertex is lit by its material's class: the light the rasteriser multiplies its texel by.
+///
+/// A diffuse material takes the scene's sun on its normal plus the ambient fill, times the vertex
+/// colour the artists painted (0x80 meaning "unchanged"); a prelit one has its light baked into that
+/// colour and ignores the sun; a constant-colour one is one colour all over.
+pub fn vertex_light(shading: Shading, light: &Lighting, normal: V3, color: [u8; 4]) -> [f32; 3] {
+    let mut lit = [0.0f32; 3];
+    let lambert = (-normal.dot(light.sun)).max(0.0);
+    for c in 0..3 {
+        let paint = color[c] as f32 / 128.0;
+        lit[c] = match shading {
+            Shading::Diffuse => (light.ambient[c] + light.sun_color[c] * lambert) * paint,
+            Shading::Prelit => paint,
+            Shading::Constant(rgba) => rgba[c] / 128.0,
+        };
+    }
+    lit
 }
 
 /// Every model, material and texture a scene needs, loaded from the archives it is spread across.
@@ -71,11 +170,11 @@ impl Assets {
             }
         };
         let tris = model.triangles(0);
-        let textures = model
+        let (textures, surfaces) = model
             .materials
             .iter()
             .map(|m| self.texture_of(archives, m))
-            .collect();
+            .unzip();
         let radius = tris
             .iter()
             .flat_map(|t| t.v.iter())
@@ -87,40 +186,58 @@ impl Assets {
                 model,
                 tris,
                 textures,
+                surfaces,
                 radius,
             },
         );
         true
     }
 
-    /// The texture a material paints with, loading it if this is the first mesh to ask.
-    fn texture_of(&mut self, archives: &[Res], material: &str) -> Option<usize> {
-        if let Some(&i) = self.by_name.get(material) {
-            return Some(i);
-        }
+    /// The texture a material paints with, loading it if this is the first mesh to ask, and how the
+    /// material is drawn.
+    fn texture_of(&mut self, archives: &[Res], material: &str) -> (Option<usize>, Surface) {
+        self.resolve(
+            &|file: &str| archives.iter().find_map(|a| a.read_suffix(file).ok()),
+            material,
+        )
+    }
+
+    /// [`Assets::texture_of`] against any reader of archive members, so it can be tried on bytes
+    /// made up for a test.
+    pub fn resolve(
+        &mut self,
+        read: &dyn Fn(&str) -> Option<Vec<u8>>,
+        material: &str,
+    ) -> (Option<usize>, Surface) {
         let asked = material;
         let material = match self.renames.get(&material.to_ascii_lowercase()) {
             Some(to) => to.clone(),
             None => material.to_string(),
         };
         let material = material.as_str();
-        let psm = archives
-            .iter()
-            .find_map(|a| a.read_suffix(&format!("{material}.psm")).ok())?;
-        let name = Material::parse(&crate::ini::text(&psm)).texture?;
-        if let Some(&i) = self.by_name.get(&name) {
-            self.by_name.insert(asked.to_string(), i);
-            return Some(i);
+        let Some(psm) = read(&format!("{material}.psm")) else {
+            return (self.by_name.get(asked).copied(), Surface::default());
+        };
+        let m = Material::parse(&crate::ini::text(&psm));
+        let surface = Surface::of(&m);
+        if let Some(&i) = self.by_name.get(asked) {
+            return (Some(i), surface);
         }
-        let pst = archives
-            .iter()
-            .find_map(|a| a.read_suffix(&format!("{name}.pst")).ok())?;
-        let texture = Texture::parse(&pst).ok()?;
-        let i = self.textures.len();
-        self.textures.push(texture);
-        self.by_name.insert(name, i);
-        self.by_name.insert(asked.to_string(), i);
-        Some(i)
+        for file in texture_files(material, &m) {
+            if let Some(&i) = self.by_name.get(&file) {
+                self.by_name.insert(asked.to_string(), i);
+                return (Some(i), surface);
+            }
+            let Some(texture) = read(&file).and_then(|b| decode_texture(&file, &b)) else {
+                continue;
+            };
+            let i = self.textures.len();
+            self.textures.push(texture);
+            self.by_name.insert(file, i);
+            self.by_name.insert(asked.to_string(), i);
+            return (Some(i), surface);
+        }
+        (None, surface)
     }
 
     /// What could not be found, for a report at the end of a draw.
@@ -290,18 +407,16 @@ pub fn draw_model(
             light: [1.0; 3],
             fog: 0.0,
         }; 3];
+        let surface = loaded
+            .surfaces
+            .get(tri.material)
+            .copied()
+            .unwrap_or_default();
         let mut behind = 0;
         for (k, v) in tri.v.iter().enumerate() {
             let world = transform.point(v.pos);
             let normal = transform.dir(v.normal).norm();
-            // Lambert against the sun, plus the scene's ambient fill; the vertex's own colour is a
-            // multiplier the artists painted, with 0x80 meaning "unchanged".
-            let lambert = (-normal.dot(light.sun)).max(0.0);
-            let mut lit = [0.0f32; 3];
-            for c in 0..3 {
-                lit[c] = (light.ambient[c] + light.sun_color[c] * lambert)
-                    * (v.color[c] as f32 / 128.0);
-            }
+            let lit = vertex_light(surface.shading, light, normal, v.color);
             let distance = world.sub(eye).len();
             let fog = ((distance - light.fog_near) / (light.fog_far - light.fog_near).max(1.0))
                 .clamp(0.0, 1.0);
@@ -319,7 +434,18 @@ pub fn draw_model(
         if behind == 3 {
             continue;
         }
-        frame.triangle(shade, texture, light.fog_color);
+        let paint = |u: f32, v: f32| match texture {
+            Some(t) => t.sample(u, v),
+            None => [255, 255, 255, 255],
+        };
+        let look = Look {
+            paint: &paint,
+            cutoff: surface.cutoff,
+            blend: surface.blend,
+            additive: surface.additive,
+            depth_write: surface.depth_write,
+        };
+        frame.triangle_with(shade, &look, light.fog_color);
         drawn += 1;
     }
     drawn
@@ -370,4 +496,117 @@ pub fn draw_scene(
         }
     }
     drawn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1x1 sixteen-colour `.pst` of one colour, alpha in the GS's units.
+    fn one_texel(rgba: [u8; 4]) -> Vec<u8> {
+        let mut d = vec![0u8; 92 + 1];
+        d[0..4].copy_from_slice(&0x0002_0002u32.to_le_bytes());
+        d[4..8].copy_from_slice(&crate::pst::FOUR_BIT.to_le_bytes());
+        d[8..12].copy_from_slice(&rgba);
+        for (at, v) in [(72, 1u32), (76, 1), (80, 1), (84, 1)] {
+            d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        d
+    }
+
+    #[test]
+    fn an_animated_material_that_came_out_untextured_now_resolves() {
+        // `seats_red.psm`: its `TextureMap_1` names no `.pst` at all, only `tex\seats_red.atm`, a
+        // header and two frames. Before V25 the stands' seats were drawn plain white.
+        let psm = b"[ShaderPass_1]\nmicroProgramName = Vu1StripPrelit.vuo\nTextureMap_1 = seats_red\n\
+                    alphaBlendingOnOff = 1\nalphaTestOnOff = 1\nalphaReferenceValue = 80\n\
+                    TextureAnimation = unique\n";
+        let mut atm = vec![];
+        for v in [1u32, 2, 0] {
+            atm.extend_from_slice(&v.to_le_bytes());
+        }
+        atm.extend(one_texel([200, 10, 20, 0x80]));
+        atm.extend(one_texel([0, 0, 255, 0x80]));
+        let read = |file: &str| match file {
+            "seats_red.psm" => Some(psm.to_vec()),
+            "seats_red.atm" => Some(atm.clone()),
+            _ => None,
+        };
+        let mut assets = Assets::default();
+        let (texture, surface) = assets.resolve(&read, "seats_red");
+        let t = &assets.textures[texture.expect("the .atm's first frame")];
+        assert_eq!(&t.rgba[0..4], &[200, 10, 20, 255]);
+        assert_eq!(surface.shading, Shading::Prelit);
+        assert_eq!((surface.cutoff, surface.blend), (160, true));
+        // Asked again, the same texture comes back rather than a second copy.
+        assert_eq!(assets.resolve(&read, "seats_red").0, texture);
+        assert_eq!(assets.textures.len(), 1);
+    }
+
+    fn light() -> Lighting {
+        Lighting {
+            // Straight down, so a normal pointing up takes all of it.
+            sun: v3(0.0, -1.0, 0.0),
+            sun_color: [0.5, 0.5, 0.5],
+            ambient: [0.25, 0.25, 0.25],
+            fog_color: [0, 0, 0],
+            fog_near: 1.0e6,
+            fog_far: 2.0e6,
+        }
+    }
+
+    #[test]
+    fn a_lit_triangle_comes_out_the_colour_worked_by_hand() {
+        // A grey texel of 200, on a face tilted 60 degrees from the sun: lambert is cos 60 = 0.5.
+        // Diffuse: (0.25 + 0.5 * 0.5) * 64/128 = 0.25, and 200 * 0.25 = 50. Prelit ignores the sun
+        // and takes the vertex colour alone: 200 * 64/128 = 100. Constant colour 32: 200 / 4 = 50.
+        let normal = v3(0.0, 0.5, 3.0f32.sqrt() / 2.0);
+        let color = [64, 64, 64, 128];
+        let texel = |_: f32, _: f32| [200u8, 200, 200, 255];
+        for (shading, want) in [
+            (Shading::Diffuse, 50),
+            (Shading::Prelit, 100),
+            (Shading::Constant([32.0, 32.0, 32.0, 128.0]), 50),
+        ] {
+            let lit = vertex_light(shading, &light(), normal, color);
+            let mut frame = Frame::new(4, 4, [0, 0, 0]);
+            // One triangle over the whole frame, in clip space already.
+            let at = |x: f32, y: f32| Shade {
+                clip: [x, y, 0.5, 1.0],
+                uv: [0.0, 0.0],
+                light: lit,
+                fog: 0.0,
+            };
+            frame.triangle_with(
+                [at(-3.0, -3.0), at(9.0, -3.0), at(-3.0, 9.0)],
+                &Look::cut_out(&texel),
+                [0, 0, 0],
+            );
+            let px = &frame.color[(2 * 4 + 2) * 3..(2 * 4 + 2) * 3 + 3];
+            assert_eq!(px, &[want; 3], "{shading:?}");
+        }
+    }
+
+    #[test]
+    fn a_blended_texel_mixes_over_the_frame_by_its_alpha() {
+        // Half alpha (the GS's 64, decoded 128): 200 over 100 is 100 + (200 - 100) * 128/255 = 150.
+        let texel = |_: f32, _: f32| [200u8, 200, 200, 128];
+        let mut frame = Frame::new(2, 2, [100, 100, 100]);
+        let at = |x: f32, y: f32| Shade {
+            clip: [x, y, 0.5, 1.0],
+            uv: [0.0, 0.0],
+            light: [1.0; 3],
+            fog: 0.0,
+        };
+        let look = Look {
+            paint: &texel,
+            cutoff: 1,
+            blend: true,
+            additive: false,
+            depth_write: false,
+        };
+        frame.triangle_with([at(-3.0, -3.0), at(9.0, -3.0), at(-3.0, 9.0)], &look, [0, 0, 0]);
+        assert_eq!(&frame.color[0..3], &[150, 150, 150]);
+        assert_eq!(frame.depth[0], 0.0);
+    }
 }

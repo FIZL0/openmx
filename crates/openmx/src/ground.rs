@@ -18,7 +18,8 @@
 //! and places a camera with them, and nothing bit-exact depends on what happens after `.0`.
 
 use game_render::mat::{V3, v3};
-use game_render::raster::{Frame, Shade};
+use game_render::raster::{Frame, Look, Shade};
+use game_render::splat::Splat;
 use game_render::world::{Camera, Lighting};
 use game_sim::track::{Terrain, TerrainLayout};
 
@@ -26,7 +27,7 @@ use game_sim::track::{Terrain, TerrainLayout};
 /// shared seventeenth sample belongs to the next leaf along.
 const LEAF_SAMPLES: u32 = 16;
 
-/// The colour the ground is painted, in the absence of its texture.
+/// The colour the ground is painted where the track has no paint of its own ([`Splat`]).
 ///
 /// The `.trn` carries a 1 MiB image and a 256-colour palette for it, but which of its tiles a cell
 /// takes and how the cell's corners index into one is not decoded (V1 says so too), so the ground is
@@ -42,6 +43,8 @@ pub struct Ground<'a> {
     /// How many samples the field holds across and along.
     pub samples_x: u32,
     pub samples_z: u32,
+    /// The track's own ground paint and baked light (V25), where it has them.
+    pub paint: Option<Splat>,
 }
 
 impl<'a> Ground<'a> {
@@ -57,7 +60,14 @@ impl<'a> Ground<'a> {
             samples_x: layout.width.max(1) * per_root,
             samples_z: layout.breadth.max(1) * per_root,
             terrain,
+            paint: None,
         }
+    }
+
+    /// Paint the ground with the track's own layers instead of one dirt colour.
+    pub fn painted(mut self, paint: Option<Splat>) -> Ground<'a> {
+        self.paint = paint;
+        self
     }
 
     /// How big the field is in world units.
@@ -108,6 +118,12 @@ impl<'a> Ground<'a> {
                 // The corners in the order the query hands them over, as a quad wound the way the
                 // rasteriser's two triangles want: sample, +x, both, +z.
                 let corner = [(0, 0, 0), (1, 1, 0), (3, 1, 1), (2, 0, 1)];
+                // Under the baked light map the light is in the paint, per pixel; elsewhere it is the
+                // sun on the stored normals, per corner.
+                let baked = self
+                    .paint
+                    .as_ref()
+                    .is_some_and(|p| p.light(middle.x, middle.z).is_some());
                 let shade = corner.map(|(i, dx, dz): (usize, u32, u32)| {
                     let point = v3(
                         x0 + dx as f32 * self.spacing,
@@ -119,27 +135,41 @@ impl<'a> Ground<'a> {
                     let lambert = (-normal.dot(light.sun)).max(0.0);
                     let mut lit = [0.0f32; 3];
                     for k in 0..3 {
-                        // There is no ground texture, so the dirt's colour goes in where a texel
-                        // would have been: the rasteriser multiplies white by this.
-                        lit[k] =
-                            (light.ambient[k] + light.sun_color[k] * lambert) * DIRT[k] / 255.0;
+                        // Without paint the dirt's colour goes in where a texel would have been: the
+                        // rasteriser multiplies white by this.
+                        let sunlit = light.ambient[k] + light.sun_color[k] * lambert;
+                        lit[k] = match (&self.paint, baked) {
+                            (Some(_), true) => 1.0,
+                            (Some(_), false) => sunlit,
+                            (None, _) => sunlit * DIRT[k] / 255.0,
+                        };
                     }
                     let fog = ((point.sub(camera.eye).len() - light.fog_near)
                         / (light.fog_far - light.fog_near).max(1.0))
                     .clamp(0.0, 1.0);
                     Shade {
                         clip: view_projection.clip(point),
-                        uv: [0.0, 0.0],
+                        // The paint is a function of where on the ground a pixel is, so that is
+                        // what is interpolated.
+                        uv: [point.x, point.z],
                         light: lit,
                         fog,
                     }
                 });
                 for tri in [[0, 1, 2], [0, 2, 3]] {
-                    frame.triangle(
-                        [shade[tri[0]], shade[tri[1]], shade[tri[2]]],
-                        None,
-                        light.fog_color,
-                    );
+                    let v = [shade[tri[0]], shade[tri[1]], shade[tri[2]]];
+                    match &self.paint {
+                        Some(splat) => {
+                            let paint = |x: f32, z: f32| {
+                                let c = splat.paint(x, z);
+                                let l = if baked { splat.light(x, z).unwrap_or(1.0) } else { 1.0 };
+                                let lit = c.map(|c| (c as f32 * l).min(255.0) as u8);
+                                [lit[0], lit[1], lit[2], 255]
+                            };
+                            frame.triangle_with(v, &Look::cut_out(&paint), light.fog_color);
+                        }
+                        None => frame.triangle(v, None, light.fog_color),
+                    }
                     drawn += 1;
                 }
             }
