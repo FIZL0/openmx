@@ -2961,4 +2961,27 @@ body_add_velocity boot 0x001f7ec0 (body, vec4*) body+0x70 and body+0xc0 += v.xyz
 body_force_at boot 0x001f7a70 (body, force*, point*, mask*) moment = q-rotated (point - pos) x force,
 #                              masked, through vt +0x5c, then the force through vt +0x38; vt +0x68
 collision_resolve boot 0x00270dc0 (collision, 1) the collision object's contact resolution (vtable
-#                              0x00454a00 +0x80): not ported, see S42
+#                              0x00454a00 +0x80): ported in S42 as contact::resolve
+# S42 — the resolution, per contact in the list: the relative velocity, then (normal speed under -10)
+# the impulse when its second argument is set and the contact is of kind 0, or (otherwise) the spring;
+# then the friction always, then the damping when +0x50 is set and the record is on a body (+0xf4).
+collision_relative_velocity boot 0x00270f60 (record, entry) -> +0xa0 the centre into the world, the
+#                              entry's arms (+0x50, +0x60), +0x1e0 the relative velocity, +0x1d8 along
+#                              the normal; the other side a body (+0xf4), a chassis (+0xf0, transform
+#                              +0xf8) or the entry's mover (+0x78: vt +0xbc spin, +0xb8 velocity,
+#                              transform +0x254, origin +0x190)
+collision_spring boot 0x00271590 (record, entry) the damped spring at the anchor, the actor's tuning
+#                              (+0x13c) or the scenery's (+0x124), depth capped at +0x118
+collision_impulse boot 0x002719b0 (record, entry) the impulse along the normal, restitution +0x12c or
+#                              +0x144, angular terms when +0x148/+0x14c
+collision_friction boot 0x002722d0 (record, entry) weight 32.2 x mass x min(0.1 |slide|, 1) x mu
+#                              against the slide; mu +0x190/+0x194 or the surface's at +0x198
+collision_damp boot 0x002724c0 (record, entry) lowers body damping (vt +0x1c) and angular damping
+#                              (vt +0x54) towards +0x58/+0x60 along the normal and its moment axis
+collision_apply boot 0x00272880 (record, force, point, mask) the masked moment (vt +0x5c), then the
+#                              force (vt +0x64)
+body_add_rates boot 0x001f7bc0 (body, vec4*) body+0x1b0 and +0x1e0 += v.xyz; vt +0x70
+body_set_damping boot 0x0015aba0 (body, vec4*) body+0x20 = v, the whole quad; vt +0x1c
+body_set_ang_damping boot 0x0015ab80 (body, vec4*) body+0x130 = v, the whole quad; vt +0x54
+# transform_unrotate (0x001b30e0) transposes in the integer registers; its third column is a 64-bit
+# move over the third row, which keeps that row's z and w, so the transpose is whole.

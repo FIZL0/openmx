@@ -416,6 +416,11 @@ pub mod chassis;
 /// sweep allows itself. The question every wheel, bale and rider asks once a substep.
 pub mod collide;
 
+/// A dynamics body's collision object resolving its contacts every substep: the relative velocity at
+/// each contact, the damped spring or the impulse along the normal, the friction across it, and the
+/// damping a contact lowers. What makes the biplane stop at what it hits.
+pub mod contact;
+
 /// The worked example from `docs/EXAMPLE.md`: three functions of the synthetic program that `./kit demo`
 /// generates, ported, with `tests/demo.rs` proving them bit-exact against the original's instructions.
 /// Delete it once your own port has something real in it.
