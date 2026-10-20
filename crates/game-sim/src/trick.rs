@@ -228,13 +228,13 @@ fn truncate(value: &str) -> String {
 }
 
 fn single(value: &str) -> Result<F, String> {
-    // The file writes its clocks as short decimals; this is the host's conversion of that text, not
-    // the original's own `atof`, which was not disassembled.
-    value
-        .trim()
-        .parse::<f32>()
-        .map(|x| F(fpu::operand(x.to_bits())))
-        .map_err(|e| format!("{value:?} is not a number: {e}"))
+    // The loader reads its clocks through the INI reader's float-with-default getter, which is the
+    // C library's `strtod` and then the EE's double-to-float routine — the same two steps as a `.phy`
+    // value, and the second one truncates. A round-to-nearest parse puts `1.33` one bit above the
+    // original's, which the human's recording shows as a trick that ends one bit late (S30). Text
+    // that is not a number stays an error here, where the original would read a zero.
+    value.trim().parse::<f32>().map_err(|e| format!("{value:?} is not a number: {e}"))?;
+    Ok(crate::phy::number(value))
 }
 
 /// The 24 stunts one rider can do, and the two of them the simulation treats specially.
@@ -594,10 +594,13 @@ impl Gesture {
     ///
     /// `wrecked` is the rider's own "I am not driving" state — while it is set the original zeroes the
     /// stick, the group and the armed flag, so a trick cannot be queued up during a crash and fire on
-    /// the way out of it.
+    /// the way out of it. It leaves the direction, the look and which axes the d-pad drove as the last
+    /// driven frame had them: a crash with the stick held left still reads "left" until the rider is
+    /// back on (recording2, S30).
     pub fn read(&mut self, table: &AngleTable, deflection: (F, F), buttons: Buttons, wrecked: bool) {
         if wrecked {
-            *self = Gesture { armed: false, ..Gesture::default() };
+            let stick = Stick { digital: self.stick.digital, ..Stick::default() };
+            *self = Gesture { armed: false, dir: self.dir, look: self.look, stick, ..Gesture::default() };
             return;
         }
         self.stick = stick(deflection.0, deflection.1, buttons.dpad);
