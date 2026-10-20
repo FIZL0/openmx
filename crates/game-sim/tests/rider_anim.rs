@@ -23,12 +23,12 @@
 //!    `settled`, so a wrecked body flails while it is thrown about, settles the tick its roll runs
 //!    past `RiderRollTime`, holds one of its five limbs and keeps that one, and has the settle
 //!    cleared again when the machine puts the rider back.
-//! 6. **the wreck arm of the mode machine** — six thousand generated frames of the original's *other*
+//! 6. **the wreck arm of the mode machine** — ten thousand generated frames of the original's *other*
 //!    vtable slot (V19), its ten callees hooked away so that only the mode chain and the wreck's own
 //!    clocks, roll and settle test run. Compared per frame: the mode and the previous mode, the settle
 //!    and flung flags, the contact flag, all three clocks, and which of the two bone damping sets the
-//!    frame asked for. The ragdoll's hook is not a no-op — it moves the body by the rise the case
-//!    asks for, which is how the condition that reads a rise across the step is reached from a test.
+//!    frame asked for. The ground query's hook is not a no-op — it answers with the ground height
+//!    the case asks for, which is how the settle test's clearance is reached from a test.
 //!
 //! The middle four need no disc: they are the task's behavioural tests and they run everywhere.
 //! What is not proved here, and why, is in the journal entry's last section.
@@ -1132,11 +1132,11 @@ struct Rest {
 
 /// **V19.** The wreck arm of the body's mode machine, frame by frame against the original.
 ///
-/// The original's own function is run with its ten callees hooked away — the ragdoll's step, the
+/// The original's own function is run with its ten callees hooked away — the ground query, the
 /// bone followers, the damping setter — so what is left running is the mode chain and the wreck's own
-/// clocks, roll and settle test, which is the whole of what this task ported. The ragdoll's hook is
-/// *not* a no-op: it moves the main bone by the rise the case asks for, which is how the condition
-/// that reads a body's rise across the step is reached from a test.
+/// clocks, roll and settle test, which is the whole of what this task ported. The ground query's hook
+/// is *not* a no-op: it answers with the ground height the case asks for, which is what the settle
+/// test measures the main bone's clearance from (S52; V19 read it as a rise across a ragdoll step).
 ///
 /// Compared per frame: the mode and the previous mode, the settle flag, the flung flag, the contact
 /// flag, all three clocks, and which of the two damping sets the frame asked for — the last one off a
@@ -1148,7 +1148,7 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         "rider_body_mode",
         "rider_body_wreck_enter",
         "rider_body_damping",
-        "rider_ragdoll_step",
+        "ground_query",
         "rider_bone_follow",
         "rider_bone_post",
         "rider_bone_detach",
@@ -1159,24 +1159,25 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
     ]) else {
         return;
     };
-    let (mode_at, damping_at, ragdoll_at) = (at[0], at[2], at[3]);
+    let (mode_at, damping_at, ground_at) = (at[0], at[2], at[3]);
     // The main bone's own damping slot is a *virtual* call, so the test gives the bone a vtable of its
     // own and points that slot at another hooked address — one the wreck arm cannot otherwise reach —
     // which is how the record it is handed becomes visible here.
     let sink_at = at[6];
 
-    // The rise the ragdoll's step is to produce, and what the damping setter was handed. Shared with
+    // The ground height the query is to answer, and what the damping setter was handed. Shared with
     // the hooks, which is the only way a hook can carry anything in or out.
-    let rise = Rc::new(Cell::new(0.0f32));
+    let ground = Rc::new(Cell::new(0.0f32));
     let stiff = Rc::new(Cell::new(None));
     let record = Rc::new(Cell::new(None));
     {
-        let rise = Rc::clone(&rise);
+        let ground = Rc::clone(&ground);
         ee.hooks.insert(
-            ragdoll_at,
+            ground_at,
             Box::new(move |ee: &mut ps2_oracle::Ee| {
-                let was = ee.f32_at(MAIN + M_HEIGHT);
-                ee.set_f32(MAIN + M_HEIGHT, was + rise.get());
+                // The point is moved onto the ground: only its height is read back.
+                let point = ee.r(5) as u32;
+                ee.set_f32(point + 4, ground.get());
             }),
         );
         let stiff = Rc::clone(&stiff);
@@ -1199,7 +1200,7 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
 
     let mut pick = Pick(0x9e37_79b9_7f4a_7c15);
     let (mut settles, mut flings, mut rolls, mut held) = (0, 0, 0, 0);
-    for k in 0..6_000u32 {
+    for k in 0..10_000u32 {
         // The frame's own numbers. Each one is pinned often enough that every branch of the test is
         // reached, and generated otherwise.
         let dt = match pick.upto(4) {
@@ -1227,14 +1228,8 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         let flung0 = pick.upto(2) == 1;
         let settled0 = pick.upto(4) == 0;
         let touching = pick.upto(3) != 0;
-        // The step's own rise, and the limit it is tested against — which is sometimes negative, so
-        // that the arm which decides a body has been flung off the ground again is reachable here.
-        let rise_k = match pick.upto(4) {
-            0 => 0.0,
-            1 => 4.0,
-            2 => -1.0,
-            _ => pick.float(6.0),
-        };
+        // The limit the clearance is tested against — which is sometimes negative, so that the arm
+        // which decides a body has been flung off the ground again is reachable here.
         let flail_height = match pick.upto(4) {
             0 => 3.0,
             1 => -1.0,
@@ -1252,6 +1247,14 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
             _ => pick.float(20.0).abs(),
         };
         let height0 = pick.float(50.0);
+        // The ground under the main bone: level with it, exactly the flail height below it, or
+        // anywhere within six feet either side.
+        let ground_k = match pick.upto(4) {
+            0 => height0,
+            1 => height0 - flail_height,
+            2 => height0 + 1.0,
+            _ => height0 - pick.float(6.0),
+        };
         let vel = [pick.float(30.0), pick.float(30.0), pick.float(30.0)];
 
         // The body, its request and the five objects the wreck arm reaches through.
@@ -1304,7 +1307,7 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         ee.set_f32(BODY + B_ROLL_TIME, roll_time);
         ee.set_f32(BODY + B_ROLL_SPEED, roll_speed);
 
-        rise.set(rise_k);
+        ground.set(ground_k);
         stiff.set(None);
         record.set(None);
         ee.call(mode_at, &[u64::from(BODY)], &[dt], BUDGET);
@@ -1320,8 +1323,8 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
             stiff: stiff.get(),
         };
 
-        // The same frame through the port. Its machine is handed the same state, and the rise is handed
-        // to it the way its own caller hands it over: last frame's height, and this frame's.
+        // The same frame through the port. Its machine is handed the same state, and the clearance the
+        // way its own caller works it out: the main bone's height less the ground's.
         let mut body = Body::default();
         body.settled = settled0;
         body.machine.prev = game_sim::rider_anim::Mode::Wrecked;
@@ -1330,7 +1333,6 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         body.machine.loose = F(loose0);
         body.machine.flung = flung0;
         body.machine.touching = ee.u32_at(BODY + B_TOUCHING) != 0;
-        body.machine.height = F(height0);
         body.machine.stiff = false;
         let mut wrecks = game_sim::phy::Wrecks::default();
         wrecks.rider_flail_height = F(flail_height);
@@ -1340,7 +1342,7 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
             throw: game_sim::phy::Throw::default(),
             touching,
             vel: Vf::new(vel[0], vel[1], vel[2], 0.0),
-            height: F(height0 + rise_k),
+            clearance: F(height0) - F(ground_k),
         };
         let (mut r, mut a) = resting();
         r.held = false;
@@ -1373,14 +1375,8 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         assert_eq!(
             ours, theirs,
             "case {k}: dt {dt}, roll {roll0}, thrown {thrown0}, loose {loose0}, flung {flung0}, \
-             settled {settled0}, touching {touching}, rise {rise_k}, flail {flail_height}, \
+             settled {settled0}, touching {touching}, ground {ground_k}, flail {flail_height}, \
              time {roll_time}, speed {roll_speed}, vel {vel:?}"
-        );
-        // The port's own latch of the height, which the original takes across its ragdoll step.
-        assert_eq!(
-            body.machine.height.0,
-            ee.f32_at(MAIN + M_HEIGHT),
-            "case {k}: the height the next frame measures its rise against"
         );
         if theirs.settled && !settled0 {
             // The one thing the settle does besides raising the flag: the main bone is handed the
@@ -1404,7 +1400,8 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
         }
     }
     println!(
-        "the wreck arm: 6000 frames, {settles} settled, {flings} flung, {rolls} rolling, \
+        "the wreck arm: 10000 frames, {settles} settled, {flings} flung, {rolls} rolling, \
          {held} already at rest"
     );
+    assert!(settles > 1000 && flings > 100, "too few settles ({settles}) or flings ({flings}) to prove the test");
 }
