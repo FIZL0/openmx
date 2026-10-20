@@ -11,7 +11,7 @@
 mod menu;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
-use menu::{Act, Controls, Gas, Menu, Reader, Screen, Settings};
+use menu::{Act, Controls, Gas, Layout, Menu, Reader, Screen, Settings};
 use std::collections::{HashSet, VecDeque};
 
 /// The buttons a hand can press on a menu.
@@ -182,6 +182,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         throttle: Gas::R2,
         pad: Some("/dev/input/js1".into()),
         pressure: "ds2@8".into(),
+        // One seat on the original's controls among the new (P40), which writes one word a seat.
+        layouts: [Layout::New, Layout::Original, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New],
     };
     menu::save(&dir, &settings, &controls).unwrap();
     assert_eq!(menu::load(&dir), (settings, controls));

@@ -85,6 +85,13 @@
 //! or closing the window quits. The same controls are on the keyboard for a machine with no pad:
 //! X/Space, Z, the arrow keys, C/V/D for the three trick buttons, A+D for the reset, Return.
 //!
+//! **Those are the original's controls**, and since P40 they are a setting: the default is a new
+//! layout with R2 the gas and L2 the brake, each on its trigger's travel, Select the camera, and Cross
+//! and Square kept free for later. Each seat picks one (`--controls new|original`, or one per seat,
+//! and the front end's Controls screen). The new one is a remap of the pad's report in [`pad`]
+//! ([`pad::Scheme::ride`]) before the engine's pad port sees it, so the simulation still reads the
+//! original's controls, a tape holds what it read, and under the original's every replay is as it was.
+//!
 //! **The throttle is a pressure and not a switch**, because the game reads Cross from its pressure
 //! byte: part throttle out of a corner is a fraction of that byte and the port has always read it as
 //! one. What has to be arranged is a host that can *ask* for a fraction (P9, [`pad`]) — almost no pad
@@ -185,7 +192,10 @@ use ground::Ground;
 use hud::Hud;
 use menu::{Act, Art, Menu, Reader};
 use moment::{Moment, Shot};
-use pad::{Bindings, Pads, SEATS, SeatInput, Seats, Throttle, Wiring};
+use pad::{Bindings, Pads, SEATS, Scheme, SeatInput, Seats, Throttle, Wiring};
+
+// `controls.txt` holds a layout for every seat the pad layer has.
+const _: () = assert!(menu::SEATS == SEATS);
 use split::{Layout, Split};
 use vehicle::{Garage, Kind, Plane, Spawn};
 use window::{Window, key};
@@ -490,8 +500,12 @@ struct Args {
     /// `--pads k,0,1,-,…`: what drives each seat (P35) — the keyboard, a pad by the order it was
     /// found, or nobody — or `None` for pads in join order with the keyboard beside 1P's.
     pads: Option<[Option<pad::Seat>; SEATS]>,
-    /// `--controls FILE`: the rebindable buttons, `context/controls.txt` when not said.
+    /// `--bindings FILE` (or `--controls FILE`): the rebindable buttons, `context/controls.txt` when
+    /// not said.
     controls: Option<std::path::PathBuf>,
+    /// Whether `--controls new|original` was given, so the front end's `controls.txt` does not
+    /// override it.
+    scheme_flag: bool,
     /// `--vehicle bike|biplane`: which machine the session starts on (P19). The bike by default,
     /// and a default session is the shell exactly as it was before there was a choice.
     vehicle: Kind,
@@ -551,6 +565,7 @@ struct Front {
     /// The wiring the command line asked for, which the file's fills in around.
     args_wiring: Wiring,
     wiring_flags: (bool, bool),
+    scheme_flag: bool,
 }
 
 impl Front {
@@ -568,6 +583,14 @@ impl Front {
             match Wiring::parse_pressures(&self.menu.controls.pressure) {
                 Ok(map) => w.pressure = map,
                 Err(e) => println!("{}: pressure: {e}", menu::CONTROLS_FILE),
+            }
+        }
+        if !self.scheme_flag {
+            for (scheme, layout) in w.schemes.iter_mut().zip(self.menu.controls.layouts) {
+                *scheme = match layout {
+                    menu::Layout::New => Scheme::New,
+                    menu::Layout::Original => Scheme::Original,
+                };
             }
         }
         w
@@ -630,6 +653,7 @@ fn front_end(args: Args) -> Result<(), String> {
         dir,
         args_wiring: args.wiring.clone(),
         wiring_flags: args.wiring_flags,
+        scheme_flag: args.scheme_flag,
     };
     let window = Window::open(&args.display, args.size, args.scale, "openmx")?;
     let seats = open_seats(&args, pad.as_deref(), front.wiring());
@@ -1520,6 +1544,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(pads) = args.pads {
         println!("seats: {}", pad::Seat::flag(&pads));
     }
+    let schemes: [Scheme; SEATS] =
+        std::array::from_fn(|i| pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(i)));
+    println!("controls: {}", Scheme::list_text(&schemes));
     if let Some(seats) = &*pad_seats
         && seats.slots.keys() == Some(0)
         && seats.name(0).is_none()
@@ -1768,13 +1795,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     for line in seats.said() {
                         println!("{line}");
                     }
+                    // Each through its seat's layout (P40): what the port reads is the original's.
                     for (i, (seat, idle)) in world.seats.iter_mut().zip(&mut idle_pads).enumerate() {
                         let report = match now.get(i) {
                             Some(SeatInput::Empty) if i > 0 => idle.report(&pad::no_keys),
                             Some(input) => input.report(),
                             None => idle.report(&pad::no_keys),
                         };
-                        seat.reports = [report, Report::missing()];
+                        seat.reports = [seats.scheme(i).ride(report), Report::missing()];
                     }
                     engine.frozen = now.iter().take(args.players).any(|n| *n == SeatInput::Waiting);
                 }
@@ -1988,7 +2016,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // L1 only: R1 is the third of the trick decoder's buttons now. The walk is the
                 // original's next-camera routine: on to the next preset the file lets the player cycle to.
                 // An L1 pressed with R1 already down is the second half of the reset chord, not a camera.
-                if pad.pressed(Control::L1) && !pad.held(Control::R1) {
+                // Under the new layout (P40) it is Select, which the simulation passes through unread
+                // and which is in no chord; the layout is the seat's, or the command line's for a
+                // session with no seats.
+                let scheme = pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(i));
+                if scheme.changes_camera(pad) {
                     follow.cam.next_preset();
                     println!("{who}camera: {}", follow.cam.preset().name);
                     rig.hud.note_camera(&follow.cam.preset().name);
@@ -2500,6 +2532,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         wiring: Wiring::default(),
         pads: None,
         controls: None,
+        scheme_flag: false,
         vehicle: Kind::Bike,
         players: 1,
         split: Split::default(),
@@ -2547,7 +2580,21 @@ fn parse_args() -> Result<Option<Args>, String> {
                         .map_err(|why| format!("--pads: {why}"))?,
                 );
             }
-            "--controls" => args.controls = Some(next("a controls file")?.into()),
+            // A layout (P40), or as before P40 the bindings file, which `--bindings` also names.
+            "--controls" => {
+                let v = next("new, original, one per seat (new,original), or a bindings file")?;
+                match Scheme::parse_list(&v) {
+                    Ok(schemes) => {
+                        args.scheme_flag = true;
+                        args.wiring.schemes = schemes;
+                    }
+                    Err(_) if v.split(',').all(|w| Scheme::from_word(w).is_some()) => {
+                        return Err(format!("--controls: {v}: at most {SEATS} seats"));
+                    }
+                    Err(_) => args.controls = Some(v.into()),
+                }
+            }
+            "--bindings" => args.controls = Some(next("a bindings file")?.into()),
             "--shot" => args.shot = Some(next("a path for the first frame")?.into()),
             "--shot-frame" => {
                 args.shot_frame = next("which frame to write")?
@@ -2690,14 +2737,19 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--players 1..8] [--split h|v] [--headless] [--frames N]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
-                            [--pads k,0,1,-] [--controls FILE]\n\
+                            [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
+                            [--bindings FILE]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
                      rides the freeride area from the disc named in kit.toml straight away.\n\
                      The front end keeps settings.txt and controls.txt beside the disc.\n\
-                     Cross throttle, Square brake, R2 front brake, L2 clutch, left stick steers\n\
+                     R2 throttle, L2 brake, each on its trigger's travel, Select changes camera;\n\
+                     Cross and Square are kept free. --controls original (or the front end's\n\
+                     Controls screen, per seat) rides the original's instead: Cross throttle,\n\
+                     Square brake, R2 front brake, L2 clutch, L1 changes camera. Either way the\n\
+                     left stick steers\n\
                      and leans, the d-pad preloads, L3 balances, R3 reverses, Start freezes,\n\
-                     L1 changes camera, Escape quits. --camera starts on a camera preset by its\n\
+                     Escape quits. --camera starts on a camera preset by its\n\
                      name in the track's cpresets.ini (\"Race Cam 1\" unless asked).\n\
                      A trick is a gesture: hold Circle, Triangle and/or R1 and push the d-pad.\n\
                      L1 and R1 together put the bike back (the original's own chord).\n\
@@ -2711,7 +2763,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      beside 1P's, or --pads says each seat's (k the keyboard, a number the pad\n\
                      in the order found, - nobody). A pad pulled out pauses its player until it\n\
                      is plugged back in; Start on the keyboard rides on without it. The buttons\n\
-                     are rebindable in --controls (context/controls.txt, written on first run).\n\
+                     are rebindable in --bindings (context/controls.txt, written on first run).\n\
                      --vehicle biplane starts in the track's biplane, where its machine.txt\n\
                      parks one, and M swaps between the bike and the plane the way the\n\
                      original's \"Switch To Machine\" does. The plane flies over the terrain\n\
