@@ -900,7 +900,19 @@ ride_reset_request          boot 0x0027b9f0 (bike, kind, page) stores the kind a
 player_hand_reset           boot 0x0027bef0 (bike, pad) slot +0xe8: the pad's reset chord. Gated on no
 #                                           AI route, +0x14d0 clear, the mode, and the reason not being
 #                                           13, then two pad bindings (0x4c, 0x4d) and the owner's pad
-#                                           index; takes +0x14d0 and asks for kind 1 with no page
+#                                           index; takes +0x14d0 and asks for kind 1 with no page.
+#                                           An event handler: fires on the press event of either
+#                                           command while the other is held (input manager slot
+#                                           +0x1c). Shipped table: 0x4c = L1, 0x4d = R1 (P20)
+binding_is_event            boot 0x0011ce10 (command, event kinds, event, ...) does this pad event's
+#                                           control match the command's first or second binding
+binding_first               boot 0x0011d080 (map, command, out, pad) map+0x138 + pad*0x138 + cmd*4
+binding_second              boot 0x0011d0e0 (map, command, out, pad) map+0x3a8 + pad*0x138 + cmd*4.
+#                                           The map is *(app_ptr)+0x104 (the input manager) +0x648;
+#                                           0x4e commands, a control index each (the port's
+#                                           input::Control order), -1 unbound. recording2's state:
+#                                           0x11-0x13 Circle/Triangle/R1 (the trick buttons), 0x4c L1,
+#                                           0x4d R1, no second bindings; command 4 Start (pause)
 jump_record_end             boot 0x0027b6e0 (bike) ends the player's current jump record; called by both
 #                                           the wreck entry and the reset request before anything else
 wreck_page_raise            boot 0x001c84b0 (page handle, which screen, node) pushes the wreck page onto

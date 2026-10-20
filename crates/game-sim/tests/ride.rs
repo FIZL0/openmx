@@ -2639,3 +2639,159 @@ fn the_lean_goes_the_way_the_originals_does() {
 }
 
 
+
+// ---------------------------------------------------------------------------------------------------
+// P20 — the reset chord.
+
+/// The human's second recording, whose second wreck the chord ended (S29). It sits directly in the
+/// acceptance directory because that is where P15 left it; this test reads it by name.
+const CHORD_CAPTURE: [&str; 2] = ["capture/acceptance", "recording2-freeride.csv"];
+
+/// The row of [`CHORD_CAPTURE`] where R1 went down with L1 already held, and the reason-12 wreck the
+/// rider was in read 0 on the same row.
+const CHORD_ROW: usize = 1212;
+
+/// The save state the recording starts from, unpacked by `./kit state ram`, which is where the
+/// original's binding table is read from.
+const CHORD_STATE: &str = "recording2.p2m2_SaveState.eeMemory.bin";
+
+/// What `from_pad` says about the chord on each frame of a run of pads.
+fn chord_over(frames: &[&[game_sim::input::Control]]) -> Vec<bool> {
+    use game_sim::input::{Manager, Report, mask_of};
+    let mut input = Manager::connected();
+    frames
+        .iter()
+        .map(|held| {
+            input.tick(F(0.03333), &[Report::from_buttons(mask_of(held)), Report::missing()]);
+            Controls::from_pad(input.pad(0)).respawn
+        })
+        .collect()
+}
+
+/// **P20.** The reset chord is the original's: L1 and R1, the second press of the two, riding or down.
+///
+/// Four things, from the cheapest up:
+///
+/// 1. **The binding table**, out of the recording's save state when it is unpacked in this checkout.
+///    The hand reset asks the input manager's binding map about two commands; the map holds, for each
+///    pad, one control index per command plus a second binding, and on the shipped table the two
+///    reset commands are L1 and R1 with no second binding, and the three trick commands are Circle,
+///    Triangle and R1 in the order [`Controls::trick`] reads them. So R1 is shared in the original
+///    too, which is why the port shares it.
+/// 2. **The edge.** It fires on the press of either while the other is held, once; held on from the
+///    frame before is not a chord, and neither button alone is one — R1 alone is a trick button.
+///    The two stick clicks the port used before are not a chord any more.
+/// 3. **The human's own presses.** Every row of the recording's sixteen control columns through the
+///    ported input layer and [`Controls::from_pad`]: the chord fires on exactly one row, the one where
+///    the original put the rider back, and not on the two stretches where R1 alone was held riding.
+/// 4. **Riding as well as down.** The original's gate has no test on a wreck, so a rider on its
+///    wheels, rolling, is put back by it on the tick of the second press.
+#[test]
+fn the_reset_chord_is_the_originals() {
+    use game_sim::input::Control::{self, *};
+
+    // 1 — the table.
+    let at = private_dir("states").join(CHORD_STATE);
+    match std::fs::read(&at) {
+        Err(_) => println!("no {} — `./kit state ram` of the recording's save state writes it", at.display()),
+        Ok(ram) => {
+            let word = |a: u32| {
+                let a = (a & 0x01ff_ffff) as usize;
+                u32::from_le_bytes(ram[a..a + 4].try_into().unwrap())
+            };
+            // `app_ptr` in kit.toml, then the input manager and its binding map.
+            let map = word(word(word(0x0041_f770) + 0x104) + 0x648);
+            let first = |pad: u32, cmd: u32| word(map + 0x138 + pad * 0x138 + cmd * 4) as i32;
+            let second = |pad: u32, cmd: u32| word(map + 0x3a8 + pad * 0x138 + cmd * 4) as i32;
+            let index = |c: Control| c.index() as i32;
+            for pad in 0..2 {
+                assert_eq!(first(pad, 0x4c), index(L1), "pad {pad}: the reset's first command");
+                assert_eq!(first(pad, 0x4d), index(R1), "pad {pad}: the reset's second command");
+                assert_eq!(second(pad, 0x4c), -1, "pad {pad}: no second binding for the first");
+                assert_eq!(second(pad, 0x4d), -1, "pad {pad}: no second binding for the second");
+                let tricks: Vec<i32> = (0x11..=0x13).map(|cmd| first(pad, cmd)).collect();
+                assert_eq!(
+                    tricks,
+                    [index(Circle), index(Triangle), index(R1)],
+                    "pad {pad}: the three trick commands, in the decoder's order"
+                );
+            }
+        }
+    }
+
+    // 2 — the edge.
+    assert_eq!(chord_over(&[&[L1], &[L1, R1], &[L1, R1]]), [false, true, false], "L1 then R1");
+    assert_eq!(chord_over(&[&[R1], &[R1, L1], &[R1, L1]]), [false, true, false], "R1 then L1");
+    assert_eq!(chord_over(&[&[L1, R1], &[L1, R1]]), [true, false], "both on one frame");
+    assert_eq!(chord_over(&[&[L1, R1], &[L1], &[L1, R1]]), [true, false, true], "R1 again");
+    assert_eq!(chord_over(&[&[R1], &[R1], &[]]), [false; 3], "R1 alone is a trick button");
+    assert_eq!(chord_over(&[&[L1], &[L1], &[]]), [false; 3], "L1 alone");
+    assert_eq!(chord_over(&[&[L3], &[L3, R3]]), [false; 2], "the stick clicks are not the chord");
+
+    // 3 — the recording.
+    let path = private_dir(CHORD_CAPTURE[0]).join(CHORD_CAPTURE[1]);
+    match std::fs::read_to_string(&path) {
+        Err(_) => println!("no {} — the recording's own presses were not replayed", path.display()),
+        Ok(text) => {
+            use game_sim::input::{Manager, Report};
+            let cap = game_sim::replay::Capture::parse(&text).expect("the recording parses");
+            let col = |name: &str| {
+                cap.columns
+                    .iter()
+                    .position(|c| c == name)
+                    .unwrap_or_else(|| panic!("no column '{name}' in {}", path.display()))
+            };
+            let reason = |row: usize| cap.rows[row][col("wreck_reason")].parse::<u32>().unwrap();
+            let mut input = Manager::connected();
+            let mut fired = Vec::new();
+            for row in 0..cap.rows.len() {
+                let mut mask = 0;
+                for c in Control::ALL {
+                    if cap.rows[row][col(&format!("ctl{}.held", c.index()))] != "0" {
+                        mask |= c.mask();
+                    }
+                }
+                input.tick(F(0.03333), &[Report::from_buttons(mask), Report::missing()]);
+                if Controls::from_pad(input.pad(0)).respawn {
+                    fired.push(row);
+                }
+            }
+            assert_eq!(fired, [CHORD_ROW], "the rows the port's chord fires on");
+            assert_eq!(reason(CHORD_ROW - 1), 12, "the rider was down on the row before");
+            assert_eq!(reason(CHORD_ROW), 0, "and the original put it back on the chord's row");
+            println!("{}: the chord fires on row {CHORD_ROW} only", path.display());
+        }
+    }
+
+    // 4 — riding, on the bike and the ground [`ride_held`] rides, for the reason its comment gives.
+    let tables = rider::Tables::build();
+    let p = Phy::read_bytes(ridden_bike().as_bytes(), &tables.ride.curve);
+    let geom = Phy::read_bytes(BIKE.as_bytes(), &tables.ride.curve);
+    let at = Vf::new(0.0, 1.0, 0.0, 1.0);
+    let mut r = Rider::new(&p, mounts(&geom), at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let part = phy::Part::read_bytes(WRECK_PART.as_bytes(), "PhysicsPart1");
+    let wrecks = phy::Wrecks::read_bytes(RIDER_WRECKS.as_bytes());
+    r.carries_wreck(part, wrecks, part.inertia(WRECK_BOX));
+    let mut world = Jump::nothing();
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    for k in 0..90 {
+        let f = r.frame(&p, &tables, &gas, DT, &mut world);
+        assert!(f.wreck.is_none() && !f.respawned, "frame {k}: the ride is not a clean one");
+    }
+    let rolled = r.ride.position();
+    let from_spawn = |v: Vf| ((v.x() - at.x()).powi(2) + (v.z() - at.z()).powi(2)).sqrt();
+    assert!(from_spawn(rolled) > 1.0, "the bike has not gone anywhere to be put back from");
+    let press = chord_over(&[&[L1], &[L1, R1]]);
+    for (k, chord) in press.into_iter().enumerate() {
+        let f = r.frame(&p, &tables, &Controls { respawn: chord, ..gas }, DT, &mut world);
+        assert!(f.wreck.is_none(), "the chord does not put the rider down");
+        assert_eq!(f.respawned, chord, "chord frame {k}: put back on the second press only");
+    }
+    let back = r.ride.position();
+    assert!(
+        from_spawn(back) < 0.5,
+        "put back {:.2} ft from the start line, from {:.2} ft down the track",
+        from_spawn(back),
+        from_spawn(rolled)
+    );
+}

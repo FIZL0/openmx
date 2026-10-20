@@ -160,11 +160,15 @@ impl Controls {
                 pad.held(Control::Down),
             ],
             balance: pad.held(Control::L3),
-            // The reset chord. The original's is two buttons taken together and this one is too, but
-            // which two is the shell's choice like everything else here: with the three trick buttons
-            // and the d-pad spoken for, the two stick clicks are what is left that a gesture can
-            // never be mistaken for.
-            respawn: pad.held(Control::L3) && pad.pressed(Control::R3),
+            // The reset chord, and unlike the rest of this binding it is the disc's (P20). The
+            // original's hand reset is an event handler on two commands of its binding table, and the
+            // shipped table binds them to L1 and R1: it fires on the press of either while the other
+            // is held, so whichever goes down second is the tick the rider is put back. R1 is also the
+            // third trick button above, in the original's table as well as here, so a trick held on R1
+            // and an L1 tapped under it is a reset there too. L1 and R1 held from before, with no
+            // press this frame, is not a chord.
+            respawn: (pad.pressed(Control::L1) && pad.held(Control::R1))
+                || (pad.pressed(Control::R1) && pad.held(Control::L1)),
         }
     }
 }

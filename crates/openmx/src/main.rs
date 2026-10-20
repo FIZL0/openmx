@@ -62,13 +62,15 @@
 //! buttons past the stunt's hold time and the rider holds the pose; let go and it runs to its end.
 //! Land with one still running and the rider comes off.
 //!
-//! **L3 and R3 clicked together** put the bike back on the start line, which is how a rider who is
-//! stuck gets going again. A wreck no longer needs it: the bike tumbles, the rider comes off it and
+//! **L1 and R1 together** put the bike back — on the start line while riding, where the wreck came to
+//! rest while down — on the press of whichever goes down second. That chord is the original's own (P20),
+//! read off its binding table, and R1 is the third trick button there as well as here.
+//! It is how a rider who is stuck gets going again. A wreck no longer needs it: the bike tumbles, the rider comes off it and
 //! the ride comes back up on its own, on the wreck's own two files (S26). Start freezes and
 //! unfreezes the ride, L1 cycles the track's own camera presets the way the original's next-camera routine
 //! does (`--camera` picks the one to start on, by name), and Escape
 //! or closing the window quits. The same controls are on the keyboard for a machine with no pad:
-//! X/Space, Z, the arrow keys, C/V/D for the three trick buttons, Q+E for the reset, Return.
+//! X/Space, Z, the arrow keys, C/V/D for the three trick buttons, A+D for the reset, Return.
 //!
 //! **The throttle is a pressure and not a switch**, because the game reads Cross from its pressure
 //! byte: part throttle out of a corner is a fraction of that byte and the port has always read it as
@@ -1024,7 +1026,8 @@ fn run() -> Result<(), String> {
             let pad = world.sim.input.pad(0);
             // L1 only: R1 is the third of the trick decoder's buttons now. The walk is the
             // original's next-camera routine: on to the next preset the file lets the player cycle to.
-            if pad.pressed(Control::L1) {
+            // An L1 pressed with R1 already down is the second half of the reset chord, not a camera.
+            if pad.pressed(Control::L1) && !pad.held(Control::R1) {
                 camera.cam.next_preset();
                 println!("camera: {}", camera.cam.preset().name);
                 hud.note_camera(&camera.cam.preset().name);
@@ -1453,8 +1456,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      L1 changes camera, Escape quits. --camera starts on a camera preset by its\n\
                      name in the track's cpresets.ini (\"Race Cam 1\" unless asked).\n\
                      A trick is a gesture: hold Circle, Triangle and/or R1 and push the d-pad.\n\
-                     L3 and R3 clicked together put the bike back on the start line.\n\
-                     On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, Q+E reset.\n\
+                     L1 and R1 together put the bike back (the original's own chord).\n\
+                     On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, A+D reset.\n\
                      The throttle is a pressure and not a switch (the game reads Cross from its\n\
                      pressure byte): a key ramps it, --throttle r2 rides it on a trigger instead,\n\
                      giving up that trigger's own control, and --pad-pressure says which joystick\n\
