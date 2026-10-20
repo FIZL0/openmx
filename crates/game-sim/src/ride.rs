@@ -1583,6 +1583,33 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
     *near = if record.hits > 0 { record.nearest } else { F::ONE };
 }
 
+/// The contact list [`air::hit_wreck`] reads: the bike's head ray ([`air::HEAD`]) swept against
+/// everything solid at the transform the frame ended on.
+///
+/// **This composition is the port's**, like [`bundle`]'s. The original sweeps eleven body rays out of
+/// the bike's model every substep and resolves what they hit; the port has no model, so it sweeps the
+/// one ray that can wreck a rider who is not on a 50cc bike, once, after the frame, and resolves
+/// nothing — the frame's own probes have already done the pushing. A prop is the world, so what it
+/// hits is [`air::Other::Scenery`].
+pub fn hits(ride: &Ride, world: &mut dyn World) -> Vec<air::Contact> {
+    let m = ride.transform();
+    let from = math::transform_point(&m, air::HEAD.0);
+    let to = math::transform_point(&m, air::HEAD.1);
+    let mut b = Bundle::default();
+    b.probes[0] = Probe::between(from, to);
+    b.count = 1;
+    b.centre = from;
+    b.radius = length(sub_xyz(to, from));
+    let mut record = Record::new();
+    world.solid(&b, &mut record);
+    let reach = F(air::HEAD.1.y());
+    if record.hit[0] {
+        vec![air::Contact { mirrored: false, reach, other: air::Other::Scenery }]
+    } else {
+        Vec::new()
+    }
+}
+
 // --- the state hash ---------------------------------------------------------------------------------
 
 /// **Every word of the ride, in declaration order.**
@@ -1881,6 +1908,7 @@ pub fn hit_of(reason: trick::Wreck) -> phy::Hit {
         2 | 3 => phy::Hit::Side,       // Left, Right
         4 => phy::Hit::Back,           // Back
         5 => phy::Hit::Bottom,         // Flat — landed too hard, and the only one proved
+        6 => phy::Hit::Front,          // Scenery — the rider's head into something, from in front
         8 => phy::Hit::FallOffFront,   // NoseDive
         0xb => phy::Hit::FallOffBack,  // Tail
         7 | 0xc => phy::Hit::Stunt,    // Joust, NoHander — came off doing something

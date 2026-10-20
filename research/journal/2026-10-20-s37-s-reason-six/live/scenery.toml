@@ -1,0 +1,88 @@
+# scenery.toml — S37: the wreck test's contact-list loop, read off the original around recording2's
+# reason-6 wreck (row 1750, frame_counter 4124). The list is the bike's collision record (bike+0x7d0):
+# +0x40 something touched, +0x100 the count, +0x108 the 0x80-byte entries. An entry's +0 is 1 when
+# another record's sweep mirrored it here, +0x10/+0x20 the two ends of the bike's own ray that hit (its
+# model space), +0x74 the other record, 0 for the world. What it showed: reason 6 from frame_counter
+# 4124, wreck_impact untouched, fifty 0 — and the list empty at every tick boundary, the wrecking one
+# included, because the record is cleared again inside the tick. The list itself was read off save
+# states instead (save.sh, ram.py and the test in crates/game-sim/tests/ride.rs).
+
+[watch]
+name        = "s37-scenery"
+description = "the collision record's contact list around a hard hit on scenery"
+every       = 1
+start       = "frame_counter >= 4100 and frame_counter <= 4126 and rider_type == 2"
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"             # +0x748
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "fifty"                    # +0x588: the bike's name holds "Race50" or "Pro50"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x588"
+type = "u32"
+
+[[field]]
+name = "wreck_impact"             # +0x560: the throw a reason 7 writes
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x560"
+type = "f32x4"
+
+[[field]]
+name = "touched"                  # record +0x40
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x40"
+type = "u32"
+
+[[field]]
+name = "ncontacts"                # record +0x100
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "capacity"                 # record +0x104
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x104"
+type = "u32"
+
+[[array]]
+name   = "c"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x108 -> 0x0"
+count  = 8
+stride = 0x80
+
+[[array.field]]
+name = "kind"
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "from"
+off  = 0x10
+type = "f32x4"
+
+[[array.field]]
+name = "to"
+off  = 0x20
+type = "f32x4"
+
+[[array.field]]
+name = "point"
+off  = 0x40
+type = "f32x4"
+
+[[array.field]]
+name = "other"
+off  = 0x74
+type = "u32"
