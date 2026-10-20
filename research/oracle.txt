@@ -2823,3 +2823,32 @@ dynamics_world_step boot 0x001f29a0 (world, dt in f12): preforce listeners (+0x9
 #                                   (integrate) and +0x30, the constraints (+0x80) world+0 times;
 #                                   then the post listeners (+0xb0). World node 0x0060b200, step at
 #                                   +0x78, called from 0x0026f800 after the collision clear/collide
+
+# --- S36: the biplane's crash, read for the port (crates/game-sim/src/biplane.rs) and proved against
+#     the biplane recording's playback (context/capture/s36/biplane-crash.csv, MXBiplane at 0xc44a40) ---
+biplane_wreck_check_edge boot 0x00353180 the map-edge half: terrain extents (+0x3b4)+0x530*256*+0x538 and
+#                                       +0x534*256*+0x53c (query 0x001a6e50, margin 150 a side);
+#                                       target (W/2, pos.y, D/2, 1), dir normalised by 1/sqrt(mula/madda/
+#                                       madd), k = 2*sqrt(14.906832 0x416e8262), speed = min(2073.6
+#                                       0x45019999, W/2)/k, lift = 16.1*k + 240/k (0x4180cccd), vel = dir*speed
+#                                       + lift on y, +0x194 *= 0.5, spin = (0.5, 0.4 0x3ecccccd, 0.7
+#                                       0x3f333333) * three rand_raw units in x, y, z order, then wreck(13).
+#                                       The same call goes on into the contact half; the edge wreck's
+#                                       clock counts on its first tick, the contact wreck's does not
+biplane_vehicle_flag boot 0x0043ed38 the string "VEHICLE": the surface flag (0x2000 in surface +0x84) the
+#                                    speed rule spares; the plane keeps the mask at +0x580
+biplane_measure_order boot 0x00353180 runs before +0x598 airspeed and +0x5e4 up.y are recomputed: the
+#                                     test reads the previous tick's. Captured entries 11664 and 12498
+#                                     (prev airspeed 101.38 and 137.23, both above 73.333)
+biplane_gravity_bits boot 0x003535d0 neg.s / mul.s / mul.s: 32.2 (0x4200cccd) * (-scale * mass); the
+#                                    body's mass (body +0xc) is 0x423a55dc = 1500 * 0.0310559 chopped,
+#                                    not 1500 / 32.2 (div.s gives 0x423a55dd). Flying -1499.9999,
+#                                    wrecked -2249.9998, both bit-equal in the capture
+mxbiplane_respawn_arm boot 0x00355c50 the racer interface's slot (vtable 0x0045b558): (+0xd60)+0x2c == 1
+#                                     resets at once, else +0xe50 = 10.0. Never armed in the freeride
+#                                     capture
+biplane_respawn_captured boot 0x003536e0 the waited-out wreck ends 151 ticks after entry (clock > 5.0 at
+#                                        dt 0.03333); the body is at the spawn (2304, 138.614059, 2281)
+#                                        facing (0,0,-1), vel and spin exactly 0, gravity back, throttle 0,
+#                                        grounded the next tick. The chord's wreck ended 83 ticks in
+#                                        (11747), the recording's L1+R1 held from field 1550

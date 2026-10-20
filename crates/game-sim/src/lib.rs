@@ -381,7 +381,9 @@ pub mod air;
 pub mod archive;
 
 /// The biplane: the pad into its control surfaces through the rate limits, the pitch-rate autopilot,
-/// the engine's thrust and the aerodynamic coefficients into the body-frame force and moment.
+/// the engine's thrust and the aerodynamic coefficients into the body-frame force and moment; and its
+/// crash: the test that decides it has hit something, the wreck it flies on in, and the reset that puts
+/// it back at its spawn.
 pub mod biplane;
 
 /// The camera for normal play: the preset record the disc ships one of per camera, what the camera
