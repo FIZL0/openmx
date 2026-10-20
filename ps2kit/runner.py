@@ -331,6 +331,44 @@ def panes() -> dict[str, tuple[str, int]]:
     return out
 
 
+def adopt(slots: int, branch: str) -> dict[int, tuple]:
+    """{n: ((pid, sid, since), task)} for the sessions a previous run left running in its slot panes.
+
+    A restarted run used to see every slot as free, and start() reset the worktree under a live session: its
+    uncommitted work went, and two agents shared one slot. Their task and session come back from the
+    agent's own command line, which agent_cmd wrote. A slot with two live sessions keeps the one on the
+    branch its worktree holds; the other is logged for a human, never adopted and never killed.
+    """
+    live: dict[int, list[tuple[str, int, str, str]]] = {}
+    for l in tmux('list-panes', '-s', '-F', '#{pane_id}\t#{pane_pid}\t#{@kit}').stdout.splitlines():
+        pane_id, pid, name = (l.split('\t') + ['', '', ''])[:3]
+        if not re.fullmatch(r's\d+', name) or not plat.alive(int(pid)):
+            continue
+        args = sp.run(['ps', '-o', 'args=', '-p', pid], capture_output=True, text=True).stdout
+        t, s = re.search(r'Do task (\S+) and nothing else', args), re.search(r'--session-id (\S+)', args)
+        if t and s:
+            live.setdefault(int(name[1:]), []).append((pane_id, int(pid), t.group(1), s.group(1)))
+    known = {t[0]: t for t in tasks(branch)}
+    out: dict[int, tuple] = {}
+    for n, found in sorted(live.items()):
+        if n > slots:
+            log(f'slot {n}: {found[0][2]} is still running, but this run has {slots} slots; left alone')
+            continue
+        held = git('branch', '--show-current', cwd=SLOTS_DIR / f's{n}').stdout.strip()
+        found.sort(key=lambda f: held != f'task/{f[2]}')
+        pane_id, pid, tid, sid = found[0]
+        for other in found[1:]:
+            log(f'slot {n}: a second session ({other[2]}, pane {other[0]}, pid {other[1]}) shares the worktree '
+                f'with {tid}; not adopted — stop it by hand')
+        logfile = cfg(False).ctx(f'notes/slot{n}.log')
+        text = logfile.read_bytes() if logfile.exists() else b''
+        at = text.rfind(f' {tid} session {sid}\n'.encode())
+        since = text.rfind(b'\n', 0, at) if at >= 0 else len(text)
+        out[n] = ((pid, sid, max(since, 0)), known.get(tid, (tid, '', set(), set())))
+        log(f'slot {n}: {tid} adopted from the previous run (pane {pane_id}, pid {pid})')
+    return out
+
+
 # --- starting a session --------------------------------------------------------
 
 def agent_cmd(prompt: str, sid: str, model: str, idle: int) -> str:
@@ -1178,8 +1216,10 @@ def cmd_run(argv: list[str]) -> int:
             merging.append(t)
     with MERGE:  # blocks freed by merges made while no run was up
         reopen_landed(branch, 'a merge before this run')
+    for n, (p, task) in adopt(a.slots, branch).items():
+        procs[n], running[n] = p, task
     for n in free_at:  # idle slots must let go of old task/<ID> branches, or start() cannot take them
-        if (SLOTS_DIR / f's{n}').is_dir():
+        if n not in procs and (SLOTS_DIR / f's{n}').is_dir():
             git('checkout', '-q', '--detach', cwd=SLOTS_DIR / f's{n}')
 
     while True:
