@@ -6,6 +6,7 @@ nobody is on, opens a git worktree and a tmux pane for it, starts an agent sessi
 already pasted into the first turn, waits for it to finish, merges the branch, and starts the next one.
 
     ./kit run once            one task, then stop (the way to try it the first time)
+    (every other form never exits on its own: Ctrl-C stops it)
     ./kit run                 3 agents, mode d (different files), in tmux
     ./kit run 5 --mode p      5 agents, strictly in plan/TODO.md order, files may overlap
     ./kit run 1               one at a time (the sequential run; also what you get without tmux)
@@ -20,7 +21,14 @@ What it has to get right, and why each of these is here rather than left to the 
 whose own subtasks are open), tasks with any `(after X, Y)` dependency still open, tasks whose line names a
 task that is running right now (prose like "P36's menu" is a dependency nobody wrote down as one), the
 `### Stretch` section, anything already tried this run, and anything whose branch is finished and waiting
-to be merged.
+to be merged. A task tried this run comes back into the pool when its line on the branch closes (blocked,
+`[~]`) and later opens again (`[ ]`): a human's `./kit plan unblock` is a new attempt, not the old one.
+
+**It stays up.** With nothing it may start, the run goes idle rather than exiting: it logs `run idle: …`
+once, tells the master `RUN DONE`, and keeps re-reading `plan/TODO.md` on the branch every few seconds, so
+tasks committed later are picked up without restarting it. Only Ctrl-C (or `once`) ends it. A script that
+waits for the run must not wait for the process to exit — it never will — but for `run idle` in
+`context/notes/run.log` after the time it started waiting, and for `run busy` to know work began again.
 
 **A block that waits on a task reopens itself.** `./kit done --blocked WHY` records the open task ids WHY
 names (or `--after X,Y`) as `BLOCKED: (after X, Y)`, and after every merge — the runner's or the master's —
@@ -770,6 +778,27 @@ def published(tid: str, branch: str) -> None:
 
 
 REOPENED: set[str] = set()  # tasks `reopen_landed` put back to [ ]: `cmd_run` lets them be tried again
+BOX = re.compile(r'^- \[(.)\] \*\*([^*\s]+)\*\*')
+
+
+def retry_reopened(tried: set[str], closed: set[str], branch: str) -> None:
+    """Put back in the pool every tried task whose line has closed and opened again since it was tried.
+
+    `tried` keeps a task from being started twice in a run, which is right for one that ended still open
+    (it failed: a human looks next) and wrong for one that blocked and was then unblocked by hand — that is
+    new information, and a run that stays up for days would otherwise never try it again. `closed` is the
+    tried tasks seen blocked or gone from TODO.md since; one seen open again after that is retried.
+    """
+    if not tried:
+        return
+    box = {m.group(2): m.group(1) for l in plan_text(branch) if (m := BOX.match(l))}
+    for t in list(tried):
+        if box.get(t) != ' ':
+            closed.add(t)
+        elif t in closed:
+            tried.discard(t)
+            closed.discard(t)
+            log(f'{t}: open again since it was tried; back in the pool')
 
 
 def reopen_landed(branch: str, why: str) -> None:
@@ -1007,7 +1036,19 @@ def sequential(branch: str, model: str, idle: int, pause: int, force: bool, once
     log(f'sequential run on {branch} ({"one task, then stop" if once else "one session at a time"}, '
         f'committing in this checkout)')
     tried: set[str] = set()
-    while (task := pick({}, tried, 'p', branch)):
+    closed: set[str] = set()
+    idle_said = False
+    while True:
+        retry_reopened(tried, closed, branch)
+        if not (task := pick({}, tried, 'p', branch)):
+            if not idle_said:
+                log('run idle: no task it may start; waiting for plan/TODO.md to change (Ctrl-C to stop)')
+                idle_said = True
+            time.sleep(30)
+            continue
+        if idle_said:
+            log('run busy: new work')
+            idle_said = False
         if not force and (w := weekly()) is not None and w >= WEEKLY_MAX:
             log(f'weekly usage {w}% >= {WEEKLY_MAX}%: waiting for the reset (--force to go on)')
             time.sleep(300)
@@ -1028,8 +1069,6 @@ def sequential(branch: str, model: str, idle: int, pause: int, force: bool, once
             log(f'{tid}: done (--once)')
             return 0
         time.sleep(pause)
-    log('sequential run done: no task left that it may start')
-    return 0
 
 
 # --- the loop ------------------------------------------------------------------
@@ -1098,7 +1137,9 @@ def cmd_run(argv: list[str]) -> int:
     log(f'run: {a.slots} slots, mode {a.mode}, merging into {branch}'
         + (f', weekly usage {weekly()}%' if not a.force else ' (weekly cap ignored)'))
 
-    done = False  # RUN DONE has gone to the master
+    done = False  # RUN DONE has gone to the master, and the run is idle
+    closed: set[str] = set()  # see retry_reopened
+    idle_said = False
     if queued():
         master(branch, a.slots)  # reports a previous run left; otherwise it starts when a merge needs it
 
@@ -1161,8 +1202,12 @@ def cmd_run(argv: list[str]) -> int:
                 if task := pick(running, tried, a.mode, branch):
                     if p := start(n, task, branch, a.model, a.idle, a.slots):
                         procs[n], running[n] = p, task
+                        if done or idle_said:
+                            log(f'run busy: new work ({task[0]})')
+                            done = idle_said = False
                     else:
                         tried.add(task[0])
+        retry_reopened(tried, closed, branch)
         if REOPENED:
             tried -= REOPENED  # a task reopened by a merge is a new attempt, not the one that blocked
             REOPENED.clear()
@@ -1178,15 +1223,16 @@ def cmd_run(argv: list[str]) -> int:
             log(f'run done; tried this run: {", ".join(sorted(tried)) or "none"}')
         flush(branch, a.slots)
         sweep_handed()
-        # Stay up while the master still has something: a report typed into a session nobody is watching
-        # for is a merge that silently never happens. Capped, so a master that died cannot pin the run.
-        if done and not merging and not queued() and \
+        # Idle, never exit: the run waits for plan/TODO.md to change on the branch, so tasks a human (or a
+        # session) commits later start without anyone restarting it. `run idle` is said once, after the
+        # master has nothing left (capped, so a master that died cannot hold it back), and is the line a
+        # script waiting on the run looks for — the process itself only ends on Ctrl-C.
+        if done and not idle_said and not procs and not merging and not queued() and \
                 (not master_busy() or time.time() - done_at > 90 * 60):
-            sweep_handed()
             if left := [t for t, swept in HANDED.items() if not swept]:
                 log(f'still with the master, or left unmerged on their branch: {", ".join(sorted(left))}')
-            log('the master session stays up for the next run; its notes are in context/notes/master.md')
-            return 0
+            log('run idle: no task it may start; waiting for plan/TODO.md to change (Ctrl-C to stop)')
+            idle_said = True
         time.sleep(10)
 
 
