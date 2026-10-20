@@ -54,6 +54,11 @@ pub struct Pass {
     pub blend: Option<[u8; 4]>,
     /// `fixedAlphaValue`, for a blend whose C is 2.
     pub fixed: f32,
+    /// `angle`'s sine and cosine, worked out once rather than at every pixel.
+    pub turn: (f32, f32),
+    /// Which of the texel's colour and alpha anything reads ([`Splat::reads`]): a mask's colour
+    /// and a layer's alpha are never looked at, so they are never mixed.
+    pub reads: (bool, bool),
 }
 
 /// A freeride track's ground paint.
@@ -147,16 +152,36 @@ impl Splat {
             passes.push(Pass {
                 texture: index,
                 scale,
+                turn: angle.sin_cos(),
+                reads: (true, true),
                 angle,
                 rgba,
                 blend,
                 fixed: s.number("fixedAlphaValue").unwrap_or(128.0),
             });
         }
+        Splat::reads(&mut passes);
         Splat {
             textures,
             passes,
             shadow: None,
+        }
+    }
+
+    /// Which half of each pass's texel the program reads. The colour, where the blend picks the
+    /// source's colour (or there is no blend and it replaces the frame's). The alpha, where the
+    /// blend scales by the source's alpha — or where the next pass scales by the frame's, which is
+    /// this pass's alpha, since every pass writes its source alpha into the frame. The last pass's
+    /// alpha goes nowhere: [`Splat::paint`] keeps the colour.
+    fn reads(passes: &mut [Pass]) {
+        for i in 0..passes.len() {
+            let rgb = match passes[i].blend {
+                None => true,
+                Some([a, b, _, d]) => a == 0 || b == 0 || d == 0,
+            };
+            let next_reads_mine = passes.get(i + 1).is_some_and(|n| matches!(n.blend, Some([_, _, 1, _])));
+            let alpha = matches!(passes[i].blend, Some([_, _, 0, _])) || next_reads_mine;
+            passes[i].reads = (rgb, alpha);
         }
     }
 
@@ -165,9 +190,9 @@ impl Splat {
     pub fn paint(&self, x: f32, z: f32) -> [u8; 3] {
         let mut frame = [0.0f32; 4];
         for p in &self.passes {
-            let (s, c) = p.angle.sin_cos();
+            let (s, c) = p.turn;
             let (u, v) = ((x * c + z * s) * p.scale[0], (z * c - x * s) * p.scale[1]);
-            let t = self.textures[p.texture].sample_smooth(u, v);
+            let t = self.textures[p.texture].sample_smooth_parts(u, v, p.reads.0, p.reads.1);
             // Modulate by the pass's constant colour; the `.pst` decoder doubled the alpha, so halve it
             // back to the GS's scale.
             let src = [
@@ -189,6 +214,7 @@ impl Splat {
 
 /// One GS blend: `(A - B) * C / 128 + D`, writing the source's alpha into the frame's. Without a
 /// blend the source replaces the frame.
+#[inline]
 pub fn blend(src: [f32; 4], dst: [f32; 4], inputs: Option<[u8; 4]>, fixed: f32) -> [f32; 4] {
     let Some([a, b, c, d]) = inputs else {
         return src;
@@ -259,7 +285,9 @@ impl Shadow {
         let rows = self.tiles.len() / self.across;
         let (fu, fv) = (u * self.across as f32, v * rows as f32);
         let tile = &self.tiles[fv as usize * self.across + fu as usize];
-        let t = tile.sample_smooth(fu.fract(), fv.fract());
+        // Both are at least 0 here, where the fraction is what is left above the floor.
+        let (fu, fv) = (fu - crate::pst::floor(fu), fv - crate::pst::floor(fv));
+        let t = tile.sample_smooth_parts(fu, fv, true, false);
         Some(t[0] as f32 / 128.0)
     }
 }
