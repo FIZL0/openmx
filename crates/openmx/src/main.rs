@@ -1,17 +1,30 @@
 //! **openmx** — the playable shell: a window, a real pad, and the freeride area to ride it in.
 //!
 //! ```sh
-//! cargo run --release -p openmx                    # ride
-//! cargo run --release -p openmx -- --seconds 60    # ride for a minute and quit (the task's own test)
+//! cargo run --release -p openmx                    # the front end: pick a track and ride it
+//! cargo run --release -p openmx -- --track free06  # straight onto a track, no menu
+//! cargo run --release -p openmx -- --ride --seconds 60   # ride for a minute and quit
 //! cargo run --release -p openmx -- --pad /dev/input/js1 --size 512x384 --scale 2
 //! cargo run --release -p openmx -- --record context/tapes/spin.tape   # write the pad down
 //! cargo run --release -p openmx -- --play context/tapes/spin.tape     # and ride it back
 //! ```
 //!
-//! No emulator, no fixture, no menu. Everything it shows is read at runtime from the user's own disc —
-//! the ISO named in `kit.toml`, the track's `.res`, its scene, its terrain, the models the scene places
-//! and their textures — and nothing is written anywhere except the one frame `--shot` asks for, which
-//! goes under `context/` and is not committed.
+//! No emulator, no fixture. Everything it shows is read at runtime from the user's own disc — the ISO
+//! named in `kit.toml`, the track's `.res`, its scene, its terrain, the models the scene places and
+//! their textures, and the menus' art — and nothing is written anywhere except the one frame `--shot`
+//! asks for, which goes under `context/` and is not committed, and the front end's two settings
+//! files beside the disc.
+//!
+//! # The front end
+//!
+//! With no flag that picks a ride (`--track`, `--play`, `--record`, `--moment`, `--vehicle`, `--phy`,
+//! any `--trace`, or `--ride`) the shell opens on its main menu ([`menu`], P36): Free Ride and its
+//! track pick, Settings with the rider's name on an on-screen keyboard, the overlay, wrecks and the
+//! throttle's wiring, and Quit. Start or Escape in a ride opens the pause — Resume, Restart, Settings,
+//! Main Menu, Quit — in place of the plain freeze Start is without the front end. `--menu` asks for
+//! the front end whatever else is given, and `--screen NAME` opens it on one screen, which is how a
+//! `--shot` of each is taken. The settings are kept in `settings.txt` and `controls.txt` beside the
+//! disc; a flag given on the command line wins over the file for the session.
 //!
 //! # What is the port and what is the shell
 //!
@@ -124,6 +137,7 @@
 
 mod ground;
 mod hud;
+mod menu;
 mod moment;
 mod pad;
 mod vehicle;
@@ -160,6 +174,7 @@ use ps2_float::{F, Vf};
 
 use ground::Ground;
 use hud::Hud;
+use menu::{Act, Art, Menu, Reader};
 use moment::{Moment, Shot};
 use pad::{Pads, Throttle, Wiring};
 use vehicle::{Garage, Kind, Plane, Spawn};
@@ -262,6 +277,9 @@ struct World<'a> {
     /// Whether the ride is moving. Start toggles it: the original's pause is a whole front-end page
     /// and this shell has no pages, so freezing the ride is the shell's own stand-in for it.
     riding: bool,
+    /// Whether Start freezes the ride here. Under the front end it opens the pause instead, which
+    /// the loop reads off the menu, so the pass leaves it alone.
+    start_freezes: bool,
     /// What the rider did this frame, kept so the loop can print it after the pass.
     said: rider::Frame,
     /// The hands this pass was stepped with, kept for the body's own animation frame — which runs
@@ -296,7 +314,7 @@ impl Game for World<'_> {
         // rider's hands off it, because which button means what lives in the ride and not here.
         let controls = self.sim.poll(dt, &self.reports);
 
-        if self.sim.input.pad(0).pressed(Control::Start) {
+        if self.start_freezes && self.sim.input.pad(0).pressed(Control::Start) {
             self.riding = !self.riding;
         }
 
@@ -310,6 +328,7 @@ impl Game for World<'_> {
 }
 
 /// What the shell was asked to do.
+#[derive(Clone)]
 struct Args {
     track: String,
     bike: String,
@@ -408,12 +427,224 @@ struct Args {
     /// `--vehicle bike|biplane`: which machine the session starts on (P19). The bike by default,
     /// and a default session is the shell exactly as it was before there was a choice.
     vehicle: Kind,
+    /// `--menu`: the front end, whatever else is asked.
+    menu: bool,
+    /// Whether a flag picked a ride, which skips the front end unless `--menu` says otherwise.
+    ride_flag: bool,
+    /// `--screen`: the front end's screen to open on.
+    screen: Option<menu::Screen>,
+    /// Which wiring flags were given, so the front end's `controls.txt` fills in only the others.
+    wiring_flags: (bool, bool),
 }
 
 fn run() -> Result<(), String> {
     let Some(args) = parse_args()? else {
         return Ok(());
     };
+    if args.menu || !args.ride_flag {
+        return front_end(args);
+    }
+    ride(args, None).map(|_| ())
+}
+
+/// The window, the pad and the menu, which outlive a ride under the front end.
+struct Shell {
+    window: Window,
+    pads: Pads,
+    front: Front,
+}
+
+/// The front end's own half of [`Shell`].
+struct Front {
+    menu: Menu,
+    reader: Reader,
+    art: Art,
+    /// Where the settings files are.
+    dir: std::path::PathBuf,
+    /// The wiring the command line asked for, which the file's fills in around.
+    args_wiring: Wiring,
+    wiring_flags: (bool, bool),
+}
+
+impl Front {
+    /// The pad's wiring: the command line's where it was given, `controls.txt`'s otherwise.
+    fn wiring(&self) -> Wiring {
+        let mut w = self.args_wiring.clone();
+        if !self.wiring_flags.0 {
+            w.throttle = match self.menu.controls.throttle {
+                menu::Gas::Cross => Throttle::Cross,
+                menu::Gas::R2 => Throttle::Trigger(Control::R2),
+                menu::Gas::L2 => Throttle::Trigger(Control::L2),
+            };
+        }
+        if !self.wiring_flags.1 {
+            match Wiring::parse_pressures(&self.menu.controls.pressure) {
+                Ok(map) => w.pressure = map,
+                Err(e) => println!("{}: pressure: {e}", menu::CONTROLS_FILE),
+            }
+        }
+        w
+    }
+
+    /// Write the settings when the menu changed them, saying so if it could not.
+    fn save(&mut self) {
+        if self.menu.take_changed() {
+            match menu::save(&self.dir, &self.menu.settings, &self.menu.controls) {
+                Ok(()) => println!("settings: saved in {}", self.dir.display()),
+                Err(e) => {
+                    println!("settings: {e}");
+                    self.menu.note = Some(format!("Could not save the settings: {e}"));
+                }
+            }
+        }
+    }
+}
+
+/// How a ride under the front end ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leave {
+    Quit,
+    Menu,
+    Restart,
+}
+
+/// The front end (P36): the menus until one of them starts a ride, the ride, and back.
+fn front_end(args: Args) -> Result<(), String> {
+    let mut disc = Disc::open_configured()?;
+    let art = Art::load(&mut disc)?;
+    drop(disc);
+    let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
+    let (settings, controls) = menu::load(&dir);
+    println!("front end: settings in {}", dir.display());
+    let pad = args.pad.clone().or_else(|| controls.pad.clone());
+    let mut front = Front {
+        menu: Menu::new(settings, controls),
+        reader: Reader::new(),
+        art,
+        dir,
+        args_wiring: args.wiring.clone(),
+        wiring_flags: args.wiring_flags,
+    };
+    let window = Window::open(&args.display, args.size, args.scale, "openmx")?;
+    let pads = Pads::open(pad.as_deref(), front.wiring());
+    match &pads.name {
+        Some(name) => println!("pad: {name}"),
+        None => println!("pad: none found — the menus are on the keyboard (arrows, X, C, Return)"),
+    }
+    if let Some(screen) = args.screen {
+        front.menu.open(screen);
+    }
+    let mut shell = Shell { window, pads, front };
+
+    let frame_size = |window: &Window| match args.size {
+        Some(size) => size,
+        None => fit_frame((window.width, window.height), window.scale),
+    };
+    let (width, height) = frame_size(&shell.window);
+    let mut frame = Frame::new(width, height, [0, 0, 0]);
+    // A pause asked for by `--screen` is over a ride, so it starts one on the last track.
+    let mut act = match shell.front.menu.screen() {
+        Some(menu::Screen::Pause) => Act::Ride(shell.front.menu.settings.track.clone()),
+        _ => Act::Stay,
+    };
+    let mut shot = args.shot.clone();
+    let started = Instant::now();
+    let mut shown = 0u32;
+    let mut escape = false;
+    loop {
+        if let Act::Ride(track) = &act {
+            loop {
+                let mut a = args.clone();
+                a.track = track.clone();
+                a.hud = args.hud || shell.front.menu.settings.overlay;
+                a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
+                a.wiring = shell.front.wiring();
+                // The shot is the menu's unless it is of the pause, which is drawn over the ride.
+                a.shot = shot.take_if(|_| shell.front.menu.screen() == Some(menu::Screen::Pause));
+                a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
+                shell.front.note_clear();
+                match ride(a, Some(&mut shell)) {
+                    Ok(Leave::Restart) => continue,
+                    Ok(Leave::Menu) => break,
+                    Ok(Leave::Quit) => return Ok(()),
+                    Err(e) => {
+                        println!("ride: {e}");
+                        shell.front.menu.note = Some(format!("Could not ride {track}: {e}"));
+                        break;
+                    }
+                }
+            }
+            shell.front.menu.main();
+            shell.front.reader.reset();
+        }
+
+        let top = Instant::now();
+        let window = &mut shell.window;
+        window.poll();
+        if window.closed() {
+            break;
+        }
+        if window.resized() {
+            let (width, height) = frame_size(window);
+            if (width, height) != (frame.width, frame.height) {
+                frame = Frame::new(width, height, [0, 0, 0]);
+            }
+        }
+        let mut press = shell.front.reader.read(&shell.pads.report(window));
+        // Escape is Back, on its edge, and the main menu's way out.
+        let esc = window.held(key::ESCAPE);
+        if esc && !escape {
+            if shell.front.menu.screen() == Some(menu::Screen::Main) {
+                break;
+            }
+            press.back = true;
+        }
+        escape = esc;
+        act = shell.front.menu.step(press);
+        if shell.front.menu.changed() {
+            shell.pads.set_wiring(shell.front.wiring());
+            shell.front.save();
+        }
+        if act == Act::Quit {
+            break;
+        }
+        if matches!(act, Act::Ride(_)) {
+            continue;
+        }
+        frame.color.fill(0);
+        shell.front.art.draw(&shell.front.menu, &mut frame);
+        shell.window.present(&frame.color, frame.width, frame.height)?;
+        if let Some(path) = shot.take_if(|_| shown >= args.shot_frame) {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            png::write_rgb(&path, frame.width, frame.height, &frame.color)?;
+            println!("wrote {}", path.display());
+        }
+        shown += 1;
+        if let Some(limit) = args.seconds {
+            if started.elapsed().as_secs_f32() >= limit {
+                break;
+            }
+        }
+        if let Some(rest) = FRAME.checked_sub(top.elapsed()) {
+            std::thread::sleep(rest);
+        }
+    }
+    Ok(())
+}
+
+impl Front {
+    /// A note on the ticker lasts until the next ride.
+    fn note_clear(&mut self) {
+        self.menu.note = None;
+    }
+}
+
+/// One ride: the old shell, start to finish. Under the front end `shell` is its window, pad and
+/// menu, and the ride ends when the pause says so; without one it opens its own and runs until
+/// Escape, the window closing, `--seconds` or the tape's end.
+fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
     // ---- the disc -------------------------------------------------------------------------------
     let mut disc = Disc::open_configured()?;
@@ -902,7 +1133,7 @@ fn run() -> Result<(), String> {
             plane: plane.as_ref(),
             pilot,
         };
-        return moment::draw(&moment, out, &shot, &ground, &assets, &vehicle, &look);
+        return moment::draw(&moment, out, &shot, &ground, &assets, &vehicle, &look).map(|()| Leave::Quit);
     }
 
     // ---- `--trace`: the solver's own numbers, with nobody on the pad (S22) -----------------------
@@ -1003,7 +1234,7 @@ fn run() -> Result<(), String> {
                     if f.wreck.is_some() { 1 } else { 0 },
                 );
             }
-            return Ok(());
+            return Ok(Leave::Quit);
         }
         // The numbers behind the columns, so a trace in a journal entry carries the tuning it was
         // taken on rather than a bike's name.
@@ -1092,7 +1323,7 @@ fn run() -> Result<(), String> {
             "peak g over {frames} frames: {:.3} sideways, {:.3} vertical, {:.3} along — phase {:?}",
             peak.0.0, peak.1.0, peak.2.0, rider.phase()
         );
-        return Ok(());
+        return Ok(Leave::Quit);
     }
 
     // ---- the tape ------------------------------------------------------------------------------
@@ -1121,8 +1352,18 @@ fn run() -> Result<(), String> {
     });
 
     // ---- the window and the pad ---------------------------------------------------------------
-    let mut window = Window::open(&args.display, args.size, args.scale, "openmx — freeride")?;
-    let mut pads = Pads::open(args.pad.as_deref(), args.wiring.clone());
+    // Under the front end they are its own, opened once; without one, this ride's.
+    let mut own: (Window, Pads);
+    let (window, pads, mut front) = match shell {
+        Some(shell) => (&mut shell.window, &mut shell.pads, Some(&mut shell.front)),
+        None => {
+            own = (
+                Window::open(&args.display, args.size, args.scale, "openmx — freeride")?,
+                Pads::open(args.pad.as_deref(), args.wiring.clone()),
+            );
+            (&mut own.0, &mut own.1, None)
+        }
+    };
     match &pads.name {
         Some(name) => println!("pad: {name}"),
         None => println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)"),
@@ -1167,7 +1408,8 @@ fn run() -> Result<(), String> {
         reports: [Report::missing(); PADS],
         sim: Sim::with_rider(0, Arc::new(tables), phy, rider),
         garage,
-        riding: true,
+        riding: front.as_ref().is_none_or(|f| f.menu.riding()),
+        start_freezes: front.is_none(),
         said: rider::Frame::default(),
         hands: Controls::default(),
         tape: recorder,
@@ -1196,11 +1438,14 @@ fn run() -> Result<(), String> {
     let mut shot = args.shot.clone();
     let started = Instant::now();
     let mut window_of_frames = (Instant::now(), 0u32, 0usize);
+    // How the ride ended, for the front end: anything but the pause's own two is a quit.
+    let mut leave = Leave::Quit;
+    let mut escape = window.held(key::ESCAPE);
     loop {
         let top = Instant::now();
 
         window.poll();
-        if window.closed() || window.held(key::ESCAPE) {
+        if window.closed() || (front.is_none() && window.held(key::ESCAPE)) {
             break;
         }
         // A window that changed size gets a frame of its new size rather than the old one stretched
@@ -1259,6 +1504,42 @@ fn run() -> Result<(), String> {
             }
         }
         swap_key = swap_now;
+
+        // The pause, under the front end: Start or Escape opens it, and while it is open the ride is
+        // frozen exactly as Start's own freeze leaves it, the pass polling the pad and stepping
+        // nothing. What it changes is applied at once, and saved.
+        if let Some(front) = front.as_deref_mut() {
+            let mut press = front.reader.read(&world.reports[0]);
+            let esc = window.held(key::ESCAPE);
+            if esc && !escape {
+                if front.menu.riding() {
+                    front.menu.pause();
+                } else {
+                    press.back = true;
+                }
+            }
+            escape = esc;
+            let act = front.menu.step(press);
+            if front.menu.changed() {
+                hud.on = front.menu.settings.overlay;
+                world.sim.rider.sense.wrecks_enabled = args.wrecks && front.menu.settings.wrecks;
+                pads.set_wiring(front.wiring());
+                front.save();
+            }
+            match act {
+                Act::Restart => {
+                    leave = Leave::Restart;
+                    break;
+                }
+                Act::MainMenu => {
+                    leave = Leave::Menu;
+                    break;
+                }
+                Act::Quit => break,
+                Act::Stay | Act::Resume | Act::Ride(_) => {}
+            }
+            world.riding = front.menu.riding();
+        }
 
         // One frame of the game's own fixed update, which calls `World::simulate` inside itself.
         let step = engine.step(wall(started), engine_input(&world.reports[0]), &mut world);
@@ -1493,6 +1774,9 @@ fn run() -> Result<(), String> {
             _ => None,
         };
         hud.draw(&mut frame, world.sim.input.pad(0), &world.sim.rider, world.riding);
+        if let Some(front) = &front {
+            front.art.draw(&front.menu, &mut frame);
+        }
         window.present(&frame.color, frame.width, frame.height)?;
 
         // One frame, on paper, for a run nobody is watching: the first by default, or the one
@@ -1582,7 +1866,7 @@ fn run() -> Result<(), String> {
         started.elapsed().as_secs_f32(),
         engine.frame
     );
-    Ok(())
+    Ok(leave)
 }
 
 /// The wall clock, as the game's own timer would have it: whole 100 ms periods and the bus-clock
@@ -1757,11 +2041,32 @@ fn parse_args() -> Result<Option<Args>, String> {
         wiring: Wiring::default(),
         vehicle: Kind::Bike,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
+        menu: false,
+        ride_flag: false,
+        screen: None,
+        wiring_flags: (false, false),
     };
     let mut argv = std::env::args().skip(1);
     while let Some(a) = argv.next() {
         let mut next = |what: &str| argv.next().ok_or(format!("{a} wants {what}"));
+        // The flags that pick a ride, which is what the shell did before it had a front end.
+        if matches!(
+            a.as_str(),
+            "--track" | "--play" | "--record" | "--moment" | "--vehicle" | "--phy" | "--ride"
+        ) || a.starts_with("--trace")
+        {
+            args.ride_flag = true;
+        }
         match a.as_str() {
+            "--ride" => {}
+            "--menu" => args.menu = true,
+            "--screen" => {
+                let w = next("a screen: main, tracks, settings, controls, keyboard or pause")?;
+                args.screen = Some(menu::Screen::from_word(&w).ok_or(format!(
+                    "--screen: main, tracks, settings, controls, keyboard or pause, not {w}"
+                ))?);
+                args.menu = true;
+            }
             "--track" => args.track = next("a track name, like free06")?,
             "--bike" => args.bike = next("a bike name, like 125sx")?,
             "--rider" => args.rider = next("a rider name, like thq1, or none")?,
@@ -1791,6 +2096,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
             }
             "--throttle" => {
+                args.wiring_flags.0 = true;
                 args.wiring.throttle = match next("cross, r2 or l2")?.as_str() {
                     "cross" => Throttle::Cross,
                     "r2" => Throttle::Trigger(Control::R2),
@@ -1799,6 +2105,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
             }
             "--pad-pressure" => {
+                args.wiring_flags.1 = true;
                 args.wiring.pressure =
                     Wiring::parse_pressures(&next("an axis map, like ds2@8, or none")?)
                         .map_err(|why| format!("--pad-pressure: {why}"))?;
@@ -1881,7 +2188,8 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "openmx [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
+                    "openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause]]\n\
+                            [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--hud] [--camera NAME]\n\
@@ -1889,7 +2197,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                      \n\
-                     Rides the freeride area from the disc named in kit.toml.\n\
+                     Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
+                     rides the freeride area from the disc named in kit.toml straight away.\n\
+                     The front end keeps settings.txt and controls.txt beside the disc.\n\
                      Cross throttle, Square brake, R2 front brake, L2 clutch, left stick steers\n\
                      and leans, the d-pad preloads, L3 balances, R3 reverses, Start freezes,\n\
                      L1 changes camera, Escape quits. --camera starts on a camera preset by its\n\

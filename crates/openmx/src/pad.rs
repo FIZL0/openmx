@@ -379,6 +379,11 @@ impl Pads {
         }
     }
 
+    /// Rewire the pad, which the front end's Controls screen does between frames (P36).
+    pub fn set_wiring(&mut self, wiring: Wiring) {
+        self.wiring = wiring;
+    }
+
     /// Read whatever the pad has said since the last frame, then build this frame's report.
     ///
     /// The joystick interface sends the whole current state as "initial" events when the device is
