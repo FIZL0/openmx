@@ -72,6 +72,13 @@ impl Disc {
         Disc::open(&path)
     }
 
+    /// Where `open_configured` looks for the disc, whether or not it is there: the shell keeps its
+    /// settings beside it (P36).
+    pub fn configured_path() -> Result<PathBuf, String> {
+        let (root, iso) = configured_iso()?;
+        Ok(root.join(iso))
+    }
+
     /// Every member of `MX.PSR`, in directory order.
     pub fn entries(&self) -> &[Entry] {
         &self.psr.entries

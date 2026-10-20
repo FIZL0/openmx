@@ -353,6 +353,11 @@ impl Pads {
         }
     }
 
+    /// Rewire the pad, which the front end's Controls screen does between frames (P36).
+    pub fn set_wiring(&mut self, wiring: Wiring) {
+        self.wiring = wiring;
+    }
+
     /// Read whatever the pad has said since the last frame, then build this frame's report.
     ///
     /// The joystick interface sends the whole current state as "initial" events when the device is
@@ -1123,6 +1128,16 @@ impl Seats {
             pads.device = Some(file);
             self.joined.push(Joined { path, id, pads });
         }
+    }
+
+    /// Rewire every pad and the keyboard, which the front end's Controls screen does between frames
+    /// (P36).
+    pub fn set_wiring(&mut self, wiring: Wiring) {
+        self.keys.set_wiring(wiring.clone());
+        for j in &mut self.joined {
+            j.pads.set_wiring(wiring.clone());
+        }
+        self.wiring = wiring;
     }
 
     /// The pad holding each seat now, by name, for the startup lines and the overlay.

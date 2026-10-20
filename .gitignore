@@ -22,6 +22,10 @@ context/
 # kit.toml.example is committed; kit.toml is not.
 /kit.toml
 
+# The shell's front end keeps its settings beside the disc (P36): yours, not the repo's.
+/settings.txt
+/controls.txt
+
 # Build output
 /target/
 **/target/
