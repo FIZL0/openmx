@@ -1,5 +1,7 @@
 //! The front end (P36): every screen is reachable from the main menu by pad input alone, and the
-//! settings files read back as they were written.
+//! settings files read back as they were written. And the machine in the menus (P41): the pause's
+//! switch puts the player who opened it in the other machine, and the ride setup's pick is the
+//! machine the ride starts on.
 //!
 //! The menu is a state machine fed by [`menu::Reader`], which turns the 32-byte reports the shell's
 //! pad layer hands the ride into edges, so these tests drive it with nothing but reports — the same
@@ -9,9 +11,13 @@
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;
+#[path = "../src/vehicle.rs"]
+#[allow(dead_code)]
+mod vehicle;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
-use menu::{Act, Controls, Gas, Menu, Reader, Screen, Settings};
+use menu::{Act, Controls, Gas, Machine, Menu, Press, Reader, Screen, Settings};
+use vehicle::{Garage, Kind, Plane, Spawn};
 use std::collections::{HashSet, VecDeque};
 
 /// The buttons a hand can press on a menu.
@@ -110,19 +116,21 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     assert!(m.riding());
     tap(&mut m, &mut r, Control::Start);
     assert_eq!(m.screen(), Some(Screen::Pause));
-    // Settings from the pause, and back to it.
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Down);
+    // Settings from the pause (past the machine switch, P41), and back to it.
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Down);
+    }
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Settings));
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Pause));
     // Restart and Main Menu.
     tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Up);
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Restart), "{acts:?}");
     tap(&mut m, &mut r, Control::Start);
-    for _ in 0..3 {
+    for _ in 0..4 {
         tap(&mut m, &mut r, Control::Down);
     }
     let acts = tap(&mut m, &mut r, Control::Cross);
@@ -177,6 +185,16 @@ fn the_settings_file_reads_back_as_it_was_written() {
         overlay: true,
         wrecks: false,
         track: "free11".into(),
+        machines: [
+            Machine::Biplane,
+            Machine::Bike,
+            Machine::Biplane,
+            Machine::Bike,
+            Machine::Bike,
+            Machine::Bike,
+            Machine::Bike,
+            Machine::Biplane,
+        ],
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -278,4 +296,140 @@ fn every_screen_draws_from_the_disc() {
         let drawn = frame.color.chunks(3).filter(|p| *p != RIDE).count();
         assert!(drawn > frame.width * frame.height * 9 / 10, "{s:?} drew over {drawn} pixels");
     }
+}
+
+/// A track's `machine.txt` with a plane for each of two players, in the disc's shape and with
+/// numbers of this file's own.
+const MACHINES: &str = "[Machines]\nNumberOfMachines = 2\n\n\
+    [Biplane1]\nType = Biplane\nPosition = 100, 20, -50\nDirection = 0, 0, -1\nHasPlayer = 1\n\n\
+    [Biplane2]\nType = Biplane\nPosition = 300, 20, -50\nDirection = 0, 0, -1\nHasPlayer = 1\n";
+
+/// Player `seat`'s garage on a ride starting on `up`, with their plane parked where the file says.
+fn garage(seat: usize, up: Kind) -> Garage {
+    let plane = Spawn::biplane(MACHINES.as_bytes(), seat).map(Plane::parked);
+    Garage::new(up, plane).unwrap()
+}
+
+/// What the shell does with a frame of the ride's menu: every seat's press through
+/// [`Menu::step_seats`], and a switch answered by that seat's garage, as main.rs's ride loop does.
+fn ride_frame(m: &mut Menu, readers: &mut [Reader], reports: &[Report], garages: &mut [Garage]) -> Act {
+    let presses: Vec<Press> = readers.iter_mut().zip(reports).map(|(r, rep)| r.read(rep)).collect();
+    let act = m.step_seats(&presses);
+    if let Act::Switch(seat) = act {
+        let up = garages[seat].swap().unwrap();
+        m.switched(seat, Machine::from_word(up.name()).unwrap());
+    }
+    act
+}
+
+/// One press and release of `control` on `seat`'s pad, the others at rest.
+fn tap_seat(m: &mut Menu, readers: &mut [Reader], garages: &mut [Garage], seat: usize, control: Control) -> Vec<Act> {
+    let mut acts = Vec::new();
+    for pressed in [true, false] {
+        let reports: Vec<Report> = (0..readers.len())
+            .map(|i| match pressed && i == seat {
+                true => Report::from_buttons(control.mask()),
+                false => Report::idle(),
+            })
+            .collect();
+        acts.push(ride_frame(m, readers, &reports, garages));
+    }
+    acts
+}
+
+#[test]
+fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
+    // Two riders on the bike, each with a plane parked (the second only in this file: the disc's
+    // tracks park the first player's), and the menu told so the way the ride tells it.
+    let (mut m, mut r) = fresh();
+    m.riders = 2;
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    let mut garages = vec![garage(0, Kind::Bike), garage(1, Kind::Bike)];
+    for (i, g) in garages.iter().enumerate() {
+        m.up[i] = Machine::from_word(g.up.name()).unwrap();
+        m.switchable[i] = g.plane.is_some();
+    }
+    let mut readers = vec![r, Reader::new()];
+    ride_frame(&mut m, &mut readers, &[Report::idle(), Report::idle()], &mut garages);
+
+    // 2P's Start pauses for 2P, and 1P's pad does nothing to it.
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.driver(), 1);
+    assert_eq!(m.pause_rows()[2], "Switch To Machine: Biplane");
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    assert_eq!(m.cursor(Screen::Pause), 0);
+    // Down twice and Cross on 2P's pad: 2P is in the plane, the ride carries on, 1P is on the bike.
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
+    assert!(acts.contains(&Act::Switch(1)), "{acts:?}");
+    assert!(m.riding());
+    assert_eq!((garages[0].up, garages[1].up), (Kind::Bike, Kind::Biplane));
+    assert_eq!(m.up[..2], [Machine::Bike, Machine::Biplane]);
+
+    // 1P's own pause switches 1P, and the row now offers 2P the bike back.
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Start);
+    assert_eq!(m.driver(), 0);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
+    assert!(acts.contains(&Act::Switch(0)), "{acts:?}");
+    assert_eq!((garages[0].up, garages[1].up), (Kind::Biplane, Kind::Biplane));
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
+    assert_eq!(m.pause_rows()[2], "Switch To Machine: Bike");
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
+    assert!(m.riding(), "2P's Start resumes 2P's pause");
+
+    // A player with no plane to take: the row says so and pressing it switches nothing.
+    m.switchable[1] = false;
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
+    assert_eq!(m.pause_rows()[2], "Switch To Machine: None");
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
+    assert!(!acts.iter().any(|a| matches!(a, Act::Switch(_))), "{acts:?}");
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(garages[1].up, Kind::Biplane);
+}
+
+#[test]
+fn the_setups_pick_starts_the_ride_on_it() {
+    let (mut m, mut r) = fresh();
+    m.riders = 2;
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    // Square changes 1P's machine; down to 2P and back to bike-then-plane leaves 2P on the plane;
+    // down again wraps to 1P. Left and right still walk the tracks and nothing else.
+    tap(&mut m, &mut r, Control::Square);
+    assert_eq!(m.settings.machines[0], Machine::Biplane);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Square);
+    tap(&mut m, &mut r, Control::Square);
+    tap(&mut m, &mut r, Control::Square);
+    assert_eq!(m.settings.machines[..2], [Machine::Biplane, Machine::Biplane]);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Square);
+    assert_eq!(m.settings.machines[..3], [Machine::Bike, Machine::Biplane, Machine::Bike]);
+    tap(&mut m, &mut r, Control::Square);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.cursor(Screen::Tracks), 1);
+    assert_eq!(m.settings.machines[..2], [Machine::Biplane, Machine::Biplane]);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("free07".into())), "{acts:?}");
+    assert!(m.take_changed());
+
+    // The ride starts on the pick: the shell reads 1P's as `--vehicle`'s word into the garage.
+    let up = Kind::parse(m.settings.machines[0].word()).unwrap();
+    assert_eq!(garage(0, up).up, Kind::Biplane);
+    // And the pick is what the file keeps, so the next session's setup opens on it.
+    let dir = scratch("machines");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    assert_eq!(menu::load(&dir).0.machines, m.settings.machines);
+    assert!(std::fs::read_to_string(dir.join(menu::SETTINGS_FILE)).unwrap().contains("machines = biplane biplane bike"));
+    std::fs::remove_dir_all(dir).ok();
+    // An older file, with no machines line, rides the bike.
+    assert_eq!(Settings::parse("track = free07\n").machines, [Machine::Bike; menu::SEATS_MAX]);
 }
