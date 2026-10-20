@@ -456,7 +456,10 @@ fn the_size_of_the_state_type_is_pinned() {
     // fresh (bike) state's leaves below are not moved by it. 7408 since P30: the input layer's
     // squared stick, its d-pad flags, the rate-limited lean and the flick's 32-sample ring. 10224
     // since P31: the plane's whole body, its measure, its three wheels, its crash state and its
-    // smooth noise.
-    assert_eq!(size_of::<Sim>(), 10224, "Sim grew or shrank: does its walk still cover every field?");
+    // smooth noise. 8928 since N1: the bike's parameters behind an `Arc` the snapshots share, which
+    // the walk still reads through, so nothing left it. The size is a 64-bit one: on wasm32 every
+    // `Vec` and `usize` is half as wide, and the leaf count below is what holds on every target.
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(size_of::<Sim>(), 8928, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 821, "the walk's leaf count moved with it");
 }

@@ -33,7 +33,7 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH= cd -- "$here/../../../.." && pwd)
 scratch=${OPENMX_CROSS_DIR:-${TMPDIR:-/tmp}/openmx-cross}
 offline=${OPENMX_CROSS_OFFLINE:-0}
-tests=${OPENMX_CROSS_TESTS:-"--test platforms --test hash --test replay --test rng"}
+tests=${OPENMX_CROSS_TESTS:-"--test platforms --test hash --test replay --test rng --test snapshot"}
 
 host=$(rustc -vV | sed -n 's/^host: //p')
 version=$(rustc -vV | sed -n 's/^release: //p')
@@ -79,9 +79,9 @@ if [ "$need_download" = 1 ]; then
         tmp=$scratch/dl-$version
         mkdir -p "$tmp" "$tc"
         base=https://static.rust-lang.org/dist
-        for c in rustc cargo "rust-std-$host"; do
+        for c in rustc cargo rust-std; do
             f=$c-$version-$host.tar.xz
-            [ -f "$tmp/$f" ] || curl -fsS -o "$tmp/$f" "$base/$c-$version-$host.tar.xz"
+            [ -f "$tmp/$f" ] || curl -fsS -o "$tmp/$f" "$base/$f"
             tar xf "$tmp/$f" -C "$tmp"
         done
         cp -a "$tmp/rustc-$version-$host/rustc/." "$tc/"

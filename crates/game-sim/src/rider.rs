@@ -211,11 +211,11 @@ pub struct Rider {
     pub body_request: vehicle_anim::Request,
 
     /// The last trick asked for since the wheels left the ground, for [`Frame::landed`].
-    flight: Trick,
+    pub(crate) flight: Trick,
     /// Whether the bike was off the ground at the end of the previous frame, which is the edge
     /// [`Frame::landed`] is taken on — [`crate::air::Air::was_airborne`] is a *substep*'s memory and
     /// says nothing about the frame before.
-    airborne: bool,
+    pub(crate) airborne: bool,
 }
 
 impl Rider {

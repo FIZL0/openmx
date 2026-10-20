@@ -58,6 +58,8 @@ use game_sim::replay::{self, Fixture, Sample, Value, Watch};
 use game_sim::{Input, Sim, state_hash};
 use ps2_float::{F, Vf, libm};
 
+mod players;
+
 // ---------------------------------------------------------------------------------------------------
 // The canonical fixture: the one run every architecture is compared on.
 //
@@ -402,6 +404,82 @@ fn the_canonical_run_hashes_to_its_pinned_vectors() {
 
     // And the run must actually be a run: a stuck hash would pass every comparison above.
     let mut seen: Vec<u64> = trace.clone();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), FRAMES, "every tick's hash is distinct");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Several riders, saved and put back (N1): online play compares these hashes between machines.
+//
+// `tests/players/mod.rs`' scripted ride — four stand-in riders over a floor with kickers, riding,
+// tricking, wrecking and being put back — is what the session's hash is taken over. Rollback runs it
+// with a guess, goes back and runs it again, so the pinned run goes through a save and a restore too,
+// and the bytes a resync sends are pinned beside the hashes. Regenerate with `print_the_riders_vectors`
+// (the last test in this file); the same rule as the block above holds: check that a state change
+// explains a moved vector before believing it.
+// ---------------------------------------------------------------------------------------------------
+
+/// `(tick, players::hash)` every 32 ticks of the riders' run.
+const RIDERS_HASHES: &[(u64, u64)] = &[
+    (32, 0x88c6a7c06160f9af),
+    (64, 0xe8935f0c68c77f63),
+    (96, 0xd5c37d15efce0e1b),
+    (128, 0x8ae3e66de3ae8daa),
+    (160, 0x82d7e0c557b8425f),
+    (192, 0x57783e0fafe5fe45),
+    (224, 0x480ee67881cecb0b),
+    (256, 0xcde9514f15fd153b),
+];
+/// FNV-1a over every tick's hash of the run.
+const RIDERS_DIGEST: u64 = 0x49441bffb5b0f536;
+/// FNV-1a over the four riders' `snapshot::encode` bytes at the end, and how many bytes they were.
+const RIDERS_WIRE_DIGEST: u64 = 0xf47adc892b8e263d;
+const RIDERS_WIRE_LEN: usize = 16710;
+
+/// The riders' run: every tick's hash, and the riders at the end. Rolled back over, eight ticks deep,
+/// every 50 ticks — rider 1's pad guessed as held, the guess ridden, the save put back and the real
+/// pads ridden — the way rollback runs a session whose pad came late.
+fn riders_run(rollback: bool) -> (Vec<u64>, Vec<Sim>) {
+    let mut riders = players::start();
+    let mut seen = players::Seen::default();
+    let mut trace = Vec::with_capacity(FRAMES);
+    for f in 0..FRAMES {
+        if rollback && f % 50 == 25 {
+            let saved: Vec<_> = riders.iter().map(game_sim::snapshot::save).collect();
+            for g in f..f + 8 {
+                let mut pads = players::inputs(g);
+                pads[1] = players::input(1, f - 1);
+                players::step(&mut riders, &pads, &mut seen);
+            }
+            riders.iter_mut().zip(&saved).for_each(|(r, s)| game_sim::snapshot::restore(r, s));
+        }
+        players::step(&mut riders, &players::inputs(f), &mut seen);
+        trace.push(players::hash(&riders));
+    }
+    assert!(seen.airborne && seen.tricks && seen.wrecks && seen.respawns, "the riders' run missed something: {seen:?}");
+    (trace, riders)
+}
+
+/// The resync bytes of the riders at the end, folded, and their length.
+fn riders_wire(riders: &[Sim]) -> (u64, usize) {
+    riders.iter().map(game_sim::snapshot::encode).fold((0, 0), |(h, n), b| (state_hash(&b, h), n + b.len()))
+}
+
+#[test]
+fn several_riders_saved_and_restored_hash_to_their_pinned_vectors() {
+    let (trace, riders) = riders_run(true);
+    // the rollbacks change nothing: the same run without them is the same run
+    assert_eq!(riders_run(false).0, trace, "a rolled-back run hashes differently from a straight one");
+    for &(tick, want) in RIDERS_HASHES {
+        let got = trace[tick as usize - 1];
+        assert_eq!(got, want, "tick {tick}: the riders hash 0x{got:016x}, pinned 0x{want:016x}");
+    }
+    let digest = trace.iter().fold(0u64, |h, &x| state_hash(&x.to_le_bytes(), h));
+    assert_eq!(digest, RIDERS_DIGEST, "the digest of all {FRAMES} of the riders' hashes");
+    assert_eq!(riders_wire(&riders), (RIDERS_WIRE_DIGEST, RIDERS_WIRE_LEN), "the riders' resync bytes");
+    // and the rollbacks were not where the riders were standing still
+    let mut seen = trace.clone();
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), FRAMES, "every tick's hash is distinct");
@@ -1010,4 +1088,25 @@ fn print_the_vectors() {
 /// A multi-line string as a Rust literal with `\n` written out, so a pasted dump stays one constant.
 fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n\\\n")
+}
+
+/// Print the riders' block, for pasting over it when the state type changes.
+///
+/// `cargo test -p game-sim --test platforms -- --ignored --nocapture print_the_riders_vectors`
+#[test]
+#[ignore = "a generator, not a test"]
+fn print_the_riders_vectors() {
+    let (trace, riders) = riders_run(true);
+    let mut o = String::new();
+    let _ = writeln!(o, "const RIDERS_HASHES: &[(u64, u64)] = &[");
+    for t in (32..=FRAMES).step_by(32) {
+        let _ = writeln!(o, "    ({t}, 0x{:016x}),", trace[t - 1]);
+    }
+    let _ = writeln!(o, "];");
+    let digest = trace.iter().fold(0u64, |h, &x| state_hash(&x.to_le_bytes(), h));
+    let _ = writeln!(o, "const RIDERS_DIGEST: u64 = 0x{digest:016x};");
+    let (wire, len) = riders_wire(&riders);
+    let _ = writeln!(o, "const RIDERS_WIRE_DIGEST: u64 = 0x{wire:016x};");
+    let _ = writeln!(o, "const RIDERS_WIRE_LEN: usize = {len};");
+    println!("{o}");
 }

@@ -415,7 +415,7 @@ pub struct Curve {
     pub points: u32,
     pub index: u32,
     /// The weight, kept as bits so [`Curve`] can be compared for equality. [`Curve::frac`] reads it.
-    frac_bits: u32,
+    pub(crate) frac_bits: u32,
 }
 
 impl Curve {
