@@ -54,7 +54,7 @@ use game_sim::phy::Phy as BikePhy;
 use game_sim::replay::{
     self, Capture, Fixture, PadFrame, PadTape, Playback, Reason, Sample, Value, Watch, Where,
 };
-use game_sim::rider::Tables as RiderTables;
+use game_sim::rider::{Rider, Tables as RiderTables};
 use game_sim::track::{Scene, Terrain};
 use game_sim::trick::{Set, Trick};
 use game_sim::world::{Ground, Place, Props, World};
@@ -962,7 +962,7 @@ fn acceptance_fixture(cap: &Capture) -> Result<Fixture, String> {
 /// ([`the_bike_the_human_rode`]).
 fn acceptance_fixture_on(
     cap: &Capture,
-    bike: Option<(Arc<RiderTables>, BikePhy)>,
+    bike: Option<Ridden>,
 ) -> Result<Fixture, String> {
     let inputs = inputs_from_capture(cap)?;
 
@@ -1076,7 +1076,7 @@ fn acceptance_fixture_on(
 fn acceptance_start(
     cap: &Capture,
     seed: u32,
-    bike: Option<(Arc<RiderTables>, BikePhy)>,
+    bike: Option<Ridden>,
 ) -> Result<Sim, String> {
     // Read through `Capture::float`, which is the same parse the watches get, so the start state's
     // position and velocity are bit-identical to the tick-0 samples they are compared against.
@@ -1109,10 +1109,14 @@ fn acceptance_start(
         // constructor and the rest of this function is the same whichever bike arrived; the wreck
         // test is left where `Sim::new` leaves it, off, which is a difference from the original and
         // is written down in S28's journal entry rather than guessed at here.
-        Some((tables, phy)) => {
-            let mut sim = Sim::ride(seed, tables, phy, origin, m.0[2], Set::default());
-            sim.rider.sense.wrecks_enabled = false;
-            sim
+        //
+        // Built the way the shell builds it rather than through `Sim::ride`, because the wheel mounts
+        // are the bike *model's* tire nodes ([`the_wheels_the_human_rode`]) and `Sim::ride` takes
+        // the `.phy`'s, which hang the wheels 1.48 units lower than the original's do.
+        Some(Ridden { tables, phy, mounts }) => {
+            let mut rider = Rider::new(&phy, mounts, origin, m.0[2], Set::default());
+            rider.sense.wrecks_enabled = false;
+            Sim::with_rider(seed, tables, phy, rider)
         }
         None => Sim::new(seed),
     };
@@ -3400,6 +3404,118 @@ fn the_bike_the_human_rode(disc: &mut Disc, tables: &RiderTables) -> Option<Bike
     None
 }
 
+/// The bike an acceptance fixture rides when the disc is here: the tables the `.phy` was read
+/// against, the `.phy` itself, and where its two wheels hang off the chassis.
+///
+/// The mounts travel with the `.phy` rather than being taken off it because they are not in it: the
+/// original's `bike_attach_nodes` looks the bike *model's* "TireFront" and "TireRear" nodes up by name
+/// and writes them into each wheel's `+0xa0` (S22), and the `.phy`'s `BodyTireForcePosition` lands
+/// at `+0xb0`, which no step reads.
+struct Ridden {
+    tables: Arc<RiderTables>,
+    phy: BikePhy,
+    mounts: (Vf, Vf),
+}
+
+/// The bike model the human's freeride was ridden on, as the archive names it. Not the `.phy`'s
+/// name: the physics file is a class (`Race125P`, D7) and the model is a make — the recording's own
+/// save state carries `125_faisst_engine` and `125_faisst_plasticsall` and no other 125's parts, and
+/// its wheels' mounts are this model's tire nodes to the bit
+/// (`the_acceptance_bike_hangs_its_wheels_where_the_original_does`).
+const FREERIDE_MODEL: &str = "125_faisst";
+
+/// **Where the human's wheels hang off the chassis**: the `TireFront` and `TireRear` nodes of the
+/// `125_faisst`'s `bike.psg`, each node's place in the model's root frame — the read the shell makes
+/// (`crates/openmx/src/main.rs`), but in the original's VU0 order ([`game_render::psg::Model::place_in`])
+/// rather than through the renderer's host-float `world`.
+///
+/// This is the number S28 measured and could not attribute: with the `.phy`'s mounts at
+/// `(0, -0.25, ±0.75)` both wheels start three quarters of a unit inside Free09 and tick 1 is shoved
+/// up, and a floor 1.42 units lower would have fitted. The model's nodes sit at y ≈ 1.23 and 1.19,
+/// 1.48 and 1.44 units higher — it was the mounts, and the ground is what D6 says it is.
+fn the_wheels_the_human_rode(disc: &mut Disc) -> Option<(Vf, Vf)> {
+    let archives: Vec<String> = disc
+        .bike_archives()
+        .into_iter()
+        .filter(|a| a.to_ascii_lowercase().contains(FREERIDE_MODEL))
+        .collect();
+    for archive in archives {
+        let Some(bytes) = disc.member(&archive) else { continue };
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        let Some(psg) = by_suffix(&res, "bike.psg").and_then(|e| res.read(&bytes, e).ok()) else {
+            continue;
+        };
+        let Ok(model) = game_render::psg::Model::parse(&psg) else { continue };
+        // The frame the place is asked in is the bike's own node — the model's root, which is what
+        // `bike+0x18` holds — and the arithmetic is the original's node lookup, not the renderer's
+        // `world`: the two differ in the last bit of the front mount's `z`.
+        let node = |name: &str| -> Option<Vf> {
+            let i = model.nodes.iter().position(|n| n.name == name)?;
+            let mut root = i;
+            while let Some(up) = model.nodes[root].parent {
+                root = up;
+            }
+            Some(Vf(model.place_in(i, root)))
+        };
+        if let (Some(front), Some(rear)) = (node("TireFront"), node("TireRear")) {
+            println!("the wheels: TireFront {front:?} and TireRear {rear:?} out of {archive}");
+            return Some((front, rear));
+        }
+    }
+    None
+}
+
+/// The human's two wheel mounts as the original held them, out of the EE image saved beside the
+/// recording: the rider R6's chain lands on (the game manager's actor list, two hops in), its front
+/// wheel at `+0x7b0` and rear at `+0x7b4`, each mount at the wheel's `+0xa0` — the same chain
+/// `watch/s22-standing.toml` records live. `None` when the image is not in this worktree or the chain
+/// does not land on the human's rider.
+fn the_wheels_in_the_save_state() -> Option<[[u32; 4]; 2]> {
+    /// The game manager singleton's slot (`@game_manager` in `kit.toml`), a research address in a
+    /// test that reads a RAM image — never in the port.
+    const GAME_MANAGER: u32 = 0x004e_1e98;
+    let at = private_dir("states").join(format!("{RECORDING}_SaveState.eeMemory.bin"));
+    let Ok(ram) = std::fs::read(&at) else {
+        println!("no {} — `./kit state ram` of the recording's save state writes it", at.display());
+        return None;
+    };
+    let word = |a: u32| -> Option<u32> {
+        let a = (a & 0x01ff_ffff) as usize;
+        Some(u32::from_le_bytes(ram.get(a..a + 4)?.try_into().ok()?))
+    };
+    let mut a = word(GAME_MANAGER)?;
+    for hop in [0x34, 0x34, 0x8, 0x8, 0x0] {
+        a = word(a + hop)?;
+    }
+    let rider = a;
+    // A rider (type 2) and the local human's (control source 1), or the chain is pointing elsewhere.
+    if word(rider)? != 2 || word(word(rider + 0x20)? + 0x34)? != 1 {
+        println!("the chain in {} does not land on the human's rider", at.display());
+        return None;
+    }
+    let mount = |wheel: u32| -> Option<[u32; 4]> {
+        let w = word(rider + wheel)?;
+        Some([word(w + 0xa0)?, word(w + 0xa4)?, word(w + 0xa8)?, word(w + 0xac)?])
+    };
+    Some([mount(0x7b0)?, mount(0x7b4)?])
+}
+
+/// **The acceptance bike hangs its wheels where the original does, bit for bit.** The mounts the
+/// fixture is built with ([`the_wheels_the_human_rode`], off the disc) against the two the original's
+/// rider was carrying in the recording's own save state. The disc's answer is the one the run uses;
+/// the save state is the proof that it is the right model and the right read. Skipped with a line
+/// where either is missing.
+#[test]
+fn the_acceptance_bike_hangs_its_wheels_where_the_original_does() {
+    let Some(mut disc) = Disc::open() else { return };
+    let Some(saved) = the_wheels_in_the_save_state() else { return };
+    let (front, rear) = the_wheels_the_human_rode(&mut disc)
+        .unwrap_or_else(|| panic!("no {FREERIDE_MODEL} bike.psg with TireFront/TireRear nodes"));
+    let bits = |v: Vf| [v.x().to_bits(), v.y().to_bits(), v.z().to_bits(), v.w().to_bits()];
+    assert_eq!(bits(front), saved[0], "the front mount: model {front:?}");
+    assert_eq!(bits(rear), saved[1], "the rear mount: model {rear:?}");
+}
+
 /// **Everything the disc's side of an acceptance run is**, handed to `then`: the world the capture was
 /// recorded on, the name of it for the fixture to carry, and the bike it was ridden on.
 ///
@@ -3410,7 +3526,7 @@ fn the_bike_the_human_rode(disc: &mut Disc, tables: &RiderTables) -> Option<Bike
 /// is what S8 measured and S28 is here to stop.
 fn in_the_world_of<R>(
     cap: &Capture,
-    then: impl FnOnce(&mut dyn World, &Where, Option<(Arc<RiderTables>, BikePhy)>) -> R,
+    then: impl FnOnce(&mut dyn World, &Where, Option<Ridden>) -> R,
 ) -> Option<R> {
     let mut disc = Disc::open()?;
     let (area, _) = recorded_on(cap, &mut disc)?;
@@ -3434,7 +3550,17 @@ fn in_the_world_of<R>(
     // folds the game's own {cos, sin} curve into half a dozen parameters, so a bike read against one
     // table and ridden against another is a different bike.
     let tables = Arc::new(RiderTables::build());
-    let bike = the_bike_the_human_rode(&mut disc, &tables).map(|phy| (Arc::clone(&tables), phy));
+    let bike = the_bike_the_human_rode(&mut disc, &tables).map(|phy| {
+        let mounts = the_wheels_the_human_rode(&mut disc).unwrap_or_else(|| {
+            println!(
+                "no {FREERIDE_MODEL} model with TireFront/TireRear nodes on this disc: the wheels \
+                 hang off the .phy's BodyTireForcePosition instead, which is not where the \
+                 original hangs them, and the run will part at tick 1",
+            );
+            game_sim::stock::mounts(&phy)
+        });
+        Ridden { tables: Arc::clone(&tables), phy, mounts }
+    });
     let mut place = Place { ground, props };
     Some(then(&mut place, &area.named, bike))
 }
