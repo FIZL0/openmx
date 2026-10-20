@@ -1,10 +1,16 @@
 //! A scripted ride of several riders, for the snapshot tests and the platform vectors (N1).
 //!
-//! **A stand-in for S54's multi-player ride, which does not exist yet.** Each player here is a whole
-//! [`Sim`] stepped one after the other, with no step order of the original's behind it and no
-//! rider-to-rider contact: what it proves is that every part of one rider's state saves, restores,
-//! encodes and hashes the same, several times over, with the riders in different states at once. When
-//! S54 puts the players inside the simulation, this is the file that should step that instead.
+//! One [`Sim`] holding [`PLAYERS`] riders (S54's [`Sim::add_player`]), stepped together by
+//! [`Sim::step_all`] in player order, so they are in one another's way the way a session's riders
+//! are: what it proves is that every part of the session's state — every rider's, the pads', the
+//! order they ride in — saves, restores, encodes and hashes the same, with the riders in different
+//! states at once.
+//!
+//! Players 1 and 2 ride the [`Sim`]'s own two pads, through its input layer, so the pads' timers and
+//! press edges are state the snapshot has to carry. Players 3 and 4 have no pad on this machine
+//! (the input layer has two), as a peer's riders do not: their [`Controls`] are their frame's
+//! [`Input`] read through a pad that has seen nothing before it ([`hands`]), so a press is a function
+//! of the frame alone and nothing outside the [`Sim`] remembers anything.
 //!
 //! Built from integers and the crate's stand-in bike, so it is the same on every machine without a
 //! file travelling with it, and it proves nothing about the game.
@@ -14,10 +20,12 @@
 use std::sync::Arc;
 
 use game_sim::collide::{Bundle, Record};
-use game_sim::rider::Tables;
+use game_sim::input::{Manager, PADS, Report};
+use game_sim::ride::Controls;
+use game_sim::rider::{Rider, Tables};
 use game_sim::trick::{SLOTS, Set, Stunt};
 use game_sim::world::World;
-use game_sim::{Input, Sim, state_hash, stock};
+use game_sim::{Input, Sim, stock};
 use ps2_float::{F, Vf};
 
 /// How many riders the scripted ride has: enough for the riders to be in four different states.
@@ -69,19 +77,22 @@ pub fn stunts() -> Set {
     )
 }
 
-/// The riders at tick 0, side by side across `x`, sharing one set of tables. Rider 1 and rider 2
-/// wreck; 0 and 3 cannot.
-pub fn start() -> Vec<Sim> {
+/// The session at tick 0: the riders side by side across `x`, sharing one set of tables, both of
+/// the [`Sim`]'s pads plugged in. Rider 1 and rider 2 wreck; 0 and 3 cannot.
+pub fn start() -> Sim {
     let tables = Arc::new(Tables::build());
-    (0..PLAYERS)
-        .map(|i| {
-            let phy = stock::phy(&tables.ride.curve);
-            let at = Vf::new(12.0 * i as f32, 1.0, 0.0, 1.0);
-            let mut sim = Sim::ride(0x4e31_0000 + i as u32, Arc::clone(&tables), phy, at, stock::FACING, stunts());
-            sim.rider.sense.wrecks_enabled = i == 1 || i == 2;
-            sim
-        })
-        .collect()
+    let at = |i: usize| Vf::new(12.0 * i as f32, 1.0, 0.0, 1.0);
+    let phy = stock::phy(&tables.ride.curve);
+    let mut sim = Sim::ride(0x4e31_0000, Arc::clone(&tables), phy, at(0), stock::FACING, stunts());
+    sim.rider.sense.wrecks_enabled = false;
+    for i in 1..PLAYERS {
+        let phy = stock::phy(&tables.ride.curve);
+        let mut rider = Rider::new(&phy, stock::mounts(&phy), at(i), stock::FACING, stunts());
+        rider.sense.wrecks_enabled = i == 1 || i == 2;
+        sim.add_player(phy, rider);
+    }
+    sim.input.pad_mut(1).connected = true;
+    sim
 }
 
 const CROSS: u16 = 0x0040;
@@ -148,11 +159,29 @@ pub struct Seen {
     pub respawns: bool,
 }
 
-/// One tick of every rider, in player order, over the kickers.
-pub fn step(players: &mut [Sim], inputs: &[Input], seen: &mut Seen) {
-    for (sim, input) in players.iter_mut().zip(inputs) {
-        let said = sim.tick_in(*input, &mut Kickers);
-        seen.airborne |= sim.rider.ride.air.airborne;
+/// A pad-less player's hands on a frame: the frame's [`Input`] through a pad that has seen nothing
+/// before it, so a button held is a button pressed (the reset chord fires on every frame of it).
+pub fn hands(input: Input) -> Controls {
+    let mut pad = Manager::connected();
+    pad.tick(F(game_sim::tick::DeltaTime::CAP_30), &Sim::reports(input));
+    Controls::from_pad(pad.pad(0))
+}
+
+/// One tick of every rider, in player order, over the kickers: the first [`PADS`] on the [`Sim`]'s
+/// own pads, the rest on [`hands`].
+pub fn step(sim: &mut Sim, inputs: &[Input], seen: &mut Seen) {
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let mut reports = [Report::missing(); PADS];
+    for (r, i) in reports.iter_mut().zip(inputs) {
+        *r = Sim::reports(*i)[0];
+    }
+    let mut controls = sim.poll_all(dt, &reports);
+    for (c, i) in controls.iter_mut().zip(inputs).skip(PADS) {
+        *c = hands(*i);
+    }
+    let said = sim.step_all(dt, &controls, &mut Kickers);
+    for (p, said) in said.iter().enumerate() {
+        seen.airborne |= sim.rider_of(p).ride.air.airborne;
         seen.tricks |= said.started.is_some();
         seen.landed |= said.landed.is_some();
         seen.wrecks |= said.wreck.is_some();
@@ -160,13 +189,8 @@ pub fn step(players: &mut [Sim], inputs: &[Input], seen: &mut Seen) {
     }
 }
 
-/// The riders' hashes folded together in player order: the one number a session compares.
-pub fn hash(players: &[Sim]) -> u64 {
-    players.iter().fold(0, |h, sim| state_hash(&sim.hash().to_le_bytes(), h))
-}
-
-/// The whole of a rider's state as text, the parts the hash leaves out included (the animation, the
-/// rider's own body and idles): a restore that missed one of those would still hash the same.
+/// The whole of the session's state as text, the parts the hash leaves out included (the animation,
+/// each rider's own body and idles): a restore that missed one of those would still hash the same.
 pub fn whole(sim: &Sim) -> String {
-    format!("{} {} {:?} {:?} {:?}", sim.ticks, sim.rng, sim.input, sim.rider, sim.plane)
+    format!("{} {} {:?} {:?} {:?} {:?}", sim.ticks, sim.rng, sim.input, sim.rider, sim.plane, sim.others)
 }

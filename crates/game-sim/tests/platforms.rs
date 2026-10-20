@@ -412,7 +412,7 @@ fn the_canonical_run_hashes_to_its_pinned_vectors() {
 // ---------------------------------------------------------------------------------------------------
 // Several riders, saved and put back (N1): online play compares these hashes between machines.
 //
-// `tests/players/mod.rs`' scripted ride — four stand-in riders over a floor with kickers, riding,
+// `tests/players/mod.rs`' scripted ride — four riders on one `Sim` over a floor with kickers, riding,
 // tricking, wrecking and being put back — is what the session's hash is taken over. Rollback runs it
 // with a guess, goes back and runs it again, so the pinned run goes through a save and a restore too,
 // and the bytes a resync sends are pinned beside the hashes. Regenerate with `print_the_riders_vectors`
@@ -420,50 +420,53 @@ fn the_canonical_run_hashes_to_its_pinned_vectors() {
 // explains a moved vector before believing it.
 // ---------------------------------------------------------------------------------------------------
 
-/// `(tick, players::hash)` every 32 ticks of the riders' run.
+/// `(tick, Sim::hash)` every 32 ticks of the riders' run.
 const RIDERS_HASHES: &[(u64, u64)] = &[
-    (32, 0x1b650dbe7a876030),
-    (64, 0x2c74aaad28751510),
-    (96, 0xbfbf6191040a02e6),
-    (128, 0x5c691fa0bedc0db4),
-    (160, 0xb86a5e1b2a244dc1),
-    (192, 0x7c17d971a6eb354c),
-    (224, 0x2ce49b809b202210),
-    (256, 0xf3b960bab65a52a5),
+    (32, 0x01a8d417a2f3379e),
+    (64, 0x2edfd21050a830b6),
+    (96, 0x5623a21df0d4c193),
+    (128, 0xa5a558cdc3c95899),
+    (160, 0x28b02dcbffd732a4),
+    (192, 0x0b7dfa1ba3617eb4),
+    (224, 0xfe813e950f923f8b),
+    (256, 0x05ca9a3cc6d79497),
 ];
 /// FNV-1a over every tick's hash of the run.
-const RIDERS_DIGEST: u64 = 0x039d790b5811d248;
-/// FNV-1a over the four riders' `snapshot::encode` bytes at the end, and how many bytes they were.
-const RIDERS_WIRE_DIGEST: u64 = 0x03ba62bf37183807;
-const RIDERS_WIRE_LEN: usize = 16862;
+const RIDERS_DIGEST: u64 = 0x72aa74cd417681d7;
+/// FNV-1a over the session's `snapshot::encode` bytes at the end, and how many bytes they were.
+const RIDERS_WIRE_DIGEST: u64 = 0xfc7a4fe7696e05be;
+const RIDERS_WIRE_LEN: usize = 11827;
 
-/// The riders' run: every tick's hash, and the riders at the end. Rolled back over, eight ticks deep,
-/// every 50 ticks — rider 1's pad guessed as held, the guess ridden, the save put back and the real
-/// pads ridden — the way rollback runs a session whose pad came late.
-fn riders_run(rollback: bool) -> (Vec<u64>, Vec<Sim>) {
+/// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
+/// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed
+/// as held, the guess ridden, the save put back and the real pads ridden — the way rollback runs a
+/// session whose pads came late.
+fn riders_run(rollback: bool) -> (Vec<u64>, Sim) {
     let mut riders = players::start();
     let mut seen = players::Seen::default();
     let mut trace = Vec::with_capacity(FRAMES);
     for f in 0..FRAMES {
         if rollback && f % 50 == 25 {
-            let saved: Vec<_> = riders.iter().map(game_sim::snapshot::save).collect();
+            let saved = game_sim::snapshot::save(&riders);
             for g in f..f + 8 {
                 let mut pads = players::inputs(g);
                 pads[1] = players::input(1, f - 1);
+                pads[3] = players::input(3, f - 1);
                 players::step(&mut riders, &pads, &mut seen);
             }
-            riders.iter_mut().zip(&saved).for_each(|(r, s)| game_sim::snapshot::restore(r, s));
+            game_sim::snapshot::restore(&mut riders, &saved);
         }
         players::step(&mut riders, &players::inputs(f), &mut seen);
-        trace.push(players::hash(&riders));
+        trace.push(riders.hash());
     }
     assert!(seen.airborne && seen.tricks && seen.wrecks && seen.respawns, "the riders' run missed something: {seen:?}");
     (trace, riders)
 }
 
-/// The resync bytes of the riders at the end, folded, and their length.
-fn riders_wire(riders: &[Sim]) -> (u64, usize) {
-    riders.iter().map(game_sim::snapshot::encode).fold((0, 0), |(h, n), b| (state_hash(&b, h), n + b.len()))
+/// The resync bytes of the session at the end, folded, and their length.
+fn riders_wire(riders: &Sim) -> (u64, usize) {
+    let b = game_sim::snapshot::encode(riders);
+    (state_hash(&b, 0), b.len())
 }
 
 #[test]

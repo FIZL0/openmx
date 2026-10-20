@@ -7,9 +7,10 @@
 //! * **`save` and `restore` are a copy.** Everything a tick reads and writes is in [`Sim`] (lib.rs's
 //!   rule 3), so a [`Snapshot`] is one and [`restore`] copies it back. opentennis needed a walk over a
 //!   Bevy world's resources and entities for the same thing.
-//! * **The ride's constants are shared, not copied.** [`Sim::tables`] and [`Sim::phy`] sit behind an
-//!   `Arc`: a snapshot points at the same tables and the same bike as the state it came from, and the
-//!   hash ([`crate::hash`]) has never walked either. The rider's four disc-read constants (the stunt
+//! * **The ride's constants are shared, not copied.** [`Sim::tables`], [`Sim::phy`] and every other
+//!   player's [`crate::Player::phy`] sit behind an `Arc`: a snapshot points at the same tables and the
+//!   same bikes as the state it came from, and the hash ([`crate::hash`]) has never walked any of
+//!   them. The rider's four disc-read constants (the stunt
 //!   set, the clip table, the wreck files and the body's numbers) are plain fields of
 //!   [`crate::rider::Rider`] and are copied with it; they are a few hundred bytes.
 //! * **The hash is the one the replay harness already uses**, [`Sim::hash`]. It is integer-only and
