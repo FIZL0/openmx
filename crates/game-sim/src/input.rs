@@ -611,7 +611,8 @@ impl Pad {
 
     /// One axis, after the dead zone and the two segments: −1 to 1, 0 while the stick is inside the
     /// dead zone. This is the number the original hands its consumers, for a consumer with the game's
-    /// own [`AxisRange::STICK`] range.
+    /// own [`AxisRange::STICK`] range — the main menu's. The ride's consumers carry
+    /// [`AxisRange::PLAYER`] instead, through [`Pad::axis_through`].
     pub fn axis(&self, axis: Axis) -> F {
         self.axis_value[axis.index()]
     }
@@ -972,7 +973,9 @@ impl AxisRange {
     ///
     /// Read out of two gameplay save states' RAM (first_recording on the bike, biplane on the plane),
     /// where these four are the only consumers registered, and proved against the biplane capture's
-    /// sticks tick by tick (`the_biplane_reads_the_pad`). I2's ±0.2 is the main menu's.
+    /// sticks tick by tick (`the_biplane_reads_the_pad`), and against a bike playback's
+    /// (`the_bike_reads_the_players_dead_zone`, I7), where ±0.2 is wrong on every byte in the band
+    /// the two disagree on. The ride's hands read this range; I2's ±0.2 is the main menu's.
     pub const PLAYER: AxisRange = AxisRange {
         centre: F(0.0),
         lo: F(-1.0),

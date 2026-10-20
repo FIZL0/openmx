@@ -41,8 +41,7 @@ pub struct Hud {
     /// it touches a pixel.
     pub on: bool,
     /// Whether the rider is in the biplane: the control list is then the plane's eight commands over
-    /// the controls they are bound to, the left stick is drawn through the plane's ±0.3 dead zone,
-    /// and the ramps beside it are the plane's five numbers. Nothing in the shell flies the plane
+    /// the controls they are bound to, and the ramps beside it are the plane's five numbers. Nothing in the shell flies the plane
     /// yet, so nothing sets it; the vehicle switch does.
     pub plane: bool,
     /// The last trick the rider started or landed, as the stunt table spells it — the shell's own
@@ -210,10 +209,11 @@ impl Hud {
     }
 
     /// The two sticks, each twice over: the blue dot is the report byte and the white cross is what
-    /// [`Pad::axis`] hands the game after the dead zone and the two segments.
+    /// the player's stick consumers hand the ride after the dead zone and the two segments —
+    /// [`AxisRange::PLAYER`], on the bike and in the plane alike (I6, I7).
     ///
     /// The grey box is the dead zone, in the raw dot's own space. Inside it the cross sits dead
-    /// centre however far the dot has moved, which is the first fifth of every stick's travel
+    /// centre however far the dot has moved, which is the first 30% of every stick's travel
     /// doing nothing at all — the thing about this game's input that surprises a rider most, and the
     /// reason both dots are here instead of one.
     fn sticks(&self, frame: &mut Frame, x: i32, y: i32, pad: &Pad) {
@@ -227,13 +227,11 @@ impl Hud {
             let bx = x + i as i32 * (STICK + 6);
             fill(frame, bx, y, STICK, STICK, EMPTY);
             let (mid_x, mid_y) = (bx + STICK / 2, y + STICK / 2);
-            // The centre cross and the dead zone, both in the raw dot's space: a fifth of the half
-            // travel either side of centre.
+            // The centre cross and the dead zone, both in the raw dot's space: the player's range
+            // throws away 0.3 of the half travel either side of centre.
             fill(frame, bx + 1, mid_y, STICK - 2, 1, GRID);
             fill(frame, mid_x, y + 1, 1, STICK - 2, GRID);
-            // The plane's left stick goes through the player's range, whose dead zone is 0.3.
-            let plane_stick = self.plane && i == 0;
-            let dead = if plane_stick { (STICK / 2) * 3 / 10 } else { (STICK / 2) / 5 };
+            let dead = (STICK / 2) * 3 / 10;
             outline(frame, mid_x - dead, mid_y - dead, 2 * dead + 1, 2 * dead + 1, GRID);
 
             // The report byte, on −1..1, with the one axis the poll inverts put back the way the
@@ -252,10 +250,7 @@ impl Hud {
             // The cross is what the game reads and the dot is where the stick is, the dot on top:
             // the two sit on each other while the stick is inside the dead zone, and the dot is the
             // half of that pair a rider needs to be able to see.
-            let (vx, vy) = match plane_stick {
-                true => (pad.axis_through(*ax, &AxisRange::PLAYER).0, pad.axis_through(*ay, &AxisRange::PLAYER).0),
-                false => (pad.axis(*ax).0, pad.axis(*ay).0),
-            };
+            let (vx, vy) = (pad.axis_through(*ax, &AxisRange::PLAYER).0, pad.axis_through(*ay, &AxisRange::PLAYER).0);
             let (px, py) = at(vx, vy);
             fill(frame, px - 3, py, 7, 1, INK);
             fill(frame, px, py - 3, 1, 7, INK);
@@ -724,13 +719,13 @@ mod tests {
     #[test]
     fn inside_the_dead_zone_the_two_dots_disagree() {
         let mut report = Report::idle();
-        // A tenth of the travel: inside the fifth that the game's own range throws away. The index
+        // A tenth of the travel: inside the 30% that the player's range throws away. The index
         // is the report's own order (right X, right Y, left X, left Y) and not the pad's.
         const REPORT_LEFT_X: usize = 2;
         report.set_axis(REPORT_LEFT_X, AXIS_CENTRE + 12);
         let manager = polled(report);
         let pad = manager.pad(0);
-        assert_eq!(pad.axis(Axis::LeftX), F::ZERO, "the range swallowed it");
+        assert_eq!(pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), F::ZERO, "the range swallowed it");
         assert!(pad.raw_axis(Axis::LeftX) > F(AXIS_CENTRE as f32), "the byte moved");
 
         let mut frame = blank();
@@ -779,8 +774,9 @@ mod tests {
         assert_eq!(at(&frame, cell(slot(PlaneCommand::Climb), 0)), EMPTY, "nobody touched the stick");
     }
 
-    /// The plane's stick goes through the player's ±0.3 range, not the bike's ±0.2: a quarter of the
-    /// travel moves the bike's cross and leaves the plane's dead centre.
+    /// The ride's stick goes through the player's ±0.3 range, not the main menu's ±0.2: a quarter of
+    /// the travel would move a menu consumer and leaves the cross dead centre, in the plane and on the
+    /// bike alike.
     #[test]
     fn the_planes_stick_has_the_players_dead_zone() {
         let mut report = Report::idle();
@@ -788,7 +784,7 @@ mod tests {
         report.set_axis(REPORT_LEFT_X, AXIS_CENTRE + 32);
         let manager = polled(report);
         let pad = manager.pad(0);
-        assert!(pad.axis(Axis::LeftX) > F::ZERO, "past the bike's dead zone");
+        assert!(pad.axis(Axis::LeftX) > F::ZERO, "past the main menu's dead zone");
         assert_eq!(pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), F::ZERO, "inside the plane's");
 
         let mut hud = Hud::new(true);
