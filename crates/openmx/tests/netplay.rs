@@ -1,0 +1,561 @@
+//! N2 — online play, proved headless the way opentennis's netplay tests prove it
+//! (`crates/hst-play/src/play/netplay.rs`'s `lossy`, `on_a_bad_network`, `play_rollback`).
+//!
+//! Every machine is a [`Netplay`] session in this one thread, and a round of the harness is a 60th of
+//! a second: each machine's frame runs, and what it sends goes on a simulated link that loses a share
+//! of the datagrams, delivers the rest some rounds late, and in an outage delivers nothing. ggrs' clock
+//! is driven a 60th a round (opentennis's B494 patch, `third_party/ggrs/src/clock.rs`), so its pings,
+//! resends and time sync — and the session's own — see the same time however long a round really
+//! takes, and every run of a test is the same run.
+//!
+//! **The ride is the real one**: [`Rides`], one [`Sim`] a seat, which is what the shell steps online,
+//! on [`game_sim::stock`]'s bike over a flat floor (no disc), each seat mashing its own pad of the
+//! original's bytes — throttle pressure, steering, trick buttons. Two things need a ride that says its
+//! state in bytes, which [`Sim`] cannot until N1 lands: the resync and the restart. Those are proved on
+//! [`Tally`], a small game of the same pads that can, and on the ride the desync is proved caught and
+//! its report proved to ride again to the same hashes.
+//!
+//! What "in sync" means here: every tick that every machine has every seat's pads for, every machine
+//! ran on the same pads (the logs) and had the same state before it (the per-tick hashes — every
+//! tick, not only the thirtieth ggrs compares).
+
+#[allow(dead_code)]
+#[path = "../src/net/mod.rs"]
+mod net;
+
+use std::ops::Range;
+use std::path::PathBuf;
+
+use game_sim::input::Report;
+use game_sim::world::Flat;
+use game_sim::Sim;
+use net::link::DATAGRAM_MAX;
+use net::rides::{self, Rides};
+use net::{Game, Lineup, Netplay, Timing, WINDOW, unwire, wire};
+use ps2_float::{F, Vf};
+
+/// The tick a glitch makes one machine's state differ (the next checksum after it is 330).
+const GLITCH: u64 = 320;
+
+// ---------------------------------------------------------------------------------------------------
+// The machines
+// ---------------------------------------------------------------------------------------------------
+
+/// One machine's game, as the harness drives it.
+trait Machine {
+    type S: Clone + 'static;
+    fn frame(&mut self, np: &mut Netplay<Self::S>, local: &[Report]);
+    fn hash(&self) -> u64;
+}
+
+/// The ride: a [`Sim`] a seat, as the shell has it; `glitch` knocks seat 0's bike sideways at
+/// [`GLITCH`] on this machine only.
+struct Ride {
+    sims: Vec<Sim>,
+    world: Flat,
+    glitch: bool,
+}
+
+fn sims(seats: usize) -> Vec<Sim> {
+    let first = Sim::new(1);
+    (0..seats)
+        .map(|s| {
+            let mut sim = first.clone();
+            sim.rng = 1 + s as u32;
+            sim
+        })
+        .collect()
+}
+
+impl Ride {
+    fn new(seats: usize) -> Ride {
+        Ride { sims: sims(seats), world: Flat::default(), glitch: false }
+    }
+}
+
+impl Machine for Ride {
+    type S = rides::State;
+    fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
+        let glitch = self.glitch;
+        let mut after = |seat: usize, _: F, sim: &mut Sim, _: &game_sim::ride::Controls| {
+            if glitch && seat == 0 && sim.ticks == GLITCH {
+                sim.rider.ride.chassis.vel = Vf::new(0.5, 0.0, 0.0, 0.0);
+            }
+        };
+        let mut game = Rides { sims: &mut self.sims, world: &mut self.world, dt: rides::steady_dt(), after: Some(&mut after) };
+        np.frame(&mut game, local, 1.0 / 60.0);
+    }
+    fn hash(&self) -> u64 {
+        let mut sims = self.sims.clone();
+        let mut world = Flat::default();
+        Rides { sims: &mut sims, world: &mut world, dt: F(0.0), after: None }.hash()
+    }
+}
+
+/// A small game of the same pads that **can** say its state in bytes: per seat, the sticks summed,
+/// the buttons counted and every pad byte folded into a running mix, so any pad that differs on any
+/// tick shows in the hash from then on. `glitch` flips a bit of seat 0's mix at [`GLITCH`].
+#[derive(Clone, Default, PartialEq, Debug)]
+struct Tally {
+    tick: u64,
+    seats: Vec<[i64; 3]>,
+    glitch: bool,
+}
+
+impl Tally {
+    fn new(seats: usize) -> Tally {
+        Tally { tick: 0, seats: vec![[0; 3]; seats], glitch: false }
+    }
+}
+
+impl Game for Tally {
+    type State = Tally;
+    fn save(&self) -> Tally {
+        self.clone()
+    }
+    fn restore(&mut self, s: &Tally) {
+        let glitch = self.glitch;
+        *self = s.clone();
+        self.glitch = glitch;
+    }
+    fn step(&mut self, pads: &[Report]) {
+        for (s, t) in self.seats.iter_mut().enumerate() {
+            let p = pads[s];
+            t[0] += p.axis(2) as i64 - 0x80;
+            t[1] += p.buttons().count_ones() as i64;
+            t[2] = t[2].rotate_left(7) ^ game_sim::state_hash(&p.0, 1) as i64;
+            if self.glitch && s == 0 && self.tick == GLITCH {
+                t[2] ^= 1;
+            }
+        }
+        self.tick += 1;
+    }
+    fn hash(&self) -> u64 {
+        let mut h = game_sim::state_hash(&self.tick.to_le_bytes(), 0);
+        for t in &self.seats {
+            for v in t {
+                h = game_sim::state_hash(&v.to_le_bytes(), h);
+            }
+        }
+        h
+    }
+    fn encode(&self) -> Option<Vec<u8>> {
+        let mut b = self.tick.to_le_bytes().to_vec();
+        for t in &self.seats {
+            for v in t {
+                b.extend(v.to_le_bytes());
+            }
+        }
+        // padding, so a state is several pieces on the wire as the ride's will be
+        b.extend(std::iter::repeat_n(0xa5, 3000));
+        Some(b)
+    }
+    fn decode(&mut self, b: &[u8]) -> Result<(), String> {
+        let word = |i: usize| b.get(8 * i..8 * i + 8).map(|w| i64::from_le_bytes(w.try_into().unwrap())).ok_or("short");
+        self.tick = word(0)? as u64;
+        for (s, t) in self.seats.iter_mut().enumerate() {
+            for (k, v) in t.iter_mut().enumerate() {
+                *v = word(1 + 3 * s + k)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Machine for Tally {
+    type S = Tally;
+    fn frame(&mut self, np: &mut Netplay<Tally>, local: &[Report]) {
+        np.frame(self, local, 1.0 / 60.0);
+    }
+    fn hash(&self) -> u64 {
+        Game::hash(self)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The harness
+// ---------------------------------------------------------------------------------------------------
+
+/// Seat `seat`'s pad for the frame this machine is at: throttle at a pressure that changes, the stick
+/// swinging, a trick chord now and then — the original's bytes, as the shell's pad builds them.
+fn mash(seat: usize, frame: usize) -> Report {
+    let phase = (frame / 20 + seat * 7) % 11;
+    let mut buttons = 0x4000; // Cross
+    if phase == 3 {
+        buttons |= 0x2000 | 0x0010; // Circle, d-pad up
+    }
+    if phase == 7 {
+        buttons = 0x8000; // Square
+    }
+    let mut r = Report::from_buttons(buttons);
+    r.0[14] = (40 + 23 * phase) as u8; // Cross's pressure
+    r.set_axis(2, ((frame * (seat + 3) * 5) % 256) as u8);
+    r.set_axis(3, (0x80 + ((frame / 7 + seat) % 9) * 9) as u8);
+    r
+}
+
+struct Link {
+    /// The share of datagrams lost, the rounds the rest take, the rounds in which nothing gets through
+    /// (`oneway`: only the host's datagrams are lost then).
+    loss: f64,
+    lag: u32,
+    outage: Range<u32>,
+    oneway: bool,
+}
+
+struct Run<M: Machine> {
+    names: Vec<String>,
+    nets: Vec<Netplay<M::S>>,
+    games: Vec<M>,
+    /// Each machine's tick after every round.
+    ran: Vec<Vec<usize>>,
+    biggest: usize,
+}
+
+fn dumps() -> PathBuf {
+    std::env::temp_dir().join(format!("openmx-netplay-{}", std::process::id()))
+}
+
+/// `lineup`'s machines, `make(seats)` each one's game, `rounds` rounds over `link`. `each(round, run,
+/// live)` runs after every round, and may take a machine off the network (`live[i] = false`: it
+/// neither runs nor hears nor is heard).
+fn run<M: Machine>(
+    lineup: &str,
+    timing: Timing,
+    make: impl Fn(usize) -> M,
+    link: &Link,
+    rounds: Range<u32>,
+    mut each: impl FnMut(u32, &mut Run<M>, &mut Vec<bool>),
+) -> Run<M> {
+    let lineup = Lineup::parse(lineup).unwrap();
+    let names = lineup.peers();
+    // driven before the sessions are made: ggrs reads the clock as it starts them
+    ggrs::clock::drive(true);
+    let mut r = Run {
+        nets: names.iter().map(|me| Netplay::new(lineup.clone(), me, timing, dumps()).unwrap()).collect(),
+        games: names.iter().map(|_| make(lineup.seats.len())).collect(),
+        ran: vec![Vec::new(); names.len()],
+        names,
+        biggest: 0,
+    };
+    let mut live = vec![true; r.names.len()];
+    let mut wire: Vec<(usize, u32, String, Vec<u8>)> = Vec::new();
+    let mut rng = 0x2545_f491_4f6c_dd1du64;
+    let mut lost = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64 <= link.loss
+    };
+    for round in rounds {
+        for (to, at, from, d) in std::mem::take(&mut wire) {
+            if at > round {
+                wire.push((to, at, from, d));
+            } else if live[to] {
+                r.nets[to].heard(&from, &d);
+            }
+        }
+        for i in (0..r.names.len()).filter(|&i| live[i]) {
+            let np = &mut r.nets[i];
+            let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| mash(s, np.tick())).collect();
+            r.games[i].frame(np, &local);
+            for (to, d) in np.outgoing() {
+                r.biggest = r.biggest.max(d.len());
+                let out = link.outage.contains(&round) && (!link.oneway || i == 0);
+                if out || lost() || d.len() > DATAGRAM_MAX {
+                    continue;
+                }
+                let j = r.names.iter().position(|n| *n == to).unwrap();
+                wire.push((j, round + link.lag, r.names[i].clone(), d));
+            }
+            np.said.clear();
+            r.ran[i].push(np.tick());
+        }
+        each(round, &mut r, &mut live);
+        ggrs::clock::advance(std::time::Duration::from_micros(16_667));
+    }
+    ggrs::clock::drive(false);
+    r
+}
+
+impl<M: Machine> Run<M> {
+    /// The ticks every machine in `who` has every seat's pads for.
+    fn settled(&self, who: &[usize]) -> usize {
+        who.iter().map(|&i| self.nets[i].confirmed().max(0) as usize).min().unwrap()
+    }
+
+    /// Every machine in `who` ran the same pads and had the same state before every settled tick
+    /// from `from`: how many ticks that is.
+    fn agree(&self, who: &[usize], from: usize) -> usize {
+        let n = self.settled(who);
+        let first = &self.nets[who[0]];
+        for &i in who {
+            let np = &self.nets[i];
+            assert!(np.log.len() >= n && np.hashes.len() >= n, "{}: {} ticks logged, {n} settled", np.me, np.log.len());
+            let at = (from..n).find(|&t| np.hashes[t] != first.hashes[t]);
+            assert_eq!(at, None, "{}'s hash differs from {}'s at tick {at:?}", np.me, first.me);
+            let at = (from..n).find(|&t| np.log[t] != first.log[t]);
+            assert_eq!(at, None, "{} ran other pads than {} at tick {at:?}", np.me, first.me);
+        }
+        n - from
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The wire
+// ---------------------------------------------------------------------------------------------------
+
+#[test]
+fn a_pad_goes_on_the_wire_as_its_own_bytes() {
+    for r in [Report::idle(), Report::missing(), mash(3, 77), mash(0, 1234)] {
+        let w = wire(&r);
+        assert_eq!(w.0[..], r.0[..20], "the wire is the report's first twenty bytes");
+        assert_eq!(unwire(w), r, "and comes back as the report");
+    }
+    assert_eq!(net::Pad::default(), wire(&Report::idle()));
+}
+
+#[test]
+fn a_big_ggrs_message_goes_in_pieces() {
+    use net::link::{Kind, Pieces, ggrs, open};
+    let body: Vec<u8> = (0..3000u32).map(|i| (i * 7) as u8).collect();
+    assert_eq!(ggrs(0, 9, &body[..100]).len(), 1, "a small one is one datagram");
+    let parts = ggrs(2, 9, &body);
+    assert_eq!(parts.len(), 3);
+    assert!(parts.iter().all(|d| d.len() <= DATAGRAM_MAX));
+    let mut got = Pieces::default();
+    let mut put = |got: &mut Pieces, d: &[u8]| match open(d) {
+        Some(Kind::Piece { round: 2, id, index, count, body }) => got.heard("g", id, index, count, body),
+        _ => panic!("not a piece"),
+    };
+    // out of order, one of an older message lost in between
+    assert_eq!(put(&mut got, &ggrs(2, 8, &body)[0]), None);
+    assert_eq!(put(&mut got, &parts[2]), None);
+    assert_eq!(put(&mut got, &parts[0]), None);
+    assert_eq!(put(&mut got, &ggrs(2, 8, &body)[1]), None, "the older message's late piece");
+    assert_eq!(put(&mut got, &parts[1]).as_deref(), Some(&body[..]));
+}
+
+#[test]
+fn a_lineup_reads_and_names_its_host() {
+    let l = Lineup::parse("host,host,g,-,k,g").unwrap();
+    assert_eq!(l.host(), "host");
+    assert_eq!(l.peers(), ["host", "g", "k"]);
+    assert_eq!(l.mine("g"), [2, 5]);
+    assert_eq!(l.text(), "host,host,g,-,k,g");
+    assert!(Lineup::parse("a,b,c,d,e,f,g,h,i").is_err(), "nine seats");
+    assert!(Lineup::parse("-,-").is_err(), "nobody");
+}
+
+#[test]
+fn the_online_step_is_the_steady_60_hz_one() {
+    let dt = rides::steady_dt();
+    assert!((dt.0 - 1.0 / 60.0).abs() < 0.001, "{}", dt.0);
+    assert_eq!(dt.0.to_bits(), rides::steady_dt().0.to_bits());
+}
+
+// ---------------------------------------------------------------------------------------------------
+// A bad network
+// ---------------------------------------------------------------------------------------------------
+
+/// opentennis's B198 acceptance, on the ride: 20 % of datagrams lost and the rest 5 rounds (83 ms)
+/// on their way, then for 3 s nothing gets through (`oneway`: nothing from the host). Every machine's
+/// ticks go on within a second of the network coming back, nobody waits a second outside it, and every
+/// settled tick has the same pads and the same state everywhere. No desync, no datagram too big.
+fn on_a_bad_network(lineup: &str, oneway: bool) {
+    let link = Link { loss: 0.2, lag: 5, outage: 240..420, oneway };
+    let r = run(lineup, Timing::default(), Ride::new, &link, 0..720, |_, _, _| {});
+    let all: Vec<usize> = (0..r.names.len()).collect();
+    for (i, f) in r.ran.iter().enumerate() {
+        let (mut still, mut worst) = (0, 0);
+        for k in 120..f.len() {
+            still = if f[k] == f[k - 1] { still + 1 } else { 0 };
+            if !(link.outage.start..link.outage.end + 60).contains(&(k as u32)) {
+                worst = worst.max(still);
+            }
+        }
+        let np = &r.nets[i];
+        eprintln!("{}: {} ticks, longest wait {worst} rounds, {} held, {} re-run, {} resent", np.me, f[f.len() - 1], np.rb.held, np.rb.reruns, np.rb.resent);
+        assert!(worst < 60, "{} waited {worst} rounds", np.me);
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+        assert_eq!(np.end, None);
+    }
+    assert!(r.biggest <= DATAGRAM_MAX, "a {}-byte datagram", r.biggest);
+    let n = r.agree(&all, 0);
+    eprintln!("{n} ticks settled and agreed on every machine");
+    assert!(n > 500, "only {n} ticks settled");
+    // every machine re-ran ticks: the guesses were wrong and were put right
+    assert!(r.nets.iter().all(|np| np.rb.reruns > 0));
+}
+
+#[test]
+fn two_peers_on_a_bad_network() {
+    // two seats on each machine
+    on_a_bad_network("host,host,g,g", false);
+}
+
+#[test]
+fn four_peers_and_eight_riders_on_a_bad_network() {
+    on_a_bad_network("host,h,g,g,k,host,g,k", false);
+}
+
+#[test]
+fn a_one_way_outage() {
+    on_a_bad_network("host,g", true);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// A desync
+// ---------------------------------------------------------------------------------------------------
+
+/// The ride runs differently on one machine: both see it at the next checksum, both save every
+/// seat's pads, and the host's report, ridden again offline from a fresh start, is the host's own
+/// ride hash for hash. The ride cannot hand its state over until N1, so nobody mends it: it is said.
+#[test]
+fn a_desync_on_the_ride_is_caught_and_its_inputs_saved() {
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    let mut said = Vec::new();
+    let r = run("host,g", Timing::default(), Ride::new, &link, 0..480, |round, r, _| {
+        if round == 0 {
+            r.games[1].glitch = true;
+        }
+        for np in &r.nets {
+            said.extend(np.said.iter().cloned());
+        }
+    });
+    for np in &r.nets {
+        let first = np.desyncs.first().unwrap_or_else(|| panic!("{} saw no desync", np.me));
+        assert_eq!(first.0, 330, "{}: the first checksum after the glitch", np.me);
+        assert!(np.desynced);
+        let at = np.report.as_ref().expect("a report");
+        let report = net::desync::Report::read(at).unwrap();
+        assert_eq!((report.me.as_str(), &report.lineup), (np.me.as_str(), &np.lineup));
+        assert!(report.why.starts_with("Out of sync at tick 330"), "{}", report.why);
+        if np.me == "host" {
+            let mut sims = sims(2);
+            let mut world = Flat::default();
+            let mut game = Rides { sims: &mut sims, world: &mut world, dt: rides::steady_dt(), after: None };
+            let hashes = report.replay(&mut game);
+            assert!(hashes.len() > 330);
+            assert_eq!(hashes[..], np.hashes[..hashes.len()], "the report rides again to the host's hashes");
+        }
+        std::fs::remove_file(at).unwrap();
+    }
+    assert!(r.nets[0].said.is_empty());
+}
+
+/// The same on [`Tally`], which can say its state in bytes: caught at 330 on both, the host's state
+/// goes out in pieces over a lossy link, the guest takes it and runs on, and from the tick it took it
+/// at every settled tick agrees again — no desync after, one resync each side.
+#[test]
+fn a_desync_is_caught_and_resynced() {
+    let link = Link { loss: 0.2, lag: 4, outage: 0..0, oneway: false };
+    let r = run("host,g,g,host", Timing::default(), Tally::new, &link, 0..900, |round, r, _| {
+        if round == 0 {
+            r.games[1].glitch = true;
+        }
+    });
+    let fresh = r.nets[1].resync.fresh as usize;
+    for np in &r.nets {
+        assert_eq!(np.desyncs.first().map(|d| d.0), Some(330), "{}", np.me);
+        assert!(np.desyncs.iter().all(|d| (d.0 as usize) < fresh.max(np.resync.fresh as usize) || d.0 == 330), "{}: {:?}", np.me, np.desyncs);
+        assert_eq!(np.resync.done, 1, "{}: resyncs", np.me);
+        assert!(!np.desynced, "{} still out of sync", np.me);
+        std::fs::remove_file(np.report.as_ref().expect("a report")).unwrap();
+    }
+    assert!(fresh > 330, "taken at {fresh}");
+    let n = r.agree(&[0, 1], fresh);
+    assert!(n > 300, "only {n} ticks agreed after the resync");
+    // and before the glitch they agreed too; between it and the resync they did not
+    assert_eq!(r.nets[0].hashes[..321], r.nets[1].hashes[..321]);
+    assert_ne!(r.nets[0].hashes[330], r.nets[1].hashes[330]);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// A silent peer
+// ---------------------------------------------------------------------------------------------------
+
+fn short() -> Timing {
+    Timing { wait: 5.0, ..Timing::default() }
+}
+
+/// `h` goes silent at round 300 for good: the others hold and say so, and after the wait the host
+/// restarts the ride without it — its seat empty — and the two ride on in sync.
+#[test]
+fn a_silent_peer_is_waited_for_then_ridden_on_without() {
+    let link = Link { loss: 0.1, lag: 3, outage: 0..0, oneway: false };
+    let mut notices = Vec::new();
+    let mut held = None;
+    let r = run("host,h,g", short(), Tally::new, &link, 0..1500, |round, r, live| {
+        if round == 300 {
+            live[1] = false;
+        }
+        if round == 600 {
+            notices.push(r.nets[2].notice.clone());
+            held = Some((r.nets[0].tick(), r.nets[2].tick()));
+        }
+        if round == 660 {
+            assert_eq!(Some((r.nets[0].tick(), r.nets[2].tick())), held, "the ride held while h was away");
+        }
+    });
+    assert!(notices[0].starts_with("Waiting for h..."), "{:?}", notices);
+    for i in [0, 2] {
+        let np = &r.nets[i];
+        assert_eq!(np.lineup.text(), "host,-,g", "{}", np.me);
+        assert_eq!((np.recover.restarts, np.rb.round, np.end.as_deref()), (1, 1, None), "{}", np.me);
+    }
+    let from = r.nets[0].rb.base;
+    let n = r.agree(&[0, 2], 0);
+    assert!(n > from + 300, "{n} settled, restarted at {from}");
+    // the empty seat's pad is unplugged from the restart on
+    assert_eq!(r.nets[0].log[from + 10][1], wire(&Report::missing()));
+}
+
+/// `h` silent for 4 s, past the 3 s that makes it away but inside the wait: the host says so, and
+/// when it is heard again the ride goes on with everyone in it, nothing restarted.
+#[test]
+fn an_away_peer_back_in_time_rides_on() {
+    let link = Link { loss: 0.1, lag: 3, outage: 0..0, oneway: false };
+    let mut away = false;
+    let r = run("host,h,g", short(), Tally::new, &link, 0..1200, |round, r, live| {
+        live[1] = !(300..540).contains(&round);
+        away |= r.nets[0].recover.away == ["h"];
+    });
+    assert!(away, "h was never away");
+    for np in &r.nets {
+        assert_eq!((np.recover.restarts, np.lineup.text().as_str(), np.end.as_deref()), (0, "host,h,g", None), "{}", np.me);
+        assert!(np.recover.away.is_empty());
+    }
+    let n = r.agree(&[0, 1, 2], 0);
+    assert!(n > 700, "only {n} ticks settled");
+}
+
+/// The host gone for good: the others wait and end the ride.
+#[test]
+fn a_silent_host_ends_the_ride() {
+    let link = Link { loss: 0.0, lag: 2, outage: 0..0, oneway: false };
+    let r = run("host,g", short(), Tally::new, &link, 0..1200, |round, _, live| {
+        if round == 200 {
+            live[0] = false;
+        }
+    });
+    assert_eq!(r.nets[1].end.as_deref(), Some("the host stopped answering: the ride is over"));
+}
+
+/// On the ride, which cannot hand its state over until N1: a peer that does not come back ends the
+/// ride for everyone, said, rather than a restart nobody could take.
+#[test]
+fn on_the_ride_a_peer_that_does_not_come_back_ends_it() {
+    let link = Link { loss: 0.0, lag: 2, outage: 0..0, oneway: false };
+    let r = run("host,h,g", short(), Ride::new, &link, 0..900, |round, _, live| {
+        if round == 200 {
+            live[1] = false;
+        }
+    });
+    for i in [0, 2] {
+        let end = r.nets[i].end.as_deref().unwrap_or_else(|| panic!("{} rode on", r.names[i]));
+        assert!(end.starts_with("h went silent"), "{end}");
+    }
+    let _ = WINDOW;
+    let _ = r.games[0].hash();
+}

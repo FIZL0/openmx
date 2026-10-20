@@ -1,0 +1,336 @@
+//! **Online play** (N2): ggrs rollback between up to eight riders on up to eight machines, any number
+//! of them on one machine, taken from opentennis (`crates/hst-play/src/play/rollback.rs`, `resync.rs`,
+//! `recover.rs`, `netplay.rs`) with its numbers kept.
+//!
+//! Each machine runs the next tick at once on its own seats' pads (sent [`DELAY`] ticks ahead) and a
+//! guess for everyone else's (their last pads held). When a peer's real pads for a guessed tick arrive
+//! and differ, the ride goes back to that tick and runs the ticks since again on the real ones, all
+//! before the next frame is drawn ([`rollback`]). A peer more than [`WINDOW`] ticks behind holds the
+//! others. Every [`HASH_EVERY`]th tick's state hash goes to the others with the inputs, and two that
+//! differ on a confirmed tick are a desync: every seat's pads are written out ([`desync`]), and the
+//! host sends its own state for the others to take on ([`resync`]). A peer that goes quiet is waited
+//! for, and then ridden on without ([`recover`]).
+//!
+//! # The pieces
+//!
+//! * [`Game`] is what the session drives: save, restore, a tick on every seat's pad, a hash, and
+//!   the state as bytes. [`rides::Rides`] is the shell's — one [`game_sim::Sim`] a seat — and the
+//!   tests drive the same session over it.
+//! * A seat's pad goes on the wire as the **original's own pad bytes** ([`wire`]): the twenty bytes
+//!   of [`Report`] the game's poll reads, so a pad that rode here rides the same on every machine,
+//!   pressures and all.
+//! * [`Netplay`] is one machine's whole session: ggrs' (in [`rollback`]), the messages beside it
+//!   ([`link`]), and the resync and recovery bookkeeping. It speaks in datagrams to named peers and
+//!   nothing else ([`Netplay::heard`], [`Netplay::outgoing`]): which socket carries them is the
+//!   caller's ([`udp`] in the shell, a simulated link in `tests/netplay.rs`, iroh once N3 lands).
+//!
+//! # What changed from opentennis
+//!
+//! * No Bevy: the session is a plain value the frame loop calls once a frame, and the game is a
+//!   trait rather than a `World` and its schedule.
+//! * One transport, datagrams. opentennis's pause, end-of-match and resync messages went over iroh
+//!   streams; here they are [`link`]'s own small reliable channel over the same datagrams ggrs uses,
+//!   so a lossy link loses them too and the tests prove they get there anyway.
+//! * No lobby, no bots, no rejoin, no "switched away": those are the front end's and the transport's
+//!   (N3). A peer that stays away past the wait has its seats emptied — the rider's pad unplugged —
+//!   instead of a bot taking them or everyone going back to a lobby that does not exist yet.
+//! * The desync report is a text file of hex pads rather than JSON (no serde_json here), and it
+//!   reads back ([`desync::Report::read`]) so a desync can be ridden again offline.
+
+#![forbid(unsafe_code)]
+
+pub mod desync;
+pub mod link;
+pub mod recover;
+pub mod resync;
+pub mod rides;
+pub mod rollback;
+pub mod udp;
+
+use std::path::PathBuf;
+
+use game_sim::input::Report;
+use serde::{Deserialize, Serialize};
+
+use link::{Link, Msg};
+
+/// The local input delay, ticks.
+pub const DELAY: usize = 2;
+/// How many ticks a machine may run on guessed pads before it waits (ggrs' prediction window).
+/// opentennis's B197: 80 (1.3 s), so the others ride on through a peer's 1 s hitch instead of
+/// stalling (ggrs' input queue holds 128).
+pub const WINDOW: usize = 80;
+/// Hashes are compared every this many ticks.
+pub const HASH_EVERY: u32 = 30;
+/// The most seats a ride has (P35's seats; one rider each).
+pub const SEATS: usize = 8;
+
+/// The pad bytes a seat sends: bytes 0 to 19 of the pad library's report — status, mode, the button
+/// word, the four stick bytes and the twelve pressures, everything the original's poll reads. The
+/// report's last twelve bytes are never read by the game and never set by this shell.
+pub const WIRE: usize = 20;
+
+/// A seat's pad on the wire ([`wire`]); an idle pad by default, which is what ggrs assumes for a
+/// seat before its first real one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Pad(pub [u8; WIRE]);
+
+impl Default for Pad {
+    fn default() -> Pad {
+        wire(&Report::idle())
+    }
+}
+
+/// A pad report as it goes on the wire: its first [`WIRE`] bytes, as the pad library left them.
+pub fn wire(r: &Report) -> Pad {
+    let mut p = [0; WIRE];
+    p.copy_from_slice(&r.0[..WIRE]);
+    Pad(p)
+}
+
+/// The report a seat's wire bytes stand for; the bytes past [`WIRE`] are zero, as in every report
+/// [`Report::idle`] and the shell's pad build.
+pub fn unwire(p: Pad) -> Report {
+    let mut r = [0; game_sim::input::REPORT_BYTES];
+    r[..WIRE].copy_from_slice(&p.0);
+    Report(r)
+}
+
+/// What a session drives: the whole ride, as rollback needs it.
+///
+/// `State` is a snapshot ggrs keeps one of a tick (cheap to clone: the shell's shares its tables).
+/// `encode`/`decode` are the state as bytes, for a resync and a restart; a game that cannot yet say
+/// its state in bytes answers `None`, and then a desync is reported but not mended and a silent peer
+/// ends the ride rather than being ridden on without.
+pub trait Game {
+    type State: Clone + 'static;
+    fn save(&self) -> Self::State;
+    fn restore(&mut self, state: &Self::State);
+    /// One tick, every seat's pad in seat order (a seat nobody sits in has [`Report::missing`]).
+    fn step(&mut self, pads: &[Report]);
+    /// The state in 64 bits, the same on every machine.
+    fn hash(&self) -> u64;
+    fn encode(&self) -> Option<Vec<u8>>;
+    fn decode(&mut self, bytes: &[u8]) -> Result<(), String>;
+}
+
+/// Who sits where: each seat's peer, or nobody. Every machine starts with the same line-up (the
+/// lobby's, once N3 has one); the **host** is the peer in the first taken seat.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lineup {
+    pub seats: Vec<Option<String>>,
+}
+
+impl Lineup {
+    /// `host,host,g,-`: a peer name a seat, `-` for nobody.
+    pub fn parse(s: &str) -> Result<Lineup, String> {
+        let seats: Vec<Option<String>> = s
+            .split(',')
+            .map(|p| p.trim())
+            .map(|p| (p != "-" && !p.is_empty()).then(|| p.to_string()))
+            .collect();
+        if seats.len() > SEATS {
+            return Err(format!("{} seats, the most is {SEATS}", seats.len()));
+        }
+        if seats.iter().all(Option::is_none) {
+            return Err("nobody in any seat".into());
+        }
+        Ok(Lineup { seats })
+    }
+
+    pub fn host(&self) -> &str {
+        self.seats.iter().flatten().next().map_or("", |s| s.as_str())
+    }
+
+    /// The seats `me` plays, in seat order.
+    pub fn mine(&self, me: &str) -> Vec<usize> {
+        (0..self.seats.len()).filter(|&s| self.seats[s].as_deref() == Some(me)).collect()
+    }
+
+    /// Every peer with a seat, once each, in seat order.
+    pub fn peers(&self) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        for p in self.seats.iter().flatten() {
+            if !v.contains(p) {
+                v.push(p.clone());
+            }
+        }
+        v
+    }
+
+    pub fn text(&self) -> String {
+        self.seats.iter().map(|s| s.as_deref().unwrap_or("-")).collect::<Vec<_>>().join(",")
+    }
+}
+
+/// How long the recovery waits, seconds (opentennis's numbers; `tests/netplay.rs` shortens the wait).
+#[derive(Clone, Copy, Debug)]
+pub struct Timing {
+    /// A peer not heard for this long is away.
+    pub silent: f32,
+    /// ... before it has been heard at all (a machine still loading its disc).
+    pub loading: f32,
+    /// How long the others wait for an away peer before its seats are emptied.
+    pub wait: f32,
+    /// How long the guests wait for a silent host before the ride ends.
+    pub host_wait: f32,
+}
+
+impl Default for Timing {
+    fn default() -> Timing {
+        Timing { silent: recover::SILENT, loading: recover::LOADING, wait: recover::WAIT, host_wait: recover::HOST_WAIT }
+    }
+}
+
+/// One machine's online session.
+pub struct Netplay<S: Clone + 'static> {
+    pub me: String,
+    pub lineup: Lineup,
+    pub timing: Timing,
+    /// Where a desync's report goes.
+    pub dumps: PathBuf,
+    pub rb: rollback::Rollback<S>,
+    pub link: Link,
+    /// Every seat's pads, every tick, as the ride ran them (re-runs write over the guesses).
+    pub log: Vec<Vec<Pad>>,
+    /// The state's hash before every tick, as the ride ran it (re-runs write over it too).
+    pub hashes: Vec<u64>,
+    pub resync: resync::Resync,
+    pub recover: recover::Recover,
+    /// Hashes differed and no resync has mended it yet.
+    pub desynced: bool,
+    /// Every desync seen: (tick, this machine's hash, a peer's).
+    pub desyncs: Vec<(u32, u64, u64)>,
+    /// The desync report, once written (once a session).
+    pub report: Option<PathBuf>,
+    /// Why the session is over, once it is.
+    pub end: Option<String>,
+    /// What the frame would say on screen ("Waiting for g... 12 s"); empty: nothing.
+    pub notice: String,
+    /// Log lines not printed yet (the caller prints them; the tests keep them quiet).
+    pub said: Vec<String>,
+}
+
+impl<S: Clone + 'static> Netplay<S> {
+    pub fn new(lineup: Lineup, me: &str, timing: Timing, dumps: PathBuf) -> Result<Netplay<S>, String> {
+        if lineup.mine(me).is_empty() {
+            return Err(format!("{me} has no seat in {}", lineup.text()));
+        }
+        let rb = rollback::Rollback::new(&lineup, me, 0, 0).map_err(|e| format!("ggrs: {e}"))?;
+        let others = lineup.peers().into_iter().filter(|p| p != me);
+        Ok(Netplay {
+            me: me.to_string(),
+            recover: recover::Recover::new(others),
+            lineup,
+            timing,
+            dumps,
+            rb,
+            link: Link::default(),
+            log: Vec::new(),
+            hashes: Vec::new(),
+            resync: resync::Resync::default(),
+            desynced: false,
+            desyncs: Vec::new(),
+            report: None,
+            end: None,
+            notice: String::new(),
+            said: Vec::new(),
+        })
+    }
+
+    pub fn host(&self) -> bool {
+        self.lineup.host() == self.me
+    }
+
+    /// The tick the next run is.
+    pub fn tick(&self) -> usize {
+        self.rb.frame
+    }
+
+    /// The last tick every seat's pads are in for, here.
+    pub fn confirmed(&self) -> i64 {
+        self.rb.base as i64 + self.rb.sess.confirmed_frame() as i64
+    }
+
+    fn say(&mut self, s: String) {
+        self.said.push(s);
+    }
+
+    /// The session is over, with why.
+    pub fn finish(&mut self, why: String) {
+        if self.end.is_none() {
+            self.say(format!("online: {why}"));
+            self.end = Some(why);
+        }
+    }
+
+    /// A datagram from peer `from`.
+    pub fn heard(&mut self, from: &str, data: &[u8]) {
+        self.recover.heard_from(from);
+        match link::open(data) {
+            Some(link::Kind::Ggrs(round, body)) => self.rb.heard(from, round, body),
+            Some(link::Kind::Reliable(seq, body)) => {
+                for m in self.link.heard(from, seq, body) {
+                    self.take(from, m);
+                }
+            }
+            Some(link::Kind::Piece { round, id, index, count, body }) => self.rb.piece(from, round, id, index, count, body),
+            Some(link::Kind::Ack(next)) => self.link.acked(from, next),
+            Some(link::Kind::Alive) | None => {}
+        }
+    }
+
+    /// A message from a peer, in order.
+    fn take(&mut self, from: &str, m: Msg) {
+        match m {
+            Msg::State { .. } | Msg::Resynced(_) => resync::heard(self, from, m),
+            Msg::Away { .. } | Msg::Restart { .. } => recover::heard(self, from, m),
+            Msg::End(why) => self.finish(why),
+        }
+    }
+
+    /// A message to every other peer.
+    pub(crate) fn tell(&mut self, m: Msg) {
+        for p in self.lineup.peers() {
+            if p != self.me {
+                self.link.send(&p, m.clone());
+            }
+        }
+    }
+
+    /// Everything to send now: (peer, datagram).
+    pub fn outgoing(&mut self) -> Vec<(String, Vec<u8>)> {
+        let mut out = self.rb.outgoing();
+        out.extend(self.recover.alive(&self.lineup, &self.me));
+        out.extend(self.link.outgoing());
+        out
+    }
+
+    /// One frame of real time (`dt` seconds, a 60th at full speed): ggrs' upkeep, the recovery's
+    /// clocks, a state taken from the host, and then this frame's ticks — none, one, or two to catch
+    /// up — on `local`, this machine's seats' pads in seat order. Re-runs happen inside.
+    pub fn frame<G: Game<State = S>>(&mut self, game: &mut G, local: &[Report], dt: f32) {
+        self.poll();
+        recover::tick(self, dt);
+        recover::restarted(self, game);
+        resync::take_state(self, game);
+        if self.end.is_some() || self.rb.sess.current_state() != ggrs::SessionState::Running {
+            return;
+        }
+        rollback::gate(self, game, local);
+        resync::send_state(self, game);
+    }
+
+    /// ggrs' upkeep (acks, keep-alives, its events), every frame.
+    fn poll(&mut self) {
+        self.rb.sess.poll_remote_clients();
+        self.rb.resend();
+        let events: Vec<_> = self.rb.sess.events().collect();
+        for e in events {
+            if let ggrs::GgrsEvent::DesyncDetected { frame, local_checksum, remote_checksum, .. } = e {
+                let t = self.rb.base as u32 + frame as u32;
+                desync::seen(self, (t, local_checksum as u64, remote_checksum as u64));
+            }
+        }
+    }
+}
