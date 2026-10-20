@@ -128,6 +128,10 @@ mod hud;
 mod moment;
 mod pad;
 mod split;
+// The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
+// is, the `.phy` lookup is the only part of it the shell calls.
+#[allow(dead_code)]
+mod roster;
 mod vehicle;
 mod window;
 
@@ -614,18 +618,14 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| format!("the bike archive has no member ending in {name}"))?;
             (archives[1].read_suffix(name)?, e.name.clone())
         }
+        // The garage's lookup (P37), on the freeride's own set: a seat's pick is the same call with
+        // its set in place of the freeride constants.
         None => {
-            let freeride =
-                track::physics_file(track::FREERIDE_ENGINE, track::FREERIDE_PRO, track::Tuning::P);
-            let wanted = [freeride.clone(), format!("{}.phy", args.bike), ".phy".to_string()];
-            let (want, e) = wanted
-                .iter()
-                .find_map(|w| archives[1].find_suffix(w).map(|e| (w, e)))
-                .ok_or("the bike archive has no .phy")?;
-            if *want != freeride {
-                println!("phy: the bike archive has no {freeride}; riding {} instead", e.name);
+            let (bytes, member, note) = roster::physics(&archives[1], roster::Set::FREERIDE, &args.bike)?;
+            if let Some(note) = note {
+                println!("phy: {note}");
             }
-            (archives[1].read_suffix(want)?, e.name.clone())
+            (bytes, member)
         }
     };
     let phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
