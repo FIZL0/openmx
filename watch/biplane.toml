@@ -1,0 +1,366 @@
+# biplane.toml — the human's biplane recording (C7), played back on the original: the plane's motion,
+# its eight controls as the game reads them, what it made of them, the prop and the crash state.
+#
+#   ./kit record --dry-run watch/biplane.toml
+#   ./kit pcsx2 with -- bash research/journal/2026-10-20-c7-c7-biplane-capture/playback/play_capture.sh \
+#       PID context/recordings/biplane.p2m2 10971 1718 context/capture/acceptance/biplane.csv
+#
+# The recording's state (Free06, frame_counter 10970) already has the human in the plane, standing on
+# the ground: the first actor in the manager's list is the biplane, type 1, owned by the local human's
+# player record, while the human's rider has no player and the human's Race250 stands parked as the
+# eighth entry. So the chains below are the first, fourth and eighth list entries, measured on that
+# state and on nothing else; if `plane_type` is not 1 or `plane_ctl_src` is not 1, the list moved.
+#
+# Where every offset comes from (research/oracle.txt, C7 block, and the journal entry):
+#   the plane's input step writes +0x338..+0x348 from the player record's stick (+0x324/+0x328) and
+#   control table (+0x334); the joystick step turns those into +0x34c..+0x364; the pitch autopilot
+#   into +0x358 and +0x584; the per-tick measure derives +0x590..+0x630 from the body at +0x160; the
+#   wreck step owns +0x3b0..+0x3bc; the engine at +0x400 the prop.
+#
+# Unlike acceptance.toml this is not a fixture spec yet (S34 builds that): it keeps every = 1 and the
+# same pad columns so it can become one, and a row carries the whole plane, not the bike.
+
+[watch]
+name        = "biplane"
+description = "the human flying the biplane on Free06: controls in, plane and prop out"
+every       = 1          # one row per tick
+frames      = 1718       # the tape is 3,437 fields = 1,718 ticks after the state's own
+
+[setup]
+warmup = 0               # the playback script loads the state through PCSX2's Play, not the kit
+
+# --- when the frame was, and how long the game thought it was ---------------------------------------
+[[field]]
+name = "frame_counter"            # the app object's own tick counter, +1 per tick
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"                       # the dt the simulation was given; 1/30 in play
+addr = "@frame_dt"
+type = "f32"
+
+# The C library's 64-bit LCG state (R5): the number a replay has to start from, because the game draws
+# from it and the port must draw the same. `Fixture::seed` is 32 bits wide, so only the low half of it
+# survives into a fixture file today — see S8's journal entry.
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+# --- the input, as the game's own input manager holds it ---------------------------------------------
+# Sixteen controls, 0x18 bytes each; `held` is 1 while down. This is the input the simulation reads, so
+# it is the one a fixture is built from: no bit permutation to guess, unlike the wire word below.
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+# --- the input, as libpad left it on the wire -------------------------------------------------------
+# Both 0x80-byte halves of port 0's buffer and both stamps, because `scePadRead` takes the half with
+# the larger stamp and a PINE row is sampled *after* the tick — by which time the IOP has refreshed the
+# other half, so the half the game actually read is the one with the *smaller* stamp (C5 measured this
+# on 300 of 300 rows). Bytes [2..3] are the button word, active low; [4..7] are RX RY LX LY, centre
+# 0x7f. The sticks come from here because the control state has no axes.
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+# --- which actor this is: the plane, flown by the local human -------------------------------------
+
+[[field]]
+name = "plane_type"            # +0x00: 1 for the plane (a bike is 4, a rider 2)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "plane_class"           # +0x48: the class vtable; the biplane class, the same on every row
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "plane_player"          # +0x20: the player record flying it; 0 once nobody is
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "plane_ctl_src"         # +0x20 -> +0x34: 1 = a local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "plane_flown"           # +0x334: the joystick step runs only while this is set; else it zeroes every command
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x334"
+type = "u32"
+
+# --- the motion: the rigid body at +0x160 and what the per-tick measure derives from it -----------
+
+[[field]]
+name = "body_pos"              # body +0x60: the centre of gravity, world
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "body_vel"              # body +0x70: velocity, world units per second (its length is +0x598)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "body_rate"             # body +0x1b0: angular velocity, world, rad/s (the throw writes its random spin here)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "body_quat"             # body +0x170: orientation quaternion, x y z w
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "plane_xform"           # +0x600: 4x4 world transform built from the quaternion; row 3 (+0x630) the model origin
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x600"
+type = "mat4"
+
+[[field]]
+name = "plane_euler"           # +0x5f0: the quaternion as euler angles (quat_to_euler)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x5f0"
+type = "f32x4"
+
+[[field]]
+name = "local_vel"             # +0x5c0: velocity in the plane's own frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x5c0"
+type = "f32x4"
+
+[[field]]
+name = "local_rate"            # +0x5b0: angular velocity in the plane's own frame; x is what the pitch autopilot holds
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x5b0"
+type = "f32x4"
+
+[[field]]
+name = "speed"                 # +0x598: |velocity|; under MinWreckSpeed (+0x3b8) a touch does not crash
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x598"
+type = "f32"
+
+[[field]]
+name = "alpha"                 # +0x59c: angle of attack from the local velocity
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x59c"
+type = "f32"
+
+[[field]]
+name = "beta"                  # +0x5a0: sideslip from the local velocity
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x5a0"
+type = "f32"
+
+[[field]]
+name = "on_ground"             # +0x590: any of the three tyres touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x590"
+type = "u32"
+
+# --- the eight controls as the plane reads them: the player record's stick and control table ------
+
+[[field]]
+name = "stick_x"               # player +0x324: left stick x, -1..1 -> aileron, cubed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x20 -> 0x324"
+type = "f32"
+
+[[field]]
+name = "stick_y"               # player +0x328: left stick y, -1..1 -> elevator, cubed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x20 -> 0x328"
+type = "f32"
+
+# The player record's control table at +0x334: 0x18 bytes a control in input::Control order, the
+# value the plane reads at +4. The plane's commands are bound (this state's map, pad 0) to
+#   0x0e throttle increase = 2 Cross     0x0f throttle decrease = 3 Square
+#   0x14 rudder (-1)       = 4 L1        0x15 rudder (+1)       = 5 R1
+#   0x02 elevator (+1)     = 12 Up       0x03 elevator (-1)     = 14 Down
+#   0x00 aileron (+1)      = 15 Left     0x01 aileron (-1)      = 13 Right
+[[array]]
+name   = "pctl"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x20 -> 0x334"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "value"
+off  = 4
+type = "f32"
+
+# --- what the input step made of them (the plane's vtable +0x20), then the joystick step (+0x19c) ---
+
+[[field]]
+name = "thr_up"                # +0x338: command 0x0e's value: throttle increase
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x338"
+type = "f32"
+
+[[field]]
+name = "thr_down"              # +0x33c: command 0x0f's value: throttle decrease
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x33c"
+type = "f32"
+
+[[field]]
+name = "elev_cmd"              # +0x340: -sign(y)|y|^3, or +1 Up / -1 Down
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x340"
+type = "f32"
+
+[[field]]
+name = "ail_cmd"               # +0x344: -sign(x)|x|^3, or +1 Left / -1 Right
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x344"
+type = "f32"
+
+[[field]]
+name = "rud_cmd"               # +0x348: -1 L1, +1 R1, else 0
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x348"
+type = "f32"
+
+[[field]]
+name = "throttle"              # +0x34c: ramped by ThrottleIncrement*dt, [ReverseThrottle, 1]; the engine reads it
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x34c"
+type = "f32"
+
+[[field]]
+name = "thr_braking"           # +0x350: the throttle-decrease value as the step last stored it
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x350"
+type = "f32"
+
+[[field]]
+name = "pitch_cmd"             # +0x354: elevator command after its rate limit, scaled off with roll
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x354"
+type = "f32"
+
+[[field]]
+name = "elevator"              # +0x358: the elevator deflection the autopilot gives the aerodynamics
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x358"
+type = "f32"
+
+[[field]]
+name = "aileron"               # +0x35c: aileron deflection, rate-limited toward ail_cmd * MaxAileron
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x35c"
+type = "f32"
+
+[[field]]
+name = "rudder"                # +0x360: rudder deflection, rate-limited toward rud_cmd * MaxRudder
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x360"
+type = "f32"
+
+[[field]]
+name = "nose_steer"            # +0x364: rate-limited toward rud_cmd, unscaled
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x364"
+type = "f32"
+
+[[field]]
+name = "pitch_int"             # +0x584: the pitch-rate autopilot's integrator, clamped to MaxElevator
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x584"
+type = "f32"
+
+# --- the prop: the engine at +0x400 ---------------------------------------------------------------
+
+[[field]]
+name = "eng_power"             # engine +0x5c: MaxPower * throttle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x400 -> 0x5c"
+type = "f32"
+
+[[field]]
+name = "prop_rpm"              # engine +0x60: lerp(idle +0x64, max +0x68) by throttle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x400 -> 0x60"
+type = "f32"
+
+[[field]]
+name = "eng_thrust"            # engine +0x6c: power * 550 * altitude and prop efficiency / max(speed, 1)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x400 -> 0x6c"
+type = "f32"
+
+[[field]]
+name = "prop_turn"             # engine +0x44: the rpm the drawn prop is turned at, * 2pi/60 * dt
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x400 -> 0x44"
+type = "f32"
+
+[[field]]
+name = "prop_angle"            # engine +0x48: the drawn prop's angle, wrapped to +-pi
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x400 -> 0x48"
+type = "f32"
+
+[[field]]
+name = "eng_sound"             # engine +0x70: the engine sound's rpm, with its own wobble
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x400 -> 0x70"
+type = "f32"
+
+# --- the crash state ------------------------------------------------------------------------------
+
+[[field]]
+name = "crash"                 # +0x3b0: 0 flying, 1 crashed (a hit above MinWreckSpeed, or upside down on the ground), 0xd thrown (out of the area)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x3b0"
+type = "u32"
+
+[[field]]
+name = "crash_down"            # +0x3b4: a throw (0xd) has come down; its WreckTime runs from here
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x3b4"
+type = "u32"
+
+[[field]]
+name = "crash_time"            # +0x3bc: seconds in the crash; recovery past WreckTime (+0x3c0)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x3bc"
+type = "f32"
+
+# --- the human's rider (fourth list entry) and the human's 250 (eighth): the switch, if there is one ---
+
+[[field]]
+name = "rider_type"            # +0x00: 2 = a rider
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "rider_player"          # +0x20: 0 while the human flies
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"          # +0x748: the rider's wreck reason
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "bike_type"             # +0x00: 4 = a vehicle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "bike_player"           # +0x20: the human's player record, even while flying
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "bike_ctl_src"          # 1 = a local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "bike_vel"              # +0x130: 0.8 x the body velocity (P22)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x4"
+
+[[field]]
+name = "bike_xform"            # +0x180: row 3 the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+

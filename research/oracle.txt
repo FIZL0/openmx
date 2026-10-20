@@ -2408,3 +2408,68 @@ quat_axes boot 0x0013f380 (132 bytes) a quaternion's axes, which the look arm re
 #   1.0x its own velocity times the frame's dt. The 1.25 was 1/0.8; the 1/24 s step was 30/24 of it.
 #   In body units (bike_vel / 0.8) the original's flights fall at -32.2 ft/s^2 at vy = 0 -- phy::G --
 #   proved against the port in crates/game-sim/tests/air.rs (a_flight_falls_and_carries_like_the_originals).
+# C7 -- the biplane (Free06's plane, biplane.p2m2): its class, its controls as the game reads them, the
+#   prop and the crash state. Read from the decompilation and proved on the capture
+#   context/capture/acceptance/biplane.csv (watch/biplane.toml); journal 2026-10-20-c7-c7-biplane-capture.
+# The plane is a type-1 actor in the GameManager's list (@game_manager -> 0x34 -> 0x34, nodes {item, prev,
+#   next +8}); in biplane.p2m2's state it is entry 0 (actor 0xc44a40), its player record (+0x20) is the
+#   human's -- the same record the human's bike (entry 7, 0xa00050) points at -- with +0x34 = 1, and
+#   +0x334 = 1 while the plane is the one being flown. vtable 0x45b250 (base 0x45b050).
+biplane_load            boot 0x00350a70 (1908 bytes) the load body: builds paths under "Biplane\" (string
+#                                       0x4e2540), reads "%sbiplane.phy" into +0x230 through vtable +0x194
+biplane_ctor            boot 0x003505f0 (940 bytes) zeroes the fields
+biplane_base_dtor       boot 0x003509a0 (196 bytes) the base class's destructor (vtable 0x45b050)
+biplane_phy_read        boot 0x003511f0 (3072 bytes) the .phy keys (strings 0x43ed90..0x43f2b0):
+#   engine object +0x400 (MaxPower +0x4c, MaxAltitude +0x54, MinPropEfficiency +0x3c,
+#   MinPropEfficiencySpeed +0x40 x 1.46666); aero object +0x404 (Chord, Span, ... +0x4c..+0xc4); tyres
+#   +0x408/+0x40c/+0x410; ThrottleIncrement +0x368, ReverseThrottle +0x36c, Aileron/Elevator/Rudder
+#   ControlRateLimit +0x370/+0x374/+0x378; MaxElevator +0x37c, MaxAileron +0x380, MaxRudder +0x384,
+#   ElevatorRampOffRollAngle +0x38c, ElevatorOffRollAngle +0x390, MinElevator +0x394; autopilot
+#   AileronDeadZone +0x398, MaxPitchRate +0x39c, MaxRollAngle +0x3a0, PitchRateFeedForwardscale +0x3a4,
+#   PitchRateGain +0x3a8, PitchRateIntegratorGain +0x3ac; MinWreckSpeed +0x3b8 (x 1.46666, 73.33 in
+#   the state), WreckTime +0x3c0 (5), WreckGravity +0x3c4, WreckDamping +0x3d0, WreckInertia +0x3e0
+player_input_dispatch   boot 0x0025e910 (836 bytes) the player record's per-tick input: sticks at
+#                                       +0x324 (x) +0x328 (y) +0x32c +0x330, the 32-entry control table at
+#                                       +0x334 (stride 0x18, value at +4), and the controlled actor's
+#                                       vtable +0x20 with (sticks, actor, table, pad)
+biplane_input           boot 0x00351e20 (820 bytes; vtable +0x20 through the thunk 0x00355f40) the eight
+#   controls, as commands looked up with pad_control_index: +0x338 throttle up = command 0xe (Cross),
+#   +0x33c throttle down = 0xf (Square); +0x340 elevator = -sign(y)|y|^3 of stick y, or +1 for command 2
+#   (Up) and -1 for 3 (Down) -- -1 is climb, +1 dive; +0x344 aileron = -sign(x)|x|^3, or +1 for command 0
+#   (Left) and -1 for 1 (Right); +0x348 rudder = -1 for command 0x14 (L1), +1 for 0x15 (R1). Bindings as
+#   biplane.p2m2's state holds them for pad 0
+biplane_joystick        boot 0x00352160 (no Ghidra function; vtable +0x19c, dt in $f12) gated on +0x334;
+#   rate-limits the commands into +0x354 pitch (x a roll-based scale from +0x5f8, +0x5d4 and
+#   0x38c/0x390/0x394), +0x35c aileron (toward +0x344 x MaxAileron at +0x370), +0x360 rudder (toward
+#   +0x348 x MaxRudder at +0x378), +0x364 nose wheel (toward +0x348); the throttle +0x34c moves by
+#   ThrottleIncrement x dt, clamped to [ReverseThrottle, 1]; +0x350 the down value. Not flown: all zero
+biplane_autopilot       boot 0x00352460 (no Ghidra function; vtable +0x1a0) the pitch-rate loop: integrator
+#   +0x584 clamped to +-MaxElevator, elevator deflection +0x358; or +0x358 = +0x354 x MaxElevator
+biplane_measure         boot 0x00352960 (1204 bytes) per tick: +0x590 on the ground (any tyre's +0x88),
+#   +0x594 the last one, +0x598 speed |body+0x70|, +0x5c0 local velocity, +0x5b0 local angular rate,
+#   +0x59c alpha, +0x5a0 beta, +0x5f0 euler from the body quaternion, +0x600 the drawn transform
+#   (vu_quat_to_mat3; position = body+0x60 less the rotated CG offset body+0x180), +0x5d0 its forward
+#   row, +0x5e0 its up row (+0x5e4 up.y); then vtable +0x1b8 and +0x1bc
+#   The body is +0x160: +0x60 position, +0x70 velocity, +0x170 quaternion, +0x180 CG offset (0, 3.5,
+#   -2.5), +0x1b0 angular velocity
+biplane_animate         boot 0x00352ff0 (388 bytes; vtable +0x1b8) flaps from +0x354 x MaxElevator, +0x35c
+#                                       and +0x360; the prop node +0x428 turned by the engine's +0x48
+#                                       while the crash state is 0
+biplane_wreck_step      boot 0x00353180 (1104 bytes; vtable +0x1bc) the crash state +0x3b0: 0 flying, 1
+#   crashed (a contact above MinWreckSpeed, a surface that is not ignored, or a contact with up.y < 0),
+#   0xd thrown (outside the area, by position_query below: velocity toward the centre +155.4 up and
+#   random spins); +0x3bc its clock, +0x3b4 "the thrown plane has landed"; recovery through vtable
+#   +0x1c4 once +0x3bc passes WreckTime
+biplane_recover         boot 0x003536e0 (252 bytes; vtable +0x1c4) back to the start, crash state 0
+biplane_set_wreck       boot 0x00354aa0 (120 bytes; vtable +0x1c0)
+biplane_reset_chord     boot 0x00355df0 (332 bytes) commands 0x4c and 0x4d together (L1 and R1 on pad 0)
+#   while on the ground or crashed, once (+0xe0c): biplane_recover early. biplane.p2m2's first crash
+#   ends this way at 2.73 s
+position_query          boot 0x001a6e50 (184 bytes) the wreck step's outside-the-area test (150.0)
+biplane_engine_ctor     boot 0x003500a0 (160 bytes) vtable 0x45afd0; +0x30 points at the throttle
+#                                       (plane+0x34c), +0x38 at plane+0x5d4
+biplane_engine_step     boot 0x003501b0 (1084 bytes) +0x5c power = MaxPower x throttle, +0x60 prop rpm =
+#   lerp(+0x64 = 500, +0x68 = 2500) by throttle, +0x6c thrust = power x 550 x altitude x efficiency /
+#   max(speed, 1), +0x48 prop angle += +0x44 (217.25) x 0.1047198 x dt wrapped to +-pi, +0x70 the
+#   sound's rpm with a wobble, +0x74 its time, +0x58 the body
+biplane_aero_step       boot 0x0034fcb0 (1008 bytes) the aero object's step (coefficients +0x48..+0xf8)
