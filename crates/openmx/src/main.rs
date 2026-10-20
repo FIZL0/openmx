@@ -308,6 +308,10 @@ struct Seat {
     /// Whether Start freezes the ride here. Under the front end it opens the pause instead, which
     /// the loop reads off the menu, so the pass leaves it alone.
     start_freezes: bool,
+    /// Whether this player's pad was pulled out and their seat waits for it (P35). A waiting player
+    /// is paused — not polled, not stepped — while every other player rides on; nothing else in the
+    /// world waits on them.
+    waiting: bool,
     /// What the rider did this frame, kept so the loop can print it after the pass.
     said: rider::Frame,
     /// The hands this pass was stepped with, kept for the body's own animation frame — which runs
@@ -318,6 +322,13 @@ struct Seat {
 impl Seat {
     /// One player's pass: the pad, then the bike.
     fn pass(&mut self, dt: F, place: &mut Place) {
+        // Nobody's hands on the bars: the pad is not polled either, so the input manager's timers
+        // and held buttons are where the pull left them, and the ride goes on from there when the
+        // pad comes back.
+        if self.waiting {
+            self.said = rider::Frame::default();
+            return;
+        }
         // The game's poll, with the frame's dt: this is what turns report bytes into held controls,
         // press and release edges, and stick axes with the game's own dead zone — and then the
         // rider's hands off it, because which button means what lives in the ride and not here.
@@ -380,7 +391,11 @@ impl Game for World<'_> {
         let dt = self.played_dt.unwrap_or(dt);
         // Writing one: the pass's own `dt` and the reports it is about to read, which is what a
         // replay of this tape will be handed (`game_sim::replay::Recorder`).
-        if let Some(tape) = &mut self.tape {
+        // A tape is the first player's, so a pass where they wait for their pad is not on it: the
+        // frames it holds are the passes the first player rode, with no hole where they were paused.
+        if let Some(tape) = &mut self.tape
+            && !self.seats[0].waiting
+        {
             tape.frame(dt, &self.seats[0].reports);
         }
         for seat in &mut self.seats {
@@ -1659,6 +1674,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         garage,
         riding: front.as_ref().is_none_or(|f| f.menu.riding()),
         start_freezes: front.is_none(),
+        waiting: false,
         said: rider::Frame::default(),
         hands: Controls::default(),
     }];
@@ -1671,6 +1687,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             garage: Garage::new(Kind::Bike, None)?,
             riding: front.as_ref().is_none_or(|f| f.menu.riding()),
             start_freezes: front.is_none(),
+            waiting: false,
             said: rider::Frame::default(),
             hands: Controls::default(),
         });
@@ -1753,9 +1770,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // that has run out ends the session — there is no pad behind it to carry on with.
         match &mut head {
             // The seats', otherwise: seat i feeds player i's own pad port (V22's players). A seat
-            // whose pad was pulled out freezes the frame rather than riding on with nobody's hands on
-            // the bars: the engine skips the pass, so a tape being written has no hole in it either.
-            // That is the whole frame for any seat's pad, not only its player's (P35 is blocked on it).
+            // whose pad was pulled out pauses its own player rather than riding on with nobody's
+            // hands on the bars (`Seat::waiting`); the other players ride on.
             None => match &mut *pad_seats {
                 Some(seats) => {
                     let now = seats.frame(&|code| held(&window, code));
@@ -1769,8 +1785,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             None => idle.report(&pad::no_keys),
                         };
                         seat.reports = [report, Report::missing()];
+                        seat.waiting = now.get(i) == Some(&SeatInput::Waiting);
                     }
-                    engine.frozen = now.iter().take(args.players).any(|n| *n == SeatInput::Waiting);
                 }
                 None => {
                     for (seat, idle) in world.seats.iter_mut().zip(&mut idle_pads) {
@@ -1891,8 +1907,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             break;
         }
         // A frame the engine did not simulate is a frame of the tape nobody rode, and the rest of the
-        // ride would be a different run from the one recorded. Nothing sets the engine's frozen flag
-        // while a tape is ridden (P35's seats are not read), so this says so and stops rather than
+        // ride would be a different run from the one recorded. Nothing in the shell sets the engine's
+        // frozen flag (a pulled pad pauses its own player), so this says so and stops rather than
         // carrying on with a hole in the ride.
         if head.is_some() && !step.simulated {
             return Err("the engine skipped a frame while a tape was being ridden".into());
@@ -1923,8 +1939,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // same idles.
             // Neither moves while the plane is up: the bike was left with no controller and nothing steps it.
             let bike_up = seat.garage.up == Kind::Bike;
-            // A pass the engine skipped (a seat's pad is out) moves neither.
-            let moving = seat.riding && simulated;
+            // A pass the engine skipped, or one this player waited out for their pad, moves neither.
+            let moving = seat.riding && simulated && !seat.waiting;
             if let Some(body) = &mut rig.body {
                 // Online the session posed it inside its ticks, so a rollback rolls the body back too.
                 if moving && bike_up && online.is_none() {
@@ -2138,7 +2154,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                 _ => None,
             };
-            rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
+            rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
             if let Some(view) = view_frames.get(v) {
                 split::put(&mut frame, view, *at);
             }
@@ -2176,6 +2192,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // Feet a second to miles an hour, for a number a rider can read.
                 ridden[0].speed.0 * 0.681_818,
                 match (world.seats[0].riding && simulated, world.seats[0].sim.rider.phase()) {
+                    _ if world.seats[0].waiting => " (waiting for the pad)",
                     (false, _) => " (frozen)",
                     _ if !bike_up => " (biplane)",
                     (_, Phase::Riding) => "",
