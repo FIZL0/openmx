@@ -82,6 +82,15 @@ const BRAKE_FADE_RATE: f32 = 0.3;
 const MAX_SPEED: f32 = 1000.0;
 const MAX_ANG_SPEED: f32 = 100.0;
 
+/// **The bike's own speed limit**, squared: 135 ft/s. The rigid body's constructor writes it, as this
+/// literal, and nothing the bike's setup or its `.phy` reads changes it — the live chassis of a
+/// freeride 125 holds it (P21). The clamp is on the chassis' velocity, which is 1.25× what the actor's
+/// `bike_vel` columns show, so 135 here is 108 in a capture's `bike_vel`.
+///
+/// It is not what tops a 125 out on the flat: the original's runs out of torque in top gear at 120.
+/// It is what a downhill or a launch off a ramp is held to.
+const BIKE_MAX_SPEED_SQ: f32 = 18225.0;
+
 // --- what the rider asks for -----------------------------------------------------------------------
 
 /// What the pad says this frame, before the input layer's rate limit.
@@ -411,11 +420,12 @@ impl Ride {
                 quat: chassis::CLEAR,
                 free: [1; 3],
                 ang_free: [1; 3],
-                // The integrator's own limits. The original's come from the vehicle's setup, which
-                // is not ported; a zero would pin the bike where it stands, because the clamp reads
-                // a zero as "no faster than nothing". These are wide enough that neither can fire
-                // on a bike — a stand-in, and listed as one.
-                max_speed_sq: F(MAX_SPEED * MAX_SPEED),
+                // The integrator's own limits. The speed is the original's (P21); the angular
+                // ones come from the vehicle's setup, which is not ported — a zero would pin the
+                // bike where it stands, because the clamp reads a zero as "no faster than nothing",
+                // so those are wide enough that they cannot fire on a bike: a stand-in, and listed
+                // as one.
+                max_speed_sq: F(BIKE_MAX_SPEED_SQ),
                 max_ang_speed_sq: F(MAX_ANG_SPEED * MAX_ANG_SPEED),
                 ang_vel_max: [F(MAX_ANG_SPEED); 3],
                 ang_vel_min: [F(-MAX_ANG_SPEED); 3],

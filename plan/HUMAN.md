@@ -56,6 +56,12 @@ goes through a menu.
       then `sudo chmod -R a+rX /opt/ghidra/Ghidra/Extensions/ghidra-emotionengine-reloaded` — the sleigh
       run writes the `.sla` root-readable-only, so without the chmod it fails identically.
 
+- [ ] **Give the kit's pad back its `/dev/uinput`.** Since the 2026-10-19 reboot `/dev/uinput` is
+      `crw------- root`, so `./kit pad` cannot open it and no agent can drive the game's pad. P21 worked
+      round it with a generated `.p2m2` played over the accessibility bus, which only does straight
+      lines. Fix (2 minutes, `docs/TROUBLESHOOTING.md`): `sudo setfacl -m u:$USER:rw /dev/uinput` for
+      now, and the udev rule there to keep it across reboots. `./kit pad check` says whether it took.
+
 ## Save states and recordings
 
 Agents can load states and replay recordings, but only a person can play the game to the interesting

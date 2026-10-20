@@ -2810,3 +2810,139 @@ fn the_reset_chord_is_the_originals() {
         from_spawn(rolled)
     );
 }
+
+/// P21's capture: the original's `race125p` held flat out from a standstill along the straight
+/// x = 4620 lane of Free09, by a generated input recording — Cross at full pressure, nothing else —
+/// with `watch/acceptance.toml`'s columns and the chassis' and engine's own. In a subdirectory of
+/// `context/capture/` for the reason [`IDLE_CAPTURE`]'s comment gives.
+const FLAT_OUT_CAPTURE: [&str; 2] = ["capture/p21", "flat-throttle.csv"];
+
+/// How many frames the terminal speed is measured over, at either end: the last second of the run.
+const TERMINAL_FRAMES: usize = 30;
+
+/// The capture's terminal speed: how far the chassis' centre of gravity went over the last
+/// [`TERMINAL_FRAMES`] rows, over the time those rows say they took. The distance and not the
+/// `ch_speed` column, so that the port's number below is measured the same way off its own position;
+/// on the capture the two agree to 0.03 ft/s.
+fn captured_terminal_speed(text: &str) -> f32 {
+    let cap = game_sim::replay::Capture::parse(text).expect("the flat-out capture parses");
+    let col = |name: &str| {
+        cap.columns.iter().position(|c| c == name).unwrap_or_else(|| panic!("no {name} column"))
+    };
+    let (x, y, z, dt) = (col("ch_cofg.x"), col("ch_cofg.y"), col("ch_cofg.z"), col("dt"));
+    let at = |row: &Vec<String>, i: usize| row[i].parse::<f32>().expect("a number");
+    let rows = &cap.rows[cap.rows.len() - TERMINAL_FRAMES - 1..];
+    let (a, b) = (&rows[0], &rows[TERMINAL_FRAMES]);
+    let gone = ((at(b, x) - at(a, x)).powi(2)
+        + (at(b, y) - at(a, y)).powi(2)
+        + (at(b, z) - at(a, z)).powi(2))
+    .sqrt();
+    gone / rows[1..].iter().map(|r| at(r, dt)).sum::<f32>()
+}
+
+/// The disc's `race125p.phy` and where the `125_faisst` model hangs its wheels — the bike the
+/// capture was ridden on, read the way `tests/replay.rs` reads it (that file says why each half is
+/// what it is). `None` when the disc is not here.
+fn the_disc_125(tables: &rider::Tables) -> Option<(Phy, (Vf, Vf))> {
+    use game_sim::archive::{Psr, Res};
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(private_dir("iso").join("MX.PSR")).ok()?;
+    let mut front = vec![0u8; 64 << 10];
+    file.read_exact(&mut front).ok()?;
+    let psr = Psr::parse(&front).ok()?;
+    let mut member = |name: &str| -> Option<Vec<u8>> {
+        let e = psr.find(name)?;
+        file.seek(SeekFrom::Start(e.at)).ok()?;
+        let mut bytes = vec![0u8; e.size as usize];
+        file.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    };
+    let leaf = |res: &Res, want: &str| {
+        res.entries
+            .iter()
+            .find(|e| {
+                let n = e.name.to_ascii_lowercase();
+                n == want || n.ends_with(&format!("\\{want}"))
+            })
+            .cloned()
+    };
+    let archives: Vec<String> = psr
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("bike\\") && n.ends_with(".res")
+        })
+        .collect();
+    let (mut phy, mut wheels) = (None, None);
+    for archive in &archives {
+        let Some(bytes) = member(archive) else { continue };
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        if phy.is_none() {
+            if let Some(e) = leaf(&res, "race125p.phy") {
+                phy = res.read(&bytes, &e).ok().map(|b| Phy::read_bytes(&b, &tables.ride.curve));
+            }
+        }
+        if wheels.is_none() && archive.to_ascii_lowercase().contains("125_faisst") {
+            let Some(e) = leaf(&res, "bike.psg") else { continue };
+            let Ok(psg) = res.read(&bytes, &e) else { continue };
+            let Ok(model) = game_render::psg::Model::parse(&psg) else { continue };
+            let node = |name: &str| -> Option<Vf> {
+                let i = model.nodes.iter().position(|n| n.name == name)?;
+                let mut root = i;
+                while let Some(up) = model.nodes[root].parent {
+                    root = up;
+                }
+                Some(Vf(model.place_in(i, root)))
+            };
+            wheels = node("TireFront").zip(node("TireRear"));
+        }
+    }
+    Some((phy?, wheels?))
+}
+
+/// **The 125's top speed is its own** (P21). Sixteen seconds of full throttle on a flat floor, from
+/// a standstill, at the 30 Hz step the capture was taken at, and the last second's speed against the
+/// original's on the straightest lane of Free09: within 5%.
+///
+/// What caps the original there is drag against the top gear's torque — the capture is in fifth, the
+/// top gear, at 8736 rpm under a 9500 rev limit, and 120 ft/s is under the rigid body's 135 — so this
+/// is a test of the drag, the gearing and the tires together, not of a clamp.
+#[test]
+fn race125p_tops_out_where_the_original_does() {
+    let path = private_dir(FLAT_OUT_CAPTURE[0]).join(FLAT_OUT_CAPTURE[1]);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no flat-out capture at {} — skipped", path.display());
+        return;
+    };
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else {
+        println!("no race125p.phy or 125_faisst wheels on a disc in context/iso — skipped");
+        return;
+    };
+    let want = captured_terminal_speed(&text);
+
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let at = Vf::new(0.0, 1.0, 0.0, 1.0);
+    let mut r = Rider::new(&p, wheels, at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let mut world = floor();
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let mut track = Vec::new();
+    for _ in 0..16 * 30 {
+        r.frame(&p, &tables, &gas, dt, &mut world);
+        track.push(r.ride.position());
+    }
+    let (a, b) = (track[track.len() - 1 - TERMINAL_FRAMES], track[track.len() - 1]);
+    let gone = ((b.x() - a.x()).powi(2) + (b.y() - a.y()).powi(2) + (b.z() - a.z()).powi(2)).sqrt();
+    let got = gone / (TERMINAL_FRAMES as f32 * dt.0);
+    println!(
+        "terminal speed: {got:.2} ft/s against the original's {want:.2} ({:+.1}%), gear {}",
+        (got / want - 1.0) * 100.0,
+        r.ride.engine.gear,
+    );
+    assert!(
+        (got / want - 1.0).abs() < 0.05,
+        "race125p tops out at {got} ft/s on the flat, against the original's {want}"
+    );
+}

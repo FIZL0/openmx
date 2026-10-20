@@ -2408,3 +2408,17 @@ quat_axes boot 0x0013f380 (132 bytes) a quaternion's axes, which the look arm re
 #   1.0x its own velocity times the frame's dt. The 1.25 was 1/0.8; the 1/24 s step was 30/24 of it.
 #   In body units (bike_vel / 0.8) the original's flights fall at -32.2 ft/s^2 at vy = 0 -- phy::G --
 #   proved against the port in crates/game-sim/tests/air.rs (a_flight_falls_and_carries_like_the_originals).
+# P21 -- the bike's top speed. The rigid body every chassis is built on, and where the bike's
+# angular limits come from. The capture's own numbers are in the P21 journal.
+rigid_body_ctor boot 0x00158ae0 the rigid body's defaults: +0x220 max_speed_sq = 18225.0 (135 ft/s),
+#                               +0x230/+0x234/+0x238 the angular windows = 25.0 (+0x23c = 1.0) and
+#                               +0x240.. their negatives, +0x224 max_ang_speed_sq = the sum of the
+#                               windows' squares, +0x218 = 933156.0 and +0x21c = 250000.0 (unread here)
+rigid_body_new boot 0x0015c2c0 calls rigid_body_ctor; the bike's chassis goes through it (and
+#                               0x001dd580 is the other caller)
+bike_build boot 0x00252ff0 the bike's setup: the chassis via 0x0015c2c0 into bike+0x7a4, the
+#                          engine via engine_ctor into bike+0x7b8; nothing in it rewrites +0x220
+# bike_phy_load (0x002539e0) [Mass Properties] YawRateLimit writes chassis+0x234 and -YawRateLimit
+# +0x244: the yaw window. The port reads the key (phy.rs yaw_rate_limit) and nothing uses it (P27).
+# The actor's velocity (@game_manager->0x34->0x34->0x8x8->0x0 +0x130, every capture's bike_vel) is
+# 0.8 x the chassis' own (+0x260) on every row of P21's capture: bike_vel is not chassis.vel.
