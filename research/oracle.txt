@@ -2444,7 +2444,15 @@ collider_ignore boot 0x0011ade0 (228 bytes; collider, other) adds other to the c
 #                               (+0xd4 array, +0xd8 count) once, into the first empty slot
 wreck_sound boot 0x0033e9c0 (524 bytes; emitter, a1) the wreck entry's last call, on actor +0xa74:
 #                           picks one of the reason's sounds and **draws rand_raw** for it when the
-#                           list has two or more (0x001b5820). Not ported
+#                           list has two or more (0x001b5820). The pick is ported (S53,
+#                           crates/game-sim/src/wreck_sound.rs, proved in tests/wreck_sound.rs).
+#                           The emitter: +0x29 bit 0, +0x1f0 bit 1 (gates the play), +0x200/+0x218 the
+#                           fall list's count and last pick (+0x208 the list), +0x21c/+0x234 the
+#                           crash list's (+0x224), +0x240 the request (the actor's +0x488), reason at
+#                           +0x104. 1..7, 12 crash; 8..11, 14 fall; 0, 13 and the rest nothing
+sound_pick boot 0x001b5820 (156 bytes; count, int* last) the no-repeat pick: count < 2 gives 0 and no
+#                          draw, else index(count) moved on one (mod count) if it equals *last
+emitter_busy boot 0x001b6440 (192 bytes) the emitter's vt +0x90: 0 idle, 2 playing, else its sounds' max
 body_set_mass boot 0x0015acc0 (body, mass in f12) vt +0x14: +0xc = m, +0x10 = 1/m, unguarded
 body_set_inertia boot 0x0015abf0 (body, vec4*) vt +0x50: writes 1.0 into the *source*'s w, copies
 #                                it to +0x110, +0x120..+0x128 = 1/v per lane or 0 when v <= 0
