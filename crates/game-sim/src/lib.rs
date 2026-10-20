@@ -570,6 +570,10 @@ pub mod flight;
 /// `rand()` on the first sample, which the plane's engine note and the rider's balance wobble read.
 pub mod noise;
 
+/// The wreck sound's pick: which of the rider's wreck sounds plays, and the one draw from the
+/// generator it costs.
+pub mod wreck_sound;
+
 #[cfg(test)]
 mod tests {
     use super::*;
