@@ -15,19 +15,24 @@
 //! The shell has no pause menu and no prompt, so its key is the menu's path: the swap with no 30 ft
 //! and no 40 mph gate, which belong to the prompt and not to the swap.
 //!
-//! # What the plane is, so far
+//! # The plane's flight
 //!
-//! The plane's flight is S34's and is not ported: there is no `biplane.phy` loader (S33), no pad
-//! mapping (I6) and no per-tick update. So [`Plane`] is the part of the machine the swap itself
-//! touches — the spawn `machine.txt` gives it, and the transform the swap resets — and its step is
-//! [`Plane::step`], which S34 fills. Until then a plane that is up stands where it was parked, and the
-//! bike that was left stands where it was left: the session is honestly a parked plane with a camera
-//! on it, and `tests/ride.rs`'s flight test is ignored with S34's name on it.
+//! [`Plane`] carries the plane's own simulation, [`game_sim::flight::Flight`] built off the disc's
+//! `biplane.phy`, and [`Garage::step`] runs one frame of it every tick the plane has the controller,
+//! on the seat's pad through I6's mapping ([`flight::pad`]) and over the same `world` the bike asks
+//! (P31). The plane touches that world only through its three wheels: the collision search its body's
+//! contacts would come from is S45/S46/S48's, so over a track it flies over the heightfield alone and
+//! passes through anything standing on it. A plane built without its file (`Plane::parked` alone, as
+//! the unit tests below do) has no flight and stands where it was parked.
+//!
+//! The plane is not [`Sim::plane`]: the shell's `Sim` is the bike's ride, which the swap leaves where it
+//! stands and which a plane session never steps, so its tick count stays where the swap found it.
 //!
 //! This file is std and `game_sim` only, for the same reason `pad.rs` is: the ride test compiles it
 //! in by path, because a binary crate has nothing a test can `use`.
 
 use game_sim::Sim;
+use game_sim::flight::{self, Flight};
 use game_sim::phy::Ini;
 use game_sim::ride::Controls;
 use game_sim::rider;
@@ -102,43 +107,89 @@ impl Spawn {
     }
 }
 
-/// The biplane, as much of it as the swap touches: where it was parked, and where it is.
+/// The biplane: where it was parked, where it is, and the flight that moves it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plane {
     /// Where `machine.txt` parked it, which is where every swap into it puts it back.
     pub spawn: Spawn,
-    /// Where it is now, and which way its nose points.
+    /// Where the model's origin is now, which way its nose points, and its orientation.
     pub at: Vf,
     pub facing: Vf,
-    /// Its velocity, feet a second. Zero until S34 gives the plane a step.
+    pub quat: Vf,
+    /// Its velocity, feet a second.
     pub vel: Vf,
+    /// The plane's own simulation, when the disc's `biplane.phy` was there to build it.
+    pub flight: Option<Flight>,
+    /// The flight has been put back at the spawn since the last reset (which cannot place it itself:
+    /// placing measures, and the measure's table is the `Sim`'s).
+    pub placed: bool,
 }
 
 impl Plane {
-    /// A plane standing where it was parked.
+    /// A plane standing where it was parked, with no flight in it.
     pub fn parked(spawn: Spawn) -> Plane {
-        Plane { spawn, at: spawn.at, facing: spawn.facing, vel: Vf::new(0.0, 0.0, 0.0, 0.0) }
+        Plane {
+            spawn,
+            at: spawn.at,
+            facing: spawn.facing,
+            quat: Vf::new(0.0, 0.0, 0.0, 1.0),
+            vel: Vf::new(0.0, 0.0, 0.0, 0.0),
+            flight: None,
+            placed: false,
+        }
     }
 
-    /// The swap's unwreck-and-reset: back to the spawn transform, at rest.
+    /// The plane with its flight: `flight` is [`Flight::new`] off the disc's file, which the next
+    /// [`Plane::step`] stands at the spawn.
+    pub fn flying(spawn: Spawn, mut flight: Flight) -> Plane {
+        // The player's plane: the controls read the pad (an unflown one is the autopilot's alone).
+        flight.attitude.flown = true;
+        Plane { flight: Some(flight), ..Plane::parked(spawn) }
+    }
+
+    /// The swap's unwreck-and-reset: back to the spawn transform, at rest. The flight is put back by
+    /// the next step ([`Flight::reset`]), which is the one with the `Sim`'s tables.
     pub fn reset(&mut self) {
-        *self = Plane::parked(self.spawn);
+        let flight = self.flight.take();
+        *self = Plane { flight, ..Plane::parked(self.spawn) };
     }
 
-    /// One frame of the plane with the controller on it. **Not ported** — the biplane's per-tick
-    /// update is S34's (crates/game-sim/src/biplane.rs), its parameters S33's and its pad mapping
-    /// I6's. S34 replaces this body with that update, fed I6's controls and the same `world` the bike
-    /// asks; until then the plane stands where it is, which is what an unflown plane does.
-    pub fn step(&mut self, _dt: F, _controls: &Controls, _world: &mut dyn World) {}
+    /// One frame of the plane with the controller on it: [`Flight::frame`] on the seat's pad, over
+    /// `world`, and the drawn transform off its body. A plane with no flight stands where it is.
+    pub fn step(&mut self, sim: &Sim, dt: F, world: &mut dyn World) {
+        let Some(f) = &mut self.flight else { return };
+        if !self.placed {
+            f.reset(self.spawn.at, self.spawn.facing, &sim.tables.ride.acos);
+            self.placed = true;
+        }
+        f.frame(dt, flight::pad(sim.input.pad(0)), world, &sim.tables.ride);
+        let (quat, origin) = f.pose();
+        let nose = f.measure.forward;
+        (self.quat, self.at) = (quat, Vf::new(origin.x(), origin.y(), origin.z(), 1.0));
+        self.facing = Vf::new(nose.x(), nose.y(), nose.z(), 0.0);
+        let v = f.body.velocity;
+        self.vel = Vf::new(v.x(), v.y(), v.z(), 0.0);
+    }
 
-    /// Whether the plane is standing on something. A parked plane is; S34 says when one is not.
+    /// Whether the plane is standing on something: any wheel down at the last measure. A plane with
+    /// no flight is parked, and so is.
     pub fn on_ground(&self) -> bool {
-        true
+        self.flight.as_ref().is_none_or(|f| f.measure.grounded)
     }
 
     /// Its speed over everything, feet a second.
     pub fn speed(&self) -> F {
         F(self.vel.x().hypot(self.vel.y()).hypot(self.vel.z()))
+    }
+
+    /// The throttle, `0..1`, and the airspeed, feet a second, as the plane's own simulation holds them.
+    pub fn gauges(&self) -> Option<(F, F)> {
+        self.flight.as_ref().map(|f| (f.surfaces.throttle, f.measure.airspeed))
+    }
+
+    /// The prop's angle, radians, as the engine turns it.
+    pub fn prop_angle(&self) -> F {
+        self.flight.as_ref().map_or(F::ZERO, |f| f.engine.prop_angle)
     }
 }
 
@@ -178,12 +229,12 @@ impl Garage {
 
     /// One simulation pass for whichever machine has the controller. With the bike up this is
     /// exactly [`Sim::step`] and nothing else, which is what keeps a `--vehicle bike` session the
-    /// shell it was before P19. With the plane up the bike is not stepped at all, and the frame the
-    /// rider reports is empty.
+    /// shell it was before P19. With the plane up the bike is not stepped at all, the plane flies on
+    /// the pad `sim` polled, and the frame the rider reports is empty.
     pub fn step(&mut self, sim: &mut Sim, dt: F, controls: &Controls, world: &mut dyn World) -> rider::Frame {
         match (self.up, &mut self.plane) {
             (Kind::Biplane, Some(plane)) => {
-                plane.step(dt, controls, world);
+                plane.step(sim, dt, world);
                 rider::Frame::default()
             }
             _ => sim.step(dt, controls, world),

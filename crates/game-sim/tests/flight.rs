@@ -10,7 +10,9 @@ use game_sim::flight::Flight;
 use game_sim::hash::Dump;
 use game_sim::phy::{self, Plane};
 use game_sim::{Input, Sim};
-use ps2_float::F;
+use game_sim::biplane::Pad;
+use game_sim::world::Flat;
+use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, skip};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -222,9 +224,113 @@ fn a_plane_ride_is_a_lane_and_a_bike_ride_is_not_moved_by_it() {
     assert_eq!(flying.ticks, 1);
     assert_eq!(flying.bike_pos().to_bits(), pos.to_bits(), "the parked bike moved");
     assert_eq!(flying.bike_vel().to_bits(), vel.to_bits(), "the parked bike's velocity changed");
-    // Hands off the pad (I6's mapping is not in yet), so the controls zero the pad and hold the
-    // throttle: the plane was stepped, the frame ran its preforce half, and nothing else moved it.
+    // Hands off the pad, so the controls zero the pad and hold the throttle: the plane was stepped,
+    // and its throttle is where it was.
     let after = flying.plane.as_ref().map(|p| p.surfaces.throttle);
     assert_eq!(after, before, "a hands-off frame moved the throttle");
     assert_eq!(flying.plane.as_ref().map(|p| p.pad.forward), Some(F::ZERO));
+}
+
+/// The plane's body (the plane's wrapper round it, `+0x160`) and the wrapper's gravity force.
+const BODY: u32 = 0x160;
+const GRAVITY: u32 = 0x50 + 0xf0;
+/// The three tires' pointers.
+const TIRES: [u32; 3] = [0x408, 0x40c, 0x410];
+
+fn quad(ee: &Ee, at: u32) -> [u32; 4] {
+    [0, 4, 8, 12].map(|k| ee.u32_at(at + k))
+}
+
+/// **The body and the wheels are the ones the original built**: the body's enable word, inverse
+/// mass, the two dampings, the inverse inertia (carried, see `flight.rs`), the centre of mass and the
+/// gravity force it is pushed with, and each tire's sixteen parameters and its brake and steer
+/// hookups — word for word against the save state, the plane off the disc's own file.
+#[test]
+fn the_body_and_the_wheels_are_built_as_the_original_builds_them() {
+    let Some(ee) = image() else { return };
+    let Some(file) = plane_file() else { return };
+    let f = Flight::new(&Plane::read_bytes(&file));
+    let b = ee.u32_at(PLANE + BODY);
+    assert_eq!(ee.u32_at(b) != 0, f.body.enabled, "enabled");
+    same("inv_mass", f.body.inv_mass, F(ee.f32_at(b + 0x10)));
+    for (what, port, at) in [
+        ("damping", f.body.damping, b + 0x20),
+        ("inv_inertia", f.body.inv_inertia, b + 0x120),
+        ("ang_damping", f.body.ang_damping, b + 0x130),
+        ("cofg", f.body.cofg, b + 0x180),
+        ("gravity", f.gravity, PLANE + GRAVITY),
+    ] {
+        assert_eq!(port.to_bits(), quad(&ee, at), "{what}: the port {port:?}");
+    }
+    for (k, (t, port)) in TIRES.iter().zip(&f.tires).enumerate() {
+        let t = ee.u32_at(PLANE + t);
+        for (what, v, o) in [
+            ("StrutCompression", port.max_compression, 0x3c),
+            ("MaxDecompressionRate", port.max_decompression_rate, 0x40),
+            ("spring", port.spring, 0x44),
+            ("bounce", port.bounce, 0x48),
+            ("rebound", port.rebound, 0x4c),
+            ("radius", port.radius, 0x150),
+            ("inv_radius", port.inv_radius, 0x154),
+            ("max_braking", port.max_braking, 0x158),
+            ("side_force", port.side_force, 0x15c),
+            ("brake_friction", port.brake_friction, 0x160),
+            ("steering_moment", port.steering_moment, 0x164),
+        ] {
+            same(&format!("tire {k}: {what}"), v, F(ee.f32_at(t + o)));
+        }
+        assert_eq!(&port.center.to_bits()[..3], &quad(&ee, t + 0x60)[..3], "tire {k}: center");
+        assert_eq!((ee.u32_at(t + 0x30) != 0, ee.u32_at(t + 0x34) != 0), (port.braked, port.steered), "tire {k}: hookups");
+    }
+}
+
+/// **The plane takes gas** (P31): stood on level ground off the disc's own file, it sits on its three
+/// wheels with the throttle closed; with the throttle held open it gathers airspeed and leaves the
+/// ground, climbing; closed again, it comes down.
+///
+/// Over a [`Flat`] floor: the scene's own ground is S45/S46/S48's to search. The numbers asked are
+/// what any plane that flies does, not the original's: nothing of the original's was flown on flat
+/// ground to compare with.
+#[test]
+fn the_plane_takes_gas_off_flat_ground() {
+    let Some(file) = plane_file() else { return };
+    let tables = game_sim::ride::Tables::build();
+    let mut f = Flight::new(&Plane::read_bytes(&file));
+    f.attitude.flown = true;
+    let lowest = f.tires.iter().map(|t| F(t.center.y()) - t.radius).fold(F(f32::MAX), |a, b| a.min(b));
+    f.place(Vf::new(0.0, (-lowest).to_f32(), 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), &tables.acos);
+    let mut ground = Flat::default();
+    let dt = F(1.0 / 30.0);
+    let mut fly = |f: &mut Flight, pad: Pad, seconds: u32| {
+        for _ in 0..seconds * 30 {
+            f.frame(dt, pad, &mut ground, &tables);
+        }
+        let (_, at) = f.pose();
+        println!(
+            "after {seconds} s: origin {:?} airspeed {} throttle {} grounded {} crash {}",
+            at, f.measure.airspeed.to_f32(), f.surfaces.throttle.to_f32(), f.measure.grounded, f.crash.reason,
+        );
+        at
+    };
+    let rest = fly(&mut f, Pad::default(), 3);
+    assert!(f.measure.grounded, "a plane at rest is not on its wheels");
+    assert!(f.measure.airspeed.to_f32() < 1.0, "a plane with the throttle shut is rolling");
+    let gas = Pad { forward: F::ONE, ..Pad::default() };
+    let mut top = rest.y();
+    let mut left = None;
+    for s in 1..=40 {
+        let at = fly(&mut f, gas, 1);
+        if left.is_none() && !f.measure.grounded && at.y() > rest.y() + 10.0 {
+            left = Some(s);
+        }
+        top = top.max(at.y());
+    }
+    let left = left.expect("forty seconds of full throttle and the plane never left the ground");
+    println!("off the ground after {left} s, as high as {top}");
+    assert!(top > rest.y() + 100.0, "the plane left the ground but did not climb");
+    let shut = Pad { back: F::ONE, ..Pad::default() };
+    let high = fly(&mut f, shut, 5).y();
+    assert_eq!(f.surfaces.throttle, F::ZERO, "five seconds of closing did not shut the throttle");
+    let low = fly(&mut f, Pad::default(), 10).y();
+    assert!(low < high - 50.0, "the throttle is shut and the plane is still not coming down");
 }

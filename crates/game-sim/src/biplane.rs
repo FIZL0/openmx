@@ -924,7 +924,7 @@ impl Plane {
 }
 
 /// The gravity force for a scale and a mass: `(0, (−scale·m)·g, 0, 1)`, in the original's order.
-fn gravity_force(scale: F, mass: F) -> Vf {
+pub(crate) fn gravity_force(scale: F, mass: F) -> Vf {
     let y = F(G) * (-scale * mass);
     Vf::new(0.0, y.0, 0.0, 1.0)
 }
@@ -1100,6 +1100,22 @@ impl Body {
         }
     }
 
+    /// A world-frame force at a world point: the moment of the lever from the centre of mass, turned
+    /// into the body's frame and masked lane by lane, through [`Body::add_moment_local`], then the
+    /// force itself through [`Body::add_force`] — the generic body's force-at-a-point entry.
+    pub fn add_force_at(&mut self, f: Vf, at: Vf, mask: Vf) {
+        let lever = at.sub(self.position);
+        let arm = Vf::opmsub(Vf::opmula(lever, f), f, lever);
+        self.add_moment_local(unturn(self.quat, arm).mul(mask));
+        self.add_force(f);
+    }
+
+    /// An instant change of velocity (`xyz`), which the body's shock accumulator takes too.
+    pub fn add_velocity(&mut self, v: Vf) {
+        self.velocity = add_xyz(self.velocity, v);
+        self.shock = add_xyz(self.shock, v);
+    }
+
     /// The plane's preforce listener's part: the shock peak is cleared, once a frame.
     pub fn clear_shock_peak(&mut self) {
         self.shock_peak = CLEAR;
@@ -1184,6 +1200,40 @@ impl Body {
         let offset = turn(self.last_quat, self.cofg);
         let p = self.last_position;
         (self.last_quat, p.merge(Dest::XYZ, p.sub(offset)))
+    }
+}
+
+/// The plane's own body is what its wheels push on.
+impl WheelBody for Body {
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+    fn position(&self) -> Vf {
+        self.position
+    }
+    fn velocity(&self) -> Vf {
+        self.velocity
+    }
+    fn force(&self) -> Vf {
+        self.force
+    }
+    fn orientation(&self) -> Vf {
+        self.quat
+    }
+    fn set_position(&mut self, at: Vf) {
+        self.position = at;
+    }
+    fn add_velocity(&mut self, v: Vf) {
+        Body::add_velocity(self, v);
+    }
+    fn add_force(&mut self, f: Vf) {
+        Body::add_force(self, f);
+    }
+    fn add_force_at(&mut self, f: Vf, at: Vf, mask: Vf) {
+        Body::add_force_at(self, f, at, mask);
+    }
+    fn add_moment_local(&mut self, m: Vf) {
+        Body::add_moment_local(self, m);
     }
 }
 
@@ -1534,7 +1584,7 @@ fn minus(a: Vf, b: Vf) -> Vf {
 }
 
 /// One of the three tires: its `biplane.phy` section and what it keeps between calls.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tire {
     /// `StrutCompression`: how far the strut gives.
     pub max_compression: F,
@@ -1840,8 +1890,25 @@ impl Crash {
         rng: &mut Rng,
         dt: F,
     ) -> Crashed {
+        self.step_in(c, Some(area), position, velocity, rates, gravity_scale, rng, dt)
+    }
+
+    /// [`Crash::step`] over a world that may have no terrain (`None`), which has no edge to be thrown
+    /// back from: the rest of the test is the same.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_in(
+        &mut self,
+        c: &CrashContact,
+        area: Option<&Area>,
+        position: Vf,
+        velocity: &mut Vf,
+        rates: &mut Vf,
+        gravity_scale: &mut F,
+        rng: &mut Rng,
+        dt: F,
+    ) -> Crashed {
         let mut out = Crashed::default();
-        if self.reason != THROWN && area.outside(position, F(EDGE)) {
+        if let Some(area) = area.filter(|a| self.reason != THROWN && a.outside(position, F(EDGE))) {
             let half_width = F(0.5) * area.width;
             let target = Vf::new(half_width.to_f32(), position.y(), (F(0.5) * area.depth).to_f32(), 1.0);
             let mut toward = minus(target, position);

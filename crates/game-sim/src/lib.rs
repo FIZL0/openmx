@@ -198,7 +198,7 @@ impl Sim {
         if let Some(plane) = &mut self.plane {
             // The plane's input step: the player's pad, through I6's mapping, into the five fields the
             // controls read. The bike's `controls` are not the plane's: the plane reads the pad itself.
-            plane.frame(dt, flight::pad(self.input.pad(0)));
+            plane.frame(dt, flight::pad(self.input.pad(0)), world, &self.tables.ride);
             self.ticks += 1;
             return crate::rider::Frame::default();
         }

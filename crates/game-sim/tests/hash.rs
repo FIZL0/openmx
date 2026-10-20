@@ -453,7 +453,8 @@ fn the_rngs_state_word_is_what_is_hashed() {
 #[test]
 fn the_size_of_the_state_type_is_pinned() {
     // 7120 since S40: `Sim::plane`, which the walk names under `plane.*` only when there is one, so a
-    // fresh (bike) state's leaves below are not moved by it.
-    assert_eq!(size_of::<Sim>(), 7120, "Sim grew or shrank: does its walk still cover every field?");
+    // fresh (bike) state's leaves below are not moved by it. 9936 since P31: the plane's whole body,
+    // its measure, its three wheels, its crash state and its smooth noise.
+    assert_eq!(size_of::<Sim>(), 9936, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 750, "the walk's leaf count moved with it");
 }
