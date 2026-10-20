@@ -557,6 +557,10 @@ pub mod trick;
 /// step empties every substep and keeps by offset get their names here.
 pub mod wheel;
 
+/// The tire's grip: the frame at the contact patch the tire pushes along, and the per-surface force
+/// law that says how hard it pushes across and along it.
+pub mod tire;
+
 /// The vehicle's own animation state machine, which is what the animation library was written for:
 /// the sixty-entry switch on the bike's animation state, its own clip table, the two lags the rows are
 /// mixed along, and the two entry points of that library — the four-clip blend and a sixth arm — that
@@ -595,7 +599,7 @@ mod tests {
     ///
     /// The same literal as `tests/hash.rs`' own, and it moves whenever the state type or the ride
     /// does. What it is here for is the *platform*: see the test below it.
-    const HUNDRED_TICKS: u64 = 0x89b7_8b45_1405_f9a9;
+    const HUNDRED_TICKS: u64 = 0x4667_aeed_f29f_5957;
 
     /// The hash is a constant of the code, not of the machine: this value must be the same on x86-64,
     /// aarch64 and wasm32. When a change to the state type changes it, that is expected — update it. When

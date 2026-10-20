@@ -93,7 +93,7 @@ const HEAD: usize = 10;
 fn a_hundred_ticks_is_a_known_constant() {
     // The hash of a hundred ticks of the stand-in bike on a level floor, as a literal: the same
     // value `Sim::hash`'s own test carries.
-    const HUNDRED_TICKS: u64 = 0x89b7_8b45_1405_f9a9;
+    const HUNDRED_TICKS: u64 = 0x4667_aeed_f29f_5957;
 
     let mut sim = Sim::new(1);
     for _ in 0..100 {
@@ -456,7 +456,8 @@ fn the_size_of_the_state_type_is_pinned() {
     // fresh (bike) state's leaves below are not moved by it. 7408 since P30: the input layer's
     // squared stick, its d-pad flags, the rate-limited lean and the flick's 32-sample ring. 10224
     // since P31: the plane's whole body, its measure, its three wheels, its crash state and its
-    // smooth noise.
-    assert_eq!(size_of::<Sim>(), 10224, "Sim grew or shrank: does its walk still cover every field?");
-    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 821, "the walk's leaf count moved with it");
+    // smooth noise. 10256 since P33: each wheel's steering axis and its tire's three slip flags,
+    // seven leaves a wheel.
+    assert_eq!(size_of::<Sim>(), 10256, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 835, "the walk's leaf count moved with it");
 }

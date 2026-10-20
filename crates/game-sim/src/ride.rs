@@ -55,6 +55,7 @@ use crate::hash::{State, Walk};
 use crate::math::{self, Mat4};
 use crate::phy::{self, Phy};
 use crate::r#move::{self as mv, Frame, Outside as _, Side};
+use crate::tire;
 use crate::trick;
 use crate::wheel;
 use crate::world::World;
@@ -407,6 +408,12 @@ pub struct Wheel {
     pub surface: u8,
     /// The tire's own inverse inertia, from `TireInertia`, which the spin integration needs.
     pub inv_inertia: F,
+    /// The axis a steered wheel turns about, in the chassis' frame: the fork's, from the shocks'
+    /// node to the handlebars' ([`tire::steering_axis`]). The original keeps it at `+0x8c0`. Straight
+    /// up until whoever has the model sets it.
+    pub steer_axis: Vf,
+    /// The tire's three force-model flags, which [`tire::force`] reads back the next substep.
+    pub slip: tire::Slip,
 }
 
 impl Wheel {
@@ -454,6 +461,8 @@ impl Wheel {
             },
             surface: 0,
             inv_inertia: if t.tire_inertia == F::ZERO { F::ZERO } else { F::ONE / t.tire_inertia },
+            steer_axis: UP,
+            slip: tire::Slip::default(),
         }
     }
 
@@ -1142,7 +1151,8 @@ fn surface_drag(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, brake: F, c: &m
 /// the same force makes a couple the file's author chose, and full throttle from a standstill
 /// drives the bike forward instead of standing it up.
 fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, body: &Body, dt: F,
-                  c: &mut wheel::Chassis, m: &Mat4, at: Vf) {
+                  c: &mut wheel::Chassis, m: &Mat4, at: Vf, brake: F, parametric: bool,
+                  curve: &CurveTable) {
     let drive_torque = wh.mv.drive_torque;
     // The engine accumulates onto this every substep and nothing else empties it.
     wh.mv.drive_torque = F::ZERO;
@@ -1159,13 +1169,17 @@ fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, body: &Body, 
     let drive = (drive_torque * wh.mv.inv_radius).clamp(-drive_cap, drive_cap);
     let along = drive.clamp(-grip, grip);
 
-    let side_cap = (surf.max_side_force * (F::ONE - wh.mv.donut_scale)).max(F::ZERO) * pt.load;
-    let arm = sub_xyz(unpoint(m, wh.w.load_point), c.cofg);
-    let dir = chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), pt.right);
-    let hold = effective_mass(body, arm, dir) * pt.side.abs() / dt;
-    let cap = side_cap.min(grip).min(hold);
-    let across = (-pt.side * surf.side_force * pt.load).clamp(-cap, cap);
-    push(c, m, add_xyz(scale(pt.forward, along), scale(pt.right, across)), at);
+    if !parametric {
+        let side_cap = (surf.max_side_force * (F::ONE - wh.mv.donut_scale)).max(F::ZERO) * pt.load;
+        let arm = sub_xyz(unpoint(m, wh.w.load_point), c.cofg);
+        let dir = chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), pt.right);
+        let hold = effective_mass(body, arm, dir) * pt.side.abs() / dt;
+        let cap = side_cap.min(grip).min(hold);
+        let across = (-pt.side * surf.side_force * pt.load).clamp(-cap, cap);
+        push(c, m, add_xyz(scale(pt.forward, along), scale(pt.right, across)), at);
+    } else {
+        tire_side(wh, pt, surf, c, m, at, drive_torque, along, brake, curve);
+    }
 
     // Rolling, plus whatever the grip would not take: the spin the road asks for, and the slip the
     // tire's own inertia lets it run away with.
@@ -1173,6 +1187,41 @@ fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, body: &Body, 
     wh.mv.spin = pt.roll * wh.mv.inv_radius + slip;
     wh.mv.spin_from_torque = false;
     wh.mv.contact_force_fwd = along;
+}
+
+/// The tire's push for a tire with `UseParametricCurve` — every tire on the disc — as the original
+/// makes it (P33): the [`tire::contact_frame`] squared to the ground's normal and steered about the
+/// fork, the contact's velocity taken into it, and [`tire::force`]'s side force, turned back out
+/// through the frame with the forward force beside it and put in on the `.phy`'s arm.
+///
+/// The forward force is still [`spin_integrate`]'s own (`along`), not the law's: the law's forward
+/// lane is the drive torque over the radius with no `WheelFriction` cap, and the spin model the
+/// stand-in pairs it with reads that key as the grip. [`tire::force`] still runs whole, because its
+/// spinning and locked flags pick the side curve, and it is handed the drive torque the original
+/// would be.
+///
+/// There is no hold bound: the original has none, and the curve rounds off.
+fn tire_side(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, c: &mut wheel::Chassis, m: &Mat4,
+             at: Vf, drive_torque: F, along: F, brake: F, curve: &CurveTable) {
+    // Across, the original's own law, in the original's own frame (P33): the contact frame squared
+    // to the ground's normal, the velocity taken into it, and the per-surface law's side force.
+    let rows = Mat3::new(m.0[0], m.0[1], m.0[2]);
+    let (frame, local) = tire::contact_frame(m.0[2], wh.mv.steered, wh.w.contact, wh.w.steer_angle,
+                                             wh.steer_axis, wh.w.contact_normal,
+                                             wh.w.contact_velocity, curve,
+                                             &mut |v| chassis::rotate(&rows, v));
+    let contact = tire::Contact {
+        load: pt.load,
+        drive_torque,
+        inv_radius: wh.mv.inv_radius,
+        donut: wh.mv.donut_scale,
+        brake,
+        parametric: true,
+        velocity: local,
+    };
+    let (across, _) = tire::force(surf, &contact, &mut wh.slip);
+    let local_force = Vf::new(across.0, 0.0, along.0, 0.0);
+    push(c, m, chassis::rotate(&Mat3::new(frame.0[0], frame.0[1], frame.0[2]), local_force), at);
 }
 
 /// The steering hinge's force: a steered wheel the bike is balancing on puts its suspension
@@ -1356,7 +1405,8 @@ fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, body: &Body, mvc:
         vel: mvc.vel,
     };
     surface_drag(wh, &pt, &surf, brake, &mut wc);
-    spin_integrate(wh, &pt, &surf, body, dt, &mut wc, m, tire.body_tire_force_position);
+    spin_integrate(wh, &pt, &surf, body, dt, &mut wc, m, tire.body_tire_force_position, brake,
+                   tire.use_parametric_curve, curve);
     let calls = wheel::integrate(&mut wh.w, dt);
     mvc.force = wc.force;
     mvc.torque = wc.torque;
@@ -2041,6 +2091,12 @@ fn walk_wheel(w: &mut Walk<'_>, wh: &Wheel) {
     });
     w.u8("surface", wh.surface);
     w.f("inv_inertia", wh.inv_inertia);
+    w.vf("steer_axis", wh.steer_axis);
+    w.group("slip", |w| {
+        w.bool("spinning", wh.slip.spinning);
+        w.bool("locked", wh.slip.locked);
+        w.bool("sliding", wh.slip.sliding);
+    });
 }
 
 /// Three floats under `x` · `y` · `z`, which is how every triple in the chassis is indexed.
