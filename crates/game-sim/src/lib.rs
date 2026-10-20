@@ -438,6 +438,11 @@ pub mod world_search;
 /// per segment, against a mesh or a placed group part by part.
 pub mod ray_probe;
 
+/// The broad phase under it: the world's collidable tree and moving-object list, the query that walks
+/// them, the gather that fills a nearby search from them, and a probe tested straight against the
+/// world when it keeps no nearby search.
+pub mod broad_phase;
+
 /// The worked example from `docs/EXAMPLE.md`: three functions of the synthetic program that `./kit demo`
 /// generates, ported, with `tests/demo.rs` proving them bit-exact against the original's instructions.
 /// Delete it once your own port has something real in it.

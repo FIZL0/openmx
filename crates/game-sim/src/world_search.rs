@@ -186,7 +186,7 @@ pub trait Narrow {
 }
 
 /// The probe tested against `other`; on a hit, the bit raised and everyone told.
-fn test(objects: &mut [Collidable], probe: usize, other: usize, narrow: &mut dyn Narrow) {
+pub(crate) fn test(objects: &mut [Collidable], probe: usize, other: usize, narrow: &mut dyn Narrow) {
     if !narrow.pair(objects, probe, other) {
         return;
     }

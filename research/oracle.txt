@@ -3182,3 +3182,37 @@ pad_ring_listener boot 0x0025d240 (listener, phase) one timed sample of the four
 pad_ring_register boot 0x0025d810 puts pad_ring_listener on the app's listener list
 listener_dispatch boot 0x001321d0 (phase) calls every registered listener; the tick and the DMA waits call it
 bike_input_limiter boot 0x00251a50 (dt in f12, bike) the bike's vt+0xec: squares the stick, walks the lean pair
+
+# S45 — the broad phase (collision_search_gather, gather_resort, the world tree query, above),
+# ported as broad_phase::{gather, resort, Query} with probe_collide_world. A space node is
+# (+0 next, +4 table); a table has its static structure at +0x34, its moving one at +0x38, and
+# sub-tables at +0x44 (count +0x48). A structure's vtable is at +8, its flags at +0x14 (bit0 a query
+# is open, bit1 it reports the box its cells cover).
+world_tree_global_table boot 0x0048aac0 the table every global query ends with (0 in the save state)
+world_tree_stamp boot 0x0045f804 u16 (gp-32620): bumped per quadtree query; a collidable's +0 u16
+#                              holds the stamp it was last handed out under
+world_tree_current boot 0x0048a528 the quadtree last begun or walked
+world_tree_cell_size boot 0x0048a530 world units per quadtree cell, for the box begin reports
+world_manager boot 0x0046a5f8 word: the world manager (+0x94 model table, +0xd4 placed-group cell size)
+quadtree_begin boot 0x00196e90 quadtree vt (0x00451060) +0x30 (tree, query, half, lo, hi): origin
+#                              +0x30/+0x38, extent +0x48/+0x4c, cell +0x58, scale +0x5c, root +0x94,
+#                              pool +0x9c, list +0xa4/+0xa8, slot +0xac, chunk +0xb0, +0x898 busy,
+#                              cells +0x8a8..+0x8b4
+quadtree_gather boot 0x00197160 (node, list, x0, z0, x1, z1, ox, oz, size, least) the nodes meeting
+#                              the cells, prepended; node +0 children array, +4 chunk (+0 next, +4..)
+quadtree_gather_all boot 0x00197370 (node, list) a whole subtree, post-order
+quadtree_child boot 0x00197560 (node, i) -> child i
+quadtree_pool_take boot 0x001974f0 one list link from the pool
+quadtree_next boot 0x00197580 quadtree vt +0x38
+quadtree_restart boot 0x00197d70 quadtree vt +0x3c
+quadtree_end boot 0x00197d90 quadtree vt +0x40
+block_list_begin boot 0x001ab7f0 moving-object list vt (0x00450220) +0x30: block size +0x30, blocks
+#                              +0x34, used in the last +0x38, array +0x3c, where +0x44/+0x48
+block_list_next boot 0x001ab850 block list vt +0x38: full blocks stamped, the last block not
+block_list_restart boot 0x001ab9c0 block list vt +0x3c
+block_list_end boot 0x001ab9f0 block list vt +0x40
+point_distance boot 0x0011c170 (reach f12, probe, point) ground-plane distance less both reaches, >= 0
+pair_distance boot 0x0011c1b0 (a, b) distance less both reaches, >= 0
+plane_refresh_search boot 0x0015b210 the plane collision owner's (plane+0x50) vt +0x108: marks its
+#                              probes moved, then collision_search_gather(+0x11c = plane+0x16c, the
+#                              ray probe +0x130, 3) -- what refills the plane's nearby search
