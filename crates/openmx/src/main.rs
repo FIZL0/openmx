@@ -571,6 +571,8 @@ struct Args {
     others: Vec<roster::Pick>,
     /// `--garage`: ride `garage.txt`'s picks without the front end, every seat its own.
     garage: bool,
+    /// `--no-sound`: no sound and no music (P42). A headless ride has none either.
+    sound: bool,
 }
 
 /// The garage's picks on a ride (P37): the first seat's bike, set and rider are the ride's own, and
@@ -625,6 +627,8 @@ struct Front {
     args_wiring: Wiring,
     wiring_flags: (bool, bool),
     scheme_flag: bool,
+    /// The sound and the music (P42), which play on across the menus and the rides.
+    sound: audio::Speakers,
 }
 
 impl Front {
@@ -653,6 +657,12 @@ impl Front {
             }
         }
         w
+    }
+
+    /// The settings' music pick and volumes, into the sound (P42).
+    fn hear(&self) {
+        let s = &self.menu.settings;
+        self.sound.apply(&s.music, s.music_volume, s.effects_volume);
     }
 
     /// Write the settings when the menu changed them, saying so if it could not.
@@ -688,6 +698,26 @@ fn open_seats(args: &Args, pad: Option<&str>, wiring: Wiring) -> Seats {
     Seats::open(pad, args.pads, wiring, bindings)
 }
 
+/// The sound (P42): the music sources — the disc's songs, then the user's own folder beside the
+/// settings — and the player it all goes out through, set as `settings` says. Silent with
+/// `--no-sound` or `--headless`, and where the desktop has no player.
+fn start_sound(args: &Args, disc: &mut Disc, dir: &std::path::Path, settings: &menu::Settings) -> audio::Speakers {
+    let image = Disc::configured_path().ok();
+    let sources = audio::sources(image.map(|path| (disc, path)), dir);
+    // Which song a shuffle starts on is the host's business and nothing of the game's: the clock.
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+    let music = audio::Music::new(sources, seed);
+    println!(
+        "music: {} songs from {}; your own .wav files go in {}",
+        music.tracks().len(),
+        music.sources().join(" and "),
+        audio::folder(dir).display()
+    );
+    let speakers = audio::Speakers::start(music, args.sound && !args.headless);
+    speakers.apply(&settings.music, settings.music_volume, settings.effects_volume);
+    speakers
+}
+
 /// How a ride under the front end ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Leave {
@@ -707,10 +737,11 @@ fn front_end(args: Args) -> Result<(), String> {
             roster::Catalogue::default()
         }
     };
-    drop(disc);
     let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
     let (settings, controls) = menu::load(&dir);
     println!("front end: settings in {}", dir.display());
+    let sound = start_sound(&args, &mut disc, &dir, &settings);
+    drop(disc);
     let picks = roster::Picks::load(&dir);
     println!(
         "garage: {} bikes, {} riders; seat 1 rides {} on {} as {}",
@@ -730,7 +761,9 @@ fn front_end(args: Args) -> Result<(), String> {
         args_wiring: args.wiring.clone(),
         wiring_flags: args.wiring_flags,
         scheme_flag: args.scheme_flag,
+        sound,
     };
+    front.menu.music_choices = front.sound.choices();
     let window = Window::open(&args.display, args.size, args.scale, "openmx")?;
     let seats = open_seats(&args, pad.as_deref(), front.wiring());
     match seats.name(0) {
@@ -843,6 +876,7 @@ fn front_end(args: Args) -> Result<(), String> {
         }
         if shell.front.menu.changed() {
             seats.set_wiring(shell.front.wiring());
+            shell.front.hear();
             shell.front.save();
         }
         if act == Act::Quit {
@@ -1668,6 +1702,51 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             (&mut own.0, &mut own.1, None)
         }
     };
+
+    // ---- the sound (P42) ----------------------------------------------------------------------
+    // The front end's speakers, which play on after the ride; without one, this ride's own, set as
+    // the front end's settings file says. Every seat hears its own bike's archive, and every
+    // seat's sounds go into the one mix (a split screen is one pair of speakers).
+    let mut own_sound = None;
+    let mixer = match front.as_deref() {
+        Some(f) => f.sound.live(),
+        None if args.sound && !args.headless => {
+            let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
+            let (settings, _) = menu::load(&dir);
+            own_sound.insert(start_sound(&args, &mut disc, &dir, &settings)).live()
+        }
+        None => None,
+    };
+    let mut sound = match mixer {
+        None => None,
+        Some(mixer) => {
+            let mut bikes = vec![bike_member.clone()];
+            for i in 1..args.players {
+                let theirs = args.others.get(i - 1).and_then(|p| member_ending(&disc, &format!("{}.res", p.bike)).ok());
+                bikes.push(theirs.unwrap_or_else(|| bike_member.clone()));
+            }
+            let machines = member_ending(&disc, MACHINE_ARCHIVE).unwrap_or_else(|_| MACHINE_ARCHIVE.to_string());
+            let read = Disc::open_configured().and_then(|d| {
+                audio::Sound::read(
+                    mixer,
+                    d,
+                    &bikes,
+                    rider_member.as_deref(),
+                    &machines,
+                    &track_member,
+                    second.as_deref(),
+                    &args.track,
+                )
+            });
+            match read {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    println!("sound: {e} — the ride is silent");
+                    None
+                }
+            }
+        }
+    };
     if let Some(pads) = args.pads {
         println!("seats: {}", pad::Seat::flag(&pads));
     }
@@ -1952,6 +2031,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // How the ride ended, for the front end: anything but the pause's own two is a quit.
     let mut leave = Leave::Quit;
     let mut escape = held(window, key::ESCAPE);
+    let mut hushed = false;
     loop {
         let top = Instant::now();
 
@@ -2083,6 +2163,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 if let Some(seats) = &mut *pad_seats {
                     seats.set_wiring(front.wiring());
                 }
+                front.hear();
                 front.save();
             }
             match act {
@@ -2279,6 +2360,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 None => Camera::behind(pos, bike_look),
             });
             ridden.push(rider);
+        }
+
+        // The frame's sound (P42), off what the ride just did, heard from every view's camera. A
+        // ride nobody is riding (the pause, a frozen ride) is quiet, and starts again from idle.
+        if let Some(sound) = &mut sound {
+            if world.seats.iter().any(|seat| seat.riding) {
+                let ears: Vec<audio::Listener> = cameras.iter().map(listener).collect();
+                sound.listen(&ears);
+                let frames: Vec<audio::SeatFrame> = world.seats.iter().map(seat_sound).collect();
+                sound.frame(&frames);
+                hushed = false;
+            } else if !hushed {
+                sound.quiet();
+                hushed = true;
+            }
         }
 
         // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
@@ -2517,12 +2613,52 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(on) = &online {
         println!("{}", on.summary());
     }
+    // The ride's sounds stop with it; the music plays on into the menus.
+    if let Some(sound) = &mut sound {
+        sound.quiet();
+    }
     println!(
         "ridden for {:.1}s over {} frames",
         started.elapsed().as_secs_f32(),
         engine.frame
     );
     Ok(leave)
+}
+
+/// Where a view hears from (P42): its camera, with its right the way the picture's is.
+fn listener(c: &Camera) -> audio::Listener {
+    let forward = c.at.sub(c.eye).norm();
+    let right = v3(0.0, 1.0, 0.0).cross(forward).norm();
+    audio::Listener { at: [c.eye.x, c.eye.y, c.eye.z], right: [right.x, right.y, right.z] }
+}
+
+/// What one seat's frame sounds like (P42): the hands and the engine on the bike, the rider's fall
+/// and landing, or the plane's engine note when the plane is up.
+fn seat_sound(seat: &Seat) -> audio::SeatFrame {
+    let r = &seat.sim.rider.ride;
+    let p = r.position();
+    let span = (r.engine.rev_limit.0 - r.engine.min_rpm.0).max(1.0);
+    let plane = match (seat.garage.up, &seat.garage.plane) {
+        (Kind::Biplane, Some(plane)) => {
+            let note = plane.flight.as_ref().map_or(0.0, |f| f.engine.note.0 / f.engine.max_rpm.0.max(1.0));
+            Some((note, [plane.at.x(), plane.at.y(), plane.at.z()]))
+        }
+        _ => None,
+    };
+    audio::SeatFrame {
+        hands: audio::Hands {
+            grounded: r.air.on_ground,
+            gas: r.held.gas.0,
+            clutch: r.held.clutch.0,
+            speed: r.chassis.speed.0,
+            rev: (r.engine.rpm.0 - r.engine.min_rpm.0) / span,
+            at: [p.x(), p.y(), p.z()],
+        },
+        vy: r.chassis.vel.y(),
+        wreck: seat.said.wreck.map(|w| w.0 as i32),
+        landed_trick: seat.said.landed.is_some(),
+        plane,
+    }
 }
 
 /// The wall clock, as the game's own timer would have it: whole 100 ms periods and the bus-clock
@@ -2750,6 +2886,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         set: None,
         others: Vec::new(),
         garage: false,
+        sound: true,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         ride_flag: false,
@@ -2879,6 +3016,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--split" => args.split = Split::parse(&next("h or v")?)?,
             "--aspect" => args.aspect = Aspect::parse(&next("fill or 4:3")?)?,
             "--headless" => args.headless = true,
+            "--no-sound" => args.sound = false,
             "--frames" => {
                 args.frames = Some(
                     next("a number of frames")?.parse().map_err(|_| "--frames: not a number of frames")?,
@@ -2951,7 +3089,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
-                            [--bindings FILE]\n\
+                            [--bindings FILE] [--no-sound]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
                      rides the freeride area from the disc named in kit.toml straight away.\n\
@@ -3011,6 +3149,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                      frame lengths, and quits when it runs out. A human's PCSX2 recording\n\
                      of the original (.p2m2) is a tape too and rides the same; --phase says\n\
                      which of a tick's two video fields that recording's game read.\n\
+                     \n\
+                     Sound plays through pw-cat, pacat or aplay, whichever is found: every\n\
+                     rider's engine, wrecks and landings, the track's own sounds, and music —\n\
+                     the disc's songs, then any .wav in the music folder beside the settings,\n\
+                     picked in Settings. --no-sound turns it off; a headless ride has none.\n\
                      \n\
                      Online: --online NAME@HOST:PORT --peer NAME@HOST:PORT ... --seats NAME,NAME,-\n\
                      rides with the other machines over UDP, one bike a seat (up to eight; the\n\

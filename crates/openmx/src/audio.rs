@@ -1740,9 +1740,10 @@ impl Reading<'_> {
         RiderSounds::read(&text, &mut |n| lib.clip(n))
     }
 
-    pub fn machines(&mut self) -> (Landing, LoopEngine) {
-        let machine = self.text("machine.res", "aud\\machine.aud");
-        let cars = self.text("machine.res", "aud\\carengine.aud");
+    /// `res` is the machines' archive (`machine.res`).
+    pub fn machines(&mut self, res: &str) -> (Landing, LoopEngine) {
+        let machine = self.text(res, "aud\\machine.aud");
+        let cars = self.text(res, "aud\\carengine.aud");
         let lib = &mut *self.lib;
         let landing = Landing::read(&machine, &mut |n| lib.clip(n));
         (landing, LoopEngine::read(&cars, "biplane", &mut |n| lib.clip(n)))
@@ -1866,4 +1867,93 @@ pub fn sources(disc: Option<(&mut Disc, PathBuf)>, settings_dir: &Path) -> Vec<A
 pub fn volume(step: u8) -> f32 {
     let v = step.min(10) as f32 / 10.0;
     v * v
+}
+
+/// **The shell's sound**, which outlives a ride under the front end: the mixer with the music in it,
+/// and the player it goes out through, if there is one (none when `out` is false — a headless run, or
+/// `--no-sound` — and then nothing is rendered at all).
+pub struct Speakers {
+    pub mixer: Arc<Mutex<Mixer>>,
+    _out: Option<Output>,
+}
+
+impl Speakers {
+    pub fn start(music: Music, out: bool) -> Speakers {
+        let mixer = Arc::new(Mutex::new(Mixer::new(music)));
+        let out = match out {
+            false => None,
+            true => match Output::start(mixer.clone()) {
+                Ok(o) => {
+                    println!("sound: through {}", o.player);
+                    Some(o)
+                }
+                Err(e) => {
+                    println!("sound: {e} — the shell is silent");
+                    None
+                }
+            },
+        };
+        Speakers { mixer, _out: out }
+    }
+
+    /// The mixer, if anything renders it: a voice started in one nobody renders never ends.
+    pub fn live(&self) -> Option<Arc<Mutex<Mixer>>> {
+        self._out.as_ref().map(|_| self.mixer.clone())
+    }
+
+    /// The settings' music pick (`off`, `shuffle` or a track's id) and the two sliders' steps.
+    pub fn apply(&self, pick: &str, music: u8, effects: u8) {
+        let Ok(mut m) = self.mixer.lock() else { return };
+        let want = Pick::parse(pick);
+        if *m.music.pick() != want {
+            m.music.set_pick(want);
+        }
+        m.music_volume = volume(music);
+        m.effects_volume = volume(effects);
+    }
+
+    /// Every track the sources have, as the settings' choices: `(id, label)`.
+    pub fn choices(&self) -> Vec<(String, String)> {
+        match self.mixer.lock() {
+            Ok(m) => m.music.tracks().iter().map(|t| (t.id.clone(), t.label())).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+impl Sound {
+    /// A ride's sounds off the disc: one bike `.aud` for each seat's bike archive (`bikes`), the
+    /// rider's voice, the machines, and the track's emitters with the race events'.
+    pub fn read(
+        mixer: Arc<Mutex<Mixer>>,
+        disc: Disc,
+        bikes: &[String],
+        rider: Option<&str>,
+        machines: &str,
+        track_res: &str,
+        events_res: Option<&str>,
+        track: &str,
+    ) -> Result<Sound, String> {
+        let mut lib = Library::open(disc)?;
+        let mut read = Reading { lib: &mut lib };
+        let mut sound = Sound::new(mixer);
+        let mut by_archive: Vec<(String, Arc<BikeSounds>)> = Vec::new();
+        for (i, res) in bikes.iter().enumerate() {
+            let bike = match by_archive.iter().find(|(r, _)| r == res) {
+                Some((_, b)) => b.clone(),
+                None => {
+                    let b = Arc::new(read.bike(res));
+                    by_archive.push((res.clone(), b.clone()));
+                    b
+                }
+            };
+            sound.seats.push(SeatSound::new(bike, 0x9e37_79b9 ^ i as u64));
+        }
+        if let Some(rider) = rider {
+            sound.rider = read.rider(rider);
+        }
+        (sound.landing, sound.plane) = read.machines(machines);
+        sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
+        Ok(sound)
+    }
 }
