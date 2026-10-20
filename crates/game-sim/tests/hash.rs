@@ -457,7 +457,8 @@ fn the_size_of_the_state_type_is_pinned() {
     // squared stick, its d-pad flags, the rate-limited lean and the flick's 32-sample ring. 10224
     // since P31: the plane's whole body, its measure, its three wheels, its crash state and its
     // smooth noise. 10256 since P33: each wheel's steering axis and its tire's three slip flags,
-    // seven leaves a wheel.
-    assert_eq!(size_of::<Sim>(), 10256, "Sim grew or shrank: does its walk still cover every field?");
+    // seven leaves a wheel. 10280 since S54: `Sim::others`, the players after the first, which the
+    // walk names under `players` only when there are any, so the fresh one-player state's leaves stay.
+    assert_eq!(size_of::<Sim>(), 10280, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 835, "the walk's leaf count moved with it");
 }

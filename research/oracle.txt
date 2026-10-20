@@ -3515,3 +3515,27 @@ axis_rotation_matrix boot 0x00134290 (angle f12, axis, out) the curve table's (c
 #                                    row 3 not written. Ported as tire::axis_rotation
 # The front's steering axis (+0x8c0) is set in bike_attach_nodes (0x00253760): normalize(Handlebars -
 # Shocks) node places; recording2's bikes have (0, 0.8807788, -0.4735278): a 28 degree rake.
+# S54 — more than one rider: the order riders are stepped in and how they reach one another, read
+# statically (R9 had not landed). The port is Sim::step_all / ride::hits_among; the journal is
+# research/journal/2026-10-20-s54-s54-more-than-one-rider.
+spawn_racers_humans     boot 0x00207b20 (also S14's spawn_racers) the humans' loop: for i in 0..humans
+#                                       a player is new'd (0x00369b00), initialised through its vt+0xb8
+#                                       with i as the pad/player index, +0x6b0 = i, +0x6b4 = the i-th
+#                                       identity off the event, and appended through the player
+#                                       manager's vt+0x74 (player_manager_add). The AI follow
+node_add_child          boot 0x00132f50 (parent, child, arg) appends the child at the TAIL of the parent's
+#                                       sibling chain (first child +0x18, next sibling +0x14, prev +0x10,
+#                                       parent +0x1c) -- so add order is walk order
+node_update_children    boot 0x00133500 (dt, node): if node+0x24 & 2, walks +0x18 then +0x14 and calls
+#                                       each enabled child's vt+0x38 (dt, child): the scene tree's update
+#                                       walk, depth first, in sibling order. engine_tick's simulation is
+#                                       vt+0x38 on app+0x378, the root
+ridden_update_thunk     boot 0x00281950 this -= 0x50, then 0x0027c890, which calls the ridden actor's
+#                                       update 0x002520d0: the rider's update is reached through the
+#                                       node at obj+0x50, i.e. by that walk
+# So riders are stepped in player order, each whole update before the next one's, humans first. The
+# vehicle node's own parent was not traced; it is created inside the player's vt+0xb8, in player order.
+# Rider-to-rider contact: collision_record_collide's world-ray loop (after the search 0x0011a150 /
+# 0x0011a9d0) adds an own entry (kind 0) per ray hit with +0x74 = the struck collidable's +0x80, its
+# collision record, and when that is not 0 raises the struck record's +0x40/+0x44/+0x4c and adds a
+# mirrored entry (kind 1) to it with this record as the other. bike_wreck_test reads only kind 0.
