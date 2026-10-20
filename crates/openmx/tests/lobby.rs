@@ -19,6 +19,14 @@ mod roster;
 #[allow(dead_code)]
 mod lobby;
 
+#[path = "../src/join.rs"]
+#[allow(dead_code)]
+mod join;
+
+#[path = "../src/split.rs"]
+#[allow(dead_code)]
+mod split;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

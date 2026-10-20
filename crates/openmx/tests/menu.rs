@@ -17,6 +17,12 @@ mod vehicle;
 #[path = "../src/roster.rs"]
 #[allow(dead_code)]
 mod roster;
+#[path = "../src/join.rs"]
+#[allow(dead_code)]
+mod join;
+#[path = "../src/split.rs"]
+#[allow(dead_code)]
+mod split;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Press, Reader, Readers, Screen, Settings};
@@ -198,6 +204,7 @@ fn the_settings_file_reads_back_as_it_was_written() {
             Machine::Bike,
             Machine::Biplane,
         ],
+        split: split::Split::SideBySide,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -223,7 +230,9 @@ fn the_settings_file_reads_back_as_it_was_written() {
 #[test]
 fn what_the_pad_sets_is_what_the_file_says() {
     let (mut m, mut r) = fresh();
-    // Settings (under Garage and Online), the name: clear it and type "Mx" on the keyboard, then Done.
+    // Settings (under Local Game, Online and Garage), the name: clear it and type "Mx" on the keyboard,
+    // then Done.
+    tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
@@ -502,7 +511,14 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                 }
                 let lists = matches!(
                     screen,
-                    Screen::Main | Screen::Pause | Screen::Settings | Screen::Controls | Screen::Online | Screen::Games | Screen::Lobby
+                    Screen::Main
+                        | Screen::Pause
+                        | Screen::Settings
+                        | Screen::Controls
+                        | Screen::Online
+                        | Screen::Games
+                        | Screen::Lobby
+                        | Screen::Split
                 );
                 if lists {
                     assert_eq!(logos.len(), 1, "{screen:?} at {w}x{h}: no logo");
@@ -516,8 +532,9 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
             }
         }
     }
-    // Four list screens, the three online ones (N3) and the keyboard, twelve looks each, at four shapes.
-    assert_eq!(pills, 8 * 12 * 4);
+    // Four list screens, the three online ones (N3), the split layout (P43) and the keyboard, twelve
+    // looks each, at four shapes.
+    assert_eq!(pills, 9 * 12 * 4);
 }
 
 /// [`tap`] on another seat's pad, which only the garage hears.
@@ -552,8 +569,10 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     // Two seats sit down; the third has nobody in it.
     m.seated = 2;
 
-    // Seat 1 opens the garage from the main menu: Down, Cross.
-    tap(&mut m, &mut reader, Control::Down);
+    // Seat 1 opens the garage from the main menu: Down three times (past Local Game and Online), Cross.
+    for _ in 0..3 {
+        tap(&mut m, &mut reader, Control::Down);
+    }
     tap(&mut m, &mut reader, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Garage));
     // Seat 1: class right (125 to 250), then Tier to Pro, then the next rider.
@@ -605,7 +624,9 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     std::fs::remove_dir_all(&dir).ok();
 
     // Free Ride, Cross on the first track: the ride starts, and it is the two seats' picks.
-    tap(&mut m, &mut reader, Control::Up);
+    for _ in 0..3 {
+        tap(&mut m, &mut reader, Control::Up);
+    }
     tap(&mut m, &mut reader, Control::Cross);
     let acts = tap(&mut m, &mut reader, Control::Cross);
     assert!(acts.contains(&Act::Ride("free06".into())), "{acts:?}");
@@ -804,4 +825,151 @@ fn back_on_the_splash_asks_to_quit_and_only_the_asker_answers() {
     assert_eq!(m.screen(), Some(Screen::Main), "only 1P and the keyboard go back");
     devices(&mut m, &mut r, &rest(circle, Report::idle()));
     assert_eq!((m.screen(), m.p1()), (Some(Screen::Splash), None));
+}
+
+/// One frame of the front end as main.rs's loop runs it (P43): which pad seats have a controller
+/// in, then pad seat 0's press through [`Menu::step`] and every other's through [`Menu::step_seat`].
+fn front_frame(m: &mut Menu, readers: &mut [Reader], present: &[usize], reports: &[Report]) -> Act {
+    m.present(present);
+    for i in 1..readers.len() {
+        let p = readers[i].read(&reports[i]);
+        m.step_seat(i, p);
+    }
+    let p = readers[0].read(&reports[0]);
+    m.step(p)
+}
+
+/// One press and release of `control` on pad seat `device`'s controller, every other at rest.
+fn tap_device(m: &mut Menu, readers: &mut [Reader], present: &[usize], device: usize, control: Control) -> Vec<Act> {
+    let mut acts = Vec::new();
+    for pressed in [true, false] {
+        let reports: Vec<Report> = (0..readers.len())
+            .map(|i| match pressed && i == device {
+                true => Report::from_buttons(control.mask()),
+                false => Report::idle(),
+            })
+            .collect();
+        acts.push(front_frame(m, readers, present, &reports));
+    }
+    acts
+}
+
+/// A menu with `pads` readers that have seen their controllers at rest, as the shell's have.
+fn fresh_with(pads: usize) -> (Menu, Vec<Reader>) {
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    let mut readers: Vec<Reader> = (0..pads).map(|_| Reader::new()).collect();
+    let present: Vec<usize> = (0..pads).collect();
+    front_frame(&mut m, &mut readers, &present, &vec![Report::idle(); pads]);
+    (m, readers)
+}
+
+#[test]
+fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
+    // Two: four pads in, the first and the third play. Local Game is the main menu's second row.
+    let all = [0, 1, 2, 3];
+    let (mut m, mut rd) = fresh_with(4);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Join));
+    // The pad that chose Local Game is 1P already; the third joins and moves a seat right.
+    assert_eq!(m.join.views(), vec![0]);
+    tap_device(&mut m, &mut rd, &all, 2, Control::Cross);
+    tap_device(&mut m, &mut rd, &all, 2, Control::Right);
+    assert_eq!(m.join.riders()[..3], [Some(0), None, Some(2)]);
+    // The second and fourth stay out: their Left and Right and Square move nothing.
+    for c in [Control::Left, Control::Right, Control::Square, Control::Start] {
+        tap_device(&mut m, &mut rd, &all, 1, c);
+        tap_device(&mut m, &mut rd, &all, 3, c);
+    }
+    assert_eq!(m.join.views(), vec![0, 2]);
+    assert_eq!(m.screen(), Some(Screen::Join));
+    // Start from the joined pad: the split layout, the original's two for a pair. Side by side.
+    tap_device(&mut m, &mut rd, &all, 2, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Split));
+    assert_eq!(menu::layouts(2), vec![split::Layout::Stacked, split::Layout::SideBySide]);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    // The ride setup lists a machine for each of the two.
+    assert_eq!(m.riders, 2);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Right);
+    let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert!(acts.contains(&Act::Ride("free07".into())), "{acts:?}");
+    let party = m.party().expect("a local game").clone();
+    assert_eq!(party.players(), 2);
+    // Player 1 rides pad seat 0's controller and player 2 pad seat 2's.
+    assert_eq!(party.devices, vec![0, 2]);
+    assert_eq!(party.layout(), split::Layout::SideBySide);
+    let views = party.layout().rects(640, 448);
+    assert_eq!(views.len(), 2);
+    assert!(views.iter().all(|v| (v.w, v.h) == (320, 448)), "{views:?}");
+    // The pick is the file's, so the next local game of two opens on it.
+    assert_eq!(m.settings.split, split::Split::SideBySide);
+    assert!(m.settings.text().contains("split = v"));
+    assert_eq!(Settings::parse(&m.settings.text()), m.settings);
+    assert!(m.riding());
+
+    // Back on the main menu after the ride, a Free Ride is `--players`' again and no local game.
+    m.main();
+    tap_device(&mut m, &mut rd, &all, 0, Control::Up);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    assert!(m.party().is_none());
+    assert_eq!(m.riders, 1);
+
+    // Four: every pad joins; the last is pulled out before Start, which keeps its seat and its view
+    // (the rider waits on the start line for it).
+    let (mut m, mut rd) = fresh_with(4);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    for d in 1..4 {
+        tap_device(&mut m, &mut rd, &all, d, Control::Cross);
+    }
+    assert_eq!(m.join.views(), vec![0, 1, 2, 3]);
+    let three = [0, 1, 2];
+    front_frame(&mut m, &mut rd, &three, &vec![Report::idle(); 4]);
+    assert!(matches!(m.join.seats[3], join::Seat::Gone(3)));
+    tap_device(&mut m, &mut rd, &three, 1, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Split));
+    // Four have one layout, the port's quarters, so the screen has one row.
+    assert_eq!(menu::layouts(4), vec![split::Layout::Quarters]);
+    tap_device(&mut m, &mut rd, &three, 0, Control::Cross);
+    assert_eq!(m.riders, 4);
+    let acts = tap_device(&mut m, &mut rd, &three, 0, Control::Cross);
+    assert!(acts.contains(&Act::Ride("free06".into())), "{acts:?}");
+    let party = m.party().expect("a local game");
+    assert_eq!(party.devices, vec![0, 1, 2, 3]);
+    let views = party.layout().rects(640, 448);
+    assert_eq!(views.len(), 4);
+    assert!(views.iter().all(|v| (v.w, v.h) == (320, 224)), "{views:?}");
+}
+
+#[test]
+fn backing_out_of_a_local_game_walks_its_screens_back_to_the_main_menu() {
+    let all = [0, 1];
+    let (mut m, mut rd) = fresh_with(2);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Start);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Split));
+    tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Join));
+    // Circle on the join screen is a seated pad leaving, then, with no seat, back.
+    tap_device(&mut m, &mut rd, &all, 1, Control::Circle);
+    assert_eq!(m.join.views(), vec![0]);
+    tap_device(&mut m, &mut rd, &all, 1, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    // The seats are kept for the next local game.
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Join));
+    assert_eq!(m.join.views(), vec![0]);
+    // Online sits beside it: N3's online screen.
+    tap_device(&mut m, &mut rd, &all, 1, Control::Circle);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Online));
 }

@@ -27,8 +27,16 @@
 //! a peer drops out of a ride. The menu does not touch the network: what it asks for queues up in
 //! [`Lobby::out`] as `openmx_net` commands for the shell to send, and what the network says comes in
 //! through [`Menu::heard`], so the tests drive the screens with reports and events alone.
+//!
+//! A local game (P43) is opentennis's Local (`main_menu/home.rs`, `assign.rs`): Local Game on the main
+//! menu opens the join screen ([`join::Join`], P38's rules), where every controller presses its own
+//! way into a seat; Start from a seated one goes on to the split layout the views are drawn in, then
+//! the track pick, and the ride starts with one view a seat in play ([`Menu::party`]). Online (above) sits
+//! beside it on the main menu.
 
+use crate::join::{self, Join, Opened, Outcome};
 use crate::roster::{self, Catalogue, Garage, Pick, Picks};
+use crate::split::{self, Split};
 use game_render::{Disc, Frame, Texture};
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use openmx_net::{Cmd, Event, HOST, Listing, Room};
@@ -170,6 +178,8 @@ pub struct Settings {
     pub track: String,
     /// The machine each seat's ride starts on, the ride setup's pick (P41), 1P's first.
     pub machines: [Machine; SEATS_MAX],
+    /// How a local game of two shares the screen, the split layout's pick (P43): `--split`'s.
+    pub split: Split,
 }
 
 /// The most players a ride seats, as P35's seats count them.
@@ -223,7 +233,16 @@ impl Default for Settings {
             wrecks: true,
             track: TRACKS[0].0.into(),
             machines: [Machine::Bike; SEATS_MAX],
+            split: Split::default(),
         }
+    }
+}
+
+/// `--split`'s word for a layout of two, as `settings.txt` keeps it.
+fn split_word(s: Split) -> &'static str {
+    match s {
+        Split::Stacked => "h",
+        Split::SideBySide => "v",
     }
 }
 
@@ -265,6 +284,7 @@ impl Settings {
                         }
                     }
                 }
+                "split" => s.split = Split::parse(v).unwrap_or(s.split),
                 _ => {}
             }
         }
@@ -273,12 +293,13 @@ impl Settings {
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\n",
+            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\n",
             self.name,
             on_off(self.overlay),
             on_off(self.wrecks),
             self.track,
-            self.machines.map(Machine::word).join(" ")
+            self.machines.map(Machine::word).join(" "),
+            split_word(self.split)
         )
     }
 
@@ -477,14 +498,20 @@ pub enum Screen {
     /// The lobby: its players, the ride, Ready and Start.
     Lobby,
     Garage,
+    /// A local game's join screen (P43 over P38's [`join`]).
+    Join,
+    /// A local game's split layout.
+    Split,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 11] = [
+    pub const ALL: [Screen; 13] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
         Screen::Garage,
+        Screen::Join,
+        Screen::Split,
         Screen::Settings,
         Screen::Controls,
         Screen::Keyboard,
@@ -512,6 +539,8 @@ impl Screen {
             Screen::Online => "online",
             Screen::Games => "games",
             Screen::Lobby => "lobby",
+            Screen::Join => "join",
+            Screen::Split => "split",
         }
     }
 
@@ -532,12 +561,19 @@ impl Screen {
             Screen::Online => "Online",
             Screen::Games => "Find Games",
             Screen::Lobby => "Lobby",
+            Screen::Join => "Local Game",
+            Screen::Split => "Split Screen",
         }
     }
 }
 
-/// The main menu's rows. P38's join screen goes in here.
-const MAIN: [&str; 5] = ["Free Ride", "Garage", "Online", "Settings", "Quit"];
+/// The main menu's rows: opentennis's Local and Online beside Free Ride, as `home.rs` lists them.
+const MAIN: [&str; 6] = ["Free Ride", "Local Game", "Online", "Garage", "Settings", "Quit"];
+const MAIN_FREE: usize = 0;
+const MAIN_LOCAL: usize = 1;
+const MAIN_ONLINE: usize = 2;
+const MAIN_GARAGE: usize = 3;
+const MAIN_SETTINGS: usize = 4;
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
 /// machine a switch would go to.
 const PAUSE: [&str; 6] = ["Resume", "Restart", "Switch To Machine", "Settings", "Main Menu", "Quit"];
@@ -667,6 +703,58 @@ pub struct Menu {
     claimed: Option<u32>,
     /// The splash's Quit popup: the device that asked, which alone answers it, and its row.
     quit: Option<(Dev, usize)>,
+    /// A local game's seats (P43): the controller on each, by the shell's pad seat number, which is
+    /// the device id the join screen is over. Kept between rides, so the next local game opens on
+    /// the last one's players.
+    pub join: Join<usize>,
+    /// What each pad seat's controller is called, for the join screen's cards; the shell fills it.
+    pub devices: Vec<String>,
+    /// The local game the ride setup is for, once the join screen is done; none for a Free Ride.
+    party: Option<Party>,
+    /// How many ride a Free Ride, which is `--players`: the shell says, and a Free Ride after a
+    /// local game goes back to it.
+    pub free_riders: usize,
+}
+
+/// A local game as the ride takes it (P43): one player a seat in play, in seat order, each on the
+/// controller of their seat, and the layout their views are drawn in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Party {
+    /// Player i's controller, as a pad seat number: the ride's player i reads that seat's pad.
+    pub devices: Vec<usize>,
+    pub split: Split,
+}
+
+impl Party {
+    /// How many players ride, which is how many views.
+    pub fn players(&self) -> usize {
+        self.devices.len()
+    }
+
+    /// The layout the views are drawn in.
+    pub fn layout(&self) -> split::Layout {
+        split::Layout::for_players(self.players(), self.split).unwrap_or(split::Layout::Full)
+    }
+}
+
+/// The layouts `players` can be drawn in, the split screen's rows: the original's two for a pair,
+/// and the one the port has for any other count.
+pub fn layouts(players: usize) -> Vec<split::Layout> {
+    match players {
+        2 => vec![split::Layout::Stacked, split::Layout::SideBySide],
+        n => vec![split::Layout::for_players(n.clamp(1, split::MOST), Split::default()).unwrap_or(split::Layout::Full)],
+    }
+}
+
+/// A layout's name on the split screen.
+fn layout_label(l: split::Layout) -> &'static str {
+    match l {
+        split::Layout::Full => "Full Screen",
+        split::Layout::Stacked => "One Above The Other",
+        split::Layout::SideBySide => "Side By Side",
+        split::Layout::Quarters => "Quarters",
+        split::Layout::Eighths => "Eighths",
+    }
 }
 
 impl Menu {
@@ -699,6 +787,63 @@ impl Menu {
             p1_name: String::new(),
             claimed: None,
             quit: None,
+            join: Join::new(join::ON_SCREEN, Opened::Menu),
+            devices: Vec::new(),
+            party: None,
+            free_riders: 1,
+        }
+    }
+
+    /// The local game the ride that starts is, or none for a Free Ride (P43).
+    pub fn party(&self) -> Option<&Party> {
+        self.party.as_ref()
+    }
+
+    /// Which pad seats have a controller in them now, as the shell sees them: a join screen seat
+    /// whose controller went is shown gone, and taken again when it is back.
+    pub fn present(&mut self, devices: &[usize]) {
+        self.join.update(devices);
+    }
+
+    fn open_join(&mut self) {
+        // The controller that chose Local Game is in it: 1P, the host's seat, as opentennis's is.
+        if self.join.views().is_empty() {
+            self.join.press(&0, join::Press::Join);
+        }
+        self.push(Screen::Join);
+    }
+
+    /// A press on the join screen from pad seat `device`'s controller.
+    fn walk_join(&mut self, device: usize, p: Press) {
+        let presses = [
+            (p.ok, join::Press::Join),
+            (p.back, join::Press::Leave),
+            (p.left, join::Press::Left),
+            (p.right, join::Press::Right),
+            (p.delete, join::Press::LetGo),
+            (p.start, join::Press::Start),
+        ];
+        for (_, jp) in presses.into_iter().filter(|(on, _)| *on) {
+            match self.join.press(&device, jp) {
+                Outcome::Stay => {}
+                Outcome::Back => {
+                    self.pop();
+                    return;
+                }
+                Outcome::Done => {
+                    let riders = self.join.riders();
+                    let devices: Vec<usize> = self.join.views().into_iter().filter_map(|i| riders[i]).collect();
+                    self.riders = devices.len();
+                    self.setup_seat = 0;
+                    let at = layouts(self.riders).iter().position(|l| {
+                        *l == split::Layout::for_players(self.riders, self.settings.split).unwrap_or(split::Layout::Full)
+                    });
+                    self.cursor[Screen::Split.index()] = at.unwrap_or(0);
+                    self.party = Some(Party { devices, split: self.settings.split });
+                    self.push(Screen::Split);
+                    return;
+                }
+            }
         }
     }
 
@@ -749,7 +894,12 @@ impl Menu {
 
     /// A frame of another seat's pad (seat 0's is [`Menu::step`]'s). Only the garage hears it: each
     /// seat walks its own column, and only the first seat leaves the screen.
+    /// The join screen hears every one, each pressing for its own seat (P43).
     pub fn step_seat(&mut self, seat: usize, p: Press) {
+        if seat > 0 && self.screen() == Some(Screen::Join) {
+            self.walk_join(seat, p);
+            return;
+        }
         if seat == 0 || seat >= self.seated || self.screen() != Some(Screen::Garage) {
             return;
         }
@@ -925,6 +1075,15 @@ impl Menu {
                 self.open_garage();
             }
             Screen::Games | Screen::Lobby => self.stack = vec![Screen::Main, Screen::Online, screen],
+            Screen::Join => {
+                self.main();
+                self.open_join();
+            }
+            Screen::Split => {
+                self.main();
+                self.open_join();
+                self.walk_join(0, Press { start: true, ..Press::default() });
+            }
             s => self.stack = vec![Screen::Main, s],
         }
     }
@@ -957,6 +1116,8 @@ impl Menu {
             Screen::Online => ONLINE.len() + 1,
             Screen::Games => self.lobby.found.len() + 1,
             Screen::Lobby => self.lobby.items().len(),
+            Screen::Join => join::ON_SCREEN,
+            Screen::Split => layouts(self.riders).len(),
         }
     }
 
@@ -1038,6 +1199,10 @@ impl Menu {
             }
             return Act::Stay;
         }
+        if screen == Screen::Join {
+            self.walk_join(0, p);
+            return Act::Stay;
+        }
         let rows = self.rows(screen);
         // The lobby's and the list's rows come and go with what the network says.
         let at = self.cursor(screen).min(rows - 1);
@@ -1062,17 +1227,43 @@ impl Menu {
             // B533); Quit is a row, and Back on the splash asks.
             Screen::Main if p.back => self.splash(),
             Screen::Main => match (p.ok || p.start, p.back, at) {
-                (true, _, 0) => {
+                (true, _, MAIN_FREE) => {
+                    if self.party.take().is_some() {
+                        self.riders = self.free_riders;
+                    }
                     self.cursor[Screen::Tracks.index()] = self.settings.track_index();
                     self.tick = 0;
                     self.push(Screen::Tracks);
                 }
-                (true, _, 1) => self.open_garage(),
-                (true, _, 2) => self.push(Screen::Online),
-                (true, _, 3) => self.push(Screen::Settings),
+                (true, _, MAIN_LOCAL) => self.open_join(),
+                (true, _, MAIN_ONLINE) => self.push(Screen::Online),
+                (true, _, MAIN_GARAGE) => self.open_garage(),
+                (true, _, MAIN_SETTINGS) => self.push(Screen::Settings),
                 (true, _, _) => return Act::Quit,
                 _ => {}
             },
+            Screen::Split => {
+                if p.back {
+                    self.pop();
+                } else if p.ok || p.start {
+                    let layout = layouts(self.riders)[at.min(rows - 1)];
+                    let split = match layout {
+                        split::Layout::SideBySide => Split::SideBySide,
+                        split::Layout::Stacked => Split::Stacked,
+                        _ => self.settings.split,
+                    };
+                    if split != self.settings.split {
+                        self.settings.split = split;
+                        self.changed = true;
+                    }
+                    if let Some(party) = &mut self.party {
+                        party.split = split;
+                    }
+                    self.cursor[Screen::Tracks.index()] = self.settings.track_index();
+                    self.tick = 0;
+                    self.push(Screen::Tracks);
+                }
+            }
             Screen::Tracks => {
                 let riders = self.riders.clamp(1, SEATS_MAX);
                 if p.up || p.down {
@@ -1167,7 +1358,7 @@ impl Menu {
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
-            Screen::Keyboard | Screen::Garage | Screen::Splash => unreachable!(),
+            Screen::Keyboard | Screen::Garage | Screen::Splash | Screen::Join => unreachable!(),
         }
         Act::Stay
     }
@@ -1948,6 +2139,17 @@ impl Art {
                 p.title(screen.title());
                 p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
             }
+            Screen::Join => p.join(menu),
+            Screen::Split => {
+                p.column();
+                let rows: Vec<String> = layouts(menu.riders).into_iter().map(|l| layout_label(l).to_string()).collect();
+                let at = menu.cursor(screen).min(rows.len() - 1);
+                p.list(&rows, at);
+                p.views(layouts(menu.riders)[at], menu.riders);
+                p.logo();
+                p.title(screen.title());
+                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
+            }
             Screen::Games => p.games(menu),
             Screen::Lobby => p.lobby(menu),
             Screen::Splash => p.splash(menu),
@@ -2398,6 +2600,87 @@ impl<'a> Painter<'a> {
                 } else {
                     self.text(Face::Item, label, 320.0, y, Align::Centre, ITEM);
                 }
+            }
+        }
+    }
+
+    /// The join screen (P43): a card a seat across the frame, the garage's columns, each saying who
+    /// is on it — a controller's name on the red bar, the same dimmed when it is gone, or the button
+    /// that joins an open one — with arrows either side of a seated card that has room to move.
+    fn join(&mut self, menu: &Menu) {
+        self.anchor(Anchor::TopLeft);
+        let seats = &menu.join.seats;
+        let n = seats.len();
+        let (vw, vh) = self.view;
+        let w = (560.0 / n as f32).min(448.0);
+        let left = vw / 2.0 - w * n as f32 / 2.0;
+        let name = |d: &usize| menu.devices.get(*d).cloned().unwrap_or_else(|| format!("Pad {}", d + 1));
+        let open = |i: usize| seats[i] == join::Seat::Open;
+        for (i, seat) in seats.iter().enumerate() {
+            let x = left + w * i as f32;
+            let centre = x + w / 2.0;
+            self.tex("mainmenu_background", rect(x + 14.0, 0.0, w - 8.0, vh), [0, 0, 0, 60]);
+            self.tex("mainmenu_background", rect(x + 4.0, 0.0, w - 8.0, vh), [255, 255, 255, 200]);
+            self.text(Face::Item, &format!("Player {}", i + 1), centre, 120.0, Align::Centre, CHOSEN);
+            let y = 160.0;
+            match seat {
+                join::Seat::Open => {
+                    self.tex("nav_x_off", rect(centre - 32.0, y - 18.0, 64.0, 64.0), CHOSEN);
+                    self.text(Face::Small, "to join", centre, y + 36.0, Align::Centre, ITEM);
+                }
+                join::Seat::Taken(d) | join::Seat::Gone(d) => {
+                    let gone = matches!(seat, join::Seat::Gone(_));
+                    let bar = w - 16.0;
+                    let tint = if gone { [120, 120, 120, 160] } else { CHOSEN };
+                    self.tex("mainmenu_highlight_off_shadow", rect(x + 18.0, y + 7.0, bar, 32.0), [0, 0, 0, 110]);
+                    self.tex("mainmenu_highlight", rect(x + 8.0, y - 3.0, bar, 32.0), tint);
+                    let face = if gone { Face::Item } else { Face::Chosen };
+                    let colour = if gone { ITEM } else { CHOSEN };
+                    // A pad's name can be long; the card shows what fits of it.
+                    let mut label = name(d);
+                    let room = bar - 16.0;
+                    while label.chars().count() > 1 && self.art.fonts[&face].measure(&label) > room {
+                        label.pop();
+                    }
+                    self.text(face, &label, centre, y, Align::Centre, colour);
+                    if gone {
+                        self.text(Face::Small, "Gone - plug it back in", centre, y + 36.0, Align::Centre, ITEM);
+                    } else {
+                        if (0..i).any(open) {
+                            self.tex("arrow_left_off", rect(x + 6.0, y + 36.0, 24.0, 24.0), CHOSEN);
+                        }
+                        if (i + 1..n).any(open) {
+                            self.tex("arrow_right_off", rect(x + w - 30.0, y + 36.0, 24.0, 24.0), CHOSEN);
+                        }
+                    }
+                }
+            }
+        }
+        self.title(Screen::Join.title());
+        let mut buttons = vec![("nav_circle_off", "Leave"), ("nav_x_off", "Join")];
+        if seats.iter().any(|s| matches!(s, join::Seat::Gone(_))) {
+            buttons.insert(0, ("nav_square_off", "Let Go"));
+        }
+        buttons.push(("nav_start_off", "Ride"));
+        self.legend(&buttons);
+    }
+
+    /// The split layout's picture, right of the list: the frame's shape cut into the layout's
+    /// views, each numbered for its player, and the views nobody has dark.
+    fn views(&mut self, layout: split::Layout, players: usize) {
+        self.anchor(Anchor::TopLeft);
+        let (fw, fh) = (224usize, 156usize);
+        let (x0, y0) = (390.0, 120.0);
+        self.fill(rect(x0 - 4.0, y0 - 4.0, fw as f32 + 8.0, fh as f32 + 8.0), BLACK);
+        for (i, r) in layout.rects(fw, fh).into_iter().enumerate() {
+            let at = rect(x0 + r.x as f32 + 2.0, y0 + r.y as f32 + 2.0, r.w as f32 - 4.0, r.h as f32 - 4.0);
+            match i < players {
+                true => {
+                    self.fill(at, [150, 72, 30, 255]);
+                    let label = format!("{}P", i + 1);
+                    self.text(Face::Item, &label, at.x + at.w / 2.0, at.y + at.h / 2.0 - 8.0, Align::Centre, CHOSEN);
+                }
+                false => self.fill(at, [40, 40, 40, 255]),
             }
         }
     }

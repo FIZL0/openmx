@@ -121,7 +121,7 @@ pub enum Opened {
 }
 
 /// The join screen's seats.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Join<D> {
     pub seats: Vec<Seat<D>>,
     pub from: Opened,
