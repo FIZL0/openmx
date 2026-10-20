@@ -65,7 +65,8 @@
 //! **L3 and R3 clicked together** put the bike back on the start line, which is how a rider who is
 //! stuck gets going again. A wreck no longer needs it: the bike tumbles, the rider comes off it and
 //! the ride comes back up on its own, on the wreck's own two files (S26). Start freezes and
-//! unfreezes the ride, L1 cycles the track's own camera presets, and Escape
+//! unfreezes the ride, L1 cycles the track's own camera presets the way the original's next-camera routine
+//! does (`--camera` picks the one to start on, by name), and Escape
 //! or closing the window quits. The same controls are on the keyboard for a machine with no pad:
 //! X/Space, Z, the arrow keys, C/V/D for the three trick buttons, Q+E for the reset, Return.
 //!
@@ -173,6 +174,18 @@ const GROUND_RADIUS: u32 = 44;
 /// preset's own minimum. The frame it uses is a different function altogether; S23's journal entry
 /// says what else differs and S24 is the task for porting it.
 const NEAR_CLIP: f32 = 2.4;
+
+/// The camera preset a session starts on. The original's own, in a freeride: the human's freeride
+/// save state has the follow camera on preset 0 of 11, whose record is named `Race Cam 1` — the
+/// race's camera and not `Freestyle Cam` (P14). L1 walks on from it.
+const START_CAMERA: &str = "Race Cam 1";
+
+/// The race camera's reverse threshold: the constant its setup hands the base camera's initialiser.
+const REVERSE_SPEED: f32 = 5.0;
+
+/// The speed the camera's look-ahead is measured against, as the original's camera holds it during a
+/// freeride: 80 mph in feet a second. Nothing in the camera's own code was found writing it (P14).
+const SPEED_REFERENCE: f32 = 117.332_8;
 
 /// The chassis model every bike is built on, which is the name the parts in a `.sub` hang off.
 const CHASSIS: &str = "bike";
@@ -286,6 +299,9 @@ struct Args {
     /// Draw the riding overlay (P6): the pad as the simulation reads it and the numbers beside it.
     /// Off by default and off is free, because it is debugging furniture and not part of the game.
     hud: bool,
+    /// `--camera NAME`: which of the track's camera presets to start on, by the name its
+    /// `cpresets.ini` gives it. The default is the one the original itself is on in a freeride (P14).
+    camera: String,
     /// Draw one frame posed from a moment of the original (V2) instead of riding: the moment file
     /// and the path to write that frame to.
     moment: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -573,25 +589,42 @@ fn run() -> Result<(), String> {
         );
     }
 
-    // The follow cameras the track carries, in the file's own order, read by S7's own reader. L1 and
-    // R1 walk them. `reverse_speed` is a constructor argument in the original and the call site was
+    // The follow cameras the track carries, in the file's own order, read by S7's own reader. L1
+    // walks the ones the file lets the player cycle to. `reverse_speed` is a constructor argument in the original and the call site was
     // not read; the preset's own switch speed is the closest number the disc has.
     let presets: Vec<Preset> = archives
         .iter()
         .find_map(|a| a.read_suffix("cpresets.ini").ok())
         .map(|b| Preset::read_bytes(&b, ""))
         .unwrap_or_default();
-    let reverse_speed =
-        presets.first().map_or(F(5.0), |p| p.forward_reverse_switch_speed);
+    // The reverse threshold is the race camera's setup's own constant: it hands the base camera's
+    // initialiser 5, and the original's camera holds 5 in both freeride save states read (P14).
+    // The preset's `ForwardReverseSwitchSpeed` was the stand-in before, and free06's file does not
+    // have that key, so it was zero.
+    let reverse_speed = F(REVERSE_SPEED);
     // The derived class, not the base one: the base camera's frame is dead code on the disc (S24),
     // and this is the frame the picture comes out of.
     let mut camera = Race::new(presets, reverse_speed);
+    // The preset the session starts on, by name rather than by its place in the file. A name the
+    // file does not have is an error rather than a quiet fall back to the first record, so that a
+    // typo cannot pass for the camera it named.
+    if !camera.cam.presets.is_empty() {
+        let Some(start) = Preset::find(&camera.cam.presets, &args.camera) else {
+            let names: Vec<&str> = camera.cam.presets.iter().map(|p| p.name.as_str()).collect();
+            return Err(format!("--camera: the track has no preset called {:?}; it has {names:?}", args.camera));
+        };
+        camera.cam.set_preset(start);
+    }
     // The first frame starts the eight lags where the camera actually is instead of lagging them in
     // from zero, which is what the camera's own snap flag is for. The disc gets it from the race's
     // setup applying a preset over a previous one; the constructor here applies its first preset to
     // itself, and that comparison cannot fire.
     camera.cam.snap = true;
-    let mut which = 0usize;
+    // What the look-ahead divides the rider's speed by. The constructor's 1.0 is not what the
+    // original rides with: both of its cameras hold 117.3328 (80 mph in feet a second) in both
+    // freeride save states read, and at 1.0 the race camera — which, unlike the base one, does not
+    // cap the ratio — aims hundreds of feet up the track and loses the bike off the screen (P14).
+    camera.cam.speed_reference = F(SPEED_REFERENCE);
 
     // The scene's own start line and start direction, as the simulation's reader read them.
     let spawn = point(place.start);
@@ -858,6 +891,9 @@ fn run() -> Result<(), String> {
     // window rather than inside the simulation's `World`, and it reads the port's own values at draw
     // time instead of being fed them.
     let mut hud = Hud::new(args.hud);
+    if !camera.cam.presets.is_empty() {
+        hud.note_camera(&camera.cam.preset().name);
+    }
     // H toggles it, on its own edge: the window keeps key state and not key events, so the shell
     // remembers last frame's to tell a press from a hold.
     let mut hud_key = false;
@@ -963,10 +999,12 @@ fn run() -> Result<(), String> {
         let presets = camera.cam.presets.len();
         if presets > 1 {
             let pad = world.sim.input.pad(0);
-            // L1 only: R1 is the third of the trick decoder's buttons now.
+            // L1 only: R1 is the third of the trick decoder's buttons now. The walk is the
+            // original's next-camera routine: on to the next preset the file lets the player cycle to.
             if pad.pressed(Control::L1) {
-                which = (which + 1) % presets;
-                camera.cam.set_preset(which);
+                camera.cam.next_preset();
+                println!("camera: {}", camera.cam.preset().name);
+                hud.note_camera(&camera.cam.preset().name);
             }
         }
         let (forward, up) = world.sim.rider.ride.axes();
@@ -1278,6 +1316,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         shot: None,
         shot_frame: 0,
         hud: false,
+        camera: START_CAMERA.to_string(),
         moment: None,
         wrecks: true,
         trace: None,
@@ -1305,6 +1344,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .map_err(|_| "--shot-frame: not a frame number")?;
             }
             "--hud" => args.hud = true,
+            "--camera" => args.camera = next("a camera preset's name, like \"Freestyle Cam\"")?,
             "--moment" => {
                 let file: std::path::PathBuf = next("a moment file")?.into();
                 let out: std::path::PathBuf = next("a path for the frame")?.into();
@@ -1379,7 +1419,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                     "openmx [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--hud]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--hud] [--camera NAME]\n\
                             [--shot-frame N]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
@@ -1387,7 +1427,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Rides the freeride area from the disc named in kit.toml.\n\
                      Cross throttle, Square brake, R2 front brake, L2 clutch, left stick steers\n\
                      and leans, the d-pad preloads, L3 balances, R3 reverses, Start freezes,\n\
-                     L1 changes camera, Escape quits.\n\
+                     L1 changes camera, Escape quits. --camera starts on a camera preset by its\n\
+                     name in the track's cpresets.ini (\"Race Cam 1\" unless asked).\n\
                      A trick is a gesture: hold Circle, Triangle and/or R1 and push the d-pad.\n\
                      L3 and R3 clicked together put the bike back on the start line.\n\
                      On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, Q+E reset.\n\

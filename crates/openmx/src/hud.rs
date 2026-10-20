@@ -45,6 +45,8 @@ pub struct Hud {
     trick: String,
     /// The last wreck, as the state machine's own reason code and this file's name for it.
     wreck: String,
+    /// The camera preset the follow camera is on, by its file's name for it.
+    camera: String,
 }
 
 impl Hud {
@@ -53,7 +55,13 @@ impl Hud {
             on,
             trick: "-".to_string(),
             wreck: "-".to_string(),
+            camera: "-".to_string(),
         }
+    }
+
+    /// Which camera preset is up, latched the same way: the shell switches presets, not the overlay.
+    pub fn note_camera(&mut self, name: &str) {
+        self.camera = name.to_string();
     }
 
     /// What the rider just did, latched for the overlay to show until the next one.
@@ -248,12 +256,16 @@ impl Hud {
                     if ride.air.on_ground { "yes" } else { "no" },
                     if ride.touching { "touching" } else { "" }
                 ),
+                String::new(),
             ],
             [
                 format!("roll{:>8.1}   pitch{:>6.1}", deg(euler.z()), deg(euler.x())),
                 format!("state  {state}"),
                 format!("trick  {trick}"),
                 format!("wreck  {}", self.wreck),
+                // Clipped to the column: a name the walk can reach is short, but `--camera` can
+                // start on any of them.
+                format!("camera {}", self.camera.chars().take(19).collect::<String>()),
             ],
         ];
         for (c, lines) in columns.iter().enumerate() {
@@ -298,12 +310,12 @@ const STICK: i32 = 46;
 /// A command bar.
 const BAR: i32 = 56;
 /// The numbers, at two pixels a font pixel: how far apart two lines are, and how far apart the two
-/// columns of four are — 27 characters of an 8-pixel advance, which is wider than any line in the
+/// columns of five are — 27 characters of an 8-pixel advance, which is wider than any line in the
 /// left column.
 const NUMBERS_LINE: i32 = 12;
 const NUMBERS_COL: i32 = 28 * 8;
 /// Where each band starts, measured from inside the panel's border.
-const CONTROLS_Y: i32 = 4 * NUMBERS_LINE + 6;
+const CONTROLS_Y: i32 = 5 * NUMBERS_LINE + 6;
 const STICKS_Y: i32 = CONTROLS_Y + 2 * (CELL_H + 2) + 6;
 /// The whole panel: as wide as the two columns of numbers and as tall as the three bands, with the
 /// stick boxes' own two lines of text under them.
