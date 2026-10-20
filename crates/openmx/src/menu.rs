@@ -17,7 +17,11 @@
 //!
 //! The state machine reads nothing but the pad, so `tests/menu.rs` walks every screen with reports
 //! alone, and the drawing is a separate half that needs the disc.
+//!
+//! The garage (P37) is one more screen: a column per seat, each walked by its own seat's pad through
+//! [`roster::Garage`], and the picks kept in `garage.txt` beside the other two files.
 
+use crate::roster::{self, Catalogue, Garage, Pick, Picks};
 use game_render::{Disc, Frame, Texture};
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use std::collections::HashMap;
@@ -440,12 +444,14 @@ pub enum Screen {
     Controls,
     Keyboard,
     Pause,
+    Garage,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 6] = [
+    pub const ALL: [Screen; 7] = [
         Screen::Main,
         Screen::Tracks,
+        Screen::Garage,
         Screen::Settings,
         Screen::Controls,
         Screen::Keyboard,
@@ -465,6 +471,7 @@ impl Screen {
             Screen::Controls => "controls",
             Screen::Keyboard => "keyboard",
             Screen::Pause => "pause",
+            Screen::Garage => "garage",
         }
     }
 
@@ -480,12 +487,13 @@ impl Screen {
             Screen::Controls => "Controls",
             Screen::Keyboard => "Rider Name",
             Screen::Pause => "Paused",
+            Screen::Garage => "Garage",
         }
     }
 }
 
-/// The main menu's rows. P37's garage and P38's join screen go in here.
-const MAIN: [&str; 3] = ["Free Ride", "Settings", "Quit"];
+/// The main menu's rows. P38's join screen goes in here.
+const MAIN: [&str; 4] = ["Free Ride", "Garage", "Settings", "Quit"];
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
 /// machine a switch would go to.
 const PAUSE: [&str; 6] = ["Resume", "Restart", "Switch To Machine", "Settings", "Main Menu", "Quit"];
@@ -543,6 +551,16 @@ pub struct Menu {
     pauser: usize,
     /// The seat whose machine the ride setup's machine row is picking.
     setup_seat: usize,
+    /// What the garage offers, off the disc; empty until [`Menu::with_garage`] gives it one.
+    pub catalogue: Catalogue,
+    /// Every seat's pick, as `garage.txt` keeps them.
+    pub picks: Picks,
+    /// The garage's seats while it is open, one [`Garage`] each.
+    garages: Vec<Garage>,
+    /// How many seats have a player, which is how many columns the garage shows.
+    pub seated: usize,
+    /// The picks changed since [`Menu::take_picks_changed`] last said so.
+    picks_changed: bool,
 }
 
 impl Menu {
@@ -564,6 +582,77 @@ impl Menu {
             switchable: [false; SEATS_MAX],
             pauser: 0,
             setup_seat: 0,
+            catalogue: Catalogue::default(),
+            picks: Picks::default(),
+            garages: Vec::new(),
+            seated: 1,
+            picks_changed: false,
+        }
+    }
+
+    /// The garage's catalogue and the picks it starts from.
+    pub fn with_garage(mut self, catalogue: Catalogue, picks: Picks) -> Menu {
+        self.catalogue = catalogue;
+        self.picks = picks;
+        self
+    }
+
+    /// Whether the picks changed since the last time this was asked, which is when the shell writes
+    /// `garage.txt`.
+    pub fn take_picks_changed(&mut self) -> bool {
+        std::mem::take(&mut self.picks_changed)
+    }
+
+    /// What the first `players` seats ride, each fitted to what the disc has: the bike archive, the
+    /// set the simulation loads out of it and the rider archive. `None` without a catalogue, which
+    /// leaves the ride to the command line.
+    pub fn ride_picks(&self, players: usize) -> Option<Vec<Pick>> {
+        if self.catalogue.bikes.is_empty() {
+            return None;
+        }
+        let seat = |i: usize| self.picks.0.get(i).cloned().unwrap_or_default();
+        Some((0..players.max(1)).map(|i| self.catalogue.fit(&seat(i))).collect())
+    }
+
+    /// One seat's garage while the screen is open.
+    pub fn garage(&self, seat: usize) -> Option<&Garage> {
+        self.garages.get(seat)
+    }
+
+    fn open_garage(&mut self) {
+        self.garages = self.picks.0.iter().map(|p| Garage::new(&self.catalogue, p)).collect();
+        self.push(Screen::Garage);
+    }
+
+    /// Leave the garage, keeping what every seat picked.
+    fn close_garage(&mut self) {
+        for (i, g) in self.garages.iter().enumerate() {
+            if self.picks.0[i] != g.pick {
+                self.picks.0[i] = g.pick.clone();
+                self.picks_changed = true;
+            }
+        }
+        self.pop();
+    }
+
+    /// A frame of another seat's pad (seat 0's is [`Menu::step`]'s). Only the garage hears it: each
+    /// seat walks its own column, and only the first seat leaves the screen.
+    pub fn step_seat(&mut self, seat: usize, p: Press) {
+        if seat == 0 || seat >= self.seated || self.screen() != Some(Screen::Garage) {
+            return;
+        }
+        self.walk_garage(seat, p);
+    }
+
+    /// Up and down choose a seat's row, left and right change it.
+    fn walk_garage(&mut self, seat: usize, p: Press) {
+        let Some(g) = self.garages.get_mut(seat) else { return };
+        if p.up {
+            g.up();
+        } else if p.down {
+            g.down();
+        } else if p.left || p.right {
+            g.turn(&self.catalogue, if p.left { -1 } else { 1 });
         }
     }
 
@@ -628,6 +717,10 @@ impl Menu {
                 self.stack = vec![Screen::Main, Screen::Settings];
                 self.open_keyboard();
             }
+            Screen::Garage => {
+                self.main();
+                self.open_garage();
+            }
             s => self.stack = vec![Screen::Main, s],
         }
     }
@@ -655,6 +748,7 @@ impl Menu {
             Screen::Controls => CONTROLS_ROWS,
             Screen::Keyboard => KEY_ROWS.len() + 1,
             Screen::Pause => PAUSE.len(),
+            Screen::Garage => roster::ROWS.len(),
         }
     }
 
@@ -715,6 +809,16 @@ impl Menu {
         if screen == Screen::Keyboard {
             return self.keyboard(p);
         }
+        if screen == Screen::Garage {
+            // Cross, Circle and Start all leave it: a pick is made by turning it, so there is
+            // nothing to confirm and nothing to cancel.
+            if p.ok || p.back || p.start {
+                self.close_garage();
+            } else {
+                self.walk_garage(0, p);
+            }
+            return Act::Stay;
+        }
         let rows = self.rows(screen);
         let at = self.cursor(screen);
         // Up and down walk the rows, wrapping, except on the ride setup where left and right walk the
@@ -739,7 +843,8 @@ impl Menu {
                     self.tick = 0;
                     self.push(Screen::Tracks);
                 }
-                (true, _, 1) => self.push(Screen::Settings),
+                (true, _, 1) => self.open_garage(),
+                (true, _, 2) => self.push(Screen::Settings),
                 (true, _, _) => return Act::Quit,
                 _ => {}
             },
@@ -834,7 +939,7 @@ impl Menu {
                     }
                 }
             }
-            Screen::Keyboard => unreachable!(),
+            Screen::Keyboard | Screen::Garage => unreachable!(),
         }
         Act::Stay
     }
@@ -1229,6 +1334,7 @@ impl Art {
             }
             Screen::Tracks => p.tracks(menu),
             Screen::Keyboard => p.keyboard(menu),
+            Screen::Garage => p.garage(menu),
         }
         // The ticker: a note when there is one, the rider's name otherwise.
         let ticker = match &menu.note {
@@ -1244,6 +1350,23 @@ impl Art {
 /// The y of a list's row `i`: `mainmenu.lyt`'s items, thirty apart from 100.
 fn item_y(i: usize) -> f32 {
     100.0 + 30.0 * i as f32
+}
+
+/// The y of the garage's row `i`: two lines each, so closer together than a list's.
+fn garage_y(i: usize) -> f32 {
+    88.0 + 38.0 * i as f32
+}
+
+fn garage_label(row: roster::Row) -> &'static str {
+    match row {
+        roster::Row::Class => "Class",
+        roster::Row::Model => "Bike",
+        roster::Row::Livery => "Paint",
+        roster::Row::Tier => "Tier",
+        roster::Row::Tuning => "Tuning",
+        roster::Row::Rider => "Rider",
+        roster::Row::Colours => "Colours",
+    }
 }
 
 struct Painter<'a> {
@@ -1545,6 +1668,45 @@ impl<'a> Painter<'a> {
         }
         self.title(Screen::Tracks.title());
         self.legend(&[("nav_square_off", "Machine"), ("nav_circle_off", "Back"), ("nav_x_off", "Ride")]);
+    }
+
+    /// The garage: a column per seated player, opentennis's roster columns in the main menu's dark
+    /// column and red bar, each row a name over its value between arrows on the chosen one.
+    fn garage(&mut self, menu: &Menu) {
+        self.anchor(Anchor::TopLeft);
+        let n = menu.seated.clamp(1, roster::SEATS);
+        // The columns share 560 of the 640 across, centred in the frame, the one-seat column as
+        // wide as the settings'.
+        let (vw, vh) = self.view;
+        let w = (560.0 / n as f32).min(448.0);
+        let left = vw / 2.0 - w * n as f32 / 2.0;
+        for seat in 0..n {
+            let x = left + w * seat as f32;
+            let centre = x + w / 2.0;
+            self.tex("mainmenu_background", rect(x + 14.0, 0.0, w - 8.0, vh), [0, 0, 0, 60]);
+            self.tex("mainmenu_background", rect(x + 4.0, 0.0, w - 8.0, vh), [255, 255, 255, 200]);
+            self.text(Face::Item, &format!("Player {}", seat + 1), centre, 64.0, Align::Centre, CHOSEN);
+            let Some(g) = menu.garage(seat) else { continue };
+            let bar = w - 16.0;
+            let y = garage_y(g.row) - 3.0;
+            self.tex("mainmenu_highlight_off_shadow", rect(x + 18.0, y + 10.0, bar, 40.0), [0, 0, 0, 110]);
+            self.tex("mainmenu_highlight", rect(x + 8.0, y, bar, 40.0), CHOSEN);
+            for (i, row) in roster::ROWS.iter().enumerate() {
+                let on = i == g.row;
+                let y = garage_y(i);
+                let colour = if on { CHOSEN } else { ITEM };
+                self.text(Face::Small, garage_label(*row), centre, y, Align::Centre, colour);
+                let value = g.value(&menu.catalogue, *row);
+                let face = if on { Face::Chosen } else { Face::Item };
+                self.text(face, &value, centre, y + 13.0, Align::Centre, colour);
+                if on {
+                    self.tex("arrow_left_off", rect(x + 6.0, y + 4.0, 24.0, 24.0), CHOSEN);
+                    self.tex("arrow_right_off", rect(x + w - 30.0, y + 4.0, 24.0, 24.0), CHOSEN);
+                }
+            }
+        }
+        self.title(Screen::Garage.title());
+        self.legend(&[("nav_x_off", "Done")]);
     }
 
     /// The on-screen keyboard, in the middle of the frame: the name being typed, the four rows of

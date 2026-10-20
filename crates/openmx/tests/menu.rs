@@ -14,6 +14,9 @@ mod menu;
 #[path = "../src/vehicle.rs"]
 #[allow(dead_code)]
 mod vehicle;
+#[path = "../src/roster.rs"]
+#[allow(dead_code)]
+mod roster;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use menu::{Act, Controls, Gas, Layout, Machine, Menu, Press, Reader, Screen, Settings};
@@ -221,6 +224,7 @@ fn the_settings_file_reads_back_as_it_was_written() {
 fn what_the_pad_sets_is_what_the_file_says() {
     let (mut m, mut r) = fresh();
     // Settings, the name: clear it and type "Mx" on the keyboard, then Done.
+    tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Settings));
@@ -510,4 +514,115 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
     }
     // Four list screens and the keyboard, twelve looks each, at four shapes.
     assert_eq!(pills, 5 * 12 * 4);
+}
+
+/// [`tap`] on another seat's pad, which only the garage hears.
+fn tap_garage_seat(menu: &mut Menu, reader: &mut Reader, seat: usize, control: Control) {
+    for report in [Report::from_buttons(control.mask()), Report::idle()] {
+        menu.step_seat(seat, reader.read(&report));
+    }
+}
+
+#[test]
+fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
+    use game_render::rider::{Rider as Body, Sex};
+    use game_sim::phy::Phy;
+    use game_sim::track::{Engine, Tuning};
+    use roster::{Catalogue, Picks};
+
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let catalogue = Catalogue::read(&mut disc).unwrap();
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::default());
+    m.step(reader.read(&Report::idle()));
+    let mut readers: Vec<Reader> = (0..roster::SEATS).map(|_| Reader::new()).collect();
+    for (i, r) in readers.iter_mut().enumerate().skip(1) {
+        m.step_seat(i, r.read(&Report::idle()));
+    }
+    // Two seats sit down; the third has nobody in it.
+    m.seated = 2;
+
+    // Seat 1 opens the garage from the main menu: Down, Cross.
+    tap(&mut m, &mut reader, Control::Down);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Garage));
+    // Seat 1: class right (125 to 250), then Tier to Pro, then the next rider.
+    tap(&mut m, &mut reader, Control::Right);
+    for _ in 0..3 {
+        tap(&mut m, &mut reader, Control::Down);
+    }
+    tap(&mut m, &mut reader, Control::Right);
+    tap(&mut m, &mut reader, Control::Down);
+    tap(&mut m, &mut reader, Control::Down);
+    tap(&mut m, &mut reader, Control::Right);
+    // Seat 2, on its own pad and its own column: class left (125 to 50), Tuning to A, and the
+    // rider two along in its second colours.
+    let r2 = &mut readers[1];
+    tap_garage_seat(&mut m, r2, 1, Control::Left);
+    for _ in 0..4 {
+        tap_garage_seat(&mut m, r2, 1, Control::Down);
+    }
+    tap_garage_seat(&mut m, r2, 1, Control::Right);
+    tap_garage_seat(&mut m, r2, 1, Control::Down);
+    tap_garage_seat(&mut m, r2, 1, Control::Right);
+    tap_garage_seat(&mut m, r2, 1, Control::Right);
+    tap_garage_seat(&mut m, r2, 1, Control::Down);
+    tap_garage_seat(&mut m, r2, 1, Control::Right);
+    // Seat 3 is empty, so its pad moves nothing, and a seat's Cross does not close the screen.
+    let before = m.garage(2).cloned();
+    tap_garage_seat(&mut m, &mut readers[2], 2, Control::Right);
+    tap_garage_seat(&mut m, &mut readers[1], 1, Control::Cross);
+    assert_eq!(m.garage(2).cloned(), before);
+    assert_eq!(m.screen(), Some(Screen::Garage));
+    let one = m.garage(0).unwrap().pick.clone();
+    let two = m.garage(1).unwrap().pick.clone();
+    // Seat 1 leaves, and the picks are kept.
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    assert!(m.take_picks_changed());
+    assert_eq!((&m.picks.0[0], &m.picks.0[1]), (&one, &two));
+    assert_eq!(m.picks.0[2], roster::Pick::default());
+
+    assert_eq!((one.set.engine, one.set.pro, one.set.tuning), (Engine::Cc250, true, Tuning::P));
+    assert_eq!((two.set.engine, two.set.pro, two.set.tuning), (Engine::Cc50, false, Tuning::A));
+    assert_ne!(one.rider, two.rider);
+    assert_ne!(one.rider, "thq1");
+
+    // Persisted: `garage.txt` reads back as the screen left it.
+    let dir = scratch("garage");
+    m.picks.save(&dir).unwrap();
+    assert_eq!(Picks::load(&dir), m.picks);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Free Ride, Cross on the first track: the ride starts, and it is the two seats' picks.
+    tap(&mut m, &mut reader, Control::Up);
+    tap(&mut m, &mut reader, Control::Cross);
+    let acts = tap(&mut m, &mut reader, Control::Cross);
+    assert!(acts.contains(&Act::Ride("free06".into())), "{acts:?}");
+    let picks = m.ride_picks(2).expect("a catalogue");
+    assert_eq!(picks, vec![one.clone(), two.clone()]);
+
+    // What the ride opens for each: the bike archive's own file of the set, which the ported loader
+    // reads, and the rider archive with its own gear — every one different per seat.
+    let tables = game_sim::rider::Tables::build();
+    let mut seen = Vec::new();
+    for (i, p) in picks.iter().enumerate() {
+        let (bike, rider) = p.members();
+        let res = disc.res(&bike).unwrap();
+        let (bytes, member, note) = roster::physics(&res, p.set, &p.bike).unwrap();
+        assert_eq!(note, None, "seat {}", i + 1);
+        assert_eq!(member.to_ascii_lowercase(), format!("bike\\{}.phy", p.set.word()), "seat {}", i + 1);
+        let phy = format!("{:?}", Phy::read_bytes(&bytes, &tables.ride.curve));
+        let body = Body::load(&[disc.res(&rider).unwrap()], &p.rider, Sex::Male).unwrap();
+        println!("seat {}: {} on {member}, {} in {}", i + 1, p.bike, p.rider, body.suit.mcf);
+        seen.push((phy, body.suit.materials.clone()));
+    }
+    assert_ne!(seen[0].0, seen[1].0, "the two seats ride the same .phy");
+    assert_ne!(seen[0].1, seen[1].1, "the two seats wear the same gear");
 }

@@ -197,7 +197,7 @@ fn leaf_in<'a>(member: &'a str, dir: &str) -> Option<String> {
 }
 
 /// Every bike and rider a seat can pick, read off the disc.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Catalogue {
     /// Class by class, and in the disc's own order within a class.
     pub bikes: Vec<Bike>,

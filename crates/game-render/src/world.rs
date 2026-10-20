@@ -193,6 +193,24 @@ impl Assets {
         true
     }
 
+    /// Load `name` a second time as `own`, painted with `pairs` over the renames already set: another
+    /// rider on the one shared body in gear of their own (P37). The materials' earlier answers are not
+    /// reused for it, and the renames and answers the first load left are back afterwards.
+    pub fn load_repainted(&mut self, archives: &[Res], name: &str, own: &str, pairs: &[(String, String)]) -> bool {
+        let saved = (std::mem::take(&mut self.by_name), self.renames.clone());
+        self.rename_materials(pairs);
+        let first = self.models.remove(name);
+        let loaded = self.load(archives, name);
+        if let Some(m) = self.models.remove(name) {
+            self.models.insert(own.to_string(), m);
+        }
+        if let Some(f) = first {
+            self.models.insert(name.to_string(), f);
+        }
+        (self.by_name, self.renames) = saved;
+        loaded
+    }
+
     /// The texture a material paints with, loading it if this is the first mesh to ask, and how the
     /// material is drawn.
     fn texture_of(&mut self, archives: &[Res], material: &str) -> (Option<usize>, Surface) {
