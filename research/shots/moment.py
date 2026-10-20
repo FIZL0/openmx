@@ -20,6 +20,18 @@ numbers, not the addresses):
               written against: the bike's origin projects to pixel (318, 305) of 640x448 and the seat
               to dead centre, which is where the original's own screenshot has them.
 
+With `--biplane` (V21) the moment is of the plane instead:
+
+  actor type 1 the biplane, spawned by the vehicle spawner 0x0020eb10 when its kind is 1 (the class
+              is MXBiplane, ctor 0x00353d10). Matched to the first player by +0x20 like a bike.
+  actor+0x18c the plane's model root node (the soultree). The plane's actor+0x180 is not a world
+              transform the way a bike's is; the node's world matrix at node+0x80 is, rows x/y/z/
+              position in the same convention, and is what the plane is drawn with. Checked on the
+              biplane recording's states: parked at the spawn (actor+0xe0) with a 10-degree nose-up
+              pitch on its tail wheel, and on screen where the original's own screenshot has it.
+  actor+0x3b0 the crashed flag the node poser 0x00352ff0 switches the prop cones on: written out as
+              `crashed`.
+
 The track name comes from the one resolved terrain path in RAM (`Tracks\Free09\Free09.ps2.trn`),
 which is V1's trick for naming the loaded track.
 """
@@ -37,6 +49,10 @@ LIST = 0x30  # {count, head, tail}
 ACTOR_TRANSFORM = 0x180
 ACTOR_PLAYER = 0x20
 VEHICLE_TYPE = 4
+BIPLANE_TYPE = 1
+BIPLANE_ROOT = 0x18C
+NODE_WORLD = 0x80
+BIPLANE_CRASHED = 0x3B0
 RENDER_CAMERA = 0x0046A540
 VIEW_PROJECTION = 0x0046A580
 
@@ -84,6 +100,7 @@ def main(argv):
     out = None
     if "-o" in argv:
         out = argv[argv.index("-o") + 1]
+    plane = "--biplane" in argv
     ram = Ram(path)
 
     manager = ram.u32(GAME_MANAGER)
@@ -91,7 +108,8 @@ def main(argv):
         print("no GameManager: this state is not in a level")
         return 1
     players = list(ram.walk(ram.u32(manager + PLAYER_MANAGER)))
-    vehicles = [a for a in ram.walk(ram.u32(manager + ACTOR_MANAGER)) if ram.u32(a) == VEHICLE_TYPE]
+    kind = BIPLANE_TYPE if plane else VEHICLE_TYPE
+    vehicles = [a for a in ram.walk(ram.u32(manager + ACTOR_MANAGER)) if ram.u32(a) == kind]
     if not players or not vehicles:
         print(f"{len(players)} players, {len(vehicles)} vehicles: nothing to pose from")
         return 1
@@ -101,7 +119,10 @@ def main(argv):
         return 1
     actor = mine[0]
 
-    rows = [ram.vec3(actor + ACTOR_TRANSFORM + 16 * r) for r in range(4)]
+    transform = actor + ACTOR_TRANSFORM
+    if plane:
+        transform = ram.u32(actor + BIPLANE_ROOT) + NODE_WORLD
+    rows = [ram.vec3(transform + 16 * r) for r in range(4)]
     eye = ram.vec3(RENDER_CAMERA + 0x30)
     vp = [[ram.f32(VIEW_PROJECTION + 16 * r + 4 * c) for c in range(4)] for r in range(4)]
     column = lambda c: [vp[r][c] for r in range(3)]  # noqa: E731
@@ -121,6 +142,8 @@ def main(argv):
         "camera_up %.6f %.6f %.6f" % tuple(up),
         "camera_fov_v %.4f" % fov_v,
     ]
+    if plane:
+        lines += ["vehicle biplane", "crashed %d" % (1 if ram.u32(actor + BIPLANE_CRASHED) else 0)]
     text = "\n".join(lines) + "\n"
     sys.stdout.write(text)
     sys.stderr.write(

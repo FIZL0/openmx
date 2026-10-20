@@ -15,6 +15,17 @@
 //! camera_fov_v 68.9974
 //! ```
 //!
+//! A moment of the biplane (V21) says so, and the bike keys then carry the plane's transform:
+//!
+//! ```text
+//! vehicle biplane
+//! livery 0
+//! crashed 0
+//! ```
+//!
+//! `livery` is which of the plane's four models the spawner was asked for and `crashed` which prop
+//! cone is on it ([`game_render::biplane`]); both default to 0.
+//!
 //! The port is handed numbers, never addresses: where in RAM each of these was read from is in the
 //! script and in the journal entry, which is where research belongs.
 //!
@@ -23,6 +34,7 @@
 //! original had it on, to the digits the file carries. The camera is the frame's own: its eye, the
 //! direction it faced and the vertical field of view its projection was built with.
 
+use game_render::biplane::Biplane;
 use game_render::mat::{M4, V3, v3};
 use game_render::png;
 use game_render::raster::Frame;
@@ -44,6 +56,12 @@ pub struct Moment {
     pub camera_up: V3,
     /// Vertical field of view, in degrees.
     pub camera_fov_v: f32,
+    /// `bike`, or `biplane` for a moment of the plane.
+    pub vehicle: String,
+    /// Which of the plane's four models.
+    pub livery: usize,
+    /// Whether the plane has crashed: the bent prop instead of the blur.
+    pub crashed: bool,
 }
 
 impl Moment {
@@ -58,6 +76,9 @@ impl Moment {
             camera_look: v3(0.0, 0.0, 1.0),
             camera_up: v3(0.0, 1.0, 0.0),
             camera_fov_v: 69.0,
+            vehicle: "bike".to_string(),
+            livery: 0,
+            crashed: false,
         };
         let mut seen = 0;
         for line in text.lines() {
@@ -81,6 +102,9 @@ impl Moment {
                 "camera_look" => moment.camera_look = vector()?,
                 "camera_up" => moment.camera_up = vector()?,
                 "camera_fov_v" => moment.camera_fov_v = number(0)?,
+                "vehicle" => moment.vehicle = rest.first().unwrap_or(&"").to_ascii_lowercase(),
+                "livery" => moment.livery = number(0)? as usize,
+                "crashed" => moment.crashed = number(0)? != 0.0,
                 other => return Err(format!("{}: unknown key {other}", path.display())),
             }
             seen += 1;
@@ -110,6 +134,10 @@ pub struct Shot<'a> {
     pub height: usize,
     pub ground_radius: u32,
     pub chassis: &'a str,
+    /// The plane, loaded, when the moment is one of the plane's.
+    pub plane: Option<&'a Biplane>,
+    /// The pilot's body, already skinned into its seat, by the name it is loaded under.
+    pub pilot: Option<&'a str>,
 }
 
 /// Draw the moment and write it out. One frame, no window: this is the picture that goes beside the
@@ -140,7 +168,11 @@ pub fn draw(
     );
     let bike_at = M4::placement(moment.bike_pos, moment.bike_look, moment.bike_up);
     let mut actor: Vec<(&str, M4)> = vec![(shot.chassis, bike_at)];
-    if let Some(chassis) = assets.models.get(shot.chassis) {
+    if let Some(plane) = shot.plane {
+        // The plane's own parts, and the pilot in its seat.
+        actor = plane.parts(bike_at, moment.crashed);
+        actor.extend(shot.pilot.map(|pilot| (pilot, plane.pilot(bike_at))));
+    } else if let Some(chassis) = assets.models.get(shot.chassis) {
         for part in &vehicle.parts {
             let node = chassis
                 .model
@@ -220,6 +252,15 @@ camera_fov_v 68.9974
         assert!((towards.z - look.z).abs() < 1e-5);
         // Degrees in the file, radians in the renderer.
         assert!((camera.fov - 1.204_2).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_moment_of_the_plane_says_which_plane_and_which_prop() {
+        let bike = Moment::read(&written("bike", SAMPLE)).unwrap();
+        assert_eq!((bike.vehicle.as_str(), bike.livery, bike.crashed), ("bike", 0, false));
+        let text = format!("{SAMPLE}vehicle Biplane\nlivery 1\ncrashed 1\n");
+        let plane = Moment::read(&written("plane", &text)).unwrap();
+        assert_eq!((plane.vehicle.as_str(), plane.livery, plane.crashed), ("biplane", 1, true));
     }
 
     #[test]
