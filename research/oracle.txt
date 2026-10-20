@@ -3002,3 +3002,40 @@ collision_record_sweep_back boot 0x00270390 (record, dt) the sweep from pos - ve
 # depth 0 is why no water reaches the contacts here. orientation_transform_point adds the origin.
 # transform_set_position on a parentless node writes local +0x70 and only marks dirt (bit0 of +0x110,
 # children via +0x104); the world copy +0x80.. is rebuilt later, not in the search.
+# S44 — the nearby search (collide_against_search, above), ported as world_search::search_nearby.
+# A collidable's flag byte +0x116: 0x01 never searches placed groups, 0x04 can be struck, 0x08 the
+# gather keeps it only within its bound, 0x10 searched this frame, 0x20 the last search hit. +2 is the
+# class (2 a collidable, 3 a placed group), +0x68 the shape kind (0 mesh, 1 hierarchy, 2 rays,
+# 3 spheres). The plane's ray probe has class vtable (+0x38) 0x00451a90, its sweep probe 0x00451910;
+# the save state's candidates are meshes (0x00451b50) and hierarchies (0x00451c10).
+collision_pair_filter boot 0x00119d70 (a, b, nearby) -> may a collide with b: not itself, b's 0x04,
+#                              b+0x31 bit0 when nearby, a+0xcc & b+0x84, then the object lists
+#                              (+0xd0 mode, +0xd4/+0xd8; +0xdc mode, +0xe0/+0xe4: mode 1 excludes,
+#                              mode 0 is the only ones) a's, b's, a's, b's, then the category lists
+#                              (+0xe8 mode, +0xec/+0xf0: mode 1 excludes, else one must match and
+#                              an empty list matches nothing) a's about b+0x84, b's about a+0x84
+collidable_listener_at boot 0x0011cb80 (list, i) -> list+8's i-th word; a collidable's listeners are
+#                              the list at +0xf4 (count +0xf4, array +0xfc)
+group_part_count boot 0x00129460 (group) -> the parts of a placed group's model: the world manager
+#                              (word at 0x0046a5f8) +0x94's model table indexed by group+0xe, +0x194
+group_part boot 0x00129490 (group, i) -> part i made ready as a collidable, or 0
+ray_probe_clear boot 0x001eb280 ray probe class vt +0x90: lowers +0x116 0x20, empties the result +0x6c
+ray_probe_pair boot 0x001eb520 ray probe class vt +0x94: stashes probe+0x174, tail-calls
+#                              ray_collide_pair
+ray_probe_prepare boot 0x001ebd20 ray probe class vt +0xb0
+sphere_probe_clear boot 0x001e88d0 sphere (sweep) probe class vt +0x90
+sphere_probe_pair boot 0x001e8d40 sphere probe class vt +0x94: stashes probe+0x164, tail-calls
+#                              sphere_collide_pair
+sphere_probe_prepare boot 0x001e93e0 sphere probe class vt +0xb0
+gather_resort boot 0x002189d0 collision_search_gather's path when the centre has not moved past the bound
+collidable_distance boot 0x0011c120 (0, object, point) the gather's per-candidate distance
+world_tree_query_init boot 0x001bb390 the broad phase's tree query, on a stack buffer
+world_tree_query_begin boot 0x001bb3e0 (query, tree, kind, centre, half, lo out, hi out, 1)
+world_tree_query_next boot 0x001bb490 (query, lo, hi) -> the next collidable, or 0
+world_tree_query_end boot 0x001bb890
+plane_probe_hit_listener boot 0x0015acf0 the plane's listener on its ray probe (at plane+0x98, vt +8
+#                              thunk 0x0015c290 subtracts 0x48): if +0x58 and the struck +0x84 & the
+#                              mask at 0x00468f68, its vt +0x124
+plane_probe_sound_listener boot 0x003ea8a0 the ray probe's second listener (a global at 0x0062e324,
+#                              thunk 0x003eb620): two sound calls and 0x002fffe0, presentation only
+bike_struck_listener boot 0x0025a480 a bike's listener on its collidable, vt +0xc (thunk 0x0025a6e0)

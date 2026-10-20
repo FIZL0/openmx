@@ -426,6 +426,10 @@ pub mod contact;
 /// the list [`contact`] resolves, and the flags the crash test reads.
 pub mod contact_search;
 
+/// The nearby search a collision object's probes make: the pair filter, the candidates within a
+/// probe's reach handed to its narrow phase, placed groups part by part, and who hears about a hit.
+pub mod world_search;
+
 /// The worked example from `docs/EXAMPLE.md`: three functions of the synthetic program that `./kit demo`
 /// generates, ported, with `tests/demo.rs` proving them bit-exact against the original's instructions.
 /// Delete it once your own port has something real in it.
