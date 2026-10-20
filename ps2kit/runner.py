@@ -30,6 +30,10 @@ tasks committed later are picked up without restarting it. Only Ctrl-C (or `once
 waits for the run must not wait for the process to exit — it never will — but for `run idle` in
 `context/notes/run.log` after the time it started waiting, and for `run busy` to know work began again.
 
+**`s` + Enter in the runner's pane stops it gently**: nothing new starts, the running tasks finish and
+merge, and then the run ends (`run stopped`). `s` again takes it back. The way to end a run without
+cutting a session off mid-task, which Ctrl-C does.
+
 **A block that waits on a task reopens itself.** `./kit done --blocked WHY` records the open task ids WHY
 names (or `--after X,Y`) as `BLOCKED: (after X, Y)`, and after every merge — the runner's or the master's —
 `plan.reopen` puts each task whose list is all done back to `[ ]`, commits that, and lets this run try it
@@ -777,6 +781,14 @@ def published(tid: str, branch: str) -> None:
         log(f'{tid}: {out}')
 
 
+KEYS: list[str] = []  # lines typed into the runner's pane; a thread reads them, as select() on stdin is POSIX-only
+
+
+def read_keys() -> None:
+    for line in sys.stdin:
+        KEYS.append(line.strip().lower())
+
+
 REOPENED: set[str] = set()  # tasks `reopen_landed` put back to [ ]: `cmd_run` lets them be tried again
 BOX = re.compile(r'^- \[(.)\] \*\*([^*\s]+)\*\*')
 
@@ -1140,6 +1152,8 @@ def cmd_run(argv: list[str]) -> int:
     done = False  # RUN DONE has gone to the master, and the run is idle
     closed: set[str] = set()  # see retry_reopened
     idle_said = False
+    stopping = False  # `s` typed: start nothing new, end once the running ones are merged
+    threading.Thread(target=read_keys, daemon=True).start()
     if queued():
         master(branch, a.slots)  # reports a previous run left; otherwise it starts when a merge needs it
 
@@ -1191,7 +1205,7 @@ def cmd_run(argv: list[str]) -> int:
                 stall_said.add(procs[n][1])
                 log(f'slot {n}: {running[n][0]} looks stalled ({why}); attach to pane s{n} to see')
                 print('\a', end='', flush=True)
-            if n not in procs and dt.datetime.now() >= free_at[n]:
+            if not stopping and n not in procs and dt.datetime.now() >= free_at[n]:
                 if not a.force and (w := weekly()) is not None and w >= WEEKLY_MAX:
                     if not cap_said:
                         log(f'weekly usage {w}% >= {WEEKLY_MAX}%: no new tasks until it resets '
@@ -1221,6 +1235,16 @@ def cmd_run(argv: list[str]) -> int:
             if 'master' in panes() or queued():
                 report('RUN DONE')
             log(f'run done; tried this run: {", ".join(sorted(tried)) or "none"}')
+        while KEYS:
+            if KEYS.pop(0) == 's':
+                stopping = not stopping
+                log('stopping: no new tasks; the running ones finish and merge, then the run ends (s again: undo)'
+                    if stopping else 'stop taken back: starting tasks again')
+        if stopping and not procs and not merging and not queued():
+            if not done and ('master' in panes() or queued()):
+                report('RUN DONE')
+            log(f'run stopped (s); tried this run: {", ".join(sorted(tried)) or "none"}')
+            return 0
         flush(branch, a.slots)
         sweep_handed()
         # Idle, never exit: the run waits for plan/TODO.md to change on the branch, so tasks a human (or a

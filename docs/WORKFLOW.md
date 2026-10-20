@@ -167,7 +167,8 @@ What to expect from a long run:
 - It never exits on its own (only `once` does): with nothing it may start it logs `run idle: …` in
   `context/notes/run.log`, tells the master `RUN DONE`, and keeps re-reading `plan/TODO.md` on the shared
   branch, starting new tasks as soon as they are committed (`run busy: …`). A task it already tried comes
-  back when a human unblocks it. Ctrl-C stops it. **A script waiting on a run must watch for `run idle`
+  back when a human unblocks it. Type `s` + Enter in its pane to stop it gently: nothing new
+  starts, the running tasks finish and merge, then it ends (`s` again undoes it). Ctrl-C stops it at once. **A script waiting on a run must watch for `run idle`
   in the log, never for the process to exit**, or it waits forever.
 - It needs `tmux` and `git worktree`. Without tmux (or with `N` of 1, or `--no-tmux`) it degrades to one
   sequential session in the current checkout and says so — and then there is no master either: a merge
