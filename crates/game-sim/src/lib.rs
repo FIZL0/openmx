@@ -111,6 +111,23 @@ pub struct Sim {
     /// bike where it stands, as the original's Switch To Machine does. `None` is a bike ride, which
     /// walks and hashes exactly as it did before the plane was a lane ([`flight`]).
     pub plane: Option<flight::Flight>,
+    /// Players 2 to 8, in player order ([`Sim::add_player`]). Player 1 is [`Sim::rider`], on
+    /// [`Sim::phy`], as it always was; an empty list is a one-player session, which steps, walks and
+    /// hashes exactly as the simulation did before there could be a second ([`Sim::step_all`]).
+    pub others: Vec<Player>,
+}
+
+/// The most riders a session holds: the original's start fills a field of up to eight.
+pub const MAX_PLAYERS: usize = 8;
+
+/// A player after the first: their own bike's numbers and the rider on it — controls, bike, tricks,
+/// wreck and recovery all inside the [`Rider`].
+#[derive(Clone, Debug)]
+pub struct Player {
+    /// The bike this player rides, off its `.phy`. A parameter of the run like [`Sim::phy`], and
+    /// left out of the walk for the same reason.
+    pub phy: Phy,
+    pub rider: Rider,
 }
 
 impl Sim {
@@ -163,7 +180,7 @@ impl Sim {
         // Pad 0 plugged in and pad 1 not, which is the shape every capture of this game was taken
         // in and the shape a one-player session has.
         input.pad_mut(0).connected = true;
-        Sim { ticks: 0, rng: seed, tables, phy, input, rider, plane: None }
+        Sim { ticks: 0, rng: seed, tables, phy, input, rider, plane: None, others: Vec::new() }
     }
 
     /// **One frame of the simulation**, in the original's order: the pads are read, and then the
@@ -194,7 +211,16 @@ impl Sim {
     }
 
     /// The simulation half: one frame of the rider, and the tick counter behind it.
+    ///
+    /// With other players in the session they are stepped too, after player 1, each on what their
+    /// own pad holds ([`Sim::step_all`]; a player with no pad of their own holds nothing). A caller
+    /// that has every player's controls — online play, a fixture of several — calls `step_all`.
     pub fn step(&mut self, dt: F, controls: &Controls, world: &mut dyn World) -> crate::rider::Frame {
+        if !self.others.is_empty() && self.plane.is_none() {
+            let mut all = self.pad_controls();
+            all[0] = *controls;
+            return self.step_all(dt, &all, world).swap_remove(0);
+        }
         if let Some(plane) = &mut self.plane {
             // The plane's input step: the player's pad, through I6's mapping, into the five fields the
             // controls read. The bike's `controls` are not the plane's: the plane reads the pad itself.
@@ -205,6 +231,81 @@ impl Sim {
         let said = self.rider.frame(&self.phy, &self.tables, controls, dt, world);
         self.ticks += 1;
         said
+    }
+
+    /// How many riders the session holds: player 1 and the others.
+    pub fn players(&self) -> usize {
+        1 + self.others.len()
+    }
+
+    /// Put another player in the session, at the end of the order: the original spawns its humans
+    /// in player order and every list a frame is walked in appends at the tail, so the player added
+    /// last is stepped last. Answers the new player's index (1 for player 2).
+    ///
+    /// Pads are not touched: plugging a second controller in is the caller's, through
+    /// [`Sim::input`], because a player may as well be somebody on the other end of a connection.
+    pub fn add_player(&mut self, phy: Phy, rider: Rider) -> usize {
+        assert!(self.players() < MAX_PLAYERS, "a session holds at most {MAX_PLAYERS} riders");
+        self.others.push(Player { phy, rider });
+        self.others.len()
+    }
+
+    /// Player `i`'s rider: 0 is [`Sim::rider`].
+    pub fn rider_of(&self, i: usize) -> &Rider {
+        if i == 0 { &self.rider } else { &self.others[i - 1].rider }
+    }
+
+    /// [`Sim::poll`] for every player: the device manager's update, then each player's hands off
+    /// their own pad — player `i` on pad `i`, and neutral controls for a player past the pads there
+    /// are ([`input::PADS`]).
+    pub fn poll_all(&mut self, dt: F, reports: &[Report; PADS]) -> Vec<Controls> {
+        self.input.tick(dt, reports);
+        self.pad_controls()
+    }
+
+    fn pad_controls(&self) -> Vec<Controls> {
+        (0..self.players())
+            .map(|i| if i < PADS { Controls::from_pad(self.input.pad(i)) } else { Controls::default() })
+            .collect()
+    }
+
+    /// **One frame of every rider**, in player order, and the tick counter behind them: player 1,
+    /// then player 2, and so on, each one's whole frame before the next one's starts — the order the
+    /// original's update walk visits them in (`research/oracle.txt`, S54). `controls[i]` is player
+    /// `i`'s.
+    ///
+    /// Each rider's frame sees every other rider where they stand *now*: the ones before it in the
+    /// order already moved this frame, the ones after it not yet, which is what a sequential walk
+    /// of the scene gives the original. That is the one way riders reach one another — their head
+    /// ray striking another's body ([`ride::hits_among`]), which is [`air::Wreck::Joust`] when the
+    /// one struck is high enough above.
+    ///
+    /// With one player this is [`Sim::step`] and nothing else, so a one-player hash does not move. A
+    /// plane ride is one player's: with a plane up, only it is stepped, as before.
+    pub fn step_all(&mut self, dt: F, controls: &[Controls], world: &mut dyn World) -> Vec<crate::rider::Frame> {
+        assert_eq!(controls.len(), self.players(), "one set of controls per player");
+        if self.others.is_empty() || self.plane.is_some() {
+            return vec![self.step(dt, &controls[0], world)];
+        }
+        let mut frames = Vec::with_capacity(controls.len());
+        for (i, c) in controls.iter().enumerate() {
+            let rivals: Vec<ride::Rival> = (0..self.players())
+                .filter(|&j| j != i)
+                .map(|j| self.rider_of(j))
+                .filter(|r| r.state.wreck.is_none())
+                .map(|r| r.ride.rival())
+                .collect();
+            let tables = &self.tables;
+            let frame = if i == 0 {
+                self.rider.frame_among(&self.phy, tables, c, dt, world, &rivals)
+            } else {
+                let p = &mut self.others[i - 1];
+                p.rider.frame_among(&p.phy, tables, c, dt, world, &rivals)
+            };
+            frames.push(frame);
+        }
+        self.ticks += 1;
+        frames
     }
 
     /// Advance one frame from a fixture's own input, over a flat floor.
@@ -291,6 +392,7 @@ impl Clone for Sim {
             input: self.input,
             rider: self.rider.clone(),
             plane: self.plane.clone(),
+            others: self.others.clone(),
         }
     }
 }

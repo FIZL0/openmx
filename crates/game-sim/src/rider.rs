@@ -285,6 +285,14 @@ impl Rider {
 
     /// **One frame of the rider**, in the original's order. The six steps at the top of this file.
     pub fn frame(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World) -> Frame {
+        self.frame_among(p, t, c, dt, world, &[])
+    }
+
+    /// [`Rider::frame`] in a session with other riders: the same six steps, with the wreck test's
+    /// contact list swept against `rivals` as well as the world ([`ride::hits_among`]), which is the
+    /// one place another rider reaches into this one's frame. With none it is `frame`.
+    pub fn frame_among(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World,
+                       rivals: &[ride::Rival]) -> Frame {
         let mut out = Frame::default();
         let Rider {
             ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
@@ -430,7 +438,7 @@ impl Rider {
         // body rays hit. The port's is its head ray, swept at the frame's end (`ride::hits`). The
         // chassis' mass is not held, only its reciprocal; it is read only for an actor, and the
         // port's world has none.
-        let hits = if state.wreck.is_none() { ride::hits(ride, world) } else { Vec::new() };
+        let hits = if state.wreck.is_none() { ride::hits_among(ride, world, rivals) } else { Vec::new() };
         let touched = ride.touching || !hits.is_empty();
         let (mass, height) = (F::ONE / ride.chassis.inv_mass, F(ride.chassis.cofg_world.y()));
         let air = &mut ride.air;

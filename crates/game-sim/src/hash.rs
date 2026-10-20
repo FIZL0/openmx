@@ -488,6 +488,18 @@ impl State for Sim {
         if let Some(plane) = &self.plane {
             w.field("plane", plane);
         }
+        // Players 2 to 8, in player order. Only a session with more than one rider has this group,
+        // so a one-player walk — and every hash pinned on one — is what it was before (S54).
+        if !self.others.is_empty() {
+            w.list("players", &self.others);
+        }
+    }
+}
+
+impl State for crate::Player {
+    /// The rider and nothing else: the bike's numbers are a parameter of the run, like `Sim::phy`.
+    fn walk(&self, w: &mut Walk<'_>) {
+        w.field("rider", &self.rider);
     }
 }
 

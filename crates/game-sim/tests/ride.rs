@@ -3908,3 +3908,142 @@ fn it_straightens_after_a_slide() {
     let (last_roll, last_slip) = after[after.len() - 1];
     assert!(last_roll.abs() < 1.0 && last_slip.abs() < 1.0, "ended at roll {last_roll} slip {last_slip}");
 }
+
+// --- S54: more than one rider -----------------------------------------------------------------------
+
+/// A session of `n` riders on the stand-in bike, wrecks on: player 1 is the seed's own rider at the
+/// stock spawn and player `i` stands `i × rise` above it, moving at a velocity of its own, so that
+/// each one's head ray reaches into the body of the one above it.
+fn stacked(n: usize, rise: f32) -> game_sim::Sim {
+    let mut sim = game_sim::Sim::new(0x5354);
+    sim.rider.sense.wrecks_enabled = true;
+    let mounts = game_sim::stock::mounts(&sim.phy);
+    for i in 1..n {
+        let at = Vf::new(SPAWN.x(), SPAWN.y() + rise * i as f32, SPAWN.z(), 1.0);
+        let mut r = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Set::default());
+        r.ride.chassis.vel = Vf::new(i as f32, 0.0, 2.0 * i as f32, 0.0);
+        let phy = sim.phy.clone();
+        assert_eq!(sim.add_player(phy, r), i);
+    }
+    sim
+}
+
+const SPAWN: Vf = game_sim::stock::SPAWN;
+
+fn held(n: usize, k: usize) -> Vec<Controls> {
+    (0..n).map(|i| Controls { gas: F(if (k + i) % 3 == 0 { 1.0 } else { 0.0 }), ..Controls::default() }).collect()
+}
+
+/// One rider: the step with nobody else in the session is the step it always was. Two copies of the
+/// same state, one stepped through `Sim::step_all` and one through the rider's own frame by hand, as
+/// `Sim::step` read before S54, hash the same on every tick — and the walk has no players group.
+#[test]
+fn one_rider_hashes_as_before() {
+    let mut a = game_sim::Sim::new(7);
+    let mut b = a.clone();
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    for k in 0..240 {
+        let c = held(1, k);
+        a.step_all(dt, &c, &mut Flat::default());
+        let tables = b.tables.clone();
+        b.rider.frame(&b.phy, &tables, &c[0], dt, &mut Flat::default());
+        b.ticks += 1;
+        assert_eq!(a.hash(), b.hash(), "tick {}", k + 1);
+    }
+    assert!(Dump::of(&a).get("players.len").is_none(), "a one-player walk has no players group");
+}
+
+/// The order is player order, each rider's whole frame before the next one's: a two-rider step is
+/// player 1's frame against player 2 where it stood, then player 2's against player 1 where it now
+/// is — rebuilt by hand here and compared word for word.
+#[test]
+fn two_riders_step_in_player_order() {
+    let mut a = stacked(2, 12.0);
+    let mut b = a.clone();
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    for k in 0..90 {
+        let c = held(2, k);
+        a.step_all(dt, &c, &mut Flat::default());
+        let tables = b.tables.clone();
+        let up = |r: &Rider| r.state.wreck.is_none();
+        let r2: Vec<_> = Some(&b.others[0].rider).filter(|r| up(r)).map(|r| r.ride.rival()).into_iter().collect();
+        b.rider.frame_among(&b.phy, &tables, &c[0], dt, &mut Flat::default(), &r2);
+        let r1: Vec<_> = Some(&b.rider).filter(|r| up(r)).map(|r| r.ride.rival()).into_iter().collect();
+        let p = &mut b.others[0];
+        p.rider.frame_among(&p.phy, &tables, &c[1], dt, &mut Flat::default(), &r1);
+        b.ticks += 1;
+        assert_eq!(a.hash(), b.hash(), "tick {}", k + 1);
+    }
+}
+
+/// Two and four riders are deterministic: the same session stepped twice hashes the same every
+/// tick, and every player is in the walk.
+#[test]
+fn two_and_four_riders_are_deterministic() {
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    for n in [2, 4] {
+        let run = || {
+            let mut sim = stacked(n, 3.0);
+            (0..150)
+                .map(|k| {
+                    sim.step_all(dt, &held(n, k), &mut Flat::default());
+                    sim.hash()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run(), "{n} riders");
+        let sim = stacked(n, 3.0);
+        let d = Dump::of(&sim);
+        assert!(d.get("players.len").is_some());
+        assert!(d.get(&format!("players[{}].rider.ride.origin[1]", n - 2)).is_some(), "{n} riders walked");
+        assert!(d.get(&format!("players[{}]", n - 1)).is_none());
+        // A rider's state is in the hash: moving player `n` moves it.
+        let mut moved = sim.clone();
+        moved.others[n - 2].rider.ride.origin = Vf::new(0.0, 99.0, 0.0, 1.0);
+        assert_ne!(moved.hash(), sim.hash());
+    }
+}
+
+/// Riders touch through the original's `Joust` path. Stacked three units apart, each rider's head
+/// ray reaches into the body of the one above, whose chassis is higher by more than the bike's
+/// `JoustWreckHeight` (2): every rider with one above them comes off with reason 7, thrown at the
+/// velocity of the rider who landed on them — taken **before** that rider's own frame, which is the
+/// step order showing. The top one has nobody above and does not joust.
+#[test]
+fn stacked_riders_joust() {
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let joust = Some(game_sim::trick::Wreck::from(game_sim::air::Wreck::Joust));
+    for n in [2, 4] {
+        let mut sim = stacked(n, 3.0);
+        let before: Vec<Vf> = (0..n).map(|i| sim.rider_of(i).ride.chassis.vel).collect();
+        let frames = sim.step_all(dt, &vec![Controls::default(); n], &mut Flat::default());
+        for i in 0..n - 1 {
+            assert_eq!(frames[i].wreck, joust, "{n} riders: player {} under player {}", i + 1, i + 2);
+            assert_eq!(sim.rider_of(i).ride.air.wreck_impact, before[i + 1], "{n} riders: player {}", i + 1);
+        }
+        assert_ne!(frames[n - 1].wreck, joust, "{n} riders: the top rider has nobody above");
+    }
+    // Side by side the heights are level: the head ray touches, and it is no joust.
+    let mut sim = game_sim::Sim::new(0x5354);
+    sim.rider.sense.wrecks_enabled = true;
+    let mounts = game_sim::stock::mounts(&sim.phy);
+    let at = Vf::new(SPAWN.x() + 1.0, SPAWN.y(), SPAWN.z(), 1.0);
+    let r = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Set::default());
+    let phy = sim.phy.clone();
+    sim.add_player(phy, r);
+    let hits = game_sim::ride::hits_among(&sim.rider.ride, &mut Flat::default(), &[sim.others[0].rider.ride.rival()]);
+    assert!(matches!(hits[..], [game_sim::air::Contact { other: game_sim::air::Other::Rider { .. }, .. }]));
+    // Asked of the contact clause alone: the stand-in bike's own landing test answers on its first
+    // frame with wrecks on (`Sim::new` says why), which is not the touch this is about.
+    let r = &sim.rider.ride;
+    let (mass, height) = (F::ONE / r.chassis.inv_mass, F(r.chassis.cofg_world.y()));
+    let mut air = r.air;
+    assert_eq!(game_sim::air::hit_wreck(&sim.phy.air, &mut air, true, false, mass, height, &hits), None);
+}
+
+/// A session holds eight riders and no more.
+#[test]
+#[should_panic(expected = "at most 8")]
+fn a_ninth_rider_is_refused() {
+    stacked(9, 20.0);
+}

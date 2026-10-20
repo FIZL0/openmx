@@ -1787,6 +1787,95 @@ pub fn hits(ride: &Ride, world: &mut dyn World) -> Vec<air::Contact> {
     }
 }
 
+/// Another rider, as this one's head ray sees it: where their body is and the two words of their
+/// chassis the wreck test reads off a struck rider — its height (`+0x64`, the centre of gravity's
+/// world `y`) and its velocity (`+0x260`), [`air::Other::Rider`]'s pair.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rival {
+    /// The centre of the rider's body: the hub all eleven of the bike's body rays start at
+    /// ([`air::HEAD`]`.0`), through the rival's own transform.
+    pub centre: Vf,
+    /// How far the body reaches round that hub: the head ray's own length.
+    pub radius: F,
+    pub height: F,
+    pub vel: Vf,
+}
+
+impl Ride {
+    /// What this bike is to another rider's head ray, as the frame left it.
+    ///
+    /// **The shape is the port's own.** In the original a rider's body rays strike the other bike's
+    /// collidable, whose shape comes out of the bike's model; the port loads no model, so the body
+    /// is a sphere about the body rays' own hub, as big as the longest of them — the reach the
+    /// original's rays say a rider's body has, and no number that is not already measured.
+    pub fn rival(&self) -> Rival {
+        let m = self.transform();
+        Rival {
+            centre: math::transform_point(&m, air::HEAD.0),
+            radius: length(sub_xyz(air::HEAD.1, air::HEAD.0)),
+            height: F(self.chassis.cofg_world.y()),
+            vel: self.chassis.vel,
+        }
+    }
+}
+
+/// Where along `from → to` (a fraction of it) the segment first enters the sphere, or `None`. A
+/// segment that starts inside it enters at 0.
+fn enters(from: Vf, to: Vf, centre: Vf, radius: F) -> Option<F> {
+    let d = sub_xyz(to, from);
+    let f = sub_xyz(from, centre);
+    let a = dot3(d, d);
+    let b = dot3(f, d);
+    let c = dot3(f, f) - radius * radius;
+    if c <= F::ZERO {
+        return Some(F::ZERO);
+    }
+    let disc = b * b - a * c;
+    if b >= F::ZERO || disc < F::ZERO || a == F::ZERO {
+        return None;
+    }
+    let t = (F::ZERO - b - disc.sqrt()) / a;
+    (t <= F::ONE).then_some(t)
+}
+
+/// [`hits`] in a session with other riders in it: the same head ray, swept against the world **and**
+/// against every rider in `rivals`, and the one nearest along the ray kept.
+///
+/// One contact per ray, the nearest, is how the original's ray probe keeps its list
+/// (`Record::one_per_ray`); that the bike's probe has the flag up as the plane's does is assumed, not
+/// read. A rider struck is an [`air::Other::Rider`] by their [`Rival::height`] and [`Rival::vel`],
+/// which is what lets [`air::hit_wreck`] answer [`air::Wreck::Joust`]. With no rivals this is
+/// [`hits`], word for word: the world is swept the same way and nothing else is asked.
+///
+/// The struck rider's own record gets nothing back here. The original mirrors the contact into it
+/// (kind 1), and that rider's wreck test skips mirrored entries, so the mirror cannot wreck them;
+/// what else reads it is listed in the S54 journal.
+pub fn hits_among(ride: &Ride, world: &mut dyn World, rivals: &[Rival]) -> Vec<air::Contact> {
+    if rivals.is_empty() {
+        return hits(ride, world);
+    }
+    let m = ride.transform();
+    let from = math::transform_point(&m, air::HEAD.0);
+    let to = math::transform_point(&m, air::HEAD.1);
+    let mut b = Bundle::default();
+    b.probes[0] = Probe::between(from, to);
+    b.count = 1;
+    b.centre = from;
+    b.radius = length(sub_xyz(to, from));
+    let mut record = Record::new();
+    world.solid(&b, &mut record);
+    let reach = F(air::HEAD.1.y());
+    let mut best = record.hit[0].then(|| (record.fraction[0], air::Other::Scenery));
+    for r in rivals {
+        let Some(t) = enters(from, to, r.centre, r.radius) else { continue };
+        // Strictly nearer, so the world keeps a tie and, among riders, the first in the list does.
+        if best.is_none_or(|(near, _)| t < near) {
+            best = Some((t, air::Other::Rider { height: r.height, vel: r.vel }));
+        }
+    }
+    best.map(|(_, other)| vec![air::Contact { mirrored: false, reach, other }]).unwrap_or_default()
+}
+
 // --- the state hash ---------------------------------------------------------------------------------
 
 /// **Every word of the ride, in declaration order.**
