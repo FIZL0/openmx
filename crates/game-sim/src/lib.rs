@@ -434,6 +434,9 @@ pub mod contact_search;
 /// The nearby search a collision object's probes make: the pair filter, the candidates within a
 /// probe's reach handed to its narrow phase, placed groups part by part, and who hears about a hit.
 pub mod world_search;
+/// A ray probe's narrow phase: its tree of segments against a mesh's tree of triangles, one contact
+/// per segment, against a mesh or a placed group part by part.
+pub mod ray_probe;
 
 /// The worked example from `docs/EXAMPLE.md`: three functions of the synthetic program that `./kit demo`
 /// generates, ported, with `tests/demo.rs` proving them bit-exact against the original's instructions.
