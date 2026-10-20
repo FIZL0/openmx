@@ -58,6 +58,7 @@ use game_sim::rider::{Rider, Tables as RiderTables};
 use game_sim::track::{Scene, Terrain};
 use game_sim::trick::{Set, Trick};
 use game_sim::world::{Ground, Place, Props, World};
+use game_sim::noise::SmoothNoise;
 use game_sim::{Input, Sim};
 use ps2_float::{Acc, F, Vf};
 
@@ -5558,19 +5559,22 @@ fn nearest_opponent(
 // plane's lanes in place of the bike's: a fixture out of the capture, seeded from its first row, ridden
 // over the ground it was flown over, against a ratchet of its own.
 //
-// The ratchet starts at 0. The capture's plane is creeping across the dirt on its first row (0.64 ft/s
-// along the nose, throttle at idle), so tick 1 moves its position. Since P31
-// [`Flight::frame`](game_sim::flight::Flight::frame) is the whole frame (the world step, the body, the
-// wheels, the measure and the crash test), but the run was not raised with it: the capture is not in
-// the worktree P31 was done in (`context/` is per-worktree), so the run skipped there. The per-lane
-// lines under the verdict say which of the plane's lanes hold, and for how long, wherever it is.
+// The ratchet is 0, and S41 left it there with the frame proved. The capture's first row is one plane
+// frame stale ([`past_the_first_row`]), so the run starts on the second, seeded off C7's save state
+// stepped there ([`off_the_save_state`], [`onto_the_row`]), over the original's own ground query
+// ([`TheOriginalsGround`]). Over that ground the port's [`Flight::frame`](game_sim::flight::Flight::frame)
+// is the game's `dynamics_world_step` word for word for a second
+// ([`the_plane_flies_frame_for_frame_like_the_original`]), yet the run parts at tick 1, a few ulp of
+// `body.vel`, because the game's frame is more than its world step: the plane's collision search
+// (the record at the plane's `+0x170`) is not in the port, and that is S48's. Over the port's own
+// ground ([`Ground::at`], one ulp low under the plane) it parts at tick 1 as well; the run prints both.
 
 /// The capture's file name in [`acceptance_dirs`] — C7's playback of `biplane.p2m2`.
 const BIPLANE_ACCEPTANCE: &str = "biplane";
 
 /// **The last tick of the biplane recording the port is known to agree with the original on.** The
 /// same contract as [`ACCEPTANCE_AGREES_THROUGH`]: further prints a line asking for it to be raised,
-/// short of it fails. 0 is the start state [`biplane_start`] seeds from row 0.
+/// short of it fails. 0 is the start state: the capture's second row, over the save state stepped to it.
 const BIPLANE_AGREES_THROUGH: u64 = 0;
 
 /// The container of the area the plane was flown over. Not found by [`recorded_on`]: that fits a
@@ -5853,6 +5857,227 @@ fn over_free06<R>(
     Some(then(&mut place, &area.named))
 }
 
+/// C7's capture without its first row, which is one plane frame behind the rest (S41).
+///
+/// Every row after the first is one frame of the plane on from the row before it, and the first is
+/// two: its prop angle is 2 × 0.7583 rad short of the second row's where every later pair is
+/// 0.7583 apart (the prop turns a constant 217.25 rpm), its `body_pos.z` is two frames' creep short
+/// where every later pair is one, and the port stepped twice from it lands on the second row's prop
+/// angle and position bit for bit. Its frame counter is still one short of the second row's, so the
+/// recorder read the plane before the game had stepped it on that first frame and after it on every
+/// later one. A run seeded from it is a frame behind from tick 1 on; seeded from the second row, it is
+/// not. The rest of the fixture (the pad off each row, the ticks off the counter) is unchanged, so the
+/// pad lanes still say whether the inputs line up.
+fn past_the_first_row(mut cap: Capture) -> Capture {
+    cap.frames.remove(0);
+    cap.rows.remove(0);
+    cap
+}
+
+/// The save state beside C7's recording: the RAM of the moment the capture's first row was read.
+const BIPLANE_STATE: &str = "biplane.p2m2_SaveState.eeMemory.bin";
+
+/// MXBiplane, the player's plane, in that state (research/oracle.txt), and the fields of it, of its
+/// rigid body, its tires and its engine object that [`off_the_save_state`] reads (the offsets
+/// `tests/biplane.rs` and `tests/flight.rs` prove the listeners on).
+const BIPLANE_PLANE: u32 = 0x00c4_4a40;
+mod plane_at {
+    pub const BODY: u32 = 0x160;
+    pub const ENGINE: u32 = 0x400;
+    pub const TIRES: [u32; 3] = [0x408, 0x40c, 0x410];
+    pub const ENGINE_CLOCK: u32 = 0x74;
+    pub const ENGINE_PROP_ANGLE: u32 = 0x48;
+    /// The world a tire asks its ground query of.
+    pub const TIRE_WORLD: u32 = 0x134;
+}
+
+/// [`BIPLANE_STATE`]'s RAM: this worktree's `context/` first, then the one `kit.toml` names. `None`,
+/// with a line, where neither holds it.
+fn biplane_state() -> Option<ps2_oracle::Ee> {
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/states").join(BIPLANE_STATE);
+    let path = if here.exists() {
+        here
+    } else {
+        match ps2_oracle::Kit::load() {
+            Ok(kit) => kit.ctx("states").join(BIPLANE_STATE),
+            Err(why) => {
+                println!("no kit.toml ({why}), so no {BIPLANE_STATE}: there is no biplane verdict here");
+                return None;
+            }
+        }
+    };
+    match ps2_oracle::Ee::from_ram(&path) {
+        Ok(ee) => Some(ee),
+        Err(why) => {
+            println!(
+                "{why}: the biplane run starts from C7's save state, which `./kit state ram \
+                 context/recordings/biplane.p2m2_SaveState.p2s` writes, so there is no biplane verdict here"
+            );
+            None
+        }
+    }
+}
+
+/// **The original's ground**: [`World::ground`] answered by the game's own `ground_query`, run in the
+/// interpreter on [`BIPLANE_STATE`]'s RAM against the world the plane's tires ask (the tire's
+/// world pointer), the call the original's tire probe makes with the flags it makes it with (0).
+///
+/// The biplane run is flown over it rather than over [`Ground`] because the port has no ground query
+/// of the original's: [`Ground::at`] blends a terrain cell bilinearly, which `world.rs` marks as its
+/// own arithmetic, and under C7's plane its height is one ulp low (134.99857 where the game answers
+/// 134.99858), which parts the strut force, and with it the body, on the first frame. Over this
+/// ground the plane's frame is the original's word for word
+/// ([`the_plane_flies_frame_for_frame_like_the_original`]), so the run measures the plane and not the
+/// terrain; [`the_biplane_acceptance_run`] prints the port's own ground's verdict beside it.
+///
+/// What it does not answer: the surface (the original keeps it in the contact record and nothing of
+/// the plane's reads it, so it is 0), and the sweep (the plane's collision search is S48's).
+struct TheOriginalsGround {
+    ee: ps2_oracle::Ee,
+    world: u32,
+    query: u32,
+}
+
+impl TheOriginalsGround {
+    /// Over a RAM image of its own: the queries' scratch writes stay out of the state the run is
+    /// seeded from.
+    fn load() -> Option<TheOriginalsGround> {
+        let mut ee = biplane_state()?;
+        let (Ok(gp), Ok(query)) = (ps2_oracle::addr("boot_gp"), ps2_oracle::addr("ground_query")) else {
+            println!("research/oracle.txt has no boot_gp or ground_query: there is no biplane verdict here");
+            return None;
+        };
+        ee.set(28, u64::from(gp));
+        let tire = ee.u32_at(BIPLANE_PLANE + plane_at::TIRES[0]);
+        let world = ee.u32_at(tire + plane_at::TIRE_WORLD);
+        Some(TheOriginalsGround { ee, world, query })
+    }
+}
+
+impl World for TheOriginalsGround {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        let ee = &mut self.ee;
+        let (point, normal, record) = (ee.scratch(0), ee.scratch(1), ee.scratch(4));
+        for k in 0..4 {
+            ee.set_f32(point + 4 * k, at[k as usize]);
+            ee.set_f32(normal + 4 * k, 0.0);
+        }
+        let args = [self.world, point, normal, 0, record].map(u64::from);
+        ee.call(self.query, &args, &[], 50_000_000);
+        let quad = |a: u32| Vf::new(ee.f32_at(a), ee.f32_at(a + 4), ee.f32_at(a + 8), ee.f32_at(a + 12));
+        (quad(point), quad(normal))
+    }
+
+    fn solid(&mut self, _: &game_sim::collide::Bundle, _: &mut game_sim::collide::Record) -> bool {
+        false
+    }
+}
+
+/// **What the capture's first row does not carry, off the save state of the same moment** (S41):
+/// the whole rigid body (its accumulators, last position and orientation, shock and twist), the three
+/// tires' state (the last compression the strut opens from, the last normal the probe leans toward,
+/// the contact the friction falls back on), the engine's noise clock, and the noise tables the session
+/// built off the wall-clock seed.
+///
+/// The state *is* the first row: its body's position, velocity, orientation and rates and its
+/// engine's prop angle are held to the row's word for word first, so a state from another moment is
+/// refused rather than mixed in.
+fn off_the_save_state(f: &mut game_sim::flight::Flight, ee: &ps2_oracle::Ee) -> Result<(), String> {
+    let quad = |at: u32| Vf::new(ee.f32_at(at), ee.f32_at(at + 4), ee.f32_at(at + 8), ee.f32_at(at + 12));
+    let word = |at: u32| F(ee.f32_at(at));
+    let b = ee.u32_at(BIPLANE_PLANE + plane_at::BODY);
+    let e = ee.u32_at(BIPLANE_PLANE + plane_at::ENGINE);
+    for (what, row, state) in [
+        ("body_pos", f.body.position, quad(b + 0x60)),
+        ("body_vel", f.body.velocity, quad(b + 0x70)),
+        ("body_quat", f.body.quat, quad(b + 0x170)),
+        ("body_rate", f.body.rates, quad(b + 0x1b0)),
+    ] {
+        if row.to_bits() != state.to_bits() {
+            return Err(format!("{what} is {state:?} in the state and {row:?} on the capture's first row: not the same moment"));
+        }
+    }
+    let prop = word(e + plane_at::ENGINE_PROP_ANGLE);
+    if prop.to_bits() != f.engine.prop_angle.to_bits() {
+        return Err(format!("the prop angle is {prop:?} in the state and {:?} on the first row", f.engine.prop_angle));
+    }
+    let body = &mut f.body;
+    body.enabled = ee.u32_at(b) != 0;
+    body.inv_mass = word(b + 0x10);
+    for (v, o) in [
+        (&mut body.damping, 0x20),
+        (&mut body.last_position, 0x50),
+        (&mut body.last_force, 0x80),
+        (&mut body.force, 0x90),
+        (&mut body.accel, 0xa0),
+        (&mut body.shock_peak, 0xb0),
+        (&mut body.shock, 0xc0),
+        (&mut body.step, 0xf0),
+        (&mut body.inv_inertia, 0x120),
+        (&mut body.ang_damping, 0x130),
+        (&mut body.last_quat, 0x150),
+        (&mut body.cofg, 0x180),
+        (&mut body.moment, 0x190),
+        (&mut body.last_moment, 0x1a0),
+        (&mut body.ang_accel, 0x1c0),
+        (&mut body.twist_peak, 0x1d0),
+        (&mut body.twist, 0x1e0),
+    ] {
+        *v = quad(b + o);
+    }
+    for (tire, at) in f.tires.iter_mut().zip(plane_at::TIRES) {
+        let t = ee.u32_at(BIPLANE_PLANE + at);
+        let flag = |o: u32| ee.u32_at(t + o) != 0;
+        (tire.below, tire.held, tire.touching) = (flag(0x80), flag(0x84), flag(0x88));
+        (tire.compression, tire.last_compression, tire.spring_force) = (word(t + 0x8c), word(t + 0x90), word(t + 0x94));
+        (tire.angle, tire.spin) = (word(t + 0x120), word(t + 0x124));
+        for (v, o) in [
+            (&mut tire.offset, 0x50),
+            (&mut tire.bottom, 0xa0),
+            (&mut tire.ground, 0xc0),
+            (&mut tire.normal, 0xd0),
+            (&mut tire.contact, 0xe0),
+            (&mut tire.hub, 0xf0),
+            (&mut tire.low, 0x100),
+            (&mut tire.contact_velocity, 0x110),
+            (&mut tire.last_normal, 0x140),
+            (&mut tire.slip, 0x170),
+            (&mut tire.friction, 0x180),
+        ] {
+            *v = quad(t + o);
+        }
+        tire.frame = [0x190, 0x1a0, 0x1b0].map(|o| quad(t + o));
+    }
+    f.engine.clock = word(e + plane_at::ENGINE_CLOCK);
+    let table = |name: &str| ps2_oracle::addr(name).map_err(|why| format!("{name}: {why}"));
+    let (perm, g1) = (table("smooth_noise_perm")?, table("smooth_noise_g1")?);
+    if ee.u32_at(table("smooth_noise_unbuilt")?) != 0 {
+        return Err("the noise tables are not built in the state".to_string());
+    }
+    f.noise = Some(SmoothNoise::from_tables(
+        &std::array::from_fn(|k| ee.u32_at(perm + 4 * k as u32)),
+        &std::array::from_fn(|k| F(ee.f32_at(g1 + 4 * k as u32))),
+    ));
+    Ok(())
+}
+
+/// **The second row's lanes over the save state stepped to it** (S41): what the capture records of the
+/// plane put back over a flight the port stepped there itself, so the run's tick 0 is the row's word
+/// for word and everything the row does not carry (the rigid body's accumulators, the tires, the
+/// measure, the engine's clock, the noise) is the save state's, stepped.
+///
+/// Not the stepped flight alone: the port's two frames over the original's ground are the original's
+/// world step to the bit, but the original's frame also searches the plane's collision record (S48's),
+/// so the velocity it lands on is a few ulp away from the row's.
+fn onto_the_row(f: &mut game_sim::flight::Flight, row: &game_sim::flight::Flight) {
+    let (b, r) = (&mut f.body, &row.body);
+    (b.position, b.velocity, b.quat, b.rates) = (r.position, r.velocity, r.quat, r.rates);
+    (f.pad, f.surfaces, f.attitude, f.air) = (row.pad, row.surfaces, row.attitude, row.air);
+    let (e, r) = (&mut f.engine, &row.engine);
+    (e.power, e.rpm, e.thrust, e.prop_angle, e.note) = (r.power, r.rpm, r.thrust, r.prop_angle, r.note);
+    (f.crash.reason, f.crash.clock) = (row.crash.reason, row.crash.clock);
+}
+
 /// **The biplane acceptance run** — C7's flight replayed over Free06 on the disc's own plane, against
 /// [`BIPLANE_AGREES_THROUGH`].
 ///
@@ -5879,14 +6104,100 @@ fn the_biplane_acceptance_run() {
         println!("no {} in this disc's machine.res: there is no plane to fly", game_sim::phy::BIPLANE_PHY);
         return;
     };
+    let Some(state) = biplane_state() else { return };
+    let Some(mut ground) = TheOriginalsGround::load() else { return };
+    let full = cap;
+    let first = inputs_from_capture(&full).unwrap_or_else(|e| panic!("{}: {e}", capture.display()))[0];
+    let cap = past_the_first_row(full.clone());
     let f = biplane_fixture(&cap, &plane).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
-    let taken = over_free06(&cap, &mut disc, |world, named| {
-        let f = Fixture { world: Some(named.clone()), ..f };
+    let taken = over_free06(&full, &mut disc, |free06, named| {
+        let mut start = biplane_start(&full, f.seed, &plane).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+        let flight = start.plane.as_mut().expect("biplane_start puts a plane in the ride");
+        off_the_save_state(flight, &state).unwrap_or_else(|e| panic!("{BIPLANE_STATE}: {e}"));
+        // Two frames to the second row, where the fixture's tick 0 is ([`past_the_first_row`]); both
+        // on the first row's pad, which is idle (nothing held, the sticks centred) on the row and on
+        // the second row alike.
+        for _ in 0..2 {
+            start.tick_in(first, &mut ground);
+        }
+        let row = biplane_start(&cap, f.seed, &plane).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+        onto_the_row(start.plane.as_mut().expect("still flying"), row.plane.as_ref().expect("a plane"));
+        let f = Fixture { world: Some(named.clone()), start: Some(start), ..f };
         println!("{}: {} frames, {} checks, seed 0x{:08x}", f.name, f.inputs.len(), f.checks(), f.seed);
         assert!(f.inputs.len() >= 30 * 20, "{} frames of flight is not an acceptance run", f.inputs.len());
-        acceptance_verdict_against(&f, world, BIPLANE_AGREES_THROUGH, "BIPLANE_AGREES_THROUGH");
+        // The port's own ground, ungated: how far the run gets with nothing of the original's in it.
+        match replay::verify_in(&f, free06) {
+            Ok(_) => println!("over the port's own ground ({named}) it agrees on every tick"),
+            Err(d) => println!("over the port's own ground ({named}) it parts at {d}"),
+        }
+        println!("over the original's ground query:");
+        acceptance_verdict_against(&f, &mut ground, BIPLANE_AGREES_THROUGH, "BIPLANE_AGREES_THROUGH");
     });
     if taken.is_none() {
         println!("— so there is no biplane verdict in this worktree, and the ratchet is unchecked, not met");
     }
+}
+
+/// **The plane's frame is the original's world step** (S41): from [`BIPLANE_STATE`], a second of the
+/// game's `dynamics_world_step` run in the interpreter beside the port's [`Flight::frame`]
+/// (through [`Sim::tick_in`], on the capture's first, idle pad) over [`TheOriginalsGround`], the
+/// body, the three tires and the engine held to the game's word for word after every frame.
+///
+/// [`Flight::frame`]: game_sim::flight::Flight::frame
+#[test]
+fn the_plane_flies_frame_for_frame_like_the_original() {
+    let Some((capture, cap)) = biplane_capture() else { return };
+    let Some(mut disc) = Disc::open() else { return };
+    let Some(plane) = the_plane_the_human_flew(&mut disc) else { return };
+    let Some(mut ee) = biplane_state() else { return };
+    let Some(mut ground) = TheOriginalsGround::load() else { return };
+    let (Ok(gp), Ok(step), Ok(world)) =
+        (ps2_oracle::addr("boot_gp"), ps2_oracle::addr("dynamics_world_step"), ps2_oracle::addr("dynamics_world"))
+    else {
+        println!("research/oracle.txt has no boot_gp, dynamics_world_step or dynamics_world");
+        return;
+    };
+    ee.set(28, u64::from(gp));
+    let pad = inputs_from_capture(&cap).unwrap_or_else(|e| panic!("{}: {e}", capture.display()))[0];
+    let mut sim = biplane_start(&cap, 0, &plane).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+    off_the_save_state(sim.plane.as_mut().expect("a plane"), &ee).unwrap_or_else(|e| panic!("{BIPLANE_STATE}: {e}"));
+    let b = ee.u32_at(BIPLANE_PLANE + plane_at::BODY);
+    let e = ee.u32_at(BIPLANE_PLANE + plane_at::ENGINE);
+    let tires = plane_at::TIRES.map(|at| ee.u32_at(BIPLANE_PLANE + at));
+    for frame in 1..=30 {
+        ee.call(step, &[u64::from(world)], &[0.03333], 200_000_000);
+        sim.tick_in(pad, &mut ground);
+        let f = sim.plane.as_ref().expect("still a plane");
+        let quad = |at: u32| Vf::new(ee.f32_at(at), ee.f32_at(at + 4), ee.f32_at(at + 8), ee.f32_at(at + 12));
+        let word = |at: u32| F(ee.f32_at(at));
+        let mut lanes = vec![
+            ("body.pos", f.body.position, quad(b + 0x60)),
+            ("body.vel", f.body.velocity, quad(b + 0x70)),
+            ("body.quat", f.body.quat, quad(b + 0x170)),
+            ("body.rate", f.body.rates, quad(b + 0x1b0)),
+        ];
+        let mut words = vec![];
+        for (k, (tire, t)) in f.tires.iter().zip(tires).enumerate() {
+            lanes.push((["tire 0 ground", "tire 1 ground", "tire 2 ground"][k], tire.ground, quad(t + 0xc0)));
+            for (what, port, o) in [
+                ("compression", tire.compression, 0x8c),
+                ("last compression", tire.last_compression, 0x90),
+                ("spring force", tire.spring_force, 0x94),
+                ("spin", tire.spin, 0x124),
+            ] {
+                words.push((format!("tire {k} {what}"), port, word(t + o)));
+            }
+        }
+        words.push(("engine thrust".to_string(), f.engine.thrust, word(e + 0x6c)));
+        words.push(("engine rpm".to_string(), f.engine.rpm, word(e + 0x60)));
+        words.push(("engine prop angle".to_string(), f.engine.prop_angle, word(e + plane_at::ENGINE_PROP_ANGLE)));
+        words.push(("engine clock".to_string(), f.engine.clock, word(e + plane_at::ENGINE_CLOCK)));
+        for (what, port, game) in lanes {
+            assert_eq!(port.to_bits(), game.to_bits(), "frame {frame}: {what} is {port:?} where the game's is {game:?}");
+        }
+        for (what, port, game) in words {
+            assert_eq!(port.to_bits(), game.to_bits(), "frame {frame}: {what} is {port:?} where the game's is {game:?}");
+        }
+    }
+    println!("30 frames of the plane, word for word with dynamics_world_step");
 }
