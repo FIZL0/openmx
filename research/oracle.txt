@@ -2440,6 +2440,14 @@ rider_ragdoll_pose boot 0x0030f0c0 the body actor's vt +0xa4 (actor, a1, dt in f
 #                                  game-sim
 rider_ragdoll_reset boot 0x0030f0b0 the actor's vt +0xa0: the world reset (0x001f28a0), each body's
 #                                  vt +0x2c (0x0015a3d0)
+# S52 -- the reset, ported in crates/game-sim/src/ragdoll_pose.rs (proved in tests/ragdoll_contact.rs)
+world_reset boot 0x001f28a0 (world) every body of the world (count +0x8, array +0x10), in order, through
+#                           its vt (at the body's +0x100) +0x2c
+body_reset boot 0x0015a3d0 (body) +0x50 and +0x60 = start position +0x30, +0x70 = start velocity +0x40,
+#                          +0x150 and +0x170 = start quat +0x160, +0x1b0 = start rates +0x140; +0x80,
+#                          +0x90, +0xa0, +0xb0, +0xc0, +0x190, +0x1a0, +0x1c0, +0x1d0, +0x1e0 = (0,0,0,1)
+body_set_start boot 0x00159f20 (body, pos*, vel*) vt +0x10: +0x30 = pos, +0x40 = vel (whole quads)
+body_set_start_turn boot 0x00159ee0 (body, quat*, rates*) vt +0x48: +0x160 = quat, +0x140 = rates
 collider_ignore boot 0x0011ade0 (228 bytes; collider, other) adds other to the collider's ignore list
 #                               (+0xd4 array, +0xd8 count) once, into the first empty slot
 wreck_sound boot 0x0033e9c0 (524 bytes; emitter, a1) the wreck entry's last call, on actor +0xa74:

@@ -11,13 +11,16 @@
 //!    asked, and the port's [`Terrain`] and [`Scene`] answer the same and log the same. The push-out
 //!    and the impulse run for real on both sides;
 //! 3. **the bike box**, over generated frames, boxes, carried velocities and bones in and out of the
-//!    box, on both of its frames: the actor's moving one and the constraint's own.
+//!    box, on both of its frames: the actor's moving one and the constraint's own;
+//! 4. **the reset**: the actor's own reset over every body of the ragdoll's world, with every field
+//!    of every body generated, and the body's two start setters.
 
 use game_sim::archive::{Psr, Res};
 use game_sim::biplane::Body;
 use game_sim::camera::{CURVE_ENTRIES, CurveTable};
 use game_sim::collide::{Bundle, Record};
 use game_sim::math::Mat4;
+use game_sim::ragdoll_pose::{self, Start};
 use game_sim::ragdoll_contact::{BikeBox, Contact, SWEEP_BACK, Scene, Sphere, Terrain};
 use game_sim::world::World;
 use ps2_float::{F, Vf};
@@ -707,4 +710,128 @@ fn the_bike_box_matches_the_original() {
     }
     eprintln!("bike box: {held} held, {free} free, {moving} moving, {still} still, {off} off");
     assert!(held > 3000 && free > 300 && moving > 3000 && still > 1500 && off > 300, "{held} {free} {moving} {still} {off}");
+}
+
+/// Every quadword of a body the reset reads or writes, and its start.
+mod reset_at {
+    pub const START_POSITION: u32 = 0x30;
+    pub const START_VELOCITY: u32 = 0x40;
+    pub const START_RATES: u32 = 0x140;
+    pub const START_QUAT: u32 = 0x160;
+    pub const LAST_POSITION: u32 = 0x50;
+    pub const LAST_FORCE: u32 = 0x80;
+    pub const FORCE: u32 = 0x90;
+    pub const ACCEL: u32 = 0xa0;
+    pub const SHOCK_PEAK: u32 = 0xb0;
+    pub const SHOCK: u32 = 0xc0;
+    pub const LAST_QUAT: u32 = 0x150;
+    pub const MOMENT: u32 = 0x190;
+    pub const LAST_MOMENT: u32 = 0x1a0;
+    pub const ANG_ACCEL: u32 = 0x1c0;
+    pub const TWIST_PEAK: u32 = 0x1d0;
+    pub const TWIST: u32 = 0x1e0;
+}
+
+/// A body's state as the reset sees it, every quadword by name.
+fn whole_body(ee: &Ee, b: u32) -> Body {
+    use reset_at::*;
+    Body {
+        last_position: quad(ee, b + LAST_POSITION),
+        last_force: quad(ee, b + LAST_FORCE),
+        force: quad(ee, b + FORCE),
+        accel: quad(ee, b + ACCEL),
+        shock_peak: quad(ee, b + SHOCK_PEAK),
+        shock: quad(ee, b + SHOCK),
+        last_quat: quad(ee, b + LAST_QUAT),
+        moment: quad(ee, b + MOMENT),
+        last_moment: quad(ee, b + LAST_MOMENT),
+        ang_accel: quad(ee, b + ANG_ACCEL),
+        twist_peak: quad(ee, b + TWIST_PEAK),
+        twist: quad(ee, b + TWIST),
+        ..body_of(ee, b)
+    }
+}
+
+fn start_of(ee: &Ee, b: u32) -> Start {
+    use reset_at::*;
+    Start {
+        position: quad(ee, b + START_POSITION),
+        velocity: quad(ee, b + START_VELOCITY),
+        quat: quad(ee, b + START_QUAT),
+        rates: quad(ee, b + START_RATES),
+    }
+}
+
+#[test]
+fn the_reset_matches_the_original() {
+    let Some(mut ee) = state() else { return };
+    let reset = addr("rider_ragdoll_reset").unwrap();
+    let world = ee.u32_at(ACTOR + 0x2cc);
+    let count = ee.u32_at(world + 8) as usize;
+    assert_eq!(count, 18, "the ragdoll's world holds the eighteen bones");
+    let list = ee.u32_at(world + 0x10);
+    let bodies: Vec<u32> = (0..count).map(|k| ee.u32_at(list + 4 * k as u32)).collect();
+    for (k, &b) in bodies.iter().enumerate() {
+        assert_eq!(b, bone_body(&ee, k), "the world's body {k} is bone {k}'s");
+        assert_eq!(ee.u32_at(ee.u32_at(b + 0x100) + 0x2c), addr("body_reset").unwrap());
+        assert_eq!(ee.u32_at(ee.u32_at(b + 0x100) + 0x10), addr("body_set_start").unwrap());
+        assert_eq!(ee.u32_at(ee.u32_at(b + 0x100) + 0x48), addr("body_set_start_turn").unwrap());
+    }
+    // Every quadword of the body from its inverse mass to the twist, generated: what the reset leaves
+    // alone must come out as it went in, on both sides.
+    let quads: Vec<u32> = (1..0x1f).map(|k| 0x10 * k).filter(|&o| o != 0xd0 && o != 0xe0 && o != 0x100).collect();
+
+    let mut pick = Pick(0x7e_5e_70_52);
+    for case in 0..CASES / 10 {
+        let mut ours = Vec::new();
+        for &b in &bodies {
+            for &o in &quads {
+                set_quad(&mut ee, b + o, pick.vector(500.0));
+            }
+            ours.push((whole_body(&ee, b), start_of(&ee, b)));
+        }
+        ragdoll_pose::reset(ours.iter_mut().map(|(b, s)| (b, &*s)));
+        ee.call(reset, &[u64::from(ACTOR)], &[], BUDGET);
+        for (k, &b) in bodies.iter().enumerate() {
+            let (port, start) = &ours[k];
+            assert_eq!(*start, start_of(&ee, b), "case {case}: body {k}'s start moved");
+            let game = whole_body(&ee, b);
+            assert_eq!(format!("{port:?}"), format!("{game:?}"), "case {case}: body {k}");
+            for (what, got, want) in [
+                ("position", port.position, game.position),
+                ("last position", port.last_position, game.last_position),
+                ("velocity", port.velocity, game.velocity),
+                ("quat", port.quat, game.quat),
+                ("last quat", port.last_quat, game.last_quat),
+                ("rates", port.rates, game.rates),
+                ("force", port.force, game.force),
+                ("twist", port.twist, game.twist),
+            ] {
+                assert_eq!(bits(got), bits(want), "case {case}: body {k}'s {what}");
+            }
+        }
+    }
+
+    // The two setters, each handed two of the body's own quadwords as its arguments (never the start
+    // itself, which the first copy would overwrite before the second reads it).
+    let (place, turn) = (addr("body_set_start").unwrap(), addr("body_set_start_turn").unwrap());
+    let sources: Vec<u32> = quads.iter().copied().filter(|o| ![0x30, 0x40, 0x140, 0x160].contains(o)).collect();
+    for case in 0..CASES {
+        let b = bodies[pick.upto(18) as usize];
+        for &o in &quads {
+            set_quad(&mut ee, b + o, pick.vector(500.0));
+        }
+        let n = sources.len() as u64;
+        let (p, v) = (sources[pick.upto(n) as usize], sources[pick.upto(n) as usize]);
+        let mut start = start_of(&ee, b);
+        let (pv, vv) = (quad(&ee, b + p), quad(&ee, b + v));
+        if pick.chance(2) {
+            start.place(pv, vv);
+            ee.call(place, &[u64::from(b), u64::from(b + p), u64::from(b + v)], &[], BUDGET);
+        } else {
+            start.turn(pv, vv);
+            ee.call(turn, &[u64::from(b), u64::from(b + p), u64::from(b + v)], &[], BUDGET);
+        }
+        assert_eq!(format!("{start:?}"), format!("{:?}", start_of(&ee, b)), "case {case}: offsets {p:#x}, {v:#x}");
+    }
 }
