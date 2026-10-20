@@ -36,15 +36,11 @@
 
 use game_sim::input::{AXIS_CENTRE, CONTROL_MAP, Control, PRESSURE_THRESHOLD, Report};
 
-use crate::window::{Window, key};
+use crate::window::key;
 
-/// Which `/dev/input/js*` a pad is read from, when the shell is not told.
-const PAD_DEVICES: [&str; 4] = [
-    "/dev/input/js0",
-    "/dev/input/js1",
-    "/dev/input/js2",
-    "/dev/input/js3",
-];
+/// Where the kernel puts its joystick devices, and where it says what each one is.
+const PAD_DIR: &str = "/dev/input";
+const PAD_SYS: &str = "/sys/class/input";
 
 /// `O_NONBLOCK`, so a frame with no pad event does not wait for one. The value is Linux's, and this
 /// is the one place the shell needs a number from a header rather than from std.
@@ -256,7 +252,7 @@ pub fn control_named(name: &str) -> Option<Control> {
 /// a stick — because the port read the backflip's stick through the ride's rate limit, which no key
 /// ramp could get ahead of. The original reads that stick raw and sizes the flip by how fast it
 /// crossed, and on the disc's 125 the ramp cannot make the three crosses inside the lip at all. The
-/// arrows are the d-pad now ([`keyboard`]), which is the original's own digital stick.
+/// arrows are the d-pad now ([`KEYBOARD`]), which is the original's own digital stick.
 const KEY_TO_EDGE: f32 = 0.18;
 const KEY_TO_CENTRE: f32 = 0.10;
 
@@ -281,18 +277,22 @@ const KEY_TO_SHUT: f32 = 0.12;
 
 /// Which two keys drive which stick axis, and where that axis goes in the report. The low key is the
 /// one at the low end of the byte, which is up or left — the hardware's own sense (see [`stick_byte`]).
-/// The left stick has no keys: the arrows are the d-pad ([`keyboard`]).
+/// The left stick has no keys: the arrows are the d-pad ([`KEYBOARD`]).
 const KEY_STICKS: [(usize, u8, u8); 2] = [
     (REPORT_RIGHT_X, key::J, key::L),
     (REPORT_RIGHT_Y, key::I, key::K),
 ];
 
-/// The host's pad and keyboard, as one report a frame.
+/// One seat's pad and keyboard, as one report a frame: a joystick device, the keyboard, or both
+/// folded together (the first seat's pad and the keyboard, on a machine nobody has set seats up on).
+/// [`Seats`] owns one of these per pad that is plugged in and one for the keyboard.
 pub struct Pads {
     /// The joystick device, if one opened.
     device: Option<std::fs::File>,
-    /// Its name, for the line the shell prints at startup.
+    /// Its name, for the line the shell prints when it joins.
     pub name: Option<String>,
+    /// The device stopped answering — unplugged, or the read failed — and was closed.
+    gone: bool,
     /// The last value of each axis, kept because a joystick event only mentions what changed.
     axis: [i16; AXES],
     /// Which pad buttons are down.
@@ -303,6 +303,8 @@ pub struct Pads {
     key_gas: KeyRamp,
     /// Where the throttle comes from and which axes carry a button's pressure.
     wiring: Wiring,
+    /// Which key and which pad button is which of the game's controls (`controls.txt`).
+    bindings: Bindings,
     /// When the last report was built, so the ramps travel at a rate in seconds rather than one a
     /// frame: the shell paces itself to 60 Hz but a heavy frame overruns, and a keyboard that leans
     /// further when the picture is cheap would be its own bug.
@@ -310,85 +312,25 @@ pub struct Pads {
 }
 
 impl Pads {
-    /// Open a pad: the one named, or the first of `/dev/input/js*` that opens, wired as the person
-    /// asked ([`Wiring`] — where the throttle comes from, and which axes carry a button's pressure).
-    ///
-    /// No pad is not an error — the keyboard is a pad in this shell — so this always returns a
-    /// `Pads`, with `name` saying whether a device was found.
-    pub fn open(named: Option<&str>, wiring: Wiring) -> Pads {
-        // A stick and a hat rest in the middle of their range, but a trigger rests at the bottom of
-        // its: zero on a trigger axis is the trigger pulled half way, which on a machine with no pad
-        // at all is a permanent 43% of clutch and of front brake. A device that opens sends an
-        // initial event for every axis and overwrites both within a frame; a machine with no device
-        // never does, so the rest position is what they start at. (Found with P6's overlay, which is
-        // what it is for.)
-        // A button's pressure axis rests at the bottom of its travel too, for the same reason and
-        // with the same consequence if it is not said: a mapped axis left at zero would read as a
-        // button held half way down before the device had spoken.
-        let mut pads = Pads::unplugged(wiring);
-        let candidates: Vec<String> = match named {
-            Some(path) => vec![path.to_string()],
-            None => PAD_DEVICES.iter().map(|p| p.to_string()).collect(),
-        };
-        for path in candidates {
-            use std::os::unix::fs::OpenOptionsExt;
-            match std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(O_NONBLOCK)
-                .open(&path)
-            {
-                Ok(file) => {
-                    pads.name = Some(match device_name(&path) {
-                        Some(name) => format!("{name} ({path})"),
-                        None => path.clone(),
-                    });
-                    pads.device = Some(file);
-                    break;
-                }
-                Err(e) if named.is_some() => {
-                    eprintln!("openmx: {path}: {e}");
-                    break;
-                }
-                Err(_) => {}
-            }
-        }
-        pads
-    }
-
-    /// The pad for a seat after the first (V22): the first of `/dev/input/js*` that no other seat
-    /// has (`taken`, the devices' paths as [`Pads::path`] holds them) and that opens, or no device
-    /// at all. A seat with no device rides an idle pad: plugged in, nothing held.
-    pub fn open_another(taken: &[String], wiring: Wiring) -> Pads {
-        let free = |p: &&&str| !taken.iter().any(|t| t == **p) && std::path::Path::new(**p).exists();
-        for path in PAD_DEVICES.iter().filter(free) {
-            let pads = Pads::open(Some(path), wiring.clone());
-            if pads.device.is_some() {
-                return pads;
-            }
-        }
-        Pads::unplugged(wiring)
-    }
-
-    /// The device this pad reads, if one opened.
-    pub fn path(&self) -> Option<String> {
-        let name = self.name.as_ref()?;
-        Some(match name.rsplit_once(" (") {
-            Some((_, path)) => path.trim_end_matches(')').to_string(),
-            None => name.clone(),
-        })
-    }
-
-    /// This frame's report with no keyboard behind it: a seat after the first, whose player has a
-    /// pad of their own and not the keys (V22).
-    pub fn report_without_keys(&mut self) -> Report {
-        let seconds = self.since_the_last_report();
-        self.build(seconds, &|_| false)
-    }
-
     /// A `Pads` with no device: the keyboard on a machine with no pad, and what this module's own
     /// tests ride, since a test that opened `/dev/input/js0` would read whatever is plugged in.
     /// `pub(crate)` for `tests/ride.rs`, which compiles this file in to ride a flip on the keys.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn unplugged(wiring: Wiring) -> Pads {
+        Pads::bound(wiring, Bindings::default())
+    }
+
+    /// A `Pads` with no device, on these bindings.
+    ///
+    /// A stick and a hat rest in the middle of their range, but a trigger rests at the bottom of
+    /// its: zero on a trigger axis is the trigger pulled half way, which on a machine with no pad at
+    /// all is a permanent 43% of clutch and of front brake. A device that opens sends an initial
+    /// event for every axis and overwrites both within a frame; a machine with no device never does,
+    /// so the rest position is what they start at. (Found with P6's overlay, which is what it is
+    /// for.) A button's pressure axis rests at the bottom of its travel too, for the same reason and
+    /// with the same consequence if it is not said: a mapped axis left at zero would read as a
+    /// button held half way down before the device had spoken.
+    fn bound(wiring: Wiring, bindings: Bindings) -> Pads {
         let mut axis = [0i16; AXES];
         axis[AXIS_L2] = TRIGGER_REST;
         axis[AXIS_R2] = TRIGGER_REST;
@@ -400,11 +342,13 @@ impl Pads {
         Pads {
             device: None,
             name: None,
+            gone: false,
             axis,
             button: [false; BUTTONS],
             key_stick: [KeyAxis::CENTRED; KEY_STICKS.len()],
             key_gas: KeyRamp::SHUT,
             wiring,
+            bindings,
             clock: None,
         }
     }
@@ -413,9 +357,11 @@ impl Pads {
     ///
     /// The joystick interface sends the whole current state as "initial" events when the device is
     /// opened, so the first frame after opening already knows where the sticks are.
-    pub fn report(&mut self, window: &Window) -> Report {
+    ///
+    /// `held` is the keyboard, for a seat the keyboard drives, and [`no_keys`] for one it does not.
+    pub fn report(&mut self, held: &dyn Fn(u8) -> bool) -> Report {
         let seconds = self.since_the_last_report();
-        self.build(seconds, &|code| window.held(code))
+        self.build(seconds, held)
     }
 
     /// This frame's report, from the pad's state and whatever `held` says about the keyboard.
@@ -430,14 +376,9 @@ impl Pads {
         let mut buttons = 0u16;
 
         // The pad's buttons and the keyboard's keys, as one set of the game's own controls.
-        for (i, control) in PAD_BUTTONS.iter().enumerate() {
-            if let (Some(control), true) = (control, self.button[i]) {
-                buttons |= control.mask();
-            }
-        }
+        buttons |= self.bindings.buttons(&self.button, held);
         buttons |= hat(self.axis[AXIS_HAT_X], Control::Left, Control::Right);
         buttons |= hat(self.axis[AXIS_HAT_Y], Control::Up, Control::Down);
-        buttons |= keyboard(held);
 
         // The button word, active low, and a full pressure byte for every analogue control in it —
         // which is what a digital source has to mean, and what the game's own binding reads.
@@ -457,9 +398,10 @@ impl Pads {
         report.set_axis(REPORT_RIGHT_Y, stick_byte(self.axis[AXIS_RIGHT_Y]));
         // The keyboard moves the right stick too: `IJKL`, ramped toward its edge for as long as the
         // key is held and let back to centre when it is not ([`KeyAxis`]). The arrows are the d-pad,
-        // in `keyboard` above.
-        for (axis, (slot, low, high)) in self.key_stick.iter_mut().zip(KEY_STICKS) {
-            if let Some(byte) = axis.step(seconds, held(low), held(high)) {
+        // in [`KEYBOARD`].
+        for (i, (axis, (slot, _, _))) in self.key_stick.iter_mut().zip(KEY_STICKS).enumerate() {
+            let (low, high) = self.bindings.stick_keys(i, held);
+            if let Some(byte) = axis.step(seconds, low, high) {
                 report.set_axis(slot, byte);
             }
         }
@@ -496,7 +438,7 @@ impl Pads {
 
         // And the keyboard's throttle, which is the one control a key cannot do justice to: ramped
         // ([`KeyRamp`]), so a stab is part throttle and a held key is still pinned.
-        if let Some(pressure) = self.key_gas.step(seconds, held(key::X) || held(key::SPACE)) {
+        if let Some(pressure) = self.key_gas.step(seconds, self.bindings.throttle_key(held)) {
             press(&mut report, Control::Cross, pressure);
         }
         report
@@ -531,20 +473,742 @@ impl Pads {
                         _ => {}
                     }
                 }
-                // A short read cannot happen on this device, and a closed one (unplugged mid-ride)
-                // leaves the state where it was rather than dropping the rider.
+                // A short read cannot happen on this device. End of file, or any error but "nothing
+                // waiting", is a device that went away — the kernel answers ENODEV once a pad is
+                // unplugged — and it is closed and said, so that [`Seats`] can pause its player and
+                // hold the seat for it, rather than read a dead file for ever.
+                Ok(0) => break,
                 Ok(_) => return,
-                Err(_) => return,
+                Err(e) if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+                {
+                    return;
+                }
+                Err(_) => break,
             }
+        }
+        self.device = None;
+        self.gone = true;
+    }
+}
+
+/// A seat that reads no keys: every pad seat but the one the keyboard shares.
+pub fn no_keys(_: u8) -> bool {
+    false
+}
+
+// ---- seats ------------------------------------------------------------------------------------
+//
+// Taken from opentennis (P35): `Seat`, `readable`'s Steam filter and `ignore_list` are
+// `crates/hst-base/src/seats.rs`'s, `PadSlots` and `Bindings` are `crates/hst-play/src/play/controls.rs`'s.
+// What changed for a raw js device instead of gilrs is said where it changed; the journal
+// (research/journal/2026-10-20-p35-p35-seats-and-pads) has the list.
+
+/// How many seats there are: up to eight players on one machine.
+pub const SEATS: usize = 8;
+
+/// What drives one seat (`--pads`): the keyboard or a pad — an index into the pads in the order
+/// they were found (the kernel's `js` numbers at startup, then the order they were plugged in).
+/// A seat that is neither (`-`) is nobody's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Seat {
+    Keys,
+    Pad(usize),
+}
+
+impl Seat {
+    /// `k` the keyboard, a number a pad, anything else (`-`) nobody.
+    pub fn parse(s: &str) -> Option<Seat> {
+        match s.trim() {
+            "k" => Some(Seat::Keys),
+            n => n.parse().ok().map(Seat::Pad),
+        }
+    }
+
+    /// `--pads` for these seats (`-` nobody).
+    pub fn flag(seats: &[Option<Seat>]) -> String {
+        let one = |s: &Option<Seat>| match s {
+            Some(Seat::Keys) => "k".to_string(),
+            Some(Seat::Pad(n)) => n.to_string(),
+            None => "-".into(),
+        };
+        seats.iter().map(one).collect::<Vec<_>>().join(",")
+    }
+
+    /// A whole `--pads` list: up to [`SEATS`] of them, comma-separated, the rest nobody's.
+    pub fn parse_list(s: &str) -> Result<[Option<Seat>; SEATS], String> {
+        let mut seats = [None; SEATS];
+        let parts: Vec<&str> = s.split(',').collect();
+        if parts.len() > SEATS {
+            return Err(format!("{s}: {} seats, and there are {SEATS}", parts.len()));
+        }
+        for (seat, part) in seats.iter_mut().zip(&parts) {
+            let part = part.trim();
+            *seat = Seat::parse(part);
+            if seat.is_none() && part != "-" {
+                return Err(format!("{part}: a seat is k, a pad's number or -"));
+            }
+        }
+        if seats.iter().filter(|s| **s == Some(Seat::Keys)).count() > 1 {
+            return Err(format!("{s}: the keyboard can only be one seat"));
+        }
+        Ok(seats)
+    }
+}
+
+/// What the kernel says a joystick device is: its name and the USB (or Bluetooth) ids, from sysfs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeviceInfo {
+    pub name: String,
+    pub vendor: u16,
+    pub product: u16,
+    /// The device's own serial, where it has one (a Bluetooth pad's address, most often).
+    pub uniq: String,
+    /// Where it is plugged in: the USB port path, for a pad that has no serial.
+    pub phys: String,
+}
+
+impl DeviceInfo {
+    /// `sys/<node>/device/…`, as much of it as is there. A node with no sysfs entry (a test's fifo,
+    /// or a container with no `/sys`) is known by its path alone.
+    fn read(sys: &std::path::Path, node: &str) -> DeviceInfo {
+        let dir = sys.join(node).join("device");
+        let text = |name: &str| {
+            std::fs::read_to_string(dir.join(name)).map(|t| t.trim().to_string()).unwrap_or_default()
+        };
+        let hex = |name: &str| u16::from_str_radix(&text(name), 16).unwrap_or(0);
+        DeviceInfo {
+            name: text("name"),
+            vendor: hex("id/vendor"),
+            product: hex("id/product"),
+            uniq: text("uniq"),
+            phys: text("phys"),
+        }
+    }
+
+    /// Which pad this is, as far as the shell can tell one pad from another across an unplug: the
+    /// same ids, serial, port and name. gilrs gives opentennis an entity per connection and a pad
+    /// that comes back is a new one; a js device has no such handle either, and its `jsN` is
+    /// handed out again to whichever pad comes next, so this is what a seat remembers instead.
+    fn identity(&self, path: &std::path::Path) -> String {
+        if self.name.is_empty() && self.vendor == 0 && self.product == 0 {
+            return path.display().to_string();
+        }
+        format!(
+            "{:04x}:{:04x} {} {} {}",
+            self.vendor, self.product, self.uniq, self.phys, self.name
+        )
+    }
+}
+
+/// Whether the shell reads this pad. Under Steam Input, Steam lists the physical pads it stands in
+/// for in `SDL_GAMECONTROLLER_IGNORE_DEVICES` (`0xVID/0xPID,…`); those are skipped so only Steam's
+/// virtual pad, with the player's Steam layout, drives the game. Outside Steam Input, Steam's
+/// background virtual pads (Valve 0x28de/0x11ff) mirror real ones and are skipped instead.
+pub fn readable(info: &DeviceInfo) -> bool {
+    static IGNORED: std::sync::OnceLock<Option<Vec<(u16, u16)>>> = std::sync::OnceLock::new();
+    let ignored = IGNORED.get_or_init(|| {
+        std::env::var("SDL_GAMECONTROLLER_IGNORE_DEVICES").ok().map(|v| ignore_list(&v))
+    });
+    readable_under(info, ignored.as_deref())
+}
+
+/// [`readable`] with the ignore list given, for the tests.
+fn readable_under(info: &DeviceInfo, ignored: Option<&[(u16, u16)]>) -> bool {
+    let id = (info.vendor, info.product);
+    match ignored {
+        Some(list) => !list.contains(&id),
+        None => id != (0x28de, 0x11ff),
+    }
+}
+
+/// `SDL_GAMECONTROLLER_IGNORE_DEVICES`' `0xVID/0xPID` pairs; malformed entries are dropped.
+fn ignore_list(v: &str) -> Vec<(u16, u16)> {
+    let hex = |s: &str| {
+        u16::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+    };
+    v.split(',')
+        .filter_map(|e| e.split_once('/'))
+        .filter_map(|(a, b)| Some((hex(a)?, hex(b)?)))
+        .collect()
+}
+
+/// The seats 1P..8P: which pad holds each, and which pad each one last had.
+///
+/// opentennis's, with two changes. It is generic over what names a pad (a [`DeviceInfo::identity`]
+/// here, a gilrs entity there), and a seat **waits for its own pad**: opentennis frees a seat whose
+/// pad is unplugged and hands it to the next pad plugged in, which a match between points can
+/// afford. A ride cannot — the seat is a rider on the track, and a different pad taking it over
+/// mid-ride would be somebody else's thumbs on that rider — so here a seat remembers its pad
+/// (`last`), its player is paused while the pad is out ([`PadSlots::waiting`]), the same pad
+/// takes it back when it is plugged in again, and a pad nobody has seen joins the first seat
+/// nobody is waiting in. [`PadSlots::forget`] lets a waiting seat go.
+#[derive(Clone, Debug)]
+pub struct PadSlots<P> {
+    /// The pad holding each seat now.
+    pub held: [Option<P>; SEATS],
+    /// `--pads`: what each seat was set up as, or `None` for "pads in join order, and the keyboard
+    /// with 1P".
+    pub seats: Option<[Option<Seat>; SEATS]>,
+    /// The pad each seat had last, kept while it is unplugged.
+    last: [Option<P>; SEATS],
+}
+
+impl<P> Default for PadSlots<P> {
+    fn default() -> PadSlots<P> {
+        PadSlots { held: std::array::from_fn(|_| None), seats: None, last: std::array::from_fn(|_| None) }
+    }
+}
+
+impl<P: Clone + PartialEq> PadSlots<P> {
+    /// Seats set up by `--pads`.
+    pub fn with_seats(seats: [Option<Seat>; SEATS]) -> PadSlots<P> {
+        PadSlots { seats: Some(seats), ..PadSlots::default() }
+    }
+
+    /// `present` is every pad plugged in, in the order they were found. Drop the pads gone from it
+    /// (their seats wait), give each one that came back its own seat, then a seat set up for pad `n`
+    /// pad `n`, then every other new pad the first free seat that wants one, in join order.
+    pub fn update(&mut self, present: &[P]) {
+        for (held, last) in self.held.iter_mut().zip(&mut self.last) {
+            if held.as_ref().is_some_and(|p| !present.contains(p)) {
+                *last = held.take();
+            }
+        }
+        // Home first, so a pad back from an unplug is never beaten to its seat by one plugged in
+        // beside it.
+        for i in 0..SEATS {
+            if self.held[i].is_none()
+                && let Some(p) = self.last[i].clone()
+                && present.contains(&p)
+                && !self.held.contains(&Some(p.clone()))
+            {
+                self.held[i] = Some(p);
+            }
+        }
+        let wants = |i: usize| {
+            self.seats.map_or(Some(None), |seats| match seats[i] {
+                Some(Seat::Pad(n)) => Some(Some(n)),
+                _ => None,
+            })
+        };
+        // Then the seats' own pads, so a seat whose pad is not in yet doesn't take one another empty
+        // seat is waiting for. Only a seat that has never had a pad: after that, `last` says which.
+        for i in 0..SEATS {
+            if let (None, None, Some(Some(n))) = (&self.held[i], &self.last[i], wants(i))
+                && let Some(p) = present.get(n).filter(|p| !self.claimed(p))
+            {
+                self.held[i] = Some(p.clone());
+                self.last[i] = Some(p.clone());
+            }
+        }
+        for i in 0..SEATS {
+            if self.held[i].is_some() || self.last[i].is_some() || wants(i).is_none() {
+                continue;
+            }
+            let own: Vec<&P> = (0..SEATS)
+                .filter(|&j| j != i && self.held[j].is_none() && self.last[j].is_none())
+                .filter_map(|j| wants(j).flatten())
+                .filter_map(|n| present.get(n))
+                .collect();
+            let free = present
+                .iter()
+                .find(|p| !self.claimed(p) && (self.seats.is_none() || !own.contains(p)))
+                .cloned();
+            if free.is_some() {
+                self.last[i] = free.clone();
+            }
+            self.held[i] = free;
+        }
+    }
+
+    /// Whether a pad already has a seat, or is the pad a waiting seat is waiting for.
+    fn claimed(&self, p: &P) -> bool {
+        self.held.iter().chain(&self.last).any(|q| q.as_ref() == Some(p))
+    }
+
+    /// Whether seat `i`'s pad is out: its player is paused until the pad is plugged back in or the
+    /// seat is let go.
+    pub fn waiting(&self, i: usize) -> bool {
+        self.held[i].is_none() && self.last[i].is_some()
+    }
+
+    /// Let seat `i` go: it holds no pad and waits for none, so the next new pad may take it.
+    pub fn forget(&mut self, i: usize) {
+        self.held[i] = None;
+        self.last[i] = None;
+    }
+
+    /// The seat the keyboard drives: 1P without `--pads` (alongside 1P's pad), else its own seat if
+    /// it has one; with none, 1P while 1P's pad is out, so the keyboard can play on (opentennis's
+    /// B388).
+    pub fn keys(&self) -> Option<usize> {
+        self.seats.map_or(Some(0), |seats| {
+            seats.iter().position(|s| *s == Some(Seat::Keys)).or(
+                (matches!(seats[0], Some(Seat::Pad(_))) && self.held[0].is_none()).then_some(0),
+            )
+        })
+    }
+}
+
+/// One binding: a key (an X keycode) or a pad button (a js button index).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Input {
+    Key(u8),
+    Button(usize),
+}
+
+/// The keyboard's right-stick keys, as `controls.txt` names them, in [`KEY_STICKS`]' order: each
+/// axis' low key, then its high key.
+const STICK_KEYS: [&str; 4] = ["stick_left", "stick_right", "stick_up", "stick_down"];
+
+/// How many lines `controls.txt` has: the sixteen controls, then the four stick keys.
+const BINDINGS: usize = 16 + STICK_KEYS.len();
+
+/// Which keys and pad buttons are which of the game's controls: `controls.txt`, opentennis's way.
+///
+/// One line per control, `control = Name Name …`, named as the port names them ([`Control::name`]):
+/// keys by name (`X`, `Space`, `Return`, `Up`, `F1`, …, [`KEY_NAMES`]) and pad buttons with a `Pad`
+/// prefix (`PadSouth`, `PadL1`, `Pad7`, … — [`BUTTON_NAMES`], or a js button number). Unknown names
+/// are reported and skipped; a control left with nothing understood keeps its default.
+///
+/// What changed from opentennis for a raw js device: its buttons are gilrs' named ones, and a js
+/// device's are only numbers, in the order the kernel gives a gamepad (see [`PAD_BUTTONS`]), so
+/// the names here are that order's and `PadN` reaches any button past them. Its actions are the
+/// game's (tennis shots there, the sixteen DualShock 2 controls here), and the d-pad hat, the
+/// sticks and the triggers are axes on a js device and are not rebindable, as opentennis's sticks
+/// are not. `cross`'s keys are the keyboard's throttle ramp ([`KeyRamp`]) rather than a bit.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Bindings([Vec<Input>; BINDINGS]);
+
+impl Default for Bindings {
+    /// [`PAD_BUTTONS`], [`KEYBOARD`], `X`/space on the throttle and `IJKL` on the right stick: the
+    /// shell's binding before there was a file.
+    fn default() -> Bindings {
+        let mut b: [Vec<Input>; BINDINGS] = std::array::from_fn(|_| Vec::new());
+        for (code, control) in KEYBOARD {
+            b[control as usize].push(Input::Key(code));
+        }
+        b[Control::Cross as usize].extend([Input::Key(key::X), Input::Key(key::SPACE)]);
+        for (i, control) in PAD_BUTTONS.iter().enumerate() {
+            if let Some(control) = control {
+                b[*control as usize].push(Input::Button(i));
+            }
+        }
+        for (i, (_, low, high)) in KEY_STICKS.iter().enumerate() {
+            b[16 + 2 * i].push(Input::Key(*low));
+            b[16 + 2 * i + 1].push(Input::Key(*high));
+        }
+        Bindings(b)
+    }
+}
+
+/// Every key a binding may name, by X keycode (the evdev code plus 8, which is what an X server on
+/// Linux hands over). Escape is not here: it quits.
+const KEY_NAMES: &[(&str, u8)] = &[
+    ("Q", 24), ("W", 25), ("E", 26), ("R", 27), ("T", 28), ("Y", 29), ("U", 30), ("I", 31),
+    ("O", 32), ("P", 33), ("A", 38), ("S", 39), ("D", 40), ("F", 41), ("G", 42), ("H", 43),
+    ("J", 44), ("K", 45), ("L", 46), ("Z", 52), ("X", 53), ("C", 54), ("V", 55), ("B", 56),
+    ("N", 57), ("M", 58), ("1", 10), ("2", 11), ("3", 12), ("4", 13), ("5", 14), ("6", 15),
+    ("7", 16), ("8", 17), ("9", 18), ("0", 19), ("Minus", 20), ("Equal", 21), ("BackSpace", 22),
+    ("Tab", 23), ("BracketLeft", 34), ("BracketRight", 35), ("Return", 36), ("ControlLeft", 37),
+    ("Semicolon", 47), ("Quote", 48), ("Backquote", 49), ("ShiftLeft", 50), ("Backslash", 51),
+    ("Comma", 59), ("Period", 60), ("Slash", 61), ("ShiftRight", 62), ("AltLeft", 64),
+    ("Space", 65), ("F1", 67), ("F2", 68), ("F3", 69), ("F4", 70), ("F5", 71), ("F6", 72),
+    ("F7", 73), ("F8", 74), ("F9", 75), ("F10", 76), ("F11", 95), ("F12", 96),
+    ("ControlRight", 105), ("AltRight", 108), ("Home", 110), ("Up", 111), ("PageUp", 112),
+    ("Left", 113), ("Right", 114), ("End", 115), ("Down", 116), ("PageDown", 117),
+    ("Insert", 118), ("Delete", 119),
+];
+
+/// The js button indices by name, in the order Linux reports a modern gamepad's buttons
+/// ([`PAD_BUTTONS`]).
+const BUTTON_NAMES: [&str; BUTTONS] = [
+    "South", "East", "West", "North", "L1", "R1", "Back", "Start", "Mode", "L3", "R3", "11",
+];
+
+impl Input {
+    fn parse(name: &str) -> Option<Input> {
+        if let Some(b) = name.strip_prefix("Pad") {
+            let named = BUTTON_NAMES.iter().position(|n| n.eq_ignore_ascii_case(b));
+            return named
+                .or_else(|| b.parse().ok().filter(|&n: &usize| n < BUTTONS))
+                .map(Input::Button);
+        }
+        let name = name.strip_prefix("Key").filter(|k| !k.is_empty()).unwrap_or(name);
+        let name = if name.eq_ignore_ascii_case("Enter") { "Return" } else { name };
+        KEY_NAMES
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, code)| Input::Key(code))
+    }
+
+    fn name(self) -> String {
+        match self {
+            Input::Key(code) => KEY_NAMES
+                .iter()
+                .find(|(_, c)| *c == code)
+                .map_or(format!("Key{code}"), |(n, _)| n.to_string()),
+            Input::Button(i) => format!("Pad{}", BUTTON_NAMES[i]),
         }
     }
 }
 
-/// The name the kernel gives a joystick, for the startup line.
-fn device_name(path: &str) -> Option<String> {
-    let node = path.rsplit('/').next()?;
-    let name = std::fs::read_to_string(format!("/sys/class/input/{node}/device/name")).ok()?;
-    Some(name.trim().to_string())
+impl Bindings {
+    /// The name of line `i`.
+    fn line_name(i: usize) -> &'static str {
+        if i < 16 { Control::ALL[i].name() } else { STICK_KEYS[i - 16] }
+    }
+
+    /// Read `text` over the defaults; returns the bindings and a message per name that wasn't
+    /// understood.
+    pub fn parse(text: &str) -> (Bindings, Vec<String>) {
+        let mut b = Bindings::default();
+        let mut errors = Vec::new();
+        for line in text
+            .lines()
+            .map(|l| l.split('#').next().unwrap_or("").trim())
+            .filter(|l| !l.is_empty())
+        {
+            let Some((action, names)) = line.split_once('=') else {
+                errors.push(format!("not `control = keys`: {line}"));
+                continue;
+            };
+            let Some(i) = (0..BINDINGS).position(|i| Bindings::line_name(i) == action.trim()) else {
+                errors.push(format!("unknown control: {}", action.trim()));
+                continue;
+            };
+            let set: Vec<Input> = names
+                .split_whitespace()
+                .filter_map(|n| {
+                    Input::parse(n).or_else(|| {
+                        errors.push(format!("unknown key or button: {n}"));
+                        None
+                    })
+                })
+                .collect();
+            if !set.is_empty() {
+                b.0[i] = set;
+            }
+        }
+        (b, errors)
+    }
+
+    /// The file text for these bindings.
+    pub fn text(&self) -> String {
+        let mut s = String::from(
+            "# openmx controls. One line per control of the game's pad: control = Key Key PadButton ...\n\
+             # Keys by name (X, Space, Return, Up, ShiftLeft, F1, ...), pad buttons with a Pad prefix\n\
+             # (PadSouth, PadEast, PadWest, PadNorth, PadL1, PadR1, PadBack, PadStart, PadL3, PadR3, or\n\
+             # Pad0 to Pad11). cross's keys are the throttle, ramped; stick_* are the right stick's keys.\n\
+             # The sticks, the triggers (l2, r2) and the d-pad hat are axes and always do what they do;\n\
+             # Escape quits, H the overlay and M the machine swap.\n",
+        );
+        for (i, set) in self.0.iter().enumerate() {
+            let names: Vec<_> = set.iter().map(|x| x.name()).collect();
+            s += &format!("{} = {}\n", Bindings::line_name(i), names.join(" "));
+        }
+        s
+    }
+
+    /// Read `path`, or write the defaults there if there is nothing to read; messages for whatever
+    /// in it was not understood, or for a file that could not be written, come back beside it.
+    pub fn load(path: &std::path::Path) -> (Bindings, Vec<String>) {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let (b, errors) = Bindings::parse(&text);
+                let errors = errors.into_iter().map(|e| format!("{}: {e}", path.display())).collect();
+                (b, errors)
+            }
+            Err(_) => {
+                let b = Bindings::default();
+                // Written beside and renamed over, so a session reading it never sees half a file.
+                let partial = path.with_extension("txt.partial");
+                let wrote = std::fs::write(&partial, b.text()).and_then(|_| std::fs::rename(&partial, path));
+                let said = match wrote {
+                    Ok(()) => format!("wrote the default controls to {}", path.display()),
+                    Err(e) => format!("{}: {e} (riding on the default controls)", path.display()),
+                };
+                (b, vec![said])
+            }
+        }
+    }
+
+    /// The game's controls held on the pad's buttons and the keyboard's keys, as its bitmask. Cross
+    /// on a key is not here: that is the throttle ramp's ([`Bindings::throttle_key`]).
+    fn buttons(&self, button: &[bool; BUTTONS], held: &dyn Fn(u8) -> bool) -> u16 {
+        let mut mask = 0;
+        for (control, set) in Control::ALL.iter().zip(&self.0) {
+            let down = set.iter().any(|x| match *x {
+                Input::Button(i) => button[i],
+                Input::Key(code) => *control != Control::Cross && held(code),
+            });
+            if down {
+                mask |= control.mask();
+            }
+        }
+        mask
+    }
+
+    /// Whether a throttle key — a key on `cross` — is down.
+    fn throttle_key(&self, held: &dyn Fn(u8) -> bool) -> bool {
+        self.0[Control::Cross as usize].iter().any(|x| matches!(x, Input::Key(c) if held(*c)))
+    }
+
+    /// The keyboard stick axis `i`'s two keys, low and high: whether any key on each is down.
+    fn stick_keys(&self, i: usize, held: &dyn Fn(u8) -> bool) -> (bool, bool) {
+        let any = |line: usize| self.0[line].iter().any(|x| matches!(x, Input::Key(c) if held(*c)));
+        (any(16 + 2 * i), any(16 + 2 * i + 1))
+    }
+
+    /// Whether any key bound to `control` is down: the keyboard's own Start, for [`Seats`]' take-over.
+    fn key_on(&self, control: Control, held: &dyn Fn(u8) -> bool) -> bool {
+        self.0[control as usize].iter().any(|x| matches!(x, Input::Key(c) if held(*c)))
+    }
+}
+
+/// What a seat gives the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeatInput {
+    /// Nobody is in it.
+    Empty,
+    /// Its player's pad report this frame.
+    Playing(Report),
+    /// Its pad was unplugged: the player is paused until it is back (or the keyboard takes over).
+    Waiting,
+}
+
+impl SeatInput {
+    /// The report the engine's port is handed: nobody's and a waiting seat's are a pad that is not
+    /// there, the same bytes the shell hands a second port it has no player for.
+    pub fn report(self) -> Report {
+        match self {
+            SeatInput::Playing(report) => report,
+            _ => Report::missing(),
+        }
+    }
+}
+
+/// A pad plugged in: its device's state and who it is.
+struct Joined {
+    path: std::path::PathBuf,
+    id: String,
+    pads: Pads,
+}
+
+/// How often the shell looks for pads it has not opened yet. A frame's worth of `read_dir` is
+/// cheap, but nobody notices half a second either way when they plug a pad in.
+const RESCAN_SECONDS: f32 = 0.5;
+
+/// Every seat, and every pad plugged in: the hot-plug half of opentennis's controls over the
+/// kernel's `/dev/input/js*`.
+///
+/// gilrs tells opentennis when a pad connects and disconnects. A js device says neither: a pad
+/// plugged in is a `jsN` node that was not there before, so the directory is looked at again every
+/// [`RESCAN_SECONDS`]; a pad unplugged is a read that fails (ENODEV), and its seat waits
+/// ([`PadSlots`]) for a node with the same [`DeviceInfo::identity`] to turn up.
+pub struct Seats {
+    dir: std::path::PathBuf,
+    sys: std::path::PathBuf,
+    /// `--pad`: read this one device and nothing else.
+    only: Option<std::path::PathBuf>,
+    /// Every pad open, in the order found.
+    joined: Vec<Joined>,
+    pub slots: PadSlots<String>,
+    /// The keyboard's own state, for a seat it drives with no pad beside it.
+    keys: Pads,
+    wiring: Wiring,
+    bindings: Bindings,
+    since_scan: Option<std::time::Instant>,
+    /// What each seat was last frame, for [`Seats::said`].
+    was: [SeatKind; SEATS],
+    /// Last frame's keyboard Start, so a take-over is a press and not a hold.
+    start_key: bool,
+    /// What changed, for the shell to print: pads joining, going and coming back.
+    said: Vec<String>,
+}
+
+/// [`SeatInput`] without its report, to say when a seat changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeatKind {
+    Empty,
+    Playing,
+    Waiting,
+}
+
+impl Seats {
+    /// The host's seats: every readable `/dev/input/js*` (or only `--pad`'s), on `--pads`' seats
+    /// or in join order, wired and bound as asked.
+    pub fn open(
+        only: Option<&str>,
+        seats: Option<[Option<Seat>; SEATS]>,
+        wiring: Wiring,
+        bindings: Bindings,
+    ) -> Seats {
+        Seats::in_dir(PAD_DIR.as_ref(), PAD_SYS.as_ref(), only, seats, wiring, bindings)
+    }
+
+    /// [`Seats::open`] over another device directory and sysfs, for the tests.
+    fn in_dir(
+        dir: &std::path::Path,
+        sys: &std::path::Path,
+        only: Option<&str>,
+        seats: Option<[Option<Seat>; SEATS]>,
+        wiring: Wiring,
+        bindings: Bindings,
+    ) -> Seats {
+        let mut seats = Seats {
+            dir: dir.to_path_buf(),
+            sys: sys.to_path_buf(),
+            only: only.map(Into::into),
+            joined: Vec::new(),
+            slots: seats.map_or_else(PadSlots::default, PadSlots::with_seats),
+            keys: Pads::bound(wiring.clone(), bindings.clone()),
+            wiring,
+            bindings,
+            since_scan: None,
+            was: [SeatKind::Empty; SEATS],
+            start_key: false,
+            said: Vec::new(),
+        };
+        seats.scan();
+        seats
+    }
+
+    /// Open every js node not open yet, in `js` number order.
+    fn scan(&mut self) {
+        self.since_scan = Some(std::time::Instant::now());
+        let mut found: Vec<(u32, std::path::PathBuf)> = match &self.only {
+            Some(path) => vec![(0, path.clone())],
+            None => std::fs::read_dir(&self.dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    let n = name.strip_prefix("js")?.parse().ok()?;
+                    Some((n, e.path()))
+                })
+                .collect(),
+        };
+        found.sort();
+        for (_, path) in found {
+            if self.joined.iter().any(|j| j.path == path) {
+                continue;
+            }
+            let node = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let info = DeviceInfo::read(&self.sys, node);
+            if !readable(&info) {
+                continue;
+            }
+            use std::os::unix::fs::OpenOptionsExt;
+            let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(&path)
+            else {
+                continue;
+            };
+            // Two of the same pad on one hub port must still be two: the first free of `id`,
+            // `id #2`, `id #3`…, so a pad that comes back gets the name it had if it is free.
+            let base = info.identity(&path);
+            let id = (1..)
+                .map(|n| if n == 1 { base.clone() } else { format!("{base} #{n}") })
+                .find(|id| !self.joined.iter().any(|j| &j.id == id))
+                .expect("some name is free");
+            let mut pads = Pads::bound(self.wiring.clone(), self.bindings.clone());
+            pads.name = Some(match info.name.as_str() {
+                "" => path.display().to_string(),
+                name => format!("{name} ({})", path.display()),
+            });
+            pads.device = Some(file);
+            self.joined.push(Joined { path, id, pads });
+        }
+    }
+
+    /// The pad holding each seat now, by name, for the startup lines and the overlay.
+    pub fn name(&self, seat: usize) -> Option<&str> {
+        let id = self.slots.held[seat].as_ref()?;
+        self.joined.iter().find(|j| &j.id == id)?.pads.name.as_deref()
+    }
+
+    /// What changed since the last time this was asked: one line per pad joining, going or back.
+    pub fn said(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.said)
+    }
+
+    /// This frame: read every pad, notice the ones that went and the ones that came, and build each
+    /// seat's report. `held` is the keyboard.
+    pub fn frame(&mut self, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
+        for j in &mut self.joined {
+            j.pads.drain();
+        }
+        self.joined.retain(|j| !j.pads.gone);
+        if self.since_scan.is_none_or(|t| t.elapsed().as_secs_f32() >= RESCAN_SECONDS) {
+            self.scan();
+        }
+        let present: Vec<String> = self.joined.iter().map(|j| j.id.clone()).collect();
+        self.slots.update(&present);
+
+        // The keyboard can take a waiting seat over: Start on its keys lets the seat's pad go and
+        // rides on, as opentennis's keyboard plays on for a 1P whose pad is out.
+        let keyboard = self.slots.keys();
+        let start = self.bindings.key_on(Control::Start, held);
+        if let Some(i) = keyboard
+            && start
+            && !self.start_key
+            && self.slots.waiting(i)
+        {
+            self.slots.forget(i);
+            self.said.push(format!("{}P: on the keyboard now", i + 1));
+            self.was[i] = SeatKind::Playing;
+            // Not this frame's Start as well: the same press would freeze the ride it just resumed.
+            self.start_key = start;
+            return self.frame_reports(keyboard, &no_keys);
+        }
+        self.start_key = start;
+        self.frame_reports(keyboard, held)
+    }
+
+    fn frame_reports(&mut self, keyboard: Option<usize>, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
+        let mut out = [SeatInput::Empty; SEATS];
+        for (i, seat) in out.iter_mut().enumerate() {
+            let keys: &dyn Fn(u8) -> bool = if keyboard == Some(i) { held } else { &no_keys };
+            *seat = match &self.slots.held[i] {
+                Some(id) => {
+                    let j = self.joined.iter_mut().find(|j| &j.id == id).expect("a held pad is joined");
+                    SeatInput::Playing(j.pads.report(keys))
+                }
+                None if self.slots.waiting(i) => SeatInput::Waiting,
+                None if keyboard == Some(i) => SeatInput::Playing(self.keys.report(held)),
+                None => SeatInput::Empty,
+            };
+        }
+        for (i, seat) in out.iter().enumerate() {
+            let kind = match seat {
+                SeatInput::Empty => SeatKind::Empty,
+                SeatInput::Playing(_) => SeatKind::Playing,
+                SeatInput::Waiting => SeatKind::Waiting,
+            };
+            let what = || self.name(i).unwrap_or("the keyboard").to_string();
+            match (self.was[i], kind) {
+                (SeatKind::Waiting, SeatKind::Playing) => {
+                    self.said.push(format!("{}P: {} is back", i + 1, what()));
+                }
+                (_, SeatKind::Playing) if self.was[i] != SeatKind::Playing => {
+                    self.said.push(format!("{}P: {}", i + 1, what()));
+                }
+                (_, SeatKind::Waiting) if self.was[i] != SeatKind::Waiting => self.said.push(format!(
+                    "{}P: the pad is out — paused until it is plugged back in{}",
+                    i + 1,
+                    if keyboard == Some(i) { " (or Start on the keyboard rides on without it)" } else { "" },
+                )),
+                (SeatKind::Playing, SeatKind::Empty) => self.said.push(format!("{}P: left", i + 1)),
+                _ => {}
+            }
+            self.was[i] = kind;
+        }
+        out
+    }
 }
 
 /// A joystick axis as the stick byte a DualShock 2 reports: centred at `0x7f`, full travel at 0 and
@@ -598,7 +1262,7 @@ fn hat(value: i16, low: Control, high: Control) -> u16 {
     }
 }
 
-/// The keyboard as the game's own bitmask.
+/// The keyboard as the game's own controls.
 ///
 /// Laid out so that the four face keys are where the four face buttons are on a pad: `Z` is Square,
 /// `X` Cross — the throttle — `C` Circle and `V` Triangle, with the shoulders on `A`, `S`, `D`, `F`
@@ -622,31 +1286,26 @@ fn hat(value: i16, low: Control, high: Control) -> u16 {
 /// together are the plane's own reset chord); and the arrows are the d-pad, where the plane's dive,
 /// climb and bank commands sit — they write the same ±1 to the elevator and the aileron that a stick
 /// at its stop does.
-fn keyboard(held: &dyn Fn(u8) -> bool) -> u16 {
-    let mut mask = 0;
-    for (code, control) in [
-        (key::Z, Control::Square),
-        (key::C, Control::Circle),
-        (key::V, Control::Triangle),
-        (key::A, Control::L1),
-        (key::S, Control::L2),
-        (key::D, Control::R1),
-        (key::F, Control::R2),
-        (key::RETURN, Control::Start),
-        (key::UP, Control::Up),
-        (key::DOWN, Control::Down),
-        (key::LEFT, Control::Left),
-        (key::RIGHT, Control::Right),
-        (key::TAB, Control::Select),
-        (key::Q, Control::L3),
-        (key::E, Control::R3),
-    ] {
-        if held(code) {
-            mask |= control.mask();
-        }
-    }
-    mask
-}
+///
+/// Since P35 this is the keyboard's half of the default [`Bindings`], which `controls.txt` can
+/// rebind; the throttle keys are that file's `cross` line.
+const KEYBOARD: [(u8, Control); 15] = [
+    (key::Z, Control::Square),
+    (key::C, Control::Circle),
+    (key::V, Control::Triangle),
+    (key::A, Control::L1),
+    (key::S, Control::L2),
+    (key::D, Control::R1),
+    (key::F, Control::R2),
+    (key::RETURN, Control::Start),
+    (key::UP, Control::Up),
+    (key::DOWN, Control::Down),
+    (key::LEFT, Control::Left),
+    (key::RIGHT, Control::Right),
+    (key::TAB, Control::Select),
+    (key::Q, Control::L3),
+    (key::E, Control::R3),
+];
 
 /// Two keys as one stick axis, ramped: where the stick has got to, as a fraction of full deflection
 /// from −1 at the low key's edge to 1 at the high key's edge.
@@ -1132,5 +1791,351 @@ mod tests {
         assert_eq!(control_named("r2"), Some(Control::R2));
         assert_eq!(control_named("Cross"), None, "the names are the port's, in lower case");
         assert_eq!(control_named("throttle"), None);
+    }
+
+    // ---- seats (P35) ---------------------------------------------------------------------------
+
+    /// Whether a report holds `control` down: its bit in the active-low word.
+    fn down(report: Report, control: Control) -> bool {
+        let word = ((report.0[2] as u16) << 8) | report.0[3] as u16;
+        word & control.mask() == 0
+    }
+
+    #[test]
+    fn seats_are_taken_in_join_order() {
+        let mut s = PadSlots::<u32>::default();
+        s.update(&[5, 7]);
+        assert_eq!(s.held[..3], [Some(5), Some(7), None]);
+        // A third pad plugged in later joins behind them, and the first two do not move.
+        s.update(&[5, 7, 8]);
+        assert_eq!(s.held[..4], [Some(5), Some(7), Some(8), None]);
+        // Eight seats, and a ninth pad has nowhere to go.
+        let mut s = PadSlots::<u32>::default();
+        s.update(&(0..9).collect::<Vec<_>>());
+        assert_eq!(s.held, std::array::from_fn(|i| Some(i as u32)));
+        // Without --pads the keyboard rides with 1P.
+        assert_eq!(s.keys(), Some(0));
+    }
+
+    #[test]
+    fn a_seat_is_kept_across_an_unplug_and_replug() {
+        let (a, b, c, d) = (1u32, 2, 3, 4);
+        let mut s = PadSlots::default();
+        s.update(&[a, b]);
+        // 1P's pad is pulled out: 1P waits for it, and 2P stays 2P.
+        s.update(&[b]);
+        assert_eq!(s.held[..2], [None, Some(b)]);
+        assert!(s.waiting(0) && !s.waiting(1));
+        // A pad nobody has had joins a seat nobody is waiting in — not 1P's, whose rider is
+        // somebody else's.
+        s.update(&[b, c]);
+        assert_eq!(s.held[..3], [None, Some(b), Some(c)]);
+        // 1P's own pad back: 1P again, and the others where they were — even when it comes back
+        // first in the list.
+        s.update(&[a, b, c]);
+        assert_eq!(s.held[..3], [Some(a), Some(b), Some(c)]);
+        assert!(!s.waiting(0));
+        // A seat let go is free for the next new pad.
+        s.update(&[b, c]);
+        s.forget(0);
+        assert!(!s.waiting(0));
+        s.update(&[b, c, d]);
+        assert_eq!(s.held[..3], [Some(d), Some(b), Some(c)]);
+        // ... and the pad it let go of, plugged back in, is a new player now.
+        s.update(&[b, c, d, a]);
+        assert_eq!(s.held[..4], [Some(d), Some(b), Some(c), Some(a)]);
+    }
+
+    /// opentennis's `seated_pads`, over eight seats, without its browser case (there is no touch
+    /// pad here), and with this module's one difference: an unplugged pad's seat waits for it.
+    #[test]
+    fn seats_set_up_by_pads() {
+        let (a, b, c) = (5u32, 7, 8);
+        let (k, p) = (Some(Seat::Keys), |n| Some(Seat::Pad(n)));
+        let seats = |s: &[Option<Seat>]| {
+            let mut all = [None; SEATS];
+            all[..s.len()].copy_from_slice(s);
+            all
+        };
+        // 1P the keyboard, 2P pad 1: seat 1 stays empty, seat 2 takes pad 1.
+        let mut s = PadSlots::with_seats(seats(&[k, p(1)]));
+        s.update(&[a, b]);
+        assert_eq!((&s.held[..2], s.keys()), (&[None, Some(b)][..], Some(0)));
+        // A seat set up as nobody's never takes a pad.
+        let mut s = PadSlots::with_seats(seats(&[p(0)]));
+        s.update(&[a, b]);
+        assert_eq!((&s.held[..2], s.keys()), (&[Some(a), None][..], None));
+        // Four players, the keyboard as 3P; pad 0 gone: its seat waits instead of taking pad 2's
+        // (or 4P's pad 1).
+        let mut s = PadSlots::with_seats(seats(&[p(0), p(2), k, p(1)]));
+        s.update(&[a, b, c]);
+        assert_eq!((&s.held[..4], s.keys()), (&[Some(a), Some(c), None, Some(b)][..], Some(2)));
+        s.update(&[b, c]);
+        assert_eq!(s.held[..4], [None, Some(c), None, Some(b)]);
+        assert!(s.waiting(0));
+        s.update(&[b, c, a]);
+        assert_eq!(s.held[..4], [Some(a), Some(c), None, Some(b)]);
+        // A seat whose pad is not in yet waits for it rather than taking another seat's.
+        let mut s = PadSlots::with_seats(seats(&[p(1), p(0)]));
+        s.update(&[a]);
+        assert_eq!(s.held[..2], [None, Some(a)]);
+        // opentennis's B388: 1P's pad out and no keyboard seat, and the keyboard is 1P's stand-in.
+        let mut s = PadSlots::with_seats(seats(&[p(0), p(1)]));
+        s.update(&[a, b]);
+        assert_eq!(s.keys(), None);
+        s.update(&[b]);
+        assert_eq!(s.keys(), Some(0));
+        s.update(&[a, b]);
+        assert_eq!(s.keys(), None);
+        s.update(&[a]);
+        assert_eq!(s.keys(), None, "2P's pad out: the keyboard is 1P's stand-in only");
+    }
+
+    #[test]
+    fn a_pads_list_reads_back() {
+        let (k, p) = (Some(Seat::Keys), |n| Some(Seat::Pad(n)));
+        assert_eq!(Seat::flag(&[k, None, p(1)]), "k,-,1");
+        assert_eq!(["k", "-", "2", ""].map(Seat::parse), [k, None, p(2), None]);
+        let list = Seat::parse_list("0,k,-,3").expect("a list");
+        assert_eq!(list[..5], [p(0), k, None, p(3), None]);
+        assert_eq!(Seat::flag(&list), "0,k,-,3,-,-,-,-");
+        assert!(Seat::parse_list("k,0,k").is_err(), "one keyboard");
+        assert!(Seat::parse_list("0,x").is_err());
+        assert!(Seat::parse_list("0,1,2,3,4,5,6,7,8").is_err(), "nine seats");
+    }
+
+    #[test]
+    fn steam_ignore_list() {
+        assert_eq!(
+            ignore_list("0x045e/0x028e,0x054C/0x09cc,,junk,0x28de/"),
+            [(0x045e, 0x028e), (0x054c, 0x09cc)]
+        );
+        let steam = DeviceInfo { vendor: 0x28de, product: 0x11ff, ..DeviceInfo::default() };
+        let pad = DeviceInfo { vendor: 0x045e, product: 0x028e, ..DeviceInfo::default() };
+        assert!(!readable_under(&steam, None) && readable_under(&pad, None));
+        // Under Steam Input it is the other way round: the physical pad is skipped.
+        let list = [(0x045e, 0x028e)];
+        assert!(readable_under(&steam, Some(&list)) && !readable_under(&pad, Some(&list)));
+    }
+
+    #[test]
+    fn bindings_round_trip_and_parse() {
+        let d = Bindings::default();
+        assert_eq!(Bindings::parse(&d.text()), (d.clone(), vec![]));
+        let (b, errors) =
+            Bindings::parse("square = B PadNorth Pad11 # a comment\ncircle = nope\nbogus = J\n");
+        assert_eq!(b.0[Control::Square as usize], [Input::Key(56), Input::Button(3), Input::Button(11)]);
+        assert_eq!(b.0[Control::Circle as usize], d.0[Control::Circle as usize], "nothing understood");
+        assert_eq!(errors.len(), 2);
+        assert_eq!(Bindings::parse(&b.text()).0, b);
+        // The default is the shell's binding from before there was a file.
+        assert_eq!(d.0[Control::Cross as usize], [Input::Key(key::X), Input::Key(key::SPACE), Input::Button(0)]);
+        assert_eq!(d.0[Control::Start as usize], [Input::Key(key::RETURN), Input::Button(6), Input::Button(7)]);
+        assert_eq!(d.0[16..20], [[Input::Key(key::J)], [Input::Key(key::L)], [Input::Key(key::I)], [Input::Key(key::K)]]);
+    }
+
+    #[test]
+    fn a_rebound_button_drives_its_new_control() {
+        // A button on two lines is both controls, as in opentennis, so triangle is moved off it.
+        let (b, _) = Bindings::parse(
+            "square = PadNorth G\ntriangle = V\nstick_left = A\ncross = Return\n",
+        );
+        let mut pads = Pads::bound(Wiring::default(), b);
+        pads.button[3] = true;
+        let report = pads.build(FRAME, &nothing);
+        assert!(down(report, Control::Square) && !down(report, Control::Triangle));
+        pads.button[3] = false;
+        let g = |code| code == 42;
+        assert!(down(pads.build(FRAME, &g), Control::Square));
+        // Return is the throttle now, ramped, and Space is not.
+        assert_eq!(gas_of(pads.build(FRAME, &|code| code == key::SPACE)), F::ZERO);
+        for _ in 0..60 {
+            pads.build(FRAME, &|code| code == key::RETURN);
+        }
+        assert_eq!(gas_of(pads.build(FRAME, &|code| code == key::RETURN)), F::ONE);
+        // A on the right stick's left: its byte leaves centre.
+        for _ in 0..30 {
+            pads.build(FRAME, &|code| code == key::A);
+        }
+        assert_eq!(pads.build(FRAME, &|code| code == key::A).0[4 + REPORT_RIGHT_X], 0);
+    }
+
+    #[test]
+    fn a_controls_file_is_written_once_and_read_after() {
+        let dir = scratch("controls");
+        let path = dir.join("controls.txt");
+        let (b, said) = Bindings::load(&path);
+        assert_eq!((b, said.len()), (Bindings::default(), 1));
+        std::fs::write(&path, "square = B\n").unwrap();
+        let (b, said) = Bindings::load(&path);
+        assert_eq!((b.0[Control::Square as usize].as_slice(), said.len()), (&[Input::Key(56)][..], 0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An empty directory of this test's own.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("openmx-pad-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A stand-in for a `/dev/input/jsN` node: a fifo the test writes joystick events into and
+    /// closes to unplug it — a closed fifo reads end-of-file, as an unplugged pad reads ENODEV.
+    struct FakePad {
+        path: std::path::PathBuf,
+        /// A reader of the test's own, so that the writer can open before [`Seats`] does.
+        _hold: std::fs::File,
+        writer: std::fs::File,
+    }
+
+    /// Held by every test that plugs a [`FakePad`]. A fifo only reads end-of-file once every writer
+    /// is closed, and `mkfifo`'s child holds a copy of every open file between its fork and its exec:
+    /// one test spawning it while another unplugs would keep that one's pad in for a moment.
+    static FIFOS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl FakePad {
+        fn plug(dir: &std::path::Path, node: &str) -> FakePad {
+            use std::os::unix::fs::OpenOptionsExt;
+            let path = dir.join(node);
+            let made = std::process::Command::new("mkfifo").arg(&path).status().expect("mkfifo");
+            assert!(made.success());
+            let hold = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(O_NONBLOCK)
+                .open(&path)
+                .unwrap();
+            let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            FakePad { path, _hold: hold, writer }
+        }
+
+        fn button(&mut self, number: u8, down: bool) {
+            use std::io::Write;
+            let event = [0, 0, 0, 0, down as u8, 0, EVENT_BUTTON, number];
+            self.writer.write_all(&event).unwrap();
+        }
+
+        /// Pull it out: the node goes, and the device reads end-of-file.
+        fn unplug(self) {
+            std::fs::remove_file(&self.path).unwrap();
+        }
+    }
+
+    /// A sysfs entry for a node, as the kernel would write one for a USB pad.
+    fn sys_entry(sys: &std::path::Path, node: &str, name: &str, phys: &str) {
+        let dir = sys.join(node).join("device");
+        std::fs::create_dir_all(dir.join("id")).unwrap();
+        std::fs::write(dir.join("name"), format!("{name}\n")).unwrap();
+        std::fs::write(dir.join("id/vendor"), "045e\n").unwrap();
+        std::fs::write(dir.join("id/product"), "028e\n").unwrap();
+        std::fs::write(dir.join("uniq"), "\n").unwrap();
+        std::fs::write(dir.join("phys"), format!("{phys}\n")).unwrap();
+    }
+
+    /// Ride a frame now, without waiting for the rescan's half second.
+    fn frame(seats: &mut Seats, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
+        seats.since_scan = None;
+        seats.frame(held)
+    }
+
+    fn playing(seat: SeatInput) -> Report {
+        match seat {
+            SeatInput::Playing(report) => report,
+            other => panic!("not playing: {other:?}"),
+        }
+    }
+
+    /// The whole thing over devices: pads joining in order, one pulled out mid-ride and its player
+    /// paused, a new pad joining past it, and the first one back in its own seat under another
+    /// `jsN` — the kernel hands the number out again — because the seat knows it by its ids.
+    #[test]
+    fn pads_join_drop_and_come_back_to_their_seats() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("hotplug");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        sys_entry(&sys, "js0", "Pad A", "usb-1/input0");
+        sys_entry(&sys, "js1", "Pad B", "usb-2/input0");
+        let mut a = FakePad::plug(&dev, "js0");
+        let mut b = FakePad::plug(&dev, "js1");
+        let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
+
+        let now = frame(&mut seats, &nothing);
+        assert!(matches!(now[..3], [SeatInput::Playing(_), SeatInput::Playing(_), SeatInput::Empty]));
+        assert_eq!(seats.name(0), Some(format!("Pad A ({})", dev.join("js0").display()).as_str()));
+        assert_eq!(seats.said(), ["1P: Pad A (".to_string() + &dev.join("js0").display().to_string() + ")", "2P: Pad B (".to_string() + &dev.join("js1").display().to_string() + ")"]);
+        // Each pad drives its own seat, and the keyboard rides with 1P.
+        b.button(0, true);
+        let now = frame(&mut seats, &|code| code == key::Z);
+        assert!(!down(playing(now[0]), Control::Cross) && down(playing(now[1]), Control::Cross));
+        assert!(down(playing(now[0]), Control::Square) && !down(playing(now[1]), Control::Square));
+        a.button(1, true);
+        let now = frame(&mut seats, &nothing);
+        assert!(down(playing(now[0]), Control::Circle));
+
+        // A pulled out: 1P waits, paused, and 2P rides on.
+        a.unplug();
+        let now = frame(&mut seats, &nothing);
+        assert_eq!(now[0], SeatInput::Waiting);
+        assert_eq!(now[0].report(), Report::missing());
+        assert!(down(playing(now[1]), Control::Cross));
+        assert!(seats.said()[0].starts_with("1P: the pad is out"));
+
+        // A third pad joins 3P, not the seat 1P is waiting in.
+        sys_entry(&sys, "js2", "Pad C", "usb-3/input0");
+        let _c = FakePad::plug(&dev, "js2");
+        let now = frame(&mut seats, &nothing);
+        assert_eq!(now[0], SeatInput::Waiting);
+        assert!(matches!(now[2], SeatInput::Playing(_)));
+
+        // A back, as js3 this time: 1P again.
+        sys_entry(&sys, "js3", "Pad A", "usb-1/input0");
+        let mut a = FakePad::plug(&dev, "js3");
+        a.button(3, true);
+        let now = frame(&mut seats, &nothing);
+        assert!(down(playing(now[0]), Control::Triangle));
+        assert!(seats.said().iter().any(|l| l.starts_with("1P: Pad A") && l.ends_with("is back")));
+
+        // Out again, and this time the keyboard's Start rides on without it; the press that let
+        // the pad go is not also the game's Start.
+        a.unplug();
+        assert_eq!(frame(&mut seats, &nothing)[0], SeatInput::Waiting);
+        let now = frame(&mut seats, &|code| code == key::RETURN);
+        assert!(!down(playing(now[0]), Control::Start));
+        assert!(down(playing(frame(&mut seats, &|code| code == key::RETURN)[0]), Control::Start));
+        assert!(!seats.slots.waiting(0));
+        drop(b);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_keyboard_is_a_seat() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("keys");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        // No pad: the keyboard is 1P, as the shell always was.
+        let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
+        let now = frame(&mut seats, &|code| code == key::Z);
+        assert!(down(playing(now[0]), Control::Square));
+        assert_eq!(now[1], SeatInput::Empty);
+        assert_eq!(seats.said(), ["1P: the keyboard"]);
+
+        // --pads 0,k: a pad is 1P and the keyboard 2P, each with only its own hands.
+        let pads = Seat::parse_list("0,k").unwrap();
+        let mut a = FakePad::plug(&dev, "js0");
+        let mut seats =
+            Seats::in_dir(&dev, &sys, None, Some(pads), Wiring::default(), Bindings::default());
+        a.button(0, true);
+        let now = frame(&mut seats, &|code| code == key::Z);
+        assert!(down(playing(now[0]), Control::Cross) && !down(playing(now[0]), Control::Square));
+        assert!(down(playing(now[1]), Control::Square) && !down(playing(now[1]), Control::Cross));
+        assert_eq!(now[2], SeatInput::Empty);
+        // 1P's pad out: 1P waits, and the keyboard stays 2P — it has a seat of its own.
+        a.unplug();
+        let now = frame(&mut seats, &|code| code == key::Z);
+        assert_eq!(now[0], SeatInput::Waiting);
+        assert!(down(playing(now[1]), Control::Square));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
