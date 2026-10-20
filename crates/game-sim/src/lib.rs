@@ -380,6 +380,10 @@ pub mod air;
 /// it hands back offsets instead of reading files.
 pub mod archive;
 
+/// The biplane: the pad into its control surfaces through the rate limits, the pitch-rate autopilot,
+/// the engine's thrust and the aerodynamic coefficients into the body-frame force and moment.
+pub mod biplane;
+
 /// The camera for normal play: the preset record the disc ships one of per camera, what the camera
 /// points at, the eight first-order lags that make it follow rather than snap, and the limits on its
 /// angles, its distance and its field of view. Presentation, not simulation — the module's own docs

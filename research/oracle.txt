@@ -2448,3 +2448,31 @@ wheel_tire_drive_force boot 0x0025ca60 (wheel) wheel_spin_integrate's tire force
 #                                      past +MaxDriveForce*load it is SkidDriveForce*load with +0xe0
 #                                      (spinning) set, past -cap -SkidDriveForce*load with +0xe4 (locked);
 #                                      side force at +0x850, forward at +0x858. P23 read it
+# ---------------------------------------------------------------------------------------------------
+# S34 — the biplane's own flight (crates/game-sim/src/biplane.rs, proofs in tests/biplane.rs). The
+# names below repeat R8's for the same addresses (R8 is on its own branch; first match wins). Offsets
+# are MXBiplane's. The live plane in context/states/biplane.p2m2_SaveState is at 0x00c44a40.
+boot_gp boot 0x00467770 the value crt0 puts in $gp (0x100148..0x100170); anything gp-relative needs it
+biplane_controls boot 0x00352160 (self, dt in f12): see R8. Pad +0x338 forward, +0x33c back, +0x340
+#                                elevator, +0x344 aileron, +0x348 rudder; the elevator fade reads
+#                                |+0x5d4| (forward axis y) < 0.8 and |+0x5f8| (roll)
+biplane_autopilot boot 0x00352460 (self, dt in f12): turn feed-forward from the curve table and
+#                                 *(+0x160)+0x1b0 (the body's body-frame pitch rate), +0x5c8 airspeed
+biplane_engine_step boot 0x003501b0 (engine at +0x400, dt in f12): +0x30 -> throttle, +0x38 -> +0x5d4,
+#                                   +0x58 the body (+0x60 position, +0x70 velocity); writes +0x5c
+#                                   power, +0x60 rpm, +0x6c thrust, +0x48 prop angle, +0x70 note,
+#                                   +0x74 clock; thrust (0,0,T,1) to the body's vt +0x58
+biplane_aero_forces boot 0x0034fcb0 (aero at +0x404): +0xc8.. pointers to +0x5c8 speed, +0x59c alpha,
+#                                   +0x5a0 beta, +0x358/+0x35c/+0x360 the surfaces, +0xe0 the body
+#                                   rates (body+0x1b0), +0xe4 the body; writes CL..CM at +0xe8..+0xf8;
+#                                   force to vt +0x58, moment to vt +0x5c. +0x30 nonzero: the yaw
+#                                   moment's slow terms use the true speed, else max(V, [0x00421308])
+body_force_local boot 0x001f7a10 (body, vec4*) the force rotated by body+0x170 into the world, then
+#                                vt +0x38 adds it
+body_moment_local boot 0x001f3360 (body, vec4*) body+0x190 += moment, then its +0xd0 listeners
+dynamics_world_step boot 0x001f29a0 (world, dt in f12): preforce listeners (+0x98 list) with dt; n =
+#                                   (int)(dt * world+4) + 1 substeps (world+4 = 115.0 in the state);
+#                                   each: force listeners (+0x68) with dt/n, every body's vt +0x44
+#                                   (integrate) and +0x30, the constraints (+0x80) world+0 times;
+#                                   then the post listeners (+0xb0). World node 0x0060b200, step at
+#                                   +0x78, called from 0x0026f800 after the collision clear/collide

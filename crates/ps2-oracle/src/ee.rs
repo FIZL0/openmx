@@ -577,6 +577,10 @@ impl Ee {
                         self.put_vf(ft, dest, [a[1], a[2], a[3], a[0]]); // vmr32
                         None
                     }
+                    0x1d => {
+                        self.put_vf(ft, dest, a.map(|x| f32::from_bits(x.to_bits() & 0x7fff_ffff))); // vabs
+                        None
+                    }
                     0x38 => {
                         self.q = vu::div(a[(w >> 21 & 3) as usize], b[ftf]);
                         None
@@ -695,6 +699,12 @@ impl Ee {
             (0x29, 0x0e) => q(self, (qs >> 64) | (qt >> 64) << 64),   // pcpyud
             (0x29, 0x12) => q(self, qs | qt),                         // por
             (0x29, 0x13) => q(self, !(qs | qt)),                      // pnor
+            (0x29, 0x1b) => {
+                // pcpyh: each doubleword's low halfword copied into all four of its halfwords (memset)
+                let (lo, hi) = (qt & 0xffff, qt >> 64 & 0xffff);
+                let spread = |h: u128| h | h << 16 | h << 32 | h << 48;
+                q(self, spread(lo) | spread(hi) << 64)
+            }
             _ => self.unknown(w, here, "MMI op"),
         }
     }
