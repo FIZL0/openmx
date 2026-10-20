@@ -86,6 +86,7 @@ pub mod key {
     pub const J: u8 = 44;
     pub const K: u8 = 45;
     pub const L: u8 = 46;
+    pub const M: u8 = 58;
 }
 
 /// An open window on an X display.
