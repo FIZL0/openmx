@@ -807,6 +807,11 @@ fn run() -> Result<(), String> {
         node_at("TireRear").unwrap_or(phy.rear.body_tire_force_position),
     );
     let mut rider = Rider::new(&phy, mounts, at, heading, stunts);
+    // The fork the front wheel steers about, from the model's shocks to its handlebars, which is the
+    // axis the bike's loader gives the front wheel (P33). Left straight up with no such nodes.
+    if let (Some(h), Some(s)) = (node_at("Handlebars"), node_at("Shocks")) {
+        rider.ride.front.steer_axis = game_sim::tire::steering_axis(h, s);
+    }
     rider.sense.wrecks_enabled = args.wrecks;
     // The eight numbers the body's *step* reads, which `Rider::new` leaves at zero and says a shell
     // is expected to fill: the five fade rates, the stunt cross-fade's cap and the pose grid's three

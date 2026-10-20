@@ -3164,3 +3164,25 @@ ray_group_gate boot 0x001eb340 (probe, other) the probe's node 0 box (or its fir
 #                              group's +0x120 / +0x130 box through ray_group_boxes, or a mesh's node 0
 ray_group_boxes boot 0x00109330 (other centre, other half, probe centre, probe half, other, probe) the
 #                              frame probe to other+0x1a0 into 0x0041da40, then ray_box_box
+
+# ---------------------------------------------------------------------------------------------------
+# P33 — the tire's grip, read from wheel_spin_integrate (0x0025c530) and proved in tests/tire.rs.
+# Wheel offsets: +0x30 -> brake lever float, +0x38 steered, +0x40 UseParametricCurve, +0x44 donut,
+# +0xdc contact, +0xe0 spinning, +0xe4 locked, +0xe8 sliding, +0xf8 load, +0x110 surface byte,
+# +0x130 contact normal, +0x170 contact velocity, +0x210 drive torque, +0x838 1/radius, +0x8ac steer
+# angle, +0x8c0 steering axis, +0x840 local velocity, +0x850 local force (side, 0, forward),
+# +0x8d0..+0x910 the contact frame. Per-surface tables, base + 4*surface, one 0x40-byte block per key:
+# SideForce 0x238, SlippingSideForce 0x278, MaxDriveForce 0x2b8, MaxSideForce 0x2f8,
+# MaxSlippingSideForce 0x338, SkidDriveForce 0x378, SkidSideForce 0x3b8, SkidSlippingSideForce 0x3f8,
+# SlippingSideForce{RoundOff,DropOff,Scale,SpeedScale} 0x438/0x478/0x4b8/0x4f8, BrakingSideForce{..}
+# 0x538/0x578/0x5b8/0x5f8, SideForce{..} 0x638/0x678/0x6b8/0x6f8, DonutsSideForceSpeedScale 0x738.
+# The powf thunk is 0x0040abf0. Every wheel of the four bikes in recording2's save state has +0x40 = 1.
+wheel_contact_frame boot 0x0025c920 (wheel) forward = transform row 2 (+0xa0), or for a steered wheel in
+#                                   contact transform_rotate(axis_rotation_matrix(+0x8ac, +0x8c0) row 2);
+#                                   mat4_basis(+0x8d0, (0,0,0,1), forward, +0x130, 1, 0); +0x840 = the
+#                                   frame's transpose times +0x170. Ported as tire::contact_frame
+axis_rotation_matrix boot 0x00134290 (angle f12, axis, out) the curve table's (cos, sin), nine entries
+#                                    of a row-major rotation, row 2 = cross of rows 0 and 1; rows' w and
+#                                    row 3 not written. Ported as tire::axis_rotation
+# The front's steering axis (+0x8c0) is set in bike_attach_nodes (0x00253760): normalize(Handlebars -
+# Shocks) node places; recording2's bikes have (0, 0.8807788, -0.4735278): a 28 degree rake.

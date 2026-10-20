@@ -93,7 +93,7 @@ const HEAD: usize = 10;
 fn a_hundred_ticks_is_a_known_constant() {
     // The hash of a hundred ticks of the stand-in bike on a level floor, as a literal: the same
     // value `Sim::hash`'s own test carries.
-    const HUNDRED_TICKS: u64 = 0xc1d1_a452_16f7_61a6;
+    const HUNDRED_TICKS: u64 = 0x27c3_821b_3ae1_5db0;
 
     let mut sim = Sim::new(1);
     for _ in 0..100 {
@@ -453,7 +453,8 @@ fn the_rngs_state_word_is_what_is_hashed() {
 #[test]
 fn the_size_of_the_state_type_is_pinned() {
     // 7120 since S40: `Sim::plane`, which the walk names under `plane.*` only when there is one, so a
-    // fresh (bike) state's leaves below are not moved by it.
-    assert_eq!(size_of::<Sim>(), 7120, "Sim grew or shrank: does its walk still cover every field?");
-    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 750, "the walk's leaf count moved with it");
+    // fresh (bike) state's leaves below are not moved by it. 7152 since P33: each wheel's steering
+    // axis and its tire's three slip flags, seven leaves a wheel.
+    assert_eq!(size_of::<Sim>(), 7152, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 764, "the walk's leaf count moved with it");
 }

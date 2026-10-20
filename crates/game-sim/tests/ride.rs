@@ -352,8 +352,8 @@ fn the_walk_names_every_field_once() {
 
     // The two numbers that catch a field added to the struct and not to the walk. Both move on
     // purpose when the ride gains state, and the per-tick hashes of every fixture move with them.
-    assert_eq!(dump.fields.len(), 472, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 1800, "the ride's own size");
+    assert_eq!(dump.fields.len(), 486, "the walk's leaves");
+    assert_eq!(std::mem::size_of::<Ride>(), 1832, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");
@@ -2894,6 +2894,12 @@ fn captured_terminal_speed(text: &str) -> f32 {
 /// capture was ridden on, read the way `tests/replay.rs` reads it (that file says why each half is
 /// what it is). `None` when the disc is not here.
 fn the_disc_125(tables: &rider::Tables) -> Option<(Phy, (Vf, Vf))> {
+    the_disc_125_and_fork(tables).map(|(p, wheels, _)| (p, wheels))
+}
+
+/// [`the_disc_125`], and the axis the model's front fork steers about: from its `Shocks` node to its
+/// `Handlebars` node, the way the bike's loader sets the front wheel's (P33).
+fn the_disc_125_and_fork(tables: &rider::Tables) -> Option<(Phy, (Vf, Vf), Vf)> {
     use game_sim::archive::{Psr, Res};
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(private_dir("iso").join("MX.PSR")).ok()?;
@@ -2925,7 +2931,7 @@ fn the_disc_125(tables: &rider::Tables) -> Option<(Phy, (Vf, Vf))> {
             n.starts_with("bike\\") && n.ends_with(".res")
         })
         .collect();
-    let (mut phy, mut wheels) = (None, None);
+    let (mut phy, mut wheels, mut fork) = (None, None, None);
     for archive in &archives {
         let Some(bytes) = member(archive) else { continue };
         let Ok(res) = Res::parse(&bytes) else { continue };
@@ -2947,9 +2953,10 @@ fn the_disc_125(tables: &rider::Tables) -> Option<(Phy, (Vf, Vf))> {
                 Some(Vf(model.place_in(i, root)))
             };
             wheels = node("TireFront").zip(node("TireRear"));
+            fork = node("Handlebars").zip(node("Shocks")).map(|(h, s)| game_sim::tire::steering_axis(h, s));
         }
     }
-    Some((phy?, wheels?))
+    Some((phy?, wheels?, fork?))
 }
 
 /// **The 125's top speed is its own** (P21). Sixteen seconds of full throttle on a flat floor, from
@@ -3737,11 +3744,12 @@ const ORIGINAL_SQUAREST_YAW: f32 = 4.2;
 #[test]
 fn it_flies_straight_hands_off() {
     let tables = rider::Tables::build();
-    let Some((p, wheels)) = the_disc_125(&tables) else {
+    let Some((p, wheels, fork)) = the_disc_125_and_fork(&tables) else {
         println!("no race125p.phy or 125_faisst wheels on a disc in context/iso — skipped");
         return;
     };
     let mut r = Rider::new(&p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    r.ride.front.steer_axis = fork;
     let off = Controls::default();
     let gas = Controls { gas: F::ONE, ..Controls::default() };
     let mut world = floor();
@@ -3793,8 +3801,11 @@ fn it_flies_straight_hands_off() {
     // heading turned −0.55 deg and a crossup of 0.0000. Since P32 the bike leaves the lip rolled
     // 10.87 deg: at speed the no-hander stands it square to the ground, and this ramp is laid across
     // the run-up, so its surface is banked under the bike. The flight only ever takes that roll out.
+    // Since P33 the tire is the original's and holds the heading up the ramp: the lip hands over
+    // −0.0123 rad/s (it was 0.0744) with the bike pointed 5.5 deg off the run-up and rolled 9.6 deg,
+    // and it lands rolled 0.03 deg with the heading turned −1.36 deg.
     assert!(flying > 30, "not a jump: {flying} frames in the air");
-    assert!(lip_rate.abs() > F(0.05), "the lip handed the air step no yaw rate to take out: {}", lip_rate.0);
+    assert!(lip_rate.abs() > F(0.01), "the lip handed the air step no yaw rate to take out: {}", lip_rate.0);
     assert!(
         roll.abs() <= ORIGINAL_SQUAREST_ROLL,
         "landed rolled {roll} deg hands off; the original's squarest landing is {ORIGINAL_SQUAREST_ROLL}"
@@ -3829,14 +3840,6 @@ const ORIGINAL_ROLL_BACK: (usize, f32) = (12, 0.34);
 /// the same releases came in from −13.4° (3976, +11 ticks), −13.8° (2765, +7) and −9.5° (3574, +3).
 const ORIGINAL_SLIP_BACK: (usize, f32) = (11, 3.0);
 
-/// What the port does instead, and so what the heading half of the test holds it to: inside 3° from
-/// 14 ticks on. Its slide comes off a smaller peak (−5.8°, where the original's turn kept within 1.9°)
-/// but decays slower — 0.9 or so of itself a tick against the original's 0.66–0.8 — so it crosses 3°
-/// at +13, two ticks after [`ORIGINAL_SLIP_BACK`]. That is the tires' side grip, not a straightener:
-/// none of the ported controllers turns the heading on the ground (`air::airborne_control` returns
-/// on the ground, S21 found every controller key wired). Left to its own task, not tuned here.
-const PORT_SLIP_BACK: (usize, f32) = (14, 3.0);
-
 /// **P32.** race125p, slid through a hard turn and let go, comes back upright and straight as fast as
 /// the original does.
 ///
@@ -3850,16 +3853,24 @@ const PORT_SLIP_BACK: (usize, f32) = (14, 3.0);
 ///
 /// The turn is the human's longest clean one (recording2, ticks 3642–3664): from 57 ft/s, the stick
 /// held hard over and pulled back — (−0.94, +0.94) on the pad — with the throttle open for 23 ticks,
-/// then centred with the throttle still held; on the level, at the captures' 30 Hz. The roll is held
-/// to the original's time; the heading to the port's own, two ticks behind it ([`PORT_SLIP_BACK`]).
+/// then centred with the throttle still held; on the level, at the captures' 30 Hz. The roll and the
+/// heading are both held to the original's times.
+///
+/// **P33.** The heading used to come back two ticks late: the port's tire was a stand-in, its slip
+/// peaked at 5.8° and decayed by about 0.9 a tick against the original's 0.66–0.8. Since P33 the
+/// tire is the original's (`tire::force` on the curve, in `tire::contact_frame`, steered about the
+/// model's fork) and the slip peaks at 2.8° and is never outside 3° after the release — 2.2° at the
+/// release, held near 2° for eight ticks while the roll comes up, then decaying by 0.8–0.85 a tick.
+/// The roll is 41.0° → 9.3° in 12 ticks.
 #[test]
 fn it_straightens_after_a_slide() {
     let tables = rider::Tables::build();
-    let Some((p, wheels)) = the_disc_125(&tables) else {
+    let Some((p, wheels, fork)) = the_disc_125_and_fork(&tables) else {
         println!("no race125p.phy or 125_faisst wheels on a disc in context/iso — skipped");
         return;
     };
     let mut r = Rider::new(&p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    r.ride.front.steer_axis = fork;
     let off = Controls::default();
     let gas = Controls { gas: F::ONE, ..Controls::default() };
     let turn = Controls { stick: (F(-0.94), F(0.94)), ..gas.clone() };
@@ -3907,7 +3918,7 @@ fn it_straightens_after_a_slide() {
          original is down to {share} of it",
         let_go.0
     );
-    let (ticks, inside) = PORT_SLIP_BACK;
+    let (ticks, inside) = ORIGINAL_SLIP_BACK;
     let worst = after[ticks - 1..].iter().map(|a| a.1.abs()).fold(0.0, f32::max);
     assert!(
         worst <= inside,
