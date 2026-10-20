@@ -2426,8 +2426,9 @@ rider_body_ride_enter boot 0x0024c490 (836 bytes) the riding mode's own entry
 rider_ragdoll_step boot 0x001dc960 (1300 bytes) **misnamed by V19: this is ground_query** (above).
 #                                  The wreck arm copies the main bone's position, ground-queries the
 #                                  copy and tests main bone y - ground y <= RiderFlailHeight: a
-#                                  clearance above the ground, not a rise across a step (S50). The
-#                                  name is kept because tests/rider_anim.rs hooks it by name
+#                                  clearance above the ground, not a rise across a step (S50). Since
+#                                  S52 tests/rider_anim.rs hooks it as ground_query; the name is kept
+#                                  only so that older journals still resolve
 rider_bone_follow boot 0x00218b80 (976 bytes) points a dummy at a bone
 rider_bone_post boot 0x001f6840 (20 bytes) the per-bone call of the arm's tail
 rider_bone_detach boot 0x0011aed0 (72 bytes) takes one bone off the bike it was following
@@ -2436,8 +2437,15 @@ quat_axes boot 0x0013f380 (132 bytes) a quaternion's axes, which the look arm re
 # S50 — the ragdoll's two entries (crates/game-sim/src/ragdoll.rs, proved in tests/ragdoll.rs)
 rider_ragdoll_pose boot 0x0030f0c0 the body actor's vt +0xa4 (actor, a1, dt in f12): every bone body
 #                                  put at its skeleton bone's world transform, velocity from the bone's
-#                                  move over dt (zero when dt <= 0). Not ported: no skeleton pose in
-#                                  game-sim
+#                                  move over dt (zero when dt <= 0). S52 ported it, given the
+#                                  skeleton's pose (ragdoll_pose::pose): per part (+0x2f4, stride 0xb0)
+#                                  node +0xa0 -> node_world_position and orientation_axes (relative to
+#                                  null), q = axes_to_quat on the w >= 0 side, then (unless a1 or
+#                                  dt <= 0) velocity = (position - part +0x90..+0x98) / dt and rates
+#                                  = quat_axis_angle(unturn(q, rel(q, mat4_to_quat(part +0x60)))) as
+#                                  axis * angle / dt; body vt +0x10 (position + turn(q, body +0x180),
+#                                  velocity), vt +0x48 (q, rates), part +0x60 = mat4_basis(position,
+#                                  forward, up, 0, 1)
 rider_ragdoll_reset boot 0x0030f0b0 the actor's vt +0xa0: the world reset (0x001f28a0), each body's
 #                                  vt +0x2c (0x0015a3d0)
 # S52 -- the reset, ported in crates/game-sim/src/ragdoll_pose.rs (proved in tests/ragdoll_contact.rs)
@@ -2448,6 +2456,14 @@ body_reset boot 0x0015a3d0 (body) +0x50 and +0x60 = start position +0x30, +0x70 
 #                          +0x90, +0xa0, +0xb0, +0xc0, +0x190, +0x1a0, +0x1c0, +0x1d0, +0x1e0 = (0,0,0,1)
 body_set_start boot 0x00159f20 (body, pos*, vel*) vt +0x10: +0x30 = pos, +0x40 = vel (whole quads)
 body_set_start_turn boot 0x00159ee0 (body, quat*, rates*) vt +0x48: +0x160 = quat, +0x140 = rates
+node_world_position boot 0x001b2870 (node, relative_to, out) a skeleton node's world position (the
+#                                  pose's first read; hooked in tests/ragdoll_contact.rs)
+axes_to_quat boot 0x0013f9f0 (out, forward*, up*) mat4_to_quat of mat4_basis((0,0,0,1), forward, up,
+#                           0, 1)
+quat_axis_angle boot 0x0013f110 (q*, angle*, axis*) w clamped to -1..1 (a w that does not compare
+#                              is 1), a = the acos table at it; a == 0 -> axis (1,0,0,1). Otherwise
+#                              axis = q.xyz / the curve table's raw sin entry at wrap(wrap(a)), w = 1,
+#                              angle = 2a
 collider_ignore boot 0x0011ade0 (228 bytes; collider, other) adds other to the collider's ignore list
 #                               (+0xd4 array, +0xd8 count) once, into the first empty slot
 wreck_sound boot 0x0033e9c0 (524 bytes; emitter, a1) the wreck entry's last call, on actor +0xa74:

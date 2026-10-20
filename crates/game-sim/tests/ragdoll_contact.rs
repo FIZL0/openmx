@@ -13,14 +13,17 @@
 //! 3. **the bike box**, over generated frames, boxes, carried velocities and bones in and out of the
 //!    box, on both of its frames: the actor's moving one and the constraint's own;
 //! 4. **the reset**: the actor's own reset over every body of the ragdoll's world, with every field
-//!    of every body generated, and the body's two start setters.
+//!    of every body generated, and the body's two start setters;
+//! 5. **the pose**: the actor's own pose over all eighteen bones, the skeleton's two reads hooked to
+//!    answer generated bone positions and axes, everything after them run for real.
 
 use game_sim::archive::{Psr, Res};
+use game_sim::air::AcosTable;
 use game_sim::biplane::Body;
 use game_sim::camera::{CURVE_ENTRIES, CurveTable};
 use game_sim::collide::{Bundle, Record};
 use game_sim::math::Mat4;
-use game_sim::ragdoll_pose::{self, Start};
+use game_sim::ragdoll_pose::{self, Bone, Start};
 use game_sim::ragdoll_contact::{BikeBox, Contact, SWEEP_BACK, Scene, Sphere, Terrain};
 use game_sim::world::World;
 use ps2_float::{F, Vf};
@@ -834,4 +837,166 @@ fn the_reset_matches_the_original() {
         }
         assert_eq!(format!("{start:?}"), format!("{:?}", start_of(&ee, b)), "case {case}: offsets {p:#x}, {v:#x}");
     }
+}
+
+/// A part's drawn matrix, at `+0x60` of its record.
+fn drawn_of(ee: &Ee, part: u32) -> Mat4 {
+    Mat4([0, 0x10, 0x20, 0x30].map(|k| quad(ee, part + 0x60 + k)))
+}
+
+/// The bone's two axes out of an orientation, as the skeleton's read hands them: the `z` row forward,
+/// the `y` row up, both with `w = 0`.
+fn axes(m: &Mat4) -> (Vf, Vf) {
+    let w0 = |v: Vf| Vf::new(v.x(), v.y(), v.z(), 0.0);
+    (w0(m.0[2]), w0(m.0[1]))
+}
+
+/// `q` nudged by up to `by` in each lane and renormalised: a bone that turned a little since the last
+/// frame.
+fn nudge(pick: &mut Pick, q: Vf, by: f32) -> Vf {
+    let v = [q.x(), q.y(), q.z(), q.w()].map(|x| x + pick.range(-by, by));
+    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-3);
+    Vf::new(v[0] / n, v[1] / n, v[2] / n, v[3] / n)
+}
+
+fn rotation(q: Vf, origin: Vf) -> Mat4 {
+    let (x, y, z, w) = (q.x(), q.y(), q.z(), q.w());
+    Mat4([
+        Vf::new(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w), 0.0),
+        Vf::new(2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w), 0.0),
+        Vf::new(2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y), 0.0),
+        origin,
+    ])
+}
+
+/// The ragdoll's pose against the actor's own (its vt `+0xa4`), over every bone at once. The two reads
+/// of the skeleton are hooked: each answers the generated bone for the node it is handed, and checks
+/// that the nodes come in the parts' order. The quaternion, its axis and angle, the drawn matrix and
+/// the two setters run for real.
+///
+/// The cases mix bones that turned a little since the drawn matrix (the frame-to-frame case the
+/// velocity and rates are for), bones that did not turn at all (no angle, the helper's constant axis),
+/// and bones with no relation to their drawn matrix, on both sides of `w`; and frame times that are
+/// a frame, anything, zero and below zero, with and without the still flag.
+#[test]
+fn the_pose_matches_the_original() {
+    let Some(mut ee) = state() else { return };
+    let pose = addr("rider_ragdoll_pose").unwrap();
+    let (place_at, axes_at) = (addr("node_world_position").unwrap(), addr("orientation_axes").unwrap());
+    let (acos, curve) = (AcosTable::build(), curve(&ee));
+    let parts = ee.u32_at(ACTOR + PARTS);
+    let count = ee.u32_at(ACTOR + 0x2e0) as usize;
+    assert_eq!(count, 18, "eighteen parts");
+    let part = |k: usize| parts + 0xb0 * k as u32;
+    let nodes: Vec<u32> = (0..count).map(|k| ee.u32_at(part(k) + 0xa0)).collect();
+    assert!(nodes.iter().all(|&n| n != 0), "every part has its node");
+
+    let bones = Rc::new(RefCell::new(vec![Bone::default(); count]));
+    let calls = Rc::new(RefCell::new((0usize, 0usize)));
+    {
+        let (bones, calls, nodes) = (Rc::clone(&bones), Rc::clone(&calls), nodes.clone());
+        ee.hooks.insert(
+            place_at,
+            Box::new(move |ee: &mut Ee| {
+                let k = calls.borrow().0;
+                calls.borrow_mut().0 += 1;
+                assert_eq!((ee.r(4) as u32, ee.r(5)), (nodes[k], 0), "the pose reads bone {k}'s node in world space");
+                set_quad(ee, ee.r(6) as u32, bones.borrow()[k].at);
+            }),
+        );
+    }
+    {
+        let (bones, calls, nodes) = (Rc::clone(&bones), Rc::clone(&calls), nodes.clone());
+        ee.hooks.insert(
+            axes_at,
+            Box::new(move |ee: &mut Ee| {
+                let k = calls.borrow().1;
+                calls.borrow_mut().1 += 1;
+                assert_eq!((ee.r(4) as u32, ee.r(5)), (nodes[k], 0), "the pose reads bone {k}'s axes in world space");
+                let b = bones.borrow()[k];
+                set_quad(ee, ee.r(6) as u32, b.forward);
+                set_quad(ee, ee.r(7) as u32, b.up);
+            }),
+        );
+    }
+
+    let mut pick = Pick(0x90_5e_52_a1);
+    let (mut still, mut moving, mut no_turn, mut flipped, mut flipped_drawn) = (0, 0, 0, 0, 0);
+    for case in 0..CASES / 10 {
+        let dt = match pick.upto(8) {
+            0 => 0.0,
+            1 => -pick.range(0.0, 0.1),
+            2 => pick.range(1e-4, 1.0),
+            3 => 1.0 / 30.0,
+            _ => 1.0 / 60.0,
+        };
+        let flag = pick.chance(6);
+        let mut ours = Vec::new();
+        for k in 0..count {
+            let b = bone_body(&ee, k);
+            let q = pick.quat();
+            let at = pick.vector(400.0);
+            let (last_q, last_at) = match pick.upto(4) {
+                0 => (q, at),
+                1 => (pick.quat(), pick.vector(400.0)),
+                _ => (nudge(&mut pick, q, 0.05), Vf::new(at.x() + pick.float(2.0), at.y() + pick.float(2.0), at.z() + pick.float(2.0), pick.float(2.0))),
+            };
+            let (forward, up) = axes(&rotation(q, at));
+            let bone = Bone { at, forward, up };
+            let mut drawn = rotation(last_q, last_at);
+            for row in 0..3 {
+                if pick.chance(2) {
+                    drawn.0[row] = Vf::new(drawn.0[row].x(), drawn.0[row].y(), drawn.0[row].z(), pick.float(2.0));
+                }
+            }
+            for (r, v) in drawn.0.iter().enumerate() {
+                set_quad(&mut ee, part(k) + 0x60 + 0x10 * r as u32, *v);
+            }
+            let cofg = if pick.chance(4) { Vf::new(0.0, 0.0, 0.0, 1.0) } else { pick.vector(1.5) };
+            set_quad(&mut ee, b + 0x180, cofg);
+            for o in [0x30, 0x40, 0x140, 0x160] {
+                set_quad(&mut ee, b + o, pick.vector(500.0));
+            }
+            bones.borrow_mut()[k] = bone;
+            ours.push((bone, cofg, drawn, start_of(&ee, b)));
+            flipped += usize::from(q.w() < 0.0);
+            flipped_drawn += usize::from(last_q.w() < 0.0);
+        }
+        *calls.borrow_mut() = (0, 0);
+        ragdoll_pose::pose_all(
+            ours.iter_mut().map(|(bone, cofg, drawn, start)| (&*bone, *cofg, drawn, start)),
+            flag,
+            F(dt),
+            &acos,
+            &curve,
+        );
+        ee.call(pose, &[u64::from(ACTOR), u64::from(flag)], &[dt], BUDGET);
+        assert_eq!(*calls.borrow(), (count, count), "case {case}: one read of each per bone");
+        for (k, (_, _, drawn, start)) in ours.iter().enumerate() {
+            let game = start_of(&ee, bone_body(&ee, k));
+            for (what, got, want) in [
+                ("position", start.position, game.position),
+                ("velocity", start.velocity, game.velocity),
+                ("quat", start.quat, game.quat),
+                ("rates", start.rates, game.rates),
+            ] {
+                assert_eq!(bits(got), bits(want), "case {case} (dt {dt}, still {flag}): bone {k}'s {what}");
+            }
+            let game = drawn_of(&ee, part(k));
+            for r in 0..4 {
+                assert_eq!(bits(drawn.0[r]), bits(game.0[r]), "case {case}: bone {k}'s drawn row {r}");
+            }
+            if flag || dt <= 0.0 {
+                still += 1;
+            } else if start.rates == Vf::new(0.0, 0.0, 0.0, 1.0) || bits(start.rates)[1..3] == [0, 0] {
+                no_turn += 1;
+            } else {
+                moving += 1;
+            }
+        }
+    }
+    assert!(
+        still > 3000 && moving > 6000 && no_turn > 200 && flipped > 4000 && flipped_drawn > 4000,
+        "coverage: {still} still, {moving} moving, {no_turn} not turning, {flipped} flipped, {flipped_drawn} drawn flipped"
+    );
 }
