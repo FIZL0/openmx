@@ -400,7 +400,7 @@ def shared_branch(cwd: Path, remote: str, branch: str) -> bool:
     return bool(here) and branch == here
 
 
-def push(cwd: Path, branch: str) -> str:
+def push(cwd: Path, branch: str, shared: bool = False) -> str:
     """Push `branch` to the remote `[git] push` names, merging the remote in first if it has moved.
 
     **Only ever the branch the work itself is on.** A shared branch — the remote's default, or whatever
@@ -414,6 +414,9 @@ def push(cwd: Path, branch: str) -> str:
     way, and a push that could not be made now is made by the next `./kit done` — so a dropped network
     does not turn a finished task into a failed one.
 
+    `shared=True` is the one exception: a `./kit run` publishing a merge that passed its test gate, when
+    `[git] push_merge` is on (see `runner.merge`).
+
     It merges rather than rebases when the remote has moved: the worktree branches of a `./kit run` are
     based on these commits, and rebasing the branch they came from turns every later merge into a fight.
     """
@@ -423,7 +426,7 @@ def push(cwd: Path, branch: str) -> str:
     g = _git(cwd)
     if g('remote', 'get-url', remote).returncode:
         return ''  # no remote of that name: nothing to push to, and nothing worth saying about it
-    if shared_branch(cwd, remote, branch):
+    if not shared and shared_branch(cwd, remote, branch):
         return ''  # yours to publish; `cmd_done` says so where somebody is reading
     if not g('push', '-q', remote, branch).returncode:
         return f'pushed {branch} → {remote}'
@@ -473,6 +476,9 @@ def cmd_done(argv: list[str]) -> int:
     ap.add_argument('message', metavar='MSG', help='the commit message')
     ap.add_argument('--blocked', metavar='WHY',
                     help='mark the task [~] instead of done: why, and what would unblock it')
+    ap.add_argument('--after', metavar='IDS', default=None,
+                    help='with --blocked: the tasks it waits on, comma-separated; a run reopens it once they '
+                         'are all done (left out, they are read off WHY)')
     ap.add_argument('--skip-audit', action='store_true',
                     help='commit even though the address audit found something (say why in the journal)')
     a = ap.parse_args(argv)
@@ -512,7 +518,7 @@ def cmd_done(argv: list[str]) -> int:
         return 1
 
     if a.blocked:
-        plan.block(a.id, a.blocked)
+        plan.block(a.id, a.blocked, after=None if a.after is None else [t for t in a.after.split(',') if t])
         print(f'blocked {a.id}')
     else:
         plan.tick(a.id)

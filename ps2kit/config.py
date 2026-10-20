@@ -247,6 +247,17 @@ class Config:
         v = self.raw.get('git', {}).get('push', True)
         return None if v is False else (str(v) if isinstance(v, str) else 'origin')
 
+    @property
+    def push_merge(self) -> bool:
+        """Whether a `./kit run` pushes the merge target after a merge that passed the test gate.
+
+        On by default: what goes out has been merged, archived and tested, and finished work that sits on
+        one disk is one failed disk from gone. `push_merge = false` is the other policy — publishing the
+        branch everyone reads is a decision a person makes after reading the merge — and then the run logs
+        the `git push` to run instead. `[git] push` still gates all of it.
+        """
+        return bool(self.raw.get('git', {}).get('push_merge', True)) and bool(self.push_remote)
+
     # --- [paths] --------------------------------------------------------------
     def ctx(self, *parts: str) -> Path:
         """A path under the private, git-ignored working dir; its parent is created."""

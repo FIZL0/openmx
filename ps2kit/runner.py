@@ -17,8 +17,18 @@ Environment: `KIT_MODEL` the agents' model, `KIT_MASTER_MODEL` the master's (bot
 What it has to get right, and why each of these is here rather than left to the agent:
 
 **Task picking** goes down `plan/TODO.md` in order and skips: blocked tasks (`[~]`), split parents (a task
-whose own subtasks are open), tasks whose `(after X)` dependency is still open, the `### Stretch` section,
-anything already tried this run, and anything whose branch is finished and waiting to be merged. Siblings
+whose own subtasks are open), tasks with any `(after X, Y)` dependency still open, tasks whose line names a
+task that is running right now (prose like "P36's menu" is a dependency nobody wrote down as one), the
+`### Stretch` section, anything already tried this run, and anything whose branch is finished and waiting
+to be merged.
+
+**A block that waits on a task reopens itself.** `./kit done --blocked WHY` records the open task ids WHY
+names (or `--after X,Y`) as `BLOCKED: (after X, Y)`, and after every merge — the runner's or the master's —
+`plan.reopen` puts each task whose list is all done back to `[ ]`, commits that, and lets this run try it
+again. Before this, a task blocked on "P36 is not merged" stayed blocked until a human read it.
+
+**A tested merge is pushed** (`[git] push_merge`, on by default): the shared branch goes to the remote after
+each merge that passed `./kit check`, the runner's own and the master's alike. Siblings
 (`L3a`, `L3b` — same prefix+number) never run at once in any mode, because they are the same code by
 definition. Mode `d` additionally keeps two running tasks off the same files, which are named on each task's
 line; mode `p` ignores that and just follows priority order.
@@ -112,7 +122,9 @@ nobody will find.
 
 Finish with `./kit done {tid} "<commit message>"`. If you are stuck (a tool hangs, the same fix fails twice,
 it needs the human, ~20 minutes with no progress): commit what is solid and `./kit done {tid} "<msg>"
---blocked "<why + what would unblock it>"`, then stop. A usage limit is not stuck: commit what is solid, do
+--blocked "<why + what would unblock it>"`, then stop. If all it waits on is another task landing (its \
+code is not on main yet), add `--after <ID>[,<ID>]`: the run reopens it the moment those merge, instead of \
+leaving it for a human. A usage limit is not stuck: commit what is solid, do
 not block the task and do not stop the emulator — the session waits for the reset and carries on.
 
 Its brief (`./kit plan brief {tid}`) follows, so don't gather it again.
@@ -176,11 +188,12 @@ def plan_text(branch: str) -> list[str]:
 
 # --- picking the next task -----------------------------------------------------
 
-def tasks(branch: str) -> list[tuple[str, str, set[str]]]:
-    """Open tasks in plan/TODO.md order: (id, section, files named on the line)."""
+def tasks(branch: str) -> list[tuple[str, str, set[str], set[str]]]:
+    """Open tasks in plan/TODO.md order: (id, section, files named on the line, task ids named on it)."""
     from ps2kit import plan as P
     ls = plan_text(branch)
     open_ids = {m.group(1) for l in ls if (m := TASK.match(l))}
+    every = {m.group(1) for l in ls if (m := ANY_TASK.match(l))}
     out, section = [], ''
     for l in ls:
         if l.startswith('### '):
@@ -194,10 +207,12 @@ def tasks(branch: str) -> list[tuple[str, str, set[str]]]:
         if any(o != tid and o.startswith(tid) and o[len(tid)].isdigit() != tid[-1].isdigit()
                for o in open_ids):
             continue
-        after = re.search(r'\(after (\S+?)\)', l)
-        if after and after.group(1).rstrip(')') in open_ids:
+        # `(after S41, S45, S46)` is every one of them: the old one-id pattern read that as no dependency
+        # at all, which is how S48 started before S41 had and then blocked itself
+        if any(set(P.TASK_ID.findall(a)) & (open_ids - {tid}) for a in re.findall(r'\(after ([^)]*)\)', l)):
             continue
-        out.append((tid, section, set(P.files_on_line(rest))))
+        named = set(P.TASK_ID.findall(rest)) & every - {tid}
+        out.append((tid, section, set(P.files_on_line(rest)), named))
     return out
 
 
@@ -213,19 +228,22 @@ def pick(running: dict, tried: set, mode: str, branch: str):
     # A section whose heading says its tasks are ordered ("Next (in this order)") runs one task at a time:
     # its second task usually depends on the first having landed, whatever the files say.
     busy_sections = {b[1] for b in busy}
-    for tid, section, files in tasks(branch):
+    busy_ids = {b[0] for b in busy}
+    for tid, section, files, named in tasks(branch):
         if all(tid != b[0] for b in busy) and git('rev-list', '-1', f'{branch}..task/{tid}').stdout.strip():
             continue  # finished, its branch is waiting to be merged: restarting it would reset the branch
         if any(family(tid) == family(b[0]) for b in busy):
             continue
         if tid in tried or any(tid == b[0] for b in busy):
             continue
+        if named & busy_ids:
+            continue  # its line names a task that is running now: it is built on that, so it waits for it
         if mode == 'p':
-            return tid, section, files
+            return tid, section, files, named
         if (section.startswith('Next') or 'in this order' in section) and section in busy_sections:
             continue
         if all(not (files & b[2]) for b in busy):
-            return tid, section, files
+            return tid, section, files, named
     return None
 
 
@@ -358,8 +376,8 @@ MERGE = threading.Lock()  # one merge into the default branch at a time: the run
 # `(after X)` on one of them, so a handful of unmergeable branches stops the whole critical path until
 # somebody wakes up. Eight of them did exactly that here on 2026-10-15.
 #
-# What it is *not* allowed to do: touch a worktree, do task work, or publish the shared branch. The last
-# one is the one difference from the project this came from, and it is deliberate — see `merge`.
+# What it is *not* allowed to do: touch a worktree or do task work. It does not push either: the runner
+# does, once it sees the merge land (`sweep_handed`), so there is one place that publishes.
 
 MASTER = """You are the master of an unattended `./kit run`: nobody will answer questions, so never ask one \
 — decide, write down why, and go on. Up to {slots} agents are working on `plan/TODO.md` tasks in git \
@@ -389,11 +407,8 @@ say why. A branch left unmerged is a result; a broken `{branch}` is not.
 5. Append one line to `context/notes/master.md`: `<ID>: merged / conflicts fixed (what) / left (why)`, the \
 task's state (ticked, part, blocked), and anything a human must do.
 6. Commit every change you made, so `git status` shows only the human's popped-back edits (`context/` is \
-git-ignored, so `master.md` itself stays uncommitted). **Do not push `{branch}`.** Publishing the branch \
-everyone reads is a decision a person makes after reading the merge, not a side effect of a run finishing \
-a task at 4am; the task branches are already on the remote, so nothing is at risk of being lost. If you \
-think the merge is worth publishing, put the one-line `git push origin {branch}` in your `master.md` line \
-and leave it for them.
+git-ignored, so `master.md` itself stays uncommitted). Do not push `{branch}` yourself: the runner pushes \
+it once it sees your merge land, after the `./kit check` of step 3.
 
 Never touch the worktrees under {slots_dir}, and never do a task's own work. When the runner says `RUN \
 DONE`, write a short summary for the human at the *top* of `context/notes/master.md` and stop."""
@@ -731,14 +746,54 @@ def merge(tid: str, branch: str) -> str | None:
               (f'; SUSPECT BLOCK (the run drives the emulator itself), recheck: {sus[0]}' if sus else '')
         note(msg)
         log(msg)
-        # The merge target is never pushed from here: publishing the branch everyone reads is a thing
-        # somebody chooses to do, not a side effect of a run finishing a task at 4am. What the run does
-        # instead is make sure the task's own branch is on the remote, and drop it only once the remote
-        # has the merge — see `drop_if_merged`. A failed push is logged, not fatal: the merge landed.
-        from ps2kit.checks import drop_if_merged
-        if out := drop_if_merged(ROOT, f'task/{tid}'):
-            log(f'{tid}: {out}')
+        reopen_landed(branch, tid)
+        published(tid, branch)
         return None
+
+
+def published(tid: str, branch: str) -> None:
+    """After a merge that passed the test gate: push the shared branch, then drop the task's remote branch.
+
+    Pushed here, and only after the gate, which is what makes publishing it unattended defensible. A failed
+    push is logged, not fatal: the merge landed locally and the next one pushes both. `[git] push_merge =
+    false` keeps the merge local and logs the `git push` to run instead; `drop_if_merged` then keeps the task
+    branch on the remote until the shared branch there has it.
+    """
+    from ps2kit.checks import drop_if_merged, push
+    if cfg(False).push_merge:
+        if out := push(ROOT, branch, shared=True):
+            log(f'{tid}: {out}')
+    elif cfg(False).push_remote:
+        log(f'{tid}: merged, not pushed ([git] push_merge is off): git push {cfg(False).push_remote} {branch}')
+    if out := drop_if_merged(ROOT, f'task/{tid}'):
+        log(f'{tid}: {out}')
+
+
+REOPENED: set[str] = set()  # tasks `reopen_landed` put back to [ ]: `cmd_run` lets them be tried again
+
+
+def reopen_landed(branch: str, why: str) -> None:
+    """Unblock what a merge freed (`plan.reopen`) and commit it. Called holding MERGE, on `branch`.
+
+    Left alone when TODO.md has edits nobody committed — a human mid-edit — so it never commits theirs;
+    the next merge tries again.
+    """
+    from ps2kit import plan as P
+    todo = Path(cfg(False).plan) / 'TODO.md'
+    rel = os.path.relpath(todo, ROOT)
+    if git('branch', '--show-current').stdout.strip() != branch or git('status', '--porcelain', '--', rel).stdout.strip():
+        return
+    if not (got := P.reopen(todo)):
+        return
+    names = ', '.join(t for t, _ in got)
+    if git('commit', '-qm', f'Plan: reopen {names} ({why} landed what they waited on)', '--', rel).returncode:
+        git('checkout', '-q', '--', rel)
+        return
+    REOPENED.update(t for t, _ in got)
+    for t, ids in got:
+        msg = f'{t}: reopened, {", ".join(ids)} landed'
+        note(msg)
+        log(msg)
 
 
 HANDED: dict[str, bool] = {}  # branches given to the master -> whether the remote copy has been swept
@@ -777,14 +832,21 @@ def sweep_handed() -> None:
     the master deletes it only when the merge passed — and then applies the same rule. A branch the master
     left alone stays on the remote, which is exactly where you want the one copy of unmerged work.
     """
-    from ps2kit.checks import drop_if_merged
+    branch = default_branch()
     for tid in [t for t, swept in HANDED.items() if not swept]:
         if lock_holder() == tid or \
                 not git('rev-parse', '--verify', '--quiet', f'refs/heads/task/{tid}').returncode:
             continue  # still with the master, or still a branch here: not merged yet
         HANDED[tid] = True
-        if out := drop_if_merged(ROOT, f'task/{tid}'):
-            log(f'{tid}: {out}')
+        if master_busy() or not MERGE.acquire(blocking=False):
+            HANDED[tid] = False  # the checkout is in use: next sweep
+            continue
+        try:
+            # The master ran `./kit check` before it committed (its step 3), so what it left is tested.
+            reopen_landed(branch, tid)
+            published(tid, branch)
+        finally:
+            MERGE.release()
 
 
 # --- watching a session --------------------------------------------------------
@@ -1059,6 +1121,8 @@ def cmd_run(argv: list[str]) -> int:
             t = threading.Thread(target=finish, args=(tid, 0, '(unknown)', branch))
             t.start()
             merging.append(t)
+    with MERGE:  # blocks freed by merges made while no run was up
+        reopen_landed(branch, 'a merge before this run')
     for n in free_at:  # idle slots must let go of old task/<ID> branches, or start() cannot take them
         if (SLOTS_DIR / f's{n}').is_dir():
             git('checkout', '-q', '--detach', cwd=SLOTS_DIR / f's{n}')
@@ -1099,6 +1163,9 @@ def cmd_run(argv: list[str]) -> int:
                         procs[n], running[n] = p, task
                     else:
                         tried.add(task[0])
+        if REOPENED:
+            tried -= REOPENED  # a task reopened by a merge is a new attempt, not the one that blocked
+            REOPENED.clear()
         merging = [t for t in merging if t.is_alive()]
         # The merges wait on each other and on the master's reports, so RUN DONE goes out only once they
         # are all in — otherwise the master is told the run is over and then handed three more reports.

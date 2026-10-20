@@ -368,6 +368,32 @@ def test_inbox():
 
 # --- the runner's task picking ------------------------------------------------
 
+def test_plan_reopen():
+    print('plan: a block that waits on a task reopens when that task is done')
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / 'plan'
+        todo, done = plan.ensure(d / 'TODO.md', d / 'DONE.md')
+        kw = dict(todo=todo, done=done)
+        for text in ('the menu → menu.rs', 'the garage → garage.rs', 'the lobby → lobby.rs', 'a capture → c.csv'):
+            plan.add('P', text, **kw)
+        plan.block('P2', "needs P1's menu (in flight) and V22's split, done long ago", todo=todo)
+        has(Path(todo).read_text(), r'\*\*P2\*\*.* BLOCKED: \(after P1\) needs',
+            'block reads the open ids off WHY, and leaves the done or unknown ones out')
+        plan.block('P3', 'waits on two', todo=todo, after=['P1', 'P2'])
+        plan.block('P4', 'needs a human with a pad (P1 is unrelated)', todo=todo, after=[])
+        has(Path(todo).read_text(), r'\*\*P4\*\*.* BLOCKED: needs a human', 'after=[] records no dependency')
+        eq(plan.reopen(todo), [], 'nothing reopens while what it waits on is open')
+        plan.tick('P1', **kw)
+        eq(plan.reopen(todo), [('P2', ['P1'])], 'a block whose tasks are all done reopens')
+        text = Path(todo).read_text()
+        has(text, r'^- \[ \] \*\*P2\*\*.*reopened: P1 landed$', 'as [ ], its BLOCKED gone, and says why')
+        has(text, r'^- \[~\] \*\*P3\*\*', 'one that also waits on a reopened task stays blocked')
+        plan.tick('P2', **kw)
+        eq([t for t, _ in plan.reopen(todo)], ['P3'], 'and reopens once the last of its list is done')
+        has(Path(todo).read_text(), r'^- \[~\] \*\*P4\*\*', 'a block that names no task is never reopened')
+        eq(plan.reopen(todo), [], 'reopen is idempotent')
+
+
 def test_runner_picking():
     print('run: which task a free slot may take')
     from ps2kit import runner as R
@@ -515,7 +541,7 @@ def test_cli_help():
 
 
 def main() -> int:
-    for t in (test_plan_roundtrip, test_plan_index_and_sections, test_brief, test_shipped_backlog,
+    for t in (test_plan_roundtrip, test_plan_reopen, test_plan_index_and_sections, test_brief, test_shipped_backlog,
               test_journal, test_check_summary, test_audit, test_guard, test_inbox, test_runner_picking,
               test_runner_union, test_runner_master, test_stop_hook_never_crashes,
               test_cli_help):

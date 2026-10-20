@@ -11,16 +11,23 @@ re-reads it on every turn pays again. So the backlog is a command instead:
     ./kit plan -f FILE <name>    the same, on any other markdown file
     ./kit plan brief <ID>        everything a task starts from, in one shot (see `brief`)
     ./kit plan tick <ID>         done: [x], and the line moves to plan/DONE.md
-    ./kit plan block <ID> WHY    [~] with "BLOCKED: WHY" appended
+    ./kit plan block <ID> [--after X,Y] WHY   [~] with "BLOCKED: (after X, Y) WHY" appended
     ./kit plan unblock <ID> [NOTE]   reopen: [ ], drop "BLOCKED: …", append NOTE (what unblocked it)
     ./kit plan move <ID> WHERE   WHERE = top | before ID | after ID | in SECTION (its end); sub-items follow
     ./kit plan add PREFIX TEXT [@ WHERE]   new "- [ ] **<next free id>** TEXT"; prints the id
     ./kit plan note <ID> TEXT    append " — TEXT" to the task (user details, priority reasons)
     ./kit plan newid PREFIX      the next free id, e.g. L -> L7
     ./kit plan archive           move every [x] line left in TODO.md to DONE.md (after merges, hand edits)
+    ./kit plan reopen            unblock every task whose BLOCKED (after X, Y) tasks are all done now
 
 The line format is `- [ ] **ID** text → files… | t: tests | j: journal-dir`, under `###` headings, and the
 checkbox is `[ ]` open, `[x]` done, `[~]` blocked.
+
+**A block that only waits on another task says which**, as `BLOCKED: (after X, Y) why`, and `reopen` (which a
+`./kit run` calls after every merge) puts it back to `[ ]` the moment X and Y are done. Without that a task
+blocked on "P36 is not merged yet" stays blocked long after P36 lands, because nothing reads prose: on
+2026-10-20 five tasks sat `[~]` through the merges that freed them. `block` fills the list in by itself
+from the open task ids its WHY names, so a session that forgets `--after` still gets one.
 
 **Design rule: checkboxes are only ever changed through this tool.** Never hand-edit a `- [ ]` in TODO.md or
 DONE.md. Ticking by hand is how a task ends up done in one file and open in another, how a `(after X)`
@@ -214,15 +221,56 @@ def tick(tid: str, todo=None, done=None, plan_dir=None) -> int:
     return archive(todo, done)
 
 
-def block(tid: str, why: str, todo=None) -> None:
-    """[~] plus "BLOCKED: why". The why must say what would unblock it, or the next session just re-reads it."""
+TASK_ID = re.compile(r'\b([A-Z]+\d+[a-z0-9]*)\b')
+WAITS = re.compile(r'BLOCKED: \(after ([^)]*)\)')
+
+
+def open_ids(ls: list[str]) -> set[str]:
+    """Ids of the top-level tasks in `ls` that are not done: open or blocked."""
+    return {m.group(3).rstrip('.') for l in ls if (m := ITEM.match(l)) and not m.group(1) and m.group(2) != 'x'}
+
+
+def block(tid: str, why: str, todo=None, after=None) -> None:
+    """[~] plus "BLOCKED: why". The why must say what would unblock it, or the next session just re-reads it.
+
+    `after` is the tasks it waits on; `reopen` unblocks it once they are all done. Left as None it is read
+    off `why`: every task id named there that is still open, other than this task and its own subtasks.
+    Pass [] for a block that waits on no task (a human, a tool, a capture).
+    """
     todo, _ = ensure(todo)
     ls = list(lines(todo))
     i = _find(ls, tid)
+    if after is None:
+        live = open_ids(ls)
+        after = [t for t in dict.fromkeys(TASK_ID.findall(why))
+                 if t in live and t != tid and not t.startswith(tid)]
     _mark(ls, i, '~')
     end = i + len(_item_block(ls, i)) - 1
-    ls[end] += f' BLOCKED: {why}'
+    ls[end] += ' BLOCKED: ' + (f'(after {", ".join(after)}) ' if after else '') + why
     _write(todo, ls)
+
+
+def reopen(todo=None) -> list[tuple[str, list[str]]]:
+    """Unblock every [~] task whose `BLOCKED: (after …)` tasks are all done. Returns (id, those ids).
+
+    "Done" is "not open in TODO.md": ticked, archived, or dropped. A task blocked twice keeps only its last
+    BLOCKED, so it is that one's list that counts.
+    """
+    todo, _ = ensure(todo)
+    ls = list(lines(todo))
+    live, out = open_ids(ls), []
+    for i, l in enumerate(ls):
+        m = ITEM.match(l)
+        if not (m and not m.group(1) and m.group(2) == '~'):
+            continue
+        tail = ls[i + len(_item_block(ls, i)) - 1]
+        w = WAITS.findall(tail)
+        ids = [t.strip() for t in w[-1].split(',') if t.strip()] if w else []
+        if ids and not set(ids) & live:
+            out.append((m.group(3).rstrip('.'), ids))
+    for tid, ids in out:
+        unblock(tid, f'reopened: {", ".join(ids)} landed', todo=todo)
+    return out
 
 
 def unblock(tid: str, note: str = '', todo=None) -> None:
@@ -442,8 +490,14 @@ def main(argv: list[str] | None = None) -> int:
         n = tick(argv[1])
         return say(f'ticked {argv[1]}' + (f', moved {n} line(s) to {plan_dir.name}/DONE.md' if n else ''))
     if argv[:1] == ['block'] and len(argv) > 2:
-        block(argv[1], ' '.join(argv[2:]))
+        after, rest = None, argv[2:]
+        if rest[0] == '--after' and len(rest) > 2:
+            after, rest = [t for t in rest[1].split(',') if t], rest[2:]
+        block(argv[1], ' '.join(rest), after=after)
         return say(f'blocked {argv[1]}')
+    if argv == ['reopen']:
+        got = reopen()
+        return say('\n'.join(f'reopened {t} ({", ".join(ids)} landed)' for t, ids in got) or 'nothing to reopen')
     if argv[:1] == ['unblock'] and len(argv) > 1:
         unblock(argv[1], ' '.join(argv[2:]))
         return say(f'unblocked {argv[1]}')
