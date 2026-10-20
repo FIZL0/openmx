@@ -521,6 +521,43 @@ impl Follow {
         self.user_fov = F::ZERO;
     }
 
+    /// The camera button: move on to the next preset the file lets the player cycle through
+    /// ([`Preset::cycle_thru_this_preset`]), wrapping past the last one to the first, and switch to it
+    /// with [`Follow::set_preset`]. A camera with one preset switches to that one.
+    ///
+    /// The search starts one past the current preset and can come all the way round to it, so a
+    /// camera whose only cycling preset is the current one switches to itself — which still throws
+    /// the nudges away, as the original's does. A camera with no cycling preset at all spins forever
+    /// in the original; here it stays where it is.
+    pub fn next_preset(&mut self) {
+        let count = self.presets.len();
+        if count == 1 {
+            self.set_preset(0);
+            return;
+        }
+        let Some(to) = (1..=count)
+            .map(|step| (self.preset + step) % count)
+            .find(|&i| self.presets[i].cycle_thru_this_preset)
+        else {
+            return;
+        };
+        self.set_preset(to);
+    }
+
+    /// The same walk the other way: the previous cycling preset, wrapping past the first to the
+    /// last. Unlike [`Follow::next_preset`] a camera with one preset gets no special case, and the
+    /// walk comes round to the current preset the same way.
+    pub fn previous_preset(&mut self) {
+        let count = self.presets.len();
+        let Some(to) = (1..=count)
+            .map(|step| (self.preset + count - step) % count)
+            .find(|&i| self.presets[i].cycle_thru_this_preset)
+        else {
+            return;
+        };
+        self.set_preset(to);
+    }
+
     /// The player's right stick, one frame of it: `x` and `y` already mapped to −1..1 by the input
     /// layer, and the two modifier controls the game binds beside them.
     ///
@@ -1116,6 +1153,14 @@ impl Preset {
     /// The same, from a file's bytes.
     pub fn read_bytes(bytes: &[u8], suffix: &str) -> Vec<Preset> {
         Preset::read(&Ini::parse_bytes(bytes), suffix)
+    }
+
+    /// Which of `presets` carries `name` (`Freestyle Cam`), ignoring case — the first one, if the
+    /// file names two the same. The game never asks this: it picks its presets by index. It is for
+    /// a front end that wants a camera by what the file calls it, since nothing promises that every
+    /// track's file puts the same camera at the same index.
+    pub fn find(presets: &[Preset], name: &str) -> Option<usize> {
+        presets.iter().position(|p| p.name.eq_ignore_ascii_case(name))
     }
 
     /// One preset out of one section, in the loader's own key order. The order matters only for a

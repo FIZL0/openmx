@@ -1067,6 +1067,95 @@ fn switching_preset_is_the_games_own() {
     assert!(parked > 100 && unparked > 100, "the generator missed a look-back switch");
 }
 
+/// The camera button's two walks, run through the original's own `set_preset` by way of the vtable:
+/// which preset they land on, and everything the switch does when they get there.
+///
+/// A camera with no cycling preset at all hangs the original, so the generator always leaves one;
+/// a quarter of the cases cut the camera down to a single preset, which is the next walk's one
+/// special case.
+#[test]
+fn walking_the_presets_is_the_games_own() {
+    let Some((mut ee, _, _)) = harness() else { return };
+    let mut g = Gen(0x5eed_0014);
+    let (mut onto_self, mut single) = (0usize, 0usize);
+    for case in 0..CASES {
+        let mut c = g.cam();
+        if g.one_in(4) {
+            c.presets.truncate(1);
+            c.preset = 0;
+            c.previous = 0;
+            single += 1;
+        }
+        if !c.presets.iter().any(|p| p.cycle_thru_this_preset) {
+            let keep = g.bits() as usize % c.presets.len();
+            c.presets[keep].cycle_thru_this_preset = true;
+        }
+        let forward = g.b();
+        let walk = if forward { "camera_next_preset" } else { "camera_previous_preset" };
+        let from = c.preset;
+
+        reset(&mut ee);
+        poke(&mut ee, &c);
+        ee.set_u32(VTABLE + 0xe8, addr("camera_next_preset").unwrap());
+        ee.set_u32(VTABLE + 0xec, addr("camera_previous_preset").unwrap());
+        ee.call(addr(walk).unwrap(), &[CAM as u64], &[], 100_000);
+        only_touched_the_regions(&ee).unwrap();
+        let theirs = snap(&ee);
+
+        if forward {
+            c.next_preset();
+        } else {
+            c.previous_preset();
+        }
+        if c.preset == from {
+            onto_self += 1;
+        }
+        assert!(
+            c.presets.len() == 1 || c.presets[c.preset].cycle_thru_this_preset,
+            "case {case}: {walk} landed on a preset the player cannot cycle to"
+        );
+        reset(&mut ee);
+        poke(&mut ee, &c);
+        same(case, walk, &theirs, &snap(&ee));
+    }
+    println!("{single} one-preset cameras, {onto_self} walks came back round to where they started");
+    assert!(single > 500 && onto_self > 500, "the generator missed a walk's edge");
+}
+
+/// A preset picked by the name its file gives it, over a file laid out the way the disc's are: the
+/// race cams first, a look-back nobody cycles to, and a section with no `Name`, which the reader
+/// calls by its section name. A name with a space in it is quoted, because the reader squeezes the
+/// whitespace out of anything that is not; the live original's records hold `Race Cam 1` spaced. Then the camera button walked from the picked one, which visits only
+/// the presets the file lets it.
+#[test]
+fn a_preset_is_found_by_name() {
+    let file = b"[NumberOfPresets]\r\nNumberOfPresets = 5\r\n\
+        [Preset1]\r\nName = \"Race Cam 1\"\r\nCycleThruThisPreset = 1\r\nFilterThisPreset = 1\r\n\
+        [Preset2]\r\nName = \"Race Cam 2\"\r\nCycleThruThisPreset = 1\r\nFilterThisPreset = 1\r\n\
+        [Preset3]\r\nName = \"Freestyle Cam\"\r\nCycleThruThisPreset = 1\r\nFilterThisPreset = 1\r\n\
+        [Preset4]\r\nName = Lookback\r\nCycleThruThisPreset = 0\r\nIsLookBackCam = 1\r\n\
+        [Preset5]\r\nCycleThruThisPreset = 0\r\n";
+    let presets = Preset::read_bytes(file, "");
+    assert_eq!(presets.len(), 5);
+    assert_eq!(Preset::find(&presets, "Freestyle Cam"), Some(2));
+    assert_eq!(Preset::find(&presets, "freestyle cam"), Some(2), "a name is matched without case");
+    assert_eq!(Preset::find(&presets, "Lookback"), Some(3));
+    assert_eq!(Preset::find(&presets, "Preset5"), Some(4), "an unnamed preset is its section");
+    assert_eq!(Preset::find(&presets, "Slot Cam"), None);
+    assert_eq!(Preset::find(&presets, "Race Cam"), None, "a prefix is not a name");
+
+    let mut c = Follow::new(presets, F(5.0));
+    c.set_preset(Preset::find(&c.presets, "Freestyle Cam").unwrap());
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        c.next_preset();
+        seen.push(c.preset().name.clone());
+    }
+    assert_eq!(seen, ["Race Cam 1", "Race Cam 2", "Freestyle Cam", "Race Cam 1"]);
+    c.previous_preset();
+    assert_eq!(c.preset().name, "Freestyle Cam");
+}
+
 /// The right stick: the two modifiers that turn it into a zoom or a widen, the swing it is otherwise,
 /// the refusal to pitch down while that is locked, and both wraps.
 ///

@@ -1133,6 +1133,12 @@ pad_control_index           boot 0x0011e2d0 (pad, control, 2, 10, ...) -> index 
 camera_park_nudges          boot 0x001fa440 (cam) vtable slot 0xf0: copies +0x11c..+0x128, the player's
 #                                           four nudges, into the shadow at +0x12c..+0x138
 camera_unpark_nudges        boot 0x001fa470 (cam) vtable slot 0xf4: copies them back
+camera_next_preset          boot 0x001fa2e0 (cam) vtable slot 0xe8: the camera button. From +0x158
+#                                           plus one, wrapping to 0, the first preset whose +0x70
+#                                           CycleThruThisPreset is set, through slot 0xfc; with +0x160
+#                                           == 1 it sets preset 0. No cycling preset: loops forever
+camera_previous_preset      boot 0x001fa3a0 (cam) vtable slot 0xec: the same walk downwards, wrapping
+#                                           to +0x160 - 1, with no one-preset case
 camera_clear_nudges         boot 0x001fa4a0 (cam) vtable slot 0xf8: zeroes all four. Nothing in the
 #                                           camera calls this one
 viewport_set_eye            boot 0x00112ac0 (viewport, &position or 0, &dir or 0, &up or 0, &index or
