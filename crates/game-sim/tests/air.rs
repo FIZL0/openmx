@@ -870,3 +870,228 @@ fn a_flat_spin_is_a_row_the_flag_adds() {
     assert!(!t.air.flip_torque_applied && !t.air.flipping);
     assert_eq!((t.ch.moment.x(), t.ch.moment.y(), t.ch.moment.z()), (1.0, 2.0, 3.0));
 }
+
+// ---------------------------------------------------------------------------------------------------
+// P22 — a flight, against the original's own flights
+
+/// **The bike falls and carries the way the original's does**, measured on the original's flights in
+/// both acceptance captures and on the port flying the disc's own Race 125 from where each began.
+///
+/// A capture's `bike_vel` is not the body's velocity: it is the type-4 actor's +0x130, which the
+/// vehicle-anim object's update writes as the body's velocity (the chassis's +0x260, reached through
+/// the owner's +0x488 block at +0x90) times 0.8 — `vmulx.xyz` by `0x3f4ccccd` at `0x0024d42c`. Read
+/// raw, that copy changes at −25.8/s² and the drawn bike's root moves 1.25× it per second — R6's two
+/// readings, and P15's "−38" and "1.25×" against the port. Divided back by 0.8 it is the body again,
+/// and in body units the original's flight is the port's:
+///
+/// - **gravity**: dvy/dt fitted against vy over every ballistic tick is −32.2 at vy = 0 on both
+///   sides — `phy::G` × the file's `Gravity` of 1 — on 600-odd ticks a capture (−32.282 against the
+///   port's −32.275 on `acceptance-freeride`, −32.240 against −32.236 on `recording2-freeride`);
+/// - **drag**: the slope of that fit, the vertical share of `Drag × ½ × speed² / Weight`, is the same
+///   −0.061 / −0.064 per ft/s on both sides, to the third decimal;
+/// - **integration**: the position advances 1.00× the body's velocity × dt, horizontally, on both
+///   sides — no 1.25, no 1/24 s step.
+///
+/// Statistical, not bit-exact: the original's flights carry the human's stick (lean torques that do
+/// not change the centre of mass's fall but do move the drawn root around it), the rows are the drawn
+/// root rather than the chassis, and the port is flown hands-off over a floor far below.
+mod flight {
+    use game_sim::archive::{Psr, Res};
+    use game_sim::phy::Phy;
+    use game_sim::replay::Capture;
+    use game_sim::ride::{Controls, Ride, Tables};
+    use game_sim::world::Flat;
+    use ps2_float::{Acc, F, Vf};
+    use ps2_oracle::{Kit, skip};
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+
+    /// The factor between the captured `bike_vel` and the body's velocity.
+    const COPY: f32 = 0.8;
+
+    fn race125p(kit: &Kit) -> Option<Vec<u8>> {
+        let at = kit.ctx("iso").join("MX.PSR");
+        let Ok(mut f) = File::open(&at) else {
+            skip(&format!("no {} — `./kit extract MX.PSR` writes it", at.display()));
+            return None;
+        };
+        let mut front = vec![0u8; 64 << 10];
+        f.read_exact(&mut front).expect("read the front of MX.PSR");
+        let psr = Psr::parse(&front).expect("MX.PSR's directory");
+        for e in &psr.entries {
+            let n = e.name.to_ascii_lowercase();
+            if !(n.starts_with("bike\\") && n.ends_with(".res")) {
+                continue;
+            }
+            f.seek(SeekFrom::Start(e.at)).expect("seek");
+            let mut bytes = vec![0u8; e.size as usize];
+            f.read_exact(&mut bytes).expect("read");
+            let Ok(res) = Res::parse(&bytes) else { continue };
+            for r in &res.entries {
+                if r.name.to_ascii_lowercase().ends_with("race125p.phy") {
+                    return Some(res.read(&bytes, r).expect("race125p.phy"));
+                }
+            }
+        }
+        panic!("no race125p.phy in any Bike\\*.res");
+    }
+
+    /// One captured tick in body units: dt, velocity, the drawn root's position.
+    #[derive(Clone, Copy)]
+    struct Row {
+        dt: f32,
+        v: [f32; 3],
+        p: [f32; 3],
+    }
+
+    fn rows(cap: &Capture) -> Vec<Row> {
+        let col = |name: &str| {
+            cap.columns.iter().position(|c| c == name).unwrap_or_else(|| panic!("no {name} column"))
+        };
+        let (dt, vx, vy, vz) = (col("dt"), col("bike_vel.x"), col("bike_vel.y"), col("bike_vel.z"));
+        let (px, py, pz) = (col("bike_xform.m30"), col("bike_xform.m31"), col("bike_xform.m32"));
+        let f = |r: &Vec<String>, i: usize| r[i].parse::<f32>().expect("a number");
+        cap.rows
+            .iter()
+            .map(|r| Row {
+                dt: f(r, dt),
+                v: [f(r, vx) / COPY, f(r, vy) / COPY, f(r, vz) / COPY],
+                p: [f(r, px), f(r, py), f(r, pz)],
+            })
+            .collect()
+    }
+
+    /// The ballistic stretches: runs of at least 20 ticks whose dvy/dt is free fall's and nothing
+    /// else's (no ground, no landing), as index ranges `a..b` with tick `a - 1` the one before.
+    fn stretches(rows: &[Row]) -> Vec<std::ops::Range<usize>> {
+        let mut out = Vec::new();
+        let mut start = None;
+        for i in 1..=rows.len() {
+            let falling = i < rows.len() && {
+                let g = (rows[i].v[1] - rows[i - 1].v[1]) / rows[i].dt;
+                -36.0 < g && g < -28.0
+            };
+            match (falling, start) {
+                (true, None) => start = Some(i),
+                (false, Some(a)) => {
+                    // The stretch's first and last ticks can be part ground: drop them.
+                    if i - a >= 22 {
+                        out.push(a + 1..i - 1);
+                    }
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// dvy/dt = a + b·vy by least squares, and the mean of the horizontal |dpos| / (|v| dt).
+    #[derive(Default)]
+    struct Fit {
+        pts: Vec<(f64, f64)>,
+        carry: Vec<f64>,
+    }
+
+    impl Fit {
+        fn tick(&mut self, before: Row, after: Row) {
+            let dt = after.dt as f64;
+            let g = (after.v[1] - before.v[1]) as f64 / dt;
+            self.pts.push((after.v[1] as f64, g));
+            let d = ((after.p[0] - before.p[0]) as f64).hypot((after.p[2] - before.p[2]) as f64);
+            let s = (after.v[0] as f64).hypot(after.v[2] as f64);
+            if s > 5.0 {
+                self.carry.push(d / (s * dt));
+            }
+        }
+
+        fn line(&self) -> (f64, f64) {
+            let n = self.pts.len() as f64;
+            let mx = self.pts.iter().map(|p| p.0).sum::<f64>() / n;
+            let my = self.pts.iter().map(|p| p.1).sum::<f64>() / n;
+            let sxy: f64 = self.pts.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
+            let sxx: f64 = self.pts.iter().map(|p| (p.0 - mx) * (p.0 - mx)).sum();
+            let b = sxy / sxx;
+            (my - b * mx, b)
+        }
+
+        fn carry(&self) -> f64 {
+            self.carry.iter().sum::<f64>() / self.carry.len() as f64
+        }
+    }
+
+    #[test]
+    fn a_flight_falls_and_carries_like_the_originals() {
+        let kit = match Kit::load() {
+            Ok(k) => k,
+            Err(why) => return skip(&why),
+        };
+        let Some(bytes) = race125p(&kit) else { return };
+        let dir = kit.ctx("capture").join("acceptance");
+        let mut csvs: Vec<_> = std::fs::read_dir(&dir)
+            .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        csvs.retain(|p| p.extension().is_some_and(|x| x == "csv"));
+        csvs.sort();
+        if csvs.is_empty() {
+            return skip(&format!("no captures in {}", dir.display()));
+        }
+        let tables = Tables::build();
+        let p = Phy::read_bytes(&bytes, &tables.curve);
+        let mounts = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+
+        let mut report = String::new();
+        for csv in &csvs {
+            let text = std::fs::read_to_string(csv).expect("read the capture");
+            let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", csv.display()));
+            let rows = rows(&cap);
+            let (mut theirs, mut ours) = (Fit::default(), Fit::default());
+            let runs = stretches(&rows);
+            for run in &runs {
+                for i in run.clone() {
+                    theirs.tick(rows[i - 1], rows[i]);
+                }
+                // The port, from the tick before the stretch, high over a floor it never reaches.
+                let first = rows[run.start - 1];
+                let [x, y, z] = first.v;
+                let facing = Vf::new(x, 0.0, z, 0.0);
+                let len = (x * x + z * z).sqrt();
+                let facing = Vf::new(facing.x() / len, 0.0, facing.z() / len, 0.0);
+                let mut ride = Ride::new(&p, mounts, Vf::new(0.0, 5000.0, 0.0, 1.0), facing);
+                let vel = Vf::new(x, y, z, 1.0);
+                ride.chassis.vel = vel;
+                ride.chassis.speed =
+                    Acc::mula(vel.x(), vel.x()).madda(vel.y(), vel.y()).madd(vel.z(), vel.z()).sqrt();
+                let mut world = Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+                let at = |ride: &Ride, dt: f32| {
+                    let (q, v) = (ride.position(), ride.chassis.vel);
+                    Row { dt, v: [v.x(), v.y(), v.z()], p: [q.x(), q.y(), q.z()] }
+                };
+                let mut before = at(&ride, first.dt);
+                for (k, i) in run.clone().enumerate() {
+                    ride.frame(&p, &tables, &Controls::default(), F(rows[i].dt), &mut world);
+                    let now = at(&ride, rows[i].dt);
+                    // A fresh ride's first frame has no integrator history behind it.
+                    if k > 0 {
+                        ours.tick(before, now);
+                    }
+                    before = now;
+                }
+            }
+            let ((ta, tb), (oa, ob)) = (theirs.line(), ours.line());
+            let (tc, oc) = (theirs.carry(), ours.carry());
+            let name = csv.file_name().unwrap().to_string_lossy();
+            report += &format!(
+                "{name}: {} flights, {} ticks — original dvy/dt {ta:.3} {tb:+.4}·vy, carry {tc:.4}; \
+                 port {oa:.3} {ob:+.4}·vy, carry {oc:.4}\n",
+                runs.len(),
+                theirs.pts.len(),
+            );
+            assert!(theirs.pts.len() >= 300, "{name}: only {} ballistic ticks", theirs.pts.len());
+            assert!((ta - oa).abs() < 0.05, "{name}: gravity — {report}");
+            assert!((tb - ob).abs() < 0.005, "{name}: drag — {report}");
+            assert!((tc - 1.0).abs() < 0.01 && (oc - 1.0).abs() < 0.01, "{name}: carry — {report}");
+        }
+        println!("{report}");
+    }
+}

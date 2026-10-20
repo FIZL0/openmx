@@ -2393,3 +2393,18 @@ rider_bone_post boot 0x001f6840 (20 bytes) the per-bone call of the arm's tail
 rider_bone_detach boot 0x0011aed0 (72 bytes) takes one bone off the bike it was following
 rand_raw boot 0x0040fd40 (100 bytes) the generator behind every draw, as an int
 quat_axes boot 0x0013f380 (132 bytes) a quaternion's axes, which the look arm reads
+# P22 -- what the captured bike_vel is, and R6's two readings of it.
+# rider_body_mode (boot 0x0024c7e0, above) also writes the owner's +0x530 -- the type-4 actor record at
+#   owner+0x400, its +0x130, which is what `./kit record` captures as bike_vel -- as the request
+#   block's (the pointer at +0x488) +0x90 times 0.8: `lui $3,0x3f4c` at 0x0024d40c builds 0x3f4ccccd
+#   and `vmulx.xyz $vf1,$vf1,$vf2x` at 0x0024d42c applies it (xyz only, so w stays 1.0). The same
+#   method copies the drawn transform (owner+0x580, the actor's +0x180, the capture's bike_xform)
+#   from request+0x50..+0x8c.
+# request+0x90 is the chassis's own velocity, chassis+0x260, bit for bit: all four bikes in
+#   recording2.p2m2's save state (chassis objects found by the vtable 0x44e8f0 at +0x08: 0xd5d610,
+#   0xdfa240, 0x1032f80, 0x15a96b0), and actor+0x130 == chassis+0x260 * 0.8 under the VU's
+#   truncating multiply on 12 of 12 lanes (round-to-nearest misses by an ulp on some).
+# So R6's question has no "right" reading: the capture's velocity is a 0.8x copy, and the body moves
+#   1.0x its own velocity times the frame's dt. The 1.25 was 1/0.8; the 1/24 s step was 30/24 of it.
+#   In body units (bike_vel / 0.8) the original's flights fall at -32.2 ft/s^2 at vy = 0 -- phy::G --
+#   proved against the port in crates/game-sim/tests/air.rs (a_flight_falls_and_carries_like_the_originals).
