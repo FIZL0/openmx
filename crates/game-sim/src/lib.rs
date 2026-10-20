@@ -421,6 +421,11 @@ pub mod collide;
 /// damping a contact lowers. What makes the biplane stop at what it hits.
 pub mod contact;
 
+/// A collision object's contact search, once a frame before the world steps: the sweep back out of
+/// what the body flew into, the rays against the terrain's cells, and the rays against the world —
+/// the list [`contact`] resolves, and the flags the crash test reads.
+pub mod contact_search;
+
 /// The worked example from `docs/EXAMPLE.md`: three functions of the synthetic program that `./kit demo`
 /// generates, ported, with `tests/demo.rs` proving them bit-exact against the original's instructions.
 /// Delete it once your own port has something real in it.

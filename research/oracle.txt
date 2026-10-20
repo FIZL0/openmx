@@ -2985,3 +2985,20 @@ body_set_damping boot 0x0015aba0 (body, vec4*) body+0x20 = v, the whole quad; vt
 body_set_ang_damping boot 0x0015ab80 (body, vec4*) body+0x130 = v, the whole quad; vt +0x54
 # transform_unrotate (0x001b30e0) transposes in the integer registers; its third column is a 64-bit
 # move over the third row, which keeps that row's z and w, so the transpose is whole.
+# S43 — the contact search (collision_record_collide, vt +0x7c), ported as contact_search::collide
+terrain_point_query boot 0x001dce80 (terrain, buf) buf+0 point in, out: y, buf+0x10 normal (weighted,
+#                              normalised), buf+0x20 four surface bytes, buf+0x30 corner weights; cell
+#                              step 2 when terrain+0x8a8; diagonal by terrain+0x760==1 or cell parity;
+#                              a miss leaves y/weights, writes normal (0,1,0,1) and surfaces 0
+terrain_cell_read boot 0x001ddaf0 (tree, ix, iz, heights, normals, surfaces, step) -> 0 on a miss;
+#                              behind a 10-entry cache of 0x70 at 0x0049f540 keyed ix<<16|iz only
+#                              (not by terrain or step); heights scaled by terrain+0x80 on a miss
+collision_record_sweep_back boot 0x00270390 (record, dt) the sweep from pos - vel*lead*dt to the
+#                              turned offset; refuses when both sides are moving (>1) and their
+#                              directions' dot > +0xc8 facing (lead +0xc0, push +0xc4); else body+0x60 =
+#                              point + push*out; needs +0x3c and the sweep probe +0x1f4
+# The ground result collide builds on its stack is the object at 0x00130950 (vtable 0x0044daf0:
+# +8 set, +0x10 argmax surface strict from 0.0, +0x14 depth = 0 always, +0x18 point, +0x1c normal);
+# depth 0 is why no water reaches the contacts here. orientation_transform_point adds the origin.
+# transform_set_position on a parentless node writes local +0x70 and only marks dirt (bit0 of +0x110,
+# children via +0x104); the world copy +0x80.. is rebuilt later, not in the search.

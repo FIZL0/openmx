@@ -498,6 +498,7 @@ fn contact_of(ee: &Ee, e: u32, others: &[u32], mover: u32) -> Contact {
     let m = ee.u32_at(e + MOVER);
     Contact {
         kind: ee.u32_at(e + KIND),
+        from: quad(ee, e + FROM),
         on_body: quad(ee, e + ON_BODY),
         normal: quad(ee, e + NORMAL),
         point: quad(ee, e + POINT),

@@ -47,7 +47,7 @@ const WEIGHT: f32 = f32::from_bits(0x4200_cccd);
 // --- the vector idioms -----------------------------------------------------------------------------
 
 /// `v` turned into the body's frame by `q`: [`turn`] with every pair of operands swapped. `w` is `v`'s.
-fn unturn(q: Vf, v: Vf) -> Vf {
+pub(crate) fn unturn(q: Vf, v: Vf) -> Vf {
     let acc = Vf::opmula(v, q);
     let acc = Vf::madd(acc, v, q.bc(Field::W));
     let t = Vf::opmsub(acc, q, v);
@@ -66,12 +66,12 @@ fn cross(a: Vf, b: Vf) -> Vf {
 }
 
 /// `a.xyz + b.xyz`, `w` from `a`.
-fn plus(a: Vf, b: Vf) -> Vf {
+pub(crate) fn plus(a: Vf, b: Vf) -> Vf {
     a.merge(Dest::XYZ, a.add(b))
 }
 
 /// `a.xyz − b.xyz`, `w` from `a`.
-fn minus(a: Vf, b: Vf) -> Vf {
+pub(crate) fn minus(a: Vf, b: Vf) -> Vf {
     a.merge(Dest::XYZ, a.sub(b))
 }
 
@@ -81,22 +81,22 @@ fn times(a: Vf, b: Vf) -> Vf {
 }
 
 /// `v.xyz · s`, `w` kept (`vmulx.xyz` against a broadcast single).
-fn scaled(v: Vf, s: F) -> Vf {
+pub(crate) fn scaled(v: Vf, s: F) -> Vf {
     v.merge(Dest::XYZ, v.mul(Vf::splat(s.to_f32())))
 }
 
 /// `-v.xyz`, `w` kept: three `neg.s`.
-fn negated(v: Vf) -> Vf {
+pub(crate) fn negated(v: Vf) -> Vf {
     Vf::new((-F(v.x())).to_f32(), (-F(v.y())).to_f32(), (-F(v.z())).to_f32(), v.w())
 }
 
 /// The FPU's three-term dot product, `mula.s` / `madda.s` / `madd.s`, in this operand order.
-fn dot(a: Vf, b: Vf) -> F {
+pub(crate) fn dot(a: Vf, b: Vf) -> F {
     Acc::mula(a.x(), b.x()).madda(a.y(), b.y()).madd(a.z(), b.z())
 }
 
 /// `vmul.xyz`, `vadday.x`, `vmaddz.x` (by one), `vrsqrt`, `vmulq.xyz`: unit length, `w` kept.
-fn unit(v: Vf) -> Vf {
+pub(crate) fn unit(v: Vf) -> Vf {
     v.merge(Dest::XYZ, v.mul_q(vu::rsqrt(1.0, vu::dot3(v.0, v.0))))
 }
 
@@ -332,6 +332,9 @@ pub struct Contact {
     /// `+0`: 0 when the contact is this body's own (the spring's anchor is on it), anything else when
     /// it is the other's.
     pub kind: u32,
+    /// `+0x10` where the probe that found the contact started, in the anchoring body's model space
+    /// (read by nothing here; the search writes it).
+    pub from: Vf,
     /// `+0x20` the contact on the anchoring body, in its model space; `+0x30` the normal, pointing at
     /// this body; `+0x40` the contact point in the world.
     pub on_body: Vf,
