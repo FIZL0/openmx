@@ -3039,3 +3039,24 @@ plane_probe_hit_listener boot 0x0015acf0 the plane's listener on its ray probe (
 plane_probe_sound_listener boot 0x003ea8a0 the ray probe's second listener (a global at 0x0062e324,
 #                              thunk 0x003eb620): two sound calls and 0x002fffe0, presentation only
 bike_struck_listener boot 0x0025a480 a bike's listener on its collidable, vt +0xc (thunk 0x0025a6e0)
+
+# S47 — the sweep probe's narrow phase (crates/game-sim/src/sweep_probe.rs, proofs in
+# tests/sweep_probe.rs). sphere_probe_clear: count = min(+0x120, 16); per segment the ends +0x128
+# (32 bytes a segment) through their nodes +0x124 (two pointers a segment; the node's world matrix is
+# at node+0x80..+0xb0, a null node leaves the end as it is), world origin +0x138, unit direction +0x13c
+# (the zero quad's xyz when the length is not > 0), length +0x134; the box of all ends gives the centre
+# +0x150 (copied to +0x40) and radius +0x160 (copied to +0x60). It also lowers bit 0x20 of +0x116,
+# zeroes the globals 0x00468a68 and 0x00468a60 (no other xrefs found), stores the answer +0x6c in the
+# global 0x00468258 (through 0x0011c110, which only does that) and resets the answer: +0/+0x10 the
+# origin quad, +0xb0 = 1, +0x8c = 0. sphere_probe_pair stores +0x164 in the global 0x00468250 and
+# tail-calls sphere_collide_pair; that global and a mesh descriptor's +4 (per-vertex normals) switch
+# mesh_sweep_level to smoothed normals (0x0010f2a0, 0x0010ea00, 0x0010db20, chosen at
+# 0x0010d418..0x0010d4cc). The plane's +0x164 is 0. Local forms: origins +0x12c, directions +0x130,
+# centre +0x140; the lengths are not rescaled. A hierarchy's part is struck only for segments whose
+# owner word is still 0 (then set to 1); a mesh sets no owner. +0x9c is the collidable struck.
+# sphere_probe_prepare is misnamed: collide_against_search calls it with (probe, search+0x38) and it is
+# a pass over a cell grid (0x003b4d50 looks up the cell from grid +0x40 origin, +0x3c cell size, +0x34
+# width, +0x50 count; also 0x003b4ef0, 0x003b4de0, 0x003b4fe0, the recursive 0x001e8e00 and 0x00218f50),
+# then fires the probe's listeners vt +8 and its hit bit / +0x10c callback. The plane's search+0x38 is
+# 0, so it does nothing in the ride. Kind 8 (a finite plane, 0x003dc030) keeps the nearest by fraction
+# below +0xb0 and copies point/normal to +0x30/+0x20. Neither is ported.
