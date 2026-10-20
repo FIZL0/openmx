@@ -3096,3 +3096,21 @@ finite_plane_init boot 0x003db9e0 (collidable) kind 8
 collision_file_load boot 0x0011b230 (owner, name, ...) loads a .col by its type word; type 8 makes a finite plane
 finite_plane_sweep boot 0x003dc030 kind 8's segment test: nearest fraction below +0xb0, point/normal
 probe_smooth_flag boot 0x00468250 set from the probe's +0x164 (sweep) or +0x174 (ray) per pair test
+
+# P30, the stick the backflip reads. For the human rider, record P = bike + 0x20.
+# The pad listener pushes one sample per call into a 32-slot ring on P: head P+0xa0, time
+# P+0xa4+4*slot (Timer0 ms x 0.001, the wall clock), axes P+0x124+0x10*slot (LX, LY with the d-pad as
+# -/+1, RX, RY). The dispatcher runs after the pad update, after the sim, and from the DMA waits each
+# time one passes 4 ms: ~5 samples a frame in the save states, not a constant.
+# player_input_dispatch then writes each axis's flick speed to P+0x638+0x18*i (LY's is P+0x650): the
+# ring scanned oldest to newest, a sample past +-0.8 remembered, the next past 0.8 on the other side
+# giving (v - v0) / (t - t0) when t0 > 0, the largest magnitude kept, the memory cleared either way.
+# pad_to_gesture copies P+0x650 to bike+0x630, the d-pad flags to +0x620/+0x624, the brake lever to
+# +0x640. The limiter squares +0x628/+0x62c in place (x*|x|) for the human (P+0x34 == 1), then walks
+# the lean pair +0x670/+0x674 toward them at XDPad/YDPadRateLimit (+0x668/+0x66c) on an axis whose
+# d-pad flag is set, else X/YAxisRateLimit (+0x660/+0x664): now + min(max(want-now, -r*dt), r*dt);
+# +0x670 is zeroed while +0x610 is clear. Preload and backflip read +0x62c and +0x630 unlimited.
+pad_ring_listener boot 0x0025d240 (listener, phase) one timed sample of the four axes into P's ring
+pad_ring_register boot 0x0025d810 puts pad_ring_listener on the app's listener list
+listener_dispatch boot 0x001321d0 (phase) calls every registered listener; the tick and the DMA waits call it
+bike_input_limiter boot 0x00251a50 (dt in f12, bike) the bike's vt+0xec: squares the stick, walks the lean pair

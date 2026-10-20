@@ -9,7 +9,7 @@
 //! notation `./kit pad script` sends to a real PCSX2 — and this file reads it frame by frame, builds
 //! the DualShock 2 reports the shell's own pad would have built out of it, and hands them to
 //! [`game_sim::Sim`] exactly the way `src/main.rs`'s fixed update does: `poll` for the controls, then
-//! `step` for the frame. Eleven legs, 4020 frames, and each leg asserts what a rider would notice:
+//! `step` for the frame. Ten legs, 3600 frames, and each leg asserts what a rider would notice:
 //!
 //!     the launch                 2 s   it goes
 //!     flat out                  20 s   it reaches a speed and keeps it
@@ -21,9 +21,9 @@
 //!     the jump                   5 s   it leaves the ground and lands on its wheels
 //!     the brake                 10 s   it stops, and stays stopped
 //!     stopped                    8 s
-//!     the flip                   7 s   a bigger ramp: pump on the lip, flip, land on the wheels
 //!
-//! (Sixty-seven seconds — P16 added the eleventh leg and the minute kept its name.)
+//! (P16 added an eleventh, a flip off a bigger ramp, and P30 moved it to a ride of its own on the
+//! disc's bike — see below.)
 //!
 //! It is headless: no window, no device, no disc. The bike is [`game_sim::stock::BIKE`], the stand-in
 //! the simulation crate ships for exactly this (no number in it is the game's), with the two keys
@@ -51,11 +51,14 @@
 //! pulls in there was a second copy of the engine's clutch word that nothing walked back out, so
 //! the bike in the shell would not move at any throttle; P11 paid it.
 //!
-//! **And the flip is ridden twice** (P16): once off the script's stick, like every other leg, and
-//! once more from the same frame on the shell's own arrow keys — `src/pad.rs`'s `Pads` and its key
-//! ramp, which is why this file compiles that module and its window in by path. The keyboard is the
-//! control most of this shell's players have, and a flip the pad can do and the keys cannot is the
-//! complaint P16 was opened for.
+//! **And the flip is ridden twice** (P16): once off its script's stick, like every leg of the
+//! minute, and once more on the shell's own arrow keys — `src/pad.rs`'s `Pads` and its key ramp,
+//! which is why this file compiles that module and its window in by path. The keyboard is the control
+//! most of this shell's players have, and a flip the pad can do and the keys cannot is the complaint
+//! P16 was opened for. Since P30 the flip is not a leg of the minute: it is `tests/ride-flip.pad`,
+//! ridden on the disc's `race125p.phy`, because the stand-in bike's flip was this file's own numbers
+//! and stopped meaning anything once the backflip read its stick the way the original does. Without
+//! the disc it skips.
 //!
 //! **And the biplane switch** (P19), at the bottom: the shell's `--vehicle` and its swap key go
 //! through `src/vehicle.rs`'s `Garage`, and the three things it must do are asserted on the same pad
@@ -94,13 +97,16 @@ mod vehicle;
 /// the same ride to a real machine with `./kit pad script`.
 const MINUTE: &str = include_str!("ride-minute.pad");
 
+/// P16's flip on the disc's bike, in the same notation: one leg, `the flip` (P30).
+const FLIP: &str = include_str!("ride-flip.pad");
+
 /// The frame the shell's fixed update runs at, and the one the script's `f` suffix counts.
 const DT: F = F(1.0 / 60.0);
 
 /// The legs the script has to come to, in order: the names and their frame counts. The script is the
 /// source of both — this is here so that an edit to one and not the other fails instead of quietly
 /// asserting about a different ride.
-const LEGS: [(&str, usize); 11] = [
+const LEGS: [(&str, usize); 10] = [
     ("the launch", 120),
     ("flat out", 1200),
     ("turning right", 240),
@@ -111,7 +117,6 @@ const LEGS: [(&str, usize); 11] = [
     ("the jump", 300),
     ("the brake", 600),
     ("stopped", 480),
-    ("the flip", 420),
 ];
 
 /// How far ahead of the bike the take-off ramp goes, and its shape: a rise over a run, in feet. The
@@ -119,9 +124,8 @@ const LEGS: [(&str, usize); 11] = [
 const RAMP: (f32, f32, f32) = (250.0, 0.3, 15.0);
 
 /// The flip's ramp, the same three numbers — the sibling file's `FLIP_RAMP`, which says why it is
-/// nearer, steeper and longer than [`RAMP`] (the jump's lip holds for 16 frames or fewer, and the
-/// flip is three stop-to-stop crosses of a stick this bike walks at 6 a second), and why it is 108 ft
-/// out and not the 100 it was before P28.
+/// nearer, steeper and longer than [`RAMP`]. Laid along +z from the origin, where [`ride_the_flip`]
+/// starts the bike.
 const FLIP_RAMP: (f32, f32, f32) = (108.0, 0.5, 25.0);
 
 /// The top speed the human's recording of the original reaches, in feet a second of the chassis —
@@ -163,24 +167,6 @@ CrossupWreck = 1
 CrossupWreckTime = 0.3
 ";
 
-/// The preload and the backflip, appended the way [`RIDE_LIMITS`] is: the stand-in bike has neither
-/// section, and with both loading as zero a flip fires with no torque behind it. The sibling file's
-/// `RIDE_FLIP`, which says where the numbers come from — this file's, not the disc's.
-const RIDE_FLIP: &str = "
-[Preload]
-PreloadTime = 0.25
-MaxPreload = 600
-MinPreloadTime = 0
-MaxPreloadTime = 0.5
-[Backflip]
-MaxBackflipTorque = 300
-MinBackflipTorque = 160
-BackflipTorqueRateIncrease = 100
-BackflipTorqueRateDecrease = 1000
-MinBackflipTime = 0
-MaxBackflipTime = 0.5
-";
-
 /// [`stock::BIKE`], made rideable — in memory, because that text is the whole workspace's stand-in and
 /// moving a number in it would move other crates' tests.
 ///
@@ -219,7 +205,7 @@ fn ridden_bike() -> String {
         assert!(out.contains(key), "game_sim::stock::BIKE no longer has `{}`", key.trim_end());
         out = out.replace(key, with);
     }
-    format!("{out}{RIDE_LIMITS}{RIDE_FLIP}")
+    format!("{out}{RIDE_LIMITS}")
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -485,11 +471,9 @@ impl Seat {
     }
 }
 
-/// The minute, leg by leg, as it was ridden — and the simulation and world as they stood when the
-/// flip's leg began, for [`it_flips_off_the_lip`] to ride it again on the keys.
+/// The minute, leg by leg, as it was ridden.
 struct Minute {
     legs: Vec<(String, Vec<Seat>)>,
-    at_the_flip: Option<(Sim, Jump)>,
 }
 
 impl Minute {
@@ -596,14 +580,12 @@ fn ride_the_minute() -> Minute {
     let mut sim = Sim::with_rider(0, tables, phy, rider);
     let mut world = Jump::nothing();
 
-    let mut out = Minute { legs: Vec::new(), at_the_flip: None };
+    let mut out = Minute { legs: Vec::new() };
     for (name, reports) in script(MINUTE) {
         // The ramp is laid when the run-up starts, ahead of wherever the bike actually is and along
-        // whatever heading it actually has — the jump has to work on the bike's own line. The flip's
-        // is laid the same way when its leg starts.
+        // whatever heading it actually has — the jump has to work on the bike's own line.
         let ramp = match name.as_str() {
             "the run-up" => Some(RAMP),
-            "the flip" => Some(FLIP_RAMP),
             _ => None,
         };
         if let Some((start, slope, length)) = ramp {
@@ -615,9 +597,6 @@ fn ride_the_minute() -> Minute {
                 slope,
                 length,
             };
-        }
-        if name == "the flip" {
-            out.at_the_flip = Some((sim.clone(), world.clone()));
         }
         let mut seen = Vec::with_capacity(reports.len());
         for report in reports {
@@ -646,11 +625,11 @@ fn the_pad_script_is_the_minute() {
     let legs = script(MINUTE);
     let read: Vec<(&str, usize)> =
         legs.iter().map(|(name, reports)| (name.as_str(), reports.len())).collect();
-    assert_eq!(read, LEGS.to_vec(), "the script is not the eleven legs the tests assert about");
+    assert_eq!(read, LEGS.to_vec(), "the script is not the ten legs the tests assert about");
     assert_eq!(
         read.iter().map(|(_, n)| n).sum::<usize>(),
-        4020,
-        "the script is not the minute and the flip at 60 frames a second"
+        3600,
+        "the script is not the minute at 60 frames a second"
     );
 
     let m = ride_the_minute();
@@ -833,7 +812,7 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
 /// ride to be compared with.
 fn assert_it_flipped(how: &str, flip: &[&Seat]) -> usize {
     let lip = flip.iter().filter(|t| t.lip).count();
-    assert!(lip > 30, "{how}: the flip's ramp only held the lip for {lip} frames");
+    assert!(lip > 20, "{how}: the flip's ramp only held the lip for {lip} frames");
     let shoved = flip.iter().position(|t| t.preload);
     let shoved = shoved.unwrap_or_else(|| panic!("{how}: the preload never fired"));
     assert!(flip[shoved].lip, "{how}: the preload fired at frame {shoved} of the leg, off the lip");
@@ -871,48 +850,143 @@ fn assert_it_flipped(how: &str, flip: &[&Seat]) -> usize {
     fired
 }
 
-/// P16: pump the lip and flip off it, through the pad and then on the keyboard.
-///
-/// The script's leg is the sibling file's `the_flip`, frame for frame, and it is asserted the same
-/// way. Then the same leg is ridden again from the frame it started on, with the left stick's y
-/// taken not from the script but from the shell's own [`pad::Pads`] with the arrow keys held where
-/// the script has the stick — `up` where it is pushed forward, `down` where it is pulled back — so
-/// the stick arrives through `KeyAxis`'s ramp: 0.18 s to the edge, 0.10 s back through centre.
-///
-/// P16's brief suspected that ramp: that a reversal on the keys costs about 0.22 s and the lip is
-/// gone before the second one lands. It does cost that — but so does the bike. Every stick y the ride
-/// reads has been walked toward the hand at `YAxisRateLimit`, 6 a second on this bike: −0.8 to +0.8
-/// is 16 frames and stop to stop 20 however fast the hand is, and the key ramp's 0.10 s home and
-/// 0.18 s out never get ahead of it. Ridden here, the keys fire the preload and the backflip on the
-/// same frames the stick does. What the keys do lose is the stab that ends the turn, which reaches
-/// −0.8 some eight frames after the stick's (the key starts from centre and has nothing to cross
-/// back through first); the script's stab is early enough in its window that both land. What was
-/// missing was a lip long enough for three crosses and a bike with a flip in it, which [`FLIP_RAMP`]
-/// and [`RIDE_FLIP`] are.
-#[test]
-fn it_flips_off_the_lip() {
-    let m = ride_the_minute();
-    let flip = m.leg("the flip");
-    let by_stick = assert_it_flipped("on the stick", &flip);
-    // The stick did reach the hand's stops, so the crosses above were the rate limit's and not a
-    // stick the dead zone kept short.
-    let reach = flip.iter().map(|t| t.stick_y).fold((0.0f32, 0.0f32), |(lo, hi), y| (lo.min(y), hi.max(y)));
-    assert!(reach.0 < -0.95 && reach.1 > 0.95, "the script's stick y only reached {reach:?}");
+/// The disc's `race125p.phy` and where the `125_faisst` model hangs its wheels — the sibling file's
+/// `the_disc_125`, repeated for the reason the file's head gives. `None` when the disc is not here.
+fn the_disc_125(tables: &Tables) -> Option<(Phy, (Vf, Vf))> {
+    use game_sim::archive::{Psr, Res};
+    use std::io::{Read, Seek, SeekFrom};
+    let iso = match std::env::var_os("GAME_SIM_FIXTURES") {
+        Some(dir) => std::path::PathBuf::from(dir).join("iso"),
+        None => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/iso"),
+    };
+    let mut file = std::fs::File::open(iso.join("MX.PSR")).ok()?;
+    let mut front = vec![0u8; 64 << 10];
+    file.read_exact(&mut front).ok()?;
+    let psr = Psr::parse(&front).ok()?;
+    let mut member = |name: &str| -> Option<Vec<u8>> {
+        let e = psr.find(name)?;
+        file.seek(SeekFrom::Start(e.at)).ok()?;
+        let mut bytes = vec![0u8; e.size as usize];
+        file.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    };
+    let leaf = |res: &Res, want: &str| {
+        res.entries
+            .iter()
+            .find(|e| {
+                let n = e.name.to_ascii_lowercase();
+                n == want || n.ends_with(&format!("\\{want}"))
+            })
+            .cloned()
+    };
+    let archives: Vec<String> = psr
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("bike\\") && n.ends_with(".res")
+        })
+        .collect();
+    let (mut phy, mut wheels) = (None, None);
+    for archive in &archives {
+        let Some(bytes) = member(archive) else { continue };
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        if phy.is_none() {
+            if let Some(e) = leaf(&res, "race125p.phy") {
+                phy = res.read(&bytes, &e).ok().map(|b| Phy::read_bytes(&b, &tables.ride.curve));
+            }
+        }
+        if wheels.is_none() && archive.to_ascii_lowercase().contains("125_faisst") {
+            let Some(e) = leaf(&res, "bike.psg") else { continue };
+            let Ok(psg) = res.read(&bytes, &e) else { continue };
+            let Ok(model) = game_render::psg::Model::parse(&psg) else { continue };
+            let node = |name: &str| -> Option<Vf> {
+                let i = model.nodes.iter().position(|n| n.name == name)?;
+                let mut root = i;
+                while let Some(up) = model.nodes[root].parent {
+                    root = up;
+                }
+                Some(Vf(model.place_in(i, root)))
+            };
+            wheels = node("TireFront").zip(node("TireRear"));
+        }
+    }
+    Some((phy?, wheels?))
+}
 
-    let (mut sim, mut world) = m.at_the_flip.expect("the minute never reached the flip");
-    let reports = script(MINUTE).into_iter().find(|(name, _)| name == "the flip").unwrap().1;
-    let mut keys = pad::Pads::unplugged(pad::Wiring::default());
-    let mut seen = Vec::with_capacity(reports.len());
-    for mut report in reports {
-        let y = report.axis(REPORT_LEFT_Y);
-        let (up, down) = (y < AXIS_CENTRE - 64, y > AXIS_CENTRE + 64);
-        let held = |code: u8| (code == window::key::UP && up) || (code == window::key::DOWN && down);
-        report.set_axis(REPORT_LEFT_Y, keys.build(DT.0, &held).axis(REPORT_LEFT_Y));
+/// Ride [`FLIP`] on the disc's 125 from a standstill at the origin, facing +z up [`FLIP_RAMP`], and
+/// keep what the rider saw. With `keys`, the left stick's y is not the script's but the shell's
+/// own [`pad::Pads`] with the arrow keys held where the script has the stick — `up` where it is
+/// pushed forward, `down` where it is pulled back — which since P30 is the d-pad. `None` without the
+/// disc.
+fn ride_the_flip(mut keys: Option<&mut pad::Pads>) -> Option<Vec<Seat>> {
+    let tables = Arc::new(Tables::build());
+    let (phy, wheels) = the_disc_125(&tables)?;
+    let at = Vf::new(0.0, 2.0, 0.0, 1.0);
+    let rider = game_sim::rider::Rider::new(&phy, wheels, at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let mut sim = Sim::with_rider(0, tables, phy, rider);
+    let (start, slope, length) = FLIP_RAMP;
+    let dir = Vf::new(0.0, 0.0, 1.0, 0.0);
+    let mut world = Jump { origin: Vf::new(0.0, 0.0, 0.0, 1.0), dir, start, slope, length };
+    let legs = script(FLIP);
+    assert_eq!(legs.len(), 1, "ride-flip.pad is one leg");
+    let mut seen = Vec::with_capacity(legs[0].1.len());
+    for &report in &legs[0].1 {
+        let mut report = report;
+        if let Some(keys) = keys.as_deref_mut() {
+            // The arrows are the d-pad (`pad::keyboard`): the stick goes back to centre and the
+            // keys' d-pad bits and pressures go into the script's report, which keeps its throttle.
+            let y = report.axis(REPORT_LEFT_Y);
+            let (up, down) = (y < AXIS_CENTRE - 64, y > AXIS_CENTRE + 64);
+            let held = |code: u8| (code == window::key::UP && up) || (code == window::key::DOWN && down);
+            let from_keys = keys.build(DT.0, &held);
+            let word = |r: &Report| !(u16::from(r.0[2]) << 8 | u16::from(r.0[3]));
+            let dpad = word(&from_keys) & (Control::Up.mask() | Control::Down.mask());
+            let low = !(word(&report) | dpad);
+            report.0[2] = (low >> 8) as u8;
+            report.0[3] = low as u8;
+            for binding in CONTROL_MAP {
+                if binding.is_analogue() && binding.mask & dpad != 0 {
+                    report.0[binding.pressure as usize] = from_keys.0[binding.pressure as usize];
+                }
+            }
+            report.set_axis(REPORT_LEFT_Y, AXIS_CENTRE);
+        }
         let reports: [Report; PADS] = [report, Report::missing()];
         let controls = sim.poll(DT, &reports);
         let frame = sim.step(DT, &controls, &mut world);
         seen.push(Seat::of(&sim, &controls, frame.wreck.is_some(), &world));
     }
+    Some(seen)
+}
+
+/// P16 and P30: pump the lip and flip off it on the disc's 125, through the pad and then on the
+/// keyboard.
+///
+/// The script is the sibling file's `THE_FLIP`, frame for frame, and it is asserted the same way.
+/// Then it is ridden again on the arrow keys through the shell's own [`pad::Pads`]
+/// ([`ride_the_flip`]).
+///
+/// What the keys have to get right changed with P30. Before it every stick y the backflip read had
+/// been walked toward the hand at `YAxisRateLimit`, which the arrows' key ramp never got ahead of,
+/// so the keys fired on the stick's frames by construction. The original reads the stick the
+/// gesture fires on raw and sizes the push by how fast the thumb crossed it, and on that reading
+/// the ramp could not fit three crosses on the 125's lip: the preload never fired. The arrows are
+/// the d-pad now, the original's own digital stick, and this is what holds that to being a control
+/// a rider can flip on.
+#[test]
+fn it_flips_off_the_lip() {
+    let Some(ridden) = ride_the_flip(None) else { return };
+    let flip: Vec<&Seat> = ridden.iter().collect();
+    let by_stick = assert_it_flipped("on the stick", &flip);
+    // The stick did reach the hand's stops, so the crosses above were the hand's and not a stick the
+    // dead zone kept short.
+    let reach = flip.iter().map(|t| t.stick_y).fold((0.0f32, 0.0f32), |(lo, hi), y| (lo.min(y), hi.max(y)));
+    assert!(reach.0 < -0.95 && reach.1 > 0.95, "the script's stick y only reached {reach:?}");
+
+    let mut keys = pad::Pads::unplugged(pad::Wiring::default());
+    let seen = ride_the_flip(Some(&mut keys)).expect("the disc went away between two rides");
     let on_keys: Vec<&Seat> = seen.iter().collect();
     let by_keys = assert_it_flipped("on the keys", &on_keys);
     assert!(
@@ -1114,7 +1188,6 @@ fn a_default_session_rides_the_bike_exactly_as_before() {
     for (name, reports) in script(MINUTE) {
         let ramp = match name.as_str() {
             "the run-up" => Some(RAMP),
-            "the flip" => Some(FLIP_RAMP),
             _ => None,
         };
         if let Some((start, slope, length)) = ramp {
@@ -1137,7 +1210,7 @@ fn a_default_session_rides_the_bike_exactly_as_before() {
             frames += 1;
         }
     }
-    assert_eq!(frames, 4020);
+    assert_eq!(frames, 3600);
     assert_eq!(garage.up, Kind::Bike);
     assert_eq!(garage.plane, Some(parked_plane()), "a bike session moved the parked plane");
     // And the bike went somewhere, or the comparison above was of two bikes standing still.

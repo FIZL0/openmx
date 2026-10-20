@@ -251,11 +251,12 @@ pub fn control_named(name: &str) -> Option<Control> {
 /// steer and the preload grow from nothing after it rather than slamming to full on frame one.
 /// Coming back is quicker than going out, because a rider who lets go of a key has already decided.
 ///
-/// Neither is what limits a reversal on the bike. The ride walks stick y toward the hand at the
-/// `.phy`'s `YAxisRateLimit` (6 a second on the stand-in bike, 3.5 on the retail 125), and a key
-/// crossing from one stop to the other at 0.10 s home and 0.18 s out stays ahead of that walk all the
-/// way, so a pump-and-flip on the arrow keys fires on the same frames as one on a stick (P16,
-/// `tests/ride.rs`'s `it_flips_off_the_lip`).
+/// Since P30 these ramp `IJKL`, the right stick, only. The arrow keys were the left stick on this
+/// ramp until then, and P16 measured that a pump-and-flip on them fired on the same frames as one on
+/// a stick — because the port read the backflip's stick through the ride's rate limit, which no key
+/// ramp could get ahead of. The original reads that stick raw and sizes the flip by how fast it
+/// crossed, and on the disc's 125 the ramp cannot make the three crosses inside the lip at all. The
+/// arrows are the d-pad now ([`keyboard`]), which is the original's own digital stick.
 const KEY_TO_EDGE: f32 = 0.18;
 const KEY_TO_CENTRE: f32 = 0.10;
 
@@ -280,9 +281,8 @@ const KEY_TO_SHUT: f32 = 0.12;
 
 /// Which two keys drive which stick axis, and where that axis goes in the report. The low key is the
 /// one at the low end of the byte, which is up or left — the hardware's own sense (see [`stick_byte`]).
-const KEY_STICKS: [(usize, u8, u8); 4] = [
-    (REPORT_LEFT_X, key::LEFT, key::RIGHT),
-    (REPORT_LEFT_Y, key::UP, key::DOWN),
+/// The left stick has no keys: the arrows are the d-pad ([`keyboard`]).
+const KEY_STICKS: [(usize, u8, u8); 2] = [
     (REPORT_RIGHT_X, key::J, key::L),
     (REPORT_RIGHT_Y, key::I, key::K),
 ];
@@ -297,7 +297,7 @@ pub struct Pads {
     axis: [i16; AXES],
     /// Which pad buttons are down.
     button: [bool; BUTTONS],
-    /// The four keyboard stick axes, in [`KEY_STICKS`]' order, each part way to its edge.
+    /// The keyboard's stick axes, in [`KEY_STICKS`]' order, each part way to its edge.
     key_stick: [KeyAxis; KEY_STICKS.len()],
     /// The keyboard's throttle, part way to full.
     key_gas: KeyRamp,
@@ -425,9 +425,9 @@ impl Pads {
         report.set_axis(REPORT_LEFT_Y, stick_byte(self.axis[AXIS_LEFT_Y]));
         report.set_axis(REPORT_RIGHT_X, stick_byte(self.axis[AXIS_RIGHT_X]));
         report.set_axis(REPORT_RIGHT_Y, stick_byte(self.axis[AXIS_RIGHT_Y]));
-        // The keyboard moves both sticks too, since half of riding is on them: the arrows are the
-        // left stick and `IJKL` the right one, each ramped toward its edge for as long as the key is
-        // held and let back to centre when it is not ([`KeyAxis`]).
+        // The keyboard moves the right stick too: `IJKL`, ramped toward its edge for as long as the
+        // key is held and let back to centre when it is not ([`KeyAxis`]). The arrows are the d-pad,
+        // in `keyboard` above.
         for (axis, (slot, low, high)) in self.key_stick.iter_mut().zip(KEY_STICKS) {
             if let Some(byte) = axis.step(seconds, held(low), held(high)) {
                 report.set_axis(slot, byte);
@@ -572,7 +572,16 @@ fn hat(value: i16, low: Control, high: Control) -> u16 {
 ///
 /// Laid out so that the four face keys are where the four face buttons are on a pad: `Z` is Square,
 /// `X` Cross — the throttle — `C` Circle and `V` Triangle, with the shoulders on `A`, `S`, `D`, `F`
-/// above them, Start on Return, and the arrow keys on the left stick.
+/// above them, Start on Return, and the arrow keys on the d-pad.
+///
+/// **The arrows are the d-pad and not the left stick** (P30). The original's d-pad *is* its digital
+/// stick on the bike: the pad read puts ±1 in place of the left stick's x or y while a direction is
+/// held, flags the axis digital, and the bike then walks its lean toward it at the `.phy`'s
+/// `XDPadRateLimit`/`YDPadRateLimit` instead of the analogue pair and times a preload with the
+/// `DPad` preload times — a whole set of numbers written for a control that is a switch, which is
+/// what a key is. The backflip and the preload are sized by how fast the stick crossed, and a d-pad
+/// crosses in one sample, the way a thumb flicking a stick does; a ramped key stick crossed at a
+/// twentieth of that speed and could not fit three crosses on a lip.
 ///
 /// The throttle keys (`X` and the space bar) are not in this table: they are a pressure and not a
 /// bit, and [`KeyRamp`] answers both the byte and the bit for them.
@@ -580,10 +589,9 @@ fn hat(value: i16, low: Control, high: Control) -> u16 {
 /// The same keys fly the biplane, with nothing added, because the plane reads the same pad through
 /// the shipped binding table ([`game_sim::input::PlaneCommand::control`]): `X`/space is Cross, the
 /// throttle up; `Z` is Square, the throttle down; `A` and `D` are L1 and R1, the rudder (and both
-/// together are the plane's own reset chord); and the arrows are the left stick, the elevator and the
-/// aileron. The plane's dive, climb and bank commands sit on the d-pad, which the keyboard does not
-/// have, but they write the same ±1 a stick at its stop does, and a held arrow is a stick at its stop
-/// in [`KEY_TO_EDGE`].
+/// together are the plane's own reset chord); and the arrows are the d-pad, where the plane's dive,
+/// climb and bank commands sit — they write the same ±1 to the elevator and the aileron that a stick
+/// at its stop does.
 fn keyboard(held: &dyn Fn(u8) -> bool) -> u16 {
     let mut mask = 0;
     for (code, control) in [
@@ -595,6 +603,10 @@ fn keyboard(held: &dyn Fn(u8) -> bool) -> u16 {
         (key::D, Control::R1),
         (key::F, Control::R2),
         (key::RETURN, Control::Start),
+        (key::UP, Control::Up),
+        (key::DOWN, Control::Down),
+        (key::LEFT, Control::Left),
+        (key::RIGHT, Control::Right),
         (key::TAB, Control::Select),
         (key::Q, Control::L3),
         (key::E, Control::R3),

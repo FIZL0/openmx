@@ -204,14 +204,18 @@ pub struct Step {
     /// Each wheel's own velocity at its contact patch.
     pub front_vel: Vf,
     pub rear_vel: Vf,
-    /// The left stick, after the dead zone and the d-pad override: `x` is lean/yaw, `y` is pitch.
+    /// The left stick, `+0x628`/`+0x62c`: the player-range deflection with the d-pad override, then
+    /// squared with its sign kept by the input layer's rate limiter (P30) — so [`HELD`] is a stick
+    /// pushed past about 0.894. `x` is lean/yaw, `y` is pitch.
     pub stick: (F, F),
-    /// How long the stick has been held where it is.
+    /// `+0x630`, the fore-aft axis's last flick speed in stick travel a second — the player record's
+    /// measure of how fast the stick crossed from past 0.8 one way to past 0.8 the other (see
+    /// `ride::Flick`), not a time it has been held. The backflip scales its torque by it.
     pub stick_hold: F,
     /// The preload came from the d-pad, which gets its own pair of times because it has no travel.
     pub dpad_y: bool,
-    /// Which of the eight directions the d-pad (or the stick) is pointing, zero for none. A backflip
-    /// only decays its torque while this is zero.
+    /// `+0x9fc`, the trick buttons' group ([`crate::trick::group`]), zero for none. A backflip only
+    /// decays its torque while no trick button is held.
     pub dpad_dir: i32,
     /// The brake, and the two brakes the gyro torque watches.
     pub brake: F,
@@ -514,9 +518,10 @@ fn on_a_lip(air: &Air, chassis: &Chassis, step: &Step) -> bool {
 ///
 /// Pull the stick back (`y` above [`HELD`]) while the lip conditions hold and it arms, with the timer
 /// counting up; push it forward again and it fires, the timer reloading with
-/// [`Params::preload_time`]. How long it was held, mapped through the Min/Max preload times onto
+/// [`Params::preload_time`]. [`Step::stick_hold`], mapped through the Min/Max preload times onto
 /// 0..[`Params::max_preload`], is the force — and the d-pad gets its own pair of times, because it
-/// cannot be held half way.
+/// cannot be held half way. Despite the keys' names that is not how long the stick was held but how
+/// fast it last crossed (P30, `ride::Flick`).
 ///
 /// While it fires the same force goes into the chassis every substep until the timer runs out, which
 /// is why a preload is a shove and not an impulse.
@@ -755,8 +760,8 @@ pub fn backflip(p: &Params, air: &mut Air, chassis: &mut Chassis, step: &Step) {
 
 /// The rotation step, for any set of rows.
 ///
-/// It runs in three phases. *Triggered* — the torque is chosen from how long the stick was held,
-/// between the floor times the minimum and the maximum, and the bike has the row's grace to get
+/// It runs in three phases. *Triggered* — the torque is chosen from [`Step::stick_hold`] (how fast
+/// the stick last crossed, P30), between the floor times the minimum and the maximum, and the bike has the row's grace to get
 /// airborne or the rotation is cancelled. *Turning* — the torque goes into the chassis every substep
 /// and decays towards zero at a rate the stick controls (one rate pushing the firing way, another
 /// otherwise), but only while the d-pad is not asking for a trick; it ends when a wheel touches, when

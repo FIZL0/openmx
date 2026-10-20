@@ -1,0 +1,28 @@
+# P16's flip, on the disc's own 125 — P30, in the kit's pad notation.
+#
+# One leg of 420 frames at 60 Hz. `crates/openmx/tests/ride.rs` rides it headless on `race125p.phy`
+# read off the disc, from a standstill 108 ft short of a 25 ft ramp at a half (`FLIP_RAMP`), once on
+# the stick as written and once on the shell's arrow keys. The sibling file's `THE_FLIP` is the same
+# hands as `Controls`, frame for frame, and says why each frame is what it is.
+#
+# Cross is the throttle and the left stick's y the gesture: positive is pulled back. The bike reaches
+# the lip at about frame 150 and leaves it at about 176.
+
+# leg: the flip
+# Flat out at the ramp. Back as the lip arrives (the preload arms), forward (a flick: the preload
+# fires and the backflip arms), back (the backflip fires), centred in the air while it turns, and
+# forward for a third of a second to end the turn about three quarters of the way round.
+down cross
+sleep 140f
+stick l 0 1
+sleep 18f
+stick l 0 -1
+sleep 8f
+stick l 0 1
+sleep 10f
+stick l 0 0
+sleep 84f
+stick l 0 -1
+sleep 20f
+stick l 0 0
+sleep 140f

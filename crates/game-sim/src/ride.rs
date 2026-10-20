@@ -68,9 +68,6 @@ const NOTHING: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
 /// How many probes the collision bundle carries, and what each one is for — see [`Ride::bundle`].
 const PROBES: usize = 4;
 
-/// The deflection past which the stick counts as held, for the stick-hold clock `air.rs` reads.
-const STICK_HELD: f32 = 0.5;
-
 /// The rate the surface's two torques fade in at, per foot a second of the contact's own slide:
 /// `wheel_surface_drag`'s own literal, which makes the brake and the rolling torque whole above
 /// 3⅓ ft/s and nothing at a standstill. See [`surface_drag`].
@@ -210,9 +207,23 @@ impl Controls {
 ///
 /// The original's input layer walks a table of bindings and moves each command towards what the pad
 /// says at a rate the `.phy` gives (`[Joystick]`'s eight `…RateLimit` keys), so a stab at the throttle
-/// is not a step. **The walk itself is this module's** — the binding table is the front end's and is
-/// not ported — but the rates are the disc's, and a rate of zero is read as "no limit" rather than as
-/// "never move", because that is what a `.phy` with the key missing has to mean.
+/// is not a step. **The levers' walk is this module's** — the binding table is the front end's and is
+/// not ported — but the rates are the disc's, and for the levers a rate of zero is read as "no limit"
+/// rather than as "never move", because that is what a `.phy` with the key missing has to mean.
+///
+/// **The stick's is the original's** (P30), and it is three things, not one:
+///
+/// - [`Held::stick`] is the stick the bike reads raw: the player-range deflection with the d-pad
+///   forcing an axis to ±1 ([`trick::stick`]), then each axis multiplied by its own magnitude, sign
+///   kept. The squaring is the rate limiter's, done in place before anything else in the frame reads
+///   it, so the air steps' gesture, the centre of gravity's shift and the balance all see `x·|x|` —
+///   a stick at 0.85 is 0.72 to them, short of the backflip's 0.8.
+/// - [`Held::lean`] walks towards that squared stick at `X`/`YAxisRateLimit` a second, or at
+///   `X`/`YDPadRateLimit` on an axis the d-pad is holding ([`Held::digital`]), as
+///   `now + min(max(want − now, −r·dt), r·dt)`. A rate of zero here never moves, as in the original.
+///   This is the lean the steering, the wheelie and the stoppie read.
+/// - [`Held::flick`] is the speed of the stick's last full flick, which the backflip reads as how
+///   hard it was asked for — see [`Flick`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Held {
     pub gas: F,
@@ -220,10 +231,17 @@ pub struct Held {
     pub front_brake: F,
     pub rear_brake: F,
     pub clutch: F,
+    /// The stick, squared with its sign kept: `+0x628`/`+0x62c` after the rate limiter.
     pub stick: (F, F),
-    /// How long the stick has been held past [`STICK_HELD`], which is what `air.rs` reads as
+    /// Whether each axis of [`Held::stick`] came from the d-pad, which picks the lean's rate.
+    pub digital: [bool; 2],
+    /// The rate-limited lean, sideways and fore and aft.
+    pub lean: (F, F),
+    /// The fore-aft axis's flick speed, in stick travel a second: what `air.rs` reads as
     /// `stick_hold`.
-    pub stick_hold: F,
+    pub flick: F,
+    /// The samples [`Held::flick`] is measured over.
+    pub ring: Flick,
 }
 
 impl Held {
@@ -241,10 +259,121 @@ impl Held {
         let clutch_rate =
             if self.clutch < c.clutch { j.clutch_in_rate_limit } else { j.clutch_out_rate_limit };
         self.clutch = toward(self.clutch, c.clutch, clutch_rate, dt);
-        self.stick.0 = toward(self.stick.0, c.stick.0, j.x_axis_rate_limit, dt);
-        self.stick.1 = toward(self.stick.1, c.stick.1, j.y_axis_rate_limit, dt);
-        let held = F(STICK_HELD) < (self.stick.0 * self.stick.0 + self.stick.1 * self.stick.1);
-        self.stick_hold = if held { self.stick_hold + dt } else { F::ZERO };
+
+        // The stick, as the player record's sampler and the bike's pad read leave it: the d-pad
+        // over the deflection, axis by axis. The flick is measured on this, before the squaring.
+        let raw = trick::stick(c.stick.0, c.stick.1, c.dpad);
+        self.flick = self.ring.sample(raw.y, dt);
+        self.digital = raw.digital;
+        self.stick = (squared(raw.x), squared(raw.y));
+        let rx = if raw.digital[0] { j.x_dpad_rate_limit } else { j.x_axis_rate_limit } * dt;
+        let ry = if raw.digital[1] { j.y_dpad_rate_limit } else { j.y_axis_rate_limit } * dt;
+        self.lean = (limit(self.lean.0, self.stick.0, rx), limit(self.lean.1, self.stick.1, ry));
+    }
+}
+
+/// An axis times its own magnitude: the original's `x · x · (x < 0 ? −1 : 1)`.
+pub fn squared(x: F) -> F {
+    x * x * if x < F::ZERO { F(-1.0) } else { F::ONE }
+}
+
+/// The rate limiter's step, in its own order: the gap clamped below, then above, then added.
+fn limit(now: F, want: F, r: F) -> F {
+    let gap = want - now;
+    let neg = F(fpu::neg(r.0));
+    let gap = if neg < gap { gap } else { neg };
+    now + if gap < r { gap } else { r }
+}
+
+/// How many samples the flick is measured over: the original's ring.
+pub const FLICK_SAMPLES: usize = 32;
+
+/// How many samples the original's ring takes a second: five a 30 Hz tick, counted in the human's two
+/// recordings' save states (see [`Flick`]).
+pub const FLICK_RATE: f32 = 150.0;
+
+/// The magnitude past which a sample counts as the stick thrown to one side.
+const FLICK_TRAVEL: f32 = 0.8;
+
+/// The flick: how fast the stick last went from one side to the other.
+///
+/// The original's player record keeps a ring of the last 32 stick samples, each with the time it was
+/// taken, and every tick scans it oldest first: a sample past ±0.8 is remembered (the latest one on
+/// that side wins), and the next one past 0.8 on the *other* side gives a speed — the change in
+/// deflection over the time between the two — if the remembered time is above zero. Each crossing
+/// forgets the remembered sample, and the fastest crossing in the ring is the answer, zero if none.
+/// The ring and the scan are the original's, comparison for comparison.
+///
+/// **The sampling is the port's own.** The original samples from a pad listener the engine calls
+/// after the pad update, after the simulation, and from inside every DMA wait longer than 4 ms, each
+/// sample stamped with the hardware timer and the axes read afresh — about five a 30 Hz tick, a number
+/// that depends on how long the GS made the CPU wait. A full flick inside one tick so measures
+/// anything from 54 to 469 in the original's own capture, and nothing deterministic can reproduce
+/// that. This takes one reading a frame, stamped with the simulation's own clock (which starts at the
+/// first frame's `dt`, not zero, because the scan ignores a remembered time of zero), and pushes it as
+/// many times as the original would have sampled in that time ([`FLICK_RATE`], at least once), so
+/// the ring spans the original's ~0.2 s. Duplicates change nothing in the scan but the span. On the
+/// human's recording (`tests/air.rs`, `the_flick_is_the_originals_clock_aside`) that puts every flick
+/// on the original's tick, with its sign, and gone again within a tick of the original's; a flick
+/// across two ticks measures what the original's does (30.0 against 29.85), and one inside a tick
+/// measures a whole tick's worth, the slowest the original could have measured it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Flick {
+    /// The simulation's clock, the time of the last sample.
+    pub now: F,
+    /// The slot the next sample goes in, which is also the oldest.
+    pub head: usize,
+    pub at: [F; FLICK_SAMPLES],
+    pub value: [F; FLICK_SAMPLES],
+}
+
+impl Flick {
+    /// One frame's reading, `dt` after the last, and the ring scanned.
+    pub fn sample(&mut self, value: F, dt: F) -> F {
+        self.now = self.now + dt;
+        let times = ((dt.0 * FLICK_RATE).round() as usize).clamp(1, FLICK_SAMPLES);
+        for _ in 0..times {
+            self.at[self.head] = self.now;
+            self.value[self.head] = value;
+            self.head = (self.head + 1) % FLICK_SAMPLES;
+        }
+        self.speed()
+    }
+
+    /// The fastest crossing in the ring, oldest sample first.
+    pub fn speed(&self) -> F {
+        let mut best = F::ZERO;
+        let (mut then, mut from) = (F::ZERO, F::ZERO);
+        for k in 0..FLICK_SAMPLES {
+            let s = (self.head + k) % FLICK_SAMPLES;
+            let v = self.value[s];
+            if !(F(FLICK_TRAVEL) < v.abs()) {
+                continue;
+            }
+            if then != F::ZERO && (v < F::ZERO) != (from < F::ZERO) {
+                if F::ZERO < then {
+                    let speed = (v - from) / (self.at[s] - then);
+                    if best.abs() < speed.abs() {
+                        best = speed;
+                    }
+                }
+                then = F::ZERO;
+                continue;
+            }
+            then = self.at[s];
+            from = v;
+        }
+        best
+    }
+}
+
+/// One of the flick ring's samples, for the walk: its time and its value.
+struct Slot(F, F);
+
+impl State for Slot {
+    fn walk(&self, w: &mut Walk<'_>) {
+        w.f("at", self.0);
+        w.f("value", self.1);
     }
 }
 
@@ -1270,7 +1399,9 @@ impl Ride {
         let rot = out.mat3(Frame::Chassis);
         let forward_speed = F(chassis.local_vel.z());
         let reverse_force = chassis::rotate(&rot, mv::reverse_push(&p.mv, forward_speed));
-        let (stick_angle, deflection) = stick(held.stick);
+        // The donut's angle and deflection are the pad read's, off the stick before the squaring.
+        let raw = trick::stick(c.stick.0, c.stick.1, c.dpad);
+        let (stick_angle, deflection) = stick((raw.x, raw.y));
 
         let step = mv::Step {
             dt,
@@ -1280,7 +1411,7 @@ impl Ride {
             stick_y: held.stick.1,
             stick_angle,
             deflection,
-            lean: held.stick.0,
+            lean: held.lean.0,
             gas: held.gas,
             brake: held.brake,
             // The clutch here is the rider's *lever* and not the rate-limited copy the engine
@@ -1295,10 +1426,10 @@ impl Ride {
             local_accel: mv::NOTHING,
             reverse_force,
             node_distance: *near,
-            stick_x: c.stick.0,
+            stick_x: held.stick.0,
             front_brake: held.front_brake,
             rear_brake: held.rear_brake,
-            lean_fore_aft: held.stick.1,
+            lean_fore_aft: held.lean.1,
         };
 
         // The ground step's view of the chassis: the same memory the original's is, so it lives
@@ -1331,14 +1462,16 @@ impl Ride {
             rear_contact: rear.mv.contact,
             front_vel: Vf::ZERO,
             rear_vel: Vf::ZERO,
+            // The squared stick, the flick, the d-pad's own flag on the fore-aft axis and the trick
+            // buttons' group (`+0x9fc`) — which is what the backflip's decay tests, not a direction.
             stick: held.stick,
-            stick_hold: held.stick_hold,
-            dpad_y: c.dpad_y,
-            dpad_dir: c.dpad_dir,
+            stick_hold: held.flick,
+            dpad_y: held.digital[1],
+            dpad_dir: trick::group(c.trick) as i32,
             brake: held.brake,
             front_brake: held.front_brake,
             rear_brake: held.rear_brake,
-            lean: held.stick.0,
+            lean: held.lean.0,
             // The trick clocks' "a trick is in progress", not the button: the original's airborne
             // control reads the clocks' own word, which last frame's clocks wrote.
             stunt: *stunt,
@@ -1679,7 +1812,16 @@ impl State for Ride {
             w.f("clutch", self.held.clutch);
             w.f("stick_x", self.held.stick.0);
             w.f("stick_y", self.held.stick.1);
-            w.f("stick_hold", self.held.stick_hold);
+            w.f("lean_x", self.held.lean.0);
+            w.f("lean_y", self.held.lean.1);
+            w.f("flick", self.held.flick);
+            w.bool("digital_x", self.held.digital[0]);
+            w.bool("digital_y", self.held.digital[1]);
+            w.f("flick_now", self.held.ring.now);
+            w.u8("flick_head", self.held.ring.head as u8);
+            let ring = self.held.ring;
+            let slots: [Slot; FLICK_SAMPLES] = std::array::from_fn(|k| Slot(ring.at[k], ring.value[k]));
+            w.list("flick_ring", &slots);
         });
         w.vf("spawn", self.spawn);
         w.vf("spawn_facing", self.spawn_facing);
