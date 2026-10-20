@@ -23,16 +23,28 @@
 //!    and the three surfaces, into a body-frame force and moment.
 //!
 //! What the original hands each of them — the plane's attitude, its airspeed and its angles, the body's
-//! rates — is measured by the plane's measure listener after every integration and read here as given.
-//! The rigid body, the world that steps it, the tires and the measure are not in this module; see the
-//! journal entry for what is ported and what is still the original's. The crash test is, below.
+//! rates — is measured by the plane's measure listener after the substeps. Those are the rest of the
+//! module:
+//!
+//! 5. [`Body`] — the rigid body: its force and moment accumulators (world-frame force, body-frame
+//!    force turned by the orientation, body-frame moment), the plane's gravity, the second-order
+//!    integrator the world calls every substep and the substep's end, and the pose it leaves;
+//! 6. [`World::step`] — the dynamics world's frame: `(int)(dt * 115) + 1` substeps, the listeners and
+//!    the bodies called over a [`Dynamics`] the caller supplies (in the game nothing is on the
+//!    constraint list, but the passes are there);
+//! 7. [`Measure`] — the measure listener: the grounded flag from the three wheels, the airspeed, alpha
+//!    and beta off the arc cosine table, the body-frame velocity, the world rates, the Euler angles and
+//!    the orientation matrix, with [`Measure::attitude`] and [`Measure::air`] handing them to 1–4.
+//!
+//! The tires and the collision response are not in this module; see the journal entries for what is
+//! ported and what is still the original's. The crash test is, below.
 //!
 //! Every field is named by the `biplane.phy` key it is loaded from, where it has one. The loader is
 //! S33's; until it lands the proofs read the values off a save state's live plane.
 //!
 //! # The crash
 //!
-//! The second half of the module is the part of the plane's frame that decides it has crashed and
+//! The section after the aerodynamics is the part of the plane's frame that decides it has crashed and
 //! puts it back, ported from `Biplane.cpp` and `MXBiplane` (research/oracle.txt, R8 and
 //! S36) and proved against a playback of the human's biplane recording
 //! (`tests/biplane.rs::the_biplane_crashes_and_respawns`). It runs on a [`Plane`] that carries only
@@ -67,13 +79,16 @@
 
 #![deny(clippy::float_arithmetic)]
 
+use crate::air::AcosTable;
 use crate::camera::CurveTable;
+use crate::chassis::{CLEAR, normalize, turn};
 use crate::hash::{State, Walk};
+use crate::math::{Mat4, quat_to_euler, quat_to_mat4};
 use crate::motion::remap;
 use crate::phy::{Ini, MPH};
 use crate::rng::Rng;
 use ps2_float::fpu::{self, Acc};
-use ps2_float::{Dest, F, Vf, libm};
+use ps2_float::{Dest, F, Field, Vf, libm, vu};
 
 const PI: f32 = 3.1415927;
 const FRAC_PI_2: f32 = 1.5707964;
@@ -612,9 +627,9 @@ pub struct Placement {
     pub up: Vf,
 }
 
-/// The rigid body, as far as the crash code touches it.
+/// The rigid body, as far as the crash code touches it (S38's [`Body`] is the whole one; S41 is to join them).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Body {
+pub struct CrashBody {
     /// The mass in slugs (`Weight` × [`SLUGS_PER_POUND`]).
     pub mass: F,
     pub at: Vf,
@@ -643,7 +658,7 @@ pub struct Contact {
 /// The biplane, as far as S36 ports it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plane {
-    pub body: Body,
+    pub body: CrashBody,
     /// The gravity force the body is given: `(0, −scale·m·g, 0, 1)`.
     pub gravity: Vf,
     /// The gravity scale an unwreck restores the force from.
@@ -688,7 +703,7 @@ impl Plane {
     /// the scale its gravity force is built with.
     pub fn new(spawn: Placement, weight: F, inertia: Vf, gravity_scale: F) -> Plane {
         let mass = weight * F(SLUGS_PER_POUND);
-        let body = Body {
+        let body = CrashBody {
             mass,
             at: spawn.at,
             forward: spawn.forward,
@@ -959,5 +974,433 @@ impl State for Plane {
         w.bool("latch", self.latch);
         w.f("respawn_clock", self.respawn_clock);
         w.bool("fresh", self.fresh);
+    }
+}
+
+// --- the rigid body ----------------------------------------------------------------------------------
+
+/// The quaternion derivative's scale as the integrator loads it: `(1/2, 1/2, 1/2, -1/2)`, the half of
+/// `q' = q ⊗ (w, 0) / 2` with the scalar half's minus sign folded in.
+const HALF: Vf = Vf([0.5, 0.5, 0.5, -0.5]);
+
+/// The rigid body the plane flies on: the engine's generic dynamics body, not the bike's chassis.
+///
+/// Everything is in the world frame except the moment, the inverse inertia and the rates, which are
+/// in the body's own (`x` pitch, `y` yaw, `z` roll). The force and the moment are accumulated over one
+/// substep by the listeners and emptied by [`Body::end_substep`]; [`Body::integrate`] turns them into
+/// motion in between. `w` lanes are kept as the original leaves them, because it stores whole
+/// quadwords.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Body {
+    /// The world steps the body (and the plane pushes gravity on it) only while this is set.
+    pub enabled: bool,
+    /// One over the mass. Zero pins the body in place: the linear step is skipped.
+    pub inv_mass: F,
+    /// What is kept of the velocity each substep, per axis (1 as shipped; the wreck lowers it).
+    pub damping: Vf,
+    /// Where the centre of mass was at the start of the last substep.
+    pub last_position: Vf,
+    /// The centre of mass.
+    pub position: Vf,
+    pub velocity: Vf,
+    /// The force of the last substep, and this one's.
+    pub last_force: Vf,
+    pub force: Vf,
+    /// The linear acceleration of the last substep (`xyz`; see [`Body::integrate`] for `w`).
+    pub accel: Vf,
+    /// A second force accumulator nothing in the plane's own listeners writes (the collision
+    /// response's), emptied each substep, and the largest magnitude per axis it reached since the
+    /// plane's preforce listener last cleared it.
+    pub shock_peak: Vf,
+    pub shock: Vf,
+    /// The step the linear half last took: `(h, h^2/2, inv_mass)`. The angular half reads it, so a
+    /// pinned body turns with the step it was last moved by.
+    pub step: Vf,
+    /// The inverse inertia, a diagonal in the body frame. Exactly `(0, 0, 0, 1)` pins the orientation.
+    pub inv_inertia: Vf,
+    /// What is kept of the rates each substep, per axis.
+    pub ang_damping: Vf,
+    /// Which way round the body was at the start of the last substep, and is now.
+    pub last_quat: Vf,
+    pub quat: Vf,
+    /// The centre of mass in the body's frame, from the model's origin.
+    pub cofg: Vf,
+    /// The moment of this substep (body frame), and the last one's.
+    pub moment: Vf,
+    pub last_moment: Vf,
+    /// The body-frame angular velocity.
+    pub rates: Vf,
+    /// The angular acceleration of the last substep (`xyz`).
+    pub ang_accel: Vf,
+    /// The moment's twin of [`Body::shock`] and its peak.
+    pub twist_peak: Vf,
+    pub twist: Vf,
+}
+
+/// `a.xyz + b.xyz`, `w` from `a`: how every accumulator is added to.
+fn add_xyz(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, a.add(b))
+}
+
+/// `v` turned into the body's frame by `q`: [`crate::chassis::turn`] with every pair of operands
+/// swapped, which is the conjugate's rotation without the conjugate. `w` is `v`'s.
+fn unturn(q: Vf, v: Vf) -> Vf {
+    let acc = Vf::opmula(v, q);
+    let acc = Vf::madd(acc, v, q.bc(Field::W));
+    let t = Vf::opmsub(acc, q, v);
+    let p = q.mul(v);
+    let acc = Vf::opmula(t, q);
+    let acc = Vf::madd(acc, q, p.bc(Field::X));
+    let acc = Vf::madd(acc, q, p.bc(Field::Y));
+    let acc = Vf::madd(acc, q, p.bc(Field::Z));
+    let acc = Vf::madd(acc, t, q.bc(Field::W));
+    v.merge(Dest::XYZ, Vf::opmsub(acc, q, t))
+}
+
+/// `q ⊗ (w, 0)` scaled by [`HALF`]: the vector half as an `vopmula`/`vopmsub` cross product with the
+/// scalar term folded in, the scalar half as `-1/2` times each of the three products, accumulated.
+fn spin(q: Vf, w: Vf) -> Vf {
+    let p = q.mul(w);
+    let acc = Vf::opmula(q, w);
+    let acc = Vf::madd(acc, w, q.bc(Field::W));
+    let v = Vf::opmsub(acc, w, q).mul(HALF);
+    let s = vu::madd(vu::madd(vu::mul(HALF.w(), p.x()), HALF.w(), p.y()), HALF.w(), p.z());
+    Vf::new(v.x(), v.y(), v.z(), s)
+}
+
+impl Body {
+    /// A world-frame force onto this substep's accumulator (`xyz`). The original then tells the
+    /// body's own listeners, of which the plane's body has none.
+    pub fn add_force(&mut self, f: Vf) {
+        self.force = add_xyz(self.force, f);
+    }
+
+    /// A body-frame force: turned into the world by the orientation, then [`Body::add_force`].
+    pub fn add_force_local(&mut self, f: Vf) {
+        self.add_force(turn(self.quat, f));
+    }
+
+    /// A body-frame moment, added as it is (the rates and the inertia are in the body frame too).
+    pub fn add_moment_local(&mut self, m: Vf) {
+        self.moment = add_xyz(self.moment, m);
+    }
+
+    /// The plane's gravity, once a substep before its other forces: a world-frame force the plane
+    /// keeps (`(0, -32.2 m, 0)` as it builds it), pushed only while the body is enabled. The original
+    /// runs the collision response straight after, which is not this module's.
+    pub fn push_gravity(&mut self, gravity: Vf) {
+        if self.enabled {
+            self.add_force(gravity);
+        }
+    }
+
+    /// The plane's preforce listener's part: the shock peak is cleared, once a frame.
+    pub fn clear_shock_peak(&mut self) {
+        self.shock_peak = CLEAR;
+    }
+
+    /// The linear half of a substep: a second-order Taylor step, `x += v h + a h^2/2`, then
+    /// `v = a h + damping * v`, with `a = force * inv_mass`. The position is remembered first, even
+    /// when the body is pinned.
+    fn advance(&mut self, h: F) {
+        self.last_position = self.position;
+        if self.inv_mass == 0.0 {
+            return;
+        }
+        let half_h2 = F(0.5) * h * h;
+        self.step = Vf::new(h.0, half_h2.0, self.inv_mass.0, self.step.w());
+        let s = self.step;
+        let a = self.force.mul(s.bc(Field::Z));
+        let d = a.mul(s.bc(Field::Y)).add(self.velocity.mul(s.bc(Field::X)));
+        self.position = add_xyz(self.position, d);
+        self.velocity = self.velocity.merge(Dest::XYZ, a.mul(s.bc(Field::X)).add(self.damping.mul(self.velocity)));
+        self.accel = self.accel.merge(Dest::XYZ, a);
+    }
+
+    /// One substep of motion, the world's integrate call: [`Body::advance`], then the orientation.
+    ///
+    /// The orientation takes the same second-order step on the quaternion: `q' = q ⊗ (w, 0) / 2`, and
+    /// `q'' = q ⊗ (alpha, 0) / 2 - q |q'|^2` (the second derivative of a unit quaternion with the
+    /// rates held), `q += q'' h^2/2 + q' h`, then back onto the unit sphere by `vrsqrt`. The rates
+    /// take `alpha h + ang_damping * rates` with `alpha = inv_inertia * moment`.
+    ///
+    /// The two accelerations are stored as whole quadwords whose `w` lanes are whatever the vector
+    /// registers held: the linear one's a register nothing in the step writes, the angular one's the
+    /// position's `w` once the linear half has run (and left as it was here otherwise).
+    pub fn integrate(&mut self, h: F) {
+        self.advance(h);
+        self.last_quat = self.quat;
+        if self.inv_inertia.to_bits() == CLEAR.to_bits() {
+            return;
+        }
+        let (q, s) = (self.quat, self.step);
+        let alpha = self.inv_inertia.mul(self.moment);
+        let d = spin(q, self.rates);
+        let dd = spin(q, alpha);
+        let sq = d.mul(d);
+        let n2 = vu::madd(vu::madd(vu::add(sq.w(), sq.x()), 1.0, sq.y()), 1.0, sq.z());
+        let curl = dd.sub(q.mul(Vf::splat(n2)));
+        let q = q.add(curl.mul(s.bc(Field::Y))).add(d.mul(s.bc(Field::X)));
+        self.quat = normalize(q);
+        self.rates = self.rates.merge(Dest::XYZ, alpha.mul(s.bc(Field::X)).add(self.ang_damping.mul(self.rates)));
+        let w = if self.inv_mass == 0.0 { self.ang_accel.w() } else { self.position.w() };
+        self.ang_accel = Vf::new(alpha.x(), alpha.y(), alpha.z(), w);
+    }
+
+    /// The world's second call per body per substep: each shock lane's peak kept by magnitude, the
+    /// force and the moment remembered and emptied, and the two shock accumulators emptied.
+    // The negated comparisons are the original's `c.ole.s` branched on false, which an unordered
+    // pair takes too.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    pub fn end_substep(&mut self) {
+        for k in 0..3 {
+            if !(F(self.shock[k]).abs() <= F(self.shock_peak[k]).abs()) {
+                self.shock_peak[k] = self.shock[k];
+            }
+        }
+        self.last_force = self.force;
+        self.force = CLEAR;
+        self.shock = CLEAR;
+        for k in 0..3 {
+            if !(F(self.twist[k]).abs() <= F(self.twist_peak[k]).abs()) {
+                self.twist_peak[k] = self.twist[k];
+            }
+        }
+        self.last_moment = self.moment;
+        self.moment = CLEAR;
+        self.twist = CLEAR;
+    }
+
+    /// Where the model is put after the substeps: the orientation and the centre of mass as they were
+    /// at the start of the *last* substep, the origin being that centre less the turned
+    /// [`Body::cofg`]. Returns `(orientation, origin)`; the origin's `w` is the last position's.
+    pub fn pose(&self) -> (Vf, Vf) {
+        let offset = turn(self.last_quat, self.cofg);
+        let p = self.last_position;
+        (self.last_quat, p.merge(Dest::XYZ, p.sub(offset)))
+    }
+}
+
+// --- the world ---------------------------------------------------------------------------------------
+
+/// The engine's dynamics world, the two numbers its step reads off itself. The lists it walks are the
+/// caller's ([`Dynamics`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct World {
+    /// How many passes the constraint list gets per substep (1 in the game).
+    pub iterations: i32,
+    /// Substeps per second at least (115 in the game).
+    pub rate: F,
+}
+
+/// The world's five lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum List {
+    Bodies,
+    Force,
+    Constraints,
+    Preforce,
+    Post,
+}
+
+/// What the world step calls. Each call is one element of one list; the counts are read again after
+/// every call, as the original's loops do, so a listener may grow its own list.
+pub trait Dynamics {
+    fn count(&self, list: List) -> i32;
+    /// Once a frame, with the frame's `dt`.
+    fn preforce(&mut self, i: i32, dt: F);
+    /// Once a substep, with the substep's.
+    fn force(&mut self, i: i32, h: F);
+    /// A body is integrated only while this is set ([`Body::enabled`]).
+    fn enabled(&self, body: i32) -> bool;
+    /// [`Body::integrate`].
+    fn integrate(&mut self, body: i32, h: F);
+    /// [`Body::end_substep`].
+    fn end_substep(&mut self, body: i32);
+    /// `first` on the first of [`World::iterations`] passes.
+    fn constrain(&mut self, i: i32, first: bool);
+    /// Once a frame after the substeps; the plane's measure is one.
+    fn post(&mut self, i: i32, dt: F);
+}
+
+impl World {
+    /// How a frame is cut: `n = (int)(dt * rate) + 1` substeps of `dt / n`. At 30 frames a second and
+    /// 115 that is four.
+    pub fn substeps(&self, dt: F) -> (i32, F) {
+        let n = (dt * self.rate).to_i32().wrapping_add(1);
+        (n, dt / F(fpu::from_i32(n)))
+    }
+
+    /// One frame: the preforce listeners, then each substep's force listeners, every enabled body's
+    /// integrate and end, and the constraint passes; then the post listeners. A world with no bodies
+    /// does nothing at all, its listeners included.
+    pub fn step(&self, dt: F, d: &mut impl Dynamics) {
+        if d.count(List::Bodies) == 0 {
+            return;
+        }
+        let mut i = 0;
+        while i < d.count(List::Preforce) {
+            d.preforce(i, dt);
+            i += 1;
+        }
+        let (n, h) = self.substeps(dt);
+        for _ in 0..n {
+            let mut i = 0;
+            while i < d.count(List::Force) {
+                d.force(i, h);
+                i += 1;
+            }
+            let mut i = 0;
+            while i < d.count(List::Bodies) {
+                if d.enabled(i) {
+                    d.integrate(i, h);
+                    d.end_substep(i);
+                }
+                i += 1;
+            }
+            let mut count = d.count(List::Constraints);
+            if count > 0 {
+                for pass in 0..self.iterations {
+                    let mut i = 0;
+                    while i < count {
+                        d.constrain(i, pass == 0);
+                        count = d.count(List::Constraints);
+                        i += 1;
+                    }
+                }
+            }
+        }
+        let mut i = 0;
+        while i < d.count(List::Post) {
+            d.post(i, dt);
+            i += 1;
+        }
+    }
+}
+
+// --- the measure -------------------------------------------------------------------------------------
+
+/// What the plane's measure listener works out after the substeps, for the next frame's listeners,
+/// the animation and the camera.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measure {
+    /// Any of the three wheels is down, now and at the last measure.
+    pub grounded: bool,
+    pub was_grounded: bool,
+    /// The velocity's length.
+    pub airspeed: F,
+    /// The angle of attack and the sideslip, radians, from the body-frame velocity.
+    pub alpha: F,
+    pub beta: F,
+    /// The rates turned into the world.
+    pub world_rates: Vf,
+    /// The velocity in the body's frame: `z` is the speed along the nose.
+    pub velocity: Vf,
+    /// The orientation matrix's forward and up rows (`xyz`; `w` is left as it was).
+    pub forward: Vf,
+    pub up: Vf,
+    /// The orientation as three angles (the roll is `z`).
+    pub euler: Vf,
+    /// The orientation and the model's origin as a matrix.
+    pub matrix: Mat4,
+}
+
+impl Default for Measure {
+    fn default() -> Measure {
+        let zero = Vf::default();
+        Measure {
+            grounded: false,
+            was_grounded: false,
+            airspeed: F::ZERO,
+            alpha: F::ZERO,
+            beta: F::ZERO,
+            world_rates: zero,
+            velocity: zero,
+            forward: zero,
+            up: zero,
+            euler: zero,
+            matrix: Mat4([zero; 4]),
+        }
+    }
+}
+
+/// `[-1, 1]` as two compares and two moves: anything unordered comes back as `1.0`.
+fn clamp_unit(c: F) -> F {
+    if c <= F::ONE {
+        if c < F(-1.0) { F(-1.0) } else { c }
+    } else {
+        F::ONE
+    }
+}
+
+/// The angle between the nose and the velocity in one plane: `acos(along / |(along, across)|)` off
+/// the arc cosine table, the length through the approximate reciprocal square root and the cosine
+/// clamped twice, negative when `across` is positive.
+fn flow_angle(along: F, across: F, table: &AcosTable) -> F {
+    let s = -across;
+    let sum = Acc::mula(s, s).madd(along, along);
+    let c = along * F::ONE.rsqrt(sum);
+    let a = table.at(clamp_unit(clamp_unit(c)));
+    if s < 0.0 { -a } else { a }
+}
+
+impl Measure {
+    /// The measure's first half: the grounded flag from the three wheels, and the aero model's
+    /// [`Aero::true_speed`], set while the plane is grounded or its collision record says it is
+    /// touching something. Returns `(touchdown, true_speed)`; a touchdown (not grounded last time,
+    /// grounded now) is when the original plays the wheels' touchdown sound.
+    ///
+    /// The original then animates the surfaces and runs the crash test, which may move the body,
+    /// before [`Measure::flight`] reads it.
+    pub fn contacts(&mut self, wheels_down: [bool; 3], touching: bool) -> (bool, bool) {
+        self.was_grounded = self.grounded;
+        self.grounded = wheels_down.iter().any(|&w| w);
+        (!self.was_grounded && self.grounded, self.grounded || touching)
+    }
+
+    /// The second half, everything off the body: the airspeed, the body-frame velocity and the world
+    /// rates, alpha (from the velocity's `y` and `z`) and beta (its `x` and `z`), the Euler angles,
+    /// and the matrix with the forward and up rows copied out. The matrix's origin is the current
+    /// centre of mass less the turned [`Body::cofg`].
+    pub fn flight(&mut self, body: &Body, table: &AcosTable) {
+        let v = body.velocity;
+        let (x, y, z) = (F(v.x()), F(v.y()), F(v.z()));
+        self.airspeed = Acc::mula(x, x).madda(y, y).madd(z, z).sqrt();
+        self.velocity = unturn(body.quat, v);
+        self.world_rates = turn(body.quat, body.rates);
+        let along = F(self.velocity.z());
+        self.alpha = flow_angle(along, F(self.velocity.y()), table);
+        self.beta = flow_angle(along, F(self.velocity.x()), table);
+        self.euler = quat_to_euler(body.quat, table);
+        let p = body.position;
+        let origin = p.merge(Dest::XYZ, p.sub(turn(body.quat, body.cofg)));
+        self.matrix = quat_to_mat4(body.quat, origin);
+        self.forward = self.forward.merge(Dest::XYZ, self.matrix.0[2]);
+        self.up = self.up.merge(Dest::XYZ, self.matrix.0[1]);
+    }
+
+    /// What [`controls`] and [`autopilot`] read, off this measure and the body.
+    pub fn attitude(&self, flown: bool, body: &Body) -> Attitude {
+        Attitude {
+            flown,
+            grounded: self.grounded,
+            nose_y: F(self.forward.y()),
+            roll: F(self.euler.z()),
+            speed: F(self.velocity.z()),
+            pitch_rate: F(body.rates.x()),
+        }
+    }
+
+    /// What [`Aero::forces`] reads, off this measure, the surfaces and the body.
+    pub fn air(&self, s: &Surfaces, body: &Body) -> Air {
+        Air {
+            alpha: self.alpha,
+            beta: self.beta,
+            speed: F(self.velocity.z()),
+            elevator: s.elevator_command,
+            aileron: s.aileron,
+            rudder: s.rudder,
+            rates: body.rates,
+        }
     }
 }
