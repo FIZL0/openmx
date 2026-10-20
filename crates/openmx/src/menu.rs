@@ -1074,8 +1074,40 @@ enum Align {
     Centre,
 }
 
-/// The layout's screen.
+/// The layout's screen. A window of another shape gets the layout at one scale both ways (the
+/// smaller of its two), and the room left over goes to whichever side each part is anchored away
+/// from, so nothing stretches.
 const LAYOUT: (f32, f32) = (640.0, 448.0);
+
+/// Which corner of the frame a part's layout numbers count from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Anchor {
+    TopLeft,
+    BottomLeft,
+    BottomRight,
+    Centre,
+}
+
+/// How far a pill reaches past each end of its label, in layout pixels.
+pub const PILL_PAD: f32 = 12.0;
+/// The list's rows are centred on this, `mainmenu.lyt`'s items.
+const LIST_X: f32 = 185.0;
+/// `mainmenu.lyt`'s logo, 512x64.
+const LOGO: Rect = Rect { x: 20.0, y: 25.0, w: 512.0, h: 64.0 };
+
+/// A box the menu drew, in frame pixels: left, top, width, height.
+pub type Bounds = [f32; 4];
+
+/// What a screen drew where, so its layout can be checked without reading pixels back.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Part {
+    /// The logo's box.
+    Logo(Bounds),
+    /// A highlight pill and the label on it.
+    Pill { pill: Bounds, label: Bounds },
+    /// A row's label with no pill under it.
+    Item(Bounds),
+}
 
 impl Art {
     pub fn load(disc: &mut Disc) -> Result<Art, String> {
@@ -1113,26 +1145,35 @@ impl Art {
     /// Draw the menu's screen into `frame`. In a ride the frame already holds the ride, which the
     /// pause darkens rather than covers; otherwise the menu draws its own background.
     pub fn draw(&self, menu: &Menu, frame: &mut Frame) {
+        self.paint(menu, frame);
+    }
+
+    /// [`Art::draw`], saying where the logo, the pills and the labels went.
+    pub fn parts(&self, menu: &Menu, frame: &mut Frame) -> Vec<Part> {
+        self.paint(menu, frame)
+    }
+
+    fn paint(&self, menu: &Menu, frame: &mut Frame) -> Vec<Part> {
         let Some(screen) = menu.screen() else {
-            return;
+            return Vec::new();
         };
-        let mut p = Painter { art: self, frame };
+        let mut p = Painter::new(self, frame);
         match screen {
-            Screen::Pause => p.fill(rect(0.0, 0.0, 640.0, 448.0), [0, 0, 0, 140]),
+            Screen::Pause => p.fill(p.whole(), [0, 0, 0, 140]),
             Screen::Tracks => {}
             _ => p.background(),
         }
         match screen {
             Screen::Main => {
+                p.column();
+                p.list(&MAIN.map(|s| s.to_string()), menu.cursor(screen));
                 p.logo();
-                p.column(107.0, 1.0);
-                p.list(185.0, 1.0, &MAIN.map(|s| s.to_string()), menu.cursor(screen));
                 p.legend(&[("nav_x_off", "Select")]);
             }
             Screen::Pause => {
+                p.column();
+                p.list(&menu.pause_rows(), menu.cursor(screen));
                 p.logo();
-                p.column(107.0, 1.0);
-                p.list(185.0, 1.0, &menu.pause_rows(), menu.cursor(screen));
                 // With more than one rider the pause is one player's, and says whose.
                 match menu.riders > 1 {
                     true => p.title(&format!("{}P {}", menu.pauser + 1, screen.title())),
@@ -1157,33 +1198,32 @@ impl Art {
                         )
                         .collect(),
                 };
-                p.logo();
-                p.column(107.0, 1.75);
+                p.column();
                 let at = menu.cursor(screen);
-                p.list(242.0, 1.75, &rows, at);
-                // A row with choices wears the arrows either side of it.
+                let bar = p.list(&rows, at);
+                // A row with choices wears the arrows either side of its pill.
                 let choice = match screen {
                     Screen::Settings => at == 1 || at == 2,
                     _ => true,
                 };
                 if choice {
-                    let y = item_y(at) - 5.0;
-                    p.tex("arrow_left_off", rect(84.0, y, 32.0, 32.0), CHOSEN);
-                    p.tex("arrow_right_off", rect(368.0, y, 32.0, 32.0), CHOSEN);
+                    p.tex("arrow_left_off", rect(bar.x - 36.0, bar.y, 32.0, 32.0), CHOSEN);
+                    p.tex("arrow_right_off", rect(bar.x + bar.w + 4.0, bar.y, 32.0, 32.0), CHOSEN);
                 }
                 if screen == Screen::Controls {
                     let pad = match &menu.controls.pad {
                         Some(dev) => format!("Pad  {dev}"),
                         None => "Pad  the first one found".to_string(),
                     };
-                    p.text(Face::Small, &pad, 242.0, item_y(CONTROLS_ROWS + 1), Align::Centre, ITEM);
+                    p.text(Face::Small, &pad, LIST_X, item_y(CONTROLS_ROWS + 1), Align::Centre, ITEM);
                     let pressure = match menu.controls.pressure.as_str() {
                         "" => "Pressures  none".to_string(),
                         map => format!("Pressures  {map}"),
                     };
-                    p.text(Face::Small, &pressure, 242.0, item_y(CONTROLS_ROWS + 2), Align::Centre, ITEM);
-                    p.text(Face::Small, "Pad and pressures: controls.txt", 242.0, item_y(CONTROLS_ROWS + 3), Align::Centre, ITEM);
+                    p.text(Face::Small, &pressure, LIST_X, item_y(CONTROLS_ROWS + 2), Align::Centre, ITEM);
+                    p.text(Face::Small, "Pad and pressures: controls.txt", LIST_X, item_y(CONTROLS_ROWS + 3), Align::Centre, ITEM);
                 }
+                p.logo();
                 p.title(screen.title());
                 p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Change")]);
             }
@@ -1195,7 +1235,9 @@ impl Art {
             Some(n) => n.clone(),
             None => format!("Riding as {}", menu.settings.name),
         };
+        p.anchor(Anchor::BottomLeft);
         p.text(Face::Small, &ticker, 50.0, 415.0, Align::Left, ITEM);
+        p.parts
     }
 }
 
@@ -1207,18 +1249,54 @@ fn item_y(i: usize) -> f32 {
 struct Painter<'a> {
     art: &'a Art,
     frame: &'a mut Frame,
+    /// Frame pixels per layout pixel, the same both ways.
+    s: f32,
+    /// The whole frame in layout pixels: 640x448, or more one way.
+    view: (f32, f32),
+    /// Where the layout's origin sits for the part being drawn, by its [`Anchor`].
+    at: (f32, f32),
+    parts: Vec<Part>,
 }
 
-impl Painter<'_> {
-    fn scale(&self) -> (f32, f32) {
-        (self.frame.width as f32 / LAYOUT.0, self.frame.height as f32 / LAYOUT.1)
+impl<'a> Painter<'a> {
+    fn new(art: &'a Art, frame: &'a mut Frame) -> Painter<'a> {
+        let (w, h) = (frame.width.max(1) as f32, frame.height.max(1) as f32);
+        let s = (w / LAYOUT.0).min(h / LAYOUT.1);
+        Painter { art, frame, s, view: (w / s, h / s), at: (0.0, 0.0), parts: Vec::new() }
+    }
+
+    /// Count the layout's numbers from `a` from here on.
+    fn anchor(&mut self, a: Anchor) {
+        let (dx, dy) = (self.view.0 - LAYOUT.0, self.view.1 - LAYOUT.1);
+        self.at = match a {
+            Anchor::TopLeft => (0.0, 0.0),
+            Anchor::BottomLeft => (0.0, dy),
+            Anchor::BottomRight => (dx, dy),
+            Anchor::Centre => (dx / 2.0, dy / 2.0),
+        };
+    }
+
+    /// The whole frame, in the current anchor's numbers.
+    fn whole(&self) -> Rect {
+        rect(-self.at.0, -self.at.1, self.view.0, self.view.1)
+    }
+
+    /// A layout box in frame pixels.
+    fn px(&self, r: Rect) -> Rect {
+        let s = self.s;
+        rect((r.x + self.at.0) * s, (r.y + self.at.1) * s, r.w * s, r.h * s)
+    }
+
+    fn bounds(&self, r: Rect) -> Bounds {
+        let p = self.px(r);
+        [p.x, p.y, p.w, p.h]
     }
 
     /// Blend `colour` over a box, by its alpha.
     fn fill(&mut self, r: Rect, colour: [u8; 4]) {
-        let (sx, sy) = self.scale();
-        let (x0, x1) = span(r.x * sx, (r.x + r.w) * sx, self.frame.width);
-        let (y0, y1) = span(r.y * sy, (r.y + r.h) * sy, self.frame.height);
+        let p = self.px(r);
+        let (x0, x1) = span(p.x, p.x + p.w, self.frame.width);
+        let (y0, y1) = span(p.y, p.y + p.h, self.frame.height);
         for y in y0..y1 {
             for x in x0..x1 {
                 blend(self.frame, x, y, colour);
@@ -1241,9 +1319,9 @@ impl Painter<'_> {
         tint: [u8; 4],
         put: fn(&mut Frame, usize, usize, [u8; 4]),
     ) {
-        let (sx, sy) = self.scale();
-        let (fx0, fx1) = (r.x * sx, (r.x + r.w) * sx);
-        let (fy0, fy1) = (r.y * sy, (r.y + r.h) * sy);
+        let p = self.px(r);
+        let (fx0, fx1) = (p.x, p.x + p.w);
+        let (fy0, fy1) = (p.y, p.y + p.h);
         let (x0, x1) = span(fx0, fx1, self.frame.width);
         let (y0, y1) = span(fy0, fy1, self.frame.height);
         for y in y0..y1 {
@@ -1265,16 +1343,34 @@ impl Painter<'_> {
         self.blit(t, all, r, tint);
     }
 
-    /// `text` with its left edge, centre or right edge at `x` and its top at `y`.
-    fn text(&mut self, face: Face, text: &str, x: f32, y: f32, align: Align, colour: [u8; 4]) {
-        let Some(font) = self.art.fonts.get(&face) else {
+    /// A rounded bar over `r`: the texture's two ends (half its height each) kept their shape and
+    /// only its middle stretched, so a short pill still has round ends.
+    fn bar(&mut self, name: &str, r: Rect, tint: [u8; 4]) {
+        let Some(t) = self.art.textures.get(name) else {
             return;
         };
+        let (tw, th) = (t.width as f32, t.height as f32);
+        let end_t = (th / 2.0).min(tw / 2.0);
+        let end = (r.h / 2.0).min(r.w / 2.0);
+        self.blit(t, [0.0, 0.0, end_t, th], rect(r.x, r.y, end, r.h), tint);
+        self.blit(t, [end_t, 0.0, tw - end_t, th], rect(r.x + end, r.y, r.w - 2.0 * end, r.h), tint);
+        self.blit(t, [tw - end_t, 0.0, tw, th], rect(r.x + r.w - end, r.y, end, r.h), tint);
+    }
+
+    /// `text` with its left edge, centre or right edge at `x` and its top at `y`; returns the box
+    /// it took, as wide as the font measures it and as tall as a capital.
+    fn text(&mut self, face: Face, text: &str, x: f32, y: f32, align: Align, colour: [u8; 4]) -> Rect {
+        let Some(font) = self.art.fonts.get(&face) else {
+            return rect(x, y, 0.0, 0.0);
+        };
         let w = font.measure(text);
-        let mut pen = match align {
+        let left = match align {
             Align::Left => x,
             Align::Centre => x - w / 2.0,
         };
+        let m = font.glyph('M');
+        let h = m.uv[3] - m.uv[1];
+        let mut pen = left;
         let mut chars = text.chars().peekable();
         while let Some(c) = chars.next() {
             let g = font.glyph(c);
@@ -1288,56 +1384,92 @@ impl Painter<'_> {
                 pen += g.kern.iter().find(|k| k.0 == n as u32).map_or(0.0, |k| k.1);
             }
         }
+        rect(left, y, w, h)
     }
 
-    /// The grey gradient in orange, and the radial light added over it (`mxfrontendnavigation.lyt`'s
-    /// Background, `frontend_background_radial` at 48 of 128).
+    /// The chosen label in the oblique face on a red pill [`PILL_PAD`] wider than it each side,
+    /// centred on `x`, the pill's top at `top` and the text's at `y`; with the pill's shadow ten
+    /// down and right when `shadow`. Returns the pill.
+    fn pill(&mut self, text: &str, x: f32, y: f32, top: f32, shadow: bool) -> Rect {
+        let w = self.art.fonts.get(&Face::Chosen).map_or(0.0, |f| f.measure(text));
+        let bar = rect(x - w / 2.0 - PILL_PAD, top, w + 2.0 * PILL_PAD, 32.0);
+        if shadow {
+            let off = rect(bar.x + 10.0, bar.y + 10.0, bar.w, bar.h);
+            self.bar("mainmenu_highlight_off_shadow", off, [0, 0, 0, 110]);
+        }
+        self.bar("mainmenu_highlight", bar, CHOSEN);
+        let label = self.text(Face::Chosen, text, x, y, Align::Centre, CHOSEN);
+        let part = Part::Pill { pill: self.bounds(bar), label: self.bounds(label) };
+        self.parts.push(part);
+        bar
+    }
+
+    /// A label in the plain face with nothing under it.
+    fn item(&mut self, text: &str, x: f32, y: f32) {
+        let label = self.text(Face::Item, text, x, y, Align::Centre, ITEM);
+        let part = Part::Item(self.bounds(label));
+        self.parts.push(part);
+    }
+
+    /// The grey gradient in orange over the whole frame, and the radial light added over it
+    /// (`mxfrontendnavigation.lyt`'s Background, `frontend_background_radial` at 48 of 128), kept
+    /// round and centred across.
     fn background(&mut self) {
-        self.tex("background", rect(0.0, 0.0, 640.0, 448.0), ORANGE);
+        self.anchor(Anchor::TopLeft);
+        self.tex("background", self.whole(), ORANGE);
         if let Some(t) = self.art.textures.get("frontend_background_radial") {
             let all = [0.0, 0.0, t.width as f32, t.height as f32];
-            self.blit_as(t, all, rect(64.0, -40.0, 512.0, 448.0), [255, 150, 80, 96], add);
+            let r = rect((self.view.0 - 512.0) / 2.0, -40.0, 512.0, 448.0);
+            self.blit_as(t, all, r, [255, 150, 80, 96], add);
         }
     }
 
-    /// The logo and its shadow, `mainmenu.lyt`'s.
+    /// The logo and its shadow, `mainmenu.lyt`'s, drawn last so nothing covers it.
     fn logo(&mut self) {
-        self.tex("mainmenu_logo_shadow", rect(30.0, 35.0, 512.0, 64.0), [0, 0, 0, 40]);
-        self.tex("mainmenu_logo", rect(20.0, 25.0, 512.0, 64.0), CHOSEN);
+        self.anchor(Anchor::TopLeft);
+        let shadow = rect(LOGO.x + 10.0, LOGO.y + 10.0, LOGO.w, LOGO.h);
+        self.tex("mainmenu_logo_shadow", shadow, [0, 0, 0, 40]);
+        self.tex("mainmenu_logo", LOGO, CHOSEN);
+        let part = Part::Logo(self.bounds(LOGO));
+        self.parts.push(part);
     }
 
-    /// The dark column the rows sit on, `width` times the main menu's, and its shadow ten to the
-    /// right.
-    fn column(&mut self, x: f32, width: f32) {
-        let w = 256.0 * width;
-        self.tex("mainmenu_background", rect(x + 10.0, 0.0, w, 448.0), [0, 0, 0, 60]);
-        self.tex("mainmenu_background", rect(x, 0.0, w, 448.0), [255, 255, 255, 200]);
+    /// The dark column the rows sit on, `mainmenu.lyt`'s, top to bottom of the frame, and its
+    /// shadow ten to the right.
+    fn column(&mut self) {
+        self.anchor(Anchor::TopLeft);
+        let h = self.view.1;
+        self.tex("mainmenu_background", rect(117.0, 0.0, 256.0, h), [0, 0, 0, 60]);
+        self.tex("mainmenu_background", rect(107.0, 0.0, 256.0, h), [255, 255, 255, 200]);
     }
 
-    /// Rows centred on `x`, the chosen one in the oblique face on the red bar.
-    fn list(&mut self, x: f32, width: f32, rows: &[String], chosen: usize) {
-        let bar = 256.0 * (0.25 + 0.75 * width);
-        let y = item_y(chosen) - 5.0;
-        self.tex("mainmenu_highlight_off_shadow", rect(x - bar / 2.0 + 10.0, y + 10.0, bar, 32.0), [0, 0, 0, 110]);
-        self.tex("mainmenu_highlight", rect(x - bar / 2.0, y, bar, 32.0), CHOSEN);
+    /// Rows centred on the list's line, the chosen one on its pill; returns the pill.
+    fn list(&mut self, rows: &[String], chosen: usize) -> Rect {
+        self.anchor(Anchor::TopLeft);
+        let mut bar = rect(LIST_X, item_y(chosen) - 5.0, 0.0, 32.0);
         for (i, row) in rows.iter().enumerate() {
             if i == chosen {
-                self.text(Face::Chosen, row, x, item_y(i) - 1.0, Align::Centre, CHOSEN);
+                bar = self.pill(row, LIST_X, item_y(i) - 1.0, item_y(i) - 5.0, true);
             } else {
-                self.text(Face::Item, row, x, item_y(i), Align::Centre, ITEM);
+                self.item(row, LIST_X, item_y(i));
             }
         }
+        bar
     }
 
     /// The screen's name, bottom left over the ticker, as the navigation layout's Screen Title.
     fn title(&mut self, title: &str) {
+        self.anchor(Anchor::BottomLeft);
         self.text(Face::Title, title, 50.0, 362.0, Align::Left, CHOSEN);
     }
 
-    /// The black bar at the bottom, and the controller legend in its corner, right to left from the
-    /// screen's edge: `mxfrontendnavigation.lyt`'s Ticker and Navigation Background panels.
+    /// The black bar along the bottom, and the controller legend in the bottom right corner, right
+    /// to left from the frame's edge: `mxfrontendnavigation.lyt`'s Ticker and Navigation
+    /// Background panels.
     fn legend(&mut self, buttons: &[(&str, &str)]) {
-        self.fill(rect(0.0, 403.0, 640.0, 45.0), BLACK);
+        self.anchor(Anchor::BottomLeft);
+        self.fill(rect(0.0, 403.0, self.view.0, 45.0), BLACK);
+        self.anchor(Anchor::BottomRight);
         let font = &self.art.fonts[&Face::Item];
         let mut widths = Vec::new();
         for (_, label) in buttons {
@@ -1355,36 +1487,48 @@ impl Painter<'_> {
         }
     }
 
-    /// The track pick: `trackpreview.lyt`'s band of stills between the two masks, the track's name
-    /// over it between arrows.
+    /// The track pick: `trackpreview.lyt`'s band of stills between the two masks, across the
+    /// whole frame, the track's name over it between arrows.
     fn tracks(&mut self, menu: &Menu) {
+        self.anchor(Anchor::TopLeft);
         let at = menu.cursor(Screen::Tracks);
-        self.fill(rect(0.0, 0.0, 640.0, 448.0), BLACK);
+        let (vw, vh) = self.view;
+        self.fill(self.whole(), BLACK);
+        let band = rect(0.0, 49.0, vw, vh - 49.0 - 90.0);
         let stills = &self.art.stills[at];
         if !stills.is_empty() {
             let still = &stills[(menu.tick / STILL_FRAMES) as usize % stills.len()];
-            // The band is wider than the still is tall: its middle, the full width.
+            // The band's shape cut from the still's middle, never stretched.
             let (w, h) = (still.width as f32, still.height as f32);
-            let rows = w * 309.0 / 640.0;
-            let top = (h - rows) / 2.0;
-            self.blit(still, [0.0, top, w, top + rows], rect(0.0, 49.0, 640.0, 309.0), CHOSEN);
+            let rows = w * band.h / band.w;
+            let src = if rows <= h {
+                let top = (h - rows) / 2.0;
+                [0.0, top, w, top + rows]
+            } else {
+                let cols = h * band.w / band.h;
+                let left = (w - cols) / 2.0;
+                [left, 0.0, left + cols, h]
+            };
+            self.blit(still, src, band, CHOSEN);
         }
         // The masks: a dark top band and the bottom one the legend sits on.
-        self.fill(rect(0.0, 0.0, 640.0, 49.0), [0, 0, 0, 200]);
-        self.fill(rect(0.0, 358.0, 640.0, 90.0), [0, 0, 0, 200]);
+        self.fill(rect(0.0, 0.0, vw, 49.0), [0, 0, 0, 200]);
+        self.fill(rect(0.0, vh - 90.0, vw, 90.0), [0, 0, 0, 200]);
         let (_, name) = TRACKS[at];
-        self.text(Face::Title, name, 320.0, 8.0, Align::Centre, CHOSEN);
+        let mid = vw / 2.0;
+        self.text(Face::Title, name, mid, 8.0, Align::Centre, CHOSEN);
         let w = self.art.fonts[&Face::Title].measure(name);
-        self.tex("arrow_left_off", rect(320.0 - w / 2.0 - 44.0, 9.0, 32.0, 32.0), CHOSEN);
-        self.tex("arrow_right_off", rect(320.0 + w / 2.0 + 12.0, 9.0, 32.0, 32.0), CHOSEN);
+        self.tex("arrow_left_off", rect(mid - w / 2.0 - 44.0, 9.0, 32.0, 32.0), CHOSEN);
+        self.tex("arrow_right_off", rect(mid + w / 2.0 + 12.0, 9.0, 32.0, 32.0), CHOSEN);
         let count = format!("Freeride {} of {}", at + 1, TRACKS.len());
-        self.text(Face::Small, &count, 320.0, 330.0, Align::Centre, ITEM);
-        // The machine each player starts on (P41), in a panel over the stills' right: one line a
-        // rider, the one Square changes in the chosen colour between up and down arrows when there
+        self.text(Face::Small, &count, mid, vh - 118.0, Align::Centre, ITEM);
+        // The machine each player starts on (P41), in a panel over the stills' right edge: one line
+        // a rider, the one Square changes in the chosen colour between up and down arrows when there
         // is more than one.
         let riders = menu.riders.clamp(1, SEATS_MAX);
         let seat = menu.setup_seat.min(riders - 1);
-        self.fill(rect(440.0, 60.0, 180.0, 12.0 + 22.0 * riders as f32), [0, 0, 0, 170]);
+        let left = vw - 200.0;
+        self.fill(rect(left, 60.0, 180.0, 12.0 + 22.0 * riders as f32), [0, 0, 0, 170]);
         for i in 0..riders {
             let y = 66.0 + 22.0 * i as f32;
             let line = match riders {
@@ -1392,19 +1536,21 @@ impl Painter<'_> {
                 _ => format!("{}P  {}", i + 1, menu.settings.machines[i].label()),
             };
             let colour = if i == seat { CHOSEN } else { ITEM };
-            self.text(Face::Small, &line, 456.0, y, Align::Left, colour);
+            self.text(Face::Small, &line, left + 16.0, y, Align::Left, colour);
         }
         if riders > 1 {
             let y = 66.0 + 22.0 * seat as f32 - 6.0;
-            self.tex("arrow_up_off", rect(590.0, y - 8.0, 24.0, 24.0), CHOSEN);
-            self.tex("arrow_down_off", rect(590.0, y + 8.0, 24.0, 24.0), CHOSEN);
+            self.tex("arrow_up_off", rect(left + 150.0, y - 8.0, 24.0, 24.0), CHOSEN);
+            self.tex("arrow_down_off", rect(left + 150.0, y + 8.0, 24.0, 24.0), CHOSEN);
         }
         self.title(Screen::Tracks.title());
         self.legend(&[("nav_square_off", "Machine"), ("nav_circle_off", "Back"), ("nav_x_off", "Ride")]);
     }
 
-    /// The on-screen keyboard: the name being typed, the four rows of ten and the commands.
+    /// The on-screen keyboard, in the middle of the frame: the name being typed, the four rows of
+    /// ten and the commands.
     fn keyboard(&mut self, menu: &Menu) {
+        self.anchor(Anchor::Centre);
         self.fill(rect(90.0, 60.0, 460.0, 290.0), [0, 0, 0, 200]);
         let typed = format!("{}_", menu.typing());
         self.fill(rect(120.0, 76.0, 400.0, 32.0), [60, 0, 0, 255]);
@@ -1413,23 +1559,20 @@ impl Painter<'_> {
         for (r, keys) in KEY_ROWS.iter().enumerate() {
             for (c, k) in keys.chars().enumerate() {
                 let (x, y) = (120.0 + 40.0 * c as f32, 124.0 + 40.0 * r as f32);
-                let on = (r, c) == (row, col);
-                if on {
-                    self.tex("mainmenu_highlight", rect(x + 2.0, y - 2.0, 36.0, 32.0), CHOSEN);
+                if (r, c) == (row, col) {
+                    self.pill(&k.to_string(), x + 20.0, y + 4.0, y - 2.0, false);
+                } else {
+                    self.item(&k.to_string(), x + 20.0, y + 4.0);
                 }
-                let colour = if on { CHOSEN } else { ITEM };
-                let face = if on { Face::Chosen } else { Face::Item };
-                self.text(face, &k.to_string(), x + 20.0, y + 4.0, Align::Centre, colour);
             }
         }
         for (c, label) in KEY_COMMANDS.iter().enumerate() {
             let (x, y) = (120.0 + 100.0 * c as f32, 290.0);
-            let on = (KEY_ROWS.len(), c) == (row, col);
-            if on {
-                self.tex("mainmenu_highlight", rect(x + 4.0, y - 4.0, 92.0, 32.0), CHOSEN);
+            if (KEY_ROWS.len(), c) == (row, col) {
+                self.pill(label, x + 50.0, y, y - 4.0, false);
+            } else {
+                self.item(label, x + 50.0, y);
             }
-            let face = if on { Face::Chosen } else { Face::Item };
-            self.text(face, label, x + 50.0, y, Align::Centre, if on { CHOSEN } else { ITEM });
         }
         self.title(Screen::Keyboard.title());
         self.legend(&[

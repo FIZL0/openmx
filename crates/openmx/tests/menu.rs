@@ -435,3 +435,79 @@ fn the_setups_pick_starts_the_ride_on_it() {
     // An older file, with no machines line, rides the bike.
     assert_eq!(Settings::parse("track = free07\n").machines, [Machine::Bike; menu::SEATS_MAX]);
 }
+
+/// Whether two boxes (left, top, width, height) share any pixels.
+fn overlap(a: menu::Bounds, b: menu::Bounds) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+#[test]
+fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let art = menu::Art::load(&mut disc).expect("the menus' art");
+    // The layout's own 4:3-ish shape, 16:9, 21:9 and a portrait phone.
+    let windows = [(640, 448), (960, 540), (1260, 540), (360, 640)];
+    let mut pills = 0;
+    for (w, h) in windows {
+        let s = (w as f32 / 640.0).min(h as f32 / 448.0);
+        for screen in Screen::ALL {
+            let (mut m, mut reader) = fresh();
+            m.open(screen);
+            // Every row of a list, and a walk across the keyboard's keys and down to its commands.
+            for step in 0..12 {
+                assert_eq!(m.screen(), Some(screen));
+                let mut frame = game_render::Frame::new(w, h, [90, 90, 90]);
+                let parts = art.parts(&m, &mut frame);
+                let logos: Vec<_> = parts.iter().filter_map(|p| match p {
+                    menu::Part::Logo(b) => Some(*b),
+                    _ => None,
+                }).collect();
+                for p in &parts {
+                    match p {
+                        menu::Part::Pill { pill, label } => {
+                            pills += 1;
+                            let want = label[2] + 2.0 * menu::PILL_PAD * s;
+                            assert!(
+                                (pill[2] - want).abs() <= 1.0,
+                                "{screen:?} at {w}x{h}: a pill {} wide on a label {} wide",
+                                pill[2],
+                                label[2]
+                            );
+                            let (pc, lc) = (pill[0] + pill[2] / 2.0, label[0] + label[2] / 2.0);
+                            assert!((pc - lc).abs() <= 1.0, "{screen:?} at {w}x{h}: a pill off its label");
+                            for logo in &logos {
+                                assert!(!overlap(*logo, *pill), "{screen:?} at {w}x{h}: a pill on the logo");
+                                assert!(!overlap(*logo, *label), "{screen:?} at {w}x{h}: a label on the logo");
+                            }
+                        }
+                        menu::Part::Item(b) => {
+                            for logo in &logos {
+                                assert!(!overlap(*logo, *b), "{screen:?} at {w}x{h}: an item on the logo");
+                            }
+                        }
+                        // Unstretched: 512x64 at any shape.
+                        menu::Part::Logo(b) => assert!((b[2] / b[3] - 8.0).abs() < 0.01, "{screen:?} at {w}x{h}"),
+                    }
+                }
+                let lists = matches!(screen, Screen::Main | Screen::Pause | Screen::Settings | Screen::Controls);
+                if lists {
+                    assert_eq!(logos.len(), 1, "{screen:?} at {w}x{h}: no logo");
+                }
+                if lists || screen == Screen::Keyboard {
+                    let n = parts.iter().filter(|p| matches!(p, menu::Part::Pill { .. })).count();
+                    assert_eq!(n, 1, "{screen:?} at {w}x{h}, step {step}: one pill under the cursor");
+                }
+                let control = if screen == Screen::Keyboard && step % 3 != 2 { Control::Right } else { Control::Down };
+                tap(&mut m, &mut reader, control);
+            }
+        }
+    }
+    // Four list screens and the keyboard, twelve looks each, at four shapes.
+    assert_eq!(pills, 5 * 12 * 4);
+}
