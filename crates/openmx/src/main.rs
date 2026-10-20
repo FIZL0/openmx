@@ -383,6 +383,10 @@ struct Args {
     /// `--trace-switch N`: under `--trace-feel`, ride the first N frames on the throttle alone and only
     /// then take the controls the other flags ask for — a full brake from top speed, or a turn at speed.
     trace_switch: Option<u32>,
+    /// `--trace-stick-y F:Y,F:Y,...`: under `--trace-feel`, the left stick's y from frame `F` on
+    /// (positive pulled back), each entry until the next — P30's pump and flip off a jump, ridden
+    /// on the shell's own frame. The line then carries the gesture's columns too.
+    trace_stick_y: Vec<(u32, f32)>,
     /// `--record FILE`: write every simulated frame's pad to a tape, and the tape to this file when
     /// the session ends. A tape holds values read out of the game, so the file belongs under
     /// `context/`.
@@ -905,18 +909,25 @@ fn run() -> Result<(), String> {
         );
         println!("phy: {phy_member}");
         if args.trace_feel || args.trace_air {
+            let gesture = !args.trace_stick_y.is_empty();
             if args.trace_air {
                 println!("frame ground fr yaw pitch roll wx wy wz crossup stick_x stick_y speed wreck");
             } else {
-                println!("frame speed vel_x vel_y vel_z x y z heading up ground wreck");
+                println!(
+                    "frame speed vel_x vel_y vel_z x y z heading up ground wreck{}",
+                    if gesture { " stick_y lip preload flip nose" } else { "" }
+                );
             }
             let throttle = Controls { gas: F::ONE, ..Controls::default() };
             for i in 0..frames {
-                let now = match args.trace_switch {
-                    Some(n) if i < n => &throttle,
-                    _ => &controls,
+                let mut now = match args.trace_switch {
+                    Some(n) if i < n => throttle.clone(),
+                    _ => controls.clone(),
                 };
-                let f = rider.frame(&phy, &tables, now, dt, &mut sim);
+                if let Some(&(_, y)) = args.trace_stick_y.iter().rev().find(|(at, _)| *at <= i) {
+                    now.stick.1 = F(y);
+                }
+                let f = rider.frame(&phy, &tables, &now, dt, &mut sim);
                 let r = &rider.ride;
                 let (v, p, m) = (r.chassis.vel, r.position(), r.transform());
                 if args.trace_air {
@@ -942,8 +953,26 @@ fn run() -> Result<(), String> {
                     );
                     continue;
                 }
+                // The gesture's columns: the stick, the lip as `air.rs` reads it (the tests'
+                // definition), the preload shoving, a backflip turning, and the nose's angle above
+                // the line the bike is travelling along, the full circle — summed frame to frame, a
+                // backflip is a turn of it.
+                let extra = if gesture {
+                    let (n, h) = (m.0[2], v.x().hypot(v.z()).max(1e-6));
+                    let lip = r.air.on_ground && v.y() > 5.0 && r.air.contact_vel.z() > 30.0 && r.held.brake == F::ZERO;
+                    format!(
+                        " {:.2} {} {} {} {:.4}",
+                        now.stick.1.0,
+                        lip as u8,
+                        r.air.preload_firing as u8,
+                        r.air.flip_active as u8,
+                        n[1].atan2((n[0] * v.x() + n[2] * v.z()) / h),
+                    )
+                } else {
+                    String::new()
+                };
                 println!(
-                    "{i} {:.4} {:.4} {:.4} {:.4} {:.3} {:.3} {:.3} {:.5} {:.4} {} {}",
+                    "{i} {:.4} {:.4} {:.4} {:.4} {:.3} {:.3} {:.3} {:.5} {:.4} {} {}{extra}",
                     v.x().hypot(v.z()),
                     v.x(), v.y(), v.z(),
                     p.x(), p.y(), p.z(),
@@ -1323,7 +1352,7 @@ fn run() -> Result<(), String> {
                     forward,
                     up,
                     vel: world.sim.rider.ride.chassis.vel,
-                    lean: world.sim.rider.ride.held.stick.0,
+                    lean: world.sim.rider.ride.held.lean.0,
                 },
                 grounded: world.sim.rider.ride.air.on_ground,
                 speed: world.sim.rider.ride.chassis.speed,
@@ -1677,6 +1706,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         phy: None,
         trace_at: None,
         trace_switch: None,
+        trace_stick_y: Vec::new(),
         record: None,
         play: None,
         phase: TickPhase::default(),
@@ -1739,6 +1769,14 @@ fn parse_args() -> Result<Option<Args>, String> {
                         .parse()
                         .map_err(|_| "--trace-switch: not a number of frames")?,
                 );
+            }
+            "--trace-stick-y" => {
+                let bad = || "--trace-stick-y: FRAME:Y,FRAME:Y,...".to_string();
+                for pair in next("frame:y pairs")?.split(',') {
+                    let (f, y) = pair.split_once(':').ok_or_else(bad)?;
+                    let at = f.trim().parse().map_err(|_| bad())?;
+                    args.trace_stick_y.push((at, y.trim().parse().map_err(|_| bad())?));
+                }
             }
             "--trace-at" => {
                 let v: Vec<f32> = next("x,z,degrees")?
@@ -1836,6 +1874,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      holds the stick over and --trace-feel prints a short line a frame instead;\n\
                      --trace-air prints the chassis' attitude and its rates instead;\n\
                      --trace-switch N rides the throttle alone for N frames first;\n\
+                     --trace-stick-y F:Y,... sets the stick's y from frame F on, each until\n\
+                     the next, and adds the backflip's columns to --trace-feel's line;\n\
                      --trace-at X,Z,DEG starts the bike there instead of the start line, and\n\
                      --phy NAME rides the bike archive's NAME (pro125a.phy) instead of Race125P.phy.\n\
                      --record writes every simulated frame's pad to a tape (under context/,\n\

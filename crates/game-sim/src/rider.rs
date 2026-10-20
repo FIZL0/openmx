@@ -311,14 +311,14 @@ impl Rider {
         *airborne = ride.air.airborne;
 
         // 3 — the controller. **The port's own ordering:** the original reads the pad in its input
-        // phase, before the update, and what it reads the stick off is the rate-limited copy that
-        // phase has just written. The rate limit lives inside `Ride::frame`, so the read is here
-        // instead — after the step that writes the stick and before the only three things that look
-        // at a gesture, which is the same frame's worth of information either way.
+        // phase, before the update; the read is here instead, before the only three things that look
+        // at a gesture, which is the same frame's worth of information either way. What it reads is
+        // the player-range stick as the pad gave it — not the rate limiter's squared copy, which is
+        // written after the read (P30).
         let down = state.wreck.is_some();
         tricks.gesture.read(
             &t.angles,
-            ride.held.stick,
+            c.stick,
             trick::Buttons { trick: c.trick, dpad: c.dpad },
             down,
         );
@@ -374,8 +374,8 @@ impl Rider {
         };
         tricks.update(dt, set, bike, false, ride::noise);
         let pose = motion::Pose {
-            lean: ride.held.stick.0,
-            fore_aft: ride.held.stick.1,
+            lean: ride.held.lean.0,
+            fore_aft: ride.held.lean.1,
             crossup: ride.air.crossup,
         };
         let asked = motion::Request { progress: tricks.progress, ..request };

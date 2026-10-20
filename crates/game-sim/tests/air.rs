@@ -1085,16 +1085,13 @@ const HUMANS_FLIPS: [Flip; 3] = [
     },
 ];
 
-/// The ticks the port does not reproduce from the original's end-of-tick state, and what it does
-/// there instead. All four are the stick's timing, not the gesture's logic. On each, the stick moved
-/// through the middle of its travel inside the tick, and the original's two substeps saw stick values
-/// that no end-of-tick row holds. At 3291 and 3518 the row before shows the stick past `HELD` (0.8) by
-/// less than 0.05, so the port acts a tick early and the original waits one more. At 2553 and 2572 the
-/// original's torque moved by what one substep at a stick of about -0.37 (and -0.04) gives, where the
-/// row before says -0.43 (and -0.15). Which pad sample each substep really reads is not settled (see the
-/// S31 journal). The gesture itself is a line-for-line read of the original's, proved by
-/// `the_backflip_step_is_the_originals`.
-const HUMANS_MISSED: [(u64, &str); 4] = [(2553, "turns"), (2572, "turns"), (3291, "fires"), (3518, "arms")];
+/// The ticks the port does not reproduce from the original's end-of-tick state: none. S31 shipped four
+/// here (2553 and 2572 turning, 3291 firing, 3518 arming), all put down to the stick's timing inside the
+/// tick; they were the input layer's squaring instead. The air steps read the stick after the rate
+/// limiter has multiplied each axis by its own magnitude, so a stick 0.05 past `HELD` (0.8) on the row
+/// is short of it (0.843² is 0.71), and a stick at -0.43 turns the torque as -0.185 does — which is the
+/// "two substeps at about -0.37" S31 measured. P30 found it; the list stays so that a miss shows up.
+const HUMANS_MISSED: [(u64, &str); 0] = [];
 
 /// A capture's cells by column name.
 struct Cells {
@@ -1155,12 +1152,12 @@ fn flip_state(c: &Cells, r: usize) -> Air {
 ///    flip state at the end of the tick before, that tick's inputs (on the ground, contact speed,
 ///    chassis velocity and angles, stick, hold, d-pad, brake, touching), and runs the original's two
 ///    substeps of half a tick each. Its flip state must be the original's at the end of the tick —
-///    armed, fired, grace, the torque to the bit, turning, applied. It is, except on the four ticks of
-///    [`HUMANS_MISSED`], and the test insists on exactly those four so that a fifth shows up. Ticks
+///    armed, fired, grace, the torque to the bit, turning, applied. It is, on every tick
+///    ([`HUMANS_MISSED`] is empty since P30 squared the stick), and the test insists on it. Ticks
 ///    after a wreck are left out: the original stops running the step there (flip 3's `flipping` stays
 ///    up through the whole crash).
 /// 3. **The flight.** Over each flight the port turns the bike with the original's torque, to the bit,
-///    on every tick but the two turning ticks above, and the rotation ends on the original's tick.
+///    on every tick, and the rotation ends on the original's tick.
 #[test]
 fn the_humans_backflips() {
     let path = match std::env::var_os("GAME_SIM_FIXTURES") {
@@ -1257,7 +1254,9 @@ fn the_humans_backflips() {
         let stick = c.v(r - 1, "s31_stick");
         let st = Step {
             dt: c.f(r, "dt") * F(0.5),
-            stick: (F(stick.z()), F(stick.w())),
+            // The capture's row holds the pad read's stick; the air steps read it after the rate
+            // limiter has squared it (P30).
+            stick: (game_sim::ride::squared(F(stick.z())), game_sim::ride::squared(F(stick.w()))),
             stick_hold: c.f(r - 1, "s31_hold.x"),
             dpad_dir: c.f(r - 1, "trick_group").0 as i32,
             brake: c.f(r - 1, "s31_brake.x"),
@@ -1293,6 +1292,77 @@ fn the_humans_backflips() {
 }
 
 // ---------------------------------------------------------------------------------------------------
+/// P30: **the flick the backflip reads is the original's, its clock aside.** `+0x630` is not a time
+/// the stick was held: it is the player record's fastest crossing of the stick's fore-aft axis from
+/// past 0.8 one way to past 0.8 the other, over its last 32 samples. The original takes those samples
+/// on the hardware timer, about five a tick; `ride::Flick` takes one a frame on the simulation's
+/// clock and pushes it as many times. Fed recording2's stick row by row, it is checked against the
+/// captured `+0x630` on every one of the 1894 rows:
+///
+/// - **when**: the port has a flick on the same rows as the original, but for the edges — a flick
+///   appears on the original's tick every time, and is gone within a tick of the original's going
+///   ([`FLICK_EDGES`] rows differ, all at the end of one);
+/// - **which way**: wherever both have one, it has the original's sign;
+/// - **how fast**: a flick across two ticks is the original's within 1% (both measure it over the two
+///   ticks); any other is no faster than the original's and at least a tenth of it, because the
+///   original's samples can fall inside a tick and the port's cannot (a one-tick flick: 56 here,
+///   469 there).
+#[test]
+fn the_flick_is_the_originals_clock_aside() {
+    let path = match std::env::var_os("GAME_SIM_FIXTURES") {
+        Some(dir) => std::path::PathBuf::from(dir).join("capture"),
+        None => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/capture"),
+    }
+    .join("acceptance/recording2-backflips.csv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("skipped: no {} — see `the_humans_backflips`", path.display());
+        return;
+    };
+    let cap = game_sim::replay::Capture::parse(&text).expect("the recorder's format");
+    let at = cap.columns.iter().enumerate().map(|(i, c)| (c.clone(), i)).collect();
+    let c = Cells { cap, at };
+    let n = c.cap.rows.len();
+    assert_eq!(n, 1894, "the capture is the one measured");
+
+    let mut ring = game_sim::ride::Flick::default();
+    let (mut edges, mut flicks, mut two_tick) = (0, 0, 0);
+    for r in 0..n {
+        let port = ring.sample(c.f(r, "s31_stick.w"), c.f(r, "dt")).0;
+        let orig = c.f(r, "s31_hold.x").0;
+        let was = if r == 0 { 0.0 } else { c.f(r - 1, "s31_hold.x").0 };
+        if (port != 0.0) != (orig != 0.0) {
+            // Only where the original's has just gone, or is about to.
+            let next = if r + 1 < n { c.f(r + 1, "s31_hold.x").0 } else { 0.0 };
+            assert!(orig == 0.0 && was != 0.0 || orig != 0.0 && next == 0.0, "row {r}: port {port}, original {orig}");
+            edges += 1;
+            continue;
+        }
+        if orig == 0.0 {
+            continue;
+        }
+        assert_eq!(port < 0.0, orig < 0.0, "row {r}: port {port}, original {orig}");
+        if orig != was {
+            flicks += 1;
+            println!("row {r}: a flick of {orig} measured {port}");
+        }
+        // Two ticks' travel over two ticks' time.
+        if (port.abs() - 30.0).abs() < 0.01 && (orig.abs() - 30.0).abs() < 0.5 {
+            assert!((port / orig - 1.0).abs() < 0.01, "row {r}: port {port}, original {orig}");
+            two_tick += 1;
+        } else {
+            assert!(port.abs() <= orig.abs() * 1.01 && port.abs() >= orig.abs() * 0.1, "row {r}: port {port}, original {orig}");
+        }
+    }
+    println!("{flicks} flicks, {edges} edge rows, {two_tick} two-tick rows");
+    assert_eq!(flicks, 12, "every flick in the capture is met");
+    assert_eq!(edges, FLICK_EDGES, "the rows the port's flick ends a tick off the original's");
+    assert!(two_tick > 0);
+}
+
+/// How many rows [`the_flick_is_the_originals_clock_aside`] finds a flick on one side and not the
+/// other: each the tick a flick ends, which on the original falls wherever its fifth-newer sample does.
+const FLICK_EDGES: usize = 5;
+
 // P22 — a flight, against the original's own flights
 
 /// **The bike falls and carries the way the original's does**, measured on the original's flights in
