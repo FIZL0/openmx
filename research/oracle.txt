@@ -2393,3 +2393,7 @@ rider_bone_post boot 0x001f6840 (20 bytes) the per-bone call of the arm's tail
 rider_bone_detach boot 0x0011aed0 (72 bytes) takes one bone off the bike it was following
 rand_raw boot 0x0040fd40 (100 bytes) the generator behind every draw, as an int
 quat_axes boot 0x0013f380 (132 bytes) a quaternion's axes, which the look arm reads
+wheel_tire_drive_force boot 0x0025ca60 (wheel) wheel_spin_integrate's tire force: forward = +0x210 * +0x838,
+#                                      past +MaxDriveForce*load it is SkidDriveForce*load with +0xe0
+#                                      (spinning) set, past -cap -SkidDriveForce*load with +0xe4 (locked);
+#                                      side force at +0x850, forward at +0x858. P23 read it
