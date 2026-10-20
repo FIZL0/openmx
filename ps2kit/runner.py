@@ -1211,8 +1211,11 @@ def cmd_run(argv: list[str]) -> int:
         tid = b.removeprefix('task/')
         if b in held or tid not in open_ids:
             continue
-        # finish() logs "<tid>: the runner could not merge it (...); queued for the master"
-        if re.search(rf'^=== \S+ {tid}: .*(queued for|handed to) the master', handed_before, re.M):
+        # finish() logs "<tid>: the runner could not merge it (...); queued for the master". Only since the
+        # task last started: P35's first attempt went to the master, and that hid its finished retry.
+        starts = [m.end() for m in re.finditer(rf'^=== \S+ slot \d+: {tid} \(', handed_before, re.M)]
+        if re.search(rf'^=== \S+ {tid}: .*(queued for|handed to) the master', handed_before[starts[-1] if starts else 0:],
+                     re.M):
             HANDED.setdefault(tid, False)  # it has it, or it left it alone: either way not ours to retry
             continue
         if git('log', '--format=%s', f'{branch}..{b}').stdout.strip():
