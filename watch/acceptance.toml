@@ -23,6 +23,12 @@
 # Nothing about the capture depends on the pad being frame-exact (it is wall-clock): every row carries
 # the bytes the game actually read that tick, which is what the port replays.
 #
+# A human recording played back on the original (C6; the GUI's Play is reached over AT-SPI, on a copy):
+#
+#   ./kit pcsx2 with -- bash research/journal/2026-10-20-c6-c6-recording2-capture/playback/play_capture.sh \
+#       PID context/recordings/recording2.p2m2 2374 1894 \
+#       context/capture/acceptance/recording2-freeride.csv            # the whole tape, ticks 2374..4267
+#
 # A row has to carry **both halves of a frame** or it cannot be replayed:
 #
 #   the input  the sixteen controls the game itself believes are held this frame, plus the raw libpad
@@ -183,3 +189,120 @@ type = "u32"
 name = "g_peak"
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x550"
 type = "f32x4"
+
+# --- the rider in the air and mid-trick (C6, for the second recording) ------------------------------
+# The second human recording (`context/recordings/recording2.p2m2`) has bails, tricks and backflips in
+# it, and the four tasks after C6 need to see them tick by tick. All of these sit on the rider actor —
+# the same object S10's air step and S11's trick machine are handed — so they share the two-hop chain
+# above. The offsets are S10's and S11's (research/journal/2026-10-15-s10-s10-air,
+# research/journal/2026-10-15-s11-s11-tricks); every one is a 32-bit word unless the type says so.
+#
+# The air step (`bike_air_state`): which wheels touch, written once per substep, so a row holds the
+# last substep's answer.
+[[field]]
+name = "on_ground"                # +0x574: either wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x574"
+type = "u32"
+
+[[field]]
+name = "both_wheels"              # +0x578: both wheels touch
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x578"
+type = "u32"
+
+[[field]]
+name = "airborne"                 # +0x57c: neither wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x57c"
+type = "u32"
+
+# The backflip (`bike_backflip`). Two words make its state: `flip_on` 0 / `flip_arm` 0 is waiting for a
+# lip; 0 / 1 is armed (the stick went forward on the lip); 1 / 0 is fired and inside the 0.6 s grace in
+# which the wheels have to leave the ground (`flip_grace` counts it down); 1 / 1 is turning. The torque
+# is the vector added to the chassis while it turns; `flip_torqued` is 1 on a frame it was, and
+# `flip_ramp` is 1 from the first turning frame until the control ramp starts.
+[[field]]
+name = "flip_torqued"             # +0x4f4
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f4"
+type = "u32"
+
+[[field]]
+name = "flip_ramp"                # +0x4f8
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f8"
+type = "u32"
+
+[[field]]
+name = "flip_on"                  # +0x4fc: fired
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4fc"
+type = "u32"
+
+[[field]]
+name = "flip_arm"                 # +0x500: armed before firing, off the ground after
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x500"
+type = "u32"
+
+[[field]]
+name = "flip_grace"               # +0x50c: seconds left to leave the ground after firing
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x50c"
+type = "f32"
+
+[[field]]
+name = "flip_torque"              # +0x520: the torque, added to the chassis' +0x140 while it turns
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x520"
+type = "f32x4"
+
+# The trick machine (`pad_to_gesture`, `stunt_request`, `stunt_clocks`). Ids 0..23 are the 24 gesture
+# slots, (group-1)*4 + (direction-1); 24 is the backflip, 25 the wheelie/lean, 26 the stoppie and 28
+# "nothing" (what a reset writes).
+[[field]]
+name = "fresh"                    # +0x750: just put back on the bike; no trick may start
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x750"
+type = "u32"
+
+[[field]]
+name = "trick_latched"            # +0x864: the requested id as packed for the network, read by the clocks
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x864"
+type = "u32"
+
+[[field]]
+name = "trick_group"              # +0x9fc: the button group held, 0..6
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9fc"
+type = "u32"
+
+[[field]]
+name = "trick_dir"                # +0xa00: the direction, 0 none, 1 up, 2 down, 3 left, 4 right
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa00"
+type = "u32"
+
+[[field]]
+name = "trick_count"              # +0xa04: the request count
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa04"
+type = "u32"
+
+[[field]]
+name = "trick_running"            # +0xa0c: in progress
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa0c"
+type = "u32"
+
+[[field]]
+name = "trick_safe"               # +0xa10: past SafeTime, a landing now is not a wreck
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa10"
+type = "u32"
+
+[[field]]
+name = "trick_armed"              # +0xa18
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa18"
+type = "u32"
+
+[[field]]
+name = "trick_elapsed"            # +0xa1c: seconds into the running trick
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa1c"
+type = "f32"
+
+[[field]]
+name = "trick_id"                 # +0xa78: the id the clocks are running
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa78"
+type = "u32"
+
+[[field]]
+name = "trick_req"                # +0xa7c: the id requested
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa7c"
+type = "u32"
