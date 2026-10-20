@@ -6,6 +6,11 @@
 # that reads this is which *trick* clause of the wreck test fires, so every clause in front of it is
 # set where a plain drop onto flat ground cannot reach it, and the journal says so.
 #
+# The tires' per-surface keys are the freeride bike's (P24). This file had kept the grip keys in the
+# pounds they were before P4 made them per unit load — a `SideForce` of 60 — which the stand-in tire
+# survived and the original's does not: sixty times the load per foot a second of slide, saturating at
+# a cap with no skid force behind it, stood the bike on its side at the start line.
+#
 # Read by crates/game-sim/tests/trick.rs.
 [Mass Properties]
 Weight = 400
@@ -29,12 +34,17 @@ SteeringInertia = 2
 MaxSteerAngle = 30
 BodyTireForcePosition = 0.0, 1.1, 2.1
 NumberOfSurfaces = 1
-WheelFriction1 = 1.1
-WheelDrag1 = 0.02
+WheelFriction1 = 8.0
+WheelDrag1 = 0.0
 MaxBrakingTorque1 = 300
-MaxDriveForce1 = 400
-MaxSideForce1 = 400
-SideForce1 = 60
+MaxDriveForce1 = 1.5
+MaxSideForce1 = 3.5
+SideForce1 = 0.1
+SkidDriveForce1 = 1.4
+SkidSideForce1 = 1.5
+SlippingSideForce1 = 0.1
+MaxSlippingSideForce1 = 3.5
+SkidSlippingSideForce1 = 1.5
 [Rear Tire]
 StrutCompression = 1.0
 Spring = 2.2
@@ -46,12 +56,17 @@ TireInertia = 1.4
 BodyTireForcePosition = 0.0, 1.1, -2.1
 OtherTireNormalLoadScale = 1.0
 NumberOfSurfaces = 1
-WheelFriction1 = 1.2
-WheelDrag1 = 0.02
+WheelFriction1 = 9.0
+WheelDrag1 = 0.0
 MaxBrakingTorque1 = 400
-MaxDriveForce1 = 600
-MaxSideForce1 = 500
-SideForce1 = 70
+MaxDriveForce1 = 2.4
+MaxSideForce1 = 4.0
+SideForce1 = 0.12
+SkidDriveForce1 = 2.2
+SkidSideForce1 = 1.8
+SlippingSideForce1 = 0.12
+MaxSlippingSideForce1 = 4.0
+SkidSlippingSideForce1 = 1.8
 [Engine]
 NumberOfRPMPoints = 4
 RPM1 = 2000

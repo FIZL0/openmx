@@ -43,7 +43,7 @@ stick l 0 0
 sleep 120f
 
 # leg: the run-up
-# The take-off ramp goes in here, 250 ft ahead of wherever the bike is and on whatever heading it has.
+# The take-off ramp goes in here, 200 ft ahead of wherever the bike is and on whatever heading it has.
 sleep 180f
 
 # leg: the jump
@@ -78,8 +78,8 @@ sleep 20f
 stick l 0 1
 sleep 30f
 stick l 0 0
-sleep 33f
+sleep 64f
 stick l 0 -1
 sleep 10f
 stick l 0 0
-sleep 115f
+sleep 84f

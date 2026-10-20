@@ -36,8 +36,9 @@
 //! (`track.rs`), the quaternion-to-Euler conversion and the transform's own rotate, unrotate, point
 //! and unpoint (`math.rs`, `chassis.rs`), every parameter the `.phy` reader reads (`phy.rs`).
 //!
-//! This module's own, each marked where it is written and listed in the journal: the wheel's spin and
-//! the forces the tire puts through its contact ([`spin_integrate`], [`surface_drag`]), the steering
+//! This module's own, each marked where it is written and listed in the journal: the contact frame the
+//! tire's slide is measured in ([`patch`]; the tire force, the surface drag and the spin they drive
+//! are the original's, through [`crate::tire`]), the steering
 //! hinge ([`hinge_force`]), the input layer's rate limiter ([`Held::step`]), the smooth noise the
 //! balance controller's rider-wobble reads ([`noise`]), the node's Gram-Schmidt ([`set_axes`]), the
 //! quaternion from an axis and an angle the integrator's correction needs, the collision bundle the
@@ -48,13 +49,14 @@
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::air::{self, AcosTable};
-use crate::camera::{self, CurveTable};
+use crate::camera::CurveTable;
 use crate::chassis::{self, Mat3};
 use crate::collide::{Bundle, Probe, Record};
 use crate::hash::{State, Walk};
 use crate::math::{self, Mat4};
 use crate::phy::{self, Phy};
 use crate::r#move::{self as mv, Frame, Outside as _, Side};
+use crate::tire;
 use crate::trick;
 use crate::wheel;
 use crate::world::World;
@@ -70,11 +72,6 @@ const PROBES: usize = 4;
 
 /// The deflection past which the stick counts as held, for the stick-hold clock `air.rs` reads.
 const STICK_HELD: f32 = 0.5;
-
-/// The rate the surface's two torques fade in at, per foot a second of the contact's own slide:
-/// `wheel_surface_drag`'s own literal, which makes the brake and the rolling torque whole above
-/// 3⅓ ft/s and nothing at a standstill. See [`surface_drag`].
-const BRAKE_FADE_RATE: f32 = 0.3;
 
 /// The integrator's speed limits, which the original takes from a vehicle setup this port does not
 /// have. Wide enough that no ride reaches them: what they are for here is to keep
@@ -243,8 +240,18 @@ pub struct Wheel {
     /// Which friction surface the contact landed on: the index of a [`phy::Surface`] in this wheel's
     /// tire. The original keeps it in the contact record at `+0x110`.
     pub surface: u8,
-    /// The tire's own inverse inertia, from `TireInertia`, which the spin integration needs.
+    /// The wheel's inverse spin inertia, `+0x64`, which the spin integration needs: the original's
+    /// works it out of the radius alone ([`tire::spin_inv_inertia`]).
     pub inv_inertia: F,
+    /// The other two of the tire force's three flags, `+0xe4` and `+0xe8` ([`tire::Flags`]); the
+    /// first is [`mv::Wheel::spin_from_torque`]. A locked wheel's spin is held at zero.
+    pub locked: bool,
+    pub sliding: bool,
+    /// The steering hinge, `+0x8c0`: a unit vector in the chassis' own frame that a steered wheel turns
+    /// about. The original's `bike_attach_nodes` writes the front wheel's from the bike model — the
+    /// line from its "Shocks" node up to its "Handlebars" node, normalised ([`hinge_axis`]) — so a
+    /// shell with the model sets it; without one it is the chassis' `y`, a fork with no rake.
+    pub hinge: Vf,
 }
 
 impl Wheel {
@@ -291,7 +298,10 @@ impl Wheel {
                 ..wheel::Wheel::default()
             },
             surface: 0,
-            inv_inertia: if t.tire_inertia == F::ZERO { F::ZERO } else { F::ONE / t.tire_inertia },
+            inv_inertia: tire::spin_inv_inertia(radius),
+            locked: false,
+            sliding: false,
+            hinge: Vf::new(0.0, 1.0, 0.0, 0.0),
         }
     }
 
@@ -758,15 +768,6 @@ fn unpoint(m: &Mat4, v: Vf) -> Vf {
     chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), sub_xyz(v, m.0[3]))
 }
 
-/// `[-1, 1]` as the port's own two compares, the shape every clamp in `move.rs` and `air.rs` has:
-/// anything unordered comes back as `1.0`.
-fn clamp_unit(c: F) -> F {
-    if c <= F::ONE {
-        if c < F(-1.0) { F(-1.0) } else { c }
-    } else {
-        F::ONE
-    }
-}
 
 // --- what the tire does, which is this module's ----------------------------------------------------
 
@@ -783,14 +784,29 @@ struct Patch {
     side: F,
 }
 
-/// The contact under a wheel, measured. The wheel's forward comes off the chassis' own `z` axis,
-/// flattened into the surface and then steered by the angle the hinge is holding — through
-/// [`crate::camera::rotate`], which is the original's own `rotate_about_axis` (S7).
+/// A steered wheel's hinge ([`Wheel::hinge`]) from the bike model's two fork nodes, each a place in
+/// the chassis' own frame: the line from "Shocks" up to "Handlebars", made a unit vector. The
+/// original's `bike_attach_nodes` normalises it on VU0; this is the port's own normalisation, which
+/// is not proved to the bit against that one.
+pub fn hinge_axis(shocks: Vf, handlebars: Vf) -> Vf {
+    let d = sub_xyz(handlebars, shocks);
+    normalize(Vf::new(d.x(), d.y(), d.z(), 0.0))
+}
+
+/// The contact under a wheel, measured. The wheel's forward is the original's (`wheel_spin_integrate`'s
+/// frame step): the chassis' own `z`, or on a steered wheel that is touching the ground that `z`
+/// turned by the steering angle about the wheel's hinge ([`tire::steered_forward`]) and then into the
+/// world. It is laid onto the surface the way the original's frame builder does it, crossed with the
+/// normal and back.
 fn patch(wh: &Wheel, m: &Mat4, curve: &CurveTable) -> Patch {
     let n = wh.w.contact_normal;
-    let along = direction(m, Vf::new(0.0, 0.0, 1.0, 0.0));
-    let flat = normalize(sub_xyz(along, scale(n, dot3(along, n))));
-    let forward = if wh.mv.steered { camera::rotate(wh.w.steer_angle, n, flat, curve) } else { flat };
+    let z = if wh.w.contact && wh.mv.steered {
+        tire::steered_forward(wh.w.steer_angle, wh.hinge, curve)
+    } else {
+        Vf::new(0.0, 0.0, 1.0, 0.0)
+    };
+    let along = direction(m, z);
+    let forward = normalize(cross(cross(n, along), n));
     // Across the wheel. Which way round this points does not matter: every force below is
     // proportional to the slide measured along the same vector, so the sign cancels.
     let right = cross(n, forward);
@@ -814,28 +830,6 @@ fn contact_velocity(vel: Vf, world_ang_vel: Vf, at: Vf, cofg_world: Vf) -> Vf {
     add_xyz(vel, cross(world_ang_vel, sub_xyz(at, cofg_world)))
 }
 
-/// What a tire's grip limit needs off the chassis, and nothing more: how much of a push it feels.
-/// Copied out once a frame because neither number changes inside one.
-#[derive(Clone, Copy)]
-struct Body {
-    inv_mass: F,
-    inv_inertia: Mat3,
-}
-
-/// The mass the chassis presents to a push at `arm` along the unit direction `dir`, both in the
-/// body's own frame: the inverse of `dir.M-1.dir + n.I-1.n` with `n = arm x dir`, which is the
-/// effective mass of a constraint along `dir` at that point. `dir` being a unit vector makes the
-/// first term the inverse mass itself.
-///
-/// The tensor goes through [`chassis::rotate`], which is the three instructions the chassis' own
-/// integrator already puts a torque through its inverse inertia with. The tensor is diagonal in this
-/// game's data; reading it as a matrix costs nothing and does not assume that.
-fn effective_mass(body: &Body, arm: Vf, dir: Vf) -> F {
-    let n = cross(arm, dir);
-    let inv = body.inv_mass + dot3(n, chassis::rotate(&body.inv_inertia, n));
-    if inv > F::ZERO { F::ONE / inv } else { F::ZERO }
-}
-
 /// A force into the chassis on a given arm: the force itself in the world, and the moment it makes
 /// about the centre of mass in the body's own frame.
 ///
@@ -849,161 +843,84 @@ fn push(c: &mut wheel::Chassis, m: &Mat4, force: Vf, arm: Vf) {
     c.torque = add_xyz(c.torque, cross(arm, local_force));
 }
 
-/// The wheel's surface drag: what the surface under it takes out of it — the rolling resistance
-/// against the patch's slide, the surface's own constant rolling torque, and the brake.
+/// The wheel's surface drag, which is [`tire::surface_drag`] — the original's own, proved in
+/// `tests/tire.rs` — with the two things it reads off the rest of the bike: the chassis' forward
+/// speed in its own frame (the `z` of `+0x190`, which the original's contact-velocity helper writes
+/// as the chassis' velocity turned into the transform's frame) and the transform that turns the drag
+/// back out into the world.
 ///
-/// **The two torques are the original's; the resistance force is still a stand-in.** The original's
-/// own version is `wheel_surface_drag` in `research/oracle.txt`, and what it does with its three
-/// per-surface numbers was read off it for P13:
-///
-/// - it builds one **signed fade** first, and both torques below are that fade times a number out
-///   of the table: on the ground `0.3 * the patch's own forward slide`, in the air the wheel's
-///   spin, each clamped to ±1. So a wheel rolling faster than 3⅓ feet a second — or spinning faster
-///   than one radian a second in the air — gets the table's number whole, and under that it gets a
-///   share of it that falls to nothing as the wheel stops. Nothing here can push a stopped wheel
-///   backwards, which is the whole reason the fade is there;
-/// - `MaxBrakingTorque` times the brake lever is that fade's number, whenever the lever is off its
-///   stop;
-/// - and it goes onto the **driven-wheel torque accumulator** — the same one the engine adds to
-///   through `wheel_add_drive_torque` — and not onto the spin. That is what P13 came for: a torque in
-///   that accumulator becomes a force at the contact patch in [`spin_integrate`], capped by the grip
-///   the load allows, and *that* is what slows the bike down. Taken off the spin instead it did
-///   nothing at all, because a wheel on the ground has its spin overwritten by the road in the same
-///   substep: the brake could not stop the bike, and the only thing decelerating it was whatever the
-///   engine's own braking happened to put through the clutch.
-///
-/// **`WheelFriction`'s own torque is still not applied.** The original takes `-fade * WheelFriction`
-/// off the same accumulator, unconditionally, and that is one line. It is left out here on purpose:
-/// this crate reads that key as the tire's *grip* limit (P4's stand-in in [`spin_integrate`]), and
-/// the test bike's value was written for that reading, so applying it as a torque as well spends a
-/// number twice. On the test bike it costs seven feet a second of top speed and moves the minute's
-/// jump, which is a recalibration of P10's fixture and not this task's. The journal entry says so.
-///
-/// ## The resistance is a force and not a couple
-///
-/// The original's own version adds its drag to the chassis' force accumulator and **never touches
-/// the torque accumulator** — the only writes it makes outside the wheel are that one force and the
-/// two torques above (P8's journal entry has the address and the read). So the drag does not pitch
-/// the bike at all, whatever the slide is, and this does not either. Its *shape* is still this
-/// module's: the original's is `WheelDrag * v²` and is not scaled by the load, where this is
-/// proportional to the load and to the slide up to one unit a second. Changing that is a
-/// recalibration of every speed in the tests and not P13's; the journal entry says so.
-fn surface_drag(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, brake: F, c: &mut wheel::Chassis) {
-    // The fade, and with it the sign: everything the surface takes out of the wheel opposes
-    // whichever way the wheel is going.
-    let fade = if wh.w.contact {
-        clamp_unit(F(BRAKE_FADE_RATE) * pt.roll)
-    } else {
-        clamp_unit(wh.mv.spin)
-    };
-    if brake > F::ZERO {
-        let torque = (brake * surf.max_braking_torque) * fade;
-        wh.mv.drive_torque = wh.mv.drive_torque - torque;
+/// Before P24 this was a stand-in that left `WheelFriction`'s torque out, because the stand-in tire
+/// read that key as its grip limit; the tire is the original's now and reads it nowhere, so the
+/// torque is back where the original puts it.
+fn surface_drag(wh: &mut Wheel, surf: &phy::Surface, brake: F, c: &mut wheel::Chassis, m: &Mat4) {
+    let rot = Mat3::new(m.0[0], m.0[1], m.0[2]);
+    let forward = F(chassis::unrotate(&rot, wh.w.chassis_velocity).z());
+    let d = tire::surface_drag(wh.mv.drive_torque, wh.w.contact, forward, wh.mv.spin, Some(brake), surf);
+    wh.mv.drive_torque = d.torque;
+    if let Some(z) = d.force_z {
+        c.force = add_xyz(c.force, chassis::rotate(&rot, Vf::new(0.0, 0.0, z.0, 1.0)));
     }
-
-    if !wh.w.contact {
-        return;
-    }
-    let drag = surf.wheel_drag * pt.load * clamp_unit(pt.roll);
-    c.force = add_xyz(c.force, scale(pt.forward, -drag));
 }
 
-/// The wheel's spin integration: the wheel's own spin, and what the tire puts through its
-/// contact patch.
+/// The wheel's spin integration, `wheel_spin_integrate`: the tire's force through the contact patch,
+/// and the wheel's own spin.
 ///
-/// **A stand-in**, and the largest one in this module. Its numbers are all the disc's — the
-/// surface's `SideForce`, `MaxDriveForce`, `MaxSideForce` and `WheelFriction`, the tire's
-/// `TireInertia` and `TireRadius` — and the engine's torque reaches it through
-/// [`mv::Wheel::drive_torque`], which the ported [`mv::engine_update`] filled in. What is this
-/// module's is the model:
+/// The force is [`tire::force`], the original's, proved in `tests/tire.rs`. P4's stand-in took its
+/// place until P24: a straight line in the slide saturated at `MaxSideForce` (and at `WheelFriction`,
+/// read as a grip limit) — a tire that, once a held turn saturated it, scrubbed the bike's speed
+/// away at the full cap every substep. The original's tire on the game's bikes is the parametric
+/// curve, which falls away past its peak rather than pinning, and whose drive and side forces do not
+/// share one cap.
 ///
-/// - A wheel on the ground rolls: its spin is the patch's own speed over the radius. What it can put
-///   down along itself is the drive torque turned into a force at the patch, capped by the surface's
-///   drive limit and then by the grip the load allows; whatever the grip would not take spins the
-///   wheel up instead, which is wheelspin.
-/// - Across itself it is a tire and not a damper: the slide times the surface's own cornering
-///   stiffness, saturated at the surface's side limit — less whatever the donut command asked for,
-///   which is how the back end is let go.
-/// - A wheel in the air just spins up under the engine's torque.
+/// It runs whenever this wheel *or the other one* is on the ground, which is the original's test; a
+/// wheel in the air under a grounded partner has no load and so no force, but its three flags are
+/// still the tire's. Then, as the original:
 ///
-/// ## The four grip limits are per unit load
+/// - the force goes into the chassis on the arm the `.phy` gives (`BodyTireForcePosition`, P8),
+/// - a locked wheel's spin is zero; a rolling one on the ground spins at the patch's speed over the
+///   radius; a spinning one — or one in the air — integrates the torque less what the drive force
+///   took back at the patch, through [`Wheel::inv_inertia`],
+/// - the torque accumulator is spent, and the drive is left where the engine reads it.
 ///
-/// `SideForce`, `MaxSideForce`, `MaxDriveForce` and `WheelFriction` are coefficients and not pounds:
-/// on the game's own surfaces they are single digits, where a wheel of the bike carries a couple of
-/// hundred pounds. Taken as pounds they are a grip circle of a few pounds against a bike of several
-/// hundred — a bike with no sideways grip at all, which is the shape of the defect this function came
-/// for (P4's journal entry has the numbers; they are the disc's and so are not written here). Each is
-/// multiplied by the load the suspension is putting through the patch.
-///
-/// ## Why the side force cannot run away
-///
-/// A cornering stiffness is a spring against a *velocity*, so integrating it explicitly has a
-/// stability limit: the port's two-step integrator goes unstable once the force can reverse the
-/// slide inside one substep, and what that looks like from the pad is a bike that will not stand
-/// still and spins out on its own.
-///
-/// So the force is held to the one that stops the slide dead and no further: friction may null a
-/// slide, never reverse it. The bound is `m * |slide| / dt` with `m` the mass the chassis actually
-/// presents to a push there ([`effective_mass`]) — a statement about friction rather than a damping
-/// constant chosen by eye, and it is the same argument [`surface_drag`] already makes for the brake.
-/// On the game's own numbers it never binds; it is what makes every surface in the data safe rather
-/// than the ones that happen to have been driven over.
-///
-/// The arm the bound is taken on stays the contact patch's, even though the force goes in on the
-/// arm below: the slide being nulled is the *patch's*, and the patch is where a push moves it most.
-/// Measuring the bound anywhere else makes it looser — a force on the `.phy`'s own arm shifts the
-/// patch about a quarter as much per pound, so the impulse that would null the slide from there is
-/// four times larger. Loose is not safe here, so the tighter of the two is kept.
-///
-/// It also sets the two fields [`mv::engine_update`] reads back: the forward contact force, and
-/// whether the spin is the torque's or the ground's.
-///
-/// ## Where the force acts on the chassis is a `.phy` key, not the contact patch
-///
-/// This is the one thing in the function that is **not** a stand-in: the original's own version puts
-/// the force into the chassis' force accumulator and the couple into its torque accumulator on an
-/// arm it loads straight out of the wheel, and that arm is `BodyTireForcePosition` — the per-tire
-/// vector the loader writes there and that nothing else in the wheel reads. It is used exactly as
-/// it stands, as an arm about the centre of gravity, with no contact point and no centre of gravity
-/// subtracted from it. P8's journal entry has the two addresses and the loads.
-///
-/// That matters more than it looks. The patch sits about two feet under the centre of gravity, so a
-/// drive force taken there turns into a couple of two foot-pounds per pound and loops the bike over
-/// backwards the instant the throttle opens — which is what P8 came for. On the arm the file gives,
-/// the same force makes a couple the file's author chose, and full throttle from a standstill
-/// drives the bike forward instead of standing it up.
-fn spin_integrate(wh: &mut Wheel, pt: &Patch, surf: &phy::Surface, body: &Body, dt: F,
-                  c: &mut wheel::Chassis, m: &Mat4, at: Vf) {
-    let drive_torque = wh.mv.drive_torque;
-    // The engine accumulates onto this every substep and nothing else empties it.
+/// **What is still this module's:** the contact frame the slide is measured in ([`patch`], not the
+/// original's frame helper, whose steering turns about the hinge axis the model gives), the wheel's
+/// rolling angle and the gyroscopic term (neither is read by anything ported), and the hinge path a
+/// balancing steered wheel's force takes in the original — here it goes into the chassis like the
+/// other's.
+#[allow(clippy::too_many_arguments)]
+fn spin_integrate(wh: &mut Wheel, pt: &Patch, t: &phy::Tire, surf: &phy::Surface, brake: F, partner: bool,
+                  dt: F, c: &mut wheel::Chassis, m: &Mat4) {
+    let torque = wh.mv.drive_torque;
+    let f = if wh.w.contact || partner {
+        let grip = tire::Grip {
+            torque,
+            inv_radius: wh.mv.inv_radius,
+            load: pt.load,
+            donut: wh.mv.donut_scale,
+            parametric: t.use_parametric_curve,
+            brake,
+            slide: pt.side,
+            roll: pt.roll,
+        };
+        let mut flags = tire::Flags { spinning: wh.mv.spin_from_torque, locked: wh.locked, sliding: wh.sliding };
+        let f = tire::force(&grip, surf, &mut flags);
+        (wh.mv.spin_from_torque, wh.locked, wh.sliding) = (flags.spinning, flags.locked, flags.sliding);
+        f
+    } else {
+        tire::Force::default()
+    };
+    // The contact frame's rows times the force: across, then along.
+    push(c, m, add_xyz(scale(pt.right, f.side), scale(pt.forward, f.drive)), t.body_tire_force_position);
+
+    wh.mv.spin = if wh.locked {
+        F::ZERO
+    } else if !wh.mv.spin_from_torque && wh.w.contact {
+        pt.roll * wh.mv.inv_radius
+    } else {
+        wh.mv.spin + dt * ((torque - f.drive * wh.mv.radius) * wh.inv_inertia)
+    };
     wh.mv.drive_torque = F::ZERO;
-
-    if !wh.w.contact {
-        wh.mv.spin = wh.mv.spin + drive_torque * wh.inv_inertia * dt;
-        wh.mv.spin_from_torque = true;
-        wh.mv.contact_force_fwd = F::ZERO;
-        return;
-    }
-
-    let grip = surf.wheel_friction * pt.load;
-    let drive_cap = surf.max_drive_force * pt.load;
-    let drive = (drive_torque * wh.mv.inv_radius).clamp(-drive_cap, drive_cap);
-    let along = drive.clamp(-grip, grip);
-
-    let side_cap = (surf.max_side_force * (F::ONE - wh.mv.donut_scale)).max(F::ZERO) * pt.load;
-    let arm = sub_xyz(unpoint(m, wh.w.load_point), c.cofg);
-    let dir = chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), pt.right);
-    let hold = effective_mass(body, arm, dir) * pt.side.abs() / dt;
-    let cap = side_cap.min(grip).min(hold);
-    let across = (-pt.side * surf.side_force * pt.load).clamp(-cap, cap);
-    push(c, m, add_xyz(scale(pt.forward, along), scale(pt.right, across)), at);
-
-    // Rolling, plus whatever the grip would not take: the spin the road asks for, and the slip the
-    // tire's own inertia lets it run away with.
-    let slip = ((drive - along) * wh.mv.radius) * wh.inv_inertia * dt;
-    wh.mv.spin = pt.roll * wh.mv.inv_radius + slip;
-    wh.mv.spin_from_torque = false;
-    wh.mv.contact_force_fwd = along;
+    wh.mv.contact_force_fwd = f.drive;
 }
 
 /// The steering hinge's force: a steered wheel the bike is balancing on puts its suspension
@@ -1174,7 +1091,8 @@ fn answer(m: &Mat4, call: wheel::Call, hinge: &mut Option<(Vf, Vf)>, synced: &mu
 /// ported half integrates reads the torque the spin step puts on it — which is the order the original
 /// runs them in (surface drag, spin, steering), so the only difference is where the `Call` list is
 /// built.
-fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, body: &Body, mvc: &mut mv::Chassis,
+#[allow(clippy::too_many_arguments)]
+fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, partner: bool, mvc: &mut mv::Chassis,
                    m: &Mat4, curve: &CurveTable, dt: F) -> Vec<wheel::Call> {
     wh.to_wheel();
     let pt = patch(wh, m, curve);
@@ -1186,8 +1104,8 @@ fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, body: &Body, mvc:
         cofg: mvc.cofg,
         vel: mvc.vel,
     };
-    surface_drag(wh, &pt, &surf, brake, &mut wc);
-    spin_integrate(wh, &pt, &surf, body, dt, &mut wc, m, tire.body_tire_force_position);
+    surface_drag(wh, &surf, brake, &mut wc, m);
+    spin_integrate(wh, &pt, tire, &surf, brake, partner, dt, &mut wc, m);
     let calls = wheel::integrate(&mut wh.w, dt);
     mvc.force = wc.force;
     mvc.torque = wc.torque;
@@ -1450,13 +1368,12 @@ impl Ride {
             }
             rear.mv.other_tire_down = front.mv.contact && !rear.mv.contact;
 
-            let body = Body { inv_mass: chassis.inv_mass, inv_inertia: chassis.inv_inertia };
             calls.push(mv::Call::WheelIntegrate(Side::Front, h));
-            let brake = held.front_brake;
-            wheel_integrate(front, &p.front, brake, &body, &mut mvc, &out.chassis, &tables.curve, h);
+            let (brake, partner) = (held.front_brake, rear.w.contact);
+            wheel_integrate(front, &p.front, brake, partner, &mut mvc, &out.chassis, &tables.curve, h);
             calls.push(mv::Call::WheelIntegrate(Side::Rear, h));
-            let brake = held.rear_brake;
-            wheel_integrate(rear, &p.rear, brake, &body, &mut mvc, &out.chassis, &tables.curve, h);
+            let (brake, partner) = (held.rear_brake, front.w.contact);
+            wheel_integrate(rear, &p.rear, brake, partner, &mut mvc, &out.chassis, &tables.curve, h);
 
             mv::engine_post(engine, &mut rear.mv);
 
@@ -1832,6 +1749,9 @@ fn walk_wheel(w: &mut Walk<'_>, wh: &Wheel) {
     });
     w.u8("surface", wh.surface);
     w.f("inv_inertia", wh.inv_inertia);
+    w.bool("locked", wh.locked);
+    w.bool("sliding", wh.sliding);
+    w.vf("hinge", wh.hinge);
 }
 
 /// Three floats under `x` · `y` · `z`, which is how every triple in the chassis is indexed.

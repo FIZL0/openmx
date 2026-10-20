@@ -703,6 +703,11 @@ fn run() -> Result<(), String> {
         node_at("TireRear").unwrap_or(phy.rear.body_tire_force_position),
     );
     let mut rider = Rider::new(&phy, mounts, at, heading, stunts);
+    // The front wheel's steering hinge, off the same model (P24): without it the bars turn about the
+    // chassis' own `y` and a held turn at speed scrubs off far more than the original's.
+    if let (Some(shocks), Some(bars)) = (node_at("Shocks"), node_at("Handlebars")) {
+        rider.ride.front.hinge = ride::hinge_axis(shocks, bars);
+    }
     rider.sense.wrecks_enabled = args.wrecks;
     // The eight numbers the body's *step* reads, which `Rider::new` leaves at zero and says a shell
     // is expected to fill: the five fade rates, the stunt cross-fade's cap and the pose grid's three

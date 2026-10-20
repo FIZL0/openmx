@@ -487,6 +487,11 @@ pub mod stock;
 /// step everything else in this crate hangs off, and the place to look for what runs before what.
 pub mod tick;
 
+/// The tire: the force one wheel's contact patch pushes back with — the drive along it, held to the
+/// grip and breaking loose past it, and the side force across it, out of the three families the brake
+/// and the wheel's spin pick between. The original's own curve, which the ride's wheel runs on.
+pub mod tire;
+
 /// One track as the disc stores it: the scene that lists what is on it, the collision shapes the
 /// simulation tests against, and the terrain the wheels run on. Pure parsing over borrowed bytes — the
 /// app layer reads them out of the archives and hands them over.
@@ -523,7 +528,7 @@ mod tests {
     ///
     /// The same literal as `tests/hash.rs`' own, and it moves whenever the state type or the ride
     /// does. What it is here for is the *platform*: see the test below it.
-    const HUNDRED_TICKS: u64 = 0xb891_0780_55ad_c328;
+    const HUNDRED_TICKS: u64 = 0x2eb0_821a_075d_6c4c;
 
     /// The hash is a constant of the code, not of the machine: this value must be the same on x86-64,
     /// aarch64 and wasm32. When a change to the state type changes it, that is expected — update it. When

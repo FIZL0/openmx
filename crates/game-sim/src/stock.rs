@@ -40,6 +40,14 @@ pub const BIKE: &str = "\
 #
 # Units are the simulation's: feet, slugs, pounds of force, g = 32.2 ft/s^2. The per-surface grip
 # keys are coefficients *per unit of tire load*, not pounds, which is why they are small numbers.
+#
+# The `Skid…` and `Slipping…` keys are what a tire past its limit pushes with (P24): since the ride
+# runs the original's own tire force, a missing one is a zero, and a tire that has slid past
+# `MaxSideForce` would have no grip at all until it slowed back under it.
+#
+# `WheelDrag` is zero, as on the game's own bikes' dirt: the original's surface drag is
+# `WheelDrag · v²` and not per unit load, and the 0.02 this file carried for the old reading held the
+# bike under forty feet a second flat out.
 [Mass Properties]
 Weight = 400
 Gravity = 1
@@ -63,11 +71,16 @@ MaxSteerAngle = 30
 BodyTireForcePosition = 0.0, 1.1, 2.1
 NumberOfSurfaces = 1
 WheelFriction1 = 8.0
-WheelDrag1 = 0.02
+WheelDrag1 = 0.0
 MaxBrakingTorque1 = 300
 MaxDriveForce1 = 1.5
 MaxSideForce1 = 3.5
-SideForce1 = 0.2
+SideForce1 = 0.1
+SkidDriveForce1 = 1.4
+SkidSideForce1 = 1.5
+SlippingSideForce1 = 0.1
+MaxSlippingSideForce1 = 3.5
+SkidSlippingSideForce1 = 1.5
 [Rear Tire]
 StrutCompression = 1.0
 Spring = 2.2
@@ -80,11 +93,16 @@ BodyTireForcePosition = 0.0, 1.1, -2.1
 OtherTireNormalLoadScale = 1.0
 NumberOfSurfaces = 1
 WheelFriction1 = 9.0
-WheelDrag1 = 0.02
+WheelDrag1 = 0.0
 MaxBrakingTorque1 = 400
 MaxDriveForce1 = 2.4
 MaxSideForce1 = 4.0
-SideForce1 = 0.25
+SideForce1 = 0.12
+SkidDriveForce1 = 2.2
+SkidSideForce1 = 1.8
+SlippingSideForce1 = 0.12
+MaxSlippingSideForce1 = 4.0
+SkidSlippingSideForce1 = 1.8
 [Engine]
 NumberOfRPMPoints = 4
 RPM1 = 2000

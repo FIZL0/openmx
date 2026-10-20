@@ -1273,6 +1273,16 @@ wheel_surface_drag boot 0x0025c390 (wheel; dt is still in f12 but is not read) -
 wheel_spin_integrate boot 0x0025c530 (dt in f12, wheel) -> the wheel's own spin, and the steering
 #                                    hinge's contribution to the chassis' angular velocity. Reads the
 #                                    hinge axis at +0x8c0 and its frame at +0x8d0..+0x8f0
+tire_patch_force boot 0x0025ca60 (wheel) -> the tire's force in the contact's frame: +0x850 the side
+#                                force, +0x858 the drive, and the spinning/locked/sliding flags at
+#                                +0xe0/+0xe4/+0xe8. Reads the torque +0x210, 1/radius +0x838, the
+#                                load +0xf8, the donut share +0x44, UseParametricCurve +0x40, the
+#                                brake through +0x30 and the patch velocity +0x840/+0x848. P24
+axis_angle_matrix boot 0x00134290 (angle in f12, unit axis, out 3x4) -> the rotation of angle about
+#                                 axis as three rows, off the same curve table and wrap as
+#                                 rotate_about_axis; row 2 is the cross of rows 0 and 1. The wheel's
+#                                 contact frame turns the chassis' z by the steer angle +0x8ac about
+#                                 the hinge +0x8c0 with it (row 2 only). Returns 0 for a null out. P24
 wheel_steer_integrate boot 0x0025d1b0 (dt in f12, wheel) -> the steering hinge: +0x6c's torque less
 #                                     +0x70's damping, through +0x78's inverse inertia into +0x8b0's
 #                                     rate, into +0x8ac's angle, clamped to +0x80..+0x7c with the rate
@@ -1744,7 +1754,7 @@ transform_set_axes boot 0x001b1e20 (node, relative_to, forward, up, sync_a in t0
 # 0x002535a0 hands the front wheel a pointer to bike+0x650 as its +0x30 and the rear wheel one to
 # bike+0x654, beside the engine's +0x658/+0x65c (the rate-limited throttle and clutch), and each wheel
 # reads its own word as a brake — 0x0025c4c8 in wheel_surface_drag turns it into a torque against the
-# spin, 0x0025cb8c in wheel_tire_forces gates the locked-wheel path on it being nonzero. So the
+# spin, 0x0025cb8c in tire_patch_force (P24: not wheel_tire_forces) picks the braking side-force family on it being nonzero. So the
 # wheelie's veto is the driven wheel's brake and the stoppie's gate is the front's. Who writes the two
 # words (one lever into two rate limiters, or two levers) was not chased down; the port keeps them as
 # two inputs, Step::front_brake and Step::rear_brake.

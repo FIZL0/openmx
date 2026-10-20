@@ -104,8 +104,8 @@ const LEGS: [(&str, usize); 11] = [
 ];
 
 /// How far ahead of the bike the take-off ramp goes, and its shape: a rise over a run, in feet. The
-/// same ramp as the sibling file's.
-const RAMP: (f32, f32, f32) = (250.0, 0.3, 15.0);
+/// same ramp as the sibling file's, which says why it is 200 ft ahead since P24 and not 250.
+const RAMP: (f32, f32, f32) = (200.0, 0.3, 15.0);
 
 /// The flip's ramp, the same three numbers — the sibling file's `FLIP_RAMP`, which says why it is
 /// nearer, steeper and longer than [`RAMP`]: the jump's lip holds for 16 frames, and the flip is
@@ -758,7 +758,8 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
     let m = ride_the_minute();
     let jump = m.span("the run-up", "the jump");
     let air = airborne(&jump);
-    assert!(air > 70, "the ramp only put the bike in the air for {air} frames");
+    // 59 frames at 47 ft/s since P24's tire; the sibling file's same test says why it is not 83.
+    assert!(air > 50, "the ramp only put the bike in the air for {air} frames");
     assert!(
         highest(&jump) > RAMP.1 * RAMP.2 + 1.0,
         "the jump's highest point was {} ft, which is no higher than the lip",
@@ -793,9 +794,12 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
         "a quarter of a second after it landed it was still at up {}",
         flattest(&landed[SETTLE..])
     );
+    // A quarter off the speed at the lip, as the sibling file's: the ramp is taken nearer 50 than 70
+    // since P24.
+    let took_off = jump.iter().find(|t| !t.on_ground).expect("the bike never left the ground").speed;
     assert!(
-        slowest(landed) > CAPTURED_TOP_SPEED * 0.65,
-        "the landing left the bike at {} ft/s",
+        slowest(landed) > took_off * 0.75,
+        "the landing left the bike at {} ft/s, from {took_off} at the lip",
         slowest(landed)
     );
     assert_eq!(wrecks(&jump), 0, "the jump wrecked");

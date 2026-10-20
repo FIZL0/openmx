@@ -350,8 +350,8 @@ fn the_walk_names_every_field_once() {
 
     // The two numbers that catch a field added to the struct and not to the walk. Both move on
     // purpose when the ride gains state, and the per-tick hashes of every fixture move with them.
-    assert_eq!(dump.fields.len(), 472, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 1800, "the ride's own size");
+    assert_eq!(dump.fields.len(), 484, "the walk's leaves");
+    assert_eq!(std::mem::size_of::<Ride>(), 1832, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");
@@ -500,47 +500,20 @@ fn a_dropped_bike_stands_still() {
     }
 }
 
-/// The test bike with a hundred times the cornering stiffness on both tires. The keys are spelled out
-/// so that renumbering the `.phy` fails here, by name, rather than silently handing the tests below the
-/// unmodified bike and passing.
-fn stiffened() -> String {
-    let mut out = BIKE.to_string();
-    let keys = [
-        ("SideForce1 = 0.2\n", "SideForce1 = 20.0\n"),
-        ("SideForce1 = 0.25", "SideForce1 = 25.0"),
-    ];
-    for (key, hundredfold) in keys {
-        assert!(out.contains(key), "freeride-bike.phy.txt no longer has `{}`", key.trim_end());
-        out = out.replace(key, hundredfold);
-    }
-    out
-}
-
-#[test]
-fn no_cornering_stiffness_can_make_the_bike_spin() {
-    // A hundred times the cornering stiffness, which no surface on the disc has and every explicit
-    // damper would blow up on. The tire's force is bounded by the slide it is there to kill, so this
-    // bike stands as still as the last one — the bound is what the test is, not the number.
-    let wild = stiffened();
-
-    for (dt, frames) in IDLE_RATES {
-        let at = format!("{frames} frames of {}", dt.0);
-        let d = idle(&wild, dt, 0, frames);
-        assert!(d.moved < 0.5, "{at}: a stiff bike nobody touched wandered {} ft", d.moved);
-        assert!(d.yaw_rate < 0.02, "{at}: a stiff bike turned at {} rad/s", d.yaw_rate);
-        assert!(d.slide < 0.02, "{at}: a stiff bike slid at {} ft/s", d.slide);
-    }
-}
+// `no_cornering_stiffness_can_make_the_bike_spin` rode this bike with a hundred times the cornering
+// stiffness and held it to standing still: P4's stand-in tire capped its side force at the impulse
+// that nulls the slide, so no gain could make it reverse one. P24 replaced that tire with the
+// original's, which has no such bound — its side force is held only by the surface's `MaxSideForce`
+// times the load, as on the disc — and a hundredfold stiffness rings at that cap and walks the bike
+// nine feet, as the original's own would. The property was the stand-in's, so it went with it.
 
 #[test]
 fn a_tire_kills_a_slide_and_never_reverses_it() {
     // Shoved sideways at twenty feet a second, which is a real slide and not a settling transient: the
     // one thing friction may not do is push back harder than the slide it is resisting. So the slide
-    // decays, monotonically, to nothing — and it does that at both frame rates and at a hundred times
-    // the stiffness, because the bound is on the impulse and not on the gain.
-    let wild = stiffened();
-
-    for phy in [BIKE, &wild] {
+    // decays, monotonically, to nothing, at both frame rates. (Until P24 this was also ridden at a
+    // hundred times the stiffness; see the note above.)
+    for phy in [BIKE] {
         for (dt, _) in IDLE_RATES {
             let tables = Tables::build();
             let p = Phy::read_bytes(phy.as_bytes(), &tables.curve);
@@ -575,7 +548,16 @@ fn a_tire_kills_a_slide_and_never_reverses_it() {
             // The shove turns the bike — it is a bike, and the front wheel is steered — but it does
             // not spin: a quarter of a turn a second is the worst of it, where the defect reached
             // three and a half radians a second from no shove at all.
-            assert!(yaw < 2.0, "the shove span the bike at {yaw} rad/s");
+            // The shove turns the bike — it is a bike, and the front wheel is steered — but it does
+            // not spin: it comes round less than a quarter of a turn and stops there, where the defect
+            // reached three and a half radians a second from no shove at all. The rate peaks at about
+            // 2.5 rad/s at 60 Hz for a moment (2.0 at 30) under the original's tire, which pushes at
+            // its skid force until the slide comes back under the limit, and the bike ends 0.31 rad
+            // round from where it was shoved.
+            let m = ride.transform();
+            let turned = m.0[2].x().atan2(m.0[2].z()).abs();
+            assert!(turned < std::f32::consts::FRAC_PI_4, "the shove turned the bike {turned} rad");
+            assert!(yaw < 3.0, "the shove span the bike at {yaw} rad/s");
         }
     }
 }
@@ -975,7 +957,7 @@ fn the_two_captured_wrecks_match_their_lengths() {
 //     straight after the right   2 s
 //     turning left               4 s   the stick hard the other way
 //     straight after the left    2 s
-//     the run-up                 3 s   a ramp is put 250 ft ahead, along the bike's own heading
+//     the run-up                 3 s   a ramp is put 200 ft ahead, along the bike's own heading
 //     the jump                   5 s   over it, through the air, and down
 //     the brake                 10 s   the brake pinned, the throttle shut
 //     stopped                    8 s   hands off the pad
@@ -1366,11 +1348,16 @@ fn minute() -> Vec<Leg> {
 /// however fast the hand is — so the first reversal is at 212, after the preload has armed, and the
 /// second at 232, as the first one lands (the preload fires at 230). The flip fires at 249, with the
 /// lip a few ticks from its end. The
-/// last two moves are the rider's timing and have slack: the forward stab anywhere from 295 to 305
-/// lands it. At 290 the bike is a quarter of a turn short when it lands, at 310 nose-high enough to
-/// come down at up 0.4. The script stabs at the early end, 295, because the shell's arrow keys put
-/// the same stab past −0.8 about eight ticks after a stick does, and `crates/openmx/tests/ride.rs`
-/// rides this leg on the keys as well.
+/// last two moves are the rider's timing and have slack: the forward stab anywhere from 324 to 340
+/// lands it, the last few ticks before the wheels touch. Before 313 the bike is still a quarter of a
+/// turn short and wrecks; from 313 to 322 it comes round but lands nose-high enough to wheelie up to
+/// 0.7 and stay there past the quarter second the landing is given. The script stabs at 326, early in
+/// that window, because the shell's arrow keys put the same stab past −0.8 about eight ticks after a
+/// stick does, and `crates/openmx/tests/ride.rs` rides this leg on the keys as well.
+///
+/// The window was 295 to 305 until P24. The original's tire costs the run-up a foot and a half a
+/// second at the foot of the ramp, the bike leaves the lip four ticks later, and the backflip's torque
+/// only builds once the wheels are off — so the turn starts later and the stab has to wait for it.
 fn the_flip() -> Leg {
     let gas = Controls { gas: F::ONE, ..Controls::default() };
     let at = |y: f32| Controls { stick: (F::ZERO, F(y)), ..gas.clone() };
@@ -1383,8 +1370,8 @@ fn the_flip() -> Leg {
             (212, at(-1.0)),
             (232, at(1.0)),
             (262, at(0.0)),
-            (295, at(-1.0)),
-            (305, at(0.0)),
+            (326, at(-1.0)),
+            (336, at(0.0)),
         ],
     }
 }
@@ -1392,7 +1379,11 @@ fn the_flip() -> Leg {
 /// How far ahead of the bike the ramp is put, and its shape: far enough that the run-up is over
 /// before the lip, short and shallow enough that a bike at the top speed clears it rather than
 /// climbing it. Feet, and a rise over the run.
-const RAMP: (f32, f32, f32) = (250.0, 0.3, 15.0);
+///
+/// It was 250 ft until P24. The minute's held turns scrub speed now, so the bike comes out of the
+/// left one at 17 ft/s rather than 73 and takes the run-up's 250 ft so long that it landed with 38
+/// ticks of `the jump` left; 200 ft gives the landing the leg it had.
+const RAMP: (f32, f32, f32) = (200.0, 0.3, 15.0);
 
 /// The flip's ramp, the same three numbers: nearer, steeper and longer than [`RAMP`], because the
 /// jump's ramp has no lip a flip fits on. At the 70 ft/s the minute takes it at, [`RAMP`]'s lip holds
@@ -1604,9 +1595,12 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
     let m = ride_the_minute(&ridden_bike());
     let jump = m.span("the run-up", "the jump");
     let air = airborne(&jump);
-    // 83 ticks (1.38 s) off this ramp at 70 ft/s; the original's lips at about 52 hang for 2.2 to 2.5 s,
-    // but they are not this ramp (P15).
-    assert!(air > 70, "the ramp only put the bike in the air for {air} ticks");
+    // 59 ticks (0.98 s) off this ramp at 47 ft/s; the original's lips at about 52 hang for 2.2 to 2.5 s,
+    // but they are not this ramp (P15). The bike took it at 70 and hung for 83 until P24: the minute's
+    // two held turns scrub speed now, as the original's do (P15: 61.4 to 52.4 ft/s in 1.1 s of a
+    // held turn), and the left one is a spiral — the slower it goes the more the bars turn — so the
+    // straight before the run-up starts at 17 ft/s instead of 73.
+    assert!(air > 50, "the ramp only put the bike in the air for {air} ticks");
     assert!(
         highest(&jump) > RAMP.1 * RAMP.2 + 1.0,
         "the jump's highest point was {} ft, which is no higher than the lip",
@@ -1654,11 +1648,13 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
         "a quarter of a second after it landed it was still at up {}",
         flattest(&landed[SETTLE..])
     );
-    // The original's clean landings cost it 4 to 8 ft/s off 52; this one comes down at 59 from 70 and
-    // bottoms out at 53, so 0.65 of the top speed is the floor this ramp carries (P15).
+    // The original's clean landings cost it 4 to 8 ft/s off 52 (P15). Until P24 this ramp was taken at
+    // 70 and held to 0.65 of the top speed; it is taken nearer 50 now (see `RAMP`), so the floor is
+    // the speed the bike left the lip at, less a quarter. It leaves at 47 and bottoms out at 40.6.
+    let took_off = jump.iter().find(|t| !t.on_ground).expect("the bike never left the ground").speed;
     assert!(
-        slowest(landed) > CAPTURED_TOP_SPEED * 0.65,
-        "the landing left the bike at {} ft/s",
+        slowest(landed) > took_off * 0.75,
+        "the landing left the bike at {} ft/s, from {took_off} at the lip",
         slowest(landed)
     );
     assert_eq!(wrecks(&jump), 0, "the jump wrecked");
@@ -2809,4 +2805,105 @@ fn the_reset_chord_is_the_originals() {
         from_spawn(back),
         from_spawn(rolled)
     );
+}
+
+// --- P24: a turn that keeps its speed --------------------------------------------------------------
+//
+// This one test rides the disc's own bike, because what it is about — how much speed a held turn costs
+// — is decided by the tire's curve and the bike's geometry, and the file's bike has neither. Nothing of
+// the disc's is in this file: the `.phy` and the model are read out of `context/iso` at run time, and
+// the test skips with a line where they are missing.
+
+/// The disc's `race125p` (the freeride's bike, D7), with its wheels hung where the original hangs
+/// them: the `125_faisst` model's "TireFront" and "TireRear" nodes, and the front hinge along its
+/// "Shocks" → "Handlebars" line — the three reads `bike_attach_nodes` makes.
+fn disc_race125p(tables: &Tables) -> Option<(Phy, (Vf, Vf), Vf)> {
+    use game_sim::archive::{Psr, Res};
+    use std::io::{Read, Seek, SeekFrom};
+    let path = private_dir("iso").join("MX.PSR");
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        println!("no {} — `./kit extract MX.PSR` writes it; the turn needs the disc's bike", path.display());
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    file.read_exact(&mut front).ok()?;
+    let psr = Psr::parse(&front).ok()?;
+    let (mut phy, mut model) = (None, None);
+    for e in &psr.entries {
+        let n = e.name.to_ascii_lowercase();
+        if !(n.starts_with("bike\\") && n.ends_with(".res")) {
+            continue;
+        }
+        file.seek(SeekFrom::Start(e.at)).ok()?;
+        let mut bytes = vec![0u8; e.size as usize];
+        file.read_exact(&mut bytes).ok()?;
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        let member = |want: &str| {
+            let m = res.entries.iter().find(|m| m.name.to_ascii_lowercase().ends_with(want))?;
+            res.read(&bytes, m).ok()
+        };
+        if phy.is_none() {
+            phy = member("race125p.phy").map(|b| Phy::read_bytes(&b, &tables.curve));
+        }
+        if model.is_none() && n.contains("125_faisst") {
+            model = member("bike.psg").and_then(|b| game_render::psg::Model::parse(&b).ok());
+        }
+    }
+    let (Some(phy), Some(model)) = (phy, model) else {
+        println!("no race125p.phy or 125_faisst bike.psg on this disc");
+        return None;
+    };
+    // Each node's place in the model's root frame, the original's arithmetic (`tests/replay.rs`).
+    let node = |name: &str| -> Vf {
+        let i = model.nodes.iter().position(|n| n.name == name).unwrap_or_else(|| panic!("no {name}"));
+        let mut root = i;
+        while let Some(up) = model.nodes[root].parent {
+            root = up;
+        }
+        Vf(model.place_in(i, root))
+    };
+    let hinge = game_sim::ride::hinge_axis(node("Shocks"), node("Handlebars"));
+    Some((phy, (node("TireFront"), node("TireRear")), hinge))
+}
+
+/// The share of its speed `race125p` keeps through one second at full lock on the flat, gas held,
+/// from `speed` ft/s.
+fn speed_kept_through_a_turn(phy: &Phy, mounts: (Vf, Vf), hinge: Vf, tables: &Tables, speed: f32) -> f32 {
+    const TICK: F = F(1.0 / 30.0);
+    let mut ride = Ride::new(phy, mounts, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0));
+    ride.front.hinge = hinge;
+    let mut world = Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    // Down onto its wheels and still, then up to speed along its own heading.
+    for _ in 0..30 {
+        ride.frame(phy, tables, &Controls::default(), TICK, &mut world);
+    }
+    let ahead = ride.transform().0[2];
+    ride.chassis.vel = Vf::new(ahead.x() * speed, 0.0, ahead.z() * speed, 0.0);
+    let flat = |r: &Ride| (r.chassis.vel.x().powi(2) + r.chassis.vel.z().powi(2)).sqrt();
+    let from = flat(&ride);
+    let turn = Controls { gas: F::ONE, stick: (F::ONE, F::ZERO), ..Controls::default() };
+    for k in 0..30 {
+        ride.frame(phy, tables, &turn, TICK, &mut world);
+        assert!(ride.front.w.contact || ride.rear.w.contact, "tick {k}: both wheels off the ground");
+    }
+    let up = ride.transform().0[1];
+    assert!(up.y() > 0.7, "the bike is not on its wheels after the turn: up {up:?}");
+    flat(&ride) / from
+}
+
+/// **P24: race125p in a one-second full-lock turn at 55 ft/s keeps 80% of its speed**, and so does
+/// one at 76, the speed P15 measured the port at 76 → 35 ft/s over 1.33 s. The original's held turn
+/// went 61.4 → 52.4 over 1.1 s (P15). Two things of the port's own scrubbed it: P4's stand-in for the
+/// tire force, and a contact frame steered about the surface's normal instead of the raked hinge.
+/// Both are the original's now ([`game_sim::tire`]); on these mounts the old pair kept 0.88 at 55 and
+/// 0.71 at 76, so it is the second leg that bites.
+#[test]
+fn a_full_lock_turn_keeps_its_speed() {
+    let tables = Tables::build();
+    let Some((phy, mounts, hinge)) = disc_race125p(&tables) else { return };
+    for speed in [55.0, 76.0] {
+        let kept = speed_kept_through_a_turn(&phy, mounts, hinge, &tables, speed);
+        println!("{speed} ft/s: {kept:.3} kept");
+        assert!(kept >= 0.8, "from {speed} ft/s a second of full lock keeps {kept:.3} of the speed");
+    }
 }

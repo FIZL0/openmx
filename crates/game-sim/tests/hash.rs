@@ -93,7 +93,7 @@ const HEAD: usize = 10;
 fn a_hundred_ticks_is_a_known_constant() {
     // The hash of a hundred ticks of the stand-in bike on a level floor, as a literal: the same
     // value `Sim::hash`'s own test carries.
-    const HUNDRED_TICKS: u64 = 0xb891_0780_55ad_c328;
+    const HUNDRED_TICKS: u64 = 0x2eb0_821a_075d_6c4c;
 
     let mut sim = Sim::new(1);
     for _ in 0..100 {
@@ -452,6 +452,6 @@ fn the_rngs_state_word_is_what_is_hashed() {
 /// one on the start line — `tests/platforms.rs` pins the count after a run as well.
 #[test]
 fn the_size_of_the_state_type_is_pinned() {
-    assert_eq!(size_of::<Sim>(), 6648, "Sim grew or shrank: does its walk still cover every field?");
-    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 750, "the walk's leaf count moved with it");
+    assert_eq!(size_of::<Sim>(), 6680, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 762, "the walk's leaf count moved with it");
 }
