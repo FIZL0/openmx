@@ -1766,6 +1766,18 @@ transform_set_axes boot 0x001b1e20 (node, relative_to, forward, up, sync_a in t0
 #                                  forward (z) axis and a3 the up (y) axis. Ghidra prints the
 #                                  orthonormalising callee (0x0013e330) as a two-argument call; it
 #                                  takes five, in a2, a3, t0, t1 and t2, passed straight through
+# P32: transform_set_axes' one callee is mat4_basis (0x0013e330, the port's math::basis, proved), at
+#   the node's own translation (+0x70..+0x78), with orthogonalise = t0 = 1 and keep_forward = t1 = 1
+#   (./kit dis 0x001b1e20). So the "Gram-Schmidt" above is mat4_basis, not a cross of its own; the
+#   port's ride.rs set_axes is now that call.
+# P32: the node bike_no_hander writes is *(bike+0x18), which is the chassis' transform +0x254 (see
+#   bike_attach_nodes below), and chassis_integrate (0x0015c540) begins by turning that transform's
+#   rotation into a quaternion and folding the change since its own +0x1a0 into the body. So the
+#   no-hander's roll is the body's roll: the lean a grounded bike shows is the chassis', although
+#   ang_free pins its roll *rate*. Checked in recording2's save-state RAM: for all four bikes
+#   *(bike+0x18) == *(chassis+0x254), and that transform's rows (at +0x80..+0xb0) equal the rows of
+#   the chassis quaternion at +0x1a0. Keys there: RollGain 5.0, MaxRollCommand 0.7854,
+#   MaxRollSpeed 51.333, MinStandUprightSpeed 14.667, MaxStandUprightSpeed 44.0.
 # The two brake words the two halves read are not copies of one another: the bike's setup at
 # 0x002535a0 hands the front wheel a pointer to bike+0x650 as its +0x30 and the rear wheel one to
 # bike+0x654, beside the engine's +0x658/+0x65c (the rate-limited throttle and clutch), and each wheel
