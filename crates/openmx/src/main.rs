@@ -161,7 +161,7 @@ use ps2_float::{F, Vf};
 use ground::Ground;
 use hud::Hud;
 use moment::{Moment, Shot};
-use pad::{Pads, Throttle, Wiring};
+use pad::{Bindings, SEATS, Seat, SeatInput, Seats, Throttle, Wiring};
 use vehicle::{Garage, Kind, Plane, Spawn};
 use window::{Window, fit_frame, key};
 
@@ -405,6 +405,11 @@ struct Args {
     /// facts about the device in somebody's hands — whether its face buttons travel, and which axis
     /// a driver publishes each button's pressure on — so neither can be guessed from here.
     wiring: Wiring,
+    /// `--pads k,0,1,-,…`: what drives each seat (P35) — the keyboard, a pad by the order it was
+    /// found, or nobody — or `None` for pads in join order with the keyboard beside 1P's.
+    pads: Option<[Option<Seat>; SEATS]>,
+    /// `--controls FILE`: the rebindable buttons, `context/controls.txt` when not said.
+    controls: Option<std::path::PathBuf>,
     /// `--vehicle bike|biplane`: which machine the session starts on (P19). The bike by default,
     /// and a default session is the shell exactly as it was before there was a choice.
     vehicle: Kind,
@@ -1122,10 +1127,26 @@ fn run() -> Result<(), String> {
 
     // ---- the window and the pad ---------------------------------------------------------------
     let mut window = Window::open(&args.display, args.size, args.scale, "openmx — freeride")?;
-    let mut pads = Pads::open(args.pad.as_deref(), args.wiring.clone());
-    match &pads.name {
-        Some(name) => println!("pad: {name}"),
-        None => println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)"),
+    // The seats (P35): every pad plugged in, the keyboard as one of them, and the buttons as
+    // `controls.txt` binds them. The file is the player's and not game data, but it sits beside the
+    // disc's other per-machine files under `context/` unless it is put somewhere else.
+    let controls = args.controls.clone().unwrap_or_else(|| "context/controls.txt".into());
+    let bindings = match controls.parent().is_none_or(|dir| dir.as_os_str().is_empty() || dir.is_dir()) {
+        true => {
+            let (bindings, said) = Bindings::load(&controls);
+            for line in said {
+                println!("controls: {line}");
+            }
+            bindings
+        }
+        false => Bindings::default(),
+    };
+    let mut seats = Seats::open(args.pad.as_deref(), args.pads, args.wiring.clone(), bindings);
+    if let Some(pads) = args.pads {
+        println!("seats: {}", Seat::flag(&pads));
+    }
+    if seats.slots.keys() == Some(0) && seats.name(0).is_none() {
+        println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)");
     }
     // How the throttle is wired, when it is not the plain binding: a session's own log should say,
     // because a rider who mapped the wrong axis sees a bike that will not pull and no reason why.
@@ -1219,7 +1240,18 @@ fn run() -> Result<(), String> {
         // The pad this frame: the tape's, if one is being ridden, and the host's otherwise. A tape
         // that has run out ends the session — there is no pad behind it to carry on with.
         match &mut head {
-            None => world.reports = [pads.report(&window), Report::missing()],
+            // The seats', otherwise: each seat feeds the engine's port of the same number, which is
+            // as many players as the ride has today (S54 makes it N). A seat whose pad was pulled
+            // out freezes the frame rather than riding on with nobody's hands on the bars: the
+            // engine skips the pass, so a tape being written has no hole in it either.
+            None => {
+                let now = seats.frame(&|code| window.held(code));
+                for line in seats.said() {
+                    println!("{line}");
+                }
+                world.reports = std::array::from_fn(|port| now[port].report());
+                engine.frozen = now[0] == SeatInput::Waiting;
+            }
             Some(head) => match head.next() {
                 Some(frame) => {
                     world.reports = frame.reports;
@@ -1287,8 +1319,10 @@ fn run() -> Result<(), String> {
         // same idles.
         // Neither moves while the plane is up: the bike was left with no controller and nothing steps it.
         let bike_up = world.garage.up == Kind::Bike;
+        // A pass the engine skipped (1P's pad is out) moves neither.
+        let moving = world.riding && step.simulated;
         if let Some(body) = &mut body {
-            if world.riding && bike_up {
+            if moving && bike_up {
                 body.ride(dt, &mut world.sim.rider, &world.hands, rider::Gate::default());
             }
         }
@@ -1298,7 +1332,7 @@ fn run() -> Result<(), String> {
         // over that pose from the ride's own numbers — the fork travel, the steering angle and the two
         // wheels' spin, which are not in any clip because no clip could have them.
         if let Some(chassis) = &mut chassis {
-            if world.riding && bike_up {
+            if moving && bike_up {
                 let ride = &world.sim.rider.ride;
                 let want = Chassis::want(ride, &world.sim.rider.tricks);
                 // The rider's two axes and not zeros: in the air they are the crossup sweep the
@@ -1492,7 +1526,7 @@ fn run() -> Result<(), String> {
             (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
             _ => None,
         };
-        hud.draw(&mut frame, world.sim.input.pad(0), &world.sim.rider, world.riding);
+        hud.draw(&mut frame, world.sim.input.pad(0), &world.sim.rider, moving);
         window.present(&frame.color, frame.width, frame.height)?;
 
         // One frame, on paper, for a run nobody is watching: the first by default, or the one
@@ -1517,7 +1551,7 @@ fn run() -> Result<(), String> {
                 triangles / frames.max(1) as usize,
                 // Feet a second to miles an hour, for a number a rider can read.
                 rider.speed.0 * 0.681_818,
-                match (world.riding, world.sim.rider.phase()) {
+                match (moving, world.sim.rider.phase()) {
                     (false, _) => " (frozen)",
                     _ if !bike_up => " (biplane)",
                     (_, Phase::Riding) => "",
@@ -1755,6 +1789,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         play: None,
         phase: TickPhase::default(),
         wiring: Wiring::default(),
+        pads: None,
+        controls: None,
         vehicle: Kind::Bike,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
     };
@@ -1766,6 +1802,13 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--bike" => args.bike = next("a bike name, like 125sx")?,
             "--rider" => args.rider = next("a rider name, like thq1, or none")?,
             "--pad" => args.pad = Some(next("a device, like /dev/input/js0")?),
+            "--pads" => {
+                args.pads = Some(
+                    Seat::parse_list(&next("seats, like k,0,1")?)
+                        .map_err(|why| format!("--pads: {why}"))?,
+                );
+            }
+            "--controls" => args.controls = Some(next("a controls file")?.into()),
             "--shot" => args.shot = Some(next("a path for the first frame")?.into()),
             "--shot-frame" => {
                 args.shot_frame = next("which frame to write")?
@@ -1888,6 +1931,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--shot-frame N] [--vehicle bike|biplane]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
+                            [--pads k,0,1,-] [--controls FILE]\n\
                      \n\
                      Rides the freeride area from the disc named in kit.toml.\n\
                      Cross throttle, Square brake, R2 front brake, L2 clutch, left stick steers\n\
@@ -1902,6 +1946,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                      giving up that trigger's own control, and --pad-pressure says which joystick\n\
                      axes a pad reports its buttons' own pressures on.\n\
                      H toggles the riding overlay, which --hud starts on.\n\
+                     Up to eight seats: every pad plugged in takes the next one, the keyboard\n\
+                     beside 1P's, or --pads says each seat's (k the keyboard, a number the pad\n\
+                     in the order found, - nobody). A pad pulled out pauses its player until it\n\
+                     is plugged back in; Start on the keyboard rides on without it. The buttons\n\
+                     are rebindable in --controls (context/controls.txt, written on first run).\n\
                      --vehicle biplane starts in the track's biplane, where its machine.txt\n\
                      parks one, and M swaps between the bike and the plane the way the\n\
                      original's \"Switch To Machine\" does. The plane flies over the terrain\n\

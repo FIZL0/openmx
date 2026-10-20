@@ -935,7 +935,7 @@ fn ride_the_flip(mut keys: Option<&mut pad::Pads>) -> Option<Vec<Seat>> {
     for &report in &legs[0].1 {
         let mut report = report;
         if let Some(keys) = keys.as_deref_mut() {
-            // The arrows are the d-pad (`pad::keyboard`): the stick goes back to centre and the
+            // The arrows are the d-pad (`pad::KEYBOARD`): the stick goes back to centre and the
             // keys' d-pad bits and pressures go into the script's report, which keeps its throttle.
             let y = report.axis(REPORT_LEFT_Y);
             let (up, down) = (y < AXIS_CENTRE - 64, y > AXIS_CENTRE + 64);
