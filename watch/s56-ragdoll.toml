@@ -356,13 +356,9 @@ type = "f32x4"
 
 # The moving world the body's update reads: every byte tests/ragdoll_wrecks.rs `what_the_wrecks_read`
 # saw it read (over all four first captures) that changes from tick to tick and is neither the actor's
-# own nor the request's, in blocks merged across gaps of 0x40. Absolute addresses: every s56 state comes
-# off the same save state, so the heap is laid out the same (the test checks the body actor's address).
-[[field]]
-name = "w0423b30"
-addr = "0x423b30"
-type = "bytes:8"
-
+# own nor the request's, in blocks merged across gaps of 0x40, less the generator (rng_state above).
+# Absolute addresses: every s56 state comes off the same save state, so the heap is laid out the same
+# (the test checks the body actor's address).
 [[field]]
 name = "w049f540"
 addr = "0x49f540"
