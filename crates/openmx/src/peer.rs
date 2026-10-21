@@ -65,6 +65,8 @@ pub fn sims(room: &Room) -> Vec<Sim> {
         .map(|s| {
             let mut sim = first.clone();
             sim.rng = room.seed.wrapping_add(1 + s as u32);
+            // each seat's bike read through its player's controller preset (N13), an open seat's 0
+            sim.set_presets([room.seats[s].as_ref().map_or(0, |s| s.pick.preset as usize), 0]);
             sim
         })
         .collect()
@@ -101,7 +103,7 @@ impl Peer {
         (room.riding, room.drop_in) = (true, true);
         let np = Netplay::new(Lineup { seats: vec![Some(openmx_net::HOST.into())] }, openmx_net::HOST, Timing::default(), self.dumps.clone())?;
         let first = sims(&room).swap_remove(0);
-        self.spawn = Some(game_sim::snapshot::encode(&first));
+        self.spawn = Some(rides::seat_bytes(&first));
         self.riding = Some(Riding { np, sims: vec![first], world: Flat::default(), room: room.clone() });
         self.net.send(Cmd::Host(room));
         Ok(())
@@ -161,8 +163,11 @@ impl Peer {
                 self.riding = Some(Riding { np, sims: vec![sims(&room).swap_remove(0)], world: Flat::default(), room });
             }
             Event::Arrived { peer, seats } => {
+                // each seat on its controller preset (N13), as the room seated it
+                let pick = |s: usize| self.room.as_ref()?.seats.get(s)?.as_ref().filter(|seat| seat.peer == peer);
+                let presets: Vec<(usize, u8)> = seats.iter().map(|&s| (s, pick(s).map_or(0, |seat| seat.pick.preset))).collect();
                 if let (Some(r), Some(spawn)) = (&mut self.riding, &self.spawn)
-                    && let Err(e) = r.np.admit(&peer, &seats, spawn.clone())
+                    && let Err(e) = r.np.admit(&peer, &seats, rides::spawn_on(spawn, &presets))
                 {
                     self.said.push(format!("online: {peer} cannot join: {e}"));
                 }

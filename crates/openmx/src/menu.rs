@@ -2674,6 +2674,9 @@ pub struct Lobby {
     pub start: Option<(Room, String)>,
     /// [`Lobby::start`] is a ride under way this machine drops in on (N10), not one starting.
     pub drop_in: bool,
+    /// [`Lobby::pick`]'s controller preset changed in a lobby that could not hear of it then (a
+    /// ride under way): it goes out once the lobby is open again (N13).
+    pub repick: bool,
 }
 
 impl Lobby {
@@ -2708,6 +2711,23 @@ impl Lobby {
         self.code.clear();
         self.chat.clear();
         self.status = status.into();
+    }
+
+    /// This machine's player's controller preset (P79) as its pick's (N13), which every machine's
+    /// ride reads the player's seat through: the shell's every frame. A lobby not riding hears of a
+    /// change; a ride under way keeps the preset it started on, as the original builds its table
+    /// once a ride, and its lobby hears of it once it is back. With no lobby the next one's Host or
+    /// Join carries the pick.
+    pub fn preset(&mut self, preset: usize) {
+        let preset = preset.min(PRESETS - 1) as u8;
+        if self.pick.preset != preset {
+            self.pick.preset = preset;
+            self.repick = self.room.is_some();
+        }
+        if self.repick && self.room.as_ref().is_some_and(|r| !r.riding) && self.start.is_none() {
+            self.out.push(Cmd::Picks(vec![self.pick.clone()]));
+            self.repick = false;
+        }
     }
 
     fn join(&mut self, code: &str) {

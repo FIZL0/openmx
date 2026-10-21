@@ -18,16 +18,22 @@ pub const SEATS: usize = 32;
 pub const HOST: &str = "host";
 
 /// One local player's pick in the garage: the rider (model and gear, `--rider`'s names, like thq1) and the bike set
-/// (the `.phy` the simulation loads, like race125p: what the handshake compares).
+/// (the `.phy` the simulation loads, like race125p: what the handshake compares), and the controller preset the
+/// player's bike is read through (N13).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pick {
     pub rider: String,
     pub bike: String,
+    /// Which of the original's four controller presets (P79, `game_sim::bindings`) the seat's bike rides on: 0
+    /// the shipped one, and always 0 under the new layout. Every machine builds the seat's binding table on it,
+    /// so it is in the handshake. A pick from a build before it is preset 0.
+    #[serde(default)]
+    pub preset: u8,
 }
 
 impl Pick {
     pub fn new(rider: &str, bike: &str) -> Pick {
-        Pick { rider: rider.into(), bike: bike.into() }
+        Pick { rider: rider.into(), bike: bike.into(), preset: 0 }
     }
 }
 
