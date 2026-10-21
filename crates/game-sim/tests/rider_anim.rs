@@ -1060,11 +1060,31 @@ fn a_wrecked_body_settles_and_then_holds_still() {
         (HOLD_LIMB..HOLD_LIMB + HOLD_LIMBS).contains(&held),
         "a settled body holds one of its five limbs, not {held}"
     );
-    // Back on the bike: the mode machine's own leaving-the-wreck arm clears the settle, so the next
-    // wreck starts flailing again rather than inheriting this one's rest.
-    assert!(!rider.body.settled, "the respawn left the body settled");
-    assert!(!rider.body.machine.flung, "and left it flung");
-    assert_eq!(rider.body.machine.roll, F::ZERO, "and left the roll running");
+    // Back on the bike, as the original goes (S74): on the clock's tick the body's request has not
+    // seen the put-back, so the body is still in the wreck; the next two it is held on the bike; then
+    // it rides. Leaving the wreck for `Held` is the arm that cleans nothing up, so the settle is kept,
+    // as the original's is — the next wreck's entry is what clears it.
+    use game_sim::rider_anim::Mode;
+    assert_eq!(rider.body.machine.mode, Mode::Wrecked, "the clock's tick: the body still down");
+    assert!(rider.drawn_jumps(), "the clock's tick: the bike is set down, a cut");
+    let mut modes = Vec::new();
+    let mut jumps = Vec::new();
+    for _ in 0..3 {
+        rider.frame(&p, &tables, &hands, WRECK_DT, &mut world);
+        jumps.push(rider.drawn_jumps());
+        rider.body_frame(WRECK_DT, &hands, gate, &lib, &clips);
+        modes.push(rider.body.machine.mode);
+        // Held, the body is in the riding row with its ramp zeroed and its axes snapped to the middle,
+        // which is where all nine captured put-backs hold it (`motion.rs` compares the joints).
+        if rider.body.machine.mode == Mode::Held {
+            let veh = &rider.body.veh;
+            assert_eq!((veh.state, veh.ramp, veh.phase.value, veh.mix.value), (30, F::ZERO, F(0.5), F(0.5)));
+        }
+    }
+    assert_eq!(modes[..2], [Mode::Held, Mode::Held], "held on the bike for two ticks");
+    assert_ne!(modes[2], Mode::Held, "and only two");
+    assert_eq!(jumps, [true, false, false], "and the body's own cut back onto it, the tick after");
+    assert!(rider.body.settled, "the put-back cleared the settle, which the original keeps");
     println!(
         "the wreck: reason {reason:?} down at {wrecked_at}, on the ground at {grounded_at}, settled at {settled_at} \
          holding state {held}, back up at {back_at} with the settle cleared"
@@ -1455,4 +1475,157 @@ fn the_wreck_arm_of_the_mode_machine_matches_frame_by_frame() {
          {held} already at rest"
     );
     assert!(settles > 1000 && flings > 100, "too few settles ({settles}) or flings ({flings}) to prove the test");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 7. the put-back's hold on the body, against the original (S74)
+// ---------------------------------------------------------------------------------------------------
+//
+// S74 recorded the body actor once a tick through S66's five runs (free06 riding, wrecked and put back
+// by the clock and by the chord; free09 riding and wrecked) with
+// `research/journal/2026-10-21-s74-putback-bones/capture/bones_watch.py`: the bike's reason and ghost
+// clock, the request block the body reads, the body's mode and every joint's node. The captures sit in
+// `context/s74/`; without them the test says so and passes, and with them it counts what it compared.
+
+/// One tick of a bones capture, as far as the put-back's hold goes.
+struct BonesTick {
+    frame: u32,
+    /// The bike's wreck reason and its ghost clock, at the end of the tick.
+    reason: u32,
+    ghost: f32,
+    /// The request as the body read it: held, and the wreck reason it was filled with.
+    held: bool,
+    asked_wreck: bool,
+    /// The body's mode.
+    mode: u32,
+    /// The body's main node and the bike's node, in the world.
+    body_at: Vf,
+    bike_at: Vf,
+}
+
+fn bones_capture(text: &str) -> Vec<BonesTick> {
+    let word = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let quad = |b: &[u8], o: usize| {
+        let f = |k: usize| f32::from_bits(word(b, o + 4 * k));
+        Vf::new(f(0), f(1), f(2), f(3))
+    };
+    let mut rows = Vec::new();
+    for chunk in text.split("\nf ").skip(1) {
+        let field = |name: &str| -> Option<Vec<u8>> {
+            let line = chunk.lines().find(|l| l.split(' ').next() == Some(name))?;
+            let hex = line.split(' ').nth(1)?;
+            (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect()
+        };
+        let (Some(bike), Some(ghost), Some(req), Some(body), Some(node0), Some(bike_node)) = (
+            field("bike.748"),
+            field("bike.7dc"),
+            field("req"),
+            field("body.47c"),
+            field("node0"),
+            field("bike.node"),
+        ) else {
+            continue;
+        };
+        rows.push(BonesTick {
+            frame: chunk.split_whitespace().next().unwrap().parse().unwrap(),
+            reason: word(&bike, 0),
+            ghost: f32::from_bits(word(&ghost, 0)),
+            held: word(&req, 0xc) != 0,
+            asked_wreck: word(&req, 0x104) != 0,
+            mode: word(&body, 0),
+            body_at: quad(&node0, 0xb0),
+            bike_at: quad(&bike_node, 0x70),
+        });
+    }
+    rows
+}
+
+/// **The put-back holds the body on the bike for two ticks** (S74). On every tick of the five
+/// captures, [`PutBack`] — set down where the port sets it, by the chord before the request's fill and
+/// by the wreck clock after it, and filled with the wreck as it stood before the machine's verdict —
+/// tells the body what the original's request told it: held, and down. On every captured put-back the
+/// body is held on exactly the two ticks the port holds it, still in the wreck on the clock's own tick,
+/// and drawn on the bike from its first held tick.
+///
+/// The one place the body's own mode parts from the port's is the wreck's entry, which the original's
+/// request lags by the same fill and the port does not (S74's journal): counted, not compared.
+#[test]
+fn the_put_back_holds_the_body_as_the_original_does() {
+    use game_sim::rider::PutBack;
+    let kit = match ps2_oracle::Kit::load() {
+        Ok(kit) => kit,
+        Err(why) => {
+            println!("no kit.toml ({why}): no put-back hold verdict");
+            return;
+        }
+    };
+    let (mut ticks, mut chords, mut clocks, mut entries) = (0, 0, 0, 0);
+    for name in ["free06-ride", "free06-down", "free06-downchord", "free09-ride", "free09-down"] {
+        let Ok(text) = std::fs::read_to_string(kit.ctx("s74").join(format!("{name}.txt"))) else {
+            println!("no context/s74/{name}.txt: no put-back hold verdict for it");
+            continue;
+        };
+        let rows = bones_capture(&text);
+        let mut back = PutBack::default();
+        // The ticks since the last put-back, and what kind it was.
+        let mut since: Option<(usize, bool)> = None;
+        for pair in rows.windows(2) {
+            let (before, now) = (&pair[0], &pair[1]);
+            assert_eq!(now.frame, before.frame + 1, "{name}: a gap at frame {}", now.frame);
+            let started = now.ghost > before.ghost;
+            // The clock's put-back starts the ghost after the ghost's tick, the chord's before it.
+            let clock = started && now.ghost == 3.0;
+            let chord = started && !clock;
+            if chord {
+                back.place();
+            }
+            back.fill(!chord && before.reason != 0);
+            if clock {
+                back.place();
+            }
+            let f = now.frame;
+            assert_eq!(back.held, now.held, "{name} frame {f}: held");
+            assert_eq!(back.wreck, now.asked_wreck, "{name} frame {f}: the wreck the request was filled with");
+            ticks += 1;
+
+            if started {
+                since = Some((0, clock));
+                if clock {
+                    clocks += 1;
+                } else {
+                    chords += 1;
+                }
+            } else if let Some((k, kind)) = since {
+                since = Some((k + 1, kind));
+            }
+            if before.reason == 0 && now.reason != 0 {
+                // The wreck's entry: the request has not seen it, and nor has the body.
+                assert!(!now.asked_wreck && now.mode != 2, "{name} frame {f}: the body saw the wreck's entry");
+                entries += 1;
+            }
+            let Some((k, clock)) = since else { continue };
+            let first_held = if clock { 1 } else { 0 };
+            match k {
+                _ if k < first_held => {
+                    assert_eq!(now.mode, 2, "{name} frame {f}: the clock's tick, the body still down");
+                    assert!(back.wreck && !back.held, "{name} frame {f}: and the port's with it");
+                }
+                _ if k < first_held + 2 => {
+                    assert_eq!(now.mode, 0, "{name} frame {f}: held on the bike");
+                    let away = now.body_at.sub(now.bike_at);
+                    let away = (away.x() * away.x() + away.y() * away.y() + away.z() * away.z()).sqrt();
+                    assert!(away < 6.0, "{name} frame {f}: held, and drawn {away} ft off the bike");
+                }
+                _ if k == first_held + 2 => {
+                    assert_ne!(now.mode, 0, "{name} frame {f}: held for two ticks only");
+                    since = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    println!("the put-back's hold: {ticks} ticks, {chords} chords, {clocks} clocks, {entries} wreck entries");
+    if ticks > 0 {
+        assert!(chords + clocks >= 9, "only {} put-backs compared", chords + clocks);
+    }
 }

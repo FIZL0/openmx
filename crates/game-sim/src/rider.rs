@@ -149,6 +149,47 @@ pub struct Wreckage {
     pub inertia: Vf,
 }
 
+/// **The put-back's hold on the body** (S74): for the two ticks after the bike is set down, the body
+/// is told the bike is placing it, and it sits on the bike straight off its clips rather than riding.
+///
+/// The original keeps the pair on the bike: a "placed" word, which the chord's put-back and the wreck
+/// clock's both raise, and a copy of it as the last request saw it. The bike's update copies the first
+/// into the body's request after its physics and then clears it if the request had already seen it,
+/// so a put-back is held for exactly two request fills — this tick and the next for the chord, which
+/// is taken before the physics, and the next two for the clock, which runs after. The same fill
+/// copies the wreck, which is why the body still sees the rider down on the tick the clock puts them
+/// back. Measured on nine put-backs in five captures (S74's journal).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PutBack {
+    /// The bike has just been set down, and the body has not yet been told twice.
+    pub placed: bool,
+    /// `placed` as the last fill saw it.
+    pub filled: bool,
+    /// The body is held on the bike: what the last fill copied into the request.
+    pub held: bool,
+    /// The rider was down as of the last fill. The body's view of the wreck lags the machine by the
+    /// fill, which sits before the machine's verdict.
+    pub wreck: bool,
+}
+
+impl PutBack {
+    /// The bike has been set down.
+    pub fn place(&mut self) {
+        self.placed = true;
+    }
+
+    /// The request's fill, and the end of the bike's update that follows it: what the body is told,
+    /// and the word cleared once the body has been told on two fills running.
+    pub fn fill(&mut self, wreck: bool) {
+        self.held = self.placed;
+        self.wreck = wreck;
+        if self.placed && self.filled {
+            self.placed = false;
+        }
+        self.filled = self.placed;
+    }
+}
+
 /// A bike with somebody on it.
 ///
 /// `Clone` because it is most of a [`crate::Sim`], and a snapshot of the simulation is a copy of
@@ -248,6 +289,14 @@ pub struct Rider {
     /// The wreck page (S72): the screen's fade to black that a wreck's automatic reset asks for, and
     /// that puts the bike back when it is black.
     pub page: wreck_page::Page,
+    /// The put-back's two-tick hold on the body (S74), filled by [`Rider::frame`] and read by
+    /// [`Rider::body_frame`].
+    pub put_back: PutBack,
+    /// The bones as the original still draws them on the tick the wreck clock puts the rider back
+    /// (S74): the body's request has not seen the put-back yet, so the body is still down and drawn
+    /// thrown for one more tick while the bike is already standing on the put-back record.
+    /// Presentation only — nothing simulated reads it, and the next [`Rider::frame`] drops it.
+    pub ragdoll_shown: Option<Box<Down>>,
 }
 
 impl Rider {
@@ -297,6 +346,8 @@ impl Rider {
             // A player's bike on a free-ride area, the only event the port has.
             edge_armed: off_map::armed(off_map::Built::Player, off_map::League::FreeRide),
             page: wreck_page::Page::default(),
+            put_back: PutBack::default(),
+            ragdoll_shown: None,
         }
     }
 
@@ -305,6 +356,7 @@ impl Rider {
         self.ride.place(at, facing);
         self.crash = None;
         self.ragdoll = None;
+        self.ragdoll_shown = None;
         self.tricks.reset();
         self.flight = Trick::NONE;
         self.airborne = false;
@@ -340,6 +392,20 @@ impl Rider {
         }
     }
 
+    /// **The bones to draw the body from**, if it is drawn thrown: the ragdoll while the rider is down,
+    /// and on the tick the wreck clock puts them back, the bones as they were (S74,
+    /// [`Rider::ragdoll_shown`]).
+    pub fn drawn_ragdoll(&self) -> Option<&Down> {
+        self.ragdoll.as_ref().or(self.ragdoll_shown.as_deref())
+    }
+
+    /// **The drawn rider jumps this tick**, so a shell that blends ticks should cut instead (S74): the
+    /// bike set down on the put-back record (S66), and the body's first tick held on it, which is the
+    /// same tick after a chord and the next one after the wreck clock ([`PutBack`]).
+    pub fn drawn_jumps(&self) -> bool {
+        self.ghost.put_back() || (self.put_back.held && self.put_back.placed)
+    }
+
     /// Which of the three states the rider is in.
     pub fn phase(&self) -> state::Phase {
         self.state.phase()
@@ -358,8 +424,10 @@ impl Rider {
         let mut out = Frame::default();
         let Rider {
             ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
-            flight, airborne, ragdoll_kit, ragdoll, skeleton, wreck_sounds, idles, ghost, edge_armed, page, ..
+            flight, airborne, ragdoll_kit, ragdoll, skeleton, wreck_sounds, idles, ghost, edge_armed, page,
+            put_back, ragdoll_shown, ..
         } = self;
+        *ragdoll_shown = None;
         let mut sense = *sense;
 
         // 0 — the ghost's tick, the first thing in the bike's update: its clock holds while the
@@ -384,6 +452,7 @@ impl Rider {
                 *flight = Trick::NONE;
                 out.respawned = true;
                 ghost.start();
+                put_back.place();
             }
         }
 
@@ -418,6 +487,8 @@ impl Rider {
             }
         }
         *airborne = ride.air.airborne;
+        // The body's request is filled here, after the physics and before the machine's verdict (S74).
+        put_back.fill(state.wreck.is_some());
 
         // 3 — the controller. **The port's own ordering:** the original reads the pad in its input
         // phase, before the update; the read is here instead, before the only three things that look
@@ -627,11 +698,12 @@ impl Rider {
             // The vehicle's unwreck doubles a cannonball's drag back; only a throw halves it.
             ride.drag_halved = false;
             *crash = None;
-            *ragdoll = None;
+            *ragdoll_shown = ragdoll.take().map(Box::new);
             tricks.reset();
             *flight = Trick::NONE;
             out.respawned = true;
             ghost.start();
+            put_back.place();
         }
         // 7 — the wreck page's fader, which updates after the bike: a request raises it and its
         // first update is this tick's, and the draw after its third puts the bike back
@@ -653,11 +725,13 @@ impl Rider {
             off_map::unwreck(&mut ride.chassis);
             ride.drag_halved = false;
             *crash = None;
-            *ragdoll = None;
+            // the same respawn as the machine's own: the body held two fills, the bones drawn once more
+            *ragdoll_shown = ragdoll.take().map(Box::new);
             tricks.reset();
             *flight = Trick::NONE;
             out.respawned = true;
             ghost.start();
+            put_back.place();
         }
         out
     }
@@ -733,6 +807,7 @@ impl Rider {
             crash,
             wreckage,
             ragdoll,
+            put_back,
             ..
         } = self;
         let ask = rider_anim::Ask {
@@ -743,7 +818,10 @@ impl Rider {
             airborne: ride.air.airborne,
             backflip: tricks.requested == Trick::BACKFLIP,
             no_hander: tricks.no_hander,
-            wreck: state.wreck.is_some(),
+            // Down, or down as the request last saw it: on the tick the wreck clock puts the rider
+            // back the body is still in the wreck (S74). The wreck's own entry is not held back the
+            // same tick, though the original's request lags it too (S74's journal).
+            wreck: state.wreck.is_some() || put_back.wreck,
             countdown: gate.countdown,
             throttle: c.gas,
             reversing: c.reverse,
@@ -766,7 +844,7 @@ impl Rider {
         let wrecks = wreckage.as_ref().map_or_else(phy::Wrecks::default, |w| w.wrecks);
         // Every field the rider derives. `cut` and `offset` are left as they are: the body's own
         // selection is the only writer of the first and nothing here wants the second.
-        body_request.held = false;
+        body_request.held = put_back.held;
         body_request.at_base = false;
         body_request.base = ride.position();
         body_request.rotation = ride.chassis.quat;
