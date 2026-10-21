@@ -197,6 +197,26 @@ impl Assets {
         true
     }
 
+    /// Load a model the scene places, [`Assets::load`] but with the placement standing in for the
+    /// model's root node: the original draws a scene prop's vertices with the prop's own matrix and
+    /// nothing above it. The exporter left one instance's rotation in the root of many of these files
+    /// (free09's and free10's telephone wires, free06's pylons, bridges, fences, a runway), so that
+    /// root turned on top of the scene's look and up laid a wire's sag sideways and stood a pylon
+    /// off the line its wires hang from (V41).
+    pub fn load_placed(&mut self, archives: &[Res], name: &str) -> bool {
+        let fresh = !self.models.contains_key(name);
+        if !self.load(archives, name) {
+            return false;
+        }
+        if let Some(loaded) = self.models.get_mut(name).filter(|_| fresh) {
+            for node in loaded.model.nodes.iter_mut().filter(|n| n.parent.is_none()) {
+                node.local = M4::IDENTITY;
+            }
+            loaded.tris = loaded.model.triangles(0);
+        }
+        true
+    }
+
     /// Load `name` a second time as `own`, painted with `pairs` over the renames already set: another
     /// rider on the one shared body in gear of their own (P37). The materials' earlier answers are not
     /// reused for it, and the renames and answers the first load left are back afterwards.

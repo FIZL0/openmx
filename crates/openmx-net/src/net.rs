@@ -313,6 +313,8 @@ pub enum Cmd {
     Picks(Vec<Pick>),
     Ride { track: String, wrecks: bool, biplane: bool },
     Private(bool),
+    /// The host opens this many seats (N12: 2 to [`crate::SEATS`]).
+    Seats(usize),
     Start,
     Kick(String),
     /// A chat line to everyone else.
@@ -765,10 +767,8 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                         refuse(&link, conn, version_differs(handshake::build(), &build));
                     } else if room.riding && !room.drop_in || shaking.is_some() {
                         refuse(&link, conn, "The ride has started: try again once it's back in the lobby.".into());
-                    } else if picks.is_empty() {
-                        refuse(&link, conn, "No players to seat.".into());
-                    } else if !room.take(&peer, &drop_in_picks(&room, picks.clone())) {
-                        refuse(&link, conn, format!("The lobby is full ({} seats open, {} wanted).", room.open(), picks.len()));
+                    } else if let Err(why) = room.seat(&peer, &drop_in_picks(&room, picks.clone())) {
+                        refuse(&link, conn, why);
                     } else {
                         room.names.insert(peer.clone(), crate::chat::clean(&name).unwrap_or_else(|| short(&peer).into()));
                         if room.riding {
@@ -901,6 +901,14 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                     cx.say(Event::Room(room.clone()));
                     (dirty, listed) = (true, None);
                 }
+                Some(Cmd::Seats(n)) if !room.riding && shaking.is_none() => match room.resize(n) {
+                    Ok(()) => {
+                        broadcast(&joined, &Msg::Room(room.clone()));
+                        cx.say(Event::Room(room.clone()));
+                        dirty = true;
+                    }
+                    Err(why) => cx.say(Event::Status(why)),
+                },
                 Some(Cmd::Kick(peer)) if peer != HOST => {
                     if let Some(i) = joined.iter().position(|j| j.peer == peer) {
                         let j = joined.remove(i);
