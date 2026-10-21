@@ -170,6 +170,7 @@ mod overlay;
 mod pad;
 mod perf;
 mod split;
+mod stages;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
 #[allow(dead_code)]
@@ -211,6 +212,7 @@ use ps2_float::{F, Vf};
 use ground::Ground;
 use hud::Hud;
 use menu::{Act, Art, Dev, Menu, Reader, Readers};
+use stages::Stages;
 use moment::{Moment, Shot};
 use pad::{Bindings, Device, Pads, SEATS, Scheme, SeatInput, Seats, Throttle, Wiring};
 
@@ -296,6 +298,11 @@ const STUNT_ARCHIVE: &str = "appstart.res";
 const STUNT_TABLE: &str = "stunts.ini";
 
 fn main() {
+    // `cargo run -p openmx` without `--release` is the dev profile, opt-level 1: several times
+    // slower a frame, which is not what the shell costs (P47).
+    if cfg!(debug_assertions) {
+        eprintln!("openmx: a debug build, slow to draw; `cargo run --release -p openmx` is the one to ride");
+    }
     if let Err(e) = run() {
         eprintln!("openmx: {e}");
         std::process::exit(1);
@@ -622,6 +629,9 @@ struct Args {
     pad_of: Vec<usize>,
     /// `--no-sound`: no sound and no music (P42). A headless ride has none either.
     sound: bool,
+    /// `--timings`: a line a second of what each stage of the frame cost (P47, [`stages`]), and
+    /// one over the whole session at the end.
+    timings: bool,
 }
 
 impl Args {
@@ -866,6 +876,8 @@ fn front_end(args: Args) -> Result<(), String> {
     let mut shot = args.shot.clone();
     let started = Instant::now();
     let mut shown = 0u32;
+    // What the menu's frames cost before their sleep, for `--timings` (P47).
+    let mut busy = Duration::ZERO;
     let mut escape = false;
     loop {
         if let Act::Ride(track) = &act {
@@ -1088,6 +1100,7 @@ fn front_end(args: Args) -> Result<(), String> {
             println!("wrote {}", path.display());
         }
         shown += 1;
+        busy += top.elapsed();
         if let Some(limit) = args.seconds {
             if started.elapsed().as_secs_f32() >= limit {
                 break;
@@ -1096,6 +1109,10 @@ fn front_end(args: Args) -> Result<(), String> {
         if let Some(rest) = FRAME.checked_sub(top.elapsed()) {
             std::thread::sleep(rest);
         }
+    }
+    if args.timings {
+        let ms = busy.as_secs_f64() * 1000.0 / shown.max(1) as f64;
+        println!("front end: {shown} frames, {ms:.2} ms a frame before the pace");
     }
     Ok(())
 }
@@ -2362,6 +2379,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut escape = held(window, key::ESCAPE);
     let mut perf = perf::Perf::new(args.fps);
     let mut hushed = false;
+    // What each stage of the frame costs (P47), for `--timings` and for the line the session ends on.
+    let mut stages = Stages::new();
+    let mut stages_since = Instant::now();
+    // The disc reads, texture decodes and bytes read by the end of the first frame: none should
+    // follow.
+    let mut loaded: Option<(game_render::tally::Tally, Option<u64>)> = None;
     loop {
         let top = Instant::now();
         perf.begin();
@@ -2464,6 +2487,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
         swap_key = swap_now;
+        stages.mark(stages::Stage::Input);
 
         // The pause, under the front end: Start or Escape opens it, and while it is open the ride is
         // frozen exactly as Start's own freeze leaves it, the pass polling the pad and stepping
@@ -2535,6 +2559,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 seat.riding = front.menu.riding();
             }
         }
+        stages.mark(stages::Stage::Menu);
 
         // Online (N2) the session steps the ride instead — every seat, a rollback's ticks again, the
         // body's frame inside each — at its one fixed frame length, and this machine's seat comes back
@@ -2579,6 +2604,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         (world.played_dt.unwrap_or(step.dt), step.simulated)
         };
         perf.add(Stage::Sim, sim_at.elapsed());
+        stages.mark(stages::Stage::Sim);
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
         cameras.clear();
@@ -2631,6 +2657,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                 }
             }
+            stages.mark(stages::Stage::Animation);
 
             // What the rider did, as a line: a run nobody is watching still says whether a trick
             // started, landed or put the rider down, and by which of the original's reason codes.
@@ -2730,6 +2757,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 None => Camera::behind(pos, bike_look),
             });
             ridden.push(rider);
+            stages.mark(stages::Stage::Camera);
         }
         perf.lap(Stage::Scene, scene_at, spent);
 
@@ -2930,11 +2958,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The picture: the dirt, then the scene's props and the bikes standing on them.
             let draw_at = Instant::now();
             clear(target, look.fog_color);
+            stages.mark(stages::Stage::Sky);
+            let mut tris = ground.draw(target, camera, &light, pos, GROUND_RADIUS);
+            stages.mark(stages::Stage::Ground);
+            // The sky after the ground and before anything that blends (P47): it only paints where
+            // nothing is drawn, and the ground is opaque, so it is the same picture as the sky first
+            // with the ground over it, for the pixels the ground leaves rather than all of them.
             if let Some(sky) = &sky {
                 sky.draw(target, camera);
             }
-            let mut tris = ground.draw(target, camera, &light, pos, GROUND_RADIUS);
             perf.add(Stage::Draw, draw_at.elapsed());
+            stages.mark(stages::Stage::Sky);
             let (scene_at, spent) = (Instant::now(), perf.spent());
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
@@ -3028,6 +3062,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             perf.lap(Stage::Scene, scene_at, spent);
             let draw_at = Instant::now();
             tris += draw_scene(target, &look, &assets, &actor, camera);
+            stages.mark(stages::Stage::Scene);
             // And the overlay over the top of it, after everything with a depth test and before anything
             // that reads the frame: what the window shows and what `--shot` writes are the same picture.
             let (seat, rig) = (&world.seats[v], &mut rigs[v]);
@@ -3052,15 +3087,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             view_triangles[v] += tris;
             drawn += tris;
             perf.add(Stage::Draw, draw_at.elapsed());
+            stages.mark(stages::Stage::Hud);
         }
         if let Some(front) = front.as_ref().filter(|_| !gpu_on) {
             perf.time(Stage::Draw, || front.art.draw(&front.menu, &mut frame));
         }
+        stages.mark(stages::Stage::Hud);
         if let Some(window) = window.as_mut().filter(|_| !gpu_on) {
             let present_at = Instant::now();
             window.present(&frame.color, frame.width, frame.height)?;
             perf.add(Stage::Present, present_at.elapsed());
         }
+        stages.mark(stages::Stage::Present);
 
         // One frame, on paper, for a run nobody is watching: the first by default, or the one
         // `--shot-frame` asks for, which is how a shot catches a ride in progress.
@@ -3115,6 +3153,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             window_of_frames = (Instant::now(), 0, 0);
         }
+        stages.mark(stages::Stage::Log);
 
         if let Some(limit) = args.seconds {
             if started.elapsed().as_secs_f32() >= limit {
@@ -3129,6 +3168,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // simulation sees, so a slow frame becomes a longer step rather than a slower game.
         if let Some(rest) = FRAME.checked_sub(top.elapsed()) {
             std::thread::sleep(rest);
+        }
+        stages.mark(stages::Stage::Pace);
+        stages.frame();
+        loaded.get_or_insert_with(|| (game_render::tally::Tally::now(), stages::bytes_read_mark()));
+        if args.timings && stages_since.elapsed() >= Duration::from_secs(1) {
+            println!("     {}", stages.line());
+            stages_since = Instant::now();
         }
     }
 
@@ -3193,6 +3239,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The ride's sounds stop with it; the music plays on into the menus.
     if let Some(sound) = &mut sound {
         sound.quiet();
+    }
+    if args.timings {
+        println!("session {}", stages.session());
+        // Bytes read count the window's socket and every pad's events too, so only a ride with
+        // neither, a headless one, should say none.
+        let (tally, bytes) = loaded.unwrap_or_else(|| (game_render::tally::Tally::now(), None));
+        let after = game_render::tally::Tally::now().since(tally);
+        let bytes = match (bytes, stages::bytes_read()) {
+            (Some(from), Some(now)) => format!("{} bytes read", now.saturating_sub(from)),
+            _ => "bytes read unknown".to_string(),
+        };
+        println!(
+            "after the first frame: {} disc reads, {} archive reads, {} texture decodes, {bytes}",
+            after.reads, after.inflates, after.decodes
+        );
     }
     println!(
         "ridden for {:.1}s over {} frames",
@@ -3482,6 +3543,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         garage: false,
         pad_of: Vec::new(),
         sound: true,
+        timings: false,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         ride_flag: false,
@@ -3627,6 +3689,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--aspect" => args.aspect = Aspect::parse(&next("fill or 4:3")?)?,
             "--headless" => args.headless = true,
             "--no-sound" => args.sound = false,
+            "--timings" => args.timings = true,
             "--frames" => {
                 args.frames = Some(
                     next("a number of frames")?.parse().map_err(|_| "--frames: not a number of frames")?,
@@ -3695,7 +3758,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--hud] [--camera NAME]\n\
                             [--shot-frame N] [--vehicle bike|biplane]\n\
-                            [--players 1..8] [--split h|v] [--headless] [--frames N]\n\
+                            [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
@@ -3735,7 +3798,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      the other (--split h, the default) or side by side (--split v), the\n\
                      original's two layouts, and three to eight in quarters or eighths. The first\n\
                      player has the keyboard, the plane and the tape. --headless draws with no\n\
-                     window and no pad, and --frames N quits after N frames.\n\
+                     window and no pad, and --frames N quits after N frames. --timings prints\n\
+                     what each stage of a frame cost, a line a second.\n\
                      The window opens at the screen's size and the frame fills it, re-made when\n\
                      the window is resized, wider or taller as the original's own 16:9 mode\n\
                      would draw it; --aspect 4:3 draws the largest 4:3 frame inside it instead,\n\

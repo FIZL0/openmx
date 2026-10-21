@@ -143,6 +143,7 @@ impl Res {
             .iter()
             .find(|e| normalise(&e.name) == want)
             .ok_or_else(|| format!("the archive has no member {name}"))?;
+        crate::tally::inflate();
         self.dir.read(&self.bytes, e)
     }
 
@@ -161,6 +162,7 @@ impl Res {
         let e = self
             .find_suffix(suffix)
             .ok_or_else(|| format!("the archive has no member ending in {suffix}"))?;
+        crate::tally::inflate();
         self.dir.read(&self.bytes, e)
     }
 }
@@ -234,6 +236,7 @@ fn le32(b: &[u8]) -> u32 {
 }
 
 fn read_at(file: &mut Box<dyn Image>, at: u64, len: usize) -> Result<Vec<u8>, String> {
+    crate::tally::read();
     file.seek(SeekFrom::Start(at)).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; len];
     let mut got = 0;

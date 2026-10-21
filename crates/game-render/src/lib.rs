@@ -48,6 +48,7 @@ pub mod scene;
 pub mod skin;
 pub mod sky;
 pub mod splat;
+pub mod tally;
 pub mod terrain;
 pub mod vehicle;
 pub mod world;

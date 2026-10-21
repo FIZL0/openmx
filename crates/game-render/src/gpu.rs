@@ -2382,6 +2382,8 @@ mod tests {
                 texture: 0,
                 scale: [0.01, 0.01],
                 angle: 0.0,
+                turn: 0f32.sin_cos(),
+                reads: (true, true),
                 rgba: [128.0; 4],
                 blend: Some([0, 1, 0, 1]),
                 fixed: 128.0,

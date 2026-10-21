@@ -18,7 +18,7 @@
 //! and places a camera with them, and nothing bit-exact depends on what happens after `.0`.
 
 use game_render::mat::{V3, v3};
-use game_render::raster::{Frame, Look, Shade};
+use game_render::raster::{Batch, Frame, Mode, Shade};
 use game_render::splat::Splat;
 #[cfg(not(target_arch = "wasm32"))]
 use game_render::gpu::{GroundChunk, GroundVertex};
@@ -36,6 +36,12 @@ const LEAF_SAMPLES: u32 = 16;
 /// one dirt colour with the file's own normals doing all the shaping. It reads as dirt and it is
 /// honest about being flat.
 pub const DIRT: [f32; 3] = [150.0, 118.0, 86.0];
+
+/// A ground cell's paint in a [`Batch`]: the track's, under its baked light map or outside it, or
+/// none.
+const PAINTED: u32 = 0;
+const BAKED: u32 = 1;
+const UNPAINTED: u32 = 2;
 
 /// The terrain, and what the scene says about how big it is.
 pub struct Ground<'a> {
@@ -140,6 +146,10 @@ impl<'a> Ground<'a> {
     /// Returns how many triangles went through the rasteriser. Cells behind the camera and cells
     /// beyond the scene's fog are dropped before they are transformed, the way the renderer's own
     /// terrain pass does it — at 60 Hz that cull is most of the frame's budget.
+    ///
+    /// The cells are gathered into one [`Batch`] and filled on every core (P47): the paint is a
+    /// whole program of texture passes a pixel, and on one core it was the frame's whole budget
+    /// many times over at a desktop's size.
     pub fn draw(
         &self,
         frame: &mut Frame,
@@ -156,6 +166,7 @@ impl<'a> Ground<'a> {
         );
         let radius = radius as i64;
         let mut drawn = 0;
+        let mut batch = Batch::new(frame.width, frame.height);
         for sz in (cz - radius).max(0)..(cz + radius).min(self.samples_z as i64 - 1) {
             for sx in (cx - radius).max(0)..(cx + radius).min(self.samples_x as i64 - 1) {
                 let (sx, sz) = (sx as u32, sz as u32);
@@ -213,24 +224,30 @@ impl<'a> Ground<'a> {
                         fog,
                     }
                 });
+                // Which paint the batch gives the cell's pixels: the splat lit by its light map
+                // or by the corners, or no paint at all.
+                let tag = match (&self.paint, baked) {
+                    (Some(_), true) => BAKED,
+                    (Some(_), false) => PAINTED,
+                    (None, _) => UNPAINTED,
+                };
                 for tri in [[0, 1, 2], [0, 2, 3]] {
                     let v = [shade[tri[0]], shade[tri[1]], shade[tri[2]]];
-                    match &self.paint {
-                        Some(splat) => {
-                            let paint = |x: f32, z: f32| {
-                                let c = splat.paint(x, z);
-                                let l = if baked { splat.light(x, z).unwrap_or(1.0) } else { 1.0 };
-                                let lit = c.map(|c| (c as f32 * l).min(255.0) as u8);
-                                [lit[0], lit[1], lit[2], 255]
-                            };
-                            frame.triangle_with(v, &Look::cut_out(&paint), light.fog_color);
-                        }
-                        None => frame.triangle(v, None, light.fog_color),
-                    }
+                    batch.triangle(v, tag, Mode::CUT_OUT);
                     drawn += 1;
                 }
             }
         }
+        let paint = |tag: u32, x: f32, z: f32| match &self.paint {
+            Some(splat) if tag != UNPAINTED => {
+                let c = splat.paint(x, z);
+                let l = if tag == BAKED { splat.light(x, z).unwrap_or(1.0) } else { 1.0 };
+                let lit = c.map(|c| (c as f32 * l).min(255.0) as u8);
+                [lit[0], lit[1], lit[2], 255]
+            }
+            _ => [255, 255, 255, 255],
+        };
+        frame.draw(&batch, &paint, light.fog_color);
         drawn
     }
 }

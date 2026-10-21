@@ -10,7 +10,7 @@ use crate::disc::Res;
 use crate::mat::{M4, V3, v3};
 use crate::psg::{Model, Tri};
 use crate::pst::Texture;
-use crate::raster::{Frame, Look, Shade};
+use crate::raster::{Batch, Frame, Mode, Shade};
 use crate::scene::{Material, Preset, Scene, Shading};
 use std::collections::HashMap;
 
@@ -410,6 +410,32 @@ pub fn draw_model(
     eye: V3,
     light: &Lighting,
 ) -> usize {
+    let mut batch = Batch::new(frame.width, frame.height);
+    let drawn = queue_model(&mut batch, loaded, assets, transform, view_projection, eye, light);
+    frame.draw(&batch, &texel_of(assets), light.fog_color);
+    drawn
+}
+
+/// A queued model triangle's texel: its tag is its texture's index in [`Assets::textures`] plus one,
+/// and 0 is untextured, flat white.
+fn texel_of(assets: &Assets) -> impl Fn(u32, f32, f32) -> [u8; 4] + Sync + '_ {
+    |tag, u, v| match tag {
+        0 => [255, 255, 255, 255],
+        t => assets.textures[t as usize - 1].sample(u, v),
+    }
+}
+
+/// [`draw_model`]'s triangles, queued into `batch` rather than drawn, in the order it would have
+/// drawn them (P47).
+fn queue_model(
+    batch: &mut Batch,
+    loaded: &Loaded,
+    assets: &Assets,
+    transform: M4,
+    view_projection: M4,
+    eye: V3,
+    light: &Lighting,
+) -> usize {
     let mvp = transform.mul(view_projection);
     let mut drawn = 0;
     for tri in &loaded.tris {
@@ -418,7 +444,7 @@ pub fn draw_model(
             .get(tri.material)
             .copied()
             .flatten()
-            .and_then(|i| assets.textures.get(i));
+            .filter(|&i| i < assets.textures.len());
         let mut shade = [Shade {
             clip: [0.0; 4],
             uv: [0.0; 2],
@@ -452,18 +478,13 @@ pub fn draw_model(
         if behind == 3 {
             continue;
         }
-        let paint = |u: f32, v: f32| match texture {
-            Some(t) => t.sample(u, v),
-            None => [255, 255, 255, 255],
-        };
-        let look = Look {
-            paint: &paint,
+        let mode = Mode {
             cutoff: surface.cutoff,
             blend: surface.blend,
             additive: surface.additive,
             depth_write: surface.depth_write,
         };
-        frame.triangle_with(shade, &look, light.fog_color);
+        batch.triangle(shade, texture.map_or(0, |i| i as u32 + 1), mode);
         drawn += 1;
     }
     drawn
@@ -480,7 +501,8 @@ pub fn draw_scene(
 ) -> usize {
     let view_projection = camera.view_projection(frame.width, frame.height);
     let light = Lighting::of(scene);
-    let mut drawn = 0;
+    // Every prop and every extra, in order: what is to be queued into the one batch.
+    let mut jobs: Vec<(&Loaded, M4)> = Vec::new();
     for placement in &scene.models {
         let Some(loaded) = assets.models.get(&placement.model) else {
             continue;
@@ -490,35 +512,70 @@ pub fn draw_scene(
         if distance > light.fog_far {
             continue;
         }
-        drawn += draw_model(
-            frame,
-            loaded,
-            assets,
-            placement.transform(),
-            view_projection,
-            camera.eye,
-            &light,
-        );
+        jobs.push((loaded, placement.transform()));
     }
     for (name, transform) in extra {
         if let Some(loaded) = assets.models.get(*name) {
-            drawn += draw_model(
-                frame,
-                loaded,
-                assets,
-                *transform,
-                view_projection,
-                camera.eye,
-                &light,
-            );
+            jobs.push((loaded, *transform));
         }
     }
+    // Queued on every core, a run of models each, and joined back in order: the same batch as one
+    // core queueing them all, and in a four-way split the vertex work is most of the scene (P47).
+    let queue = |batch: &mut Batch, jobs: &[(&Loaded, M4)]| {
+        jobs.iter()
+            .map(|&(loaded, at)| queue_model(batch, loaded, assets, at, view_projection, camera.eye, &light))
+            .sum::<usize>()
+    };
+    let mut batch = Batch::new(frame.width, frame.height);
+    let threads = crate::raster::threads();
+    let drawn = if threads == 1 || jobs.len() < 2 {
+        queue(&mut batch, &jobs)
+    } else {
+        // Runs of about equal triangle counts, so one core does not get every rider.
+        let total: usize = jobs.iter().map(|(l, _)| l.tris.len()).sum();
+        let share = total.div_ceil(threads).max(1);
+        let mut runs: Vec<&[(&Loaded, M4)]> = Vec::new();
+        let (mut from, mut held) = (0, 0);
+        for (i, (l, _)) in jobs.iter().enumerate() {
+            held += l.tris.len();
+            if held >= share {
+                runs.push(&jobs[from..=i]);
+                (from, held) = (i + 1, 0);
+            }
+        }
+        if from < jobs.len() {
+            runs.push(&jobs[from..]);
+        }
+        let (width, height) = (frame.width, frame.height);
+        let queued: Vec<(Batch, usize)> = std::thread::scope(|s| {
+            let handles: Vec<_> = runs
+                .iter()
+                .map(|run| {
+                    let queue = &queue;
+                    s.spawn(move || {
+                        let mut part = Batch::new(width, height);
+                        let drawn = queue(&mut part, run);
+                        (part, drawn)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("a queueing thread panicked")).collect()
+        });
+        let mut drawn = 0;
+        for (part, n) in queued {
+            batch.append(part);
+            drawn += n;
+        }
+        drawn
+    };
+    frame.draw(&batch, &texel_of(assets), light.fog_color);
     drawn
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster::Look;
 
     /// A 1x1 sixteen-colour `.pst` of one colour, alpha in the GS's units.
     fn one_texel(rgba: [u8; 4]) -> Vec<u8> {

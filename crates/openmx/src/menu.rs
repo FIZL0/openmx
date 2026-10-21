@@ -2060,6 +2060,18 @@ pub struct Art {
     fonts: HashMap<Face, Font>,
     /// Each free-ride track's stills, in [`TRACKS`] order.
     stills: Vec<Vec<Texture>>,
+    /// The big stretches drawn last frame, by what they were drawn from and over (P47).
+    blits: std::sync::Mutex<Vec<Blitted>>,
+}
+
+/// One big [`Painter::blit_as`] as it came out: the texture, its part, the box, the tint and the
+/// way of putting texels down, the rows it covered as they were before, and the same rows after.
+/// The background is the same full-frame stretch over the same black every frame, so the next
+/// frame that asks for it over the same pixels gets the pixels it got, without a texel read.
+struct Blitted {
+    key: (usize, [u32; 4], [usize; 4], [u8; 4], usize),
+    before: Vec<u8>,
+    after: Vec<u8>,
 }
 
 /// Where a box goes, in the 640x448 layout.
@@ -2146,7 +2158,7 @@ impl Art {
             }
             stills.push(these);
         }
-        Ok(Art { textures, fonts, stills })
+        Ok(Art { textures, fonts, stills, blits: Default::default() })
     }
 
     /// Draw the menu's screen into `frame`. In a ride the frame already holds the ride, which the
@@ -2363,7 +2375,7 @@ impl<'a> Painter<'a> {
     /// `src` (texels, left top right bottom) of a texture, stretched over `r` and multiplied by
     /// `tint`, filtered bilinearly.
     fn blit(&mut self, t: &Texture, src: [f32; 4], r: Rect, tint: [u8; 4]) {
-        self.blit_as(t, src, r, tint, blend);
+        self.blit_as(t, src, r, tint, blend_into);
     }
 
     /// [`Painter::blit`] with its own way of putting a texel down.
@@ -2373,21 +2385,72 @@ impl<'a> Painter<'a> {
         src: [f32; 4],
         r: Rect,
         tint: [u8; 4],
-        put: fn(&mut Frame, usize, usize, [u8; 4]),
+        put: fn(&mut [u8], [u8; 4]),
     ) {
         let p = self.px(r);
         let (fx0, fx1) = (p.x, p.x + p.w);
         let (fy0, fy1) = (p.y, p.y + p.h);
         let (x0, x1) = span(fx0, fx1, self.frame.width);
         let (y0, y1) = span(fy0, fy1, self.frame.height);
-        for y in y0..y1 {
-            let v = src[1] + (y as f32 + 0.5 - fy0) / (fy1 - fy0) * (src[3] - src[1]);
-            for x in x0..x1 {
-                let u = src[0] + (x as f32 + 0.5 - fx0) / (fx1 - fx0) * (src[2] - src[0]);
-                let c = bilinear(t, u, v, src);
-                let mul = |i: usize| (c[i] as u32 * tint[i] as u32 / 255) as u8;
-                put(self.frame, x, y, [mul(0), mul(1), mul(2), mul(3)]);
+        let width = self.frame.width;
+        // Rows `from..` of the frame, starting at `rows`' first byte.
+        let paint = |rows: &mut [u8], from: usize| {
+            for (dy, row) in rows.chunks_mut(width * 3).enumerate() {
+                let y = from + dy;
+                let v = src[1] + (y as f32 + 0.5 - fy0) / (fy1 - fy0) * (src[3] - src[1]);
+                for x in x0..x1 {
+                    let u = src[0] + (x as f32 + 0.5 - fx0) / (fx1 - fx0) * (src[2] - src[0]);
+                    let c = bilinear(t, u, v, src);
+                    let mul = |i: usize| (c[i] as u32 * tint[i] as u32 / 255) as u8;
+                    put(&mut row[x * 3..x * 3 + 3], [mul(0), mul(1), mul(2), mul(3)]);
+                }
             }
+        };
+        if y0 >= y1 {
+            return;
+        }
+        let rows = &mut self.frame.color[y0 * width * 3..y1 * width * 3];
+        // A big one asked for again over the same pixels is the pixels it made last time.
+        let big = x1.saturating_sub(x0) * (y1 - y0) >= 1 << 15;
+        let key = (
+            t as *const Texture as usize,
+            src.map(f32::to_bits),
+            [x0, x1, y0, y1],
+            tint,
+            put as usize,
+        );
+        let mut blits = self.art.blits.lock().unwrap_or_else(|e| e.into_inner());
+        if big {
+            if let Some(done) = blits.iter().find(|b| b.key == key && b.before[..] == rows[..]) {
+                rows.copy_from_slice(&done.after);
+                return;
+            }
+        }
+        let before = if big { rows.to_vec() } else { Vec::new() };
+        // The background is a full-screen bilinear stretch, every frame: on one core it was most of
+        // a menu frame at the window's own size (P47). Each band of rows is its own, so the bands
+        // can be filled at once and the pixels are the same.
+        // A thread is worth starting for about a 128x256 box of texels, not for a glyph.
+        let threads = game_render::raster::threads().min(x1.saturating_sub(x0) * (y1 - y0) / (1 << 15));
+        if threads <= 1 {
+            paint(rows, y0);
+        } else {
+            let band = (y1 - y0).div_ceil(threads).max(8);
+            std::thread::scope(|scope| {
+                for (b, rows) in rows.chunks_mut(band * width * 3).enumerate() {
+                    let paint = &paint;
+                    scope.spawn(move || paint(rows, y0 + b * band));
+                }
+            });
+        }
+        if big {
+            // A frame's worth of them at most: a screen draws a handful, and a new one, or the same
+            // over other pixels, takes the place of the one that was there the longest.
+            blits.retain(|b| b.key != key);
+            if blits.len() >= 8 {
+                blits.remove(0);
+            }
+            blits.push(Blitted { key, before, after: rows.to_vec() });
         }
     }
 
@@ -2900,19 +2963,24 @@ pub(crate) fn span(a: f32, b: f32, n: usize) -> (usize, usize) {
 
 pub(crate) fn blend(frame: &mut Frame, x: usize, y: usize, c: [u8; 4]) {
     let at = 3 * (y * frame.width + x);
+    blend_into(&mut frame.color[at..at + 3], c);
+}
+
+/// [`blend`], into one pixel's three bytes.
+fn blend_into(px: &mut [u8], c: [u8; 4]) {
     let a = c[3] as u32;
     for i in 0..3 {
-        let d = frame.color[at + i] as u32;
-        frame.color[at + i] = ((c[i] as u32 * a + d * (255 - a)) / 255) as u8;
+        let d = px[i] as u32;
+        px[i] = ((c[i] as u32 * a + d * (255 - a)) / 255) as u8;
     }
 }
 
-/// Light added by its alpha, which is how the radial glow brightens and never darkens.
-fn add(frame: &mut Frame, x: usize, y: usize, c: [u8; 4]) {
-    let at = 3 * (y * frame.width + x);
+/// Light added by its alpha, which is how the radial glow brightens and never darkens: into one
+/// pixel's three bytes.
+fn add(px: &mut [u8], c: [u8; 4]) {
     for i in 0..3 {
-        let d = frame.color[at + i] as u32 + c[i] as u32 * c[3] as u32 / 255;
-        frame.color[at + i] = d.min(255) as u8;
+        let d = px[i] as u32 + c[i] as u32 * c[3] as u32 / 255;
+        px[i] = d.min(255) as u8;
     }
 }
 
@@ -2925,7 +2993,8 @@ pub(crate) fn bilinear(t: &Texture, u: f32, v: f32, src: [f32; 4]) -> [u8; 4] {
     let hi_y = (src[1].max(src[3]) - 1.0).min(t.height as f32 - 1.0).max(lo_y);
     let u = (u - 0.5).clamp(lo_x, hi_x);
     let v = (v - 0.5).clamp(lo_y, hi_y);
-    let (x0, y0) = (u.floor() as usize, v.floor() as usize);
+    // Both are clamped to 0 or more, where the cast is the floor (and the library's floor a call).
+    let (x0, y0) = (u as usize, v as usize);
     let (x1, y1) = ((x0 + 1).min(hi_x as usize), (y0 + 1).min(hi_y as usize));
     let (fx, fy) = (u - x0 as f32, v - y0 as f32);
     let px = |x: usize, y: usize| {
@@ -2937,7 +3006,35 @@ pub(crate) fn bilinear(t: &Texture, u: f32, v: f32, src: [f32; 4]) -> [u8; 4] {
     for i in 0..4 {
         let top = a[i] as f32 * (1.0 - fx) + b[i] as f32 * fx;
         let bottom = c[i] as f32 * (1.0 - fx) + d[i] as f32 * fx;
-        out[i] = (top * (1.0 - fy) + bottom * fy).round() as u8;
+        out[i] = round(top * (1.0 - fy) + bottom * fy);
     }
     out
+}
+
+/// `x.round() as u8` for an `x` in 0..=255, without the library call: the fraction left by the
+/// truncating cast is exact, and half rounds up, as `round` rounds half away from zero.
+fn round(x: f32) -> u8 {
+    let t = x as u32;
+    (t + (x - t as f32 >= 0.5) as u32) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::round;
+
+    #[test]
+    fn the_inline_round_is_the_library_round() {
+        // Every 997th f32 from 0 to 255, and every half and its neighbours.
+        let mut x = 0.0f32;
+        while x <= 255.0 {
+            assert_eq!(round(x), x.round() as u8, "{x}");
+            x = f32::from_bits(x.to_bits() + 997);
+        }
+        for n in 0..255 {
+            let half = n as f32 + 0.5;
+            for y in [f32::from_bits(half.to_bits() - 1), half, f32::from_bits(half.to_bits() + 1)] {
+                assert_eq!(round(y), y.round() as u8, "{y}");
+            }
+        }
+    }
 }

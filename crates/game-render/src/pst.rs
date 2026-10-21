@@ -31,6 +31,7 @@ pub struct Texture {
 impl Texture {
     /// Decode the largest mip of a `.pst`.
     pub fn parse(d: &[u8]) -> Result<Texture, String> {
+        crate::tally::decode();
         if d.len() >= 8 && le32(d, 4) == FOUR_BIT {
             return Texture::parse_four_bit(d);
         }
@@ -115,25 +116,57 @@ impl Texture {
     /// The texel at wrapped texture coordinates, mixed from the four nearest: the hardware's bilinear
     /// filter, for a texture seen up close, where nearest neighbour shows its squares.
     pub fn sample_smooth(&self, u: f32, v: f32) -> [u8; 4] {
+        self.sample_smooth_parts(u, v, true, true)
+    }
+
+    /// [`Texture::sample_smooth`], mixing only the colour, only the alpha, or both: a channel not
+    /// asked for comes back 0, and one asked for is exactly what `sample_smooth` gives. The ground's
+    /// masks are read for their alpha alone and its layers for their colour (P47).
+    #[inline]
+    pub fn sample_smooth_parts(&self, u: f32, v: f32, rgb: bool, alpha: bool) -> [u8; 4] {
         if self.width == 0 || self.height == 0 {
             return [255, 0, 255, 255];
         }
         let (x, y) = (u * self.width as f32 - 0.5, v * self.height as f32 - 0.5);
-        let (fx, fy) = (x - x.floor(), y - y.floor());
-        let (x0, y0) = (x.floor() as i64, y.floor() as i64);
-        let at = |dx: i64, dy: i64| {
-            let px = (x0 + dx).rem_euclid(self.width as i64) as usize;
-            let py = (y0 + dy).rem_euclid(self.height as i64) as usize;
-            4 * (py * self.width + px)
-        };
-        let corners = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
+        let (x_floor, y_floor) = (floor(x), floor(y));
+        let (fx, fy) = (x - x_floor, y - y_floor);
+        let (x0, y0) = (x_floor as i64, y_floor as i64);
+        // Every texture on the disc is a power of two along each side, where the wrap is a mask
+        // rather than a division (P47: four divisions a sample, nine samples a ground pixel).
+        let (w, h) = (self.width as i64, self.height as i64);
+        let wrap = |t: i64, n: i64| if n & (n - 1) == 0 { (t & (n - 1)) as usize } else { t.rem_euclid(n) as usize };
+        let (xa, xb, ya, yb) = (wrap(x0, w), wrap(x0 + 1, w), wrap(y0, h), wrap(y0 + 1, h));
+        let corners = [
+            4 * (ya * self.width + xa),
+            4 * (ya * self.width + xb),
+            4 * (yb * self.width + xa),
+            4 * (yb * self.width + xb),
+        ];
         let weights = [(1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy];
         let mut out = [0u8; 4];
-        for (k, slot) in out.iter_mut().enumerate() {
+        let channels = match (rgb, alpha) {
+            (true, true) => 0..4,
+            (true, false) => 0..3,
+            (false, true) => 3..4,
+            (false, false) => 0..0,
+        };
+        for k in channels {
             let mixed: f32 = corners.iter().zip(weights).map(|(&c, w)| self.rgba[c + k] as f32 * w).sum();
-            *slot = (mixed + 0.5).min(255.0) as u8;
+            out[k] = (mixed + 0.5).min(255.0) as u8;
         }
         out
+    }
+}
+
+/// `x.floor()`, without the library call a target with no rounding instruction makes of it: the
+/// same value for every float a texture coordinate can be (an integer-valued float is its own floor).
+#[inline]
+pub(crate) fn floor(x: f32) -> f32 {
+    if x.abs() < 8_388_608.0 {
+        let t = x as i32 as f32;
+        if t > x { t - 1.0 } else { t }
+    } else {
+        x.floor()
     }
 }
 
@@ -246,6 +279,20 @@ mod tests {
         assert_eq!(&t.rgba[4..8], &[0, 255, 0, 255]);
         assert_eq!(&t.rgba[8..12], &[255, 0, 0, 255]);
         assert_eq!(t.rgba[15], 0);
+    }
+
+    #[test]
+    fn the_inline_floor_is_the_library_floor() {
+        // Equal as numbers: the one difference, -0.0's floor coming back +0.0, mixes the same texels.
+        for x in [-2.5f32, -1.0, -0.75, -0.0, 0.0, 0.25, 1.0, 3.999_999_8, 1e7, -1e7, 8_388_607.5, -8_388_607.5, 4e9] {
+            assert_eq!(floor(x), x.floor(), "{x}");
+        }
+        // And over a sweep of the coordinates a ground sample sees.
+        let mut x = -30_000.0f32;
+        while x < 30_000.0 {
+            assert_eq!(floor(x), x.floor(), "{x}");
+            x += 0.137;
+        }
     }
 
     #[test]

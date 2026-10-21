@@ -169,20 +169,40 @@ impl Sky {
         }
         let half_h = (camera.fov / 2.0).tan();
         let half_w = half_h * w as f32 / h as f32;
-        for y in 0..h {
-            let ny = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
-            for x in 0..w {
-                let at = y * w + x;
-                if frame.depth[at] > 0.0 {
+        // Only where nothing has been drawn, so a caller that draws the opaque ground first leaves
+        // the sky the pixels the ground did not cover. A band of rows to a thread (P47).
+        let rows = |first: usize, color: &mut [u8], depth: &[f32]| {
+            for (r, (color, depth)) in color.chunks_mut(w * 3).zip(depth.chunks(w)).enumerate() {
+                let y = first + r;
+                let ny = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
+                for x in 0..w {
+                    if depth[x] > 0.0 {
+                        continue;
+                    }
+                    let nx = 2.0 * (x as f32 + 0.5) / w as f32 - 1.0;
+                    let dir = forward
+                        .add(right.scale(nx * half_w))
+                        .add(up.scale(ny * half_h));
+                    color[x * 3..x * 3 + 3].copy_from_slice(&self.color(dir));
+                }
+            }
+        };
+        let threads = crate::raster::threads();
+        if threads == 1 || w * h < 64 * 64 {
+            rows(0, &mut frame.color, &frame.depth);
+            return;
+        }
+        let band = h.div_ceil(threads * 2).max(1);
+        std::thread::scope(|scope| {
+            let rows = &rows;
+            for (b, (color, depth)) in frame.color.chunks_mut(band * w * 3).zip(frame.depth.chunks(band * w)).enumerate() {
+                // A band the ground has filled already costs nothing to skip.
+                if depth.iter().all(|&d| d > 0.0) {
                     continue;
                 }
-                let nx = 2.0 * (x as f32 + 0.5) / w as f32 - 1.0;
-                let dir = forward
-                    .add(right.scale(nx * half_w))
-                    .add(up.scale(ny * half_h));
-                frame.color[at * 3..at * 3 + 3].copy_from_slice(&self.color(dir));
+                scope.spawn(move || rows(b * band, color, depth));
             }
-        }
+        });
     }
 }
 
