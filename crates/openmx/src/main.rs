@@ -40,10 +40,11 @@
 //! * **The pad** is I1 and I2: the host's joystick and keyboard are folded into a DualShock 2 report
 //!   ([`pad`]), and the report is read by [`game_sim::input::Manager`] — the game's own poll, dead zone
 //!   and press/release edges.
-//! * **The frame** is S1: [`game_sim::tick::Engine`] is handed a wall clock sampled the way the
-//!   original samples EE Timer 0, and it hands the simulation the same thirty-frame averaged, 30 fps
-//!   clamped `dt` the original does. The loop paces itself at the game's 60 Hz and degrades the way the
-//!   original degrades when a frame runs long: the clock is real, so `dt` grows.
+//! * **The frame** is S1: [`game_sim::tick::Engine`] is handed the Timer 0 a PS2 holding 30 fps reads
+//!   ([`pace`], P52), and it hands the simulation the same thirty-frame averaged, 30 fps clamped `dt`
+//!   the original does. The ticks run 30 a second on the wall clock whatever the picture's rate: a
+//!   slow picture runs several before it is drawn, a fast one draws several between two, blended
+//!   between them on the drawing side only.
 //! * **The place** is D6: the spawn, the start direction and the terrain come out of `free06`'s own
 //!   `.scn` and `.ps2.trn`, through the ported scene reader and the ported height-and-surface query.
 //! * **The ride** is P2: [`game_sim::ride::Ride`] is the bike, stepped by the ported ground step with
@@ -167,6 +168,7 @@ mod moment;
 mod net;
 mod online;
 mod overlay;
+mod pace;
 mod pad;
 mod perf;
 mod split;
@@ -203,7 +205,7 @@ use game_sim::ride::{self, Controls};
 use game_sim::rider::{self, Rider};
 use game_sim::rng::Rng;
 use game_sim::state::Phase;
-use game_sim::tick::{Engine, Game, Outcome, Timer0};
+use game_sim::tick::{Engine, Game, Outcome};
 use game_sim::trick::{Set, Stunts};
 use game_sim::world::Place;
 use game_sim::{Input, Sim, track, world as sim_world};
@@ -468,6 +470,70 @@ impl Rig {
     }
 }
 
+/// What the picture shows of one seat at a tick (P52), kept from the tick before the last so a drawn
+/// frame can blend it into the last.
+#[derive(Clone)]
+struct Shown {
+    /// Where the bike is: where the wreck body has taken it while the rider is down (S53), and
+    /// where the ride has it otherwise.
+    bike: M4,
+    /// The chassis' node pose, empty before the chassis' first frame.
+    chassis: Vec<M4>,
+    /// The body's pose as the GPU draws it — thrown by the ragdoll's bones while the rider is down,
+    /// on the bike otherwise — or none: not posed yet, no body, or the software path, which skins at
+    /// the draw.
+    body: Option<Vec<M4>>,
+}
+
+impl Shown {
+    fn of(seat: &Seat, rig: &Rig, assets: &Assets, ragdolled: Option<&game_render::rider::Ragdolled>, poses: bool) -> Shown {
+        let bike = match &seat.sim.rider.crash {
+            Some(crash) => chassis_wrecked(crash),
+            None => chassis_at(&seat.sim.rider.ride),
+        };
+        if !poses {
+            return Shown { bike, chassis: Vec::new(), body: None };
+        }
+        let chassis = rig.chassis.as_ref().map_or(Vec::new(), |c| c.world.clone());
+        let down = match (&seat.sim.rider.ragdoll, &seat.sim.rider.ragdoll_kit, ragdolled) {
+            (Some(doll), Some(kit), Some(rigged)) => Some((doll.nodes(kit), rigged)),
+            _ => None,
+        };
+        let body = match (&rig.body, &down) {
+            (Some(body), Some((bones, rigged))) => Some(body.ragdoll_palette(rigged, bones, bike)),
+            (Some(body), None) if body.posed => {
+                let grips = match &rig.chassis {
+                    Some(chassis) => chassis_grips(chassis),
+                    None => match assets.models.get(CHASSIS) {
+                        Some(loaded) => anchors_of(&Skeleton::of(&loaded.model), &[]),
+                        None => Default::default(),
+                    },
+                };
+                Some(body.palette(Some(&grips)).0)
+            }
+            _ => None,
+        };
+        Shown { bike, chassis, body }
+    }
+
+    /// From this, the tick before the last, to `now`, the last.
+    fn blend(&self, now: &Shown, by: &pace::Blend) -> Shown {
+        Shown {
+            bike: by.at(self.bike, now.bike),
+            chassis: by.pose(&self.chassis, &now.chassis),
+            body: match (&self.body, &now.body) {
+                (Some(was), Some(is)) => Some(by.pose(was, is)),
+                (_, is) => is.clone(),
+            },
+        }
+    }
+}
+
+/// Where the plane is drawn: at its body's pose, nose and up off the plane's own measure.
+fn plane_at(plane: &Plane) -> M4 {
+    M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up))
+}
+
 impl Game for World<'_> {
     /// One simulation pass: each player's pad, then their bike, in player order.
     ///
@@ -623,6 +689,10 @@ struct Args {
     headless: bool,
     /// `--frames N`: quit after N frames, which unlike `--seconds` is the same run on any machine.
     frames: Option<u32>,
+    /// `--draw-fps N`: draw at most N pictures a second. Unset, a window draws as fast as its
+    /// display takes them and a headless ride draws 60. The ride's ticks are 30 a second either way
+    /// (P52).
+    draw_fps: Option<f32>,
     /// `--menu`: the front end, whatever else is asked.
     menu: bool,
     /// Whether a flag picked a ride, which skips the front end unless `--menu` says otherwise.
@@ -659,6 +729,15 @@ struct Args {
 }
 
 impl Args {
+    /// The least time a picture takes (P52): `--draw-fps`', a headless ride's 60 a second, or none.
+    fn draw_frame(&self) -> Option<Duration> {
+        match self.draw_fps {
+            Some(fps) => Some(Duration::from_secs_f32(1.0 / fps)),
+            None if self.headless => Some(FRAME),
+            None => None,
+        }
+    }
+
     /// The pad seat player `i` reads.
     fn pad_seat(&self, i: usize) -> usize {
         self.pad_of.get(i).copied().unwrap_or(i)
@@ -2309,6 +2388,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         );
     }
     let mut engine = Engine::new();
+    // The ride's first frame comes a world load after the menu's, as the original's does (P52).
+    pace::after_load(&mut engine);
     let tables = Arc::new(tables);
     let mut seats = vec![Seat {
         reports: [Report::missing(); PADS],
@@ -2434,10 +2515,28 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The disc reads, texture decodes and bytes read by the end of the first frame: none should
     // follow.
     let mut loaded: Option<(game_render::tally::Tally, Option<u64>)> = None;
+    // The ride's ticks on their own schedule (P52): the original's 30 fps frame, or online the
+    // session's 60 Hz tick (`net::rollback::gate` counts every call as one), whatever the picture's
+    // rate. Each pass of the loop either runs one tick the wall clock owes, or — owing none —
+    // draws, blended between the last two ticks.
+    let step_length = match online {
+        Some(_) => Duration::from_nanos(1_000_000_000 / 60),
+        None => pace::TICK,
+    };
+    let mut pacer = pace::Pacer::new(step_length, started).most(args.frames).until(args.seconds);
+    // What the tick before the last one showed, for the picture to blend from: each seat's pose,
+    // each view's camera and the plane.
+    let mut before: Vec<Shown> = Vec::new();
+    let mut before_cameras: Vec<Camera> = Vec::new();
+    let mut before_plane: Option<M4> = None;
+    // What the last tick left for the picture: whether it simulated, and each player's ride for the
+    // camera and the overlay.
+    let mut simulated = false;
+    let mut ridden: Vec<Ridden> = Vec::with_capacity(args.players);
+    let mut top = Instant::now();
+    perf.begin();
     loop {
-        let top = Instant::now();
-        perf.begin();
-
+        if pacer.owed(Instant::now()) {
         if let Some(window) = &mut *window {
             window.poll();
             if window.closed() || (front.is_none() && window.held(key::ESCAPE)) {
@@ -2630,8 +2729,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // body's frame inside each — at its one fixed frame length, and this machine's seat comes back
         // as the first seat's `sim` (the only local seat online), every other seat as one of the
         // seats after it (N5). Its frames count toward `--frames`, the engine's not being run.
+        // Where everything is before this tick, which the picture blends from until the next.
+        before = world.seats.iter().zip(&rigs).map(|(seat, rig)| Shown::of(seat, rig, &assets, ragdolled.as_ref(), gpu_on)).collect();
+        before_cameras.clone_from(&cameras);
+        before_plane = world.seats[0].garage.plane.as_ref().map(plane_at);
         let sim_at = Instant::now();
-        let (dt, simulated) = if let Some(on) = &mut online {
+        let dt: F;
+        (dt, simulated) = if let Some(on) = &mut online {
             online_frames += 1;
             // Paused, this machine's rider lets go: the others ride on.
             let pad = match front.as_deref().is_some_and(|f| !f.menu.riding()) {
@@ -2654,7 +2758,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             (on.dt(), true)
         } else {
         // One frame of the game's own fixed update, which calls `World::simulate` inside itself.
-        let step = engine.step(wall(started), engine_input(&world.seats[0].reports[0]), &mut world);
+        // The clock a steady PS2 reads at this tick, not the host's (P52): every tick is the same
+        // length whatever the picture did, and `dt` is the original's.
+        let now = pace::tick_clock(pacer.ticks());
+        let step = engine.step(now, engine_input(&world.seats[0].reports[0]), &mut world);
         if step.outcome == Outcome::Quit {
             break;
         }
@@ -2673,7 +2780,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
         cameras.clear();
-        let mut ridden: Vec<Ridden> = Vec::with_capacity(args.players);
+        ridden.clear();
         for (i, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
             // How a player other than the first is named in the lines below; the first's lines are
             // the ones a one-player session has always printed.
@@ -2835,13 +2942,27 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let ears: Vec<audio::Listener> = cameras.iter().map(listener).collect();
                 sound.listen(&ears);
                 let frames: Vec<audio::SeatFrame> = world.seats.iter().map(seat_sound).collect();
-                sound.frame(&frames);
+                sound.frame(&frames, dt.0);
                 hushed = false;
             } else if !hushed {
                 sound.quiet();
                 hushed = true;
             }
         }
+
+        pacer.ran();
+        continue;
+        }
+
+        // The picture, owing no tick (P52): every camera, bike, rider and the plane blended from the
+        // tick before the last to the last by how far the wall clock is past it. Render-side only:
+        // nothing below writes the simulation.
+        let blend = pace::Blend(pacer.blend(Instant::now()));
+        let cameras: Vec<Camera> = cameras
+            .iter()
+            .enumerate()
+            .map(|(v, c)| before_cameras.get(v).map_or(*c, |b| blend.camera(b, c)))
+            .collect();
 
         // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
         // own shape and put into the window's frame; a full screen's one view is the frame itself.
@@ -2899,17 +3020,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 if seat.garage.up != Kind::Bike || !seated[p] {
                     continue;
                 }
-                let bike_at = match &seat.sim.rider.crash {
-                    Some(crash) => chassis_wrecked(crash),
-                    None => chassis_at(&seat.sim.rider.ride),
-                };
-                let pose = rig.chassis.as_ref().filter(|c| !c.world.is_empty()).map(|c| {
-                    gpu_poses.push(c.world.clone());
+                let now = perf.time(Stage::Skinning, || Shown::of(seat, rig, &assets, ragdolled.as_ref(), true));
+                let shown = before.get(p).map_or(now.clone(), |b| b.blend(&now, &blend));
+                let bike_at = shown.bike;
+                let pose = (!shown.chassis.is_empty()).then(|| {
+                    gpu_poses.push(shown.chassis.clone());
                     gpu_poses.len() - 1
                 });
                 actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None });
                 let node_now = |name: &str| -> Option<M4> {
-                    rig.chassis.as_ref().and_then(|c| c.node(name)).or_else(|| {
+                    let blended = rig.chassis.as_ref().and_then(|c| c.stance.set.skeleton.find(name));
+                    blended.and_then(|j| shown.chassis.get(j).copied()).or_else(|| {
                         let model = &assets.models.get(CHASSIS)?.model;
                         let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
                         Some(model.world(i))
@@ -2922,31 +3043,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     };
                     actors.push(Actor { model: part.model.as_str(), at, pose: None, lod_from: None });
                 }
-                // While the rider is down the body is posed from the ragdoll's bones (S53).
-                let down = match (&seat.sim.rider.ragdoll, &seat.sim.rider.ragdoll_kit, &ragdolled) {
-                    (Some(doll), Some(kit), Some(rigged)) => Some((doll.nodes(kit), rigged)),
-                    _ => None,
-                };
-                if let (Some(body), Some(model), Some((bones, rigged))) = (&rig.body, &rig.body_model, &down) {
-                    let pose = perf.time(Stage::Skinning, || body.ragdoll_palette(rigged, bones, bike_at));
-                    gpu_poses.push(pose);
-                    actors.push(Actor {
-                        model: model.as_str(),
-                        at: bike_at,
-                        pose: Some(gpu_poses.len() - 1),
-                        lod_from: Some(vector(seat.sim.rider.ride.position())),
-                    });
-                } else if let (Some(body), Some(model)) = (&rig.body, &rig.body_model)
-                    && body.posed
-                {
-                    let grips = match &rig.chassis {
-                        Some(chassis) => chassis_grips(chassis),
-                        None => match assets.models.get(CHASSIS) {
-                            Some(loaded) => anchors_of(&Skeleton::of(&loaded.model), &[]),
-                            None => Default::default(),
-                        },
-                    };
-                    let (pose, _) = perf.time(Stage::Skinning, || body.palette(Some(&grips)));
+                // The body, thrown by the ragdoll's bones while the rider is down (S53) and on the
+                // bike otherwise ([`Shown::of`]).
+                if let (Some(pose), Some(model)) = (shown.body, &rig.body_model) {
                     gpu_poses.push(pose);
                     actors.push(Actor {
                         model: model.as_str(),
@@ -2957,7 +3056,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
             }
             if let (Some(drawn), Some(plane)) = (&plane_drawn, &world.seats[0].garage.plane) {
-                let at = M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up));
+                let at = before_plane.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
                 for (model, at) in drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)) {
                     actors.push(Actor { model, at, pose: None, lod_from: None });
                 }
@@ -3054,6 +3153,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     Some(crash) => chassis_wrecked(crash),
                     None => chassis_at(&seat.sim.rider.ride),
                 };
+                // Between the last two ticks (P52). The software path blends where the machine is
+                // and not its pose, which it skins once a tick.
+                let bike_at = before.get(p).map_or(bike_at, |b| blend.at(b.bike, bike_at));
                 // Each part rides on one node of the chassis, so its transform is that node's place in the
                 // chassis followed by the chassis's place in the world.
                 actor.push((rig.bike_model.as_str(), bike_at));
@@ -3127,7 +3229,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // left after. At its body's pose, nose and up off the plane's own measure, with the prop
             // at the engine's angle (S35) — or the bent cone, unturned, once it is wrecked.
             if let (Some(drawn), Some(plane)) = (&plane_drawn, &world.seats[0].garage.plane) {
-                let at = M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up));
+                let at = before_plane.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
                 actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
             }
             perf.lap(Stage::Scene, scene_at, spent);
@@ -3232,13 +3334,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 break;
             }
         }
-        if args.frames.is_some_and(|n| engine.frame.max(online_frames) >= n) {
+        if args.frames.is_some_and(|n| pacer.ticks() >= u64::from(n)) {
             break;
         }
         perf.end(rects.len().min(world.seats.len()));
-        // Pace to 60 Hz. A frame that overran does not sleep, and the engine's own clock is what the
-        // simulation sees, so a slow frame becomes a longer step rather than a slower game.
-        if let Some(rest) = FRAME.checked_sub(top.elapsed()) {
+        // The picture's own rate (P52): as fast as the machine draws it — a window's present waits
+        // for the display's refresh — or `--draw-fps`', which a headless ride, with no display to
+        // wait for, takes as 60. The ticks owed meanwhile all run before the next picture, so a slow
+        // picture is a jumpier one and never a slower game.
+        if let Some(rest) = args.draw_frame().and_then(|frame| frame.checked_sub(top.elapsed())) {
             std::thread::sleep(rest);
         }
         stages.mark(stages::Stage::Pace);
@@ -3248,6 +3352,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             println!("     {}", stages.line());
             stages_since = Instant::now();
         }
+        top = Instant::now();
+        perf.begin();
     }
 
     // A split session's last word on each view: whose it was, how often that player's simulation
@@ -3292,9 +3398,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Where a session that was taped ended up, as the number the replay harness compares runs by.
     // A played tape is a function of its file — the pad and the frame length both come off it — so
     // two rides of one tape print the same hash, and a change that moved the physics prints a
-    // different one. It is only printed for a taped session: a live ride is paced by the wall clock
-    // and its hash would be a different number every time, which is a number worth nothing.
-    if head.is_some() || args.record.is_some() {
+    // different one. A headless ride is a function of its ticks too, since every tick reads the PS2's
+    // clock and not the host's (P52): `--frames N` rides the same N ticks at any drawn rate. A ride
+    // with a pad is a different ride every time, and its number is worth nothing.
+    if head.is_some() || args.record.is_some() || args.headless {
         println!("ride hash {:#018x}", game_sim::hash::of(&world.seats[0].sim.rider.ride));
     }
 
@@ -3327,10 +3434,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             after.reads, after.inflates, after.decodes
         );
     }
+    let at = world.seats[0].sim.rider.ride.position();
     println!(
-        "ridden for {:.1}s over {} frames",
+        "ridden for {:.1}s over {} frames, ending at {:.2}, {:.2}, {:.2}",
         started.elapsed().as_secs_f32(),
-        engine.frame
+        engine.frame,
+        at.x(),
+        at.y(),
+        at.z()
     );
     Ok(leave)
 }
@@ -3370,17 +3481,6 @@ fn seat_sound(seat: &Seat) -> audio::SeatFrame {
         wreck: seat.said.wreck.map(|w| w.0 as i32),
         landed_trick: seat.said.landed.is_some(),
         plane,
-    }
-}
-
-/// The wall clock, as the game's own timer would have it: whole 100 ms periods and the bus-clock
-/// counts into the current one, which is what [`game_sim::tick::clock_ms`] is written to convert.
-fn wall(since: Instant) -> Timer0 {
-    let us = since.elapsed().as_micros() as u64;
-    Timer0 {
-        ticks: (us / 100_000) as u32,
-        // 576,000 counts a second is 576 per millisecond, and the remainder here is microseconds.
-        count: ((us % 100_000) * 576 / 1_000) as u32,
     }
 }
 
@@ -3610,6 +3710,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         aspect: Aspect::default(),
         headless: false,
         frames: None,
+        draw_fps: None,
         online: None,
         peers: Vec::new(),
         seats: None,
@@ -3776,6 +3877,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                     next("a number of frames")?.parse().map_err(|_| "--frames: not a number of frames")?,
                 )
             }
+            "--draw-fps" => {
+                let fps: f32 = next("pictures a second")?.parse().map_err(|_| "--draw-fps: not a number")?;
+                if !(fps > 0.0) {
+                    return Err("--draw-fps: more than none a second".into());
+                }
+                args.draw_fps = Some(fps);
+            }
             "--online" => args.online = Some(next("this machine, like host@0.0.0.0:7000")?),
             "--peer" => args.peers.push(next("another machine, like g@192.168.1.20:7000")?),
             "--seats" => args.seats = Some(next("who sits where, like host,g,g")?),
@@ -3840,6 +3948,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--hud] [--camera NAME]\n\
                             [--shot-frame N] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
+                            [--draw-fps N]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
@@ -3886,6 +3995,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                      player has the keyboard, the plane and the tape. --headless draws with no\n\
                      window and no pad, and --frames N quits after N frames. --timings prints\n\
                      what each stage of a frame cost, a line a second.\n\
+                     The ride runs 30 ticks a second, as the original does, however fast it is\n\
+                     drawn: a window draws as fast as its display takes pictures, a headless\n\
+                     ride 60 a second, and --draw-fps N at most N.\n\
                      The window opens at the screen's size and the frame fills it, re-made when\n\
                      the window is resized, wider or taller as the original's own 16:9 mode\n\
                      would draw it; --aspect 4:3 draws the largest 4:3 frame inside it instead,\n\
