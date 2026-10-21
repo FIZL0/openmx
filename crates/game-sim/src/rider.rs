@@ -24,6 +24,8 @@
 //!    ([`crate::motion::Driver::frame`]) on the same request, which is what writes the crossup the
 //!    landing is judged on.
 //! 6. **The machine** — [`crate::state::Ride::step`], carrying the airborne wreck test.
+//! 7. **The wreck page** — not the player's but the screen's fader, which updates after it and puts
+//!    the bike back three ticks after a wreck's reset asked for the page ([`crate::wreck_page`]).
 //!
 //! # One wreck test, not two
 //!
@@ -65,6 +67,7 @@ use crate::ragdoll_ride::{self, Down, Kit, Posed};
 use crate::rider_anim;
 use crate::state;
 use crate::wreck_sound;
+use crate::wreck_page;
 use crate::ghost::Ghost;
 use std::sync::Arc;
 use crate::trick::{self, AngleTable, Set, Trick, Tricks, Wreck};
@@ -238,6 +241,9 @@ pub struct Rider {
     /// The bike's ghost after a put-back (P57, S63): see-through for three seconds, passing through
     /// the other riders, its clock held while it is inside one.
     pub ghost: Ghost,
+    /// The wreck page (S72): the screen's fade to black that a wreck's automatic reset asks for, and
+    /// that puts the bike back when it is black.
+    pub page: wreck_page::Page,
 }
 
 impl Rider {
@@ -253,13 +259,13 @@ impl Rider {
             motion: motion::Driver::default(),
             set,
             clips: motion::Clips::default(),
-            // A local human, freestyle, wrecks on. `settles` starts false and is written every frame
-            // from the wreck in progress ([`Crash::settles`]) once a shell has handed over the two
-            // wreck files; a rider with none keeps it false, and for that one the automatic reset is
-            // out of reach and the chord is the way back.
+            // A local human with a screen of their own, freestyle, wrecks on. `settles` starts false
+            // and is written every frame from the wreck in progress ([`Crash::settles`]) once a shell
+            // has handed over the two wreck files; a rider with none keeps it false, and for that one
+            // the automatic reset is out of reach and the chord is the way back.
             sense: state::Sense {
                 ai_route: false,
-                owner: Some(state::Owner { human: true, screen: false }),
+                owner: Some(state::Owner { human: true, screen: true }),
                 wrecks_enabled: true,
                 settles: false,
             },
@@ -284,6 +290,7 @@ impl Rider {
             flight: Trick::NONE,
             airborne: false,
             ghost: Ghost::default(),
+            page: wreck_page::Page::default(),
         }
     }
 
@@ -345,7 +352,7 @@ impl Rider {
         let mut out = Frame::default();
         let Rider {
             ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
-            flight, airborne, ragdoll_kit, ragdoll, skeleton, wreck_sounds, idles, ghost, ..
+            flight, airborne, ragdoll_kit, ragdoll, skeleton, wreck_sounds, idles, ghost, page, ..
         } = self;
         let mut sense = *sense;
 
@@ -549,8 +556,8 @@ impl Rider {
                 let hit = air::hit_wreck(&p.air, air, touched, false, mass, height, &hits);
                 hit.or(landed).map(Wreck::from)
             },
-            // No wreck page: this shell has no front end to put one on.
-            || false,
+            // The screen's page is up from the request until its fade back in is over.
+            || page.up(),
         );
         if let Some(reason) = verdict.wreck {
             out.wreck = Some(reason);
@@ -606,6 +613,34 @@ impl Rider {
                 None => (ride.spawn, ride.spawn_facing),
             };
             ride.place(at, facing);
+            off_map::unwreck(&mut ride.chassis);
+            *crash = None;
+            *ragdoll = None;
+            tricks.reset();
+            *flight = Trick::NONE;
+            out.respawned = true;
+            ghost.start();
+        }
+        // 7 — the wreck page's fader, which updates after the bike: a request raises it and its
+        // first update is this tick's, and the draw after its third puts the bike back
+        // ([`wreck_page`]). The put-back is the bike's respawn, the same as the machine's own.
+        if verdict.reset == Some(state::Reset::Page) {
+            page.raise();
+        }
+        if page.update() {
+            if state.wreck.is_some() {
+                state.respawn();
+                let (at, facing) = match crash.as_ref() {
+                    Some(down) => down.rest(),
+                    None => (ride.spawn, ride.spawn_facing),
+                };
+                ride.place(at, facing);
+            } else {
+                // Put back already, by the chord in the fade's first ticks: the page's listener
+                // is still on the fader and respawns a riding bike again. **Not measured**: the
+                // port leaves it where the chord put it (journal 2026-10-21-s72).
+                state.respawn();
+            }
             off_map::unwreck(&mut ride.chassis);
             *crash = None;
             *ragdoll = None;
@@ -770,6 +805,10 @@ impl State for Rider {
         // The bones, when the ride runs them (S53). A rider without a kit hashes as before.
         if let Some(doll) = &self.ragdoll {
             w.group("ragdoll", |w| hash::State::walk(doll, w));
+        }
+        // The page, while one is up (S72): a rider with none hashes as before.
+        if self.page.up() {
+            w.group("page", |w| hash::State::walk(&self.page, w));
         }
         // The wreck sounds' picks move only for a rider that runs a ragdoll (S53).
         if self.ragdoll_kit.is_some() {

@@ -471,7 +471,8 @@ fn the_size_of_the_state_type_is_pinned() {
     // 9736 since S61: the kit's wreck table and a wreck's fade and touching, walked with the bones.
     // 9744 since S65: the skeleton the shell last drew, an input like the controls that the walk
     // leaves out; the bones it poses are walked.
+    // 9752 since S72: the rider's wreck page, which the walk names under `page` only while one is up.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 9744, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 9752, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 897, "the walk's leaf count moved with it");
 }
