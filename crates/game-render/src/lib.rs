@@ -39,6 +39,7 @@ pub mod disc;
 pub mod gpu;
 pub mod ini;
 pub mod mat;
+pub mod particle;
 pub mod png;
 pub mod psg;
 pub mod pst;
