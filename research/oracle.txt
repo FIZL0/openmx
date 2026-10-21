@@ -3977,3 +3977,43 @@ camera_snap_player boot 0x00200a70 (manager) called by mxbiplane_reset when *(pl
 #   In the biplane state: plane 0xc44a40, its block 0xc45320; the plane's camera 0x947fd0 ("Flight
 #   Cam 1", 5 presets; +0xd0 dist 13, +0x14c speed reference 117.3328, +0x150 height bias 3.0) and
 #   the bike's 0x946c80 ("Race Cam 1", 11 presets) share the viewport 0x946910 (near clip 2.4).
+
+# S59 — off the map: the bike's cannonball (reason 13). Port: crates/game-sim/src/off_map.rs, wired in
+#   rider.rs ahead of air::wreck_test; proof crates/game-sim/tests/off_the_map.rs. Journal:
+#   research/journal/2026-10-21-s59-off-the-map.
+#   bike_wreck_test's first clause (0x002522c0..0x002525e4), gated on wreck_enabled_flag (zero skips the
+#   whole test), bike +0x570 != 0 and +0x748 != 13. It runs while the rider is already down. Two points
+#   go to position_query with margin 150 and the bike's +0x960 terrain object: a1 (the caller passes
+#   bike+0xd40, skipped when null or bit-equal to (0,0,0,1) by pceqw/ppach) and the chassis' +0x60.
+#   Either outside: target (W/2, chassis y, D/2, w of the quad at 0x00420bd0 = 1), d = target - pos
+#   (vsub.xyz), len2 by mula/madda/madd, dir = (0,0,0,1) at len2 == 0 else xyz * rsqrt(1, len2);
+#   k = 2 * sqrt(6.21118 [0x40c6c1fd]); speed = min(1497.6 [0x44bb3333], W/2) / k; chassis +0x260 =
+#   dir * speed (vmulx.xyz, w kept), +0x264 += 16.1*k + 100/k; chassis vt +0x80 (350.0); bike +0x6a8
+#   (the .phy drag the physics step 0x00257a00 reads) *= 0.5; chassis +0x290 = 0.5 * unit, +0x294 =
+#   0.4 * unit, +0x298 = 0.02, +0x29c = 1.0; rider_part_sync(*(chassis+0x254), chassis+0x60) moves the
+#   transform onto the centre of gravity; vt +0xfc (bike, 13); the rest of the test is skipped.
+chassis_set_max_speed boot 0x00158e40 (chassis, speed in f12) chassis vt +0x80: +0x220 = speed*speed.
+#                                     The vehicle's unwreck (0x00252ee0) leaves it; the bike's does not
+mxbike_unwreck boot 0x0027bb20 the motocross bike's unwreck slot (vtable 0x00455138), called from
+#                              0x00281c10: the vehicle's unwreck (bike, +0x14d4), then chassis vt +0x80
+#                              with 135.0 (lui 0x4307), so +0x220 = 18225 after every put-back; then a
+#                              player-only HUD reset (+0x146c/+0x1470), a flag 0x80000 on +0xf9c's
+#                              +0x8, +0x14b4 = 0
+bike_edge_armed_by boot 0x0027aa70 the bike builder: +0x570 = 1 when its a3 is 0 and the event's
+#                                  first word (league) is 1 or 2, else 0. RAM: the player's bike 1, the
+#                                  AI's 0 (rec-start, acc-start)
+body_publish boot 0x0024e250 the body actor's last call: the request block's +0x1c0 (= bike+0xd40)
+#                             = the main bone body's +0x60, [[actor+0x2f4]+0xa4]+0x60. Riding, it sat
+#                             (-0.07, +1.74, -1.19) from the chassis' +0x60 in rec-start's RAM
+#   bike_wreck_entry with reason 13: the wreck body (*(bike+0x7a8)+0x110) takes chassis +0x260 as
+#   ever, but its spin +0x1b0/+0x1b4/+0x1b8 is three units (x, y, z; +0x1bc untouched) instead of
+#   chassis +0x290. bike_unwreck divides +0x6a8 by 0.5 again when the reason was 13.
+#   free09 (rec-start RAM): terrain +0x530..+0x53c = 3, 3, 9, 9, so the map is 6912 x 6912 ft.
+#   Live (research/s59_edge.py, watch/s59-edge.toml, captures context/capture/s59/*.csv, copy 4 from
+#   free09's save state 7): five throws, north/east/west/south and north again crossed 10 ft up
+#   (a one-off +30 ft/s write to chassis +0x264). Every one by the chassis' +0x60 (6762.1377 east,
+#   149.32 west, 148.149 north, 6764.68 south); the rows between are 2..5 rand calls. The chassis then
+#   stands still (+0x60 frozen) while +0x254's transform follows the wreck body. +0x220 reads 122500
+#   from the throw to the put-back's tick and 18225 on it; +0x6a8 0.0125 then 0.025. The clock
+#   (+0x794) arms 201..211 rows after the throw (the body's +0xd3c gate, 2.5 s window long past), the
+#   page is asked for when it passes 5.0, and the put-back is 3 rows after that every time.

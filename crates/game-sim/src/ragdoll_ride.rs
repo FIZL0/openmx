@@ -197,6 +197,18 @@ impl std::fmt::Debug for Kit {
 }
 
 impl Kit {
+    /// **The main bone's centre of mass in the world**, in the riding pose on the bike at `m` (the
+    /// ride's transform): where [`Down::enter`] would put it. The empty vector for a rig without one.
+    pub fn main_bone(&self, m: &Mat4) -> Vf {
+        let Some(part) = self.rig.parts.get(MAIN) else {
+            return UNIT_W;
+        };
+        let mut drawn = Mat4([Vf::ZERO; 4]);
+        let mut start = Start::default();
+        ragdoll_pose::pose(&self.rig.place(m, MAIN), part.cofg, &mut drawn, &mut start, None, &self.tables.acos, &self.tables.curve);
+        start.position
+    }
+
     /// The kit out of the rider file's bytes (`rider\anim\mrider.phy`) and the skeleton's riding
     /// pose.
     pub fn new(rider_file: &[u8], rig: Rig) -> Kit {
