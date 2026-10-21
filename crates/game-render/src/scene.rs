@@ -187,6 +187,10 @@ pub struct Material {
     pub rgba: Option<[f32; 4]>,
     /// `TextureAnimation`: `unique` for the material's own `.atm`, or the name of another.
     pub animation: Option<String>,
+    /// `wrapModeHorizontal` and `wrapModeVertical` of 1: the texture is clamped at its edges along
+    /// that axis instead of repeated (the GS's CLAMP against its REPEAT, 0, which is also what a
+    /// material that says nothing gets). Palm fronds, bark and the cut-out cowboys clamp.
+    pub clamp: [bool; 2],
 }
 
 /// How a material's vertices are lit, by the family of microprogram it names.
@@ -231,6 +235,7 @@ impl Material {
                 .filter(|v| v.len() >= 4)
                 .map(|v| [v[0], v[1], v[2], v[3]]),
             animation: get("TextureAnimation").map(|t| t.to_string()),
+            clamp: [number("wrapModeHorizontal") == Some(1.0), number("wrapModeVertical") == Some(1.0)],
         }
     }
 
@@ -403,6 +408,16 @@ mod tests {
         );
         assert_eq!(m.alpha_test, None);
         assert_eq!(m.shading(), Shading::Constant([64.0, 128.0, 128.0, 128.0]));
+    }
+
+    #[test]
+    fn a_material_says_whether_its_texture_repeats_or_clamps() {
+        // `palmfraunb.psm` clamps along v only; most materials say nothing and repeat both ways.
+        let m = Material::parse(
+            "[ShaderPass_1]\nTextureMap_1 = palmfraunb\nwrapModeHorizontal = 0\nwrapModeVertical = 1\n",
+        );
+        assert_eq!(m.clamp, [false, true]);
+        assert_eq!(Material::parse("[ShaderPass_1]\nTextureMap_1 = x\n").clamp, [false; 2]);
     }
 
     #[test]

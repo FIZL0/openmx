@@ -44,6 +44,8 @@ pub struct Surface {
     pub blend: bool,
     pub additive: bool,
     pub depth_write: bool,
+    /// The material's texture is clamped at its edges along u and along v, not repeated.
+    pub clamp: [bool; 2],
 }
 
 impl Default for Surface {
@@ -56,6 +58,7 @@ impl Default for Surface {
             blend: false,
             additive: false,
             depth_write: true,
+            clamp: [false; 2],
         }
     }
 }
@@ -81,6 +84,7 @@ impl Surface {
             // A texel that fails the test but still lands in colour must not hide what is behind it:
             // the port has no "colour only" write, so the whole material skips depth instead.
             depth_write: !m.no_depth_write && !(blend && m.fail_keeps_color && cutoff > 1),
+            clamp: m.clamp,
         }
     }
 }
@@ -417,12 +421,34 @@ pub fn draw_model(
 }
 
 /// A queued model triangle's texel: its tag is its texture's index in [`Assets::textures`] plus one,
-/// and 0 is untextured, flat white.
+/// and 0 is untextured, flat white. The tag's top two bits are its material's clamp along u and v
+/// ([`tag_of`]).
 fn texel_of(assets: &Assets) -> impl Fn(u32, f32, f32) -> [u8; 4] + Sync + '_ {
-    |tag, u, v| match tag {
+    |tag, u, v| match tag & !(CLAMP_U | CLAMP_V) {
         0 => [255, 255, 255, 255],
-        t => assets.textures[t as usize - 1].sample(u, v),
+        t => {
+            // Just short of 1, which the wrap would take back round to the first texel.
+            let clamp = |c: f32, on: bool| if on { c.clamp(0.0, 0.999_999) } else { c };
+            assets.textures[t as usize - 1].sample(clamp(u, tag & CLAMP_U != 0), clamp(v, tag & CLAMP_V != 0))
+        }
     }
+}
+
+/// The tag bits that say a triangle's texture is clamped along u and along v.
+const CLAMP_U: u32 = 1 << 31;
+const CLAMP_V: u32 = 1 << 30;
+
+/// The tag [`texel_of`] reads: the texture's index plus one (0 for none), with the clamp bits.
+fn tag_of(texture: Option<usize>, surface: &Surface) -> u32 {
+    let Some(i) = texture else { return 0 };
+    let mut tag = i as u32 + 1;
+    if surface.clamp[0] {
+        tag |= CLAMP_U;
+    }
+    if surface.clamp[1] {
+        tag |= CLAMP_V;
+    }
+    tag
 }
 
 /// [`draw_model`]'s triangles, queued into `batch` rather than drawn, in the order it would have
@@ -484,7 +510,7 @@ fn queue_model(
             additive: surface.additive,
             depth_write: surface.depth_write,
         };
-        batch.triangle(shade, texture.map_or(0, |i| i as u32 + 1), mode);
+        batch.triangle(shade, tag_of(texture, &surface), mode);
         drawn += 1;
     }
     drawn

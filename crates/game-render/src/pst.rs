@@ -3,16 +3,22 @@
 //! ```text
 //! 0     u32 0x00020002, u32 0x28     the same in every texture on the disc; unexplained
 //! 8     256 x RGBA                   the palette, in the GS's order (see below)
-//! 1032  u32 mip count, u32 height of the *smallest* mip, u32 width of it, u32 its byte count, u32 0
-//! 1052  the largest mip, width x height bytes, then each smaller one after 16 unexplained bytes
+//! 1032  u32 mip count
+//! 1036  the mips, the *smallest first*, each one a 16-byte head and its pixels:
+//!         u32 height, u32 width, u32 byte count, u32 0, then width x height bytes
 //! ```
+//!
+//! So the largest mip, the one drawn up close, is the last thing in the file. Until V27 it was read
+//! from the first mip's pixels on, which on a 256x256 texture of six mips put the five small mips
+//! (21,824 bytes, 85 rows) across the top of the picture and pushed the real one down out of the
+//! bottom: every textured thing in the world carried a smeared band across a third of its texture.
+//! Walking the heads reproduces the exact length of every one of the 2,798 distinct `.pst` and
+//! `.atm` frames on this disc (1,861 of them with more than one mip), which is the check that this
+//! layout is the one the files use.
 //!
 //! Height first: the title screen says 448 then 640, and the bushes' billboard on `free06` is a clean
 //! strip of plants at 512x256 and the same plants cut into alternating rows at 256x512. Square
 //! textures, which are most of them, read the same either way, which is how this stayed hidden (P36).
-//!
-//! The full size is `last << (mips - 1)`, which reproduces the exact length of all 143 textures on this
-//! disc — the check that the header is understood.
 //!
 //! The palette order is the one quirk. The GS reads a 256-entry palette as eight blocks of 32, with the
 //! middle two blocks of each group of four swapped, so a palette copied straight out of the file comes
@@ -38,24 +44,8 @@ impl Texture {
         if d.len() < 1052 {
             return Err(format!("not a .pst: only {} bytes", d.len()));
         }
-        let mips = le32(d, 1032) as usize;
-        let small_h = le32(d, 1036) as usize;
-        let small_w = le32(d, 1040) as usize;
-        if !(1..=12).contains(&mips) || small_w == 0 || small_h == 0 {
-            return Err(format!(
-                "not a .pst: {mips} mips of {small_w}x{small_h} makes no sense"
-            ));
-        }
-        let width = small_w << (mips - 1);
-        let height = small_h << (mips - 1);
+        let (width, height, at) = largest_mip(d, 1032, 2)?;
         let pixels = width * height;
-        if 1052 + pixels > d.len() {
-            return Err(format!(
-                "a {width}x{height} texture needs {} bytes, the file has {}",
-                1052 + pixels,
-                d.len()
-            ));
-        }
         let mut palette = [[0u8; 4]; 256];
         for (i, slot) in palette.iter_mut().enumerate() {
             let at = 8 + 4 * unswizzle(i);
@@ -64,7 +54,7 @@ impl Texture {
             *slot = [d[at], d[at + 1], d[at + 2], a];
         }
         let mut rgba = vec![0u8; pixels * 4];
-        for (i, &p) in d[1052..1052 + pixels].iter().enumerate() {
+        for (i, &p) in d[at..at + pixels].iter().enumerate() {
             rgba[4 * i..4 * i + 4].copy_from_slice(&palette[p as usize]);
         }
         Ok(Texture {
@@ -181,8 +171,8 @@ impl Texture {
     /// ```text
     /// 0     u32 0x00020002, u32 0x2e
     /// 8     16 x RGBA                    the palette
-    /// 72    u32 mip count, u32 height of the smallest mip, u32 width of it, u32 its byte count, u32 0
-    /// 92    the largest mip, width x height / 2 bytes, a row at a time
+    /// 72    u32 mip count, then the mips smallest first, as in the 256-colour layout: a 16-byte
+    ///       head (height, width, byte count, 0) and width x height / 2 bytes, a row at a time
     /// ```
     ///
     /// Height before width, as in the 256-colour header: the main menu's highlight bar is 256 wide
@@ -193,24 +183,8 @@ impl Texture {
         if d.len() < PIXELS {
             return Err(format!("not a sixteen-colour .pst: only {} bytes", d.len()));
         }
-        let mips = le32(d, 72) as usize;
-        let small_h = le32(d, 76) as usize;
-        let small_w = le32(d, 80) as usize;
-        if !(1..=12).contains(&mips) || small_w == 0 || small_h == 0 {
-            return Err(format!(
-                "not a .pst: {mips} mips of {small_w}x{small_h} makes no sense"
-            ));
-        }
-        let width = small_w << (mips - 1);
-        let height = small_h << (mips - 1);
+        let (width, height, at) = largest_mip(d, 72, 1)?;
         let pixels = width * height;
-        if PIXELS + pixels.div_ceil(2) > d.len() {
-            return Err(format!(
-                "a {width}x{height} sixteen-colour texture needs {} bytes, the file has {}",
-                PIXELS + pixels.div_ceil(2),
-                d.len()
-            ));
-        }
         let mut palette = [[0u8; 4]; 16];
         for (i, slot) in palette.iter_mut().enumerate() {
             let at = 8 + 4 * i;
@@ -219,7 +193,7 @@ impl Texture {
         }
         let mut rgba = vec![0u8; pixels * 4];
         for i in 0..pixels {
-            let byte = d[PIXELS + i / 2];
+            let byte = d[at + i / 2];
             let p = if i % 2 == 0 { byte & 0x0f } else { byte >> 4 };
             rgba[4 * i..4 * i + 4].copy_from_slice(&palette[p as usize]);
         }
@@ -229,6 +203,38 @@ impl Texture {
             rgba,
         })
     }
+}
+
+/// Walk a mip chain whose count is at `count_at`, the smallest mip first, and say where the last and
+/// largest one's pixels start, and its size. `per_two` is the bytes two of its pixels take: 2 for
+/// eight-bit pixels, 1 for four. Each head's byte count has to be what its size says and the chain has
+/// to grow, so a file of some other layout is refused rather than drawn as noise.
+fn largest_mip(d: &[u8], count_at: usize, per_two: usize) -> Result<(usize, usize, usize), String> {
+    let mips = le32(d, count_at) as usize;
+    if !(1..=12).contains(&mips) {
+        return Err(format!("not a .pst: {mips} mips makes no sense"));
+    }
+    let mut at = count_at + 4;
+    let mut last = (0usize, 0usize, 0usize);
+    for i in 0..mips {
+        if at + 16 > d.len() {
+            return Err(format!("a .pst whose mip {i} would start past its end ({} bytes)", d.len()));
+        }
+        let (h, w, bytes) = (le32(d, at) as usize, le32(d, at + 4) as usize, le32(d, at + 8) as usize);
+        if w == 0 || h == 0 || bytes != (w * h * per_two).div_ceil(2) || w < last.0 || h < last.1 {
+            return Err(format!("not a .pst: mip {i} of {mips} says {w}x{h} in {bytes} bytes"));
+        }
+        if at + 16 + bytes > d.len() {
+            return Err(format!(
+                "a {w}x{h} mip needs {} bytes, the file has {}",
+                at + 16 + bytes,
+                d.len()
+            ));
+        }
+        last = (w, h, at + 16);
+        at += 16 + bytes;
+    }
+    Ok(last)
 }
 
 /// Where entry `i` of a 256-colour palette really lives: the GS swaps the middle two blocks of 8 in
@@ -279,6 +285,30 @@ mod tests {
         assert_eq!(&t.rgba[4..8], &[0, 255, 0, 255]);
         assert_eq!(&t.rgba[8..12], &[255, 0, 0, 255]);
         assert_eq!(t.rgba[15], 0);
+    }
+
+    #[test]
+    fn the_picture_is_the_last_mip_of_the_chain_the_smallest_coming_first() {
+        // A 1x1 mip of index 1, then the 2x1 picture of indices 2 and 1 (V27: the first mip in the
+        // file is the smallest, not the picture).
+        let mut d = vec![0u8; 72 + 4 + 16 + 1 + 16 + 1];
+        d[0..4].copy_from_slice(&0x0002_0002u32.to_le_bytes());
+        d[4..8].copy_from_slice(&FOUR_BIT.to_le_bytes());
+        d[12..16].copy_from_slice(&[255, 0, 0, 0x80]);
+        d[16..20].copy_from_slice(&[0, 255, 0, 0x80]);
+        d[72..76].copy_from_slice(&2u32.to_le_bytes());
+        for (at, v) in [(76, 1u32), (80, 1), (84, 1), (93, 1), (97, 2), (101, 1)] {
+            d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        d[92] = 0x01;
+        d[109] = 0x12;
+        let t = Texture::parse(&d).unwrap();
+        assert_eq!((t.width, t.height), (2, 1));
+        assert_eq!(&t.rgba[0..4], &[0, 255, 0, 255]);
+        assert_eq!(&t.rgba[4..8], &[255, 0, 0, 255]);
+        // A mip with no width is not a texture.
+        d[97..101].copy_from_slice(&0u32.to_le_bytes());
+        assert!(Texture::parse(&d).is_err());
     }
 
     #[test]
