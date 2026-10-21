@@ -391,6 +391,7 @@ impl Wire for Rider {
             flight,
             airborne,
             ghost,
+            page,
         } = self;
         ride.put(out);
         tricks.put(out);
@@ -410,6 +411,7 @@ impl Wire for Rider {
         flight.put(out);
         airborne.put(out);
         ghost.put(out);
+        page.put(out);
     }
     fn take(r: &mut Reader<'_>) -> Result<Self, String> {
         Ok(Rider {
@@ -437,6 +439,7 @@ impl Wire for Rider {
             flight: Wire::take(r)?,
             airborne: Wire::take(r)?,
             ghost: Wire::take(r)?,
+            page: Wire::take(r)?,
         })
     }
 }
@@ -506,6 +509,8 @@ wire!(crate::ride::Wheel { mv, w, surface, inv_inertia, steer_axis, slip, gyro, 
 wire!(crate::tire::Slip { spinning, locked, sliding });
 wire!(crate::rng::Rng { state });
 wire_enum!(crate::state::Kind { Plain, Wrecked });
+wire!(crate::wreck_page::Page { fade, updates });
+wire_enum!(crate::wreck_page::Fade { Off, Out, In });
 wire!(crate::trick::Gesture { group, dir, stick, look, armed });
 wire!(crate::trick::Wreck; f0);
 wire!(crate::vehicle_anim::Driver { want, state, prev, seq, rate, ramp, started, holding, from_table, cross, cross_prev, cross_start, reverse, extra, mix, phase });
