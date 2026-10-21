@@ -2979,8 +2979,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // terrain query for the ground under them (P61), which reads the terrain and nothing else.
         if simulated && let (Some((fx, binds)), Some(plane)) = (&mut plane_fx, &world.seats[0].garage.plane) {
             let place = &mut world.place;
-            let mut ground = |p: V3| Some(sim_world::World::ground(place, Vf::new(p.x, p.y, p.z, 1.0)).0.y());
-            fx.step_over(&plane_fx_frame(plane, binds), dt.0, &mut ground);
+            fx.step_over(&plane_fx_frame(plane, binds), dt.0, &mut |at| plane_fx_ground(place, at));
         }
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
@@ -3984,7 +3983,9 @@ fn load_plane_fx(
 
 /// What the plane's particles read off it this frame (P58): its emitters' nodes where the plane is,
 /// its throttle, airspeed and wreck, and its body's contacts — none: the port's plane has no
-/// collision model to touch the ground with until S48, so the wreck's dust is never fed.
+/// collision model to touch the ground with until S48, so the wreck's dust is never fed. Its three
+/// tires as the tire dust reads them (P60): the ground under the bottom of the tire, the held
+/// contact (only ever cleared, so never an object), the strut's compression and the surface under it.
 fn plane_fx_frame(plane: &Plane, binds: &[(String, M4)]) -> particles::PlaneFrame {
     let at = plane_at(plane);
     let (throttle, airspeed) = plane.gauges().map_or((0.0, 0.0), |(t, a)| (t.0, a.0));
@@ -3996,7 +3997,21 @@ fn plane_fx_frame(plane: &Plane, binds: &[(String, M4)]) -> particles::PlaneFram
         vel: vector(plane.vel),
         ground_contacts: Vec::new(),
         object_contacts: Vec::new(),
+        tires: plane.flight.as_ref().map_or_else(Vec::new, |f| {
+            f.tires
+                .iter()
+                .map(|t| particles::TireFrame { ground: t.below, object: t.held, compression: t.compression.0, zone: t.surface })
+                .collect()
+        }),
     }
+}
+
+/// The ground under a point for the plane's particles (P60): its height and its surface, from the
+/// ride's own terrain query. `None` off the terrain, where the query answers its no-ground depth.
+fn plane_fx_ground(place: &mut impl sim_world::World, at: V3) -> Option<(f32, u8)> {
+    let p = Vf::new(at.x, at.y, at.z, 1.0);
+    let (on, _) = place.ground(p);
+    (on.y() > -1.0e5).then(|| (on.y(), place.surface(on)))
 }
 
 /// The plane's particles as the GPU draws them.
