@@ -3790,3 +3790,36 @@ ghost_step    boot 0x00250950 (rider, dt f12) vt+0x13c, first thing in the bike'
 # Live: the put-back's tick draws 0.5 with the clock at 3.0; the next 90 ticks 0.109999 .. 0.999909
 # (dt 0.03333 a tick), the 91st the clock is -0.033028 and the flag is off. The bike's parts carry the
 # model's alpha on every tick. L1+R1 in a running ghost starts it over at 3.0.
+# P58 the biplane's particles (journal 2026-10-21-p58-biplane-particles): the generic particle system
+# and the vehicle particle manager the plane's biplaneparticles.dat feeds.
+emitter_defaults     boot 0x0014d410 an emitter's constructor: rate 0..10, life 500..3500 ms, size
+#                                    0..5, growth 0..1, fade in 0.25, fade out from 0.7, gravity 3.0
+emt_read             boot 0x0014e910 reads an .emt's [General Info] and [Properties] into an emitter
+emit_timing          boot 0x0014daa0 the per-frame gate: speed = |pos - prev| / dt, nothing under
+#                                    MinimumEmissionSpeed
+emit                 boot 0x00150540 places the frame's particles along prev..pos; velocity turned by
+#                                    the node, plus noise from a ball, plus the emitter's own if
+#                                    ApplyEmitterVelocity
+emit_count           boot 0x00151d80 carry += rate * dt, emits floor(carry), at least
+#                                    MinParticlesPerFrame
+particle_life_size   boot 0x00152030 draws a particle's life, size and growth between the file's two
+speed_emitter_read   boot 0x00152230 the speed-gated emitter's own keys (MinimumEmissionSpeed)
+particle_update      boot 0x001556b0 per particle: age += dt * 1000, dead past life; grows (flag 8)
+#                                    size += growth dt and y += growth dt; moves (4) pos += vel dt;
+#                                    drag (0x80000) vel -= vel drag dt; gravity (0x20000) vel.y -=
+#                                    mult * 32.2 * dt; terrain collision (0x200) and wind not ported.
+#                                    Particle: +0x30 age, +0x34 life, +0x3c size, +0x44 growth, +0x48
+#                                    flags. First call divides the .prt's UVs by the texture's size
+prt_read             boot 0x00155c50 reads a .prt sheet: [General Info] NumFrames, [GroupN]
+#                                    Name/FirstFrame/LastFrame, [FrameN] UV in pixels
+particle_vu_packets  boot 0x00156510 builds the VU1 packets (Vu1Particles.vuo draws; not read)
+particle_system_init boot 0x00156af0 the track's particle system: <track>particles.prt/.psm/.pst
+vehicle_fx_read      boot 0x003d52b0 reads a vehicle particles .dat: Type Generic / Exhaust /
+#                                    CollisionModel / Dust / HelicopterDust, Disable flags, Emitter
+vehicle_fx_update    boot 0x003d5aa0 the manager's frame: flags Wrecking 8 / NotWrecking 0x10,
+#                                    NoContact 1, GroundContact 2, ObjectContact 4; an entry runs
+#                                    unless its Disable & the frame's flags
+vehicle_fx_exhaust   boot 0x003d5f70 f = throttle * 0.5 * (MaxSpeed - airspeed) / MaxSpeed; off when
+#                                    f <= 0; the file's velocity.y *= f + 0.5
+vehicle_fx_generic   boot 0x003d6e60 a Generic entry's init: the emitter on its AttachedToSoultree node
+vehicle_fx_collision boot 0x003d75d0 one emitter per body contact, prev = contact - body velocity dt
