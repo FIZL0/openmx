@@ -1459,7 +1459,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     names.sort();
     names.dedup();
     for name in &names {
-        assets.load(&archives, name);
+        assets.load_placed(&archives, name);
     }
     let has_bike = assets.load(&archives, CHASSIS);
     for part in &vehicle.parts {
