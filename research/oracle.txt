@@ -3615,13 +3615,57 @@ engine_sound_list boot 0x0030fd10 one list: NumSounds, SoundN, SoundNLooping, th
 engine_sound_decide boot 0x0030ffc0 the frame's next note from the hands (gas, clutch, grounded, speed)
 engine_sound_chain boot 0x00311160 queues the note's next sample after the one playing; picks through
 #                                  sound_pick (draws rand_raw) and draws rand again for a pitch variance
-# The note states' frames. Which address is which state is read off the decider's switch, a best reading.
-engine_note_idle boot 0x00310370 idle
-engine_note_low boot 0x003104f0 low accel
-engine_note_high boot 0x00310ad0 high accel
-engine_note_power boot 0x00310c50 power
-engine_note_sputter boot 0x00310980 sputter
-engine_note_decel boot 0x00310dd0 decel
+# The note states' starters, by the state each sets (+0x2d8) and the list it plays (P49 corrected
+# P42's reading of four of them). Lists: +0x204 Idle, +0x21c LowAccel, +0x234 HighAccel, +0x24c Decel,
+# +0x264 Power, +0x27c Sputter, +0x294 Panic, +0x2ac Clutch (0x18 each; +0x8 the array).
+engine_note_idle boot 0x00310370 idle (1): Idle[0], queued under the one sounding, next 1
+engine_note_accel boot 0x003104f0 accel (2/3): from 8/9/10 HighAccel cut in; else LowAccel at speed <=
+#                                LowTorqueSpeed, HighAccel above, cut in from 1/6 only; next 4
+engine_note_power boot 0x00310ad0 power (4): Power picked, queued, next 5
+engine_note_sputter boot 0x00310c50 sputter (5): Sputter picked, queued, next 4
+engine_note_decel boot 0x00310980 decel (6): Decel[0] cut in, next 1
+engine_note_rev boot 0x00310dd0 (state) 7 Clutch picked cut in, next 8; 9 with gas the limiter,
+#                               next 10; 9 without and 10 the limiter off, state 10, next 1; else
+#                               the free rev Panic[0] cut in, state 8, next 9
+# P49 — the rest of the engine note.
+engine_sound_frame boot 0x0030fcb0 (a0 the note, f12 dt) unless muted (+0x2fc): decide, and when it
+#                                  started nothing, chain; then the emitter's own update
+engine_sound_limiter boot 0x003110d0 (note, on) +0x2f8: pauses Panic[0] (sound vt +0x24) and plays or
+#                                    stops Panic[1] over it
+engine_sound_vtable boot 0x00458b50 the note's class: +0x7c queue (cut stops it first), +0x9c stop
+engine_sound_queue boot 0x001b6b10 (emitter, sound, cut) the emitter's vt +0x7c: cut stops the queue
+#                                  (vt +0x9c), then the queue is the one sound
+sound_3d boot 0x00104480 (f12 min, f13 max, a0 listener, a1 sound, a2 at, a3 velocity) the positional
+#                        sound's volume, angle and Doppler off the listener; 0 (and no play) at
+#                        MaxAttenuationDistance and beyond
+sound_3d_mix boot 0x00103020 100% within Min, 100 - (int)((d-min)/(max-min)*100) to Max; Doppler is
+#                            the closing speed along the line, level components only
+sound_doppler boot 0x00166bc0 the sound's vt +0x68: pitch x (1 + DopplerFactor * (int)(v*0.68182)/1125),
+#                             a shift under 0.01 none
+sound_class_vtable boot 0x0044ed00 one sound: +0x1c start, +0x20 playing, +0x24 pause, +0x28 stop,
+#                                  +0x40 set pitch, +0x48 its pitch (+0x54)
+voice_position boot 0x0019c390 (spu, voice) seconds into a voice; -112 when it is not sounding
+sound_start boot 0x00166380 the sound's vt +0x1c: start it
+sound_playing boot 0x001666e0 the sound's vt +0x20: still sounding (a paused one is)
+sound_pause boot 0x00166580 the sound's vt +0x24: (sound, on) pause or resume its voice
+sound_stop boot 0x00166640 the sound's vt +0x28: stop it
+sound_set_pitch boot 0x00166970 the sound's vt +0x40: (sound, pitch) in pitch units, 4096 = 48 kHz
+sound_pitch boot 0x00166e60 the sound's vt +0x48: its own pitch
+emitter_play boot 0x001b6e70 (emitter, sound, 1, 0) the limiter's Panic[1] started on the emitter
+emitter_stop boot 0x001b6150 (emitter, sound) the limiter's Panic[1] stopped
+emitter_update boot 0x001b6f30 (emitter, f12 dt) the emitter's own frame: positions its sounds
+engine_sound_hands boot 0x00280fb0 points the note's +0x200 table at the rider O's snapshot: [0]
+#                                  grounded O+0x93c, [1] gas O+0x888 (the rate-limited throttle,
+#                                  +0x658), [2] speed O+0x860, [3] clutch O+0x890 (the lever, +0x644,
+#                                  not +0x65c the clutch the engine is driven through)
+sound_class_ctor boot 0x00165d60 (sound, bank) +0x30 the sample handle (slot << 16) and +0x34 the
+#                                voice, both -1; +0x24 the length 0 until it is loaded
+sample_length boot 0x0019d860 (spu, handle) seconds of the slot's sample: spu+0x3e8 + 8*slot, -106
+#                             for none; the loaders write it to the sound's +0x24 (0x0016633c)
+voice_start boot 0x0019cde0 (spu, handle, ...) starts the slot's sample (spu+0x3e4 + 8*slot)
+# P49: Aud\audio.res's directory is [count][word][len][name][offset][size]...; the original's slot
+# lengths (first_recording: Engine\125A\decel01 2.219 s, clutch01 0.252 s) are the files after each
+# name, not before it as P42 read.
 rider_wreck_sound_load boot 0x0033e5b0 reads the rider archive's rider.aud [Fall] and [IMPACT] into the
 #                                      emitter wreck_sound plays from
 crowd_sound_load boot 0x001fe220 reads event.aud's Crowd* lists when the track's CrowdPresent is set
