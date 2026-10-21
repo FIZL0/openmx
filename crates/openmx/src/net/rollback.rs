@@ -214,6 +214,11 @@ pub(super) fn confirmed<S: Clone + 'static, G: Game<State = S>>(np: &Netplay<S>,
     if rb.frame == rb.base {
         return Some((t, game.encode()?));
     }
+    // a machine riding alone (N10: a freeride opened online) has every pad in as it runs them: the
+    // state now is settled, and ggrs counts its delayed input as confirmed past it
+    if rb.sess.remote_player_handles().is_empty() && f as usize >= rb.frame - rb.base {
+        return Some((rb.frame as u32, game.encode()?));
+    }
     let then = rb.cell(f)?.load()?;
     let now = game.save();
     game.restore(&then);
