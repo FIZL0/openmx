@@ -3275,7 +3275,7 @@ fn listener(c: &Camera) -> audio::Listener {
 fn seat_sound(seat: &Seat) -> audio::SeatFrame {
     let r = &seat.sim.rider.ride;
     let p = r.position();
-    let span = (r.engine.rev_limit.0 - r.engine.min_rpm.0).max(1.0);
+    let v = r.chassis.vel;
     let plane = match (seat.garage.up, &seat.garage.plane) {
         (Kind::Biplane, Some(plane)) => {
             let note = plane.flight.as_ref().map_or(0.0, |f| f.engine.note.0 / f.engine.max_rpm.0.max(1.0));
@@ -3287,12 +3287,14 @@ fn seat_sound(seat: &Seat) -> audio::SeatFrame {
         hands: audio::Hands {
             grounded: r.air.on_ground,
             gas: r.held.gas.0,
-            clutch: r.held.clutch.0,
+            // The lever (`+0x644`), not the clutch the engine is driven through: that one is in
+            // whenever the bike stands, and the note would rev at every standstill.
+            clutch: seat.hands.clutch.0,
             speed: r.chassis.speed.0,
-            rev: (r.engine.rpm.0 - r.engine.min_rpm.0) / span,
             at: [p.x(), p.y(), p.z()],
+            vel: [v.x(), v.y(), v.z()],
         },
-        vy: r.chassis.vel.y(),
+        vy: v.y(),
         wreck: seat.said.wreck.map(|w| w.0 as i32),
         landed_trick: seat.said.landed.is_some(),
         plane,

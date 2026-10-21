@@ -1,0 +1,16 @@
+# P49's ride for the engine note, wall-clock: stand, pull away and shift up, roll off, blip, ride on.
+release
+sleep 4000
+down cross
+sleep 6000
+up cross
+sleep 4000
+press cross 600
+sleep 1500
+press cross 600
+sleep 1500
+down cross
+sleep 8000
+up cross
+sleep 5000
+release

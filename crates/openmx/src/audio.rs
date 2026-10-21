@@ -5,18 +5,19 @@
 //!
 //! All of it is one member of `MX.PSR`, `Aud\audio.res`, which is not the deflate archive every
 //! other `.res` is. Its front is three words (`3`, the directory's place less 8, `0x100`), then at that
-//! place one record per file: `[u32 offset][u32 size][u32 name length][name]`, the name with no
-//! terminator (`Aud\Engine\250A\idle02.VAG`). The first record's offset word is the count of
-//! records. The files follow the directory, each at a multiple of `0x2000`, the offsets counted from
+//! place the count of records and a word nothing here reads, then one record per file:
+//! `[u32 name length][name][u32 offset][u32 size]`, the name with no terminator
+//! (`Aud\Engine\250A\idle02.VAG`). (P42 read `[offset][size][length][name]`, giving every name the
+//! file before it; P49 matched the pairing to the original's own sample lengths.) The files follow the directory, each at a multiple of `0x2000`, the offsets counted from
 //! the first such multiple after the directory.
 //!
 //! Two kinds of file, both Sony's 4-bit ADPCM ([`decode_block`]: 16 bytes in, 28 samples out):
 //!
-//! - **`.VAG`**, one mono sound: a `0x30`-byte header (its `VAGp` magic is zeroed on this disc) with
+//! - **`.VAG`**, one mono sound: a `0x30`-byte header (its `VAGp` magic zeroed in the loops) with
 //!   the big-endian data size at `0x0c` and the rate at `0x10`, nearly always 22050.
 //! - **`.vig`**, a stereo stream (the music, the start-line ditties): a `0x800`-byte header with the
 //!   per-channel size at `0x0c` and the rate at `0x10` (44100), then the two channels interleaved one
-//!   16-byte block at a time. `Crowd\cheer.vig` is the odd one: a mono VAG under the other extension.
+//!   16-byte block at a time.
 //!
 //! What plays which file is text: the `.aud` files in the bike, rider, machine and track archives
 //! (`[Section]` lists of `SoundN = Engine\250A\low07`, paths under `Aud\`, the extension optional and
@@ -37,6 +38,7 @@
 
 use game_render::disc::Disc;
 use game_render::ini::{self, Section};
+use ps2_float::F;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -138,14 +140,17 @@ impl Clip {
         Ok(Clip { rate, channels: 1, pcm: decode_mono(&bytes[0x30..0x30 + size]) })
     }
 
-    /// A `.vig` file: the `0x800`-byte header and stereo ADPCM, or (one file on the disc) a VAG under
-    /// that name, told apart by which header's size fits the file.
+    /// A `.vig` file: the `0x800`-byte header and stereo ADPCM, or a VAG under that name, told apart by
+    /// which header's size fits the file (P42 took `Crowd\cheer.vig` for one; it was the archive's
+    /// file before it, P49, and every `.vig` on the disc is stereo).
     pub fn vig(bytes: &[u8]) -> Result<Clip, String> {
         if bytes.len() < 0x40 {
             return Err(format!("a {}-byte vig", bytes.len()));
         }
         let size = be32(bytes, 0x0c) as usize;
-        if 0x800 + 2 * size > bytes.len() && 0x30 + size <= bytes.len() {
+        // A stream's size runs one block pair past its file (every `.vig` on this disc), so only a
+        // file too short for a 0x800 header and one channel is a VAG.
+        if bytes.len() < 0x800 + size && 0x30 + size <= bytes.len() {
             return Clip::vag(bytes);
         }
         let rate = match be32(bytes, 0x10) {
@@ -196,19 +201,23 @@ impl Bank {
     /// 64 KiB is plenty).
     pub fn parse(front: &[u8]) -> Result<Bank, String> {
         let dir = le32(front, 4).ok_or("a sound archive with no header")? as usize + 8;
-        // The count is the first record's offset word: that record (`SFX\RumbleMono.VAG`, which
-        // nothing here plays) has no offset of its own.
+        // The count, a word nothing here reads, then each record: the name's length, the name, then
+        // its offset and size. P49: P42 read the offset and size in front of the name as its own,
+        // which gave every name the file before it; the original's own sample lengths (`decel01` is
+        // 2.219 s in its RAM, the 28000 bytes after `Decel01.vag`'s name) are the pairing here.
         let count = le32(front, dir).ok_or("the sound archive's directory is past its front")? as usize;
-        let mut at = dir;
+        let mut at = dir + 8;
         let mut raw = Vec::with_capacity(count);
         for _ in 0..count {
-            let (off, size, len) = match (le32(front, at), le32(front, at + 4), le32(front, at + 8)) {
-                (Some(o), Some(s), Some(l)) => (o, s, l as usize),
+            let len = le32(front, at).ok_or("the sound archive's directory runs off its front")? as usize;
+            let name = front.get(at + 4..at + 4 + len).ok_or("a name past the front")?;
+            at += 4 + len;
+            let (off, size) = match (le32(front, at), le32(front, at + 4)) {
+                (Some(o), Some(s)) => (o, s),
                 _ => return Err("the sound archive's directory runs off its front".to_string()),
             };
-            let name = front.get(at + 12..at + 12 + len).ok_or("a name past the front")?;
             raw.push((off as u64, size as u64, ini::text(name)));
-            at += 12 + len;
+            at += 8;
         }
         // The data starts at the first 0x2000 boundary after the directory.
         let base = (at as u64).div_ceil(0x2000) * 0x2000;
@@ -389,6 +398,8 @@ struct Voice {
     /// The gains actually applied, eased toward the target so a change does not click.
     applied: [f32; 2],
     stopping: bool,
+    /// Held where it is and silent (the engine's free rev under the limiter's loop).
+    paused: bool,
 }
 
 /// One ear: a camera's position and its right-hand direction.
@@ -436,6 +447,7 @@ impl Mixer {
             segment: 0,
             applied: [-1.0; 2],
             stopping: false,
+            paused: false,
         });
         id
     }
@@ -473,6 +485,24 @@ impl Mixer {
                 v.play.at = at;
             }
         }
+    }
+
+    /// Hold a voice where it is, silent, or let it go on.
+    pub fn pause(&mut self, id: VoiceId, on: bool) {
+        if let Some(v) = self.voices.iter_mut().find(|v| v.id == id) {
+            v.paused = on;
+        }
+    }
+
+    /// The listener nearest a place.
+    pub fn nearest(&self, at: [f32; 3]) -> Option<[f32; 3]> {
+        let d = |l: &Listener| (0..3).map(|i| (l.at[i] - at[i]).powi(2)).sum::<f32>();
+        self.listeners.iter().min_by(|a, b| d(a).total_cmp(&d(b))).map(|l| l.at)
+    }
+
+    /// Someone is nearer a place than `far`: a positional sound beyond it is not started.
+    pub fn within(&self, at: [f32; 3], far: f32) -> bool {
+        self.nearest(at).is_none_or(|l| (0..3).map(|i| (l[i] - at[i]).powi(2)).sum::<f32>() < far * far)
     }
 
     /// Fade a voice out over a few milliseconds and drop it.
@@ -525,6 +555,9 @@ impl Mixer {
             .map(|v| if v.stopping { [0.0; 2] } else { self.gains(&v.play) })
             .collect();
         for (v, target) in self.voices.iter_mut().zip(targets) {
+            if v.paused && !v.stopping {
+                continue;
+            }
             if v.applied[0] < 0.0 {
                 v.applied = target;
             }
@@ -694,7 +727,8 @@ impl Stream for Pcm {
 }
 
 /// **The disc's songs**: `music.pb`'s list, each song's `.vig` read out of the sound archive when it
-/// starts. The list's first song, College Kids, is a 28 ms stub on this disc and is left off.
+/// starts. A file too short to be a song is left off (P42 found College Kids one; it was the archive's
+/// file before it, P49).
 pub struct DiscMusic {
     image: PathBuf,
     bank: Bank,
@@ -1061,19 +1095,31 @@ impl Music {
 
 // --- the bike's engine ------------------------------------------------------------------------------
 
-/// The engine note's states, as the original's bike sound numbers them (1..=10; 10 is not used).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The engine note's states, numbered as the original's bike sound numbers them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Note {
-    Idle,
-    LowAccel,
-    HighAccel,
-    Power,
-    Sputter,
-    Decel,
-    Clutch,
-    /// The free rev, the first half of `[Panic]`, cut at `RevMidpoint` into the panic loop.
-    Rev,
-    Panic,
+    /// Nothing chosen: a chain that ran out with nowhere to go.
+    Off = 0,
+    Idle = 1,
+    LowAccel = 2,
+    HighAccel = 3,
+    Power = 4,
+    Sputter = 5,
+    Decel = 6,
+    Clutch = 7,
+    /// The free rev, `[Panic]`'s first sample, up to `RevMidpoint`.
+    Rev = 8,
+    /// Held at the limiter: the rev sample paused at its midpoint, `[Panic]`'s loop playing over it.
+    Panic = 9,
+    /// Off the gas after the limiter: the rev sample resumed, falling back to the idle.
+    Unwind = 10,
+}
+
+impl Note {
+    /// The four states a throttle held on the ground plays.
+    fn pulling(self) -> bool {
+        matches!(self, Note::LowAccel | Note::HighAccel | Note::Power | Note::Sputter)
+    }
 }
 
 /// One bike's `vehicle_*.aud`.
@@ -1088,10 +1134,17 @@ pub struct BikeSounds {
     pub clutch: List,
     pub panic: List,
     pub wreck: List,
-    /// `LowTorqueSpeed` in feet a second (the file's mph, ×1.4667 as the loader does).
+    /// `LowTorqueSpeed` in feet a second (the file's mph, ×1.46666 as the loader does).
     pub low_torque_speed: f32,
     pub airborne_to_decel: f32,
     pub rev_midpoint: f32,
+    /// `OverlapTime`: how long before a sample's end the next one starts under it.
+    pub overlap: f32,
+    /// `PitchVariance`: the most a sample's pitch is moved either way, in the sound chip's pitch units
+    /// (4096 is a sample played at 48 kHz).
+    pub pitch_variance: i32,
+    /// `DopplerFactor`.
+    pub doppler: f32,
     pub near: f32,
     pub far: f32,
     pub wreck_near: f32,
@@ -1115,17 +1168,22 @@ impl BikeSounds {
             clutch: List::read(section(&s, "Clutch"), lib),
             panic: List::read(section(&s, "Panic"), lib),
             wreck: List::read(wreck, lib),
-            low_torque_speed: p("LowTorqueSpeed", 25.0) * 1.466_666_6,
+            low_torque_speed: p("LowTorqueSpeed", 25.0) * 1.46666,
             airborne_to_decel: p("AirborneTimeToDecel", 0.3),
             rev_midpoint: p("RevMidpoint", 0.311),
+            overlap: p("OverlapTime", 0.008),
+            pitch_variance: p("PitchVariance", 0.0) as i32,
+            doppler: p("DopplerFactor", 0.25),
             near: p("MinAttenuationDistance", 20.0),
-            far: p("MaxAttenuationDistance", 200.0),
+            far: p("MaxAttenuationDistance", 100.0),
             wreck_near: w("MinDistance", 30.0),
             wreck_far: w("MaxDistance", 150.0),
         }
     }
 
-    fn list(&self, n: Note) -> &List {
+    /// The list a sample is from. `Note::Rev` is `[Panic]`, whose first sample is the free rev and
+    /// whose second is the limiter's loop.
+    pub fn list(&self, n: Note) -> &List {
         match n {
             Note::Idle => &self.idle,
             Note::LowAccel => &self.low,
@@ -1134,12 +1192,26 @@ impl BikeSounds {
             Note::Sputter => &self.sputter,
             Note::Decel => &self.decel,
             Note::Clutch => &self.clutch,
-            Note::Rev | Note::Panic => &self.panic,
+            Note::Rev | Note::Panic | Note::Unwind | Note::Off => &self.panic,
         }
+    }
+
+    pub fn clip(&self, s: Sample) -> Option<&(Arc<Clip>, bool)> {
+        self.list(s.list).sounds.get(s.index)
+    }
+
+    /// A sample's own looping flag, and its length in seconds (0 for one the disc lacks).
+    pub fn looping(&self, s: Sample) -> bool {
+        self.clip(s).is_some_and(|c| c.1)
+    }
+
+    pub fn seconds(&self, s: Sample) -> f32 {
+        self.clip(s).map_or(0.0, |c| c.0.seconds())
     }
 }
 
-/// What the engine note hears from the ride each frame.
+/// What the engine note hears from the ride each frame: the original's four (on the ground, the
+/// throttle, the speed, the clutch), and where the bike is and how fast it is going for the mix.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Hands {
     pub grounded: bool,
@@ -1147,188 +1219,518 @@ pub struct Hands {
     pub clutch: f32,
     /// Feet a second.
     pub speed: f32,
-    /// `0..1` between idle and the rev limit.
-    pub rev: f32,
     pub at: [f32; 3],
+    /// Feet a second, the world's axes.
+    pub vel: [f32; 3],
 }
 
-/// **One bike's engine note**: a chain of whole samples, the next queued behind the one playing, the
-/// state machine choosing which list it comes from — the original's, as the journal reads it.
-pub struct Engine {
+/// One of a bike's engine samples: the list it is in (as [`BikeSounds::list`] names them) and its
+/// place there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sample {
+    pub list: Note,
+    pub index: usize,
+}
+
+impl Sample {
+    const IDLE: Sample = Sample { list: Note::Idle, index: 0 };
+    const REV: Sample = Sample { list: Note::Rev, index: 0 };
+    /// The limiter's loop.
+    pub const PANIC: Sample = Sample { list: Note::Rev, index: 1 };
+}
+
+/// A source of the original's `rand()`: `0..=0x7fff_ffff`.
+pub trait Draw {
+    fn rand(&mut self) -> i32;
+}
+
+impl Draw for Dice {
+    fn rand(&mut self) -> i32 {
+        (self.next() >> 33) as i32
+    }
+}
+
+/// `rand()` as the original scales it, `[0, 1)`.
+fn unit(d: &mut impl Draw) -> F {
+    F(1.0 / 2_147_483_648.0) * F::from(d.rand())
+}
+
+/// **The no-repeat pick** the engine's lists use: a list of one or none answers its first sample and
+/// draws nothing; a longer one draws an index, moved on by one (and wrapped) when it is the last pick.
+pub fn pick(count: i32, last: &mut i32, d: &mut impl Draw) -> i32 {
+    if count < 2 {
+        *last = 0;
+        return 0;
+    }
+    let mut i = (F::from(count) * unit(d)).to_i32();
+    if i == *last {
+        i = (i + 1) % count;
+    }
+    *last = i;
+    i
+}
+
+/// **A sample's pitch variance**: a uniform offset in `-variance..variance` pitch units, from one draw.
+pub fn jitter(variance: i32, d: &mut impl Draw) -> i32 {
+    let r = d.rand();
+    (F::from(variance << 1) * F::from(r) * F(1.0 / 2_147_483_648.0)).to_i32() - variance
+}
+
+/// What the engine note plays on: the original's emitter and its sounds, the mixer in the shell, the
+/// original itself in the test.
+pub trait Bed {
+    /// The sample is sounding (a paused one is still sounding).
+    fn playing(&self, s: Sample) -> bool;
+    /// Seconds into the sample's voice, or -1 when it has none.
+    fn position(&self, s: Sample) -> f32;
+    /// Stop the sample.
+    fn stop(&mut self, s: Sample);
+    /// Start the sample where the bike is: false, and nothing started, when no one is near enough to
+    /// hear it or the bike's sound is gated off.
+    fn play(&mut self, s: Sample) -> bool;
+    /// Move a sample just started off its own pitch, in pitch units.
+    fn detune(&mut self, s: Sample, by: i32);
+    /// The limiter: pause the free rev and start `[Panic]`'s loop over it, or stop the loop and let
+    /// the rev go on.
+    fn hold(&mut self, on: bool);
+}
+
+/// **The engine note's state machine**, the original's: the frame's decision from the hands, else the
+/// chain to the next sample once the one sounding is about to end. One sample is the note's at a time
+/// (`current`); one that is not cut plays out under the next.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Brain {
     pub note: Note,
-    voice: Option<VoiceId>,
-    segment: u32,
-    /// What the queued sample is, once queued.
-    queued: Option<Note>,
-    last: [i32; 9],
-    off_gas: f32,
-    in_air: f32,
-    was_gas: bool,
-    was_grounded: bool,
+    /// The state the chain goes to when the current sample ends.
+    pub next: Note,
+    /// The sample that is the note's: the emitter's queue.
+    pub current: Sample,
+    /// Counts down off the throttle from a quarter second; with `hold_off_gas` the accelerations hold
+    /// until it runs out.
+    pub off_gas: f32,
+    /// Counts down in the air from `AirborneTimeToDecel`.
+    pub air: f32,
+    pub hold_off_gas: bool,
+    /// A throttle in the air revs the engine; without it the air is the throttle let go.
+    pub air_revs: bool,
+    /// The throttle was held last frame.
+    pub was_gas: bool,
+    /// The limiter's loop is playing.
+    pub held: bool,
+    pub muted: bool,
+    /// The last picks: low, high, power, sputter, clutch.
+    pub last: [i32; 5],
+}
+
+/// How long the throttle is remembered after it is let go.
+const OFF_GAS_HOLD: f32 = 0.25;
+
+impl Brain {
+    /// The player's note as the loader leaves it: idle queued and not yet started, nothing to chain to,
+    /// nothing picked, the throttle in the air revving the engine.
+    pub fn new() -> Brain {
+        Brain {
+            note: Note::Idle,
+            next: Note::Off,
+            current: Sample::IDLE,
+            off_gas: 0.0,
+            air: 0.0,
+            hold_off_gas: false,
+            air_revs: true,
+            was_gas: false,
+            held: false,
+            muted: false,
+            last: [-1; 5],
+        }
+    }
+
+    /// One frame.
+    pub fn frame(&mut self, h: &Hands, dt: f32, sounds: &BikeSounds, bed: &mut impl Bed, d: &mut impl Draw) {
+        if !self.muted && !self.decide(h, dt, sounds, bed, d) {
+            self.chain(h, sounds, bed, d);
+        }
+    }
+
+    /// **The frame's decision**: true when it started a note (and the chain waits a frame).
+    pub fn decide(&mut self, h: &Hands, dt: f32, sounds: &BikeSounds, bed: &mut impl Bed, d: &mut impl Draw) -> bool {
+        let gas = 0.1 < h.gas;
+        let mut started = false;
+        if !h.grounded {
+            self.air = (F(self.air) - F(dt)).0;
+            if gas && self.air_revs {
+                if !self.was_gas {
+                    self.air = 0.0;
+                    self.rev(Note::Rev, h, sounds, bed, d);
+                    started = true;
+                } else if self.air <= 0.0 && self.note.pulling() {
+                    self.air = 0.0;
+                    self.decel(bed, d, sounds);
+                    started = true;
+                }
+                self.was_gas = true;
+                return started;
+            }
+            if self.note == Note::Panic {
+                self.rev(self.next, h, sounds, bed, d);
+            } else if self.note.pulling() {
+                self.decel(bed, d, sounds);
+            } else {
+                self.was_gas = false;
+                return false;
+            }
+            self.was_gas = false;
+            return true;
+        }
+        if 0.1 < h.clutch {
+            if gas {
+                if !self.was_gas {
+                    self.rev(Note::Rev, h, sounds, bed, d);
+                    started = true;
+                } else if 1.0 < h.speed && self.note < Note::Clutch {
+                    self.rev(Note::Clutch, h, sounds, bed, d);
+                    started = true;
+                }
+                self.was_gas = true;
+            } else {
+                if self.note.pulling() {
+                    self.decel(bed, d, sounds);
+                    started = true;
+                } else if self.note == Note::Clutch {
+                    self.next = Note::Idle;
+                } else if self.note == Note::Panic {
+                    self.rev(self.next, h, sounds, bed, d);
+                    started = true;
+                }
+                self.was_gas = false;
+            }
+        } else if gas {
+            self.off_gas = OFF_GAS_HOLD;
+            if matches!(self.note, Note::Unwind | Note::Panic | Note::Rev | Note::Idle | Note::Decel | Note::Off) {
+                self.accel(h, sounds, bed, d);
+                started = true;
+            } else if self.note == Note::Clutch {
+                self.power(sounds, bed, d);
+                started = true;
+            }
+            self.was_gas = true;
+        } else {
+            self.off_gas = (F(self.off_gas) - F(dt)).0;
+            if !self.hold_off_gas || self.off_gas <= 0.0 {
+                if self.note == Note::Panic {
+                    self.rev(self.next, h, sounds, bed, d);
+                    started = true;
+                } else if self.note.pulling() {
+                    self.decel(bed, d, sounds);
+                    started = true;
+                }
+            }
+            self.was_gas = false;
+        }
+        self.air = sounds.airborne_to_decel;
+        started
+    }
+
+    /// **The chain**: once the current sample is within `OverlapTime` of its end (or has ended, or never
+    /// started), the next state's sample; the free rev hands on at `RevMidpoint` instead. A looping
+    /// sample never ends.
+    pub fn chain(&mut self, h: &Hands, sounds: &BikeSounds, bed: &mut impl Bed, d: &mut impl Draw) {
+        let cur = self.current;
+        let at_midpoint = self.note == Note::Rev && sounds.rev_midpoint < bed.position(cur);
+        if !at_midpoint {
+            if sounds.looping(cur) {
+                return;
+            }
+            if bed.playing(cur) && (F(sounds.overlap) + F(bed.position(cur))).0 < sounds.seconds(cur) {
+                return;
+            }
+        }
+        match self.next {
+            Note::Unwind => {}
+            Note::Panic | Note::Rev => self.rev(self.next, h, sounds, bed, d),
+            Note::Sputter => self.sputter(sounds, bed, d),
+            Note::Power => self.power(sounds, bed, d),
+            Note::Idle => self.idle(sounds, bed, d),
+            Note::Off => self.note = Note::Off,
+            _ => {}
+        }
+    }
+
+    fn limiter(&mut self, on: bool, bed: &mut impl Bed) {
+        if self.held != on {
+            self.held = on;
+            bed.hold(on);
+        }
+    }
+
+    /// Make `s` the note's sample and start it. `cut` stops the one sounding first; `unless_playing`
+    /// leaves a sample that is still sounding alone. The idle is never detuned.
+    fn sound(&mut self, s: Sample, cut: bool, unless_playing: bool, sounds: &BikeSounds, bed: &mut impl Bed, d: &mut impl Draw) {
+        if self.muted {
+            return;
+        }
+        if self.held {
+            self.limiter(false, bed);
+        }
+        if cut {
+            bed.stop(self.current);
+        }
+        self.current = s;
+        if unless_playing && bed.playing(s) {
+            return;
+        }
+        if bed.play(s) && s != Sample::IDLE {
+            let by = jitter(sounds.pitch_variance, d);
+            bed.detune(s, by);
+        }
+    }
+
+    fn picked(&mut self, list: Note, slot: usize, sounds: &BikeSounds, d: &mut impl Draw) -> Sample {
+        let n = sounds.list(list).sounds.len() as i32;
+        Sample { list, index: pick(n, &mut self.last[slot], d) as usize }
+    }
+
+    fn idle(&mut self, sounds: &BikeSounds, bed: &mut impl Bed, d: &mut impl Draw) {
+        if self.note != Note::Idle {
+            self.note = Note::Idle;
+            self.sound(Sample::IDLE, false, true, sounds, bed, d);
+            self.next = Note::Idle;
+        }
+    }
+
+    /// The throttle opened: the low or high acceleration by the speed, cut straight in from the idle,
+    /// the deceleration or the rev.
+    fn accel(&mut self, h: &Hands, sounds: &BikeSounds, bed: &mut impl Bed, d: &mut impl Draw) {
+        if matches!(self.note, Note::Unwind | Note::Panic | Note::Rev) {
+            let s = self.picked(Note::HighAccel, 1, sounds, d);
+            self.note = Note::HighAccel;
+            self.sound(s, true, false, sounds, bed, d);
+        } else {
+            let cut = matches!(self.note, Note::Decel | Note::Idle);
+            let s = if h.speed <= sounds.low_torque_speed {
+                self.note = Note::LowAccel;
+                self.picked(Note::LowAccel, 0, sounds, d)
+            } else {
+                self.note = Note::HighAccel;
+                self.picked(Note::HighAccel, 1, sounds, d)
+            };
+            self.sound(s, cut, !cut, sounds, bed, d);
+        }
+        self.next = Note::Power;
+    }
+
+    fn power(&mut self, sounds: &BikeSounds, bed: &mut impl Bed, d: &mut impl Draw) {
+        let s = self.picked(Note::Power, 2, sounds, d);
+        self.note = Note::Power;
+        self.sound(s, false, true, sounds, bed, d);
+        self.next = Note::Sputter;
+    }
+
+    fn sputter(&mut self, sounds: &BikeSounds, bed: &mut impl Bed, d: &mut impl Draw) {
+        let s = self.picked(Note::Sputter, 3, sounds, d);
+        self.note = Note::Sputter;
+        self.sound(s, false, true, sounds, bed, d);
+        self.next = Note::Power;
+    }
+
+    fn decel(&mut self, bed: &mut impl Bed, d: &mut impl Draw, sounds: &BikeSounds) {
+        self.note = Note::Decel;
+        self.sound(Sample { list: Note::Decel, index: 0 }, true, false, sounds, bed, d);
+        self.next = Note::Idle;
+    }
+
+    /// The clutch's blip, the free rev, the limiter and the fall from it, by the state asked for.
+    fn rev(&mut self, want: Note, h: &Hands, sounds: &BikeSounds, bed: &mut impl Bed, d: &mut impl Draw) {
+        match want {
+            Note::Clutch => {
+                let s = self.picked(Note::Clutch, 4, sounds, d);
+                self.note = Note::Clutch;
+                self.sound(s, true, false, sounds, bed, d);
+                self.next = Note::Rev;
+            }
+            Note::Panic if 0.1 < h.gas => {
+                self.limiter(true, bed);
+                self.note = Note::Panic;
+                self.next = Note::Unwind;
+            }
+            Note::Panic | Note::Unwind => {
+                self.limiter(false, bed);
+                self.note = Note::Unwind;
+                self.next = Note::Idle;
+            }
+            _ => {
+                self.note = Note::Rev;
+                self.sound(Sample::REV, true, false, sounds, bed, d);
+                self.next = Note::Panic;
+            }
+        }
+    }
+}
+
+/// **The Doppler shift** as the original's 3-D sound makes it: the speed the bike closes on the ear
+/// along the line between them (level components only), in mph truncated, over 1125 (the speed of
+/// sound in feet a second, against a speed in mph: the original's own mix of units), times
+/// `DopplerFactor`. Only a closing bike is raised; a shift under 0.01, and so every receding bike, is
+/// none.
+pub fn doppler(factor: f32, at: [f32; 3], vel: [f32; 3], ear: [f32; 3], ear_vel: [f32; 3]) -> f32 {
+    let d = [ear[0] - at[0], ear[1] - at[1], ear[2] - at[2]];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if len < 1e-3 {
+        return 1.0;
+    }
+    let closing = ((vel[0] - ear_vel[0]) * d[0] + (vel[2] - ear_vel[2]) * d[2]) / len;
+    let shift = factor * (((closing * 0.68182) as i32) as f32 / 1125.0);
+    if shift < 0.01 { 1.0 } else { 1.0 + shift }
+}
+
+/// A sample this engine started, while it may still sound.
+struct Sounding {
+    s: Sample,
+    voice: VoiceId,
+    /// Its pitch variance, as a rate.
+    detune: f32,
+}
+
+/// The engine's level in the mix: every engine sample is played at the one volume, then the distance.
+const ENGINE_GAIN: f32 = 0.7;
+
+/// The mixer as the engine note's [`Bed`].
+struct Bench<'a> {
+    mixer: &'a mut Mixer,
+    sounds: &'a BikeSounds,
+    voices: &'a mut Vec<Sounding>,
+    limiter: &'a mut Option<VoiceId>,
+    at: [f32; 3],
+    pitch: f32,
+}
+
+impl Bench<'_> {
+    fn start(&mut self, s: Sample) -> Option<VoiceId> {
+        let (clip, looping) = self.sounds.clip(s).cloned()?;
+        if !self.mixer.within(self.at, self.sounds.far) {
+            return None;
+        }
+        let play = Play {
+            gain: ENGINE_GAIN,
+            pitch: self.pitch,
+            looping,
+            at: Some(self.at),
+            near: self.sounds.near,
+            far: self.sounds.far,
+        };
+        Some(self.mixer.play(clip, play))
+    }
+}
+
+impl Bed for Bench<'_> {
+    fn playing(&self, s: Sample) -> bool {
+        self.voices.iter().any(|v| v.s == s && self.mixer.playing(v.voice))
+    }
+
+    fn position(&self, s: Sample) -> f32 {
+        let v = self.voices.iter().rev().find(|v| v.s == s);
+        v.and_then(|v| self.mixer.progress(v.voice)).map_or(-1.0, |p| p.1)
+    }
+
+    fn stop(&mut self, s: Sample) {
+        for v in self.voices.iter().filter(|v| v.s == s) {
+            self.mixer.stop(v.voice);
+        }
+    }
+
+    fn play(&mut self, s: Sample) -> bool {
+        // A sample is one voice: starting it again starts it over.
+        self.stop(s);
+        let Some(voice) = self.start(s) else { return false };
+        self.voices.push(Sounding { s, voice, detune: 1.0 });
+        true
+    }
+
+    fn detune(&mut self, s: Sample, by: i32) {
+        let rate = self.sounds.clip(s).map_or(22_050, |c| c.0.rate);
+        if let Some(v) = self.voices.iter_mut().rev().find(|v| v.s == s) {
+            let own = rate as f32 * 4096.0 / 48_000.0;
+            v.detune = ((own + by as f32) / own).max(0.0);
+        }
+    }
+
+    fn hold(&mut self, on: bool) {
+        for v in self.voices.iter().filter(|v| v.s == Sample::REV) {
+            self.mixer.pause(v.voice, on);
+        }
+        if let Some(v) = self.limiter.take() {
+            self.mixer.stop(v);
+        }
+        if on {
+            *self.limiter = self.start(Sample::PANIC);
+        }
+    }
+}
+
+/// **One bike's engine note**: the original's machine ([`Brain`]) on this file's own dice, each sample
+/// it starts a voice of its own that plays out under the next one unless it is cut.
+pub struct Engine {
+    pub brain: Brain,
     dice: Dice,
-}
-
-/// How long off the throttle before an accelerating note falls to the deceleration.
-const OFF_GAS_TO_DECEL: f32 = 0.25;
-
-fn slot(n: Note) -> usize {
-    n as usize
-}
-
-fn accelerating(n: Note) -> bool {
-    matches!(n, Note::LowAccel | Note::HighAccel | Note::Power | Note::Sputter)
+    voices: Vec<Sounding>,
+    limiter: Option<VoiceId>,
+    /// The nearest ear last frame, for its speed.
+    ear: Option<[f32; 3]>,
 }
 
 impl Engine {
     pub fn new(seed: u64) -> Engine {
-        Engine {
-            note: Note::Idle,
-            voice: None,
-            segment: 0,
-            queued: None,
-            last: [-1; 9],
-            off_gas: 0.0,
-            in_air: 0.0,
-            was_gas: false,
-            was_grounded: true,
-            dice: Dice::new(seed),
-        }
+        Engine { brain: Brain::new(), dice: Dice::new(seed), voices: Vec::new(), limiter: None, ear: None }
     }
 
-    /// What follows a sample that ends on its own.
-    fn after(&self, n: Note, h: &Hands, sounds: &BikeSounds) -> Note {
-        let next = match n {
-            Note::LowAccel | Note::HighAccel | Note::Sputter | Note::Clutch => Note::Power,
-            Note::Power => Note::Sputter,
-            Note::Decel | Note::Idle => Note::Idle,
-            Note::Rev | Note::Panic => {
-                if h.gas > 0.1 { Note::Panic } else { Note::Decel }
-            }
-        };
-        next.min_with(sounds)
+    pub fn note(&self) -> Note {
+        self.brain.note
     }
 
-    /// The state the hands ask for now, if it is not the one playing.
-    fn decide(&mut self, h: &Hands, dt: f32, sounds: &BikeSounds) -> Option<Note> {
-        let gas = h.gas > 0.1;
-        let clutch = h.clutch > 0.1;
-        let pressed = gas && !self.was_gas;
-        let took_off = !h.grounded && self.was_grounded;
-        self.off_gas = if gas { 0.0 } else { self.off_gas + dt };
-        self.in_air = if h.grounded { 0.0 } else { self.in_air + dt };
-        let n = self.note;
-        let free = matches!(n, Note::Rev | Note::Panic | Note::Clutch);
-        if h.grounded && gas && clutch {
-            let want = if h.speed > 1.0 { Note::Clutch } else { Note::Rev };
-            return (!free).then_some(want);
-        }
-        if !h.grounded {
-            if gas && (pressed || took_off) && !free {
-                return Some(Note::Rev);
-            }
-            if !gas && self.in_air > sounds.airborne_to_decel && (accelerating(n) || free) {
-                return Some(Note::Decel);
-            }
-            return None;
-        }
-        if gas {
-            if matches!(n, Note::Idle | Note::Decel) || (free && !clutch) {
-                return Some(if h.speed <= sounds.low_torque_speed { Note::LowAccel } else { Note::HighAccel });
-            }
-            return None;
-        }
-        if (accelerating(n) && self.off_gas > OFF_GAS_TO_DECEL) || free {
-            return Some(Note::Decel);
-        }
-        None
-    }
-
-    fn start(&mut self, n: Note, mixer: &mut Mixer, sounds: &BikeSounds, play: Play) {
-        if let Some(v) = self.voice.take() {
-            mixer.stop(v);
-        }
-        self.queued = None;
-        let n = n.min_with(sounds);
-        let Some((clip, looping)) = self.choose(n, sounds) else {
-            self.note = n;
-            return;
-        };
-        self.voice = Some(mixer.play(clip, Play { looping, ..play }));
-        self.segment = 0;
-        self.note = n;
-    }
-
-    fn choose(&mut self, n: Note, sounds: &BikeSounds) -> Option<(Arc<Clip>, bool)> {
-        match n {
-            Note::Rev => sounds.panic.sounds.first().cloned(),
-            Note::Panic => sounds.panic.sounds.get(1).or(sounds.panic.sounds.first()).cloned(),
-            _ => sounds.list(n).pick(&mut self.dice, &mut self.last[slot(n)]),
-        }
-    }
-
-    /// One frame: choose, queue, and move the voice to the bike.
+    /// One frame: the machine, then every voice moved to the bike and shifted for its speed.
     pub fn update(&mut self, h: &Hands, dt: f32, mixer: &mut Mixer, sounds: &BikeSounds) {
-        // The pitch follows the revs a little — this port's, not the original's (whose bike note has
-        // no pitch but its samples'): a chain of whole samples cannot follow a throttle blip inside
-        // one.
-        let pitch = 0.94 + 0.12 * h.rev.clamp(0.0, 1.0);
-        let play = Play { gain: 0.7, pitch, looping: false, at: Some(h.at), near: sounds.near, far: sounds.far };
-        if let Some(want) = self.decide(h, dt, sounds) {
-            if want.min_with(sounds) != self.note {
-                self.start(want, mixer, sounds, play);
-            }
+        let ear = mixer.nearest(h.at);
+        let ear_vel = match (ear, self.ear) {
+            (Some(e), Some(was)) if dt > 0.0 => [(e[0] - was[0]) / dt, (e[1] - was[1]) / dt, (e[2] - was[2]) / dt],
+            _ => [0.0; 3],
+        };
+        self.ear = ear;
+        let pitch = ear.map_or(1.0, |e| doppler(sounds.doppler, h.at, h.vel, e, ear_vel));
+        let mut bench = Bench {
+            mixer,
+            sounds,
+            voices: &mut self.voices,
+            limiter: &mut self.limiter,
+            at: h.at,
+            pitch,
+        };
+        // The idle the loader queues is started by the emitter when it is not sounding.
+        if self.brain.current == Sample::IDLE && self.brain.note == Note::Idle && !bench.playing(Sample::IDLE) {
+            bench.play(Sample::IDLE);
         }
-        self.was_gas = h.gas > 0.1;
-        self.was_grounded = h.grounded;
-        let progress = self.voice.and_then(|v| mixer.progress(v));
-        match progress {
-            None => {
-                // Nothing playing (a list the disc lacks, or a sample just ended with nothing queued).
-                let next = if self.voice.is_some() { self.after(self.note, h, sounds) } else { self.note };
-                self.voice = None;
-                self.start(next, mixer, sounds, play);
-            }
-            Some((segment, _, queued)) => {
-                if segment != self.segment {
-                    self.segment = segment;
-                    if let Some(n) = self.queued.take() {
-                        self.note = n;
-                    }
-                }
-                if !queued && self.queued.is_none() && !(self.note == Note::Idle || self.note == Note::Panic) {
-                    let next = self.after(self.note, h, sounds);
-                    if let Some((clip, looping)) = self.choose(next, sounds) {
-                        let v = self.voice.unwrap_or_default();
-                        let cut = (self.note == Note::Rev).then_some(sounds.rev_midpoint);
-                        mixer.chain(v, clip, looping, cut);
-                        self.queued = Some(next);
-                    }
-                }
-                if let Some(v) = self.voice {
-                    mixer.set(v, play.gain, pitch, play.at);
-                }
-            }
+        self.brain.frame(h, dt, sounds, &mut bench, &mut self.dice);
+        for v in &self.voices {
+            mixer.set(v.voice, ENGINE_GAIN, v.detune * pitch, Some(h.at));
         }
+        if let Some(v) = self.limiter {
+            mixer.set(v, ENGINE_GAIN, pitch, Some(h.at));
+        }
+        self.voices.retain(|v| mixer.playing(v.voice));
     }
 
-    /// Quiet the engine (the rider left the bike for the plane).
+    /// Quiet the engine (the rider left the bike for the plane); it comes back at the idle.
     pub fn silence(&mut self, mixer: &mut Mixer) {
-        if let Some(v) = self.voice.take() {
+        for v in self.voices.drain(..) {
+            mixer.stop(v.voice);
+        }
+        if let Some(v) = self.limiter.take() {
             mixer.stop(v);
         }
-        self.note = Note::Idle;
-        self.queued = None;
+        self.brain = Brain::new();
     }
 
+    /// The voice of the note's own sample, while it sounds.
     pub fn voice(&self) -> Option<VoiceId> {
-        self.voice
-    }
-}
-
-impl Note {
-    /// A state whose list the disc lacks falls back to the idle.
-    fn min_with(self, sounds: &BikeSounds) -> Note {
-        if sounds.list(self).is_empty() { Note::Idle } else { self }
+        self.voices.iter().rev().find(|v| v.s == self.brain.current).map(|v| v.voice)
     }
 }
 
