@@ -32,6 +32,9 @@ pub struct Rides<'a> {
     /// shell's body machine, which is the simulation's too ([`game_sim::rider::Rider::body_frame`])
     /// but needs the clip table the renderer holds.
     pub after: Option<&'a mut dyn FnMut(usize, F, &mut Sim, &Controls)>,
+    /// The host's time-scale modifier (P55), [`game_sim::modifiers::Mods::time_scale`]: `None`, the
+    /// original's, leaves [`tick_dt`] as it is.
+    pub time_scale: Option<F>,
 }
 
 impl Game for Rides<'_> {
@@ -46,7 +49,7 @@ impl Game for Rides<'_> {
     }
 
     fn step(&mut self, tick: usize, pads: &[Report]) {
-        let dt = tick_dt(tick);
+        let dt = game_sim::modifiers::scaled_dt(tick_dt(tick), self.time_scale);
         for (seat, sim) in self.sims.iter_mut().enumerate() {
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());

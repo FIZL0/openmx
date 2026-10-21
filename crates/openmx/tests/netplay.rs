@@ -86,13 +86,13 @@ impl Machine for Ride {
                 sim.rider.ride.chassis.vel = Vf::new(0.5, 0.0, 0.0, 0.0);
             }
         };
-        let mut game = Rides { sims: &mut self.sims, world: &mut self.world, after: Some(&mut after) };
+        let mut game = Rides { sims: &mut self.sims, world: &mut self.world, after: Some(&mut after), time_scale: None };
         np.frame(&mut game, local, ROUND.as_secs_f32());
     }
     fn hash(&self) -> u64 {
         let mut sims = self.sims.clone();
         let mut world = Flat::default();
-        Rides { sims: &mut sims, world: &mut world, after: None }.hash()
+        Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None }.hash()
     }
 }
 
@@ -451,7 +451,7 @@ fn a_desync_on_the_ride_is_caught_saved_and_resynced() {
         if np.me == "host" {
             let mut sims = sims(2);
             let mut world = Flat::default();
-            let mut game = Rides { sims: &mut sims, world: &mut world, after: None };
+            let mut game = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None };
             let hashes = report.replay(&mut game);
             // through the tick it was caught at, every pad was in; the newest ticks' may have been
             // guesses the host ran again on the real ones after the report was written
@@ -477,7 +477,7 @@ fn the_ride_says_every_seat_in_bytes() {
     let mut world = Flat::default();
     let mut there = sims(3);
     let pads = |t: usize| (0..3).map(|s| mash(s, t)).collect::<Vec<_>>();
-    let mut game = Rides { sims: &mut there, world: &mut world, after: None };
+    let mut game = Rides { sims: &mut there, world: &mut world, after: None, time_scale: None };
     for t in 0..200 {
         game.step(t, &pads(t));
     }
@@ -485,7 +485,7 @@ fn the_ride_says_every_seat_in_bytes() {
     let hash = game.hash();
     let mut here = sims(3);
     let mut world2 = Flat::default();
-    let mut mine = Rides { sims: &mut here, world: &mut world2, after: None };
+    let mut mine = Rides { sims: &mut here, world: &mut world2, after: None, time_scale: None };
     assert_ne!(mine.hash(), hash);
     mine.decode(&bytes).unwrap();
     assert_eq!(mine.hash(), hash);
@@ -499,7 +499,7 @@ fn the_ride_says_every_seat_in_bytes() {
     let before = mine.hash();
     let mut two = sims(2);
     let mut world3 = Flat::default();
-    let mut other = Rides { sims: &mut two, world: &mut world3, after: None };
+    let mut other = Rides { sims: &mut two, world: &mut world3, after: None, time_scale: None };
     let theirs = other.encode().unwrap();
     assert!(mine.decode(&theirs).unwrap_err().contains("2 seats in the state, 3 here"));
     let cut = mine.encode().unwrap();
@@ -540,7 +540,7 @@ fn the_mashed_pads_are_a_ride() {
             s.up += c.dpad[2] as usize;
             s.speed = s.speed.max(sim.rider.ride.chassis.speed.0);
         };
-        let mut game = Rides { sims: &mut sims, world: &mut world, after: Some(&mut after) };
+        let mut game = Rides { sims: &mut sims, world: &mut world, after: Some(&mut after), time_scale: None };
         for t in 0..ticks {
             game.step(t, &(0..3).map(|s| mash(s, t)).collect::<Vec<_>>());
         }
