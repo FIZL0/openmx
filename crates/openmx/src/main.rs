@@ -3039,6 +3039,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (Kind::Biplane, Some(cam)) => cam,
                 _ => &mut rig.camera,
             };
+            // The original's plane reset (the chord, a wreck's recovery) snaps the plane's camera onto
+            // the spawn rather than letting it fly the whole way back (V29).
+            if seat.garage.up == Kind::Biplane && seat.said.respawned {
+                follow.cam.snap = true;
+            }
             let presets = follow.cam.presets.len();
             if presets > 1 {
                 let pad = seat.sim.input.pad(0);

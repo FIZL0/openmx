@@ -14,6 +14,7 @@
 //! in by path, because a binary crate has nothing a test can `use`.
 
 use game_sim::camera::{Ridden, Target};
+use game_sim::flight::Flight;
 use game_sim::ride::{Crash, Ride};
 use ps2_float::{F, Vf};
 
@@ -22,22 +23,44 @@ use crate::vehicle::{Garage, Kind};
 /// The camera's target for whichever machine is up: the bike's ride, or the parked plane.
 pub fn ridden(garage: &Garage, ride: &Ride) -> Ridden {
     match (garage.up, &garage.plane) {
-        // The plane, as the camera's target: where it is, its nose, its up, and no lean — a plane
-        // has no rider's stick to lean on. Which of the plane's fields the original's plane camera
-        // reads was not traced; these are its body's (P31). Its flag is the same one: in the recording2 biplane save state the plane stands on its wheels and the block's
-        // flag reads 0.
-        (Kind::Biplane, Some(plane)) => Ridden {
-            target: Target {
-                body_point: plane.at,
-                forward: plane.facing,
-                up: plane.up,
-                vel: plane.vel,
-                lean: F::ZERO,
+        // The plane: its flight's block (V29), or a parked plane's origin when there is no flight.
+        (Kind::Biplane, Some(plane)) => match &plane.flight {
+            Some(f) => flown(f),
+            None => Ridden {
+                target: Target {
+                    body_point: plane.at,
+                    forward: plane.facing,
+                    up: plane.up,
+                    vel: plane.vel,
+                    lean: F::ZERO,
+                },
+                airborne: !plane.on_ground(),
+                speed: plane.speed(),
             },
-            airborne: !plane.on_ground(),
-            speed: plane.speed(),
         },
         _ => bike(ride),
+    }
+}
+
+/// The plane's target block, as its own writer fills it once a frame after the measure (V29,
+/// `research/oracle.txt`): the point is the body's centre of mass where the frame's last substep
+/// began — not the drawn model's origin, which sits three feet below and in front of it, and which
+/// put the camera that much too close and too low — the rows are the measure's, the velocity the
+/// body's, the lean is the measure's world yaw rate, the flag is "no wheel down" and the speed the
+/// airspeed floored at zero. Every word's `w` is 1, as the original's are.
+pub fn flown(f: &Flight) -> Ridden {
+    let one = |v: Vf| Vf::new(v.x(), v.y(), v.z(), 1.0);
+    let m = &f.measure;
+    Ridden {
+        target: Target {
+            body_point: one(f.body.last_position),
+            forward: one(m.forward),
+            up: one(m.up),
+            vel: one(f.body.velocity),
+            lean: F(m.world_rates.y()),
+        },
+        airborne: !m.grounded,
+        speed: if m.airspeed < F::ZERO { F::ZERO } else { m.airspeed },
     }
 }
 
