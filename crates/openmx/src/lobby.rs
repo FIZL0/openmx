@@ -145,6 +145,15 @@ impl Network {
         self.net.clone()
     }
 
+    /// Open the ride under way to online players (N10, the pause's "Open to Online"): host `room`,
+    /// a riding one that takes peers on, starting the network if it is not up. The connection, for
+    /// the ride to go over.
+    pub fn open(&mut self, menu: &mut Menu, room: openmx_net::Room) -> Arc<Net> {
+        menu.lobby.out.push(openmx_net::Cmd::Host(room));
+        self.pump(menu);
+        self.net.clone().expect("pump starts it for the command")
+    }
+
     /// A lobby's ride that could not start here: the host takes everyone back to the lobby, a guest
     /// leaves it, so nobody waits on a machine that is not riding.
     pub fn abandon(&mut self, menu: &mut Menu) {
