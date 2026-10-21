@@ -3954,3 +3954,26 @@ pause_audio_index   boot 0x00102670 a song's playlist index
 #   FPU (mula/madda/madd, sqrt; chopped -- a host float gives 0x4089b63c), its +0x40 centre = the root
 #   node's centre (file offset 284) through the request's frame (+0x10..+0x4c, a copy of the wreck
 #   bike's), translation first then x, y, z (transform_point's x,y,z,w order is 1-2 ulp off).
+# V29 — the biplane's camera. The plane's camera is the race camera (race_camera_create, S7/S24's
+#   game_sim::camera::Race) on camera_presets_by_kind's kind-1 object; what is the plane's own is the
+#   target block it reads, and the snap on a reset. Held in crates/openmx/tests/biplane_camera.rs:
+#   the block captured off biplane.p2m2 (watch/biplane-camera.toml) replayed through the port's
+#   camera puts the eye within 0.004 ft of the viewport's on every compared tick (1549 of 1718; the
+#   rest are capture tears), the view within 0.6 mrad.
+plane_camera_target boot 0x00354e00 (plane) the plane's target block, plane +0x8e0, written by
+#                                   mxbiplane_post after the measure and by mxbiplane_reset. Its
+#                                   +0x10 point = body (+0x160) +0x50, the centre of mass where
+#                                   the last substep began (port Body::last_position), *not* the
+#                                   drawn origin; +0x30/+0x40 forward and up rows off the body's
+#                                   +0x170 quat (0x0013f380); +0x50 vel = body +0x70; +0x80 lean
+#                                   word = +0x5b0 (the measure's world rates; the camera reads .y);
+#                                   +0xb0 flag = (+0x590 grounded == 0); +0xb4 speed =
+#                                   max(+0x598 airspeed, 0). Every w is 1. The branch on
+#                                   (flag & +0x8e4) == 0 writes +0x9c0.. instead: not read.
+camera_snap_player boot 0x00200a70 (manager) called by mxbiplane_reset when *(plane+0x20) and its
+#                                  +0x50: the active camera (+0x40) is the race camera (+0x54) ->
+#                                  its +0x168 snap = 1, else +0x5c's +0xb4 = 1. So every plane reset
+#                                  (the chord, a wreck's recovery) snaps the camera to the spawn.
+#   In the biplane state: plane 0xc44a40, its block 0xc45320; the plane's camera 0x947fd0 ("Flight
+#   Cam 1", 5 presets; +0xd0 dist 13, +0x14c speed reference 117.3328, +0x150 height bias 3.0) and
+#   the bike's 0x946c80 ("Race Cam 1", 11 presets) share the viewport 0x946910 (near clip 2.4).
