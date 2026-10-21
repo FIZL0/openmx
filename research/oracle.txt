@@ -3888,3 +3888,69 @@ ini_switch           boot 0x0014b3f0 an int/switch key: T/F by first letter, ON/
 #   the draw seen on the settle tick is the animation selection (vt+0xa8) that runs after it.
 #   The ride machine's gate (+0xd3c on the rider) is still *not* the body's +0x6b4: S26 saw it come
 #   on with the body at 42 ft/s, so Down::settles keeps S53's hands-off-and-touching inference.
+
+# P73 — the binding table, whole (crates/game-sim/src/bindings.rs; tests/bindings.rs holds it against
+#   three save states and runs binding_table_build in the interpreter for both pads x four presets).
+#   The map is *(*(app_pointer)+0x104)+0x648 (first_recording: app 0x479990, manager 0x678550, map
+#   0x679ca0), 0x750 bytes: +0x000 kind 0x10 (keyboard-like), +0x138 pad0 first, +0x270 pad1 first,
+#   +0x3a8 pad0 second, +0x4e0 pad1 second, +0x618 kind 1; 0x4e commands x 4 bytes, a control index
+#   in input::Control order, -1 unbound. All three riding states (first_recording, recording2,
+#   biplane): pads 0 and 1 identical, preset 0, no second binding, kind 0x10 and kind 1 rows all -1.
+binding_table_alloc  boot 0x0011d670 allocates the 0x750-byte map, every slot -1 (from 0x00169ac0)
+binding_set_pad      boot 0x0011cfc0 (map, command, control, pad) one pad's first binding
+binding_set_both     boot 0x0011d010 (map, command, control) both pads' first binding
+binding_table_build  boot 0x00200f00 (app, pad, preset) the only writer of the table: the preset's
+#                                    eight commands via binding_set_pad, then 52 via binding_set_both
+#   Preset commands, in call order:  0x20   0x22   0x0e    0x0f    0x10  0x11    0x12      0x13
+#     preset 0 (shipped):            L2     R2     Cross   Square  L1    Circle  Triangle  R1
+#     preset 1:                      L2     R2     Square  Cross   L1    Circle  Triangle  R1
+#     preset 2:                      L2     R1     Cross   Square  R2    Circle  Triangle  L1
+#     preset 3:                      L1     R1     R2      Square  L2    Circle  Triangle  Cross
+#   Fixed, both pads, in call order: 00 Left, 01 Right, 02 Up, 03 Down, 04 Start, 05 Select, 06 L2,
+#     07 R3, 08 R2, 09 Up, 0a Down, 0b Left, 0c Right, 0d L3, 14 L1, 15 R1, 16 Circle, 17 L1, 18 R1,
+#     19 Cross, 1a Cross, 1b Square, 1c L1, 1d R1, 21 Select, 2e Select, 25 Circle, 26 Triangle,
+#     27 L1, 28 R1, 29 L2, 2a R2, 2b Cross, 2d L3, 30 Square, 1e L3, 1f R1, 23 R3, 32 Left,
+#     33 Right, 34 Up, 35 Down, 36 Cross, 3a Square, 38 Triangle, 37 Circle, 39 Start, 3e R1,
+#     3f L1, 40 L2, 4c L1, 4d R1. Never bound: 24, 2c, 2f, 31, 3b-3d, 41-4b.
+#   Callers and the preset they pass: 0x00205c40, 0x0023f0b0 and 0x002b0300 build every pad on the
+#     player's profile preset, *(*(app+0x3d4)+8) + 0x28 + pad*4; vehicle_switch 0x00210b90 builds
+#     the profile's preset when the new machine is the bike (its case 0) and preset 0 for the five
+#     others (biplane and the rest); the Controller Presets screen (0x003c8c30) rebuilds on a change.
+#     So the table changes by player preset and by vehicle, never by mode; the bike's is the profile's.
+#     The Map Stunts screen (OptionsControllerMapStunts, ctor 0x003cd330) never writes it: the two
+#     setters have no other caller.
+# What each command is, from its readers (value = pad_control_index's strength of the first binding;
+#   event = binding_is_event, either binding):
+#   00-03 Left Right Up Down: the bike's d-pad (pad_to_gesture: +0x628 = -1/+1 x, +0x62c = -1/+1 y,
+#     flags +0x620/+0x624, and the trick gesture's direction), the ring (pad_ring_listener 0x0025d240),
+#     the biplane's bank/dive/climb (biplane_input), the rider body (0x0024e3b0), two other vehicle
+#     classes (0x0038d8e0, 0x00396490). Value, held = value != 0.
+#   04 Start: pause, an event (0x00206e90).
+#   0e Cross gas: bike +0x63c = 1.0 when the value is not 0, else 0 -- a SWITCH, the pressure is
+#     dropped (P9's "the gas is analogue" holds for the biplane's +0x338, not the bike). 0x00396490
+#     reads it as a pressure under a flag, else as a switch.
+#   0f Square brake: bike +0x640 = 1.0 (or StoppieBrake +0x72c while the stoppie latch +0x728 is set),
+#     0 released; a switch. The biplane's throttle down (+0x33c), a pressure.
+#   gas and brake both > 0 on the bike: speed (+0x438) < 5 -> reverse +0x648 = 1, gas and brake 0;
+#     else +0x648 = 0 and gas = (+0x57c != 0). The original's only reverse.
+#   10 L1 clutch: bike +0x644 = 1.0/0, a switch; 0x00396490 +0x3e4.
+#   11 12 13 Circle Triangle R1: the three trick buttons (pad_to_gesture's group, +0x9fc).
+#   14 15 L1 R1: the biplane's rudder. 16 Circle: 0x00396490 +0x3fc. 17 18 19 L1 R1 Cross: the rider
+#     body's input slot (0x0024e3b0, +0x44c..+0x460). 1a 1b 1c 1d Cross Square L1 R1: 0x0038d8e0.
+#   1e L3, 1f R1: camera_nudge's two modifiers -- held, the right stick zooms / widens instead of
+#     turning (1f also read at 0x0021f770).
+#   20 L2, 21 Select, 22 R2: the camera manager's event handler (0x00200000, vtable 0x00452314):
+#     20 press -> look-back preset (0x002006e0; release 0x00200820 restores it and sets +0x144),
+#     22 press -> the camera at +0x64 while moving faster than 3 (0x00200740; release 0x002008b0,
+#     +0x148), 21 press with +0x144 and +0x148 set (neither held) -> next preset (0x00200330(-1) ->
+#     camera_next_preset). The original's camera button is Select, not L1.
+#   27 28 29 2a 2b 2d 2e 30: the engine's free camera (0x00118920, from 0x00118f90).
+#   32-3a, 3e-40: front-end screens' menu commands (Controller Presets 0x003c9130: 32 left, 33
+#     right, 34 up, 35 down, 36 OK ...).
+#   4c L1 + 4d R1: the reset chord (player_hand_reset, mxbiplane_reset_chord, 0x00391830, 0x00398c8c).
+#   05-0d, 23, 25, 26: no constant-command reader found (the pad vtable's query slots take the
+#     command in a register).
+#   The bike's own vt+0xec, bike_input_limiter, then walks +0x650/+0x654 brake (front = rear),
+#     +0x658 gas, +0x65c clutch toward those switches; not ported by P73.
+# Strings: the preset screen's labels are STR_BUTTON_1..6_TEXT / STR_BUTTON_DES_* in AppStart's
+#   loc\ui.loc, whose values are encoded (not plain or UTF-16); not decoded.

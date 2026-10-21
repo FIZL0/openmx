@@ -118,11 +118,14 @@ pub struct Controls {
     pub gas: F,
     /// The brake lever the rider is holding, which is both wheels unless the two are split.
     pub brake: F,
+    /// A split brake's two halves. The original's pad has no command for either (P73), so a pad
+    /// leaves them at 0; [`Held`] brakes the front with the larger of this and the brake.
     pub front_brake: F,
     pub rear_brake: F,
     /// The clutch lever.
     pub clutch: F,
-    /// Reverse, which is a command and not a gear: held, it pushes the bike backwards.
+    /// Reverse, which is a command and not a gear: held, it pushes the bike backwards. No button of
+    /// the original's is it (P73); a pad leaves it at 0.
     pub reverse: F,
     /// The left stick: `x` leans and steers, `y` moves the rider fore and aft.
     pub stick: (F, F),
@@ -137,65 +140,66 @@ pub struct Controls {
     /// The d-pad, in the order the trick decoder polls it — left, right, up, down — which is the
     /// other half of that gesture and not the eight-way code [`Controls::dpad_dir`] carries.
     pub dpad: [bool; trick::DPAD],
-    /// The rider is balancing on one wheel.
+    /// The rider is balancing on one wheel. The original's table has no such command (P73); a pad
+    /// leaves it false.
     pub balance: bool,
     /// Put the bike back on the start line.
     pub respawn: bool,
 }
 
 impl Controls {
-    /// What one pad is asking for, through the ported input layer.
-    ///
-    /// **The binding is the port's own.** The original's front end builds a table of binding to
-    /// command and that table is not ported (see [`Held`]), so which button is the throttle is a
-    /// choice this project makes and not a fact about the disc; what is the disc's is everything
-    /// downstream — the strengths and press timers come from [`crate::input::Pad`]'s ported poll, and
-    /// the rate limit from the `.phy`. It lives here rather than in the shell so that a replay fixture
-    /// and the shell derive the rider's hands from a pad the same way.
+    /// What one pad is asking for, through the ported input layer and the shipped binding table.
     pub fn from_pad(pad: &crate::input::Pad) -> Controls {
-        use crate::input::{Axis, AxisRange, Control};
-        let dpad = [Control::Up, Control::Right, Control::Down, Control::Left];
+        Controls::through(pad, &crate::bindings::Table::SHIPPED)
+    }
+
+    /// What one pad is asking for, every command looked up in `table` (P73) the way the original's
+    /// bike reads it: the levers, the trick buttons and the d-pad by their value on the first
+    /// binding, the reset chord by its two commands' events. A control the table leaves out of
+    /// these commands does nothing here, and a command it leaves unbound reads nothing.
+    ///
+    /// What the original does not have is not read: it has no front brake of its own (the brake is
+    /// both wheels), no reverse button (it reverses on gas and brake held together, slow) and no
+    /// balance button, so those three stay at rest. The levers are still read as their strength and
+    /// rate-limited by [`Held`]; the original's bike makes each a switch first (see the journal).
+    /// The strengths and press timers come from [`crate::input::Pad`]'s ported poll. It lives here
+    /// rather than in the shell so that a replay fixture and the shell derive the rider's hands from
+    /// a pad the same way.
+    pub fn through(pad: &crate::input::Pad, table: &crate::bindings::Table) -> Controls {
+        use crate::bindings::Command;
+        use crate::input::{Axis, AxisRange};
+        let held = |c: Command| table.held(pad, c);
+        let pressed = |c: Command| table.pressed(pad, c);
+        // The eight-way code the trick table reads, from the d-pad's four commands: odd for a
+        // single direction, and the game's own order round the d-pad. A diagonal is not derived,
+        // because which of two held directions wins is the front end's business.
+        let round = [Command::UP, Command::RIGHT, Command::DOWN, Command::LEFT];
         Controls {
-            gas: pad.strength(Control::Cross),
-            brake: pad.strength(Control::Square),
-            front_brake: pad.strength(Control::R2),
+            gas: table.value(pad, Command::GAS),
+            brake: table.value(pad, Command::BRAKE),
+            front_brake: F::ZERO,
             rear_brake: F::ZERO,
-            clutch: pad.strength(Control::L2),
-            reverse: if pad.held(Control::R3) { F::ONE } else { F::ZERO },
+            clutch: table.value(pad, Command::CLUTCH),
+            reverse: F::ZERO,
             // Through the player's own range, ±0.3, which is what the ride's stick consumers carry
             // in the original (I7, proved on a playback of the human's recording) — not the main
             // menu's ±0.2 that [`crate::input::Pad::axis`] hands out.
             stick: (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER)),
-            dpad_y: pad.held(Control::Up) || pad.held(Control::Down),
-            // The eight-way code the trick table reads: odd for a single direction, and the game's
-            // own order round the d-pad. A diagonal is not derived, because which of two held
-            // directions wins is the front end's business.
-            dpad_dir: dpad.iter().position(|c| pad.held(*c)).map_or(0, |i| i as i32 * 2 + 1),
-            stunt: pad.held(Control::Circle),
-            // The shipped pad's three trick buttons, in the order the decoder tests them. Which
-            // host button each is remains the shell's choice; the *order* is the disc's, because it
-            // is what numbers the six groups and so which of the 24 slots a gesture names.
-            trick: [
-                pad.held(Control::Circle),
-                pad.held(Control::Triangle),
-                pad.held(Control::R1),
-            ],
-            dpad: [
-                pad.held(Control::Left),
-                pad.held(Control::Right),
-                pad.held(Control::Up),
-                pad.held(Control::Down),
-            ],
-            balance: pad.held(Control::L3),
-            // The reset chord, and unlike the rest of this binding it is the disc's (P20). The
-            // original's hand reset is an event handler on two commands of its binding table, and the
-            // shipped table binds them to L1 and R1: it fires on the press of either while the other
-            // is held, so whichever goes down second is the tick the rider is put back. R1 is also the
-            // third trick button above, in the original's table as well as here, so a trick held on R1
-            // and an L1 tapped under it is a reset there too. L1 and R1 held from before, with no
-            // press this frame, is not a chord.
-            respawn: (pad.pressed(Control::L1) && pad.held(Control::R1))
-                || (pad.pressed(Control::R1) && pad.held(Control::L1)),
+            dpad_y: held(Command::UP) || held(Command::DOWN),
+            dpad_dir: round.iter().position(|c| held(*c)).map_or(0, |i| i as i32 * 2 + 1),
+            stunt: held(Command::TRICK_1),
+            // The three trick buttons, in the order the decoder tests them: the order is what numbers
+            // the six groups and so which of the 24 slots a gesture names.
+            trick: [held(Command::TRICK_1), held(Command::TRICK_2), held(Command::TRICK_3)],
+            dpad: [held(Command::LEFT), held(Command::RIGHT), held(Command::UP), held(Command::DOWN)],
+            balance: false,
+            // The reset chord (P20): the original's hand reset is an event handler on two commands,
+            // and fires on the press of either while the other is held, so whichever goes down second
+            // is the tick the rider is put back. In the shipped table they are L1 and R1, which are
+            // also the clutch and the third trick button, there as here. Both held from before, with
+            // no press this frame, is not a chord.
+            respawn: (pressed(Command::RESET_LEFT) && held(Command::RESET_RIGHT))
+                || (pressed(Command::RESET_RIGHT) && held(Command::RESET_LEFT)),
         }
     }
 }
