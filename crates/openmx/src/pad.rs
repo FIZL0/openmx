@@ -633,6 +633,20 @@ const KEY_STICKS: [(usize, u8, u8); 2] = [
     (REPORT_RIGHT_Y, key::I, key::K),
 ];
 
+/// The new layout's stick keys (P54), in [`KEY_STICK_SLOTS`]' order: `HJKL` the right stick, vim's
+/// way (H left, J down, K up, L right), and `WASD` the left, which steers and leans (A and D steer,
+/// W leans forward and S back — up is the low end of the byte, as on the pad).
+const KEY_STICKS_NEW: [(usize, u8, u8); 4] = [
+    (REPORT_RIGHT_X, key::H, key::L),
+    (REPORT_RIGHT_Y, key::K, key::J),
+    (REPORT_LEFT_X, key::A, key::D),
+    (REPORT_LEFT_Y, key::W, key::S),
+];
+
+/// The stick axes the keyboard can move, in `controls.txt`'s order of stick lines ([`STICK_KEYS`]):
+/// the right stick's two, then the left stick's.
+const KEY_STICK_SLOTS: [usize; 4] = [REPORT_RIGHT_X, REPORT_RIGHT_Y, REPORT_LEFT_X, REPORT_LEFT_Y];
+
 /// One seat's pad and keyboard, as one report a frame: a joystick device, the keyboard, or both
 /// folded together (the first seat's pad and the keyboard, on a machine nobody has set seats up on).
 /// [`Seats`] owns one of these per pad that is plugged in and one for the keyboard.
@@ -662,8 +676,8 @@ pub struct Pads {
     button: [bool; BUTTONS],
     /// The d-pad directions a device sends as buttons ([`JsButton::Dpad`]) held.
     dpad: u16,
-    /// The keyboard's stick axes, in [`KEY_STICKS`]' order, each part way to its edge.
-    key_stick: [KeyAxis; KEY_STICKS.len()],
+    /// The keyboard's stick axes, in [`KEY_STICK_SLOTS`]' order, each part way to its edge.
+    key_stick: [KeyAxis; KEY_STICK_SLOTS.len()],
     /// The keyboard's throttle, part way to full.
     key_gas: KeyRamp,
     /// Where the throttle comes from and which axes carry a button's pressure.
@@ -722,7 +736,7 @@ impl Pads {
             taps: 0,
             button: [false; BUTTONS],
             dpad: 0,
-            key_stick: [KeyAxis::CENTRED; KEY_STICKS.len()],
+            key_stick: [KeyAxis::CENTRED; KEY_STICK_SLOTS.len()],
             key_gas: KeyRamp::SHUT,
             scheme: Scheme::Original,
             wiring,
@@ -759,7 +773,7 @@ impl Pads {
         let mut buttons = self.take_taps();
 
         // The pad's buttons and the keyboard's keys, as one set of the game's own controls.
-        buttons |= self.bindings.buttons(&self.button, held);
+        buttons |= self.bindings.buttons(self.scheme, &self.button, held);
         buttons |= self.hat_mask() | self.dpad;
 
         // The button word, active low, and a full pressure byte for every analogue control in it —
@@ -778,11 +792,12 @@ impl Pads {
         report.set_axis(REPORT_LEFT_Y, stick_byte(self.axis[AXIS_LEFT_Y]));
         report.set_axis(REPORT_RIGHT_X, stick_byte(self.axis[AXIS_RIGHT_X]));
         report.set_axis(REPORT_RIGHT_Y, stick_byte(self.axis[AXIS_RIGHT_Y]));
-        // The keyboard moves the right stick too: `IJKL`, ramped toward its edge for as long as the
-        // key is held and let back to centre when it is not ([`KeyAxis`]). The arrows are the d-pad,
-        // in [`KEYBOARD`].
-        for (i, (axis, (slot, _, _))) in self.key_stick.iter_mut().zip(KEY_STICKS).enumerate() {
-            let (low, high) = self.bindings.stick_keys(i, held);
+        // The keyboard moves the sticks too — the right stick on `IJKL` under the original's layout,
+        // and under the new one (P54) `HJKL` and the left stick on `WASD` — ramped toward the edge
+        // for as long as the key is held and let back to centre when it is not ([`KeyAxis`]). The
+        // arrows are the d-pad, in [`KEYBOARD`].
+        for (i, (axis, slot)) in self.key_stick.iter_mut().zip(KEY_STICK_SLOTS).enumerate() {
+            let (low, high) = self.bindings.stick_keys(self.scheme, i, held);
             if let Some(byte) = axis.step(seconds, low, high) {
                 report.set_axis(slot, byte);
             }
@@ -823,8 +838,9 @@ impl Pads {
         // And the keyboard's throttle, which is the one control a key cannot do justice to: ramped
         // ([`KeyRamp`]), so a stab is part throttle and a held key is still pinned. It is Cross in the
         // report whatever the scheme, which is the menus' OK, and under the new scheme R2 as well,
-        // which is what the ride takes the gas from there.
-        if let Some(pressure) = self.key_gas.step(seconds, self.bindings.throttle_key(held)) {
+        // which is what the ride takes the gas from there. Its keys are the scheme's gas line's
+        // ([`Bindings::gas`]): `cross` under the original's, `r2` under the new one.
+        if let Some(pressure) = self.key_gas.step(seconds, self.bindings.throttle_key(self.scheme, held)) {
             press(&mut report, Control::Cross, pressure);
             if self.scheme == Scheme::New {
                 press(&mut report, Control::R2, pressure);
@@ -866,7 +882,7 @@ impl Pads {
                     if down && !init && !self.button[slot] {
                         let mut one = [false; BUTTONS];
                         one[slot] = true;
-                        self.queue_mask(self.bindings.buttons(&one, &no_keys));
+                        self.queue_mask(self.bindings.buttons(self.scheme, &one, &no_keys));
                     }
                     self.button[slot] = down;
                 }
@@ -1371,11 +1387,15 @@ enum Input {
     Button(usize),
 }
 
-/// The keyboard's right-stick keys, as `controls.txt` names them, in [`KEY_STICKS`]' order: each
-/// axis' low key, then its high key.
-const STICK_KEYS: [&str; 4] = ["stick_left", "stick_right", "stick_up", "stick_down"];
+/// The keyboard's stick keys, as `controls.txt` names them, in [`KEY_STICK_SLOTS`]' order: each
+/// axis' low key, then its high key. `stick_*` are the right stick's, as they were before the left
+/// stick had keys (P54).
+const STICK_KEYS: [&str; 8] = [
+    "stick_left", "stick_right", "stick_up", "stick_down",
+    "left_stick_left", "left_stick_right", "left_stick_up", "left_stick_down",
+];
 
-/// How many lines `controls.txt` has: the sixteen controls, then the four stick keys.
+/// How many lines `controls.txt` has: the sixteen controls, then the eight stick keys.
 const BINDINGS: usize = 16 + STICK_KEYS.len();
 
 /// Which keys and pad buttons are which of the game's controls: `controls.txt`, opentennis's way.
@@ -1390,30 +1410,34 @@ const BINDINGS: usize = 16 + STICK_KEYS.len();
 /// the names here are that order's and `PadN` reaches any button past them. Its actions are the
 /// game's (tennis shots there, the sixteen DualShock 2 controls here), and the d-pad hat, the
 /// sticks and the triggers are axes on a js device and are not rebindable, as opentennis's sticks
-/// are not. `cross`'s keys are the keyboard's throttle ramp ([`KeyRamp`]) rather than a bit.
+/// are not. The gas line's keys are the keyboard's throttle ramp ([`KeyRamp`]) rather than a bit:
+/// `cross`'s under the original's layout, `r2`'s under the new one ([`Bindings::gas`]).
+///
+/// The keyboard's defaults depend on the seat's layout (P54): the original's is the shell's binding
+/// from before there was a file ([`KEYBOARD`], `X`/space the throttle, `IJKL` the right stick), and
+/// the new one's the usual one ([`KEYBOARD_NEW`], `WASD` and `HJKL` the sticks, space the gas). A
+/// line the file has is that line under both layouts. The pad buttons' defaults are the same under
+/// both ([`PAD_BUTTONS`]).
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Bindings([Vec<Input>; BINDINGS]);
+pub struct Bindings {
+    /// Every line under each layout, in [`Scheme::ALL`]'s order: the file's where it has the line,
+    /// and that layout's default where it does not.
+    lines: [[Vec<Input>; BINDINGS]; 2],
+    /// Which lines the file set, which [`Bindings::text`] writes out as lines; the rest it writes
+    /// as comments, each layout's default.
+    set: [bool; BINDINGS],
+}
 
 impl Default for Bindings {
-    /// [`PAD_BUTTONS`], [`KEYBOARD`], `X`/space on the throttle and `IJKL` on the right stick: the
-    /// shell's binding before there was a file.
+    /// Each layout's own defaults and nothing from a file.
     fn default() -> Bindings {
-        let mut b: [Vec<Input>; BINDINGS] = std::array::from_fn(|_| Vec::new());
-        for (code, control) in KEYBOARD {
-            b[control as usize].push(Input::Key(code));
-        }
-        b[Control::Cross as usize].extend([Input::Key(key::X), Input::Key(key::SPACE)]);
-        for (i, control) in PAD_BUTTONS.iter().enumerate() {
-            if let Some(control) = control {
-                b[*control as usize].push(Input::Button(i));
-            }
-        }
-        for (i, (_, low, high)) in KEY_STICKS.iter().enumerate() {
-            b[16 + 2 * i].push(Input::Key(*low));
-            b[16 + 2 * i + 1].push(Input::Key(*high));
-        }
-        Bindings(b)
+        Bindings { lines: Scheme::ALL.map(Bindings::defaults), set: [false; BINDINGS] }
     }
+}
+
+/// Where a layout is in [`Scheme::ALL`], which is where its lines are in a [`Bindings`].
+fn layout_at(scheme: Scheme) -> usize {
+    Scheme::ALL.iter().position(|s| *s == scheme).unwrap_or(0)
 }
 
 /// Every key a binding may name, by X keycode (the evdev code plus 8, which is what an X server on
@@ -1473,6 +1497,57 @@ impl Bindings {
         if i < 16 { Control::ALL[i].name() } else { STICK_KEYS[i - 16] }
     }
 
+    /// Every line's default under `scheme`: the keyboard's for that layout, then [`PAD_BUTTONS`].
+    fn defaults(scheme: Scheme) -> [Vec<Input>; BINDINGS] {
+        let mut b: [Vec<Input>; BINDINGS] = std::array::from_fn(|_| Vec::new());
+        let (keys, sticks): (&[(u8, Control)], &[(usize, u8, u8)]) = match scheme {
+            Scheme::Original => (&KEYBOARD, &KEY_STICKS),
+            Scheme::New => (&KEYBOARD_NEW, &KEY_STICKS_NEW),
+        };
+        for &(code, control) in keys {
+            b[control as usize].push(Input::Key(code));
+        }
+        if scheme == Scheme::Original {
+            b[Control::Cross as usize].extend([Input::Key(key::X), Input::Key(key::SPACE)]);
+        }
+        for (i, control) in PAD_BUTTONS.iter().enumerate() {
+            if let Some(control) = control {
+                b[*control as usize].push(Input::Button(i));
+            }
+        }
+        for &(slot, low, high) in sticks {
+            let i = KEY_STICK_SLOTS.iter().position(|s| *s == slot).expect("a stick slot");
+            b[16 + 2 * i].push(Input::Key(low));
+            b[16 + 2 * i + 1].push(Input::Key(high));
+        }
+        b
+    }
+
+    /// The control whose keys are the keyboard's throttle ramp under `scheme`: the gas, as the
+    /// pad's report carries it before [`Scheme::ride`] — Cross under the original's, R2 under the
+    /// new one.
+    pub fn gas(scheme: Scheme) -> Control {
+        match scheme {
+            Scheme::New => Control::R2,
+            Scheme::Original => Control::Cross,
+        }
+    }
+
+    /// Whether `set`, a line `i` read from a file, is only what the shell wrote there before the
+    /// layouts had keyboards of their own (P54): the original's default, or the line as it was
+    /// before P40 moved js button 6 from Start to Select. A file the shell wrote on its first run has
+    /// every line, and if they counted as the player's they would pin the original's keys under the
+    /// new layout too; so they are read as no line at all, and each layout keeps its default.
+    fn as_written(i: usize, set: &[Input]) -> bool {
+        let same = |b: &[Input]| b.len() == set.len() && b.iter().all(|x| set.contains(x));
+        let before_p40: &[Input] = match i {
+            i if i == Control::Select as usize => &[Input::Key(key::TAB)],
+            i if i == Control::Start as usize => &[Input::Key(key::RETURN), Input::Button(6), Input::Button(7)],
+            _ => &[],
+        };
+        same(&Bindings::defaults(Scheme::Original)[i]) || (!before_p40.is_empty() && same(before_p40))
+    }
+
     /// Read `text` over the defaults; returns the bindings and a message per name that wasn't
     /// understood.
     pub fn parse(text: &str) -> (Bindings, Vec<String>) {
@@ -1500,8 +1575,11 @@ impl Bindings {
                     })
                 })
                 .collect();
-            if !set.is_empty() {
-                b.0[i] = set;
+            if !set.is_empty() && !Bindings::as_written(i, &set) {
+                for lines in &mut b.lines {
+                    lines[i] = set.clone();
+                }
+                b.set[i] = true;
             }
         }
         (b, errors)
@@ -1513,17 +1591,33 @@ impl Bindings {
             "# openmx controls. One line per control of the game's pad: control = Key Key PadButton ...\n\
              # Keys by name (X, Space, Return, Up, ShiftLeft, F1, ...), pad buttons with a Pad prefix\n\
              # (PadSouth, PadEast, PadWest, PadNorth, PadL1, PadR1, PadBack, PadStart, PadL3, PadR3, or\n\
-             # Pad0 to Pad11). cross's keys are the throttle, ramped; stick_* are the right stick's keys.\n\
+             # Pad0 to Pad11). stick_* are the right stick's keys, left_stick_* the left stick's.\n\
              # The sticks, the triggers (l2, r2) and the d-pad hat are axes and always do what they do;\n\
-             # Escape quits, H the overlay and M the machine swap.\n\
+             # Escape is the pause (it quits without the menus), F3 the overlay (and H, where H is\n\
+             # not a stick key) and M the machine swap.\n\
              # A ride reads these through the seat's scheme (--controls new|original, P40). Under the\n\
              # new one r2 is the gas, l2 the brake and select the camera, and cross and square do\n\
              # nothing in a ride: they are kept free for later. Under the original's, cross is the\n\
-             # gas, square the brake, r2 the front brake, l2 the clutch and l1 the camera.\n",
+             # gas, square the brake, r2 the front brake, l2 the clutch and l1 the camera. The gas\n\
+             # line's keys (r2's under the new one, cross's under the original's) are the throttle,\n\
+             # ramped.\n\
+             # The keyboard's defaults differ by layout (P54): the new one's is WASD the left stick,\n\
+             # HJKL the right, Space the gas, Shift the brake, Q/E L1/R1, Tab or C the camera; the\n\
+             # original's is the shell's old one. A commented line is the default; a line written\n\
+             # out is that line under both layouts.\n",
         );
-        for (i, set) in self.0.iter().enumerate() {
-            let names: Vec<_> = set.iter().map(|x| x.name()).collect();
-            s += &format!("{} = {}\n", Bindings::line_name(i), names.join(" "));
+        let words = |set: &[Input]| set.iter().map(|x| x.name()).collect::<Vec<_>>().join(" ");
+        for i in 0..BINDINGS {
+            let name = Bindings::line_name(i);
+            let [new, original] = [&self.lines[0][i], &self.lines[1][i]];
+            if self.set[i] {
+                s += &format!("{name} = {}\n", words(new));
+            } else if new == original {
+                s += &format!("# {name} = {}\n", words(new));
+            } else {
+                s += &format!("# {name} = {}  # new\n", words(new));
+                s += &format!("# {name} = {}  # original\n", words(original));
+            }
         }
         s
     }
@@ -1551,14 +1645,15 @@ impl Bindings {
         }
     }
 
-    /// The game's controls held on the pad's buttons and the keyboard's keys, as its bitmask. Cross
-    /// on a key is not here: that is the throttle ramp's ([`Bindings::throttle_key`]).
-    fn buttons(&self, button: &[bool; BUTTONS], held: &dyn Fn(u8) -> bool) -> u16 {
+    /// The game's controls held on the pad's buttons and the keyboard's keys under `scheme`, as its
+    /// bitmask. The gas on a key is not here: that is the throttle ramp's ([`Bindings::throttle_key`]).
+    fn buttons(&self, scheme: Scheme, button: &[bool; BUTTONS], held: &dyn Fn(u8) -> bool) -> u16 {
         let mut mask = 0;
-        for (control, set) in Control::ALL.iter().zip(&self.0) {
+        let gas = Bindings::gas(scheme);
+        for (control, set) in Control::ALL.iter().zip(&self.lines[layout_at(scheme)]) {
             let down = set.iter().any(|x| match *x {
                 Input::Button(i) => button[i],
-                Input::Key(code) => *control != Control::Cross && held(code),
+                Input::Key(code) => *control != gas && held(code),
             });
             if down {
                 mask |= control.mask();
@@ -1567,20 +1662,96 @@ impl Bindings {
         mask
     }
 
-    /// Whether a throttle key — a key on `cross` — is down.
-    fn throttle_key(&self, held: &dyn Fn(u8) -> bool) -> bool {
-        self.0[Control::Cross as usize].iter().any(|x| matches!(x, Input::Key(c) if held(*c)))
+    /// Whether a throttle key — a key on `scheme`'s gas line ([`Bindings::gas`]) — is down.
+    fn throttle_key(&self, scheme: Scheme, held: &dyn Fn(u8) -> bool) -> bool {
+        self.key_on(scheme, Bindings::gas(scheme), held)
     }
 
-    /// The keyboard stick axis `i`'s two keys, low and high: whether any key on each is down.
-    fn stick_keys(&self, i: usize, held: &dyn Fn(u8) -> bool) -> (bool, bool) {
-        let any = |line: usize| self.0[line].iter().any(|x| matches!(x, Input::Key(c) if held(*c)));
+    /// The keyboard stick axis `i`'s two keys under `scheme`, low and high: whether any key on each
+    /// is down.
+    fn stick_keys(&self, scheme: Scheme, i: usize, held: &dyn Fn(u8) -> bool) -> (bool, bool) {
+        let lines = &self.lines[layout_at(scheme)];
+        let any = |line: usize| lines[line].iter().any(|x| matches!(x, Input::Key(c) if held(*c)));
         (any(16 + 2 * i), any(16 + 2 * i + 1))
     }
 
-    /// Whether any key bound to `control` is down: the keyboard's own Start, for [`Seats`]' take-over.
-    fn key_on(&self, control: Control, held: &dyn Fn(u8) -> bool) -> bool {
-        self.0[control as usize].iter().any(|x| matches!(x, Input::Key(c) if held(*c)))
+    /// Whether any key bound to `control` under `scheme` is down: the keyboard's own Start, for
+    /// [`Seats`]' take-over.
+    fn key_on(&self, scheme: Scheme, control: Control, held: &dyn Fn(u8) -> bool) -> bool {
+        self.lines[layout_at(scheme)][control as usize].iter().any(|x| matches!(x, Input::Key(c) if held(*c)))
+    }
+
+    /// Whether `code` is one of the keyboard's keys under `scheme`, on any line: the shell's own
+    /// keys (the overlay's H) stand aside for a key the ride reads.
+    pub fn binds_key(&self, scheme: Scheme, code: u8) -> bool {
+        self.lines[layout_at(scheme)].iter().flatten().any(|x| *x == Input::Key(code))
+    }
+
+    /// The keyboard's layout under `scheme`, as the Controls screen lists it (P54): what each key
+    /// does in a ride, as `(what, keys)` pairs, from these bindings — so a `controls.txt` that moved
+    /// a key shows where it moved to. The pad's buttons are not here.
+    pub fn keyboard_layout(&self, scheme: Scheme) -> Vec<(String, String)> {
+        let lines = &self.lines[layout_at(scheme)];
+        let keys = |line: usize| -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            for x in &lines[line] {
+                if let Input::Key(code) = *x {
+                    let name = key_label(Input::Key(code).name());
+                    if !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+            }
+            out
+        };
+        let of = |controls: &[Control]| controls.iter().flat_map(|c| keys(*c as usize)).collect::<Vec<_>>().join(" ");
+        // A stick's four keys, and the d-pad's, in the order a reader expects them: up, left, down,
+        // right — and the four arrows as one word.
+        let stick = |first: usize| [first + 2, first, first + 3, first + 1].into_iter().flat_map(keys).collect::<Vec<_>>().join(" ");
+        let dpad = match of(&[Control::Up, Control::Left, Control::Down, Control::Right]) {
+            arrows if arrows == "Up Left Down Right" => "Arrows".to_string(),
+            other => other,
+        };
+        let row = |what: &str, keys: String| (what.to_string(), keys);
+        let mut out = vec![
+            row("Gas", of(&[Bindings::gas(scheme)])),
+            row("Brake", of(&[match scheme {
+                Scheme::New => Control::L2,
+                Scheme::Original => Control::Square,
+            }])),
+            row("Left stick", stick(16 + 4)),
+            row("Right stick", stick(16)),
+            row("D-pad", dpad),
+            row("Camera", of(&[scheme.camera()])),
+            row("L1  R1", format!("{}  {}", of(&[Control::L1]), of(&[Control::R1]))),
+        ];
+        match scheme {
+            Scheme::New => out.push(row("Faces", of(&[Control::Cross, Control::Circle, Control::Square, Control::Triangle]))),
+            Scheme::Original => {
+                out.push(row("Front brake", of(&[Control::R2])));
+                out.push(row("Clutch", of(&[Control::L2])));
+                out.push(row("Tricks", of(&[Control::Circle, Control::Triangle])));
+            }
+        }
+        out.push(row("Start", of(&[Control::Start])));
+        out.push(row("Pause", "Escape".to_string()));
+        out.retain(|(_, k)| !k.trim().is_empty());
+        out
+    }
+}
+
+/// A key's name as the Controls screen shows it: the two Shifts (and Controls, and Alts) are one
+/// key to a reader, and Return is the Enter key.
+fn key_label(name: String) -> String {
+    let name = ["Left", "Right"]
+        .iter()
+        .find_map(|side| {
+            name.strip_suffix(side).filter(|k| ["Shift", "Control", "Alt"].contains(k)).map(str::to_string)
+        })
+        .unwrap_or(name);
+    match name.as_str() {
+        "Return" => "Enter".to_string(),
+        _ => name,
     }
 }
 
@@ -1810,6 +1981,7 @@ impl Seats {
     pub fn devices(&mut self, held: &dyn Fn(u8) -> bool) -> Vec<(Device<String>, Report, u16)> {
         self.poll();
         self.keyboard_alone = None;
+        self.keys.scheme = self.keys_scheme();
         let keys = self.keys.report(held);
         let mut out = vec![(Device::Keys, keys, self.keys.taps())];
         for j in &mut self.joined {
@@ -1847,6 +2019,23 @@ impl Seats {
         self.joined.iter().find(|j| j.id == id)?.pads.name.as_deref()
     }
 
+    /// The layout the keyboard's keys are read under: its seat's, or 1P's when it drives no seat.
+    fn keys_scheme(&self) -> Scheme {
+        self.wiring.schemes[self.slots.keys().unwrap_or(0)]
+    }
+
+    /// Whether `code` is a key the keyboard rides with, under the layout its seat rides: the
+    /// shell's own keys (the overlay's H, which the new layout's right stick has) stand aside for
+    /// it (P54).
+    pub fn binds_key(&self, code: u8) -> bool {
+        self.bindings.binds_key(self.keys_scheme(), code)
+    }
+
+    /// The keyboard's layout under `scheme`, for the Controls screen ([`Bindings::keyboard_layout`]).
+    pub fn keyboard_layout(&self, scheme: Scheme) -> Vec<(String, String)> {
+        self.bindings.keyboard_layout(scheme)
+    }
+
     /// The keyboard's report this frame when it drives no seat — a pad is 1P — for the pause, which
     /// the keyboard still opens and works whoever has 1P (P46). `None` when it rides in a seat,
     /// whose report already has it.
@@ -1862,7 +2051,7 @@ impl Seats {
         // The keyboard can take a waiting seat over: Start on its keys lets the seat's pad go and
         // rides on, as opentennis's keyboard plays on for a 1P whose pad is out.
         let keyboard = self.slots.keys();
-        let start = self.bindings.key_on(Control::Start, held);
+        let start = self.bindings.key_on(self.keys_scheme(), Control::Start, held);
         if let Some(i) = keyboard
             && start
             && !self.start_key
@@ -1885,6 +2074,9 @@ impl Seats {
     }
 
     fn frame_reports(&mut self, keyboard: Option<usize>, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
+        if keyboard.is_none() {
+            self.keys.scheme = self.keys_scheme();
+        }
         self.keyboard_alone = keyboard.is_none().then(|| self.keys.report(held));
         let mut out = [SeatInput::Empty; SEATS];
         self.taps = [0; SEATS];
@@ -2035,6 +2227,37 @@ const KEYBOARD: [(u8, Control); 15] = [
     (key::TAB, Control::Select),
     (key::Q, Control::L3),
     (key::E, Control::R3),
+];
+
+/// The keyboard under the new layout (P54): the usual one. Space is the gas and Shift the brake —
+/// R2 and L2, which is where [`Scheme::ride`] reads the new layout's gas and brake from — Q and E
+/// are L1 and R1, Tab or C the camera (Select), Enter Start, the arrows the d-pad (and the menus),
+/// and the 1-4 row the face buttons, which the new layout keeps free in a ride (Cross, Circle,
+/// Square, Triangle). Z and N are L3 and R3, beside the stick keys they click. Escape is the pause,
+/// the shell's own key. `WASD` and `HJKL` are the sticks ([`KEY_STICKS_NEW`]).
+///
+/// R and F, L2 and R2 in the brief where a scheme still needs them, are not bound: under the new
+/// layout L2 and R2 are the brake and the gas, already on Shift and Space, and the original's
+/// layout keeps its own keyboard ([`KEYBOARD`]).
+const KEYBOARD_NEW: [(u8, Control); 18] = [
+    (key::SPACE, Control::R2),
+    (key::SHIFT_LEFT, Control::L2),
+    (key::SHIFT_RIGHT, Control::L2),
+    (key::Q, Control::L1),
+    (key::E, Control::R1),
+    (key::TAB, Control::Select),
+    (key::C, Control::Select),
+    (key::RETURN, Control::Start),
+    (key::UP, Control::Up),
+    (key::DOWN, Control::Down),
+    (key::LEFT, Control::Left),
+    (key::RIGHT, Control::Right),
+    (key::ONE, Control::Cross),
+    (key::TWO, Control::Circle),
+    (key::THREE, Control::Square),
+    (key::FOUR, Control::Triangle),
+    (key::Z, Control::L3),
+    (key::N, Control::R3),
 ];
 
 /// Two keys as one stick axis, ramped: where the stick has got to, as a fraction of full deflection
@@ -2716,16 +2939,218 @@ pub(crate) mod tests {
         assert_eq!(Bindings::parse(&d.text()), (d.clone(), vec![]));
         let (b, errors) =
             Bindings::parse("square = B PadNorth Pad11 # a comment\ncircle = nope\nbogus = J\n");
-        assert_eq!(b.0[Control::Square as usize], [Input::Key(56), Input::Button(3), Input::Button(11)]);
-        assert_eq!(b.0[Control::Circle as usize], d.0[Control::Circle as usize], "nothing understood");
+        // A line in the file is that line under both layouts (P54).
+        for lines in &b.lines {
+            assert_eq!(lines[Control::Square as usize], [Input::Key(56), Input::Button(3), Input::Button(11)]);
+        }
+        assert_eq!(b.lines, [d.lines[0].clone(), d.lines[1].clone()].map(|mut l| {
+            l[Control::Square as usize] = vec![Input::Key(56), Input::Button(3), Input::Button(11)];
+            l
+        }), "nothing understood, nothing else changed");
         assert_eq!(errors.len(), 2);
         assert_eq!(Bindings::parse(&b.text()).0, b);
-        // The default is the shell's binding from before there was a file.
-        assert_eq!(d.0[Control::Cross as usize], [Input::Key(key::X), Input::Key(key::SPACE), Input::Button(0)]);
+        // The original's default is the shell's binding from before there was a file.
+        let o = &d.lines[layout_at(Scheme::Original)];
+        assert_eq!(o[Control::Cross as usize], [Input::Key(key::X), Input::Key(key::SPACE), Input::Button(0)]);
         // Except that js button 6 is Select since P40 (a pad with none has its Start moved to 7).
-        assert_eq!(d.0[Control::Start as usize], [Input::Key(key::RETURN), Input::Button(7)]);
-        assert_eq!(d.0[Control::Select as usize], [Input::Key(key::TAB), Input::Button(6)]);
-        assert_eq!(d.0[16..20], [[Input::Key(key::J)], [Input::Key(key::L)], [Input::Key(key::I)], [Input::Key(key::K)]]);
+        assert_eq!(o[Control::Start as usize], [Input::Key(key::RETURN), Input::Button(7)]);
+        assert_eq!(o[Control::Select as usize], [Input::Key(key::TAB), Input::Button(6)]);
+        assert_eq!(o[16..20], [[Input::Key(key::J)], [Input::Key(key::L)], [Input::Key(key::I)], [Input::Key(key::K)]]);
+        assert!(o[20..].iter().all(Vec::is_empty), "the original's left stick has no keys");
+        // The pad's buttons are the same under both.
+        let pad_of = |l: &[Vec<Input>; BINDINGS]| l.clone().map(|set| set.into_iter().filter(|x| matches!(x, Input::Button(_))).collect::<Vec<_>>());
+        assert_eq!(pad_of(&d.lines[0]), pad_of(&d.lines[1]));
+    }
+
+    /// P54: one key held for half a second on a bare `Pads` under `scheme`, and the report after it.
+    fn held_for(scheme: Scheme, code: u8) -> Report {
+        let mut pads = Pads::unplugged(Wiring::default());
+        pads.scheme = scheme;
+        let held = |c: u8| c == code;
+        for _ in 0..30 {
+            pads.build(FRAME, &held);
+        }
+        pads.build(FRAME, &held)
+    }
+
+    /// P54, the new layout's keyboard: WASD the left stick, HJKL the right (vim's way), Space the
+    /// gas, Shift the brake, Q and E L1 and R1, Tab or C the camera, Enter Start, the arrows the
+    /// d-pad and the 1-4 row the face buttons — as the ride reads them through the new scheme.
+    #[test]
+    fn the_new_layout_s_keyboard_is_wasd_and_hjkl() {
+        let centre = Report::idle();
+        let axes = |r: Report| [REPORT_LEFT_X, REPORT_LEFT_Y, REPORT_RIGHT_X, REPORT_RIGHT_Y].map(|a| r.axis(a));
+        let c = centre.axis(REPORT_LEFT_X);
+        for (code, want) in [
+            (key::A, [0, c, c, c]),
+            (key::D, [255, c, c, c]),
+            (key::W, [c, 0, c, c]),
+            (key::S, [c, 255, c, c]),
+            (key::H, [c, c, 0, c]),
+            (key::L, [c, c, 255, c]),
+            (key::K, [c, c, c, 0]),
+            (key::J, [c, c, c, 255]),
+        ] {
+            let report = held_for(Scheme::New, code);
+            assert_eq!(axes(report), want, "key {code}");
+            assert_eq!(report.buttons(), 0, "key {code} pressed a button too");
+        }
+        // The ride reads WASD as its lean and steer: A and D steer, W leans forward and S back,
+        // the same as the pad's left stick at those bytes.
+        let stick = |code| ride_of(Scheme::New.ride(held_for(Scheme::New, code))).stick;
+        let pad_stick = |x: u8, y: u8| {
+            let mut r = Report::idle();
+            r.set_axis(REPORT_LEFT_X, x);
+            r.set_axis(REPORT_LEFT_Y, y);
+            ride_of(Scheme::New.ride(r)).stick
+        };
+        assert_eq!(stick(key::A), pad_stick(0, c));
+        assert_eq!(stick(key::D), pad_stick(255, c));
+        assert_eq!(stick(key::W), pad_stick(c, 0));
+        assert_eq!(stick(key::S), pad_stick(c, 255));
+        assert_ne!(stick(key::A), stick(key::D));
+        assert_ne!(stick(key::W), stick(key::S));
+        // Space is the gas, ramped, and nothing else in the ride; X is nothing at all now.
+        let space = ride_of(Scheme::New.ride(held_for(Scheme::New, key::SPACE)));
+        assert_eq!((space.gas, space.brake), (F::ONE, F::ZERO));
+        assert_eq!(held_for(Scheme::New, key::X), Report::idle());
+        let mut pads = Pads::unplugged(Wiring::default());
+        pads.scheme = Scheme::New;
+        pads.build(FRAME, &|c| c == key::SPACE);
+        let stab = ride_of(Scheme::New.ride(pads.build(FRAME, &|c| c == key::SPACE))).gas;
+        assert!(stab > F::ZERO && stab < F::ONE, "a stab of Space is part throttle: {stab:?}");
+        // Shift (either) is the brake.
+        for shift in [key::SHIFT_LEFT, key::SHIFT_RIGHT] {
+            let c = ride_of(Scheme::New.ride(held_for(Scheme::New, shift)));
+            assert_eq!((c.gas, c.brake, c.clutch, c.front_brake), (F::ZERO, F::ONE, F::ZERO, F::ZERO));
+        }
+        // The buttons, as the ride is handed them: one each, and the one the brief names.
+        let ridden = |code| Scheme::New.ride(held_for(Scheme::New, code)).buttons();
+        for (code, control) in [
+            (key::Q, Control::L1),
+            (key::E, Control::R1),
+            (key::TAB, Control::Select),
+            (key::C, Control::Select),
+            (key::RETURN, Control::Start),
+            (key::UP, Control::Up),
+            (key::DOWN, Control::Down),
+            (key::LEFT, Control::Left),
+            (key::RIGHT, Control::Right),
+            (key::TWO, Control::Circle),
+            (key::FOUR, Control::Triangle),
+            (key::Z, Control::L3),
+            (key::N, Control::R3),
+        ] {
+            assert_eq!(ridden(code), control.mask(), "key {code}");
+        }
+        // Tab or C changes the camera under the new scheme.
+        assert_eq!(Scheme::New.camera(), Control::Select);
+        // 1 and 3 are Cross and Square on the pad's report — the menus' OK and delete — and the new
+        // scheme keeps both out of a ride, as it does the pad's own.
+        for (code, control) in [(key::ONE, Control::Cross), (key::THREE, Control::Square)] {
+            let report = held_for(Scheme::New, code);
+            assert_eq!(report.buttons(), control.mask(), "key {code}");
+            assert_eq!(Scheme::New.ride(report).buttons(), 0, "key {code} in a ride");
+        }
+        // And H is a stick key now, so the shell's overlay moves off it; M is still the swap's.
+        let b = Bindings::default();
+        assert!(b.binds_key(Scheme::New, key::H) && !b.binds_key(Scheme::Original, key::H));
+        assert!(!b.binds_key(Scheme::New, key::M) && !b.binds_key(Scheme::Original, key::M));
+        assert!(!b.binds_key(Scheme::New, key::F3) && !b.binds_key(Scheme::Original, key::F3));
+    }
+
+    /// P54: the original's layout keeps the keyboard it had, key for key — every X keycode held
+    /// alone, against the table the shell shipped before P54 (literal keycodes, not this module's
+    /// constants, so a constant that moved would show).
+    #[test]
+    fn the_original_layout_s_keyboard_maps_exactly_as_before() {
+        let buttons: [(u8, Control); 15] = [
+            (52, Control::Square), (54, Control::Circle), (55, Control::Triangle), (38, Control::L1),
+            (39, Control::L2), (40, Control::R1), (41, Control::R2), (36, Control::Start),
+            (111, Control::Up), (116, Control::Down), (113, Control::Left), (114, Control::Right),
+            (23, Control::Select), (24, Control::L3), (26, Control::R3),
+        ];
+        // I and K the right stick's up and down, J and L its left and right.
+        let sticks = [(31, REPORT_RIGHT_Y, 0), (45, REPORT_RIGHT_Y, 255), (44, REPORT_RIGHT_X, 0), (46, REPORT_RIGHT_X, 255)];
+        for code in 0..=255u8 {
+            let report = held_for(Scheme::Original, code);
+            let mut want = Report::idle();
+            if let Some((_, control)) = buttons.iter().find(|(c, _)| *c == code) {
+                press(&mut want, *control, 0xff);
+            } else if [53, 65].contains(&code) {
+                // X and Space: the throttle, ramped to full.
+                press(&mut want, Control::Cross, report.pressure(Control::Cross.binding().pressure));
+                assert_eq!(gas_of(report), F::ONE, "key {code}");
+            } else if let Some((_, slot, byte)) = sticks.iter().find(|(c, _, _)| *c == code) {
+                want.set_axis(*slot, *byte);
+            }
+            assert_eq!(report, want, "key {code}");
+            // And Scheme::ride leaves it alone.
+            assert_eq!(Scheme::Original.ride(report), report);
+        }
+    }
+
+    /// P54: a `controls.txt` the shell wrote before the layouts had keyboards of their own — every
+    /// line as it was then, this machine's own file among them (pre-P40's select and start) — is
+    /// read as no file at all, so the new layout gets its keys; a line the player changed is theirs
+    /// under both layouts.
+    #[test]
+    fn an_old_controls_file_keeps_each_layout_s_keys() {
+        let old = "triangle = V PadNorth\ncircle = C PadEast\ncross = X Space PadSouth\nsquare = Z PadWest\n\
+                   l1 = A PadL1\nr1 = D PadR1\nl2 = S\nr2 = F\nselect = Tab\nstart = Return PadBack PadStart\n\
+                   r3 = E PadR3\nl3 = Q PadL3\nup = Up\nright = Right\ndown = Down\nleft = Left\n\
+                   stick_left = J\nstick_right = L\nstick_up = I\nstick_down = K\n";
+        assert_eq!(Bindings::parse(old), (Bindings::default(), vec![]));
+        let after_p40 = old.replace("select = Tab\n", "select = Tab PadBack\n").replace("PadBack PadStart", "PadStart");
+        assert_eq!(Bindings::parse(&after_p40), (Bindings::default(), vec![]));
+        // One line moved: L1 on G, under both layouts; the rest as each layout has it.
+        let (b, _) = Bindings::parse(&old.replace("l1 = A PadL1", "l1 = G PadL1"));
+        for scheme in Scheme::ALL {
+            assert_eq!(held_for_on(&b, scheme, 42).buttons(), Control::L1.mask());
+        }
+        assert_eq!(held_for_on(&b, Scheme::New, key::Q).buttons(), 0, "Q is nothing now");
+        assert_eq!(held_for_on(&b, Scheme::New, key::W).axis(REPORT_LEFT_Y), 0);
+        assert_eq!(gas_of(held_for_on(&b, Scheme::Original, key::X)), F::ONE);
+        // The file the shell writes now has every keyboard line as a comment, and reads back the same.
+        let text = Bindings::default().text();
+        assert!(text.contains("# l1 = Q PadL1  # new\n# l1 = A PadL1  # original\n"), "{text}");
+        assert!(text.contains("# left_stick_up = W  # new\n"), "{text}");
+    }
+
+    /// [`held_for`] on these bindings.
+    fn held_for_on(b: &Bindings, scheme: Scheme, code: u8) -> Report {
+        let mut pads = Pads::bound(Wiring::default(), b.clone());
+        pads.scheme = scheme;
+        let held = |c: u8| c == code;
+        for _ in 0..30 {
+            pads.build(FRAME, &held);
+        }
+        pads.build(FRAME, &held)
+    }
+
+    /// P54: the Controls screen's list is the bindings' — the brief's keys under the new layout,
+    /// today's under the original's, and a key the file moved where it moved to.
+    #[test]
+    fn the_controls_screen_lists_the_keyboard() {
+        let rows = |b: &Bindings, s: Scheme| b.keyboard_layout(s).into_iter().collect::<std::collections::HashMap<_, _>>();
+        let new = rows(&Bindings::default(), Scheme::New);
+        for (what, keys) in [
+            ("Gas", "Space"), ("Brake", "Shift"), ("Left stick", "W A S D"), ("Right stick", "K H J L"),
+            ("D-pad", "Arrows"), ("Camera", "Tab C"), ("L1  R1", "Q  E"), ("Faces", "1 2 3 4"),
+            ("Start", "Enter"), ("Pause", "Escape"),
+        ] {
+            assert_eq!(new.get(what).map(String::as_str), Some(keys), "{what}");
+        }
+        let original = rows(&Bindings::default(), Scheme::Original);
+        for (what, keys) in [
+            ("Gas", "X Space"), ("Brake", "Z"), ("Right stick", "I J K L"), ("D-pad", "Arrows"),
+            ("Camera", "A"), ("Front brake", "F"), ("Clutch", "S"), ("Tricks", "C V"),
+        ] {
+            assert_eq!(original.get(what).map(String::as_str), Some(keys), "{what}");
+        }
+        assert!(!original.contains_key("Left stick"), "the original's left stick has no keys");
+        let (b, _) = Bindings::parse("r2 = G PadR1\n");
+        assert_eq!(rows(&b, Scheme::New)["Gas"], "G");
     }
 
     #[test]
@@ -2762,7 +3187,11 @@ pub(crate) mod tests {
         assert_eq!((b, said.len()), (Bindings::default(), 1));
         std::fs::write(&path, "square = B\n").unwrap();
         let (b, said) = Bindings::load(&path);
-        assert_eq!((b.0[Control::Square as usize].as_slice(), said.len()), (&[Input::Key(56)][..], 0));
+        assert_eq!((b.lines[0][Control::Square as usize].as_slice(), said.len()), (&[Input::Key(56)][..], 0));
+        // What the first run wrote is each layout's default, read back as it was.
+        std::fs::remove_file(&path).unwrap();
+        Bindings::load(&path);
+        assert_eq!(Bindings::load(&path), (Bindings::default(), vec![]));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2923,7 +3352,7 @@ pub(crate) mod tests {
         assert_eq!(seats.said(), ["1P: Pad A (".to_string() + &dev.join("js0").display().to_string() + ")", "2P: Pad B (".to_string() + &dev.join("js1").display().to_string() + ")"]);
         // Each pad drives its own seat, and the keyboard rides with 1P.
         b.button(0, true);
-        let now = frame(&mut seats, &|code| code == key::Z);
+        let now = frame(&mut seats, &|code| code == key::THREE);
         assert!(!down(playing(now[0]), Control::Cross) && down(playing(now[1]), Control::Cross));
         assert!(down(playing(now[0]), Control::Square) && !down(playing(now[1]), Control::Square));
         a.button(1, true);
@@ -2973,7 +3402,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dev).unwrap();
         // No pad: the keyboard is 1P, as the shell always was.
         let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
-        let now = frame(&mut seats, &|code| code == key::Z);
+        let now = frame(&mut seats, &|code| code == key::THREE);
         assert!(down(playing(now[0]), Control::Square));
         assert_eq!(now[1], SeatInput::Empty);
         assert_eq!(seats.said(), ["1P: the keyboard"]);
@@ -2984,13 +3413,13 @@ pub(crate) mod tests {
         let mut seats =
             Seats::in_dir(&dev, &sys, None, Some(pads), Wiring::default(), Bindings::default());
         a.button(0, true);
-        let now = frame(&mut seats, &|code| code == key::Z);
+        let now = frame(&mut seats, &|code| code == key::THREE);
         assert!(down(playing(now[0]), Control::Cross) && !down(playing(now[0]), Control::Square));
         assert!(down(playing(now[1]), Control::Square) && !down(playing(now[1]), Control::Cross));
         assert_eq!(now[2], SeatInput::Empty);
         // 1P's pad out: 1P waits, and the keyboard stays 2P — it has a seat of its own.
         a.unplug();
-        let now = frame(&mut seats, &|code| code == key::Z);
+        let now = frame(&mut seats, &|code| code == key::THREE);
         assert_eq!(now[0], SeatInput::Waiting);
         assert!(down(playing(now[1]), Control::Square));
         std::fs::remove_dir_all(&root).unwrap();
@@ -3136,8 +3565,9 @@ pub(crate) mod tests {
         let wiring = Wiring { throttle: Throttle::Trigger(Control::L2), ..Wiring::default() };
         assert_eq!(wiring.schemes, [Scheme::New; SEATS], "the new layout is the default");
         let mut seats = Seats::in_dir(&dev, &sys, None, None, wiring, Bindings::default());
-        // A pad on a new-layout seat, a frame at a time: the ramp, and pinned after it.
-        let x = |code: u8| code == key::X;
+        // A pad on a new-layout seat, a frame at a time: the ramp, and pinned after it. The new
+        // layout's throttle key is Space (P54).
+        let x = |code: u8| code == key::SPACE;
         let mut pads = Pads::unplugged(Wiring::default());
         pads.scheme = Scheme::New;
         let mut gas = Vec::new();
@@ -3148,8 +3578,8 @@ pub(crate) mod tests {
         }
         assert!(gas.windows(2).all(|w| w[1] >= w[0]) && gas[0] < F::ONE, "ramped: {gas:?}");
         assert_eq!(*gas.last().unwrap(), F::ONE);
-        // L2 on the keyboard (S) is the brake.
-        let s = |code: u8| code == key::S;
+        // L2 on the keyboard (Shift since P54) is the brake.
+        let s = |code: u8| code == key::SHIFT_LEFT;
         let c = ride_of(seats.scheme(0).ride(playing(frame(&mut seats, &s)[0])));
         assert_eq!((c.gas, c.brake, c.clutch), (F::ZERO, F::ONE, F::ZERO));
         std::fs::remove_dir_all(&root).unwrap();
@@ -3280,7 +3710,7 @@ pub(crate) mod tests {
         let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
         b.button(0, true);
         seats.since_scan = None;
-        let got = seats.devices(&|code| code == key::Z);
+        let got = seats.devices(&|code| code == key::THREE);
         assert_eq!(got.len(), 3);
         assert_eq!(got[0].0, Device::Keys);
         assert!(down(got[0].1, Control::Square) && !down(got[0].1, Control::Cross));
@@ -3290,7 +3720,7 @@ pub(crate) mod tests {
         assert_eq!(seats.device_name(&b_id), Some(format!("Pad B ({})", dev.join("js1").display()).as_str()));
 
         seats.set_first(Some(Device::Pad(b_id.clone())));
-        let now = frame(&mut seats, &|code| code == key::Z);
+        let now = frame(&mut seats, &|code| code == key::THREE);
         let one = playing(now[0]);
         assert!(down(one, Control::Cross) && !down(one, Control::Square), "1P is B's alone");
         assert!(matches!(now[1], SeatInput::Playing(_)));
@@ -3302,7 +3732,7 @@ pub(crate) mod tests {
         assert_eq!(frame(&mut seats, &nothing)[0], SeatInput::Waiting);
         frame(&mut seats, &|code| code == key::RETURN);
         assert_eq!(seats.first(), Some(&Device::Keys));
-        assert!(down(playing(frame(&mut seats, &|code| code == key::Z)[0]), Control::Square));
+        assert!(down(playing(frame(&mut seats, &|code| code == key::THREE)[0]), Control::Square));
         assert!(seats.keyboard_alone().is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }
