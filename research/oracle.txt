@@ -4176,3 +4176,21 @@ collision_node_update boot 0x0026f800 (node, dt in f12): every collision object 
 # (pose -> the transform's rows by vu_quat_to_mat3 0x0013ebd0). Off the running game, not keys:
 # the collidable's flags (C+0x1f8, +0x84) 0x9a058, actors (+0x110) 8, collides-with (+0x114)
 # 0x40000. The ray probe's eleven rays are bike\col\wreckbikem.col's segments, bit for bit.
+# --- V42: the speedometer's digital readout, the default in crates/openmx/src/overlay.rs ---
+# speedo_mode's setting is *(*(*(*0x0041f770 + 0x3d4) + 8) + 0x1c), 1 = digital; speedo_update
+#   forces digital when the byte at *(opts + 0xc) + 0x114 (players) is 2 or more. speedo_mode runs
+#   when the options are applied, not per frame: a PINE write of the word changes nothing on screen;
+#   the original's own pause page Player Options > "Speedometer Display" (Digital/Analog, Cross
+#   accepts) does, once the value changes.
+# Seen (PCSX2, freestyle, digital set): the readout "51" in yearlingdashboldoblique_55 inks x 539-587,
+#   y 344-375 of 640x448, the preload meter at 599,314 beside it, no dial, no odometer plate, no
+#   miles. speedometer1.lyr's "Speedometer Digital1" container holds Speedometer_text alone;
+#   SpeedometerBackground_digital is in no container. So the right-justified text's right edge is
+#   the layout's X (588): the last box's right edge, its negative after-gap not counted.
+# Layouts, from mxingame.pag's layers: FreestyleOverlays -> speedometer.lyt (text 588,329, meter
+#   0,-12); FreestyleOverlaysHorizontal -> speedometerhorizontal1.lyt (588,155; meter 0,-194) and
+#   speedometerhorizontal2.lyt (588,145; 0,10); FreestyleOverlaysVertical ->
+#   speedometervertical1free.lyt (270,340; -320,0) and speedometervertical2.lyt (270,340; meter
+#   untouched). Read as: text in the view's own 640x224 / 320x448 frame (the radar layouts' 77 and
+#   135 say the same), the Flash meter offset from its movie's place on the whole screen. Not seen
+#   on a split screen of the original.
