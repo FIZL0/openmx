@@ -3807,7 +3807,7 @@ speed_emitter_read   boot 0x00152230 the speed-gated emitter's own keys (Minimum
 particle_update      boot 0x001556b0 per particle: age += dt * 1000, dead past life; grows (flag 8)
 #                                    size += growth dt and y += growth dt; moves (4) pos += vel dt;
 #                                    drag (0x80000) vel -= vel drag dt; gravity (0x20000) vel.y -=
-#                                    mult * 32.2 * dt; terrain collision (0x200) and wind not ported.
+#                                    mult * 32.2 * dt; terrain collision (0x200) ported by P61, below.
 #                                    Particle: +0x30 age, +0x34 life, +0x3c size, +0x44 growth, +0x48
 #                                    flags. First call divides the .prt's UVs by the texture's size
 prt_read             boot 0x00155c50 reads a .prt sheet: [General Info] NumFrames, [GroupN]
@@ -3854,3 +3854,16 @@ wheel_hinge_torque boot 0x0025d0f0 (scale in f12, wheel, torque) the torque unro
 #   query on a passing overlap; where it is cleared between ticks was not found (only on an inactive
 #   body, at the query's end). The type-3 candidates (not filtered) also set it unless +0x116 bit 0 —
 #   live (P57) the clock ran on the ground, so they do not reach a riding bike.
+# P61 particles that meet the ground and take the wind (journal 2026-10-21-p61-biplane-particles).
+# particle_update's collision: on a tick with (app tick counter +0x374) & 1, a particle with flag 0x200
+# asks ground_query for the terrain under a copy of its point; d = y - ground; if d < 0 and vel.y < 0:
+# vel *= Restitution (emitter +0x208); then d > -0.1 puts it on the ground and clears flags 4, 0x200,
+# 0x20000, 0x80000 (no more move/collide/gravity/drag), else vel.y = -vel.y where it is.
+# emt_read: GroundLevel (+0x1dc, default FLT_MAX) sets 0x200 when present; Restitution default 0.55;
+# [Properties] Wind (+0x234), MatchTerrainContour (+0x238). emit adds the system's wind (+0x140) to
+# the start velocity before the noise when Wind; the system is built with 0,0,0,1 there and nothing
+# writes it (free06 and first_recording save states: 0,0,0,1 in the track system, vtable 0x004593c0).
+vehicle_fx_collision_init boot 0x003d73e0 a CollisionModel entry: loads its .emt, then HasCollision
+#                                         ORs 0x200 into the emitter's flags (the chunks say TRUE)
+ini_switch           boot 0x0014b3f0 an int/switch key: T/F by first letter, ON/OFF, Y/N by first
+#                                    letter (all ignoring case), else strtol base 0
