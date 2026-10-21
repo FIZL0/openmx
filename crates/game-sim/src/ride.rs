@@ -889,7 +889,8 @@ fn flat_unit(v: Vf) -> Vf {
 /// `{cos, sin}` table; and one along the heading six and a half feet up, from twenty feet behind to
 /// twenty ahead. The ground query then moves the spot onto the ground and says its normal. The probe
 /// straight down only lifts the spot — onto anything solid it meets above the ground, with that
-/// thing's normal; any of the other thirteen meeting something refuses the spot.
+/// thing's normal; any of the other thirteen meeting something refuses the spot, and so does the world
+/// saying the ring is [`World::crowded`] (S75), which the original's query answers in the same pass.
 fn clear(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> Option<(Vf, Vf)> {
     let flat = flat_unit(heading);
     let (fx, fz) = (F(flat.x()), F(flat.z()));
@@ -922,7 +923,7 @@ fn clear(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> Op
         spot = Vf::new(spot.x(), found.point[0].y(), spot.z(), spot.w());
         normal = found.normal[0];
     }
-    if found.hit[1..BACK_PROBES].iter().any(|&hit| hit) {
+    if found.hit[1..BACK_PROBES].iter().any(|&hit| hit) || world.crowded(ring.centre, ring.radius) {
         return None;
     }
     Some((spot, normal))
