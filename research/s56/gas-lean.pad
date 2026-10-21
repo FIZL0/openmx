@@ -1,0 +1,6 @@
+# gas straight ahead, leaning forward from 2.5 s
+down cross
+sleep 2500
+stick l 0 -1
+sleep 4000
+release

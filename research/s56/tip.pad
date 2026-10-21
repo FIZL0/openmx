@@ -1,0 +1,4 @@
+# standing, stick hard right: a slow tip-over
+stick l 1 0
+sleep 6000
+release

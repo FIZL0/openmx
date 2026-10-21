@@ -1,0 +1,5 @@
+# a short roll, then leaning hard back and right at walking pace
+press cross 1200
+stick l 1 1
+sleep 6000
+release
