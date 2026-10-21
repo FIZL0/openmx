@@ -2362,7 +2362,7 @@ fn a_rider(p: &Phy, set: &game_sim::trick::Set, drop: f32) -> rider::Rider {
 
 /// The same rider, pitched nose-down by a grade so that a hill can be ridden instead of landed on.
 fn a_rider_facing(p: &Phy, set: &game_sim::trick::Set, drop: f32, grade: f32) -> rider::Rider {
-    let mounts = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+    let mounts = game_sim::stock::MOUNTS;
     let at = Vf::new(0.0, drop, 0.0, 1.0);
     let len = (1.0 + grade * grade).sqrt();
     let forward = Vf::new(0.0, -grade / len, 1.0 / len, 0.0);
@@ -2433,7 +2433,11 @@ fn a_ride_reaches_the_four_clip_blend_and_the_pair() {
     let set = game_sim::trick::Set::new(stunts);
 
     // --- ride one: the gate, and then the grid's bands ----------------------------------------------
-    let grade = 1.0;
+    // Half a foot of fall a foot. It was 1.0 until S58 gave the tires the original's law: on a 45°
+    // hill the dropped bike now hops down the slope for over a second and is already rolling when
+    // the gate opens; on this one it lands, the brake holds it at a few hundredths of a foot a second
+    // until the gate, and the throttle takes it through all three thresholds.
+    let grade = 0.5;
     let mut r = a_rider_facing(&phy, &set, 1.0, grade);
     let mut world = Hill { grade };
     let mut body = Body::new();

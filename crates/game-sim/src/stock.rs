@@ -40,6 +40,10 @@ pub const BIKE: &str = "\
 #
 # Units are the simulation's: feet, slugs, pounds of force, g = 32.2 ft/s^2. The per-surface grip
 # keys are coefficients *per unit of tire load*, not pounds, which is why they are small numbers.
+#
+# `BodyTireForcePosition` is where the spin step puts the tire's force on the chassis, a short way
+# under the centre of gravity, not where the wheel hangs: the hubs are `MOUNTS` below. The `Skid*`
+# and `Slipping*` keys are what a sliding, spinning or locked tire still pushes with (S58).
 [Mass Properties]
 Weight = 400
 Gravity = 1
@@ -60,14 +64,19 @@ SteeringTorque = 40
 SteeringDamping = 8
 SteeringInertia = 2
 MaxSteerAngle = 30
-BodyTireForcePosition = 0.0, 1.1, 2.1
+BodyTireForcePosition = 0.0, -0.3, 0.8
 NumberOfSurfaces = 1
 WheelFriction1 = 8.0
-WheelDrag1 = 0.02
-MaxBrakingTorque1 = 300
+WheelDrag1 = 0.001
+MaxBrakingTorque1 = 330
 MaxDriveForce1 = 1.5
+SkidDriveForce1 = 1.4
 MaxSideForce1 = 3.5
 SideForce1 = 0.2
+SkidSideForce1 = 3.3
+SlippingSideForce1 = 0.2
+MaxSlippingSideForce1 = 3.5
+SkidSlippingSideForce1 = 3.3
 [Rear Tire]
 StrutCompression = 1.0
 Spring = 2.2
@@ -76,15 +85,20 @@ BounceDampingRatio = 0.4
 ReboundDampingRatio = 0.6
 TireRadius = 1.12
 TireInertia = 1.4
-BodyTireForcePosition = 0.0, 1.1, -2.1
+BodyTireForcePosition = 0.0, -0.3, -0.8
 OtherTireNormalLoadScale = 1.0
 NumberOfSurfaces = 1
 WheelFriction1 = 9.0
-WheelDrag1 = 0.02
+WheelDrag1 = 0.001
 MaxBrakingTorque1 = 400
 MaxDriveForce1 = 2.4
+SkidDriveForce1 = 2.2
 MaxSideForce1 = 4.0
 SideForce1 = 0.25
+SkidSideForce1 = 3.8
+SlippingSideForce1 = 0.25
+MaxSlippingSideForce1 = 4.0
+SkidSlippingSideForce1 = 3.8
 [Engine]
 NumberOfRPMPoints = 4
 RPM1 = 2000
@@ -137,12 +151,18 @@ pub fn phy(curve: &CurveTable) -> Phy {
     Phy::read_bytes(BIKE.as_bytes(), curve)
 }
 
-/// Where the two wheels hang off the chassis.
+/// Where the stand-in's two wheels hang off its chassis: its hubs, in the chassis' frame.
+pub const MOUNTS: (Vf, Vf) = (Vf([0.0, 1.1, 2.1, 1.0]), Vf([0.0, 1.1, -2.1, 1.0]));
+
+/// Where the two wheels hang off the chassis: the stand-in's [`MOUNTS`], whichever `.phy` it is
+/// handed.
 ///
 /// The original reads each one off the bike's model — the front and rear wheel nodes — which is the
-/// renderer's side of the disc; a bike with no model has to put a hub somewhere, and the `.phy`'s own
-/// tire force positions are where this one puts them. The shell does the same with the disc's bike
-/// until a model reader lands.
-pub fn mounts(p: &Phy) -> (Vf, Vf) {
-    (p.front.body_tire_force_position, p.rear.body_tire_force_position)
+/// renderer's side of the disc; a bike with no model has to put a hub somewhere. Until S58 that was
+/// the `.phy`'s own `BodyTireForcePosition`, but that key is not where a wheel is: it is the arm the
+/// spin step puts the tire's force on the chassis at, and the original's bike has it a short way
+/// under the centre of gravity. A hub-length arm above it turns every correction the tire makes into
+/// a bigger slide, so the stand-in's two are now different numbers and the hubs live here.
+pub fn mounts(_: &Phy) -> (Vf, Vf) {
+    MOUNTS
 }
