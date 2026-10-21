@@ -15,7 +15,6 @@ use game_sim::input::Report;
 use game_sim::world::Flat;
 use game_sim::Sim;
 use openmx_net::{Cmd, Event, Net, Room};
-use ps2_float::F;
 
 use crate::net::rides::{self, Rides};
 use crate::net::{Lineup, Netplay, Timing};
@@ -25,7 +24,6 @@ pub struct Riding {
     pub np: Netplay<rides::State>,
     pub sims: Vec<Sim>,
     world: Flat,
-    dt: F,
     /// The room as the ride started (its seed, its seats).
     pub room: Room,
 }
@@ -89,7 +87,8 @@ impl Peer {
         Peer { net, status: String::new(), ticket: String::new(), room: None, riding: None, failed: None, too_big: 0, dumps: crate::net::desync::dumps(), said: Vec::new() }
     }
 
-    /// One frame of `dt` seconds: the transport's news, then the ride's ticks on `pad(seat, tick)`
+    /// One tick of real time, `dt` seconds (call it on the ride's 30 Hz schedule, every
+    /// `pace::TICK`, as the shell does): the transport's news, then the ride's ticks on `pad(seat, tick)`
     /// for this machine's seats.
     pub fn frame(&mut self, pad: &dyn Fn(usize, usize) -> Report, dt: f32) {
         for e in self.net.poll() {
@@ -98,7 +97,7 @@ impl Peer {
         let Some(r) = &mut self.riding else { return };
         let np = &mut r.np;
         let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| pad(s, np.tick())).collect();
-        let mut game = Rides { sims: &mut r.sims, world: &mut r.world, dt: r.dt, after: None };
+        let mut game = Rides { sims: &mut r.sims, world: &mut r.world, after: None };
         np.frame(&mut game, &local, dt);
         self.said.append(&mut np.said);
         for (to, d) in np.outgoing() {
@@ -128,7 +127,7 @@ impl Peer {
                         return;
                     }
                 };
-                self.riding = Some(Riding { np, sims: sims(&room), world: Flat::default(), dt: rides::steady_dt(), room });
+                self.riding = Some(Riding { np, sims: sims(&room), world: Flat::default(), room });
             }
             Event::Datagram(from, d) => {
                 if let Some(r) = &mut self.riding {

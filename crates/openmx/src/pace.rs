@@ -268,6 +268,20 @@ mod tests {
         assert!(dts[..settled].windows(2).all(|w| w[0] <= w[1]), "the ramp is not a ramp");
     }
 
+    /// N6: the frame length online is the one the offline ride's engine hands each tick, bit for
+    /// bit, over a hundred thousand ticks (an hour of riding): an online ride on the same pads is the
+    /// offline ride.
+    #[test]
+    fn the_online_ticks_are_the_offline_ones() {
+        let mut engine = Engine::new();
+        after_load(&mut engine);
+        for t in 0..100_000u64 {
+            let dt = engine.step(tick_clock(t), Input::default(), &mut Idle).dt;
+            let online = crate::net::rides::tick_dt(t as usize);
+            assert_eq!(online.0.to_bits(), dt.0.to_bits(), "tick {t}: online {online:?}, offline {dt:?}");
+        }
+    }
+
     /// The ticks owed are the wall clock's, however it is sampled; a stall past the catch-up limit is
     /// forgotten.
     #[test]

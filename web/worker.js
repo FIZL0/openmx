@@ -10,8 +10,8 @@
 // `openmx` wasm-bindgen's glue calls them on; that list and crates/openmx/tests/web/host.mjs, which answers them in
 // node for the tests, are kept call for call alike. A module worker: the glue is an ES module.
 //
-// Online (N4): `{ online }` joins or hosts a lobby through a relay and rides once the host starts, at 60 frames a
-// second on this thread's timer; the page's seat rides a pad nobody holds (web.rs says why). It needs no disc.
+// Online (N4): `{ online }` joins or hosts a lobby through a relay and rides once the host starts, a frame per
+// tick of the ride's 30 Hz clock on this thread's timer; the page's seat rides a pad nobody holds (web.rs says why). It needs no disc.
 //
 // Messages in:  { import: File }            copy the disc into OPFS, then start
 //               { start: { canvas?, file? } } start on the OPFS copy, or on `file` when given
@@ -130,8 +130,8 @@ async function start(file) {
   postMessage({ started: true });
 }
 
-// A ride against other machines: join (a room code or ticket) or host (that many seats), then a frame every 60th of
-// a second by the clock, ready as soon as seated; a host starts once every seat is taken and ready. `ticks`: post
+// A ride against other machines: join (a room code or ticket) or host (that many seats), then a frame every tick of
+// the ride's 30 Hz clock (1001/30 ms, N6), ready as soon as seated; a host starts once every seat is taken and ready. `ticks`: post
 // the first that many ticks' lines once settled.
 async function online({ name, relay, codes, join, host, bike, ticks }) {
   const glue = await game();
@@ -167,7 +167,7 @@ async function online({ name, relay, codes, join, host, bike, ticks }) {
       postMessage({ online: s });
       told = now;
     }
-  }, 1000 / 60);
+  }, 1001 / 30);
 }
 
 onmessage = async ({ data }) => {
