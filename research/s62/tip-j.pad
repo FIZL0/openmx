@@ -1,0 +1,49 @@
+# tip-h's crawl over the drop and up the far slope; where it stalls, the stick hard right
+stick l 0 0
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+stick l 1 0
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+wait 6000
+release

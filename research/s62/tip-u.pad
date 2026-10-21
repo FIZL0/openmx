@@ -1,0 +1,5 @@
+# from rest, leaning hard back, a 0.6 s burst of gas: a slow loop-out on the flat
+stick l 0 1
+press cross 600
+wait 6000
+release
