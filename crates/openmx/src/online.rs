@@ -148,12 +148,12 @@ impl Online {
     }
 
     /// Everything that came in since the last frame, as (peer, datagram); `Err` when the lobby's
-    /// network ended the ride.
+    /// network ended the ride, or a `--peer` runs another build.
     fn receive(&mut self) -> Result<Vec<(String, Vec<u8>)>, String> {
         use openmx_net::Event;
         let me = self.net.me.clone();
         match &mut self.wire {
-            Wire::Udp(udp) => Ok(udp.receive()),
+            Wire::Udp(udp) => udp.receive(),
             Wire::Lobby { net, kept } => {
                 let mut got = Vec::new();
                 let mut end = None;
