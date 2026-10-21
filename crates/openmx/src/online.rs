@@ -208,6 +208,14 @@ impl Online {
         }
     }
 
+    /// The pause's commands for the lobby under the ride (N14, an opened ride's Seats row), to its
+    /// network; a ride with no lobby has nobody to tell.
+    pub fn command(&self, c: openmx_net::Cmd) {
+        if let Wire::Lobby { net, .. } = &self.wire {
+            net.send(c);
+        }
+    }
+
     /// Leave a lobby's ride from the pause: the host takes everyone back to the lobby, a guest leaves
     /// the lobby (the others go back to theirs). Whether this machine is still in a lobby after.
     pub fn leave(&self) -> bool {

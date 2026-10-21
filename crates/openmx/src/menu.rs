@@ -1020,6 +1020,9 @@ const PAUSE_MAIN: usize = 5;
 /// ([`Menu::opening`]); Quit moves down one under it.
 const PAUSE_OPEN: usize = 6;
 const PAUSE_OPEN_ROW: &str = "Open to Online";
+/// The pause's Seats row (N14), under the online row: the seats the room opens with, then, opened,
+/// the room's own, as the lobby's Seats row sets them.
+const PAUSE_SEATS: usize = PAUSE_OPEN + 1;
 
 /// Whether the ride under the pause can be opened to online players (N10), and whether it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1901,7 +1904,33 @@ impl Menu {
             Opening::Open if self.lobby.code.is_empty() => rows.insert(PAUSE_OPEN, "Online: opening...".into()),
             Opening::Open => rows.insert(PAUSE_OPEN, format!("Online: {}", self.lobby.code)),
         }
+        if self.opening != Opening::No {
+            rows.insert(PAUSE_SEATS, format!("Seats: {}", self.pause_seats()));
+        }
         rows
+    }
+
+    /// The pause's seat count (N14): the opened room's once the network has said it, else the one it
+    /// opens (or is opening) with, the lobby's last pick.
+    fn pause_seats(&self) -> usize {
+        match (&self.lobby.room, self.opening) {
+            // not a lobby left over from before the ride
+            (Some(room), Opening::Open) if room.riding && room.drop_in => room.seats.len(),
+            _ => self.settings.lobby_seats,
+        }
+    }
+
+    /// The pause's Seats row stepped `by` one, round from the cap to two as the lobby's is. Before
+    /// opening it is only the pick the room will open with; opened, the network is asked, and it
+    /// refuses under the last taken seat (its reason comes back as the status).
+    fn pause_seats_by(&mut self, by: i32) {
+        let span = (openmx_net::SEATS - 1) as i32;
+        let n = 2 + (self.pause_seats() as i32 - 2 + by).rem_euclid(span) as usize;
+        if self.opening == Opening::Open {
+            self.lobby.out.push(Cmd::Seats(n));
+        }
+        self.settings.lobby_seats = n;
+        self.changed = true;
     }
 
     /// Open `screen` the way the pad would reach it, for `--screen`: over the main menu, or for the
@@ -1967,7 +1996,7 @@ impl Menu {
             Screen::Controls => CONTROLS_ROWS,
             Screen::Modifiers => MODIFIERS_ROWS,
             Screen::Keyboard => KEY_ROWS.len() + 1,
-            Screen::Pause => PAUSE.len() + usize::from(self.opening != Opening::No),
+            Screen::Pause => PAUSE.len() + 2 * usize::from(self.opening != Opening::No),
             Screen::Garage => roster::ROWS.len(),
             Screen::Online => ONLINE.len() + 1,
             Screen::Games => self.lobby.found.len() + 1,
@@ -2223,6 +2252,12 @@ impl Menu {
                 if p.back || p.start {
                     self.stack.clear();
                     return Act::Resume;
+                }
+                if at == PAUSE_SEATS && self.opening != Opening::No {
+                    if p.ok || p.left || p.right {
+                        self.pause_seats_by(if p.left { -1 } else { 1 });
+                    }
+                    return Act::Stay;
                 }
                 if p.ok {
                     match at {
@@ -3210,7 +3245,7 @@ impl Art {
         }
         // The ticker: a note when there is one, the network's word online, the rider's name otherwise
         // (not on the splash, where nobody is riding as anyone yet).
-        let online = matches!(screen, Screen::Online | Screen::Games | Screen::Lobby);
+        let online = matches!(screen, Screen::Online | Screen::Games | Screen::Lobby) || screen == Screen::Pause && menu.opening == Opening::Open;
         let ticker = match &menu.note {
             Some(n) => n.clone(),
             None if screen == Screen::Splash => return p.parts,
