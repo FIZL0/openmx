@@ -726,6 +726,8 @@ struct Args {
     /// `--render-scale auto|F`: the fraction of the frame the GPU draws the 3D at (V30); `None` is
     /// auto, picked from the frames' time in a window and whole offscreen.
     render_scale: Option<f32>,
+    /// Whether `--render-scale` was given, `auto` included (V34): if so it wins over the settings'.
+    render_scale_asked: bool,
     /// The pad seat each player reads, the front end's local game's (P43): player i rides seat
     /// `pad_of[i]`'s controller. Empty is seat i for player i, which is every ride outside one.
     pad_of: Vec<usize>,
@@ -1018,6 +1020,9 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
+                if !args.render_scale_asked {
+                    a.render_scale = shell.front.menu.settings.render_scale.fraction();
+                }
                 a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
                 a.wiring = shell.front.wiring();
                 // The ride setup's machine for 1P (P41), unless `--vehicle biplane` asked for the plane
@@ -1082,6 +1087,9 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
+                if !args.render_scale_asked {
+                    a.render_scale = shell.front.menu.settings.render_scale.fraction();
+                }
                 a.wrecks = room.wrecks;
                 a.wiring = shell.front.wiring();
                 a.shot = None;
@@ -2393,11 +2401,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The render scale (V30): as asked, or picked from the frames' time against the display's refresh.
     let refresh = window.as_mut().and_then(|w| w.gpu()).and_then(|w| w.refresh).unwrap_or(60.0);
     let mut auto_scale = game_render::gpu::AutoScale::new(Duration::from_secs_f32(0.8 / refresh));
+    // The settings' row changes it mid-ride (V34), unless `--render-scale` was given.
+    let mut render_scale = args.render_scale;
     if let Some(r) = renderer_of(&mut offscreen, window) {
-        r.render_scale = args.render_scale.unwrap_or(1.0);
+        r.render_scale = render_scale.unwrap_or(1.0);
         println!(
             "render scale: {}",
-            match args.render_scale {
+            match render_scale {
                 Some(f) => format!("{f}"),
                 None if offscreen.is_some() => "1 (auto, offscreen)".into(),
                 None => format!("auto, for {refresh:.0} Hz"),
@@ -2768,6 +2778,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if front.menu.changed() {
                 overlay_mode = front.menu.settings.overlay;
                 graphics = front.menu.settings.graphics;
+                if !args.render_scale_asked && render_scale != front.menu.settings.render_scale.fraction() {
+                    render_scale = front.menu.settings.render_scale.fraction();
+                    if let Some(r) = renderer_of(&mut offscreen, window) {
+                        r.render_scale = render_scale.unwrap_or(1.0);
+                    }
+                    println!("render scale: {} (settings)", render_scale.map_or("auto".into(), |f| f.to_string()));
+                }
                 for rig in &mut rigs {
                     rig.hud.on = overlay_mode == menu::Overlay::Debug;
                 }
@@ -3211,7 +3228,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let spent = Instant::now();
                     let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
                     waited = w.waited;
-                    if args.render_scale.is_none() {
+                    if render_scale.is_none() {
                         let was = w.renderer.render_scale;
                         w.renderer.render_scale = auto_scale.frame(spent.elapsed());
                         if w.renderer.render_scale != was {
@@ -3853,6 +3870,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         renderer: Backend::default(),
         graphics: None,
         render_scale: None,
+        render_scale_asked: false,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(a) = argv.next() {
@@ -3935,6 +3953,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--renderer" => args.renderer = Backend::parse(&next("gpu or software")?)?,
             "--render-scale" => {
                 let v = next("auto, or a fraction of the frame like 0.75")?;
+                args.render_scale_asked = true;
                 args.render_scale = match v.as_str() {
                     "auto" => None,
                     _ => Some(
@@ -4155,7 +4174,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      draws each frame pixel N times across and down. --render-scale draws the\n\
                      3D at a fraction of the frame and stretches it over, the HUD and menus\n\
                      still sharp; auto, the default, lowers it while the GPU misses the\n\
-                     display's refresh and raises it again when there is room.\n\
+                     display's refresh and raises it again when there is room. Without it,\n\
+                     the front end's Settings row (Auto, 100%, 75%, 50%) says.\n\
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
                      rider, tumbles the bike and puts you back on it); --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\
