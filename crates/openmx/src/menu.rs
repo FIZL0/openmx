@@ -197,6 +197,58 @@ pub struct Settings {
     pub effects_volume: u8,
     /// What the GPU draws of the track (V32): the whole map, or the original's fog and far clip.
     pub graphics: Graphics,
+    /// The fraction of the frame the GPU draws the 3D at (V34): `--render-scale`'s, as a choice of four.
+    pub render_scale: RenderScale,
+}
+
+/// The settings' render scale (V34): auto, picked from the frames' time against the display's
+/// refresh (V30), or a fixed fraction of the frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderScale {
+    #[default]
+    Auto,
+    Full,
+    ThreeQuarters,
+    Half,
+}
+
+impl RenderScale {
+    pub const ALL: [RenderScale; 4] = [RenderScale::Auto, RenderScale::Full, RenderScale::ThreeQuarters, RenderScale::Half];
+
+    /// The settings file's word: `auto`, or the percentage.
+    pub fn word(self) -> &'static str {
+        match self {
+            RenderScale::Auto => "auto",
+            RenderScale::Full => "100",
+            RenderScale::ThreeQuarters => "75",
+            RenderScale::Half => "50",
+        }
+    }
+
+    /// A word of the file's, with or without its `%`.
+    pub fn from_word(w: &str) -> Option<RenderScale> {
+        let w = w.trim_end_matches('%');
+        RenderScale::ALL.into_iter().find(|r| r.word() == w)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RenderScale::Auto => "Auto",
+            RenderScale::Full => "100%",
+            RenderScale::ThreeQuarters => "75%",
+            RenderScale::Half => "50%",
+        }
+    }
+
+    /// What `--render-scale` would say: `None` for auto, else the fraction of the frame.
+    pub fn fraction(self) -> Option<f32> {
+        match self {
+            RenderScale::Auto => None,
+            RenderScale::Full => Some(1.0),
+            RenderScale::ThreeQuarters => Some(0.75),
+            RenderScale::Half => Some(0.5),
+        }
+    }
 }
 
 /// The volume sliders' top step.
@@ -258,6 +310,7 @@ impl Default for Settings {
             music_volume: 7,
             effects_volume: 8,
             graphics: Graphics::default(),
+            render_scale: RenderScale::default(),
         }
     }
 }
@@ -313,6 +366,7 @@ impl Settings {
                 "music_volume" => s.music_volume = v.parse().map_or(s.music_volume, |n: u8| n.min(VOLUME_MAX)),
                 "effects_volume" => s.effects_volume = v.parse().map_or(s.effects_volume, |n: u8| n.min(VOLUME_MAX)),
                 "graphics" => s.graphics = Graphics::from_word(v).unwrap_or(s.graphics),
+                "render_scale" => s.render_scale = RenderScale::from_word(v).unwrap_or(s.render_scale),
                 _ => {}
             }
         }
@@ -321,7 +375,7 @@ impl Settings {
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\ngraphics = {}\n",
+            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\ngraphics = {}\nrender_scale = {}\n",
             self.name,
             self.overlay.word(),
             on_off(self.wrecks),
@@ -331,7 +385,8 @@ impl Settings {
             self.music,
             self.music_volume,
             self.effects_volume,
-            self.graphics.word()
+            self.graphics.word(),
+            self.render_scale.word()
         )
     }
 
@@ -705,13 +760,15 @@ const MAIN_SETTINGS: usize = 4;
 /// machine a switch would go to.
 const PAUSE: [&str; 6] = ["Resume", "Restart", "Switch To Machine", "Settings", "Main Menu", "Quit"];
 const PAUSE_SWITCH: usize = 2;
-const SETTINGS_ROWS: usize = 8;
+const SETTINGS_ROWS: usize = 9;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
 const SETTINGS_MUSIC_VOLUME: usize = 5;
 const SETTINGS_EFFECTS_VOLUME: usize = 6;
 /// The graphics row (V32): the whole map or the original's fog.
 const SETTINGS_GRAPHICS: usize = 7;
+/// The render scale's row (V34), beside the graphics'.
+const SETTINGS_RENDER_SCALE: usize = 8;
 const CONTROLS_ROWS: usize = 1 + LAYOUT_ROWS;
 
 /// The on-screen keyboard: opentennis's four rows of ten, then a row of four commands.
@@ -1526,6 +1583,13 @@ impl Menu {
                             let i = all.iter().position(|g| *g == self.settings.graphics).unwrap_or(0);
                             let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
                             self.settings.graphics = all[i];
+                            self.changed = true;
+                        }
+                        SETTINGS_RENDER_SCALE => {
+                            let all = RenderScale::ALL;
+                            let i = all.iter().position(|r| *r == self.settings.render_scale).unwrap_or(0);
+                            let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
+                            self.settings.render_scale = all[i];
                             self.changed = true;
                         }
                         _ => {}
@@ -2362,6 +2426,7 @@ impl Art {
                         format!("Music volume  {}", menu.settings.music_volume),
                         format!("Effects volume  {}", menu.settings.effects_volume),
                         format!("Graphics  {}", menu.settings.graphics.label()),
+                        format!("Render scale  {}", menu.settings.render_scale.label()),
                     ],
                     _ => std::iter::once(format!("Original throttle  {}", menu.controls.throttle.label()))
                         .chain(

@@ -33,7 +33,7 @@ mod window;
 mod pad;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
-use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, Screen, Settings};
+use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, RenderScale, Screen, Settings};
 use vehicle::{Garage, Kind, Plane, Spawn};
 use game_render::world::Graphics;
 use std::collections::{HashSet, VecDeque};
@@ -220,6 +220,7 @@ fn the_settings_file_reads_back_as_it_was_written() {
         music_volume: 3,
         effects_volume: 10,
         graphics: Graphics::Original,
+        render_scale: RenderScale::ThreeQuarters,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -261,7 +262,7 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     }
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Settings));
-    // The last row: past the name, overlay, wrecks, controls, music and the two volumes.
+    // Past the name, overlay, wrecks, controls, music and the two volumes.
     for _ in 0..7 {
         tap(&mut m, &mut r, Control::Down);
     }
@@ -275,6 +276,54 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Original);
     assert_eq!(Settings::parse("graphics = full\n").graphics, Graphics::Full);
     assert_eq!(Settings::parse("graphics = fancy\n").graphics, Graphics::Full);
+}
+
+#[test]
+fn the_render_scale_row_cycles_and_is_saved() {
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.render_scale, RenderScale::Auto, "auto unless asked");
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    // The last row, under the graphics'.
+    for _ in 0..8 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Right);
+        assert!(m.take_changed());
+        seen.push(m.settings.render_scale);
+    }
+    assert_eq!(seen, [RenderScale::Full, RenderScale::ThreeQuarters, RenderScale::Half, RenderScale::Auto]);
+    assert_eq!(m.settings.graphics, Graphics::Full, "the graphics row is untouched");
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.render_scale, RenderScale::Half);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.render_scale, RenderScale::Auto);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.render_scale, RenderScale::Full);
+    // Down from the last row wraps to the first.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.render_scale, RenderScale::Full);
+    // Each one is written and read back, and is what `--render-scale` would say.
+    for scale in RenderScale::ALL {
+        let s = Settings { render_scale: scale, ..Settings::default() };
+        assert!(s.text().contains(&format!("render_scale = {}\n", scale.word())));
+        assert_eq!(Settings::parse(&s.text()).render_scale, scale);
+    }
+    assert_eq!(RenderScale::ALL.map(RenderScale::fraction), [None, Some(1.0), Some(0.75), Some(0.5)]);
+    // Auto when the file has no key, or one it cannot read; a hand-written `%` reads too.
+    assert_eq!(Settings::parse("graphics = original\n").render_scale, RenderScale::Auto);
+    assert_eq!(Settings::parse("render_scale = 33\n").render_scale, RenderScale::Auto);
+    assert_eq!(Settings::parse("render_scale = 50%\n").render_scale, RenderScale::Half);
+    let dir = scratch("render-scale");
+    std::fs::write(dir.join(menu::SETTINGS_FILE), "name = Rider\ngraphics = full\n").unwrap();
+    assert_eq!(menu::load(&dir).0.render_scale, RenderScale::Auto);
+    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
