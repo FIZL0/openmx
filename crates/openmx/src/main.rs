@@ -1760,6 +1760,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         },
         None => (None, None),
     };
+    // The software path's own copy (P62): the GPU's is handed over on its first frame, and a GPU
+    // that cannot be had leaves the software path drawing.
+    let soft_sheet = fx_sheet.clone();
 
     // The scene's own start line and start direction, as the simulation's reader read them.
     let spawn = point(place.start);
@@ -3396,6 +3399,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             perf.lap(Stage::Scene, scene_at, spent);
             let draw_at = Instant::now();
             tris += draw_scene(target, &look, &assets, &actor, camera);
+            // The plane's particles (P62), after the models and before the overlay, as the GPU draws
+            // them, two triangles a square in the count.
+            if let (Some((fx, _)), Some(sheet)) = (&plane_fx, &soft_sheet) {
+                tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx), &light);
+            }
             stages.mark(stages::Stage::Scene);
             // And the overlay over the top of it, after everything with a depth test and before anything
             // that reads the frame: what the window shows and what `--shot` writes are the same picture.
@@ -3888,6 +3896,14 @@ fn plane_sprites(fx: &particles::PlaneFx) -> Vec<game_render::gpu::Particle> {
     fx.drawn()
         .iter()
         .map(|d| game_render::gpu::Particle { at: [d.at.x, d.at.y, d.at.z], size: d.size, uv: d.uv, alpha: d.alpha, _pad: [0.0; 3] })
+        .collect()
+}
+
+/// The plane's particles as the software path draws them (P62).
+fn plane_particles(fx: &particles::PlaneFx) -> Vec<game_render::particle::Particle> {
+    fx.drawn()
+        .iter()
+        .map(|d| game_render::particle::Particle { at: [d.at.x, d.at.y, d.at.z], size: d.size, uv: d.uv, alpha: d.alpha })
         .collect()
 }
 
