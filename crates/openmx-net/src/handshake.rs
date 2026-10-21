@@ -49,10 +49,12 @@ pub struct Handshake {
 
 /// The build: two builds can't be trusted to simulate alike. The crate's version and "dev" unless the shell stamps
 /// its own (`set_build`, as opentennis's `hst` does with its git commit): dev builds of one version meet each other.
+/// The dev id names the ride's tick too (N6, the 30 Hz one, `net::ALPN`'s 2), so Find greys out the lobbies of a
+/// dev build still on the 60 Hz tick rather than offering one it cannot connect to.
 static BUILD: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
 pub fn build() -> &'static str {
-    BUILD.get().copied().unwrap_or(concat!(env!("CARGO_PKG_VERSION"), " dev"))
+    BUILD.get().copied().unwrap_or(concat!(env!("CARGO_PKG_VERSION"), " dev, 30 Hz"))
 }
 
 /// Stamps this build's id before any lobby; a second call changes nothing.

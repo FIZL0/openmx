@@ -270,18 +270,18 @@ pub(super) fn handle<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay<S>
                 np.log.resize(f, vec![Pad::default(); np.rb.count]);
                 let reports: Vec<Report> = pads.iter().map(|&p| unwire(p)).collect();
                 np.log.push(pads);
-                game.step(&reports);
+                game.step(f, &reports);
                 np.rb.frame += 1;
             }
         }
     }
 }
 
-/// The ride's tick gate, once a frame of real time: runs the next tick (and any re-runs), or two to
-/// catch up, or none (time sync, a stall).
+/// The ride's tick gate, once a tick of real time (the shell calls it on pace's 30 Hz schedule):
+/// runs the next tick (and any re-runs), or two to catch up, or none (time sync, a stall).
 pub(super) fn gate<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay<S>, game: &mut G, local: &[Report]) {
     // B197: every call is a tick of real time; one that did not run (a stall, time sync) is run
-    // later, a second tick in a call, so the ride keeps 60 ticks a second whatever the others do.
+    // later, a second tick in a call, so the ride keeps 30 ticks a second whatever the others do.
     let want = {
         let rb = &mut np.rb;
         rb.since += 1;

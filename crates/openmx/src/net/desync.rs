@@ -136,10 +136,10 @@ impl Report {
     /// The report's ticks ridden again on `game` from its start: the hash before every tick.
     pub fn replay<G: Game>(&self, game: &mut G) -> Vec<u64> {
         let mut hashes = Vec::with_capacity(self.pads.len());
-        for pads in &self.pads {
+        for (tick, pads) in self.pads.iter().enumerate() {
             hashes.push(game.hash());
             let reports: Vec<_> = pads.iter().map(|&p| unwire(p)).collect();
-            game.step(&reports);
+            game.step(tick, &reports);
         }
         hashes
     }

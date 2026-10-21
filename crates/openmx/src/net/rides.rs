@@ -5,15 +5,17 @@
 //! shell rides online yet. Each reads its seat's pad as pad 0, the shape every one-player capture of
 //! the original has. In bytes (a resync, a restart) each seat is [`game_sim::snapshot`]'s codec.
 //!
-//! The frame length is fixed: every machine must hand every tick the same `dt`, and a wall clock is
-//! a different number on each. It is [`steady_dt`], what the engine's own averaged frame time settles
-//! at when the game holds 60 frames a second — the step a player at full speed rides offline.
+//! The frame length is the tick's own: every machine must hand every tick the same `dt`, and a wall
+//! clock is a different number on each. It is [`tick_dt`], what the engine hands the simulation on
+//! the offline ride's schedule (P52, `pace.rs`): one tick per 30 Hz frame of a PS2 holding 30 fps,
+//! the clock a steady PS2 reads, a world load before the first. So an online ride is the ride the
+//! same pads ride offline, tick for tick and `dt` for `dt` (N6).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use game_sim::input::{PADS, Report};
 use game_sim::ride::Controls;
-use game_sim::tick::{Engine, Timer0};
+use game_sim::tick::{Engine, Timer0, clock_ms};
 use game_sim::world::World;
 use game_sim::{Input, Sim};
 use ps2_float::F;
@@ -26,7 +28,6 @@ pub type State = Arc<Vec<Sim>>;
 pub struct Rides<'a> {
     pub sims: &'a mut Vec<Sim>,
     pub world: &'a mut dyn World,
-    pub dt: F,
     /// After each seat's tick (the seat, the frame length, its state and the hands it rode with): the
     /// shell's body machine, which is the simulation's too ([`game_sim::rider::Rider::body_frame`])
     /// but needs the clip table the renderer holds.
@@ -44,14 +45,15 @@ impl Game for Rides<'_> {
         self.sims.clone_from(&**s);
     }
 
-    fn step(&mut self, pads: &[Report]) {
+    fn step(&mut self, tick: usize, pads: &[Report]) {
+        let dt = tick_dt(tick);
         for (seat, sim) in self.sims.iter_mut().enumerate() {
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());
-            let hands = sim.poll(self.dt, &reports);
-            sim.step(self.dt, &hands, self.world);
+            let hands = sim.poll(dt, &reports);
+            sim.step(dt, &hands, self.world);
             if let Some(after) = &mut self.after {
-                after(seat, self.dt, sim, &hands);
+                after(seat, dt, sim, &hands);
             }
         }
     }
@@ -100,22 +102,36 @@ impl Game for Rides<'_> {
     }
 }
 
-/// The frame length the engine settles at on a steady 60 Hz clock: its thirty-frame average after a
-/// second of frames exactly a 60th apart (9,600 counts of the 576 kHz timer each). Integer timer
-/// arithmetic and the port's own float, so the same number on every machine.
-pub fn steady_dt() -> F {
-    struct Idle;
-    impl game_sim::tick::Game for Idle {
-        fn simulate(&mut self, _: F, _: Input, _: &mut game_sim::rng::Rng) -> bool {
-            true
+/// The Timer 0 a PS2 holding 30 fps reads at its `frame`th frame: two NTSC fields a frame, 19,219.2
+/// counts of the 576 kHz timer, in integers. `pace::ps2_clock`'s clock (the shell's offline one,
+/// which this module cannot reach from the tests that mount it alone); `pace.rs`'s
+/// `the_online_ticks_are_the_offline_ones` holds the two to the same `dt` tick for tick.
+fn ps2_clock(frame: u64) -> Timer0 {
+    let counts = frame * (2 * 1001 * 576) / 60;
+    Timer0 { ticks: (counts / 57_600) as u32, count: (counts % 57_600) as u32 }
+}
+
+/// How many ticks of [`tick_dt`]'s ramp are worked out; every later tick is the last of them.
+const RAMP: usize = 64;
+
+/// The frame length of the ride's `tick`th tick (the first is 0), as the engine works it out on
+/// pace's schedule (P52): the frame before the first is the menu's, a world load earlier, so the
+/// first tick is the long-frame rule's 0.033 and the ticks average their way up to the 30 Hz cap.
+/// There they stay for good: any thirty frames of this clock are 576,576 counts, 1001 ms exactly,
+/// whose average is over the cap. The same bits on every machine: integer timer arithmetic and the
+/// port's own float.
+pub fn tick_dt(tick: usize) -> F {
+    static DTS: OnceLock<Vec<F>> = OnceLock::new();
+    let dts = DTS.get_or_init(|| {
+        struct Idle;
+        impl game_sim::tick::Game for Idle {
+            fn simulate(&mut self, _: F, _: Input, _: &mut game_sim::rng::Rng) -> bool {
+                true
+            }
         }
-    }
-    let mut engine = Engine::new();
-    let mut dt = F(0.0);
-    for n in 1..=60u32 {
-        let counts = n * 9_600;
-        let now = Timer0 { ticks: counts / 57_600, count: counts % 57_600 };
-        dt = engine.step(now, Input::default(), &mut Idle).dt;
-    }
-    dt
+        let mut engine = Engine::new();
+        engine.prev_clock_ms = clock_ms(ps2_clock(1));
+        (0..RAMP as u64).map(|t| engine.step(ps2_clock(1 + 19 * 30 + t), Input::default(), &mut Idle).dt).collect()
+    });
+    dts[tick.min(RAMP - 1)]
 }

@@ -44,7 +44,9 @@ use crate::codes::{self, Codes};
 use crate::handshake::{self, Disc, Handshake};
 use crate::room::{HOST, Listing, Pick, Room, quick_pick};
 
-pub const ALPN: &[u8] = b"openmx/lobby/1";
+/// The lobby's protocol. 2 since N6: the ride's tick is the original's 30 Hz frame, not a 60th, so a
+/// 1 build cannot ride with a 2 (it would run a tick of the others' every frame at another length).
+pub const ALPN: &[u8] = b"openmx/lobby/2";
 /// How long Find listens on the LAN before it shows what it has (mDNS answers come within a second or two).
 const LAN_WAIT: Duration = Duration::from_secs(3);
 /// A host's listing and code go out again this often, and on a change at most every [`LIST_GAP`].

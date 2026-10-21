@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 
 use openmx_net::{Board, Cmd, Names, Net, Online, Pick, Relay, Room, HOST};
 
-/// How many ticks both machines must agree on: ten seconds of riding.
-const TICKS: usize = 600;
+/// How many ticks both machines must agree on: ten seconds of riding at the ride's 30 Hz (N6).
+const TICKS: usize = 300;
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -111,7 +111,8 @@ fn ride(browser: impl FnOnce(&Path, &str, &str) -> Command) {
     room.take(HOST, &[Pick::new("thq1", "race125p")]);
     desk.net.send(Cmd::Host(room));
 
-    let frame = Duration::from_secs_f64(1.0 / 60.0);
+    // one call a tick of the ride's clock, as the shell calls it (`pace::TICK`)
+    let frame = Duration::from_nanos(1_001_000_000_000 / 30_000);
     let started = Instant::now();
     let mut last = Instant::now();
     // what the desktop's lobby said last, printed when it changes (the log of a failed run)
