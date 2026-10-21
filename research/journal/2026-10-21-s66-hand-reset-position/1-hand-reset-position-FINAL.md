@@ -1,4 +1,4 @@
-# 1 — hand reset position (PART)
+# 1 — hand reset position (FINAL)
 
 Task S66. 2026-10-21.
 
