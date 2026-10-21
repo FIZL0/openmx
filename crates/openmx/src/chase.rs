@@ -65,7 +65,7 @@ pub fn bike(ride: &Ride) -> Ridden {
 /// wreck's flat heading and the world's up, not the tumbling body's own: which rows the original's
 /// writer reads off a wrecked bike was not traced, and a camera turned by every tumble is unwatchable.
 pub fn wrecked(crash: &Crash) -> Ridden {
-    let v = crash.body.vel;
+    let v = crash.bike.body.velocity;
     let speed = F((v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt());
     Ridden {
         target: Target {
@@ -109,7 +109,7 @@ pub fn wreck_targets(crash: &Crash, down: Option<(&game_sim::ragdoll_ride::Down,
             .map_or(crash.rider, |node| node.0[3]),
         None => crash.rider,
     };
-    WreckTargets { rider, bike: crash.origin, bike_vel: crash.body.vel }
+    WreckTargets { rider, bike: crash.origin, bike_vel: crash.bike.body.velocity }
 }
 
 /// The original's camera frame is the game's 30 Hz frame: its lags are handed 1/30 s, and the aim's
