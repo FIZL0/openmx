@@ -1000,7 +1000,7 @@ impl Machine for Ghosted {
             }
             seen[t] = Some(sim.rider.ghost);
         };
-        let mut game = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: Some(&mut after) };
+        let mut game = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: Some(&mut after), time_scale: None };
         np.frame(&mut game, &local, ROUND.as_secs_f32());
     }
     fn hash(&self) -> u64 {
@@ -1074,7 +1074,7 @@ fn the_online_hash_and_bytes_carry_the_ghost() {
     let mut there = Ride::new(2);
     for t in 0..100 {
         let pads = [if t == 70 { chord() } else { mash(0, t) }, mash(1, t)];
-        Rides { sims: &mut there.sims, world: &mut there.world, after: None }.step(t, &pads);
+        Rides { sims: &mut there.sims, world: &mut there.world, after: None, time_scale: None }.step(t, &pads);
     }
     assert!(there.sims[0].rider.ghost.on && !there.sims[1].rider.ghost.on);
     let mut solid = Ride { sims: there.sims.clone(), world: Flat::default(), glitch: false };
@@ -1082,9 +1082,9 @@ fn the_online_hash_and_bytes_carry_the_ghost() {
     assert_eq!(solid.sims[0].hash(), there.sims[0].hash(), "a one-player sim's hash has no ghost in it");
     assert_ne!(solid.hash(), there.hash(), "the online hash has");
 
-    let bytes = Rides { sims: &mut there.sims, world: &mut there.world, after: None }.encode().unwrap();
+    let bytes = Rides { sims: &mut there.sims, world: &mut there.world, after: None, time_scale: None }.encode().unwrap();
     let mut here = Ride::new(2);
-    Rides { sims: &mut here.sims, world: &mut here.world, after: None }.decode(&bytes).unwrap();
+    Rides { sims: &mut here.sims, world: &mut here.world, after: None, time_scale: None }.decode(&bytes).unwrap();
     assert_eq!(here.sims[0].rider.ghost, there.sims[0].rider.ghost);
     assert_eq!(here.hash(), there.hash());
 }
