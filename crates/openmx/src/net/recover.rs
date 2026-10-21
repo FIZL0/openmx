@@ -43,7 +43,7 @@ pub struct Recover {
     /// A restart's pieces so far, and a whole one to take on (`tick` `u32::MAX`: the host's own,
     /// its state still to be read).
     pieces: Vec<u8>,
-    ready: Option<(u8, u32, Lineup, Vec<u8>)>,
+    pub(super) ready: Option<(u8, u32, Lineup, Vec<u8>)>,
     /// Restarts so far.
     pub restarts: u32,
 }
@@ -207,6 +207,13 @@ pub(super) fn restarted<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay
         if !lineup.peers().contains(&p) {
             np.link.forget(&p);
             np.recover.quiet.remove(&p);
+        }
+    }
+    // a peer new to the ride (N10's join): heard from as the others are, and given the loading
+    // time to answer
+    for p in lineup.peers() {
+        if p != np.me {
+            np.recover.quiet.entry(p).or_insert((0.0, false));
         }
     }
     np.rb = rb;

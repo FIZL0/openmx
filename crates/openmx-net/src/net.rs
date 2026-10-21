@@ -188,6 +188,9 @@ pub enum Msg {
     Start(Room),
     Shake(Handshake),
     Go(Room),
+    /// To a guest that joined a ride under way ([`Room::drop_in`]) and passed its handshake: it is in,
+    /// and the ride's state comes from the host's session (N10).
+    DropIn(Room),
     /// Everyone back in the lobby (why: a peer dropped, or the ride ended).
     Lobby { room: Room, why: String },
     /// A line for a guest's status.
@@ -338,6 +341,12 @@ pub enum Event {
     Room(Room),
     /// The ride starts: the line-up with the seed, and which peer this machine is.
     Start(Room, String),
+    /// This machine joined a ride under way (N10): the room as it is, and which peer this machine is.
+    /// No session starts from it; the host's sends the ride's state when it takes this peer on.
+    DropIn(Room, String),
+    /// The host of a ride that takes peers on: `peer` passed its handshake on `seats` and is waiting
+    /// to be taken into the ride (`Netplay::admit`).
+    Arrived { peer: String, seats: Vec<usize> },
     /// A peer left mid-ride: everyone is back in the lobby (a `Room` follows).
     Dropped(String),
     /// Out of the lobby (refused, the host left, a code that leads nowhere): why.
@@ -694,6 +703,8 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
     let mut listed: Option<Instant> = None;
     let mut rates: HashMap<String, Vec<Instant>> = HashMap::new();
     let mut shaking: Option<Shaking> = None;
+    // guests that joined the ride under way, waiting for their handshake: until when
+    let mut dropping: Vec<(String, n0_future::time::Instant)> = Vec::new();
     loop {
         // the listing on the LAN and the DHT board, and the code's record, after a change (at most every LIST_GAP)
         if dirty && listed.is_none_or(|t| t.elapsed() >= LIST_GAP) {
@@ -752,14 +763,20 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                 Guest::In { peer, name, picks, build, link, conn } => {
                     if build != handshake::build() {
                         refuse(&link, conn, version_differs(handshake::build(), &build));
-                    } else if room.riding || shaking.is_some() {
+                    } else if room.riding && !room.drop_in || shaking.is_some() {
                         refuse(&link, conn, "The ride has started: try again once it's back in the lobby.".into());
                     } else if picks.is_empty() {
                         refuse(&link, conn, "No players to seat.".into());
-                    } else if !room.take(&peer, &picks) {
+                    } else if !room.take(&peer, &drop_in_picks(&room, picks.clone())) {
                         refuse(&link, conn, format!("The lobby is full ({} seats open, {} wanted).", room.open(), picks.len()));
                     } else {
                         room.names.insert(peer.clone(), crate::chat::clean(&name).unwrap_or_else(|| short(&peer).into()));
+                        if room.riding {
+                            // into the ride under way: its handshake first, on the room as it is now
+                            link.send(&Msg::Start(room.clone()));
+                            dropping.push((peer.clone(), n0_future::time::Instant::now() + SHAKE_WAIT));
+                            cx.say(Event::Status(format!("{} is joining the ride...", room.names[&peer])));
+                        }
                         joined.push(Joined { peer, link, conn });
                         broadcast(&joined, &Msg::Room(room.clone()));
                         cx.say(Event::Room(room.clone()));
@@ -776,6 +793,24 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                         room.repick(&peer, &p);
                         broadcast(&joined, &Msg::Room(room.clone()));
                         cx.say(Event::Room(room.clone()));
+                    }
+                    Msg::Shake(h) if dropping.iter().any(|d| d.0 == peer) => {
+                        dropping.retain(|d| d.0 != peer);
+                        let Some(i) = joined.iter().position(|j| j.peer == peer) else { continue };
+                        match h.check(&Handshake::of(&room, &*cx.disc)) {
+                            Ok(()) => {
+                                joined[i].link.send(&Msg::DropIn(room.clone()));
+                                cx.say(Event::Arrived { peer: peer.clone(), seats: room.seats_of(&peer) });
+                            }
+                            Err(why) => {
+                                let j = joined.remove(i);
+                                refuse(&j.link, j.conn, why);
+                                room.free(&peer);
+                                broadcast(&joined, &Msg::Room(room.clone()));
+                                cx.say(Event::Room(room.clone()));
+                                dirty = true;
+                            }
+                        }
                     }
                     Msg::Shake(h) => {
                         if let Some(s) = &mut shaking && s.waiting.contains(&peer) {
@@ -817,9 +852,16 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                     joined.remove(i);
                     let name = room.names.get(&peer).cloned().unwrap_or_else(|| short(&peer).into());
                     room.free(&peer);
+                    dropping.retain(|d| d.0 != peer);
                     if let Some(s) = &mut shaking {
                         s.waiting.retain(|p| *p != peer);
                         s.refused.push(format!("{name} left"));
+                    } else if room.riding && room.drop_in {
+                        // a ride that takes peers on rides on without one: its seats open for the next
+                        // (the session empties them as a silent peer's)
+                        broadcast(&joined, &Msg::Room(room.clone()));
+                        cx.say(Event::Status(format!("{name} left the ride.")));
+                        cx.say(Event::Room(room.clone()));
                     } else if room.riding {
                         room.back_to_lobby();
                         let why = format!("{name} left the ride: back to the lobby.");
@@ -908,7 +950,21 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                 }
             }
             _ = republish.tick() => dirty = true,
-            _ = ping.tick() => broadcast(&joined, &Msg::Ping(micros(t0))),
+            _ = ping.tick() => {
+                broadcast(&joined, &Msg::Ping(micros(t0)));
+                // a drop-in whose handshake never came
+                let now = n0_future::time::Instant::now();
+                for (peer, _) in dropping.extract_if(.., |d| d.1 <= now).collect::<Vec<_>>() {
+                    if let Some(i) = joined.iter().position(|j| j.peer == peer) {
+                        let j = joined.remove(i);
+                        refuse(&j.link, j.conn, "Your game didn't answer the host's start.".into());
+                    }
+                    room.free(&peer);
+                    broadcast(&joined, &Msg::Room(room.clone()));
+                    cx.say(Event::Room(room.clone()));
+                    dirty = true;
+                }
+            }
         }
         // every handshake in: the ride goes, or (someone refused or gone) everyone left is back in the lobby
         if shaking.as_ref().is_some_and(|s| s.waiting.is_empty()) {
@@ -928,6 +984,16 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
             dirty = true;
         }
     }
+}
+
+/// A guest's picks for a ride under way: every bike the host's first seat's (the ride's bikes are
+/// set when it starts — a drop-in's seat is spawned on the host's constants, `net::admit`), the
+/// riders its own. In the lobby they stand as picked.
+fn drop_in_picks(room: &Room, mut picks: Vec<Pick>) -> Vec<Pick> {
+    if let Some(first) = room.seats.iter().flatten().next().filter(|_| room.riding) {
+        picks.iter_mut().for_each(|p| p.bike = first.pick.bike.clone());
+    }
+    picks
 }
 
 fn micros(t0: Instant) -> u64 {
@@ -1072,6 +1138,11 @@ async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedR
                 Ok(Msg::Go(r)) => {
                     riding = true;
                     cx.say(Event::Start(r, me.clone()));
+                }
+                Ok(Msg::DropIn(r)) => {
+                    riding = true;
+                    cx.say(Event::Status("In the ride: waiting for the host to take you on...".into()));
+                    cx.say(Event::DropIn(r, me.clone()));
                 }
                 Ok(Msg::Lobby { room, why }) => {
                     riding = false;

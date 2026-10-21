@@ -69,6 +69,11 @@ pub struct Room {
     /// the ride with them, so the lockstep rides one set of numbers. Empty is the original game.
     #[serde(default)]
     pub modifiers: String,
+    /// The ride takes peers on while under way (N10, a freeride opened online from its pause menu):
+    /// listed as joinable while riding, and a peer that joins is seated, handshaken and sent into
+    /// the ride as it is, rather than turned away until the lobby is back.
+    #[serde(default)]
+    pub drop_in: bool,
 }
 
 impl Room {
@@ -175,12 +180,18 @@ pub struct Listing {
     /// The host's build: Find greys out the others, and Quickplay skips them.
     #[serde(default)]
     pub build: String,
+    /// The ride is under way and takes peers on (a [`Room::drop_in`] one): Find says so. Not written
+    /// when false, so a lobby's mDNS record (245 bytes at most) is no longer than it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub riding: bool,
 }
 
 impl Listing {
     pub fn of(id: &str, room: &Room) -> Listing {
-        let taken = if room.private || room.riding { room.seats.len() } else { room.taken() };
-        Listing { id: id.into(), name: room.name.clone(), track: room.track.clone(), taken, seats: room.seats.len(), time: now(), code: room.short.clone(), build: crate::handshake::build().into() }
+        let closed = room.private || room.riding && !room.drop_in;
+        let taken = if closed { room.seats.len() } else { room.taken() };
+        let riding = room.riding && !closed;
+        Listing { id: id.into(), name: room.name.clone(), track: room.track.clone(), taken, seats: room.seats.len(), time: now(), code: room.short.clone(), build: crate::handshake::build().into(), riding }
     }
 
     pub fn open(&self) -> usize {
@@ -230,7 +241,7 @@ mod tests {
 
     #[test]
     fn quickplay_takes_the_busiest_that_fits() {
-        let l = |id: &str, taken, seats, time| Listing { id: id.into(), name: String::new(), track: "free06".into(), taken, seats, time, code: String::new(), build: crate::handshake::build().into() };
+        let l = |id: &str, taken, seats, time| Listing { id: id.into(), name: String::new(), track: "free06".into(), taken, seats, time, code: String::new(), build: crate::handshake::build().into(), riding: false };
         let other = Listing { build: "0.0.0 other".into(), ..l("x", 3, 4, 9) };
         let list = [l("a", 1, 4, 5), l("b", 2, 4, 3), l("c", 2, 4, 4), l("d", 3, 4, 9), other];
         let ids: Vec<String> = quick_pick(&list, 2).into_iter().map(|l| l.id).collect();
@@ -247,5 +258,23 @@ mod tests {
         r.private = false;
         r.riding = true;
         assert_eq!(Listing::of("id", &r).open(), 0);
+        assert!(!Listing::of("id", &r).riding, "a ride that takes nobody on lists as a full lobby");
+    }
+
+    #[test]
+    fn a_ride_open_to_drop_ins_lists_as_joinable() {
+        let mut r = Room::new("h", "free06", 4);
+        r.take(HOST, &[Pick::new("thq1", "race125p")]);
+        (r.riding, r.drop_in) = (true, true);
+        let l = Listing::of("id", &r);
+        assert_eq!((l.open(), l.riding), (3, true));
+        assert_eq!(quick_pick(&[l.clone()], 1).len(), 1, "Quickplay can drop in on it");
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(json.contains("\"riding\":true"), "{json}");
+        let back: Listing = serde_json::from_str(&json.replace(",\"riding\":true", "")).unwrap();
+        assert!(!back.riding, "an older build's listing reads as a lobby");
+        assert!(!serde_json::to_string(&Listing { riding: false, ..l }).unwrap().contains("riding"));
+        r.private = true;
+        assert_eq!(Listing::of("id", &r).open(), 0, "private is private, riding or not");
     }
 }
