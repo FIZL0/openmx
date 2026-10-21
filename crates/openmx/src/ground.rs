@@ -86,53 +86,82 @@ impl<'a> Ground<'a> {
         )
     }
 
-    /// The whole field as the GPU draws it (P44): square chunks of `cells` cells a side, each a grid
-    /// of its cells' corners with their stored normals and two triangles a cell, wound and split as
-    /// [`Ground::draw`] splits them. Built once; the GPU culls the chunks by its frusta and the fog.
+    /// The whole field as the GPU draws it (P44): square chunks of `cells` cells a side, each the
+    /// grid of its cells' corners with their stored normals. The GPU picks each chunk's level of
+    /// detail and so its triangles (V32), split as [`Ground::draw`] splits them at full detail.
+    ///
+    /// `cells` is rounded up to a power of two. A chunk past the field's far edge repeats the edge's
+    /// corners, and a cell the terrain has no quad for is listed in the chunk's `missing`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn chunks(&self, cells: u32) -> Vec<GroundChunk> {
-        let cells = cells.max(1);
+        let cells = cells.max(1).next_power_of_two();
         let (across, along) = (self.samples_x - 1, self.samples_z - 1);
+        let row = cells + 1;
         let mut out = Vec::new();
-        for z0 in (0..along).step_by(cells as usize) {
-            for x0 in (0..across).step_by(cells as usize) {
-                let (w, h) = (cells.min(across - x0), cells.min(along - z0));
-                let row = w + 1;
-                let mut vertices = vec![GroundVertex::default(); (row * (h + 1)) as usize];
-                let mut indices = Vec::new();
-                let (mut lo, mut hi) = (v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN));
-                for j in 0..h {
-                    for i in 0..w {
+        for (cz, z0) in (0..along).step_by(cells as usize).enumerate() {
+            for (cx, x0) in (0..across).step_by(cells as usize).enumerate() {
+                let mut vertices = vec![GroundVertex::default(); (row * row) as usize];
+                let mut found = vec![false; vertices.len()];
+                let mut missing = vec![false; (cells * cells) as usize];
+                // Each corner from a quad that has it: the cell it starts, or failing that a
+                // neighbour's. Past the field's edge, the edge's own.
+                for j in 0..cells {
+                    for i in 0..cells {
                         let (sx, sz) = (x0 + i, z0 + j);
+                        if sx >= across || sz >= along {
+                            continue;
+                        }
                         let Some(quad) = self.terrain.cell(sx, sz, 1) else {
+                            missing[(j * cells + i) as usize] = true;
                             continue;
                         };
                         for (k, dx, dz) in [(0, 0, 0), (1, 1, 0), (3, 1, 1), (2, 0, 1)] {
-                            let pos = v3(
-                                (sx + dx) as f32 * self.spacing,
-                                self.spacing * quad.height[k].0,
-                                (sz + dz) as f32 * self.spacing,
-                            );
+                            let at = ((j + dz) * row + i + dx) as usize;
+                            if found[at] {
+                                continue;
+                            }
                             let n = quad.normal[k];
                             let normal = v3(n[0].0, n[1].0, n[2].0).norm();
-                            vertices[((j + dz) * row + i + dx) as usize] = GroundVertex {
-                                pos: [pos.x, pos.y, pos.z],
+                            vertices[at] = GroundVertex {
+                                pos: [(sx + dx) as f32 * self.spacing, self.spacing * quad.height[k].0, (sz + dz) as f32 * self.spacing],
                                 normal: [normal.x, normal.y, normal.z],
                             };
-                            lo = v3(lo.x.min(pos.x), lo.y.min(pos.y), lo.z.min(pos.z));
-                            hi = v3(hi.x.max(pos.x), hi.y.max(pos.y), hi.z.max(pos.z));
+                            found[at] = true;
                         }
-                        let at = |dx: u32, dz: u32| (j + dz) * row + i + dx;
-                        indices.extend([at(0, 0), at(1, 0), at(1, 1), at(0, 0), at(1, 1), at(0, 1)]);
                     }
                 }
-                if indices.is_empty() {
+                if !found.iter().any(|&f| f) {
                     continue;
                 }
+                // Past the far edge: the last corner of the field along that row or column.
+                let (w, h) = (cells.min(across - x0), cells.min(along - z0));
+                for j in 0..row {
+                    for i in 0..row {
+                        let at = (j * row + i) as usize;
+                        if i > w || j > h {
+                            vertices[at] = vertices[(j.min(h) * row + i.min(w)) as usize];
+                            found[at] = found[(j.min(h) * row + i.min(w)) as usize];
+                        }
+                    }
+                }
+                let (mut lo, mut hi) = (v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN));
+                for (v, _) in vertices.iter().zip(&found).filter(|(_, f)| **f) {
+                    let p = v3(v.pos[0], v.pos[1], v.pos[2]);
+                    lo = v3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                    hi = v3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+                }
+                // A corner no quad reached is only ever used by a missing cell; put it on the
+                // chunk's floor so the chunk's sphere and its errors stay honest.
+                for (v, _) in vertices.iter_mut().zip(&found).filter(|(_, f)| !**f) {
+                    v.pos[1] = lo.y;
+                }
+                let any_missing = missing.iter().any(|&m| m);
                 let centre = lo.add(hi).scale(0.5);
                 out.push(GroundChunk {
                     vertices,
-                    indices,
+                    cells,
+                    at: (cx as u32, cz as u32),
+                    missing: if any_missing { missing } else { Vec::new() },
                     centre,
                     radius: hi.sub(centre).len(),
                 });

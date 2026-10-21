@@ -35,6 +35,7 @@ mod pad;
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, Screen, Settings};
 use vehicle::{Garage, Kind, Plane, Spawn};
+use game_render::world::Graphics;
 use std::collections::{HashSet, VecDeque};
 
 /// The buttons a hand can press on a menu.
@@ -218,6 +219,7 @@ fn the_settings_file_reads_back_as_it_was_written() {
         music: "disc:headstrong".into(),
         music_volume: 3,
         effects_volume: 10,
+        graphics: Graphics::Original,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -248,6 +250,31 @@ fn the_settings_file_reads_back_as_it_was_written() {
     assert_eq!(menu::load(&empty), (Settings::default(), Controls::default()));
     std::fs::remove_dir_all(dir).ok();
     std::fs::remove_dir_all(empty).ok();
+}
+
+#[test]
+fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.graphics, Graphics::Full, "the whole map unless asked");
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    // The last row: past the name, overlay, wrecks, controls, music and the two volumes.
+    for _ in 0..7 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.graphics, Graphics::Original);
+    assert!(m.take_changed());
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.graphics, Graphics::Full);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.graphics, Graphics::Original);
+    assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Original);
+    assert_eq!(Settings::parse("graphics = full\n").graphics, Graphics::Full);
+    assert_eq!(Settings::parse("graphics = fancy\n").graphics, Graphics::Full);
 }
 
 #[test]
