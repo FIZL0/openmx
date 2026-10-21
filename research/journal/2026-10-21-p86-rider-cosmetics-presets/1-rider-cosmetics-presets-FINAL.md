@@ -1,4 +1,4 @@
-# 1 — rider cosmetics presets (PART)
+# 1 — rider cosmetics presets (FINAL)
 
 Task P86. 2026-10-21.
 
