@@ -41,6 +41,7 @@ use game_render::world::Graphics;
 use game_render::gpu::{Shape, Sprite, clamp_of};
 use game_render::{Disc, Frame, Texture};
 use game_sim::input::{AXIS_CENTRE, Control, Report};
+use game_sim::modifiers::{Knob, Mods};
 use openmx_net::{Cmd, Event, HOST, Listing, Room};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -199,6 +200,10 @@ pub struct Settings {
     pub graphics: Graphics,
     /// The fraction of the frame the GPU draws the 3D at (V34): `--render-scale`'s, as a choice of four.
     pub render_scale: RenderScale,
+    /// The game modifiers the next ride loads with (P55): the original game's unless changed.
+    pub modifiers: Mods,
+    /// Modifier presets saved by name, in the order they were saved.
+    pub presets: Vec<(String, Mods)>,
 }
 
 /// The settings' render scale (V34): auto, picked from the frames' time against the display's
@@ -311,6 +316,8 @@ impl Default for Settings {
             effects_volume: 8,
             graphics: Graphics::default(),
             render_scale: RenderScale::default(),
+            modifiers: Mods::original(),
+            presets: Vec::new(),
         }
     }
 }
@@ -367,6 +374,19 @@ impl Settings {
                 "effects_volume" => s.effects_volume = v.parse().map_or(s.effects_volume, |n: u8| n.min(VOLUME_MAX)),
                 "graphics" => s.graphics = Graphics::from_word(v).unwrap_or(s.graphics),
                 "render_scale" => s.render_scale = RenderScale::from_word(v).unwrap_or(s.render_scale),
+                // A line it cannot read leaves the original game rather than half a set (P55).
+                "modifiers" => s.modifiers = Mods::parse(v).unwrap_or_default(),
+                "preset" => {
+                    if let Some((name, mods)) = v.split_once('|')
+                        && let Ok(mods) = Mods::parse(mods)
+                    {
+                        let name = clean_name(name);
+                        if !name.is_empty() {
+                            s.presets.retain(|(n, _)| *n != name);
+                            s.presets.push((name, mods));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -387,7 +407,20 @@ impl Settings {
             self.effects_volume,
             self.graphics.word(),
             self.render_scale.word()
-        )
+        ) + &self.modifiers_text()
+    }
+
+    /// The modifiers' lines (P55): the set the next ride loads, and the presets. Nothing at all for
+    /// the original game with no presets, so a file from before P55 is written as it was.
+    fn modifiers_text(&self) -> String {
+        let mut out = String::new();
+        if !self.modifiers.is_original() {
+            out += &format!("modifiers = {}\n", self.modifiers.text());
+        }
+        for (name, mods) in &self.presets {
+            out += &format!("preset = {name} | {}\n", mods.text());
+        }
+        out
     }
 
     /// The track pick's index of [`Settings::track`].
@@ -684,10 +717,12 @@ pub enum Screen {
     Join,
     /// A local game's split layout.
     Split,
+    /// The game modifiers (P55), under Settings.
+    Modifiers,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 13] = [
+    pub const ALL: [Screen; 14] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -701,6 +736,7 @@ impl Screen {
         Screen::Online,
         Screen::Games,
         Screen::Lobby,
+        Screen::Modifiers,
     ];
 
     fn index(self) -> usize {
@@ -723,6 +759,7 @@ impl Screen {
             Screen::Lobby => "lobby",
             Screen::Join => "join",
             Screen::Split => "split",
+            Screen::Modifiers => "modifiers",
         }
     }
 
@@ -745,6 +782,7 @@ impl Screen {
             Screen::Lobby => "Lobby",
             Screen::Join => "Local Game",
             Screen::Split => "Split Screen",
+            Screen::Modifiers => "Game Modifiers",
         }
     }
 }
@@ -760,7 +798,7 @@ const MAIN_SETTINGS: usize = 4;
 /// machine a switch would go to.
 const PAUSE: [&str; 6] = ["Resume", "Restart", "Switch To Machine", "Settings", "Main Menu", "Quit"];
 const PAUSE_SWITCH: usize = 2;
-const SETTINGS_ROWS: usize = 9;
+const SETTINGS_ROWS: usize = 10;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
 const SETTINGS_MUSIC_VOLUME: usize = 5;
@@ -769,6 +807,18 @@ const SETTINGS_EFFECTS_VOLUME: usize = 6;
 const SETTINGS_GRAPHICS: usize = 7;
 /// The render scale's row (V34), beside the graphics'.
 const SETTINGS_RENDER_SCALE: usize = 8;
+/// The game modifiers' screen (P55).
+const SETTINGS_MODIFIERS: usize = 9;
+/// The modifiers' screen: whose they are, every modifier, then the presets and the reset.
+const MODIFIERS_SEAT: usize = 0;
+const MODIFIERS_KNOBS: usize = 1;
+const MODIFIERS_PRESET: usize = MODIFIERS_KNOBS + game_sim::modifiers::KNOBS;
+const MODIFIERS_SAVE: usize = MODIFIERS_PRESET + 1;
+const MODIFIERS_DELETE: usize = MODIFIERS_SAVE + 1;
+const MODIFIERS_RESET: usize = MODIFIERS_DELETE + 1;
+const MODIFIERS_ROWS: usize = MODIFIERS_RESET + 1;
+/// How many of a long list's rows a screen shows at once, the rest scrolled to.
+const SHOWN_ROWS: usize = 9;
 const CONTROLS_ROWS: usize = 1 + LAYOUT_ROWS;
 
 /// The on-screen keyboard: opentennis's four rows of ten, then a row of four commands.
@@ -929,6 +979,13 @@ pub struct Menu {
     /// The songs the music row steps through after Off and Shuffle, `(id, label)`, as the shell's
     /// music sources list them (P42). Empty until the shell says.
     pub music_choices: Vec<(String, String)>,
+    /// The modifiers' screen (P55): whose a per-player row sets (0 every player's, then 1P on), and
+    /// the preset its row is on.
+    mod_seat: usize,
+    mod_preset: usize,
+    /// The ride under the menu has a modifier off the original game's, as the shell tells it: the
+    /// pause says so.
+    pub modified: bool,
 }
 
 /// A local game as the ride takes it (P43): one player a seat in play, in seat order, each on the
@@ -1010,6 +1067,9 @@ impl Menu {
             party: None,
             free_riders: 1,
             music_choices: Vec::new(),
+            mod_seat: 0,
+            mod_preset: 0,
+            modified: false,
         }
     }
 
@@ -1292,6 +1352,128 @@ impl Menu {
         }
     }
 
+    /// The modifiers' screen (P55): Square or the arrows step a slider by ten percent, Cross on a
+    /// toggle-like row does it, and the last rows load, save and delete presets and put every
+    /// modifier back. What it sets is the next ride's: a ride already going keeps what it loaded with.
+    fn walk_modifiers(&mut self, p: Press, at: usize) {
+        if p.back {
+            self.pop();
+            return;
+        }
+        let side = p.left || p.right;
+        if !(p.ok || side) {
+            return;
+        }
+        let presets = self.settings.presets.len();
+        match at {
+            MODIFIERS_SEAT => {
+                let n = SEATS_MAX + 1;
+                self.mod_seat = if p.left { (self.mod_seat + n - 1) % n } else { (self.mod_seat + 1) % n };
+            }
+            _ if at < MODIFIERS_PRESET => {
+                let knob = Knob::ALL[at - MODIFIERS_KNOBS];
+                let now = self.knob_value(knob);
+                let step = game_sim::modifiers::STEP;
+                let to = match (p.left, p.right) {
+                    (true, _) => now.saturating_sub(step).max(knob.least()),
+                    (_, true) => (now + step).min(game_sim::modifiers::MOST),
+                    // Cross puts the one modifier back.
+                    _ => game_sim::modifiers::ORIGINAL,
+                };
+                let seats: Vec<usize> = match (knob.per_seat(), self.mod_seat) {
+                    (true, 0) => (0..SEATS_MAX).collect(),
+                    (true, s) => vec![s - 1],
+                    (false, _) => vec![0],
+                };
+                for seat in seats {
+                    self.settings.modifiers.set(seat, knob, to);
+                }
+                self.changed = true;
+            }
+            MODIFIERS_PRESET if presets > 0 => {
+                if side {
+                    self.mod_preset = if p.left { (self.mod_preset + presets - 1) % presets } else { (self.mod_preset + 1) % presets };
+                } else {
+                    self.settings.modifiers = self.settings.presets[self.mod_preset.min(presets - 1)].1;
+                    self.changed = true;
+                }
+            }
+            MODIFIERS_SAVE if p.ok => self.type_for(Typing::Preset),
+            MODIFIERS_DELETE if p.ok && presets > 0 => {
+                self.settings.presets.remove(self.mod_preset.min(presets - 1));
+                self.mod_preset = self.mod_preset.min(self.settings.presets.len().saturating_sub(1));
+                self.changed = true;
+            }
+            MODIFIERS_RESET if p.ok => {
+                self.settings.modifiers = Mods::original();
+                self.changed = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// A modifier's value on its row: the chosen player's, or with every player chosen 1P's.
+    fn knob_value(&self, knob: Knob) -> u16 {
+        self.settings.modifiers.get(self.mod_seat.saturating_sub(1), knob)
+    }
+
+    /// Keep the modifiers now set as preset `name`, over one already called that.
+    fn save_preset(&mut self, name: &str) {
+        let mods = self.settings.modifiers;
+        match self.settings.presets.iter().position(|(n, _)| n == name) {
+            Some(i) => {
+                self.settings.presets[i].1 = mods;
+                self.mod_preset = i;
+            }
+            None => {
+                self.settings.presets.push((name.to_string(), mods));
+                self.mod_preset = self.settings.presets.len() - 1;
+            }
+        }
+        self.changed = true;
+    }
+
+    /// The modifiers' screen's rows as drawn.
+    pub fn modifier_rows(&self) -> Vec<String> {
+        let seat = match self.mod_seat {
+            0 => "Every Player".to_string(),
+            s => format!("{s}P"),
+        };
+        let mut rows = vec![format!("Player  {seat}")];
+        for knob in Knob::ALL {
+            let mixed = knob.per_seat()
+                && self.mod_seat == 0
+                && (1..SEATS_MAX).any(|s| self.settings.modifiers.get(s, knob) != self.settings.modifiers.get(0, knob));
+            let value = self.knob_value(knob);
+            let mark = if value == game_sim::modifiers::ORIGINAL { "" } else { " *" };
+            rows.push(match mixed {
+                true => format!("{}  Mixed", knob.label()),
+                false => format!("{}  {value}%{mark}", knob.label()),
+            });
+        }
+        rows.push(match self.settings.presets.get(self.mod_preset) {
+            Some((name, _)) => format!("Load Preset  {name}"),
+            None => "Load Preset  None Saved".to_string(),
+        });
+        rows.push("Save As Preset".to_string());
+        rows.push("Delete Preset".to_string());
+        rows.push("Reset To Original".to_string());
+        rows
+    }
+
+    /// The modifiers' ticker: what the row's modifier scales, and when it takes.
+    pub fn modifier_help(&self) -> String {
+        let at = self.cursor(Screen::Modifiers);
+        match at {
+            _ if (MODIFIERS_KNOBS..MODIFIERS_PRESET).contains(&at) => {
+                let knob = Knob::ALL[at - MODIFIERS_KNOBS];
+                let whose = if knob.per_seat() { "each player's" } else { "everyone's" };
+                format!("{} for {whose} ride, from the next one", knob.blurb())
+            }
+            _ => "Modifiers take on the next ride or restart".to_string(),
+        }
+    }
+
     /// The pause's rows as drawn: the switch row names the machine it would go to, or says there is
     /// none for this player.
     pub fn pause_rows(&self) -> Vec<String> {
@@ -1315,6 +1497,7 @@ impl Menu {
             Screen::Main => self.main(),
             Screen::Pause => self.pause(),
             Screen::Controls => self.stack = vec![Screen::Main, Screen::Settings, Screen::Controls],
+            Screen::Modifiers => self.stack = vec![Screen::Main, Screen::Settings, Screen::Modifiers],
             Screen::Keyboard => {
                 self.stack = vec![Screen::Main, Screen::Settings];
                 self.open_keyboard();
@@ -1359,6 +1542,7 @@ impl Menu {
             Screen::Tracks => TRACKS.len(),
             Screen::Settings => SETTINGS_ROWS,
             Screen::Controls => CONTROLS_ROWS,
+            Screen::Modifiers => MODIFIERS_ROWS,
             Screen::Keyboard => KEY_ROWS.len() + 1,
             Screen::Pause => PAUSE.len(),
             Screen::Garage => roster::ROWS.len(),
@@ -1557,6 +1741,7 @@ impl Menu {
                             self.changed = true;
                         }
                         3 if p.ok => self.push(Screen::Controls),
+                        SETTINGS_MODIFIERS if p.ok => self.push(Screen::Modifiers),
                         SETTINGS_MUSIC => {
                             let all = self.music_options();
                             let n = all.len();
@@ -1647,6 +1832,7 @@ impl Menu {
                     }
                 }
             }
+            Screen::Modifiers => self.walk_modifiers(p, at),
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
@@ -1686,7 +1872,7 @@ impl Menu {
                     // code is all capitals.
                     let word_start = self.typing.is_empty() || self.typing.ends_with(' ');
                     let upper = match self.typing_for {
-                        Typing::Name => word_start,
+                        Typing::Name | Typing::Preset => word_start,
                         Typing::Code => true,
                         Typing::Chat => false,
                     };
@@ -1727,6 +1913,13 @@ impl Menu {
                 if !text.is_empty() {
                     self.lobby.out.push(Cmd::Chat(text.clone()));
                     self.lobby.said(&self.settings.name, &text);
+                }
+            }
+            Typing::Preset => {
+                let name = clean_name(&self.typing);
+                self.pop();
+                if !name.is_empty() {
+                    self.save_preset(&name);
                 }
             }
         }
@@ -1935,6 +2128,8 @@ enum Typing {
     Name,
     Code,
     Chat,
+    /// A modifier preset's name (P55).
+    Preset,
 }
 
 impl Typing {
@@ -1944,6 +2139,7 @@ impl Typing {
             // A code is four; a little over lets a slip be seen and deleted.
             Typing::Code => 8,
             Typing::Chat => 40,
+            Typing::Preset => NAME_MAX,
         }
     }
 
@@ -1952,6 +2148,7 @@ impl Typing {
             Typing::Name => "Rider Name",
             Typing::Code => "Room Code",
             Typing::Chat => "Chat",
+            Typing::Preset => "Preset Name",
         }
     }
 }
@@ -2040,6 +2237,7 @@ impl Lobby {
     fn room_for(&self, settings: &Settings) -> Room {
         let mut room = Room::new(&settings.name, &settings.track, LOBBY_SEATS);
         room.wrecks = settings.wrecks;
+        room.modifiers = settings.modifiers.text();
         room.take(HOST, std::slice::from_ref(&self.pick));
         room
     }
@@ -2409,9 +2607,11 @@ impl Art {
                 p.list(&menu.pause_rows(), menu.cursor(screen));
                 p.logo();
                 // With more than one rider the pause is one player's, and says whose.
+                // A ride with a modifier off the original's says so (P55).
+                let modified = if menu.modified { "  Modified" } else { "" };
                 match menu.riders > 1 {
-                    true => p.title(&format!("{}P {}", menu.pauser + 1, screen.title())),
-                    false => p.title(screen.title()),
+                    true => p.title(&format!("{}P {}{modified}", menu.pauser + 1, screen.title())),
+                    false => p.title(&format!("{}{modified}", screen.title())),
                 }
                 p.legend(&[("nav_circle_off", "Resume"), ("nav_x_off", "Select")]);
             }
@@ -2427,6 +2627,10 @@ impl Art {
                         format!("Effects volume  {}", menu.settings.effects_volume),
                         format!("Graphics  {}", menu.settings.graphics.label()),
                         format!("Render scale  {}", menu.settings.render_scale.label()),
+                        format!(
+                            "Game Modifiers  {}",
+                            if menu.settings.modifiers.is_original() { "Original" } else { "Modified" }
+                        ),
                     ],
                     _ => std::iter::once(format!("Original throttle  {}", menu.controls.throttle.label()))
                         .chain(
@@ -2440,10 +2644,10 @@ impl Art {
                 };
                 p.column();
                 let at = menu.cursor(screen);
-                let bar = p.list(&rows, at);
+                let bar = p.scrolled(&rows, at);
                 // A row with choices wears the arrows either side of its pill.
                 let choice = match screen {
-                    Screen::Settings => at == 1 || at == 2 || at >= SETTINGS_MUSIC,
+                    Screen::Settings => at == 1 || at == 2 || (at >= SETTINGS_MUSIC && at != SETTINGS_MODIFIERS),
                     _ => true,
                 };
                 if choice {
@@ -2467,6 +2671,18 @@ impl Art {
                 p.logo();
                 p.title(screen.title());
                 p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Change")]);
+            }
+            Screen::Modifiers => {
+                p.column();
+                let at = menu.cursor(screen);
+                let bar = p.scrolled(&menu.modifier_rows(), at);
+                if at < MODIFIERS_PRESET || (at == MODIFIERS_PRESET && menu.settings.presets.len() > 1) {
+                    p.tex("arrow_left_off", rect(bar.x - 36.0, bar.y, 32.0, 32.0), CHOSEN);
+                    p.tex("arrow_right_off", rect(bar.x + bar.w + 4.0, bar.y, 32.0, 32.0), CHOSEN);
+                }
+                p.logo();
+                p.title(screen.title());
+                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
             }
             Screen::Tracks => p.tracks(menu),
             Screen::Keyboard => p.keyboard(menu),
@@ -2503,6 +2719,7 @@ impl Art {
             Some(n) => n.clone(),
             None if screen == Screen::Splash => return p.parts,
             None if online && !menu.lobby.status.is_empty() => menu.lobby.status.clone(),
+            None if screen == Screen::Modifiers => menu.modifier_help(),
             None => format!("Riding as {}", menu.settings.name),
         };
         p.anchor(Anchor::BottomLeft);
@@ -2849,6 +3066,13 @@ impl<'a> Painter<'a> {
         let h = self.view.1;
         self.tex("mainmenu_background", rect(117.0, 0.0, 256.0, h), [0, 0, 0, 60]);
         self.tex("mainmenu_background", rect(107.0, 0.0, 256.0, h), [255, 255, 255, 200]);
+    }
+
+    /// A list longer than the screen holds: [`SHOWN_ROWS`] of it, scrolled so the chosen row shows.
+    fn scrolled(&mut self, rows: &[String], chosen: usize) -> Rect {
+        let first = chosen.saturating_sub(SHOWN_ROWS - 1).min(rows.len().saturating_sub(SHOWN_ROWS));
+        let end = (first + SHOWN_ROWS).min(rows.len());
+        self.list(&rows[first..end], chosen - first)
     }
 
     /// Rows centred on the list's line, the chosen one on its pill; returns the pill.

@@ -63,6 +63,8 @@ pub struct Online {
     poses: Vec<Option<vehicle_anim::Frame>>,
     /// The ticks run in all, and the notice last printed.
     shown: String,
+    /// The host's time-scale modifier (P55), which every machine scales the same ticks by.
+    pub time_scale: Option<F>,
 }
 
 impl Online {
@@ -100,6 +102,7 @@ impl Online {
             last: Instant::now(),
             hands: Controls::default(),
             shown: String::new(),
+            time_scale: None,
         })
     }
 
@@ -123,6 +126,7 @@ impl Online {
             last: Instant::now(),
             hands: Controls::default(),
             shown: String::new(),
+            time_scale: None,
         })
     }
 
@@ -266,10 +270,10 @@ impl Online {
                     hands = Some(*c);
                 }
             };
-            let mut game = Rides { sims: &mut self.sims, world: place, after: Some(&mut after) };
+            let mut game = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale };
             self.net.frame(&mut game, &local, real);
         }
-        self.dt = rides::tick_dt(self.net.tick().saturating_sub(1));
+        self.dt = game_sim::modifiers::scaled_dt(rides::tick_dt(self.net.tick().saturating_sub(1)), self.time_scale);
         for (to, d) in self.net.outgoing() {
             self.send(&to, &d);
         }
