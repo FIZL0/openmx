@@ -232,6 +232,11 @@ pub struct Rider {
     /// towards in place of the kit's fixed riding pose. An input like the controls: a shell that
     /// draws the body writes it every frame, and `None` keeps the kit's pose.
     pub skeleton: Option<Arc<Posed>>,
+    /// The skeleton's nodes' drawn matrices as the last riding tick placed them (S70): what a wreck
+    /// entered on the next tick measures each bone's velocity and spin from, as the original's pose
+    /// measures them from the node's last drawn frame. Empty with no kit, while down, and on the
+    /// tick of a put-back, when the next wreck starts its bones as [`Down::enter_posed`] does.
+    pub drawn: Vec<crate::math::Mat4>,
     /// The rider's wreck sounds, as far as the pick goes: which was played last, so that the next
     /// wreck draws as the original does ([`wreck_sound`]).
     pub wreck_sounds: wreck_sound::Emitter,
@@ -328,6 +333,7 @@ impl Rider {
             ragdoll_kit: None,
             ragdoll: None,
             skeleton: None,
+            drawn: Vec::new(),
             wreck_sounds: wreck_sound::Emitter::retail(),
             animation: motion::Frame { blend: motion::Blend::Free, restart: false },
             body: rider_anim::Body::default(),
@@ -424,7 +430,7 @@ impl Rider {
         let mut out = Frame::default();
         let Rider {
             ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
-            flight, airborne, ragdoll_kit, ragdoll, skeleton, wreck_sounds, idles, ghost, edge_armed, page,
+            flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, wreck_sounds, idles, ghost, edge_armed, page,
             put_back, ragdoll_shown, ..
         } = self;
         *ragdoll_shown = None;
@@ -455,6 +461,15 @@ impl Rider {
                 put_back.place();
             }
         }
+
+        // 1c — the skeleton's nodes on the bike where the last tick left it, and the drawn matrices
+        // they were at the tick before (S70): a wreck entered this tick poses its bones from both, as
+        // the original's entry does from the riding skeleton's nodes and their last drawn frame.
+        let drawn_before = std::mem::take(drawn);
+        let nodes = match ragdoll_kit.as_ref() {
+            Some(kit) if state.wreck.is_none() => Some(ragdoll_ride::nodes(kit, skeleton.as_deref(), &ride.transform())),
+            _ => None,
+        };
 
         // 2 — the physics, only while the rider is not down. The respawn is the machine's to order,
         // so the bike's own chord is taken out of the controls it is handed here and read below.
@@ -661,11 +676,13 @@ impl Rider {
             *ragdoll = match (ragdoll_kit.as_ref(), wreckage.as_ref(), crash.as_ref()) {
                 (Some(kit), Some(w), Some(down)) => {
                     let rng = ragdoll_ride::generator(idles);
-                    let m = ride.transform();
-                    let doll = Down::enter_posed(
+                    let now = nodes.clone().unwrap_or_else(|| ragdoll_ride::nodes(kit, skeleton.as_deref(), &ride.transform()));
+                    let before = (drawn_before.len() == now.len()).then_some(&drawn_before[..]);
+                    let doll = Down::enter_from(
                         kit,
-                        skeleton.as_deref(),
-                        &m,
+                        &now,
+                        before,
+                        dt,
                         down,
                         down.throw,
                         i32::from(reason.0),
@@ -732,6 +749,13 @@ impl Rider {
             out.respawned = true;
             ghost.start();
             put_back.place();
+        }
+        // The nodes' drawn matrices for the next tick's entry: none once the rider is down or put
+        // back, where the next riding tick starts a fresh history.
+        if state.wreck.is_none() && !out.respawned {
+            if let Some(nodes) = nodes {
+                *drawn = ragdoll_ride::drawn(&nodes);
+            }
         }
         out
     }
