@@ -50,6 +50,9 @@ pub struct Ee {
     /// Every byte address written since the current call began — how a test checks out-parameters and
     /// how `./kit oracle` reports what a function touched.
     pub written: BTreeSet<u32>,
+    /// Every byte address read while this is `Some` — what a function depends on, for finding which
+    /// parts of a RAM dump a replay has to lay in. Off (`None`) unless a test turns it on.
+    pub reads: std::cell::RefCell<Option<BTreeSet<u32>>>,
     /// Instructions executed by the last call.
     pub steps: u64,
     /// The stack pointer each call starts with. Defaults to 16 KB below the top of RAM; move it if a RAM
@@ -91,6 +94,7 @@ impl Ee {
             ram,
             spr: vec![0; SPR],
             written: BTreeSet::new(),
+            reads: std::cell::RefCell::new(None),
             steps: 0,
             stack,
             hooks: BTreeMap::new(),
@@ -192,6 +196,9 @@ impl Ee {
     /// `n` bytes at `a`, little-endian.
     pub fn read(&self, a: u32, n: usize) -> u128 {
         let (spr, o) = self.loc(a);
+        if let Some(reads) = self.reads.borrow_mut().as_mut() {
+            reads.extend(a..a.wrapping_add(n as u32));
+        }
         let m = if spr { &self.spr } else { &self.ram };
         (0..n).fold(0u128, |v, k| v | (m[o + k] as u128) << (8 * k))
     }

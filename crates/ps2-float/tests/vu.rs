@@ -33,6 +33,10 @@ fn vu_arithmetic_chops_and_clamps() {
     assert_eq!(vu::div(1.0, 3.0), 0.3333333, "Q is chopped too, unlike the FPU's div.s");
     assert_eq!(fpu::div(1.0, 3.0), 0.33333334, "— which is the FPU's answer, one ulp up");
     assert_eq!(vu::sqrt(-4.0), 2.0, "vsqrt takes |x|");
+    // √5 rounds up to nearest (0x400f1bbd); PCSX2's VU0 chops it, which S56's wrecks needed
+    assert_eq!(vu::sqrt(5.0).to_bits(), 0x400f_1bbc, "vsqrt is chopped");
+    assert_eq!(fpu::sqrt(5.0).to_bits(), 0x400f_1bbd, "— the FPU's sqrt.s is not");
+    assert_eq!(vu::sqrt(2.0).to_bits(), 0x3fb5_04f3, "a root that rounded down is left alone");
     assert_eq!(vu::rsqrt(1.0, 4.0), 0.5);
     assert_eq!(vu::operand(0x7f80_0000), vu::MAX, "an Inf pattern is just a big number");
     assert_eq!(vu::operand(0x0040_0000), 0.0, "denormals are zero here too");
