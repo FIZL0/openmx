@@ -651,12 +651,13 @@ const KEY_STICKS: [(usize, u8, u8); 2] = [
     (REPORT_RIGHT_Y, key::I, key::K),
 ];
 
-/// The new layout's stick keys (P54), in [`KEY_STICK_SLOTS`]' order: `HJKL` the right stick, vim's
-/// way (H left, J down, K up, L right), and `WASD` the left, which steers and leans (A and D steer,
-/// W leans forward and S back — up is the low end of the byte, as on the pad).
+/// The new layout's stick keys (P54), in [`KEY_STICK_SLOTS`]' order: `YUIO` the right stick, the
+/// row above `HJKL` and vim's way along it (Y left, U down, I up, O right) — `HJKL` itself is the
+/// face buttons since P75 ([`KEYBOARD_NEW`]) — and `WASD` the left, which steers and leans (A and D
+/// steer, W leans forward and S back — up is the low end of the byte, as on the pad).
 const KEY_STICKS_NEW: [(usize, u8, u8); 4] = [
-    (REPORT_RIGHT_X, key::H, key::L),
-    (REPORT_RIGHT_Y, key::K, key::J),
+    (REPORT_RIGHT_X, key::Y, key::O),
+    (REPORT_RIGHT_Y, key::I, key::U),
     (REPORT_LEFT_X, key::A, key::D),
     (REPORT_LEFT_Y, key::W, key::S),
 ];
@@ -811,7 +812,7 @@ impl Pads {
         report.set_axis(REPORT_RIGHT_X, stick_byte(self.axis[AXIS_RIGHT_X]));
         report.set_axis(REPORT_RIGHT_Y, stick_byte(self.axis[AXIS_RIGHT_Y]));
         // The keyboard moves the sticks too — the right stick on `IJKL` under the original's layout,
-        // and under the new one (P54) `HJKL` and the left stick on `WASD` — ramped toward the edge
+        // and under the new one (P54, P75) `YUIO` and the left stick on `WASD` — ramped toward the edge
         // for as long as the key is held and let back to centre when it is not ([`KeyAxis`]). The
         // arrows are the d-pad, in [`KEYBOARD`].
         for (i, (axis, slot)) in self.key_stick.iter_mut().zip(KEY_STICK_SLOTS).enumerate() {
@@ -1433,7 +1434,8 @@ const BINDINGS: usize = 16 + STICK_KEYS.len();
 ///
 /// The keyboard's defaults depend on the seat's layout (P54): the original's is the shell's binding
 /// from before there was a file ([`KEYBOARD`], `X`/space the throttle, `IJKL` the right stick), and
-/// the new one's the usual one ([`KEYBOARD_NEW`], `WASD` and `HJKL` the sticks, space the gas). A
+/// the new one's the usual one ([`KEYBOARD_NEW`], `WASD` and `YUIO` the sticks, `HJKL` the face
+/// buttons, space the gas). A
 /// line the file has is that line under both layouts. The pad buttons' defaults are the same under
 /// both ([`PAD_BUTTONS`]).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1612,7 +1614,7 @@ impl Bindings {
              # Pad0 to Pad11). stick_* are the right stick's keys, left_stick_* the left stick's.\n\
              # The sticks, the triggers (l2, r2) and the d-pad hat are axes and always do what they do;\n\
              # Escape is the pause (it quits without the menus), F3 the overlay (and H, where H is\n\
-             # not a stick key) and M the machine swap.\n\
+             # not a key of the ride) and M the machine swap.\n\
              # A ride reads these through the seat's scheme (--controls new|original, P40). Under the\n\
              # new one r2 is the gas, l2 the brake and select the camera, and cross and square do\n\
              # nothing in a ride: they are kept free for later. Under the original's, cross is the\n\
@@ -1620,8 +1622,9 @@ impl Bindings {
              # line's keys (r2's under the new one, cross's under the original's) are the throttle,\n\
              # ramped.\n\
              # The keyboard's defaults differ by layout (P54): the new one's is WASD the left stick,\n\
-             # HJKL the right, Space the gas, Shift the brake, Q/E L1/R1, Tab or C the camera; the\n\
-             # original's is the shell's old one. A commented line is the default; a line written\n\
+             # YUIO the right (Y left, U down, I up, O right), HJKL the face buttons (H square,\n\
+             # J cross, K triangle, L circle), Space the gas, Shift the brake, Q/E L1/R1, Tab or C\n\
+             # the camera; the original's is the shell's old one. A commented line is the default; a line written\n\
              # out is that line under both layouts.\n",
         );
         let words = |set: &[Input]| set.iter().map(|x| x.name()).collect::<Vec<_>>().join(" ");
@@ -2255,9 +2258,9 @@ const KEYBOARD: [(u8, Control); 15] = [
 /// The keyboard under the new layout (P54): the usual one. Space is the gas and Shift the brake —
 /// R2 and L2, which is where [`Scheme::ride`] reads the new layout's gas and brake from — Q and E
 /// are L1 and R1, Tab or C the camera (Select), Enter Start, the arrows the d-pad (and the menus),
-/// and the 1-4 row the face buttons, which the new layout keeps free in a ride (Cross, Circle,
-/// Square, Triangle). Z and N are L3 and R3, beside the stick keys they click. Escape is the pause,
-/// the shell's own key. `WASD` and `HJKL` are the sticks ([`KEY_STICKS_NEW`]).
+/// and `HJKL` the face buttons, vim's left, down, up and right on the pad's diamond (P75): H Square,
+/// J Cross, K Triangle, L Circle. Z and N are L3 and R3. Escape is the pause, the shell's own key.
+/// `WASD` and `YUIO` are the sticks ([`KEY_STICKS_NEW`]).
 ///
 /// R and F, L2 and R2 in the brief where a scheme still needs them, are not bound: under the new
 /// layout L2 and R2 are the brake and the gas, already on Shift and Space, and the original's
@@ -2275,10 +2278,10 @@ const KEYBOARD_NEW: [(u8, Control); 18] = [
     (key::DOWN, Control::Down),
     (key::LEFT, Control::Left),
     (key::RIGHT, Control::Right),
-    (key::ONE, Control::Cross),
-    (key::TWO, Control::Circle),
-    (key::THREE, Control::Square),
-    (key::FOUR, Control::Triangle),
+    (key::H, Control::Square),
+    (key::J, Control::Cross),
+    (key::K, Control::Triangle),
+    (key::L, Control::Circle),
     (key::Z, Control::L3),
     (key::N, Control::R3),
 ];
@@ -2997,9 +3000,9 @@ pub(crate) mod tests {
         pads.build(FRAME, &held)
     }
 
-    /// P54, the new layout's keyboard: WASD the left stick, HJKL the right (vim's way), Space the
-    /// gas, Shift the brake, Q and E L1 and R1, Tab or C the camera, Enter Start, the arrows the
-    /// d-pad and the 1-4 row the face buttons — as the ride reads them through the new scheme.
+    /// P54, the new layout's keyboard: WASD the left stick, YUIO the right (P75), Space the gas,
+    /// Shift the brake, Q and E L1 and R1, Tab or C the camera, Enter Start, the arrows the d-pad
+    /// and HJKL the face buttons (P75) — as the ride reads them through the new scheme.
     #[test]
     fn the_new_layout_s_keyboard_is_wasd_and_hjkl() {
         let centre = Report::idle();
@@ -3010,14 +3013,26 @@ pub(crate) mod tests {
             (key::D, [255, c, c, c]),
             (key::W, [c, 0, c, c]),
             (key::S, [c, 255, c, c]),
-            (key::H, [c, c, 0, c]),
-            (key::L, [c, c, 255, c]),
-            (key::K, [c, c, c, 0]),
-            (key::J, [c, c, c, 255]),
+            (key::Y, [c, c, 0, c]),
+            (key::O, [c, c, 255, c]),
+            (key::I, [c, c, c, 0]),
+            (key::U, [c, c, c, 255]),
         ] {
             let report = held_for(Scheme::New, code);
             assert_eq!(axes(report), want, "key {code}");
             assert_eq!(report.buttons(), 0, "key {code} pressed a button too");
+        }
+        // P75: HJKL are the face buttons, vim's left, down, up and right on the diamond, and move
+        // no stick.
+        for (code, control) in [
+            (key::H, Control::Square),
+            (key::J, Control::Cross),
+            (key::K, Control::Triangle),
+            (key::L, Control::Circle),
+        ] {
+            let report = held_for(Scheme::New, code);
+            assert_eq!(report.buttons(), control.mask(), "key {code}");
+            assert_eq!(axes(report), [c; 4], "key {code} moved a stick");
         }
         // The ride reads WASD as its lean and steer: A and D steer, W leans forward and S back,
         // the same as the pad's left stick at those bytes.
@@ -3060,8 +3075,8 @@ pub(crate) mod tests {
             (key::DOWN, Control::Down),
             (key::LEFT, Control::Left),
             (key::RIGHT, Control::Right),
-            (key::TWO, Control::Circle),
-            (key::FOUR, Control::Triangle),
+            (key::L, Control::Circle),
+            (key::K, Control::Triangle),
             (key::Z, Control::L3),
             (key::N, Control::R3),
         ] {
@@ -3069,14 +3084,14 @@ pub(crate) mod tests {
         }
         // Tab or C changes the camera under the new scheme.
         assert_eq!(Scheme::New.camera(), Control::Select);
-        // 1 and 3 are Cross and Square on the pad's report — the menus' OK and delete — and the new
+        // J and H are Cross and Square on the pad's report — the menus' OK and delete — and the new
         // scheme keeps both out of a ride, as it does the pad's own.
-        for (code, control) in [(key::ONE, Control::Cross), (key::THREE, Control::Square)] {
+        for (code, control) in [(key::J, Control::Cross), (key::H, Control::Square)] {
             let report = held_for(Scheme::New, code);
             assert_eq!(report.buttons(), control.mask(), "key {code}");
             assert_eq!(Scheme::New.ride(report).buttons(), 0, "key {code} in a ride");
         }
-        // And H is a stick key now, so the shell's overlay moves off it; M is still the swap's.
+        // And H is a face button now, so the shell's overlay stays off it; M is still the swap's.
         let b = Bindings::default();
         assert!(b.binds_key(Scheme::New, key::H) && !b.binds_key(Scheme::Original, key::H));
         assert!(!b.binds_key(Scheme::New, key::M) && !b.binds_key(Scheme::Original, key::M));
@@ -3160,8 +3175,8 @@ pub(crate) mod tests {
         let rows = |b: &Bindings, s: Scheme| b.keyboard_layout(s).into_iter().collect::<std::collections::HashMap<_, _>>();
         let new = rows(&Bindings::default(), Scheme::New);
         for (what, keys) in [
-            ("Gas", "Space"), ("Brake", "Shift"), ("Clutch", "Q"), ("Trick 1", "2"), ("Trick 2", "4"),
-            ("Trick 3", "E"), ("Left stick", "W A S D"), ("Right stick", "K H J L"), ("D-pad", "Arrows"),
+            ("Gas", "Space"), ("Brake", "Shift"), ("Clutch", "Q"), ("Trick 1", "L"), ("Trick 2", "K"),
+            ("Trick 3", "E"), ("Left stick", "W A S D"), ("Right stick", "I Y U O"), ("D-pad", "Arrows"),
             ("Camera", "Tab C"), ("Reset", "Q + E"), ("Pause", "Enter Escape"),
         ] {
             assert_eq!(new.get(what).map(String::as_str), Some(keys), "{what}");
@@ -3380,7 +3395,7 @@ pub(crate) mod tests {
         assert_eq!(seats.said(), ["1P: Pad A (".to_string() + &dev.join("js0").display().to_string() + ")", "2P: Pad B (".to_string() + &dev.join("js1").display().to_string() + ")"]);
         // Each pad drives its own seat, and the keyboard rides with 1P.
         b.button(0, true);
-        let now = frame(&mut seats, &|code| code == key::THREE);
+        let now = frame(&mut seats, &|code| code == key::H);
         assert!(!down(playing(now[0]), Control::Cross) && down(playing(now[1]), Control::Cross));
         assert!(down(playing(now[0]), Control::Square) && !down(playing(now[1]), Control::Square));
         a.button(1, true);
@@ -3430,7 +3445,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dev).unwrap();
         // No pad: the keyboard is 1P, as the shell always was.
         let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
-        let now = frame(&mut seats, &|code| code == key::THREE);
+        let now = frame(&mut seats, &|code| code == key::H);
         assert!(down(playing(now[0]), Control::Square));
         assert_eq!(now[1], SeatInput::Empty);
         assert_eq!(seats.said(), ["1P: the keyboard"]);
@@ -3441,13 +3456,13 @@ pub(crate) mod tests {
         let mut seats =
             Seats::in_dir(&dev, &sys, None, Some(pads), Wiring::default(), Bindings::default());
         a.button(0, true);
-        let now = frame(&mut seats, &|code| code == key::THREE);
+        let now = frame(&mut seats, &|code| code == key::H);
         assert!(down(playing(now[0]), Control::Cross) && !down(playing(now[0]), Control::Square));
         assert!(down(playing(now[1]), Control::Square) && !down(playing(now[1]), Control::Cross));
         assert_eq!(now[2], SeatInput::Empty);
         // 1P's pad out: 1P waits, and the keyboard stays 2P — it has a seat of its own.
         a.unplug();
-        let now = frame(&mut seats, &|code| code == key::THREE);
+        let now = frame(&mut seats, &|code| code == key::H);
         assert_eq!(now[0], SeatInput::Waiting);
         assert!(down(playing(now[1]), Control::Square));
         std::fs::remove_dir_all(&root).unwrap();
@@ -3796,7 +3811,7 @@ pub(crate) mod tests {
         let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
         b.button(0, true);
         seats.since_scan = None;
-        let got = seats.devices(&|code| code == key::THREE);
+        let got = seats.devices(&|code| code == key::H);
         assert_eq!(got.len(), 3);
         assert_eq!(got[0].0, Device::Keys);
         assert!(down(got[0].1, Control::Square) && !down(got[0].1, Control::Cross));
@@ -3806,7 +3821,7 @@ pub(crate) mod tests {
         assert_eq!(seats.device_name(&b_id), Some(format!("Pad B ({})", dev.join("js1").display()).as_str()));
 
         seats.set_first(Some(Device::Pad(b_id.clone())));
-        let now = frame(&mut seats, &|code| code == key::THREE);
+        let now = frame(&mut seats, &|code| code == key::H);
         let one = playing(now[0]);
         assert!(down(one, Control::Cross) && !down(one, Control::Square), "1P is B's alone");
         assert!(matches!(now[1], SeatInput::Playing(_)));
@@ -3818,7 +3833,7 @@ pub(crate) mod tests {
         assert_eq!(frame(&mut seats, &nothing)[0], SeatInput::Waiting);
         frame(&mut seats, &|code| code == key::RETURN);
         assert_eq!(seats.first(), Some(&Device::Keys));
-        assert!(down(playing(frame(&mut seats, &|code| code == key::THREE)[0]), Control::Square));
+        assert!(down(playing(frame(&mut seats, &|code| code == key::H)[0]), Control::Square));
         assert!(seats.keyboard_alone().is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }
