@@ -59,6 +59,7 @@ use crate::tire;
 use crate::trick;
 use crate::wheel;
 use crate::world::World;
+use crate::wreck_bike::{NoObjects, WreckBike};
 use ps2_float::{Acc, Dest, F, Field, Vf, fpu, libm, vu};
 
 /// World up, with `w` of one, as every module here holds it.
@@ -69,12 +70,6 @@ const NOTHING: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
 /// How many probes the collision bundle carries, and what each one is for — see [`Ride::bundle`].
 const PROBES: usize = 4;
 
-
-/// The integrator's speed limits, which the original takes from a vehicle setup this port does not
-/// have. Wide enough that no ride reaches them: what they are for here is to keep
-/// [`chassis::integrate`]'s clamp from reading a zero limit as a standstill.
-const MAX_SPEED: f32 = 1000.0;
-const MAX_ANG_SPEED: f32 = 100.0;
 
 /// **The bike's own speed limit**, squared: 135 ft/s. The rigid body's constructor writes it, as this
 /// literal, and nothing the bike's setup or its `.phy` reads changes it — the live chassis of a
@@ -2190,9 +2185,11 @@ pub fn hit_of(reason: trick::Wreck) -> Option<phy::Hit> {
 /// before this. A [`Crash`] is what sets it, by simulating the two things the original has lying on
 /// the dirt:
 ///
-/// * **The bike**, as `Wreckbike.phy`'s one `[PhysicsPart1]` — a rigid body of its own, entered from
-///   the bike's own velocity and spin by [`Crash::begin`] (a port of `bike_wreck_entry`'s body half)
-///   and integrated by the same ported integrator the bike uses ([`chassis::integrate`]).
+/// * **The bike**, as `Wreckbike.phy`'s one `[PhysicsPart1]` — a rigid body of its own with its
+///   collision object, entered from the bike's own velocity and spin by [`Crash::begin`] (a port of
+///   `bike_wreck_entry`'s body half) and run as the original's world node runs it
+///   ([`crate::wreck_bike`], S69): the contact search against the terrain, then the world's four
+///   substeps of gravity, contact resolution and integration.
 /// * **The rider**, as one point. The original's rider is an eighteen-part ragdoll with twenty-six
 ///   constraints running at 25 Hz, which is not ported and is not a small job; what is here is the
 ///   one thing the machine needs out of it — when the rider, having let go of the bars after the
@@ -2228,8 +2225,8 @@ pub struct Crash {
     /// What is left of the throw's `ForceTime` once the hands are off. Counted down and not spent —
     /// see the type's own docs.
     pub throwing: F,
-    /// The bike's wreck body, and its transform's origin.
-    pub body: chassis::Chassis,
+    /// The bike's wreck body and its collision object, and its transform's origin.
+    pub bike: WreckBike,
     pub origin: Vf,
     /// Where the rider is and how fast, as one point, and whether they have hit the ground yet.
     pub rider: Vf,
@@ -2265,34 +2262,13 @@ impl Crash {
     ) -> Crash {
         let hit = hit_of(reason);
         let m = ride.transform();
-        let inv = |v: f32| if v == 0.0 { F::ZERO } else { F::ONE / F(v) };
-        let body = chassis::Chassis {
-            awake: 1,
-            cofg: part.cofg,
-            inv_mass: if part.mass == F::ZERO { F::ZERO } else { F::ONE / part.mass },
-            inv_inertia: Mat3::new(
-                Vf::new(inv(inertia.x()).0, 0.0, 0.0, 0.0),
-                Vf::new(0.0, inv(inertia.y()).0, 0.0, 0.0),
-                Vf::new(0.0, 0.0, inv(inertia.z()).0, 0.0),
-            ),
-            quat: ride.chassis.quat,
-            cofg_world: math::transform_point(&m, part.cofg),
-            // The entry's two copies: `chassis + 0x260` into the body's velocity and `chassis + 0x290`
-            // — the spin in the bike's own frame — into the body's.
-            vel: ride.chassis.vel,
-            ang_vel: spin.unwrap_or(ride.chassis.ang_vel),
-            free: [1; 3],
-            ang_free: [1; 3],
-            // The same stand-in limits the bike is built with, and for the same reason: a zero limit
-            // is read as a standstill by the clamp. `Wreckbike.phy`'s own `BodyAngularRateLimit` is
-            // one of the four keys nothing in the game reads.
-            max_speed_sq: F(MAX_SPEED * MAX_SPEED),
-            max_ang_speed_sq: F(MAX_ANG_SPEED * MAX_ANG_SPEED),
-            ang_vel_max: [F(MAX_ANG_SPEED); 3],
-            ang_vel_min: [F(-MAX_ANG_SPEED); 3],
-            correction: chassis::CLEAR,
-            ..chassis::Chassis::default()
-        };
+        // The body where the bike's centre of mass is, turned as the bike is, with the entry's two
+        // copies: `chassis + 0x260` into the body's velocity and `chassis + 0x290` — the spin in the
+        // bike's own frame — into the body's rates.
+        let mut bike = WreckBike::new(part, inertia, math::transform_point(&m, part.cofg), ride.chassis.quat);
+        let still = Vf::new(0.0, 0.0, 0.0, 1.0);
+        bike.body.velocity = still.merge(Dest::XYZ, ride.chassis.vel);
+        bike.body.rates = still.merge(Dest::XYZ, spin.unwrap_or(ride.chassis.ang_vel));
         let (forward, _) = ride.axes();
         let flat = Vf::new(forward.x(), 0.0, forward.z(), 0.0);
         Crash {
@@ -2302,7 +2278,7 @@ impl Crash {
             clock: F::ZERO,
             holding: true,
             throwing: F::ZERO,
-            body,
+            bike,
             origin: ride.origin,
             // While the hands are on the bars the rider is where the bike is; the flail height is
             // taken when they come off.
@@ -2324,17 +2300,19 @@ impl Crash {
         if self.holding && !(self.clock < self.throw.hand_hold_time) {
             self.holding = false;
             self.throwing = self.throw.force_time;
-            self.rider = add_xyz(self.body.cofg_world, scale(UP, wrecks.rider_flail_height));
-            self.rider_vel = self.body.vel;
+            self.rider = add_xyz(self.bike.body.position, scale(UP, wrecks.rider_flail_height));
+            self.rider_vel = self.bike.body.velocity;
         }
 
-        // The body: its own gravity, the dirt under it, and the ported integrator.
-        self.body.force = add_xyz(self.body.force, part.gravity);
-        self.contact(dt, part, world);
-        let entry = math::quat_to_mat4(self.body.quat, self.origin);
-        integrate(&mut self.body, dt, &entry, &mut self.origin);
-        self.resting = length(self.body.vel) <= part.speed_threshold
-            && length(self.body.ang_vel) <= part.angular_rate_threshold;
+        // The body: the world node's tick, against the terrain. The world's objects are not searched
+        // (see `wreck_bike`), and a part with its collision off searches nothing.
+        {
+            let field = if part.collision_enabled { world.heightfield() } else { None };
+            self.bike.tick(dt, field.as_deref(), &mut NoObjects);
+        }
+        self.origin = self.bike.origin();
+        self.resting = length(self.bike.body.velocity) <= part.speed_threshold
+            && length(self.bike.body.rates) <= part.angular_rate_threshold;
 
         // The rider, as one point, until they reach the dirt.
         if !self.holding && !self.landed {
@@ -2352,8 +2330,8 @@ impl Crash {
                 self.landed = true;
             }
         } else if self.holding {
-            self.rider = self.body.cofg_world;
-            self.rider_vel = self.body.vel;
+            self.rider = self.bike.body.position;
+            self.rider_vel = self.bike.body.velocity;
             self.ground = F(world.ground(self.rider).0.y());
         }
     }
@@ -2364,59 +2342,6 @@ impl Crash {
     /// it; this port's rider is one point, so the point stands in for the bone.
     pub fn clearance(&self) -> F {
         F(self.rider.y()) - self.ground
-    }
-
-    /// The dirt under the wreck body, as a spring, a damper and a friction at one contact point.
-    ///
-    /// **The shape is the original's and the numbers are the file's; the solver is not ported.** The
-    /// engine resolves a part against the world through its collision record, which this crate has no
-    /// port of (`collide.rs` is the sweep, not the response). What is here is the contact the file is
-    /// written for: `SpringStiffness` and `SpringDamping` against the penetration of the part's own
-    /// `Radius` sphere, held to `MaxPenetration`, with `FrictionZone1` across it, each put in at the
-    /// contact point so that it turns the body as well as pushing it, and each scaled by the file's
-    /// own `SpringMomentScale` and `FrictionMomentScale`. The two rates go through the same
-    /// [`phy::spring_rate`] and [`phy::damping`] the wheels' do, which is what makes a stiffness of 5
-    /// hold a 250 lb body up.
-    fn contact(&mut self, dt: F, part: &phy::Part, world: &mut dyn World) {
-        if !part.collision_enabled {
-            return;
-        }
-        let (on, normal) = world.ground(self.body.cofg_world);
-        let depth = part.radius - dot3(sub_xyz(self.body.cofg_world, on), normal);
-        if depth <= F::ZERO {
-            return;
-        }
-        let m = math::quat_to_mat4(self.body.quat, self.origin);
-        let at = on;
-        let rate = phy::spring_rate(part.spring_stiffness, part.mass);
-        let held = if depth < part.max_penetration { depth } else { part.max_penetration };
-        let v = contact_velocity(self.body.vel, self.body.world_ang_vel, at, self.body.cofg_world);
-        let closing = -dot3(v, normal);
-        let load = rate * held + phy::damping(part.spring_damping, part.mass, rate) * closing;
-        let load = if load > F::ZERO { load } else { F::ZERO };
-        self.push(&m, scale(normal, load), at, part.spring_moment_scale);
-
-        // The slide across the contact, held to what would stop it inside one step so that a body at
-        // rest is not shoved about by its own friction.
-        let across = sub_xyz(v, scale(normal, dot3(v, normal)));
-        let speed = length(across);
-        if speed > F::ZERO {
-            let grip = part.friction_zone1 * load;
-            let stop = speed * part.mass / dt;
-            let f = if grip < stop { grip } else { stop };
-            self.push(&m, scale(normal_of(across, speed), -f), at, part.friction_moment_scale);
-        }
-        self.body.contacts += 1;
-    }
-
-    /// A force into the wreck body at a point, with the part of its moment the file allows: the same
-    /// shape as [`push`], which is how the wheels put theirs into the bike.
-    fn push(&mut self, m: &Mat4, force: Vf, at: Vf, moment_scale: Vf) {
-        let local = chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), force);
-        let arm = sub_xyz(unpoint(m, at), self.body.cofg);
-        self.body.force = add_xyz(self.body.force, force);
-        let moment = cross(arm, local);
-        self.body.torque = add_xyz(self.body.torque, moment.merge(Dest::XYZ, moment.mul(moment_scale)));
     }
 
     /// **What the ride state machine waits for**: the rider is on the ground.
@@ -2441,11 +2366,6 @@ impl Crash {
     }
 }
 
-/// `across / speed`, where the length is already known: the slide's direction.
-fn normal_of(across: Vf, speed: F) -> Vf {
-    scale(across, F::ONE / speed)
-}
-
 impl State for Crash {
     fn walk(&self, w: &mut Walk<'_>) {
         w.u8("reason", self.reason.0);
@@ -2461,7 +2381,7 @@ impl State for Crash {
         w.f("clock", self.clock);
         w.bool("holding", self.holding);
         w.f("throwing", self.throwing);
-        w.group("body", |w| walk_chassis(w, &self.body));
+        w.field("body", &self.bike);
         w.vf("origin", self.origin);
         w.vf("rider", self.rider);
         w.vf("rider_vel", self.rider_vel);

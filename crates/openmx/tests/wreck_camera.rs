@@ -39,10 +39,10 @@ fn dist(a: Vf, b: Vf) -> f32 {
     ((a.x() - b.x()).powi(2) + (a.y() - b.y()).powi(2) + (a.z() - b.z()).powi(2)).sqrt()
 }
 
-/// A wreck with the bike's wreck body at `bike` and the rider's point at `rider`.
-fn crash(rider: Vf, bike: Vf) -> Crash {
-    let mut body = game_sim::chassis::Chassis::default();
-    body.vel = v(0.0, 0.0, 30.0);
+/// A wreck with the bike's wreck body at `at` and the rider's point at `rider`.
+fn crash(rider: Vf, at: Vf) -> Crash {
+    let mut bike = game_sim::wreck_bike::WreckBike::default();
+    bike.body.velocity = v(0.0, 0.0, 30.0);
     Crash {
         reason: Wreck::THROWN,
         hit: None,
@@ -50,8 +50,8 @@ fn crash(rider: Vf, bike: Vf) -> Crash {
         clock: F::ZERO,
         holding: false,
         throwing: F::ZERO,
-        body,
-        origin: bike,
+        bike,
+        origin: at,
         rider,
         rider_vel: v(0.0, 0.0, 0.0),
         landed: true,
