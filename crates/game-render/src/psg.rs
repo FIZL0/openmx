@@ -346,15 +346,21 @@ impl Model {
     ///
     /// A model with no groups at all answers 0, as the original's walk does.
     pub fn group_for(&self, distance: f32, radius: f32, focal: f32) -> usize {
-        let metric = focal / (distance - radius).max(0.1);
-        let mut chosen = 0;
-        for i in 0..self.group_distance.len().saturating_sub(1) {
-            if metric * self.group_distance[i] < 1.0 {
-                chosen = i + 1;
-            }
-        }
-        chosen
+        group_at(&self.group_distance, distance, radius, focal)
     }
+}
+
+/// [`Model::group_for`] with the model's `group_distance` handed in, for a renderer that keeps only
+/// that list of a model it has uploaded (V32).
+pub fn group_at(group_distance: &[f32], distance: f32, radius: f32, focal: f32) -> usize {
+    let metric = focal / (distance - radius).max(0.1);
+    let mut chosen = 0;
+    for i in 0..group_distance.len().saturating_sub(1) {
+        if metric * group_distance[i] < 1.0 {
+            chosen = i + 1;
+        }
+    }
+    chosen
 }
 
 /// Walk one mesh's VIF packet, turning each batch into a strip.

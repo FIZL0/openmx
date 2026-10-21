@@ -11,8 +11,16 @@
 //!   node matrices: the vertex shader reads its node's matrix out of a palette texture. A prop's
 //!   palette is its bind pose, written once; a body's or a chassis' is the frame's pose — a hundred
 //!   matrices a rider, rather than every triangle re-made on the CPU (`skin::skin`).
-//! * **Draws are batched and culled.** Each view's props are culled against its frustum and the fog,
-//!   gathered by model and level of detail, and drawn with one call per material for every copy.
+//! * **Draws are batched and culled.** Each view's props are culled against its frustum and its reach
+//!   (the fog's end, or none: [`Graphics`]), and the ones under a pixel across are dropped. The rest
+//!   are gathered by model and level of detail, the disc's own test choosing it ([`Model::group_for`]),
+//!   and drawn with one call per material for every copy.
+//! * **The ground has levels of detail** (V32). It is uploaded once as square chunks of corners, and
+//!   each view draws each chunk it sees at the coarsest level whose height error is under a pixel,
+//!   stitched to its neighbours ([`crate::terrain::lod_indices`]), in one draw.
+//! * **Depth is reversed** (V32): 1 at the near plane and 0 at the far one, so a float depth buffer
+//!   keeps its precision out to the far side of a whole map and the ruts and shadows laid on the
+//!   ground do not fight it there.
 //! * **One pass for every view.** A split screen's views (V22) are viewports of one render pass, each
 //!   with its own camera.
 //!
@@ -38,7 +46,8 @@ use crate::pst::Texture;
 use crate::scene::{Scene, Shading};
 use crate::sky::Sky;
 use crate::splat::Splat;
-use crate::world::{Assets, Camera, Lighting, Surface};
+use crate::terrain::{lod_balance, lod_coarser, lod_errors, lod_indices, lod_indices_where, lod_level, lod_levels};
+use crate::world::{Assets, Camera, Fog, Graphics, Lighting, Surface};
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
@@ -47,9 +56,10 @@ use wgpu::util::DeviceExt;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The format an offscreen frame is drawn in: plain bytes, as the rasteriser's are.
 pub const OFFSCREEN: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// How far away the GPU's far plane is. The rasteriser clips nothing beyond the near plane, and the
-/// fog and the sky end the world long before this.
-const FAR: f32 = 100_000.0;
+/// How many pixels a chunk of ground's height may be out by, at the level of detail it is drawn at.
+const GROUND_PIXELS: f32 = 0.75;
+/// How few pixels across a prop may be before it is not drawn at all: less than one can show.
+const PROP_PIXELS: f32 = 0.5;
 /// Node matrices a palette row holds (four texels each).
 const PALETTE_ROW: u32 = 256;
 /// A view's uniforms, padded to the alignment a dynamic offset needs.
@@ -91,7 +101,7 @@ struct ViewUniform {
     sun_color: [f32; 4],
     ambient: [f32; 4],
     fog_color: [f32; 4],
-    /// near, far, whether there is a sky, unused.
+    /// near, far, whether there is a sky, the most fog anything gets ([`Fog`]).
     fog: [f32; 4],
     /// The sky's ray: forward, and the view's right and up scaled by its half extents.
     forward: [f32; 4],
@@ -187,6 +197,8 @@ struct GpuModel {
     vertices: wgpu::Buffer,
     /// Per level of detail, its runs, the opaque ones first.
     groups: Vec<Vec<Range>>,
+    /// The distances its levels of detail switch at, as the file has them ([`Model::group_for`]).
+    group_distance: Vec<f32>,
     /// Where the bind pose's palette starts, and how many nodes it has.
     bind_palette: u32,
     nodes: u32,
@@ -202,28 +214,61 @@ impl GpuModel {
     }
 }
 
-/// A patch of the ground: some cells, as triangles, with a sphere to cull it by.
+/// A square patch of the ground, `cells` cells a side: its corners, with a sphere to cull it by.
+///
+/// Every chunk of a ground is the same size, a power of two, and has all `(cells + 1)²` corners, row
+/// by row along `x`; one at the map's edge repeats the edge's corners past it, which makes empty
+/// triangles rather than a different shape. The GPU picks how many of them to draw
+/// ([`crate::terrain::lod_indices`]).
 #[derive(Clone, Debug, Default)]
 pub struct GroundChunk {
     pub vertices: Vec<GroundVertex>,
-    pub indices: Vec<u32>,
+    pub cells: u32,
+    /// Which chunk this is, across and along.
+    pub at: (u32, u32),
+    /// The cells that have no ground, row by row; empty when there are none. A chunk with holes is
+    /// always drawn whole.
+    pub missing: Vec<bool>,
     pub centre: V3,
     pub radius: f32,
 }
 
 struct GpuChunk {
-    first: u32,
-    count: u32,
+    /// Where its corners start in the vertex buffer.
+    base: u32,
     centre: V3,
     radius: f32,
+    /// Its height error at each level ([`lod_errors`]).
+    errors: Vec<f32>,
+    /// A chunk with holes: its whole grid, stitched each of the sixteen ways.
+    own: Option<Vec<Vec<u32>>>,
 }
 
 struct GpuGround {
     vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
     chunks: Vec<GpuChunk>,
+    cells: u32,
+    across: usize,
+    along: usize,
+    /// The grid of chunks: which one is at each place, if any.
+    slots: Vec<Option<usize>>,
+    /// Every level's triangles, stitched each of the sixteen ways: `level * 16 + coarser sides`.
+    patterns: Vec<Vec<u32>>,
+    /// Each view's triangles, as last built, and what they were built from.
+    views: Vec<GroundView>,
+    levels: Vec<u32>,
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
+}
+
+/// One view's ground: what it drew last frame, kept until the chunks it sees or their levels change.
+struct GroundView {
+    buffer: wgpu::Buffer,
+    capacity: u64,
+    /// For each chunk, the pattern it was drawn with, or `u32::MAX` for not drawn.
+    key: Vec<u32>,
+    count: u32,
+    indices: Vec<u32>,
 }
 
 /// Something to draw in a view besides the scene's own props: a bike, its parts, a rider, the plane.
@@ -314,6 +359,10 @@ pub struct Drawn {
     /// Triangles sent to the GPU, per view.
     pub triangles: Vec<usize>,
     pub draws: usize,
+    /// Ground chunks drawn, at each level of detail, over every view.
+    pub ground_levels: Vec<usize>,
+    /// Props drawn, over every view.
+    pub props: usize,
 }
 
 /// Where a frame goes: a texture view, how big that texture is, and where in it the frame sits.
@@ -369,6 +418,9 @@ pub struct Renderer {
     overlay: Option<Overlay>,
     ground: Option<GpuGround>,
     props: Vec<Prop>,
+    /// How far the world is drawn (V32), and how far apart the ground's two farthest points are.
+    graphics: Graphics,
+    span: f32,
     /// The frame's instances and batches, kept to reuse their allocations.
     scratch: Vec<(u64, InstanceRaw)>,
     batches: Vec<Batch>,
@@ -740,15 +792,68 @@ fn strips_of(model: &Model, material_of: &[usize], blended: impl Fn(usize) -> bo
     (vertices, out)
 }
 
-/// World to clip for a view of this shape, with the GPU's far plane.
-fn view_projection(camera: &Camera, width: u32, height: u32) -> M4 {
-    let aspect = width.max(1) as f32 / height.max(1) as f32;
-    M4::look_at(camera.eye, camera.at, v3(0.0, 1.0, 0.0)).mul(M4::perspective(camera.fov, aspect, camera.near, FAR))
+/// A four-bit mask of a chunk's coarser sides as [`lod_indices`] wants them.
+fn sides(mask: usize) -> [bool; 4] {
+    [mask & 1 != 0, mask & 2 != 0, mask & 4 != 0, mask & 8 != 0]
 }
 
-/// The frustum's planes out of a row-vector world-to-clip matrix: left, right, bottom, top, near, as
-/// `(normal, offset)` with the inside where `normal . p + offset >= 0`.
-fn frustum(vp: &M4) -> [[f32; 4]; 5] {
+/// World to clip for a view of this shape, with its far plane at `far`, depth running 0 to 1 from
+/// near to far.
+fn view_projection(camera: &Camera, width: u32, height: u32, far: f32) -> M4 {
+    let aspect = width.max(1) as f32 / height.max(1) as f32;
+    M4::look_at(camera.eye, camera.at, v3(0.0, 1.0, 0.0)).mul(M4::perspective(camera.fov, aspect, camera.near, far.max(camera.near * 2.0)))
+}
+
+/// [`view_projection`] as the GPU draws it: depth reversed, 1 at the near plane and 0 at the far one.
+fn reversed(vp: M4) -> M4 {
+    let mut m = vp.0;
+    for row in &mut m {
+        row[2] = row[3] - row[2];
+    }
+    M4(m)
+}
+
+/// What one view draws (V32): what its frustum holds, no further than its reach, and nothing too
+/// small to make a pixel.
+pub struct Cull {
+    planes: [[f32; 4]; 6],
+    eye: V3,
+    reach: f32,
+    focal: f32,
+}
+
+impl Cull {
+    /// The cull of `camera` drawn `width` by `height` pixels under `graphics`, for a map `span` feet
+    /// across and a scene lit (and fogged) by `light`.
+    pub fn of(camera: &Camera, width: u32, height: u32, graphics: Graphics, light: &Lighting, span: f32) -> Cull {
+        let vp = view_projection(camera, width, height, graphics.far_clip(light, span));
+        Cull {
+            planes: frustum(&vp),
+            eye: camera.eye,
+            reach: graphics.fog(light, span).reach,
+            focal: camera.focal(height.max(1) as usize),
+        }
+    }
+
+    /// Whether a sphere is in view: inside the frustum and not past the reach.
+    pub fn sees(&self, centre: V3, radius: f32) -> bool {
+        centre.sub(self.eye).len() - radius <= self.reach && sees(&self.planes, centre, radius)
+    }
+
+    /// How far the camera is from a sphere's surface; 0 inside it.
+    pub fn distance(&self, centre: V3, radius: f32) -> f32 {
+        (centre.sub(self.eye).len() - radius).max(0.0)
+    }
+
+    /// Whether a sphere is at least `pixels` across on screen.
+    pub fn big_enough(&self, centre: V3, radius: f32, pixels: f32) -> bool {
+        2.0 * radius * self.focal >= pixels * centre.sub(self.eye).len()
+    }
+}
+
+/// The frustum's planes out of a row-vector world-to-clip matrix: left, right, bottom, top, near, far,
+/// as `(normal, offset)` with the inside where `normal . p + offset >= 0`.
+fn frustum(vp: &M4) -> [[f32; 4]; 6] {
     let m = vp.0;
     let col = |k: usize| [m[0][k], m[1][k], m[2][k], m[3][k]];
     let (x, y, z, w) = (col(0), col(1), col(2), col(3));
@@ -757,10 +862,10 @@ fn frustum(vp: &M4) -> [[f32; 4]; 5] {
         let n = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt().max(1e-12);
         [p[0] / n, p[1] / n, p[2] / n, p[3] / n]
     };
-    [plane(w, 1.0, x), plane(w, -1.0, x), plane(w, 1.0, y), plane(w, -1.0, y), plane(z, 0.0, z)]
+    [plane(w, 1.0, x), plane(w, -1.0, x), plane(w, 1.0, y), plane(w, -1.0, y), plane(z, 0.0, z), plane(w, -1.0, z)]
 }
 
-fn sees(planes: &[[f32; 4]; 5], c: V3, r: f32) -> bool {
+fn sees(planes: &[[f32; 4]; 6], c: V3, r: f32) -> bool {
     planes.iter().all(|p| p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] >= -r)
 }
 
@@ -1035,6 +1140,8 @@ impl Renderer {
             overlay: None,
             ground: None,
             props: Vec::new(),
+            graphics: Graphics::default(),
+            span: 0.0,
             scratch: Vec::new(),
             batches: Vec::new(),
             flat: Vec::new(),
@@ -1064,35 +1171,62 @@ impl Renderer {
 
     /// The ground: its chunks, and the track's paint for it — or, without paint, the one colour `dirt`
     /// (0..255) lit by the sun.
+    ///
+    /// Every chunk must be the same size, a power of two, with all its corners ([`GroundChunk`]).
     pub fn set_ground(&mut self, chunks: &[GroundChunk], paint: Option<&Splat>, dirt: [f32; 3]) -> Result<(), String> {
-        let mut vertices: Vec<GroundVertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
+        let cells = chunks.first().map_or(1, |c| c.cells);
+        if !cells.is_power_of_two() {
+            return Err(format!("ground chunks of {cells} cells: not a power of two"));
+        }
+        let corners = ((cells + 1) * (cells + 1)) as usize;
+        let mut vertices: Vec<GroundVertex> = Vec::with_capacity(chunks.len() * corners);
         let mut gpu_chunks = Vec::with_capacity(chunks.len());
+        let (mut lo, mut hi) = (v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN));
         for c in chunks {
+            if c.cells != cells || c.vertices.len() != corners {
+                return Err(format!("a ground chunk of {} cells and {} corners among chunks of {cells}", c.cells, c.vertices.len()));
+            }
             let base = vertices.len() as u32;
             vertices.extend_from_slice(&c.vertices);
-            let first = indices.len() as u32;
-            indices.extend(c.indices.iter().map(|i| i + base));
+            for v in &c.vertices {
+                lo = v3(lo.x.min(v.pos[0]), lo.y.min(v.pos[1]), lo.z.min(v.pos[2]));
+                hi = v3(hi.x.max(v.pos[0]), hi.y.max(v.pos[1]), hi.z.max(v.pos[2]));
+            }
+            let heights: Vec<f32> = c.vertices.iter().map(|v| v.pos[1]).collect();
+            let own = c.missing.iter().any(|&m| m).then(|| {
+                (0..16)
+                    .map(|mask| {
+                        let row = cells as usize;
+                        lod_indices_where(cells, 0, sides(mask), |i, j| !c.missing[j as usize * row + i as usize])
+                    })
+                    .collect()
+            });
             gpu_chunks.push(GpuChunk {
-                first,
-                count: c.indices.len() as u32,
+                base,
                 centre: c.centre,
                 radius: c.radius,
+                errors: lod_errors(&heights, cells),
+                own,
             });
         }
-        if indices.is_empty() {
+        if gpu_chunks.is_empty() {
             self.ground = None;
             return Ok(());
         }
+        self.span = if lo.x <= hi.x { hi.sub(lo).len() } else { 0.0 };
+        let across = chunks.iter().map(|c| c.at.0 as usize + 1).max().unwrap_or(0);
+        let along = chunks.iter().map(|c| c.at.1 as usize + 1).max().unwrap_or(0);
+        let mut slots = vec![None; across * along];
+        for (i, c) in chunks.iter().enumerate() {
+            slots[c.at.1 as usize * across + c.at.0 as usize] = Some(i);
+        }
+        let patterns: Vec<Vec<u32>> = (0..=lod_levels(cells))
+            .flat_map(|level| (0..16).map(move |mask| lod_indices(cells, level, sides(mask))))
+            .collect();
         let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ground vertices"),
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ground indices"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
         });
 
         // The paint is a little program (`splat.rs`); here it is written out as the shader's own code.
@@ -1169,7 +1303,7 @@ impl Renderer {
                 })],
             },
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Less)),
+            depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Greater)),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -1182,12 +1316,32 @@ impl Renderer {
         });
         self.ground = Some(GpuGround {
             vertices: vertex_buffer,
-            indices: index_buffer,
+            levels: vec![0; slots.len()],
             chunks: gpu_chunks,
+            cells,
+            across,
+            along,
+            slots,
+            patterns,
+            views: Vec::new(),
             pipeline,
             bind,
         });
         Ok(())
+    }
+
+    /// How far the world is drawn from now on (V32): the original's fog and far clip, or all of it.
+    pub fn set_graphics(&mut self, graphics: Graphics) {
+        self.graphics = graphics;
+    }
+
+    pub fn graphics(&self) -> Graphics {
+        self.graphics
+    }
+
+    /// The fog every view is drawn with, under the current [`Graphics`], and where its far plane is.
+    pub fn fog(&self, light: &Lighting) -> (Fog, f32) {
+        (self.graphics.fog(light, self.span), self.graphics.far_clip(light, self.span))
     }
 
     /// Forget every model, material and texture uploaded so far: a new ride's assets are not the last
@@ -1248,6 +1402,7 @@ impl Renderer {
             self.models.push(GpuModel {
                 vertices: buffer,
                 groups,
+                group_distance: model.group_distance.clone(),
                 bind_palette,
                 nodes: model.nodes.len() as u32,
                 radius: loaded.radius,
@@ -1370,7 +1525,7 @@ impl Renderer {
                 ],
             },
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(depth_state(key.depth_write, wgpu::CompareFunction::Less)),
+            depth_stencil: Some(depth_state(key.depth_write, wgpu::CompareFunction::Greater)),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &self.mesh_module,
@@ -1572,13 +1727,21 @@ impl Renderer {
         let pose_starts = self.write_palette(frame.poses);
 
         let mut uniforms = vec![0u8; (VIEW_STRIDE as usize) * views.len()];
-        let mut planes = Vec::with_capacity(views.len());
+        let mut ground_counts = vec![0u32; views.len()];
+        let mut drawn = Drawn {
+            triangles: vec![0; views.len()],
+            draws: 0,
+            ground_levels: Vec::new(),
+            props: 0,
+        };
+        let (fog, far) = self.fog(light);
         self.scratch.clear();
         for (v, view) in views.iter().enumerate() {
             let [_, _, w, h] = view.rect;
             let (w, h) = (w * target.scale, h * target.scale);
             let camera = view.camera;
-            let vp = view_projection(camera, w, h);
+            let vp = view_projection(camera, w, h, far);
+            let cull = Cull::of(camera, w, h, self.graphics, light, self.span);
             // The sky's ray, as `Sky::draw` makes it: the screen's right and up, whichever way the
             // cross products came out.
             let forward = camera.at.sub(camera.eye).norm();
@@ -1595,13 +1758,13 @@ impl Renderer {
             let half_h = (camera.fov / 2.0).tan();
             let half_w = half_h * w as f32 / h.max(1) as f32;
             let u = ViewUniform {
-                vp: vp.0,
+                vp: reversed(vp).0,
                 eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
                 sun: [light.sun.x, light.sun.y, light.sun.z, 0.0],
                 sun_color: [light.sun_color[0], light.sun_color[1], light.sun_color[2], 0.0],
                 ambient: [light.ambient[0], light.ambient[1], light.ambient[2], 0.0],
                 fog_color: [light.fog_color[0] as f32, light.fog_color[1] as f32, light.fog_color[2] as f32, 0.0],
-                fog: [light.fog_near, light.fog_far, if self.has_sky { 1.0 } else { 0.0 }, 0.0],
+                fog: [fog.near, fog.far, if self.has_sky { 1.0 } else { 0.0 }, fog.max],
                 forward: [forward.x, forward.y, forward.z, 0.0],
                 right: [right.x * half_w, right.y * half_w, right.z * half_w, 0.0],
                 up: [up.x * half_h, up.y * half_h, up.z * half_h, 0.0],
@@ -1609,17 +1772,19 @@ impl Renderer {
             };
             let at = v * VIEW_STRIDE as usize;
             uniforms[at..at + std::mem::size_of::<ViewUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
-            let fr = frustum(&vp);
             let focal = camera.focal(h as usize);
-            // The props: culled against the frustum and the fog, as `draw_scene` culls them by the fog.
+            // The props: culled against the frustum and the reach (the fog's end, as `draw_scene` culls
+            // them, or the whole map), and each at the level of detail the disc's own test picks.
             for prop in &self.props {
                 let Some(Some(m)) = prop.model else { continue };
                 let model = &self.models[m];
                 let centre = v3(prop.at.0[3][0], prop.at.0[3][1], prop.at.0[3][2]);
-                if centre.sub(camera.eye).len() - model.radius > light.fog_far || !sees(&fr, centre, model.radius) {
+                if !cull.sees(centre, model.radius) || !cull.big_enough(centre, model.radius, PROP_PIXELS) {
                     continue;
                 }
-                let key = ((v as u64) << 48) | ((m as u64) << 16);
+                drawn.props += 1;
+                let group = crate::psg::group_at(&model.group_distance, centre.sub(camera.eye).len(), model.radius, focal);
+                let key = ((v as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
                 self.scratch.push((
                     key,
                     InstanceRaw {
@@ -1647,7 +1812,7 @@ impl Renderer {
                 let key = ((v as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
                 self.scratch.push((key, InstanceRaw { m: a.at.0, palette }));
             }
-            planes.push(fr);
+            ground_counts[v] = self.ground_for(v, &cull, focal, &mut drawn);
         }
         self.queue.write_buffer(&self.view_buffer, 0, &uniforms);
 
@@ -1684,10 +1849,6 @@ impl Renderer {
         self.write_overlay(target, frame.overlay);
 
         let depth = self.depth_for(target.size);
-        let mut drawn = Drawn {
-            triangles: vec![0; views.len()],
-            draws: 0,
-        };
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1704,7 +1865,7 @@ impl Renderer {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Discard,
                     }),
                     stencil_ops: None,
@@ -1731,41 +1892,19 @@ impl Renderer {
                 pass.set_bind_group(1, &self.sky_bind, &[]);
                 pass.draw(0..3, 0..1);
                 drawn.draws += 1;
-                // The ground, in runs of the chunks this view sees.
-                if let Some(ground) = &self.ground {
+                // The ground: the chunks this view sees, each at its level, in one draw.
+                if let Some(ground) = &self.ground
+                    && let Some(gv) = ground.views.get(v)
+                    && ground_counts[v] > 0
+                {
                     pass.set_pipeline(&ground.pipeline);
                     pass.set_bind_group(0, &self.view_bind, &offset);
                     pass.set_bind_group(1, &ground.bind, &[]);
                     pass.set_vertex_buffer(0, ground.vertices.slice(..));
-                    pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    let eye = view.camera.eye;
-                    let mut run: Option<(u32, u32)> = None;
-                    for c in &ground.chunks {
-                        let seen = c.centre.sub(eye).len() - c.radius <= light.fog_far && sees(&planes[v], c.centre, c.radius);
-                        run = match (run, seen) {
-                            (Some((first, end)), true) if end == c.first => Some((first, c.first + c.count)),
-                            (Some((first, end)), true) => {
-                                pass.draw_indexed(first..end, 0, 0..1);
-                                drawn.draws += 1;
-                                drawn.triangles[v] += ((end - first) / 3) as usize;
-                                Some((c.first, c.first + c.count))
-                            }
-                            (None, true) => Some((c.first, c.first + c.count)),
-                            (r, false) => {
-                                if let Some((first, end)) = r {
-                                    pass.draw_indexed(first..end, 0, 0..1);
-                                    drawn.draws += 1;
-                                    drawn.triangles[v] += ((end - first) / 3) as usize;
-                                }
-                                None
-                            }
-                        };
-                    }
-                    if let Some((first, end)) = run {
-                        pass.draw_indexed(first..end, 0, 0..1);
-                        drawn.draws += 1;
-                        drawn.triangles[v] += ((end - first) / 3) as usize;
-                    }
+                    pass.set_index_buffer(gv.buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..ground_counts[v], 0, 0..1);
+                    drawn.draws += 1;
+                    drawn.triangles[v] += (ground_counts[v] / 3) as usize;
                 }
                 // The models: the opaque runs of every batch, then the translucent ones over them.
                 let end = (b..self.batches.len()).find(|&i| self.batches[i].view != v).unwrap_or(self.batches.len());
@@ -1819,6 +1958,96 @@ impl Renderer {
         }
         self.queue.submit([encoder.finish()]);
         drawn
+    }
+
+    /// View `v`'s ground for this frame: each chunk's level from this view's camera, balanced so
+    /// neighbours differ by one at most, stitched, and the chunks it sees written into the view's own
+    /// index buffer — only when something changed since its last frame. How many indices it holds.
+    fn ground_for(&mut self, v: usize, cull: &Cull, focal: f32, drawn: &mut Drawn) -> u32 {
+        let Some(g) = &mut self.ground else { return 0 };
+        let top = lod_levels(g.cells);
+        for (slot, level) in g.slots.iter().zip(g.levels.iter_mut()) {
+            *level = match slot {
+                Some(c) => {
+                    let c = &g.chunks[*c];
+                    match c.own {
+                        Some(_) => 0,
+                        None => lod_level(&c.errors, cull.distance(c.centre, c.radius), focal, GROUND_PIXELS),
+                    }
+                }
+                // No chunk here: it holds nobody back.
+                None => top + 1,
+            };
+        }
+        lod_balance(&mut g.levels, g.across, g.along);
+        for (slot, level) in g.slots.iter().zip(g.levels.iter_mut()) {
+            if slot.is_none() {
+                *level = 0;
+            }
+        }
+        while g.views.len() <= v {
+            g.views.push(GroundView {
+                buffer: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ground indices"),
+                    size: 4,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                capacity: 0,
+                key: Vec::new(),
+                count: 0,
+                indices: Vec::new(),
+            });
+        }
+        if drawn.ground_levels.len() <= top as usize {
+            drawn.ground_levels.resize(top as usize + 1, 0);
+        }
+        let mut key = Vec::with_capacity(g.chunks.len());
+        for (at, slot) in g.slots.iter().enumerate() {
+            let Some(c) = *slot else { continue };
+            let chunk = &g.chunks[c];
+            if !cull.sees(chunk.centre, chunk.radius) {
+                key.push(u32::MAX);
+                continue;
+            }
+            let level = g.levels[at];
+            let coarser = lod_coarser(&g.levels, g.across, g.along, at % g.across, at / g.across);
+            let mask = coarser.iter().enumerate().map(|(i, &b)| (b as u32) << i).sum::<u32>();
+            drawn.ground_levels[level as usize] += 1;
+            key.push(level * 16 + mask);
+        }
+        let gv = &mut g.views[v];
+        if key != gv.key {
+            gv.indices.clear();
+            let chunks = g.slots.iter().flatten();
+            for (&c, &k) in chunks.zip(&key) {
+                if k == u32::MAX {
+                    continue;
+                }
+                let chunk = &g.chunks[c];
+                let pattern = match &chunk.own {
+                    Some(own) => &own[(k % 16) as usize],
+                    None => &g.patterns[k as usize],
+                };
+                gv.indices.extend(pattern.iter().map(|i| i + chunk.base));
+            }
+            let bytes = (gv.indices.len() * 4) as u64;
+            if bytes > gv.capacity {
+                gv.capacity = bytes.next_power_of_two();
+                gv.buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ground indices"),
+                    size: gv.capacity,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            if !gv.indices.is_empty() {
+                self.queue.write_buffer(&gv.buffer, 0, bytemuck::cast_slice(&gv.indices));
+            }
+            gv.count = gv.indices.len() as u32;
+            gv.key = key;
+        }
+        gv.count
     }
 
     /// Put this frame's overlay patches into the overlay textures, after putting last frame's back.
@@ -2158,7 +2387,7 @@ fn to_clip(p: vec3f) -> vec4f {
   return rows(view.vp, p);
 }
 fn fog_at(p: vec3f) -> f32 {
-  return clamp((distance(p, view.eye.xyz) - view.fog.x) / max(view.fog.y - view.fog.x, 1.0), 0.0, 1.0);
+  return clamp((distance(p, view.eye.xyz) - view.fog.x) / max(view.fog.y - view.fog.x, 1.0), 0.0, view.fog.w);
 }
 "#;
 
@@ -2244,7 +2473,7 @@ fn node_matrix(i: u32) -> mat4x4f {
   o.clip = rows(view.vp, world);
   o.uv = v.uv;
   o.lit = lit;
-  o.fog = clamp((distance(world, view.eye.xyz) - view.fog.x) / max(view.fog.y - view.fog.x, 1.0), 0.0, 1.0);
+  o.fog = clamp((distance(world, view.eye.xyz) - view.fog.x) / max(view.fog.y - view.fog.x, 1.0), 0.0, view.fog.w);
   return o;
 }
 
@@ -2390,7 +2619,7 @@ mod tests {
             near: 0.5,
             far: 100.0,
         };
-        let planes = frustum(&view_projection(&camera, 640, 480));
+        let planes = frustum(&view_projection(&camera, 640, 480, camera.far));
         assert!(sees(&planes, v3(0.0, 0.0, 50.0), 1.0));
         assert!(!sees(&planes, v3(0.0, 0.0, -50.0), 1.0));
         assert!(!sees(&planes, v3(500.0, 0.0, 50.0), 1.0));
@@ -2548,6 +2777,8 @@ mod tests {
         assert!(soft > 0);
 
         let light = Lighting::of(&scene);
+        // The rasteriser draws the original's fog, so this is drawn under it too.
+        gpu.set_graphics(Graphics::Original);
         gpu.set_scene(&scene);
         gpu.set_sky(None);
         let texture = gpu.offscreen(w, h);
@@ -2596,6 +2827,119 @@ mod tests {
         assert!(hard.chunks_exact(3).filter(|p| p != &scene.fog_color).count() > 1000);
     }
 
+    /// A scene with the disc's kind of fog: free07's, 25 to 1,000 feet.
+    fn fogged() -> Lighting {
+        Lighting::of(&crate::scene::Scene::parse(
+            "[Fog]\nColorRGB=61,68,76\nMinimumFogDistance=25.00\nMaximumFogDistance=1000.00\n",
+        ))
+    }
+
+    /// A camera on a map's near edge, 300 feet in, looking along it.
+    fn on_the_near_edge() -> Camera {
+        Camera {
+            eye: v3(100.0, 30.0, 300.0),
+            at: v3(100.0, 20.0, 400.0),
+            fov: 1.0,
+            near: 2.4,
+            far: 1000.0,
+        }
+    }
+
+    #[test]
+    fn the_original_is_the_discs_fog_and_far_clip() {
+        let light = fogged();
+        let span = 9000.0;
+        let fog = Graphics::Original.fog(&light, span);
+        assert_eq!(fog, Fog { near: 25.0, far: 1000.0, max: 1.0, reach: 1000.0 });
+        assert_eq!(Graphics::Original.far_clip(&light, span), 1000.0);
+        // The whole map: no reach, a far clip past the map's far corner, and a haze that never hides.
+        let full = Graphics::Full.fog(&light, span);
+        assert_eq!(full.reach, f32::INFINITY);
+        assert!(full.max <= crate::world::HAZE_MAX && full.max < 1.0);
+        assert!(full.near >= 1000.0, "the haze starts where the original's fog ends");
+        assert!(Graphics::Full.far_clip(&light, span) >= span);
+        assert_eq!(Graphics::default(), Graphics::Full);
+        for g in Graphics::ALL {
+            assert_eq!(Graphics::from_word(g.word()), Some(g));
+        }
+    }
+
+    #[test]
+    fn the_whole_map_sees_its_far_edge_and_culls_behind() {
+        let light = fogged();
+        let camera = on_the_near_edge();
+        let span = 6400.0 * std::f32::consts::SQRT_2;
+        // Ground chunks 200 feet across: one at the far edge of a 6,400-foot map, one behind the camera.
+        let (far_edge, behind) = (v3(100.0, 0.0, 6300.0), v3(100.0, 0.0, 100.0));
+        let radius = 145.0;
+        // Each of four split views, as a quarter of 4K.
+        let full = Cull::of(&camera, 1920, 1080, Graphics::Full, &light, span);
+        assert!(full.sees(far_edge, radius));
+        assert!(!full.sees(behind, radius));
+        let original = Cull::of(&camera, 1920, 1080, Graphics::Original, &light, span);
+        assert!(!original.sees(far_edge, radius), "past the disc's far clip");
+        assert!(!original.sees(behind, radius));
+        assert!(original.sees(v3(100.0, 0.0, 900.0), radius));
+    }
+
+    /// A flat chunk of `cells` cells `size` feet each at chunk (`x`, `z`).
+    fn flat_chunk(cells: u32, size: f32, x: u32, z: u32) -> GroundChunk {
+        let side = cells as f32 * size;
+        let (x0, z0) = (x as f32 * side, z as f32 * side);
+        let vertices = (0..=cells)
+            .flat_map(|j| (0..=cells).map(move |i| (i, j)))
+            .map(|(i, j)| GroundVertex {
+                pos: [x0 + i as f32 * size, 0.0, z0 + j as f32 * size],
+                normal: [0.0, 1.0, 0.0],
+            })
+            .collect();
+        GroundChunk {
+            vertices,
+            cells,
+            at: (x, z),
+            missing: Vec::new(),
+            centre: v3(x0 + side / 2.0, 0.0, z0 + side / 2.0),
+            radius: side * std::f32::consts::FRAC_1_SQRT_2,
+        }
+    }
+
+    #[test]
+    fn the_gpu_draws_the_far_edge_under_full_and_not_under_original() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        // A 6,400-foot map of 200-foot chunks with three put down: behind the camera, ahead of it, and
+        // at the far edge.
+        let chunks = [flat_chunk(8, 25.0, 0, 0), flat_chunk(8, 25.0, 0, 2), flat_chunk(8, 25.0, 0, 31)];
+        let scene = crate::scene::Scene::parse("[Fog]\nColorRGB=61,68,76\nMinimumFogDistance=25.00\nMaximumFogDistance=1000.00\n");
+        let light = Lighting::of(&scene);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        gpu.set_ground(&chunks, None, [150.0, 118.0, 86.0]).unwrap();
+        let camera = on_the_near_edge();
+        let (w, h) = (320u32, 180u32);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &[] }];
+        let assets = Assets::default();
+        let mut drawn = |gpu: &mut Renderer, graphics| {
+            gpu.set_graphics(graphics);
+            let d = gpu.render(
+                &Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 },
+                &assets,
+                &Scene3 { views: &views, poses: &[], overlay: &[], light: &light },
+            );
+            d.ground_levels.iter().sum::<usize>()
+        };
+        assert_eq!(drawn(&mut gpu, Graphics::Full), 2, "the chunk ahead and the far edge's");
+        assert_eq!(drawn(&mut gpu, Graphics::Original), 1, "the chunk ahead only");
+        // And back: the per-view index list follows the setting.
+        assert_eq!(drawn(&mut gpu, Graphics::Full), 2);
+    }
 
     /// Every shader, written out as the GLSL ES 3.00 wgpu's WebGL2 backend hands the browser (P48):
     /// WebGL2 has no storage buffers, no compute and no textures read without a sampler in GLSL's

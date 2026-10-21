@@ -193,7 +193,7 @@ use game_render::rider::{Body, Sex, Skeleton, anchors_of};
 use game_render::scene::Vehicle;
 use game_render::vehicle::{Chassis, Drive, params as vehicle_params};
 use game_render::gpu::{Actor, Renderer, Scene3, Target, View, wgpu};
-use game_render::world::{Assets, Camera, Lighting, draw_scene};
+use game_render::world::{Assets, Camera, Graphics, Lighting, draw_scene};
 use game_render::{ini, png, scene as view};
 use game_sim::biplane::Area;
 use game_sim::camera::{Preset, Race, Ridden, Switches};
@@ -718,6 +718,9 @@ struct Args {
     fps: bool,
     /// `--renderer gpu|software`: what draws the picture (P44); the GPU unless asked.
     renderer: Backend,
+    /// `--graphics original|full` (V32): the original's fog and far clip, or the whole map with a
+    /// haze; the front end's setting when not given. Only the GPU draws `full`.
+    graphics: Option<Graphics>,
     /// The pad seat each player reads, the front end's local game's (P43): player i rides seat
     /// `pad_of[i]`'s controller. Empty is seat i for player i, which is every ride outside one.
     pad_of: Vec<usize>,
@@ -1005,6 +1008,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
+                a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
                 a.wiring = shell.front.wiring();
                 // The ride setup's machine for 1P (P41), unless `--vehicle biplane` asked for the plane
@@ -1068,6 +1072,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
+                a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 a.wrecks = room.wrecks;
                 a.wiring = shell.front.wiring();
                 a.shot = None;
@@ -2328,6 +2333,25 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             chunks.len(),
             at.elapsed().as_secs_f32()
         );
+        // What the graphics setting makes of the disc's fog (V32): the original's is its fog and far
+        // clip as the scene file gives them, the whole map's a haze that never hides it.
+        let shown = args.graphics.unwrap_or_default();
+        r.set_graphics(shown);
+        let lit = Lighting::of(&look);
+        let (fog, far) = r.fog(&lit);
+        println!(
+            "graphics: {} (fog {:.0}..{:.0} up to {:.0}%, far clip {:.0}; the disc's fog {:.0}..{:.0} in {:?})",
+            shown.word(),
+            fog.near,
+            fog.far,
+            fog.max * 100.0,
+            far,
+            lit.fog_near,
+            lit.fog_far,
+            look.fog_color
+        );
+    } else if args.graphics == Some(Graphics::Full) {
+        println!("graphics: the software renderer draws the original's fog and far clip only");
     }
     // The GPU's per-frame lists, kept to reuse their room: the poses, the overlay and its layers.
     let mut gpu_poses: Vec<Vec<M4>> = Vec::new();
@@ -2370,6 +2394,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let hud_art = overlay::Art::load(&mut disc).map_err(|e| format!("the original's HUD: {e}"))?;
     let radar_span = overlay::radar_span(ground.spacing);
     let mut overlay_mode = args.overlay.unwrap_or_default();
+    let mut graphics = args.graphics.unwrap_or_default();
     let mut frame = Frame::new(width, height, look.fog_color);
     // The views (V22): where each player's goes in the frame, and a frame of its own size for each to
     // be drawn into. A full screen has none — its one view is drawn straight into the frame, as it
@@ -2688,6 +2713,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let act = front.menu.step_seats(&presses);
             if front.menu.changed() {
                 overlay_mode = front.menu.settings.overlay;
+                graphics = front.menu.settings.graphics;
                 for rig in &mut rigs {
                     rig.hud.on = overlay_mode == menu::Overlay::Debug;
                 }
@@ -3087,6 +3113,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (Some((r, texture)), _) => {
                     let t = texture.take().filter(|t| (t.width(), t.height()) == (fw, fh)).unwrap_or_else(|| r.offscreen(fw, fh));
                     let view = t.create_view(&Default::default());
+                    r.set_graphics(graphics);
                     let d = r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
                     // Nothing else waits on a frame nobody sees: without this the queue runs ahead,
                     // and the times would be the CPU's alone.
@@ -3100,6 +3127,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     Some(d)
                 }
                 (None, Some(w)) => {
+                    w.renderer.set_graphics(graphics);
                     let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
                     waited = w.waited;
                     if shooting {
@@ -3735,6 +3763,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         wiring_flags: (false, false),
         fps: false,
         renderer: Backend::default(),
+        graphics: None,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(a) = argv.next() {
@@ -3808,6 +3837,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.overlay = Some(overlay);
             }
             "--fps" => args.fps = true,
+            "--graphics" => {
+                let word = next("original or full")?;
+                let graphics = Graphics::from_word(&word)
+                    .ok_or_else(|| format!("--graphics: {word:?} is not original or full"))?;
+                args.graphics = Some(graphics);
+            }
             "--renderer" => args.renderer = Backend::parse(&next("gpu or software")?)?,
             "--camera" => args.camera = next("a camera preset's name, like \"Freestyle Cam\"")?,
             "--moment" => {
@@ -3961,7 +3996,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
                             [--biplane-controls new|original|new,original,...]\n\
-                            [--bindings FILE] [--renderer gpu|software] [--fps]\n\
+                            [--bindings FILE] [--renderer gpu|software] [--graphics full|original] [--fps]\n\
                             [--no-sound]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
