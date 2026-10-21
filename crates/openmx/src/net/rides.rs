@@ -79,18 +79,21 @@ impl Game for Rides<'_> {
     }
 
     /// [`Rides::encode`]'s bytes back, onto this machine's seats. Nothing is written unless every
-    /// seat decodes, so a broken state leaves the ride as it was.
+    /// seat decodes, so a broken state leaves the ride as it was. A state with more seats than here
+    /// is a ride someone joined (N10): the seats past this machine's are added on the first seat's
+    /// constants, as [`Rides::seat`] adds them on the host; one with fewer is refused.
     fn decode(&mut self, bytes: &[u8]) -> Result<(), String> {
         let word = |at: usize, what: &str| -> Result<usize, String> {
             let w = bytes.get(at..at + 4).ok_or(format!("the state ends before {what}"))?;
             Ok(u32::from_le_bytes(w.try_into().unwrap()) as usize)
         };
         let seats = word(0, "its seat count")?;
-        if seats != self.sims.len() {
+        if seats < self.sims.len() || self.sims.is_empty() || seats > super::SEATS {
             return Err(format!("{seats} seats in the state, {} here", self.sims.len()));
         }
         let mut at = 4;
         let mut sims = self.sims.clone();
+        sims.resize(seats, self.sims[0].clone());
         for (seat, sim) in sims.iter_mut().enumerate() {
             let n = word(at, "a seat's length")?;
             let one = bytes.get(at + 4..at + 4 + n).ok_or(format!("seat {}'s state is cut short", seat + 1))?;
@@ -101,6 +104,26 @@ impl Game for Rides<'_> {
             return Err(format!("{} bytes left over after the seats", bytes.len() - at));
         }
         *self.sims = sims;
+        Ok(())
+    }
+
+    /// A new rider on seat `seat` (N10's join): the first seat's constants — its tables, its bike's
+    /// `.phy`, the rider's files, which every machine has the same of — in `spawn`'s state, one
+    /// seat in [`game_sim::snapshot`]'s codec. Seats between the last and it are added the same,
+    /// nobody's (their pads unplugged).
+    fn seat(&mut self, seat: usize, spawn: &[u8]) -> Result<(), String> {
+        if seat >= super::SEATS {
+            return Err(format!("seat {} of {}", seat + 1, super::SEATS));
+        }
+        let mut sim = self.sims.first().ok_or("no seat to take the constants from")?.clone();
+        game_sim::snapshot::decode(&mut sim, spawn).map_err(|e| format!("the spawn: {e}"))?;
+        while self.sims.len() < seat {
+            self.sims.push(sim.clone());
+        }
+        match self.sims.get_mut(seat) {
+            Some(s) => *s = sim,
+            None => self.sims.push(sim),
+        }
         Ok(())
     }
 }
