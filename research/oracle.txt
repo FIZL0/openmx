@@ -3671,3 +3671,40 @@ rider_wreck_sound_load boot 0x0033e5b0 reads the rider archive's rider.aud [Fall
 crowd_sound_load boot 0x001fe220 reads event.aud's Crowd* lists when the track's CrowdPresent is set
 music_list_load boot 0x001fd9f0 reads appstart.res aud\music\music.pb: [Artists], [Song N] Filename,
 #                               Title, Artist
+
+# ---------------------------------------------------------------------------------------------------
+# V31 — the wreck camera (MXCameraWreck over SimpleWreckCam). How each was read, and the live logs, are
+# in the journal wreck-camera. The camera's frame is the game's 30 Hz one (its lags get 1/30 s; the
+# eases below are per frame). Not camera_wreck_cut above: 0x003dcb90 picks a crash sound.
+wreck_cam_base_ctor   boot 0x0031be20 SimpleWreckCam, vtable 0x004592b0: +0x9c base fov 80, +0xa0 0.75
+#                                     the look-at's height lag ratio (0.25 at 16:9), +0x114 45 the
+#                                     second target's radius (25 at 16:9)
+wreck_cam_ctor        boot 0x0031fd60 MXCameraWreck, vtable 0x00459440; params {yaw pi/2, pitch 0.1396,
+#                                     35, 65, min dist 13, max dist 100, min fov 20, max fov 82}, +0x388
+#                                     the eye's floor 5, +0x38c the ceiling FLT_MAX
+wreck_cam_set_active  boot 0x0031ca90 (cam, from) vt slot: with a camera to take over from, +0x9c = the
+#                                     viewport's (+0x7c) fov +0x170, the follow camera's at the switch
+#                                     (live: 85 on screen A, 80 on screen B); without, +0x318
+wreck_cam_activate    boot 0x0031cda0 vt +0xe0: spread 0, direction and distance from eye - centroid,
+#                                     doff = distance - 13 clamped, foff 0
+wreck_cam_add_target  boot 0x0031c530 a target with +0xc0 set goes to slot 0
+wreck_cam_target      boot 0x0031cf60 point = (T0 + sum_i>=1 [T0 + (Ti-T0)(1-i/(n+1))max(0,1-d/R)])
+#                                     / active; velocity averaged, &8 targets use +0x50, others their
+#                                     point differenced; vertical x0.7 under 20 ft/s
+wreck_cam_frame       boot 0x0031c670 the frame: pitch and yaw ease 0.05 a frame (yaw only with the
+#                                     spread over 3); the direction +0x2d0 is not eased but set to the
+#                                     new aim + 0.1 x (new aim - old), normalized
+wreck_cam_spread      boot 0x0031d480 spread, foff and doff walks: a tenth of the spread's growth
+wreck_cam_fov         boot 0x0031dcd0 fov = base + foff clamped to [20, 82]; past 82 foff is set to 62
+#                                     (the span), which is the live 62/-3 alternation
+wreck_cam_look_at     boot 0x0031de70 point + vel x 0.2 while moving, held inside a 1 ft deadband
+wreck_cam_distance    boot 0x0031e2d0 13 + doff clamped to [13, 100]
+rider_body_cam_point  boot 0x00319050 the rider body's CameraInterface (obj+0xa80) point obj+0xa90: off
+#                                     the bike (request obj+0x488, +0x104) request+0x1e0, else the node
+#                                     world position of obj+0xc58; live it sits on the upper body,
+#                                     nearest [Part4]'s node (0.05-0.15 ft still, ~0.7 ft flying); the
+#                                     writer of request+0x1e0 was not found
+# The second target is the rider's bike camera block, rider+0xdd0, flag &8: its velocity is the one it
+# had as the wreck began. screen_wreck_notice seeds the eye from the viewport's eye (lag 0.28, 0.2 for
+# reason 13) and the look-at from the follow camera's lags (0.3 / 0.3x0.75 / 0.3; reason 13 0.23 /
+# 0.23x0.75x0.9 / 0.23); back on, the follow camera takes over with a snap and the list is emptied.

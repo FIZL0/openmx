@@ -442,6 +442,8 @@ struct Rig {
     chassis: Option<Chassis>,
     camera: Race,
     plane_camera: Option<Race>,
+    /// The camera the screen switches to while this player's rider is down (V31).
+    wreck_camera: chase::WreckCamera,
     hud: Hud,
     /// The distance this player's odometer shows, under the original's overlay (V26).
     odometer: overlay::Odometer,
@@ -2293,6 +2295,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             chassis,
             camera: Race { cam: camera.cam.clone() },
             plane_camera: None,
+            wreck_camera: chase::WreckCamera::new(false),
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
             bike_model,
@@ -2307,6 +2310,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             chassis,
             camera,
             plane_camera,
+            wreck_camera: chase::WreckCamera::new(false),
             // The riding overlay (P6). It is the shell's own furniture, so it is created here beside
             // the window rather than inside the simulation's `World`, and it reads the port's own
             // values at draw time instead of being fed them.
@@ -2921,6 +2925,23 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (Kind::Bike, Some(crash)) => chase::wrecked(crash),
                 _ => chase::ridden(&seat.garage, &seat.sim.rider.ride),
             };
+            // The wreck camera (V31): the moment the rider wrecks, the screen switches to it, starting
+            // from the follow camera's eye and look-at as they were last frame; back on, the screen
+            // goes back to the follow camera, which snaps rather than lagging in from the wreck.
+            let crash = match seat.garage.up {
+                Kind::Bike => seat.sim.rider.crash.as_ref(),
+                _ => None,
+            };
+            let wreck = &mut rig.wreck_camera;
+            wreck.wide = display == Display::Wide;
+            let wreck_targets = crash.map(|crash| {
+                let down = match (&seat.sim.rider.ragdoll, &seat.sim.rider.ragdoll_kit) {
+                    (Some(down), Some(kit)) => Some((down, &**kit)),
+                    _ => None,
+                };
+                chase::wreck_targets(crash, down)
+            });
+            wreck.switch(wreck_targets.as_ref(), crash.map_or(0, |c| c.reason.0), &mut follow.cam);
             // The shape of the view this camera draws into (V22), which on a full screen is the frame.
             let (view_w, view_h) = (rects[i].w, rects[i].h);
             let view = if presets == 0 {
@@ -2947,6 +2968,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     },
                     &mut world.place,
                 ))
+            };
+            let view = match (view, &wreck_targets) {
+                (Some(_), Some(targets)) if wreck.on => Some(wreck.update(
+                    dt.0,
+                    targets,
+                    aspect::short_viewport(display, view_w, view_h),
+                    NEAR_CLIP,
+                    &seat.sim.tables.ride.curve,
+                    &mut world.place,
+                )),
+                (view, _) => view,
             };
             let bike_look = vector(rider.target.forward);
             let pos = vector(rider.target.body_point);
