@@ -226,7 +226,7 @@ use pad::{Bindings, Device, Pads, PlaneScheme, SEATS, Scheme, SeatInput, Seats, 
 const _: () = assert!(menu::SEATS == SEATS);
 use perf::Stage;
 use split::{Layout, Split};
-use vehicle::{Garage, Kind, Plane, Spawn};
+use vehicle::{Garage, Kind, Lot, Machine, Plane};
 use screen::{Backend, Screen};
 use window::key;
 use aspect::{Aspect, Display};
@@ -1759,17 +1759,35 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let e = res.find_suffix(phy::BIPLANE_PHY)?;
         res.read(&e.name).ok()
     });
-    let plane = machines.as_ref().and_then(|(_, b)| Spawn::biplane(b, 0)).map(|spawn| match &plane_phy {
-        Some(bytes) => {
+    // One of each machine per player (P87): the file's two spots for the first two, beside them for
+    // the rest, every second copy in the alternate livery. Only the plane is ported, so the lot's
+    // other machines are counted and not stood up.
+    let lot = {
+        let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
+        let mut ground = |at: Vf| sim_world::World::ground(&mut probe, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y();
+        machines.as_ref().map_or_else(Lot::default, |(_, b)| Lot::new(b, args.players.max(1), &mut ground))
+    };
+    let flight_for = |seat: usize| {
+        plane_phy.as_ref().map(|bytes| {
             let mut plane = phy::Plane::read_bytes(bytes);
-            mods.plane(0, &mut plane);
+            mods.plane(seat, &mut plane);
             let mut flight = Flight::new(&plane);
             let t = &place.terrain;
             flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
-            Plane::flying(spawn, flight)
-        }
-        None => Plane::parked(spawn),
-    });
+            flight
+        })
+    };
+    let plane = lot.plane(0, flight_for(0));
+    if machines.is_some() {
+        let parked: Vec<String> = Machine::ALL
+            .iter()
+            .map(|&m| {
+                let stood = if m.kind().is_some() { "" } else { " (not ported)" };
+                format!("{} {}{stood}", lot.of(m).count(), m.section().to_ascii_lowercase())
+            })
+            .collect();
+        println!("machines: {} for {} players", parked.join(", "), args.players.max(1));
+    }
     if machines.is_some() {
         println!("biplane: {}", if plane_phy.is_some() { "flies on its biplane.phy" } else { "no biplane.phy, parked" });
     }
@@ -1808,18 +1826,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             Some(cam)
         }
     };
-    // Its model and both prop cones, out of the machines' archive, where its textures are too (V21).
-    let plane_drawn = match (&garage.plane, machine_res) {
+    // Its model and both prop cones, out of the machines' archive, where its textures are too (V21):
+    // one model a livery the lot parks (P87), the first copy's plain and the second's the disc's
+    // alternate, so a plane is drawn in `plane_drawn[plane.livery]`.
+    let plane_drawn: Vec<Biplane> = match (&garage.plane, machine_res) {
         (Some(_), Some(res)) => {
             let own = vec![res];
-            let drawn = Biplane::load(&mut assets, &own, 0);
-            println!("biplane: {}", if drawn.is_some() { "model loaded" } else { "no model to draw" });
+            let liveries = args.players.clamp(1, vehicle::LIVERIES);
+            let drawn: Vec<Biplane> = (0..liveries).map_while(|l| Biplane::load(&mut assets, &own, l)).collect();
+            println!("biplane: {} of {liveries} liveries loaded", drawn.len());
             drawn
         }
-        _ => None,
+        _ => Vec::new(),
     };
     // Its particles (P58): the emitter list and its `.emt`s, and the track's particle sheet.
-    let (mut plane_fx, mut fx_sheet) = match &plane_drawn {
+    let (mut plane_fx, mut fx_sheet) = match plane_drawn.first() {
         Some(drawn) => match load_plane_fx(&archives, &args.track, drawn, &assets) {
             Ok((fx, binds, sheet)) => (Some((fx, binds)), Some(sheet)),
             Err(why) => {
@@ -2427,7 +2448,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             body,
             chassis,
             camera: Race { cam: camera.cam.clone() },
-            plane_camera: None,
+            // Their own plane's camera, on the same presets as the first player's (P87).
+            plane_camera: plane_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
             wreck_camera: chase::WreckCamera::new(false),
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
@@ -2601,16 +2623,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         hands: Controls::default(),
     }];
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
-        // The track's plane is the first player's: `machine.txt` parks one per player, and the
-        // shell draws one. So a later seat's setup pick of the plane (P41) rides the bike, and says so.
+        // Every player has a plane of their own, parked in their bay of the lot (P87), and starts in
+        // it if the setup picked it (P41). A track that parks none rides the bike, and says so.
         let pick = front.as_ref().map_or(menu::Machine::Bike, |f| f.menu.settings.machines[i + 1]);
-        if pick != menu::Machine::Bike {
-            println!("vehicle: player {} picked the {}, but only player 1 has one; the bike", i + 2, pick.word());
-        }
+        let plane = lot.plane(i + 1, flight_for(i + 1));
+        let up = match (pick, &plane) {
+            (menu::Machine::Biplane, Some(_)) => Kind::Biplane,
+            (menu::Machine::Bike, _) => Kind::Bike,
+            (pick, None) => {
+                println!("vehicle: player {} picked the {}, but the track parks none; the bike", i + 2, pick.word());
+                Kind::Bike
+            }
+        };
         seats.push(Seat {
             reports: [Report::missing(); PADS],
             sim: Sim::with_rider(0, tables.clone(), phy, rider),
-            garage: Garage::new(Kind::Bike, None)?,
+            garage: Garage::new(up, plane)?,
             riding: front.as_ref().is_none_or(|f| f.menu.riding()),
             start_freezes: front.is_none(),
             waiting: false,
@@ -2776,7 +2804,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // each view's camera and the plane.
     let mut before: Vec<Shown> = Vec::new();
     let mut before_cameras: Vec<Camera> = Vec::new();
-    let mut before_plane: Option<M4> = None;
+    let mut before_planes: Vec<Option<M4>> = Vec::new();
     // What the last tick left for the picture: whether it simulated, and each player's ride for the
     // camera and the overlay.
     let mut simulated = false;
@@ -3022,7 +3050,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // Where everything is before this tick, which the picture blends from until the next.
         before = world.seats.iter().zip(&rigs).map(|(seat, rig)| Shown::of(seat, rig, &assets, ragdolled.as_ref(), gpu_on)).collect();
         before_cameras.clone_from(&cameras);
-        before_plane = world.seats[0].garage.plane.as_ref().map(plane_at);
+        before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
         let sim_at = Instant::now();
         let dt: F;
         (dt, simulated) = if let Some(on) = &mut online {
@@ -3402,8 +3430,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     });
                 }
             }
-            if let (Some(drawn), Some(plane)) = (&plane_drawn, &world.seats[0].garage.plane) {
-                let at = before_plane.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
+            // Every player's plane, in its own livery (P87).
+            for (p, seat) in world.seats.iter().enumerate() {
+                let Some(plane) = &seat.garage.plane else { continue };
+                let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
+                let before = before_planes.get(p).copied().flatten();
+                let at = before.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
                 for (model, at) in drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)) {
                     actors.push(Actor { model, at, pose: None, lod_from: None, alpha: 1.0 });
                 }
@@ -3588,8 +3620,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The plane stands in the world either way: parked until it is taken, wherever it was
             // left after. At its body's pose, nose and up off the plane's own measure, with the prop
             // at the engine's angle (S35) — or the bent cone, unturned, once it is wrecked.
-            if let (Some(drawn), Some(plane)) = (&plane_drawn, &world.seats[0].garage.plane) {
-                let at = before_plane.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
+            for (p, seat) in world.seats.iter().enumerate() {
+                let Some(plane) = &seat.garage.plane else { continue };
+                let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
+                let before = before_planes.get(p).copied().flatten();
+                let at = before.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
                 actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
             }
             perf.lap(Stage::Scene, scene_at, spent);

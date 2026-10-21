@@ -28,6 +28,15 @@
 //! The plane is not [`Sim::plane`]: the shell's `Sim` is the bike's ride, which the swap leaves where it
 //! stands and which a plane session never steps, so its tick count stays where the swap found it.
 //!
+//! # One of each per player (P87)
+//!
+//! The original parks two of every machine on a freeride track, one for each of its two players
+//! (`[Biplane1]`, `[Biplane2]`, the same for the helicopter, the buggy, the monster truck and the
+//! baja), and its second player's wears the disc's alternate livery. The port's rides have as many
+//! players as join, so a [`Lot`] parks one of each machine per player: the file's spots first, then
+//! beside them ([`park`]), the liveries alternating ([`livery`]). Copy `n` is player `n`'s, which is
+//! what keeps two players off one machine: the swap only ever takes the player's own.
+//!
 //! This file is std and `game_sim` only, for the same reason `pad.rs` is: the ride test compiles it
 //! in by path, because a binary crate has nothing a test can `use`.
 
@@ -91,12 +100,21 @@ impl Spawn {
     /// `SetGroundHeight` (on by default) is not applied: what the placement does with it was not
     /// read past the call it changes, and on free06 the position the file gives is the one used.
     pub fn biplane(machine_txt: &[u8], player: usize) -> Option<Spawn> {
-        let ini = Ini::parse_bytes(machine_txt);
-        let name = format!("Biplane{}", player + 1);
-        if !ini.names().iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+        Spawn::machine(machine_txt, Machine::Biplane, player)
+    }
+
+    /// Copy `copy` of `machine` out of a track's `machine.txt`: the section the original's machine
+    /// placement reads for a player whose vehicle kind is that machine's, its section word and the
+    /// player counting from one (`[Helicopter2]`, `[Monster1]`). `None` where the file stops.
+    pub fn machine(machine_txt: &[u8], machine: Machine, copy: usize) -> Option<Spawn> {
+        Spawn::section(&Ini::parse_bytes(machine_txt), &format!("{}{}", machine.section(), copy + 1))
+    }
+
+    fn section(ini: &Ini, name: &str) -> Option<Spawn> {
+        if !ini.names().iter().any(|n| n.eq_ignore_ascii_case(name)) {
             return None;
         }
-        let s = ini.section(&name);
+        let s = ini.section(name);
         s.text("Position")?;
         let at = s.vector("Position", Vf::default());
         let facing = s.vector("Direction", Vf::new(0.0, 0.0, 1.0, 0.0));
@@ -104,6 +122,216 @@ impl Spawn {
             at: Vf::new(at.x(), at.y(), at.z(), 1.0),
             facing: Vf::new(facing.x(), facing.y(), facing.z(), 0.0),
         })
+    }
+}
+
+/// Every machine the disc carries besides the bike: `machine.res` has a directory for each (model,
+/// collision, `.phy`), and the vehicle factory builds them by the original's kind number, 1 to 5
+/// (R8, `research/oracle.txt`'s `vehicle_factory`). Every freeride track's `machine.txt` (free06, 07,
+/// 09, 10 and 11) parks two of each, `[<section>1]` and `[<section>2]`, one per player of the
+/// original's two. Only the biplane is ported ([`Machine::kind`]); the others are each a task of
+/// their own, and until one lands the lot parks it on paper and the shell does not stand it up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Machine {
+    /// Kind 1, MXBiplane: `biplane\`.
+    Biplane,
+    /// Kind 2, the Kiowa helicopter: `helicopter\`, `kiowa.phy`.
+    Helicopter,
+    /// Kind 3, the dune buggy: `buggy\`.
+    Buggy,
+    /// Kind 4, MXMonsterTruck: `monstertruck\`, sections `[Monster<n>]`.
+    Monster,
+    /// Kind 5, the baja truck: `baja\`.
+    Baja,
+}
+
+impl Machine {
+    /// In the original's kind order.
+    pub const ALL: [Machine; 5] = [Machine::Biplane, Machine::Helicopter, Machine::Buggy, Machine::Monster, Machine::Baja];
+
+    /// The original's kind number: the vehicle factory's switch and the event's per-player kind.
+    #[allow(dead_code)] // the disc test's, until a second machine is ported
+    pub fn number(self) -> u32 {
+        match self {
+            Machine::Biplane => 1,
+            Machine::Helicopter => 2,
+            Machine::Buggy => 3,
+            Machine::Monster => 4,
+            Machine::Baja => 5,
+        }
+    }
+
+    /// The word the placement's sections start with, and the `Type` the file gives them.
+    pub fn section(self) -> &'static str {
+        match self {
+            Machine::Biplane => "Biplane",
+            Machine::Helicopter => "Helicopter",
+            Machine::Buggy => "Buggy",
+            Machine::Monster => "Monster",
+            Machine::Baja => "Baja",
+        }
+    }
+
+    /// Its directory in `machine.res`.
+    #[allow(dead_code)] // the disc test's, until a second machine is ported
+    pub fn dir(self) -> &'static str {
+        match self {
+            Machine::Biplane => "biplane",
+            Machine::Helicopter => "helicopter",
+            Machine::Buggy => "buggy",
+            Machine::Monster => "monstertruck",
+            Machine::Baja => "baja",
+        }
+    }
+
+    /// Its four models, `<dir>\anim\<name>.psg`, in the factory's skin order: the livery, the
+    /// alternate livery, and the split-screen texture sets of the same two (`_ss`, whose textures are
+    /// the first two's with `_ss` on the name).
+    pub fn models(self) -> [&'static str; 4] {
+        match self {
+            Machine::Biplane => ["biplane", "biplane2", "biplane_ss", "biplane2_ss"],
+            Machine::Helicopter => ["kiowa", "kiowa2", "kiowa_ss", "kiowa2_ss"],
+            Machine::Buggy => ["buggy", "buggy2", "buggy_ss", "buggy2_ss"],
+            Machine::Monster => ["monstertruck", "monstertruck2", "monstertruck_ss", "monstertruck2_ss"],
+            Machine::Baja => ["baja", "baja2", "baja_ss", "baja2_ss"],
+        }
+    }
+
+    /// The shell's machine for it, where the port has one.
+    pub fn kind(self) -> Option<Kind> {
+        match self {
+            Machine::Biplane => Some(Kind::Biplane),
+            _ => None,
+        }
+    }
+
+    /// How far apart the port parks the copies it adds past the file's ([`park`]), feet: more than
+    /// the machine is across, so no two stand in each other. The port's own numbers, from the
+    /// models' size and the file's own pairs (its trucks stand 18 ft apart, its planes 25 to 60).
+    pub fn spacing(self) -> f32 {
+        match self {
+            Machine::Biplane => 40.0,
+            Machine::Helicopter => 50.0,
+            Machine::Buggy | Machine::Baja => 18.0,
+            Machine::Monster => 22.0,
+        }
+    }
+}
+
+/// How many liveries the disc has of each machine: the factory's skins 0 and 1. Its 2 and 3 are the
+/// same two in split-screen textures, which the port does not need.
+pub const LIVERIES: usize = 2;
+
+/// The livery copy `copy` of a machine wears, as an index into [`Machine::models`]. The original
+/// parks its second player's machine in skin 1, the alternate (`biplane2`, `kiowa2`, …), and its
+/// first in skin 0 (the event's own pick, 0 by default); the port's copies past two cycle the two.
+pub fn livery(copy: usize) -> usize {
+    copy % LIVERIES
+}
+
+/// One parked machine: which, which copy of it (and so whose: copy `n` is player `n`'s), where it
+/// stands, and the livery it wears.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bay {
+    pub machine: Machine,
+    pub copy: usize,
+    pub spawn: Spawn,
+    pub livery: usize,
+    /// Whether the spot is the file's own, rather than one the port found beside it.
+    pub original: bool,
+}
+
+/// The original's spots for `machine` on a track: `[<section>1]`, `[<section>2]`, … for as many as
+/// the file has.
+pub fn spots(machine_txt: &[u8], machine: Machine) -> Vec<Spawn> {
+    let ini = Ini::parse_bytes(machine_txt);
+    (0..).map_while(|i| Spawn::section(&ini, &format!("{}{}", machine.section(), i + 1))).collect()
+}
+
+/// `players` copies of `machine`, one a player: the first as many as the file has stand where it
+/// parks them, exactly, and the rest beside those in turn — copy `k` beside the file's spot
+/// `k % spots`, stepped sideways (across its `Direction`) one [`Machine::spacing`] at a time, right
+/// then left, to the first place at least that far from every copy already parked. The height keeps
+/// the file spot's clearance over the ground, which `ground` gives (feet, the dirt's height at a
+/// point). There is no cap: a ride of any size parks one each. A copy's place depends only on the
+/// copies before it, so a ride that grows keeps every machine where it was.
+///
+/// The original has no copies past two and the nearby rule is the port's; a track whose file parks
+/// none of the machine gets none.
+pub fn park(machine_txt: &[u8], machine: Machine, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Vec<Bay> {
+    let file = spots(machine_txt, machine);
+    let mut bays: Vec<Bay> = Vec::with_capacity(players);
+    if file.is_empty() {
+        return bays;
+    }
+    let gap = machine.spacing();
+    for copy in 0..players {
+        let livery = livery(copy);
+        if let Some(&spawn) = file.get(copy) {
+            bays.push(Bay { machine, copy, spawn, livery, original: true });
+            continue;
+        }
+        let base = file[copy % file.len()];
+        let (fx, fz) = (base.facing.x(), base.facing.z());
+        let len = fx.hypot(fz);
+        // Across the nose, flat; a spot facing straight up or down steps along x.
+        let (rx, rz) = if len > 1e-6 { (-fz / len, fx / len) } else { (1.0, 0.0) };
+        let clear = base.at.y() - ground(base.at);
+        // A step's own distance comes out a hair either side of `gap`, so a spot one step away counts.
+        let free = |x: f32, z: f32, bays: &[Bay]| bays.iter().all(|b| (b.spawn.at.x() - x).hypot(b.spawn.at.z() - z) >= gap - 0.01);
+        let (x, z) = (1..)
+            .flat_map(|step: i32| [step, -step])
+            .map(|step| (base.at.x() + rx * gap * step as f32, base.at.z() + rz * gap * step as f32))
+            .find(|&(x, z)| free(x, z, &bays))
+            .expect("an unbounded row always has a free place");
+        let y = ground(Vf::new(x, base.at.y(), z, 1.0)) + clear;
+        let spawn = Spawn { at: Vf::new(x, y, z, 1.0), facing: base.facing };
+        bays.push(Bay { machine, copy, spawn, livery, original: false });
+    }
+    bays
+}
+
+/// Every machine a ride parks, one of each per player, sized to the player count as players join and
+/// leave.
+#[derive(Clone, Debug, Default)]
+pub struct Lot {
+    machine_txt: Vec<u8>,
+    pub bays: Vec<Bay>,
+}
+
+impl Lot {
+    /// A track's lot for `players`: [`park`] for every machine in [`Machine::ALL`].
+    pub fn new(machine_txt: &[u8], players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
+        let mut lot = Lot { machine_txt: machine_txt.to_vec(), bays: Vec::new() };
+        lot.resize(players, ground);
+        lot
+    }
+
+    /// Re-park for a new player count: a player joining adds one of each machine, beside the rest,
+    /// and the last one leaving takes theirs away. Every copy that stays keeps its place.
+    pub fn resize(&mut self, players: usize, ground: &mut dyn FnMut(Vf) -> f32) {
+        self.bays = Machine::ALL.iter().flat_map(|&m| park(&self.machine_txt, m, players, ground)).collect();
+    }
+
+    /// The copies of `machine`, in copy order.
+    pub fn of(&self, machine: Machine) -> impl Iterator<Item = &Bay> {
+        self.bays.iter().filter(move |b| b.machine == machine)
+    }
+
+    /// Player `player`'s own copy of `machine`: the one they take and nobody else does.
+    pub fn bay(&self, machine: Machine, player: usize) -> Option<&Bay> {
+        self.of(machine).find(|b| b.copy == player)
+    }
+
+    /// Player `player`'s plane, standing in their bay: parked, or flying when `flight` is given.
+    pub fn plane(&self, player: usize, flight: Option<Flight>) -> Option<Plane> {
+        let bay = self.bay(Machine::Biplane, player)?;
+        let mut plane = match flight {
+            Some(f) => Plane::flying(bay.spawn, f),
+            None => Plane::parked(bay.spawn),
+        };
+        plane.livery = bay.livery;
+        Some(plane)
     }
 }
 
@@ -130,6 +358,8 @@ pub struct Plane {
     /// The flight has been put back at the spawn since the last reset (which cannot place it itself:
     /// placing measures, and the measure's table is the `Sim`'s).
     pub placed: bool,
+    /// Which of the disc's liveries it wears, an index into [`Machine::models`] ([`livery`]).
+    pub livery: usize,
 }
 
 impl Plane {
@@ -144,6 +374,7 @@ impl Plane {
             vel: Vf::new(0.0, 0.0, 0.0, 0.0),
             flight: None,
             placed: false,
+            livery: 0,
         }
     }
 
@@ -158,8 +389,8 @@ impl Plane {
     /// The swap's unwreck-and-reset: back to the spawn transform, at rest. The flight is put back by
     /// the next step ([`Flight::reset`]), which is the one with the `Sim`'s tables.
     pub fn reset(&mut self) {
-        let flight = self.flight.take();
-        *self = Plane { flight, ..Plane::parked(self.spawn) };
+        let (flight, livery) = (self.flight.take(), self.livery);
+        *self = Plane { flight, livery, ..Plane::parked(self.spawn) };
     }
 
     /// One frame of the plane with the controller on it: the reset chord ([`Flight::reset_chord`],
@@ -235,7 +466,7 @@ impl Plane {
 #[derive(Clone, Debug)]
 pub struct Garage {
     pub up: Kind,
-    /// The track's biplane, if its `machine.txt` parks one.
+    /// This player's own copy of the track's biplane ([`Lot::plane`]), if its `machine.txt` parks one.
     pub plane: Option<Plane>,
 }
 
@@ -323,6 +554,82 @@ mod tests {
         let mut g = Garage::new(Kind::Bike, None).unwrap();
         assert!(g.swap().is_err());
         assert_eq!(g.up, Kind::Bike);
+    }
+
+    /// Two of each, as the disc's files have them, with the heights of this file's own.
+    const TWO_OF_EACH: &str = "[Machines]\nNumberOfMachines = 1\n\n\
+        [Machine1]\nType = Helicopter\nPosition = 1, 2, 3\nDirection = 0, 0, 1\n\
+        [Buggy1]\nPosition = 0, 0, 0\nDirection = 0, 0, 1\n[Buggy2]\nPosition = 20, 0, 0\nDirection = 0, 0, 1\n\
+        [Biplane1]\nPosition = 100, 20, -50\nDirection = 0, 0, -1\n\
+        [Biplane2]\nPosition = 80, 20, -25\nDirection = -1, 0, 0\n\
+        [Helicopter1]\nPosition = 300, 5, 0\nDirection = 1, 0, 0\n[Helicopter2]\nPosition = 300, 5, 60\nDirection = 1, 0, 0\n\
+        [Monster1]\nPosition = -100, 0, 0\nDirection = 0, 0, 1\n[Monster2]\nPosition = -80, 0, 0\nDirection = 0, 0, 1\n\
+        [Baja1]\nPosition = 0, 0, 200\nDirection = 0, 0, 1\n[Baja2]\nPosition = 20, 0, 200\nDirection = 0, 0, 1\n";
+
+    #[test]
+    fn the_lot_parks_one_of_each_a_player() {
+        // A ground that slopes up along x, so a copy stepped sideways is lifted with it.
+        let mut ground = |at: Vf| at.x() * 0.1;
+        for players in [1, 2, 3, 4, 8, 16, 33] {
+            let lot = Lot::new(TWO_OF_EACH.as_bytes(), players, &mut ground);
+            for m in Machine::ALL {
+                let bays: Vec<&Bay> = lot.of(m).collect();
+                assert_eq!(bays.len(), players, "{players} players, {m:?}");
+                let file = spots(TWO_OF_EACH.as_bytes(), m);
+                for (i, b) in bays.iter().enumerate() {
+                    assert_eq!((b.copy, b.livery, b.original), (i, i % 2, i < 2));
+                    assert_eq!(lot.bay(m, i), Some(*b));
+                    if i < 2 {
+                        assert_eq!(b.spawn, file[i], "the file's own spot, exactly");
+                    } else {
+                        let base = file[i % 2];
+                        let clear = base.at.y() - base.at.x() * 0.1;
+                        assert!((b.spawn.at.y() - (b.spawn.at.x() * 0.1 + clear)).abs() < 1e-3, "{m:?} {i} keeps its clearance");
+                        assert_eq!(b.spawn.facing, base.facing);
+                    }
+                    for c in &bays[..i] {
+                        let apart = (b.spawn.at.x() - c.spawn.at.x()).hypot(b.spawn.at.z() - c.spawn.at.z());
+                        assert!(c.original && b.original || apart >= m.spacing() - 0.01, "{m:?} {i} and {} are {apart} ft apart", c.copy);
+                    }
+                }
+            }
+            // A ride that grows keeps every machine where it was.
+            let more = Lot::new(TWO_OF_EACH.as_bytes(), players + 3, &mut ground);
+            for b in &lot.bays {
+                assert_eq!(more.bay(b.machine, b.copy), Some(b));
+            }
+        }
+        // A file with only the first player's plane parks the rest beside it, and one with none, none.
+        let lot = Lot::new(MACHINES.as_bytes(), 4, &mut ground);
+        assert_eq!(lot.of(Machine::Biplane).count(), 4);
+        assert_eq!(lot.of(Machine::Helicopter).count(), 0);
+        let mut lot = Lot::new(b"[Machines]\n", 4, &mut ground);
+        assert!(lot.bays.is_empty());
+        lot.resize(0, &mut ground);
+        assert!(lot.plane(0, None).is_none());
+    }
+
+    #[test]
+    fn each_player_takes_their_own_plane() {
+        let mut ground = |_: Vf| 0.0;
+        let lot = Lot::new(TWO_OF_EACH.as_bytes(), 8, &mut ground);
+        let mut garages: Vec<Garage> = (0..8).map(|p| Garage::new(Kind::Bike, lot.plane(p, None)).unwrap()).collect();
+        for g in &mut garages {
+            assert_eq!(g.swap(), Ok(Kind::Biplane));
+        }
+        let planes: Vec<&Plane> = garages.iter().map(|g| g.plane.as_ref().unwrap()).collect();
+        for (i, p) in planes.iter().enumerate() {
+            assert_eq!(p.at, lot.bay(Machine::Biplane, i).unwrap().spawn.at, "player {i} is in their own bay");
+            assert_eq!(p.livery, i % 2, "every second plane wears biplane2");
+            for q in &planes[..i] {
+                assert_ne!(p.at, q.at, "two players in one plane");
+            }
+        }
+        // The swap's reset keeps the livery.
+        garages[1].swap().unwrap();
+        garages[1].swap().unwrap();
+        assert_eq!(garages[1].plane.as_ref().unwrap().livery, 1);
+        assert_eq!(Machine::Biplane.models()[livery(1)], "biplane2");
     }
 
     #[test]
