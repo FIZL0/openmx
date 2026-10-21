@@ -674,6 +674,12 @@ fn negate(v: Vf) -> Vf {
     Vf::msub(Vf::VF0.mul(Vf::VF0.bc(Field::X)), v, Vf::VF0.bc(Field::W))
 }
 
+/// The quaternion product the step's poses are put together with, `a` then `b`, as the original
+/// multiplies them.
+pub fn product(a: Vf, b: Vf) -> Vf {
+    prod(a, b)
+}
+
 /// `a ⊗ b`.
 fn prod(a: Vf, b: Vf) -> Vf {
     let p = a.mul(b);

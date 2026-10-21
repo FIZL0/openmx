@@ -31,10 +31,11 @@
 
 use crate::biplane::{Body, World as Stepped};
 use crate::camera::CurveTable;
-use crate::chassis::{self, Mat3, turn};
+use crate::chassis::{self, Mat3, normalize, turn};
 use crate::math::{self, Mat4};
 use crate::phy::{Ini, Throw, Wrecks};
 use crate::ragdoll::{Among, Bike, Carrier, Drive, HOLD_BONES, Launch, MAIN, PARTS, Ragdoll, Records, Tables};
+use crate::ragdoll_body::{self, Fade};
 use crate::ragdoll_contact::{Contact, Open, Sphere};
 use crate::ragdoll_pose::{self, Bone, Start};
 use crate::rider_anim::{Clock, Pool, Thrown};
@@ -179,6 +180,9 @@ pub struct Kit {
     pub pose_spring: Vf,
     pub pose_damping: Vf,
     pub tables: Tables,
+    /// `[Wrecks]`, for the wreck's settle test: the flail height, the roll's time and speed, and
+    /// the main bone's damping at rest.
+    pub wrecks: Wrecks,
 }
 
 impl std::fmt::Debug for Kit {
@@ -204,6 +208,7 @@ impl Kit {
             spheres: Sphere::read(&ini),
             pose_spring: forces.vector("SpringForce", UNIT_W),
             pose_damping: forces.vector("DampingForce", UNIT_W),
+            wrecks: Wrecks::read(&ini),
             rig,
             ragdoll,
             tables,
@@ -234,6 +239,10 @@ pub struct Down {
     pub held_at: [Vf; 4],
     /// What the mode machine's settle test reads, as the last step left it.
     pub sensed: Thrown,
+    /// The torques' fade, which every stiffening restarts, and whether a bone was touching when the
+    /// settle test last looked (S61).
+    pub fade: Fade,
+    pub touching: bool,
 }
 
 impl Down {
@@ -284,16 +293,35 @@ impl Down {
             ragdoll,
             held_at,
             sensed: Thrown { throw, ..Thrown::default() },
+            fade: Fade { length: F::ONE, left: F::ZERO },
+            touching: false,
         };
         down.sense(world);
         down
     }
 
-    /// **One frame of it**: the throw's clock, then the world stepped with the bone collisions on the
-    /// ground, the hands that still hold following the wreck bike.
+    /// **One frame of it**: the wreck's arm of the original's mode machine
+    /// ([`ragdoll_body::wreck_arm`]: the throw's clock, the roll, the settle test and its damping
+    /// switch), then the world stepped with the bone collisions on the ground, the hands that still
+    /// hold following the wreck bike, and every bone's orientation normalised.
+    ///
+    /// The wreck bike has no collider here, so the bones are never off the bike; the step has no
+    /// bike box either.
     pub fn step(&mut self, kit: &Kit, dt: F, crash: &crate::ride::Crash, world: &mut dyn World) {
         let frame = math::quat_to_mat4(crash.body.quat, crash.origin);
-        self.ragdoll.throw_clock(dt, crash.body.quat);
+        ragdoll_body::wreck_arm(
+            &mut self.ragdoll,
+            &self.contacts,
+            &mut self.touching,
+            &mut self.fade,
+            dt,
+            crash.body.quat,
+            None,
+            self.reason,
+            &kit.wrecks,
+            world,
+        );
+        let v = crash.body.vel;
         let drive = Drive {
             bike: Carrier {
                 rows: [frame.0[0], frame.0[1], frame.0[2]],
@@ -304,18 +332,21 @@ impl Down {
             },
             rests: std::array::from_fn(|i| kit.rig.parts.get(i).map_or(UNIT_W, |p| p.rest)),
             hold_targets: self.held_at.map(|p| math::transform_point(&frame, p)),
-            hold_velocity: crash.body.vel,
+            hold_velocity: v.merge(Dest::XYZ, v.mul(Vf::splat(0.8))),
             gravity_scale: F::ONE,
             pose_spring: kit.pose_spring,
             pose_damping: kit.pose_damping,
             torques: true,
             mode: WRECK_MODE,
-            fade_length: F::ONE,
-            fade_left: F::ZERO,
+            fade_length: self.fade.length,
+            fade_left: self.fade.left,
             ..Drive::default()
         };
         for c in &mut self.contacts {
-            c.touched = false;
+            *c = Contact { touched: false, ground: false, scene: false, swept: false, ..*c };
+        }
+        for c in &mut self.ragdoll.collisions {
+            c.touching = false;
         }
         self.ragdoll.step_among(
             dt,
@@ -323,6 +354,9 @@ impl Down {
             &kit.tables,
             Among { spheres: &kit.spheres, contacts: &mut self.contacts, terrain: Some((&mut *world, TERRAIN_MIN, TERRAIN_MAX)), scene: &mut Open, bike_box: None },
         );
+        for b in &mut self.ragdoll.bones {
+            b.body.quat = normalize(b.body.quat);
+        }
         self.sense(world);
     }
 
@@ -336,7 +370,8 @@ impl Down {
     ///
     /// **Inferred.** The gate's writer in the original was not found. This keeps what S26 measured
     /// it to follow, the hands off and then the rider on the ground, read off the bones in place of
-    /// the one rider point.
+    /// the one rider point. It is not the body's own settle test ([`Ragdoll::settled`], S61): S26
+    /// saw the gate come on with the body still doing 42 ft/s.
     pub fn settles(&self) -> bool {
         !self.ragdoll.holds[0] && !self.ragdoll.holds[1] && self.contacts.iter().any(|c| c.touched)
     }
@@ -386,6 +421,11 @@ impl crate::hash::State for Down {
         w.f("force_time", self.ragdoll.launch.force_time);
         w.f("hand_hold", self.ragdoll.launch.hand_hold);
         w.bool("stiff", self.ragdoll.stiff);
+        w.bool("flung", self.ragdoll.flung);
+        w.bool("settled", self.ragdoll.settled);
+        w.f("roll", self.ragdoll.roll);
+        w.f("fade_left", self.fade.left);
+        w.bool("touching", self.touching);
         for b in &self.ragdoll.bones {
             w.vf("position", b.body.position);
             w.vf("velocity", b.body.velocity);

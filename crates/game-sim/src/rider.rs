@@ -662,13 +662,7 @@ impl Rider {
         body_request.progress = tricks.progress;
         body_request.seq = tricks.seq;
         body.mode(dt, body_request, &ask, &wrecks, thrown, idles, gate.clock);
-        // The bones' damping switch: the settle test's stiff flag, handed to the ragdoll when it
-        // changes, as the original's mode machine does.
-        if let Some(doll) = ragdoll.as_mut() {
-            if body.machine.stiff != doll.ragdoll.stiff {
-                doll.ragdoll.damping(body.machine.stiff, doll.reason);
-            }
-        }
+        // A ragdoll throws its own damping switch, in its settle test (S61, `Down::step`).
         let (frame, clocked) = body.frame_clocked(
             dt,
             body_numbers,
