@@ -3851,6 +3851,27 @@ vehicle_fx_exhaust   boot 0x003d5f70 f = throttle * 0.5 * (MaxSpeed - airspeed) 
 #                                    f <= 0; the file's velocity.y *= f + 0.5
 vehicle_fx_generic   boot 0x003d6e60 a Generic entry's init: the emitter on its AttachedToSoultree node
 vehicle_fx_collision boot 0x003d75d0 one emitter per body contact, prev = contact - body velocity dt
+# P60 the biplane's tire dust and prop wash (journal 2026-10-21-p60-biplane-particles).
+vehicle_fx_dust_ctor boot 0x003d6020 a Dust entry's defaults: MinCompressionThreshold 0.3,
+#                                    MinBurstCompressionThreshold 0.85, UseBurstDust 1, GrowthMultiplier 2,
+#                                    VelocityMultiplier 5, ModifierBase 0.5, ModifierScale 5,
+#                                    BurstModifierScale 5 (entry +0x28..+0x44)
+vehicle_fx_dust_init boot 0x003d6100 reads those keys and EmitterOffset, keeps the emitter's rates, growth
+#                                    and velocity noise, and its Zone1..16 groups (none = 0xff) from
+#                                    mxparticlezones.dat's ZoneDescriptor section
+vehicle_fx_dust_zone boot 0x003d63f0 a zone change on the entry's tire: 0xff -> vt +0x1c (zone off: flag 2,
+#                                    emitter off), else the zone's group and vt +0x20 (flag 2 cleared)
+vehicle_fx_dust_update boot 0x003d64e0 latch +0x90: ground contact on, object contact off; off unless latched
+#                                    and compression > MinCompression; rate = file x (base + scale c);
+#                                    past the burst threshold + burst_scale c, growth min x GrowthMult,
+#                                    noise min.x, max.x x VelocityMult and max.y = file max.z x it
+vehicle_fx_heli_init boot 0x003d7190 Generic's init plus BeginFadeHeight (0) / EndFadeHeight (50)
+vehicle_fx_heli_update boot 0x003d7210 ground_query under the emitter's point for height and zone; zone
+#                                    none -> off; h < Begin full rate, < End rate x (1 - (h-B)/(E-B)), else off
+# the manager (0x003d5aa0) also builds each tire's flags (+0x28) off its record: +8 ground contact (the
+# plane tire's +0x80), +0xc object contact (+0x84), +0x10 compression (+0x8c), +0x24 zone (+0xb0's byte).
+# MatchTerrainContour (emitter +0x238): emit (0x00150540) puts each particle on ground_query's height
+# plus its turned emit-point extent's y.
 # S58 — the spin step whole (wheel_spin_integrate, wheel_surface_drag, wheel_set_tire's 1/I), ported as
 # tire::spin_integrate / surface_drag / spin_inertia and proved in tests/spin.rs (10 000 cases each,
 # every word of the wheel and its chassis).
