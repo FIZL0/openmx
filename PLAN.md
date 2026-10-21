@@ -128,6 +128,10 @@ added beside them:
     this frame" mask, so the edge is the event and "held with the timer at 0" (I1). The same poll's
     six analogue axes: the report byte each one reads, the inversion one of them gets, and the dead
     zone of ±0.2 that is the only shaping there is — no clamp and no curve (I2).
+  - `modifiers.rs` — the game modifiers (P55): twelve percentages, per player or for the world, that
+    scale fields of the loaded `.phy`, the built ride's speed limit, the biplane's file and the
+    engine's time scale before a ride starts — never a branch in a step, and nothing touched at 100%.
+    Their text form is what `settings.txt`, a tape's `modifiers` line and a lobby's room carry.
   - `replay.rs` — the replay harness: a fixture of inputs and expectations replayed tick by tick (A2),
     plus the pad tape — a recorded session as the report bytes and measured `dt` of each frame, which
     `Playback` plays back through the input layer so a human-played sequence drives the port (I3), and

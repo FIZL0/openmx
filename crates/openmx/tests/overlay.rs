@@ -420,7 +420,7 @@ fn the_gpu_draws_the_hud_as_the_cpu_does() {
     ride(&mut one, 200, true, 0.0);
     let solo = ridden(std::slice::from_ref(&one));
     let four = ridden(&four_riders(&tables));
-    let gauges = overlay::Gauges { feet: 1234.0, bike: true, score: 4321, preload: 0.6 };
+    let gauges = overlay::Gauges { feet: 1234.0, bike: true, score: 4321, preload: 0.6, modified: false };
     let (w, h) = (1280usize, 720usize);
     let texture = gpu.offscreen(w as u32, h as u32);
     let view = texture.create_view(&Default::default());
@@ -474,7 +474,7 @@ fn the_score_and_the_preload_meter_are_drawn() {
     let Some(art) = art() else { return };
     let tables = Arc::new(Tables::build());
     let riders = ridden(&[rider(&tables, [0.0, 0.0], [0.0, 1.0])]);
-    let gauges = overlay::Gauges { feet: 5280.0, bike: true, preload: 0.5, score: 1234 };
+    let gauges = overlay::Gauges { feet: 5280.0, bike: true, preload: 0.5, score: 1234, modified: false };
     let mut frame = Frame::new(640, 448, [255, 255, 255]);
     let drawn = art.draw(&mut frame, (640, 448), &riders, 0, 384.0, &gauges);
     assert_eq!(drawn.score, "1234");
