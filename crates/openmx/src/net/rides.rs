@@ -58,8 +58,17 @@ impl Game for Rides<'_> {
         }
     }
 
+    /// Every seat's hash, and its put-back ghost beside it (P59): a one-player [`Sim`]'s walk leaves
+    /// the ghost out (S63), and online every seat is one, so the checksum peers compare names it here.
     fn hash(&self) -> u64 {
-        self.sims.iter().fold(0, |h, s| game_sim::state_hash(&s.hash().to_le_bytes(), h))
+        self.sims.iter().fold(0, |h, s| {
+            let g = &s.rider.ghost;
+            let mut bytes = s.hash().to_le_bytes().to_vec();
+            bytes.extend(g.clock.0.to_bits().to_le_bytes());
+            bytes.extend(g.alpha.0.to_bits().to_le_bytes());
+            bytes.push(g.on as u8);
+            game_sim::state_hash(&bytes, h)
+        })
     }
 
     /// Every seat's state in [`game_sim::snapshot`]'s codec (N1): the seat count, then each seat's
