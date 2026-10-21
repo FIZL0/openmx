@@ -102,6 +102,12 @@ pub struct Sim {
     /// The bike's own parameters, off its `.phy`: shared by every clone of this state like the
     /// tables, because nothing in a ride writes them ([`snapshot`]).
     pub phy: Arc<Phy>,
+    /// The binding table the bike's commands are read through (P73, P79): [`bindings::Table::SHIPPED`]
+    /// unless a player picked another controller preset ([`Sim::set_presets`]). The original builds
+    /// it when a ride starts and when the Controller Presets screen is left, never during a frame, so
+    /// it is a constant of the ride like the bike's numbers: copied with a snapshot, kept local by a
+    /// resync, and not hashed. A plane ride reads preset 0 whatever this says ([`Sim::table`]).
+    pub bindings: bindings::Table,
     /// The input layer, read once a frame *before* the simulation — which is where the original
     /// reads it ([`tick`]). It is state and not a parameter: the press and release timers and the
     /// one-frame event queue are what a gesture is decoded out of.
@@ -181,7 +187,17 @@ impl Sim {
         // Pad 0 plugged in and pad 1 not, which is the shape every capture of this game was taken
         // in and the shape a one-player session has.
         input.pad_mut(0).connected = true;
-        Sim { ticks: 0, rng: seed, tables, phy: Arc::new(phy), input, rider, plane: None, others: Vec::new() }
+        Sim {
+            ticks: 0,
+            rng: seed,
+            tables,
+            phy: Arc::new(phy),
+            bindings: bindings::Table::SHIPPED,
+            input,
+            rider,
+            plane: None,
+            others: Vec::new(),
+        }
     }
 
     /// **One frame of the simulation**, in the original's order: the pads are read, and then the
@@ -208,7 +224,20 @@ impl Sim {
     /// ride in a shell with no pages).
     pub fn poll(&mut self, dt: F, reports: &[Report; PADS]) -> Controls {
         self.input.tick(dt, reports);
-        Controls::from_pad(self.input.pad(0))
+        Controls::through(self.input.pad(0), self.table())
+    }
+
+    /// Build the binding table on each pad's controller preset, pad 0 first, as the original's builder
+    /// does when a ride starts or the Controller Presets screen is left (P79): the preset's eight
+    /// commands on that pad, the fixed ones on both. Preset 0 on both is [`bindings::Table::SHIPPED`].
+    pub fn set_presets(&mut self, presets: [usize; PADS]) {
+        self.bindings = bindings::Table::built(presets.map(|p| p.min(bindings::PRESETS - 1)));
+    }
+
+    /// The table the pads are read through this frame: [`Sim::bindings`] on the bike, and preset 0 in
+    /// a plane — on any vehicle but the bike the original builds preset 0 whatever the profile says.
+    pub fn table(&self) -> &bindings::Table {
+        if self.plane.is_some() { &bindings::Table::SHIPPED } else { &self.bindings }
     }
 
     /// The simulation half: one frame of the rider, and the tick counter behind it.
@@ -266,7 +295,7 @@ impl Sim {
 
     fn pad_controls(&self) -> Vec<Controls> {
         (0..self.players())
-            .map(|i| if i < PADS { Controls::from_pad(self.input.pad(i)) } else { Controls::default() })
+            .map(|i| if i < PADS { Controls::through(self.input.pad(i), self.table()) } else { Controls::default() })
             .collect()
     }
 
@@ -393,6 +422,7 @@ impl Clone for Sim {
             rng: self.rng,
             tables: Arc::clone(&self.tables),
             phy: Arc::clone(&self.phy),
+            bindings: self.bindings,
             input: self.input,
             rider: self.rider.clone(),
             plane: self.plane.clone(),
