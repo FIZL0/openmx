@@ -430,3 +430,57 @@ fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_ends_i
     h.back_from_online();
     assert_eq!(h.screen(), Some(Screen::Lobby));
 }
+
+/// N10, the menu's side: a local freeride's pause offers "Open to Online" above Quit, which asks the
+/// shell to open the ride, and then shows the room code; a ride that cannot be opened has no such
+/// row and Quit where it was. A guest's join that lands in a ride under way is the lobby's ride with
+/// [`menu::Lobby::drop_in`] set, and Find says a listing is a ride to drop in on.
+#[test]
+fn a_freerides_pause_opens_it_online() {
+    use menu::Opening;
+    let (mut m, mut r) = fresh("Hosty", "thq1");
+    m.pause();
+    assert_eq!(m.pause_rows().last().map(String::as_str), Some("Quit"));
+    let quit = m.pause_rows().len() - 1;
+    m.opening = Opening::Can;
+    let rows = m.pause_rows();
+    assert_eq!(rows[rows.len() - 2..], ["Open to Online", "Quit"]);
+    // six rows down from Resume: Open to Online, and the pause closes over a ride that goes on
+    let mut acts = Vec::new();
+    for _ in 0..quit {
+        acts.extend(tap(&mut m, &mut r, Control::Down));
+    }
+    acts.extend(tap(&mut m, &mut r, Control::Cross));
+    assert_eq!(acts.last(), Some(&Act::Stay));
+    assert!(acts.contains(&Act::OpenOnline), "{acts:?}");
+    assert!(m.riding());
+    // opened: the row is the code once the network says it, and pressing it does nothing
+    m.opening = Opening::Open;
+    m.pause();
+    assert_eq!(m.pause_rows()[quit], "Online: opening...");
+    m.heard(Event::Short("QKX4".into()));
+    assert_eq!(m.pause_rows()[quit], "Online: QKX4");
+    taps(&mut m, &mut r, &vec![Control::Down; quit]);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.iter().all(|a| *a == Act::Stay) && m.screen() == Some(Screen::Pause), "{acts:?}");
+    // the last row is still Quit
+    let acts = taps_acts(&mut m, &mut r, &[Control::Down, Control::Cross]);
+    assert!(acts.contains(&Act::Quit), "{acts:?}");
+
+    // a guest dropping in
+    let (mut g, _) = fresh("Guesty", "thq2");
+    let mut riding = guest_room();
+    (riding.riding, riding.drop_in) = (true, true);
+    assert_eq!(g.heard(Event::DropIn(riding.clone(), "guest-id".into())), Act::Online);
+    assert!(g.lobby.drop_in && g.riding());
+    assert_eq!(g.lobby.start.as_ref().map(|s| s.1.as_str()), Some("guest-id"));
+    assert_eq!(g.heard(Event::Arrived { peer: "x".into(), seats: vec![2] }), Act::Stay);
+    g.back_from_online();
+    assert!(!g.lobby.drop_in);
+    assert_eq!(g.heard(Event::Start(riding, "guest-id".into())), Act::Online);
+    assert!(!g.lobby.drop_in, "a ride that starts is not a drop-in");
+}
+
+fn taps_acts(menu: &mut Menu, reader: &mut Reader, controls: &[Control]) -> Vec<Act> {
+    controls.iter().flat_map(|&c| tap(menu, reader, c)).collect()
+}

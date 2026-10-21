@@ -938,6 +938,22 @@ const PAUSE_SWITCH: usize = 2;
 const PAUSE_AUDIO: usize = 3;
 const PAUSE_SETTINGS: usize = 4;
 const PAUSE_MAIN: usize = 5;
+/// The pause's "Open to Online" row (N10), before Quit, on a ride that can be opened
+/// ([`Menu::opening`]); Quit moves down one under it.
+const PAUSE_OPEN: usize = 6;
+const PAUSE_OPEN_ROW: &str = "Open to Online";
+
+/// Whether the ride under the pause can be opened to online players (N10), and whether it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Opening {
+    /// Not this ride (online already, more than one local player, a tape, no front end).
+    #[default]
+    No,
+    /// A local freeride: the pause offers "Open to Online".
+    Can,
+    /// Hosting: the row shows the room code, for others to join by.
+    Open,
+}
 /// The Game Audio Options page's rows (P56): the original's Song, Audio Presets and six sliders in
 /// its order, with Skip Song and Play Order, which are this port's, beside the song.
 const AUDIO: [&str; 10] = ["Song", "Skip Song", "Play Order", "Audio Presets", "Music", "Sound FX", "Crowd", "Engine", "Menu FX", "User Soundtracks"];
@@ -1062,8 +1078,11 @@ pub enum Act {
     /// [`Menu::switched`].
     Switch(usize),
     Quit,
-    /// The lobby's ride starts: [`Lobby::start`] says on what.
+    /// The lobby's ride starts: [`Lobby::start`] says on what (with [`Lobby::drop_in`], a ride
+    /// under way this machine joins).
     Online,
+    /// Open the ride under the pause to online players (N10): host a lobby on it, and carry on.
+    OpenOnline,
 }
 
 /// The front end's state: which screens are open, where each one's cursor is, and the settings it
@@ -1107,6 +1126,8 @@ pub struct Menu {
     picks_changed: bool,
     /// Online play's side of the menu (N3).
     pub lobby: Lobby,
+    /// The pause's "Open to Online" (N10), as the shell says the ride under it stands.
+    pub opening: Opening,
     /// 1P (P46): the device the splash's press came from, the one that drives the menus — with the
     /// keyboard, which always may. `None` before anyone has pressed (or under `--screen`, which
     /// skips the splash and lets every device drive, as before P46).
@@ -1220,6 +1241,7 @@ impl Menu {
             seated: 1,
             picks_changed: false,
             lobby: Lobby::default(),
+            opening: Opening::No,
             p1: None,
             p1_name: String::new(),
             claimed: None,
@@ -1785,7 +1807,7 @@ impl Menu {
     /// none for this player.
     pub fn pause_rows(&self) -> Vec<String> {
         let seat = self.pauser;
-        PAUSE
+        let mut rows: Vec<String> = PAUSE
             .iter()
             .enumerate()
             .map(|(i, row)| match i {
@@ -1793,7 +1815,14 @@ impl Menu {
                 PAUSE_SWITCH => format!("{row}: None"),
                 _ => row.to_string(),
             })
-            .collect()
+            .collect();
+        match self.opening {
+            Opening::No => {}
+            Opening::Can => rows.insert(PAUSE_OPEN, PAUSE_OPEN_ROW.into()),
+            Opening::Open if self.lobby.code.is_empty() => rows.insert(PAUSE_OPEN, "Online: opening...".into()),
+            Opening::Open => rows.insert(PAUSE_OPEN, format!("Online: {}", self.lobby.code)),
+        }
+        rows
     }
 
     /// Open `screen` the way the pad would reach it, for `--screen`: over the main menu, or for the
@@ -1859,7 +1888,7 @@ impl Menu {
             Screen::Controls => CONTROLS_ROWS,
             Screen::Modifiers => MODIFIERS_ROWS,
             Screen::Keyboard => KEY_ROWS.len() + 1,
-            Screen::Pause => PAUSE.len(),
+            Screen::Pause => PAUSE.len() + usize::from(self.opening != Opening::No),
             Screen::Garage => roster::ROWS.len(),
             Screen::Online => ONLINE.len() + 1,
             Screen::Games => self.lobby.found.len() + 1,
@@ -2136,6 +2165,11 @@ impl Menu {
                             self.main();
                             return Act::MainMenu;
                         }
+                        PAUSE_OPEN if self.opening == Opening::Can => {
+                            self.stack.clear();
+                            return Act::OpenOnline;
+                        }
+                        PAUSE_OPEN if self.opening == Opening::Open => {}
                         _ => return Act::Quit,
                     }
                 }
@@ -2387,10 +2421,23 @@ impl Menu {
                 l.me = me.clone();
                 l.room = Some(room.clone());
                 l.start = Some((room, me));
+                l.drop_in = false;
                 l.status.clear();
                 self.stack.clear();
                 return Act::Online;
             }
+            // into a ride under way (N10): the same ride from the lobby, its state from the host
+            Event::DropIn(room, me) => {
+                l.me = me.clone();
+                l.room = Some(room.clone());
+                l.start = Some((room, me));
+                l.drop_in = true;
+                l.status.clear();
+                self.stack.clear();
+                return Act::Online;
+            }
+            // the host's ride takes the peer on (`online.rs`); the lobby has nothing to show for it
+            Event::Arrived { .. } => {}
             Event::Dropped(why) => {
                 l.status = why.clone();
                 self.note = Some(why);
@@ -2413,6 +2460,7 @@ impl Menu {
     /// Back from an online ride: the lobby if this machine is still in one, else the online menu.
     pub fn back_from_online(&mut self) {
         self.lobby.start = None;
+        self.lobby.drop_in = false;
         self.stack = vec![Screen::Main, Screen::Online];
         if self.lobby.room.is_some() {
             self.stack.push(Screen::Lobby);
@@ -2524,6 +2572,8 @@ pub struct Lobby {
     pub network_changed: bool,
     /// The line-up and this machine's peer name, once the host has started the ride.
     pub start: Option<(Room, String)>,
+    /// [`Lobby::start`] is a ride under way this machine drops in on (N10), not one starting.
+    pub drop_in: bool,
 }
 
 impl Lobby {
@@ -3774,7 +3824,7 @@ impl Painter<'_> {
             .iter()
             .map(|l| {
                 let track = TRACKS.iter().find(|t| t.0 == l.track).map_or(l.track.as_str(), |t| t.1);
-                let build = if l.same_build() { "" } else { "  (another version)" };
+                let build = if !l.same_build() { "  (another version)" } else if l.riding { "  (riding: drop in)" } else { "" };
                 format!("{}  {track}  {}/{}{build}", l.name, l.taken, l.seats)
             })
             .chain(["Refresh".to_string()])

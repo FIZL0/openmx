@@ -23,6 +23,9 @@
 #[allow(dead_code)]
 #[path = "../src/net/mod.rs"]
 mod net;
+#[allow(dead_code)]
+#[path = "../src/peer.rs"]
+mod peer;
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -675,4 +678,278 @@ fn on_the_ride_a_silent_peers_seat_empties_and_the_others_ride_on() {
     let a = &r.games[0];
     assert!(a.sims[1].ticks > from as u64 + 150, "the empty seat rode on: {} ticks", a.sims[1].ticks);
     let _ = WINDOW;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Joining a ride under way (N10)
+// ---------------------------------------------------------------------------------------------------
+
+/// A freeride opened online: the host rides alone in a session of one, `g` joins on seat 2 at round
+/// `joins[0]` and `k` on seats 3 and 4 at `joins[1]`, over a lossy link. As the lobby has it, the
+/// host is asked to take each on (its handshake passed) 30 rounds before the joiner's game is up,
+/// loading its ride; the joiner then comes as [`Netplay::joining`] (no seat, no session), and is
+/// taken on once the host hears it. The run's machines in join order, and the host's tick and its
+/// first seat's own tick count after every round.
+fn joined_mid_ride(link: &Link, joins: [u32; 2], rounds: u32) -> (Run<Ride>, Vec<(usize, u64)>) {
+    ggrs::clock::drive(true);
+    let spawn = game_sim::snapshot::encode(&sims(1)[0]);
+    let mut r: Run<Ride> = Run {
+        names: vec!["host".into()],
+        nets: vec![Netplay::new(Lineup::parse("host").unwrap(), "host", Timing::default(), dumps()).unwrap()],
+        games: vec![Ride::new(1)],
+        ran: vec![Vec::new()],
+        biggest: 0,
+    };
+    let mut host = Vec::new();
+    let mut wire: Vec<(usize, u32, String, Vec<u8>)> = Vec::new();
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    let mut lost = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64 <= link.loss
+    };
+    for round in 0..rounds {
+        for (who, seats, at) in [("g", vec![1], joins[0]), ("k", vec![2, 3], joins[1])] {
+            if round == at {
+                r.names.push(who.into());
+                r.nets.push(Netplay::joining("host", who, Timing::default(), dumps()).unwrap());
+                r.games.push(Ride::new(1));
+                r.ran.push(Vec::new());
+            }
+            if round + 30 == at {
+                r.nets[0].admit(who, &seats, spawn.clone()).unwrap();
+            }
+        }
+        for (to, at, from, d) in std::mem::take(&mut wire) {
+            if at > round {
+                wire.push((to, at, from, d));
+            } else {
+                r.nets[to].heard(&from, &d);
+            }
+        }
+        for i in 0..r.names.len() {
+            let np = &mut r.nets[i];
+            let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| mash(s, np.tick())).collect();
+            r.games[i].frame(np, &local);
+            for (to, d) in np.outgoing() {
+                r.biggest = r.biggest.max(d.len());
+                if lost() || d.len() > DATAGRAM_MAX {
+                    continue;
+                }
+                // a datagram for a machine not on the network yet is lost, as it would be
+                if let Some(j) = r.names.iter().position(|n| *n == to) {
+                    wire.push((j, round + link.lag, r.names[i].clone(), d));
+                }
+            }
+            np.said.clear();
+            r.ran[i].push(np.tick());
+        }
+        host.push((r.nets[0].tick(), r.games[0].sims[0].ticks));
+        ggrs::clock::advance(ROUND);
+    }
+    ggrs::clock::drive(false);
+    (r, host)
+}
+
+/// N10's acceptance, on the ride: a one-peer freeride opens, a second and then a third peer join it
+/// mid-ride, and from each join's tick every machine in the ride has the same state hash before
+/// every settled tick and ran the same pads; the host's ride never resets — alone, it loses not a
+/// tick to the first join, and its ride before it is the ride it had; with others in, the second
+/// join steps it back no further than the settled tick, the few ticks a rollback re-runs anyway.
+#[test]
+fn a_freeride_opened_online_takes_two_peers_mid_ride() {
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    let joins = [200, 500];
+    // the host alone, as it rode before anyone came
+    let (alone, _) = joined_mid_ride(&link, [u32::MAX - 20, u32::MAX - 10], joins[0] + 100);
+    let (r, host) = joined_mid_ride(&link, joins, 1100);
+    let (h, g, k) = (&r.nets[0], &r.nets[1], &r.nets[2]);
+    let at: Vec<(&str, u32)> = h.admit.joins.iter().map(|(p, t)| (p.as_str(), *t)).collect();
+    assert_eq!(at.iter().map(|a| a.0).collect::<Vec<_>>(), ["g", "k"], "{at:?}");
+    let (t1, t2) = (at[0].1 as usize, at[1].1 as usize);
+    for np in [h, g, k] {
+        assert_eq!(np.lineup.text(), "host,g,k,k", "{}", np.me);
+        assert_eq!((np.rb.round, np.end.as_deref()), (2, None), "{}", np.me);
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+    }
+    assert_eq!((h.recover.restarts, g.recover.restarts, k.recover.restarts), (2, 2, 1));
+    for i in 0..3 {
+        assert_eq!(r.games[i].sims.len(), 4, "{}: every seat a bike", r.names[i]);
+    }
+
+    // the host: the first join at the tick it was at once g was heard (a keep-alive, half a second
+    // in, and the lag), its ride before it untouched, not a tick lost to it
+    let before = &alone.nets[0];
+    let g_round = joins[0] as usize;
+    assert!(t1 > g_round && t1 < g_round + 40, "g heard and taken on at tick {t1}, up at round {g_round}");
+    assert_eq!(h.hashes[..t1], before.hashes[..t1], "the host's ride before the join is the one it rode");
+    let at = r.ran[0].iter().position(|&t| t >= t1).unwrap();
+    assert_eq!(r.ran[0][..=at], alone.ran[0][..=at], "the host's ticks round by round up to the join");
+    // after it the host holds while the new session synchronises — ggrs' five round trips, as at
+    // every restart, and the state's way to g — then rides on: about 6 rounds a trip at lag 3
+    let trip = 2 * link.lag as usize;
+    let held = r.ran[0][at..at + 120].windows(2).filter(|w| w[0] == w[1]).count();
+    assert!(held <= 7 * trip, "the host held {held} rounds at g's join");
+    assert_eq!(h.log[..t1].iter().map(|p| p[0]).collect::<Vec<_>>(), before.log[..t1].iter().map(|p| p[0]).collect::<Vec<_>>());
+    let k_round = joins[1] as usize;
+    let mut back = Vec::new();
+    for (round, w) in host.windows(2).enumerate() {
+        let ((t0, s0), (t1_, s1)) = (w[0], w[1]);
+        assert!(t1_ + WINDOW >= t0 && s1 + WINDOW as u64 >= s0, "round {round}: the host went back from {t0} to {t1_}");
+        if t1_ < t0 || s1 < s0 {
+            back.push((round + 1, t0, t1_));
+        }
+    }
+    assert!(back.len() <= 1 && back.iter().all(|b| b.0 >= k_round && b.0 < k_round + 40 && b.2 == t2), "the host stepped back only at k's join, to its tick: {back:?}");
+    let (end_t, end_s) = *host.last().unwrap();
+    assert!(end_t > 1000 && end_s > 1000, "the host rode on: tick {end_t}, its bike {end_s} ticks");
+
+    // from each join on, the machines in the ride agree
+    let n = r.agree(&[0, 1], t1);
+    assert!(n > 700, "host and g agree on {n} ticks from {t1}");
+    let n = r.agree(&[0, 1, 2], t2);
+    assert!(n > 450, "everyone agrees on {n} ticks from {t2}");
+    assert!(t2 > t1 + 250 && t2 < k_round + 40, "k joined at {t2}, up at round {k_round}");
+    // a joiner's own seats ride its own pads (mashed a tick or so earlier: the input delay)
+    for seat in [2, 3] {
+        let t = t2 + 20;
+        assert!((0..4).any(|d| k.log[t][seat] == wire(&mash(seat, t - d))), "seat {}: {:?}", seat + 1, k.log[t][seat]);
+    }
+    assert!(r.biggest <= DATAGRAM_MAX, "a {}-byte datagram", r.biggest);
+}
+
+/// A game that cannot change its seats ([`Tally`]) refuses the join, and the ride goes on as it was.
+#[test]
+fn a_ride_that_cannot_seat_a_joiner_says_so() {
+    ggrs::clock::drive(true);
+    let mut np: Netplay<Tally> = Netplay::new(Lineup::parse("host").unwrap(), "host", Timing::default(), dumps()).unwrap();
+    let mut game = Tally::new(1);
+    for t in 0..40 {
+        if t == 20 {
+            np.admit("g", &[1], Vec::new()).unwrap();
+            np.heard("g", &[]);
+            assert!(np.admit("g", &[2], Vec::new()).is_err(), "g twice");
+            assert!(np.admit("k", &[0], Vec::new()).is_err(), "the host's seat");
+        }
+        let pad = [mash(0, np.tick())];
+        game.frame(&mut np, &pad);
+        np.outgoing();
+        ggrs::clock::advance(ROUND);
+    }
+    ggrs::clock::drive(false);
+    assert!(np.said.iter().any(|s| s.contains("g cannot join: this ride's seats cannot change")), "{:?}", np.said);
+    assert_eq!((np.lineup.text().as_str(), np.recover.restarts, np.admit.pending()), ("host", 0, 0));
+    assert!(np.tick() > 30);
+    let mut guest: Netplay<Tally> = Netplay::joining("host", "g", Timing::default(), dumps()).unwrap();
+    assert!(guest.waiting() && guest.admit("k", &[1], Vec::new()).is_err(), "only the host takes a peer on");
+}
+
+/// N10's acceptance over the lobby's real connections, on the LAN (mDNS, no relay, no board, nothing
+/// leaves the machine): a host opens its freeride of one ([`peer::Peer::open`], the pause's "Open to
+/// Online"), rides alone, and two peers join it by its room code mid-ride, one after the other, each
+/// through the lobby's handshake and into the session at a tick. From each join's tick every machine
+/// in the ride agrees — the state's hash before every settled tick and the pads it ran — and the
+/// host's ride never went back but for the settled tick at the second join.
+#[test]
+fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
+    use openmx_net::{Board, Cmd, Names, Net, Online, Pick, Relay, Room, HOST};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let lan = |name: &str| Online { name: name.into(), relay: Relay::Off, board: Board::Off, lan: true, code_servers: Some(vec![]), ..Online::default() };
+    let tmp = std::env::temp_dir().join(format!("openmx-n10-desyncs-{}", std::process::id()));
+    let mut peers: Vec<peer::Peer> = ["Hosty", "Guesty", "Thirdy"].iter().map(|n| peer::Peer::new(Net::start(lan(n), Arc::new(Names)))).collect();
+    for p in &mut peers {
+        p.dumps = tmp.clone();
+    }
+    let mut room = Room::new("Hosty", "free06", 4);
+    room.take(HOST, &[Pick::new("thq1", "race125p")]);
+    peers[0].open(room).unwrap();
+
+    let frame = Duration::from_nanos(1_001_000_000_000 / 30_000);
+    let started = Instant::now();
+    let mut last = Instant::now();
+    // the host's tick after every frame, and when each guest asked to join
+    let mut host: Vec<usize> = Vec::new();
+    let mut asked = [false; 2];
+    let code = loop {
+        std::thread::sleep(frame.saturating_sub(last.elapsed()));
+        let dt = last.elapsed().as_secs_f32().min(0.25);
+        last = Instant::now();
+        for (i, p) in peers.iter_mut().enumerate() {
+            p.frame(&peer::mash, dt);
+            for line in p.said.drain(..) {
+                eprintln!("{i}: {line}");
+            }
+            assert!(p.failed.is_none(), "peer {i}: {:?} ({})", p.failed, p.status);
+        }
+        let h = peers[0].riding.as_ref().unwrap();
+        host.push(h.np.tick());
+        let tick = h.np.tick();
+        let joins = h.np.admit.joins.len();
+        let short = peers[0].room.as_ref().map(|r| r.short.clone()).unwrap_or_default();
+        // g once the host has ridden two seconds alone and its code is out; k ten seconds after g is in
+        if !asked[0] && tick >= 60 && !short.is_empty() {
+            assert!(peers[0].room.as_ref().unwrap().riding, "the room is the ride");
+            peers[1].net.send(Cmd::Join(short.clone(), vec![Pick::new("thq2", "pro250a")]));
+            asked[0] = true;
+        }
+        if !asked[1] && joins == 1 && tick >= h.np.admit.joins[0].1 as usize + 300 {
+            peers[2].net.send(Cmd::Join(short.clone(), vec![Pick::new("thq3", "race125p"), Pick::new("thq4", "race125p")]));
+            asked[1] = true;
+        }
+        if joins == 2 && h.np.confirmed() > h.np.admit.joins[1].1 as i64 + 300 && peers.iter().all(|p| p.riding.as_ref().is_some_and(|r| r.np.confirmed() > h.np.admit.joins[1].1 as i64 + 300)) {
+            break short;
+        }
+        if started.elapsed() > Duration::from_secs(150) {
+            for (i, p) in peers.iter().enumerate() {
+                let Some(r) = &p.riding else { continue };
+                let np = &r.np;
+                eprintln!("{i} {}: tick {} waiting {} restarts {} lineup {} notice {:?} round {} state {:?} sims {} too_big {}", np.me, np.tick(), np.waiting(), np.recover.restarts, np.lineup.text(), np.notice, np.rb.round, np.rb.sess.current_state(), r.sims.len(), p.too_big);
+            }
+            panic!("not done in 150 s: tick {tick}, {joins} joined; {:?}", peers.iter().map(|p| p.status.clone()).collect::<Vec<_>>());
+        }
+    };
+    eprintln!("room {code}: done in {:.1} s", started.elapsed().as_secs_f32());
+
+    let rides: Vec<&peer::Riding> = peers.iter().map(|p| p.riding.as_ref().unwrap()).collect();
+    let (h, g, k) = (&rides[0].np, &rides[1].np, &rides[2].np);
+    let joins: Vec<(&str, usize)> = h.admit.joins.iter().map(|(p, t)| (p.as_str(), *t as usize)).collect();
+    assert_eq!((joins[0].0, joins[1].0), (g.me.as_str(), k.me.as_str()));
+    let (t1, t2) = (joins[0].1, joins[1].1);
+    for np in [h, g, k] {
+        assert_eq!(np.lineup.seats.len(), 4, "{}", np.me);
+        assert_eq!(np.lineup.seats.iter().flatten().filter(|p| **p == k.me).count(), 2, "k rides two seats");
+        assert!(np.desyncs.is_empty() && np.end.is_none(), "{}: {:?} {:?}", np.me, np.desyncs, np.end);
+    }
+    // a drop-in rides the host's bike set: the room says so, as its handshake compared it
+    let r = peers[0].room.as_ref().unwrap();
+    assert!(r.seats.iter().flatten().all(|s| s.pick.bike == "race125p"), "{:?}", r.seats);
+    assert_eq!(r.seats_of(&g.me), [1]);
+    assert_eq!(r.seats_of(&k.me), [2, 3]);
+
+    // from each join on, the machines in the ride ran the same ticks
+    let settled = |nps: &[&net::Netplay<rides::State>]| nps.iter().map(|np| np.confirmed().max(0) as usize).min().unwrap();
+    for (who, from) in [(vec![h, g], t1), (vec![h, g, k], t2)] {
+        let to = settled(&who);
+        assert!(to > from + 250, "{to} settled from {from}");
+        let first = peer::ticks(who[0], from, to);
+        for np in &who[1..] {
+            let theirs = peer::ticks(np, from, to);
+            if let Some((t, (a, b))) = first.lines().zip(theirs.lines()).enumerate().find(|(_, (a, b))| a != b) {
+                panic!("tick {}: {} has {a}, {} has {b} (hash, pads)", from + t, who[0].me, np.me);
+            }
+            assert_eq!(first.lines().count(), theirs.lines().count());
+        }
+    }
+    // the bikes move: the agreement is about something
+    let states: std::collections::BTreeSet<u64> = h.hashes[t2..t2 + 200].iter().copied().collect();
+    assert!(states.len() > 100, "{} states", states.len());
+
+    // the host's ride: forward all the way, but for the one step back to the settled tick at k's join
+    let back: Vec<(usize, usize)> = host.windows(2).filter(|w| w[1] < w[0]).map(|w| (w[0], w[1])).collect();
+    assert!(back.len() <= 1 && back.iter().all(|b| b.1 == t2 && b.0 - b.1 <= WINDOW), "the host went back: {back:?} (joins at {t1}, {t2})");
+    assert!(host[0] <= 1 && *host.last().unwrap() > t2 + 300, "{:?}..{:?}", host.first(), host.last());
+    assert_eq!((h.recover.restarts, g.recover.restarts, k.recover.restarts), (2, 2, 1));
 }
