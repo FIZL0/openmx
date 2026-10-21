@@ -381,8 +381,10 @@ fn bits(v: Vf) -> [u32; 4] {
 /// - **The state machine** ([`game_sim::state::Ride`]) through the reset: entered on the throw's
 ///   tick and stepped with the settle gate the rows show, its clock and latch are every row's, bit for
 ///   bit; it asks for the wreck page as the clock passes `CannonballWreckTime`, and the put-back's
-///   tick — the page's, three rows on, which the port does not model — reads the speed limit
-///   [`off_map::unwreck`] gives.
+///   tick reads the speed limit [`off_map::unwreck`] gives.
+/// - **The page** ([`game_sim::wreck_page::Page`], S72): stepped with the machine from the tick it
+///   was asked for on, it puts the bike back on its third update, and the machine's clock there —
+///   which the put-back leaves alone — is the clock the put-back's row shows, bit for bit.
 /// - **The drag** (S71): the bike's air drag is the riding one on the row before the throw, the
 ///   port's halved [`off_map::drag`] on every row from the throw's to the one before the put-back,
 ///   and the riding one again from the put-back's row, bit for bit.
@@ -534,6 +536,20 @@ fn the_original_rides_off_each_edge() {
         assert!(4 * (repeated + skipped) < back - t, "{name}: {repeated} rows repeated, {skipped} skipped one");
         assert!(late_gate <= 2, "{name}: the gate read off the row itself {late_gate} times");
         let asked = asked.unwrap_or_else(|| panic!("{name}: no reset asked for"));
+        // The page, from the tick it was asked for on: the fader's first update is that tick's, and
+        // the machine runs on (asking nothing, the page being up) until the draw that puts it back.
+        let j = page.unwrap_or_else(|| panic!("{name}: no page"));
+        let mut paged = ticks[j];
+        let mut fader = game_sim::wreck_page::Page::default();
+        fader.raise();
+        let mut updates = 1;
+        while !fader.update() {
+            let ask = step(&mut paged, j + updates, true, c.f(back, "dt"), fader.up());
+            assert_eq!(ask, None, "{name}: asked again with the page up");
+            updates += 1;
+        }
+        assert_eq!(updates, 3, "{name}: the page's put-back is its third update");
+        assert_eq!(paged.elapsed.0.to_bits(), c.f(back, "clock").0.to_bits(), "{name}: the clock the put-back left");
         assert_eq!(m.respawn(), Kind::Wrecked);
         let mut ch = Chassis { max_speed_sq: c.f(back - 1, "max_speed_sq"), ..Chassis::default() };
         assert_eq!(ch.max_speed_sq.0, 122500.0, "{name}: thrown until the put-back");

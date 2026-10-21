@@ -4143,6 +4143,34 @@ put_back_solid              boot 0x0027df50 (bike, y in/out, normal out, ...) th
 #                                           +0x13a8).
 put_back_gate               boot 0x0027e410 (bike, point) a bounds table at 0x00420c00 used only when
 #                                           two config words are zero; passed on free06 and free09.
+# S75 — put_back_solid read whole, and driven from the record test's world (crates/game-sim/tests/
+#   ride.rs, TheOriginalsTerrain::solid). Args: (bike, bike +0x148c, filter, bundle = bike +0x1484,
+#   normal out or 0, y in/out). The bundle as the put-back fills it: +0x120 count, *(+0x134) lengths,
+#   *(+0x138) origins, *(+0x13c) directions, +0x150 centre, +0x160 radius; the record *(+0x6c) is
+#   cleared over the count (+0xa4 flags, +0x98 points, +0x94 normals, +0xa8 fractions, all zero).
+#   Broad phase: |+0x150 - bike +0x1390|^2 -> bike +0x13a8; past bike +0x13a4 the list at bike +0x1488
+#   is regathered (collision_search_gather, mode 1 when the race record's +0x40 is 1, else 3) and
+#   +0x1390 moves to the centre. Each entry (object, distance) under the bundle's radius: type 2 with
+#   +0x31 & 1 and not (+0x84 & the word at 0x004e2130) -> 0x0011c210 (bundle, object, record), and
+#   on a hit y = max(y, record point 0's y) (normal copied with it), and any flag 1..count-1 refuses;
+#   type 3 -> each part (group_part_count/group_part) whose u16 cell x/z at +8/+0xc times the world's
+#   cell size is within 20 of the centre refuses; then mode 1 with race flag 1: any checkpoint within
+#   sqrt(r^2/4 + 100) refuses. Returns the refusal. The overhead probe ignores it and reads only y.
+#   The filter argument is not read in it; put_back_clear passes it to put_back_refile.
+put_back_refile             boot 0x001ab310 (bundle, centre, filter; radius in f12) -> 0x001adc70 on
+#                                           the bundle's +4: re-files the bundle in the world's tree;
+#                                           put_back_clear calls it before the ring when bike +0x13a4 <
+#                                           +0x13a8, i.e. after a query that regathered
+put_back_ring_filter        boot 0x00420d80 the filter quad put_back_clear hands put_back_solid/refile
+put_back_over_filter        boot 0x00420db0 the filter quad put_back_keep's overhead probe hands it
+bundle_sweep_object         boot 0x0011c210 (bundle, object, record) -> met: nothing unless the object
+#                                           is +0x31 & 1 and its sphere (+0x40, +0x60) meets the bundle's
+#                                           (+0x150, +0x160); clears the record's flags (+0xa4) and
+#                                           fractions (to -1) and its tally first, never its points or
+#                                           normals; then by the object's class at +0x68 (2, 3: nothing).
+#                                           put_back_solid reads its answer object by object.
+put_back_mask               boot 0x004e2130 the word put_back_solid masks an object's +0x84 with: a hit
+#                                           there skips it (the bike's own, 0x10000, in both states)
 hand_reset_thunk            boot 0x00281930 this -= 80, into player_hand_reset: the input interface's
 #                                           slot (vtable 0x00454fb0), so the chord runs before the
 #                                           update (0x00281950 -> 0x0027c890, slot at 0x00454f84).
@@ -4176,3 +4204,29 @@ collision_node_update boot 0x0026f800 (node, dt in f12): every collision object 
 # (pose -> the transform's rows by vu_quat_to_mat3 0x0013ebd0). Off the running game, not keys:
 # the collidable's flags (C+0x1f8, +0x84) 0x9a058, actors (+0x110) 8, collides-with (+0x114)
 # 0x40000. The ray probe's eleven rays are bike\col\wreckbikem.col's segments, bit for bit.
+
+# S72 — the wreck page's put-back delay. Port: crates/game-sim/src/wreck_page.rs, wired into rider.rs;
+#   proved in tests/wreck_page.rs and tests/off_the_map.rs. With page != 0 and a screen (player +0x20 ->
+#   +0x50), ride_reset_request 0x0027b9f0 registers bike+0x1340 on viewport fader [which] (fader_listener)
+#   and calls viewport_fade; which = (0x0041f770 -> 0x3cc -> +0x64 != the player's screen), 0 for one
+#   player. Without a page or a screen it calls the screen's vt +0xa0 and respawns at once.
+fader_start boot 0x001c8e80 (fader, out ms, in ms) via 0x001c8400: +0x50 = 1, +0x58 = in ms, +0x34 = 0,
+#                           +0x38 = ms/1000, +0x3c = 0, +0x48 = 1, +0x4c = 0
+fader_update boot 0x001c8a80 the fader's vt +0x38 (vtable 0x00450ec0): t < 1 and duration != 0 ->
+#                            elapsed += dt, t = min(elapsed/duration, 1)
+fader_draw boot 0x001c8f50 the fader's vt +0x48: fading out, alpha = (int)(255 t + 0.5); at 255 +0x54
+#                          (held) = 1, +0x48 = 0, every listener's vt +8; then, with +0x50, the fade in
+#                          from elapsed 0. Fading in at alpha 0: held and in cleared, listeners' vt
+#                          +0xc, the list emptied
+bike_page_listener boot 0x00281c10 the bike's listener vt +8 (vtable 0x00455128): this - 0x1340 to
+#                                  player_respawn 0x0027bb20
+screen_page_off boot 0x00200ab0 the screen's vt +0xa0, to 0x00200ac0: only the HUD flags +0x144/+0x148;
+#                               the fader is not touched
+#   The machine's "page up" query is the fader's +0x54 || +0x48.
+#   Live (research/s72_page.py, watch/s72-page.toml, copy 5 slot 9 = free09's state 7; captures
+#   context/capture/s72/{north,east,west}.csv, seven pages: reasons 6, 2 and 13): the fader updates after
+#   the bike in the tick; its dt is whole ms of frame time, 34/33/33 or 34/33/34, so three updates make
+#   t >= 0.99999994 (alpha 255) and two never do. The respawn is in the draw after the request tick's
+#   third update (end of tick R+2); the bike rides from R+3, and the clock left on it is clock_R + 2 dt.
+#   The fade in is three more updates (elapsed 0.1 or 0.101), then held and the listeners clear.
+#   Rows may read between the bike's update and the fader's, and once inside the black draw (west).
