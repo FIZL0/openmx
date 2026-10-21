@@ -422,20 +422,20 @@ fn the_canonical_run_hashes_to_its_pinned_vectors() {
 
 /// `(tick, Sim::hash)` every 32 ticks of the riders' run.
 const RIDERS_HASHES: &[(u64, u64)] = &[
-    (32, 0x5e7c5f90262b0f5a),
-    (64, 0xf68fb8deb70b1218),
-    (96, 0x274f9659c0547912),
-    (128, 0x228712c34b77fae8),
-    (160, 0xc9ea47b03cd63a16),
-    (192, 0x61622f25df27a73c),
-    (224, 0x787ef88971f29c3d),
-    (256, 0xa10611a0586af296),
+    (32, 0x5016acf0edfcc16e),
+    (64, 0x891fb45cf3fb817b),
+    (96, 0x12e4bbf8113db9e6),
+    (128, 0x2613994cd2de5f2d),
+    (160, 0x5a464dec02662a68),
+    (192, 0x96239fcb97f7e865),
+    (224, 0x529a1daa9f31de9c),
+    (256, 0x14fc11abad0a4026),
 ];
 /// FNV-1a over every tick's hash of the run.
-const RIDERS_DIGEST: u64 = 0xf24e313ac98adf12;
+const RIDERS_DIGEST: u64 = 0x2c2823b782491197;
 /// FNV-1a over the session's `snapshot::encode` bytes at the end, and how many bytes they were.
-const RIDERS_WIRE_DIGEST: u64 = 0xe9bcaf3c50b249e7;
-const RIDERS_WIRE_LEN: usize = 11895;
+const RIDERS_WIRE_DIGEST: u64 = 0xad4cb6cc9f2e9a3f;
+const RIDERS_WIRE_LEN: usize = 11931;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed

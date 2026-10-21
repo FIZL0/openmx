@@ -64,6 +64,7 @@ use crate::ragdoll_ride::{self, Down, Kit};
 use crate::rider_anim;
 use crate::state;
 use crate::wreck_sound;
+use crate::ghost::Ghost;
 use std::sync::Arc;
 use crate::trick::{self, AngleTable, Set, Trick, Tricks, Wreck};
 use crate::vehicle_anim;
@@ -229,6 +230,9 @@ pub struct Rider {
     /// [`Frame::landed`] is taken on — [`crate::air::Air::was_airborne`] is a *substep*'s memory and
     /// says nothing about the frame before.
     pub(crate) airborne: bool,
+    /// The bike's ghost after a put-back (P57, S63): see-through for three seconds, passing through
+    /// the other riders, its clock held while it is inside one.
+    pub ghost: Ghost,
 }
 
 impl Rider {
@@ -273,6 +277,7 @@ impl Rider {
             body_request: vehicle_anim::Request { cut: true, ..vehicle_anim::Request::default() },
             flight: Trick::NONE,
             airborne: false,
+            ghost: Ghost::default(),
         }
     }
 
@@ -320,9 +325,13 @@ impl Rider {
         let mut out = Frame::default();
         let Rider {
             ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
-            flight, airborne, ragdoll_kit, ragdoll, wreck_sounds, idles, ..
+            flight, airborne, ragdoll_kit, ragdoll, wreck_sounds, idles, ghost, ..
         } = self;
         let mut sense = *sense;
+
+        // 0 — the ghost's tick, the first thing in the bike's update: its clock holds while the
+        // body is inside another rider's (`rivals` holds no ghosts, whose lists reject this one).
+        ghost.step(dt, || crate::ghost::overlaps(&ride.rival(), rivals));
 
         // 1 — the top of the player's update: the hand-reset latch is dropped.
         state.frame_start();
@@ -374,6 +383,7 @@ impl Rider {
                 tricks.reset();
                 *flight = Trick::NONE;
                 out.respawned = true;
+                ghost.start();
             }
         }
 
@@ -472,6 +482,8 @@ impl Rider {
         // body rays hit. The port's is its head ray, swept at the frame's end (`ride::hits`). The
         // chassis' mass is not held, only its reciprocal; it is read only for an actor, and the
         // port's world has none.
+        // A ghost's head ray sweeps the world alone: its body ignores the vehicle class (S63).
+        let rivals = if ghost.on { &[][..] } else { rivals };
         let hits = if state.wreck.is_none() { ride::hits_among(ride, world, rivals) } else { Vec::new() };
         let touched = ride.touching || !hits.is_empty();
         let (mass, height) = (F::ONE / ride.chassis.inv_mass, F(ride.chassis.cofg_world.y()));
@@ -544,6 +556,7 @@ impl Rider {
             tricks.reset();
             *flight = Trick::NONE;
             out.respawned = true;
+            ghost.start();
         }
         out
     }

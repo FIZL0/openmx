@@ -3139,7 +3139,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     gpu_poses.len() - 1
                 });
                 // See-through for a while after a put-back, the bike, its parts and the rider alike (P57).
-                let alpha = seat.garage.ghost.shown();
+                let alpha = seat.sim.rider.ghost.shown();
                 actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha });
                 let node_now = |name: &str| -> Option<M4> {
                     let blended = rig.chassis.as_ref().and_then(|c| c.stance.set.skeleton.find(name));

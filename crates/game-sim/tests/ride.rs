@@ -4060,6 +4060,109 @@ fn a_ninth_rider_is_refused() {
     stacked(9, 20.0);
 }
 
+// --- S63: the put-back ghost among other riders ---------------------------------------------------
+
+/// Two riders side by side, `apart` along x, neither of whom wrecks: the stand-in bike's own landing
+/// test answers on its first frame with wrecks on (`Sim::new` says why), and a downed rider is no
+/// rival, which would end every overlap this is about.
+fn side_by_side(apart: f32) -> game_sim::Sim {
+    let mut sim = game_sim::Sim::new(0x5363);
+    let mounts = game_sim::stock::mounts(&sim.phy);
+    let at = Vf::new(SPAWN.x() + apart, SPAWN.y(), SPAWN.z(), 1.0);
+    let mut r = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Set::default());
+    r.sense.wrecks_enabled = false;
+    let phy = (*sim.phy).clone();
+    sim.add_player(phy, r);
+    sim
+}
+
+/// S63: a ghost passes through the other riders and they pass through it. The stack that jousts in
+/// `stacked_riders_joust` does not once either rider is a ghost: the one below's head ray sweeps the
+/// world alone while it is the ghost, and the one above is nobody's rival while it is.
+#[test]
+fn a_ghost_passes_through_another_rider() {
+    use game_sim::ghost::Ghost;
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let joust = Some(game_sim::trick::Wreck::from(game_sim::air::Wreck::Joust));
+    let still = vec![Controls::default(); 2];
+    let mut sim = stacked(2, 3.0);
+    let frames = sim.step_all(dt, &still, &mut Flat::default());
+    assert_eq!(frames[0].wreck, joust, "the stack without a ghost");
+    for ghost in [0, 1] {
+        let mut sim = stacked(2, 3.0);
+        if ghost == 0 { sim.rider.ghost.start() } else { sim.others[0].rider.ghost.start() }
+        let frames = sim.step_all(dt, &still, &mut Flat::default());
+        assert_ne!(frames[0].wreck, joust, "player {} a ghost: the head ray struck the other rider", ghost + 1);
+        assert!(sim.rider_of(ghost).ghost.on);
+    }
+    // Nor can it run out in there: half a tick left, and inside the rider above, it is still a ghost
+    // after the tick — the clock that would have ended it did not count — and still struck nobody.
+    let mut sim = stacked(2, 3.0);
+    let half = F(dt.0 / 2.0);
+    sim.rider.ghost = Ghost { clock: half, alpha: F(0.9), on: true };
+    let frames = sim.step_all(dt, &still, &mut Flat::default());
+    assert_eq!((sim.rider.ghost.clock, sim.rider.ghost.on), (half, true), "the clock ran out inside");
+    assert_ne!(frames[0].wreck, joust);
+}
+
+/// S63: the ghost's clock stands still for as long as its body is inside another rider's, and runs
+/// the rest of its three seconds once it is out. Held, the alpha is what the fade gives a full clock,
+/// the floor. Two ghosts inside each other do not hold each other: each one's list rejects the other.
+#[test]
+fn a_ghost_holds_its_clock_while_inside_another_rider() {
+    use game_sim::ghost::Ghost;
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let still = vec![Controls::default(); 2];
+    let mut sim = side_by_side(1.0);
+    sim.rider.ghost.start();
+    for k in 0..45 {
+        sim.step_all(dt, &still, &mut Flat::default());
+        let g = sim.rider.ghost;
+        assert_eq!((g.clock, g.alpha, g.on), (Ghost::LENGTH, Ghost::FLOOR, true), "tick {k}: the clock moved inside");
+    }
+    // Out of the other rider: the clock counts, and the fade runs its 90 ticks and ends on the 91st.
+    let far = Vf::new(SPAWN.x() + 50.0, SPAWN.y(), SPAWN.z(), 1.0);
+    sim.others[0].rider.ride.place(far, game_sim::stock::FACING);
+    let mut ticks = 0;
+    while sim.rider.ghost.on {
+        sim.step_all(dt, &still, &mut Flat::default());
+        ticks += 1;
+        if ticks == 1 {
+            assert_eq!(sim.rider.ghost.clock, Ghost::LENGTH - dt, "the first tick out counts");
+        }
+        assert!(ticks <= 91, "the ghost never ended");
+    }
+    assert_eq!(ticks, 91);
+
+    // Next to it is not inside it: far enough apart that the two bodies only miss.
+    let reach = 2.0 * sim.rider.ride.rival().radius.0;
+    let mut sim = side_by_side(reach + 0.01);
+    sim.rider.ghost.start();
+    sim.step_all(dt, &still, &mut Flat::default());
+    assert_eq!(sim.rider.ghost.clock, Ghost::LENGTH - dt, "two bodies apart held the clock");
+
+    // Two ghosts in one place: neither holds the other.
+    let mut sim = side_by_side(1.0);
+    sim.rider.ghost.start();
+    sim.others[0].rider.ghost.start();
+    sim.step_all(dt, &still, &mut Flat::default());
+    for i in 0..2 {
+        assert_eq!(sim.rider_of(i).ghost.clock, Ghost::LENGTH - dt, "player {}: held by another ghost", i + 1);
+    }
+}
+
+/// The overlap query on its own: strictly closer than the two reaches, and only against the rivals
+/// it is handed.
+#[test]
+fn the_ghosts_overlap_query_is_strict() {
+    use game_sim::ride::Rival;
+    let body = |x: f32| Rival { centre: Vf::new(x, 0.0, 0.0, 1.0), radius: F(1.0), height: F(0.0), vel: Vf::default() };
+    assert!(game_sim::ghost::overlaps(&body(0.0), &[body(1.999)]));
+    assert!(!game_sim::ghost::overlaps(&body(0.0), &[body(2.0)]), "touching is not inside");
+    assert!(game_sim::ghost::overlaps(&body(0.0), &[body(9.0), body(-1.0)]));
+    assert!(!game_sim::ghost::overlaps(&body(0.0), &[]));
+}
+
 // --- S55: crooked landings ----------------------------------------------------------------------------
 
 /// One crooked landing off P29's cross-laid ramp: the run-up on the throttle, then from the first
