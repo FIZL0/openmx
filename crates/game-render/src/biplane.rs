@@ -204,6 +204,16 @@ pub struct Emitter {
     /// An exhaust's `MaxSpeed`: the airspeed, feet a second, at which it stops (P58). 0 where the
     /// entry does not say.
     pub max_speed: f32,
+    /// Every `key = value` of the section, as written: the keys a type reads for itself (a tire
+    /// dust's `AttachedToTire` and `MinCompressionThreshold`, the prop wash's fade heights, P60).
+    pub keys: Vec<(String, String)>,
+}
+
+impl Emitter {
+    /// A key of the section, ignoring case.
+    pub fn key(&self, key: &str) -> Option<&str> {
+        self.keys.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str())
+    }
 }
 
 /// Read the emitter list: one [`Emitter`] per `[section]`, in the file's order.
@@ -219,6 +229,7 @@ pub fn emitters(text: &str) -> Vec<Emitter> {
             continue;
         };
         let value = value.trim().to_string();
+        e.keys.push((key.trim().to_string(), value.clone()));
         match key.trim().to_ascii_lowercase().as_str() {
             "type" => e.kind = value,
             "emitter" => e.emitter = value,
