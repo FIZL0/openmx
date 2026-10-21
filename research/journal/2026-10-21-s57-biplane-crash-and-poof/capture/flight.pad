@@ -1,0 +1,49 @@
+# S57's flight in the original, wall-clock, from slot 7 (the plane standing on the runway):
+# L1 alone, R1 alone, the L1+R1 chord on the ground; take off and dive into the ground, wait the
+# wreck out; take off again, dive in, and end the wreck with the chord.
+release
+sleep 3000
+press l1 600
+sleep 2500
+press r1 600
+sleep 2500
+down l1
+down r1
+sleep 600
+up l1
+up r1
+sleep 4000
+# take off
+down cross
+sleep 7000
+down down
+sleep 2500
+up down
+sleep 1500
+# dive in
+down up
+sleep 6000
+up up
+sleep 8000
+up cross
+sleep 3000
+# again, and the chord in the wreck
+down cross
+sleep 7000
+down down
+sleep 2500
+up down
+sleep 1500
+down up
+sleep 6000
+up up
+sleep 2000
+down l1
+down r1
+sleep 600
+up l1
+up r1
+sleep 4000
+up cross
+sleep 3000
+release

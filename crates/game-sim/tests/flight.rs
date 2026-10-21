@@ -336,3 +336,72 @@ fn the_plane_takes_gas_off_flat_ground() {
     let low = fly(&mut f, Pad::default(), 10).y();
     assert!(low < high - 50.0, "the throttle is shut and the plane is still not coming down");
 }
+
+/// **The reset chord on the flown plane** (S57): [`Flight::reset_chord`] is the original's L1+R1
+/// (`biplane::Plane::reset_chord`, S36's model, which `tests/biplane.rs` holds to the recording's
+/// chord exit). In the air it does nothing; on the wheels or wrecked it is the unwreck, and the plane
+/// is back at its spawn, at rest, the throttle shut, the wreck cleared and its spin, damping, inertia
+/// and gravity given back — on the same call, which is the press's own frame.
+///
+/// The wreck is the map edge's throw (reason 13) over a [`Flat`] floor: the crash into the ground
+/// (reason 1) needs the world's contact, which is S48's. Bit for bit, the chord's plane is the plane
+/// a fresh [`Flight::reset`] at the same spawn gives — the same unwreck — in every field the frame
+/// reads.
+#[test]
+fn the_reset_chord_puts_the_flown_plane_back() {
+    let Some(file) = plane_file() else { return };
+    let tables = game_sim::ride::Tables::build();
+    let acos = &tables.acos;
+    let mut f = Flight::new(&Plane::read_bytes(&file));
+    f.attitude.flown = true;
+    let lowest = f.tires.iter().map(|t| F(t.center.y()) - t.radius).fold(F(f32::MAX), |a, b| a.min(b));
+    let spawn = (Vf::new(2048.0, (-lowest).to_f32(), 2048.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0));
+    f.area = Some(game_sim::biplane::Area::new(F(16.0), F(16.0), F(1.0), F(1.0)));
+    f.place(spawn.0, spawn.1, acos);
+    let built = (f.gravity, f.body.damping, f.body.ang_damping, f.body.inv_inertia);
+    let mut ground = Flat::default();
+    let dt = F(1.0 / 30.0);
+    for _ in 0..30 {
+        f.frame(dt, Pad::default(), &mut ground, &tables);
+    }
+    assert!(f.measure.grounded, "the parked plane is not on its wheels");
+
+    // On the wheels: back, at rest.
+    let gas = Pad { forward: F::ONE, ..Pad::default() };
+    for _ in 0..60 {
+        f.frame(dt, gas, &mut ground, &tables);
+    }
+    assert!(f.measure.grounded && f.surfaces.throttle > F::ZERO);
+    assert!(!f.reset_chord(false, acos), "no chord, no reset");
+    assert!(f.reset_chord(true, acos), "the chord on the wheels did nothing");
+    let (_, at) = f.pose();
+    assert_eq!((at.x(), at.z()), (spawn.0.x(), spawn.0.z()));
+    assert_eq!(f.surfaces.throttle, F::ZERO);
+    assert_eq!((f.body.velocity.x(), f.body.velocity.y(), f.body.velocity.z()), (0.0, 0.0, 0.0));
+
+    // In the air: nothing. Held 2000 ft up and let fall for a frame, it is not on its wheels.
+    let high = Vf::new(spawn.0.x(), spawn.0.y() + 2000.0, spawn.0.z(), 1.0);
+    f.place(high, spawn.1, acos);
+    f.frame(dt, Pad::default(), &mut ground, &tables);
+    assert!(!f.measure.grounded && f.crash.reason == 0);
+    let before = f.body.position;
+    assert!(!f.reset_chord(true, acos), "the chord in the air put the plane back");
+    assert_eq!(f.body.position, before);
+
+    // Wrecked: thrown back off the map's west edge, then the chord, still in the air.
+    f.place(Vf::new(50.0, spawn.0.y() + 2000.0, 2048.0, 1.0), spawn.1, acos);
+    f.spawn = spawn;
+    f.frame(dt, Pad::default(), &mut ground, &tables);
+    assert_eq!(f.crash.reason, 13, "the map's edge did not throw the plane");
+    assert_ne!(f.gravity, built.0, "a wreck's gravity");
+    f.frame(dt, Pad::default(), &mut ground, &tables);
+    assert!(!f.measure.grounded);
+    let mut fresh = f.clone();
+    assert!(f.reset_chord(true, acos), "the chord in a wreck did nothing");
+    fresh.reset(spawn.0, spawn.1, acos);
+    assert_eq!(f.crash.reason, 0);
+    assert_eq!((f.gravity, f.body.damping, f.body.ang_damping, f.body.inv_inertia), built, "the wreck given back");
+    assert!(f == fresh, "the chord's plane is not the reset's");
+    let (_, at) = f.pose();
+    assert_eq!((at.x(), at.z()), (spawn.0.x(), spawn.0.z()));
+}
