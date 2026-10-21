@@ -313,7 +313,8 @@ pub enum Cmd {
     Picks(Vec<Pick>),
     Ride { track: String, wrecks: bool, biplane: bool },
     Private(bool),
-    /// The host opens this many seats (N12: 2 to [`crate::SEATS`]).
+    /// The host opens this many seats (N12: 2 to [`crate::SEATS`]), in the lobby or in a ride that
+    /// takes peers on (N14).
     Seats(usize),
     Start,
     Kick(String),
@@ -901,7 +902,8 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                     cx.say(Event::Room(room.clone()));
                     (dirty, listed) = (true, None);
                 }
-                Some(Cmd::Seats(n)) if !room.riding && shaking.is_none() => match room.resize(n) {
+                // a ride that takes peers on (N10) can grow or shrink its open seats mid-ride (N14)
+                Some(Cmd::Seats(n)) if (!room.riding || room.drop_in) && shaking.is_none() => match room.resize(n) {
                     Ok(()) => {
                         broadcast(&joined, &Msg::Room(room.clone()));
                         cx.say(Event::Room(room.clone()));

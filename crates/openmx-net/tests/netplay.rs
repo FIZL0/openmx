@@ -219,3 +219,30 @@ fn a_joiner_whose_bike_set_differs_is_refused() {
     let back = room_with(&h, "host", |r| !r.riding && r.taken() == 1);
     assert_eq!(back.seed, 0, "no ride");
 }
+
+/// N14: a ride open to drop-ins (N10) takes the pause's Seats row mid-ride, as a lobby does; a ride
+/// that takes nobody on keeps its seats (Private, which is always taken, shows the Seats was not).
+#[test]
+fn an_opened_ride_resizes_its_room_and_a_closed_one_does_not() {
+    let lan = |name: &str| Online { name: name.into(), relay: Relay::Off, board: Board::Off, lan: true, code_servers: Some(vec![]), ..Online::default() };
+    for drop_in in [true, false] {
+        let h = Net::start(lan("Hosty"), disc(1));
+        let mut r = Room::new("", "free06", 4);
+        r.take(HOST, &[Pick::new("thq1", "race125p")]);
+        (r.riding, r.drop_in) = (true, drop_in);
+        h.send(Cmd::Host(r));
+        room_with(&h, "host", |r| !r.short.is_empty());
+        h.send(Cmd::Seats(9));
+        h.send(Cmd::Private(true));
+        let after = room_with(&h, "host", |r| r.private);
+        assert_eq!(after.seats.len(), if drop_in { 9 } else { 4 }, "drop_in {drop_in}");
+        if drop_in {
+            h.send(Cmd::Seats(1));
+            assert!(wait(&h, "host", 10, |e| match e {
+                Event::Status(s) => Some(s.contains("2 to")),
+                _ => None,
+            }));
+        }
+        h.send(Cmd::Leave);
+    }
+}
