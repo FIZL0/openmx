@@ -1,0 +1,6 @@
+# gas, stick back over the first crest
+down cross
+sleep 1500
+stick l 0 1
+sleep 5000
+release

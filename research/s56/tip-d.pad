@@ -1,0 +1,6 @@
+# a short roll, then braking with the stick hard right
+press cross 700
+down square
+stick l 1 0
+sleep 7000
+release

@@ -1,0 +1,6 @@
+# gas, then hard right at speed
+down cross
+sleep 3500
+stick l 1 0
+sleep 3000
+release

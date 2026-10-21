@@ -3671,3 +3671,25 @@ rider_wreck_sound_load boot 0x0033e5b0 reads the rider archive's rider.aud [Fall
 crowd_sound_load boot 0x001fe220 reads event.aud's Crowd* lists when the track's CrowdPresent is set
 music_list_load boot 0x001fd9f0 reads appstart.res aud\music\music.pb: [Artists], [Song N] Filename,
 #                               Title, Artist
+# S56 — the ragdoll through whole wrecks (crates/game-sim/tests/ragdoll_wrecks.rs). The rider body
+#   actor is the human's type-4 vehicle record less 0x400 (@game_manager -> 0x34 -> 0x34 -> 0x8 x8 ->
+#   0x0, then -0x400; its own +0x14 is another rider's body, an AI's). watch/s56-ragdoll.toml
+rider_body_update boot 0x0024e640 (dt in f12, the actor in a0) the body actor's vt update: the
+#                                  request's +0x238/+0x23c effects, the two look clocks
+#                                  (+0x474/+0x478), rider_body_mode while the request's +0x8 is set
+#                                  (else placed +0x2ac = 0), rider_physics_update, then 0x0024e250
+#   What the update reads off the rest of the game each tick: the request block [actor+0x488] and the
+#   0x200 before it (the hand dummies, which the request's +0xf0/+0xf4 point at), the 0x100 at the
+#   request's +0x1ac (the bike: centre +0x40, radius +0x60), and, once a bone nears the bike or
+#   another collidable, those actors' scene data and the terrain cell cache at 0x0049f540 (ten 0x70
+#   cells keyed ix<<16|iz). Laid in from a capture, the Ee replays a wreck bit-exactly until the first
+#   contact with something moving that the capture does not carry (front 2608, side 2613, back 2491,
+#   tip 2482 of the s56 captures); the reads it was then missing: 0x00601900(4), 0x00dfd580(27),
+#   0x00dfd690(15), 0x00dfd6d0(11), 0x00dfe350(36), 0x00e379bc(3), 0x00e37a4c(7), 0x00e37c04(64),
+#   0x011b1680(4), 0x011b16fc(20), 0x011b1734(7), 0x01672fec(3), 0x01673b14(2) (heap, this session).
+#   rand_state draws within the tick: the rest of the game draws 0..~20 before the body updates;
+#   the wreck entry draws 6 inside the update (side 2605), the damping/settle switch 1 each time.
+#   A save state requested by PINE can land between the frame counter's step and the tick: the
+#   recorder then logs the previous tick again under the next counter (rng and bones identical).
+#   VU0 vsqrt (and so vrsqrt) is chopped under PCSX2 (Roundmode 3), not rounded: with nearest the
+#   Ee's tick missed the captured bones by 1 ulp in 207..261 lanes; chopped, every lane matches.
