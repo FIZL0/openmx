@@ -86,7 +86,7 @@ no `kit.toml` present.
 
 The kit runs on a stock Python 3.11+ with no packages at all for everything static (disc, ELF,
 decompilation, journal, checks). The task list and the unattended run need
-[agent-runner](https://github.com/FIZL0/agent-runner) v0.4.1 (stdlib only; SETUP.md step 1). Optional
+[agent-runner](https://github.com/FIZL0/agent-runner) v0.5.0 (stdlib only; SETUP.md step 1). Optional
 extras, each needed by exactly one thing:
 
 | Package | Needed for |
