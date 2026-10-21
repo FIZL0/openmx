@@ -334,8 +334,8 @@ fn bike(feet: f32) -> overlay::Gauges {
     overlay::Gauges { feet, bike: true, ..Default::default() }
 }
 
-/// What the views draw is what the ride says: one player's dial and needle at its speed, four
-/// players' readouts at theirs, and each view's marks, in the view's pixels, where the riders are —
+/// What the views draw is what the ride says: one player's readout, or the dial and needle when
+/// asked for, at its speed, four players' readouts at theirs, and each view's marks, in the view's pixels, where the riders are —
 /// drawn there in the human riders' cyan.
 #[test]
 fn the_views_draw_the_riders() {
@@ -348,15 +348,21 @@ fn the_views_draw_the_riders() {
     ride(&mut one, 200, true, 0.0);
     let solo = ridden(std::slice::from_ref(&one));
     let mut frame = Frame::new(640, 448, [0, 0, 0]);
-    let drawn = art.draw(&mut frame, (640, 448), &solo, 0, span, &bike(1000.0));
+    let analog = overlay::Gauges { speedometer: menu::Speedometer::Analog, ..bike(1000.0) };
+    let drawn = art.draw(&mut frame, (640, 448), &solo, 0, span, &analog);
     assert_eq!(drawn.needle, Some(overlay::needle_degrees(solo[0].speed.0)));
-    assert_eq!(drawn.speed, None, "one player gets the dial, not the readout");
+    assert_eq!(drawn.speed, None, "the dial, not the readout");
     assert_eq!(drawn.odometer.as_deref(), Some("00000.2"));
     assert!(drawn.marks.is_empty());
     assert_eq!(drawn.player, overlay::RADAR_AT);
     assert!(solo[0].speed.0 > 20.0);
     assert_eq!(drawn.score, "0");
     assert_eq!(drawn.preload, Some(0.0));
+    let mut frame = Frame::new(640, 448, [0, 0, 0]);
+    let drawn = art.draw(&mut frame, (640, 448), &solo, 0, span, &bike(1000.0));
+    assert_eq!(drawn.speed, Some(overlay::speed_text(solo[0].speed.0)), "the readout by default");
+    assert_eq!((drawn.needle, drawn.odometer), (None, None), "the digital layout has no dial or odometer");
+    assert_eq!(drawn.place, overlay::Place::Full);
 
     // Four players, four 320x224 views of a 640x448 window: the parts at full size, the radar from
     // each view's bottom-left.
@@ -365,11 +371,14 @@ fn the_views_draw_the_riders() {
     let mut marked = 0;
     for v in 0..4 {
         let mut view = Frame::new(320, 224, [0, 0, 0]);
-        let drawn = art.draw(&mut view, (640, 448), &riders, v, span, &bike(0.0));
+        // Asking for the dial does not get it in a split: the original forces the readout there.
+        let analog = overlay::Gauges { speedometer: menu::Speedometer::Analog, ..bike(0.0) };
+        let drawn = art.draw(&mut view, (640, 448), &riders, v, span, &analog);
         assert_eq!(drawn.scale, 1.0);
         assert_eq!(drawn.speed, Some(overlay::speed_text(riders[v].speed.0)), "view {v}");
         assert_eq!(drawn.needle, None);
-        assert_eq!(drawn.preload, None, "a split view has no preload meter");
+        assert_eq!(drawn.preload, Some(0.0), "view {v} has its preload meter");
+        assert_eq!(drawn.place, if v < 2 { overlay::Place::Top } else { overlay::Place::Bottom });
         let up = 448.0 - 224.0;
         assert_eq!(drawn.player, (overlay::RADAR_AT.0, overlay::RADAR_AT.1 - up));
         assert_eq!(drawn.marks.iter().map(|m| m.0).collect::<Vec<_>>(), (0..4).filter(|&i| i != v).collect::<Vec<_>>());
@@ -399,8 +408,8 @@ fn apart(a: &[u8], b: &[u8]) -> (f64, f64) {
     (sum as f64 / a.len() as f64, off as f64 / (a.len() / 3) as f64)
 }
 
-/// V30: the GPU draws the HUD as sprites the way the CPU draws it — one player's dial, needle, score,
-/// odometer and preload, and four views' readouts and radars, each in its own corner of the window.
+/// V30: the GPU draws the HUD as sprites the way the CPU draws it — one player's readout or dial,
+/// needle, score, odometer and preload, and four views' readouts and radars, each in its own corner of the window.
 /// The shapes' edges are smoothed by distance rather than by four samples, so a few edge pixels may
 /// part; the rest is the same picture.
 #[test]
@@ -420,12 +429,17 @@ fn the_gpu_draws_the_hud_as_the_cpu_does() {
     ride(&mut one, 200, true, 0.0);
     let solo = ridden(std::slice::from_ref(&one));
     let four = ridden(&four_riders(&tables));
-    let gauges = overlay::Gauges { feet: 1234.0, bike: true, score: 4321, preload: 0.6, modified: false };
+    let analog = overlay::Gauges { feet: 1234.0, bike: true, score: 4321, preload: 0.6, modified: false, speedometer: menu::Speedometer::Analog };
+    let digital = overlay::Gauges { speedometer: menu::Speedometer::Digital, ..analog };
     let (w, h) = (1280usize, 720usize);
     let texture = gpu.offscreen(w as u32, h as u32);
     let view = texture.create_view(&Default::default());
     let target = game_render::gpu::Target { view: &view, size: (w as u32, h as u32), frame: [0, 0, w as u32, h as u32], scale: 1 };
-    for (riders, views) in [(&solo, vec![(0, 0, w, h)]), (&four, (0..4).map(|v| ((v % 2) * w / 2, (v / 2) * h / 2, w / 2, h / 2)).collect())] {
+    let quarters = (0..4).map(|v| ((v % 2) * w / 2, (v / 2) * h / 2, w / 2, h / 2)).collect();
+    let halves = (0..2).map(|v| (v * w / 2, 0, w / 2, h)).collect();
+    for (riders, views, gauges) in
+        [(&solo[..], vec![(0, 0, w, h)], analog), (&solo[..], vec![(0, 0, w, h)], digital), (&four[..], quarters, digital), (&four[..2], halves, digital)]
+    {
         let mut frame = Frame::new(w, h, [0, 0, 0]);
         let mut sprites = Vec::new();
         for (v, &(x, y, vw, vh)) in views.iter().enumerate() {
@@ -453,7 +467,8 @@ fn a_wide_window_puts_the_parts_in_its_corners() {
     let riders = ridden(&[rider(&tables, [0.0, 0.0], [0.0, 1.0])]);
     for (w, h) in [(1280, 448), (640, 896), (1920, 1080)] {
         let mut frame = Frame::new(w, h, [0, 0, 0]);
-        let drawn = art.draw(&mut frame, (w, h), &riders, 0, 384.0, &bike(0.0));
+        let analog = overlay::Gauges { speedometer: menu::Speedometer::Analog, ..bike(0.0) };
+        let drawn = art.draw(&mut frame, (w, h), &riders, 0, 384.0, &analog);
         let s = (w as f32 / 640.0).min(h as f32 / 448.0);
         assert_eq!(drawn.scale, s);
         let want = (overlay::RADAR_AT.0 * s, h as f32 - (448.0 - overlay::RADAR_AT.1) * s);
@@ -467,14 +482,14 @@ fn a_wide_window_puts_the_parts_in_its_corners() {
     }
 }
 
-/// The score bar is drawn top left with the score in it; the bike has its odometer and preload
-/// meter, the plane the dial alone (V28) — the original's biplane rides show neither.
+/// The score bar is drawn top left with the score in it; the bike's dial has its odometer and
+/// preload meter, the plane's dial is alone (V28) — the original's biplane rides show neither.
 #[test]
 fn the_score_and_the_preload_meter_are_drawn() {
     let Some(art) = art() else { return };
     let tables = Arc::new(Tables::build());
     let riders = ridden(&[rider(&tables, [0.0, 0.0], [0.0, 1.0])]);
-    let gauges = overlay::Gauges { feet: 5280.0, bike: true, preload: 0.5, score: 1234, modified: false };
+    let gauges = overlay::Gauges { feet: 5280.0, bike: true, preload: 0.5, score: 1234, modified: false, speedometer: menu::Speedometer::Analog };
     let mut frame = Frame::new(640, 448, [255, 255, 255]);
     let drawn = art.draw(&mut frame, (640, 448), &riders, 0, 384.0, &gauges);
     assert_eq!(drawn.score, "1234");
@@ -496,6 +511,73 @@ fn the_score_and_the_preload_meter_are_drawn() {
     assert_eq!(drawn.preload, None);
     assert_eq!(drawn.score, "1234");
     assert!(!(320..395).any(|y| (610..618).any(|x| frame.color[3 * (y * 640 + x)] < 200)), "the plane has no preload meter");
+}
+
+/// V42: a fresh settings file rides with the readout, its right edge where the layout's `X` is, and
+/// the preload meter beside it, in one view and in either split: `speedometer.lyt`'s readout at
+/// 588,329 and its meter 12 up from the Flash movie's 599,326; `speedometerhorizontal1.lyt`'s at
+/// 588,155 and 194 up, `speedometerhorizontal2.lyt`'s at 588,145 and 10 down, both half-height views;
+/// `speedometervertical1free.lyt`'s at 270,340 and 320 left of a half-width view. The readout's
+/// place is the view's, the meter's the whole screen's. The plane has the readout alone.
+#[test]
+fn a_fresh_settings_file_rides_with_the_readout_and_the_meter() {
+    let Some(art) = art() else { return };
+    let style = menu::Settings::parse("").speedometer;
+    assert_eq!(style, menu::Speedometer::Digital);
+    let tables = Arc::new(Tables::build());
+    let mut one = rider(&tables, [0.0, 0.0], [0.0, 1.0]);
+    ride(&mut one, 200, true, 0.0);
+    let mut two = vec![one, rider(&tables, [SPACING, 0.0], [0.0, 1.0])];
+    ride(&mut two[1], 100, true, 0.0);
+    let two = ridden(&two);
+    let gauges = overlay::Gauges { bike: true, speedometer: style, ..Default::default() };
+    let back = [90, 110, 140];
+    // The view, the riders, which of them, the place, the readout's right edge, the meter's top left.
+    let cases = [
+        ((640, 448), &two[..1], 0, overlay::Place::Full, 588, (599, 314)),
+        ((640, 224), &two[..], 0, overlay::Place::Top, 588, (599, 132)),
+        ((640, 224), &two[..], 1, overlay::Place::Bottom, 588, (599, 112)),
+        ((320, 448), &two[..], 0, overlay::Place::Side, 270, (279, 326)),
+        ((320, 448), &two[..], 1, overlay::Place::Side, 270, (279, 326)),
+    ];
+    for ((w, h), riders, v, place, right, (mx, my)) in cases {
+        let mut frame = Frame::new(w, h, back);
+        let drawn = art.draw(&mut frame, (640, 448), riders, v, 384.0, &gauges);
+        let what = format!("{place:?} view {v}");
+        assert_eq!(drawn.place, place, "{what}");
+        assert_eq!(drawn.speed, Some(overlay::speed_text(riders[v].speed.0)), "{what}");
+        assert_eq!((drawn.needle, drawn.odometer.as_deref(), drawn.preload), (None, None, Some(0.0)), "{what}");
+        // What is lit or dark in a box, as its bounds.
+        let bounds = |x0: usize, x1: usize, y0: usize, y1: usize, hit: &dyn Fn(&[u8]) -> bool| {
+            let mut b = (usize::MAX, usize::MAX, 0, 0);
+            for y in y0..y1.min(h) {
+                for x in x0..x1.min(w) {
+                    if hit(&frame.color[3 * (y * w + x)..][..3]) {
+                        b = (b.0.min(x), b.1.min(y), b.2.max(x + 1), b.3.max(y + 1));
+                    }
+                }
+            }
+            b
+        };
+        let meter = bounds(mx - 8, mx + 28, my - 8, my + 93, &|c| c.iter().all(|&c| c < 50));
+        let want = (mx, my, mx + 20, my + 85);
+        let near = |a: usize, b: usize| a.abs_diff(b) <= 2;
+        assert!(
+            near(meter.0, want.0) && near(meter.1, want.1) && near(meter.2, want.2) && near(meter.3, want.3),
+            "{what}: the meter is at {meter:?}, wanted {want:?}"
+        );
+        let text = bounds(w / 2, w, 0, h, &|c| c.iter().all(|&c| c > 180));
+        assert!(text.2 <= right + 1 && text.2 + 4 >= right, "{what}: the readout ends at {}, wanted {right}", text.2);
+        assert!(text.2 < meter.0 && text.1 < meter.3 && text.3 > meter.1, "{what}: the readout {text:?} is not beside the meter {meter:?}");
+    }
+
+    let plane = overlay::Gauges { bike: false, ..gauges };
+    let mut frame = Frame::new(640, 448, back);
+    let drawn = art.draw(&mut frame, (640, 448), &two[..1], 0, 384.0, &plane);
+    assert_eq!((drawn.speed.is_some(), drawn.needle, drawn.preload), (true, None, None));
+    let analog = overlay::Gauges { speedometer: menu::Speedometer::Analog, ..plane };
+    let drawn = art.draw(&mut frame, (640, 448), &two[..1], 0, 384.0, &analog);
+    assert_eq!((drawn.speed, drawn.needle.is_some(), drawn.odometer, drawn.preload), (None, true, None, None));
 }
 
 /// The meter fills with the preload's shove and empties as its timer runs out; it is empty unless
