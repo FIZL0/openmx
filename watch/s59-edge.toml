@@ -1,0 +1,126 @@
+# s59-edge.toml — the human's bike riding off the edge of the map: the map-edge clause's inputs and
+# outputs, and the ride state machine through the cannonball and the put-back, one row a tick.
+# S59's spec, driven by research/s59_edge.py (closed-loop steering toward an edge over the pad).
+#
+# The chain is acceptance.toml's two-hop one: the human's rider record, which carries the ride state
+# (+0x748 reason, +0x74c the reset latch, +0x794 the clock, +0x798/+0x79c the two wreck times, +0xd3c
+# the settle gate), the edge clause's arming word (+0x570), the rider's main bone the body actor
+# publishes (+0xd40) and the chassis (+0x7a4: +0x60 centre of gravity, +0x220 speed limit squared,
+# +0x260 velocity, +0x290 body-frame spin, +0x254 the transform node, translation at +0x70). The wreck
+# body is +0x7a8's +0x110 (velocity +0x70, spin +0x1b0). research/oracle.txt's S59 block has the rest.
+#
+#   ./kit record --dry-run watch/s59-edge.toml
+
+[watch]
+name        = "s59-edge"
+description = "the human's bike off the map edge: the clause's inputs and outputs, the ride state"
+every       = 1
+frames      = 3000
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+[[field]]
+name = "bike_ctl_src"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "edge_armed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x570"
+type = "u32"
+
+[[field]]
+name = "reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "latch"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x74c"
+type = "u32"
+
+[[field]]
+name = "clock"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x794"
+type = "f32"
+
+[[field]]
+name = "max_wreck_time"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x798"
+type = "f32"
+
+[[field]]
+name = "cannonball_wreck_time"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x79c"
+type = "f32"
+
+[[field]]
+name = "settles"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xd3c"
+type = "u32"
+
+[[field]]
+name = "drag"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x6a8"
+type = "f32"
+
+[[field]]
+name = "main_bone"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xd40"
+type = "f32x4"
+
+[[field]]
+name = "cofg"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "max_speed_sq"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x220"
+type = "f32"
+
+[[field]]
+name = "vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "ang_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x290"
+type = "f32x4"
+
+[[field]]
+name = "origin"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x254 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "wreck_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a8 -> 0x110 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "wreck_spin"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a8 -> 0x110 -> 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "on_ground"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f4"
+type = "u32"

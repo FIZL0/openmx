@@ -67,6 +67,13 @@ pub trait World {
     /// Sweep a bundle of probes against everything solid, in world space. `true` when anything was
     /// looked at — the record says what was hit.
     fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool;
+
+    /// How big the map is, as the bike's map-edge test measures it ([`crate::off_map`]): the
+    /// terrain's root cells times 256 times its sample spacing. `None` for a world with no edge, which
+    /// is every world but a track's.
+    fn area(&self) -> Option<crate::biplane::Area> {
+        None
+    }
 }
 
 /// A flat plane at a height, with nothing standing on it. What a fixture rides.
@@ -116,6 +123,9 @@ pub struct Ground<'a> {
     /// How many samples the field holds across and along.
     pub samples_x: u32,
     pub samples_z: u32,
+    /// The map's extent as the game's own edge test computes it, from the scene's numbers rather than
+    /// the samples: [`World::area`].
+    pub area: crate::biplane::Area,
 }
 
 impl<'a> Ground<'a> {
@@ -128,6 +138,12 @@ impl<'a> Ground<'a> {
             spacing: terrain.scale,
             samples_x: layout.width.max(1) * per_root,
             samples_z: layout.breadth.max(1) * per_root,
+            area: crate::biplane::Area::new(
+                F(layout.width as f32),
+                F(layout.breadth as f32),
+                layout.width_scale,
+                layout.breadth_scale,
+            ),
             terrain,
         }
     }
@@ -195,6 +211,10 @@ impl World for Ground<'_> {
 
     fn surface(&mut self, at: Vf) -> u8 {
         self.at(F(at.x()), F(at.z())).map_or(0, |hit| hit.surface)
+    }
+
+    fn area(&self) -> Option<crate::biplane::Area> {
+        Some(self.area)
     }
 
     fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
@@ -368,6 +388,10 @@ impl World for Place<'_> {
 
     fn surface(&mut self, at: Vf) -> u8 {
         self.ground.surface(at)
+    }
+
+    fn area(&self) -> Option<crate::biplane::Area> {
+        self.ground.area()
     }
 
     fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
