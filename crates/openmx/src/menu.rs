@@ -215,6 +215,9 @@ pub struct Settings {
     pub modifiers: Mods,
     /// Modifier presets saved by name, in the order they were saved.
     pub presets: Vec<(String, Mods)>,
+    /// The seats a lobby or an opened ride this machine hosts has (N12), the lobby's Seats row's:
+    /// 2 to [`openmx_net::SEATS`], everyone's together.
+    pub lobby_seats: usize,
 }
 
 /// The settings' render scale (V34): auto, picked from the frames' time against the display's
@@ -389,6 +392,7 @@ impl Default for Settings {
             render_scale: RenderScale::default(),
             modifiers: Mods::original(),
             presets: Vec::new(),
+            lobby_seats: LOBBY_SEATS,
         }
     }
 }
@@ -462,6 +466,7 @@ impl Settings {
                 }
                 "graphics" => s.graphics = Graphics::from_word(v).unwrap_or(s.graphics),
                 "render_scale" => s.render_scale = RenderScale::from_word(v).unwrap_or(s.render_scale),
+                "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
                 "modifiers" => s.modifiers = Mods::parse(v).unwrap_or_default(),
                 "preset" => {
@@ -537,7 +542,14 @@ impl Settings {
             self.custom.map(|n| n.to_string()).join(" "),
             self.graphics.word(),
             self.render_scale.word()
-        ) + &self.modifiers_text()
+        ) + &self.lobby_seats_text()
+            + &self.modifiers_text()
+    }
+
+    /// The lobby's seat count (N12), only when it is not the usual [`LOBBY_SEATS`], so a file from
+    /// before it is written as it was.
+    fn lobby_seats_text(&self) -> String {
+        if self.lobby_seats == LOBBY_SEATS { String::new() } else { format!("lobby_seats = {}\n", self.lobby_seats) }
     }
 
     /// The modifiers' lines (P55): the set the next ride loads, and the presets. Nothing at all for
@@ -2430,6 +2442,17 @@ impl Menu {
                     l.out.push(Cmd::Ride { track: room.track.clone(), wrecks: !room.wrecks, biplane: false });
                 }
             }
+            // One more or one fewer, round from the cap to two: never under the last seat taken,
+            // which the network says rather than does.
+            Item::Seats if p.ok || side => {
+                if let Some(room) = &l.room {
+                    let span = (openmx_net::SEATS - 1) as i32;
+                    let n = 2 + (room.seats.len() as i32 - 2 + by).rem_euclid(span) as usize;
+                    l.out.push(Cmd::Seats(n));
+                    self.settings.lobby_seats = n;
+                    self.changed = true;
+                }
+            }
             Item::Bike if (p.ok || side) && !l.bikes.is_empty() => {
                 let i = l.bikes.iter().position(|b| b.0 == l.pick.bike).unwrap_or(0) as i32;
                 let n = l.bikes.len() as i32;
@@ -2542,8 +2565,13 @@ impl Menu {
 /// The online menu's rows; a last one switches the network.
 const ONLINE: [&str; 4] = ["Quickplay", "Host", "Find Games", "Join by Code"];
 
-/// The players a lobby this machine opens has seats for.
+/// The players a lobby this machine opens has seats for, until its host's Seats row says otherwise
+/// ([`Settings::lobby_seats`]).
 pub const LOBBY_SEATS: usize = 4;
+
+/// The seats the lobby lists a line each; a bigger room's go in columns of [`SEAT_COLUMN`] (N12).
+const SEAT_LINES: usize = 6;
+const SEAT_COLUMN: usize = 8;
 
 /// The chat lines the lobby keeps.
 const CHAT_LINES: usize = 5;
@@ -2584,6 +2612,8 @@ impl Typing {
 pub enum Item {
     Track,
     Wrecks,
+    /// The host's seat count (N12), 2 to [`openmx_net::SEATS`].
+    Seats,
     Bike,
     Private,
     Chat,
@@ -2602,6 +2632,7 @@ impl Item {
                 format!("Track  {}", TRACKS.iter().find(|x| x.0 == t).map_or(t, |x| x.1))
             }
             Item::Wrecks => format!("Wrecks  {}", on(room.is_some_and(|r| r.wrecks))),
+            Item::Seats => format!("Seats  {}", room.map_or(0, |r| r.seats.len())),
             Item::Bike => format!("Bike  {}", l.bike_label(&l.pick.bike)),
             Item::Private => format!("Private  {}", on(room.is_some_and(|r| r.private))),
             Item::Chat => "Chat".into(),
@@ -2651,7 +2682,7 @@ impl Lobby {
         match &self.room {
             None => vec![Item::Leave],
             Some(_) if self.hosting() => {
-                vec![Item::Track, Item::Wrecks, Item::Bike, Item::Private, Item::Chat, Item::Start, Item::Leave]
+                vec![Item::Track, Item::Wrecks, Item::Bike, Item::Private, Item::Seats, Item::Chat, Item::Start, Item::Leave]
             }
             Some(_) => vec![Item::Bike, Item::Chat, Item::Ready, Item::Leave],
         }
@@ -2663,7 +2694,7 @@ impl Lobby {
 
     /// A lobby for this machine's player to open: the last free-ride track, the settings' wrecks.
     fn room_for(&self, settings: &Settings) -> Room {
-        let mut room = Room::new(&settings.name, &settings.track, LOBBY_SEATS);
+        let mut room = Room::new(&settings.name, &settings.track, settings.lobby_seats);
         room.wrecks = settings.wrecks;
         room.modifiers = settings.modifiers.text();
         room.take(HOST, std::slice::from_ref(&self.pick));
@@ -2696,6 +2727,25 @@ impl Lobby {
     }
 
     /// A seat's line: its player, their rider and bike, ready or not, and their ping.
+    /// A seat in a room of more than [`SEAT_LINES`] (N12): its number, the player's name cut short,
+    /// and `H` the host, `R` ready, `-` not yet; an open one says so.
+    fn seat_short(&self, room: &Room, i: usize) -> String {
+        let Some(seat) = room.seats.get(i).and_then(|s| s.as_ref()) else {
+            return format!("{}  open", i + 1);
+        };
+        let name = room.names.get(&seat.peer).cloned().unwrap_or_else(|| {
+            if seat.peer == HOST { room.name.clone() } else { seat.peer.clone() }
+        });
+        let mark = if seat.peer == HOST {
+            'H'
+        } else if room.ready.contains(&seat.peer) {
+            'R'
+        } else {
+            '-'
+        };
+        format!("{} {} {mark}", i + 1, name.chars().take(7).collect::<String>())
+    }
+
     fn seat_line(&self, room: &Room, i: usize) -> String {
         let Some(seat) = room.seats.get(i).and_then(|s| s.as_ref()) else {
             return format!("{}  open", i + 1);
@@ -3925,10 +3975,16 @@ impl Painter<'_> {
         };
         self.text(Face::Item, &code, x + 12.0, 98.0, Align::Left, CHOSEN);
         if let Some(room) = &l.room {
-            for i in 0..room.seats.len() {
-                let line = l.seat_line(room, i);
+            // Six seats a line each above the chat; more (N12) in columns of eight short lines.
+            let n = room.seats.len();
+            let (cols, step) = if n <= SEAT_LINES { (1, 20.0) } else { (n.div_ceil(SEAT_COLUMN), 15.0) };
+            let width = ((self.view.0 - x - 10.0).max(237.0) - 24.0) / cols as f32;
+            for i in 0..n {
+                let line = if cols == 1 { l.seat_line(room, i) } else { l.seat_short(room, i) };
                 let colour = if room.seats[i].as_ref().is_some_and(|s| s.peer == l.me) { CHOSEN } else { ITEM };
-                self.text(Face::Small, &line, x + 12.0, 128.0 + 20.0 * i as f32, Align::Left, colour);
+                let (col, row) = if cols == 1 { (0, i) } else { (i / SEAT_COLUMN, i % SEAT_COLUMN) };
+                let at = (x + 12.0 + width * col as f32, 128.0 + step * row as f32);
+                self.text(Face::Small, &line, at.0, at.1, Align::Left, colour);
             }
         }
         for (i, line) in l.chat.iter().enumerate() {
