@@ -688,6 +688,8 @@ struct Args {
     scheme_flag: bool,
     /// Whether `--biplane-controls new|original` was given (P50), for the same reason.
     plane_flag: bool,
+    /// Whether `--preset N` was given (P79), for the same reason.
+    preset_flag: bool,
     /// `--vehicle bike|biplane`: which machine the session starts on (P19). The bike by default,
     /// and a default session is the shell exactly as it was before there was a choice.
     vehicle: Kind,
@@ -824,6 +826,7 @@ struct Front {
     wiring_flags: (bool, bool),
     scheme_flag: bool,
     plane_flag: bool,
+    preset_flag: bool,
     /// Online play's network (N3), started when the online screens first ask for it.
     network: lobby::Network,
     /// The sound and the music (P42), which play on across the menus and the rides.
@@ -855,6 +858,9 @@ impl Front {
                     menu::Layout::Original => Scheme::Original,
                 };
             }
+        }
+        if !self.preset_flag {
+            w.presets = self.menu.controls.presets;
         }
         if !self.plane_flag {
             for (plane, layout) in w.planes.iter_mut().zip(self.menu.controls.planes) {
@@ -992,6 +998,7 @@ fn front_end(args: Args) -> Result<(), String> {
         wiring_flags: args.wiring_flags,
         scheme_flag: args.scheme_flag,
         plane_flag: args.plane_flag,
+        preset_flag: args.preset_flag,
         network,
         sound,
     };
@@ -1004,7 +1011,11 @@ fn front_end(args: Args) -> Result<(), String> {
     let window = Screen::open(args.renderer, &args.display, args.size, args.scale, "openmx")?;
     let seats = open_seats(&args, pad.as_deref(), front.wiring());
     // The Controls screen lists the keyboard under each layout (P54), as the bindings file has it.
-    front.menu.keyboard = [Scheme::New, Scheme::Original].map(|s| seats.keyboard_layout(s));
+    // And the original's on each of its controller presets (P79), in `menu::keyboard_at`'s order.
+    front.menu.keyboard = std::array::from_fn(|i| match i {
+        0 => seats.keyboard_layout(Scheme::New),
+        p => seats.keyboard_layout_on(Scheme::Original, p - 1),
+    });
     match seats.name(0) {
         Some(name) => println!("pad: {name}"),
         None => println!("pad: none found — the menus are on the keyboard (arrows, Space, Return, Escape)"),
@@ -2254,6 +2265,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let schemes: [Scheme; SEATS] =
         std::array::from_fn(|i| pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(i)));
     println!("controls: {}", Scheme::list_text(&schemes));
+    // Each seat's controller preset (P79), the original layout's pick and preset 0 under the new one.
+    // A tape holds the pad and not the table, so a ride on another preset says which, and plays back
+    // on it only with the same --preset.
+    let presets: [usize; SEATS] = std::array::from_fn(|i| pad_seats.as_ref().map_or(schemes[i].preset(args.wiring.presets[i]), |s| s.preset(i)));
+    if presets.iter().any(|p| *p != 0) {
+        println!("controller preset: {}", presets.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
+    }
     let planes: [PlaneScheme; SEATS] =
         std::array::from_fn(|i| pad_seats.as_ref().map_or(args.wiring.planes[i], |s| s.plane(i)));
     println!("biplane controls: {}", PlaneScheme::list_text(&planes));
@@ -2663,6 +2681,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 sim.rng = room.seed;
                 sims.push(sim);
             }
+            // The controller preset (P79) is this machine's and is not sent: every seat online rides
+            // the shipped table, preset 0.
+            if presets[0] != 0 {
+                println!("online: controller preset {} is not sent to the other machines — preset 0", presets[0]);
+            }
             let mut online = online::Online::lobby(net, &room, &me, sims)?;
             online.time_scale = mods.time_scale();
             Some(online)
@@ -2678,6 +2701,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 return Err("--online rides one local player outside the front end: drop --players and --menu".into());
             }
             let starts: Vec<Sim> = world.seats.iter().map(|s| s.sim.clone()).collect();
+            // The controller preset (P79) is this machine's and is not sent: every seat online rides
+            // the shipped table, preset 0.
+            if presets[0] != 0 {
+                println!("online: controller preset {} is not sent to the other machines — preset 0", presets[0]);
+            }
             let mut online = online::Online::start(me, &args.peers, args.seats.as_deref(), &starts)?;
             online.time_scale = mods.time_scale();
             Some(online)
@@ -2780,6 +2808,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         seat.inverted = seat.garage.inverted(seat.inverted);
                         let report = seats.plane(from).fly(seats.scheme(from).ride(report), seat.inverted);
                         seat.reports = [report, Report::missing()];
+                        // The bike's commands through the seat's controller preset (P79); online, where
+                        // the preset is not sent, the shipped one.
+                        seat.sim.set_presets([if online.is_some() { 0 } else { seats.preset(from) }, 0]);
                         seat.waiting = now.get(from) == Some(&SeatInput::Waiting);
                     }
                 }
@@ -2795,6 +2826,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // the camera's, which reads the turned-round L1 back.
                     world.seats[0].inverted = world.seats[0].garage.inverted(world.seats[0].inverted);
                     world.seats[0].reports = frame.reports;
+                    // A tape holds the pad, not the table: the controller preset is --preset's
+                    // (P79), whichever layout is said, because the tape is already past the layout.
+                    world.seats[0].sim.set_presets([args.wiring.presets[0], 0]);
                     world.played_dt = Some(frame.dt());
                 }
                 None => {
@@ -3084,7 +3118,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // cycle to. The layout is the seat's, or the command line's for a session with no seats.
                 let scheme = pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(args.pad_seat(i)));
                 let plane = pad_seats.as_ref().map_or(args.wiring.planes[i], |s| s.plane(args.pad_seat(i)));
-                if plane.changes_camera(scheme, pad, seat.inverted) {
+                // The bike's two hold-back commands are where its controller preset puts them (P79).
+                let changes = match seat.garage.up {
+                    Kind::Bike => scheme.changes_camera_on(pad, seat.sim.table()),
+                    _ => plane.changes_camera(scheme, pad, seat.inverted),
+                };
+                if changes {
                     follow.cam.next_preset();
                     println!("{who}camera: {}", follow.cam.preset().name);
                     rig.hud.note_camera(&follow.cam.preset().name);
@@ -3217,6 +3256,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let (seat, rig) = (&world.seats[v], &mut rigs[v]);
                 let bike_up = seat.garage.up == Kind::Bike;
                 rig.hud.plane = !bike_up;
+                rig.hud.bindings = *seat.sim.table();
                 rig.hud.flight = match (bike_up, &seat.garage.plane) {
                     (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                     _ => None,
@@ -3500,6 +3540,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let (seat, rig) = (&world.seats[v], &mut rigs[v]);
             let bike_up = seat.garage.up == Kind::Bike;
             rig.hud.plane = !bike_up;
+            rig.hud.bindings = *seat.sim.table();
             rig.hud.flight = match (bike_up, &seat.garage.plane) {
                 (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                 _ => None,
@@ -4062,6 +4103,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         controls: None,
         scheme_flag: false,
         plane_flag: false,
+        preset_flag: false,
         vehicle: Kind::Bike,
         players: 1,
         split: Split::default(),
@@ -4140,6 +4182,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let v = next("new, original, or one per seat (new,original)")?;
                 args.wiring.planes = PlaneScheme::parse_list(&v).map_err(|why| format!("--biplane-controls: {why}"))?;
                 args.plane_flag = true;
+            }
+            // The original's controller preset under its layout (P79), per seat like --controls.
+            "--preset" => {
+                let v = next("a controller preset from 0 to 3, or one per seat (0,2)")?;
+                args.wiring.presets = Scheme::parse_presets(&v).map_err(|why| format!("--preset: {why}"))?;
+                args.preset_flag = true;
             }
             "--bindings" => args.controls = Some(next("a bindings file")?.into()),
             "--shot" => args.shot = Some(next("a path for the first frame")?.into()),
@@ -4338,6 +4386,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
                             [--biplane-controls new|original|new,original,...]\n\
+                            [--preset 0..3|0,2,...]\n\
                             [--bindings FILE] [--renderer gpu|software] [--graphics full|original] [--fps]\n\
                             [--render-scale auto|0.5..1]\n\
                             [--no-sound]\n\
@@ -4359,6 +4408,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Down, and L1 and R1 swap, so they move the plane the same way on the screen\n\
                      whichever way up it is; --biplane-controls original (or the Controls\n\
                      screen) flies the original's, which never swaps them.\n\
+                     --preset 1..3 (or the Controls screen, under Original) rides the original\n\
+                     layout on one of the original's other controller presets; 0 is the shipped one.\n\
                      On the keyboard, under the new layout: WASD the left stick (A/D steer, W/S\n\
                      lean), HJKL the right stick, Space gas, Shift brake, Q/E L1/R1, Tab or C\n\
                      the camera, arrows the d-pad, 1-4 the face buttons, Enter Start, Escape the\n\
