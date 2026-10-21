@@ -71,6 +71,17 @@ pub struct Car {
     pub has_physics: bool,
 }
 
+impl Car {
+    /// The model's name as the renderer's assets know it: `FileName` without its `.psg`.
+    pub fn stem(&self) -> &str {
+        let m = self.model.as_str();
+        match m.len().checked_sub(4) {
+            Some(cut) if m.is_char_boundary(cut) && m[cut..].eq_ignore_ascii_case(".psg") => &m[..cut],
+            _ => m,
+        }
+    }
+}
+
 /// The cars a `.toy` lists, `Car1` to `CarN` for the `NumberOfCars` its `[Cars]` says.
 pub fn cars(text: &str) -> Vec<Car> {
     let sections = ini::parse(text);
@@ -312,3 +323,59 @@ pub fn upright(pos: V3, forward: V3, up: V3) -> M4 {
         [pos.x, pos.y, pos.z, 1.0],
     ])
 }
+
+/// Every path car a track drives, ready to be placed: what a ride loads once and asks each tick.
+#[derive(Clone, Debug, Default)]
+pub struct Traffic {
+    pub cars: Vec<(Car, Path)>,
+    /// The cars left out, each with why: the ones with a body of their own, and any whose clip is
+    /// missing or has no `Body`.
+    pub skipped: Vec<String>,
+}
+
+impl Traffic {
+    /// The cars of the track whose `.toy` is `<track>.toy` in one of these archives. A track with no
+    /// `.toy`, or none of whose cars drive a clip, has no traffic. Presampling cars are put on the
+    /// ground here, which the original does on their first frame.
+    pub fn load(archives: &[crate::disc::Res], track: &str, ground: &mut Ground) -> Traffic {
+        let mut traffic = Traffic::default();
+        let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
+        let Some(text) = read(&format!("{track}.toy")) else { return traffic };
+        for car in cars(&ini::text(&text)) {
+            if car.has_physics {
+                traffic.skipped.push(format!("{}: HasPhysics", car.model));
+                continue;
+            }
+            let clip = read(&car.mot).ok_or_else(|| "no such member".to_string()).and_then(|b| skin::Clip::parse(&b));
+            match clip.map(|c| Path::from_clip(&c)) {
+                Ok(Some(mut path)) => {
+                    if car.presample {
+                        path.presample(ground);
+                    }
+                    traffic.cars.push((car, path));
+                }
+                Ok(None) => traffic.skipped.push(format!("{}: {} has no Body", car.model, car.mot)),
+                Err(e) => traffic.skipped.push(format!("{}: {}: {e}", car.model, car.mot)),
+            }
+        }
+        traffic
+    }
+
+    /// Every car's model and where it is, `elapsed` seconds of the scene's own clock after the track
+    /// loaded, its filters settled at the scene's [`SCENE_STEP`].
+    pub fn placed(&self, elapsed: f64, ground: &mut Ground) -> Vec<(String, M4)> {
+        self.cars
+            .iter()
+            .map(|(car, path)| {
+                let at = clock(elapsed, car.time_scale, path.last());
+                let pose = path.pose(car, at, SCENE_STEP * car.time_scale, ground);
+                (car.stem().to_string(), pose.transform)
+            })
+            .collect()
+    }
+}
+
+/// How long one scene update is: the game's 30 a second. The trucks' headings, which trail the way
+/// they move by a filter's worth of updates, agree with the original's at this step and not at half
+/// of it.
+pub const SCENE_STEP: f32 = 1.0 / 30.0;
