@@ -401,6 +401,90 @@ impl Lighting {
     }
 }
 
+/// How far the world is drawn (V32): the original's fog and far clip, or the whole map.
+///
+/// The original fogs every track from the scene's `MinimumFogDistance` to its `MaximumFogDistance`,
+/// and its race viewport's far clip plane is that same `MaximumFogDistance` (the fog object hands its
+/// end to the viewport's far setter; the human's freeride save state reads near 2.4, far 1000), so
+/// nothing past the fog's end is drawn at all. `Full` draws the whole map from anywhere, with a light
+/// haze past the original's fog end for depth that never hides more than [`HAZE_MAX`] of a colour.
+/// Only the picture changes: nothing here is read by the simulation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Graphics {
+    /// The original's look: its fog colour, fog start and end, and its far clip.
+    Original,
+    /// No fog and no draw distance: the whole map, everywhere.
+    #[default]
+    Full,
+}
+
+/// The most of the fog's colour `Graphics::Full`'s haze mixes into anything, however far.
+pub const HAZE_MAX: f32 = 0.3;
+
+/// How a view's fog is applied: the factor is `clamp((d - near) / (far - near), 0, max)` of the fog's
+/// colour at `d` feet from the eye, and nothing past `reach` feet is drawn at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fog {
+    pub near: f32,
+    pub far: f32,
+    pub max: f32,
+    pub reach: f32,
+}
+
+impl Graphics {
+    pub const ALL: [Graphics; 2] = [Graphics::Full, Graphics::Original];
+
+    /// `--graphics`' word, and the settings file's.
+    pub fn word(self) -> &'static str {
+        match self {
+            Graphics::Original => "original",
+            Graphics::Full => "full",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Graphics> {
+        Graphics::ALL.into_iter().find(|g| g.word() == w)
+    }
+
+    /// The settings screen's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Graphics::Original => "Original",
+            Graphics::Full => "Whole map",
+        }
+    }
+
+    /// The fog a view is drawn with, for a map whose farthest two points are `span` feet apart.
+    ///
+    /// `Original` is the disc's: the scene's fog, and the far clip at its end. `Full` reaches past the
+    /// whole map and starts its haze where the original's fog ends, at its most `span` further on.
+    pub fn fog(self, light: &Lighting, span: f32) -> Fog {
+        match self {
+            Graphics::Original => Fog {
+                near: light.fog_near,
+                far: light.fog_far,
+                max: 1.0,
+                reach: light.fog_far,
+            },
+            Graphics::Full => Fog {
+                near: light.fog_far,
+                far: light.fog_far + span.max(1.0),
+                max: HAZE_MAX,
+                reach: f32::INFINITY,
+            },
+        }
+    }
+
+    /// Where the projection's far plane goes: the original's far clip, or past anything on a map
+    /// `span` feet across, seen from anywhere on it.
+    pub fn far_clip(self, light: &Lighting, span: f32) -> f32 {
+        match self {
+            Graphics::Original => light.fog_far,
+            Graphics::Full => (2.0 * span).max(light.fog_far).max(10_000.0),
+        }
+    }
+}
+
 /// Draw one model, placed by `transform`, into `frame`.
 ///
 /// Returns how many triangles it put through the rasteriser, which is the only progress report a batch
