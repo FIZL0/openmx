@@ -10,6 +10,10 @@
 //!
 //! A frame is: what the transport brought goes to the session (a Start makes one), the session runs
 //! its ticks on this machine's pads, and what it sends goes back to the transport.
+//!
+//! A ride opened to drop-ins (N10): [`Peer::open`] hosts one already under way, alone, and takes
+//! each peer that arrives into its session; a peer whose join lands in it ([`Event::DropIn`]) waits
+//! for the host's state, as the shell's [`crate::online::Online`] does.
 
 use game_sim::input::Report;
 use game_sim::world::Flat;
@@ -38,12 +42,15 @@ pub struct Peer {
     /// Why this machine is out of the lobby or the ride (refused, the host left, a peer dropped).
     pub failed: Option<String>,
     /// Datagrams the transport could not carry whole (longer than [`openmx_net::net::DATAGRAM_MAX`]):
-    /// dropped here, as a lossy link drops them, and counted.
+    /// counted, and sent on the lobby's reliable stream instead, addressed, as the shell's
+    /// `online.rs` sends them (a ride's state for a peer that joins it, N10, is pieces that big).
     pub too_big: u32,
     /// Where a desync's report goes.
     pub dumps: std::path::PathBuf,
     /// The session's log lines not printed yet (the caller prints them).
     pub said: Vec<String>,
+    /// Hosting a ride opened to drop-ins (N10): the state a joiner's seats spawn in.
+    spawn: Option<Vec<u8>>,
 }
 
 /// The seats as the session names them: each seat's peer, in seat order.
@@ -84,7 +91,20 @@ pub fn mash(seat: usize, tick: usize) -> Report {
 
 impl Peer {
     pub fn new(net: Net) -> Peer {
-        Peer { net, status: String::new(), ticket: String::new(), room: None, riding: None, failed: None, too_big: 0, dumps: crate::net::desync::dumps(), said: Vec::new() }
+        Peer { net, status: String::new(), ticket: String::new(), room: None, riding: None, failed: None, too_big: 0, dumps: crate::net::desync::dumps(), said: Vec::new(), spawn: None }
+    }
+
+    /// Host `room` as a ride under way that takes peers on (N10): this machine rides its first
+    /// seat alone from now, and every peer that joins rides in on a seat spawned where the ride
+    /// started.
+    pub fn open(&mut self, mut room: Room) -> Result<(), String> {
+        (room.riding, room.drop_in) = (true, true);
+        let np = Netplay::new(Lineup { seats: vec![Some(openmx_net::HOST.into())] }, openmx_net::HOST, Timing::default(), self.dumps.clone())?;
+        let first = sims(&room).swap_remove(0);
+        self.spawn = Some(game_sim::snapshot::encode(&first));
+        self.riding = Some(Riding { np, sims: vec![first], world: Flat::default(), room: room.clone() });
+        self.net.send(Cmd::Host(room));
+        Ok(())
     }
 
     /// One tick of real time, `dt` seconds (call it on the ride's 30 Hz schedule, every
@@ -103,6 +123,7 @@ impl Peer {
         for (to, d) in np.outgoing() {
             if d.len() > openmx_net::net::DATAGRAM_MAX {
                 self.too_big += 1;
+                self.net.send(Cmd::Send([&[to.len() as u8][..], to.as_bytes(), &d].concat()));
                 continue;
             }
             self.net.send(Cmd::Datagram(to, d));
@@ -129,9 +150,36 @@ impl Peer {
                 };
                 self.riding = Some(Riding { np, sims: sims(&room), world: Flat::default(), room });
             }
+            Event::DropIn(room, me) => {
+                let np = match Netplay::joining(openmx_net::HOST, &me, Timing::default(), self.dumps.clone()) {
+                    Ok(np) => np,
+                    Err(e) => {
+                        self.failed = Some(e);
+                        return;
+                    }
+                };
+                self.riding = Some(Riding { np, sims: vec![sims(&room).swap_remove(0)], world: Flat::default(), room });
+            }
+            Event::Arrived { peer, seats } => {
+                if let (Some(r), Some(spawn)) = (&mut self.riding, &self.spawn)
+                    && let Err(e) = r.np.admit(&peer, &seats, spawn.clone())
+                {
+                    self.said.push(format!("online: {peer} cannot join: {e}"));
+                }
+            }
             Event::Datagram(from, d) => {
                 if let Some(r) = &mut self.riding {
                     r.np.heard(&from, &d);
+                }
+            }
+            // a datagram too big for one, on the stream: for the peer it names
+            Event::Ride(from, d) => {
+                if let Some(r) = &mut self.riding
+                    && let Some((&n, rest)) = d.split_first()
+                    && let Some((to, data)) = rest.split_at_checked(n as usize)
+                    && to == r.np.me.as_bytes()
+                {
+                    r.np.heard(&from, data);
                 }
             }
             Event::Dropped(who) => self.failed = Some(format!("{who} dropped")),

@@ -272,9 +272,15 @@ impl<S: Clone + 'static> Netplay<S> {
     }
 
     /// The host: peer `peer` joins the ride under way on `seats`, each spawned as `spawn` (one seat
-    /// in the game's own bytes). It happens at the next frame that can: [`admit`].
+    /// in the game's own bytes). It happens at the first frame that can once `peer` has been heard
+    /// from: [`admit`].
     pub fn admit(&mut self, peer: &str, seats: &[usize], spawn: Vec<u8>) -> Result<(), String> {
         admit::ask(self, peer, seats, spawn)
+    }
+
+    /// The host: a join asked for and not taken on yet is off (the peer left first).
+    pub fn unadmit(&mut self, peer: &str) {
+        self.admit.forget(peer);
     }
 
     pub fn host(&self) -> bool {
@@ -306,6 +312,7 @@ impl<S: Clone + 'static> Netplay<S> {
     /// A datagram from peer `from`.
     pub fn heard(&mut self, from: &str, data: &[u8]) {
         self.recover.heard_from(from);
+        self.admit.heard(from);
         match link::open(data) {
             Some(link::Kind::Ggrs(round, body)) => self.rb.heard(from, round, body),
             Some(link::Kind::Reliable(seq, body)) => {
