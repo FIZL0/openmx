@@ -164,7 +164,8 @@ impl Plane {
 
     /// One frame of the plane with the controller on it: the reset chord ([`Flight::reset_chord`],
     /// S57) and [`Flight::frame`] on the seat's pad, over `world`, and the drawn transform off its
-    /// body. A plane with no flight stands where it is. Whether the chord put it back this frame.
+    /// body. A plane with no flight stands where it is. Whether the chord or a wreck's recovery put it
+    /// back at its spawn this frame: both are the original's plane reset, which snaps its camera (V29).
     pub fn step(&mut self, sim: &Sim, dt: F, world: &mut dyn World) -> bool {
         let Some(f) = &mut self.flight else { return false };
         if !self.placed {
@@ -174,7 +175,9 @@ impl Plane {
         // The input slot runs before the frame. L1 and R1 are the chord under either scheme: P40's
         // new one moves the gas and the brake, not the shoulder buttons.
         let chord = f.reset_chord(Controls::from_pad(sim.input.pad(0)).respawn, &sim.tables.ride.acos);
+        let wrecked = f.crash.reason != 0;
         f.frame(dt, flight::pad(sim.input.pad(0)), world, &sim.tables.ride);
+        let recovered = wrecked && f.crash.reason == 0;
         let (quat, origin) = f.pose();
         let nose = f.measure.forward;
         (self.quat, self.at) = (quat, Vf::new(origin.x(), origin.y(), origin.z(), 1.0));
@@ -183,7 +186,7 @@ impl Plane {
         self.up = Vf::new(up.x(), up.y(), up.z(), 0.0);
         let v = f.body.velocity;
         self.vel = Vf::new(v.x(), v.y(), v.z(), 0.0);
-        chord
+        chord || recovered
     }
 
     /// Whether the plane is standing on something: any wheel down at the last measure. A plane with
