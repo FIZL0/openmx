@@ -2262,7 +2262,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         && seats.name(0).is_none()
     {
         match schemes[0] {
-            Scheme::New => println!("pad: none found — riding on the keyboard (Space gas, Shift brake, WASD and HJKL the sticks)"),
+            Scheme::New => println!("pad: none found — riding on the keyboard (Space gas, Shift brake, WASD and YUIO the sticks, HJKL the face buttons)"),
             Scheme::Original => println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)"),
         }
     }
@@ -4355,15 +4355,15 @@ fn parse_args() -> Result<Option<Args>, String> {
                      whichever way up it is; --biplane-controls original (or the Controls\n\
                      screen) flies the original's, which never swaps them.\n\
                      On the keyboard, under the new layout: WASD the left stick (A/D steer, W/S\n\
-                     lean), HJKL the right stick, Space gas, Shift brake, Q/E L1/R1, Tab or C\n\
-                     the camera, arrows the d-pad, 1-4 the face buttons, Enter Start, Escape the\n\
-                     pause. Under the original's (--controls original): X throttle, Z brake,\n\
+                     lean), YUIO the right stick, Space gas, Shift brake, Q/E L1/R1, Tab or C\n\
+                     the camera, arrows the d-pad, HJKL the face buttons (H Square, J Cross,\n\
+                     K Triangle, L Circle), Enter Start, Escape the pause. Under the original's (--controls original): X throttle, Z brake,\n\
                      arrows steer, IJKL the right stick, C/V/D trick, A+D reset.\n\
                      The throttle is a pressure and not a switch (the game reads Cross from its\n\
                      pressure byte): a key ramps it, --throttle r2 rides it on a trigger instead,\n\
                      giving up that trigger's own control, and --pad-pressure says which joystick\n\
                      axes a pad reports its buttons' own pressures on.\n\
-                     F3 toggles the debug overlay (and H, where H is not a stick key), which\n\
+                     F3 toggles the debug overlay (and H, where H is not a ride's key), which\n\
                      --hud (--overlay debug) starts on.\n\
                      Up to eight seats: every pad plugged in takes the next one, the keyboard\n\
                      beside 1P's, or --pads says each seat's (k the keyboard, a number the pad\n\

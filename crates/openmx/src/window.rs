@@ -87,13 +87,12 @@ pub mod key {
     pub const K: u8 = 45;
     pub const L: u8 = 46;
     pub const M: u8 = 58;
-    // The new layout's keys (P54): WASD the left stick, HJKL the right, the 1-4 row the face buttons.
+    // The new layout's keys (P54): WASD the left stick, YUIO the right (P75), HJKL the face buttons.
     pub const W: u8 = 25;
     pub const N: u8 = 57;
-    pub const ONE: u8 = 10;
-    pub const TWO: u8 = 11;
-    pub const THREE: u8 = 12;
-    pub const FOUR: u8 = 13;
+    pub const Y: u8 = 29;
+    pub const U: u8 = 30;
+    pub const O: u8 = 32;
     pub const SHIFT_LEFT: u8 = 50;
     pub const SHIFT_RIGHT: u8 = 62;
     pub const F3: u8 = 69;
