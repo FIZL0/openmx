@@ -95,7 +95,7 @@ pub fn start_line(disc: &mut Disc, track_name: &str, width: usize, height: usize
     names.sort();
     names.dedup();
     for name in &names {
-        assets.load(&archives, name);
+        assets.load_placed(&archives, name);
     }
 
     let spawn = v3(place.start[0].0, place.start[1].0, place.start[2].0);

@@ -1470,7 +1470,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     names.sort();
     names.dedup();
     for name in &names {
-        assets.load(&archives, name);
+        assets.load_placed(&archives, name);
     }
     let has_bike = assets.load(&archives, CHASSIS);
     for part in &vehicle.parts {
@@ -1842,6 +1842,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         ground: sim_world::Ground::new(&sim_terrain, &place.terrain),
         props,
     };
+    // The cars the track's `.toy` drives along their clips (V41): free06's train, its trucks and
+    // scrapers, the other freeride tracks' trailers. Drawn, not ridden into: they reach nothing in the
+    // simulation, and their clock is the scene's own, summed from the ticks' `dt` below.
+    let traffic = game_render::toy::Traffic::load(&archives, &args.track, &mut |p| car_ground(&mut sim, p));
+    for (car, _) in &traffic.cars {
+        assets.load(&archives, car.stem());
+    }
+    if !traffic.cars.is_empty() || !traffic.skipped.is_empty() {
+        println!("traffic: {} cars on clips, {} left out", traffic.cars.len(), traffic.skipped.len());
+    }
+    let mut traffic_time = 0.0f64;
+    let mut traffic_at: Vec<(String, M4)> = Vec::new();
     // Where the wheels hang off the chassis, which is where each suspension ray starts: the **bike
     // model's own wheel nodes**. `bike_attach_nodes` looks "TireFront" and "TireRear" up in the bike's
     // node by name and writes each one's place, in that node's frame, straight into the wheel's
@@ -2990,7 +3002,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         front.menu.note = Some("Open to Online rides the bike: switch to it first.".into());
                     } else {
                         let settings = &front.menu.settings;
-                        let mut room = openmx_net::Room::new(&settings.name, &args.track, menu::LOBBY_SEATS);
+                        let mut room = openmx_net::Room::new(&settings.name, &args.track, settings.lobby_seats);
                         room.wrecks = args.wrecks && settings.wrecks;
                         room.modifiers = mods.text();
                         let pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
@@ -3081,6 +3093,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if simulated && let (Some((fx, binds)), Some(plane)) = (&mut plane_fx, &world.seats[0].garage.plane) {
             let place = &mut world.place;
             fx.step_over(&plane_fx_frame(plane, binds), dt.0, &mut |at| plane_fx_ground(place, at));
+        }
+        if simulated && !traffic.cars.is_empty() {
+            traffic_time += f64::from(dt.0);
+            let place = &mut world.place;
+            traffic_at = traffic.placed(traffic_time, &mut |p| car_ground(place, p));
         }
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
@@ -3408,6 +3425,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     actors.push(Actor { model, at, pose: None, lod_from: None, alpha: 1.0 });
                 }
             }
+            for (model, at) in &traffic_at {
+                actors.push(Actor { model: model.as_str(), at: *at, pose: None, lod_from: None, alpha: 1.0 });
+            }
             let views: Vec<View> = rects
                 .iter()
                 .zip(&cameras)
@@ -3592,6 +3612,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let at = before_plane.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
                 actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
             }
+            actor.extend(traffic_at.iter().map(|(model, at)| (model.as_str(), *at)));
             perf.lap(Stage::Scene, scene_at, spent);
             let draw_at = Instant::now();
             tris += draw_scene(target, &look, &assets, &actor, camera);
@@ -3965,6 +3986,16 @@ fn set_display(rigs: &mut [Rig], layout: Layout, display: Display, bike: Option<
 /// The terrain file a scene asks for. Most scenes name it `SX02.trn`, but what the archive holds is
 /// `sx02.ps2.trn`: the loader tags the file with the platform it was built for, and a few scenes
 /// already spell the tag out.
+/// The ground under a path car (V41), as the ride's own query answers it: the point on the surface
+/// and the surface's normal. Off the terrain the point stays where it is, standing straight up.
+fn car_ground(world: &mut dyn sim_world::World, p: V3) -> (V3, V3) {
+    let (on, normal) = world.ground(Vf::new(p.x, p.y, p.z, 1.0));
+    if on.y() < -1.0e5 {
+        return (p, v3(0.0, 1.0, 0.0));
+    }
+    (v3(p.x, on.y(), p.z), v3(normal.x(), normal.y(), normal.z()))
+}
+
 fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
     if let Ok(bytes) = res.read_suffix(named) {
         return Ok(bytes);

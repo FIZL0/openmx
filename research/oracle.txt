@@ -4265,3 +4265,16 @@ screen_page_off boot 0x00200ab0 the screen's vt +0xa0, to 0x00200ac0: only the H
 #   (+0x30 pos, +0x40 vel, +0x160 quat, +0x140 rates) survive the entry tick in RAM.
 #   tests/ragdoll_entry.rs: the port's pose from what the original's read == its starts bit for bit
 #   (side); from the captured bodies within NEAR on side/back/tip (front's 2599 row is torn).
+# V41 — the path cars and the scene's props, as the original draws them.
+#   car class (the .toy's [CarN] on a .mot clip): init 0x001147c0, mot load 0x00114fc0, arc length
+#   0x00115330, update 0x00115540 (the 1/30 s scene step), lag walk 0x00116150, curve 0x00116410;
+#   .toy reader 0x00289710; the ground snap is ground_query 0x001dc960; the heading basis 0x0013e330.
+#   ini line reader 0x0014a040: drops ' ', '\t', '\r', '\n' outside [...] and quotes before the
+#   split at '=' — so SLT=Free06_Power Line_A loads free06_powerline_a.psg (scene.rs slt_name).
+#   static model reader 0x001a8cd0, model load 0x001a0360 (lower-cases the name, ext -> .psg);
+#   resource lookup 0x00125dc0 / 0x00128450, hash 0x001f8760 (byte sum), compare 0x001f8820 (strcmp).
+#   Instance check (free09, first_recording state): the wire at 4519.14,201.6,2325.56 carries rows
+#   (0.939,-0.343,0) (0,0,-1) (0.343,0.939,0) = M4::placement(pos, look, up), and the vertices are
+#   drawn by it alone: the file's root node holds the same turn again, which the original does not
+#   apply (world.rs Assets::load_placed). free06 (biplane state): Free06_PowerLine_A at
+#   4235.519,260.544,4304.064 identity, box centre (6.852,3.352,-14.884) half (172.997,10.131,100.064).
