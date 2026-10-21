@@ -1586,7 +1586,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     };
     let ragdoll_kit = match (&ragdolled, &wreckage) {
         (Some(doll), Some((_, rider_file))) => {
-            Some(Arc::new(game_sim::ragdoll_ride::Kit::new(rider_file, doll.rig.clone())))
+            let mut kit = game_sim::ragdoll_ride::Kit::new(rider_file, doll.rig.clone());
+            // The wreck bike's collision sphere, which the bones are off the bike past (S65). One
+            // file on the disc, looked for by suffix like the wreck bike's own.
+            kit.bike = archives
+                .iter()
+                .find_map(|a| a.read_suffix("wreckbikef.col").ok())
+                .and_then(|col| game_sim::ragdoll_ride::bike_sphere(&col));
+            Some(Arc::new(kit))
         }
         _ => None,
     };
@@ -2941,6 +2948,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     perf.time(Stage::Animation, || {
                         body.ride(dt, &mut seat.sim.rider, &seat.hands, rider::Gate::default())
                     });
+                    // The pose just drawn is the one the next frame's wreck is thrown from (S65).
+                    if let (Some(doll), true) = (&ragdolled, seat.sim.rider.ragdoll_kit.is_some()) {
+                        seat.sim.rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+                    }
                 }
             }
 

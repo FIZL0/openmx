@@ -1489,8 +1489,14 @@ fn ride_kit() -> Option<(game_sim::ragdoll_ride::Kit, game_sim::phy::Part, Wreck
         .iter()
         .find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbike.phy").ok()))
         .expect("an archive carries wreckbike.phy");
+    let mut kit = game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig);
+    kit.bike = names
+        .iter()
+        .find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbikef.col").ok()))
+        .and_then(|col| game_sim::ragdoll_ride::bike_sphere(&col));
+    assert!(kit.bike.is_some(), "an archive carries wreckbikef.col");
     Some((
-        game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig),
+        kit,
         game_sim::phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"),
         Wrecks::read_bytes(&rider_file),
     ))
@@ -1576,28 +1582,70 @@ fn wreck2_settles() -> Option<(Option<u32>, [Option<u32>; 2])> {
 
 /// **A reason-5 wreck that settles on the original's tick** (S53), to within two ticks: the
 /// original's gate came on 18 ticks after the entry (`wreck2.csv` rows 150 and 168), and S26's
-/// three measurements spread 18 to 26. The bones' gate is the port's own reading of it — hands off
-/// and a contact touching — and the ground is the capture's bike heights, not the track; the port
-/// comes on at 16. [`a_reason_5_wreck_settles_on_the_originals_tick_exactly`] holds the exact tick.
+/// three measurements spread 18 to 26. The gate is the body's touching flag, as the original's is
+/// (S65; S53 inferred "hands off and a contact touching", and came on at 16), the bike's sphere is
+/// `wreckbikef.col`'s, and the ground is the capture's bike heights, not the track; the port comes
+/// on at 17. Nothing is asked of the hands: the original's gate opens with them holding (S65,
+/// `tests/ragdoll_gate.rs`). [`a_reason_5_wreck_settles_on_the_originals_tick_exactly`] holds the
+/// exact tick.
 #[test]
 fn a_reason_5_wreck_that_settles_on_the_originals_tick() {
-    let Some((settled, let_go)) = wreck2_settles() else { return };
+    let Some((settled, _)) = wreck2_settles() else { return };
     let tick = settled.expect("the bones settle inside two seconds");
     assert!((16..=20).contains(&tick), "the gate came on {tick} ticks after the entry; the original's 18");
-    for (hand, gone) in let_go.iter().enumerate() {
-        let gone = gone.expect("both hands let go");
-        assert!(gone <= tick, "hand {hand} let go on tick {gone}, after the gate on {tick}");
-    }
 }
 
-/// The same, to the tick. Ignored: the port's gate comes on two ticks early (16 against 18), and
-/// with one capture holding an entry the port can be started from, there is nothing to calibrate the
-/// inferred gate against.
+/// The same, to the tick. Ignored: the port's gate comes on a tick early (17 against 18). The gate
+/// is the original's (S65), so the tick is the bones' and the ground's: the ground here is four
+/// heights off the capture, and the bones start from the fixed riding pose with the bike's
+/// velocity.
 #[test]
-#[ignore = "the port settles on tick 16, the original on 18; see the S53 journal"]
+#[ignore = "the port settles on tick 17, the original on 18; see the S65 journal"]
 fn a_reason_5_wreck_settles_on_the_originals_tick_exactly() {
     let Some((settled, _)) = wreck2_settles() else { return };
     assert_eq!(settled, Some(18), "the gate came on 18 ticks after the entry in the original");
+}
+
+/// **A wreck thrown from the shell's skeleton** (S65): handed the kit's own riding pose as the live
+/// one, the posed entry and step are the fixed pose's to the bit; handed another pose, the bones
+/// start where it has them and pull towards its rests.
+#[test]
+fn a_wreck_is_thrown_from_the_shells_skeleton() {
+    use game_sim::ragdoll_ride::{Down, Posed};
+    let Some((kit, part, wrecks)) = ride_kit() else { return };
+    let mut ride = game_sim::ride::Ride::default();
+    ride.chassis.quat = Vf::new(0.0, 0.0, 0.0, 1.0);
+    ride.origin = Vf::new(4304.0, 150.0, 3412.0, 1.0);
+    ride.chassis.vel = Vf::new(1.0, -3.0, 25.0, 1.0);
+    let mut world = Slope;
+    let mut crash =
+        game_sim::ride::Crash::begin(&ride, game_sim::trick::Wreck(5), &part, game_sim::ride::WRECK_INERTIA, &wrecks, None);
+    let same = Posed { bones: kit.rig.parts.iter().map(|p| p.bone).collect(), rests: kit.rig.parts.iter().map(|p| p.rest).collect() };
+    let lifted = Posed {
+        bones: same.bones.iter().map(|b| game_sim::ragdoll_pose::Bone { at: b.at.add(Vf::new(0.0, 0.5, 0.0, 0.0)), ..*b }).collect(),
+        rests: vec![Vf::new(0.0, 0.0, 0.0, 1.0); same.rests.len()],
+    };
+    let m = ride.transform();
+    let enter = |posed: Option<&Posed>, world: &mut Slope| {
+        Down::enter_posed(&kit, posed, &m, &crash, crash.throw, 5, &wrecks, &mut Rng::default(), world)
+    };
+    let mut fixed = enter(None, &mut world);
+    let mut live = enter(Some(&same), &mut world);
+    let mut other = enter(Some(&lifted), &mut world);
+    assert_eq!(fixed, live, "the kit's pose handed over as the live one enters as the kit's");
+    let dy = other.main().position.y() - fixed.main().position.y();
+    assert!((dy - 0.5).abs() < 1e-4, "a pose half a foot up starts the main bone {dy} ft up");
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let mut parted = false;
+    for _ in 0..10 {
+        crash.step(dt, &part, &wrecks, &mut world);
+        fixed.step(&kit, dt, &crash, &mut world);
+        live.step_posed(&kit, Some(&same), dt, &crash, &mut world);
+        other.step_posed(&kit, Some(&lifted), dt, &crash, &mut world);
+        assert_eq!(fixed, live, "the kit's rests handed over step as the kit's");
+        parted |= other.ragdoll.bones.iter().zip(&fixed.ragdoll.bones).any(|(a, b)| a.body.rates != b.body.rates);
+    }
+    assert!(parted, "other rests turn the bones otherwise");
 }
 
 /// **The pins the shell's kit loads are the live actor's** (S53): every hold's and joint's bones,

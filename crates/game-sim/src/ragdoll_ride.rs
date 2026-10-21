@@ -20,9 +20,10 @@
 //!
 //! # What is the port's own
 //!
-//! The pose is fixed. The original poses the bones from the live animated skeleton at the frame
-//! of the wreck. This port has no skeleton in the simulation, so the shell hands over one riding
-//! pose ([`Rig`]), and the wreck starts from it wherever the bike is. The bones start with the
+//! The pose is the shell's. The original poses the bones from the live animated skeleton at the
+//! frame of the wreck. This port has no skeleton in the simulation, so the shell hands over one
+//! riding pose ([`Rig`]) and, where it draws the body, the pose it last drew ([`Posed`], S65); the
+//! wreck starts from that wherever the bike is. The bones start with the
 //! bike's velocity and no spin, where the original takes both from the skeleton's last frame. The
 //! holds follow the points where the hands were on the wreck bike, carried with its body; the
 //! original's follow the bike's own dummies. The rest of what is not 1:1 is listed on each item.
@@ -183,6 +184,10 @@ pub struct Kit {
     /// `[Wrecks]`, for the wreck's settle test: the flail height, the roll's time and speed, and
     /// the main bone's damping at rest.
     pub wrecks: Wrecks,
+    /// The wreck bike's collision sphere, its centre in the bike's frame and its radius, which the
+    /// bones are off the bike once the main bone is a foot past (S65). [`Kit::new`] leaves it
+    /// `None`, and the bones never leave the bike; a shell sets it from [`bike_sphere`].
+    pub bike: Option<(Vf, F)>,
 }
 
 impl std::fmt::Debug for Kit {
@@ -209,11 +214,49 @@ impl Kit {
             pose_spring: forces.vector("SpringForce", UNIT_W),
             pose_damping: forces.vector("DampingForce", UNIT_W),
             wrecks: Wrecks::read(&ini),
+            bike: None,
             rig,
             ragdoll,
             tables,
         }
     }
+}
+
+/// **The wreck bike's collision sphere** out of its collision file (`wreckbikef.col`), as the
+/// collision object the body's request points at holds it (S65): the root node's centre, and its
+/// box's half extent's length for the radius, through the FPU. `None` when the file does not read
+/// as a mesh or has no nodes.
+pub fn bike_sphere(col: &[u8]) -> Option<(Vf, F)> {
+    let mesh = crate::track::Mesh::parse(col).ok()?;
+    let root = mesh.nodes.first()?;
+    let [x, y, z] = root.centre;
+    let [hx, hy, hz] = root.half_extent;
+    let acc = fpu::mula(hx.0, hx.0);
+    let acc = fpu::madda(acc, hy.0, hy.0);
+    let radius = F(fpu::sqrt(fpu::madd(acc, hz.0, hz.0)));
+    Some((Vf::new(x.0, y.0, z.0, 1.0), radius))
+}
+
+/// **The bike sphere's centre in the world**: `centre` (in the bike's frame) through the wreck
+/// bike's frame `m`, as the collision object places it. The translation goes in first and then the
+/// three rows, which is not [`math::transform_point`]'s order and differs from it in the last bit.
+pub fn bike_centre(m: &Mat4, centre: Vf) -> Vf {
+    let acc = m.0[3].mul(Vf::splat(1.0));
+    let acc = Vf::madd(acc, m.0[0], Vf::splat(centre.x()));
+    let acc = Vf::madd(acc, m.0[1], Vf::splat(centre.y()));
+    let p = Vf::madd(acc, m.0[2], Vf::splat(centre.z()));
+    Vf::new(p.x(), p.y(), p.z(), 1.0)
+}
+
+/// **The skeleton as the shell last posed it** (S65): each part's node in the bike's frame and its
+/// rest orientation, the same two things [`RigPart::bone`] and [`RigPart::rest`] hold for the fixed
+/// riding pose. A wreck that has one is posed from it and its step pulls towards its rests, as the
+/// original's are from the live animated skeleton; one without falls back on the [`Rig`]'s.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Posed {
+    /// One per part, in the file's order.
+    pub bones: Vec<Bone>,
+    pub rests: Vec<Vf>,
 }
 
 /// The game's generator as the wreck entry draws from it: the one the body's idle pool keeps,
@@ -263,11 +306,32 @@ impl Down {
         rng: &mut Rng,
         world: &mut dyn World,
     ) -> Down {
+        Down::enter_posed(kit, None, m, crash, throw, reason, wrecks, rng, world)
+    }
+
+    /// [`Down::enter`], the bones put where `posed` has them when there is one (S65).
+    #[allow(clippy::too_many_arguments)]
+    pub fn enter_posed(
+        kit: &Kit,
+        posed: Option<&Posed>,
+        m: &Mat4,
+        crash: &crate::ride::Crash,
+        throw: Throw,
+        reason: i32,
+        wrecks: &Wrecks,
+        rng: &mut Rng,
+        world: &mut dyn World,
+    ) -> Down {
         let mut ragdoll = kit.ragdoll.clone();
         let t = &kit.tables;
         let mut starts = [Start::default(); PARTS];
         let mut drawn = [Mat4([Vf::ZERO; 4]); PARTS];
-        let places: Vec<Bone> = (0..kit.rig.parts.len().min(PARTS)).map(|i| kit.rig.place(m, i)).collect();
+        let places: Vec<Bone> = (0..kit.rig.parts.len().min(PARTS))
+            .map(|i| match posed.and_then(|p| p.bones.get(i)) {
+                Some(b) => Bone { at: math::transform_point(m, b.at), forward: rotate(m, b.forward), up: rotate(m, b.up) },
+                None => kit.rig.place(m, i),
+            })
+            .collect();
         ragdoll_pose::pose_all(
             places.iter().zip(&kit.rig.parts).zip(drawn.iter_mut().zip(starts.iter_mut())).map(|((b, p), (d, s))| (b, p.cofg, d, s)),
             true,
@@ -305,10 +369,16 @@ impl Down {
     /// switch), then the world stepped with the bone collisions on the ground, the hands that still
     /// hold following the wreck bike, and every bone's orientation normalised.
     ///
-    /// The wreck bike has no collider here, so the bones are never off the bike; the step has no
-    /// bike box either.
+    /// The bones are off the bike once the main bone is a foot past the kit's bike sphere
+    /// ([`Kit::bike`]), its centre carried with the wreck body; the step has no bike box.
     pub fn step(&mut self, kit: &Kit, dt: F, crash: &crate::ride::Crash, world: &mut dyn World) {
+        self.step_posed(kit, None, dt, crash, world);
+    }
+
+    /// [`Down::step`], the joint torques pulling towards `posed`'s rests when there is one (S65).
+    pub fn step_posed(&mut self, kit: &Kit, posed: Option<&Posed>, dt: F, crash: &crate::ride::Crash, world: &mut dyn World) {
         let frame = math::quat_to_mat4(crash.body.quat, crash.origin);
+        let bike = kit.bike.map(|(centre, radius)| (bike_centre(&frame, centre), radius));
         ragdoll_body::wreck_arm(
             &mut self.ragdoll,
             &self.contacts,
@@ -316,7 +386,7 @@ impl Down {
             &mut self.fade,
             dt,
             crash.body.quat,
-            None,
+            bike,
             self.reason,
             &kit.wrecks,
             world,
@@ -330,7 +400,10 @@ impl Down {
                 centre: crash.body.cofg_world,
                 quat: crash.body.quat,
             },
-            rests: std::array::from_fn(|i| kit.rig.parts.get(i).map_or(UNIT_W, |p| p.rest)),
+            rests: std::array::from_fn(|i| match posed.and_then(|p| p.rests.get(i)) {
+                Some(&r) => r,
+                None => kit.rig.parts.get(i).map_or(UNIT_W, |p| p.rest),
+            }),
             hold_targets: self.held_at.map(|p| math::transform_point(&frame, p)),
             hold_velocity: v.merge(Dest::XYZ, v.mul(Vf::splat(0.8))),
             gravity_scale: F::ONE,
@@ -366,14 +439,15 @@ impl Down {
         self.sensed = Thrown { launch: Some(self.ragdoll.launch), ..t };
     }
 
-    /// **The settle gate**: both hands have let go of the bars and a bone is on the ground.
+    /// **The settle gate**: the body's touching flag, as the last step's wreck arm left it (S65).
     ///
-    /// **Inferred.** The gate's writer in the original was not found. This keeps what S26 measured
-    /// it to follow, the hands off and then the rider on the ground, read off the bones in place of
-    /// the one rider point. It is not the body's own settle test ([`Ragdoll::settled`], S61): S26
-    /// saw the gate come on with the body still doing 42 ft/s.
+    /// The original's body actor ends its tick by copying its touching flag into the request it
+    /// shares with the bike, and that word is the gate the ride machine reads. The bike's update runs
+    /// before the rider's, so the machine sees the flag the previous tick's step left: a caller reads
+    /// this before the step. The hands may still hold; S26's "hands off first" was the clock's half
+    /// second, not the gate.
     pub fn settles(&self) -> bool {
-        !self.ragdoll.holds[0] && !self.ragdoll.holds[1] && self.contacts.iter().any(|c| c.touched)
+        self.touching
     }
 
     /// The main bone.
