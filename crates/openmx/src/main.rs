@@ -171,6 +171,9 @@ mod overlay;
 mod pace;
 mod pad;
 mod perf;
+// N8: the one-seat online ride against the offline one, tick for tick.
+#[cfg(test)]
+mod same_ride;
 mod split;
 mod stages;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
@@ -316,11 +319,12 @@ fn main() {
 ///
 /// This is what [`Game`] is implemented on, so the only thing that happens inside a simulation pass is
 /// what the game would do in one — reading the pads and moving the world.
-struct World<'a> {
+struct World<P> {
     /// What the ride asks about the world: the ported terrain query and the scene's collision
     /// placements, swept by S4's own sweep. The *drawn* ground is the loop's own [`Ground`], which
-    /// reads the same file for triangles instead. Every player rides the one world.
-    place: Place<'a>,
+    /// reads the same file for triangles instead. Every player rides the one world. (Any world: the
+    /// shell's is that `Place`, N8's test rides a flat floor.)
+    place: P,
     /// The local players, the first of them the one a one-player session has always had (V22).
     seats: Vec<Seat>,
     /// `--record`: the tape this session is being written to, one frame per simulation pass. It is
@@ -367,7 +371,7 @@ struct Seat {
 
 impl Seat {
     /// One player's pass: the pad, then the bike.
-    fn pass(&mut self, dt: F, place: &mut Place) {
+    fn pass(&mut self, dt: F, place: &mut dyn sim_world::World) {
         // Nobody's hands on the bars: the pad is not polled either, so the input manager's timers
         // and held buttons are where the pull left them, and the ride goes on from there when the
         // pad comes back.
@@ -536,7 +540,7 @@ fn plane_at(plane: &Plane) -> M4 {
     M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up))
 }
 
-impl Game for World<'_> {
+impl<P: sim_world::World> Game for World<P> {
     /// One simulation pass: each player's pad, then their bike, in player order.
     ///
     /// `input` is the engine's own sampled pad, which this shell does not use — the full 32-byte
