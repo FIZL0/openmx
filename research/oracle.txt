@@ -4317,3 +4317,53 @@ rider_score_trick_abort     boot 0x00280d70 (rider) rider vt+0x114: the trick an
 #   unbanked, +0x13f0/+0x13f4/+0x1400 zeroed. Called by player_wreck_entry and ride_reset_request.
 # The scoring section of the player update 0x0027c890 is ported as Score::frame (one-wheel nodes,
 # the bank, the backflip watch); the manager's mode handler for mode 3 (0x00268d00) scores nothing.
+# --- V42: the speedometer's digital readout, the default in crates/openmx/src/overlay.rs ---
+# speedo_mode's setting is *(*(*(*0x0041f770 + 0x3d4) + 8) + 0x1c), 1 = digital; speedo_update
+#   forces digital when the byte at *(opts + 0xc) + 0x114 (players) is 2 or more. speedo_mode runs
+#   when the options are applied, not per frame: a PINE write of the word changes nothing on screen;
+#   the original's own pause page Player Options > "Speedometer Display" (Digital/Analog, Cross
+#   accepts) does, once the value changes.
+# Seen (PCSX2, freestyle, digital set): the readout "51" in yearlingdashboldoblique_55 inks x 539-587,
+#   y 344-375 of 640x448, the preload meter at 599,314 beside it, no dial, no odometer plate, no
+#   miles. speedometer1.lyr's "Speedometer Digital1" container holds Speedometer_text alone;
+#   SpeedometerBackground_digital is in no container. So the right-justified text's right edge is
+#   the layout's X (588): the last box's right edge, its negative after-gap not counted.
+# Layouts, from mxingame.pag's layers: FreestyleOverlays -> speedometer.lyt (text 588,329, meter
+#   0,-12); FreestyleOverlaysHorizontal -> speedometerhorizontal1.lyt (588,155; meter 0,-194) and
+#   speedometerhorizontal2.lyt (588,145; 0,10); FreestyleOverlaysVertical ->
+#   speedometervertical1free.lyt (270,340; -320,0) and speedometervertical2.lyt (270,340; meter
+#   untouched). Read as: text in the view's own 640x224 / 320x448 frame (the radar layouts' 77 and
+#   135 say the same), the Flash meter offset from its movie's place on the whole screen. Not seen
+#   on a split screen of the original.
+
+# S78 — rider against rider: the riding bike's collision record, read for the port; the own-chassis
+# half of the resolution ported (contact::resolve_ridden) and proved in tests/contact.rs
+# (the_contact_resolution_on_a_chassis_matches_the_original: the plane's record pointed at a scratch
+# chassis + transform, 10k cases, every write bit for bit, 616 single-contact impulses chassis on chassis).
+#   The riding bike's record is bike+0x7d0 (vtable 0x00454a00), wired by 0x0026fbd0(record, chassis,
+#   bike+0x7c4, bike+0x7c0, bike+0x7cc, bike+0x7ac): +0xf0 = the chassis, +0xf4 = 0 (no dynamics
+#   body), +0xf8 = chassis+0x254 (its transform); +0x1f0 = +0x7c4 (kind 2 rays, "%sm.col", the 11 body
+#   rays; its +0x84 = word 0x00468f50), +0x1f8 = +0x7c0 (kind 5, "%sf.col", loaded 0x001ed1e0 ->
+#   0x001edda0; its +0x84 = bike+0x394 | bike+0x390 | [0x00468f50] | [0x00468f68]; its +0x80 = the
+#   record: the collidable other riders' rays strike), +0x1f4 = +0x7cc (the sweep probe, kind 3).
+#   +0x7c8 is a second kind-2 rays object with no file; +0x7a8 the "Wreck%s" physics object.
+#   Record +0x64 = chassis+0x210, +0x68 = chassis+0x214, +0x80.. = the chassis' inverse-inertia diagonal;
+#   +0x110 (actors) = bike+0x390 | [0x00468f50]; +0x114 (collides-with) left 0xffffffff. The two mask
+#   words are 0 in the image (set at run time; not read from a riding state yet). The constructor's
+#   ignore lists (0x0011b070 / 0x0011add0 / 0x0011ade0 / 0x0011b080) keep a bike's own collidables off
+#   each other; the ghost adds the vehicle class word 0x00468f68 to +0x7c4's and +0x7cc's (S63).
+#   collision_record_collide: terrain rays, then the actor query; each actor hit leaves an own entry
+#   (kind 0) and a mirrored one (kind 1) in the struck record. collision_resolve runs every substep
+#   (vt +0x80, the flag = first substep), so impulses only on a substep's first pass. Both bikes' +0x1f8
+#   flags meet the other's collides-with, so a bike pair is mutual and shares the impulse by mass.
+#   Damping needs +0xf4: never on a chassis. Own-chassis branches (+0xf4 == 0):
+#     relative_velocity: cofg_world = node.rotate(+0x90); arm = node.unplace(point) - (chassis+0x190 +
+#       cofg_world); mine = node.rotate(rates+0x290 x arm) + vel+0x260.
+#     spring: the kind-0 anchor = node.place(on_body); an unshared share uses chassis+0x214.
+#     impulse: m1 = chassis+0x214, i1 = (+0xf0, +0x104, +0x118); the normal into the frame by an inline
+#       unrotate; dv to shock +0x170 and vel +0x260, with angular dw = (arm x node.unrotate(j)) * i1 to
+#       twist +0x180 and rates +0x290.
+#     friction: mass = chassis+0x210.
+#     apply: r = at - (chassis+0x60 + cofg_world); torque +0x140 += node.unrotate(r x f) * mask,
+#       force +0x130 += f (xyz only, from the disassembly).
+#   The wreck it causes is reason 7 (joust), already ported by S54 (air::hit_wreck over ride::hits_among).

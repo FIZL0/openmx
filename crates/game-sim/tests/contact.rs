@@ -12,7 +12,7 @@
 //! mover. What is not proved, and why, is in the journal entry's last section.
 
 use game_sim::biplane::Body;
-use game_sim::contact::{Collider, Contact, Mover, Node, Other, Response, Rigid, Side, Vehicle, Weighed, resolve};
+use game_sim::contact::{Collider, Contact, Mover, Node, Other, Response, Ridden, Rigid, Side, Vehicle, Weighed, resolve, resolve_ridden};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
 
@@ -122,6 +122,11 @@ mod veh {
     pub const NODE_ROWS: u32 = 0x80;
     pub const NODE_ORIGIN: u32 = 0xb0;
     pub const NODE_CLEAN: u32 = 0x110;
+    /// S78: what a chassis that is the own side also gives: its centre in the world, and the force
+    /// and moment the substep gathers.
+    pub const POSITION: u32 = 0x60;
+    pub const FORCE: u32 = 0x130;
+    pub const TORQUE: u32 = 0x140;
 }
 
 /// A mover's fields: its vtable, the two slots the resolution calls, its transform and origin, and
@@ -812,5 +817,255 @@ fn the_contact_resolution_matches_the_original() {
         ("damped cases", damped),
     ] {
         assert!(n >= 100, "only {n} {what}: the generator stopped reaching a path");
+    }
+}
+
+// --- S78: the own side on a chassis ----------------------------------------------------------------
+
+/// The same resolution with the own side on a vehicle's chassis (the record's body pointer null), the
+/// way a riding bike's collision record is: the plane's object is pointed at a generated chassis and
+/// transform in scratch memory, and everything the original writes there is compared with
+/// [`resolve_ridden`]'s: the chassis' four accumulators, its force and moment, the object's fields,
+/// the arms, and the others (bodies and chassis, so bike against bike is the `Side::Vehicle` case).
+#[test]
+fn the_contact_resolution_on_a_chassis_matches_the_original() {
+    let Some(mut ee) = plane() else { return };
+    let record = ee.u32_at(PLANE + PLANE_COLLISION);
+    let plane_body = ee.u32_at(PLANE + PLANE_BODY);
+    let resolve_at = ee.u32_at(ee.u32_at(record + rec::VTABLE) + rec::RESOLVE);
+    assert_eq!(resolve_at, addr("collision_resolve").unwrap(), "the collision object's slot is not the resolution");
+    let l = layout(&ee);
+    hook_mover(&mut ee, &l);
+    // The own chassis (0x2a0) and its transform (0x120), past the layout's slots.
+    let (chassis, node) = (ee.scratch(112), ee.scratch(123));
+    let template: Vec<u32> = (0..body_at::SIZE).step_by(4).map(|k| ee.u32_at(plane_body + k)).collect();
+    let mut p = Pick(0x5eed_b1_4e_b1_4e);
+    let mut seen = Seen::default();
+    for case in 0..CASES {
+        write_collider(&mut ee, &mut p, record);
+        write_vehicle(&mut ee, &mut p, chassis);
+        for (at, s) in [(veh::POSITION, 100.0), (veh::FORCE, 1000.0), (veh::TORQUE, 1000.0)] {
+            let v = p.loose(s);
+            set_quad(&mut ee, chassis + at, v);
+        }
+        let n = p.node();
+        write_node(&mut ee, node, &n);
+        ee.set_u32(record + rec::VEHICLE, chassis);
+        ee.set_u32(record + rec::BODY, 0);
+        ee.set_u32(record + rec::NODE, node);
+        let own_collidable = !p.one_in(4);
+        if own_collidable {
+            let f = p.flags();
+            zero(&mut ee, l.collidable, 0xc0);
+            ee.set_u32(l.collidable + rec::FLAGS, f);
+        }
+        ee.set_u32(record + rec::COLLIDABLE, if own_collidable { l.collidable } else { 0 });
+
+        // Two others: most often another chassis, as one bike meets another.
+        let mut on_vehicle = [false; 2];
+        for (k, o) in l.others.iter().enumerate() {
+            zero(&mut ee, o.record, 0x200);
+            write_collider(&mut ee, &mut p, o.record);
+            let has = !p.one_in(4);
+            if has {
+                let f = p.flags();
+                zero(&mut ee, o.collidable, 0xc0);
+                ee.set_u32(o.collidable + rec::FLAGS, f);
+            }
+            ee.set_u32(o.record + rec::COLLIDABLE, if has { o.collidable } else { 0 });
+            on_vehicle[k] = !p.one_in(3);
+            if on_vehicle[k] {
+                write_vehicle(&mut ee, &mut p, o.vehicle);
+                let n = p.node();
+                write_node(&mut ee, o.node, &n);
+                ee.set_u32(o.record + rec::VEHICLE, o.vehicle);
+                ee.set_u32(o.record + rec::BODY, 0);
+                ee.set_u32(o.record + rec::NODE, o.node);
+            } else {
+                for (j, w) in template.iter().enumerate() {
+                    ee.set_u32(o.body + 4 * j as u32, *w);
+                }
+                write_body(&mut ee, &mut p, o.body);
+                ee.set_u32(o.record + rec::VEHICLE, 0);
+                ee.set_u32(o.record + rec::BODY, o.body);
+                ee.set_u32(o.record + rec::NODE, 0);
+            }
+        }
+
+        // The mover.
+        zero(&mut ee, l.mover, 0x260);
+        ee.set_u32(l.mover + mov::VTABLE, l.mover_vtable);
+        ee.set_u32(l.mover_vtable + mov::SPIN_SLOT, l.spin_hook);
+        ee.set_u32(l.mover_vtable + mov::VELOCITY_SLOT, l.velocity_hook);
+        let n = p.node();
+        write_node(&mut ee, l.mover_node, &n);
+        ee.set_u32(l.mover + mov::NODE, l.mover_node);
+        for (at, s) in [(mov::ORIGIN, 3.0), (mov::SPIN, 3.0), (mov::VELOCITY, 30.0)] {
+            let v = p.loose(s);
+            set_quad(&mut ee, l.mover + at, v);
+        }
+
+        // The contacts, around the chassis' transform.
+        let count = match p.below(10) {
+            0 => 0,
+            1..=5 => 1,
+            6 | 7 => 2,
+            _ => 4,
+        };
+        ee.set_u32(record + rec::COUNT, count);
+        ee.set_u32(record + rec::LIST, l.list);
+        let centre = n_origin(&ee, node);
+        for k in 0..count {
+            use entry::*;
+            let e = l.list + SIZE * k;
+            zero(&mut ee, e, SIZE);
+            let other = match p.below(3) {
+                0 => None,
+                k => Some(k as usize - 1),
+            };
+            let kind = if other.is_some() && p.one_in(4) { 1 } else { 0 };
+            let mover = other.is_none() && p.one_in(3) || p.one_in(8);
+            ee.set_u32(e + KIND, kind);
+            for (at, s) in [(FROM, 5.0), (ON_BODY, 5.0), (ARM, 5.0), (OTHER_ARM, 5.0)] {
+                let v = p.loose(s);
+                set_quad(&mut ee, e + at, v);
+            }
+            let nv = p.normal();
+            set_quad(&mut ee, e + NORMAL, nv);
+            let off = p.loose(8.0);
+            let point = Vf::new(centre.x() + off.x(), centre.y() + off.y(), centre.z() + off.z(), off.w());
+            set_quad(&mut ee, e + POINT, point);
+            ee.set_u32(e + SURFACE, (p.below(17) as i32 - 1) as u32);
+            ee.set_u32(e + OTHER, other.map_or(0, |k| l.others[k].record));
+            ee.set_u32(e + MOVER, if mover { l.mover } else { 0 });
+        }
+        let impulses = !p.one_in(4);
+
+        // The port, on the same inputs.
+        let mut own = collider_of(&ee, record);
+        let mut ridden = ridden_of(&ee, chassis, node);
+        let other_records = l.others.map(|o| o.record);
+        let mut contacts: Vec<Contact> =
+            (0..count).map(|k| contact_of(&ee, l.list + entry::SIZE * k, &other_records, l.mover)).collect();
+        let mut colliders = l.others.map(|o| collider_of(&ee, o.record));
+        let mut bodies = l.others.map(|o| body_of(&ee, o.body));
+        let mut vehicles = l.others.map(|o| vehicle_of(&ee, o.vehicle, o.node));
+        let masses = l.others.map(|o| F(ee.f32_at(o.body + body_at::MASS)));
+        let movers = [Mover {
+            spin: quad(&ee, l.mover + mov::SPIN),
+            velocity: quad(&ee, l.mover + mov::VELOCITY),
+            node: node_of(&ee, l.mover_node),
+            origin: quad(&ee, l.mover + mov::ORIGIN),
+        }];
+        for c in &contacts {
+            seen.contacts += 1;
+            seen.movers += usize::from(c.mover.is_some());
+            if let Some(k) = c.other {
+                if on_vehicle[k] { seen.vehicles += 1 } else { seen.bodies += 1 }
+                seen.theirs += usize::from(c.kind != 0);
+            }
+        }
+        {
+            let [c0, c1] = &mut colliders;
+            let [b0, b1] = &mut bodies;
+            let [v0, v1] = &mut vehicles;
+            let mut w0 = Weighed { body: b0, mass: masses[0] };
+            let mut w1 = Weighed { body: b1, mass: masses[1] };
+            let side0 = if on_vehicle[0] { Side::Vehicle(v0) } else { Side::Body(&mut w0 as &mut dyn Rigid) };
+            let side1 = if on_vehicle[1] { Side::Vehicle(v1) } else { Side::Body(&mut w1 as &mut dyn Rigid) };
+            let mut others = [Other { collider: c0, side: side0 }, Other { collider: c1, side: side1 }];
+            resolve_ridden(&mut own, &mut ridden, &mut contacts, &mut others, &movers, impulses);
+        }
+
+        // The original.
+        ee.call(resolve_at, &[u64::from(record), u64::from(impulses)], &[], BUDGET);
+
+        same_quad(case, "the object's centre in the world", own.cofg_world, quad(&ee, record + rec::COFG_WORLD));
+        same_quad(case, "the relative velocity", own.relative, quad(&ee, record + rec::RELATIVE));
+        assert_eq!(own.normal_speed.to_bits(), ee.f32_at(record + rec::NORMAL_SPEED).to_bits(), "case {case}: the normal speed");
+        for (k, c) in contacts.iter().enumerate() {
+            let e = l.list + entry::SIZE * k as u32;
+            same_quad(case, &format!("contact {k}'s arm"), c.arm, quad(&ee, e + entry::ARM));
+            same_quad(case, &format!("contact {k}'s other arm"), c.other_arm, quad(&ee, e + entry::OTHER_ARM));
+        }
+        let want = ridden_of(&ee, chassis, node);
+        for (name, g, w) in [
+            ("velocity", ridden.chassis.velocity, want.chassis.velocity),
+            ("rates", ridden.chassis.rates, want.chassis.rates),
+            ("shock", ridden.chassis.shock, want.chassis.shock),
+            ("twist", ridden.chassis.twist, want.chassis.twist),
+            ("force", ridden.force, want.force),
+            ("moment", ridden.torque, want.torque),
+        ] {
+            same_quad(case, &format!("the own chassis' {name}"), g, w);
+        }
+        for (k, o) in l.others.iter().enumerate() {
+            same_quad(case, &format!("other {k}'s centre in the world"), colliders[k].cofg_world, quad(&ee, o.record + rec::COFG_WORLD));
+            if on_vehicle[k] {
+                let want = vehicle_of(&ee, o.vehicle, o.node);
+                let got = vehicles[k];
+                for (name, g, w) in [
+                    ("velocity", got.velocity, want.velocity),
+                    ("rates", got.rates, want.rates),
+                    ("shock", got.shock, want.shock),
+                    ("twist", got.twist, want.twist),
+                ] {
+                    same_quad(case, &format!("other {k}'s chassis {name}"), g, w);
+                }
+            } else {
+                check_body(case, &format!("other {k}'s body"), &ee, o.body, &bodies[k]);
+            }
+        }
+        if count == 1 {
+            let c = &contacts[0];
+            let hard = ee.f32_at(record + rec::NORMAL_SPEED) < -10.0;
+            seen.hard += usize::from(hard);
+            seen.impulses += usize::from(hard && impulses && c.kind == 0);
+            seen.springs += usize::from(!hard);
+            if let Some(k) = c.other {
+                let mine = ee.u32_at(record + rec::COLLIDABLE);
+                let theirs = ee.u32_at(l.others[k].record + rec::COLLIDABLE);
+                let flags = |c: u32| ee.u32_at(c + rec::FLAGS);
+                let shared = theirs != 0
+                    && if mine != 0 {
+                        flags(theirs) & own.collides_with != 0 && flags(mine) & colliders[k].collides_with != 0
+                    } else {
+                        flags(theirs) & own.collides_with != 0
+                    };
+                seen.mutual += usize::from(shared);
+                seen.actors += usize::from(theirs != 0 && flags(theirs) & own.actors != 0);
+                seen.vehicle_impulses += usize::from(on_vehicle[k] && hard && impulses && c.kind == 0);
+            }
+        }
+    }
+    eprintln!("{seen:?}");
+    let Seen { contacts, hard, impulses, springs, mutual, actors, vehicle_impulses, vehicles, bodies, movers, theirs, .. } = seen;
+    for (what, n) in [
+        ("contacts", contacts),
+        ("hard contacts", hard),
+        ("impulses", impulses),
+        ("springs", springs),
+        ("mutual contacts", mutual),
+        ("actor contacts", actors),
+        ("impulses on a chassis", vehicle_impulses),
+        ("contacts with a chassis", vehicles),
+        ("contacts with a body", bodies),
+        ("contacts with a mover", movers),
+        ("contacts of the other's kind", theirs),
+    ] {
+        assert!(n >= 100, "only {n} {what}: the generator stopped reaching a path");
+    }
+}
+
+fn n_origin(ee: &Ee, n: u32) -> Vf {
+    quad(ee, n + veh::NODE_ORIGIN)
+}
+
+fn ridden_of(ee: &Ee, v: u32, node: u32) -> Ridden {
+    Ridden {
+        chassis: vehicle_of(ee, v, node),
+        position: quad(ee, v + veh::POSITION),
+        force: quad(ee, v + veh::FORCE),
+        torque: quad(ee, v + veh::TORQUE),
     }
 }
