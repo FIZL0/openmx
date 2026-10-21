@@ -113,7 +113,8 @@
 //! `--hud` (`--overlay debug`) starts on: the sixteen controls as the port's own input manager holds
 //! them, both sticks where its dead zone put them, and beside them the numbers the ride is running
 //! on. That one is debugging furniture and matches nothing on the disc. `--overlay none`, or the
-//! front end's setting, draws neither until H.
+//! front end's setting, draws neither until H. The original's speed is its digital readout unless
+//! `--speedometer analog` or the Settings' Speedometer row asks for its dial (V42).
 //!
 //! **M** swaps between the bike and the track's biplane, as does the pause's "Switch To Machine" for
 //! the player who opened it, and `--vehicle biplane` or the ride setup's machine pick starts in the
@@ -423,7 +424,7 @@ fn switch_machine(seat: &mut Seat, rig: &mut Rig) -> Option<Kind> {
 /// What the original's HUD shows of a player's own ride (V26, V28): their odometer, which machine is
 /// up, how hard a preload is shoving the bike, and the score. The port keeps no stunt score yet, so
 /// the score reads 0 — what the original's shows until a trick lands.
-fn gauges(seat: &Seat, rig: &Rig) -> overlay::Gauges {
+fn gauges(seat: &Seat, rig: &Rig, speedometer: menu::Speedometer) -> overlay::Gauges {
     let (air, p) = (&seat.sim.rider.ride.air, &seat.sim.phy.air);
     overlay::Gauges {
         feet: rig.odometer.feet,
@@ -437,6 +438,7 @@ fn gauges(seat: &Seat, rig: &Rig) -> overlay::Gauges {
         ),
         score: 0,
         modified: rig.modified,
+        speedometer,
     }
 }
 
@@ -601,6 +603,9 @@ struct Args {
     /// `--overlay original|debug|none` (V26): which overlay a ride draws, the original's HUD by
     /// default. Unset, the front end's setting decides; `--hud` is `--overlay debug`.
     overlay: Option<menu::Overlay>,
+    /// `--speedometer digital|analog` (V42): how the original's HUD shows the speed. Unset, the
+    /// front end's setting decides, and without one the digital readout.
+    speedometer: Option<menu::Speedometer>,
     /// `--camera NAME`: which of the track's camera presets to start on, by the name its
     /// `cpresets.ini` gives it. The default is the one the original itself is on in a freeride (P14).
     camera: String,
@@ -1062,6 +1067,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
+                a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 if !args.render_scale_asked {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
@@ -1132,6 +1138,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
+                a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 if !args.render_scale_asked {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
@@ -2573,6 +2580,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     let radar_span = overlay::radar_span(ground.spacing);
     let mut overlay_mode = args.overlay.unwrap_or_default();
+    let mut speedometer = args.speedometer.unwrap_or_default();
     let mut graphics = args.graphics.unwrap_or_default();
     let mut frame = Frame::new(width, height, look.fog_color);
     // The views (V22): where each player's goes in the frame, and a frame of its own size for each to
@@ -2956,6 +2964,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let act = front.menu.step_seats(&presses);
             if front.menu.changed() {
                 overlay_mode = front.menu.settings.overlay;
+                speedometer = front.menu.settings.speedometer;
                 graphics = front.menu.settings.graphics;
                 if !args.render_scale_asked && render_scale != front.menu.settings.render_scale.fraction() {
                     render_scale = front.menu.settings.render_scale.fraction();
@@ -3361,7 +3370,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     if seat.riding && simulated {
                         rig.odometer.step([b.x(), b.y(), b.z()]);
                     }
-                    let (window, gauges) = ((frame.width, frame.height), gauges(seat, rig));
+                    let (window, gauges) = ((frame.width, frame.height), gauges(seat, rig, speedometer));
                     art.sprites(&mut gpu_sprites, (at.x, at.y, at.w, at.h), window, &ridden, v, radar_span, &gauges);
                 }
             }
@@ -3646,7 +3655,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 if seat.riding && simulated {
                     rig.odometer.step([b.x(), b.y(), b.z()]);
                 }
-                art.draw(target, (width, height), &ridden, v, radar_span, &gauges(seat, rig));
+                art.draw(target, (width, height), &ridden, v, radar_span, &gauges(seat, rig, speedometer));
             }
             if let Some(view) = view_frames.get(v) {
                 split::put(&mut frame, view, *at);
@@ -4209,6 +4218,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         shot_frame: 0,
         hud: false,
         overlay: None,
+        speedometer: None,
         camera: START_CAMERA.to_string(),
         moment: None,
         wrecks: true,
@@ -4336,6 +4346,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .ok_or_else(|| format!("--overlay: {word:?} is not original, debug or none"))?;
                 args.hud = overlay == menu::Overlay::Debug;
                 args.overlay = Some(overlay);
+            }
+            "--speedometer" => {
+                let word = next("digital or analog")?;
+                let style = menu::Speedometer::from_word(&word)
+                    .ok_or_else(|| format!("--speedometer: {word:?} is not digital or analog"))?;
+                args.speedometer = Some(style);
             }
             "--fps" => args.fps = true,
             "--graphics" => {
@@ -4506,7 +4522,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--hud] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--speedometer digital|analog] [--hud] [--camera NAME]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\

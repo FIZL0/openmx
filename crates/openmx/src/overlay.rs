@@ -7,8 +7,13 @@
 //!   `speedometer_analog` (128x128 at 480,301), the odometer's plate `odometer_background` (128x32 at
 //!   486,398) with its dim `00000.0` behind (`eurostileboldbold_14`, 204,204,204,77 at 501,403) and
 //!   the miles over it (alpha 255, right edge at 573), and the needle, the model
-//!   `ui\geom\speedometer_needle.psg` at 536,357. With two players or more the original drops the
-//!   dial for the digital readout alone: `yearlingdashboldoblique_55`, right edge at 588, top at 329.
+//!   `ui\geom\speedometer_needle.psg` at 536,357; or the digital readout,
+//!   `yearlingdashboldoblique_55`, right edge at 588, top at 329 — the `Speedometer Digital`
+//!   container, which has no odometer (its `SpeedometerBackground_digital` is in no container, so
+//!   is never drawn). The digital readout is the default here, the dial a setting (V42), as the
+//!   original's own overlay options choose; with two players or more the original forces the
+//!   readout, and so does this. A split view's readout and meter are placed by the split layouts
+//!   ([`Place`]).
 //! - **The radar** (`ui\freestyleradar.lyr`): `freestyle_radar`, a compass rose 128x128 centred on
 //!   87,363 and turned so the rider's heading is up; the yellow `map_icon_player_freestyle` fixed at
 //!   its middle; and an 8x8 `map_icon_hit_freestyle` for every other rider, at their bearing and
@@ -20,9 +25,9 @@
 //!   which nothing here plays, so it is drawn to the original's own picture by eye (V28), at the
 //!   movie's own tints (black at 0x80 over the label, 0x66 over the rest).
 //! - **The preload meter** (`speedometer.lyt`'s `PreloadMeter`, `Ingame_Preloadmeter.fsh`): the dark
-//!   capsule right of the dial, black at the movie's 0xb3, likewise drawn by eye (V28). The plane has
-//!   neither it nor the odometer: the original's biplane shows the dial alone. A split view
-//!   has none (its own layouts were not followed).
+//!   capsule right of the speed, black at the movie's 0xb3, likewise drawn by eye (V28), in every
+//!   view (V42). The plane has neither it nor the odometer: the original's biplane shows the speed
+//!   alone.
 //!
 //! What the numbers are, and where they come from, is in `research/oracle.txt` (V26, V28). The pure
 //! parts — [`mph`], [`speed_text`], [`needle_degrees`], [`odometer_text`] and [`radar_mark`] — take
@@ -45,7 +50,7 @@ use game_render::gpu::{Shape, Sprite, clamp_of};
 use game_render::{Disc, Frame, Texture};
 use game_sim::camera::Ridden;
 
-use crate::menu::{Font, bilinear, blend, span};
+use crate::menu::{Font, Speedometer, bilinear, blend, span};
 
 /// The layouts' screen.
 pub const LAYOUT: (f32, f32) = (640.0, 448.0);
@@ -94,6 +99,54 @@ const TEXT: [u8; 4] = [204, 204, 204, 255];
 /// The digital readout's right edge and top.
 const DIGITAL: (f32, f32) = (588.0, 329.0);
 
+/// Which of the disc's speedometer layouts a view's readout and preload meter are placed by (V42):
+/// `speedometer.lyt` for a whole screen; `speedometerhorizontal1.lyt` and `…2.lyt` for the views of
+/// the top row and the rest of a screen cut across; `speedometervertical1free.lyt` and `…2.lyt` —
+/// which say the same — for views side by side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Place {
+    #[default]
+    Full,
+    Top,
+    Bottom,
+    Side,
+}
+
+impl Place {
+    /// View `v` of `view`'s size in a window of `window`'s, its views in rows of equal ones.
+    pub fn of(view: (usize, usize), window: (usize, usize), v: usize) -> Place {
+        let cols = (window.0 as f32 / view.0.max(1) as f32).round().max(1.0) as usize;
+        let rows = (window.1 as f32 / view.1.max(1) as f32).round().max(1.0) as usize;
+        match (cols, rows) {
+            (_, 2..) if v / cols == 0 => Place::Top,
+            (_, 2..) => Place::Bottom,
+            (2.., _) => Place::Side,
+            _ => Place::Full,
+        }
+    }
+
+    /// The digital readout's right edge and top, and the preload meter's left and top, as
+    /// [`Corner::BottomRight`] counts them on a whole screen. A split layout's text is in its own
+    /// view's pixels (a 640x224 or 320x448 one), which moves here by the part of the screen the
+    /// view is short of; its meter, a Flash movie, is in the whole screen's — the movie's own
+    /// place, 599,326, moved by the layout's `X`/`Y` — so the bottom view's meter is the screen's
+    /// lower half's, and the right-hand view's sits at 279 in its own pixels like the left's.
+    pub fn speedometer(self) -> ((f32, f32), (f32, f32)) {
+        // Each layout's text, the size of the view it is in, the meter movie's `X`/`Y`, and where
+        // that view starts on the screen (the left view's numbers serve the right's).
+        let (w, h) = LAYOUT;
+        let (text, view, (mx, my), within) = match self {
+            Place::Full => (DIGITAL, LAYOUT, (0.0, -12.0), (0.0, 0.0)),
+            Place::Top => ((588.0, 155.0), (w, h / 2.0), (0.0, -194.0), (0.0, 0.0)),
+            Place::Bottom => ((588.0, 145.0), (w, h / 2.0), (0.0, 10.0), (0.0, h / 2.0)),
+            Place::Side => ((270.0, 340.0), (w / 2.0, h), (-320.0, 0.0), (0.0, 0.0)),
+        };
+        let (dx, dy) = (w - view.0, h - view.1);
+        let meter = (PRELOAD_MOVIE.0 + mx - within.0 + dx, PRELOAD_MOVIE.1 + my - within.1 + dy);
+        ((text.0 + dx, text.1 + dy), meter)
+    }
+}
+
 /// The score bar (left, top, width, height), from the view's top-left, where its darker label end
 /// stops, and the label's and the number's left edges and tops — measured off the original's frame.
 const SCORE_BAR: (f32, f32, f32, f32) = (14.0, 25.0, 168.0, 20.5);
@@ -107,8 +160,11 @@ const SCORE_LABEL_SHADE: u8 = 0x80;
 const SCORE_SHADE: u8 = 0x66;
 const PRELOAD_SHADE: u8 = 0xb3;
 const SCORE_COLOUR: [u8; 4] = [200, 200, 200, 255];
-/// The preload meter's capsule, from the view's bottom-right, and the colour of its charge.
-const PRELOAD_METER: (f32, f32, f32, f32) = (599.0, 314.0, 20.0, 85.0);
+/// The preload meter's capsule's size, and the colour of its charge. On a whole screen it is at
+/// 599,314, from the view's bottom-right: the movie's own place, [`PRELOAD_MOVIE`], moved by
+/// `speedometer.lyt`'s `Y=-12`.
+const PRELOAD_METER: (f32, f32) = (20.0, 85.0);
+const PRELOAD_MOVIE: (f32, f32) = (599.0, 326.0);
 const PRELOAD_COLOUR: [u8; 4] = [255, 153, 0, 255];
 /// How far the charge sits inside the capsule.
 const PRELOAD_INSET: f32 = 3.0;
@@ -158,7 +214,7 @@ pub fn preload_fill(firing: bool, force: f32, max: f32, timer: f32, time: f32) -
 pub struct Gauges {
     /// The odometer's distance, in feet.
     pub feet: f32,
-    /// On the bike: the dial's odometer and the preload meter. The plane has the dial alone.
+    /// On the bike: the preload meter, and the dial's odometer. The plane has the speed alone.
     pub bike: bool,
     /// The preload meter, [`preload_fill`].
     pub preload: f32,
@@ -166,6 +222,9 @@ pub struct Gauges {
     pub score: u32,
     /// The ride has a game modifier off the original's (P55): the port's own mark under the score.
     pub modified: bool,
+    /// The speed's style, the settings' (V42). A split view is digital whichever it is, as the
+    /// original forces it with two players or more.
+    pub speedometer: Speedometer,
 }
 
 /// The world the radar covers across, for a terrain's sample spacing.
@@ -285,7 +344,8 @@ impl Art {
         gauges: &Gauges,
     ) -> Drawn {
         let (w, h) = (frame.width, frame.height);
-        self.paint(&mut Pen::new(Ink::Frame(frame), (w, h), window), riders, v, span, gauges)
+        let place = Place::of((w, h), window, v);
+        self.paint(&mut Pen::new(Ink::Frame(frame), (w, h), window), place, riders, v, span, gauges)
     }
 
     /// Every picture [`Art::sprites`] counts into, in its order: the textures, then the three fonts'
@@ -314,10 +374,12 @@ impl Art {
         gauges: &Gauges,
     ) -> Drawn {
         let ink = Ink::Sprites { out, at: (view.0 as f32, view.1 as f32) };
-        self.paint(&mut Pen::new(ink, (view.2, view.3), window), riders, v, span, gauges)
+        let place = Place::of((view.2, view.3), window, v);
+        self.paint(&mut Pen::new(ink, (view.2, view.3), window), place, riders, v, span, gauges)
     }
 
-    fn paint(&self, pen: &mut Pen, riders: &[Ridden], v: usize, span: f32, gauges: &Gauges) -> Drawn {
+    #[allow(clippy::too_many_arguments)]
+    fn paint(&self, pen: &mut Pen, place: Place, riders: &[Ridden], v: usize, span: f32, gauges: &Gauges) -> Drawn {
         let me = &riders[v];
         let speed = me.speed.0;
         let mut drawn = Drawn::default();
@@ -357,13 +419,16 @@ impl Art {
             drawn.modified = true;
         }
 
-        // The speedometer: the dial with its needle and odometer for one rider, the number for more;
-        // and on the bike, the preload meter beside it. Split, the original moves the meter by
-        // layouts of its own not followed here, and where the dial's is it would cover the number:
-        // a split view has no meter.
+        // The speedometer (V42): the number, or for one rider who asked for it the dial with its
+        // needle and odometer; and on the bike, the preload meter beside either, where the view's
+        // layout puts it. The original's two-player layouts keep the dial where a whole screen's
+        // is, off a half-height view, and its code forces the number there: a split is digital.
         pen.corner = Corner::BottomRight;
-        if gauges.bike && riders.len() < 2 {
-            let (x, y, w, h) = PRELOAD_METER;
+        let dial = gauges.speedometer == Speedometer::Analog && place == Place::Full && riders.len() < 2;
+        let (digital, meter) = place.speedometer();
+        drawn.place = place;
+        if gauges.bike {
+            let ((x, y), (w, h)) = (meter, PRELOAD_METER);
             pen.capsule((x, y, w, h), [0, 0, 0, PRELOAD_SHADE], f32::MAX, [0; 4]);
             let fill = gauges.preload.clamp(0.0, 1.0);
             if fill > 0.0 {
@@ -373,9 +438,15 @@ impl Art {
             }
             drawn.preload = Some(fill);
         }
-        if riders.len() >= 2 {
+        if !dial {
+            // Its right edge at the layout's `X`: the last box's right edge, so the last glyph's
+            // (negative) gap to a next pen does not count. The original's "51" inks 539 to 587 of a
+            // 640 screen (V42, PCSX2); the last-character rule the odometer reads by would put it
+            // past the meter.
             let text = speed_text(speed);
-            pen.text((&self.digits, DIGITS), &text, DIGITAL.0, DIGITAL.1, true, TEXT);
+            let last = text.chars().last().map_or(0.0, |c| self.digits.glyph(c).after);
+            let left = digital.0 - (self.digits.measure(&text) - last);
+            pen.text((&self.digits, DIGITS), &text, left, digital.1, false, TEXT);
             drawn.speed = Some(text);
         } else {
             if let Some(t) = self.texture("speedometer_analog") {
@@ -437,6 +508,8 @@ pub struct Drawn {
     pub scale: f32,
     /// The modified-ride mark was drawn.
     pub modified: bool,
+    /// The layout the speedometer was placed by.
+    pub place: Place,
 }
 
 #[derive(Clone, Copy)]
