@@ -476,7 +476,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // in place of the stand-in chassis, walked under `ride.crash.body` only while there is a wreck.
     // Still 10208 with S73's map edge arm, a constant of the session the bike's builder decides,
     // which the walk leaves out like the stunt set: it fits in S69's padding.
+    // 10520 since P79: `Sim::bindings`, the controller preset's table, a constant of the ride like
+    // `Sim::phy` that the walk leaves out (tests/presets.rs: the hash does not move with it).
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 10208, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 10520, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

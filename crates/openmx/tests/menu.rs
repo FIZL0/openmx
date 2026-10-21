@@ -249,6 +249,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         layouts: [Layout::New, Layout::Original, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New],
         // And another flying the original's biplane (P50).
         planes: [Layout::New, Layout::New, Layout::Original, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New],
+        // 2P on the original's controller preset 2 (P79), which writes one number a seat.
+        presets: [0, 2, 0, 0, 0, 0, 0, 0],
         // A Nintendo pad's B as Cross, by where it sits (P53).
         nintendo_positions: true,
     };
@@ -1731,4 +1733,54 @@ fn the_pause_picks_a_song_skips_it_and_its_music_slider_is_kept() {
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.mix, menu::Mix::Custom);
     assert_eq!(m.settings.music_volume, 60);
+}
+
+/// P79: a seat's Controls row offers the original's controller presets under the original layout —
+/// New on its two biplanes, then Original on presets 0 to 3 on each — and the file keeps the pick.
+#[test]
+fn the_controls_row_offers_the_originals_presets() {
+    let (mut m, mut r) = fresh();
+    m.open(Screen::Controls);
+    tap(&mut m, &mut r, Control::Down);
+    let one = |m: &Menu| (m.controls.layouts[0], m.controls.presets[0], m.controls.planes[0]);
+    let mut seen = vec![one(&m)];
+    for _ in 0..9 {
+        tap(&mut m, &mut r, Control::Right);
+        seen.push(one(&m));
+    }
+    let (n, o) = (Layout::New, Layout::Original);
+    assert_eq!(
+        seen,
+        vec![(n, 0, n), (n, 0, o), (o, 0, n), (o, 0, o), (o, 1, n), (o, 1, o), (o, 2, n), (o, 2, o), (o, 3, n), (o, 3, o)]
+    );
+    // On round to the start, and back the other way.
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(one(&m), (n, 0, n));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(one(&m), (o, 3, o));
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(one(&m), (o, 2, o));
+    assert_eq!(m.controls.presets[1..], [0; 7], "2P's preset moved with 1P's");
+    assert!(m.take_changed());
+    assert_eq!(menu::controls_label(o, 2), "Original preset 2");
+    assert_eq!(menu::controls_label(o, 0), "Original");
+    assert_eq!(menu::controls_label(n, 0), "New");
+
+    // The file: one number for every seat, or one a seat with the last carried on; nonsense and
+    // presets past 3 are the default.
+    let dir = scratch("presets");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (_, controls) = menu::load(&dir);
+    assert_eq!(controls.presets, [2, 0, 0, 0, 0, 0, 0, 0]);
+    assert!(m.controls.text().contains("\npreset = 2,0,0,0,0,0,0,0\n"));
+    std::fs::remove_dir_all(dir).ok();
+    assert_eq!(Controls::parse("preset = 3").presets, [3; 8]);
+    assert_eq!(Controls::parse("preset = 1,2").presets, [1, 2, 2, 2, 2, 2, 2, 2]);
+    assert_eq!(Controls::parse("preset = 4").presets, [0; 8]);
+    assert_eq!(Controls::parse("preset = one").presets, [0; 8]);
+    assert!(Controls::default().text().contains("\npreset = 0\n"));
+    // Where the Controls screen keeps each one's keyboard list.
+    assert_eq!(menu::keyboard_at(n, 2), 0);
+    assert_eq!((0..4).map(|p| menu::keyboard_at(o, p)).collect::<Vec<_>>(), [1, 2, 3, 4]);
 }
