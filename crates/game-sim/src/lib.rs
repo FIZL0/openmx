@@ -752,6 +752,10 @@ pub mod modifiers;
 /// Off the map: the bike's cannonball, the throw back toward the middle of a map a rider has left.
 pub mod off_map;
 
+/// The wreck page: the viewport fade a wreck's reset asks for, and the put-back it hands back three
+/// ticks later.
+pub mod wreck_page;
+
 #[cfg(test)]
 mod tests {
     use super::*;

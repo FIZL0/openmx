@@ -1,0 +1,180 @@
+# s72-page.toml — the wreck page: the ride state machine's request and the viewport fader that puts
+# the bike back. S72's spec, driven by research/s72_page.py (S59's edge ride, which always pages).
+#
+# The rider chain is s59-edge.toml's: +0x748 reason, +0x74c latch, +0x794 clock, +0xd3c the settle
+# gate, +0x20 the player record (+0x50 its screen), +0x7dc the put-back ghost's clock, +0x7a4 the
+# chassis (+0x220 the speed limit squared, which the put-back writes). The faders are the video fx
+# manager's two viewport faders (app_pointer -> 0x3d0 -> 0xd4, +0x40 and +0x44): +0x34 elapsed, +0x38
+# duration, +0x3c t, +0x48 fading out, +0x4c fading in, +0x50 in after out, +0x54 held, +0x58 the
+# fade in's milliseconds, +0x5c the listener count. research/oracle.txt's S57 and S72 blocks.
+#
+#   ./kit record --dry-run watch/s72-page.toml
+
+[watch]
+name        = "s72-page"
+description = "the wreck page: the ride state's request, the viewport faders, the put-back"
+every       = 1
+frames      = 3000
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "latch"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x74c"
+type = "u32"
+
+[[field]]
+name = "clock"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x794"
+type = "f32"
+
+[[field]]
+name = "max_wreck_time"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x798"
+type = "f32"
+
+[[field]]
+name = "cannonball_wreck_time"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x79c"
+type = "f32"
+
+[[field]]
+name = "settles"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xd3c"
+type = "u32"
+
+[[field]]
+name = "screen"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "screen_current"
+addr = "@app_pointer -> 0x3cc -> 0x64"
+type = "u32"
+
+[[field]]
+name = "ghost"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7dc"
+type = "f32"
+
+[[field]]
+name = "max_speed_sq"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x220"
+type = "f32"
+
+[[field]]
+name = "cofg"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "f0_elapsed"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "f0_dur"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "f0_t"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "f0_out"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "f0_in"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "f0_in_after"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "f0_held"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "f0_in_ms"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x58"
+type = "u32"
+
+[[field]]
+name = "f0_listeners"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x5c"
+type = "u32"
+
+[[field]]
+name = "f1_elapsed"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "f1_dur"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "f1_t"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "f1_out"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "f1_in"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "f1_in_after"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "f1_held"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "f1_in_ms"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x58"
+type = "u32"
+
+[[field]]
+name = "f1_listeners"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x5c"
+type = "u32"
