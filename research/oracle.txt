@@ -3888,3 +3888,22 @@ ini_switch           boot 0x0014b3f0 an int/switch key: T/F by first letter, ON/
 #   the draw seen on the settle tick is the animation selection (vt+0xa8) that runs after it.
 #   The ride machine's gate (+0xd3c on the rider) is still *not* the body's +0x6b4: S26 saw it come
 #   on with the body at 42 ft/s, so Down::settles keeps S53's hands-off-and-touching inference.
+
+# S65 — the ride machine's settle gate (+0xd3c on the vehicle) and the off-bike sphere, found.
+#   The rider body actor's request pointer (+0x488) is the human's vehicle + 0xb80 (vehicle vtable
+#   0x454ef0 at +0x48 in the s56 states), so request+0x1bc *is* the vehicle's +0xd3c. The actor's
+#   tail (0x0024e250) writes [actor+0x488]+0x1bc = actor+0x48c, the touching flag: that is the gate's
+#   writer S26/S53 never found. Touching is written only by the actor's constructor (0x002472c0, to 0)
+#   and rider_body_mode's wreck arm (0x0024c7e0, 0/1), so it keeps its last wreck's value while riding
+#   (s26 shows the gate 1 after a respawn); the machine also wants the clock past 0.5 s (2.5 s for
+#   reason 13), and the arm refreshes it long before that.
+#   Order: the player update (0x0027c890) runs the base update (0x002520d0: physics, then the ride
+#   machine 0x0027bc90 at its end), then 0x0027c2d0 fills the request; the rider (master list index
+#   8, after the bike's 2) ticks later. So the machine reads the gate the previous tick's tail left.
+#   tests/ragdoll_gate.rs: req_area's gate == a_touching on all ~1600 rows of the four s56 captures,
+#   on with a_hand_hold > 0 on some (S53's "hands off first" was wrong).
+#   Off-bike sphere: [request+0x1ac] is the wreck bike's collision object ("Wreckbike.col" in its
+#   name, from wreckbikef.col). Its +0x60 radius 0x4089b63b = |root node half extent| through the
+#   FPU (mula/madda/madd, sqrt; chopped -- a host float gives 0x4089b63c), its +0x40 centre = the root
+#   node's centre (file offset 284) through the request's frame (+0x10..+0x4c, a copy of the wreck
+#   bike's), translation first then x, y, z (transform_point's x,y,z,w order is 1-2 ulp off).
