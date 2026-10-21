@@ -246,6 +246,8 @@ struct Answers {
     ground: (Vf, Vf),
     touching: Option<Vec<(Vf, Vf)>>,
     sweep: Option<(Vf, Vf)>,
+    /// The collidable each touching contact is with (S62), 0 for none.
+    others: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -355,7 +357,7 @@ fn hook(ee: &mut Ee, shared: &Rc<RefCell<(Answers, Asked)>>, segments: Vec<u32>)
                 for (i, (p, n)) in hits.iter().enumerate() {
                     set_quad(ee, rec + 0x60 + 0x10 * i as u32, *p);
                     set_quad(ee, rec + 0x30 + 0x10 * i as u32, *n);
-                    ee.set_u32(rec + 0x90 + 4 * i as u32, 0);
+                    ee.set_u32(rec + 0x90 + 4 * i as u32, s.0.others.get(i).copied().unwrap_or(0));
                 }
             }
         }) as Box<dyn FnMut(&mut Ee)>
@@ -508,7 +510,7 @@ fn the_solve_matches_the_original() {
         };
         let sweep = if pick.chance(3) { Some(pick.contact(pos, radius)) } else { None };
         let contacts = touching.as_ref().map_or(0, Vec::len);
-        let answers = Answers { ground, touching, sweep };
+        let answers = Answers { ground, touching, sweep, others: Vec::new() };
 
         // The port first, off the case as written.
         let sphere = sphere_of(&ee, c, bone);
@@ -999,4 +1001,501 @@ fn the_pose_matches_the_original() {
         still > 3000 && moving > 6000 && no_turn > 200 && flipped > 4000 && flipped_drawn > 4000,
         "coverage: {still} still, {moving} moving, {no_turn} not turning, {flipped} flipped, {flipped_drawn} drawn flipped"
     );
+}
+
+// --- S62: contacts with things that move -----------------------------------------------------------
+//
+// The push-out measures the bone's velocity against whatever the contact is with. The contact's other
+// (the collision's +0x70, a collidable) is generated in scratch memory in each of the forms the
+// original tells apart: none; a collidable with nothing behind it; one whose owner is not a mover
+// (class at +0x1b0 not 2); a mover (its two virtuals hooked to answer generated spins and velocities);
+// a collision object (+0x80) on a dynamics body (+0xf4); and one on a vehicle's chassis (+0xf0, its
+// transform +0xf8). Research/oracle.txt, S62.
+
+use game_sim::contact::{Collider, Mover, Node, Other, Rigid, Side, Vehicle, Weighed};
+use game_sim::ragdoll_contact::{Against, NodeBox, moving};
+
+/// The other side's fields.
+mod other_at {
+    /// The collidable's owner (a mover when its class is 2) and its collision object.
+    pub const OWNER: u32 = 0x7c;
+    pub const OBJECT: u32 = 0x80;
+    /// The collision object's centre of mass, in its body's frame and in the world, and its body,
+    /// chassis and transform.
+    pub const COFG: u32 = 0x90;
+    pub const COFG_WORLD: u32 = 0xa0;
+    pub const VEHICLE: u32 = 0xf0;
+    pub const BODY: u32 = 0xf4;
+    pub const NODE: u32 = 0xf8;
+    /// A mover: its vtable, its class, its origin and its transform; the two slots the push-out
+    /// calls; and where the test stashes what they answer (nothing reads `+0x200`/`+0x210`).
+    pub const VTABLE: u32 = 0x08;
+    pub const CLASS: u32 = 0x1b0;
+    pub const ORIGIN: u32 = 0x190;
+    pub const MOVER_NODE: u32 = 0x254;
+    pub const VELOCITY_SLOT: u32 = 0xb8;
+    pub const SPIN_SLOT: u32 = 0xbc;
+    pub const SPIN: u32 = 0x200;
+    pub const VELOCITY: u32 = 0x210;
+    /// A chassis: centre of mass, velocity and angular velocity.
+    pub const V_COFG: u32 = 0x190;
+    pub const V_VELOCITY: u32 = 0x260;
+    pub const V_RATES: u32 = 0x290;
+    /// A transform: rows, origin, and the flag that says it is up to date.
+    pub const ROWS: u32 = 0x80;
+    pub const T_ORIGIN: u32 = 0xb0;
+    pub const CLEAN: u32 = 0x110;
+}
+
+/// Where the cases put the other side, in the interpreter's scratch slots of 0x40.
+struct Others {
+    point: u32,
+    normal: u32,
+    /// Three collidables: on the mover, on the body's object, on the chassis' object.
+    collidables: [u32; 3],
+    objects: [u32; 2],
+    body: u32,
+    vehicle: u32,
+    node: u32,
+    mover: u32,
+    mover_node: u32,
+    vtable: u32,
+    spin_hook: u32,
+    velocity_hook: u32,
+}
+
+fn others(ee: &Ee) -> Others {
+    Others {
+        point: ee.scratch(0),
+        normal: ee.scratch(1),
+        collidables: [ee.scratch(2), ee.scratch(5), ee.scratch(8)],
+        objects: [ee.scratch(11), ee.scratch(19)],
+        body: ee.scratch(27),
+        vehicle: ee.scratch(35),
+        node: ee.scratch(46),
+        mover: ee.scratch(51),
+        mover_node: ee.scratch(61),
+        vtable: ee.scratch(66),
+        spin_hook: ee.scratch(70),
+        velocity_hook: ee.scratch(71),
+    }
+}
+
+fn zero(ee: &mut Ee, a: u32, n: u32) {
+    for k in (0..n).step_by(4) {
+        ee.set_u32(a + k, 0);
+    }
+}
+
+fn write_node(ee: &mut Ee, n: u32, node: &Node) {
+    use other_at::*;
+    zero(ee, n, 0x120);
+    for (k, r) in node.rows.iter().enumerate() {
+        set_quad(ee, n + ROWS + 16 * k as u32, *r);
+    }
+    set_quad(ee, n + T_ORIGIN, node.origin);
+    // Up to date: the transform does not rebuild itself from parents.
+    ee.set_u32(n + CLEAN, 1);
+}
+
+impl Pick {
+    /// A vector with any `w`.
+    fn loose(&mut self, x: f32) -> Vf {
+        Vf::new(self.range(-x, x), self.range(-x, x), self.range(-x, x), self.range(-2.0, 2.0))
+    }
+    /// A transform: a rotation, now and then scaled, the rows' `w`s anything (the transpose reads
+    /// the third row's), somewhere about the bone.
+    fn node(&mut self, near: Vf) -> Node {
+        let q = self.quat();
+        let (x, y, z, w) = (q.x(), q.y(), q.z(), q.w());
+        let s = if self.chance(4) { self.range(0.5, 2.0) } else { 1.0 };
+        let mut w0 = || if self.chance(2) { 0.0 } else { self.range(-1.0, 1.0) };
+        let rows = [
+            Vf::new(s * (1.0 - 2.0 * (y * y + z * z)), s * 2.0 * (x * y + z * w), s * 2.0 * (x * z - y * w), w0()),
+            Vf::new(s * 2.0 * (x * y - z * w), s * (1.0 - 2.0 * (x * x + z * z)), s * 2.0 * (y * z + x * w), w0()),
+            Vf::new(s * 2.0 * (x * z + y * w), s * 2.0 * (y * z - x * w), s * (1.0 - 2.0 * (x * x + y * y)), w0()),
+        ];
+        let o = self.loose(4.0);
+        Node { rows, origin: Vf::new(near.x() + o.x(), near.y() + o.y(), near.z() + o.z(), 1.0) }
+    }
+}
+
+/// The mover's two virtuals: each answers what the test stashed in the mover.
+fn hook_mover(ee: &mut Ee, o: &Others) {
+    for (hook, from) in [(o.spin_hook, other_at::SPIN), (o.velocity_hook, other_at::VELOCITY)] {
+        ee.hooks.insert(hook, Box::new(move |ee: &mut Ee| {
+            let (out, m) = (ee.r(4) as u32, ee.r(5) as u32);
+            let v = quad(ee, m + from);
+            set_quad(ee, out, v);
+        }));
+    }
+}
+
+/// The port's copy of the other side, read back off the generated RAM.
+struct PortOthers {
+    mover: Mover,
+    /// The mover's class is 2 (it is a mover at all).
+    is_mover: bool,
+    body: Body,
+    vehicle: Vehicle,
+    objects: [Collider; 2],
+    /// Which collidables carry what: the mover's has its owner, the objects' theirs.
+    owner_on_object: bool,
+}
+
+impl PortOthers {
+    /// The velocity at `at` of the `k`-th collidable, as [`moving`] has it.
+    fn velocity(&mut self, k: usize, at: Vf) -> Vf {
+        let still = Vf::new(0.0, 0.0, 0.0, 1.0);
+        match k {
+            0 if self.is_mover => moving(at, Against::Mover(&self.mover)),
+            0 => still,
+            1 => {
+                let mut w = Weighed { body: &mut self.body, mass: F::ONE };
+                let mut o = Other { collider: &mut self.objects[0], side: Side::Body(&mut w as &mut dyn Rigid) };
+                moving(at, Against::Other(&mut o))
+            }
+            _ => {
+                let mut o = Other { collider: &mut self.objects[1], side: Side::Vehicle(&mut self.vehicle) };
+                moving(at, Against::Other(&mut o))
+            }
+        }
+    }
+}
+
+/// Generate the other side: the mover, the body, the chassis and their objects, about `near`.
+fn write_others(ee: &mut Ee, pick: &mut Pick, o: &Others, near: Vf) -> PortOthers {
+    use other_at::*;
+    // The mover.
+    zero(ee, o.mover, 0x280);
+    ee.set_u32(o.mover + VTABLE, o.vtable);
+    ee.set_u32(o.vtable + SPIN_SLOT, o.spin_hook);
+    ee.set_u32(o.vtable + VELOCITY_SLOT, o.velocity_hook);
+    let is_mover = !pick.chance(5);
+    ee.set_u32(o.mover + CLASS, if is_mover { 2 } else { pick.upto(2) as u32 });
+    let mover_node = pick.node(near);
+    write_node(ee, o.mover_node, &mover_node);
+    ee.set_u32(o.mover + MOVER_NODE, o.mover_node);
+    let mover = Mover { spin: pick.loose(4.0), velocity: pick.loose(40.0), node: mover_node, origin: pick.loose(2.0) };
+    set_quad(ee, o.mover + SPIN, mover.spin);
+    set_quad(ee, o.mover + VELOCITY, mover.velocity);
+    set_quad(ee, o.mover + ORIGIN, mover.origin);
+
+    // The body, as the bone bodies are laid out.
+    zero(ee, o.body, 0x200);
+    let off = pick.loose(3.0);
+    let body = Body {
+        position: Vf::new(near.x() + off.x(), near.y() + off.y(), near.z() + off.z(), off.w()),
+        velocity: pick.loose(40.0),
+        quat: pick.quat(),
+        rates: pick.loose(8.0),
+        ..Body::default()
+    };
+    set_quad(ee, o.body + body_at::POSITION, body.position);
+    set_quad(ee, o.body + body_at::VELOCITY, body.velocity);
+    set_quad(ee, o.body + body_at::QUAT, body.quat);
+    set_quad(ee, o.body + body_at::RATES, body.rates);
+
+    // The chassis and its transform.
+    zero(ee, o.vehicle, 0x2c0);
+    let node = pick.node(near);
+    write_node(ee, o.node, &node);
+    let vehicle = Vehicle { node, cofg: pick.loose(2.0), velocity: pick.loose(40.0), rates: pick.loose(4.0), ..Vehicle::default() };
+    set_quad(ee, o.vehicle + V_COFG, vehicle.cofg);
+    set_quad(ee, o.vehicle + V_VELOCITY, vehicle.velocity);
+    set_quad(ee, o.vehicle + V_RATES, vehicle.rates);
+
+    // The two collision objects: one on the body, one on the chassis.
+    let mut objects = [Collider::default(); 2];
+    for (k, &r) in o.objects.iter().enumerate() {
+        zero(ee, r, 0x200);
+        objects[k].cofg = pick.loose(1.5);
+        objects[k].cofg_world = pick.loose(1.5);
+        set_quad(ee, r + COFG, objects[k].cofg);
+        set_quad(ee, r + COFG_WORLD, objects[k].cofg_world);
+    }
+    ee.set_u32(o.objects[0] + BODY, o.body);
+    ee.set_u32(o.objects[1] + VEHICLE, o.vehicle);
+    ee.set_u32(o.objects[1] + NODE, o.node);
+
+    // The collidables: the first is the mover's; the other two are the objects', and now and then
+    // carry the mover as their owner too (the object wins).
+    let owner_on_object = pick.chance(3);
+    for (k, &c) in o.collidables.iter().enumerate() {
+        zero(ee, c, 0xc0);
+        if k == 0 || owner_on_object {
+            ee.set_u32(c + OWNER, o.mover);
+        }
+        if k > 0 {
+            ee.set_u32(c + OBJECT, o.objects[k - 1]);
+        }
+    }
+    PortOthers { mover, is_mover, body, vehicle, objects, owner_on_object }
+}
+
+/// Every lane the push-out writes, the port's against the game's.
+fn same_push(ctx: &str, ee: &Ee, b: u32, c: u32, body: &Body, contact: &Contact) {
+    for (what, got, want) in [
+        ("position", body.position, quad(ee, b + body_at::POSITION)),
+        ("velocity", body.velocity, quad(ee, b + body_at::VELOCITY)),
+        ("quat", body.quat, quad(ee, b + body_at::QUAT)),
+        ("rates", body.rates, quad(ee, b + body_at::RATES)),
+        ("dv", contact.dv, quad(ee, c + at::DV)),
+        ("point", contact.point, quad(ee, c + at::POINT)),
+        ("normal", contact.normal, quad(ee, c + at::NORMAL)),
+    ] {
+        assert_eq!(bits(got), bits(want), "{ctx}: {what} is {want:?} in the game, {got:?} in the port");
+    }
+    assert_eq!(contact.touched, ee.u32_at(c + at::TOUCHED) != 0, "{ctx}: touched");
+}
+
+/// Generate one bone and its collision's numbers, and read them back as the port's.
+fn write_bone(ee: &mut Ee, pick: &mut Pick, c: u32, b: u32) -> Vf {
+    let pos = Vf::new(pick.range(10.0, 6000.0), pick.range(-20.0, 260.0), pick.range(10.0, 6000.0), pick.float(2.0));
+    ee.set_u32(b + body_at::ENABLED, 1);
+    ee.set_f32(b + body_at::INV_MASS, pick.range(0.05, 6.0));
+    ee.set_f32(b + body_at::RADIUS, pick.range(0.05, 1.2));
+    set_quad(ee, b + body_at::POSITION, pos);
+    set_quad(ee, b + body_at::VELOCITY, pick.vector(40.0));
+    let lane = |pick: &mut Pick| if pick.chance(10) { 0.0 } else { pick.range(0.01, 6.0) };
+    let ii = Vf::new(lane(pick), lane(pick), lane(pick), pick.float(2.0));
+    set_quad(ee, b + body_at::INV_INERTIA, ii);
+    set_quad(ee, b + body_at::QUAT, pick.quat());
+    set_quad(ee, b + body_at::RATES, pick.vector(10.0));
+    ee.set_u32(c + at::ON, 1);
+    ee.set_f32(c + at::UNPENETRATION, if pick.chance(3) { 1.0 } else { pick.float(1.5) });
+    ee.set_f32(c + at::ROTATION, if pick.chance(3) { 1.0 } else { pick.float(1.5) });
+    ee.set_f32(c + at::RESTITUTION, if pick.chance(2) { 0.0 } else { pick.float(1.0) });
+    ee.set_f32(c + at::FRICTION, if pick.chance(2) { 1.0 } else { pick.float(1.2) });
+    set_quad(ee, c + at::DV, pick.vector(9.0));
+    pos
+}
+
+/// The push-out against each kind of other matches the original's, every lane it writes, and the
+/// other's centre of mass in the world it writes on the way.
+#[test]
+fn the_push_out_against_moving_things_matches_the_original() {
+    let Some(mut ee) = state() else { return };
+    let table = curve(&ee);
+    let push_out = addr("bone_collision_push_out").unwrap();
+    let o = others(&ee);
+    hook_mover(&mut ee, &o);
+    let mut pick = Pick(0x62_b0_e5_0f_f1);
+    // none, a bare collidable, a non-mover owner, the mover, the body, the chassis
+    let mut seen = [0usize; 6];
+    let mut swept = 0;
+    for case in 0..CASES {
+        let i = pick.upto(9) as usize;
+        let c = collision(&ee, i);
+        let b = ee.u32_at(c + at::BODY);
+        let bone = (0..18).find(|&k| bone_body(&ee, k) == b).unwrap();
+        let pos = write_bone(&mut ee, &mut pick, c, b);
+        let is_swept = pick.chance(4);
+        ee.set_u32(c + at::SWEPT, u32::from(is_swept));
+        let radius = ee.f32_at(b + body_at::RADIUS);
+        let (point, normal) = pick.contact(pos, radius);
+        set_quad(&mut ee, o.point, point);
+        set_quad(&mut ee, o.normal, normal);
+        let mut port = write_others(&mut ee, &mut pick, &o, pos);
+        // What the contact is with.
+        let kind = pick.upto(6) as usize;
+        let other = match kind {
+            0 => 0,
+            1 => {
+                ee.set_u32(o.collidables[0] + other_at::OWNER, 0);
+                o.collidables[0]
+            }
+            2 => {
+                ee.set_u32(o.mover + other_at::CLASS, 3);
+                port.is_mover = false;
+                o.collidables[0]
+            }
+            3 => o.collidables[0],
+            4 => o.collidables[1],
+            _ => o.collidables[2],
+        };
+        ee.set_u32(c + 0x70, other);
+        let kind = if kind == 3 && !port.is_mover { 2 } else { kind };
+        seen[kind] += 1;
+        swept += usize::from(is_swept);
+
+        let sphere = sphere_of(&ee, c, bone);
+        let mut body = body_of(&ee, b);
+        let mut contact = contact_of(&ee, c);
+        let against = match kind {
+            0 | 1 => Vf::new(0.0, 0.0, 0.0, 1.0),
+            2 | 3 => port.velocity(0, point),
+            4 => port.velocity(1, point),
+            _ => port.velocity(2, point),
+        };
+        contact.point = point;
+        contact.normal = normal;
+        contact.push_out_against(&sphere, &mut body, point, normal, against, &table);
+        set_quad(&mut ee, c + at::POINT, point);
+        set_quad(&mut ee, c + at::NORMAL, normal);
+        ee.call(push_out, &[u64::from(c), u64::from(o.point), u64::from(o.normal)], &[], BUDGET);
+
+        let ctx = format!("case {case}: collision {i}, other kind {kind}, swept {is_swept}, owner on object {}", port.owner_on_object);
+        same_push(&ctx, &ee, b, c, &body, &contact);
+        for k in 0..2 {
+            let want = quad(&ee, o.objects[k] + other_at::COFG_WORLD);
+            assert_eq!(bits(port.objects[k].cofg_world), bits(want), "{ctx}: object {k}'s centre in the world");
+        }
+    }
+    eprintln!("push-out against: {seen:?}, {swept} swept");
+    assert!(seen.iter().all(|&n| n > 1000) && swept > 2000, "{seen:?} {swept}");
+}
+
+/// A scene whose contacts are with the generated others: what the hooked colliders answer, and the
+/// port's copy of the others for their velocities.
+struct MovingScene<'a> {
+    fake: &'a RefCell<Fake>,
+    with: Vec<Option<usize>>,
+    port: &'a mut PortOthers,
+}
+
+impl Scene for MovingScene<'_> {
+    fn touching(&mut self, centre: Vf, radius: F) -> Option<Vec<(Vf, Vf)>> {
+        FakeScene(self.fake).touching(centre, radius)
+    }
+    fn sweep(&mut self, from: Vf, to: Vf) -> Option<(Vf, Vf)> {
+        FakeScene(self.fake).sweep(from, to)
+    }
+    fn other(&mut self, i: usize) -> Option<usize> {
+        self.with[i]
+    }
+    fn velocity(&mut self, other: usize, at: Vf) -> Vf {
+        self.port.velocity(other, at)
+    }
+}
+
+/// The whole solve with scene contacts against moving things: each contact's push-out against its
+/// own other, the ground's against nothing, and the sweep's against the last scene contact's other.
+#[test]
+fn the_solve_against_moving_things_matches_the_original() {
+    let Some(mut ee) = state() else { return };
+    let table = curve(&ee);
+    let solve = addr("bone_collision_solve").unwrap();
+    let c0 = collision(&ee, 0);
+    let refresh = ee.u32_at(ee.u32_at(ee.u32_at(c0 + at::SPHERE) + 0x38) + 0xa8);
+    ee.hooks.insert(refresh, Box::new(|_| {}));
+    let segments: Vec<u32> = (0..9).map(|i| ee.u32_at(collision(&ee, i) + at::SEGMENT)).collect();
+    let o = others(&ee);
+    hook_mover(&mut ee, &o);
+    let shared = Rc::new(RefCell::new((Answers::default(), Asked::default())));
+    hook(&mut ee, &shared, segments);
+    let terrain = ee.u32_at(c0 + at::TERRAIN);
+
+    let mut pick = Pick(0x62_5c_e0_e5);
+    let (mut moving_contacts, mut swept_moving) = (0, 0);
+    for case in 0..CASES {
+        let i = pick.upto(9) as usize;
+        let c = collision(&ee, i);
+        let b = ee.u32_at(c + at::BODY);
+        let bone = (0..18).find(|&k| bone_body(&ee, k) == b).unwrap();
+        let pos = write_bone(&mut ee, &mut pick, c, b);
+        for k in [at::TOUCHED, at::GROUND, at::SCENE, at::SWEPT] {
+            ee.set_u32(c + k, pick.upto(2) as u32);
+        }
+        ee.set_u32(c + at::SWEEP, u32::from(!pick.chance(4)));
+        ee.set_f32(c + at::SWEEP_BACK, SWEEP_BACK);
+        // A stale other from an earlier solve, which the solve must clear.
+        ee.set_u32(c + 0x70, o.collidables[pick.upto(3) as usize]);
+        let radius = ee.f32_at(b + body_at::RADIUS);
+        let mut port = write_others(&mut ee, &mut pick, &o, pos);
+
+        let on_terrain = pick.chance(2);
+        ee.set_u32(c + at::TERRAIN, if on_terrain { terrain } else { 0 });
+        let lo = Vf::new(pos.x() - 10.0, 0.0, pos.z() - 10.0, 0.0);
+        let hi = Vf::new(pos.x() + 10.0, 300.0, pos.z() + 10.0, 0.0);
+        set_quad(&mut ee, terrain + BOX_MIN, lo);
+        set_quad(&mut ee, terrain + BOX_MAX, hi);
+        let ground_y = pos.y() - radius * pick.range(-1.0, 2.0);
+        let ground = (Vf::new(pos.x(), ground_y, pos.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0));
+        let n = if pick.chance(4) { 0 } else { 1 + pick.upto(3) as usize };
+        let touching = (n > 0).then(|| (0..n).map(|_| pick.contact(pos, radius)).collect::<Vec<_>>());
+        let with: Vec<Option<usize>> = (0..n).map(|_| if pick.chance(4) { None } else { Some(pick.upto(3) as usize) }).collect();
+        let sweep = if pick.chance(2) { Some(pick.contact(pos, radius)) } else { None };
+        moving_contacts += with.iter().flatten().count();
+        swept_moving += usize::from(sweep.is_some() && with.last().copied().flatten().is_some());
+        let answers = Answers { ground, touching, sweep, others: with.iter().map(|w| w.map_or(0, |k| o.collidables[k])).collect() };
+
+        let sphere = sphere_of(&ee, c, bone);
+        let mut body = body_of(&ee, b);
+        let mut contact = contact_of(&ee, c);
+        let fake = RefCell::new(Fake { answers: answers.clone(), asked: Asked::default() });
+        {
+            let mut w = WorldRef(&fake);
+            let t = on_terrain.then(|| Terrain { world: &mut w as &mut dyn World, min: lo, max: hi });
+            let mut scene = MovingScene { fake: &fake, with: with.clone(), port: &mut port };
+            contact.solve(true, &sphere, &mut body, t, &mut scene, &table);
+        }
+        *shared.borrow_mut() = (answers, Asked::default());
+        ee.call(solve, &[u64::from(c), 1], &[], BUDGET);
+
+        let ctx = format!("case {case}: collision {i}, contacts with {with:?}, sweep {}", sweep.is_some());
+        same_push(&ctx, &ee, b, c, &body, &contact);
+        for k in 0..2 {
+            let want = quad(&ee, o.objects[k] + other_at::COFG_WORLD);
+            assert_eq!(bits(port.objects[k].cofg_world), bits(want), "{ctx}: object {k}'s centre in the world");
+        }
+    }
+    eprintln!("solve against moving things: {moving_contacts} moving contacts, {swept_moving} sweeps after one");
+    assert!(moving_contacts > 8000 && swept_moving > 1500, "{moving_contacts} {swept_moving}");
+}
+
+/// The bike box pointed at another actor's transform (+0x14) matches the original's, including the
+/// velocity it writes (the clamped centre, turned out of the node's frame).
+#[test]
+fn the_bike_box_in_another_frame_matches_the_original() {
+    let Some(mut ee) = state() else { return };
+    let solve = addr("bike_box_solve").unwrap();
+    let r = ee.u32_at(ACTOR + 0x5f8);
+    let b = ee.u32_at(r + box_at::BODY);
+    let o = others(&ee);
+    let mut pick = Pick(0x62_b0_c5_14);
+    let (mut held, mut free, mut off) = (0, 0, 0);
+    for case in 0..CASES {
+        let on = !pick.chance(30);
+        let enabled = !pick.chance(30);
+        ee.set_u32(r + box_at::ON, u32::from(on));
+        ee.set_u32(b + body_at::ENABLED, u32::from(enabled));
+        let origin = Vf::new(pick.range(10.0, 6000.0), pick.range(-20.0, 260.0), pick.range(10.0, 6000.0), 1.0);
+        let node = pick.node(origin);
+        write_node(&mut ee, o.node, &node);
+        ee.set_u32(r + box_at::OTHER, o.node);
+        let (centre, half) = if pick.chance(4) {
+            (Vf::new(0.0, 1.9, -0.25, 1.0), Vf::new(0.5, 1.75, 2.5, 1.0))
+        } else {
+            (pick.vector(3.0), Vf::new(pick.positive(1.0), pick.positive(1.0), pick.positive(1.5), pick.float(2.0)))
+        };
+        set_quad(&mut ee, r + box_at::CENTRE, centre);
+        set_quad(&mut ee, r + box_at::HALF, half);
+        // The four pointers of the moving frame do not matter on this path: any of them, or none.
+        for k in [box_at::FRAME_AT, box_at::CENTRE_AT, box_at::HALF_AT, box_at::CARRIED_AT] {
+            ee.set_u32(r + k, if pick.chance(2) { 0 } else { ACTOR + 0x530 });
+        }
+        let l = [0, 1, 2].map(|k| centre[k] + half[k].abs() * pick.range(-1.6, 1.6));
+        let pos = node.place(Vf::new(l[0], l[1], l[2], pick.float(2.0)));
+        let vel = pick.vector(60.0);
+        set_quad(&mut ee, b + body_at::POSITION, pos);
+        set_quad(&mut ee, b + body_at::VELOCITY, vel);
+
+        let mut body = Body { enabled, position: pos, velocity: vel, ..Body::default() };
+        NodeBox { node, centre, half }.hold(on, &mut body);
+        ee.call(solve, &[u64::from(r)], &[], BUDGET);
+        let ctx = format!("case {case}: on {on}, enabled {enabled}, local {l:?}, half {half:?}");
+        assert_eq!(bits(body.position), bits(quad(&ee, b + body_at::POSITION)), "{ctx}: position");
+        assert_eq!(bits(body.velocity), bits(quad(&ee, b + body_at::VELOCITY)), "{ctx}: velocity");
+        if !on || !enabled {
+            off += 1;
+        } else if (0..3).any(|k| !(l[k] - centre[k] <= half[k]) || l[k] - centre[k] < -half[k]) {
+            held += 1;
+        } else {
+            free += 1;
+        }
+    }
+    ee.set_u32(r + box_at::OTHER, 0);
+    eprintln!("bike box in another frame: {held} held, {free} free, {off} off");
+    assert!(held > 3000 && free > 300 && off > 300, "{held} {free} {off}");
 }

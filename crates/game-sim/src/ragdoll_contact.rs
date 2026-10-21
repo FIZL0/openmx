@@ -18,14 +18,17 @@
 //! the contact, a radius from the centre, so a bone that hits off-centre is also turned; a swept bone
 //! takes them straight on its centre instead.
 //!
-//! Only the static half of the push-out is here: a contact whose other side has no body. The scene
-//! objects that move (the bike's bodies, a vehicle) are another branch of the same function and are
-//! not ported. Neither is the scene's broad phase: [`Scene`] hands the solve whatever the caller's
-//! scene found.
+//! Against something that moves (the wreck bike's bodies, another rider, a vehicle) the push-out is
+//! the same, but the velocity it takes apart is the bone's *relative to that thing* at the contact
+//! ([`moving`]): the bounce and the friction are measured in the other's frame, so a bone lying on a
+//! bike that rolls away is carried with it. The other side is not pushed back. The scene's broad
+//! phase is not here: [`Scene`] hands the solve whatever the caller's scene found, and says which
+//! collidable each contact is with.
 
 use crate::biplane::{Body, unturn};
 use crate::camera::CurveTable;
 use crate::chassis::{self, Mat3, turn};
+use crate::contact::{Mover, Node, Other, Side};
 use crate::math::Mat4;
 use crate::phy::Ini;
 use crate::world::World;
@@ -136,6 +139,78 @@ pub trait Scene {
         let _ = (from, to);
         None
     }
+
+    /// Which collidable the `i`-th contact of the last [`Scene::touching`] is with: `None` for the
+    /// scenery, which does not move.
+    fn other(&mut self, i: usize) -> Option<usize> {
+        let _ = i;
+        None
+    }
+
+    /// How fast collidable `other` moves at the world point `at`: [`moving`] over it, which may also
+    /// write the other's collision object (its centre of mass in the world).
+    fn velocity(&mut self, other: usize, at: Vf) -> Vf {
+        let _ = (other, at);
+        STILL
+    }
+}
+
+/// **What a bone's contact is with**, as the push-out tells the three kinds of other apart.
+pub enum Against<'a, 'b> {
+    /// The scenery, or a collidable that is neither of the two below: the velocity is `(0, 0, 0, 1)`.
+    Still,
+    /// A collidable whose owner is a moving object that is not a dynamics body (its class is 2).
+    Mover(&'a Mover),
+    /// A collidable on a collision object, with a dynamics body or on a vehicle's chassis. This one
+    /// wins over a mover when a collidable has both.
+    Other(&'a mut Other<'b>),
+}
+
+/// **The velocity of the other side of a contact at `at`**, which the push-out measures the bone's
+/// against: the other's own velocity plus its spin crossed with the arm from its centre of mass to
+/// the point. A collision object's centre of mass in the world ([`crate::contact::Collider::cofg_world`])
+/// is written on the way, as the original does.
+///
+/// Each kind keeps its spin in a different frame, so the arm is taken into that frame and the spin's
+/// part turned back out: a body's through its quaternion, a vehicle's and a mover's through their
+/// transform node.
+pub fn moving(at: Vf, against: Against<'_, '_>) -> Vf {
+    match against {
+        Against::Still => STILL,
+        Against::Mover(m) => {
+            let arm = minus(m.node.unplace(at), m.origin);
+            plus(m.node.rotate(cross_xyz(m.spin, arm)), m.velocity)
+        }
+        Against::Other(o) => match &mut o.side {
+            Side::Body(b) => {
+                let q = b.quat();
+                o.collider.cofg_world = turn(q, o.collider.cofg);
+                let centre = plus(b.position(), o.collider.cofg_world);
+                let arm = unturn(q, minus(at, centre));
+                plus(turn(q, cross_xyz(b.rates(), arm)), b.velocity())
+            }
+            Side::Vehicle(v) => {
+                o.collider.cofg_world = v.node.rotate(o.collider.cofg);
+                let arm = minus(v.node.unplace(at), plus(v.cofg, o.collider.cofg_world));
+                plus(v.node.rotate(cross_xyz(v.rates, arm)), v.velocity)
+            }
+        },
+    }
+}
+
+/// `a.xyz + b.xyz`, `w` from `a`.
+fn plus(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, a.add(b))
+}
+
+/// `a.xyz - b.xyz`, `w` from `a`.
+fn minus(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, a.sub(b))
+}
+
+/// `a x b`, `.xyz`, `w` from `a`: `vopmula a, b` then `vopmsub b, a`.
+fn cross_xyz(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, cross(a, b))
 }
 
 /// A scene with nothing in it but the terrain.
@@ -172,12 +247,17 @@ impl Contact {
                 }
             }
         }
+        // What the contact is with: the scenery's for the ground, each scene contact's own, and the
+        // sweep's is the last scene contact's (the sweep does not say what it hit).
+        let mut other = None;
         if let Some(hits) = scene.touching(body.position, s.radius) {
             self.scene = true;
-            for (point, normal) in hits {
+            for (i, (point, normal)) in hits.into_iter().enumerate() {
                 self.point = point;
                 self.normal = normal;
-                self.push_out(s, body, point, normal, curve);
+                other = scene.other(i);
+                let against = other.map_or(STILL, |o| scene.velocity(o, point));
+                self.push_out_against(s, body, point, normal, against, curve);
             }
         }
         if s.sweep {
@@ -188,13 +268,20 @@ impl Contact {
                 self.swept = true;
                 self.point = point;
                 self.normal = normal;
-                self.push_out(s, body, point, normal, curve);
+                let against = other.map_or(STILL, |o| scene.velocity(o, point));
+                self.push_out_against(s, body, point, normal, against, curve);
             }
         }
     }
 
     /// **The push-out** against a surface with no body behind it.
     pub fn push_out(&mut self, s: &Sphere, body: &mut Body, point: Vf, normal: Vf, curve: &CurveTable) {
+        self.push_out_against(s, body, point, normal, STILL, curve);
+    }
+
+    /// **The push-out** against a surface moving at `against` at the contact ([`moving`]): the
+    /// bounce and the friction act on the bone's velocity relative to it.
+    pub fn push_out_against(&mut self, s: &Sphere, body: &mut Body, point: Vf, normal: Vf, against: Vf, curve: &CurveTable) {
         self.touched = true;
         let pos = body.position;
         let d = pos.merge(Dest::XYZ, pos.sub(point));
@@ -202,7 +289,7 @@ impl Contact {
         let corr = normal.merge(Dest::XYZ, normal.mul(Vf::splat((s.unpenetration * (s.radius - depth)).0)));
 
         let vel = body.velocity;
-        let rel = vel.merge(Dest::XYZ, vel.sub(STILL));
+        let rel = vel.merge(Dest::XYZ, vel.sub(against));
         let into = dot(rel, normal);
         let vn = normal.merge(Dest::XYZ, normal.mul(Vf::splat(into.0)));
         let vt = rel.merge(Dest::XYZ, rel.sub(vn));
@@ -290,6 +377,43 @@ impl BikeBox {
             Some(c) => v.merge(Dest::XYZ, v.add(c)),
             None => v,
         };
+    }
+}
+
+/// **The bike box in another actor's frame**: the same constraint when it is pointed at another
+/// actor's transform node instead of a frame of its own. The box is the constraint's own (`centre`,
+/// `half`), and nothing carries the bone's velocity.
+///
+/// The original keeps one oddity here that the port keeps too: having clamped the bone's centre and
+/// zeroed the held axes of its velocity in the node's frame, it writes back the *clamped centre*,
+/// turned out of the node's frame, as the velocity. The zeroed velocity is never used.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NodeBox {
+    pub node: Node,
+    pub centre: Vf,
+    pub half: Vf,
+}
+
+impl NodeBox {
+    /// **The solve**, on a bike box that is `on`. A disabled body is left alone.
+    pub fn hold(&self, on: bool, body: &mut Body) {
+        if !on || !body.enabled {
+            return;
+        }
+        let p = self.node.unplace(body.position);
+        let mut p = p.merge(Dest::XYZ, p.sub(self.centre));
+        for (i, f) in [Field::X, Field::Y, Field::Z].into_iter().enumerate() {
+            let h = self.half.lane(f);
+            let at = p.lane(f);
+            if !(F(at) <= F(h)) {
+                p[i] = h;
+            } else if F(at) < F(fpu::neg(h)) {
+                p[i] = fpu::neg(h);
+            }
+        }
+        let p = p.merge(Dest::XYZ, p.add(self.centre));
+        body.position = self.node.place(p);
+        body.velocity = self.node.rotate(p);
     }
 }
 
