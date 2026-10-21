@@ -624,6 +624,11 @@ pub struct Ride {
     /// what writes it; a bare [`Ride`] with no trick machine leaves it false, which is the state of
     /// a rider that never asks for a stunt.
     pub stunt: bool,
+    /// The bike's air drag is halved: the cannonball's throw halves it and the bike's put-back doubles
+    /// it again ([`crate::off_map::drag`]). The original keeps the drag itself on the bike, a copy of
+    /// the `.phy`'s; the port keeps the `.phy`'s on [`Phy`] and only this, which is the same value
+    /// whenever the halving undoes exactly (every normal drag).
+    pub drag_halved: bool,
 }
 
 impl Ride {
@@ -683,6 +688,7 @@ impl Ride {
             near: F::ONE,
             touching: false,
             stunt: false,
+            drag_halved: false,
         };
         ride.place(at, facing);
         ride
@@ -1338,7 +1344,7 @@ impl Ride {
         }
         let Ride {
             mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
-            ..
+            drag_halved, ..
         } = self;
         *touching = false;
 
@@ -1542,7 +1548,7 @@ impl Ride {
             mvc.torque = ac.moment;
 
             mv::engine_update(engine, &mut rear.mv, s.gas_rate_limited, ride.clutch_in, h);
-            mvc.force = add_xyz(mvc.force, mv::drag(mvp, &mvc));
+            mvc.force = add_xyz(mvc.force, mv::air_drag(crate::off_map::drag(mvp.drag, *drag_halved), &mvc));
 
             calls.push(mv::Call::AirborneControl(h));
             let mut ac = air_chassis!();

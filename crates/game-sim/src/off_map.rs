@@ -25,8 +25,9 @@
 //! * the chassis' body-frame spin is two draws of the game's `rand` (½ and 0.4 of a unit) and two
 //!   constants;
 //! * the transform is moved onto the centre of gravity;
-//! * and the bike's air drag is halved. That one is **not ported**: nothing reads the drag while the
-//!   rider is down (the bike is not simulated), and the put-back doubles it again, so it never shows.
+//! * and the bike's air drag is halved ([`drag`], [`crate::ride::Ride::drag_halved`]). Nothing reads
+//!   it while the rider is down (the bike is not simulated), and the bike's put-back doubles it again,
+//!   so a ride never shows it; it is ported so that the bike's state is the original's throughout.
 //!
 //! Then the wreck is entered with the cannonball's reason, and the rest of the test is skipped. The
 //! entry's own half for this reason is three more draws, which are the wreck body's spin instead of
@@ -62,6 +63,16 @@ pub const THROWN_MAX_SPEED: F = F(350.0);
 
 /// The speed limit the bike's put-back gives the chassis again, feet a second: the rigid body's own.
 pub const RIDING_MAX_SPEED: F = F(135.0);
+
+/// What the throw multiplies the bike's air drag by; the put-back divides by it again.
+pub const DRAG_SCALE: F = F(0.5);
+
+/// The bike's air drag as the ground step reads it: the `.phy`'s `riding` one, or that times
+/// [`DRAG_SCALE`] while `thrown`. The original's put-back divides the halved value by the scale, which
+/// gives `riding` back bit for bit unless the halving flushed it to zero (a drag under 2⁻¹²⁵ ft⁻¹).
+pub fn drag(riding: F, thrown: bool) -> F {
+    if thrown { riding * DRAG_SCALE } else { riding }
+}
 
 /// The thrown chassis' spin: the first two lanes scale a draw each, the last two are constants.
 const SPIN_X: F = F(0.5);

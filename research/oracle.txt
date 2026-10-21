@@ -4122,3 +4122,12 @@ hand_reset_thunk            boot 0x00281930 this -= 80, into player_hand_reset: 
 #   mode 3 asks the player (+0x20, vt+0xac) for the name bits of "StuntCompetition" (0x00433b80)
 #   and "HitFreeride" (0x00433b98) when 0x004e1df8 is set; answered, the reset; otherwise
 #   0x003a6dc0 instead (not ported; the captures all took the reset).
+# S71 — the cannonball's drag, ported: ride::Ride::drag_halved (set by the throw, cleared by both
+#   put-backs) and off_map::drag (the .phy Drag, times 0.5 while thrown), read by the ground step's
+#   air drag. +0x6a8's only readers on the bike are the .phy loader (writes it), the ground step and
+#   the clause/unwreck pair; the ground step is skipped while +0x748 != 0, so the halved value is
+#   never read in a ride. Proved in tests/off_the_map.rs: bike_unwreck run over 12,000 bikes gives
+#   the .phy drag back bit for bit after a cannonball and leaves other reasons' alone, except a halving
+#   flushed to zero (|drag| < 2^-125: stays 0) and the top exponent (doubling clamps to 0x7f7fffff);
+#   the five s59 captures' drag column is riding, halved from the throw's row to the put-back's, then
+#   riding again, bit for bit.

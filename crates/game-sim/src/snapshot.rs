@@ -469,7 +469,7 @@ wire!(crate::trick::Tricks { gesture, queue, requested, current, restart, seq, p
 wire!(crate::motion::Driver { action, ramp, faded, fore_aft, pose, shown_crossup });
 wire!(crate::motion::Frame { blend, restart });
 wire!(crate::ride::Crash { reason, hit, throw, clock, holding, throwing, body, origin, rider, rider_vel, landed, ground, resting, facing });
-wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt });
+wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt, drag_halved });
 wire!(crate::ride::Back { at, facing, up });
 wire!(crate::rider_anim::Body { veh, player, ready, picked, look, looking, settled, machine });
 wire!(crate::state::Ride { wreck, counting, elapsed, kind, pending, fresh, wrecking, wrecks, entries });
