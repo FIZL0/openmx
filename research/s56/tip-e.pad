@@ -1,0 +1,5 @@
+# braking, leaning hard right and back from a standstill
+down square
+stick l 1 1
+sleep 7000
+release

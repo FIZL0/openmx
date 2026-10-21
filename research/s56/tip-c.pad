@@ -1,0 +1,6 @@
+# gas held, leaning back from 0.5 s: a slow loop over backwards
+down cross
+sleep 500
+stick l 0 1
+sleep 6000
+release

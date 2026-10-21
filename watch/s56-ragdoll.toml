@@ -1,0 +1,1329 @@
+# s56-ragdoll.toml — the original's ragdoll while the human's rider wrecks: every bone's body, per tick.
+# S56's spec. Driven by research/s56_wreck.py, which runs this through `ps2kit.record` and saves a state
+# the tick the wreck starts, so a test can start the port from the original's own bones.
+#
+#   python3 -B research/s56_wreck.py <name> --pad <script>       # see its docstring
+#   ./kit record --dry-run watch/s56-ragdoll.toml                # check the spec, no emulator
+#
+# ## Where the bones are
+#
+# The human's vehicle is acceptance.toml's eight-hop list item (`bike_*`, a type-4 actor, control
+# source 1). The **rider body actor** sits 0x400 in front of it, as rider-joints.toml's animation object
+# does (they are one object): the one tests/ragdoll.rs reads at a fixed address in the first
+# recording's state. Its +0x14 is *another* rider's body actor, which is what a first try of this
+# spec followed and captured an AI rider's wreck by. Its fields, named in research/oracle.txt under
+# S50–S52:
+#
+#   * +0x2f4: the eighteen parts, stride 0xb0; a part's +0xa4 is its bone's rigid body and +0x40 its
+#     skeleton joint. A body: +0x50 last position, +0x60 position, +0x70 velocity, +0x150 last
+#     quaternion, +0x170 quaternion, +0x1b0 angular rates;
+#   * +0x234: the skeleton's joints, stride 0x60, +0x50 each joint's blended quaternion: the rests the
+#     wreck's joint torques pull towards (tests/ragdoll.rs `rest_at`);
+#   * +0x5d0..+0x5dc the four holds (pins: +4 on, +0x60 -> the point followed, +0x64 -> its velocity),
+#     +0x5f8 the bike box, +0x624 the nine bone collisions (+4 on, +0x14 touched), +0x62c the throw
+#     force (+0 on), +0x488 the riding request the bike carrier is read from;
+#   * the wreck's flags and clocks: +0x2a4..+0x2d0, +0x47c..+0x49c, +0x644..+0x6e0.
+#
+# `every = 1`: the comparison is per tick.
+
+[watch]
+name        = "s56-ragdoll"
+description = "the original's rider ragdoll, every bone's body and the wreck state, one row a tick"
+every       = 1
+frames      = 600
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"  # the C library LCG the wreck entry draws from
+addr = "@rand_state"
+type = "u64"
+
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+[[field]]
+name = "rider_ctl_src"  # 1 = the local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"  # 0 riding; the reason while wrecked
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "bike_type"  # must read 4
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "bike_ctl_src"  # 1 = the local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "bike_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x4"
+
+[[field]]
+name = "bike_xform"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+
+[[field]]
+name = "bike_wrecked"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xb7c"
+type = "u32"
+
+[[field]]
+name = "a_riding"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2a4 - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_repose"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2a8 - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_placed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2ac - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_active"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2b0 - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_stiff"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2b4 - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_torques"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2b8 - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_gravity_scale"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2d0 - 0x400"
+type = "f32"
+
+[[field]]
+name = "a_mode"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x47c - 0x400"
+type = "s32"
+
+[[field]]
+name = "a_touching"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x48c - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_roll"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x490 - 0x400"
+type = "f32"
+
+[[field]]
+name = "a_entered"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x49c - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_fade_length"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x644 - 0x400"
+type = "f32"
+
+[[field]]
+name = "a_fade_left"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x648 - 0x400"
+type = "f32"
+
+[[field]]
+name = "a_pose_spring"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x650 - 0x400"
+type = "f32x4"
+
+[[field]]
+name = "a_pose_damping"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x660 - 0x400"
+type = "f32x4"
+
+[[field]]
+name = "a_other_frame"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6a8 - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_world_frame"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6ac - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_off_bike"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6b0 - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_settled"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6b4 - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_flung"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6b8 - 0x400"
+type = "u32"
+
+[[field]]
+name = "a_force_time"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6bc - 0x400"
+type = "f32"
+
+[[field]]
+name = "a_hand_hold"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6c0 - 0x400"
+type = "f32"
+
+[[field]]
+name = "a_launch"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6d0 - 0x400"
+type = "f32x4"
+
+[[field]]
+name = "a_pull"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6e0 - 0x400"
+type = "f32x4"
+
+[[field]]
+name = "a_world_iterations"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2cc - 0x400 -> 0x0"
+type = "s32"
+
+[[field]]
+name = "a_world_rate"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2cc - 0x400 -> 0x4"
+type = "f32"
+
+[[field]]
+name = "a_throwing"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x62c - 0x400 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "a_box_on"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5f8 - 0x400 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "hold0_on"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5d0 - 0x400 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "hold0_target"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5d0 - 0x400 -> 0x60 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "hold0_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5d0 - 0x400 -> 0x64 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "hold1_on"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5d4 - 0x400 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "hold1_target"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5d4 - 0x400 -> 0x60 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "hold1_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5d4 - 0x400 -> 0x64 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "hold2_on"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5d8 - 0x400 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "hold2_target"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5d8 - 0x400 -> 0x60 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "hold2_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5d8 - 0x400 -> 0x64 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "hold3_on"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5dc - 0x400 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "hold3_target"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5dc - 0x400 -> 0x60 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "hold3_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x5dc - 0x400 -> 0x64 -> 0x0"
+type = "f32x4"
+
+# The whole riding request, from 0x200 before it (the hand dummies its +0xf0/+0xf4 point at) to
+# 0x300 after, and the 0x100 its +0x1ac points at (the bike's centre and radius the off-bike test
+# reads): what the body's update reads off the bike each tick, so a replay can lay it in.
+[[field]]
+name = "req_area"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x0 - 0x200"
+type = "bytes:1280"
+
+[[field]]
+name = "req_far"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1ac -> 0x0"
+type = "bytes:256"
+
+[[field]]
+name = "req_rows"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x10"
+type = "bytes:48"
+
+[[field]]
+name = "req_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x90"
+type = "f32x4"
+
+[[field]]
+name = "req_spin"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0xa8"
+type = "f32"
+
+[[field]]
+name = "req_centre"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x180"
+type = "f32x4"
+
+[[field]]
+name = "req_quat"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x190"
+type = "f32x4"
+
+# The moving world the body's update reads: every byte tests/ragdoll_wrecks.rs `what_the_wrecks_read`
+# saw it read (over all four first captures) that changes from tick to tick and is neither the actor's
+# own nor the request's, in blocks merged across gaps of 0x40, less the generator (rng_state above).
+# Absolute addresses: every s56 state comes off the same save state, so the heap is laid out the same
+# (the test checks the body actor's address).
+[[field]]
+name = "w049f540"
+addr = "0x49f540"
+type = "bytes:1092"
+
+[[field]]
+name = "w05c9a90"
+addr = "0x5c9a90"
+type = "bytes:48"
+
+[[field]]
+name = "w05ca1f8"
+addr = "0x5ca1f8"
+type = "bytes:264"
+
+[[field]]
+name = "w05ca3b0"
+addr = "0x5ca3b0"
+type = "bytes:464"
+
+[[field]]
+name = "w05d2f18"
+addr = "0x5d2f18"
+type = "bytes:4"
+
+[[field]]
+name = "w06ef798"
+addr = "0x6ef798"
+type = "bytes:4"
+
+[[field]]
+name = "w0c89d30"
+addr = "0xc89d30"
+type = "bytes:12"
+
+[[field]]
+name = "w0c8a120"
+addr = "0xc8a120"
+type = "bytes:36"
+
+[[field]]
+name = "w0c8b710"
+addr = "0xc8b710"
+type = "bytes:12"
+
+[[field]]
+name = "w0c8bc90"
+addr = "0xc8bc90"
+type = "bytes:12"
+
+[[field]]
+name = "w0c8c300"
+addr = "0xc8c300"
+type = "bytes:36"
+
+[[field]]
+name = "w0dfd760"
+addr = "0xdfd760"
+type = "bytes:12"
+
+[[field]]
+name = "w0dfddc0"
+addr = "0xdfddc0"
+type = "bytes:60"
+
+[[field]]
+name = "w0e379bc"
+addr = "0xe379bc"
+type = "bytes:16"
+
+[[field]]
+name = "w0e37a54"
+addr = "0xe37a54"
+type = "bytes:4"
+
+[[field]]
+name = "w0e37c44"
+addr = "0xe37c44"
+type = "bytes:192"
+
+[[field]]
+name = "w101ab40"
+addr = "0x101ab40"
+type = "bytes:12"
+
+[[field]]
+name = "w101e950"
+addr = "0x101e950"
+type = "bytes:12"
+
+[[field]]
+name = "w1034c40"
+addr = "0x1034c40"
+type = "bytes:12"
+
+[[field]]
+name = "w10352f0"
+addr = "0x10352f0"
+type = "bytes:36"
+
+[[field]]
+name = "w1040050"
+addr = "0x1040050"
+type = "bytes:12"
+
+[[field]]
+name = "w1045b60"
+addr = "0x1045b60"
+type = "bytes:12"
+
+[[field]]
+name = "w11b16bc"
+addr = "0x11b16bc"
+type = "bytes:16"
+
+[[field]]
+name = "w11b1740"
+addr = "0x11b1740"
+type = "bytes:16"
+
+[[field]]
+name = "w12502a0"
+addr = "0x12502a0"
+type = "bytes:12"
+
+[[field]]
+name = "w1253c70"
+addr = "0x1253c70"
+type = "bytes:12"
+
+[[field]]
+name = "w12647d0"
+addr = "0x12647d0"
+type = "bytes:12"
+
+[[field]]
+name = "w1273680"
+addr = "0x1273680"
+type = "bytes:12"
+
+[[field]]
+name = "w1275f50"
+addr = "0x1275f50"
+type = "bytes:12"
+
+[[field]]
+name = "w127b000"
+addr = "0x127b000"
+type = "bytes:12"
+
+[[field]]
+name = "w1482ed0"
+addr = "0x1482ed0"
+type = "bytes:12"
+
+[[field]]
+name = "w15aac70"
+addr = "0x15aac70"
+type = "bytes:12"
+
+[[field]]
+name = "w15ab1f0"
+addr = "0x15ab1f0"
+type = "bytes:12"
+
+[[field]]
+name = "w15ab2d0"
+addr = "0x15ab2d0"
+type = "bytes:60"
+
+[[field]]
+name = "w15ab5e0"
+addr = "0x15ab5e0"
+type = "bytes:36"
+
+[[field]]
+name = "w15af6e0"
+addr = "0x15af6e0"
+type = "bytes:12"
+
+[[field]]
+name = "w15c7208"
+addr = "0x15c7208"
+type = "bytes:480"
+
+[[field]]
+name = "w15f8020"
+addr = "0x15f8020"
+type = "bytes:12"
+
+[[field]]
+name = "w15f82a0"
+addr = "0x15f82a0"
+type = "bytes:36"
+
+[[field]]
+name = "w15f8890"
+addr = "0x15f8890"
+type = "bytes:12"
+
+[[field]]
+name = "w15f8b40"
+addr = "0x15f8b40"
+type = "bytes:36"
+
+[[field]]
+name = "w1600b50"
+addr = "0x1600b50"
+type = "bytes:12"
+
+[[field]]
+name = "w1600e00"
+addr = "0x1600e00"
+type = "bytes:36"
+
+[[field]]
+name = "w16013f0"
+addr = "0x16013f0"
+type = "bytes:12"
+
+[[field]]
+name = "w16016a0"
+addr = "0x16016a0"
+type = "bytes:36"
+
+[[field]]
+name = "w1601c90"
+addr = "0x1601c90"
+type = "bytes:12"
+
+[[field]]
+name = "w1601f40"
+addr = "0x1601f40"
+type = "bytes:36"
+
+[[field]]
+name = "w1602530"
+addr = "0x1602530"
+type = "bytes:12"
+
+[[field]]
+name = "w16027e0"
+addr = "0x16027e0"
+type = "bytes:36"
+
+[[field]]
+name = "w1602dd0"
+addr = "0x1602dd0"
+type = "bytes:12"
+
+[[field]]
+name = "w1603080"
+addr = "0x1603080"
+type = "bytes:36"
+
+[[field]]
+name = "w1603670"
+addr = "0x1603670"
+type = "bytes:12"
+
+[[field]]
+name = "w173a980"
+addr = "0x173a980"
+type = "bytes:36"
+
+[[field]]
+name = "w173d950"
+addr = "0x173d950"
+type = "bytes:36"
+
+[[field]]
+name = "w173de40"
+addr = "0x173de40"
+type = "bytes:12"
+
+[[field]]
+name = "w173e0f0"
+addr = "0x173e0f0"
+type = "bytes:36"
+
+[[field]]
+name = "w176d304"
+addr = "0x176d304"
+type = "bytes:32"
+
+[[field]]
+name = "w179dbd0"
+addr = "0x179dbd0"
+type = "bytes:12"
+
+[[field]]
+name = "w179dc20"
+addr = "0x179dc20"
+type = "bytes:12"
+
+[[field]]
+name = "w179dd10"
+addr = "0x179dd10"
+type = "bytes:12"
+
+[[field]]
+name = "w179dd60"
+addr = "0x179dd60"
+type = "bytes:12"
+
+[[field]]
+name = "w179de50"
+addr = "0x179de50"
+type = "bytes:12"
+
+[[field]]
+name = "w179dea0"
+addr = "0x179dea0"
+type = "bytes:12"
+
+[[field]]
+name = "w179df90"
+addr = "0x179df90"
+type = "bytes:12"
+
+[[field]]
+name = "w179dfe4"
+addr = "0x179dfe4"
+type = "bytes:8"
+
+[[field]]
+name = "w179e0d0"
+addr = "0x179e0d0"
+type = "bytes:12"
+
+[[field]]
+name = "w179e120"
+addr = "0x179e120"
+type = "bytes:12"
+
+[[field]]
+name = "w179e210"
+addr = "0x179e210"
+type = "bytes:12"
+
+[[field]]
+name = "w179e260"
+addr = "0x179e260"
+type = "bytes:12"
+
+[[field]]
+name = "w179e350"
+addr = "0x179e350"
+type = "bytes:12"
+
+[[field]]
+name = "w179e3a0"
+addr = "0x179e3a0"
+type = "bytes:12"
+
+[[field]]
+name = "w179e490"
+addr = "0x179e490"
+type = "bytes:12"
+
+[[field]]
+name = "w179e4e0"
+addr = "0x179e4e0"
+type = "bytes:12"
+
+[[field]]
+name = "w179e5d0"
+addr = "0x179e5d0"
+type = "bytes:12"
+
+[[field]]
+name = "w179e620"
+addr = "0x179e620"
+type = "bytes:12"
+
+[[field]]
+name = "w179e710"
+addr = "0x179e710"
+type = "bytes:12"
+
+[[field]]
+name = "w179e760"
+addr = "0x179e760"
+type = "bytes:12"
+
+[[field]]
+name = "w17a98c0"
+addr = "0x17a98c0"
+type = "bytes:12"
+
+[[field]]
+name = "w17a9910"
+addr = "0x17a9910"
+type = "bytes:12"
+
+[[field]]
+name = "w17a9a00"
+addr = "0x17a9a00"
+type = "bytes:12"
+
+[[field]]
+name = "w17a9a50"
+addr = "0x17a9a50"
+type = "bytes:12"
+
+[[field]]
+name = "w17a9b40"
+addr = "0x17a9b40"
+type = "bytes:12"
+
+[[field]]
+name = "w17a9b90"
+addr = "0x17a9b90"
+type = "bytes:12"
+
+[[field]]
+name = "w17a9dc0"
+addr = "0x17a9dc0"
+type = "bytes:12"
+
+[[field]]
+name = "w17a9e10"
+addr = "0x17a9e10"
+type = "bytes:12"
+
+[[field]]
+name = "w17a9f00"
+addr = "0x17a9f00"
+type = "bytes:12"
+
+[[field]]
+name = "w17a9f50"
+addr = "0x17a9f50"
+type = "bytes:12"
+
+[[field]]
+name = "w17aa180"
+addr = "0x17aa180"
+type = "bytes:12"
+
+[[field]]
+name = "w17aa1d0"
+addr = "0x17aa1d0"
+type = "bytes:12"
+
+[[field]]
+name = "w17aa2c0"
+addr = "0x17aa2c0"
+type = "bytes:12"
+
+[[field]]
+name = "w17aa310"
+addr = "0x17aa310"
+type = "bytes:12"
+
+[[field]]
+name = "w17f5690"
+addr = "0x17f5690"
+type = "bytes:28"
+
+[[field]]
+name = "w17f577c"
+addr = "0x17f577c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f5890"
+addr = "0x17f5890"
+type = "bytes:28"
+
+[[field]]
+name = "w17f597c"
+addr = "0x17f597c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f5a90"
+addr = "0x17f5a90"
+type = "bytes:28"
+
+[[field]]
+name = "w17f5b7c"
+addr = "0x17f5b7c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f5c90"
+addr = "0x17f5c90"
+type = "bytes:28"
+
+[[field]]
+name = "w17f5d7c"
+addr = "0x17f5d7c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f5e90"
+addr = "0x17f5e90"
+type = "bytes:28"
+
+[[field]]
+name = "w17f5f7c"
+addr = "0x17f5f7c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f6090"
+addr = "0x17f6090"
+type = "bytes:28"
+
+[[field]]
+name = "w17f617c"
+addr = "0x17f617c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f6290"
+addr = "0x17f6290"
+type = "bytes:28"
+
+[[field]]
+name = "w17f637c"
+addr = "0x17f637c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f6490"
+addr = "0x17f6490"
+type = "bytes:28"
+
+[[field]]
+name = "w17f657c"
+addr = "0x17f657c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f6690"
+addr = "0x17f6690"
+type = "bytes:28"
+
+[[field]]
+name = "w17f677c"
+addr = "0x17f677c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f6890"
+addr = "0x17f6890"
+type = "bytes:28"
+
+[[field]]
+name = "w17f697c"
+addr = "0x17f697c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f6a90"
+addr = "0x17f6a90"
+type = "bytes:28"
+
+[[field]]
+name = "w17f6b7c"
+addr = "0x17f6b7c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f6c90"
+addr = "0x17f6c90"
+type = "bytes:28"
+
+[[field]]
+name = "w17f6d7c"
+addr = "0x17f6d7c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f6e90"
+addr = "0x17f6e90"
+type = "bytes:28"
+
+[[field]]
+name = "w17f6f7c"
+addr = "0x17f6f7c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f7090"
+addr = "0x17f7090"
+type = "bytes:28"
+
+[[field]]
+name = "w17f719c"
+addr = "0x17f719c"
+type = "bytes:8"
+
+[[field]]
+name = "w17f72b0"
+addr = "0x17f72b0"
+type = "bytes:28"
+
+[[field]]
+name = "w17f73bc"
+addr = "0x17f73bc"
+type = "bytes:8"
+
+[[field]]
+name = "w17f74d0"
+addr = "0x17f74d0"
+type = "bytes:28"
+
+[[field]]
+name = "w17f75dc"
+addr = "0x17f75dc"
+type = "bytes:8"
+
+[[field]]
+name = "w17f76f0"
+addr = "0x17f76f0"
+type = "bytes:28"
+
+[[field]]
+name = "w17f77fc"
+addr = "0x17f77fc"
+type = "bytes:8"
+
+[[field]]
+name = "w17f7910"
+addr = "0x17f7910"
+type = "bytes:28"
+
+[[field]]
+name = "w17f7a14"
+addr = "0x17f7a14"
+type = "bytes:4"
+
+[[field]]
+name = "w17f8284"
+addr = "0x17f8284"
+type = "bytes:4"
+
+[[field]]
+name = "w17fbea0"
+addr = "0x17fbea0"
+type = "bytes:8"
+
+[[field]]
+name = "w17fc100"
+addr = "0x17fc100"
+type = "bytes:4"
+
+[[field]]
+name = "w17ff240"
+addr = "0x17ff240"
+type = "bytes:4"
+
+[[field]]
+name = "w17ff2a0"
+addr = "0x17ff2a0"
+type = "bytes:44"
+
+[[field]]
+name = "w17ff360"
+addr = "0x17ff360"
+type = "bytes:4"
+
+[[field]]
+name = "w17ff3c0"
+addr = "0x17ff3c0"
+type = "bytes:44"
+
+[[field]]
+name = "w17ff480"
+addr = "0x17ff480"
+type = "bytes:4"
+
+[[field]]
+name = "w17ff4e0"
+addr = "0x17ff4e0"
+type = "bytes:44"
+
+[[field]]
+name = "w17ff5a0"
+addr = "0x17ff5a0"
+type = "bytes:4"
+
+[[field]]
+name = "w17ff600"
+addr = "0x17ff600"
+type = "bytes:44"
+
+[[field]]
+name = "w17ff6c0"
+addr = "0x17ff6c0"
+type = "bytes:4"
+
+[[field]]
+name = "w17ff720"
+addr = "0x17ff720"
+type = "bytes:44"
+
+[[field]]
+name = "w17ff7e0"
+addr = "0x17ff7e0"
+type = "bytes:4"
+
+[[field]]
+name = "w17ff840"
+addr = "0x17ff840"
+type = "bytes:44"
+
+[[field]]
+name = "w17ff900"
+addr = "0x17ff900"
+type = "bytes:4"
+
+[[field]]
+name = "w17ff960"
+addr = "0x17ff960"
+type = "bytes:44"
+
+[[field]]
+name = "w17ffa20"
+addr = "0x17ffa20"
+type = "bytes:4"
+
+[[field]]
+name = "w17ffa80"
+addr = "0x17ffa80"
+type = "bytes:44"
+
+[[field]]
+name = "w17ffb40"
+addr = "0x17ffb40"
+type = "bytes:4"
+
+[[field]]
+name = "w17ffba0"
+addr = "0x17ffba0"
+type = "bytes:44"
+
+[[field]]
+name = "w17ffc60"
+addr = "0x17ffc60"
+type = "bytes:4"
+
+[[field]]
+name = "w17ffcc0"
+addr = "0x17ffcc0"
+type = "bytes:44"
+
+[[field]]
+name = "w17ffd80"
+addr = "0x17ffd80"
+type = "bytes:4"
+
+[[field]]
+name = "w17ffde0"
+addr = "0x17ffde0"
+type = "bytes:44"
+
+[[field]]
+name = "w17ffea0"
+addr = "0x17ffea0"
+type = "bytes:4"
+
+[[field]]
+name = "w17fff00"
+addr = "0x17fff00"
+type = "bytes:44"
+
+[[field]]
+name = "w17fffc0"
+addr = "0x17fffc0"
+type = "bytes:4"
+
+[[field]]
+name = "w1800020"
+addr = "0x1800020"
+type = "bytes:44"
+
+[[field]]
+name = "w18000e0"
+addr = "0x18000e0"
+type = "bytes:4"
+
+[[field]]
+name = "w1800140"
+addr = "0x1800140"
+type = "bytes:44"
+
+[[field]]
+name = "w1800200"
+addr = "0x1800200"
+type = "bytes:4"
+
+[[field]]
+name = "w1800260"
+addr = "0x1800260"
+type = "bytes:44"
+
+[[field]]
+name = "w1800320"
+addr = "0x1800320"
+type = "bytes:4"
+
+[[field]]
+name = "w1800380"
+addr = "0x1800380"
+type = "bytes:44"
+
+[[field]]
+name = "w1800440"
+addr = "0x1800440"
+type = "bytes:4"
+
+[[field]]
+name = "w18004a0"
+addr = "0x18004a0"
+type = "bytes:88"
+
+[[field]]
+name = "w1800d94"
+addr = "0x1800d94"
+type = "bytes:4"
+
+[[field]]
+name = "w1801634"
+addr = "0x1801634"
+type = "bytes:4"
+
+[[field]]
+name = "w1801ed4"
+addr = "0x1801ed4"
+type = "bytes:4"
+
+[[field]]
+name = "w1802774"
+addr = "0x1802774"
+type = "bytes:4"
+
+[[field]]
+name = "w1803014"
+addr = "0x1803014"
+type = "bytes:4"
+
+[[field]]
+name = "w18038b4"
+addr = "0x18038b4"
+type = "bytes:4"
+
+[[field]]
+name = "w1804834"
+addr = "0x1804834"
+type = "bytes:260"
+
+[[field]]
+name = "w1805244"
+addr = "0x1805244"
+type = "bytes:4"
+
+[[field]]
+name = "w18053e4"
+addr = "0x18053e4"
+type = "bytes:4"
+
+[[field]]
+name = "w1805504"
+addr = "0x1805504"
+type = "bytes:4"
+
+[[field]]
+name = "w1805744"
+addr = "0x1805744"
+type = "bytes:4"
+
+[[field]]
+name = "w1805864"
+addr = "0x1805864"
+type = "bytes:4"
+
+[[field]]
+name = "w1cb53b0"
+addr = "0x1cb53b0"
+type = "bytes:380"
+
+[[array]]
+name   = "col"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x624 - 0x400 -> 0x0"
+count  = 9
+stride = 4
+deref  = true
+
+[[array.field]]
+name = "on"
+off  = 0x4
+type = "u32"
+
+[[array.field]]
+name = "touched"
+off  = 0x14
+type = "u32"
+
+[[array]]
+name   = "bone"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2f4 - 0x400 -> 0x0"
+count  = 18
+stride = 0xb0
+
+[[array.field]]
+name = "enabled"
+off  = "0xa4 -> 0x0"
+type = "u32"
+
+[[array.field]]
+name = "last_pos"
+off  = "0xa4 -> 0x50"
+type = "f32x4"
+
+[[array.field]]
+name = "pos"
+off  = "0xa4 -> 0x60"
+type = "f32x4"
+
+[[array.field]]
+name = "vel"
+off  = "0xa4 -> 0x70"
+type = "f32x4"
+
+[[array.field]]
+name = "last_quat"
+off  = "0xa4 -> 0x150"
+type = "f32x4"
+
+[[array.field]]
+name = "quat"
+off  = "0xa4 -> 0x170"
+type = "f32x4"
+
+[[array.field]]
+name = "rates"
+off  = "0xa4 -> 0x1b0"
+type = "f32x4"
+
+[[array.field]]
+name = "joint"                    # the part's skeleton joint: its rest is joint<n>.quat
+off  = 0x40
+type = "u32"
+
+[[array.field]]
+name = "drawn"                    # the part's +0x60: the pose's mat4_basis(position, forward, up)
+off  = 0x60
+type = "mat4"
+
+[[array.field]]
+name = "was"                      # the part's +0x90: the position the pose's velocity is taken from
+off  = 0x90
+type = "f32x4"
+
+[[array]]
+name   = "joint"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x234 - 0x400 -> 0x0"
+count  = 22
+stride = 0x60
+
+[[array.field]]
+name = "quat"
+off  = 0x50
+type = "f32x4"

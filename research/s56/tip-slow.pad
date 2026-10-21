@@ -1,0 +1,5 @@
+# a short roll, then the stick hard right at walking pace
+press cross 900
+stick l 1 0
+sleep 6000
+release

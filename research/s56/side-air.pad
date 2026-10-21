@@ -1,0 +1,6 @@
+# gas, stick hard left from 5 s, through the crest's jump
+down cross
+sleep 5000
+stick l -1 0
+sleep 4000
+release

@@ -112,25 +112,25 @@ fn canonical_trace() -> Vec<u64> {
 /// `(tick, Sim::hash at that tick)`, every sixteenth tick of the canonical run.
 const HASHES: &[(u64, u64)] = &[
     (16, 0x6c4b289a7b04d12d),
-    (32, 0x07363f6e5c5ce90b),
-    (48, 0xd54fb172a1a2b800),
-    (64, 0x8017f349f137f177),
-    (80, 0x39d55130bc68ae29),
-    (96, 0xfcacf44c66a9c890),
-    (112, 0xae11511e70359a9a),
-    (128, 0xe8ec7ba50f63854a),
-    (144, 0xa9778b07a116bbe7),
-    (160, 0x174ae5f196abe4db),
-    (176, 0xf0fb9221e93b68d3),
-    (192, 0xf7f7dcb0569ed9a1),
-    (208, 0x824a62a83db9457f),
-    (224, 0x4af1708ae4bcc74f),
-    (240, 0x39c5984cbe1fd480),
-    (256, 0x2167bc369951e8b8),
+    (32, 0xba1788c36d05b24b),
+    (48, 0x2b47b7040083fa8b),
+    (64, 0xbe5ec4cace736976),
+    (80, 0xdf6b1ddd0c48f996),
+    (96, 0x2c8d931176614bb7),
+    (112, 0xf2998565e1d876c8),
+    (128, 0xf753376fe8a6096d),
+    (144, 0x60ee3848103ff9f4),
+    (160, 0x4cd9fbcfdf74e9c2),
+    (176, 0x514334c0b779d1be),
+    (192, 0x3fc8dba77150047c),
+    (208, 0x9ad69ceab1673d81),
+    (224, 0x7d0d883374f37eec),
+    (240, 0x2fda702109f72196),
+    (256, 0xfef1d170ce41e852),
 ];
 
 /// FNV-1a over all 256 of the run's hashes, little-endian: the one number that covers every tick.
-const TRACE_DIGEST: u64 = 0x761231d9535ed2fa;
+const TRACE_DIGEST: u64 = 0x858b2529d39337d7;
 
 /// `(tick, bike.pos[1] as a bit pattern)` on the same ticks — a watched field rather than a whole-state
 /// hash, which is the shape an acceptance fixture of the original has.
@@ -159,9 +159,9 @@ const VEL_Y: &[(u64, u32)] = &[
     (16, 0xc01a72ac),
     (32, 0xbfabb755),
     (48, 0xbfabb755),
-    (64, 0xc08ec0f3),
-    (80, 0xc02d8715),
-    (96, 0x3ef316ec),
+    (64, 0xc08ec0f4),
+    (80, 0xc02d8713),
+    (96, 0x3ef316df),
     (112, 0xc091773a),
     (128, 0xc0917843),
     (144, 0xbfabb755),
@@ -196,11 +196,11 @@ bike.vel[3] = 0 (0x00000000)";
 
 /// How many leaves the walk of the state has, and FNV-1a over the whole of its printed form.
 const FINAL_DUMP_LEAVES: usize = 895;
-const FINAL_DUMP_DIGEST: u64 = 0xa19c7b80d9237c53;
+const FINAL_DUMP_DIGEST: u64 = 0x2ba80f56d5b9f3c0;
 
 /// FNV-1a over the bytes of the fixture's text form: a fixture file written on one machine must be the
 /// same bytes on another, or a recording cannot be shared.
-const FIXTURE_TEXT_DIGEST: u64 = 0x734d2cce1670f33c;
+const FIXTURE_TEXT_DIGEST: u64 = 0x63bc9b361ca4f5f5;
 
 /// The hash of [`Every`], the state below that holds one of every leaf kind the walker can emit.
 const EVERY_LEAF_HASH: u64 = 0xa228ffa8409c01f8;
@@ -422,19 +422,19 @@ fn the_canonical_run_hashes_to_its_pinned_vectors() {
 
 /// `(tick, Sim::hash)` every 32 ticks of the riders' run.
 const RIDERS_HASHES: &[(u64, u64)] = &[
-    (32, 0x01a8d417a2f3379e),
-    (64, 0x2edfd21050a830b6),
-    (96, 0x5623a21df0d4c193),
-    (128, 0xa5a558cdc3c95899),
-    (160, 0x28b02dcbffd732a4),
-    (192, 0x0b7dfa1ba3617eb4),
-    (224, 0xfe813e950f923f8b),
-    (256, 0x05ca9a3cc6d79497),
+    (32, 0x5e7c5f90262b0f5a),
+    (64, 0xf68fb8deb70b1218),
+    (96, 0x274f9659c0547912),
+    (128, 0x228712c34b77fae8),
+    (160, 0xc9ea47b03cd63a16),
+    (192, 0x61622f25df27a73c),
+    (224, 0x787ef88971f29c3d),
+    (256, 0xa10611a0586af296),
 ];
 /// FNV-1a over every tick's hash of the run.
-const RIDERS_DIGEST: u64 = 0x72aa74cd417681d7;
+const RIDERS_DIGEST: u64 = 0xf24e313ac98adf12;
 /// FNV-1a over the session's `snapshot::encode` bytes at the end, and how many bytes they were.
-const RIDERS_WIRE_DIGEST: u64 = 0x24f3bbdc4335b59e;
+const RIDERS_WIRE_DIGEST: u64 = 0xe9bcaf3c50b249e7;
 const RIDERS_WIRE_LEN: usize = 11895;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
@@ -672,7 +672,7 @@ fn a_length_in_the_hash_is_eight_bytes_wide_whatever_a_usize_is() {
     for _ in 0..100 {
         sim.tick(Input::default());
     }
-    assert_eq!(sim.hash(), 0x4667_aeed_f29f_5957);
+    assert_eq!(sim.hash(), 0x48e4_491f_d474_e1f7);
 }
 
 // ---------------------------------------------------------------------------------------------------

@@ -1,0 +1,6 @@
+# gas, stick hard left and forward from 5 s
+down cross
+sleep 5000
+stick l -1 -1
+sleep 4000
+release
