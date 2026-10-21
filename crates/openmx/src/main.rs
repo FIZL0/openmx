@@ -505,7 +505,7 @@ impl Shown {
             return Shown { bike, chassis: Vec::new(), body: None };
         }
         let chassis = rig.chassis.as_ref().map_or(Vec::new(), |c| c.world.clone());
-        let down = match (&seat.sim.rider.ragdoll, &seat.sim.rider.ragdoll_kit, ragdolled) {
+        let down = match (seat.sim.rider.drawn_ragdoll(), &seat.sim.rider.ragdoll_kit, ragdolled) {
             (Some(doll), Some(kit), Some(rigged)) => Some((doll.nodes(kit), rigged)),
             _ => None,
         };
@@ -3255,9 +3255,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
                 let now = perf.time(Stage::Skinning, || Shown::of(seat, rig, &assets, ragdolled.as_ref(), true));
                 // A put-back is a cut: the bike and the rider are drawn where it set them, not slid
-                // there from the wreck (S66).
+                // there from the wreck (S66), and so is the body's first tick back on the bike (S74).
                 let shown = match before.get(p) {
-                    Some(b) if !seat.sim.rider.ghost.put_back() => b.blend(&now, &blend),
+                    Some(b) if !seat.sim.rider.drawn_jumps() => b.blend(&now, &blend),
                     _ => now.clone(),
                 };
                 let bike_at = shown.bike;
@@ -3448,7 +3448,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // pose the game never draws.
                 // While the rider is down and the ride runs their bones (S53), the body is drawn from
                 // the bones: thrown off the bike, not sat on it.
-                let down = match (&seat.sim.rider.ragdoll, &seat.sim.rider.ragdoll_kit, &ragdolled) {
+                let down = match (seat.sim.rider.drawn_ragdoll(), &seat.sim.rider.ragdoll_kit, &ragdolled) {
                     (Some(doll), Some(kit), Some(rigged)) => Some((doll.nodes(kit), rigged)),
                     _ => None,
                 };

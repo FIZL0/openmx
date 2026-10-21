@@ -472,7 +472,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // 9744 since S65: the skeleton the shell last drew, an input like the controls that the walk
     // leaves out; the bones it poses are walked.
     // 9792 since S66: the bike's put-back record, its point, heading and up.
+    // 9808 since S74: the put-back's two-tick hold on the body, which only the body reads and the
+    // walk leaves out with it, and the bones drawn on a clock put-back's own tick, presentation.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 9792, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 9808, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
