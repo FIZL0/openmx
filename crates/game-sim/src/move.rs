@@ -1011,8 +1011,14 @@ pub fn substeps(dt: F) -> (i32, F) {
 /// the order a decompiler prints. The direction is the *velocity* normalised by VU0's approximate
 /// reciprocal square root, so a bike travelling backwards is dragged forwards.
 pub fn drag(p: &Params, ch: &Chassis) -> Vf {
+    air_drag(p.drag, ch)
+}
+
+/// [`drag`] with the bike's drag handed in rather than read off the `.phy`: what the ground step reads
+/// is the bike's own copy, which the cannonball halves ([`crate::off_map::drag`]).
+pub fn air_drag(drag: F, ch: &Chassis) -> Vf {
     let q = F(HALF) * ch.speed * ch.speed;
-    scale(normalize(ch.vel), F(fpu::neg(p.drag.0)) * q)
+    scale(normalize(ch.vel), F(fpu::neg(drag.0)) * q)
 }
 
 /// The reverse push, as a force in the bike's own frame: proportional to how far below

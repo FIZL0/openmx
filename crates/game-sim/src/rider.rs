@@ -364,6 +364,7 @@ impl Rider {
                 state.respawn();
                 ride.place_back();
                 off_map::unwreck(&mut ride.chassis);
+                ride.drag_halved = false;
                 *crash = None;
                 *ragdoll = None;
                 tricks.reset();
@@ -527,6 +528,7 @@ impl Rider {
         let thrown = &mut ride.chassis;
         let origin = &mut ride.origin;
         let air = &mut ride.air;
+        let drag_halved = &mut ride.drag_halved;
         let verdict = state.step(
             dt,
             sense,
@@ -542,6 +544,7 @@ impl Rider {
                 // map, the bike is thrown back and nothing else is asked.
                 if let Some(area) = edge.filter(|a| off_map::outside(a, bone, thrown.cofg_world)) {
                     off_map::throw(&area, thrown, origin, ragdoll_ride::generator(idles));
+                    *drag_halved = true;
                     return Some(Wreck::CANNONBALL);
                 }
                 if !allowed.landing {
@@ -610,6 +613,8 @@ impl Rider {
             // holds the last spot ridden over for a rider put down without a wreck body under them.
             ride.place_back();
             off_map::unwreck(&mut ride.chassis);
+            // The vehicle's unwreck doubles a cannonball's drag back; only a throw halves it.
+            ride.drag_halved = false;
             *crash = None;
             *ragdoll = None;
             tricks.reset();
