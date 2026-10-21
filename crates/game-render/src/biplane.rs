@@ -39,7 +39,8 @@
 //! foot from the plane's foot anchors and the hands a fifth of a foot from its hand anchors.
 //!
 //! **The effects.** `tracks\biplaneparticles.dat` attaches the plane's emitters to its nodes; it is read
-//! here ([`Emitter`]) so the list is the disc's own, but the port draws no particles yet.
+//! here ([`Emitter`]) so the list is the disc's own, and the shell's `particles.rs` emits and draws from
+//! it (P58).
 
 use crate::anim::Set;
 use crate::disc::Res;
@@ -152,6 +153,14 @@ impl Biplane {
     }
 }
 
+impl Biplane {
+    /// A node of the plane's model in the plane's own space, by name: where an emitter of
+    /// [`PARTICLES`] rides (P58). `None` if the model is not in `assets` or has no such node.
+    pub fn node(&self, assets: &Assets, name: &str) -> Option<M4> {
+        node(&assets.models.get(&self.model)?.model, name)
+    }
+}
+
 /// A node's transform in its model's own space, by name, ignoring case as the engine's lookup does.
 fn node(model: &Model, name: &str) -> Option<M4> {
     let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
@@ -192,6 +201,9 @@ pub struct Emitter {
     pub node: Option<String>,
     /// When it is switched off: `Wrecking`, `NoContact | ObjectContact`, and so on, as written.
     pub disable: String,
+    /// An exhaust's `MaxSpeed`: the airspeed, feet a second, at which it stops (P58). 0 where the
+    /// entry does not say.
+    pub max_speed: f32,
 }
 
 /// Read the emitter list: one [`Emitter`] per `[section]`, in the file's order.
@@ -212,6 +224,7 @@ pub fn emitters(text: &str) -> Vec<Emitter> {
             "emitter" => e.emitter = value,
             "attachedtosoultree" => e.node = Some(value),
             "disable" => e.disable = value,
+            "maxspeed" => e.max_speed = value.parse().unwrap_or(0.0),
             _ => {}
         }
     }
