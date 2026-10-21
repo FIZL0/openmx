@@ -3671,3 +3671,23 @@ rider_wreck_sound_load boot 0x0033e5b0 reads the rider archive's rider.aud [Fall
 crowd_sound_load boot 0x001fe220 reads event.aud's Crowd* lists when the track's CrowdPresent is set
 music_list_load boot 0x001fd9f0 reads appstart.res aud\music\music.pb: [Artists], [Song N] Filename,
 #                               Title, Artist
+# S57: the screen fader. The wreck_page_* names above (S-era guesses) are wrong for two of them:
+# 0x001c84b0 registers a listener on the fader and 0x001ffe80 runs a viewport fade; neither is a page.
+video_fx_manager boot 0x0041f770 -> 0x3d0 -> 0xd4 the fader manager; viewport faders at +0x40/+0x44,
+#                                the full-screen one at +0x50
+fader_fields boot 0x0041f770 -> 0x3d0 -> 0xd4 -> 0x40 +0x34 elapsed, +0x38 duration, +0x3c t, +0x48
+#                                fading out, +0x4c fading in, +0x50 in after out, +0x54 held, +0x68
+#                                colour (black); linear, alpha = (int)(255 t + 0.5)
+fader_listener boot 0x001c84b0 (handle, which screen, node) registers a listener on the fader
+viewport_fade boot 0x001ffe80 (screen, which) the viewport fade, 100 ms out and 100 ms in; its only
+#                             caller is ride_reset_request 0x0027b9f0 with page != 0. player_hand_reset
+#                             0x0027bef0 passes page 0, so the bike's L1+R1 has no screen fade
+freeride_item_fade boot 0x003620d0 a freeride item/trigger system (entry type 0x15): full-screen fade
+#                                  250/250 ms and a viewport fade 250/250 ms
+replay_end_fade boot 0x003b40d0 the replay's end: a viewport fade 250/250 ms
+# S57 live (copy 5, biplane.p2m2_SaveState and first_recording's, poof.toml/bike.toml in the journal):
+# the biplane's ground crash shows engine smoke in the dive, a dark dust puff on the wreck tick, 151
+# ticks of tumbling, then a hard cut to the spawn on the unwreck tick: no fade, no puff, the plane
+# opaque at once. The fader never ran (all three faders' fields constant) for the crash, the plane's
+# chord or the bike's chord. The bike's L1+R1 (reset_kind 1, in place) draws the bike and the rider
+# see-through, back to opaque over about 0.7-1 s, the shadow opaque; its timer was not found.

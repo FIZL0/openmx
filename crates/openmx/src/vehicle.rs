@@ -162,14 +162,18 @@ impl Plane {
         *self = Plane { flight, ..Plane::parked(self.spawn) };
     }
 
-    /// One frame of the plane with the controller on it: [`Flight::frame`] on the seat's pad, over
-    /// `world`, and the drawn transform off its body. A plane with no flight stands where it is.
-    pub fn step(&mut self, sim: &Sim, dt: F, world: &mut dyn World) {
-        let Some(f) = &mut self.flight else { return };
+    /// One frame of the plane with the controller on it: the reset chord ([`Flight::reset_chord`],
+    /// S57) and [`Flight::frame`] on the seat's pad, over `world`, and the drawn transform off its
+    /// body. A plane with no flight stands where it is. Whether the chord put it back this frame.
+    pub fn step(&mut self, sim: &Sim, dt: F, world: &mut dyn World) -> bool {
+        let Some(f) = &mut self.flight else { return false };
         if !self.placed {
             f.reset(self.spawn.at, self.spawn.facing, &sim.tables.ride.acos);
             self.placed = true;
         }
+        // The input slot runs before the frame. L1 and R1 are the chord under either scheme: P40's
+        // new one moves the gas and the brake, not the shoulder buttons.
+        let chord = f.reset_chord(Controls::from_pad(sim.input.pad(0)).respawn, &sim.tables.ride.acos);
         f.frame(dt, flight::pad(sim.input.pad(0)), world, &sim.tables.ride);
         let (quat, origin) = f.pose();
         let nose = f.measure.forward;
@@ -179,6 +183,7 @@ impl Plane {
         self.up = Vf::new(up.x(), up.y(), up.z(), 0.0);
         let v = f.body.velocity;
         self.vel = Vf::new(v.x(), v.y(), v.z(), 0.0);
+        chord
     }
 
     /// Whether the plane is standing on something: any wheel down at the last measure. A plane with
@@ -269,8 +274,8 @@ impl Garage {
     pub fn step(&mut self, sim: &mut Sim, dt: F, controls: &Controls, world: &mut dyn World) -> rider::Frame {
         match (self.up, &mut self.plane) {
             (Kind::Biplane, Some(plane)) => {
-                plane.step(sim, dt, world);
-                rider::Frame::default()
+                let respawned = plane.step(sim, dt, world);
+                rider::Frame { respawned, ..rider::Frame::default() }
             }
             _ => sim.step(dt, controls, world),
         }

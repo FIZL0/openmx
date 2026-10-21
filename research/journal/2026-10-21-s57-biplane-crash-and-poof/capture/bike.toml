@@ -1,0 +1,166 @@
+# bike.toml — S57: the bike's L1+R1 hand reset in the original, and whether the fader runs for it.
+# The rider and bike chains are acceptance.toml's (R6/S8), over first_recording's own save state.
+
+[watch]
+name        = "s57-bike-reset"
+description = "the rider's hand-reset latch and wreck reason, the bike's position, and the fader"
+every       = 1
+frames      = 1200
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"   # +0x748
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "hand_latch"     # +0x14d0: the hand reset's latch
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x14d0"
+type = "u32"
+
+[[field]]
+name = "reset_kind"     # +0x14d4: the reset request's kind
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x14d4"
+type = "u32"
+
+[[field]]
+name = "bike_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "bike_pos"       # +0x1b0: the transform's row 3
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x1b0"
+type = "f32x3"
+
+[[field]]
+name = "vp0_elapsed"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "vp0_dur"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "vp0_t"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "vp0_out"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "vp0_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "vp0_then_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "vp0_held"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "vp0_colour"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x68"
+type = "u32"
+
+[[field]]
+name = "vp1_elapsed"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "vp1_dur"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "vp1_t"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "vp1_out"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "vp1_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "vp1_then_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "vp1_held"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "vp1_colour"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x68"
+type = "u32"
+
+[[field]]
+name = "fs_elapsed"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "fs_dur"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "fs_t"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "fs_out"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "fs_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "fs_then_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "fs_held"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "fs_colour"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x68"
+type = "u32"
