@@ -3671,3 +3671,22 @@ rider_wreck_sound_load boot 0x0033e5b0 reads the rider archive's rider.aud [Fall
 crowd_sound_load boot 0x001fe220 reads event.aud's Crowd* lists when the track's CrowdPresent is set
 music_list_load boot 0x001fd9f0 reads appstart.res aud\music\music.pb: [Artists], [Song N] Filename,
 #                               Title, Artist
+# S58 — the spin step whole (wheel_spin_integrate, wheel_surface_drag, wheel_set_tire's 1/I), ported as
+# tire::spin_integrate / surface_drag / spin_inertia and proved in tests/spin.rs (10 000 cases each,
+# every word of the wheel and its chassis).
+wheel_gyro_torque boot 0x0025d030 (scale in f12, wheel, torque) the spin step's gyroscopic helper: w = 1,
+#                                 the torque added whole to the chassis' +0x140, and scale times its
+#                                 part along the fork's axis (+0x8c0) to the hinge through
+#                                 float_mul_add_into (jumps to 0x0025d180)
+wheel_hinge_moment boot 0x0025d090 (scale in f12, wheel, force, point) (point - mount +0x150) x force,
+#                                  handed to wheel_hinge_torque
+wheel_hinge_torque boot 0x0025d0f0 (scale in f12, wheel, torque) the torque unrotated into the chassis'
+#                                  frame (0x001b30e0), +0x6c += scale * (it . axis +0x8c0)
+# The spin step's constants: 0x00420bf0 = 0.25, the scale its tire force goes through the hinge with
+# for a balanced, steered wheel; 0x00426d70 (0,0,0,1) the both-in-the-air local velocity and force;
+# 0x00426d80 (1,1,1,1) the couple's lane mask in wheel_hinge_force.
+# S58 findings: the wheel's +0xb0 (BodyTireForcePosition) is the arm the tire force turns the chassis
+# on, not the hub (+0xa0, the model's TireFront/TireRear nodes). +0x64 is not 1/TireInertia: it is
+# 1/(r * (r * ((m/2) * 6/12))) with m = (6/12) * 2*pi*r*r, 0.614 for race125p; TireInertia (+0x68)
+# only feeds the gyroscopic torque. WheelFriction is a rolling torque -fade*WheelFriction, never grip;
+# grip is MaxDriveForce*load, past which the tire spins (or locks) and pushes SkidDriveForce*load.

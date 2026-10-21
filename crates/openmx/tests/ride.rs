@@ -193,7 +193,8 @@ CrossupWreckTime = 0.3
 /// behind the axle, which is both a nose-diving launch (P8) and a yaw arm two and a half times the
 /// sibling's: on the unpatched bike the stick at 0.05 of the lock spun the minute a full turn and a
 /// quarter in four seconds. The mounts are kept off the *unpatched* text, which is what
-/// [`ride_the_minute`] builds the rider with and what the sibling file's harness does.
+/// [`ride_the_minute`] builds the rider with and what the sibling file's harness does. Since S58
+/// that arm is `stock::BIKE`'s own value and the mounts are `stock::MOUNTS`, so the patch is gone.
 ///
 /// The two files' bikes have to agree, because `the_pad_script_is_the_minute` is what says the shell
 /// rides the same minute `game-sim` does.
@@ -205,8 +206,6 @@ fn ridden_bike() -> String {
             "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.05\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
         ),
         ("Drag = 0.5", "Drag = 0.037"),
-        ("BodyTireForcePosition = 0.0, 1.1, 2.1", "BodyTireForcePosition = 0.0, -0.3, 0.8"),
-        ("BodyTireForcePosition = 0.0, 1.1, -2.1", "BodyTireForcePosition = 0.0, -0.3, -0.8"),
     ];
     for (key, with) in patches {
         assert!(out.contains(key), "game_sim::stock::BIKE no longer has `{}`", key.trim_end());
@@ -568,9 +567,10 @@ fn came_over(seen: &[&Seat]) -> f32 {
 fn ride_the_minute() -> Minute {
     let tables = Arc::new(Tables::build());
     let phy = Phy::read_bytes(ridden_bike().as_bytes(), &tables.ride.curve);
-    // The wheel mounts come off the *unpatched* text, because `ridden_bike`'s third patch moves the
-    // key this crate reads as the mounts when the bike model has no wheel nodes — the sibling file's
-    // harness keeps them the same way, and the two minutes have to be one bike. That is why the rider
+    // The wheel mounts come off the *unpatched* text, because `ridden_bike`'s third patch moved the
+    // key this crate read as the mounts when the bike model has no wheel nodes (S58 made them
+    // `stock::MOUNTS` and dropped the patch) — the sibling file's harness keeps them the same way,
+    // and the two minutes have to be one bike. That is why the rider
     // is built here and handed over (`Sim::with_rider`, which is also how the shell itself builds one)
     // rather than through `Sim::ride`, which would take the mounts off the patched copy.
     //
@@ -777,7 +777,9 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
         "the jump's highest point was {} ft, which is no higher than the lip",
         highest(&jump)
     );
-    assert!(flattest(&jump) > 0.6, "in the air the bike got to up {}", flattest(&jump));
+    // 0.6 until S58, like the sibling file's: the bike leaves the lip pitching down and comes down
+    // at up 0.58 on the original's tire law; the landing below still holds whole.
+    assert!(flattest(&jump) > 0.5, "in the air the bike got to up {}", flattest(&jump));
 
     // And down: landed with a second of the leg still to run, upright, still rolling, never having
     // wrecked. From the last airborne frame rather than the leg's own last second, because where in
@@ -819,7 +821,9 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
 /// ride to be compared with.
 fn assert_it_flipped(how: &str, flip: &[&Seat]) -> usize {
     let lip = flip.iter().filter(|t| t.lip).count();
-    assert!(lip > 20, "{how}: the flip's ramp only held the lip for {lip} frames");
+    // Sixteen frames since S58, as in the sibling file: the bike reaches the ramp faster and the
+    // ramp goes by sooner. Twelve still leaves the two gestures room to land on it.
+    assert!(lip > 12, "{how}: the flip's ramp only held the lip for {lip} frames");
     let shoved = flip.iter().position(|t| t.preload);
     let shoved = shoved.unwrap_or_else(|| panic!("{how}: the preload never fired"));
     assert!(flip[shoved].lip, "{how}: the preload fired at frame {shoved} of the leg, off the lip");

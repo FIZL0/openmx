@@ -3736,7 +3736,7 @@ fn in_the_world_of<R>(
                  hang off the .phy's BodyTireForcePosition instead, which is not where the \
                  original hangs them, and the run will part at tick 1",
             );
-            game_sim::stock::mounts(&phy)
+            (phy.front.body_tire_force_position, phy.rear.body_tire_force_position)
         });
         Ridden { tables: Arc::clone(&tables), phy, mounts }
     });
@@ -4870,7 +4870,7 @@ impl Freeride {
     fn new() -> Freeride {
         let tables = Tables::build();
         let phy = Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.curve);
-        let mounts = (phy.front.body_tire_force_position, phy.rear.body_tire_force_position);
+        let mounts = game_sim::stock::MOUNTS;
         let ride =
             Ride::new(&phy, mounts, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0));
         let mut input = Manager::new();

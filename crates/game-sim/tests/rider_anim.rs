@@ -956,7 +956,7 @@ const ROLL_TICKS: usize = 23;
 fn a_wrecked_body_settles_and_then_holds_still() {
     let tables = rider::Tables::build();
     let p = Phy::read_bytes(format!("{BIKE}{WRECK_LIMITS}").as_bytes(), &tables.ride.curve);
-    let hubs = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+    let hubs = game_sim::stock::MOUNTS;
     let at = Vf::new(0.0, DROP, 0.0, 1.0);
     let mut rider =
         Rider::new(&p, hubs, at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());

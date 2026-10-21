@@ -10,6 +10,11 @@
 # coefficients *per unit of tire load*, not pounds, so they are small numbers here where they used
 # to be hundreds. A wheel of this bike carries about two hundred pounds, which is the factor.
 #
+# `BodyTireForcePosition` is where the spin step puts the tire's force on the chassis, a short way
+# under the centre of gravity as on the original's own bikes, not where the wheel hangs: the hubs are
+# `game_sim::stock::MOUNTS`. The `Skid*` and `Slipping*` keys are what a sliding, spinning or locked
+# tire still pushes with; without them it pushes nothing at all (S58).
+#
 # Read by crates/game-sim/tests/ride.rs and crates/game-sim/tests/replay.rs.
 [Mass Properties]
 Weight = 400
@@ -31,14 +36,19 @@ SteeringTorque = 40
 SteeringDamping = 8
 SteeringInertia = 2
 MaxSteerAngle = 30
-BodyTireForcePosition = 0.0, 1.1, 2.1
+BodyTireForcePosition = 0.0, -0.3, 0.8
 NumberOfSurfaces = 1
 WheelFriction1 = 8.0
-WheelDrag1 = 0.02
-MaxBrakingTorque1 = 300
+WheelDrag1 = 0.001
+MaxBrakingTorque1 = 330
 MaxDriveForce1 = 1.5
+SkidDriveForce1 = 1.4
 MaxSideForce1 = 3.5
 SideForce1 = 0.2
+SkidSideForce1 = 3.3
+SlippingSideForce1 = 0.2
+MaxSlippingSideForce1 = 3.5
+SkidSlippingSideForce1 = 3.3
 [Rear Tire]
 StrutCompression = 1.0
 Spring = 2.2
@@ -47,15 +57,20 @@ BounceDampingRatio = 0.4
 ReboundDampingRatio = 0.6
 TireRadius = 1.12
 TireInertia = 1.4
-BodyTireForcePosition = 0.0, 1.1, -2.1
+BodyTireForcePosition = 0.0, -0.3, -0.8
 OtherTireNormalLoadScale = 1.0
 NumberOfSurfaces = 1
 WheelFriction1 = 9.0
-WheelDrag1 = 0.02
+WheelDrag1 = 0.001
 MaxBrakingTorque1 = 400
 MaxDriveForce1 = 2.4
+SkidDriveForce1 = 2.2
 MaxSideForce1 = 4.0
 SideForce1 = 0.25
+SkidSideForce1 = 3.8
+SlippingSideForce1 = 0.25
+MaxSlippingSideForce1 = 4.0
+SkidSlippingSideForce1 = 3.8
 [Engine]
 NumberOfRPMPoints = 4
 RPM1 = 2000

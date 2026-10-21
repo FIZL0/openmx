@@ -493,7 +493,7 @@ wire!(crate::input::Pad { device, index, connected, controls, axis_raw, axis_val
 wire_enum!(crate::phy::Hit { Front, Side, Back, Bottom, FallOffFront, FallOffBack, Stunt });
 wire!(crate::r#move::Engine { gear, gears, final_drive, gear_ratios, ratio, inv_ratio, clutch_torque_scale, clutch_locked, rev_limit, idle_throttle, engine_braking, inv_inertia, clutch_static, clutch_kinetic, min_rpm, curve_rpm, curve_torque, curve, torque, wheel_torque, rpm, road_rpm, torque_scale });
 wire!(crate::r#move::Ride { g_peak, clutch_timer, clutch_scale_start, clutch_cofg_weight, clutch_in, collision_near, balance_inertia, balance_command, balance_point, balance_noise_time, pitch_integral, stoppie });
-wire!(crate::ride::Wheel { mv, w, surface, inv_inertia, steer_axis, slip });
+wire!(crate::ride::Wheel { mv, w, surface, inv_inertia, steer_axis, slip, gyro, angle, chassis_local_velocity, local_velocity, local_force, frame, side_per_load });
 wire!(crate::tire::Slip { spinning, locked, sliding });
 wire!(crate::rng::Rng { state });
 wire_enum!(crate::state::Kind { Plain, Wrecked });
