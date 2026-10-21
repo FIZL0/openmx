@@ -705,6 +705,9 @@ pub mod wreck_sound;
 /// through it until it has.
 pub mod ghost;
 
+/// Off the map: the bike's cannonball, the throw back toward the middle of a map a rider has left.
+pub mod off_map;
+
 #[cfg(test)]
 mod tests {
     use super::*;

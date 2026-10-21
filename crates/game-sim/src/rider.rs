@@ -58,6 +58,7 @@
 use crate::air;
 use crate::hash::{self, State, Walk};
 use crate::motion;
+use crate::off_map;
 use crate::phy::{self, Phy};
 use crate::ride::{self, Controls, Crash, Ride};
 use crate::ragdoll_ride::{self, Down, Kit};
@@ -307,6 +308,20 @@ impl Rider {
         self.ragdoll_kit = Some(kit);
     }
 
+    /// **The rider's main bone, in the world**: the point the body actor publishes onto the bike every
+    /// tick, which the map-edge test asks about beside the chassis. While the rider is down it is the
+    /// ragdoll's main bone, or the one point [`Crash`] has for a rider with no ragdoll. Riding, it is
+    /// the riding pose's main bone on the bike — the pose the port has, not the animated one the
+    /// original publishes. With neither a kit nor a wreck it is the empty vector, which the test skips.
+    pub fn main_bone(ride: &Ride, kit: Option<&Kit>, ragdoll: Option<&Down>, crash: Option<&Crash>) -> Vf {
+        match (ragdoll, crash, kit) {
+            (Some(doll), _, _) => doll.main().position,
+            (None, Some(down), _) => down.rider,
+            (None, None, Some(kit)) => kit.main_bone(&ride.transform()),
+            (None, None, None) => crate::r#move::NOTHING,
+        }
+    }
+
     /// Which of the three states the rider is in.
     pub fn phase(&self) -> state::Phase {
         self.state.phase()
@@ -378,6 +393,7 @@ impl Rider {
                     None => (ride.spawn, ride.spawn_facing),
                 };
                 ride.place(at, facing);
+                off_map::unwreck(&mut ride.chassis);
                 *crash = None;
                 *ragdoll = None;
                 tricks.reset();
@@ -487,6 +503,14 @@ impl Rider {
         let hits = if state.wreck.is_none() { ride::hits_among(ride, world, rivals) } else { Vec::new() };
         let touched = ride.touching || !hits.is_empty();
         let (mass, height) = (F::ONE / ride.chassis.inv_mass, F(ride.chassis.cofg_world.y()));
+        // The map edge (S59): armed on a player's bike, on a map with an edge, and not for a rider
+        // already shot off it. Its two points are the rider's main bone and the chassis.
+        let edge = world
+            .area()
+            .filter(|_| sense.owner.is_some_and(|o| o.human) && state.wreck != Some(Wreck::CANNONBALL));
+        let bone = Self::main_bone(ride, ragdoll_kit.as_deref(), ragdoll.as_ref(), crash.as_ref());
+        let thrown = &mut ride.chassis;
+        let origin = &mut ride.origin;
         let air = &mut ride.air;
         let verdict = state.step(
             dt,
@@ -496,7 +520,16 @@ impl Rider {
                 cannonball_wreck_time: p.wreck_times.cannonball_wreck_time,
             },
             |allowed| {
-                if !allowed.wrecks || !allowed.landing {
+                if !allowed.wrecks {
+                    return None;
+                }
+                // The first clause, and the only one that runs for a rider already down: off the
+                // map, the bike is thrown back and nothing else is asked.
+                if let Some(area) = edge.filter(|a| off_map::outside(a, bone, thrown.cofg_world)) {
+                    off_map::throw(&area, thrown, origin, ragdoll_ride::generator(idles));
+                    return Some(Wreck::CANNONBALL);
+                }
+                if !allowed.landing {
                     return None;
                 }
                 // Both can enter a wreck on one substep, and the entry stores its reason without
@@ -516,9 +549,13 @@ impl Rider {
             // The wreck entered on the bike's side: `Wreckbike.phy`'s body takes the bike's place,
             // its velocity and its spin. A rider with no wreck files has none of this and lies there
             // until the chord, which is where the port was before S26.
+            // A cannonball's entry draws the wreck body's spin instead of copying the bike's, whether
+            // or not this rider has a wreck body to give it to.
+            let spin = (reason == Wreck::CANNONBALL)
+                .then(|| off_map::entry_spin(ragdoll_ride::generator(idles), ride.chassis.ang_vel.w()));
             *crash = wreckage
                 .as_ref()
-                .map(|w| Crash::begin(ride, reason, &w.part, w.inertia, &w.wrecks, None));
+                .map(|w| Crash::begin(ride, reason, &w.part, w.inertia, &w.wrecks, spin));
             // The body actor's wreck entry: the bones off the bike, then the wreck sound picked.
             // Both draw from the game's one generator, which is the idle pool's.
             *ragdoll = match (ragdoll_kit.as_ref(), wreckage.as_ref(), crash.as_ref()) {
@@ -551,6 +588,7 @@ impl Rider {
                 None => (ride.spawn, ride.spawn_facing),
             };
             ride.place(at, facing);
+            off_map::unwreck(&mut ride.chassis);
             *crash = None;
             *ragdoll = None;
             tricks.reset();
