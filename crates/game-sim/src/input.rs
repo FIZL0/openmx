@@ -1286,7 +1286,8 @@ impl PlaneInput {
     }
 
     /// The input step on one pad through the shipped bindings: the player's sticks are the left
-    /// stick through [`AxisRange::PLAYER`], and a command's value is its control's strength.
+    /// stick through [`AxisRange::PLAYER`], and a command's value is its first binding's strength in
+    /// the shipped table ([`crate::bindings::Table::value`], P73).
     ///
     /// The player record also merges a second pad bound to the same player (its sticks where they
     /// are further out, its controls where the first's are 0); a player with one pad, which is every
@@ -1294,6 +1295,7 @@ impl PlaneInput {
     pub fn from_pad(pad: &Pad) -> PlaneInput {
         let stick =
             (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
-        PlaneInput::from_sticks(stick, |c| pad.strength(c.control()))
+        let table = &crate::bindings::Table::SHIPPED;
+        PlaneInput::from_sticks(stick, |c| table.value(pad, crate::bindings::Command(c as u8)))
     }
 }

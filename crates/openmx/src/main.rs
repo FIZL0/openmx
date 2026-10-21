@@ -3079,14 +3079,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let presets = follow.cam.presets.len();
             if presets > 1 {
                 let pad = seat.sim.input.pad(0);
-                // L1 only: R1 is the third of the trick decoder's buttons now. The walk is the
-                // original's next-camera routine: on to the next preset the file lets the player cycle to.
-                // An L1 pressed with R1 already down is the second half of the reset chord, not a camera.
-                // Under the new layout (P40) it is Select, which the simulation passes through unread
-                // and which is in no chord; the layout is the seat's, or the command line's for a
-                // session with no seats.
+                // The shipped table's next-camera command, Select under either layout (P73). The walk
+                // is the original's next-camera routine: on to the next preset the file lets the player
+                // cycle to. The layout is the seat's, or the command line's for a session with no seats.
                 let scheme = pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(args.pad_seat(i)));
-                // Upside down in the plane the original's L1 reached the plane as R1 (P50).
                 let plane = pad_seats.as_ref().map_or(args.wiring.planes[i], |s| s.plane(args.pad_seat(i)));
                 if plane.changes_camera(scheme, pad, seat.inverted) {
                     follow.cam.next_preset();

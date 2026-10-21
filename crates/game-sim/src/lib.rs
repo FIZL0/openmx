@@ -578,6 +578,10 @@ pub mod r#move;
 /// the hardware.
 pub mod input;
 
+/// The original's binding table (P73): which of a pad's sixteen controls each of the game's commands
+/// is on, built from a per-player preset, and the two ways the game reads a command through it.
+pub mod bindings;
+
 /// Animation driving: which motion plays for the state the rider is in, how far into it the frame is,
 /// and how one motion blends into the next. The tail of the rider update that the trick clocks stop
 /// short of: the selection per action id, the cross-fade a restarted motion starts with, the clip's own
