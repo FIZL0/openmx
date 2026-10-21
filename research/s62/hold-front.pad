@@ -1,0 +1,5 @@
+# S62: hold what front-5000.pad holds at the wreck (gas, stick forward)
+down cross
+stick l 0 -1
+sleep 20000
+release

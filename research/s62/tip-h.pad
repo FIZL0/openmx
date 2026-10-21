@@ -1,0 +1,44 @@
+# a crawl straight ahead (gas 150 ms in 800) to the drop beyond the start, and over it
+stick l 0 0
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+wait 6000
+release

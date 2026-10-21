@@ -1,0 +1,17 @@
+# a slow crawl (gas 80 ms in 800) towards the drop with the stick hard forward, then both brakes held
+# from 4 s as the front wheel goes over the lip: a slow endo
+stick l 0 -1
+press cross 80
+wait 720
+press cross 80
+wait 720
+press cross 80
+wait 720
+press cross 80
+wait 720
+press cross 80
+wait 720
+down r2
+down square
+wait 8000
+release

@@ -1,0 +1,6 @@
+# a touch of gas, then the brake held and the stick hard right
+press cross 400
+down square
+stick l 1 0
+sleep 9000
+release

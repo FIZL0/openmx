@@ -1,0 +1,45 @@
+# a crawl straight ahead to the drop, then the stick hard right on its lip
+stick l 0 0
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+stick l 1 0
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+wait 6000
+release

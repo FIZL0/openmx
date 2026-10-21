@@ -1,0 +1,14 @@
+# a crawl to the drop beyond the start with the stick hard forward, then rolling over its lip on no gas
+stick l 0 -1
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+wait 9000
+release
