@@ -146,7 +146,7 @@ fn online(ticks: usize, pads: impl Fn(usize) -> Report) -> (Vec<Report>, Vec<Vec
         let mut after = |_: usize, dt: F, sim: &mut Sim, c: &Controls| {
             sim.rider.body_frame(dt, c, Gate::default(), &lib, &clip);
         };
-        let mut game = Logged { rides: Rides { sims: &mut sims, world: &mut world, after: Some(&mut after) }, ran: &mut ran };
+        let mut game = Logged { rides: Rides { sims: &mut sims, world: &mut world, after: Some(&mut after), time_scale: None }, ran: &mut ran };
         np.frame(&mut game, &[pads(f)], pace::TICK.as_secs_f32());
         np.outgoing();
         assert_eq!(np.end, None, "frame {f}: the session ended");
