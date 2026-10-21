@@ -852,6 +852,9 @@ pub struct Menu {
     /// splash lists both, so a pad that cannot become 1P — or one that should not — shows (P53).
     pub heard: Vec<String>,
     pub skipped: Vec<String>,
+    /// The keyboard under each layout, in [`Layout::ALL`]'s order, as the shell's bindings have it
+    /// (P54): what each key does in a ride, for the Controls screen. Empty without a shell.
+    pub keyboard: [Vec<(String, String)>; 2],
     /// The local game the ride setup is for, once the join screen is done; none for a Free Ride.
     party: Option<Party>,
     /// How many ride a Free Ride, which is `--players`: the shell says, and a Free Ride after a
@@ -937,6 +940,7 @@ impl Menu {
             devices: Vec::new(),
             heard: Vec::new(),
             skipped: Vec::new(),
+            keyboard: [Vec::new(), Vec::new()],
             party: None,
             free_riders: 1,
             music_choices: Vec::new(),
@@ -2177,6 +2181,8 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
 enum Align {
     Left,
     Centre,
+    /// Ending at x: the Controls screen's keyboard column (P54).
+    Right,
 }
 
 /// The layout's screen. A window of another shape gets the layout at one scale both ways (the
@@ -2197,6 +2203,10 @@ enum Anchor {
 pub const PILL_PAD: f32 = 12.0;
 /// The list's rows are centred on this, `mainmenu.lyt`'s items.
 const LIST_X: f32 = 185.0;
+/// The Controls screen's keyboard column (P54): what a key does to the left of this, the key to its
+/// right, a row every this many layout pixels.
+const KEYS_X: f32 = 548.0;
+const KEYS_ROW: f32 = 20.0;
 /// `mainmenu.lyt`'s logo, 512x64.
 const LOGO: Rect = Rect { x: 20.0, y: 25.0, w: 512.0, h: 64.0 };
 
@@ -2331,6 +2341,7 @@ impl Art {
                     };
                     p.text(Face::Small, &pressure, LIST_X, item_y(CONTROLS_ROWS + 2), Align::Centre, ITEM);
                     p.text(Face::Small, "Pad and pressures: controls.txt", LIST_X, item_y(CONTROLS_ROWS + 3), Align::Centre, ITEM);
+                    p.keyboard_layout(menu, at);
                 }
                 p.logo();
                 p.title(screen.title());
@@ -2573,6 +2584,7 @@ impl<'a> Painter<'a> {
         let left = match align {
             Align::Left => x,
             Align::Centre => x - w / 2.0,
+            Align::Right => x - w,
         };
         let m = font.glyph('M');
         let h = m.uv[3] - m.uv[1];
@@ -2951,6 +2963,27 @@ impl<'a> Painter<'a> {
                 }
                 false => self.fill(at, [40, 40, 40, 255]),
             }
+        }
+    }
+
+    /// The Controls screen's keyboard (P54), down the right of the frame: the keys under the layout
+    /// of the seat whose row the cursor is on (1P's on the throttle's row), as the bindings file has
+    /// them.
+    fn keyboard_layout(&mut self, menu: &Menu, at: usize) {
+        let seat = at.saturating_sub(1).min(LAYOUT_ROWS - 1);
+        let layout = menu.controls.layouts[seat];
+        let i = Layout::ALL.iter().position(|l| *l == layout).unwrap_or(0);
+        let rows = &menu.keyboard[i];
+        if rows.is_empty() {
+            return;
+        }
+        self.anchor(Anchor::BottomRight);
+        let title = format!("{}P keyboard  {}", seat + 1, layout.label());
+        self.text(Face::Small, &title, KEYS_X, item_y(0), Align::Centre, CHOSEN);
+        for (n, (what, keys)) in rows.iter().enumerate() {
+            let y = item_y(0) + KEYS_ROW * (n + 1) as f32;
+            self.text(Face::Small, what, KEYS_X - 6.0, y, Align::Right, ITEM);
+            self.text(Face::Small, keys, KEYS_X + 6.0, y, Align::Left, CHOSEN);
         }
     }
 

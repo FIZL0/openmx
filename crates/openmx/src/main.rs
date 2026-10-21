@@ -882,9 +882,11 @@ fn front_end(args: Args) -> Result<(), String> {
     front.menu.lobby.lan = front.network.online().relay == openmx_net::Relay::Off;
     let window = Screen::open(args.renderer, &args.display, args.size, args.scale, "openmx")?;
     let seats = open_seats(&args, pad.as_deref(), front.wiring());
+    // The Controls screen lists the keyboard under each layout (P54), as the bindings file has it.
+    front.menu.keyboard = [Scheme::New, Scheme::Original].map(|s| seats.keyboard_layout(s));
     match seats.name(0) {
         Some(name) => println!("pad: {name}"),
-        None => println!("pad: none found — the menus are on the keyboard (arrows, X, C, Return)"),
+        None => println!("pad: none found — the menus are on the keyboard (arrows, Space, Return, Escape)"),
     }
     // The ride setup lists a machine for each player who will ride (P41): a Free Ride's are
     // `--players`, a local game's its join screen's (P43).
@@ -2058,7 +2060,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         && seats.slots.keys() == Some(0)
         && seats.name(0).is_none()
     {
-        println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)");
+        match schemes[0] {
+            Scheme::New => println!("pad: none found — riding on the keyboard (Space gas, Shift brake, WASD and HJKL the sticks)"),
+            Scheme::Original => println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)"),
+        }
     }
     // The other players' pads (V22): seat i is player i's. A player whose seat nobody sits in rides
     // an idle pad, standing on the start line, until a pad joins it.
@@ -2526,7 +2531,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 seat.reports = [Report::idle(), Report::missing()];
             }
         }
-        let hud_now = held(&window, key::H);
+        // F3, or H where the keyboard's layout does not ride on it: the new layout's H is the right
+        // stick's left (P54), which would flash the overlay on and off with every trick.
+        let h_free = pad_seats.as_ref().is_none_or(|s| !s.binds_key(key::H));
+        let hud_now = held(&window, key::F3) || (h_free && held(&window, key::H));
         if hud_now && !hud_key {
             for rig in &mut rigs {
                 rig.hud.on = !rig.hud.on;
@@ -3864,12 +3872,17 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Down, and L1 and R1 swap, so they move the plane the same way on the screen\n\
                      whichever way up it is; --biplane-controls original (or the Controls\n\
                      screen) flies the original's, which never swaps them.\n\
-                     On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, A+D reset.\n\
+                     On the keyboard, under the new layout: WASD the left stick (A/D steer, W/S\n\
+                     lean), HJKL the right stick, Space gas, Shift brake, Q/E L1/R1, Tab or C\n\
+                     the camera, arrows the d-pad, 1-4 the face buttons, Enter Start, Escape the\n\
+                     pause. Under the original's (--controls original): X throttle, Z brake,\n\
+                     arrows steer, IJKL the right stick, C/V/D trick, A+D reset.\n\
                      The throttle is a pressure and not a switch (the game reads Cross from its\n\
                      pressure byte): a key ramps it, --throttle r2 rides it on a trigger instead,\n\
                      giving up that trigger's own control, and --pad-pressure says which joystick\n\
                      axes a pad reports its buttons' own pressures on.\n\
-                     H toggles the debug overlay, which --hud (--overlay debug) starts on.\n\
+                     F3 toggles the debug overlay (and H, where H is not a stick key), which\n\
+                     --hud (--overlay debug) starts on.\n\
                      Up to eight seats: every pad plugged in takes the next one, the keyboard\n\
                      beside 1P's, or --pads says each seat's (k the keyboard, a number the pad\n\
                      in the order found, - nobody). A pad pulled out pauses its player until it\n\
