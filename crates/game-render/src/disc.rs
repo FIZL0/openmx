@@ -97,6 +97,23 @@ impl Disc {
         read_at(&mut self.file, at, size)
     }
 
+    /// Part of one member: `len` bytes from `at` into it, for a member too big to read whole (the
+    /// 160 MB sound archive, P42). Short at the member's end.
+    pub fn member_part(&mut self, name: &str, at: u64, len: usize) -> Result<Vec<u8>, String> {
+        let want = normalise(name);
+        let e = self
+            .psr
+            .entries
+            .iter()
+            .find(|e| normalise(&e.name) == want)
+            .ok_or_else(|| format!("MX.PSR has no member {name}"))?;
+        if at >= e.size as u64 {
+            return Err(format!("{name} has no byte {at}"));
+        }
+        let len = len.min((e.size as u64 - at) as usize);
+        read_at(&mut self.file, self.psr_at + e.at + at, len)
+    }
+
     /// One `.res` archive, unpacked far enough to read members out of it.
     pub fn res(&mut self, name: &str) -> Result<Res, String> {
         let bytes = self.member(name)?;

@@ -75,7 +75,9 @@ fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
     let mut seen = HashSet::from([key(&menu)]);
     let mut queue = VecDeque::from([(menu, reader, Vec::<Control>::new())]);
     while let Some((menu, reader, path)) = queue.pop_front() {
-        if found.len() == Screen::ALL.len() || path.len() >= 6 {
+        // Seven: Controls is the fourth of the settings' seven rows since P42's sound rows, so the
+        // wrap from the first row no longer reaches it in one.
+        if found.len() == Screen::ALL.len() || path.len() >= 7 {
             break;
         }
         for b in BUTTONS {
@@ -205,6 +207,9 @@ fn the_settings_file_reads_back_as_it_was_written() {
             Machine::Biplane,
         ],
         split: split::Split::SideBySide,
+        music: "disc:headstrong".into(),
+        music_volume: 3,
+        effects_volume: 10,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -972,4 +977,49 @@ fn backing_out_of_a_local_game_walks_its_screens_back_to_the_main_menu() {
     tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Online));
+}
+
+/// P42's three sound rows, below Controls: the music steps Off, Shuffle and every song the shell's
+/// sources listed, and the two sliders stop at their ends.
+#[test]
+fn the_sound_rows_pick_the_music_and_the_volumes() {
+    let (mut m, mut r) = fresh();
+    m.music_choices = vec![("disc:ooc".into(), "Out of Control - Hoobastank".into()), ("folder:mine.wav".into(), "mine".into())];
+    // Settings, under Local Game, Online and Garage.
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    assert_eq!(m.settings.music, "shuffle");
+    assert_eq!(m.music_label(), "Shuffle");
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.music, "disc:ooc");
+    assert_eq!(m.music_label(), "Out of Control - Hoobastank");
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.music, "off", "past the last song it wraps to Off");
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.music, "folder:mine.wav");
+    // The music volume, down to nothing and no further.
+    tap(&mut m, &mut r, Control::Down);
+    for _ in 0..12 {
+        tap(&mut m, &mut r, Control::Left);
+    }
+    assert_eq!(m.settings.music_volume, 0);
+    // The effects, up to the top and no further.
+    tap(&mut m, &mut r, Control::Down);
+    for _ in 0..12 {
+        tap(&mut m, &mut r, Control::Right);
+    }
+    assert_eq!(m.settings.effects_volume, menu::VOLUME_MAX);
+    assert!(m.take_changed());
+    let back = Settings::parse(&m.settings.text());
+    assert_eq!((back.music.as_str(), back.music_volume, back.effects_volume), ("folder:mine.wav", 0, 10));
+    // An older file, with no sound keys, opens on the defaults.
+    let old = Settings::parse("name = Old\n");
+    assert_eq!((old.music.as_str(), old.music_volume, old.effects_volume), ("shuffle", 7, 8));
 }

@@ -3592,3 +3592,25 @@ curve_sine          boot 0x0030ea70 the engine's sine off the curve table (the p
 #                                   bit-exact only with the game's own table, not CurveTable::build()
 pin_set             boot 0x001f3cd0 a pin's setter: +0x20 anchor 1, +0x30 anchor 2, +0x68 body 1,
 #                                   +0x6c body 2
+# ---------------------------------------------------------------------------------------------------
+# P42 — the shell's sound (crates/openmx/src/audio.rs plays it; nothing here is ported to game-sim).
+# The engine note: a state machine of whole samples chained one after the other, read off the bike
+# archive's vehicle_*.aud. Journal: research/journal/*-p42-sound-and-music.
+engine_sound_load boot 0x0030fb00 reads the vehicle .aud: the [Idle]..[Panic] lists, LowTorqueSpeed,
+#                                 the distances
+engine_sound_list boot 0x0030fd10 one list: NumSounds, SoundN, SoundNLooping, the section's Looping
+engine_sound_decide boot 0x0030ffc0 the frame's next note from the hands (gas, clutch, grounded, speed)
+engine_sound_chain boot 0x00311160 queues the note's next sample after the one playing; picks through
+#                                  sound_pick (draws rand_raw) and draws rand again for a pitch variance
+# The note states' frames. Which address is which state is read off the decider's switch, a best reading.
+engine_note_idle boot 0x00310370 idle
+engine_note_low boot 0x003104f0 low accel
+engine_note_high boot 0x00310ad0 high accel
+engine_note_power boot 0x00310c50 power
+engine_note_sputter boot 0x00310980 sputter
+engine_note_decel boot 0x00310dd0 decel
+rider_wreck_sound_load boot 0x0033e5b0 reads the rider archive's rider.aud [Fall] and [IMPACT] into the
+#                                      emitter wreck_sound plays from
+crowd_sound_load boot 0x001fe220 reads event.aud's Crowd* lists when the track's CrowdPresent is set
+music_list_load boot 0x001fd9f0 reads appstart.res aud\music\music.pb: [Artists], [Song N] Filename,
+#                               Title, Artist

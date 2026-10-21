@@ -180,7 +180,15 @@ pub struct Settings {
     pub machines: [Machine; SEATS_MAX],
     /// How a local game of two shares the screen, the split layout's pick (P43): `--split`'s.
     pub split: Split,
+    /// The music (P42): `off`, `shuffle`, or one song's id (`disc:headstrong`, `folder:mine.wav`).
+    pub music: String,
+    /// The two volume sliders, `0..=VOLUME_MAX`.
+    pub music_volume: u8,
+    pub effects_volume: u8,
 }
+
+/// The volume sliders' top step.
+pub const VOLUME_MAX: u8 = 10;
 
 /// The most players a ride seats, as P35's seats count them.
 pub const SEATS_MAX: usize = 8;
@@ -234,6 +242,9 @@ impl Default for Settings {
             track: TRACKS[0].0.into(),
             machines: [Machine::Bike; SEATS_MAX],
             split: Split::default(),
+            music: "shuffle".into(),
+            music_volume: 7,
+            effects_volume: 8,
         }
     }
 }
@@ -285,6 +296,9 @@ impl Settings {
                     }
                 }
                 "split" => s.split = Split::parse(v).unwrap_or(s.split),
+                "music" if !v.is_empty() => s.music = v.to_string(),
+                "music_volume" => s.music_volume = v.parse().map_or(s.music_volume, |n: u8| n.min(VOLUME_MAX)),
+                "effects_volume" => s.effects_volume = v.parse().map_or(s.effects_volume, |n: u8| n.min(VOLUME_MAX)),
                 _ => {}
             }
         }
@@ -293,13 +307,16 @@ impl Settings {
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\n",
+            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\n",
             self.name,
             self.overlay.word(),
             on_off(self.wrecks),
             self.track,
             self.machines.map(Machine::word).join(" "),
-            split_word(self.split)
+            split_word(self.split),
+            self.music,
+            self.music_volume,
+            self.effects_volume
         )
     }
 
@@ -621,7 +638,11 @@ const MAIN_SETTINGS: usize = 4;
 /// machine a switch would go to.
 const PAUSE: [&str; 6] = ["Resume", "Restart", "Switch To Machine", "Settings", "Main Menu", "Quit"];
 const PAUSE_SWITCH: usize = 2;
-const SETTINGS_ROWS: usize = 4;
+const SETTINGS_ROWS: usize = 7;
+/// The settings' sound rows (P42), after the four P36 shipped.
+const SETTINGS_MUSIC: usize = 4;
+const SETTINGS_MUSIC_VOLUME: usize = 5;
+const SETTINGS_EFFECTS_VOLUME: usize = 6;
 const CONTROLS_ROWS: usize = 1 + LAYOUT_ROWS;
 
 /// The on-screen keyboard: opentennis's four rows of ten, then a row of four commands.
@@ -757,6 +778,9 @@ pub struct Menu {
     /// How many ride a Free Ride, which is `--players`: the shell says, and a Free Ride after a
     /// local game goes back to it.
     pub free_riders: usize,
+    /// The songs the music row steps through after Off and Shuffle, `(id, label)`, as the shell's
+    /// music sources list them (P42). Empty until the shell says.
+    pub music_choices: Vec<(String, String)>,
 }
 
 /// A local game as the ride takes it (P43): one player a seat in play, in seat order, each on the
@@ -834,6 +858,23 @@ impl Menu {
             devices: Vec::new(),
             party: None,
             free_riders: 1,
+            music_choices: Vec::new(),
+        }
+    }
+
+    /// The music row's choices: Off, Shuffle, then every song, as `(settings word, label)`.
+    pub fn music_options(&self) -> Vec<(String, String)> {
+        let mut out = vec![("off".to_string(), "Off".to_string()), ("shuffle".to_string(), "Shuffle".to_string())];
+        out.extend(self.music_choices.iter().cloned());
+        out
+    }
+
+    /// What the music row shows for the setting as it stands.
+    pub fn music_label(&self) -> String {
+        let all = self.music_options();
+        match all.iter().find(|(id, _)| *id == self.settings.music) {
+            Some((_, label)) => label.clone(),
+            None => self.settings.music.clone(),
         }
     }
 
@@ -1351,6 +1392,27 @@ impl Menu {
                             self.changed = true;
                         }
                         3 if p.ok => self.push(Screen::Controls),
+                        SETTINGS_MUSIC => {
+                            let all = self.music_options();
+                            let n = all.len();
+                            let i = all.iter().position(|(id, _)| *id == self.settings.music).unwrap_or(1);
+                            let i = if p.left { (i + n - 1) % n } else { (i + 1) % n };
+                            self.settings.music = all[i].0.clone();
+                            self.changed = true;
+                        }
+                        SETTINGS_MUSIC_VOLUME | SETTINGS_EFFECTS_VOLUME => {
+                            let v = if at == SETTINGS_MUSIC_VOLUME {
+                                &mut self.settings.music_volume
+                            } else {
+                                &mut self.settings.effects_volume
+                            };
+                            *v = match (p.left, p.right) {
+                                (true, _) => v.saturating_sub(1),
+                                (_, true) => (*v + 1).min(VOLUME_MAX),
+                                _ => (*v + 1) % (VOLUME_MAX + 1),
+                            };
+                            self.changed = true;
+                        }
                         _ => {}
                     }
                 }
@@ -2133,6 +2195,9 @@ impl Art {
                         format!("Overlay  {}", menu.settings.overlay.label()),
                         format!("Wrecks  {}", if menu.settings.wrecks { "On" } else { "Off" }),
                         "Controls".to_string(),
+                        format!("Music  {}", menu.music_label()),
+                        format!("Music volume  {}", menu.settings.music_volume),
+                        format!("Effects volume  {}", menu.settings.effects_volume),
                     ],
                     _ => std::iter::once(format!("Original throttle  {}", menu.controls.throttle.label()))
                         .chain(
@@ -2148,7 +2213,7 @@ impl Art {
                 let bar = p.list(&rows, at);
                 // A row with choices wears the arrows either side of its pill.
                 let choice = match screen {
-                    Screen::Settings => at == 1 || at == 2,
+                    Screen::Settings => at == 1 || at == 2 || at >= SETTINGS_MUSIC,
                     _ => true,
                 };
                 if choice {
