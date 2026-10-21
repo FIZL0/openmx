@@ -12,6 +12,8 @@ use std::process::Command;
 
 /// The speedometer's dial and the radar, in a 640x448 frame's pixels: left, top, right, bottom.
 const DIAL: (usize, usize, usize, usize) = (480, 301, 608, 429);
+/// The default speedometer's readout with the preload meter beside it (V42).
+const READOUT: (usize, usize, usize, usize) = (520, 314, 620, 400);
 const RADAR: (usize, usize, usize, usize) = (23, 299, 151, 427);
 
 /// A PNG the shell wrote, back to its RGB pixels: its rows are filter 0 in zlib stored blocks.
@@ -77,22 +79,26 @@ fn apart(a: &[u8], b: &[u8], (x0, y0, x1, y1): (usize, usize, usize, usize)) -> 
         .count()
 }
 
-/// The HUD is over the frame: a good part of the dial's and of the radar's box is drawn on.
-fn assert_hud(name: &str, with: &[u8], without: &[u8]) {
+/// The HUD is over the frame: a good part of the speedometer's box, `speedo`, and of the radar's is
+/// drawn on.
+fn assert_hud(name: &str, with: &[u8], without: &[u8], speedo: (usize, usize, usize, usize)) {
     let area = |b: (usize, usize, usize, usize)| (b.2 - b.0) * (b.3 - b.1);
-    for (part, b) in [("speedometer", DIAL), ("radar", RADAR)] {
+    for (part, b) in [("speedometer", speedo), ("radar", RADAR)] {
         let n = apart(with, without, b);
         assert!(n * 10 > area(b), "{name}: only {n} of the {part}'s {} pixels were drawn on", area(b));
     }
 }
 
-/// A default launch's first ride frame has the original's HUD over it, on either renderer.
+/// A default launch's first ride frame has the original's HUD over it, on either renderer: the
+/// readout and the preload meter, or the dial when asked for (V42).
 #[test]
 fn a_default_launch_shows_the_originals_hud() {
     for renderer in ["gpu", "software"] {
         let Some(with) = first_frame(renderer, &["--renderer", renderer]) else { return };
         let without = first_frame(&format!("{renderer}-none"), &["--renderer", renderer, "--overlay", "none"]).unwrap();
-        assert_hud(renderer, &with, &without);
+        assert_hud(renderer, &with, &without, READOUT);
+        let dial = first_frame(&format!("{renderer}-analog"), &["--renderer", renderer, "--speedometer", "analog"]).unwrap();
+        assert_hud(&format!("{renderer}, analog"), &dial, &without, DIAL);
     }
 }
 
@@ -103,6 +109,6 @@ fn the_pause_menu_keeps_the_hud_under_it() {
         let pause = |overlay| ["--renderer", renderer, "--menu", "--screen", "pause", "--overlay", overlay];
         let Some(with) = first_frame(&format!("{renderer}-pause"), &pause("original")) else { return };
         let without = first_frame(&format!("{renderer}-pause-none"), &pause("none")).unwrap();
-        assert_hud(&format!("{renderer}, paused"), &with, &without);
+        assert_hud(&format!("{renderer}, paused"), &with, &without, READOUT);
     }
 }

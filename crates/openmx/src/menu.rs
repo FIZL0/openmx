@@ -183,6 +183,8 @@ pub struct Settings {
     pub name: String,
     /// Which overlay a ride draws (V26), `--overlay`'s word; H toggles the debug one in a ride.
     pub overlay: Overlay,
+    /// How the original's HUD shows the speed (V42): the digital readout, or the dial.
+    pub speedometer: Speedometer,
     /// Whether a ride wrecks at all.
     pub wrecks: bool,
     /// The last track ridden, which the track pick opens on.
@@ -375,6 +377,7 @@ impl Default for Settings {
         Settings {
             name: "Rider".into(),
             overlay: Overlay::Original,
+            speedometer: Speedometer::default(),
             wrecks: true,
             track: TRACKS[0].0.into(),
             machines: [Machine::Bike; SEATS_MAX],
@@ -440,6 +443,7 @@ impl Settings {
                     }
                 }
                 "overlay" => s.overlay = Overlay::from_word(v).unwrap_or(s.overlay),
+                "speedometer" => s.speedometer = Speedometer::from_word(v).unwrap_or(s.speedometer),
                 "wrecks" => s.wrecks = v != "off",
                 "track" if TRACKS.iter().any(|t| t.0 == v) => s.track = v.to_string(),
                 // One word a seat, 1P's first; a seat the line does not reach rides the bike.
@@ -524,9 +528,10 @@ impl Settings {
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\nfolder_volume = {}\ncrowd_volume = {}\nengine_volume = {}\nmenu_volume = {}\nmix = {}\ncustom = {}\ngraphics = {}\nrender_scale = {}\n",
+            "# openmx's front end (P36)\nname = {}\noverlay = {}\nspeedometer = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\nfolder_volume = {}\ncrowd_volume = {}\nengine_volume = {}\nmenu_volume = {}\nmix = {}\ncustom = {}\ngraphics = {}\nrender_scale = {}\n",
             self.name,
             self.overlay.word(),
+            self.speedometer.word(),
             on_off(self.wrecks),
             self.track,
             self.machines.map(Machine::word).join(" "),
@@ -621,6 +626,39 @@ impl Overlay {
             Overlay::Original => "Original",
             Overlay::Debug => "Debug",
             Overlay::None => "None",
+        }
+    }
+}
+
+/// How the original's HUD shows the speed (V42), as `settings.txt` and `--speedometer` spell it. The
+/// original offers the same choice in its own overlay options; here the readout is the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Speedometer {
+    /// The number in `yearlingdashboldoblique_55`, with the preload meter beside it.
+    #[default]
+    Digital,
+    /// The dial and its needle, the odometer under it and the preload meter beside it.
+    Analog,
+}
+
+impl Speedometer {
+    pub const ALL: [Speedometer; 2] = [Speedometer::Digital, Speedometer::Analog];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Speedometer::Digital => "digital",
+            Speedometer::Analog => "analog",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Speedometer> {
+        Speedometer::ALL.into_iter().find(|s| s.word() == w)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Speedometer::Digital => "Digital",
+            Speedometer::Analog => "Analog",
         }
     }
 }
@@ -1043,7 +1081,7 @@ const AUDIO_PRESET: usize = 3;
 const AUDIO_SLIDERS: usize = 4;
 /// Which of [`Mix::levels`]' sliders each slider row is.
 const AUDIO_SLIDER: [usize; 6] = [0, 2, 3, 4, 5, 1];
-const SETTINGS_ROWS: usize = 10;
+const SETTINGS_ROWS: usize = 11;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
 const SETTINGS_MUSIC_VOLUME: usize = 5;
@@ -1052,8 +1090,10 @@ const SETTINGS_EFFECTS_VOLUME: usize = 6;
 const SETTINGS_GRAPHICS: usize = 7;
 /// The render scale's row (V34), beside the graphics'.
 const SETTINGS_RENDER_SCALE: usize = 8;
-/// The game modifiers' screen (P55).
-const SETTINGS_MODIFIERS: usize = 9;
+/// The speedometer's style (V42), under the render scale's.
+const SETTINGS_SPEEDOMETER: usize = 9;
+/// The game modifiers' screen (P55), the last row.
+const SETTINGS_MODIFIERS: usize = 10;
 /// The modifiers' screen: whose they are, every modifier, then the presets and the reset.
 const MODIFIERS_SEAT: usize = 0;
 const MODIFIERS_KNOBS: usize = 1;
@@ -2193,6 +2233,13 @@ impl Menu {
                             self.settings.render_scale = all[i];
                             self.changed = true;
                         }
+                        SETTINGS_SPEEDOMETER => {
+                            let all = Speedometer::ALL;
+                            let i = all.iter().position(|s| *s == self.settings.speedometer).unwrap_or(0);
+                            let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
+                            self.settings.speedometer = all[i];
+                            self.changed = true;
+                        }
                         _ => {}
                     }
                 }
@@ -3106,6 +3153,7 @@ impl Art {
                         format!("Effects volume  {}", menu.settings.effects_volume),
                         format!("Graphics  {}", menu.settings.graphics.label()),
                         format!("Render scale  {}", menu.settings.render_scale.label()),
+                        format!("Speedometer  {}", menu.settings.speedometer.label()),
                         format!(
                             "Game Modifiers  {}",
                             if menu.settings.modifiers.is_original() { "Original" } else { "Modified" }
