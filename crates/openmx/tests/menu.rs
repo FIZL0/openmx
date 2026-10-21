@@ -77,7 +77,10 @@ fn key(menu: &Menu) -> String {
 
 #[test]
 fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
-    let (menu, reader) = fresh();
+    let (mut menu, reader) = fresh();
+    // A second pad has joined a local game before (P51): the split screen is two players' at least,
+    // and this walk taps one pad only. One alone is `one_pad_cannot_start_a_local_game_but_can_free_ride`.
+    menu.join = join::Join::with(&[Some(0), Some(1)], join::ON_SCREEN, join::Opened::Menu);
     assert_eq!(menu.screen(), Some(Screen::Main));
     // Breadth first over single button taps, so each screen is found by its shortest path.
     let mut found: Vec<(Screen, Vec<Control>)> = vec![(Screen::Main, vec![])];
@@ -1107,6 +1110,108 @@ fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
     let views = party.layout().rects(640, 448);
     assert_eq!(views.len(), 4);
     assert!(views.iter().all(|v| (v.w, v.h) == (320, 224)), "{views:?}");
+}
+
+/// Pad input alone, from the main menu to the ride: Local Game by pad seat 0 (the host), Cross from
+/// each of `joiners`, Start from the host, the split screen's first row, a track. The local game it
+/// starts, if it does.
+fn local_game(pads: usize, joiners: &[usize]) -> (Menu, Vec<Act>) {
+    let all: Vec<usize> = (0..pads).collect();
+    let (mut m, mut rd) = fresh_with(pads);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Join));
+    for &d in joiners {
+        tap_device(&mut m, &mut rd, &all, d, Control::Cross);
+    }
+    let mut acts = tap_device(&mut m, &mut rd, &all, 0, Control::Start);
+    if m.screen() == Some(Screen::Split) {
+        acts.extend(tap_device(&mut m, &mut rd, &all, 0, Control::Cross));
+        assert_eq!(m.screen(), Some(Screen::Tracks));
+        acts.extend(tap_device(&mut m, &mut rd, &all, 0, Control::Cross));
+    }
+    (m, acts)
+}
+
+#[test]
+fn two_or_three_pads_start_a_local_game_with_a_view_each() {
+    // Two (P51): the host and one more is enough; the ride has the original's two-player layout.
+    for split in [split::Split::Stacked, split::Split::SideBySide] {
+        let (mut m, mut rd) = fresh_with(2);
+        m.settings.split = split;
+        let all = [0, 1];
+        tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+        tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+        tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
+        assert!(m.join.can_start());
+        tap_device(&mut m, &mut rd, &all, 0, Control::Start);
+        assert_eq!(m.screen(), Some(Screen::Split));
+        // The split screen opens on the setting's layout; Cross takes it.
+        tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+        let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+        assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+        assert_eq!(m.riders, 2);
+        let party = m.party().expect("a local game");
+        assert_eq!(party.devices, vec![0, 1], "each player on their own pad");
+        let want = match split {
+            split::Split::Stacked => split::Layout::Stacked,
+            split::Split::SideBySide => split::Layout::SideBySide,
+        };
+        assert_eq!(party.layout(), want);
+        assert_eq!(party.layout().rects(640, 448).len(), 2, "exactly two views");
+        assert_eq!(m.ride_picks(party.players()).map_or(2, |p| p.len()), 2);
+    }
+    let (m, acts) = local_game(2, &[1]);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    assert_eq!(m.party().map(|p| p.layout()), Some(split::Layout::for_players(2, m.settings.split).unwrap()));
+
+    // Three, of four pads plugged in: three views in the port's quarters, the fourth quarter nobody's
+    // (the ride draws it black), and each rides their own pad.
+    let (m, acts) = local_game(4, &[3, 1]);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    let party = m.party().expect("a local game");
+    assert_eq!((party.players(), m.riders), (3, 3));
+    assert_eq!(party.devices, vec![0, 3, 1], "seats in join order, each on its own pad");
+    assert_eq!(party.layout(), split::Layout::Quarters);
+    assert_eq!(party.layout().rects(640, 448).len(), 4);
+    assert_eq!(menu::layouts(3), vec![split::Layout::Quarters]);
+
+    // Four still start, and Start may come from any seated pad, not only the host.
+    let (m, acts) = local_game(4, &[1, 2, 3]);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    assert_eq!(m.party().map(|p| p.players()), Some(4));
+}
+
+#[test]
+fn one_pad_cannot_start_a_local_game_but_can_free_ride() {
+    // Alone on the join screen, Start stays there, with other pads plugged in that have not joined.
+    for pads in [1, 2] {
+        let (m, acts) = local_game(pads, &[]);
+        assert_eq!(m.screen(), Some(Screen::Join), "{pads} pads plugged in, one joined");
+        assert!(acts.iter().all(|a| *a == Act::Stay), "{acts:?}");
+        assert!(!m.join.can_start());
+        assert!(m.party().is_none());
+    }
+    // A pad that joins and leaves again leaves the host alone.
+    let all = [0, 1];
+    let (mut m, mut rd) = fresh_with(2);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
+    tap_device(&mut m, &mut rd, &all, 1, Control::Circle);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Join));
+    // Back on the main menu, the same pad rides a Free Ride on its own.
+    tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
+    tap_device(&mut m, &mut rd, &all, 1, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    tap_device(&mut m, &mut rd, &all, 0, Control::Up);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    assert!(m.party().is_none());
+    assert_eq!(m.riders, 1);
 }
 
 #[test]

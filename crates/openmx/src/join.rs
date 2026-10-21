@@ -10,7 +10,9 @@
 //!   other seat is somebody's rider;
 //! * a seated one presses **Circle** to leave, and its seat is open again;
 //! * **Square** from any seated controller lets go of the seats whose controllers are gone (below);
-//! * **Start** from a seated controller is done, and **Circle** from one with no seat is back.
+//! * **Start** from a seated controller is done — from the menu once at least [`FEWEST`] seats are in
+//!   play, the host and one more (P51): a local game of one is a Free Ride — and **Circle** from one
+//!   with no seat is back.
 //!
 //! The seats are the riders, in order, and the split screen has one view per seat in play
 //! ([`Join::views`]): open seats are skipped, so two players on seats 1 and 3 are a two-way split.
@@ -35,6 +37,10 @@ pub const ON_SCREEN: usize = 4;
 
 /// The most seats the screen can be made with ([`Join::new`]): P35's eight.
 pub const MOST: usize = 8;
+
+/// The fewest seats in play a local game starts with from the menu (P51): the host and one more. A
+/// player alone rides a Free Ride.
+pub const FEWEST: usize = 2;
 
 /// What one seat holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -156,6 +162,12 @@ impl<D: Clone + PartialEq> Join<D> {
         (0..self.seats.len()).filter(|&i| self.seats[i].in_play()).collect()
     }
 
+    /// Whether Start is done: from the menu, once [`FEWEST`] seats are in play; from the pause menu
+    /// always, since the ride goes on with whoever is left in it.
+    pub fn can_start(&self) -> bool {
+        self.from == Opened::Pause || self.views().len() >= FEWEST
+    }
+
     /// The seats as the ride takes them: the controller on each seat, gone or in, or nobody.
     pub fn riders(&self) -> Vec<Option<D>> {
         self.seats.iter().map(|s| s.device().cloned()).collect()
@@ -213,7 +225,8 @@ impl<D: Clone + PartialEq> Join<D> {
                 Outcome::Stay
             }
             (Some(_), Press::Join) => Outcome::Stay,
-            (Some(_), Press::Start) => Outcome::Done,
+            (Some(_), Press::Start) if self.can_start() => Outcome::Done,
+            (Some(_), Press::Start) => Outcome::Stay,
         }
     }
 
