@@ -76,6 +76,9 @@ pub struct Online {
     /// [`game_sim::snapshot`]'s codec), and the peers handed to the session not taken on yet.
     spawn: Option<Vec<u8>>,
     arrived: Vec<String>,
+    /// The room as the network last said it, for the controller preset of a peer that arrives
+    /// (N13): its seat's pick says it, and the network seats a joiner before it arrives.
+    room: Option<openmx_net::Room>,
 }
 
 impl Online {
@@ -116,6 +119,7 @@ impl Online {
             time_scale: None,
             spawn: None,
             arrived: Vec::new(),
+            room: None,
         })
     }
 
@@ -142,6 +146,7 @@ impl Online {
             time_scale: None,
             spawn: None,
             arrived: Vec::new(),
+            room: None,
         })
     }
 
@@ -163,8 +168,9 @@ impl Online {
             hands: Controls::default(),
             shown: String::new(),
             time_scale: None,
-            spawn: Some(game_sim::snapshot::encode(spawn)),
+            spawn: Some(rides::seat_bytes(spawn)),
             arrived: Vec::new(),
+            room: None,
         })
     }
 
@@ -187,6 +193,7 @@ impl Online {
             time_scale: None,
             spawn: None,
             arrived: Vec::new(),
+            room: None,
         })
     }
 
@@ -232,7 +239,7 @@ impl Online {
         use openmx_net::Event;
         let me = self.net.me.clone();
         let session = &mut self.net;
-        let (spawn, arrived) = (&self.spawn, &mut self.arrived);
+        let (spawn, arrived, room) = (&self.spawn, &mut self.arrived, &mut self.room);
         match &mut self.wire {
             Wire::Udp(udp) => udp.receive(),
             Wire::Lobby { net, kept } => {
@@ -257,14 +264,27 @@ impl Online {
                             kept.push(e);
                         }
                         // a peer into the opened ride: the session takes it on once it hears it
+                        // on its own controller preset (N13), each seat its pick's
                         Event::Arrived { ref peer, ref seats } if let Some(spawn) = spawn => {
-                            match session.admit(peer, seats, spawn.clone()) {
+                            let pick = |s: usize| room.as_ref()?.seats.get(s)?.as_ref().filter(|seat| seat.peer == *peer);
+                            let presets: Vec<(usize, u8)> = seats
+                                .iter()
+                                .map(|&s| match pick(s) {
+                                    Some(seat) => (s, seat.pick.preset),
+                                    None => {
+                                        println!("online: {peer}'s seat {} is not in the room as last heard: preset 0", s + 1);
+                                        (s, 0)
+                                    }
+                                })
+                                .collect();
+                            match session.admit(peer, seats, rides::spawn_on(spawn, &presets)) {
                                 Ok(()) => arrived.push(peer.clone()),
                                 Err(why) => println!("online: {peer} cannot join: {why}"),
                             }
                             kept.push(e);
                         }
                         Event::Room(ref r) => {
+                            *room = Some(r.clone());
                             // one that left before it was taken on
                             let seated = r.peers();
                             for p in arrived.extract_if(.., |p| !seated.contains(p)) {

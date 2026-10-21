@@ -1310,6 +1310,8 @@ fn front_end(args: Args) -> Result<(), String> {
             shell.front.hear();
             shell.front.save();
         }
+        // 1P's controller preset into this machine's lobby pick (N13), for every machine's ride.
+        shell.front.menu.lobby.preset(seats.preset(args.pad_seat(0)));
         if shell.front.network.pump(&mut shell.front.menu) == Act::Online {
             act = Act::Online;
         }
@@ -2774,13 +2776,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     mods.bike(0, &mut phy);
                     sim.phy = Arc::new(phy);
                 }
+                // Each seat's bike through its player's controller preset (N13), as the room says
+                // it and the handshake held every machine to; an open seat's is 0.
+                sim.set_presets([seat.as_ref().map_or(0, |s| s.pick.preset as usize), 0]);
                 sim.rng = room.seed;
                 sims.push(sim);
             }
-            // The controller preset (P79) is this machine's and is not sent: every seat online rides
-            // the shipped table, preset 0.
-            if presets[0] != 0 {
-                println!("online: controller preset {} is not sent to the other machines — preset 0", presets[0]);
+            let mine = room.seats.iter().flatten().find(|s| s.peer == me).map_or(0, |s| s.pick.preset as usize);
+            let here = pad_seats.as_ref().map_or(presets[0], |s| s.preset(args.pad_seat(0)));
+            if mine != here {
+                println!("online: this machine's seat rides controller preset {mine}, its lobby pick's, not {here}");
             }
             let mut online = online::Online::lobby(net, &room, &me, sims)?;
             online.time_scale = mods.time_scale();
@@ -2922,9 +2927,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         seat.garage.set_every_bank(seats.plane(from).every_bank());
                         let report = seats.plane(from).fly(seats.scheme(from).ride(report), seat.inverted);
                         seat.reports = [report, Report::missing()];
-                        // The bike's commands through the seat's controller preset (P79); online, where
-                        // the preset is not sent, the shipped one.
-                        seat.sim.set_presets([if online.is_some() { 0 } else { seats.preset(from) }, 0]);
+                        // The bike's commands through the seat's controller preset (P79). Online the
+                        // ride's own seats hold theirs, the room's pick (N13), and this one is drawn
+                        // from them.
+                        seat.sim.set_presets([seats.preset(from), 0]);
                         seat.waiting = now.get(from) == Some(&SeatInput::Waiting);
                     }
                 }
@@ -3076,7 +3082,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         let mut room = openmx_net::Room::new(&settings.name, &args.track, settings.lobby_seats);
                         room.wrecks = args.wrecks && settings.wrecks;
                         room.modifiers = mods.text();
-                        let pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
+                        let mut pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
+                        // the preset this seat rides on now (N13), which the room tells a joiner's machine
+                        pick.preset = net::rides::preset(&world.seats[0].sim).unwrap_or(0) as u8;
                         room.take(openmx_net::HOST, &[pick]);
                         (room.riding, room.drop_in) = (true, true);
                         let net = front.network.open(&mut front.menu, room);

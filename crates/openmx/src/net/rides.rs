@@ -80,12 +80,14 @@ impl Game for Rides<'_> {
     }
 
     /// Every seat's state in [`game_sim::snapshot`]'s codec (N1): the seat count, then each seat's
-    /// bytes behind its length. What a resync sends a peer that fell out of step and a restart sends
-    /// everyone; the constants (tables, bike, the rider's disc files) stay each machine's own.
+    /// bytes behind its length ([`seat_bytes`]: its controller preset, then its state). What a resync
+    /// sends a peer that fell out of step and a restart sends everyone; the constants (tables, bike,
+    /// the rider's disc files) stay each machine's own, all but the preset (N13), which a seat a
+    /// join added on another machine could not know otherwise.
     fn encode(&self) -> Option<Vec<u8>> {
         let mut out = (self.sims.len() as u32).to_le_bytes().to_vec();
         for sim in self.sims.iter() {
-            let bytes = game_sim::snapshot::encode(sim);
+            let bytes = seat_bytes(sim);
             out.extend((bytes.len() as u32).to_le_bytes());
             out.extend(bytes);
         }
@@ -111,7 +113,7 @@ impl Game for Rides<'_> {
         for (seat, sim) in sims.iter_mut().enumerate() {
             let n = word(at, "a seat's length")?;
             let one = bytes.get(at + 4..at + 4 + n).ok_or(format!("seat {}'s state is cut short", seat + 1))?;
-            game_sim::snapshot::decode(sim, one).map_err(|e| format!("seat {}: {e}", seat + 1))?;
+            from_seat_bytes(sim, one).map_err(|e| format!("seat {}: {e}", seat + 1))?;
             at += 4 + n;
         }
         if at != bytes.len() {
@@ -123,14 +125,19 @@ impl Game for Rides<'_> {
 
     /// A new rider on seat `seat` (N10's join): the first seat's constants — its tables, its bike's
     /// `.phy`, the rider's files, which every machine has the same of — in `spawn`'s state, one
-    /// seat in [`game_sim::snapshot`]'s codec. Seats between the last and it are added the same,
+    /// seat in [`spawn_on`]'s bytes, which say the joiner's own preset for each of its seats (N13). Seats between the last and it are added the same,
     /// nobody's (their pads unplugged).
     fn seat(&mut self, seat: usize, spawn: &[u8]) -> Result<(), String> {
         if seat >= super::SEATS {
             return Err(format!("seat {} of {}", seat + 1, super::SEATS));
         }
         let mut sim = self.sims.first().ok_or("no seat to take the constants from")?.clone();
-        game_sim::snapshot::decode(&mut sim, spawn).map_err(|e| format!("the spawn: {e}"))?;
+        let (&n, rest) = spawn.split_first().ok_or("the spawn is empty")?;
+        let (presets, state) = rest.split_at_checked(2 * n as usize).ok_or("the spawn's presets are cut short")?;
+        from_seat_bytes(&mut sim, state).map_err(|e| format!("the spawn: {e}"))?;
+        if let Some(p) = presets.chunks(2).find(|p| p[0] as usize == seat) {
+            sim.set_presets([p[1] as usize, 0]);
+        }
         while self.sims.len() < seat {
             self.sims.push(sim.clone());
         }
@@ -140,6 +147,47 @@ impl Game for Rides<'_> {
         }
         Ok(())
     }
+}
+
+/// One seat in bytes (N13): its controller preset (P79), which its binding table is built on,
+/// then its state in [`game_sim::snapshot`]'s codec. A seat's preset is a constant of the ride like
+/// its bike, and every machine builds the seat's table on it; it travels with the state because a
+/// seat a join adds is decoded onto another seat's constants. A table built on none of them —
+/// which no online seat is: each is built by [`from_seat_bytes`] or `Sim::set_presets([p, 0])` —
+/// goes as preset 0.
+pub fn seat_bytes(sim: &Sim) -> Vec<u8> {
+    let mut out = vec![preset(sim).unwrap_or(0) as u8];
+    out.extend(game_sim::snapshot::encode(sim));
+    out
+}
+
+/// [`seat_bytes`] back onto `sim`: its state, and its binding table built on the preset.
+pub fn from_seat_bytes(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
+    let (&p, state) = bytes.split_first().ok_or("no controller preset")?;
+    if p as usize >= game_sim::bindings::PRESETS {
+        return Err(format!("controller preset {p}"));
+    }
+    game_sim::snapshot::decode(sim, state)?;
+    sim.set_presets([p as usize, 0]);
+    Ok(())
+}
+
+/// A joiner's spawn for [`Rides::seat`] (N13): `spawn`, [`seat_bytes`] of where the ride starts,
+/// behind the controller preset of each of the joiner's seats as (seat, preset) — their count,
+/// then the pairs. A seat not in the list rides the spawn's own preset.
+pub fn spawn_on(spawn: &[u8], presets: &[(usize, u8)]) -> Vec<u8> {
+    let mut out = vec![presets.len() as u8];
+    for &(seat, preset) in presets {
+        out.extend([seat as u8, preset]);
+    }
+    out.extend(spawn);
+    out
+}
+
+/// Which controller preset a seat's bike is read through: the one whose table on pad 0 (and the
+/// shipped one on pad 1, which no online seat reads) is the seat's.
+pub fn preset(sim: &Sim) -> Option<usize> {
+    (0..game_sim::bindings::PRESETS).find(|&p| game_sim::bindings::Table::built([p, 0]) == sim.bindings)
 }
 
 /// The Timer 0 a PS2 holding 30 fps reads at its `frame`th frame: two NTSC fields a frame, 19,219.2
