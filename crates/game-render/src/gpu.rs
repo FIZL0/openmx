@@ -52,6 +52,9 @@ use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
+mod sprites;
+pub use sprites::Sprite;
+
 /// The format of the depth buffer.
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The format an offscreen frame is drawn in: plain bytes, as the rasteriser's are.
@@ -426,6 +429,8 @@ pub struct Renderer {
     batches: Vec<Batch>,
     flat: Vec<InstanceRaw>,
     blit: Option<Blit>,
+    /// The particle sheet and this frame's particles (P58).
+    sprites: Option<sprites::Sprites>,
 }
 
 /// A prop the scene places, as culling needs it.
@@ -1146,6 +1151,7 @@ impl Renderer {
             batches: Vec::new(),
             flat: Vec::new(),
             blit: None,
+            sprites: None,
         })
     }
 
@@ -1939,6 +1945,12 @@ impl Renderer {
                             drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
                         }
                     }
+                }
+                // The particles, over the models (P58).
+                if let Some(sprites) = &self.sprites
+                    && sprites.draw(&mut pass, &self.view_bind, &offset)
+                {
+                    drawn.draws += 1;
                 }
             }
             // The overlay, over the whole frame.
