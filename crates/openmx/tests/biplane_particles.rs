@@ -11,6 +11,11 @@
 //! a rate drawn between its two a second, carried from frame to frame; the smoke is off while the
 //! plane is wrecked; an exhaust is off once `throttle × ½ × (MaxSpeed − airspeed)` is not positive; the
 //! wreck's dust comes from the collision model's contacts, and from nothing while it touches nothing.
+//!
+//! P61 adds the ground and the wind: a particle whose `.emt` has a `GroundLevel`, or whose collision
+//! model entry says `HasCollision`, meets the terrain under it on odd frames — under it and going
+//! down, its velocity is scaled by `Restitution`, then within a tenth of a foot it lies there and
+//! deeper it bounces; `Wind` adds the system's wind to a particle's start velocity.
 
 #[allow(dead_code)]
 #[path = "../src/particles.rs"]
@@ -243,6 +248,7 @@ fn a_particle_ages_grows_moves_drags_and_falls_in_that_order() {
         life: 100.0,
         frame: 0,
         mirror: (false, false),
+        landed: false,
     };
     assert!(p.step(&emt, 0.05));
     assert_eq!(p.age, 50.0, "milliseconds");
@@ -325,6 +331,16 @@ fn the_discs_biplane_particles() {
     assert_eq!(dust.frames, (49, 64));
     // The exhaust has no gate of its own.
     assert_eq!(fx.entries[3].emt.min_speed, 0.0);
+    // P61: only the chunks meet the ground — by their entry's `HasCollision = TRUE`, as
+    // `wreckchunks.emt` has no `GroundLevel` — keeping 0.6 of their velocity. The dust and the smoke
+    // take the wind, which the track's system holds at nothing.
+    let chunks = &fx.entries[1];
+    assert_eq!((chunks.emt.collides, chunks.emt.restitution, chunks.emt.gravity), (true, 0.6, 2.0));
+    assert!(list.iter().any(|e| e.name == "Vehicle Chunks" && e.has_collision));
+    assert!(fx.entries.iter().filter(|e| e.name != "Vehicle Chunks").all(|e| !e.emt.collides));
+    let winded: Vec<&str> = fx.entries.iter().filter(|e| e.emt.wind).map(|e| e.name.as_str()).collect();
+    assert_eq!(winded, ["Vehicle Dust", "Smoke"]);
+    assert_eq!(fx.wind, V3::default());
 
     // Flown through: the smoke runs over 35 ft/s and stops on the wreck; the dust needs a contact.
     let mut fx = fx;
@@ -345,4 +361,160 @@ fn the_discs_biplane_particles() {
     assert!(fx.particles.len() <= before, "the wreck tick makes no smoke");
     fx.step(&PlaneFrame { wrecked: true, vel: v3(0.0, -60.0, 50.0), ground_contacts: vec![v3(0.0, 0.0, 0.0)], ..PlaneFrame::default() }, DT);
     assert!(fx.counts().iter().any(|c| c.0 == "Vehicle Dust" && c.1 >= 1), "{:?}", fx.counts());
+
+    // The wreck's chunks on flat ground: a third of a second of contacts at 15 ft/s and more, then
+    // half a second; none is ever more than two frames' fall under the ground, and some lie on it.
+    let hit = PlaneFrame { wrecked: true, vel: v3(0.0, -10.0, 30.0), ground_contacts: vec![v3(0.0, 0.0, 0.0)], ..PlaneFrame::default() };
+    let mut lowest = f32::MAX;
+    for f in 0..25 {
+        let frame = if f < 10 { hit.clone() } else { PlaneFrame { wrecked: true, ..PlaneFrame::default() } };
+        fx.step_over(&frame, DT, &mut |_| Some(0.0));
+        lowest = fx.particles.iter().filter(|p| fx.entries[p.emitter].name == "Vehicle Chunks").map(|p| p.at.y).fold(lowest, f32::min);
+    }
+    let chunks: Vec<&Particle> = fx.particles.iter().filter(|p| fx.entries[p.emitter].name == "Vehicle Chunks").collect();
+    let landed = chunks.iter().filter(|p| p.landed).count();
+    assert!(landed > 0 && lowest > -2.0, "{landed} of {} landed, lowest {lowest}", chunks.len());
+    assert!(chunks.iter().filter(|p| p.landed).all(|p| p.at.y == 0.0));
+}
+
+/// Chunks that fall onto the ground: 60 a second, a second's life, thrown up at 10 ft/s, twice the
+/// gravity, gated at 1 ft/s. No `GroundLevel`: the entry's `HasCollision` is what makes them collide.
+const CHUNKS: &str = "[General Info]\nParticleGroupName=\"Grit\"\nMinimumEmitRate=60\nMaximumEmitRate=60\n\
+MinimumLife=1000\nMaximumLife=1000\nVelocity=0, 10, 0\nGravityMultiplier=2\nRestitution = 0.60\nMinimumEmissionSpeed=1\n\
+[Properties]\nHasVelocity=T\nGravity=T\nWind=T\n";
+
+fn chunks(has_collision: &str) -> PlaneFx {
+    let list = biplane::emitters(&format!(
+        "[Chunks]\nType = CollisionModel\nDisable = NoContact\nHasCollision = {has_collision}\nEmitter = chunks.emt\n\
+         [Thrown]\nType = Generic\nAttachedToSoultree = Stack_L\nHasCollision = TRUE\nEmitter = chunks.emt\n"
+    ));
+    PlaneFx::new(&list, Atlas::parse(SHEET, 64, 64), |n| (n == "chunks.emt").then(|| CHUNKS.as_bytes().to_vec()))
+}
+
+/// A particle of `emt` at `y`, going `vy`.
+fn falling(y: f32, vy: f32) -> Particle {
+    Particle {
+        emitter: 0,
+        at: v3(1.0, y, 2.0),
+        vel: v3(4.0, vy, -2.0),
+        size: 1.0,
+        growth: 0.0,
+        age: 0.0,
+        life: 10_000.0,
+        frame: 0,
+        mirror: (false, false),
+        landed: false,
+    }
+}
+
+#[test]
+fn an_emt_says_whether_it_meets_the_ground_and_takes_the_wind() {
+    let d = Emt::parse("[General Info]\n");
+    assert_eq!((d.collides, d.restitution, d.wind), (false, 0.55, false), "the constructor's");
+    let e = Emt::parse("[General Info]\nGroundLevel=1.000000\nRestitution=0.100000\n[Properties]\nWind=T\nGravity=TRUE\nHasDrag=0\n");
+    assert_eq!((e.collides, e.restitution, e.wind), (true, 0.1, true));
+    assert!(e.falls && !e.has_drag, "a switch reads like the original's: TRUE on, 0 off");
+    // The chunks' entry collides by its HasCollision, and only a collision model's entry reads it.
+    let fx = chunks("TRUE");
+    assert_eq!(fx.entries.iter().map(|e| (e.name.as_str(), e.emt.collides)).collect::<Vec<_>>(), [("Chunks", true), ("Thrown", false)]);
+    assert!(!chunks("FALSE").entries[0].emt.collides);
+}
+
+#[test]
+fn a_particle_bounces_off_the_ground_then_lies_on_it() {
+    let mut emt = Emt::parse(CHUNKS);
+    emt.collides = true;
+    // Deep under the ground and going down: 0.6 of its velocity, the y turned round, left where it is.
+    let mut p = falling(-0.5, -10.0);
+    p.land(&emt, 0.0);
+    assert_eq!((p.at.y, p.vel), (-0.5, v3(4.0 * 0.6, 10.0 * 0.6, -2.0 * 0.6)));
+    assert!(!p.landed);
+    // Going up, or above the ground: nothing.
+    let before = p.clone();
+    p.land(&emt, 0.0);
+    assert_eq!(p, before, "going up");
+    let mut q = falling(0.5, -10.0);
+    q.land(&emt, 0.0);
+    assert_eq!(q, falling(0.5, -10.0), "above the ground");
+    // Within a tenth of a foot: scaled, put on the ground, and it lies there.
+    let mut r = falling(9.95, -3.0);
+    r.land(&emt, 10.0);
+    assert_eq!((r.at.y, r.vel, r.landed), (10.0, v3(4.0 * 0.6, -3.0 * 0.6, -2.0 * 0.6), true));
+    let lying = r.at;
+    assert!(r.step(&emt, DT));
+    assert_eq!(r.at, lying, "no longer moves or falls");
+    assert_eq!(r.age, DT * 1000.0, "but still ages");
+    // A tenth exactly is a bounce.
+    let mut t = falling(-0.1, -1.0);
+    t.land(&emt, 0.0);
+    assert!(!t.landed && t.vel.y > 0.0);
+    // An emitter that does not collide never meets it.
+    let mut u = falling(-5.0, -10.0);
+    u.land(&Emt::parse(CHUNKS), 0.0);
+    assert_eq!(u, falling(-5.0, -10.0));
+}
+
+#[test]
+fn the_ground_is_met_on_odd_frames() {
+    let mut fx = only(chunks("TRUE"), "Chunks");
+    let none = PlaneFrame::default();
+    let asked = std::cell::Cell::new(0);
+    let mut ground = |_: V3| {
+        asked.set(asked.get() + 1);
+        Some(0.0)
+    };
+    fx.particles.push(falling(-1.0, -20.0));
+    fx.step_over(&none, DT, &mut ground);
+    assert_eq!(fx.tick, 1);
+    assert_eq!(asked.get(), 1, "frame 1 is odd: asked about the one particle");
+    assert!(fx.particles[0].vel.y > 0.0, "and it bounced: {:?}", fx.particles[0]);
+    fx.particles[0].vel.y = -20.0;
+    fx.step_over(&none, DT, &mut ground);
+    assert_eq!(asked.get(), 1, "frame 2 is even: not asked");
+    assert!(fx.particles[0].vel.y < -20.0, "and it fell on: {:?}", fx.particles[0]);
+    fx.step_over(&none, DT, &mut ground);
+    assert_eq!(asked.get(), 2);
+    // No ground under it is not a collision.
+    fx.particles = vec![falling(-1.0, -20.0)];
+    fx.tick = 0;
+    fx.step_over(&none, DT, &mut |_| None);
+    assert!(fx.particles[0].vel.y < 0.0);
+}
+
+#[test]
+fn wreck_chunks_stay_on_the_ground() {
+    // Chunks off a contact on flat ground at 50 for a third of a second, then a second's wait — the
+    // first ones' life: with the ground they bounce and come to lie on it;
+    // over no ground they fall through it, as P58's did.
+    let run = |ground: bool| {
+        let mut fx = only(chunks("TRUE"), "Chunks");
+        let wreck = PlaneFrame { wrecked: true, vel: v3(0.0, 0.0, 20.0), ground_contacts: vec![v3(0.0, 50.0, 0.0)], ..PlaneFrame::default() };
+        let mut lowest = f32::MAX;
+        for f in 0..30 {
+            let frame = if f < 10 { wreck.clone() } else { PlaneFrame { wrecked: true, ..PlaneFrame::default() } };
+            fx.step_over(&frame, DT, &mut |_| ground.then_some(50.0));
+            lowest = fx.particles.iter().map(|p| p.at.y).fold(lowest, f32::min);
+        }
+        (fx.particles.iter().filter(|p| p.landed).count(), fx.particles.len(), lowest)
+    };
+    let (landed, alive, lowest) = run(true);
+    assert!(alive > 0 && landed * 2 > alive, "most lie on the ground by the end: {landed} of {alive}");
+    // Tested every other frame, a chunk can be up to two frames' fall under it before it turns round.
+    assert!(lowest > 50.0 - 2.0, "{lowest}");
+    let (landed, _, lowest) = run(false);
+    assert_eq!(landed, 0);
+    assert!(lowest < 40.0, "{lowest}");
+}
+
+#[test]
+fn the_wind_is_added_to_the_start_velocity() {
+    let first = |wind: V3| {
+        let mut fx = only(chunks("TRUE"), "Chunks");
+        fx.wind = wind;
+        let f = PlaneFrame { wrecked: true, vel: v3(0.0, 0.0, 20.0), ground_contacts: vec![v3(0.0, 50.0, 0.0)], ..PlaneFrame::default() };
+        fx.step(&f, DT);
+        fx.particles[0].vel
+    };
+    assert_eq!(first(V3::default()), v3(0.0, 10.0, 0.0));
+    assert_eq!(first(v3(3.0, 0.0, -1.0)), v3(3.0, 10.0, -1.0));
 }

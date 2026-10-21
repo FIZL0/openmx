@@ -24,6 +24,15 @@
 //! **A particle, a frame:** its age grows by the frame in milliseconds and it dies past its life; a
 //! growing one grows by its rate and rises by the same; one with a velocity moves by it; drag takes
 //! `Drag` of the velocity a second and gravity `GravityMultiplier` of 32.2 ft/s² — in that order.
+//! Then, on a frame whose tick count is odd, one that collides meets the terrain under it (P61): an
+//! `.emt` with a `GroundLevel` collides, and so does a `CollisionModel` entry's with `HasCollision`
+//! (the wreck's chunks). Under the ground and still going down, its velocity is scaled by
+//! `Restitution`; within a tenth of a foot of the ground it is put on it and lies there for the rest
+//! of its life, and deeper it bounces, its y velocity turned round where it is ([`Particle::land`]).
+//!
+//! **Wind** is not in the update: an `.emt` with `Wind` adds the particle system's wind to each
+//! particle's start velocity, before the noise. The original's track system is built with no wind and
+//! nothing sets it, so on the disc's tracks it adds nothing ([`PlaneFx::wind`]).
 //!
 //! **Which emitters are on** is the vehicle's particle manager's: a flag word per frame, `Wrecking`
 //! while the plane is wrecked and `NotWrecking` while it is not, and an emitter is on while none of its
@@ -98,6 +107,12 @@ pub struct Emt {
     pub gravity: f32,
     /// `MinimumEmissionSpeed`, feet a second.
     pub min_speed: f32,
+    /// `GroundLevel` is in the file: its particles meet the ground. The value itself is not what they
+    /// meet — the terrain under them is — so only its presence counts. A `CollisionModel` entry's
+    /// `HasCollision` switches it on as well ([`PlaneFx::new`]).
+    pub collides: bool,
+    /// `Restitution`: what share of its velocity a particle keeps when it meets the ground.
+    pub restitution: f32,
     /// The `[Properties]` this port acts on.
     pub has_velocity: bool,
     pub grows: bool,
@@ -108,6 +123,8 @@ pub struct Emt {
     pub apply_emitter_velocity: bool,
     pub mirror_x: bool,
     pub mirror_y: bool,
+    /// `Wind`: the particle system's wind is added to each particle's start velocity.
+    pub wind: bool,
 }
 
 impl Default for Emt {
@@ -129,6 +146,8 @@ impl Default for Emt {
             fade_out: 0.7,
             gravity: 3.0,
             min_speed: 0.0,
+            collides: false,
+            restitution: 0.55,
             has_velocity: false,
             grows: false,
             fades: false,
@@ -138,6 +157,7 @@ impl Default for Emt {
             apply_emitter_velocity: false,
             mirror_x: false,
             mirror_y: false,
+            wind: false,
         }
     }
 }
@@ -154,7 +174,7 @@ impl Emt {
                 .filter(|n| n.len() == 3)
                 .map_or(or, |n| v3(n[0], n[1], n[2]))
         };
-        let flag = |key: &str| find(key).is_some_and(|v| v.trim().eq_ignore_ascii_case("T"));
+        let flag = |key: &str| find(key).is_some_and(ini::switch);
         let d = Emt::default();
         Emt {
             group: find("ParticleGroupName").map_or(String::new(), |g| g.trim().trim_matches('"').to_string()),
@@ -172,6 +192,8 @@ impl Emt {
             fade_out: number("FadeOutFromPercentAge", d.fade_out),
             gravity: number("GravityMultiplier", d.gravity),
             min_speed: number("MinimumEmissionSpeed", d.min_speed),
+            collides: find("GroundLevel").is_some(),
+            restitution: number("Restitution", d.restitution),
             has_velocity: flag("HasVelocity"),
             grows: flag("Grows"),
             fades: flag("Fades"),
@@ -181,6 +203,7 @@ impl Emt {
             apply_emitter_velocity: flag("ApplyEmitterVelocity"),
             mirror_x: flag("RandomMirrorAboutX"),
             mirror_y: flag("RandomMirrorAboutY"),
+            wind: flag("Wind"),
         }
     }
 }
@@ -285,6 +308,9 @@ pub struct Particle {
     /// The sheet's frame, and whether it is drawn mirrored left to right and top to bottom.
     pub frame: usize,
     pub mirror: (bool, bool),
+    /// It met the ground slower than a tenth of a foot under it and lies there: it no longer moves,
+    /// drags, falls or meets the ground again. It still ages and grows.
+    pub landed: bool,
 }
 
 impl Particle {
@@ -298,6 +324,9 @@ impl Particle {
             self.size = (self.size + self.growth * dt).max(0.0);
             self.at.y += self.growth * dt;
         }
+        if self.landed {
+            return true;
+        }
         if emt.has_velocity {
             self.at = self.at.add(self.vel.scale(dt));
         }
@@ -308,6 +337,26 @@ impl Particle {
             self.vel.y -= emt.gravity * GRAVITY * dt;
         }
         true
+    }
+
+    /// Meet the ground at height `ground` under it (P61), after [`Particle::step`] on a frame the
+    /// ground is tested: only when it is under the ground and still going down. Its velocity is
+    /// scaled by the restitution; then within a tenth of a foot it is put on the ground and lies
+    /// there, and deeper it bounces, its y velocity turned round where it is.
+    pub fn land(&mut self, emt: &Emt, ground: f32) {
+        if self.landed || !emt.collides {
+            return;
+        }
+        let under = self.at.y - ground;
+        if under < 0.0 && self.vel.y < 0.0 {
+            self.vel = self.vel.scale(emt.restitution);
+            if -0.1 < under {
+                self.at.y = ground;
+                self.landed = true;
+            } else {
+                self.vel.y = -self.vel.y;
+            }
+        }
     }
 
     /// How opaque it is, `0..1`: faded in up to `FadeInTillPercentAge` of its life when the file
@@ -337,7 +386,8 @@ pub struct Source {
 impl Source {
     /// One frame of an emitter at `at`, on: `turn` is its node's rotation (None for a world-aligned
     /// one), `velocity` the file's velocity after its type has had its say, `moving` the emitter's own
-    /// velocity for `ApplyEmitterVelocity`. Pushes what it emits onto `out`, made by emitter `index`.
+    /// velocity for `ApplyEmitterVelocity`, `wind` the particle system's for `Wind`. Pushes what it
+    /// emits onto `out`, made by emitter `index`.
     #[allow(clippy::too_many_arguments)]
     pub fn emit(
         &mut self,
@@ -349,6 +399,7 @@ impl Source {
         turn: Option<M4>,
         velocity: V3,
         moving: V3,
+        wind: V3,
         dt: f32,
         rng: &mut Rng,
         out: &mut Vec<Particle>,
@@ -369,10 +420,14 @@ impl Source {
         let turned = |d: V3| turn.map_or(d, |m| m.dir(d));
         for i in 0..n {
             let along = from.add(at.sub(from).scale((i + 1) as f32 / n as f32));
-            let mut vel = turned(velocity).add(turned(rng.spread(emt.noise)));
+            let mut vel = turned(velocity);
             if emt.apply_emitter_velocity {
                 vel = vel.add(moving);
             }
+            if emt.wind {
+                vel = vel.add(wind);
+            }
+            let vel = vel.add(turned(rng.spread(emt.noise)));
             let life = rng.between(emt.life);
             let (first, last) = frames;
             let frame = first + ((rng.unit() * (last + 1 - first) as f32) as usize).min(last - first);
@@ -386,6 +441,7 @@ impl Source {
                 life,
                 frame,
                 mirror: (emt.mirror_x && rng.unit() < 0.5, emt.mirror_y && rng.unit() < 0.5),
+                landed: false,
             });
         }
     }
@@ -485,6 +541,13 @@ pub struct PlaneFx {
     /// The list's entries the port does not emit from, by name and type.
     pub skipped: Vec<(String, String)>,
     pub rng: Rng,
+    /// The particle system's wind, feet a second, which an emitter with `Wind` adds to what it emits.
+    /// The original's track system is built with none and nothing sets it: free06's and the first
+    /// recording's track hold 0, 0, 0 in their save states (journal `biplane-particles` P61).
+    pub wind: V3,
+    /// Frames stepped. The original tests a particle against the ground only on a frame its tick
+    /// counter is odd; this counts the fx's own.
+    pub tick: u32,
 }
 
 impl PlaneFx {
@@ -504,7 +567,7 @@ impl PlaneFx {
                     continue;
                 }
             };
-            let Some(emt) = read(&e.emitter).map(|b| Emt::parse(&ini::text(&b))) else {
+            let Some(mut emt) = read(&e.emitter).map(|b| Emt::parse(&ini::text(&b))) else {
                 skipped.push((e.name.clone(), format!("{}: no {}", e.kind, e.emitter)));
                 continue;
             };
@@ -512,6 +575,8 @@ impl PlaneFx {
                 skipped.push((e.name.clone(), format!("{}: no group {:?}", e.kind, emt.group)));
                 continue;
             };
+            // The collision model's entry turns the ground on for its emitter after reading the `.emt`.
+            emt.collides |= kind == Kind::CollisionModel && e.has_collision;
             entries.push(Entry {
                 name: e.name.clone(),
                 kind,
@@ -522,14 +587,37 @@ impl PlaneFx {
                 sources: Vec::new(),
             });
         }
-        PlaneFx { entries, atlas, particles: Vec::new(), skipped, rng: Rng::new(0x5eed_0058) }
+        PlaneFx { entries, atlas, particles: Vec::new(), skipped, rng: Rng::new(0x5eed_0058), wind: V3::default(), tick: 0 }
+    }
+
+    /// One frame of `dt` seconds over no ground at all: [`PlaneFx::step_over`] with nothing under
+    /// anything. The shell always has its terrain to hand; the tests step without one.
+    #[allow(dead_code)]
+    pub fn step(&mut self, plane: &PlaneFrame, dt: f32) {
+        self.step_over(plane, dt, &mut |_| None);
     }
 
     /// One frame of `dt` seconds: the particles already in the air first, then what each entry emits
-    /// this frame, as the original's manager runs them.
-    pub fn step(&mut self, plane: &PlaneFrame, dt: f32) {
+    /// this frame, as the original's manager runs them. `ground` is the terrain's height under a point,
+    /// `None` where there is none; a particle that collides meets it on odd frames
+    /// ([`Particle::land`]).
+    pub fn step_over(&mut self, plane: &PlaneFrame, dt: f32, ground: &mut dyn FnMut(V3) -> Option<f32>) {
+        self.tick = self.tick.wrapping_add(1);
         let entries = &self.entries;
-        self.particles.retain_mut(|p| p.step(&entries[p.emitter].emt, dt));
+        let tested = self.tick & 1 == 1;
+        self.particles.retain_mut(|p| {
+            let emt = &entries[p.emitter].emt;
+            if !p.step(emt, dt) {
+                return false;
+            }
+            if tested && emt.collides && !p.landed {
+                // No ground under it leaves the point where it is: not under anything.
+                let under = ground(p.at).unwrap_or(p.at.y);
+                p.land(emt, under);
+            }
+            true
+        });
+        let wind = self.wind;
         let global = if plane.wrecked { Disable::WRECKING } else { Disable::NOT_WRECKING };
         for (index, entry) in self.entries.iter_mut().enumerate() {
             match entry.kind {
@@ -547,7 +635,7 @@ impl PlaneFx {
                     match node {
                         Some((_, m)) if on => {
                             let at = m.point(v3(0.0, 0.0, 0.0));
-                            source.emit(index, &entry.emt, entry.frames, at, None, Some(*m), velocity, plane.vel, dt, &mut self.rng, &mut self.particles);
+                            source.emit(index, &entry.emt, entry.frames, at, None, Some(*m), velocity, plane.vel, wind, dt, &mut self.rng, &mut self.particles);
                         }
                         _ => source.off(),
                     }
@@ -573,7 +661,7 @@ impl PlaneFx {
                         // As if the point had come from the body's velocity a frame back: its speed is
                         // the body's, and its particles spread along that path.
                         let from = at.sub(plane.vel.scale(dt));
-                        source.emit(index, &entry.emt, entry.frames, at, Some(from), None, entry.emt.velocity, plane.vel, dt, &mut self.rng, &mut self.particles);
+                        source.emit(index, &entry.emt, entry.frames, at, Some(from), None, entry.emt.velocity, plane.vel, wind, dt, &mut self.rng, &mut self.particles);
                     }
                 }
             }
