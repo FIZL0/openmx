@@ -83,6 +83,14 @@ impl Ghost {
         }
     }
 
+    /// Whether this tick put the bike back: the one tick the clock still holds its whole length
+    /// (S66). A picture blended between ticks cuts here, as it does for any other jump — the
+    /// original draws every tick where it is, and a put-back lands a few feet from the wreck, too
+    /// close for a distance test to call it one.
+    pub fn put_back(&self) -> bool {
+        self.on && self.clock == Self::LENGTH
+    }
+
     /// What to draw the bike and the rider at: below 1 while the ghost is on, 1 otherwise.
     pub fn shown(&self) -> f32 {
         if self.on { self.alpha.0 } else { 1.0 }

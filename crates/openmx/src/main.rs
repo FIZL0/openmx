@@ -3023,7 +3023,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 rig.hud.note_wreck(why);
             }
             if seat.said.respawned {
-                println!("{who}back on the start line");
+                println!("{who}put back");
             }
             // Online, the other machines' riders past the local players have no view of their own:
             // posed and drawn, no camera.
@@ -3221,7 +3221,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     continue;
                 }
                 let now = perf.time(Stage::Skinning, || Shown::of(seat, rig, &assets, ragdolled.as_ref(), true));
-                let shown = before.get(p).map_or(now.clone(), |b| b.blend(&now, &blend));
+                // A put-back is a cut: the bike and the rider are drawn where it set them, not slid
+                // there from the wreck (S66).
+                let shown = match before.get(p) {
+                    Some(b) if !seat.sim.rider.ghost.put_back() => b.blend(&now, &blend),
+                    _ => now.clone(),
+                };
                 let bike_at = shown.bike;
                 let pose = (!shown.chassis.is_empty()).then(|| {
                     gpu_poses.push(shown.chassis.clone());
