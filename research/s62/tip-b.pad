@@ -1,0 +1,5 @@
+# a touch of gas, then the stick hard right at a crawl
+press cross 300
+stick l 1 0
+sleep 9000
+release

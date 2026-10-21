@@ -1,0 +1,63 @@
+# the stick hard right, the gas pulsed 200 ms in 800: a crawl in a tight turn
+stick l 1 0
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+press cross 200
+wait 600
+release

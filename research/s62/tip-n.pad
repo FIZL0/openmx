@@ -1,0 +1,55 @@
+# tip-h's crawl over the drop and up the far slope; where it stalls, leaning hard back on a little gas
+stick l 0 0
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+press cross 150
+wait 650
+stick l 0 1
+press cross 250
+wait 550
+press cross 250
+wait 550
+press cross 250
+wait 550
+press cross 250
+wait 550
+press cross 250
+wait 550
+press cross 250
+wait 550
+press cross 250
+wait 550
+press cross 250
+wait 550
+wait 4000
+release
