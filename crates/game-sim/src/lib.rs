@@ -756,6 +756,10 @@ pub mod off_map;
 /// ticks later.
 pub mod wreck_page;
 
+/// The points (S79): what a trick, a wheelie, a stoppie and a backflip score, the combo they add up
+/// in, and the rider's total it is banked into — or lost from, on a wreck.
+pub mod score;
+
 #[cfg(test)]
 mod tests {
     use super::*;

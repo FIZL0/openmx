@@ -427,15 +427,15 @@ const RIDERS_HASHES: &[(u64, u64)] = &[
     (96, 0xb854c17da1d3a831),
     (128, 0xa96a204e511b33fc),
     (160, 0x05928d61f126105b),
-    (192, 0x4a4ca68ccf156532),
-    (224, 0xb78ef508a85ebaaa),
-    (256, 0x2bf53cee7dd4d358),
+    (192, 0xd3d012fb35b3ab5a),
+    (224, 0xe5dcc5b387849f6d),
+    (256, 0x5617b8b1fcfe43ff),
 ];
 /// FNV-1a over every tick's hash of the run.
-const RIDERS_DIGEST: u64 = 0xa96c83447aaadf67;
+const RIDERS_DIGEST: u64 = 0xa6635a0cb8dc9a31;
 /// FNV-1a over the session's `snapshot::encode` bytes at the end, and how many bytes they were.
-const RIDERS_WIRE_DIGEST: u64 = 0x69f5de82a7d3e210;
-const RIDERS_WIRE_LEN: usize = 13159;
+const RIDERS_WIRE_DIGEST: u64 = 0x2397a9e3c6dc6b75;
+const RIDERS_WIRE_LEN: usize = 13287;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed
