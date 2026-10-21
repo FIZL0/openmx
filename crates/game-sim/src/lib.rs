@@ -294,6 +294,9 @@ impl Sim {
                 .filter(|&j| j != i)
                 .map(|j| self.rider_of(j))
                 .filter(|r| r.state.wreck.is_none())
+                // A ghost is nobody's rival: its bodies ignore the vehicle class, and the pair
+                // filter reads both bodies' lists (S63, `ghost`).
+                .filter(|r| !r.ghost.on)
                 .map(|r| r.ride.rival())
                 .collect();
             let tables = &self.tables;
@@ -697,6 +700,10 @@ pub mod noise;
 /// The wreck sound's pick: which of the rider's wreck sounds plays, and the one draw from the
 /// generator it costs.
 pub mod wreck_sound;
+
+/// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
+/// through it until it has.
+pub mod ghost;
 
 #[cfg(test)]
 mod tests {

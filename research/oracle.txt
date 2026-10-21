@@ -3842,3 +3842,15 @@ wheel_hinge_torque boot 0x0025d0f0 (scale in f12, wheel, torque) the torque unro
 # 1/(r * (r * ((m/2) * 6/12))) with m = (6/12) * 2*pi*r*r, 0.614 for race125p; TireInertia (+0x68)
 # only feeds the gyroscopic torque. WheelFriction is a rolling torque -fade*WheelFriction, never grip;
 # grip is MaxDriveForce*load, past which the tire spins (or locks) and pushes SkidDriveForce*load.
+# S63: the ghost's collision half, from the decompilation (no two-rider session of the original exists).
+#   0x0011b080 / 0x0011b160 add / clear one class mask in a body's ignore list (+0xec words, +0xf0
+#   count); 0x0011b070 writes the list's mode +0xe8 (1 exclude, 0 include). The pair filter 0x00119d70
+#   (a, b, 1) rejects a pair when either side's list, in exclude mode, holds the other's class +0x84 —
+#   and in include mode passes it only when the list holds it. The overlap/sweep query 0x0011a150 runs
+#   every candidate of type 2 through it, and the bike's own collide 0x002708a0 runs that same query on
+#   its body before it adds its ray contacts (own + mirrored), so a ghost neither strikes nor is struck.
+#   ghost_step's include window makes its query see vehicles only; another ghost's own list (exclude)
+#   still rejects it, so two ghosts do not hold each other's clocks. Bit 0x20 of +0x116 is set by the
+#   query on a passing overlap; where it is cleared between ticks was not found (only on an inactive
+#   body, at the query's end). The type-3 candidates (not filtered) also set it unless +0x116 bit 0 —
+#   live (P57) the clock ran on the ground, so they do not reach a riding bike.

@@ -492,6 +492,10 @@ impl State for Sim {
         // so a one-player walk — and every hash pinned on one — is what it was before (S54).
         if !self.others.is_empty() {
             w.list("players", &self.others);
+            // Every player's put-back ghost, player 1's too: it reaches the simulation only through
+            // the other riders (S63), so a one-player walk leaves it out like the group above.
+            let ghosts: Vec<crate::ghost::Ghost> = (0..self.players()).map(|i| self.rider_of(i).ghost).collect();
+            w.list("ghosts", &ghosts);
         }
     }
 }
