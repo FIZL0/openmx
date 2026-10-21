@@ -473,7 +473,7 @@ angle_table_build           boot 0x0012e150 () -> 1: allocates 30001 floats, fil
 angle_table_ptr             boot 0x0046a688 the global the table is allocated into: a float*
 angle_table_scale           boot 0x0046a6a0 the global 14999.5 the builder stores, read by the lookup
 float_to_double             boot 0x00417b48 (f12) -> double in v0; the EE has no hardware doubles
-acos_double                 boot 0x0040aba8 (double in a0) -> acos in v0, software, ~9000 instructions
+acos_double_thunk           boot 0x0040aba8 (double in a0) -> acos in v0, software, ~9000 instructions
 double_to_float             boot 0x00418700 (double in a0) -> f0
 #
 # The gesture.
