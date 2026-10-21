@@ -140,6 +140,8 @@ struct MaterialKey {
     shading: (u8, [u32; 4]),
     cutoff: u8,
     pipeline: PipelineKey,
+    /// Clamped at the texture's edges along u and v rather than repeated.
+    clamp: [bool; 2],
 }
 
 impl MaterialKey {
@@ -162,6 +164,7 @@ impl MaterialKey {
                 blend,
                 depth_write: s.depth_write,
             },
+            clamp: s.clamp,
         }
     }
 }
@@ -1284,6 +1287,20 @@ impl Renderer {
             contents: bytemuck::bytes_of(&uniform),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        // The few materials that clamp (palm fronds, bark, cut-outs) get a sampler of their own;
+        // everything else shares the repeating one.
+        let clamped = (key.clamp != [false; 2]).then(|| {
+            let mode = |on: bool| if on { wgpu::AddressMode::ClampToEdge } else { wgpu::AddressMode::Repeat };
+            self.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("material clamp"),
+                address_mode_u: mode(key.clamp[0]),
+                address_mode_v: mode(key.clamp[1]),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                ..Default::default()
+            })
+        });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material"),
             layout: &self.material_layout,
@@ -1298,7 +1315,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(clamped.as_ref().unwrap_or(&self.sampler)),
                 },
             ],
         });
@@ -2468,6 +2485,7 @@ mod tests {
             blend: true,
             additive: false,
             depth_write: false,
+            clamp: [false; 2],
         };
         assets.models.insert(
             "board".into(),
