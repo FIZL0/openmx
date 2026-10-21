@@ -1,0 +1,234 @@
+# poof.toml — S57, after S36's crash.toml: the biplane's crash state, one row per tick, over the biplane recording played back.
+# The plane is the MXBiplane object at 0xc44a40 in the recording's own save state (found by its actor
+# vtable at +0x48); a playback restores that RAM, so the address holds for the whole tape.
+# Run through play_capture.sh (C6's, research/journal/2026-10-20-c6-c6-recording2-capture/playback/)
+# with this spec in place of watch/acceptance.toml.
+
+[watch]
+name        = "s57-poof"
+description = "the biplane's wreck reason, its timers, the contact the crash test reads, and the body"
+every       = 1 # one row per tick
+frames      = 3600
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "wreck"          # +0x3b0: 0, or the reason (1 contact, 13 the map edge)
+addr = "0xc44a40 + 0x3b0"
+type = "u32"
+
+[[field]]
+name = "landed13"       # +0x3b4: reason 13's "down on the ground" latch
+addr = "0xc44a40 + 0x3b4"
+type = "u32"
+
+[[field]]
+name = "wreck_clock"    # +0x3bc: seconds in the wreck
+addr = "0xc44a40 + 0x3bc"
+type = "f32"
+
+[[field]]
+name = "grounded"       # +0x590: any tire down
+addr = "0xc44a40 + 0x590"
+type = "u32"
+
+[[field]]
+name = "airspeed"       # +0x598
+addr = "0xc44a40 + 0x598"
+type = "f32"
+
+[[field]]
+name = "up_y"           # +0x5e4: the matrix's up.y, < 0 upside down
+addr = "0xc44a40 + 0x5e4"
+type = "f32"
+
+[[field]]
+name = "throttle"       # +0x34c
+addr = "0xc44a40 + 0x34c"
+type = "f32"
+
+[[field]]
+name = "respawn_clock"  # +0xe50
+addr = "0xc44a40 + 0xe50"
+type = "f32"
+
+[[field]]
+name = "contact"        # the body contact the crash test reads: (+0x170) + 0x40
+addr = "0xc44a40 + 0x170 -> 0x40"
+type = "u32"
+
+[[field]]
+name = "gravity_y"      # +0x144: the gravity force, -WreckGravity*m*32.2 while wrecked
+addr = "0xc44a40 + 0x144"
+type = "f32"
+
+[[field]]
+name = "pos"            # the rigid body's position
+addr = "0xc44a40 + 0x160 -> 0x60"
+type = "f32x3"
+
+[[field]]
+name = "vel"
+addr = "0xc44a40 + 0x160 -> 0x70"
+type = "f32x3"
+
+[[field]]
+name = "spin"           # the body's angular velocity, x4 on a wreck
+addr = "0xc44a40 + 0x160 -> 0x1b0"
+type = "f32x3"
+
+[[field]]
+name = "at"             # the actor's transform: +0xe0 the position
+addr = "0xc44a40 + 0xe0"
+type = "f32x3"
+
+[[field]]
+name = "fwd"            # +0xf0 the facing
+addr = "0xc44a40 + 0xf0"
+type = "f32x3"
+
+[[field]]
+name = "up"             # +0x100 the up
+addr = "0xc44a40 + 0x100"
+type = "f32x3"
+
+[[field]]
+name = "chord_latch"    # +0xe0c: the L1+R1 reset's latch
+addr = "0xc44a40 + 0xe0c"
+type = "u32"
+
+[[field]]
+name = "vp0_elapsed"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "vp0_dur"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "vp0_t"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "vp0_out"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "vp0_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "vp0_then_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "vp0_held"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "vp0_colour"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x40 -> 0x68"
+type = "u32"
+
+[[field]]
+name = "vp1_elapsed"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "vp1_dur"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "vp1_t"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "vp1_out"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "vp1_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "vp1_then_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "vp1_held"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "vp1_colour"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x44 -> 0x68"
+type = "u32"
+
+[[field]]
+name = "fs_elapsed"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "fs_dur"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "fs_t"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "fs_out"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "fs_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "fs_then_in"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "fs_held"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "fs_colour"
+addr = "0x41f770 -> 0x3d0 -> 0xd4 -> 0x50 -> 0x68"
+type = "u32"

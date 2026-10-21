@@ -1,0 +1,28 @@
+# S57's bike in the original, from first_recording's state (slot 8): ride away from the start, stop,
+# the L1+R1 chord; L1 alone, R1 alone; ride again and the chord on the move.
+release
+sleep 2000
+down cross
+sleep 4000
+up cross
+sleep 2500
+down l1
+down r1
+sleep 500
+up l1
+up r1
+sleep 4000
+press l1 500
+sleep 2000
+press r1 500
+sleep 2000
+down cross
+sleep 4000
+down l1
+down r1
+sleep 500
+up l1
+up r1
+up cross
+sleep 5000
+release

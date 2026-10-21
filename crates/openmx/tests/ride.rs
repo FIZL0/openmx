@@ -1688,3 +1688,86 @@ fn a_four_player_session_steps_and_draws_four_views() {
         }
     }
 }
+
+/// S57: L1+R1 puts the plane back where it was parked, on the press's own frame, when it is on its
+/// wheels or wrecked — the original's reset chord — and nowhere else. The original has no fade and no
+/// smoke for it (S57's capture: a hard cut, the plane drawn whole on the next frame), so the frame
+/// count asked is zero: the frame R1 goes down with L1 held is the frame the plane is back. L1 or R1
+/// alone is the rudder, and in the air the chord does nothing. Under both of P40's layouts: the new
+/// one moves the gas and the brake, not the shoulder buttons.
+///
+/// Over the flat floor `a_biplane_session_flies` uses; a crash needs the world's contact (S48).
+#[test]
+fn l1_and_r1_put_the_biplane_back_on_the_press_frame() {
+    use pad::Scheme;
+    let Some(file) = the_discs_plane() else { return };
+    for scheme in Scheme::ALL {
+        let flight = game_sim::flight::Flight::new(&file);
+        let lowest = flight.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min);
+        let spawn = Spawn { at: Vf::new(400.0, -lowest, -300.0, 1.0), facing: Vf::new(0.0, 0.0, -1.0, 0.0) };
+        let mut sim = the_minutes_bike();
+        let mut garage = Garage::new(Kind::Biplane, Some(Plane::flying(spawn, flight))).unwrap();
+        let mut world = Jump::nothing();
+        // One pass as the shell makes it: the seat's layout over the pad, the poll, the garage.
+        let mut pass = |sim: &mut Sim, garage: &mut Garage, buttons: &[Control]| {
+            let report = scheme.ride(Report::from_buttons(game_sim::input::mask_of(buttons)));
+            let controls = sim.poll(DT, &[report, Report::missing()]);
+            let said = garage.step(sim, DT, &controls, &mut world);
+            (said.respawned, garage.plane.clone().unwrap())
+        };
+        let away = |p: &Plane| (p.at.x() - spawn.at.x()).abs() + (p.at.z() - spawn.at.z()).abs();
+        // The original's gas under either layout: what the ride reads after the remap.
+        let gas = match scheme {
+            Scheme::Original => Control::Cross,
+            Scheme::New => Control::R2,
+        };
+
+        for _ in 0..60 {
+            pass(&mut sim, &mut garage, &[]);
+        }
+        // Rolling on the wheels: two seconds of gas, then the throttle shut and the plane rolling on.
+        for _ in 0..120 {
+            pass(&mut sim, &mut garage, &[gas]);
+        }
+        let (_, rolling) = pass(&mut sim, &mut garage, &[]);
+        assert!(rolling.on_ground(), "{scheme:?}: two seconds of gas and the plane is off the ground");
+        assert!(away(&rolling) > 5.0, "{scheme:?}: the plane has not rolled away from its spawn");
+
+        // L1 alone, then R1 alone: the rudder, never the reset.
+        for buttons in [[Control::L1], [Control::R1]] {
+            for _ in 0..10 {
+                let (back, plane) = pass(&mut sim, &mut garage, &buttons);
+                assert!(!back && away(&plane) > 5.0, "{scheme:?}: {buttons:?} alone put the plane back");
+            }
+            pass(&mut sim, &mut garage, &[]);
+        }
+
+        // L1 down, then R1 with it: back on that frame, at rest, the throttle shut.
+        let (back, plane) = pass(&mut sim, &mut garage, &[Control::L1]);
+        assert!(!back && away(&plane) > 5.0, "{scheme:?}: L1 alone put the plane back");
+        let (back, plane) = pass(&mut sim, &mut garage, &[Control::L1, Control::R1]);
+        assert!(back, "{scheme:?}: R1 pressed with L1 held did not put the plane back");
+        assert!(away(&plane) < 0.5, "{scheme:?}: put back {:.2} ft from the spawn", away(&plane));
+        let (throttle, speed) = plane.gauges().unwrap();
+        assert_eq!(throttle, F::ZERO, "{scheme:?}");
+        assert!(speed.0 < 1.0, "{scheme:?}: put back moving at {} ft/s", speed.0);
+        // Held on, it is not taken again: the chord is a press.
+        let (back, _) = pass(&mut sim, &mut garage, &[Control::L1, Control::R1]);
+        assert!(!back, "{scheme:?}: the chord held put the plane back a second time");
+
+        // In the air: nothing.
+        let mut high = None;
+        for _ in 0..40 * 60 {
+            let (_, plane) = pass(&mut sim, &mut garage, &[gas]);
+            if !plane.on_ground() && plane.at.y() > spawn.at.y() + 50.0 {
+                high = Some(plane);
+                break;
+            }
+        }
+        let high = high.unwrap_or_else(|| panic!("{scheme:?}: forty seconds of gas and the plane never climbed"));
+        pass(&mut sim, &mut garage, &[gas, Control::L1]);
+        let (back, plane) = pass(&mut sim, &mut garage, &[gas, Control::L1, Control::R1]);
+        assert!(!back, "{scheme:?}: the chord put the plane back in the air");
+        assert!(plane.at.y() > high.at.y() - 20.0, "{scheme:?}: the chord moved the plane in the air");
+    }
+}

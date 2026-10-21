@@ -258,6 +258,22 @@ impl Flight {
         self.unwreck(acos);
     }
 
+    /// **The reset chord** (S57), from the input slot, before the frame: `respawn` is
+    /// [`crate::ride::Controls::respawn`] off the plane's pad — L1 pressed while R1 is held or the
+    /// other way round, the two commands the original's chord reads ([`crate::biplane::Plane::reset_chord`]
+    /// is S36's model of it). On the wheels or wrecked, the plane is unwrecked: back to its spawn at
+    /// rest, on the press's own frame, as the waited-out wreck is. In the air it does nothing, and L1
+    /// or R1 alone is the rudder. The original latches it once a frame because L1's and R1's press
+    /// events are two calls; here they are one `respawn` a frame, so there is nothing to latch.
+    /// Whether it put the plane back.
+    pub fn reset_chord(&mut self, respawn: bool, acos: &AcosTable) -> bool {
+        if !respawn || !(self.measure.grounded || self.crash.reason != 0) {
+            return false;
+        }
+        self.unwreck(acos);
+        true
+    }
+
     /// The spawn into the body, and the measure after it.
     fn put(&mut self, acos: &AcosTable) {
         let (origin, facing) = self.spawn;
