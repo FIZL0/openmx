@@ -3138,7 +3138,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     gpu_poses.push(shown.chassis.clone());
                     gpu_poses.len() - 1
                 });
-                actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None });
+                // See-through for a while after a put-back, the bike, its parts and the rider alike (P57).
+                let alpha = seat.garage.ghost.shown();
+                actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha });
                 let node_now = |name: &str| -> Option<M4> {
                     let blended = rig.chassis.as_ref().and_then(|c| c.stance.set.skeleton.find(name));
                     blended.and_then(|j| shown.chassis.get(j).copied()).or_else(|| {
@@ -3152,7 +3154,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         Some(node) => node.mul(bike_at),
                         None => bike_at,
                     };
-                    actors.push(Actor { model: part.model.as_str(), at, pose: None, lod_from: None });
+                    actors.push(Actor { model: part.model.as_str(), at, pose: None, lod_from: None, alpha });
                 }
                 // The body, thrown by the ragdoll's bones while the rider is down (S53) and on the
                 // bike otherwise ([`Shown::of`]).
@@ -3163,13 +3165,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         at: bike_at,
                         pose: Some(gpu_poses.len() - 1),
                         lod_from: Some(vector(seat.sim.rider.ride.position())),
+                        alpha,
                     });
                 }
             }
             if let (Some(drawn), Some(plane)) = (&plane_drawn, &world.seats[0].garage.plane) {
                 let at = before_plane.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
                 for (model, at) in drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)) {
-                    actors.push(Actor { model, at, pose: None, lod_from: None });
+                    actors.push(Actor { model, at, pose: None, lod_from: None, alpha: 1.0 });
                 }
             }
             let views: Vec<View> = rects

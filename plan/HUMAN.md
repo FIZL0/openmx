@@ -212,3 +212,10 @@ Two things that bite:
       Either S29 closes as "matches the original by having none", or you name the bail you want — the
       button, the wreck reason (and so the throw), ground, air or both — and it goes in as an addition
       behind an off-by-default flag, with nothing in the original to prove it against.
+- [ ] **A ghost on the machine switch (P57).** The bike's put-back ghost is in: after L1+R1 or a wreck
+      the bike and the rider are drawn see-through and fade back to solid over 3 s, as the original's.
+      P57 was asked whether the M key and P41's menu switch should use it too. The original's swap does
+      not: it hides the machine left and hands the controller over with no put-back, so nothing starts
+      the ghost there (research/journal/2026-10-21-p57-bike-reset-ghost-fade). P57 left it so. Say if
+      you want the ghost on a switch back to the bike anyway — an addition with nothing in the original
+      to prove it against.
