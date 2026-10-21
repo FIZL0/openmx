@@ -27,7 +27,7 @@ mod net;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use game_sim::input::Report;
+use game_sim::input::{Control, Report};
 use game_sim::world::Flat;
 use game_sim::Sim;
 use net::link::DATAGRAM_MAX;
@@ -184,15 +184,17 @@ impl Machine for Tally {
 /// swinging, a trick chord now and then — the original's bytes, as the shell's pad builds them.
 fn mash(seat: usize, frame: usize) -> Report {
     let phase = (frame / 20 + seat * 7) % 11;
-    let mut buttons = 0x4000; // Cross
+    let mut buttons = Control::Cross.mask();
     if phase == 3 {
-        buttons |= 0x2000 | 0x0010; // Circle, d-pad up
+        buttons |= Control::Circle.mask() | Control::Up.mask();
     }
     if phase == 7 {
-        buttons = 0x8000; // Square
+        buttons = Control::Square.mask();
     }
     let mut r = Report::from_buttons(buttons);
-    r.0[14] = (40 + 23 * phase) as u8; // Cross's pressure
+    if buttons & Control::Cross.mask() != 0 {
+        r.0[Control::Cross.binding().pressure as usize] = (40 + 21 * phase) as u8;
+    }
     r.set_axis(2, ((frame * (seat + 3) * 5) % 256) as u8);
     r.set_axis(3, (0x80 + ((frame / 7 + seat) % 9) * 9) as u8);
     r
@@ -504,6 +506,51 @@ fn the_ride_says_every_seat_in_bytes() {
     assert!(mine.decode(&cut[..cut.len() - 1]).is_err());
     assert!(mine.decode(&[cut.clone(), vec![0]].concat()).is_err());
     assert_eq!(mine.hash(), before, "a refused state writes nothing");
+}
+
+/// [`mash`]'s pads are a ride as the game reads them (N9): every seat's bike is on the gas nearly
+/// every tick at more than one pressure, brakes now and then, holds a stunt on the chord, and the
+/// d-pad is touched only by the chord (up), not held throughout. And the bikes get going.
+#[test]
+fn the_mashed_pads_are_a_ride() {
+    let mut world = Flat::default();
+    let mut sims = sims(3);
+    #[derive(Default, Debug)]
+    struct Seen {
+        gas: usize,
+        gases: std::collections::BTreeSet<u32>,
+        brake: usize,
+        stunt: usize,
+        down: usize,
+        up: usize,
+        speed: f32,
+    }
+    let mut seen: Vec<Seen> = (0..3).map(|_| Seen::default()).collect();
+    let ticks = 900;
+    {
+        let mut after = |seat: usize, _: F, sim: &mut Sim, c: &game_sim::ride::Controls| {
+            let s = &mut seen[seat];
+            if c.gas > F::ZERO {
+                s.gas += 1;
+                s.gases.insert(c.gas.0.to_bits());
+            }
+            s.brake += (c.brake > F::ZERO) as usize;
+            s.stunt += c.stunt as usize;
+            s.down += c.dpad[3] as usize;
+            s.up += c.dpad[2] as usize;
+            s.speed = s.speed.max(sim.rider.ride.chassis.speed.0);
+        };
+        let mut game = Rides { sims: &mut sims, world: &mut world, after: Some(&mut after) };
+        for t in 0..ticks {
+            game.step(t, &(0..3).map(|s| mash(s, t)).collect::<Vec<_>>());
+        }
+    }
+    for (seat, s) in seen.iter().enumerate() {
+        assert!(s.gas > ticks * 8 / 11 && s.gases.len() > 5, "seat {seat}: {s:?}");
+        assert!(s.brake > 0 && s.stunt > 0 && s.up > 0, "seat {seat}: {s:?}");
+        assert_eq!(s.down, 0, "seat {seat}: d-pad down held");
+        assert!(s.speed > 10.0, "seat {seat} never got going: {s:?}");
+    }
 }
 
 /// The same on [`Tally`], which can say its state in bytes: caught at 330 on both, the host's state
