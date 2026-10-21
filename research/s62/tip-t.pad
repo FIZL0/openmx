@@ -1,0 +1,5 @@
+# from rest, full gas leaning hard back at once: a loop-out on the flat before the drop
+stick l 0 1
+down cross
+wait 3000
+release

@@ -1,0 +1,4 @@
+# standing still, the stick hard right
+stick l 1 0
+sleep 9000
+release

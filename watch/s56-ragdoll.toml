@@ -354,6 +354,51 @@ name = "req_quat"
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x190"
 type = "f32x4"
 
+# S62: the wreck bike, by chain. The request's +0x1ac points into one object of the bike's that holds,
+# at fixed offsets from that pointer, the bike's rigid body (-0x780: +0x60 position, +0x70 velocity,
+# +0x170 quaternion, +0x1b0 rates), its collision objects (-0x580, +0x670) and what the bones' contacts
+# with it read: the whole object, -0x980..+0xb80 of the pointer, in two fields (a field is at most
+# 4096 bytes). research/oracle.txt, S62.
+[[field]]
+name = "bike_a"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1ac -> 0x0 - 0x980"
+type = "bytes:4096"
+
+[[field]]
+name = "bike_b"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1ac -> 0x680"
+type = "bytes:1280"
+
+# S62: the broad phase's object lists. The bones' scene queries walk short linked nodes (pointers to
+# the collidables near a cell) that the game relinks as the bike and the riders move, so new nodes turn
+# up anywhere in their pools: the pools are taken whole, at their addresses in recording2's state
+# (every s56/s62 capture starts there, and the heap is laid out the same: the tests check the body
+# actor's address). And the word block at 0x601900 the contacts read.
+[[field]]
+name = "w0601800"
+addr = "0x601800"
+type = "bytes:512"
+
+[[field]]
+name = "w0e37000"
+addr = "0xe37000"
+type = "bytes:4096"
+
+[[field]]
+name = "w11b1000"
+addr = "0x11b1000"
+type = "bytes:4096"
+
+[[field]]
+name = "w1672800"
+addr = "0x1672800"
+type = "bytes:4096"
+
+[[field]]
+name = "w1673800"
+addr = "0x1673800"
+type = "bytes:1024"
+
 # The moving world the body's update reads: every byte tests/ragdoll_wrecks.rs `what_the_wrecks_read`
 # saw it read (over all four first captures) that changes from tick to tick and is neither the actor's
 # own nor the request's, in blocks merged across gaps of 0x40, less the generator (rng_state above).

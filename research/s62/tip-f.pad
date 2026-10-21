@@ -1,0 +1,63 @@
+# the stick hard right, the gas pulsed 120 ms in 600: a slower crawl
+stick l 1 0
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+press cross 120
+wait 480
+release
