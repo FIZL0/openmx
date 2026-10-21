@@ -37,7 +37,7 @@ mod pad;
 mod audio;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
-use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, RenderScale, Screen, Settings};
+use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, RenderScale, Screen, Settings, Speedometer};
 use vehicle::{Garage, Kind, Plane, Spawn};
 use game_render::world::Graphics;
 use game_sim::modifiers::{Knob, Mods};
@@ -237,6 +237,7 @@ fn the_settings_file_reads_back_as_it_was_written() {
         custom: [35, 5, 100, 0, 90, 55],
         graphics: Graphics::Original,
         render_scale: RenderScale::ThreeQuarters,
+        speedometer: Speedometer::Analog,
         // Gravity halved for everyone and 2P's bike twice as fast (P55), and a preset kept by name.
         modifiers: Mods::parse("gravity=50 bike_speed.2=200").unwrap(),
         presets: vec![("Moon".into(), Mods::parse("gravity=20").unwrap())],
@@ -295,6 +296,50 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Original);
     assert_eq!(Settings::parse("graphics = full\n").graphics, Graphics::Full);
     assert_eq!(Settings::parse("graphics = fancy\n").graphics, Graphics::Full);
+}
+
+/// V42: the readout unless asked, and the row under the render scale's switches it to the dial and
+/// back by pad, and says so to be applied and saved.
+#[test]
+fn the_speedometer_row_switches_the_dial_and_is_saved() {
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.speedometer, Speedometer::Digital, "the readout unless asked");
+    assert_eq!(Settings::parse("").speedometer, Speedometer::Digital);
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    for _ in 0..9 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.speedometer, Speedometer::Analog);
+    assert!(m.settings.text().contains("speedometer = analog\n"));
+    assert_eq!(m.settings.render_scale, RenderScale::Auto, "the render scale's row is untouched");
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.speedometer, Speedometer::Digital);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.speedometer, Speedometer::Analog);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.speedometer, Speedometer::Digital);
+    assert!(m.settings.text().contains("speedometer = digital\n"));
+    // Saved to the file and read back from it.
+    tap(&mut m, &mut r, Control::Left);
+    let dir = scratch("speedometer");
+    menu::save(&dir, &m.settings, &Controls::default()).unwrap();
+    assert_eq!(menu::load(&dir).0.speedometer, Speedometer::Analog);
+    std::fs::remove_dir_all(&dir).unwrap();
+    for style in Speedometer::ALL {
+        let s = Settings { speedometer: style, ..Settings::default() };
+        assert_eq!(Settings::parse(&s.text()).speedometer, style);
+        assert_eq!(Speedometer::from_word(style.word()), Some(style));
+    }
+    // The readout when the file has a word it cannot read.
+    assert_eq!(Settings::parse("speedometer = sundial\n").speedometer, Speedometer::Digital);
 }
 
 #[test]
