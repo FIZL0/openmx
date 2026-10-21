@@ -356,9 +356,10 @@ fn the_walk_names_every_field_once() {
     // rate-limited lean and the flick's 32-sample ring. P33 moved both again (543 and 2088 before
     // it): each wheel's steering axis and its tire's three slip flags. S58 moved both again (557 and
     // 2120 before it): each wheel's gyro, turn angle, the three velocities and forces the spin step
-    // keeps, its contact frame and its side force per pound of load.
-    assert_eq!(dump.fields.len(), 619, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2368, "the ride's own size");
+    // keeps, its contact frame and its side force per pound of load. S66 moved both (619 and 2368
+    // before it): the put-back record's point, heading and up.
+    assert_eq!(dump.fields.len(), 631, "the walk's leaves");
+    assert_eq!(std::mem::size_of::<Ride>(), 2416, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");
@@ -2828,12 +2829,15 @@ fn the_reset_chord_is_the_originals() {
         assert!(f.wreck.is_none(), "the chord does not put the rider down");
         assert_eq!(f.respawned, chord, "chord frame {k}: put back on the second press only");
     }
+    // Put back where it was riding, on the put-back record, and never on the start line (S66):
+    // the record is the spot under the bike a frame before the press, and the press's own frame
+    // rides on from it.
     let back = r.ride.position();
+    let apart = ((back.x() - rolled.x()).powi(2) + (back.z() - rolled.z()).powi(2)).sqrt();
     assert!(
-        from_spawn(back) < 0.5,
-        "put back {:.2} ft from the start line, from {:.2} ft down the track",
-        from_spawn(back),
-        from_spawn(rolled)
+        apart < 2.0 && from_spawn(back) > 1.0,
+        "put back {apart:.2} ft from where it rode and {:.2} ft from the start line",
+        from_spawn(back)
     );
 }
 
@@ -4261,5 +4265,302 @@ fn it_lands_crooked_without_a_snap() {
             "{what}: still {after} deg crossed up two ticks after landing; the original is inside \
              {ORIGINAL_LANDING_CROSSUP}"
         );
+    }
+}
+
+// --- the put-back (S66) ---------------------------------------------------------------------------
+//
+// S66 recorded the original's put-back record once a tick on two tracks (free06 riding, wrecked and
+// put back by the chord and by the clock; free09 riding), with every float as its bits, through
+// `research/journal/2026-10-21-s66-hand-reset-position/capture/putback_watch.py`. The captures sit in
+// `context/s66/` and the save states they started from in `context/states/`; without them the tests
+// below say so and pass, and with them they count what they compared so a skip cannot read as a pass.
+
+/// One tick of a put-back capture: what the record's update reads and what it and the put-back wrote.
+struct BackTick {
+    frame: u32,
+    reason: u32,
+    /// The put-back record: point, heading, up.
+    rec: [Vf; 3],
+    /// The point the model setup last applied to the bike.
+    applied: Vf,
+    /// The sweep's point (three feet up the frame the tick started with), the body's centre (as
+    /// printed, four places: only its height is read, and only to start the ground query from), the
+    /// wreck part's point, and the forward row the race manager hands the record.
+    e0: Vf,
+    centre: Vf,
+    part: Vf,
+    heading: Vf,
+    /// The node's forward row, which the race manager's copy is made from (its `w` set to one).
+    row: Vf,
+}
+
+fn bits4(words: &[&str]) -> Vf {
+    let f = |s: &str| f32::from_bits(u32::from_str_radix(s, 16).expect("a capture word"));
+    Vf::new(f(words[0]), f(words[1]), f(words[2]), f(words[3]))
+}
+
+fn floats4(text: &str) -> Vf {
+    let inside = &text[text.find('[').unwrap() + 1..text.find(']').unwrap()];
+    let v: Vec<f32> = inside.split(", ").map(|s| s.parse().unwrap()).collect();
+    Vf::new(v[0], v[1], v[2], v[3])
+}
+
+fn word_after(row: &str, key: &str) -> u32 {
+    let at = row.find(key).unwrap_or_else(|| panic!("no {key} in a row")) + key.len();
+    row[at..].split_whitespace().next().unwrap().parse().unwrap()
+}
+
+/// A capture's header (the bike's address) and its rows.
+fn back_capture(text: &str) -> (u32, Vec<BackTick>) {
+    let mut chunks = text.split("\nf ");
+    let head = chunks.next().unwrap();
+    let bike = u32::from_str_radix(head.split_whitespace().nth(2).unwrap(), 16).unwrap();
+    let mut rows = Vec::new();
+    for chunk in chunks {
+        if !chunk.contains("race.120") {
+            continue; // the last, torn row
+        }
+        let line = |key: &str| chunk.lines().find(|l| l.trim_start().starts_with(key)).unwrap();
+        let tail = |key: &str| {
+            let words: Vec<&str> = line(key).split_whitespace().collect();
+            bits4(&words[words.len() - 4..])
+        };
+        let part_line = line("part ");
+        let after = &part_line[part_line.find(']').unwrap() + 1..];
+        let part_words: Vec<&str> = after.split_whitespace().take(4).collect();
+        rows.push(BackTick {
+            frame: chunk.split_whitespace().next().unwrap().parse().unwrap(),
+            reason: word_after(chunk, "reason "),
+            rec: [tail("rec.p"), tail("rec.f"), tail("rec.u")],
+            applied: tail("applied"),
+            e0: tail("coll.b0"),
+            centre: floats4(line("body.c")),
+            part: bits4(&part_words),
+            heading: tail("part "),
+            row: {
+                let words: Vec<&str> = line("node.l3").split_whitespace().collect();
+                let r = bits4(&words[6..10]);
+                Vf::new(r.x(), r.y(), r.z(), 1.0)
+            },
+        });
+    }
+    (bike, rows)
+}
+
+/// The bike's terrain: the world its record's ground query is asked of.
+const BIKE_TERRAIN: u32 = 0x7ac;
+
+/// **The original's ground under the put-back** — [`World::ground`] answered by the game's own
+/// `ground_query`, run in the interpreter on the save state's RAM against the bike's own terrain, with
+/// no normal or record pointer past the two the record's update hands it. Nothing is solid: the
+/// clearance probes the ring sends out are not this ground's to answer, so a tick the original refused
+/// is not compared ([`the_put_back_record_is_kept_bit_for_bit`] counts them).
+struct TheOriginalsTerrain {
+    ee: ps2_oracle::Ee,
+    terrain: u32,
+    query: u32,
+}
+
+impl World for TheOriginalsTerrain {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        let ee = &mut self.ee;
+        let (point, normal) = (ee.scratch(0), ee.scratch(1));
+        for k in 0..4 {
+            ee.set_f32(point + 4 * k, at[k as usize]);
+            ee.set_f32(normal + 4 * k, 0.0);
+        }
+        let args = [self.terrain, point, normal, 0, 0].map(u64::from);
+        ee.call(self.query, &args, &[], 50_000_000);
+        let quad = |a: u32| Vf::new(ee.f32_at(a), ee.f32_at(a + 4), ee.f32_at(a + 8), ee.f32_at(a + 12));
+        (quad(point), quad(normal))
+    }
+
+    fn solid(&mut self, _: &Bundle, _: &mut Record) -> bool {
+        false
+    }
+}
+
+/// The captures and the save-state slot each started from.
+const BACK_CAPTURES: [(&str, u32); 5] = [
+    ("free06-ride2.txt", 6),
+    ("free06-down.txt", 6),
+    ("free06-downchord.txt", 6),
+    ("free09-ride2.txt", 7),
+    ("free09-down.txt", 7),
+];
+
+/// A capture's rows and the original's terrain under them; `None`, said why, when this checkout has
+/// not got them.
+fn back_run(name: &str, slot: u32) -> Option<(Vec<BackTick>, TheOriginalsTerrain)> {
+    let kit = match ps2_oracle::Kit::load() {
+        Ok(kit) => kit,
+        Err(why) => {
+            println!("no kit.toml ({why}): no put-back verdict");
+            return None;
+        }
+    };
+    let Ok(text) = std::fs::read_to_string(kit.ctx("s66").join(name)) else {
+        println!("no context/s66/{name}: no put-back verdict for it");
+        return None;
+    };
+    let ram = kit.ctx("states").join(format!("SLUS-20767 (9866FE54).{slot:02}.eeMemory.bin"));
+    let mut ee = match ps2_oracle::Ee::from_ram(&ram) {
+        Ok(ee) => ee,
+        Err(why) => {
+            println!("{why}: `./kit state ram {slot}` writes it; no put-back verdict for {name}");
+            return None;
+        }
+    };
+    let (Ok(gp), Ok(query)) = (ps2_oracle::addr("boot_gp"), ps2_oracle::addr("ground_query")) else {
+        println!("research/oracle.txt has no boot_gp or ground_query: no put-back verdict");
+        return None;
+    };
+    ee.set(28, u64::from(gp));
+    let (bike, rows) = back_capture(&text);
+    let terrain = ee.u32_at(bike + BIKE_TERRAIN);
+    Some((rows, TheOriginalsTerrain { ee, terrain, query }))
+}
+
+fn same_bits(a: Vf, b: Vf) -> bool {
+    (0..4).all(|k| a[k].to_bits() == b[k].to_bits())
+}
+
+fn show(v: Vf) -> String {
+    format!("{:08x} {:08x} {:08x} {:08x}", v[0].to_bits(), v[1].to_bits(), v[2].to_bits(), v[3].to_bits())
+}
+
+/// **The put-back record, tick for tick** (S66): on every captured tick the original moved its record,
+/// the port's [`Ride::keep_back`] — handed the same probe and heading, from the record the tick
+/// before — moves it to the same point, heading and up, to the bit. Riding, the probe is the sweep's
+/// point at the body's height; down, the wreck part's point.
+#[test]
+fn the_put_back_record_is_kept_bit_for_bit() {
+    let tables = Tables::build();
+    let p = bike(&tables);
+    let (mut compared, mut down_compared) = (0, 0);
+    for (name, slot) in BACK_CAPTURES {
+        let Some((rows, mut world)) = back_run(name, slot) else { continue };
+        let (mut here, mut held, mut unseen, mut unfaced) = (0, 0, 0, 0);
+        for i in 1..rows.len() {
+            let (before, now) = (&rows[i - 1], &rows[i]);
+            if now.frame != before.frame + 1 {
+                continue; // a tick lost between them
+            }
+            if same_bits(now.rec[0], before.rec[0]) {
+                held += 1; // refused, or not moved: the clearance is not this world's to answer
+                continue;
+            }
+            if now.applied[0].to_bits() != before.applied[0].to_bits() {
+                continue; // the put-back tick itself
+            }
+            // A row is read while the game runs, so it can hold this tick's sweep with the record
+            // the tick before left, and the race manager's heading from either side of the physics:
+            // the probe and the heading (the race manager's copy, or the node row it copies) are taken
+            // from this row or the one before, every way, and one of them has to give the original's
+            // record word for word.
+            // The reset clears the reason before the tick is over, so a row read across it says
+            // riding of a record the wreck kept: either row down and the wreck part is tried too.
+            let down = now.reason != 0 || before.reason != 0;
+            let probe = |r: &BackTick, part: bool| {
+                if part { r.part } else { Vf::new(r.e0.x(), r.centre.y(), r.e0.z(), r.e0.w()) }
+            };
+            let xz = |v: Vf| (v.x().to_bits(), v.z().to_bits());
+            let mut sources = [(now, false), (before, false), (now, true), (before, true)]
+                .into_iter()
+                .filter(|&(r, part)| (down || !part) && xz(probe(r, part)) == xz(now.rec[0]))
+                .peekable();
+            if sources.peek().is_none() {
+                unseen += 1; // the probe it was kept from fell between two rows
+                continue;
+            }
+            let (mut placed, mut faced, mut tried) = (false, false, Vec::new());
+            for (from, part) in sources {
+                for heading in [now.heading, before.heading, now.row, before.row] {
+                    let mut ride = rider(&p);
+                    ride.back =
+                        game_sim::ride::Back { at: before.rec[0], facing: before.rec[1], up: before.rec[2] };
+                    let kept = ride.keep_back(probe(from, part), heading, &mut world, &tables.curve);
+                    if kept && same_bits(ride.back.at, now.rec[0]) && same_bits(ride.back.up, now.rec[2]) {
+                        placed = true;
+                        faced |= same_bits(ride.back.facing, now.rec[1]);
+                    }
+                    tried.push(format!("{} / {}", show(ride.back.at), show(ride.back.up)));
+                }
+            }
+            assert!(
+                placed,
+                "{name} frame {} ({}): the original's record is {} up {}; the port's off the same \
+                 probe: {tried:?}",
+                now.frame,
+                if down { "down" } else { "riding" },
+                show(now.rec[0]),
+                show(now.rec[2])
+            );
+            if !faced {
+                unfaced += 1; // the heading it was kept with fell between two rows
+            }
+            here += 1;
+            if down {
+                down_compared += 1;
+            }
+        }
+        println!("{name}: {here} ticks kept bit for bit ({unfaced} of them off a heading no row holds), \
+                  {held} held, {unseen} off a probe no row holds");
+        assert!(unfaced * 20 <= here, "{name}: {unfaced} of {here} headings matched no row's");
+        assert!(unseen * 20 <= here, "{name}: {unseen} of {here} probes matched no row's");
+        compared += here;
+    }
+    if compared > 0 {
+        assert!(compared > 1000, "only {compared} ticks compared");
+        assert!(down_compared > 50, "only {down_compared} down ticks compared");
+    }
+}
+
+/// **The put-back lands on the record** (S66): on every captured put-back — the chord riding, the chord
+/// down, and the clock's reset after a wreck — the original applied the record as it stood the tick
+/// before, and [`Ride::place_back`] from that record puts the bike's origin on the same point to the
+/// bit, its forward row along the record's heading and square to its up.
+#[test]
+fn every_captured_put_back_lands_where_the_original_put_the_bike() {
+    let tables = Tables::build();
+    let p = bike(&tables);
+    let mut landed = 0;
+    for (name, slot) in BACK_CAPTURES {
+        let Some((rows, _)) = back_run(name, slot) else { continue };
+        for pair in rows.windows(2) {
+            let (before, now) = (&pair[0], &pair[1]);
+            if now.frame != before.frame + 1 || same_bits(now.applied, before.applied) {
+                continue;
+            }
+            // The record as it stood when the chord ran: the row before's, or — when this row was
+            // read before its own tick's record update — this row's, which nothing after the
+            // physics could make equal to the point applied.
+            let Some(rec) = [before.rec, now.rec].into_iter().find(|rec| same_bits(now.applied, rec[0])) else {
+                panic!(
+                    "{name} frame {}: the original applied {} and its record held {}",
+                    now.frame,
+                    show(now.applied),
+                    show(before.rec[0])
+                )
+            };
+            let mut ride = rider(&p);
+            ride.back = game_sim::ride::Back { at: rec[0], facing: rec[1], up: rec[2] };
+            ride.place_back();
+            assert!(
+                same_bits(ride.position(), now.applied),
+                "{name} frame {}: the port put the bike at {}, the original at {}",
+                now.frame,
+                show(ride.position()),
+                show(now.applied)
+            );
+            let m = game_sim::math::basis(rec[0], rec[1], rec[2], true, false);
+            assert_eq!(ride.node, [m.0[0], m.0[1], m.0[2]], "{name} frame {}: the frame set down", now.frame);
+            println!("{name}: put back at frame {} ({})", now.frame, if before.reason != 0 { "down" } else { "riding" });
+            landed += 1;
+        }
+    }
+    if landed > 0 {
+        assert!(landed >= 5, "only {landed} put-backs compared");
     }
 }

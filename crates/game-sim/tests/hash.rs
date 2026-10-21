@@ -93,7 +93,7 @@ const HEAD: usize = 10;
 fn a_hundred_ticks_is_a_known_constant() {
     // The hash of a hundred ticks of the stand-in bike on a level floor, as a literal: the same
     // value `Sim::hash`'s own test carries.
-    const HUNDRED_TICKS: u64 = 0x4fe3_589c_fa99_5379;
+    const HUNDRED_TICKS: u64 = 0x09a0_2520_1f3f_518b;
 
     let mut sim = Sim::new(1);
     for _ in 0..100 {
@@ -471,7 +471,8 @@ fn the_size_of_the_state_type_is_pinned() {
     // 9736 since S61: the kit's wreck table and a wreck's fade and touching, walked with the bones.
     // 9744 since S65: the skeleton the shell last drew, an input like the controls that the walk
     // leaves out; the bones it poses are walked.
+    // 9792 since S66: the bike's put-back record, its point, heading and up.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 9744, "Sim grew or shrank: does its walk still cover every field?");
-    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 897, "the walk's leaf count moved with it");
+    assert_eq!(size_of::<Sim>(), 9792, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
