@@ -37,7 +37,7 @@ use game_sim::phy::Ini;
 use game_sim::ride::Controls;
 use game_sim::rider;
 use game_sim::world::World;
-use ps2_float::{F, Vf};
+use ps2_float::{Acc, F, Vf};
 
 /// The two machines the shell can put the player on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,6 +234,77 @@ pub struct Garage {
     pub up: Kind,
     /// The track's biplane, if its `machine.txt` parks one.
     pub plane: Option<Plane>,
+    /// The bike's see-through fade-in after a put-back (P57).
+    pub ghost: Ghost,
+}
+
+/// **The bike's ghost after a put-back** (P57): the bike, its parts and the rider drawn see-through
+/// and faded back in to solid over three seconds. The original's own; the poof the user remembered.
+///
+/// Every put-back of the "after a wreck" kind starts it — the pad's L1+R1 and the wreck's own
+/// respawn alike, which are the only two the port has: the respawn's model setup turns the
+/// see-through flag on, sets each model's alpha to a half and the clock to its length, 3 s, the
+/// rider's constructor's value and never read from a file. Then, once a tick at the head of the
+/// bike's update and so before anything in it can put the bike back again: the clock runs down by
+/// the tick's `dt` and the alpha is the share of the clock gone, mapped onto `0.1..1` — 0.11 on
+/// the next tick, a hundredth more each tick after at 30 Hz, 0.9999 on the ninetieth — until the
+/// clock is spent, when the flag goes off and the bike is solid. A put-back while it runs starts it
+/// again. The plane has none of it (S57).
+///
+/// What it does not do here: in the original the ghost's bike also stops colliding with the other
+/// vehicles, and its clock stands still while its body still overlaps one. The port's bikes do not
+/// collide with each other, so there is nothing to switch off and nothing to overlap.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ghost {
+    /// Seconds left, and below zero once it has run out; the original never puts it back to zero.
+    pub clock: F,
+    /// The alpha the models are drawn at while [`Ghost::on`].
+    pub alpha: F,
+    /// The see-through flag.
+    pub on: bool,
+}
+
+impl Ghost {
+    /// How long the fade takes, seconds.
+    pub const LENGTH: F = F(3.0);
+    /// The alpha the put-back sets, drawn on its own tick.
+    pub const START: F = F(0.5);
+    /// The alpha the fade starts from and never goes under.
+    pub const FLOOR: F = F(0.1);
+
+    /// A put-back: see-through, at half, with the whole clock to run.
+    pub fn start(&mut self) {
+        *self = Ghost { clock: Self::LENGTH, alpha: Self::START, on: true };
+    }
+
+    /// One tick of the bike's update, before anything in it.
+    pub fn step(&mut self, dt: F) {
+        if !(self.clock > F::ZERO) {
+            return;
+        }
+        self.clock -= dt;
+        if self.clock > F::ZERO {
+            let len = Self::LENGTH;
+            // A length of zero holds the floor; the original tests it, though its length is fixed.
+            self.alpha = if len == F::ZERO {
+                Self::FLOOR
+            } else {
+                let gone = (self.clock - len) / (F::ZERO - len);
+                let span = F(1.0) - Self::FLOOR;
+                Acc::adda(F::ZERO, Self::FLOOR)
+                    .madd(gone, span)
+                    .max(Self::FLOOR.min(F(1.0)))
+                    .min(Self::FLOOR.max(F(1.0)))
+            };
+        } else {
+            self.on = false;
+        }
+    }
+
+    /// What to draw the bike and the rider at: below 1 while the ghost is on, 1 otherwise.
+    pub fn shown(&self) -> f32 {
+        if self.on { self.alpha.0 } else { 1.0 }
+    }
 }
 
 impl Garage {
@@ -243,7 +314,7 @@ impl Garage {
         if up == Kind::Biplane && plane.is_none() {
             return Err("--vehicle biplane: this track's machine.txt parks no biplane".into());
         }
-        Ok(Garage { up, plane })
+        Ok(Garage { up, plane, ghost: Ghost::default() })
     }
 
     /// The swap: the controller moves to the other machine. The bike is left exactly as it is — no
@@ -277,7 +348,16 @@ impl Garage {
                 let respawned = plane.step(sim, dt, world);
                 rider::Frame { respawned, ..rider::Frame::default() }
             }
-            _ => sim.step(dt, controls, world),
+            _ => {
+                // The ghost's tick is at the head of the bike's update, and a put-back in it starts
+                // the ghost again; a bike the plane has the controller from is not updated at all.
+                self.ghost.step(dt);
+                let frame = sim.step(dt, controls, world);
+                if frame.respawned {
+                    self.ghost.start();
+                }
+                frame
+            }
         }
     }
 }

@@ -150,6 +150,8 @@ enum Blend {
 struct PipelineKey {
     blend: Blend,
     depth_write: bool,
+    /// Drawn see-through at the pass's blend constant, whatever its own blend ([`Actor::alpha`]).
+    ghost: bool,
 }
 
 /// What makes two materials one material on the GPU.
@@ -182,6 +184,7 @@ impl MaterialKey {
             pipeline: PipelineKey {
                 blend,
                 depth_write: s.depth_write,
+                ghost: false,
             },
             clamp: s.clamp,
         }
@@ -292,6 +295,10 @@ pub struct Actor<'a> {
     /// Where to measure the camera's distance from for its level of detail ([`Model::group_for`]);
     /// `None` draws the finest, as the props are drawn.
     pub lod_from: Option<V3>,
+    /// 1 is solid. Below it the actor is drawn see-through, every material of it at this alpha over
+    /// what is behind it, after everything solid and translucent in its view (a bike's put-back
+    /// ghost); 0 or less is not drawn.
+    pub alpha: f32,
 }
 
 /// One view of the frame: where in the frame it goes, and the camera it is drawn from.
@@ -445,7 +452,8 @@ pub struct Renderer {
     graphics: Graphics,
     span: f32,
     /// The frame's instances and batches, kept to reuse their allocations.
-    scratch: Vec<(u64, InstanceRaw)>,
+    /// Each copy's batch key, its see-through alpha's bits (0 for solid) and the copy.
+    scratch: Vec<(u64, u32, InstanceRaw)>,
     batches: Vec<Batch>,
     flat: Vec<InstanceRaw>,
     blit: Option<Blit>,
@@ -468,6 +476,8 @@ struct Batch {
     view: usize,
     model: usize,
     group: usize,
+    /// The see-through alpha's bits, 0 for a solid batch.
+    ghost: u32,
     first: u32,
     count: u32,
 }
@@ -1537,6 +1547,7 @@ impl Renderer {
             ],
         });
         self.pipeline(key.pipeline);
+        self.pipeline(PipelineKey { ghost: true, ..key.pipeline });
         self.materials.push(GpuMaterial {
             bind,
             pipeline: key.pipeline,
@@ -1550,7 +1561,19 @@ impl Renderer {
         if self.pipelines.contains_key(&key) {
             return;
         }
+        // A ghost lays every material at the pass's blend constant: over what is behind it, or added
+        // to it at that share for an additive one.
+        let constant = |dst_factor| wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Constant,
+                dst_factor,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::OVER,
+        };
         let blend = match key.blend {
+            _ if key.ghost && key.blend == Blend::Add => Some(constant(wgpu::BlendFactor::One)),
+            _ if key.ghost => Some(constant(wgpu::BlendFactor::OneMinusConstant)),
             Blend::Opaque => None,
             Blend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
             Blend::Add => Some(wgpu::BlendState {
@@ -1849,6 +1872,7 @@ impl Renderer {
                 let key = ((v as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
                 self.scratch.push((
                     key,
+                    0,
                     InstanceRaw {
                         m: prop.at.0,
                         palette: [model.bind_palette, model.nodes],
@@ -1858,6 +1882,10 @@ impl Renderer {
             // The actors: few, and each at the level of detail this camera has earned.
             for a in view.actors {
                 let Some(Some(m)) = self.model_ids.get(a.model).copied() else { continue };
+                if !(a.alpha > 0.0) {
+                    continue;
+                }
+                let ghost = if a.alpha < 1.0 { a.alpha.to_bits() } else { 0 };
                 let model = &self.models[m];
                 let group = match a.lod_from {
                     Some(at) => {
@@ -1872,24 +1900,26 @@ impl Renderer {
                     None => [model.bind_palette, model.nodes],
                 };
                 let key = ((v as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
-                self.scratch.push((key, InstanceRaw { m: a.at.0, palette }));
+                self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette }));
             }
             ground_counts[v] = self.ground_for(v, &cull, focal, &mut drawn);
         }
         self.queue.write_buffer(&self.view_buffer, 0, &uniforms);
 
         // Gather the copies into batches, model by model, and upload them as one buffer.
-        self.scratch.sort_unstable_by_key(|(k, _)| *k);
+        self.scratch.sort_unstable_by_key(|(k, g, _)| (*k, *g));
         self.batches.clear();
         self.flat.clear();
-        for (i, (key, inst)) in self.scratch.iter().enumerate() {
+        for (i, (key, ghost, inst)) in self.scratch.iter().enumerate() {
             let (view, model, group) = ((key >> 48) as usize, ((key >> 16) & 0xffff_ffff) as usize, (key & 0xffff) as usize);
+            let ghost = *ghost;
             match self.batches.last_mut() {
-                Some(b) if b.view == view && b.model == model && b.group == group => b.count += 1,
+                Some(b) if b.view == view && b.model == model && b.group == group && b.ghost == ghost => b.count += 1,
                 _ => self.batches.push(Batch {
                     view,
                     model,
                     group,
+                    ghost,
                     first: i as u32,
                     count: 1,
                 }),
@@ -2091,7 +2121,7 @@ impl Renderer {
             for blended in [false, true] {
                 let mut current: Option<PipelineKey> = None;
                 let mut bound: Option<usize> = None;
-                for batch in mine {
+                for batch in mine.iter().filter(|b| b.ghost == 0) {
                     let model = &self.models[batch.model];
                     let ranges = model.group(batch.group);
                     if !ranges.iter().any(|r| r.blended == blended) {
@@ -2116,6 +2146,33 @@ impl Renderer {
                         drawn.draws += 1;
                         drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
                     }
+                }
+            }
+            // The see-through copies last, over everything else in the view: every run of each,
+            // its solid ones first, at its alpha as the blend constant.
+            let mut current: Option<PipelineKey> = None;
+            let mut bound: Option<usize> = None;
+            for batch in mine.iter().filter(|b| b.ghost != 0) {
+                let model = &self.models[batch.model];
+                let alpha = f32::from_bits(batch.ghost) as f64;
+                pass.set_blend_constant(wgpu::Color { r: alpha, g: alpha, b: alpha, a: alpha });
+                pass.set_vertex_buffer(0, model.vertices.slice(..));
+                pass.set_vertex_buffer(1, self.instances.slice(batch.first as u64 * stride..(batch.first + batch.count) as u64 * stride));
+                for r in model.group(batch.group) {
+                    let material = &self.materials[r.material];
+                    let key = PipelineKey { ghost: true, ..material.pipeline };
+                    if current != Some(key) {
+                        pass.set_pipeline(&self.pipelines[&key]);
+                        pass.set_bind_group(0, &self.view_bind, &offset);
+                        current = Some(key);
+                    }
+                    if bound != Some(r.material) {
+                        pass.set_bind_group(1, &material.bind, &[]);
+                        bound = Some(r.material);
+                    }
+                    pass.draw(r.start..r.start + r.count, 0..batch.count);
+                    drawn.draws += 1;
+                    drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
                 }
             }
         }
@@ -2997,6 +3054,68 @@ mod tests {
         assert!(share < 0.03, "{off} pixels ({:.1}%) differ by more than 6, worst {worst}", share * 100.0);
         // And it drew something besides the fog.
         assert!(hard.chunks_exact(3).filter(|p| p != &scene.fog_color).count() > 1000);
+    }
+
+    /// P57: an actor below alpha 1 is drawn over what is behind it at that alpha — the bike's put-back
+    /// ghost — and at 0 not at all. The known scene's board, drawn as an actor rather than a prop, three
+    /// times over an empty scene: solid, at half, and at nothing. Wherever the solid board changed the
+    /// fog, the half board sits halfway between the two, but for the edges.
+    #[test]
+    fn a_ghost_actor_is_drawn_at_its_alpha() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (mut scene, mut assets, camera) = known_scene();
+        // Without its glass: a translucent pane over the board is not halfway between two draws.
+        let loaded = assets.models.get_mut("board").unwrap();
+        loaded.model.meshes.truncate(1);
+        loaded.tris = loaded.model.triangles(0);
+        let board = scene.models.remove(0);
+        scene.models.clear();
+        let at = M4::placement(board.pos, board.look, board.up);
+        let (w, h) = (160u32, 120u32);
+        let light = Lighting::of(&scene);
+        gpu.set_graphics(Graphics::Original);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let mut draw = |alpha: Option<f32>| {
+            let actors: Vec<Actor> =
+                alpha.map(|alpha| Actor { model: "board", at, pose: None, lod_from: None, alpha }).into_iter().collect();
+            let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
+            let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+            gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+            gpu.read(&texture)
+        };
+        let empty = draw(None);
+        let solid = draw(Some(1.0));
+        let half = draw(Some(0.5));
+        let none = draw(Some(0.0));
+        assert_eq!(none, empty, "an actor at alpha 0 was drawn");
+        let (mut changed, mut halfway) = (0, 0);
+        for ((e, s), g) in empty.chunks_exact(3).zip(solid.chunks_exact(3)).zip(half.chunks_exact(3)) {
+            if e.iter().zip(s).all(|(&e, &s)| (e as i32 - s as i32).abs() <= 8) {
+                assert!(e.iter().zip(g).all(|(&e, &g)| (e as i32 - g as i32).abs() <= 2), "the ghost drew off the board");
+                continue;
+            }
+            changed += 1;
+            if (0..3).all(|k| (g[k] as i32 - (e[k] as i32 + s[k] as i32) / 2).abs() <= 2) {
+                halfway += 1;
+            }
+        }
+        eprintln!("{halfway} of {changed} board pixels halfway between the fog and the solid board");
+        if let Ok(dir) = std::env::var("GPU_TEST_PNG") {
+            for (name, rgb) in [("ghost-solid.png", &solid), ("ghost-half.png", &half)] {
+                let _ = crate::png::write_rgb(&std::path::Path::new(&dir).join(name), w as usize, h as usize, rgb);
+            }
+        }
+        assert!(changed > 500, "the board covered {changed} pixels");
+        assert!(halfway as f32 > 0.95 * changed as f32, "only {halfway} of {changed} pixels are halfway");
     }
 
     /// A scene with the disc's kind of fog: free07's, 25 to 1,000 feet at haziness 0.7, which the

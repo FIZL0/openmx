@@ -1771,3 +1771,98 @@ fn l1_and_r1_put_the_biplane_back_on_the_press_frame() {
         assert!(plane.at.y() > high.at.y() - 20.0, "{scheme:?}: the chord moved the plane in the air");
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// the put-back's ghost (P57)
+// ---------------------------------------------------------------------------------------------------
+
+/// P57: the bike's ghost after a put-back runs as the original's does, bit for bit. Captured live on
+/// copy 3 (the journal's `capture/ghost_watch.py`, freeride state 8): the put-back's own frame draws
+/// the bike at half, the clock at its 3 s; each tick after it takes the tick's 0.03333 off the clock
+/// and the alpha climbs from 0.1 towards 1 with the time gone; on the 91st the clock is past zero and
+/// the bike is solid again. The bit patterns below are the game's own, read off the model and the
+/// rider object.
+#[test]
+fn the_put_back_ghost_fades_in_as_the_originals() {
+    use vehicle::Ghost;
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let mut ghost = Ghost::default();
+    assert_eq!(ghost.shown(), 1.0, "a bike never put back is solid");
+    ghost.step(dt);
+    assert_eq!(ghost, Ghost::default(), "the tick does nothing with no ghost running");
+
+    ghost.start();
+    assert_eq!((ghost.clock.0, ghost.alpha.0, ghost.on), (3.0, 0.5, true));
+    assert_eq!(ghost.shown(), 0.5);
+    // (tick after the put-back, clock bits, alpha bits)
+    let seen: [(usize, u32, u32); 7] = [
+        (1, 0x403dddec, 0x3de14726),
+        (2, 0x403bbbd8, 0x3df5c180),
+        (3, 0x403999c4, 0x3e051dec),
+        (4, 0x403777b0, 0x3e0f5b19),
+        (5, 0x4035559c, 0x3e199846),
+        (89, 0x3d09c19e, 0x3f7d6ac5),
+        (90, 0x399e4a00, 0x3f7ffa10),
+    ];
+    let mut tick = 0;
+    for (at, clock, alpha) in seen {
+        while tick < at {
+            ghost.step(dt);
+            tick += 1;
+        }
+        assert_eq!((ghost.clock.0.to_bits(), ghost.alpha.0.to_bits()), (clock, alpha), "tick {at}");
+        assert!(ghost.on, "tick {at}: solid too soon");
+    }
+    ghost.step(dt);
+    assert_eq!(ghost.clock.0.to_bits(), 0xbd074876, "tick 91");
+    assert!(!ghost.on);
+    assert_eq!(ghost.shown(), 1.0, "solid on the 91st tick");
+    ghost.step(dt);
+    assert_eq!(ghost.clock.0.to_bits(), 0xbd074876, "a spent clock is not counted further");
+
+    // A put-back while one runs starts it over (the capture's L1+R1 25 ticks into the wreck's).
+    ghost.start();
+    for _ in 0..25 {
+        ghost.step(dt);
+    }
+    ghost.start();
+    assert_eq!((ghost.clock.0, ghost.alpha.0, ghost.on), (3.0, 0.5, true));
+}
+
+/// P57 through the garage: L1+R1 on the bike puts it back and starts its ghost on that frame, at
+/// half; three seconds of the shell's frames later it is solid. The plane's put-back (S57) has no
+/// ghost — the original's plane is drawn whole straight away — and a plane session never ticks the
+/// bike's.
+#[test]
+fn l1_and_r1_put_the_bike_back_as_a_ghost() {
+    let mut sim = the_minutes_bike();
+    let mut garage = Garage::new(Kind::Bike, Some(parked_plane())).unwrap();
+    let mut world = Jump::nothing();
+    for &report in &first_frames(2 * 60) {
+        pass(&mut sim, &mut garage, report, &mut world);
+        assert_eq!(garage.ghost.shown(), 1.0, "the bike is a ghost before any put-back");
+    }
+    let chord = Report::from_buttons(game_sim::input::mask_of(&[Control::L1, Control::R1]));
+    pass(&mut sim, &mut garage, chord, &mut world);
+    assert!(garage.ghost.on, "L1+R1 did not start the ghost");
+    assert_eq!(garage.ghost.shown(), 0.5);
+    let idle = Report::from_buttons(game_sim::input::mask_of(&[]));
+    let mut frames = 0;
+    while garage.ghost.on {
+        pass(&mut sim, &mut garage, idle, &mut world);
+        frames += 1;
+        assert!(frames < 400, "the ghost never ended");
+    }
+    // 3 s at the shell's 60 Hz, give or take the frame the clock crosses zero on.
+    assert!((179..=181).contains(&frames), "the ghost lasted {frames} frames");
+    assert_eq!(garage.ghost.shown(), 1.0);
+
+    // The plane: its own put-back starts no ghost, and the bike's is not ticked while it flies.
+    garage.ghost.start();
+    let held = garage.ghost;
+    assert_eq!(garage.swap(), Ok(Kind::Biplane));
+    for _ in 0..30 {
+        pass(&mut sim, &mut garage, chord, &mut world);
+    }
+    assert_eq!(garage.ghost, held, "the bike's ghost moved while the plane had the controller");
+}
