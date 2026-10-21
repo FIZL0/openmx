@@ -1997,9 +1997,6 @@ pub struct Sound {
     last: [i32; 3],
 }
 
-/// The frame the shell steps at.
-const FRAME: f32 = 1.0 / 60.0;
-
 impl Sound {
     pub fn new(mixer: Arc<Mutex<Mixer>>) -> Sound {
         Sound {
@@ -2023,8 +2020,8 @@ impl Sound {
         }
     }
 
-    /// One frame of every seat.
-    pub fn frame(&mut self, frames: &[SeatFrame]) {
+    /// One tick of every seat, `dt` long: the ride's own, which is the original's 30 Hz frame (P52).
+    pub fn frame(&mut self, frames: &[SeatFrame], dt: f32) {
         let Ok(mut m) = self.mixer.lock() else { return };
         let m = &mut *m;
         if !self.started {
@@ -2051,7 +2048,7 @@ impl Sound {
                 continue;
             }
             s.plane.silence(m);
-            s.engine.update(h, FRAME, m, &s.bike);
+            s.engine.update(h, dt, m, &s.bike);
             let near = Play { at: Some(h.at), near: self.rider.near, far: self.rider.far, ..Play::default() };
             if let Some(reason) = f.wreck {
                 // The rider's voice by the wreck reason, as `game_sim::wreck_sound` sorts them: a fall
