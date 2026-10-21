@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, others } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, others, markers } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -90,8 +90,18 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         riders.len().put(&mut out);
         riders.iter().for_each(|r| r.put(&mut out));
     }
+    // The session markers (P88), only once they have been touched and behind a tag no player count
+    // can be, so a state that never used them is the bytes it was before.
+    if !markers.fresh() {
+        MARKERS.put(&mut out);
+        markers.at.put(&mut out);
+        markers.slots.put(&mut out);
+    }
     out
 }
+
+/// What begins [`encode`]'s markers section: a word no length of the players' list can be.
+const MARKERS: u64 = u64::from_le_bytes(*b"P88marks");
 
 /// [`encode`]'s bytes into this machine's state. The constants stay this machine's own: the session
 /// agreed them before the ride began (the bike, the stunt set, the track), and a peer's are not this
@@ -106,7 +116,15 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let input = Wire::take(&mut r)?;
     let mut rider: crate::rider::Rider = Wire::take(&mut r)?;
     let plane = Wire::take(&mut r)?;
-    let mut others_riders: Vec<Rider> = if r.at < bytes.len() { Wire::take(&mut r)? } else { Vec::new() };
+    let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
+    let mut others_riders: Vec<Rider> =
+        if r.at < bytes.len() && !tagged(&r) { Wire::take(&mut r)? } else { Vec::new() };
+    let mut markers = crate::markers::Markers::default();
+    if r.at < bytes.len() && tagged(&r) {
+        r.at += 8;
+        markers.at = Wire::take(&mut r)?;
+        markers.slots = Wire::take(&mut r)?;
+    }
     if r.at != bytes.len() {
         return Err(format!("{} bytes left over after the state", bytes.len() - r.at));
     }
@@ -142,6 +160,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         rider,
         plane,
         others,
+        markers,
     };
     Ok(())
 }
@@ -276,6 +295,15 @@ impl<T: Wire> Wire for Vec<T> {
             return Err(format!("a list of {n} with {} bytes left", r.bytes.len() - r.at));
         }
         (0..n).map(|_| T::take(r)).collect()
+    }
+}
+
+impl<T: Wire> Wire for Box<T> {
+    fn put(&self, out: &mut Vec<u8>) {
+        (**self).put(out);
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        Ok(Box::new(T::take(r)?))
     }
 }
 

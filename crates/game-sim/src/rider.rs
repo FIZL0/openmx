@@ -372,6 +372,40 @@ impl Rider {
         self.airborne = false;
     }
 
+    /// **A marker's teleport** (P88, [`crate::markers`]): the whole bike put back as a marker kept
+    /// it — its place, its heading, its speed — and the rider on it, as a put-back leaves one: up out
+    /// of any wreck, the trick machine cleared, and ghosted, so it passes through whoever is there.
+    pub fn teleport(&mut self, ride: Ride) {
+        self.ride = ride;
+        self.teleported();
+    }
+
+    /// A teleport onto a spot rather than a marker — another player, where they stand: the bike set
+    /// down there stopped, on their heading and their up, and the rest as [`Rider::teleport`].
+    pub fn teleport_to(&mut self, spot: crate::markers::Spot) {
+        self.ride.place_on(spot.at, spot.forward, spot.up);
+        off_map::unwreck(&mut self.ride.chassis);
+        self.ride.drag_halved = false;
+        self.teleported();
+    }
+
+    /// What both teleports leave the rider as, which is what the put-backs in [`Rider::frame_among`]
+    /// leave: the machine out of a wreck, no wreck body, no trick, a fresh drawn history, the ghost on.
+    fn teleported(&mut self) {
+        if self.state.wreck.is_some() {
+            self.state.respawn();
+        }
+        self.crash = None;
+        self.ragdoll = None;
+        self.tricks.reset();
+        self.flight = Trick::NONE;
+        self.airborne = self.ride.air.airborne;
+        self.drawn.clear();
+        // A wreck page fading when the teleport came is dropped: there is no wreck left to put back.
+        self.page = wreck_page::Page::default();
+        self.ghost.start();
+    }
+
     /// **Hand the rider the two files a wreck needs** — `Wreckbike.phy`'s part and the rider's
     /// `[Wrecks]` — and the wreck body's inertia tensor.
     ///
