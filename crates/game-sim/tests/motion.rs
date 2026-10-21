@@ -4098,3 +4098,192 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
         joint.3,
     );
 }
+
+/// One tick of an S74 bones capture (`research/journal/2026-10-21-s74-putback-bones/capture/
+/// bones_watch.py`): each region the recorder read, by its name, as the bytes it read.
+struct Bones {
+    frame: u32,
+    fields: std::collections::HashMap<String, Vec<u8>>,
+}
+
+impl Bones {
+    fn bytes(&self, name: &str) -> &[u8] {
+        self.fields.get(name).unwrap_or_else(|| panic!("frame {}: no {name}", self.frame))
+    }
+    fn word(&self, name: &str, at: usize) -> u32 {
+        u32::from_le_bytes(self.bytes(name)[at..at + 4].try_into().unwrap())
+    }
+    fn float(&self, name: &str, at: usize) -> f32 {
+        f32::from_bits(self.word(name, at))
+    }
+    fn lag(&self, name: &str) -> game_sim::vehicle_anim::Lag {
+        use ps2_float::F;
+        game_sim::vehicle_anim::Lag {
+            value: F(self.float(name, 0)),
+            tau: F(self.float(name, 4)),
+            ratio: F(self.float(name, 8)),
+        }
+    }
+}
+
+/// A bones capture's clip table and rows, or `None` when this checkout has not got it.
+fn bones_capture(name: &str) -> Option<([u32; 60], Vec<Bones>)> {
+    let Ok(text) = std::fs::read_to_string(private_dir("s74").join(format!("{name}.txt"))) else {
+        println!("no context/s74/{name}.txt: no held-pose verdict for it");
+        return None;
+    };
+    let hex = |s: &str| -> Vec<u8> {
+        (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+    };
+    let mut table = [0u32; 60];
+    let mut rows: Vec<Bones> = Vec::new();
+    for line in text.lines() {
+        if let Some(t) = line.strip_prefix("# clip-table ") {
+            for (k, w) in hex(t).chunks(4).enumerate() {
+                table[k] = u32::from_le_bytes(w.try_into().unwrap());
+            }
+        } else if line.starts_with('#') {
+            continue;
+        } else if let Some(f) = line.strip_prefix("f ") {
+            rows.push(Bones { frame: f.parse().unwrap(), fields: Default::default() });
+        } else if let (Some((k, v)), Some(row)) = (line.split_once(' '), rows.last_mut()) {
+            row.fields.insert(k.to_string(), hex(v));
+        }
+    }
+    rows.retain(|r| r.fields.contains_key(&format!("node{}", JOINTS - 1)));
+    Some((table, rows))
+}
+
+/// **S74.** The rider the original draws on the two ticks a put-back holds them on the bike, joint by
+/// joint: on every tick of S74's five captures that the request held the body, the port's
+/// [`game_sim::vehicle_anim::Driver`] — seeded from the tick before, handed the request the original
+/// was handed — latches the same state with the ramp zeroed and the two axes snapped, and the pose its
+/// blend draws is the original's 22 joints within [`TOLERANCE`].
+///
+/// Those two ticks are the whole of what the body draws straight off its clips after a put-back: from
+/// the third the body is riding again, which in the original is the ragdoll's riding spring pulling the
+/// bones towards this pose (S74's journal), and not compared.
+#[test]
+fn the_put_back_holds_the_original_pose_joint_by_joint() {
+    use game_sim::vehicle_anim as va;
+    use ps2_float::F;
+
+    let Some((mut set, lib)) = rider_clips() else { return };
+    let mut held = 0usize;
+    let mut worst = (0.0f32, 0usize, String::new());
+    for name in ["free06-ride", "free06-down", "free06-downchord", "free09-ride", "free09-down"] {
+        let Some((table, rows)) = bones_capture(name) else { continue };
+        let id_of = |ptr: u32| -> Option<game_sim::motion::ClipId> {
+            if ptr == 0 {
+                return None;
+            }
+            let slot = table.iter().position(|&c| c == ptr).expect("a clip of the table");
+            lib.clip[slot]
+        };
+        for pair in rows.windows(2) {
+            let (before, now) = (&pair[0], &pair[1]);
+            if now.word("req", 0xc) == 0 {
+                continue;
+            }
+            assert_eq!(now.frame, before.frame + 1, "{name}: a gap before held frame {}", now.frame);
+            let mut d = va::Driver {
+                want: now.word("body.8dc", 0x8f4 - 0x8dc) as i32,
+                state: before.word("body.8dc", 0x8f0 - 0x8dc) as i32,
+                prev: before.word("body.8dc", 0x8ec - 0x8dc) as i32,
+                seq: (before.word("body.8dc", 0x8fc - 0x8dc) & 0xff) as u8,
+                rate: F(before.float("body.680", 0x690 - 0x680)),
+                ramp: F(before.float("body.680", 0x68c - 0x680)),
+                started: before.word("body.680", 0x688 - 0x680) != 0,
+                holding: before.word("body.680", 0x684 - 0x680) != 0,
+                from_table: before.word("body.680", 0) != 0,
+                cross: F(before.float("body.8dc", 0)),
+                cross_prev: F(before.float("body.8dc", 0x8e0 - 0x8dc)),
+                cross_start: F(before.float("body.8dc", 0x8e4 - 0x8dc)),
+                reverse: F(before.float("body.a3c", 0)),
+                extra: before.word("body.9f0", 0) as i32,
+                mix: before.lag("lag.mix"),
+                phase: before.lag("lag.phase"),
+            };
+            let clock = |at: u32| at as usize - 0x3c;
+            let mut player = game_sim::motion::Player {
+                clip: id_of(before.word("body.3c", clock(0x48))),
+                last: id_of(before.word("body.3c", clock(0x50))),
+                time: F(before.float("body.3c", clock(0x84))),
+                prev: F(before.float("body.3c", clock(0x54))),
+                finished: before.word("body.3c", 0) != 0,
+                fade: game_sim::motion::Fade {
+                    on: before.word("body.3c", clock(0x80)) != 0,
+                    from: id_of(before.word("body.3c", clock(0x4c))),
+                    clock: F(before.float("body.3c", clock(0x88))),
+                    delay: F(before.float("body.3c", clock(0x90))),
+                    length: F(before.float("body.3c", clock(0x94))),
+                    end: F(before.float("body.3c", clock(0x8c))),
+                },
+            };
+            let rate = |at: u32| F(now.float("body.680", at as usize - 0x680));
+            let p = va::Params {
+                rate_ready: rate(0x694),
+                rate_hold: rate(0x698),
+                rate_default: rate(0x69c),
+                rate_pose: rate(0x6a0),
+                rate_stunt: rate(0x6a4),
+                cross_cap: F(now.float("body.8dc", 0x8e8 - 0x8dc)),
+                start_phase: F::ZERO,
+                band: [0, 4, 8].map(|at| F(now.float("body.a14", at))),
+            };
+            let r = va::Request {
+                held: true,
+                at_base: now.word("req", 0x8) != 0,
+                cut: now.word("req", 0x140) != 0,
+                offset: ps2_float::Vf::ZERO,
+                base: ps2_float::Vf::ZERO,
+                rotation: ps2_float::Vf::ZERO,
+                phase_axis: F(now.float("req", 0x170)),
+                mix_axis: F(now.float("req", 0x174)),
+                band: F(now.float("req", 0x178)),
+                progress: F(now.float("req", 0x1a4)),
+                seq: now.word("req", 0x1a8) as i32,
+            };
+            let dt = F(now.float("dt", 0));
+            let mut snapshot = game_sim::motion::Snapshot::default();
+            let (frame, fade, _) = captured_step(dt, &mut d, &mut player, &mut set, &mut snapshot, &lib, &p, &r);
+            let f = now.frame;
+            assert_eq!(d.state, now.word("body.8dc", 0x8f0 - 0x8dc) as i32, "{name} frame {f}: the state");
+            assert_eq!(d.state, va::TURN_RIDING, "{name} frame {f}: held in the riding row");
+            assert_eq!(d.ramp.0, now.float("body.680", 0x68c - 0x680), "{name} frame {f}: the ramp");
+            assert_eq!(d.phase.value.0, now.float("lag.phase", 0), "{name} frame {f}: the phase axis");
+            assert_eq!(d.mix.value.0, now.float("lag.mix", 0), "{name} frame {f}: the mix axis");
+            assert!(set.apply_vehicle_crossed(frame.blend, &player, fade), "{name} frame {f}: nothing drawn");
+            let joints = now.bytes("joints");
+            for j in 0..JOINTS {
+                let lane = |at: usize, k: usize| f32::from_bits(u32::from_le_bytes(
+                    joints[0x60 * j + at + 4 * k..0x60 * j + at + 4 * k + 4].try_into().unwrap(),
+                ));
+                for k in 0..4 {
+                    for (mine, theirs, what) in
+                        [(set.pose.rot[j][k], lane(0x50, k), "quaternion"), (set.pose.pos[j][k], lane(0x40, k), "translation")]
+                    {
+                        let off = (mine - theirs).abs();
+                        if off > worst.0 {
+                            worst = (off, j, format!("{name} frame {f} {what} lane {k}"));
+                        }
+                        assert!(
+                            off <= TOLERANCE,
+                            "{name} frame {f}: the {what} of joint {j} ({}) lane {k} is {mine}, the original's {theirs}",
+                            set.skeleton.bones[j].name
+                        );
+                    }
+                }
+            }
+            held += 1;
+        }
+    }
+    println!(
+        "the put-back's held pose: {held} ticks, {JOINTS} joints each, every lane within {TOLERANCE}; worst {:e} at \
+         joint {} ({})",
+        worst.0, worst.1, worst.2
+    );
+    if held > 0 {
+        assert!(held >= 18, "only {held} held ticks compared");
+    }
+}

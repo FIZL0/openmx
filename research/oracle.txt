@@ -4122,3 +4122,22 @@ hand_reset_thunk            boot 0x00281930 this -= 80, into player_hand_reset: 
 #   mode 3 asks the player (+0x20, vt+0xac) for the name bits of "StuntCompetition" (0x00433b80)
 #   and "HitFreeride" (0x00433b98) when 0x004e1df8 is set; answered, the reset; otherwise
 #   0x003a6dc0 instead (not ported; the captures all took the reset).
+# S74 — the put-back's two-tick hold on the rider's body, ported as rider::PutBack
+#   (crates/game-sim/src/rider.rs) and held in crates/game-sim/tests/rider_anim.rs
+#   (the_put_back_holds_the_body_as_the_original_does: 2695 ticks of five captures, 7 chords, 2 clocks)
+#   and crates/game-sim/tests/motion.rs (the_put_back_holds_the_original_pose_joint_by_joint: 18 held
+#   ticks, 22 joints, within 1e-4, worst 6.6e-7).
+#   The player update 0x0027c890: after the base update 0x002520d0, a delayed counter +0x1480 that
+#   raises +0x3a0 when it runs down to 0 (not seen in any capture, not ported); then 0x0027c2d0 fills
+#   the request at +0xb80 (+0xb8c = +0x3a0, the body's held; +0xc84 the reason); at the end
+#   `if (+0x3a0 && +0x3a4) +0x3a0 = 0; +0x3a4 = +0x3a0;`. +0x3a0 = 1 is set by the ghost chain
+#   0x0027b650 (both put-backs) and by 0x0027bbe0. Measured: the request's reason is the bike's
+#   +0x748 from before the tick's verdict on every captured tick — the wreck's entry tick has it 0 and
+#   a clock put-back's tick still 11 — so the chord (input phase, before the update) is held on T and
+#   T+1, the clock's put-back on T+1 and T+2, with the body (mode +0x47c) still 2 on the clock's T.
+#   Body actor = the type-4 record less 0x400 whose +0x488 is bike + 0xb80; +0x230 joint count (22),
+#   +0x234 joints (0x60 each: +0x34 node, +0x40 translation, +0x50 quaternion); nodes' local rows
+#   +0x40..+0x7f, world rows +0x80..+0xbf. Held ticks: state +0x8f0 = 30, ramp +0x68c = 0, both lags
+#   (+0x630/+0x634 -> value) snapped to the request's 0.5/0.5, and node 0's local translation is
+#   joint 0's. From T+2 (chord) the nodes part from the joints: the riding body is the ragdoll's.
+#   The settle (+0x6b4) is kept through the put-back: 2 -> 0 skips the wreck's clean-up arm.
