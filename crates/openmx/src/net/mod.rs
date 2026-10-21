@@ -39,6 +39,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admit;
 pub mod desync;
 pub mod link;
 pub mod recover;
@@ -115,6 +116,13 @@ pub trait Game {
     fn hash(&self) -> u64;
     fn encode(&self) -> Option<Vec<u8>>;
     fn decode(&mut self, bytes: &[u8]) -> Result<(), String>;
+    /// Seat `seat` becomes a new rider in `spawn`'s state — one seat in the game's own per-seat
+    /// bytes — for a peer joining the ride under way ([`admit`]): a seat past the last is added
+    /// (with any between, nobody's), one nobody sits in is taken over. A game whose seats cannot
+    /// change answers `Err`, and nobody can join it mid-ride.
+    fn seat(&mut self, _seat: usize, _spawn: &[u8]) -> Result<(), String> {
+        Err("this ride's seats cannot change".into())
+    }
 }
 
 /// Who sits where: each seat's peer, or nobody. Every machine starts with the same line-up (the
@@ -212,6 +220,8 @@ pub struct Netplay<S: Clone + 'static> {
     pub notice: String,
     /// Log lines not printed yet (the caller prints them; the tests keep them quiet).
     pub said: Vec<String>,
+    /// Peers joining the ride under way (N10): the host's queue, and every join so far.
+    pub admit: admit::Admit,
 }
 
 impl<S: Clone + 'static> Netplay<S> {
@@ -238,7 +248,33 @@ impl<S: Clone + 'static> Netplay<S> {
             end: None,
             notice: String::new(),
             said: Vec::new(),
+            admit: admit::Admit::default(),
         })
+    }
+
+    /// A machine joining `host`'s ride under way (N10): no seat and no session until the host's
+    /// restart brings both ([`admit`]); until then it only keeps in touch with the host.
+    pub fn joining(host: &str, me: &str, timing: Timing, dumps: PathBuf) -> Result<Netplay<S>, String> {
+        if host == me {
+            return Err(format!("{me} cannot join its own ride"));
+        }
+        let mut np = Netplay::new(Lineup { seats: vec![Some(me.to_string())] }, me, timing, dumps)?;
+        // a session of its own seat alone, never run, and numbered off every real one's datagrams
+        np.rb.round = u8::MAX;
+        np.lineup = Lineup { seats: vec![Some(host.to_string())] };
+        np.recover = recover::Recover::new(std::iter::once(host.to_string()));
+        Ok(np)
+    }
+
+    /// Waiting for the host's state to join with: no seat yet.
+    pub fn waiting(&self) -> bool {
+        self.lineup.mine(&self.me).is_empty()
+    }
+
+    /// The host: peer `peer` joins the ride under way on `seats`, each spawned as `spawn` (one seat
+    /// in the game's own bytes). It happens at the next frame that can: [`admit`].
+    pub fn admit(&mut self, peer: &str, seats: &[usize], spawn: Vec<u8>) -> Result<(), String> {
+        admit::ask(self, peer, seats, spawn)
     }
 
     pub fn host(&self) -> bool {
@@ -318,11 +354,12 @@ impl<S: Clone + 'static> Netplay<S> {
         recover::tick(self, dt);
         recover::restarted(self, game);
         resync::take_state(self, game);
-        if self.end.is_some() || self.rb.sess.current_state() != ggrs::SessionState::Running {
+        if self.end.is_some() || self.waiting() || self.rb.sess.current_state() != ggrs::SessionState::Running {
             return;
         }
         rollback::gate(self, game, local);
         resync::send_state(self, game);
+        admit::run(self, game);
     }
 
     /// ggrs' upkeep (acks, keep-alives, its events), every frame.
