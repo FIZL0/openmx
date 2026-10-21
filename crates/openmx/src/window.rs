@@ -275,6 +275,11 @@ impl Window {
         self.keys.held(code)
     }
 
+    /// Whether a key went down during the last poll, whether or not it is still down (P53).
+    pub fn tapped(&self, code: u8) -> bool {
+        self.keys.tapped[code as usize]
+    }
+
     /// Read everything the server has said since the last call: keys, and whether the window is gone.
     ///
     /// Never blocks, so a frame that nobody touches costs one `read` that returns `WouldBlock`.
@@ -282,6 +287,7 @@ impl Window {
     /// The key state settles when the stream runs dry rather than on each event, because a release
     /// is only believed once the event after it has been seen ([`Keyboard`]).
     pub fn poll(&mut self) {
+        self.keys.tapped = [false; KEYCODES];
         let mut event = [0u8; 32];
         loop {
             match read_exact_nb(&mut self.stream, &mut event) {
@@ -441,6 +447,8 @@ struct Keyboard {
     down: [bool; KEYCODES],
     /// A release that has arrived but is not believed yet: its keycode and its timestamp.
     pending: Option<(u8, u32)>,
+    /// Keys that went down since the last poll — not a repeat's second half — down now or not.
+    tapped: [bool; KEYCODES],
 }
 
 impl Keyboard {
@@ -448,6 +456,7 @@ impl Keyboard {
         Keyboard {
             down: [false; KEYCODES],
             pending: None,
+            tapped: [false; KEYCODES],
         }
     }
 
@@ -476,6 +485,7 @@ impl Keyboard {
         }
         if press {
             self.down[code as usize] = true;
+            self.tapped[code as usize] = true;
         } else {
             self.pending = Some((code, time));
         }

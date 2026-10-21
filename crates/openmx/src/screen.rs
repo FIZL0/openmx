@@ -110,6 +110,16 @@ impl Screen {
         }
     }
 
+    /// Down now, or pressed since the last poll though let go again (P53): a key's state for a
+    /// frame, so a tap inside one slow frame is still a press.
+    pub fn pressed(&self, code: u8) -> bool {
+        self.held(code)
+            || match &self.inner {
+                Inner::X(w) => w.tapped(code),
+                Inner::Gpu(w) => w.tapped(code),
+            }
+    }
+
     pub fn resized(&mut self) -> bool {
         let r = match &mut self.inner {
             Inner::X(w) => w.resized(),

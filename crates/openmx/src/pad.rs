@@ -63,13 +63,15 @@ const EVENT_INIT: u8 = 0x80;
 const AXES: usize = 32;
 const BUTTONS: usize = 12;
 
-/// Which control each joystick button index is, in the order Linux reports a gamepad's buttons.
+/// Which control each of the shell's own button slots is: the order the kernel gives an Xbox pad
+/// (xpad) its buttons, which is what the bindings' names (`PadSouth`, `PadStart`, …) mean.
 ///
-/// The kernel orders them by keycode, so a pad with no `BTN_SELECT` — the kit's own virtual pad, for
-/// one — slides start down into index 6. Until P40 both 6 and 7 were therefore Start, which cost
-/// nothing while Select did nothing; under the new scheme Select is the camera, so 6 is Select and a
-/// pad whose sysfs entry says it has no `BTN_SELECT` has its buttons from 6 on moved up one as they
-/// are read ([`DeviceInfo::no_select`]), which puts its Start back on 7.
+/// The kernel numbers a js device's buttons by keycode, among the keys *that device* has, so the
+/// same number is a different button on another pad: a pad with no `BTN_SELECT` slides Start down
+/// to 6, a PlayStation pad has its digital L2 and R2 at 6 and 7 and Options at 9, and a Switch Pro
+/// Controller has Capture at 4 and + at 10 (P53, where + did nothing and ZL was Start). So a device
+/// whose sysfs entry lists its keys has each js number turned into one of these slots by the code
+/// behind it ([`JsMap`]), and only a node with no sysfs entry is read in this order as it comes.
 const PAD_BUTTONS: [Option<Control>; BUTTONS] = [
     Some(Control::Cross),    // south
     Some(Control::Circle),   // east
@@ -85,7 +87,10 @@ const PAD_BUTTONS: [Option<Control>; BUTTONS] = [
     None,
 ];
 
-/// The joystick axes the shell reads: the two sticks, the two triggers and the d-pad hat.
+/// The joystick axes the shell reads, in its own order (an Xbox pad's, and a PlayStation pad's): the
+/// two sticks, the two triggers and the d-pad hat. A device with a sysfs entry has its axes put in
+/// these slots by their codes ([`JsMap`]); a Switch Pro Controller has no trigger axes, so its right
+/// stick was read as L2 and its d-pad as the right stick and R2 until P53.
 const AXIS_LEFT_X: usize = 0;
 const AXIS_LEFT_Y: usize = 1;
 const AXIS_L2: usize = 2;
@@ -94,6 +99,124 @@ const AXIS_RIGHT_Y: usize = 4;
 const AXIS_R2: usize = 5;
 const AXIS_HAT_X: usize = 6;
 const AXIS_HAT_Y: usize = 7;
+
+/// The shell's own axis slots, [`AXIS_LEFT_X`] to [`AXIS_HAT_Y`].
+const PAD_AXES: usize = 8;
+
+/// What one js button number of a device is to the shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JsButton {
+    /// One of [`PAD_BUTTONS`]' slots, which the bindings name.
+    Pad(usize),
+    /// A trigger with no axis of its own (a Switch pad's ZL and ZR): its axis slot, all the way down
+    /// while the button is.
+    Trigger(usize),
+    /// A d-pad direction sent as a button rather than as a hat (a left Joy-Con's).
+    Dpad(Control),
+    /// Nothing the game has: a Capture or a Home button, or a key past the gamepad's.
+    Nothing,
+}
+
+/// How a device's js numbers land on the shell's slots (P53), built from the keys and axes its sysfs
+/// entry lists: the joystick interface numbers them in code order among the ones the device has,
+/// buttons from `BTN_JOYSTICK` up and then the `BTN_MISC` block, axes from `ABS_X` up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JsMap {
+    button: Vec<JsButton>,
+    /// The shell's axis slot for each js axis; `None` for one it does not read (an accelerometer, a
+    /// pressure the [`Wiring`] reads by its raw number).
+    axis: Vec<Option<usize>>,
+}
+
+/// The kernel's codes the map needs.
+const BTN_MISC: u16 = 0x100;
+const BTN_JOYSTICK: u16 = 0x120;
+const KEY_MAX: u16 = 0x2ff;
+const ABS_MAX: u16 = 0x3f;
+const ABS_Z: u16 = 0x02;
+const ABS_RZ: u16 = 0x05;
+const ABS_GAS: u16 = 0x09;
+const ABS_BRAKE: u16 = 0x0a;
+const ABS_HAT0X: u16 = 0x10;
+const ABS_HAT0Y: u16 = 0x11;
+
+impl JsMap {
+    /// A node with no sysfs entry: its numbers are taken as the shell's own, as before P53.
+    fn identity() -> JsMap {
+        JsMap {
+            button: (0..BUTTONS).map(JsButton::Pad).collect(),
+            axis: (0..PAD_AXES).map(Some).collect(),
+        }
+    }
+
+    /// The map for a device with these keys and axes, js order. `positional` is a pad whose driver
+    /// names its four face buttons by where they are (`BTN_NORTH` the top one, `BTN_WEST` the left
+    /// one: hid-playstation, hid-nintendo); xpad, and every pad that pretends to be one, sends an
+    /// Xbox pad's X — the left button — as `BTN_X`, which is the same code as `BTN_NORTH`. Either
+    /// list empty (no sysfs) keeps that half the identity.
+    fn of(keys: &[u16], abs: &[u16], positional: bool) -> JsMap {
+        let mut map = JsMap::identity();
+        let has_abs = |code: u16| abs.contains(&code);
+        if !keys.is_empty() {
+            map.button = keys
+                .iter()
+                .map(|&code| match code {
+                    0x130 => JsButton::Pad(0),
+                    0x131 => JsButton::Pad(1),
+                    0x133 => JsButton::Pad(if positional { 3 } else { 2 }),
+                    0x134 => JsButton::Pad(if positional { 2 } else { 3 }),
+                    0x136 => JsButton::Pad(4),
+                    0x137 => JsButton::Pad(5),
+                    0x138 if !has_abs(ABS_Z) && !has_abs(ABS_BRAKE) => JsButton::Trigger(AXIS_L2),
+                    0x139 if !has_abs(ABS_RZ) && !has_abs(ABS_GAS) => JsButton::Trigger(AXIS_R2),
+                    0x13a => JsButton::Pad(6),
+                    0x13b => JsButton::Pad(7),
+                    0x13c => JsButton::Pad(8),
+                    0x13d => JsButton::Pad(9),
+                    0x13e => JsButton::Pad(10),
+                    0x220 => JsButton::Dpad(Control::Up),
+                    0x221 => JsButton::Dpad(Control::Down),
+                    0x222 => JsButton::Dpad(Control::Left),
+                    0x223 => JsButton::Dpad(Control::Right),
+                    _ => JsButton::Nothing,
+                })
+                .collect();
+        }
+        if !abs.is_empty() {
+            map.axis = abs
+                .iter()
+                .map(|&code| match code {
+                    0 | 1 | 3 | 4 => Some(code as usize),
+                    ABS_Z => Some(AXIS_L2),
+                    ABS_RZ => Some(AXIS_R2),
+                    ABS_BRAKE if !has_abs(ABS_Z) => Some(AXIS_L2),
+                    ABS_GAS if !has_abs(ABS_RZ) => Some(AXIS_R2),
+                    ABS_HAT0X => Some(AXIS_HAT_X),
+                    ABS_HAT0Y => Some(AXIS_HAT_Y),
+                    _ => None,
+                })
+                .collect();
+        }
+        map
+    }
+
+    fn button(&self, number: usize) -> JsButton {
+        self.button.get(number).copied().unwrap_or(JsButton::Nothing)
+    }
+
+    fn axis(&self, number: usize) -> Option<usize> {
+        self.axis.get(number).copied().flatten()
+    }
+}
+
+/// The codes a sysfs capability bitmap lists, in the order the joystick interface numbers them.
+fn js_order(bitmap: &str, codes: impl Iterator<Item = u16>) -> Vec<u16> {
+    codes.filter(|&c| has_key(bitmap, c as usize)).collect()
+}
+
+/// How many presses of one control the shell keeps for the frames after a slow one (P53): a
+/// double tap inside one frame is two presses, handed over one a frame.
+const QUEUE_MAX: u8 = 4;
 
 /// Where each stick axis goes in the report: the report's own order is right X, right Y, left X,
 /// left Y, which is not the pad's.
@@ -168,11 +291,20 @@ pub struct Wiring {
     pub pressure: [Option<Control>; AXES],
     /// Which layout each seat rides on (P40): the new one, or the original's.
     pub schemes: [Scheme; SEATS],
+    /// A Nintendo pad's A and B by where they are (P53): B, the bottom one, is Cross and confirms,
+    /// as on every other pad. Off, the default, they go by what they say — A, the right one, confirms
+    /// and B goes back, the way a Switch player's thumb expects ([`Pads::nintendo`]).
+    pub nintendo_positions: bool,
 }
 
 impl Default for Wiring {
     fn default() -> Wiring {
-        Wiring { throttle: Throttle::default(), pressure: [None; AXES], schemes: [Scheme::default(); SEATS] }
+        Wiring {
+            throttle: Throttle::default(),
+            pressure: [None; AXES],
+            schemes: [Scheme::default(); SEATS],
+            nintendo_positions: false,
+        }
     }
 }
 
@@ -404,16 +536,29 @@ const KEY_STICKS: [(usize, u8, u8); 2] = [
 pub struct Pads {
     /// The joystick device, if one opened.
     device: Option<std::fs::File>,
-    /// The device has no Select, so its buttons from 6 on are read one up ([`DeviceInfo::no_select`]).
-    no_select: bool,
+    /// Which of the shell's slots each of the device's js numbers is ([`JsMap`]).
+    map: JsMap,
+    /// A Nintendo pad, whose A (the right button) confirms unless the wiring says positions.
+    nintendo: bool,
     /// Its name, for the line the shell prints when it joins.
     pub name: Option<String>,
     /// The device stopped answering — unplugged, or the read failed — and was closed.
     gone: bool,
-    /// The last value of each axis, kept because a joystick event only mentions what changed.
+    /// The last value of each axis, kept because a joystick event only mentions what changed: in
+    /// the shell's own slots ([`AXIS_LEFT_X`]…), and by the device's own numbers, which is what a
+    /// [`Wiring`]'s pressure axes are.
     axis: [i16; AXES],
-    /// Which pad buttons are down.
+    raw: [i16; AXES],
+    /// Presses since the last report, a count per control ([`Control`] order), so a press and its
+    /// release inside one slow frame is still a press (P53): at 5 fps a tap is shorter than a frame,
+    /// and the held state alone never saw it.
+    queue: [u8; 16],
+    /// The controls the last report pressed out of [`Pads::queue`].
+    taps: u16,
+    /// Which pad buttons are down, in [`PAD_BUTTONS`]' slots.
     button: [bool; BUTTONS],
+    /// The d-pad directions a device sends as buttons ([`JsButton::Dpad`]) held.
+    dpad: u16,
     /// The keyboard's stick axes, in [`KEY_STICKS`]' order, each part way to its edge.
     key_stick: [KeyAxis; KEY_STICKS.len()],
     /// The keyboard's throttle, part way to full.
@@ -456,18 +601,24 @@ impl Pads {
         let mut axis = [0i16; AXES];
         axis[AXIS_L2] = TRIGGER_REST;
         axis[AXIS_R2] = TRIGGER_REST;
-        for (slot, control) in axis.iter_mut().zip(wiring.pressure) {
+        let mut raw = [0i16; AXES];
+        for (slot, control) in raw.iter_mut().zip(wiring.pressure) {
             if control.is_some() {
                 *slot = TRIGGER_REST;
             }
         }
         Pads {
             device: None,
-            no_select: false,
+            map: JsMap::identity(),
+            nintendo: false,
             name: None,
             gone: false,
             axis,
+            raw,
+            queue: [0; 16],
+            taps: 0,
             button: [false; BUTTONS],
+            dpad: 0,
             key_stick: [KeyAxis::CENTRED; KEY_STICKS.len()],
             key_gas: KeyRamp::SHUT,
             scheme: Scheme::Original,
@@ -502,12 +653,11 @@ impl Pads {
     pub(crate) fn build(&mut self, seconds: f32, held: &dyn Fn(u8) -> bool) -> Report {
         self.drain();
         let mut report = Report::idle();
-        let mut buttons = 0u16;
+        let mut buttons = self.take_taps();
 
         // The pad's buttons and the keyboard's keys, as one set of the game's own controls.
         buttons |= self.bindings.buttons(&self.button, held);
-        buttons |= hat(self.axis[AXIS_HAT_X], Control::Left, Control::Right);
-        buttons |= hat(self.axis[AXIS_HAT_Y], Control::Up, Control::Down);
+        buttons |= self.hat_mask() | self.dpad;
 
         // The button word, active low, and a full pressure byte for every analogue control in it —
         // which is what a digital source has to mean, and what the game's own binding reads.
@@ -544,7 +694,7 @@ impl Pads {
             if !binding.is_analogue() || buttons & binding.mask == 0 {
                 continue;
             }
-            let pressure = trigger_pressure(self.axis[axis]);
+            let pressure = trigger_pressure(self.raw[axis]);
             if pressure > PRESSURE_THRESHOLD {
                 report.0[binding.pressure as usize] = pressure;
             }
@@ -590,10 +740,110 @@ impl Pads {
         }
     }
 
+    /// One joystick event: the state it changes, and a press for [`Pads::queue`] when it is a
+    /// button or a hat direction going down — not an initial one, which is how the device was when
+    /// it was opened and nobody's press.
+    fn event(&mut self, kind: u8, number: usize, value: i16, init: bool) {
+        match kind {
+            EVENT_AXIS => {
+                if let Some(slot) = self.raw.get_mut(number) {
+                    *slot = value;
+                }
+                let Some(slot) = self.map.axis(number) else { return };
+                let before = self.hat_mask();
+                self.axis[slot] = value;
+                if !init && (slot == AXIS_HAT_X || slot == AXIS_HAT_Y) {
+                    self.queue_mask(self.hat_mask() & !before);
+                }
+            }
+            EVENT_BUTTON => match self.map.button(number) {
+                JsButton::Pad(slot) => {
+                    let slot = self.slot(slot);
+                    let down = value != 0;
+                    if down && !init && !self.button[slot] {
+                        let mut one = [false; BUTTONS];
+                        one[slot] = true;
+                        self.queue_mask(self.bindings.buttons(&one, &no_keys));
+                    }
+                    self.button[slot] = down;
+                }
+                JsButton::Trigger(slot) => self.axis[slot] = if value != 0 { i16::MAX } else { TRIGGER_REST },
+                JsButton::Dpad(control) => {
+                    let mask = control.mask();
+                    let held = self.dpad & mask != 0;
+                    if value != 0 {
+                        if !held && !init {
+                            self.queue_mask(mask);
+                        }
+                        self.dpad |= mask;
+                    } else {
+                        self.dpad &= !mask;
+                    }
+                }
+                JsButton::Nothing => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// The slot a button is read in: a Nintendo pad's A and B change places unless the wiring reads
+    /// it by position (P53). hid-nintendo names its buttons by where they are — B, the bottom one,
+    /// is `BTN_SOUTH` — so by position B is Cross; by its label A is, which is what a Switch's own
+    /// menus confirm with.
+    fn slot(&self, slot: usize) -> usize {
+        match slot {
+            0 | 1 if self.nintendo && !self.wiring.nintendo_positions => 1 - slot,
+            _ => slot,
+        }
+    }
+
+    /// The d-pad held on the hat.
+    fn hat_mask(&self) -> u16 {
+        hat(self.axis[AXIS_HAT_X], Control::Left, Control::Right) | hat(self.axis[AXIS_HAT_Y], Control::Up, Control::Down)
+    }
+
+    /// One more press of each control in `mask`.
+    fn queue_mask(&mut self, mask: u16) {
+        for (n, control) in self.queue.iter_mut().zip(Control::ALL) {
+            if mask & control.mask() != 0 {
+                *n = (*n + 1).min(QUEUE_MAX);
+            }
+        }
+    }
+
+    /// One press off the queue for every control that has one: the controls this report presses
+    /// whether or not they are still down, which [`Pads::taps`] says afterwards.
+    fn take_taps(&mut self) -> u16 {
+        let mut taps = 0;
+        for (n, control) in self.queue.iter_mut().zip(Control::ALL) {
+            if *n > 0 {
+                *n -= 1;
+                taps |= control.mask();
+            }
+        }
+        self.taps = taps;
+        taps
+    }
+
+    /// The presses the last report was built with ([`Pads::queue`]): a control in it went down since
+    /// the report before, even if it is up again. The menus read these as presses on their own, so
+    /// a button let go and pressed again inside one frame still presses.
+    pub fn taps(&self) -> u16 {
+        self.taps
+    }
+
+    /// Forget every press waiting: a pad nobody reads this frame, whose presses would otherwise fire
+    /// on the first menu after the ride.
+    fn clear_queue(&mut self) {
+        self.queue = [0; 16];
+        self.taps = 0;
+    }
+
     /// Read every joystick event waiting, updating the axis and button state.
     fn drain(&mut self) {
         use std::io::Read;
-        let Some(device) = self.device.as_mut() else {
+        // Out of `self` while it is read, so each event can go through [`Pads::event`].
+        let Some(mut device) = self.device.take() else {
             return;
         };
         let mut event = [0u8; EVENT_BYTES];
@@ -601,34 +851,29 @@ impl Pads {
             match device.read(&mut event) {
                 Ok(EVENT_BYTES) => {
                     let value = i16::from_le_bytes([event[4], event[5]]);
-                    let kind = event[6] & !EVENT_INIT;
-                    let mut number = event[7] as usize;
-                    if kind == EVENT_BUTTON && self.no_select && number >= 6 {
-                        number += 1;
-                    }
-                    match kind {
-                        EVENT_AXIS if number < AXES => self.axis[number] = value,
-                        EVENT_BUTTON if number < BUTTONS => self.button[number] = value != 0,
-                        _ => {}
-                    }
+                    let init = event[6] & EVENT_INIT != 0;
+                    self.event(event[6] & !EVENT_INIT, event[7] as usize, value, init);
                 }
                 // A short read cannot happen on this device. End of file, or any error but "nothing
                 // waiting", is a device that went away — the kernel answers ENODEV once a pad is
                 // unplugged — and it is closed and said, so that [`Seats`] can pause its player and
                 // hold the seat for it, rather than read a dead file for ever.
                 Ok(0) => break,
-                Ok(_) => return,
+                Ok(_) => {
+                    self.device = Some(device);
+                    return;
+                }
                 Err(e) if matches!(
                     e.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                 ) =>
                 {
+                    self.device = Some(device);
                     return;
                 }
                 Err(_) => break,
             }
         }
-        self.device = None;
         self.gone = true;
     }
 }
@@ -707,10 +952,15 @@ pub struct DeviceInfo {
     pub uniq: String,
     /// Where it is plugged in: the USB port path, for a pad that has no serial.
     pub phys: String,
-    /// The device says which keys it has and Select is not among them, so its js button numbers
-    /// from 6 on are one short of [`PAD_BUTTONS`]' (P40). A node with no sysfs entry is taken to
-    /// number its buttons as a full gamepad does.
-    pub no_select: bool,
+    /// The keys the device says it has from `BTN_MISC` up and its axes, in the order the joystick
+    /// interface numbers them ([`JsMap`]); empty for a node with no sysfs entry, which is taken to
+    /// number them as an Xbox pad does.
+    pub keys: Vec<u16>,
+    pub abs: Vec<u16>,
+    /// A motion sensor and not a pad (P53): the kernel flags it an accelerometer, or it is named as
+    /// hid-nintendo names the second device it makes for a Switch pad ("… (IMU)"). Its axes never
+    /// rest, so read as a pad it is a drifting stick, and it can take a seat before the real one.
+    pub motion: bool,
     /// The kernel made it for a program, not for hardware: its sysfs node is under
     /// `/sys/devices/virtual/input/`, where uinput puts what it makes — a uinput pad (`ps2kit`'s,
     /// which calls itself an Xbox 360 pad with the real one's ids, another slot's, a remapper's) or
@@ -721,11 +971,21 @@ pub struct DeviceInfo {
 
 /// The kernel's `BTN_SELECT` and `BTN_SOUTH`: a gamepad has the second, and the first if it has a
 /// Select (or Back) button at all.
+#[cfg(test)]
 const BTN_SELECT: usize = 0x13a;
+#[cfg(test)]
 const BTN_SOUTH: usize = 0x130;
 
-/// Whether `bitmap` — a sysfs `capabilities/key`, hex words most significant first, each a C
-/// `long` — has bit `code` set.
+/// The input property a motion sensor carries, in a sysfs `properties` bitmap.
+const INPUT_PROP_ACCELEROMETER: usize = 0x06;
+
+/// Nintendo's USB vendor id, which a Switch pad (and an 8BitDo pad in its Switch mode) reports.
+const NINTENDO: u16 = 0x057e;
+/// Sony's, whose pads hid-playstation names by position as hid-nintendo does.
+const SONY: u16 = 0x054c;
+
+/// Whether `bitmap` — a sysfs `capabilities/key` (or `abs`, or `properties`), hex words most
+/// significant first, each a C `long` — has bit `code` set.
 fn has_key(bitmap: &str, code: usize) -> bool {
     let bits = usize::BITS as usize;
     let words: Vec<&str> = bitmap.split_whitespace().collect();
@@ -748,13 +1008,28 @@ impl DeviceInfo {
             product: hex("id/product"),
             uniq: text("uniq"),
             phys: text("phys"),
-            no_select: {
+            keys: {
                 let keys = text("capabilities/key");
-                has_key(&keys, BTN_SOUTH) && !has_key(&keys, BTN_SELECT)
+                js_order(&keys, (BTN_JOYSTICK..=KEY_MAX).chain(BTN_MISC..BTN_JOYSTICK))
+            },
+            abs: js_order(&text("capabilities/abs"), 0..=ABS_MAX),
+            motion: has_key(&text("properties"), INPUT_PROP_ACCELEROMETER) || {
+                let name = text("name");
+                name.ends_with(" (IMU)") || name.ends_with(" IMU")
             },
             virtual_device: std::fs::canonicalize(sys.join(node))
                 .is_ok_and(|p| p.to_string_lossy().contains("/devices/virtual/input/")),
         }
+    }
+
+    /// A Nintendo pad: by its vendor id, or by its name for one that came through without ids.
+    pub fn nintendo(&self) -> bool {
+        self.vendor == NINTENDO || self.name.starts_with("Nintendo ")
+    }
+
+    /// How its js numbers land on the shell's slots ([`JsMap::of`]).
+    fn map(&self) -> JsMap {
+        JsMap::of(&self.keys, &self.abs, self.nintendo() || self.vendor == SONY)
     }
 
     /// Which pad this is, as far as the shell can tell one pad from another across an unplug: the
@@ -793,7 +1068,12 @@ pub fn readable(info: &DeviceInfo) -> bool {
 /// [`readable`] with the ignore list given, for the tests.
 fn readable_under(info: &DeviceInfo, ignored: Option<&[(u16, u16)]>) -> bool {
     let id = (info.vendor, info.product);
-    if info.virtual_device && !(ignored.is_some() && info.vendor == 0x28de) {
+    if info.motion {
+        return false;
+    }
+    // joycond's pair of Joy-Cons is a uinput pad, and the one way two Joy-Cons are one controller.
+    let joined_joycons = info.name == "Nintendo Switch Combined Joy-Cons";
+    if info.virtual_device && !joined_joycons && !(ignored.is_some() && info.vendor == 0x28de) {
         return false;
     }
     match ignored {
@@ -1262,6 +1542,11 @@ pub struct Seats {
     keyboard_alone: Option<Report>,
     /// What changed, for the shell to print: pads joining, going and coming back.
     said: Vec<String>,
+    /// The js devices plugged in and not read — virtual pads, motion sensors, Steam's stand-ins —
+    /// by name, as the last scan found them, for the splash to say (P53).
+    skipped: Vec<String>,
+    /// Each seat's presses this frame ([`Pads::taps`]), beside its report.
+    taps: [u16; SEATS],
 }
 
 /// [`SeatInput`] without its report, to say when a seat changes.
@@ -1307,6 +1592,8 @@ impl Seats {
             start_key: false,
             keyboard_alone: None,
             said: Vec::new(),
+            skipped: Vec::new(),
+            taps: [0; SEATS],
         };
         seats.scan();
         seats
@@ -1329,6 +1616,7 @@ impl Seats {
                 .collect(),
         };
         found.sort();
+        self.skipped.clear();
         for (_, path) in found {
             if self.joined.iter().any(|j| j.path == path) {
                 continue;
@@ -1336,6 +1624,10 @@ impl Seats {
             let node = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
             let info = DeviceInfo::read(&self.sys, node);
             if self.only.is_none() && !readable(&info) {
+                self.skipped.push(match info.name.as_str() {
+                    "" => path.display().to_string(),
+                    name => name.to_string(),
+                });
                 continue;
             }
             use std::os::unix::fs::OpenOptionsExt;
@@ -1356,7 +1648,8 @@ impl Seats {
                 name => format!("{name} ({})", path.display()),
             });
             pads.device = Some(file);
-            pads.no_select = info.no_select;
+            pads.map = info.map();
+            pads.nintendo = info.nintendo();
             self.joined.push(Joined { path, id, pads });
         }
     }
@@ -1403,14 +1696,31 @@ impl Seats {
     /// A menu frame (P46): every device's own report, the keyboard's first and then each pad
     /// plugged in by name, so the front end can tell who pressed. It reads the pads as
     /// [`Seats::frame`] does, and a frame is one or the other.
-    pub fn devices(&mut self, held: &dyn Fn(u8) -> bool) -> Vec<(Device<String>, Report)> {
+    ///
+    /// Each comes with its presses since the last frame ([`Pads::taps`]), which the report also
+    /// holds down: a press and release inside one slow frame still reaches the menus (P53).
+    pub fn devices(&mut self, held: &dyn Fn(u8) -> bool) -> Vec<(Device<String>, Report, u16)> {
         self.poll();
         self.keyboard_alone = None;
-        let mut out = vec![(Device::Keys, self.keys.report(held))];
+        let keys = self.keys.report(held);
+        let mut out = vec![(Device::Keys, keys, self.keys.taps())];
         for j in &mut self.joined {
-            out.push((Device::Pad(j.id.clone()), j.pads.report(&no_keys)));
+            let report = j.pads.report(&no_keys);
+            out.push((Device::Pad(j.id.clone()), report, j.pads.taps()));
         }
         out
+    }
+
+    /// The js devices plugged in that the shell does not read, by name (P53): a wrong 1P on the
+    /// splash is often a pad the player expected to be read and is not.
+    pub fn skipped(&self) -> &[String] {
+        &self.skipped
+    }
+
+    /// Seat `seat`'s presses this frame ([`Pads::taps`]): what [`Seats::frame`]'s report for it was
+    /// built with, for the pause, which reads them as presses on their own (P53).
+    pub fn taps(&self, seat: usize) -> u16 {
+        self.taps.get(seat).copied().unwrap_or(0)
     }
 
     /// The seats start from 1P, the device the splash took it from ([`PadSlots::set_first`]).
@@ -1469,6 +1779,7 @@ impl Seats {
     fn frame_reports(&mut self, keyboard: Option<usize>, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
         self.keyboard_alone = keyboard.is_none().then(|| self.keys.report(held));
         let mut out = [SeatInput::Empty; SEATS];
+        self.taps = [0; SEATS];
         for (i, seat) in out.iter_mut().enumerate() {
             let keys: &dyn Fn(u8) -> bool = if keyboard == Some(i) { held } else { &no_keys };
             let scheme = self.wiring.schemes[i];
@@ -1476,7 +1787,9 @@ impl Seats {
                 Some(id) => {
                     let j = self.joined.iter_mut().find(|j| &j.id == id).expect("a held pad is joined");
                     j.pads.scheme = scheme;
-                    SeatInput::Playing(j.pads.report(keys))
+                    let report = j.pads.report(keys);
+                    self.taps[i] = j.pads.taps();
+                    SeatInput::Playing(report)
                 }
                 None if self.slots.waiting(i) => SeatInput::Waiting,
                 None if keyboard == Some(i) => {
@@ -1485,6 +1798,12 @@ impl Seats {
                 }
                 None => SeatInput::Empty,
             };
+        }
+        // A pad in no seat is read by nobody this frame; its presses are not kept for the menus.
+        for j in &mut self.joined {
+            if !self.slots.held.contains(&Some(j.id.clone())) {
+                j.pads.clear_queue();
+            }
         }
         for (i, seat) in out.iter().enumerate() {
             let kind = match seat {
@@ -1699,7 +2018,7 @@ impl KeyRamp {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use game_sim::input::{AXIS_CENTRE_RAW, AxisRange, Manager, PADS};
     use game_sim::ride::Controls;
@@ -1934,18 +2253,18 @@ mod tests {
         // The same button, half way down. The axis is a travel like a trigger's, so it comes through
         // the same dead zone, and what reaches the gas is a fraction of the throttle and not all of
         // it — which is the thing this module could not do before.
-        pads.axis[14] = 0;
+        pads.raw[14] = 0;
         let half = gas_of(pads.build(FRAME, &nothing));
         assert_eq!(half, F((trigger_pressure(0) as f32 + 1.0) / 256.0));
         assert!(half > F(0.3) && half < F(0.7), "half a button's travel reads {half:?}");
 
         // A touch the dead zone swallows is still the press the bit says it is.
-        pads.axis[14] = TRIGGER_REST;
+        pads.raw[14] = TRIGGER_REST;
         assert_eq!(gas_of(pads.build(FRAME, &nothing)), F::ONE);
 
         // And the button up is no throttle, however hard the axis is leaning.
         pads.button[0] = false;
-        pads.axis[14] = i16::MAX;
+        pads.raw[14] = i16::MAX;
         assert_eq!(gas_of(pads.build(FRAME, &nothing)), F::ZERO);
     }
 
@@ -2278,7 +2597,7 @@ mod tests {
     }
 
     /// An empty directory of this test's own.
-    fn scratch(name: &str) -> std::path::PathBuf {
+    pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("openmx-pad-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2287,7 +2606,7 @@ mod tests {
 
     /// A stand-in for a `/dev/input/jsN` node: a fifo the test writes joystick events into and
     /// closes to unplug it — a closed fifo reads end-of-file, as an unplugged pad reads ENODEV.
-    struct FakePad {
+    pub(crate) struct FakePad {
         path: std::path::PathBuf,
         /// A reader of the test's own, so that the writer can open before [`Seats`] does.
         _hold: std::fs::File,
@@ -2297,10 +2616,10 @@ mod tests {
     /// Held by every test that plugs a [`FakePad`]. A fifo only reads end-of-file once every writer
     /// is closed, and `mkfifo`'s child holds a copy of every open file between its fork and its exec:
     /// one test spawning it while another unplugs would keep that one's pad in for a moment.
-    static FIFOS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static FIFOS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     impl FakePad {
-        fn plug(dir: &std::path::Path, node: &str) -> FakePad {
+        pub(crate) fn plug(dir: &std::path::Path, node: &str) -> FakePad {
             use std::os::unix::fs::OpenOptionsExt;
             let path = dir.join(node);
             let made = std::process::Command::new("mkfifo").arg(&path).status().expect("mkfifo");
@@ -2314,20 +2633,38 @@ mod tests {
             FakePad { path, _hold: hold, writer }
         }
 
-        fn button(&mut self, number: u8, down: bool) {
+        pub(crate) fn button(&mut self, number: u8, down: bool) {
+            self.send(EVENT_BUTTON, number, down as i16);
+        }
+
+        pub(crate) fn axis(&mut self, number: u8, value: i16) {
+            self.send(EVENT_AXIS, number, value);
+        }
+
+        /// The joystick interface's greeting: every button and axis' state, flagged initial.
+        pub(crate) fn init(&mut self, buttons: u8, axes: &[i16]) {
+            for n in 0..buttons {
+                self.send(EVENT_BUTTON | EVENT_INIT, n, 0);
+            }
+            for (n, &v) in axes.iter().enumerate() {
+                self.send(EVENT_AXIS | EVENT_INIT, n as u8, v);
+            }
+        }
+
+        fn send(&mut self, kind: u8, number: u8, value: i16) {
             use std::io::Write;
-            let event = [0, 0, 0, 0, down as u8, 0, EVENT_BUTTON, number];
-            self.writer.write_all(&event).unwrap();
+            let [lo, hi] = value.to_le_bytes();
+            self.writer.write_all(&[0, 0, 0, 0, lo, hi, kind, number]).unwrap();
         }
 
         /// Pull it out: the node goes, and the device reads end-of-file.
-        fn unplug(self) {
+        pub(crate) fn unplug(self) {
             std::fs::remove_file(&self.path).unwrap();
         }
     }
 
     /// A sysfs entry for a node, as the kernel would write one for a USB pad.
-    fn sys_entry(sys: &std::path::Path, node: &str, name: &str, phys: &str) {
+    pub(crate) fn sys_entry(sys: &std::path::Path, node: &str, name: &str, phys: &str) {
         let dir = sys.join(node).join("device");
         std::fs::create_dir_all(dir.join("id")).unwrap();
         std::fs::write(dir.join("name"), format!("{name}\n")).unwrap();
@@ -2337,8 +2674,53 @@ mod tests {
         std::fs::write(dir.join("phys"), format!("{phys}\n")).unwrap();
     }
 
+    /// A sysfs entry with the device's ids, keys, axes and properties, as hid-nintendo, hid-playstation
+    /// or xpad write theirs: the codes are the kernel's, written as its bitmaps.
+    pub(crate) fn sys_device(
+        sys: &std::path::Path,
+        node: &str,
+        name: &str,
+        ids: (u16, u16),
+        keys: &[u16],
+        abs: &[u16],
+        props: &[u16],
+    ) {
+        sys_entry(sys, node, name, &format!("usb-{node}/input0"));
+        let dir = sys.join(node).join("device");
+        std::fs::write(dir.join("id/vendor"), format!("{:04x}\n", ids.0)).unwrap();
+        std::fs::write(dir.join("id/product"), format!("{:04x}\n", ids.1)).unwrap();
+        std::fs::create_dir_all(dir.join("capabilities")).unwrap();
+        std::fs::write(dir.join("capabilities/key"), bitmap(keys)).unwrap();
+        std::fs::write(dir.join("capabilities/abs"), bitmap(abs)).unwrap();
+        std::fs::write(dir.join("properties"), bitmap(props)).unwrap();
+    }
+
+    /// Codes as a sysfs bitmap: 64-bit hex words, most significant first.
+    fn bitmap(codes: &[u16]) -> String {
+        let top = codes.iter().map(|&c| c as usize / 64).max().unwrap_or(0);
+        let words: Vec<String> = (0..=top)
+            .rev()
+            .map(|w| {
+                let word = codes.iter().filter(|&&c| c as usize / 64 == w).fold(0u64, |m, &c| m | 1 << (c % 64));
+                format!("{word:x}")
+            })
+            .collect();
+        words.join(" ") + "\n"
+    }
+
+    /// The seats over a test's own device directory and sysfs.
+    pub(crate) fn seats_in(dev: &std::path::Path, sys: &std::path::Path, wiring: Wiring) -> Seats {
+        Seats::in_dir(dev, sys, None, None, wiring, Bindings::default())
+    }
+
+    /// A menu frame now ([`Seats::devices`]), without waiting for the rescan's half second.
+    pub(crate) fn devices_now(seats: &mut Seats, held: &dyn Fn(u8) -> bool) -> Vec<(Device<String>, Report, u16)> {
+        seats.since_scan = None;
+        seats.devices(held)
+    }
+
     /// Ride a frame now, without waiting for the rescan's half second.
-    fn frame(seats: &mut Seats, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
+    pub(crate) fn frame(seats: &mut Seats, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
         seats.since_scan = None;
         seats.frame(held)
     }
@@ -2627,8 +3009,11 @@ mod tests {
     /// has it, so its Start is not the new layout's camera.
     #[test]
     fn a_pad_with_no_select_keeps_its_start() {
-        // BTN_SOUTH (0x130) to BTN_START (0x13b) but not BTN_SELECT (0x13a), in the kernel's words.
-        let word = (0x0fffu64 << 48) & !(1 << 58);
+        // The kit's virtual pad's keys (ps2kit/pad.py): A, B, X, Y, TL, TR, Start, Mode and the two
+        // thumbs, and no Select, in the kernel's words. Start is js 6.
+        let word = [0x130u64, 0x131, 0x133, 0x134, 0x136, 0x137, 0x13b, 0x13c, 0x13d, 0x13e]
+            .iter()
+            .fold(0u64, |w, c| w | 1 << (c - 0x100));
         let keys = format!("{word:x} 0 0 0 0");
         assert!(has_key(&keys, BTN_SOUTH) && !has_key(&keys, BTN_SELECT) && has_key(&keys, 0x13b));
         assert!(!has_key("", BTN_SOUTH) && !has_key("zz", BTN_SOUTH));
@@ -2750,5 +3135,221 @@ mod tests {
         assert!(down(playing(frame(&mut seats, &|code| code == key::Z)[0]), Control::Square));
         assert!(seats.keyboard_alone().is_none());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ---- P53: pads read by what their keys are, and presses between frames ----------------------
+
+    /// A Switch Pro Controller's keys under hid-nintendo, in code order — read out of the kernel's own
+    /// module (7.2.8's `procon_button_mappings`): B is `BTN_SOUTH`, A `BTN_EAST`, X `BTN_NORTH`, Y
+    /// `BTN_WEST`, Capture `BTN_Z`, L and R, ZL and ZR as `BTN_TL2`/`BTN_TR2`, - and +, Home, and the
+    /// two stick clicks. So its js numbers are B 0, A 1, X 2, Y 3, Capture 4, L 5, R 6, ZL 7, ZR 8,
+    /// - 9, + 10, Home 11, L3 12, R3 13. An 8BitDo pad in its Switch mode wears these ids too.
+    pub(crate) const PRO_KEYS: [u16; 14] =
+        [0x130, 0x131, 0x133, 0x134, 0x135, 0x136, 0x137, 0x138, 0x139, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e];
+    /// Its axes, from the same module: the two sticks and the d-pad as a hat, and no trigger axes —
+    /// js 0 and 1 the left stick, 2 and 3 the right, 4 and 5 the hat.
+    pub(crate) const PRO_ABS: [u16; 6] = [0, 1, 3, 4, ABS_HAT0X, ABS_HAT0Y];
+    /// The second device hid-nintendo makes for it: an accelerometer and a gyro on six axes.
+    const IMU_ABS: [u16; 6] = [0, 1, 2, 3, 4, 5];
+    /// An Xbox pad under xpad: A, B, X, Y (X as `BTN_X`, which is `BTN_NORTH`'s code), the
+    /// shoulders, Back, Start, Guide and the thumbs; two sticks, two trigger axes and a hat.
+    pub(crate) const XPAD_KEYS: [u16; 11] = [0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e];
+    pub(crate) const PAD_ABS: [u16; 8] = [0, 1, ABS_Z, 3, 4, ABS_RZ, ABS_HAT0X, ABS_HAT0Y];
+    /// A DualSense under hid-playstation: the face buttons by position (Triangle `BTN_NORTH`, Square
+    /// `BTN_WEST`), digital L2 and R2 beside their axes, Create, Options, PS and the thumbs.
+    const DUALSENSE_KEYS: [u16; 13] =
+        [0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x138, 0x139, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e];
+
+    fn pressure(report: Report, control: Control) -> u8 {
+        report.0[control.binding().pressure as usize]
+    }
+
+    /// One pad's report this menu frame, by js node.
+    fn pad_report(seats: &mut Seats, node: &str) -> (Report, u16) {
+        let got = devices_now(seats, &nothing);
+        let id = seats.joined.iter().find(|j| j.path.ends_with(node)).expect("joined").id.clone();
+        got.into_iter().find(|(d, _, _)| *d == Device::Pad(id.clone())).map(|(_, r, t)| (r, t)).unwrap()
+    }
+
+    /// P53, the user's pad: a Switch Pro Controller's A confirms and B goes back, + is Start and -
+    /// Select, ZR is a full R2 (the new scheme's gas), its d-pad is the d-pad and its right stick the
+    /// right stick — where before it was Circle, Cross, R3, L3, nothing, the right stick, and L2. Its
+    /// IMU device is not read, and the splash's list says so. `nintendo = positions` puts B on Cross.
+    #[test]
+    fn a_switch_pro_controller_reads_as_its_labels_say() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("procon");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        let name = "Nintendo Switch Pro Controller";
+        sys_device(&sys, "js0", name, (0x057e, 0x2009), &PRO_KEYS, &PRO_ABS, &[]);
+        sys_device(&sys, "js1", &format!("{name} (IMU)"), (0x057e, 0x2009), &[], &IMU_ABS, &[INPUT_PROP_ACCELEROMETER as u16]);
+        let mut pro = FakePad::plug(&dev, "js0");
+        let mut imu = FakePad::plug(&dev, "js1");
+        pro.init(14, &[0; 6]);
+        imu.init(0, &[1200, -800, 16000, 30, -12, 7]);
+        let mut seats = seats_in(&dev, &sys, Wiring::default());
+        assert_eq!(seats.joined.len(), 1, "the IMU is not a pad");
+        assert_eq!(seats.skipped(), [format!("{name} (IMU)")]);
+
+        let (idle, _) = pad_report(&mut seats, "js0");
+        assert_eq!(idle.buttons(), 0);
+        assert_eq!((pressure(idle, Control::L2), pressure(idle, Control::R2)), (0, 0));
+        let held = |seats: &mut Seats, pro: &mut FakePad, js: u8| {
+            pro.button(js, true);
+            let (r, _) = pad_report(seats, "js0");
+            pro.button(js, false);
+            pad_report(seats, "js0");
+            r
+        };
+        assert_eq!(held(&mut seats, &mut pro, 1).buttons(), Control::Cross.mask(), "A");
+        assert_eq!(held(&mut seats, &mut pro, 0).buttons(), Control::Circle.mask(), "B");
+        assert_eq!(held(&mut seats, &mut pro, 2).buttons(), Control::Triangle.mask(), "X, the top one");
+        assert_eq!(held(&mut seats, &mut pro, 3).buttons(), Control::Square.mask(), "Y, the left one");
+        assert_eq!(held(&mut seats, &mut pro, 10).buttons(), Control::Start.mask(), "+");
+        assert_eq!(held(&mut seats, &mut pro, 9).buttons(), Control::Select.mask(), "-");
+        assert_eq!(held(&mut seats, &mut pro, 5).buttons(), Control::L1.mask(), "L");
+        assert_eq!(held(&mut seats, &mut pro, 6).buttons(), Control::R1.mask(), "R");
+        assert_eq!(held(&mut seats, &mut pro, 4).buttons(), 0, "Capture");
+        assert_eq!(held(&mut seats, &mut pro, 11).buttons(), 0, "Home");
+        assert_eq!(held(&mut seats, &mut pro, 12).buttons(), Control::L3.mask());
+        let zr = held(&mut seats, &mut pro, 8);
+        assert_eq!((pressure(zr, Control::R2), pressure(zr, Control::L2)), (255, 0), "ZR is all of R2");
+        assert!(down(zr, Control::R2));
+        assert_eq!(pressure(held(&mut seats, &mut pro, 7), Control::L2), 255, "ZL");
+
+        pro.axis(2, i16::MAX);
+        pro.axis(5, -32767);
+        let (r, _) = pad_report(&mut seats, "js0");
+        assert_eq!((r.axis(REPORT_RIGHT_X), r.axis(REPORT_RIGHT_Y)), (0xff, AXIS_CENTRE));
+        assert_eq!(r.buttons(), Control::Up.mask(), "the hat's up is the d-pad's");
+        assert_eq!((pressure(r, Control::L2), pressure(r, Control::R2)), (0, 0), "no trigger moved");
+        pro.axis(2, 0);
+        pro.axis(5, 0);
+
+        // By position, B (the bottom one) is Cross, as on every other pad.
+        seats.set_wiring(Wiring { nintendo_positions: true, ..Wiring::default() });
+        assert_eq!(held(&mut seats, &mut pro, 0).buttons(), Control::Cross.mask());
+        assert_eq!(held(&mut seats, &mut pro, 1).buttons(), Control::Circle.mask());
+        drop(imu);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// P53: the same js numbers are other buttons on other pads. On an Xbox pad (xpad) 2 is X, the
+    /// left button — Square — and 6 and 7 are Back and Start; on a DualSense (hid-playstation) 2 is
+    /// Triangle, 3 Square, 6 and 7 the digital L2 and R2 (read from their axes instead) and 9 Options.
+    #[test]
+    fn an_xbox_pad_and_a_dualsense_read_by_their_keys() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("by-keys");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        sys_device(&sys, "js0", "Microsoft X-Box 360 pad", (0x045e, 0x028e), &XPAD_KEYS, &PAD_ABS, &[]);
+        sys_device(&sys, "js1", "Sony Interactive Entertainment DualSense Wireless Controller", (0x054c, 0x0ce6), &DUALSENSE_KEYS, &PAD_ABS, &[]);
+        let mut xbox = FakePad::plug(&dev, "js0");
+        let mut ds = FakePad::plug(&dev, "js1");
+        let rest = [0, 0, -32767, 0, 0, -32767, 0, 0];
+        xbox.init(11, &rest);
+        ds.init(13, &rest);
+        let mut seats = seats_in(&dev, &sys, Wiring::default());
+        let mut press = |pad: &mut FakePad, node: &str, js: u8| {
+            pad.button(js, true);
+            let (r, _) = pad_report(&mut seats, node);
+            pad.button(js, false);
+            pad_report(&mut seats, node);
+            r.buttons()
+        };
+        let x: Vec<u16> = [0, 1, 2, 3, 6, 7].iter().map(|&js| press(&mut xbox, "js0", js)).collect();
+        let want = [Control::Cross, Control::Circle, Control::Square, Control::Triangle, Control::Select, Control::Start];
+        assert_eq!(x, want.map(Control::mask));
+        let d: Vec<u16> = [0, 1, 2, 3, 6, 7, 8, 9].iter().map(|&js| press(&mut ds, "js1", js)).collect();
+        let want = [
+            Control::Cross.mask(),
+            Control::Circle.mask(),
+            Control::Triangle.mask(),
+            Control::Square.mask(),
+            0,
+            0,
+            Control::Select.mask(),
+            Control::Start.mask(),
+        ];
+        assert_eq!(d, want);
+        // The triggers are their axes on both.
+        ds.axis(5, i16::MAX);
+        let (r, _) = pad_report(&mut seats, "js1");
+        assert_eq!((pressure(r, Control::R2), pressure(r, Control::L2)), (255, 0));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// P53: a press and its release before the next frame — a tap, at 5 fps — is a press for that
+    /// frame: in the report and in its taps. Two inside one frame are two presses, one a frame. The
+    /// hat's are the same. A pad in no seat during a ride keeps none for the menu after it.
+    #[test]
+    fn a_tap_between_two_frames_is_still_a_press() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("taps");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        sys_device(&sys, "js0", "Microsoft X-Box 360 pad", (0x045e, 0x028e), &XPAD_KEYS, &PAD_ABS, &[]);
+        let mut a = FakePad::plug(&dev, "js0");
+        a.init(11, &[0, 0, -32767, 0, 0, -32767, 0, 0]);
+        let mut seats = seats_in(&dev, &sys, Wiring::default());
+        assert_eq!(pad_report(&mut seats, "js0").1, 0, "the greeting is nobody's press");
+
+        a.button(7, true);
+        a.button(7, false);
+        let (r, taps) = pad_report(&mut seats, "js0");
+        assert!(down(r, Control::Start));
+        assert_eq!(taps, Control::Start.mask());
+        let (r, taps) = pad_report(&mut seats, "js0");
+        assert!(!down(r, Control::Start) && taps == 0);
+
+        // Held across the frame, then let go and pressed again inside the next: down in both
+        // reports, and the second press is in the taps.
+        a.button(0, true);
+        assert_eq!(pad_report(&mut seats, "js0").1, Control::Cross.mask());
+        a.button(0, false);
+        a.button(0, true);
+        let (r, taps) = pad_report(&mut seats, "js0");
+        assert!(down(r, Control::Cross) && taps == Control::Cross.mask());
+        a.button(0, false);
+        assert_eq!(pad_report(&mut seats, "js0").1, 0);
+
+        // Two taps of the d-pad's down inside one frame: two frames of presses.
+        for _ in 0..2 {
+            a.axis(7, i16::MAX);
+            a.axis(7, 0);
+        }
+        let taps: Vec<u16> = (0..3).map(|_| pad_report(&mut seats, "js0").1).collect();
+        assert_eq!(taps, [Control::Down.mask(), Control::Down.mask(), 0]);
+
+        // In a ride with the seats set up for nobody's pad, a tap is not kept for the menu after.
+        let mut seats_none = Seats::in_dir(&dev, &sys, None, Some([None; SEATS]), Wiring::default(), Bindings::default());
+        devices_now(&mut seats_none, &nothing);
+        drop(seats);
+        a.button(7, true);
+        a.button(7, false);
+        frame(&mut seats_none, &nothing);
+        let got = devices_now(&mut seats_none, &nothing);
+        assert!(got.iter().all(|(_, _, taps)| *taps == 0), "{got:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// P53: a node with no sysfs entry is read as an Xbox pad's numbers, as before; the map from a
+    /// device's codes otherwise.
+    #[test]
+    fn the_map_follows_the_codes() {
+        let id = JsMap::identity();
+        assert_eq!((id.button(7), id.axis(5), id.axis(8)), (JsButton::Pad(7), Some(AXIS_R2), None));
+        let pro = JsMap::of(&PRO_KEYS, &PRO_ABS, true);
+        assert_eq!(pro.button(10), JsButton::Pad(7));
+        assert_eq!(pro.button(8), JsButton::Trigger(AXIS_R2));
+        assert_eq!((pro.axis(2), pro.axis(4), pro.axis(5)), (Some(AXIS_RIGHT_X), Some(AXIS_HAT_X), Some(AXIS_HAT_Y)));
+        let joycon = JsMap::of(&[0x130, 0x131, 0x220, 0x221, 0x222, 0x223], &[0, 1], true);
+        assert_eq!(joycon.button(2), JsButton::Dpad(Control::Up));
+        assert_eq!(joycon.button(5), JsButton::Dpad(Control::Right));
+        // The BTN_MISC block comes after the gamepad's in the joystick interface's numbering.
+        let keys = format!("{} 0 0 0 0\n", format!("{:x}", (1u64 << 48) | 1));
+        assert_eq!(js_order(&keys, (BTN_JOYSTICK..=KEY_MAX).chain(BTN_MISC..BTN_JOYSTICK)), [0x130, 0x100]);
     }
 }

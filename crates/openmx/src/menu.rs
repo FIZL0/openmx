@@ -125,13 +125,21 @@ impl Reader {
     }
 
     pub fn read(&mut self, r: &Report) -> Press {
+        self.read_taps(r, 0)
+    }
+
+    /// [`Reader::read`], with the controls the pad layer saw go down since the last report (P53:
+    /// `pad.rs`'s `Pads::taps`). Each of those is a press whatever the two reports say: a button
+    /// let go and pressed again between two frames is down in both, and a slow frame — 5 fps at 4K
+    /// — is longer than a tap. Not on the first report: that one is what was already held.
+    pub fn read_taps(&mut self, r: &Report, taps: u16) -> Press {
         // A pad that is not there holds nothing.
         let now = if r.status() == 0xff { 0 } else { r.buttons() | stick(r) };
         let Some(last) = self.last.replace(now) else {
             return Press::default();
         };
         let dirs = Control::Up.mask() | Control::Down.mask() | Control::Left.mask() | Control::Right.mask();
-        let mut edge = now & !last;
+        let mut edge = now & !last | taps;
         if now & dirs != 0 && now & dirs == last & dirs {
             self.held_for += 1;
             if self.held_for >= REPEAT_AFTER && (self.held_for - REPEAT_AFTER) % REPEAT_EVERY == 0 {
@@ -455,6 +463,9 @@ pub struct Controls {
     pub pressure: String,
     /// `--controls`' layout per seat, 1P first.
     pub layouts: [Layout; SEATS],
+    /// A Nintendo pad's A and B by position (`nintendo = positions`): B, the bottom one, confirms.
+    /// The default (`labels`) has A confirm and B go back, as on a Switch (P53).
+    pub nintendo_positions: bool,
 }
 
 impl Controls {
@@ -469,6 +480,7 @@ impl Controls {
                 }
                 "pad" => c.pad = (!v.is_empty() && v != "auto").then(|| v.to_string()),
                 "pressure" => c.pressure = if v == "none" { String::new() } else { v.to_string() },
+                "nintendo" => c.nintendo_positions = v == "positions",
                 // One word for every seat, or one per seat with the last carried on.
                 "layout" => {
                     let words: Vec<Option<Layout>> = v
@@ -494,12 +506,14 @@ impl Controls {
             "# openmx's pad wiring (P36): throttle is cross, r2 or l2; pad is a device or auto;\n\
              # pressure is --pad-pressure's axis:control list, or none; layout is new or original,\n\
              # or one per seat (new,original,...) — new is R2 gas, L2 brake, Select camera, with\n\
-             # Cross and Square kept free; original is the game's own (P40)\n\
-             throttle = {}\npad = {}\npressure = {}\nlayout = {}\n",
+             # Cross and Square kept free; original is the game's own (P40); nintendo is labels\n\
+             # (a Switch pad's A confirms and B goes back) or positions (B, the bottom one, confirms)\n\
+             throttle = {}\npad = {}\npressure = {}\nlayout = {}\nnintendo = {}\n",
             self.throttle.word(),
             self.pad.as_deref().unwrap_or("auto"),
             if self.pressure.is_empty() { "none" } else { &self.pressure },
             self.layout_text(),
+            if self.nintendo_positions { "positions" } else { "labels" },
         )
     }
 
@@ -673,10 +687,16 @@ impl Readers {
 
     /// This frame's reports, a device each, as presses. A device missing from them is forgotten.
     pub fn read(&mut self, reports: &[(Dev, Report)]) -> Vec<(Dev, Press)> {
-        self.0.retain(|(d, _)| reports.iter().any(|(r, _)| r == d));
+        let with: Vec<(Dev, Report, u16)> = reports.iter().map(|(d, r)| (d.clone(), *r, 0)).collect();
+        self.read_taps(&with)
+    }
+
+    /// [`Readers::read`] with each device's presses since the last frame ([`Reader::read_taps`]).
+    pub fn read_taps(&mut self, reports: &[(Dev, Report, u16)]) -> Vec<(Dev, Press)> {
+        self.0.retain(|(d, _)| reports.iter().any(|(r, _, _)| r == d));
         reports
             .iter()
-            .map(|(dev, report)| {
+            .map(|(dev, report, taps)| {
                 let at = match self.0.iter().position(|(d, _)| d == dev) {
                     Some(at) => at,
                     None => {
@@ -684,9 +704,18 @@ impl Readers {
                         self.0.len() - 1
                     }
                 };
-                (dev.clone(), self.0[at].1.read(report))
+                (dev.clone(), self.0[at].1.read_taps(report, *taps))
             })
             .collect()
+    }
+}
+
+/// Device names on one line of the splash: the first three, and how many more.
+fn names_line(names: &[String]) -> String {
+    let shown: Vec<&str> = names.iter().take(3).map(String::as_str).collect();
+    match names.len() {
+        n if n > 3 => format!("{}, +{} more", shown.join(", "), n - 3),
+        _ => shown.join(", "),
     }
 }
 
@@ -773,6 +802,10 @@ pub struct Menu {
     pub join: Join<usize>,
     /// What each pad seat's controller is called, for the join screen's cards; the shell fills it.
     pub devices: Vec<String>,
+    /// Every device the shell reads, keyboard first, and the js devices it skips, by name: the
+    /// splash lists both, so a pad that cannot become 1P — or one that should not — shows (P53).
+    pub heard: Vec<String>,
+    pub skipped: Vec<String>,
     /// The local game the ride setup is for, once the join screen is done; none for a Free Ride.
     party: Option<Party>,
     /// How many ride a Free Ride, which is `--players`: the shell says, and a Free Ride after a
@@ -856,6 +889,8 @@ impl Menu {
             quit: None,
             join: Join::new(join::ON_SCREEN, Opened::Menu),
             devices: Vec::new(),
+            heard: Vec::new(),
+            skipped: Vec::new(),
             party: None,
             free_riders: 1,
             music_choices: Vec::new(),
@@ -2757,6 +2792,14 @@ impl<'a> Painter<'a> {
             self.tex("nav_x_off", rect(x - 12.0, y - 12.0, 64.0, 64.0), colour);
             self.text(Face::Small, "Enter or Space on the keyboard", 320.0, 316.0, Align::Centre, ITEM);
             self.text(Face::Small, "Whoever presses it rides as Player 1", 320.0, 338.0, Align::Centre, ITEM);
+            if !menu.heard.is_empty() {
+                let line = format!("Controllers: {}", names_line(&menu.heard));
+                self.text(Face::Small, &line, 320.0, 372.0, Align::Centre, ITEM);
+            }
+            if !menu.skipped.is_empty() {
+                let line = format!("Not read: {}", names_line(&menu.skipped));
+                self.text(Face::Small, &line, 320.0, 394.0, Align::Centre, [255, 255, 255, 120]);
+            }
         }
         if menu.p1.is_none() {
             self.legend(&[("nav_circle_off", "Quit"), ("nav_x_off", "Start")]);
