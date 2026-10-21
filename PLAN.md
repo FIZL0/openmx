@@ -128,6 +128,9 @@ added beside them:
     this frame" mask, so the edge is the event and "held with the timer at 0" (I1). The same poll's
     six analogue axes: the report byte each one reads, the inversion one of them gets, and the dead
     zone of ±0.2 that is the only shaping there is — no clamp and no curve (I2).
+  - `markers.rs` — session markers (P88), the port's own: five slots a player, a d-pad direction
+    held 250 ms to step the selection (slots, then the other players), place the bike as it is, or
+    teleport back ghosted. Pad input on agreed ticks, state in `Sim`, hashed and sent only once used.
   - `modifiers.rs` — the game modifiers (P55): twelve percentages, per player or for the world, that
     scale fields of the loaded `.phy`, the built ride's speed limit, the biplane's file and the
     engine's time scale before a ride starts — never a branch in a step, and nothing touched at 100%.

@@ -122,6 +122,10 @@ pub struct Sim {
     /// [`Sim::phy`], as it always was; an empty list is a one-player session, which steps, walks and
     /// hashes exactly as the simulation did before there could be a second ([`Sim::step_all`]).
     pub others: Vec<Player>,
+    /// This player's session markers (P88): five saved spots and the d-pad's selection, stepped by
+    /// [`markers::frame`] after the tick. Untouched, it is not walked or sent, so every state that
+    /// never used them hashes and encodes as before.
+    pub markers: markers::Markers,
 }
 
 /// The most riders a session holds: the original's start fills a field of up to eight.
@@ -197,6 +201,7 @@ impl Sim {
             rider,
             plane: None,
             others: Vec::new(),
+            markers: markers::Markers::default(),
         }
     }
 
@@ -427,6 +432,7 @@ impl Clone for Sim {
             rider: self.rider.clone(),
             plane: self.plane.clone(),
             others: self.others.clone(),
+            markers: self.markers.clone(),
         }
     }
 }
@@ -744,6 +750,10 @@ pub mod wreck_bike;
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.
 pub mod ghost;
+
+/// Session markers (P88): five spots a player saves on the d-pad and rides back to, and the other
+/// players to ride to.
+pub mod markers;
 
 /// Game modifiers (P55): percentages on the loaded files' numbers, set before a ride starts, and
 /// nothing at all at their defaults.

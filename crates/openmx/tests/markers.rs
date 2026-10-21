@@ -1,0 +1,312 @@
+//! P88 — session markers on the d-pad, ridden the way the shell and the online session ride them: a
+//! tick is the pad's poll, the step, then `markers::frame` with every rider's spot from before the
+//! tick (`Seat::pass`, `net::rides::Rides::step`). The stand-in bike on a flat floor, at the 30 Hz
+//! clamp: a hold's length is the input layer's own held timer, which counts that `dt` in whole
+//! milliseconds (33, 66, 99 … 231, 264), so 250 ms fires on the eighth tick after the press.
+
+use game_sim::input::{Control, PADS, Report};
+use game_sim::markers::{self, Did, HOLD_MS, Pick, SLOTS, Spot};
+use game_sim::ride::Controls;
+use game_sim::rider::Rider;
+use game_sim::trick::Set;
+use game_sim::world::Flat;
+use game_sim::{Sim, hash, stock};
+use ps2_float::{F, Vf};
+
+const DT: F = F(game_sim::tick::DeltaTime::CAP_30);
+
+fn pads(buttons: u16) -> [Report; PADS] {
+    let mut r = [Report::missing(); PADS];
+    r[0] = Report::from_buttons(buttons);
+    r
+}
+
+/// One tick of every rider, player 1 on `buttons` and the rest on nothing, then player 1's markers.
+fn tick(sim: &mut Sim, buttons: u16) -> Option<Did> {
+    let spots: Vec<Spot> = (0..sim.players()).map(|i| Spot::of(sim.rider_of(i))).collect();
+    let mut hands = sim.poll_all(DT, &pads(buttons));
+    hands.resize(sim.players(), Controls::default());
+    sim.step_all(DT, &hands, &mut Flat::default());
+    markers::frame(sim, 0, &spots, &hands[0])
+}
+
+/// `control` held (on top of `with`) until the input layer's timer reads at least `ms`, then let go
+/// for a tick; what each tick's markers did.
+fn hold(sim: &mut Sim, control: Control, with: u16, ms: u32) -> Vec<Option<Did>> {
+    let mut did = vec![tick(sim, with | control.mask())];
+    while sim.input.pad(0).control(control).held_ms < ms {
+        did.push(tick(sim, with | control.mask()));
+    }
+    did.push(tick(sim, with));
+    did
+}
+
+fn fired(did: &[Option<Did>]) -> Vec<(usize, Did)> {
+    did.iter().enumerate().filter_map(|(k, d)| d.map(|d| (k, d))).collect()
+}
+
+const GAS: u16 = 0x0040; // Cross, the shipped preset's gas
+
+/// A stand-in ride with some speed on it.
+fn moving() -> Sim {
+    let mut sim = Sim::new(0x88);
+    for _ in 0..45 {
+        tick(&mut sim, GAS);
+    }
+    assert!(F(sim.bike_vel().z()).abs() > F(1.0), "the bike is not moving: {:?}", sim.bike_vel());
+    sim
+}
+
+/// Down held 250 ms puts a marker in the selected slot, the bike as that tick left it — speed and
+/// all — and fires once however long it is held after.
+#[test]
+fn down_held_250_ms_places_a_marker() {
+    let mut sim = moving();
+    let mut kept = None;
+    let mut did = vec![tick(&mut sim, GAS | Control::Down.mask())];
+    for _ in 0..40 {
+        did.push(tick(&mut sim, GAS | Control::Down.mask()));
+        if did.last() == Some(&Some(Did::Placed(0))) {
+            kept = Some(hash::of(&sim.rider.ride));
+        }
+    }
+    assert_eq!(fired(&did), vec![(8, Did::Placed(0))], "one placement, on the eighth tick held");
+    let s = sim.input.pad(0).control(Control::Down);
+    assert!(s.held_ms > 1000, "held {} ms", s.held_ms);
+    let marker = sim.markers.slots[0].as_ref().expect("a marker in slot 1");
+    assert_eq!(Some(hash::of(&**marker)), kept, "the marker is the bike as the firing tick left it");
+    assert!(F(marker.chassis.vel.z()).abs() > F(1.0), "the marker kept no speed");
+    assert!((1..SLOTS).all(|s| !sim.markers.holds(s)));
+}
+
+/// A tap shorter than the hold does nothing: 200 ms (and 231, the last tick under 250) never fires,
+/// and the next hold starts its count again from the press.
+#[test]
+fn a_200_ms_tap_does_not_place_a_marker() {
+    let mut sim = moving();
+    for ms in [0, 100, 200, 231] {
+        let did = hold(&mut sim, Control::Down, GAS, ms);
+        assert_eq!(fired(&did), vec![], "a {ms} ms tap fired");
+        assert!(sim.markers.fresh(), "a {ms} ms tap touched the markers");
+    }
+    let did = hold(&mut sim, Control::Down, GAS, HOLD_MS);
+    assert_eq!(fired(&did), vec![(8, Did::Placed(0))]);
+    // The same with Up: on an empty slot it is refused, never before the hold.
+    let did = hold(&mut sim, Control::Right, GAS, HOLD_MS);
+    assert_eq!(fired(&did), vec![(8, Did::Stepped(Pick::Slot(1)))]);
+    assert_eq!(fired(&hold(&mut sim, Control::Up, GAS, 200)), vec![]);
+    assert_eq!(fired(&hold(&mut sim, Control::Up, GAS, HOLD_MS)), vec![(8, Did::Refused(Pick::Slot(1)))]);
+}
+
+/// A hold with a trick button down is the trick's gesture (the d-pad names its direction, P73) and
+/// fires nothing — and the bike reads the d-pad exactly as it would with no markers at all.
+#[test]
+fn a_trick_gesture_is_not_a_marker() {
+    let mut sim = moving();
+    let mut plain = sim.clone();
+    let circle = Control::Circle.mask(); // trick 1, the shipped preset's
+    let did = hold(&mut sim, Control::Down, GAS | circle, 1000);
+    assert_eq!(fired(&did), vec![]);
+    assert!(sim.markers.fresh());
+    // A ride that never had a marker step: the same pads into the same state, ridden on the plain
+    // step alone, hash the same.
+    let mut hands = Vec::new();
+    for k in 0..did.len() {
+        let b = if k + 1 < did.len() { GAS | circle | Control::Down.mask() } else { GAS | circle };
+        let c = plain.poll(DT, &pads(b));
+        plain.step(DT, &c, &mut Flat::default());
+        hands.push(c);
+    }
+    assert_eq!(plain.hash(), sim.hash(), "a gesture's hold changed the ride");
+}
+
+/// Up held 250 ms lands the rider on the marker: the bike exactly as it was kept, its speed too, the
+/// rider back on and ghosted (P57's poof). The tick after rides as the tick after the placement did.
+#[test]
+fn up_held_250_ms_lands_on_the_marker_ghosted() {
+    let mut sim = moving();
+    let did = hold(&mut sim, Control::Down, GAS, HOLD_MS);
+    assert_eq!(fired(&did), vec![(8, Did::Placed(0))]);
+    // The placement was on the hold's eighth tick; the tick after it let go. Ride the one after that
+    // again from a copy of the marker for the comparison below.
+    let marker = (**sim.markers.slots[0].as_ref().unwrap()).clone();
+    // Away from it, and down in a heap: the teleport takes the rider out of a wreck too.
+    for _ in 0..60 {
+        tick(&mut sim, GAS);
+    }
+    let away = sim.bike_pos();
+    assert!(F(away.z() - marker.origin.z()).abs() > F(5.0));
+    sim.rider.sense.wrecks_enabled = true;
+    assert!(!sim.rider.ghost.on);
+
+    let mut did = vec![tick(&mut sim, Control::Up.mask())];
+    while did.last() == Some(&None) {
+        did.push(tick(&mut sim, Control::Up.mask()));
+    }
+    assert_eq!(fired(&did), vec![(8, Did::Teleported(Pick::Slot(0)))]);
+    assert_eq!(hash::of(&sim.rider.ride), hash::of(&marker), "the bike is not the marker's");
+    assert_eq!(sim.bike_pos().to_bits(), marker.origin.to_bits());
+    assert_eq!(sim.bike_vel().to_bits(), marker.chassis.vel.to_bits(), "the run-up's speed was not kept");
+    assert!(sim.rider.ghost.on, "not ghosted");
+    assert_eq!(sim.rider.ghost.alpha, game_sim::ghost::Ghost::START, "not the put-back's half see-through");
+    assert!(sim.rider.state.wreck.is_none() && sim.rider.crash.is_none());
+    assert!(sim.markers.holds(0), "a teleport keeps the marker");
+    // The ghost runs its whole fade from here, as after a put-back.
+    let mut ticks = 0;
+    while sim.rider.ghost.on {
+        tick(&mut sim, 0);
+        ticks += 1;
+        assert!(ticks <= 91);
+    }
+    assert_eq!(ticks, 91);
+}
+
+/// A marker repeats: the tick after a teleport is the tick after the placement, bit for bit, on the
+/// same hands.
+#[test]
+fn the_tick_after_a_teleport_is_the_tick_after_the_placement() {
+    let mut sim = moving();
+    hold(&mut sim, Control::Down, GAS, HOLD_MS);
+    let mut placed = sim.clone();
+    // `hold` let go on the tick after the placement: ride the placement's state forward again from
+    // the marker itself, then compare that tick with one more after a teleport.
+    placed.rider.ride = (**sim.markers.slots[0].as_ref().unwrap()).clone();
+    let mut a = placed.clone();
+    tick(&mut a, GAS);
+    for _ in 0..30 {
+        tick(&mut sim, GAS);
+    }
+    let did = hold(&mut sim, Control::Up, GAS, HOLD_MS);
+    assert_eq!(fired(&did), vec![(8, Did::Teleported(Pick::Slot(0)))]);
+    // `hold` rode one more tick after the teleport, on gas: so did `a` after the placement.
+    let mut b = placed.clone();
+    b.rider.teleport((**sim.markers.slots[0].as_ref().unwrap()).clone());
+    tick(&mut b, GAS);
+    assert_eq!(hash::of(&a.rider.ride), hash::of(&b.rider.ride), "the run-up did not repeat");
+}
+
+/// Left and Right step through the five slots, then each other player, then round; each player
+/// sees everybody but themselves.
+#[test]
+fn left_and_right_reach_every_slot_and_then_the_other_players() {
+    let mut sim = three_riders();
+    let mut seen = vec![sim.markers.pick(0, 3)];
+    for _ in 0..SLOTS + 2 {
+        let did = hold(&mut sim, Control::Right, 0, HOLD_MS);
+        let [(8, Did::Stepped(p))] = fired(&did)[..] else { panic!("{did:?}") };
+        seen.push(p);
+    }
+    let slots = (0..SLOTS).map(Pick::Slot);
+    let want: Vec<Pick> = slots.chain([Pick::Player(1), Pick::Player(2), Pick::Slot(0)]).collect();
+    assert_eq!(seen, want);
+    // Left from the first slot is the last player.
+    let did = hold(&mut sim, Control::Left, 0, HOLD_MS);
+    assert_eq!(fired(&did), vec![(8, Did::Stepped(Pick::Player(2)))]);
+    // Player 2's own list leaves them out.
+    let m = markers::Markers { at: SLOTS as u8, ..Default::default() };
+    assert_eq!((m.pick(1, 3), markers::Markers { at: SLOTS as u8 + 1, ..Default::default() }.pick(1, 3)),
+               (Pick::Player(0), Pick::Player(2)));
+    // A selection past a player who left is the first slot.
+    assert_eq!(markers::Markers { at: SLOTS as u8 + 1, ..Default::default() }.pick(0, 2), Pick::Slot(0));
+    // Down on a player places nothing.
+    hold(&mut sim, Control::Left, 0, HOLD_MS);
+    assert_eq!(sim.markers.pick(0, 3), Pick::Player(1));
+    assert_eq!(fired(&hold(&mut sim, Control::Down, 0, HOLD_MS)), vec![(8, Did::Refused(Pick::Player(1)))]);
+    assert!((0..SLOTS).all(|s| !sim.markers.holds(s)));
+}
+
+/// Three riders in a row on the flat, 12 ft apart, wrecks off (the stand-in's own first-tick wreck,
+/// `Sim::new`).
+fn three_riders() -> Sim {
+    let mut sim = Sim::new(0x88);
+    let mounts = stock::mounts(&sim.phy);
+    for i in 1..3 {
+        let at = Vf::new(stock::SPAWN.x() + 12.0 * i as f32, stock::SPAWN.y(), stock::SPAWN.z(), 1.0);
+        let mut r = Rider::new(&sim.phy, mounts, at, stock::FACING, Set::default());
+        r.sense.wrecks_enabled = false;
+        let phy = (*sim.phy).clone();
+        sim.add_player(phy, r);
+    }
+    sim
+}
+
+/// Up on another player lands the rider where they stand, ghosted, and the two collide with nothing:
+/// stepped together for a second, inside each other, each rides exactly as it does with the other
+/// far away — and the ghost holds its clock while player 2 pulls out of it, so they were inside each
+/// other.
+#[test]
+fn a_teleport_onto_another_rider_collides_with_nothing() {
+    let mut sim = three_riders();
+    for _ in 0..SLOTS {
+        hold(&mut sim, Control::Right, 0, HOLD_MS);
+    }
+    assert_eq!(sim.markers.pick(0, 3), Pick::Player(1));
+    // Player 2 on the move, so the landing is on a rider and not a parked bike.
+    sim.others[0].rider.ride.chassis.vel = Vf::new(0.0, 0.0, 6.0, 0.0);
+    let mut did = vec![tick(&mut sim, Control::Up.mask())];
+    while did.last() == Some(&None) {
+        did.push(tick(&mut sim, Control::Up.mask()));
+    }
+    assert_eq!(fired(&did), vec![(8, Did::Teleported(Pick::Player(1)))]);
+    // Where player 2 stood before the tick (the spots are taken before anybody moves), facing their way.
+    assert!(sim.rider.ghost.on);
+    let (me, them) = (sim.rider.ride.position(), sim.others[0].rider.ride.position());
+    assert!(F(me.z() - them.z()).abs() < F(1.0) && F(me.x() - them.x()).abs() < F(0.01), "{me:?} {them:?}");
+    assert!(game_sim::ghost::overlaps(&sim.rider.ride.rival(), &[sim.others[0].rider.ride.rival()]));
+    // Not ghosted, the same two bodies strike: the head ray finds the other rider.
+    let hits = game_sim::ride::hits_among(&sim.rider.ride, &mut Flat::default(), &[sim.others[0].rider.ride.rival()]);
+    assert!(hits.iter().any(|c| matches!(c.other, game_sim::air::Other::Rider { .. })), "the control: no contact");
+
+    // Together, against the same two with player 2 put 500 ft off: nobody rides any differently.
+    let mut apart = sim.clone();
+    let far = Vf::new(stock::SPAWN.x() + 500.0, stock::SPAWN.y(), stock::SPAWN.z(), 1.0);
+    let mut solo_two = sim.clone();
+    apart.others[0].rider.ride.place(far, stock::FACING);
+    solo_two.rider.ride.place(far, stock::FACING);
+    solo_two.rider.ghost = Default::default();
+    for k in 0..30 {
+        for s in [&mut sim, &mut apart, &mut solo_two] {
+            tick(s, GAS);
+        }
+        assert_eq!(hash::of(&sim.rider.ride), hash::of(&apart.rider.ride), "tick {k}: the ghost touched player 2");
+        assert_eq!(hash::of(&sim.others[0].rider.ride), hash::of(&solo_two.others[0].rider.ride), "tick {k}: player 2 touched the ghost");
+        assert!(sim.rider.state.wreck.is_none() && sim.others[0].rider.state.wreck.is_none());
+        if k < 5 {
+            assert_eq!(sim.rider.ghost.clock, game_sim::ghost::Ghost::LENGTH, "tick {k}: the clock ran inside player 2");
+        }
+    }
+}
+
+/// The markers are the simulation's: a snapshot's bytes carry them and put them back, and a state
+/// that never touched them encodes to the bytes and hashes to the number it did before there were any.
+#[test]
+fn markers_go_with_a_snapshot_and_cost_nothing_untouched() {
+    let mut sim = moving();
+    let untouched = game_sim::snapshot::encode(&sim);
+    let before = sim.hash();
+    let mut copy = sim.clone();
+    copy.markers = Default::default();
+    assert_eq!(game_sim::snapshot::encode(&copy), untouched);
+    assert_eq!(copy.hash(), before);
+
+    hold(&mut sim, Control::Down, GAS, HOLD_MS);
+    hold(&mut sim, Control::Right, GAS, HOLD_MS);
+    assert_ne!(sim.hash(), {
+        let mut s = sim.clone();
+        s.markers = Default::default();
+        s.hash()
+    }, "the markers are not in the hash");
+    let bytes = game_sim::snapshot::encode(&sim);
+    let mut back = moving();
+    game_sim::snapshot::decode(&mut back, &bytes).unwrap();
+    assert_eq!(back.hash(), sim.hash());
+    assert!(back.markers.holds(0) && back.markers.at == 1);
+
+    // With other players too: their section and the markers' both read back.
+    let mut three = three_riders();
+    hold(&mut three, Control::Down, 0, HOLD_MS);
+    let bytes = game_sim::snapshot::encode(&three);
+    let mut back = three_riders();
+    game_sim::snapshot::decode(&mut back, &bytes).unwrap();
+    assert_eq!(back.hash(), three.hash());
+}
