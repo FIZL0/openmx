@@ -61,6 +61,9 @@ use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
+mod sprites;
+pub use sprites::Sprite as Particle;
+
 /// The format of the depth buffer.
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The format an offscreen frame is drawn in: plain bytes, as the rasteriser's are.
@@ -461,6 +464,8 @@ pub struct Renderer {
     upscale: scale::Upscale,
     /// The fraction of the frame's size the views are drawn at, [`MIN_SCALE`] to 1 (V30).
     pub render_scale: f32,
+    /// The particle sheet and this frame's particles (P58).
+    particles: Option<sprites::Sprites>,
 }
 
 /// A prop the scene places, as culling needs it.
@@ -1218,6 +1223,7 @@ impl Renderer {
             sprites,
             upscale,
             render_scale: 1.0,
+            particles: None,
         })
     }
 
@@ -2174,6 +2180,12 @@ impl Renderer {
                     drawn.draws += 1;
                     drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
                 }
+            }
+            // The particles, over the models (P58).
+            if let Some(particles) = &self.particles
+                && particles.draw(pass, &self.view_bind, &offset)
+            {
+                drawn.draws += 1;
             }
         }
     }

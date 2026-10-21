@@ -170,6 +170,7 @@ mod online;
 mod overlay;
 mod pace;
 mod pad;
+mod particles;
 mod perf;
 mod split;
 mod stages;
@@ -1748,6 +1749,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         _ => None,
     };
+    // Its particles (P58): the emitter list and its `.emt`s, and the track's particle sheet.
+    let (mut plane_fx, mut fx_sheet) = match &plane_drawn {
+        Some(drawn) => match load_plane_fx(&archives, &args.track, drawn, &assets) {
+            Ok((fx, binds, sheet)) => (Some((fx, binds)), Some(sheet)),
+            Err(why) => {
+                println!("biplane: no particles: {why}");
+                (None, None)
+            }
+        },
+        None => (None, None),
+    };
 
     // The scene's own start line and start direction, as the simulation's reader read them.
     let spawn = point(place.start);
@@ -2882,6 +2894,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         };
         perf.add(Stage::Sim, sim_at.elapsed());
         stages.mark(stages::Stage::Sim);
+        // The plane's particles (P58): a frame of them for each frame the plane was simulated, off
+        // where it is now. Nothing here reads or writes the simulation.
+        if simulated && let (Some((fx, binds)), Some(plane)) = (&mut plane_fx, &world.seats[0].garage.plane) {
+            fx.step(&plane_fx_frame(plane, binds), dt.0);
+        }
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
         cameras.clear();
@@ -3202,6 +3219,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
             let draw_at = Instant::now();
             let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, sprites: &gpu_sprites, light: &light };
+            let sprites = plane_fx.as_ref().map_or_else(Vec::new, |(fx, _)| plane_sprites(fx));
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
@@ -3211,6 +3229,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let t = texture.take().filter(|t| (t.width(), t.height()) == (fw, fh)).unwrap_or_else(|| r.offscreen(fw, fh));
                     let view = t.create_view(&Default::default());
                     r.set_graphics(graphics);
+                    set_plane_sprites(r, &mut fx_sheet, &sprites);
                     let d = r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
                     // Nothing else waits on a frame nobody sees: without this the queue runs ahead,
                     // and the times would be the CPU's alone.
@@ -3225,6 +3244,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
                 (None, Some(w)) => {
                     w.renderer.set_graphics(graphics);
+                    set_plane_sprites(&mut w.renderer, &mut fx_sheet, &sprites);
                     let spent = Instant::now();
                     let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
                     waited = w.waited;
@@ -3465,6 +3485,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     air.0 * 0.681_818,
                     if plane.on_ground() { "on the ground" } else { "in the air" }
                 );
+            }
+            // And its particles in the air, by emitter (P58).
+            if let (false, Some((fx, _))) = (bike_up, &plane_fx) {
+                let counts: Vec<String> = fx.counts().iter().map(|(name, n)| format!("{name} {n}")).collect();
+                println!("     particles: {}", counts.join(", "));
             }
             window_of_frames = (Instant::now(), 0, 0);
         }
@@ -3799,12 +3824,79 @@ fn load_biplane(
         Some(bytes) => {
             for e in biplane::emitters(&ini::text(&bytes)) {
                 let on = e.node.as_deref().unwrap_or("its collision model");
-                println!("  emitter {} ({}) on {on}: not drawn, the port has no particles", e.emitter, e.name);
+                println!("  emitter {} ({}) on {on}: not in a moment, the ride emits it (P58)", e.emitter, e.name);
             }
         }
         None => println!("  no {} in these archives", biplane::PARTICLES),
     }
     Ok(plane)
+}
+
+/// The plane's particles (P58): the emitter list out of the track's archives and each `.emt` it names
+/// beside it, the track's particle sheet (`particle\<track>particles.prt` and its texture), and where
+/// each entry's node is on the plane. Says what it found, and what it skips.
+fn load_plane_fx(
+    archives: &[Res],
+    track: &str,
+    drawn: &Biplane,
+    assets: &Assets,
+) -> Result<(particles::PlaneFx, Vec<(String, M4)>, game_render::pst::Texture), String> {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let list = read(biplane::PARTICLES).ok_or(format!("no {}", biplane::PARTICLES))?;
+    let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
+    let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
+    let texture = game_render::pst::Texture::parse(&texture)?;
+    let atlas = particles::Atlas::parse(&ini::text(&sheet), texture.width, texture.height);
+    let fx = particles::PlaneFx::new(&biplane::emitters(&ini::text(&list)), atlas, read);
+    let mut binds: Vec<(String, M4)> = Vec::new();
+    for e in &fx.entries {
+        match e.node.as_deref() {
+            Some(name) => match drawn.node(assets, name) {
+                Some(m) if !binds.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) => binds.push((name.to_string(), m)),
+                Some(_) => {}
+                None => println!("biplane: particles: {} rides {name}, which the model does not have", e.name),
+            },
+            None => {}
+        }
+        println!("biplane: particles: {} ({:?}) from {:?}", e.name, e.kind, e.emt.group);
+    }
+    for (name, why) in &fx.skipped {
+        println!("biplane: particles: {name} ({why}) not ported");
+    }
+    Ok((fx, binds, texture))
+}
+
+/// What the plane's particles read off it this frame (P58): its emitters' nodes where the plane is,
+/// its throttle, airspeed and wreck, and its body's contacts — none: the port's plane has no
+/// collision model to touch the ground with until S48, so the wreck's dust is never fed.
+fn plane_fx_frame(plane: &Plane, binds: &[(String, M4)]) -> particles::PlaneFrame {
+    let at = plane_at(plane);
+    let (throttle, airspeed) = plane.gauges().map_or((0.0, 0.0), |(t, a)| (t.0, a.0));
+    particles::PlaneFrame {
+        nodes: binds.iter().map(|(n, m)| (n.clone(), m.mul(at))).collect(),
+        throttle,
+        airspeed,
+        wrecked: plane.prop_angle().is_none(),
+        vel: vector(plane.vel),
+        ground_contacts: Vec::new(),
+        object_contacts: Vec::new(),
+    }
+}
+
+/// The plane's particles as the GPU draws them.
+fn plane_sprites(fx: &particles::PlaneFx) -> Vec<game_render::gpu::Particle> {
+    fx.drawn()
+        .iter()
+        .map(|d| game_render::gpu::Particle { at: [d.at.x, d.at.y, d.at.z], size: d.size, uv: d.uv, alpha: d.alpha, _pad: [0.0; 3] })
+        .collect()
+}
+
+/// This frame's particles into `r`, the sheet first if it has not been uploaded yet.
+fn set_plane_sprites(r: &mut Renderer, sheet: &mut Option<game_render::pst::Texture>, sprites: &[game_render::gpu::Particle]) {
+    if let Some(sheet) = sheet.take() {
+        r.set_sprite_sheet(&sheet);
+    }
+    r.set_sprites(sprites);
 }
 
 /// The command line. `Ok(None)` means `--help` was asked for and the shell should not start.
