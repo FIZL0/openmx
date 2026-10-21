@@ -4278,3 +4278,42 @@ screen_page_off boot 0x00200ab0 the screen's vt +0xa0, to 0x00200ac0: only the H
 #   drawn by it alone: the file's root node holds the same turn again, which the original does not
 #   apply (world.rs Assets::load_placed). free06 (biplane state): Free06_PowerLine_A at
 #   4235.519,260.544,4304.064 identity, box centre (6.852,3.352,-14.884) half (172.997,10.131,100.064).
+# ---------------------------------------------------------------------------------------------------
+# S79 — the points: crates/game-sim/src/score.rs, proved in crates/game-sim/tests/score.rs. How each was
+# found is in research/journal/2026-10-21-s79-trick-points.
+# The rider's score card is *(rider+0xf9c), the score manager *(rider+0xfa0) (one for the session;
+# its cards are a list from mgr+0x34 through card+0x1c8). Card words, by offset:
+#   +0x8 flags (0x2 takes part, 0x1 a networked card, 0x20 combo open, 0x40 newest node scoring,
+#   0x80 newest node growing), +0xc8 the node list (newest first), +0xcc its count, +0xd8 the combo's
+#   seconds, +0xdc the banked total, +0xe0 the combo's points.
+# Node (0x28 bytes): +0x0 flags (1 counts, 2 round to nearest, 4 round down), +0x4 id (0-23 a trick,
+#   24 backflip, 25 wheelie, 26 stoppie), +0x8 points, +0xc base, +0x10 rate a second, +0x14 mult,
+#   +0x18 extra, +0x1c seconds held, +0x20 granularity, +0x24 next.
+# Manager: +0x5c flags (0x1 running, 0x8 stopped), +0x64 event mode (3 in freeride), +0xac the
+#   total's granularity (1.0), +0x48 a free list of 100 nodes shared by every card, +0xf8 its clock.
+# Rider words beside the card: +0x13f0 / +0x13f4 seconds on the rear / front wheel alone, +0x13f8 the
+#   slow speed (5.0) +0x438 is compared with at the top of the rider's tick, +0x1400 the backflip
+#   watch (0..3), +0x140c a per-trick rate bonus (zero for all 26 in every state looked at).
+score_combo_start           boot 0x00266e00 (mgr, card) opens a combo on a card that takes part and
+#                                           is not networked, the manager running: +0xd8 and +0xcc
+#                                           zeroed, the old nodes back to the pool
+score_node_push             boot 0x00267620 (base f12, extra f13, rate f14, mult f15, granularity f16,
+#                                           mgr, card, id, flags) a node at the head of an open combo,
+#                                           points = base * mult; card |= 0x40
+score_finish                boot 0x00267820 (mult f12, mgr, card, ok) the head node: not ok it stops
+#                                           counting, ok its points * mult and rounded; card &= ~0xc0
+score_hold                  boot 0x00267a30 (mgr, card, on) card |= 0x80 if scoring, or &= ~0x80
+score_combo_end             boot 0x00266fb0 (scale f12, mgr, card, ok) closes the combo: ok adds every
+#                                           node's points * scale to the total; the total rounded
+#                                           down to mgr+0xac either way, +0xe0 zeroed, the nodes freed
+#                                           (but in event mode 5)
+score_grow                  boot 0x00267a90 (dt f12, mgr) the manager's tick, after every rider's: an
+#                                           open combo's clock, the growing head's (base + held *
+#                                           rate) * mult rounded, +0xe0 the counting nodes' sum
+rider_score_trick_start     boot 0x00280b30 (rider, id) rider vt+0x10c: a trick's clock started
+rider_score_trick_stop      boot 0x00280d00 (rider) rider vt+0x110: the head * the combo's count
+rider_score_trick_abort     boot 0x00280d70 (rider) rider vt+0x114: the trick and the combo lost
+# jump_record_end (above, 0x0027b6e0) is the score card's wreck: the head lost, the combo closed
+#   unbanked, +0x13f0/+0x13f4/+0x1400 zeroed. Called by player_wreck_entry and ride_reset_request.
+# The scoring section of the player update 0x0027c890 is ported as Score::frame (one-wheel nodes,
+# the bank, the backflip watch); the manager's mode handler for mode 3 (0x00268d00) scores nothing.

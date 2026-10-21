@@ -836,7 +836,11 @@ impl Tricks {
     ///
     /// `frozen` is the rider's "do not restart anything" state, which the original sets while the
     /// level is paused mid-animation.
-    pub fn update(&mut self, dt: F, set: &Set, bike: Bike, frozen: bool, wiggle: impl FnOnce(F) -> F) {
+    ///
+    /// What it answers is the three calls the clocks make on the rider (S79), which is where the
+    /// points hang off: [`Clocked`]. A caller with no points to keep drops it.
+    pub fn update(&mut self, dt: F, set: &Set, bike: Bike, frozen: bool, wiggle: impl FnOnce(F) -> F) -> Clocked {
+        let mut out = Clocked::default();
         // The id the rider latched into its own state, which is what it runs. For a local rider that is
         // the one it asked for this frame; for a networked one it arrived in the packet.
         let latched = self.requested;
@@ -854,8 +858,10 @@ impl Tricks {
             if restart {
                 if self.restart {
                     self.hand_hold = false;
+                    out.stopped_before = true;
                     self.restart = false;
                 }
+                out.started = Some(self.current);
                 self.elapsed = F::ZERO;
                 self.held = F::ZERO;
                 self.hold_elapsed = F::ZERO;
@@ -908,6 +914,7 @@ impl Tricks {
                 self.elapsed = duration;
                 self.in_progress = false;
                 self.hand_hold = false;
+                out.stopped = true;
             } else {
                 self.in_progress = true;
                 // The no-hander is the one trick that is safe to land from the moment it is held.
@@ -919,6 +926,7 @@ impl Tricks {
             }
         }
         self.prev_seq = self.seq;
+        out
     }
 
     /// The trick's clause of the landing test: what makes a landing a crash rather than a landing.
@@ -954,6 +962,20 @@ impl Tricks {
         }
         None
     }
+}
+
+/// **What the clocks told the rider this frame** (S79), in the order they told it: the trick that was
+/// running stopped because another restarted over it, a trick started, a trick ran its whole length.
+/// The original makes these as three calls on the rider's own vtable, and the rider's answer to them
+/// is its points ([`crate::score::Score`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Clocked {
+    /// A restart over a running trick stopped it first.
+    pub stopped_before: bool,
+    /// The clock (re)started on this trick.
+    pub started: Option<Trick>,
+    /// The trick's clock is at its end: told every frame it stays there.
+    pub stopped: bool,
 }
 
 /// The engine's one-line remap, which the trick clocks use twice: take `x`'s position between `in_lo`

@@ -43,7 +43,7 @@ Task S74. 2026-10-21.
     is on the wire so a rollback restores the hold.
   - The walk is unchanged. `PutBack` is read only by the body, which is not walked either, so no replay
     hash and no leaf count moved.
-- Follow-ups: S86 (the riding body from the ragdoll's spring) and S87 (the body's one-tick lag at a
+- Follow-ups: S90 (the riding body from the ragdoll's spring) and S91 (the body's one-tick lag at a
   wreck's entry).
 
 ## What the original does
