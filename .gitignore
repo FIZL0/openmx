@@ -26,6 +26,7 @@ context/
 /settings.txt
 /controls.txt
 /garage.txt
+/riders.txt
 
 # Build output
 /target/

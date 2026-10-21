@@ -156,6 +156,8 @@
 mod audio;
 mod aspect;
 mod chase;
+// The riders' names and numbers on their jerseys and plates (P86).
+mod dress;
 mod gpuwin;
 mod ground;
 mod hud;
@@ -760,6 +762,9 @@ struct Args {
     /// The garage's picks for the second player on, each ridden on its own bike's `.phy` and in its
     /// own rider's gear. A player past the end rides the first player's.
     others: Vec<roster::Pick>,
+    /// The garage's look for the first player (P86): what they wear over the gear set `rider` names,
+    /// and their name and number.
+    look: roster::Look,
     /// `--garage`: ride `garage.txt`'s picks without the front end, every seat its own.
     garage: bool,
     /// `--fps`: a line a second with the frame rate, the slow frames and each stage's time ([`perf`]).
@@ -807,6 +812,7 @@ fn apply_picks(args: &mut Args, picks: &[roster::Pick]) {
     args.bike = first.bike.clone();
     args.rider = first.rider.clone();
     args.set = Some(first.set);
+    args.look = first.look.clone();
     args.others = rest.to_vec();
 }
 
@@ -1018,7 +1024,7 @@ fn front_end(args: Args) -> Result<(), String> {
     let pad = args.pad.clone().or_else(|| controls.pad.clone());
     let network = lobby::Network::new(&dir);
     let mut front = Front {
-        menu: Menu::new(settings, controls).with_garage(catalogue, picks),
+        menu: Menu::new(settings, controls).with_garage(catalogue, picks).with_looks(roster::Presets::load(&dir)),
         reader: Reader::new(),
         seat_readers: (0..roster::SEATS).map(|_| Reader::new()).collect(),
         keys_reader: Reader::new(),
@@ -1038,6 +1044,8 @@ fn front_end(args: Args) -> Result<(), String> {
     // the rider the command line names.
     front.menu.lobby.bikes = lobby::bikes();
     front.menu.lobby.pick = openmx_net::Pick::new(&args.rider, &roster::Set::FREERIDE.word());
+    // In the first seat's look from the garage (P86), which the seat list shows the others.
+    front.menu.lobby.pick.look = front.menu.picks.0[0].look.text();
     front.menu.lobby.lan = front.network.online().relay == openmx_net::Relay::Off;
     let window = Screen::open(args.renderer, &args.display, args.size, args.scale, "openmx")?;
     let seats = open_seats(&args, pad.as_deref(), front.wiring());
@@ -1170,6 +1178,8 @@ fn front_end(args: Args) -> Result<(), String> {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
                 }
                 a.wrecks = room.wrecks;
+                // This machine's rider in the first seat's look (P86), as the room was told.
+                a.look = shell.front.menu.picks.0[0].look.clone();
                 a.wiring = shell.front.wiring();
                 a.shot = None;
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
@@ -1294,6 +1304,16 @@ fn front_end(args: Args) -> Result<(), String> {
                     }));
                 }
                 None => seats.set_first(None),
+            }
+        }
+        // A seat saved its look (P86): `riders.txt`, beside the settings.
+        if shell.front.menu.take_looks_changed() {
+            match shell.front.menu.looks.save(&shell.front.dir) {
+                Ok(()) => println!("garage: looks saved in {}", shell.front.dir.join(roster::PRESETS_FILE).display()),
+                Err(e) => {
+                    println!("garage: {e}");
+                    shell.front.menu.note = Some(format!("Could not save the look: {e}"));
+                }
             }
         }
         if shell.front.menu.take_picks_changed() {
@@ -1421,6 +1441,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(name) = &rider_member {
         archives.push(disc.res(name)?);
     }
+    // The garage's looks (P86): a ride where someone wears more than their gear set or has a name or
+    // number opens the wardrobe — the pieces' paint last, behind every archive above — and the fonts.
+    let dressed = args.look != roster::Look::default() || args.others.iter().any(|p| p.look != roster::Look::default());
+    let mut kit = dressed.then(|| dress::Kit::open(&mut disc));
+    if let Some(member) = kit.as_ref().and_then(|k| k.custom.as_ref()) {
+        archives.push(disc.res(member)?);
+    }
     let archives = archives;
 
     // The rider's stunts, which are neither the track's nor the bike's: one table in the app's own
@@ -1506,6 +1533,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     names.dedup();
     for name in &names {
         assets.load_placed(&archives, name);
+    }
+    // The first rider's name and number on their bike's plates and, below, their jersey (P86).
+    if let Some(k) = &mut kit {
+        assets.make_texture(dress::NAME_TEXTURE, k.texture(&args.rider, &args.look, &args.bike));
     }
     let has_bike = assets.load(&archives, CHASSIS);
     for part in &vehicle.parts {
@@ -1630,6 +1661,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // The gear is a repaint of the one shared body, exactly as a bike's `.sub` repaints the one
         // shared chassis, so the renames go in before the geometry is loaded.
         assets.rename_materials(&body.rider.suit.materials);
+        if let Some(k) = &kit {
+            assets.rename_materials(&k.repaint(&body.rider.suit, &args.look));
+        }
         let drawn = assets.load(&archives, body.geometry());
         let bound = body.rig.set.clips.len();
         let slots = body.rig.lib.stunt.iter().filter(|c| c.is_some()).count();
@@ -2420,6 +2454,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, motion).ok()
             }
         };
+        // Its own name and number (P86), on whatever of its bike and body is loaded below.
+        let own_look = args.others.get(i - 1).map(|p| p.look.clone()).unwrap_or_default();
+        if let Some(k) = &mut kit {
+            let pick = args.others.get(i - 1);
+            let (rider, bike) = pick.map_or((&args.rider, &args.bike), |p| (&p.rider, &p.bike));
+            assets.make_texture(dress::NAME_TEXTURE, k.texture(rider, &own_look, bike));
+        }
         // Its own bike when the garage picked one (P37): that archive's `.sub`, its chassis and parts
         // loaded again under names of their own in that bike's paint.
         let own_bike = match args.others.get(i - 1) {
@@ -2472,7 +2513,20 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     true => None,
                     false => copy(&mut assets, CHASSIS),
                 };
-                (model.unwrap_or_else(|| CHASSIS.to_string()), vehicle.parts.clone())
+                // Its own plates when anyone has a number (P86): the parts again under its own names.
+                let parts = match kit.is_some() {
+                    true => vehicle
+                        .parts
+                        .iter()
+                        .map(|part| {
+                            let name = format!("{}@{}", part.model, i + 1);
+                            assets.load_repainted(&archives, &part.model, &name, &vehicle.materials);
+                            game_render::scene::Part { model: name, placement: part.placement.clone() }
+                        })
+                        .collect(),
+                    false => vehicle.parts.clone(),
+                };
+                (model.unwrap_or_else(|| CHASSIS.to_string()), parts)
             }
         };
         // A picked rider's body is loaded again under its own name with its own gear's renames, which
@@ -2480,8 +2534,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let own_gear = match (body_model.as_deref(), own_rider, &body) {
             (Some(name), Some((_, member)), Some(b)) => {
                 let own = format!("{name}@{}", i + 1);
-                let res = [disc.res(member)?];
-                assets.load_repainted(&res, name, &own, &b.rider.suit.materials).then_some(own)
+                let mut res = vec![disc.res(member)?];
+                // In its own look over its gear set (P86), the pieces' paint out of the wardrobe.
+                let pairs = match &kit {
+                    Some(k) => {
+                        if let Some(custom) = &k.custom {
+                            res.push(disc.res(custom)?);
+                        }
+                        k.repaint(&b.rider.suit, &own_look)
+                    }
+                    None => b.rider.suit.materials.clone(),
+                };
+                assets.load_repainted(&res, name, &own, &pairs).then_some(own)
             }
             _ => None,
         };
@@ -2617,7 +2681,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The original's HUD (V26): its art off the disc, the world its radar covers, and which overlay is
     // up. Art that does not load stops the ride with the reason (V28) — it used to say so on stderr
     // and ride on with no HUD, which is how a HUD went missing with nobody told why.
-    let hud_art = overlay::Art::load(&mut disc).map_err(|e| format!("the original's HUD: {e}"))?;
+    let mut hud_art = overlay::Art::load(&mut disc).map_err(|e| format!("the original's HUD: {e}"))?;
+    // Each rider's name and number on it (P86), in seat order.
+    hud_art.tags = std::iter::once(&args.look)
+        .chain(args.others.iter().map(|p| &p.look))
+        .map(|l| overlay::Tag { name: l.name.clone(), number: l.number.clone() })
+        .collect();
     // The GPU draws it as sprites from its pictures, uploaded once (V30).
     // The front end's after them, for the pause (V30), which is why the HUD's are numbered from 0.
     let menu_base = hud_art.images().len();
@@ -3085,6 +3154,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         let mut pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
                         // the preset this seat rides on now (N13), which the room tells a joiner's machine
                         pick.preset = net::rides::preset(&world.seats[0].sim).unwrap_or(0) as u8;
+                        pick.look = front.menu.lobby.pick.look.clone();
                         room.take(openmx_net::HOST, &[pick]);
                         (room.riding, room.drop_in) = (true, true);
                         let net = front.network.open(&mut front.menu, room);
@@ -4394,6 +4464,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         seats: None,
         set: None,
         others: Vec::new(),
+        look: roster::Look::default(),
         garage: false,
         pad_of: Vec::new(),
         sound: true,

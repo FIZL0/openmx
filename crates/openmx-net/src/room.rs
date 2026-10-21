@@ -29,11 +29,16 @@ pub struct Pick {
     /// so it is in the handshake. A pick from a build before it is preset 0.
     #[serde(default)]
     pub preset: u8,
+    /// What the rider wears over the gear set and their name and number (P86), as the garage writes
+    /// a look in `garage.txt`: `outfit, helmet, goggles, gloves, boots, number, name`. Empty is the
+    /// gear set as it comes, and what an older build sends.
+    #[serde(default)]
+    pub look: String,
 }
 
 impl Pick {
     pub fn new(rider: &str, bike: &str) -> Pick {
-        Pick { rider: rider.into(), bike: bike.into(), preset: 0 }
+        Pick { rider: rider.into(), bike: bike.into(), preset: 0, look: String::new() }
     }
 }
 
