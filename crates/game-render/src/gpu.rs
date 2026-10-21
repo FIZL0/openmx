@@ -2732,8 +2732,11 @@ mod tests {
             start_dir: v3(0.0, 0.0, 1.0),
             terrain: String::new(),
             fog_color: [90, 110, 140],
+            // Fog from 6 to 70 feet: the original's start is 64 feet short of the end at haziness 0.
             fog_near: 5.0,
-            fog_far: 40.0,
+            fog_far: 70.0,
+            fog_visibility: 1.0,
+            fog_haziness: 0.0,
             lights: Vec::new(),
             models: vec![
                 crate::scene::Placement {
@@ -2827,10 +2830,12 @@ mod tests {
         assert!(hard.chunks_exact(3).filter(|p| p != &scene.fog_color).count() > 1000);
     }
 
-    /// A scene with the disc's kind of fog: free07's, 25 to 1,000 feet.
+    /// A scene with the disc's kind of fog: free07's, 25 to 1,000 feet at haziness 0.7, which the
+    /// original draws from 280.8 to 1,000 feet.
     fn fogged() -> Lighting {
         Lighting::of(&crate::scene::Scene::parse(
-            "[Fog]\nColorRGB=61,68,76\nMinimumFogDistance=25.00\nMaximumFogDistance=1000.00\n",
+            "[Fog]\nColorRGB=61,68,76\nVisibility=1.00\nHaziness=0.70\n\
+             MinimumFogDistance=25.00\nMaximumFogDistance=1000.00\n",
         ))
     }
 
@@ -2850,7 +2855,8 @@ mod tests {
         let light = fogged();
         let span = 9000.0;
         let fog = Graphics::Original.fog(&light, span);
-        assert_eq!(fog, Fog { near: 25.0, far: 1000.0, max: 1.0, reach: 1000.0 });
+        assert_eq!(fog, Fog { near: light.fog_near, far: 1000.0, max: 1.0, reach: 1000.0 });
+        assert!((fog.near - 280.8).abs() < 1e-3, "the fog starts at {}", fog.near);
         assert_eq!(Graphics::Original.far_clip(&light, span), 1000.0);
         // The whole map: no reach, a far clip past the map's far corner, and a haze that never hides.
         let full = Graphics::Full.fog(&light, span);

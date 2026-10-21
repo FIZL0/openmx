@@ -384,29 +384,33 @@ pub struct Lighting {
     pub sun_color: [f32; 3],
     pub ambient: [f32; 3],
     pub fog_color: [u8; 3],
+    /// Where the original's fog starts and ends ([`Scene::fog_range`]), not the scene's minimum and
+    /// maximum.
     pub fog_near: f32,
     pub fog_far: f32,
 }
 
 impl Lighting {
     pub fn of(scene: &Scene) -> Lighting {
+        let (fog_near, fog_far) = scene.fog_range();
         Lighting {
             sun: scene.sun(),
             sun_color: scene.sun_color(),
             ambient: scene.ambient(),
             fog_color: scene.fog_color,
-            fog_near: scene.fog_near,
-            fog_far: scene.fog_far,
+            fog_near,
+            fog_far,
         }
     }
 }
 
 /// How far the world is drawn (V32): the original's fog and far clip, or the whole map.
 ///
-/// The original fogs every track from the scene's `MinimumFogDistance` to its `MaximumFogDistance`,
-/// and its race viewport's far clip plane is that same `MaximumFogDistance` (the fog object hands its
-/// end to the viewport's far setter; the human's freeride save state reads near 2.4, far 1000), so
-/// nothing past the fog's end is drawn at all. `Full` draws the whole map from anywhere, with a light
+/// The original fogs every track over [`Scene::fog_range`] — on every scene but nat08 from
+/// `1 - Haziness` of the way to 64 ft short of `MaximumFogDistance`, to `MaximumFogDistance` — and its
+/// race viewport's far clip plane is that same end (the fog object hands its end to the viewport's
+/// far setter; the human's freeride save state reads near 2.4, far 1000), so nothing past the fog's
+/// end is drawn at all. `Full` draws the whole map from anywhere, with a light
 /// haze past the original's fog end for depth that never hides more than [`HAZE_MAX`] of a colour.
 /// Only the picture changes: nothing here is read by the simulation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
