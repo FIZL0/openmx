@@ -217,6 +217,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         pressure: "ds2@8".into(),
         // One seat on the original's controls among the new (P40), which writes one word a seat.
         layouts: [Layout::New, Layout::Original, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New],
+        // And another flying the original's biplane (P50).
+        planes: [Layout::New, Layout::New, Layout::Original, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New],
     };
     menu::save(&dir, &settings, &controls).unwrap();
     assert_eq!(menu::load(&dir), (settings, controls));
@@ -282,6 +284,19 @@ fn what_the_pad_sets_is_what_the_file_says() {
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.controls.throttle, Gas::L2);
     assert!(m.take_changed());
+    // 1P's row steps its layout and its biplane's together (P50), the biplane's the faster, and
+    // wraps either way.
+    tap(&mut m, &mut r, Control::Down);
+    let one = |m: &Menu| (m.controls.layouts[0], m.controls.planes[0]);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(one(&m), (Layout::New, Layout::Original));
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(one(&m), (Layout::Original, Layout::Original));
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(one(&m), (Layout::New, Layout::Original));
+    assert_eq!(m.controls.planes[1], Layout::New, "2P's biplane moved with 1P's");
 
     let dir = scratch("pad");
     menu::save(&dir, &m.settings, &m.controls).unwrap();
@@ -291,6 +306,7 @@ fn what_the_pad_sets_is_what_the_file_says() {
         Settings { name: "Mx".into(), overlay: Overlay::Debug, wrecks: false, ..Settings::default() }
     );
     assert_eq!(controls.throttle, Gas::L2);
+    assert_eq!(controls.planes[0], Layout::Original);
     // And a menu opened on what was read is the menu that wrote it.
     let again = Menu::new(settings, controls);
     assert_eq!((&again.settings, &again.controls), (&m.settings, &m.controls));

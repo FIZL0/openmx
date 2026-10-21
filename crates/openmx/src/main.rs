@@ -214,7 +214,7 @@ use hud::Hud;
 use menu::{Act, Art, Dev, Menu, Reader, Readers};
 use stages::Stages;
 use moment::{Moment, Shot};
-use pad::{Bindings, Device, Pads, SEATS, Scheme, SeatInput, Seats, Throttle, Wiring};
+use pad::{Bindings, Device, Pads, PlaneScheme, SEATS, Scheme, SeatInput, Seats, Throttle, Wiring};
 
 // `controls.txt` holds a layout for every seat the pad layer has.
 const _: () = assert!(menu::SEATS == SEATS);
@@ -355,6 +355,9 @@ struct Seat {
     waiting: bool,
     /// What the rider did this frame, kept so the loop can print it after the pass.
     said: rider::Frame,
+    /// Whether the plane was upside down when this frame's report was made, which turns the
+    /// biplane's stick round under the new biplane controls (P50, `pad::PlaneScheme::fly`).
+    inverted: bool,
     /// The hands this pass was stepped with, kept for the body's own animation frame — which runs
     /// after the pass, off the same controls and the same `dt` (V18).
     hands: Controls,
@@ -583,6 +586,8 @@ struct Args {
     /// Whether `--controls new|original` was given, so the front end's `controls.txt` does not
     /// override it.
     scheme_flag: bool,
+    /// Whether `--biplane-controls new|original` was given (P50), for the same reason.
+    plane_flag: bool,
     /// `--vehicle bike|biplane`: which machine the session starts on (P19). The bike by default,
     /// and a default session is the shell exactly as it was before there was a choice.
     vehicle: Kind,
@@ -697,6 +702,7 @@ struct Front {
     args_wiring: Wiring,
     wiring_flags: (bool, bool),
     scheme_flag: bool,
+    plane_flag: bool,
     /// Online play's network (N3), started when the online screens first ask for it.
     network: lobby::Network,
     /// The sound and the music (P42), which play on across the menus and the rides.
@@ -725,6 +731,14 @@ impl Front {
                 *scheme = match layout {
                     menu::Layout::New => Scheme::New,
                     menu::Layout::Original => Scheme::Original,
+                };
+            }
+        }
+        if !self.plane_flag {
+            for (plane, layout) in w.planes.iter_mut().zip(self.menu.controls.planes) {
+                *plane = match layout {
+                    menu::Layout::New => PlaneScheme::New,
+                    menu::Layout::Original => PlaneScheme::Original,
                 };
             }
         }
@@ -836,6 +850,7 @@ fn front_end(args: Args) -> Result<(), String> {
         args_wiring: args.wiring.clone(),
         wiring_flags: args.wiring_flags,
         scheme_flag: args.scheme_flag,
+        plane_flag: args.plane_flag,
         network,
         sound,
     };
@@ -2004,6 +2019,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let schemes: [Scheme; SEATS] =
         std::array::from_fn(|i| pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(i)));
     println!("controls: {}", Scheme::list_text(&schemes));
+    let planes: [PlaneScheme; SEATS] =
+        std::array::from_fn(|i| pad_seats.as_ref().map_or(args.wiring.planes[i], |s| s.plane(i)));
+    println!("biplane controls: {}", PlaneScheme::list_text(&planes));
     if let Some(seats) = &*pad_seats
         && seats.slots.keys() == Some(0)
         && seats.name(0).is_none()
@@ -2273,6 +2291,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         start_freezes: front.is_none(),
         waiting: false,
         said: rider::Frame::default(),
+        inverted: false,
         hands: Controls::default(),
     }];
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
@@ -2290,6 +2309,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             start_freezes: front.is_none(),
             waiting: false,
             said: rider::Frame::default(),
+            inverted: false,
             hands: Controls::default(),
         });
     }
@@ -2437,7 +2457,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             Some(input) => input.report(),
                             None => idle.report(&pad::no_keys),
                         };
-                        seat.reports = [seats.scheme(from).ride(report), Report::missing()];
+                        // And the plane's stick turned round upside down (P50), off the attitude
+                        // the last step left, so the plane's simulation reads the original's pad.
+                        seat.inverted = seat.garage.inverted(seat.inverted);
+                        let report = seats.plane(from).fly(seats.scheme(from).ride(report), seat.inverted);
+                        seat.reports = [report, Report::missing()];
                         seat.waiting = now.get(from) == Some(&SeatInput::Waiting);
                     }
                 }
@@ -2449,6 +2473,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             },
             Some(head) => match head.next() {
                 Some(frame) => {
+                    // A tape holds what the plane read, already turned round (P50); this is only
+                    // the camera's, which reads the turned-round L1 back.
+                    world.seats[0].inverted = world.seats[0].garage.inverted(world.seats[0].inverted);
                     world.seats[0].reports = frame.reports;
                     world.played_dt = Some(frame.dt());
                 }
@@ -2700,7 +2727,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // and which is in no chord; the layout is the seat's, or the command line's for a
                 // session with no seats.
                 let scheme = pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(args.pad_seat(i)));
-                if scheme.changes_camera(pad) {
+                // Upside down in the plane the original's L1 reached the plane as R1 (P50).
+                let plane = pad_seats.as_ref().map_or(args.wiring.planes[i], |s| s.plane(args.pad_seat(i)));
+                if plane.changes_camera(scheme, pad, seat.inverted) {
                     follow.cam.next_preset();
                     println!("{who}camera: {}", follow.cam.preset().name);
                     rig.hud.note_camera(&follow.cam.preset().name);
@@ -3529,6 +3558,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         pads: None,
         controls: None,
         scheme_flag: false,
+        plane_flag: false,
         vehicle: Kind::Bike,
         players: 1,
         split: Split::default(),
@@ -3597,6 +3627,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                     }
                     Err(_) => args.controls = Some(v.into()),
                 }
+            }
+            // How the biplane's stick reads upside down (P50), per seat like --controls.
+            "--biplane-controls" => {
+                let v = next("new, original, or one per seat (new,original)")?;
+                args.wiring.planes = PlaneScheme::parse_list(&v).map_err(|why| format!("--biplane-controls: {why}"))?;
+                args.plane_flag = true;
             }
             "--bindings" => args.controls = Some(next("a bindings file")?.into()),
             "--shot" => args.shot = Some(next("a path for the first frame")?.into()),
@@ -3762,6 +3798,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
+                            [--biplane-controls new|original|new,original,...]\n\
                             [--bindings FILE] [--renderer gpu|software] [--fps]\n\
                             [--no-sound]\n\
                      \n\
@@ -3778,6 +3815,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      name in the track's cpresets.ini (\"Race Cam 1\" unless asked).\n\
                      A trick is a gesture: hold Circle, Triangle and/or R1 and push the d-pad.\n\
                      L1 and R1 together put the bike back (the original's own chord).\n\
+                     Upside down in the biplane the stick's up and down, the d-pad's Up and\n\
+                     Down, and L1 and R1 swap, so they move the plane the same way on the screen\n\
+                     whichever way up it is; --biplane-controls original (or the Controls\n\
+                     screen) flies the original's, which never swaps them.\n\
                      On the keyboard: X throttle, Z brake, arrows steer, C/V/D trick, A+D reset.\n\
                      The throttle is a pressure and not a switch (the game reads Cross from its\n\
                      pressure byte): a key ramps it, --throttle r2 rides it on a trigger instead,\n\

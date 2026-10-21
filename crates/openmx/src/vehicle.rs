@@ -107,6 +107,11 @@ impl Spawn {
     }
 }
 
+/// How far past the horizon the plane's up has to go before [`Plane::inverted`] changes its answer:
+/// the sine of about 11 degrees of roll past knife edge. The port's own feel, not the original's,
+/// which never asks (P50).
+pub const INVERTED_MARGIN: f32 = 0.2;
+
 /// The biplane: where it was parked, where it is, and the flight that moves it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plane {
@@ -182,6 +187,19 @@ impl Plane {
         self.flight.as_ref().is_none_or(|f| f.measure.grounded)
     }
 
+    /// Whether the plane is upside down as the player sees it, for the pad's remap
+    /// (`pad::PlaneScheme::fly`, P50): its up pointing below the horizon. `was` is last frame's
+    /// answer, and the answer only changes once the up is [`INVERTED_MARGIN`] past the horizon the
+    /// other way, so a plane flown along knife edge does not swap its stick back and forth every frame.
+    ///
+    /// The camera that follows the plane keeps the world's up, so this is the attitude at which
+    /// the plane's own climb and the screen's part company. It reads the plane after the last step,
+    /// which is the attitude the player was looking at when they moved the stick.
+    pub fn inverted(&self, was: bool) -> bool {
+        let up = self.up.y();
+        if was { up < INVERTED_MARGIN } else { up < -INVERTED_MARGIN }
+    }
+
     /// Its speed over everything, feet a second.
     pub fn speed(&self) -> F {
         F(self.vel.x().hypot(self.vel.y()).hypot(self.vel.z()))
@@ -234,6 +252,14 @@ impl Garage {
         }
         self.up = to;
         Ok(to)
+    }
+
+    /// [`Plane::inverted`] for the plane with the controller; never, with the bike up.
+    pub fn inverted(&self, was: bool) -> bool {
+        match (self.up, &self.plane) {
+            (Kind::Biplane, Some(plane)) => plane.inverted(was),
+            _ => false,
+        }
     }
 
     /// One simulation pass for whichever machine has the controller. With the bike up this is
