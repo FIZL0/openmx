@@ -254,6 +254,44 @@ pub struct Chassis {
     /// state with no clip behind it at all, which every grounded row of a bike's table is
     /// ([`crate::chassis::poses_the_chassis`]).
     pub posing: bool,
+    /// How much of the pose drawn before a restart is still showing, on a frame whose blend names no
+    /// clip: the blend's own `ramp`, which the machine runs whether or not there is a clip to fade
+    /// *into*. Zero once it has run out, and on every frame a clip posed.
+    pub fading: f32,
+    /// The node pose the last frame drew, before the drives: the clip's, the rest shape, or the fade
+    /// between them. A restart snapshots this rather than the pose buffer, which on the ground still
+    /// holds the last airborne clip.
+    pub shown: crate::skin::Pose,
+}
+
+/// The cross-fade's weight on a frame: how much of the snapshot is still showing. Mode 0 carries
+/// none of its own.
+fn ramp_of(blend: va::Blend) -> f32 {
+    match blend {
+        va::Blend::Free => 0.0,
+        va::Blend::One { ramp, .. }
+        | va::Blend::Two { ramp, .. }
+        | va::Blend::Four { ramp, .. }
+        | va::Blend::Pair { ramp, .. } => ramp.0,
+    }
+}
+
+/// The rest shape faded back towards `under` by `fade`, joint by joint, with the clip samplers'
+/// own arithmetic: a shortest-way slerp for the turn and a straight line for the place, 1 being all
+/// of `under`.
+fn fade_rest(skeleton: &Skeleton, under: &crate::skin::Pose, fade: f32) -> crate::skin::Pose {
+    let mut out = skeleton.nodes(&crate::skin::Pose::new(skeleton.len()));
+    for j in 0..out.rot.len().min(under.rot.len()) {
+        out.rot[j] = crate::skin::slerp(fade, out.rot[j], under.rot[j], true);
+        let (p, was) = (out.pos[j], under.pos[j]);
+        out.pos[j] = [
+            p[0] + (was[0] - p[0]) * fade,
+            p[1] + (was[1] - p[1]) * fade,
+            p[2] + (was[2] - p[2]) * fade,
+            1.0,
+        ];
+    }
+    out
 }
 
 impl Chassis {
@@ -292,6 +330,8 @@ impl Chassis {
             rear_roll: Roll::default(),
             world: Vec::new(),
             posing: false,
+            fading: 0.0,
+            shown: crate::skin::Pose::new(0),
         })
     }
 
@@ -304,8 +344,19 @@ impl Chassis {
     /// the request is run as a self-placing actor and [`game_sim::vehicle_anim::Frame::place`] comes
     /// back `None`.
     pub fn frame(&mut self, dt: F, want: i32, r: &Request, drive: Drive) -> va::Frame {
+        // What a restart snapshots is the buffer, so put what was last *drawn* in it: after a frame
+        // with no clip that is the rest shape (or the fade towards it), not the airborne clip the
+        // buffer still holds. Otherwise a landing fades out of nothing and a take-off fades out of
+        // the last jump's crossup (S55).
+        if !self.posing && self.shown.rot.len() == self.stance.set.pose.rot.len() {
+            self.stance.set.pose = self.shown.clone();
+        }
         let frame = self.stance.frame(dt, want, r);
         self.posing = crate::chassis::poses_the_chassis(frame.blend, &self.stance.player);
+        self.fading = match self.posing {
+            true => 0.0,
+            false => ramp_of(frame.blend),
+        };
         self.drive(dt.0, drive);
         frame
     }
@@ -323,11 +374,23 @@ impl Chassis {
         // drives over *that* puts the whole bike wherever the crossup threw it and leaves it there
         // (V20). With no clip behind the frame the chassis is the shape it was modelled in, and the
         // drives are the only thing that moves it.
+        //
+        // But the machine still runs its cross-fade on such a frame: a landing restarts it into a
+        // grounded row with the ramp at its top, asking for the airborne pose to ease out over the
+        // fade rate. Drawing the rest shape at once threw that away, and a bike crossed up in the air
+        // snapped square under its rider on the frame it touched down (S55). So while the ramp runs,
+        // the rest shape is faded from the snapshot by it, the way a clip is (`Clip::pose_faded`).
         let rest = crate::skin::Pose::new(self.stance.set.skeleton.len());
-        let live = match self.posing {
-            true => &self.stance.set.pose,
-            false => &rest,
+        let faded;
+        let live = match (self.posing, self.fading > 0.0) {
+            (true, _) => &self.stance.set.pose,
+            (false, true) => {
+                faded = fade_rest(&self.stance.set.skeleton, &self.stance.set.under, self.fading);
+                &faded
+            }
+            (false, false) => &rest,
         };
+        self.shown = live.clone();
         let mut local = self.stance.set.skeleton.locals(live);
         let front = self.front_roll.step(dt, d.front_spin);
         let rear = self.rear_roll.step(dt, d.rear_spin);
