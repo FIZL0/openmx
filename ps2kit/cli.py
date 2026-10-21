@@ -75,7 +75,7 @@ def usage() -> str:
     return '\n'.join(out)
 
 
-INSTALL = 'pip install --user git+https://github.com/FIZL0/agent-runner@v0.4.1'
+INSTALL = 'pip install --user git+https://github.com/FIZL0/agent-runner@v0.5.0'
 
 
 def main(argv: list[str] | None = None) -> int:
