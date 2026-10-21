@@ -3403,7 +3403,25 @@ viewport_arrange            boot 0x0020aaa0 (game): mode = game+0x78 (copied fro
 #                                           (activity 5) sets the near clip to 2.4 (0x00112a80)
 viewport_set_rect           boot 0x00113b40 (view, x, y, w, h) plus the centring offsets 0x004e2208 /
 #                                           0x004e2210
-fog_set                     boot 0x0012f940 world+0x6c far, +0x70 near, +0x74
+fog_set                     boot 0x0012f940 (far f12, near f13, 64.0 f14, fog) -> fog+0x6c far, +0x70 near,
+#                                           +0x74 the 64, then fog_apply; the fog object is scene+0x420
+fog_new                     boot 0x0012f4d0 (Visibility, Haziness, Max, Min, 64.0, fog, colour): the fog
+#                                           object's constructor, from the scene's fog record scene+0x3b8
+#                                           (+0x10 Visibility, +0x14 Haziness, +0x18 Min, +0x1c Max)
+fog_apply                   boot 0x0012f6a0 (vis, haz, blend time, fog, colour): both fractions clamped
+#                                           0..1 to +0x3c/+0x40; end +0x38 = near + vis*(far-near), start
+#                                           +0x34 = (1-haz)*(end-64). A blend time > 1e-7 only stores the
+#                                           target (+0x50..+0x5c) for fog_tick to ease towards
+fog_tick                    boot 0x0012f970 (fog, dt): eases colour and both fractions to the target
+fog_to_view                 boot 0x0012fb00 (fog): the view's far clip (0x00112aa0) = end, then the
+#                                           display object's vtable +0x3c (renderer_set_fog) with start/end
+renderer_set_fog            boot 0x00179ea0 (display, start, end): +0x48 start, +0x4c end, +0x7c
+#                                           255/(start-end) — linear, FOG 255 (clear) at the start, 0 (all
+#                                           fog colour) at the end. A model wholly nearer than the start is
+#                                           drawn without fog (display+0x48 against distance+radius)
+scene_fog_read              boot 0x001a8a50 (record, ini): [Fog] ColorRGB, Visibility (default 1),
+#                                           Haziness (0.5), MinimumFogDistance (64), MaximumFogDistance
+#                                           (768), each through strtod + double_to_float (truncating)
 #
 # short_viewport (crates/game-sim camera::Switches): the race camera's aim, 0x0021f1bc..0x0021f2b0.
 # Skipped when aspect == 3, or when *(app+0x3cc)+0x78 != 0 (meaning not found); otherwise if the view's
