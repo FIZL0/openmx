@@ -356,6 +356,10 @@ mod net;
 #[allow(dead_code)]
 mod online;
 
+#[path = "../src/vehicle.rs"]
+#[allow(dead_code)]
+mod vehicle;
+
 /// The `Event::Start` a network says, waiting up to 30 s.
 fn started(net: &Net, who: &str) -> (Room, String) {
     let end = Instant::now() + Duration::from_secs(30);

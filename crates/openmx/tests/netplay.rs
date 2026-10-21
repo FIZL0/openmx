@@ -629,3 +629,154 @@ fn on_the_ride_a_silent_peers_seat_empties_and_the_others_ride_on() {
     assert!(a.sims[1].ticks > from as u64 + 150, "the empty seat rode on: {} ticks", a.sims[1].ticks);
     let _ = WINDOW;
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The put-back ghost online (P59)
+// ---------------------------------------------------------------------------------------------------
+
+#[path = "../src/online.rs"]
+#[allow(dead_code)]
+mod online;
+
+#[path = "../src/vehicle.rs"]
+#[allow(dead_code)]
+mod vehicle;
+
+use vehicle::Ghost;
+
+/// The tick in every [`PUT_BACK_EVERY`] the host's seat asks for a put-back on.
+const PUT_BACK_AT: usize = 60;
+const PUT_BACK_EVERY: usize = 120;
+
+/// The ride as the shell steps it online, each seat's put-back ghost beside its [`Sim`]
+/// ([`online::Seats`]); the host's seat presses L1+R1 for one tick every four seconds.
+struct Ghosted {
+    sims: Vec<Sim>,
+    ghosts: Vec<Ghost>,
+    world: Flat,
+}
+
+impl Ghosted {
+    fn new(seats: usize) -> Ghosted {
+        Ghosted { sims: sims(seats), ghosts: vec![Ghost::default(); seats], world: Flat::default() }
+    }
+
+    fn game(&mut self) -> online::Seats<'_> {
+        let rides = Rides { sims: &mut self.sims, world: &mut self.world, after: None };
+        online::Seats { rides, ghosts: &mut self.ghosts }
+    }
+}
+
+impl Machine for Ghosted {
+    type S = online::State;
+    fn frame(&mut self, np: &mut Netplay<online::State>, local: &[Report]) {
+        let mut local = local.to_vec();
+        if np.tick() % PUT_BACK_EVERY == PUT_BACK_AT
+            && let Some(i) = np.lineup.mine(&np.me).iter().position(|&s| s == 0)
+        {
+            local[i] = Report::from_buttons(game_sim::input::mask_of(&[Control::L1, Control::R1]));
+        }
+        np.frame(&mut self.game(), &local, ROUND.as_secs_f32());
+    }
+    fn hash(&self) -> u64 {
+        let mut copy = Ghosted { sims: self.sims.clone(), ghosts: self.ghosts.clone(), world: Flat::default() };
+        copy.game().hash()
+    }
+}
+
+use game_sim::input::Control;
+
+/// P59: the host's L1+R1 puts its bike back, and on both machines that bike is a ghost from that
+/// tick, at the same alpha on every tick, over a link that loses and delays datagrams (so the ticks
+/// are guessed, rolled back and run again): every settled tick's hash, which has every seat's ghost
+/// in it, is the same on both. The settled ticks ridden again offline through the same
+/// [`online::Seats`] give those hashes back, and show the ghost itself: on at half on the put-back's
+/// tick, fading as the garage's does, solid three seconds on, and never on the guest's bike.
+#[test]
+fn a_put_back_on_one_peer_is_a_ghost_on_both() {
+    let link = Link { loss: 0.2, lag: 3, outage: 0..0, oneway: false };
+    let r = run("host,g", Timing::default(), Ghosted::new, &link, 0..420, |_, _, _| {});
+    for np in &r.nets {
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+        assert!(np.rb.reruns > 0, "{} never ran a tick again", np.me);
+    }
+    let n = r.agree(&[0, 1], 0);
+    assert!(n > 300, "only {n} ticks settled");
+
+    // The same pads offline: the hashes come back, and the ghost is in them.
+    let mut alone = Ghosted::new(2);
+    let mut solo = Ghosted::new(2);
+    let (mut put_backs, mut ghosted) = (Vec::new(), 0);
+    for t in 0..n {
+        let mut game = alone.game();
+        assert_eq!(game.hash(), r.nets[0].hashes[t], "tick {t}: offline is not the online ride");
+        let pads: Vec<Report> = r.nets[0].log[t].iter().map(|&p| unwire(p)).collect();
+        game.step(t, &pads);
+        // the ghost-less ride on the same pads: the ghost does not move the bikes
+        Rides { sims: &mut solo.sims, world: &mut solo.world, after: None }.step(t, &pads);
+        assert_eq!(alone.sims[0].hash(), solo.sims[0].hash(), "tick {t}");
+        let g = alone.ghosts[0];
+        if g.on && g.alpha == Ghost::START && g.clock == Ghost::LENGTH {
+            put_backs.push(t);
+        }
+        ghosted += g.on as usize;
+        assert!(!alone.ghosts[1].on, "tick {t}: the guest's bike is a ghost");
+    }
+    eprintln!("put back on ticks {put_backs:?}, {ghosted} ghost ticks of {n}");
+    assert!(put_backs.len() >= 2, "put back on {put_backs:?}");
+    for w in put_backs.windows(2) {
+        assert_eq!(w[1] - w[0], PUT_BACK_EVERY, "put backs on {put_backs:?}");
+    }
+    // 3 s at 30 Hz: the put-back's tick at half, then 90 more, the 91st solid.
+    let first = put_backs[0];
+    let mut g = Ghost::default();
+    g.start();
+    let mut fade = vec![g];
+    while g.on {
+        g.step(rides::tick_dt(first + fade.len()));
+        fade.push(g);
+    }
+    assert_eq!(fade.len(), 92);
+    assert!(fade[1].alpha < fade[45].alpha && fade[45].alpha < fade[90].alpha);
+    let mut again = Ghosted::new(2);
+    for t in 0..(first + fade.len()).min(n) {
+        let pads: Vec<Report> = r.nets[0].log[t].iter().map(|&p| unwire(p)).collect();
+        again.game().step(t, &pads);
+        if t >= first {
+            let want = fade[t - first];
+            assert_eq!(again.ghosts[0], want, "tick {t}, {} after the put-back", t - first);
+        }
+    }
+}
+
+/// P59: [`online::Seats`]' bytes carry every seat's ghost after the ride's, so a resync or a restart
+/// mid-fade hands the peer the same ghost; a state cut short or with a broken flag writes nothing.
+#[test]
+fn the_ghost_goes_over_in_the_rides_bytes() {
+    let chord = Report::from_buttons(game_sim::input::mask_of(&[Control::L1, Control::R1]));
+    let mut there = Ghosted::new(2);
+    for t in 0..100 {
+        let pads = [if t == 70 { chord } else { mash(0, t) }, mash(1, t)];
+        there.game().step(t, &pads);
+    }
+    assert!(there.ghosts[0].on && !there.ghosts[1].on, "{:?}", there.ghosts);
+    let bytes = there.game().encode().unwrap();
+    let mut here = Ghosted::new(2);
+    assert_ne!(here.game().hash(), there.game().hash());
+    here.game().decode(&bytes).unwrap();
+    assert_eq!(here.ghosts, there.ghosts);
+    assert_eq!(here.game().hash(), there.game().hash());
+    for t in 100..200 {
+        let pads = [mash(0, t), mash(1, t)];
+        here.game().step(t, &pads);
+        there.game().step(t, &pads);
+        assert_eq!(here.ghosts, there.ghosts, "tick {t}");
+    }
+    let before = here.game().hash();
+    let mut flag = bytes.clone();
+    *flag.last_mut().unwrap() = 2;
+    assert!(here.game().decode(&flag).unwrap_err().contains("flag"));
+    assert!(here.game().decode(&bytes[..bytes.len() - 1]).is_err());
+    assert!(here.game().decode(&bytes[..4]).is_err());
+    assert_eq!(here.game().hash(), before, "a refused state writes nothing");
+}

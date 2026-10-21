@@ -2857,6 +2857,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // Every seat back into the shell's, this machine's first: the others are drawn beside it.
             for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
                 seated[d] = on.show(d, &mut seat.sim, rig.body.as_mut());
+                seat.garage.ghost = on.ghost(d);
             }
             world.seats[0].hands = on.hands;
             world.seats[0].said = rider::Frame::default();
