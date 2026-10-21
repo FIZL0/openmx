@@ -24,10 +24,10 @@
 //! other whose collidable is in this object's actor mask, or a mover, gets the actor coefficients
 //! instead of the scenery's.
 //!
-//! The port takes the own side as a [`Collider`] with a [`Rigid`] body: the plane's case. The
-//! original also lets the own side be a vehicle's chassis, through its transform; that path is not
-//! ported yet (the plane's object is on its body). `w` lanes are kept as the original leaves
-//! them, because it stores whole quadwords.
+//! The own side is a [`Collider`] on a [`Rigid`] body ([`resolve`]: the plane's case, the wreck
+//! bike's), or on a vehicle's chassis through its transform ([`resolve_ridden`]: a riding bike's,
+//! whose collision record is how one rider's bike pushes on another's). `w` lanes are kept as the
+//! original leaves them, because it stores whole quadwords.
 
 #![deny(clippy::float_arithmetic)]
 
@@ -352,6 +352,63 @@ pub struct Contact {
     pub mover: Option<usize>,
 }
 
+/// A vehicle's chassis as the **own** side of a contact: a riding bike's collision object sits on its
+/// chassis (`+0xf0`, with the transform at `+0xf8`) and has no dynamics body (`+0xf4` is 0). Every
+/// step of the resolution has a branch for that, which reads [`Vehicle`]'s fields and three more.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ridden {
+    pub chassis: Vehicle,
+    /// `+0x60` the centre of gravity in the world: where a force's lever is measured from. (The
+    /// relative velocity measures its arm in the chassis' frame, from `+0x190`, instead.)
+    pub position: Vf,
+    /// `+0x130` the force and `+0x140` the moment, in the chassis' frame, that the substep gathers.
+    pub force: Vf,
+    pub torque: Vf,
+}
+
+/// Whose collision object is resolving: one on a dynamics body (the plane's, the wreck bike's), or
+/// one on a vehicle's chassis (a riding bike's).
+pub enum Own<'a> {
+    Body(&'a mut dyn Rigid),
+    Vehicle(&'a mut Ridden),
+}
+
+impl Own<'_> {
+    fn mass(&self) -> F {
+        match self {
+            Own::Body(b) => b.mass(),
+            Own::Vehicle(r) => r.chassis.mass,
+        }
+    }
+
+    fn inv_mass(&self) -> F {
+        match self {
+            Own::Body(b) => b.inv_mass(),
+            Own::Vehicle(r) => r.chassis.inv_mass,
+        }
+    }
+
+    /// The inverse inertia's diagonal. The chassis' is built on the stack from three floats, and its
+    /// `w` is never read.
+    fn inv_inertia(&self) -> Vf {
+        match self {
+            Own::Body(b) => b.inv_inertia(),
+            Own::Vehicle(r) => {
+                let i = r.chassis.inv_inertia;
+                Vf::new(i[0].to_f32(), i[1].to_f32(), i[2].to_f32(), 0.0)
+            }
+        }
+    }
+
+    /// A world direction into the own side's frame.
+    fn local(&self, v: Vf) -> Vf {
+        match self {
+            Own::Body(b) => unturn(b.quat(), v),
+            Own::Vehicle(r) => r.chassis.node.unrotate(v),
+        }
+    }
+}
+
 /// The other side's body.
 pub enum Side<'a> {
     Body(&'a mut dyn Rigid),
@@ -393,21 +450,47 @@ pub fn resolve(
     movers: &[Mover],
     impulses: bool,
 ) {
+    resolve_on(own, &mut Own::Body(body), contacts, others, movers, impulses);
+}
+
+/// [`resolve`] for a collision object on a vehicle's chassis: a riding bike's. The damping step needs a
+/// dynamics body, so it never runs here, whatever [`Collider::damp`] says.
+pub fn resolve_ridden(
+    own: &mut Collider,
+    chassis: &mut Ridden,
+    contacts: &mut [Contact],
+    others: &mut [Other<'_>],
+    movers: &[Mover],
+    impulses: bool,
+) {
+    resolve_on(own, &mut Own::Vehicle(chassis), contacts, others, movers, impulses);
+}
+
+fn resolve_on(
+    own: &mut Collider,
+    side: &mut Own<'_>,
+    contacts: &mut [Contact],
+    others: &mut [Other<'_>],
+    movers: &[Mover],
+    impulses: bool,
+) {
     for e in contacts.iter_mut() {
         let mut other = e.other.map(|k| &mut others[k]);
         let mover = e.mover.map(|k| &movers[k]);
-        relative_velocity(own, body, e, other.as_deref_mut(), mover);
+        relative_velocity_on(own, side, e, other.as_deref_mut(), mover);
         let shared = mutual(own, other.as_deref().map(|o: &Other<'_>| &*o.collider));
         if own.normal_speed < HARD {
             if impulses && e.kind == 0 {
-                impulse(own, body, e, other.as_deref_mut(), shared);
+                impulse_on(own, side, e, other.as_deref_mut(), shared);
             }
         } else {
-            spring(own, body, e, other.as_deref_mut(), mover.is_some(), shared);
+            spring_on(own, side, e, other.as_deref_mut(), mover.is_some(), shared);
         }
-        friction(own, body, e, other.as_deref().map(|o: &Other<'_>| &*o.collider));
-        if own.damp {
-            damp(own, body, e);
+        friction_on(own, side, e, other.as_deref().map(|o: &Other<'_>| &*o.collider));
+        if own.damp
+            && let Own::Body(body) = side
+        {
+            damp(own, &mut **body, e);
         }
     }
 }
@@ -416,11 +499,38 @@ pub fn resolve(
 /// [`Collider::cofg_world`], the contact's arms (the other's when there is an other or a mover, and
 /// the other's own `cofg_world`), and the relative velocity and its speed along the normal.
 pub fn relative_velocity(own: &mut Collider, body: &dyn Rigid, e: &mut Contact, other: Option<&mut Other<'_>>, mover: Option<&Mover>) {
+    let mine = on_body(own, body, e);
+    against(own, e, other, mover, mine);
+}
+
+fn relative_velocity_on(own: &mut Collider, side: &Own<'_>, e: &mut Contact, other: Option<&mut Other<'_>>, mover: Option<&Mover>) {
+    let mine = match side {
+        Own::Body(body) => on_body(own, &**body, e),
+        Own::Vehicle(r) => on_chassis(own, &r.chassis, e),
+    };
+    against(own, e, other, mover, mine);
+}
+
+/// The own side's half on a dynamics body: its centre into the world, the arm, the point's velocity.
+fn on_body(own: &mut Collider, body: &dyn Rigid, e: &mut Contact) -> Vf {
     let q = body.quat();
     own.cofg_world = turn(q, own.cofg);
     let centre = plus(body.position(), own.cofg_world);
     e.arm = unturn(q, minus(e.point, centre));
-    let mine = plus(turn(q, cross(body.rates(), e.arm)), body.velocity());
+    plus(turn(q, cross(body.rates(), e.arm)), body.velocity())
+}
+
+/// The same on a chassis: the arm in the chassis' frame from its centre of mass (`+0x190`) moved by
+/// the object's own, as the other side's chassis has it below.
+fn on_chassis(own: &mut Collider, v: &Vehicle, e: &mut Contact) -> Vf {
+    own.cofg_world = v.node.rotate(own.cofg);
+    let local = v.node.unplace(e.point);
+    e.arm = minus(local, plus(v.cofg, own.cofg_world));
+    plus(v.node.rotate(cross(v.rates, e.arm)), v.velocity)
+}
+
+/// The other side's velocity at the point, and the relative velocity and its normal speed.
+fn against(own: &mut Collider, e: &mut Contact, other: Option<&mut Other<'_>>, mover: Option<&Mover>, mine: Vf) {
     let theirs = match (other, mover) {
         (Some(o), _) => match &mut o.side {
             Side::Body(b) => {
@@ -449,21 +559,39 @@ pub fn relative_velocity(own: &mut Collider, body: &dyn Rigid, e: &mut Contact, 
 
 /// A force at a world point on the body: the moment about the centre of mass, into the body's frame and
 /// masked lane by lane, then the force itself.
-fn apply(own: &Collider, body: &mut dyn Rigid, f: Vf, at: Vf, mask: Vf) {
-    let r = minus(at, plus(body.position(), own.cofg_world));
-    let m = unturn(body.quat(), cross(r, f));
-    body.add_moment_local(times(mask, m));
-    body.push(f);
+fn apply(own: &Collider, side: &mut Own<'_>, f: Vf, at: Vf, mask: Vf) {
+    match side {
+        Own::Body(body) => {
+            let r = minus(at, plus(body.position(), own.cofg_world));
+            let m = unturn(body.quat(), cross(r, f));
+            body.add_moment_local(times(mask, m));
+            body.push(f);
+        }
+        // Straight into the chassis' two accumulators, `.xyz`: no virtual, no listener.
+        Own::Vehicle(c) => {
+            let r = minus(at, plus(c.position, own.cofg_world));
+            let m = c.chassis.node.unrotate(cross(r, f));
+            c.torque = plus(c.torque, times(mask, m));
+            c.force = plus(c.force, f);
+        }
+    }
 }
 
 /// The damped spring that pushes the body out of a contact it is not closing on fast:
 /// `max(k·min(depth, max) − d·speed, 0)` along the normal, scaled down by the other's share of the
 /// mass, at the anchor (the contact on whichever body the contact's kind says).
 pub fn spring(own: &Collider, body: &mut dyn Rigid, e: &Contact, other: Option<&mut Other<'_>>, mover: bool, shared: bool) {
+    spring_on(own, &mut Own::Body(body), e, other, mover, shared);
+}
+
+fn spring_on(own: &Collider, side: &mut Own<'_>, e: &Contact, other: Option<&mut Other<'_>>, mover: bool, shared: bool) {
     let r = if mover || actor(own, other.as_deref().map(|o| &*o.collider)) { own.actor } else { own.scenery };
     let n = e.normal;
     let (anchor, depth) = if e.kind == 0 {
-        let anchor = plus(turn(body.quat(), minus(e.on_body, body.cofg())), body.position());
+        let anchor = match side {
+            Own::Body(body) => plus(turn(body.quat(), minus(e.on_body, body.cofg())), body.position()),
+            Own::Vehicle(c) => c.chassis.node.place(e.on_body),
+        };
         (anchor, dot(minus(e.point, anchor), n))
     } else {
         let o = other.as_deref().expect("a contact of the other's kind always has the other");
@@ -481,12 +609,12 @@ pub fn spring(own: &Collider, body: &mut dyn Rigid, e: &Contact, other: Option<&
                 Side::Body(b) => b.mass(),
                 Side::Vehicle(v) => v.mass,
             };
-            (theirs * body.inv_mass()).min(F::ONE)
+            (theirs * side.inv_mass()).min(F::ONE)
         }
     };
     let push = r.stiffness * depth.min(own.max_depth);
     let f = share * (push - r.damping * dot(own.relative, n)).max(F::ZERO);
-    apply(own, body, scaled(n, f), anchor, r.spring_mask);
+    apply(own, side, scaled(n, f), anchor, r.spring_mask);
 }
 
 /// `R · ((a × R)·I⁻¹ × a)`: the inverse-inertia term of the impulse for one body, with the normal
@@ -499,9 +627,13 @@ fn turning(r: Vf, arm: Vf, inv_inertia: Vf) -> F {
 /// The impulse that stops a hard contact: `J = n · −(1 + e)·speed / (m₁⁻¹ + m₂⁻¹ + k₁ + k₂)`, `J·m₁⁻¹`
 /// onto the body's velocity and `−J·m₂⁻¹` onto the other's, and the matching turn when the response is
 /// angular.
-pub fn impulse(own: &Collider, body: &mut dyn Rigid, e: &Contact, mut other: Option<&mut Other<'_>>, shared: bool) {
+pub fn impulse(own: &Collider, body: &mut dyn Rigid, e: &Contact, other: Option<&mut Other<'_>>, shared: bool) {
+    impulse_on(own, &mut Own::Body(body), e, other, shared);
+}
+
+fn impulse_on(own: &Collider, side: &mut Own<'_>, e: &Contact, mut other: Option<&mut Other<'_>>, shared: bool) {
     let r = if actor(own, other.as_deref().map(|o| &*o.collider)) { own.actor } else { own.scenery };
-    let (m1, i1) = if shared { (own.inv_mass, own.inv_inertia) } else { (body.inv_mass(), body.inv_inertia()) };
+    let (m1, i1) = if shared { (own.inv_mass, own.inv_inertia) } else { (side.inv_mass(), side.inv_inertia()) };
     let (m2, i2) = match other.as_deref() {
         None => (F::ZERO, CLEAR),
         Some(o) if shared => (o.collider.inv_mass, o.collider.inv_inertia),
@@ -513,7 +645,7 @@ pub fn impulse(own: &Collider, body: &mut dyn Rigid, e: &Contact, mut other: Opt
         },
     };
     let n = e.normal;
-    let k1 = if r.angular { turning(unturn(body.quat(), n), e.arm, i1) } else { F::ZERO };
+    let k1 = if r.angular { turning(side.local(n), e.arm, i1) } else { F::ZERO };
     let k2 = match other.as_deref() {
         Some(o) if r.angular => {
             let local = match &o.side {
@@ -526,9 +658,24 @@ pub fn impulse(own: &Collider, body: &mut dyn Rigid, e: &Contact, mut other: Opt
     };
     let size = (F::ONE / (k2 + (k1 + (m1 + m2)))) * (-(F::ONE + r.restitution) * own.normal_speed);
     let j = scaled(n, size);
-    body.add_velocity(scaled(j, m1));
-    if r.angular {
-        body.add_rates(times(cross(e.arm, unturn(body.quat(), j)), i1));
+    let dv = scaled(j, m1);
+    let dw = r.angular.then(|| times(cross(e.arm, side.local(j)), i1));
+    match side {
+        Own::Body(body) => {
+            body.add_velocity(dv);
+            if let Some(dw) = dw {
+                body.add_rates(dw);
+            }
+        }
+        Own::Vehicle(c) => {
+            let v = &mut c.chassis;
+            v.shock = plus(v.shock, dv);
+            v.velocity = plus(v.velocity, dv);
+            if let Some(dw) = dw {
+                v.twist = plus(v.twist, dw);
+                v.rates = plus(v.rates, dw);
+            }
+        }
     }
     let Some(o) = other.as_deref_mut() else { return };
     let dv = scaled(negated(j), m2);
@@ -556,6 +703,10 @@ pub fn impulse(own: &Collider, body: &mut dyn Rigid, e: &Contact, mut other: Opt
 /// it, at the contact point. `μ` is the actors' when the other is an actor, otherwise the contact's
 /// surface's (or the default for surface -1).
 pub fn friction(own: &Collider, body: &mut dyn Rigid, e: &Contact, other: Option<&Collider>) {
+    friction_on(own, &mut Own::Body(body), e, other);
+}
+
+fn friction_on(own: &Collider, side: &mut Own<'_>, e: &Contact, other: Option<&Collider>) {
     let (mu, mask) = if actor(own, other) {
         (own.actor.friction, own.actor.friction_mask)
     } else if e.surface == -1 {
@@ -567,8 +718,8 @@ pub fn friction(own: &Collider, body: &mut dyn Rigid, e: &Contact, other: Option
     let slide = minus(scaled(n, dot(own.relative, n)), own.relative);
     let along = unit(slide);
     let speed = dot(slide, slide).sqrt();
-    let f = F(WEIGHT) * (body.mass() * ((F(SLIDE) * speed).min(F::ONE) * mu));
-    apply(own, body, scaled(along, f), e.point, mask);
+    let f = F(WEIGHT) * (side.mass() * ((F(SLIDE) * speed).min(F::ONE) * mu));
+    apply(own, side, scaled(along, f), e.point, mask);
 }
 
 /// One lane of the damping a contact asks for: `|c|` remapped from `0..1` onto `1..k` and clamped
