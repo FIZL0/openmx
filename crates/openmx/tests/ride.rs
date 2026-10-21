@@ -1456,6 +1456,114 @@ fn a_biplane_session_flies() {
     );
 }
 
+/// P50: upside down, the new biplane controls move the plane on the screen the way they move it the
+/// right way up, and the original's reach the plane's simulation unchanged.
+///
+/// The shell's pass, as `main.rs` makes it: the plane's attitude after the last step says whether
+/// it is upside down (`Plane::inverted`), and the seat's `PlaneScheme` turns the report round before
+/// the poll. The plane takes off on the disc's `biplane.phy`, then rolls on full right stick until its
+/// up points well down. From there and from the right way up, a third of a second of each control is
+/// flown against a third of a second of nothing, and what the control added is read the way the
+/// follow camera shows it, whose up is the world's: the nose's height for a pulled stick, the turn of
+/// the heading for the left rudder. Under the new scheme each goes the same way upside down as the
+/// right way up; under the original's both go the other way, which is the original's flip.
+#[test]
+fn upside_down_the_new_biplane_controls_fly_the_way_they_do_upright() {
+    use pad::PlaneScheme;
+    let Some(file) = the_discs_plane() else { return };
+    let flight = game_sim::flight::Flight::new(&file);
+    let lowest = flight.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min);
+    let spawn = Spawn { at: Vf::new(400.0, -lowest, -300.0, 1.0), facing: Vf::new(0.0, 0.0, -1.0, 0.0) };
+    let mut sim = the_minutes_bike();
+    let mut garage = Garage::new(Kind::Biplane, Some(Plane::flying(spawn, flight))).unwrap();
+    let mut world = Jump::nothing();
+
+    // One frame of the shell: the remap off the attitude, then the pass.
+    let shell = |sim: &mut Sim, garage: &mut Garage, inverted: &mut bool, scheme: PlaneScheme, report: Report, world: &mut Jump| {
+        *inverted = garage.inverted(*inverted);
+        pass(sim, garage, scheme.fly(report, *inverted), world);
+    };
+    let gas = Report::from_buttons(Control::Cross.mask());
+    let with_stick = |mut r: Report, x: u8, y: u8| {
+        r.set_axis(2, x);
+        r.set_axis(3, y);
+        r
+    };
+    let mut inverted = false;
+    for _ in 0..30 * 60 {
+        shell(&mut sim, &mut garage, &mut inverted, PlaneScheme::New, gas, &mut world);
+    }
+    let plane = garage.plane.clone().unwrap();
+    assert!(!plane.on_ground() && plane.up.y() > 0.9, "thirty seconds of gas and the plane is not flying level");
+    assert!(!inverted);
+    let upright = (sim.clone(), garage.clone());
+
+    let mut frames = 0;
+    // Full stick rolls it with the nose falling away, so its up gets to about -0.8 at the most:
+    // -0.75 is well past where the shell calls it upside down.
+    while garage.plane.as_ref().unwrap().up.y() > -0.75 {
+        shell(&mut sim, &mut garage, &mut inverted, PlaneScheme::New, with_stick(gas, 0xff, AXIS_CENTRE), &mut world);
+        frames += 1;
+        assert!(frames < 5 * 60, "five seconds of full right stick and the plane did not roll over");
+    }
+    let plane = garage.plane.as_ref().unwrap();
+    assert!(inverted, "the plane is upside down (up {:.2}) and the shell does not know it", plane.up.y());
+    assert!(!plane.on_ground());
+    let upside_down = (sim.clone(), garage.clone());
+
+    // What a third of a second of `report` does to the nose's height and the heading, from `from`,
+    // under `scheme`; and the plane it leaves.
+    let try_it = |from: &(Sim, Garage), was: bool, scheme: PlaneScheme, report: Report| {
+        let (mut sim, mut garage, mut inverted) = (from.0.clone(), from.1.clone(), was);
+        let before = garage.plane.as_ref().unwrap().facing;
+        let mut world = Jump::nothing();
+        for _ in 0..20 {
+            shell(&mut sim, &mut garage, &mut inverted, scheme, report, &mut world);
+        }
+        let plane = garage.plane.unwrap();
+        let after = plane.facing;
+        // The heading's turn about the world's up, which is the camera's: only its sign against
+        // the right way up's is asserted, so which way round the world's axes are does not matter.
+        let turn = before.z() * after.x() - before.x() * after.z();
+        (after.y() - before.y(), turn, plane)
+    };
+    let pulled = with_stick(gas, AXIS_CENTRE, 0xff);
+    let left = Report::from_buttons(Control::Cross.mask() | Control::L1.mask());
+    let effect = |from: &(Sim, Garage), was: bool, scheme: PlaneScheme| {
+        let (rise, turn, _) = try_it(from, was, scheme, gas);
+        let (pull_rise, _, _) = try_it(from, was, scheme, pulled);
+        let (_, left_turn, _) = try_it(from, was, scheme, left);
+        (pull_rise - rise, left_turn - turn)
+    };
+
+    let (climb, yaw) = effect(&upright, false, PlaneScheme::New);
+    assert!(climb > 0.01, "the right way up a pulled stick does not lift the nose ({climb})");
+    assert!(yaw.abs() > 1e-3, "the right way up the left rudder does not turn the plane ({yaw})");
+    assert_eq!(effect(&upright, false, PlaneScheme::Original), (climb, yaw), "the right way up the schemes differ");
+
+    let (new_climb, new_yaw) = effect(&upside_down, true, PlaneScheme::New);
+    assert!(new_climb > 0.01, "upside down a pulled stick does not lift the nose under the new controls ({new_climb})");
+    assert!(new_yaw.signum() == yaw.signum() && new_yaw.abs() > 1e-3, "upside down the left rudder turns {new_yaw}, upright {yaw}");
+    let (old_climb, old_yaw) = effect(&upside_down, true, PlaneScheme::Original);
+    assert!(old_climb < -0.01, "upside down the original's pulled stick does not drop the nose ({old_climb})");
+    assert!(old_yaw.signum() != yaw.signum() && old_yaw.abs() > 1e-3, "upside down the original's left rudder turns {old_yaw}, upright {yaw}");
+
+    // And the original's is the pad as it is: the same plane, field for field, as the raw report.
+    for report in [pulled, left, with_stick(Report::from_buttons(Control::Up.mask() | Control::R1.mask()), 0x30, 0xc0)] {
+        let (_, _, through) = try_it(&upside_down, true, PlaneScheme::Original, report);
+        let (mut sim, mut garage) = upside_down.clone();
+        let mut world = Jump::nothing();
+        for _ in 0..20 {
+            pass(&mut sim, &mut garage, report, &mut world);
+        }
+        assert_eq!(through, garage.plane.unwrap(), "the original's biplane controls changed what the plane read");
+    }
+    println!(
+        "biplane upside down: pulled stick lifts the nose {climb:.4} upright, {new_climb:.4} new, {old_climb:.4} original; \
+         left rudder turns {yaw:.4} upright, {new_yaw:.4} new, {old_yaw:.4} original ({frames} frames to roll over)"
+    );
+}
+
 /// A swap mid-session swaps, the way the original's swap does (R8): ride the bike off its start
 /// line, swap, and the plane has the controller from where it was parked while the bike stands
 /// exactly where it was left; swap back and the bike carries on from there rather than from its

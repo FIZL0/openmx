@@ -438,6 +438,15 @@ impl Layout {
     }
 }
 
+/// What a seat's Controls row says of its biplane (P50): its stick holds still on the screen upside
+/// down, or turns round with the plane as the original's does.
+fn plane_label(l: Layout) -> &'static str {
+    match l {
+        Layout::New => "plane steady",
+        Layout::Original => "plane flips",
+    }
+}
+
 /// How many seats the file holds a layout for: the shell's `pad::SEATS`.
 pub const SEATS: usize = 8;
 
@@ -455,6 +464,9 @@ pub struct Controls {
     pub pressure: String,
     /// `--controls`' layout per seat, 1P first.
     pub layouts: [Layout; SEATS],
+    /// `--biplane-controls`' per seat (P50): under `New` the biplane's stick is turned round while
+    /// the plane is upside down, under `Original` it never is, as on the disc.
+    pub planes: [Layout; SEATS],
 }
 
 impl Controls {
@@ -483,6 +495,11 @@ impl Controls {
                         }
                     }
                 }
+                "biplane" => {
+                    if let Some(planes) = per_seat(v) {
+                        c.planes = planes;
+                    }
+                }
                 _ => {}
             }
         }
@@ -494,12 +511,15 @@ impl Controls {
             "# openmx's pad wiring (P36): throttle is cross, r2 or l2; pad is a device or auto;\n\
              # pressure is --pad-pressure's axis:control list, or none; layout is new or original,\n\
              # or one per seat (new,original,...) — new is R2 gas, L2 brake, Select camera, with\n\
-             # Cross and Square kept free; original is the game's own (P40)\n\
-             throttle = {}\npad = {}\npressure = {}\nlayout = {}\n",
+             # Cross and Square kept free; original is the game's own (P40); biplane is new or\n\
+             # original, or one per seat — new turns the plane's stick round upside down so it\n\
+             # moves the plane the same way on the screen, original never does (P50)\n\
+             throttle = {}\npad = {}\npressure = {}\nlayout = {}\nbiplane = {}\n",
             self.throttle.word(),
             self.pad.as_deref().unwrap_or("auto"),
             if self.pressure.is_empty() { "none" } else { &self.pressure },
             self.layout_text(),
+            seat_text(&self.planes),
         )
     }
 
@@ -510,6 +530,30 @@ impl Controls {
         }
         self.layouts.iter().map(|l| l.word()).collect::<Vec<_>>().join(",")
     }
+}
+
+/// A `controls.txt` value of one layout word for every seat, or one per seat with the last carried
+/// on; `None` for anything else.
+fn per_seat(v: &str) -> Option<[Layout; SEATS]> {
+    let words: Vec<Option<Layout>> = v.split(',').map(|w| Layout::ALL.into_iter().find(|l| l.word() == w.trim())).collect();
+    if !words.iter().all(Option::is_some) || words.len() > SEATS {
+        return None;
+    }
+    let mut out = [Layout::default(); SEATS];
+    let mut last = Layout::default();
+    for (i, slot) in out.iter_mut().enumerate() {
+        last = words.get(i).copied().flatten().unwrap_or(last);
+        *slot = last;
+    }
+    Some(out)
+}
+
+/// [`per_seat`]'s text back: one word when every seat agrees.
+fn seat_text(layouts: &[Layout; SEATS]) -> String {
+    if layouts.iter().all(|l| *l == layouts[0]) {
+        return layouts[0].word().to_string();
+    }
+    layouts.iter().map(|l| l.word()).collect::<Vec<_>>().join(",")
 }
 
 /// Where the two files live: beside the disc, as opentennis keeps its own, or here when there is no
@@ -1427,9 +1471,14 @@ impl Menu {
                     self.controls.throttle = Gas::ALL[i];
                     self.changed = true;
                 } else if (p.ok || side) && at <= LAYOUT_ROWS {
-                    // Two layouts, so either way is the other one.
-                    let seat = &mut self.controls.layouts[at - 1];
-                    *seat = if *seat == Layout::New { Layout::Original } else { Layout::New };
+                    // A seat's row holds its layout and its biplane's (P50): four together, stepped
+                    // through as one, the biplane's the faster. The screen has no room for a second
+                    // row a seat.
+                    let i = at - 1;
+                    let both = [(Layout::New, Layout::New), (Layout::New, Layout::Original), (Layout::Original, Layout::New), (Layout::Original, Layout::Original)];
+                    let now = both.iter().position(|b| *b == (self.controls.layouts[i], self.controls.planes[i])).unwrap_or(0);
+                    let next = if p.left { (now + both.len() - 1) % both.len() } else { (now + 1) % both.len() };
+                    (self.controls.layouts[i], self.controls.planes[i]) = both[next];
                     self.changed = true;
                 }
             }
@@ -2215,8 +2264,9 @@ impl Art {
                         .chain(
                             menu.controls.layouts[..LAYOUT_ROWS]
                                 .iter()
+                                .zip(&menu.controls.planes)
                                 .enumerate()
-                                .map(|(i, l)| format!("{}P controls  {}", i + 1, l.label())),
+                                .map(|(i, (l, plane))| format!("{}P controls  {}  {}", i + 1, l.label(), plane_label(*plane))),
                         )
                         .collect(),
                 };

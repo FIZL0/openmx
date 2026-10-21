@@ -168,11 +168,18 @@ pub struct Wiring {
     pub pressure: [Option<Control>; AXES],
     /// Which layout each seat rides on (P40): the new one, or the original's.
     pub schemes: [Scheme; SEATS],
+    /// How each seat's biplane stick reads upside down (P50).
+    pub planes: [PlaneScheme; SEATS],
 }
 
 impl Default for Wiring {
     fn default() -> Wiring {
-        Wiring { throttle: Throttle::default(), pressure: [None; AXES], schemes: [Scheme::default(); SEATS] }
+        Wiring {
+            throttle: Throttle::default(),
+            pressure: [None; AXES],
+            schemes: [Scheme::default(); SEATS],
+            planes: [PlaneScheme::default(); SEATS],
+        }
     }
 }
 
@@ -287,6 +294,106 @@ impl Scheme {
         out
     }
 }
+
+/// How the biplane's stick reads while the plane is upside down (P50).
+///
+/// The original never turns the plane's controls round: its input step (I6) and its control law
+/// (`game_sim::biplane::controls`, S34) read the stick, the d-pad and L1/R1 with the same sign at
+/// every attitude, and nothing in either looks at the roll but the elevator's fade near knife edge.
+/// The surfaces are the plane's own, though, and the camera that follows it keeps the world's up,
+/// so on the screen two of them turn round as the plane rolls past knife edge: the elevator
+/// (climb pulls the nose toward the pilot's head, which upside down is toward the ground) and the
+/// rudder (the pilot's left is the screen's right). The ailerons do not: a roll about the nose looks
+/// the same way round from behind whichever way up the plane is.
+///
+/// Under [`PlaneScheme::New`] the shell turns those two back round in the pad's report while the
+/// plane is upside down ([`PlaneScheme::fly`]), so the stick means the same on the screen at every
+/// attitude; under [`PlaneScheme::Original`] the report reaches the plane as the pad said it. Like
+/// [`Scheme`], it is a remap before the simulation reads the pad, so the plane's simulation stays
+/// the original's and a tape records what it read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlaneScheme {
+    /// Upside down, the left stick's y, Up and Down, and L1 and R1 are each other's.
+    #[default]
+    New,
+    /// The original's: the plane reads the pad as it is, at any attitude.
+    Original,
+}
+
+impl PlaneScheme {
+    /// The word `--biplane-controls` and `controls.txt` spell it with.
+    pub fn word(self) -> &'static str {
+        match self {
+            PlaneScheme::New => "new",
+            PlaneScheme::Original => "original",
+        }
+    }
+
+    fn of(scheme: Scheme) -> PlaneScheme {
+        match scheme {
+            Scheme::New => PlaneScheme::New,
+            Scheme::Original => PlaneScheme::Original,
+        }
+    }
+
+    /// `new`, `original`, or one per seat, the way [`Scheme::parse_list`] reads them.
+    pub fn parse_list(s: &str) -> Result<[PlaneScheme; SEATS], String> {
+        Scheme::parse_list(s).map(|list| list.map(PlaneScheme::of))
+    }
+
+    /// [`PlaneScheme::parse_list`]'s text back: one word when every seat agrees.
+    pub fn list_text(schemes: &[PlaneScheme; SEATS]) -> String {
+        if schemes.iter().all(|s| *s == schemes[0]) {
+            return schemes[0].word().to_string();
+        }
+        schemes.iter().map(|s| s.word()).collect::<Vec<_>>().join(",")
+    }
+
+    /// The report the plane is handed for a pad that reported `report`, `inverted` being whether the
+    /// plane is upside down this frame (`vehicle::Plane::inverted`).
+    ///
+    /// Upside down under the new scheme: the left stick's y byte is mirrored (`255 - b`, which the
+    /// poll's `-1 + 2b/255` reads as exactly the other side), and Up and Down, and L1 and R1, are
+    /// swapped, bit and pressure byte together. Everything else, and every report under the
+    /// original's or the right way up, is passed as it is. A pad that is not there is left alone.
+    pub fn fly(self, report: Report, inverted: bool) -> Report {
+        if self == PlaneScheme::Original || !inverted || report.status() == 0xff {
+            return report;
+        }
+        let mut out = report;
+        let was = report.buttons();
+        let pairs = [(Control::Up, Control::Down), (Control::L1, Control::R1)];
+        let mut held = was & !game_sim::input::mask_of(&[Control::Up, Control::Down, Control::L1, Control::R1]);
+        for (a, b) in pairs {
+            if was & a.mask() != 0 {
+                held |= b.mask();
+            }
+            if was & b.mask() != 0 {
+                held |= a.mask();
+            }
+            let (pa, pb) = (a.binding().pressure as usize, b.binding().pressure as usize);
+            (out.0[pa], out.0[pb]) = (report.0[pb], report.0[pa]);
+        }
+        let low = !held;
+        out.0[2] = (low >> 8) as u8;
+        out.0[3] = low as u8;
+        out.set_axis(LEFT_Y, 255 - report.axis(LEFT_Y));
+        out
+    }
+
+    /// [`Scheme::changes_camera`] for a seat flying under this scheme: the original's layout's
+    /// camera is L1, which upside down [`PlaneScheme::fly`] has handed the plane as R1, so it is
+    /// read back off R1 there. Select, the new layout's, is never swapped.
+    pub fn changes_camera(self, scheme: Scheme, pad: &game_sim::input::Pad, inverted: bool) -> bool {
+        if scheme.camera() != Control::L1 || self == PlaneScheme::Original || !inverted {
+            return scheme.changes_camera(pad);
+        }
+        pad.pressed(Control::R1) && !pad.held(Control::L1)
+    }
+}
+
+/// The left stick's y, in the report's own axis order ([`Report::axis`]).
+const LEFT_Y: usize = 3;
 
 impl Wiring {
     /// Read a `--pad-pressure` spec: `none`, `ds2@AXIS` — twelve consecutive axes from `AXIS` in
@@ -1376,6 +1483,11 @@ impl Seats {
         self.wiring.schemes[seat]
     }
 
+    /// How seat `seat`'s biplane stick reads upside down (P50).
+    pub fn plane(&self, seat: usize) -> PlaneScheme {
+        self.wiring.planes[seat]
+    }
+
     /// The pad holding each seat now, by name, for the startup lines and the overlay.
     pub fn name(&self, seat: usize) -> Option<&str> {
         let id = self.slots.held[seat].as_ref()?;
@@ -1880,6 +1992,68 @@ mod tests {
         let idle = fly(&[]);
         assert_eq!([idle.throttle_up, idle.throttle_down, idle.rudder], [F::ZERO; 3]);
         assert_eq!([idle.elevator.to_bits(), idle.aileron.to_bits()], [0x8000_0000; 2]);
+    }
+
+    /// P50, at the pad: upside down under the new biplane controls the plane's input step reads the
+    /// elevator and the rudder the other way round and everything else as it was — and under the
+    /// original's, or the right way up, the plane is handed the very report the pad made.
+    ///
+    /// Over 20,000 generated reports: random buttons, pressures and stick bytes, through the game's
+    /// own poll and I6's input step.
+    #[test]
+    fn upside_down_the_new_biplane_controls_turn_the_elevator_and_rudder_round() {
+        use game_sim::input::PlaneInput;
+        let read = |report: Report| {
+            let mut manager = Manager::connected();
+            manager.tick(F(FRAME), &[report; PADS]);
+            PlaneInput::from_pad(manager.pad(0))
+        };
+        let mut seed = 0x5eed_1234_u64;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for _ in 0..20_000 {
+            let mut report = Report::idle();
+            let buttons = next() as u16;
+            report.0[2] = !(buttons >> 8) as u8;
+            report.0[3] = !buttons as u8;
+            for binding in CONTROL_MAP.iter().filter(|b| b.is_analogue()) {
+                if buttons & binding.mask != 0 {
+                    report.0[binding.pressure as usize] = next() as u8;
+                }
+            }
+            for axis in 0..4 {
+                report.set_axis(axis, next() as u8);
+            }
+
+            // The original's, and either scheme the right way up: the same bytes, so the same
+            // simulation, bit for bit.
+            assert_eq!(PlaneScheme::Original.fly(report, true), report);
+            assert_eq!(PlaneScheme::Original.fly(report, false), report);
+            assert_eq!(PlaneScheme::New.fly(report, false), report);
+
+            let (up, down) = (read(report), read(PlaneScheme::New.fly(report, true)));
+            assert_eq!(PlaneScheme::New.fly(PlaneScheme::New.fly(report, true), true), report, "twice is not once undone");
+            let bits = |i: &PlaneInput| [i.throttle_up, i.throttle_down, i.aileron].map(F::to_bits);
+            assert_eq!(bits(&down), bits(&up), "the throttle or the ailerons moved: {report:?}");
+            // Both held is the original's left-wins (and up-wins) either way round, and is the
+            // plane's own reset chord for L1 and R1, so it is the same both ways.
+            let mut manager = Manager::connected();
+            manager.tick(F(FRAME), &[report; PADS]);
+            let held = |c: Control| manager.pad(0).strength(c) != F::ZERO;
+            if !(held(Control::L1) && held(Control::R1)) {
+                assert_eq!(down.rudder, -up.rudder, "the rudder is not turned round: {report:?}");
+            }
+            if !(held(Control::Up) && held(Control::Down)) {
+                // The mirrored byte reads as the other side of centre to within the poll's rounding.
+                let (a, b) = (up.elevator.0, down.elevator.0);
+                assert!((a + b).abs() <= 1e-6 * a.abs().max(1.0), "the elevator {a} upside down is {b}: {report:?}");
+                assert!(a == 0.0 || a.signum() != b.signum(), "the elevator {a} kept its sign upside down: {report:?}");
+            }
+        }
+        // A pad that is not there stays not there.
+        assert_eq!(PlaneScheme::New.fly(Report::missing(), true), Report::missing());
     }
 
     /// Nobody's hands on anything, for a test that only cares about one control.
