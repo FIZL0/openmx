@@ -3729,3 +3729,24 @@ replay_end_fade boot 0x003b40d0 the replay's end: a viewport fade 250/250 ms
 # opaque at once. The fader never ran (all three faders' fields constant) for the crash, the plane's
 # chord or the bike's chord. The bike's L1+R1 (reset_kind 1, in place) draws the bike and the rider
 # see-through, back to opaque over about 0.7-1 s, the shadow opaque; its timer was not found.
+
+# P57: the bike's put-back ghost (S57's "timer not found" above, and its 0.7-1 s is wrong: it is 3 s).
+# Live on copy 3 (freeride state 8, the journal's capture/ghost_watch.py). Every put-back of the bike,
+# the wreck's own (kind 1) and L1+R1's alike, runs player_respawn -> bike_unwreck 0x00252ee0(kind) ->
+# vt+0x138 0x0027b650(this, 0, kind) -> ghost_start below; the plane's has no ghost.
+ghost_start   boot 0x00250580 (rider, 0, kind) kind != 0: clock +0x7dc = length +0x7e0, state +0xb7c = 2,
+#                             the bike model (*(+0x7a0)+0x30) and every part (+0x954 list of +0x950)
+#                             see-through: model +0x136 bit 0x10 on (0x001a12a0, which also sets +0x148
+#                             = 1.6, meaning unknown), alpha +0x16c = 0.5 (0x001a1b20); and both bodies
+#                             +0x7c4/+0x7cc ignore the vehicle class mask (word 0x00468f68) via 0x0011b080.
+#                             kind 0 makes the model solid (0x001a12d0)
+ghost_step    boot 0x00250950 (rider, dt f12) vt+0x13c, first thing in the bike's update 0x002520d0: if
+#                             the clock > 0: body +0xe8 = 0, an overlap query 0x0011a150, +0xe8 = 1; the
+#                             clock counts dt down only while body+0x116 bit 0x20 is clear (nothing
+#                             overlapping); still > 0: alpha = 0.1 + gone * 0.9 (adda/madd), gone =
+#                             (clock - len) / (0 - len), clamped to [0.1, 1], len 0 -> 0.1; else solid
+#                             again, the mask removed (0x0011b160), +0xb7c = 1
+# The ghost's length, rider +0x7e0, is 3.0: written by the rider's constructor, not read from a file.
+# Live: the put-back's tick draws 0.5 with the clock at 3.0; the next 90 ticks 0.109999 .. 0.999909
+# (dt 0.03333 a tick), the 91st the clock is -0.033028 and the flag is off. The bike's parts carry the
+# model's alpha on every tick. L1+R1 in a running ghost starts it over at 3.0.
