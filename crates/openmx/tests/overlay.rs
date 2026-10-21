@@ -331,6 +331,11 @@ fn art() -> Option<overlay::Art> {
     Some(overlay::Art::load(&mut disc).expect("fstyleui.res's HUD art"))
 }
 
+/// The bike's gauges, nothing preloaded and no score, `feet` along.
+fn bike(feet: f32) -> overlay::Gauges {
+    overlay::Gauges { feet, bike: true, ..Default::default() }
+}
+
 /// What the views draw is what the ride says: one player's dial and needle at its speed, four
 /// players' readouts at theirs, and each view's marks, in the view's pixels, where the riders are —
 /// drawn there in the human riders' cyan.
@@ -345,13 +350,15 @@ fn the_views_draw_the_riders() {
     ride(&mut one, 200, true, 0.0);
     let solo = ridden(std::slice::from_ref(&one));
     let mut frame = Frame::new(640, 448, [0, 0, 0]);
-    let drawn = art.draw(&mut frame, (640, 448), &solo, 0, span, 1000.0);
+    let drawn = art.draw(&mut frame, (640, 448), &solo, 0, span, &bike(1000.0));
     assert_eq!(drawn.needle, Some(overlay::needle_degrees(solo[0].speed.0)));
     assert_eq!(drawn.speed, None, "one player gets the dial, not the readout");
     assert_eq!(drawn.odometer.as_deref(), Some("00000.2"));
     assert!(drawn.marks.is_empty());
     assert_eq!(drawn.player, overlay::RADAR_AT);
     assert!(solo[0].speed.0 > 20.0);
+    assert_eq!(drawn.score, "0");
+    assert_eq!(drawn.preload, Some(0.0));
 
     // Four players, four 320x224 views of a 640x448 window: the parts at full size, the radar from
     // each view's bottom-left.
@@ -360,10 +367,11 @@ fn the_views_draw_the_riders() {
     let mut marked = 0;
     for v in 0..4 {
         let mut view = Frame::new(320, 224, [0, 0, 0]);
-        let drawn = art.draw(&mut view, (640, 448), &riders, v, span, 0.0);
+        let drawn = art.draw(&mut view, (640, 448), &riders, v, span, &bike(0.0));
         assert_eq!(drawn.scale, 1.0);
         assert_eq!(drawn.speed, Some(overlay::speed_text(riders[v].speed.0)), "view {v}");
         assert_eq!(drawn.needle, None);
+        assert_eq!(drawn.preload, None, "a split view has no preload meter");
         let up = 448.0 - 224.0;
         assert_eq!(drawn.player, (overlay::RADAR_AT.0, overlay::RADAR_AT.1 - up));
         assert_eq!(drawn.marks.iter().map(|m| m.0).collect::<Vec<_>>(), (0..4).filter(|&i| i != v).collect::<Vec<_>>());
@@ -393,7 +401,7 @@ fn a_wide_window_puts_the_parts_in_its_corners() {
     let riders = ridden(&[rider(&tables, [0.0, 0.0], [0.0, 1.0])]);
     for (w, h) in [(1280, 448), (640, 896), (1920, 1080)] {
         let mut frame = Frame::new(w, h, [0, 0, 0]);
-        let drawn = art.draw(&mut frame, (w, h), &riders, 0, 384.0, 0.0);
+        let drawn = art.draw(&mut frame, (w, h), &riders, 0, 384.0, &bike(0.0));
         let s = (w as f32 / 640.0).min(h as f32 / 448.0);
         assert_eq!(drawn.scale, s);
         let want = (overlay::RADAR_AT.0 * s, h as f32 - (448.0 - overlay::RADAR_AT.1) * s);
@@ -405,4 +413,47 @@ fn a_wide_window_puts_the_parts_in_its_corners() {
         assert!(lit(w - (160.0 * s) as usize, w), "{w}x{h}: no dial in the bottom right");
         assert!(!lit(w / 2 - 20, w / 2 + 20), "{w}x{h}: something drawn mid-screen");
     }
+}
+
+/// The score bar is drawn top left with the score in it; the bike has its odometer and preload
+/// meter, the plane the dial alone (V28) — the original's biplane rides show neither.
+#[test]
+fn the_score_and_the_preload_meter_are_drawn() {
+    let Some(art) = art() else { return };
+    let tables = Arc::new(Tables::build());
+    let riders = ridden(&[rider(&tables, [0.0, 0.0], [0.0, 1.0])]);
+    let gauges = overlay::Gauges { feet: 5280.0, bike: true, preload: 0.5, score: 1234 };
+    let mut frame = Frame::new(640, 448, [255, 255, 255]);
+    let drawn = art.draw(&mut frame, (640, 448), &riders, 0, 384.0, &gauges);
+    assert_eq!(drawn.score, "1234");
+    assert_eq!(drawn.preload, Some(0.5));
+    assert!(drawn.odometer.is_some());
+    // The bar darkens a white frame inside its box, and nowhere just below it.
+    let dark = |x0: usize, x1: usize, y0: usize, y1: usize| {
+        (y0..y1).any(|y| (x0..x1).any(|x| frame.color[3 * (y * 640 + x)..3 * (y * 640 + x) + 3].iter().any(|&c| c < 200)))
+    };
+    assert!(dark(20, 180, 28, 43), "no score bar");
+    assert!(!dark(20, 180, 50, 60), "the score bar runs too low");
+    // The preload meter, right of the dial.
+    assert!(dark(600, 618, 320, 395), "no preload meter");
+
+    let plane = overlay::Gauges { bike: false, ..gauges };
+    let mut frame = Frame::new(640, 448, [255, 255, 255]);
+    let drawn = art.draw(&mut frame, (640, 448), &riders, 0, 384.0, &plane);
+    assert_eq!(drawn.odometer, None);
+    assert_eq!(drawn.preload, None);
+    assert_eq!(drawn.score, "1234");
+    assert!(!(320..395).any(|y| (610..618).any(|x| frame.color[3 * (y * 640 + x)] < 200)), "the plane has no preload meter");
+}
+
+/// The meter fills with the preload's shove and empties as its timer runs out; it is empty unless
+/// a preload is firing.
+#[test]
+fn the_preload_meter_follows_the_preload() {
+    assert_eq!(overlay::preload_fill(false, 10.0, 10.0, 1.0, 1.0), 0.0);
+    assert_eq!(overlay::preload_fill(true, 10.0, 10.0, 1.0, 1.0), 1.0);
+    assert_eq!(overlay::preload_fill(true, 5.0, 10.0, 1.0, 1.0), 0.5);
+    assert_eq!(overlay::preload_fill(true, 10.0, 10.0, 0.25, 1.0), 0.25);
+    assert_eq!(overlay::preload_fill(true, 30.0, 10.0, 1.0, 1.0), 1.0);
+    assert_eq!(overlay::preload_fill(true, 10.0, 0.0, 1.0, 1.0), 0.0);
 }

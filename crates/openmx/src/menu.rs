@@ -360,12 +360,13 @@ impl Overlay {
         }
     }
 
-    /// A word back, and the two P36 wrote before there were three: `on` was the debug HUD, and `off`
-    /// was no debug HUD, which is now the original's.
+    /// A word back, and the two P36 wrote before there were three. Either is the original's HUD now
+    /// (V28): `on` asked for the only HUD there was then, the debug one, and a settings file saved
+    /// that way kept every ride since V26 on the debug HUD with the original's nowhere to be seen.
+    /// The debug HUD is only ever `debug`, the word V26 gave it.
     pub fn from_word(w: &str) -> Option<Overlay> {
         match w {
-            "on" => Some(Overlay::Debug),
-            "off" => Some(Overlay::Original),
+            "on" | "off" => Some(Overlay::Original),
             _ => Overlay::ALL.into_iter().find(|o| o.word() == w),
         }
     }
