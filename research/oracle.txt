@@ -3498,6 +3498,19 @@ radar_place_riders          boot 0x0035e4d0 every rider but the viewer: rel = th
 #                                           00 ff ff ff when the rider's +0x34 player kind is 1 (human)
 radar_place_activities      boot 0x0035efa0 the H/R/S/M activity icons (37a66e/3399ff/cc7333/b53b81),
 #                                           scale clamp(0.3+(r-d)/r, 0.5, 0.8); not ported
+# --- V28: the rest of the riding HUD, read for crates/openmx/src/overlay.rs (score bar, preload meter).
+#     Both are Flash movies (Overlay_1p_Score.fsh, ingame_preloadmeter.fsh) the port has no player
+#     for; their shapes, tints (black 0x80/0x66 score, ~0xb3 meter) and text colour 200,200,200 were
+#     read out of the .fsh bytes, the geometry off PCSX2 frames of first_recording ---
+speedo_preload_var          boot 0x00436f78 string "preloadMeter": speedo_update binds the meter movie's
+#                                           variable to the speedometer's +0x4c. What it is fed was not
+#                                           followed: the port fills the meter from the preload's own
+#                                           force and timer, a guess
+speedo_show_a               boot 0x002ac190 speedometer part visibility setters (three, by flag); which
+speedo_show_b               boot 0x002ac200 part each shows was not pinned. The biplane rides of the
+speedo_show_c               boot 0x002ac2a0 original show the dial with no odometer and no preload meter
+preload_tip_popup           boot 0x0029aad0 the "Preload Movie" / "Clutch Movie" tip popup (vtable
+#                                           0x00455d30): the tutorial tip, not the meter
 #
 # Two riders touching. Nothing two-player about it: it is the same contact clause S37 ported
 # (air::hit_wreck), and AI riders meet it too. A record's sweep writes each actor it hits twice:
