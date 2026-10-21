@@ -53,7 +53,9 @@ pub fn placed(ride: &Ride) -> M4 {
 /// crash has taken it over. The ride is left where the wreck began and is not moved again until the
 /// rider is back on.
 pub fn wrecked(crash: &game_sim::ride::Crash) -> M4 {
-    let (forward, up) = game_sim::math::quat_axes(crash.body.quat);
+    // The transform's orientation, which is the body's at the start of its last substep, as the
+    // origin is.
+    let (forward, up) = game_sim::math::quat_axes(crash.bike.body.last_quat);
     let axis = |v: [ps2_float::F; 3]| v3(v[0].0, v[1].0, v[2].0);
     M4::placement(at(crash.origin), axis(forward), axis(up))
 }

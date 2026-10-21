@@ -4131,3 +4131,18 @@ hand_reset_thunk            boot 0x00281930 this -= 80, into player_hand_reset: 
 #   flushed to zero (|drag| < 2^-125: stays 0) and the top exponent (doubling clamps to 0x7f7fffff);
 #   the five s59 captures' drag column is riding, halved from the throw's row to the put-back's, then
 #   riding again, bit for bit.
+# S69 — the wreck bike's collision (crates/game-sim/src/wreck_bike.rs), proved in
+# tests/wreck_bike.rs against the s62 states and captures: 362 ticks over five wrecks bit-exact.
+# The wreck bike hangs off a world node of its own (0xe17ef0 in every s62 state; the request's
+# +0x1ac is the part wrapper B, body B-0x780, collision object B+0x8c0); the node's update is the
+# bike's whole tick.
+collision_node_update boot 0x0026f800 (node, dt in f12): every collision object vt+0x74 (clear), then
+#                                     vt+0x7c (collide), then dynamics_world_step on node+0x78
+#                                     (iterations 1, rate 115); run alone on the s62 RAM it holds the
+#                                     captured body and collision object to each wreck's end
+# Wreckbike.phy goes through physics_part_read 0x0015a500 and the setters above (0x0026fd80,
+# 0x0026ff10, 0x00270220, 0x002700d0, 0x002701d0, 0x002701b0); its listeners are
+# body_wrapper_force 0x0015af40, body_wrapper_preforce 0x0015b050, body_wrapper_post 0x0015b070
+# (pose -> the transform's rows by vu_quat_to_mat3 0x0013ebd0). Off the running game, not keys:
+# the collidable's flags (C+0x1f8, +0x84) 0x9a058, actors (+0x110) 8, collides-with (+0x114)
+# 0x40000. The ray probe's eleven rays are bike\col\wreckbikem.col's segments, bit for bit.
