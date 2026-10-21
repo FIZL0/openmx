@@ -100,6 +100,8 @@ const SCORE_BAR: (f32, f32, f32, f32) = (14.0, 25.0, 168.0, 20.5);
 const SCORE_LABEL_END: f32 = 82.0;
 const SCORE_LABEL: (f32, f32) = (31.0, 26.5);
 const SCORE_TEXT: (f32, f32) = (88.0, 28.0);
+/// How far below the score's label the modified-ride mark sits (P55).
+const MODIFIED_DROP: f32 = 24.0;
 /// The movie's tints over its black shapes: the label end's, the rest's, the preload meter's.
 const SCORE_LABEL_SHADE: u8 = 0x80;
 const SCORE_SHADE: u8 = 0x66;
@@ -162,6 +164,8 @@ pub struct Gauges {
     pub preload: f32,
     /// The stunt score.
     pub score: u32,
+    /// The ride has a game modifier off the original's (P55): the port's own mark under the score.
+    pub modified: bool,
 }
 
 /// The world the radar covers across, for a terrain's sample spacing.
@@ -346,6 +350,12 @@ impl Art {
         let score = score_text(gauges.score);
         pen.text((&self.small, SMALL), &score, SCORE_TEXT.0, SCORE_TEXT.1, false, SCORE_COLOUR);
         drawn.score = score;
+        // A modified ride says so under the score, in the label's face: the original has no such
+        // thing, so where it goes is the port's.
+        if gauges.modified {
+            pen.text((&self.label, LABEL), "MODIFIED", SCORE_LABEL.0, SCORE_LABEL.1 + MODIFIED_DROP, false, SCORE_COLOUR);
+            drawn.modified = true;
+        }
 
         // The speedometer: the dial with its needle and odometer for one rider, the number for more;
         // and on the bike, the preload meter beside it. Split, the original moves the meter by
@@ -425,6 +435,8 @@ pub struct Drawn {
     pub turn: f32,
     /// View pixels per layout pixel.
     pub scale: f32,
+    /// The modified-ride mark was drawn.
+    pub modified: bool,
 }
 
 #[derive(Clone, Copy)]
