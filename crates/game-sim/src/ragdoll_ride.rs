@@ -277,11 +277,11 @@ impl Down {
         );
         ragdoll_pose::reset(ragdoll.bones.iter_mut().map(|b| &mut b.body).zip(starts.iter()));
         for b in &mut ragdoll.bones {
-            b.body.velocity = crash.body.vel;
+            b.body.velocity = crash.bike.body.velocity;
         }
-        let bike = Bike { velocity: crash.body.vel, rates: crash.body.ang_vel, hit_velocity: crash.body.vel };
+        let bike = Bike { velocity: crash.bike.body.velocity, rates: crash.bike.body.rates, hit_velocity: crash.bike.body.velocity };
         ragdoll.wreck_enter(reason, &bike, wrecks, rng);
-        let frame = math::quat_to_mat4(crash.body.quat, crash.origin);
+        let frame = math::quat_to_mat4(crash.bike.body.quat, crash.origin);
         let held_at = std::array::from_fn(|h| {
             let pin = &ragdoll.pins[h];
             let b = &ragdoll.bones[pin.first].body;
@@ -308,27 +308,27 @@ impl Down {
     /// The wreck bike has no collider here, so the bones are never off the bike; the step has no
     /// bike box either.
     pub fn step(&mut self, kit: &Kit, dt: F, crash: &crate::ride::Crash, world: &mut dyn World) {
-        let frame = math::quat_to_mat4(crash.body.quat, crash.origin);
+        let frame = math::quat_to_mat4(crash.bike.body.quat, crash.origin);
         ragdoll_body::wreck_arm(
             &mut self.ragdoll,
             &self.contacts,
             &mut self.touching,
             &mut self.fade,
             dt,
-            crash.body.quat,
+            crash.bike.body.quat,
             None,
             self.reason,
             &kit.wrecks,
             world,
         );
-        let v = crash.body.vel;
+        let v = crash.bike.body.velocity;
         let drive = Drive {
             bike: Carrier {
                 rows: [frame.0[0], frame.0[1], frame.0[2]],
                 spin: F::ZERO,
-                velocity: crash.body.vel,
-                centre: crash.body.cofg_world,
-                quat: crash.body.quat,
+                velocity: crash.bike.body.velocity,
+                centre: crash.bike.body.position,
+                quat: crash.bike.body.quat,
             },
             rests: std::array::from_fn(|i| kit.rig.parts.get(i).map_or(UNIT_W, |p| p.rest)),
             hold_targets: self.held_at.map(|p| math::transform_point(&frame, p)),
