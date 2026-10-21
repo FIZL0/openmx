@@ -15,6 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 use game_sim::input::{PADS, Report};
 use game_sim::ride::Controls;
+use game_sim::rider;
 use game_sim::tick::{Engine, Timer0, clock_ms};
 use game_sim::world::World;
 use game_sim::{Input, Sim};
@@ -34,6 +35,23 @@ pub struct Rides<'a> {
     pub after: Option<&'a mut dyn FnMut(usize, F, &mut Sim, &Controls)>,
 }
 
+impl Rides<'_> {
+    /// Seat `seat`'s share of a tick `dt` long, on `pad`: its pad polled, its ride stepped, the
+    /// `after` hook. What its rider said, for whoever steps the seats with more than the ride
+    /// (`online::Seats`' put-back ghost, P59).
+    pub fn seat(&mut self, seat: usize, dt: F, pad: Report) -> rider::Frame {
+        let sim = &mut self.sims[seat];
+        let mut reports = [Report::missing(); PADS];
+        reports[0] = pad;
+        let hands = sim.poll(dt, &reports);
+        let said = sim.step(dt, &hands, self.world);
+        if let Some(after) = &mut self.after {
+            after(seat, dt, sim, &hands);
+        }
+        said
+    }
+}
+
 impl Game for Rides<'_> {
     type State = State;
 
@@ -47,14 +65,8 @@ impl Game for Rides<'_> {
 
     fn step(&mut self, tick: usize, pads: &[Report]) {
         let dt = tick_dt(tick);
-        for (seat, sim) in self.sims.iter_mut().enumerate() {
-            let mut reports = [Report::missing(); PADS];
-            reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());
-            let hands = sim.poll(dt, &reports);
-            sim.step(dt, &hands, self.world);
-            if let Some(after) = &mut self.after {
-                after(seat, dt, sim, &hands);
-            }
+        for seat in 0..self.sims.len() {
+            self.seat(seat, dt, pads.get(seat).copied().unwrap_or(Report::missing()));
         }
     }
 
