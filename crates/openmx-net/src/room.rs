@@ -65,6 +65,10 @@ pub struct Room {
     /// The ride is under way (between the host's go and the way back to the lobby).
     #[serde(default)]
     pub riding: bool,
+    /// The host's game modifiers (P55), in `game_sim::modifiers::Mods`' text form: every peer loads
+    /// the ride with them, so the lockstep rides one set of numbers. Empty is the original game.
+    #[serde(default)]
+    pub modifiers: String,
 }
 
 impl Room {

@@ -36,6 +36,7 @@ use game_sim::input::{AXIS_CENTRE, Control, Report};
 use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, RenderScale, Screen, Settings};
 use vehicle::{Garage, Kind, Plane, Spawn};
 use game_render::world::Graphics;
+use game_sim::modifiers::{Knob, Mods};
 use std::collections::{HashSet, VecDeque};
 
 /// The buttons a hand can press on a menu.
@@ -221,6 +222,9 @@ fn the_settings_file_reads_back_as_it_was_written() {
         effects_volume: 10,
         graphics: Graphics::Original,
         render_scale: RenderScale::ThreeQuarters,
+        // Gravity halved for everyone and 2P's bike twice as fast (P55), and a preset kept by name.
+        modifiers: Mods::parse("gravity=50 bike_speed.2=200").unwrap(),
+        presets: vec![("Moon".into(), Mods::parse("gravity=20").unwrap())],
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -684,6 +688,7 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                         | Screen::Games
                         | Screen::Lobby
                         | Screen::Split
+                        | Screen::Modifiers
                 );
                 if lists {
                     assert_eq!(logos.len(), 1, "{screen:?} at {w}x{h}: no logo");
@@ -697,9 +702,9 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
             }
         }
     }
-    // Four list screens, the three online ones (N3), the split layout (P43) and the keyboard, twelve
-    // looks each, at four shapes.
-    assert_eq!(pills, 9 * 12 * 4);
+    // Four list screens, the three online ones (N3), the split layout (P43), the game modifiers (P55)
+    // and the keyboard, twelve looks each, at four shapes.
+    assert_eq!(pills, 10 * 12 * 4);
 }
 
 /// [`tap`] on another seat's pad, which only the garage hears.
@@ -1331,4 +1336,81 @@ fn on_the_splash_a_pad_s_cross_makes_it_1p_even_while_an_idle_virtual_pad_is_plu
         }
     }
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// P55: Settings' last row opens the game modifiers; the arrows step a modifier by ten percent, for
+/// every player or for one; a preset saved by name loads back; and Reset To Original puts every
+/// modifier back, which writes the settings file as it was before there were modifiers.
+#[test]
+fn the_game_modifiers_screen_sets_saves_and_resets() {
+    let (mut m, mut r) = fresh();
+    m.open(Screen::Settings);
+    // Up from the first row wraps to the last: Game Modifiers.
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    let rows = m.modifier_rows();
+    assert_eq!(rows.len(), 1 + Knob::ALL.len() + 4, "{rows:?}");
+    assert!(rows.last().unwrap().contains("Reset To Original"), "{rows:?}");
+
+    // Gravity, a world modifier, down twice: 80 for everyone.
+    let gravity = 1 + Knob::ALL.iter().position(|k| *k == Knob::Gravity).unwrap();
+    for _ in 0..gravity {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 80);
+    assert_eq!(m.settings.modifiers.get(3, Knob::Gravity), 80);
+    assert!(m.take_changed());
+
+    // Bike top speed for 2P alone: the player row to 2P, then the speed row right once.
+    for _ in 0..gravity {
+        tap(&mut m, &mut r, Control::Up);
+    }
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.modifier_rows()[0].contains("2P"), "{:?}", m.modifier_rows());
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.modifiers.get(1, Knob::BikeSpeed), 110);
+    assert_eq!(m.settings.modifiers.get(0, Knob::BikeSpeed), 100);
+    assert!(m.settings.modifiers.seat_is_original(0) == false, "gravity reaches 1P too");
+
+    // Saved as "Low", on the keyboard: L, o, w over the first letter row's keys is long-winded, so
+    // the name is typed the way the keyboard test does — through its own text.
+    let save = 1 + Knob::ALL.len() + 1;
+    let preset = save - 1;
+    while m.cursor(Screen::Modifiers) != save {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Keyboard));
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    assert_eq!(m.settings.presets.len(), 1);
+    let saved = m.settings.modifiers;
+    assert_eq!(m.settings.presets[0].1, saved);
+
+    // Reset To Original, and the preset loads it all back.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.modifiers.is_original());
+    while m.cursor(Screen::Modifiers) != preset {
+        tap(&mut m, &mut r, Control::Up);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.modifiers, saved);
+
+    // The file keeps both, and an original set with no presets writes no modifier line at all.
+    let dir = scratch("modifiers");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    assert_eq!(menu::load(&dir).0, m.settings);
+    let plain = Settings::default();
+    assert!(!plain.text().contains("modifiers") && !plain.text().contains("preset"), "{}", plain.text());
+    std::fs::remove_dir_all(dir).ok();
+    // A modifier line the reader cannot make sense of is the original game, not half a set.
+    assert!(Settings::parse("modifiers = gravity=50 warp=9\n").modifiers.is_original());
 }

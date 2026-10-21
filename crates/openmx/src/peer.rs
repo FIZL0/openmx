@@ -97,7 +97,7 @@ impl Peer {
         let Some(r) = &mut self.riding else { return };
         let np = &mut r.np;
         let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| pad(s, np.tick())).collect();
-        let mut game = Rides { sims: &mut r.sims, world: &mut r.world, after: None };
+        let mut game = Rides { sims: &mut r.sims, world: &mut r.world, after: None, time_scale: None };
         np.frame(&mut game, &local, dt);
         self.said.append(&mut np.said);
         for (to, d) in np.outgoing() {

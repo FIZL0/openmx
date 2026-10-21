@@ -436,6 +436,7 @@ fn gauges(seat: &Seat, rig: &Rig) -> overlay::Gauges {
             p.preload_time.0,
         ),
         score: 0,
+        modified: rig.modified,
     }
 }
 
@@ -457,6 +458,8 @@ struct Rig {
     /// What bolts onto this player's chassis, each part under the model name it is drawn from: the
     /// first player's `.sub`, or the garage pick's own bike's (P37).
     parts: Vec<game_render::scene::Part>,
+    /// A game modifier reaches this player's ride (P55): the overlay says it is modified.
+    modified: bool,
 }
 
 impl Rig {
@@ -615,6 +618,11 @@ struct Args {
     /// it says it is: a way to ride without being judged, not a way to ride at all. The g loads are
     /// still a task of their own.
     wrecks: bool,
+    /// `--modifiers TEXT` (P55): the game modifiers the ride loads with, as `settings.txt` spells
+    /// them (`gravity=50 bike_speed.1=200`). The original game's by default; under the front end the
+    /// Settings screen's unless this asked for others. A `--play` tape rides with its own, and a
+    /// lobby's ride with its host's.
+    modifiers: game_sim::modifiers::Mods,
     /// `--trace N`: ride N frames with nobody touching the pad and print one line per frame of what
     /// the solver is doing, then quit without opening a window. S22's measuring stick for the ride's
     /// g loads — the one thing the shell could show about them before was that it had wrecked.
@@ -1029,6 +1037,9 @@ fn front_end(args: Args) -> Result<(), String> {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
                 }
                 a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
+                if args.modifiers.is_original() {
+                    a.modifiers = shell.front.menu.settings.modifiers;
+                }
                 a.wiring = shell.front.wiring();
                 // The ride setup's machine for 1P (P41), unless `--vehicle biplane` asked for the plane
                 // whatever the setup says. The other seats' picks are read where their garages are.
@@ -1315,6 +1326,14 @@ impl Front {
 /// menu, and the ride ends when the pause says so; without one it opens its own and runs until
 /// Escape, the window closing, `--seconds` or the tape's end.
 fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
+    // ---- the game modifiers (P55) ----------------------------------------------------------------
+    // Applied to what the ride loads, never as a branch in the simulation: at their defaults nothing
+    // is touched at all.
+    let lobby_room = shell.as_deref().and_then(|s| s.front.menu.lobby.start.as_ref()).map(|(room, _)| room);
+    let mods = ride_modifiers(&args, lobby_room)?;
+    if !mods.is_original() {
+        println!("modifiers: {}", mods.text());
+    }
 
     // ---- the disc -------------------------------------------------------------------------------
     let mut disc = Disc::open_configured()?;
@@ -1466,7 +1485,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             (bytes, member)
         }
     };
-    let phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
+    let stock_phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
+    let mut phy = stock_phy.clone();
+    mods.bike(0, &mut phy);
     // The other players' own picks (P37): each rides the `.phy` its set names in its own bike's
     // archive, and wears its own rider's gear. A player the garage has no pick for rides the first's.
     let mut other_phys: Vec<Phy> = Vec::new();
@@ -1486,12 +1507,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     println!("player {}: phy: {note}", i + 1);
                 }
                 println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
-                other_phys.push(Phy::read_bytes(&bytes, &tables.ride.curve));
+                let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+                mods.bike(i, &mut phy);
+                other_phys.push(phy);
                 let rider = member_ending(&disc, &format!("{}.res", pick.rider)).ok();
                 other_riders.push(rider.map(|m| (pick.rider.clone(), m)));
             }
             None => {
-                other_phys.push(phy.clone());
+                let mut phy = stock_phy.clone();
+                mods.bike(i, &mut phy);
+                other_phys.push(phy);
                 other_riders.push(None);
             }
         }
@@ -1698,7 +1723,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     });
     let plane = machines.as_ref().and_then(|(_, b)| Spawn::biplane(b, 0)).map(|spawn| match &plane_phy {
         Some(bytes) => {
-            let mut flight = Flight::new(&phy::Plane::read_bytes(bytes));
+            let mut plane = phy::Plane::read_bytes(bytes);
+            mods.plane(0, &mut plane);
+            let mut flight = Flight::new(&plane);
             let t = &place.terrain;
             flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
             Plane::flying(spawn, flight)
@@ -1835,6 +1862,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         rider
     };
     let mut rider = new_rider(&phy, at, heading);
+    mods.ride(0, &mut rider.ride);
     // The other local players (V22), beside the first on the start line: where the original puts a
     // second rider was not read (R9), so this is the port's own — every SEAT_SPACING feet along the
     // start line's own right and left in turn, each stood on the ground under it, all facing the
@@ -1847,7 +1875,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let off = side * SEAT_SPACING * i.div_ceil(2) as f32;
             let (x, z) = (at.x() + right.x() * off, at.z() + right.z() * off);
             let (on, _) = sim_world::World::ground(&mut sim, Vf::new(x, 1.0e4, z, 1.0));
-            new_rider(&other_phys[i - 1], Vf::new(x, at.y() + (on.y() - under_first.y()), z, 1.0), heading)
+            let mut rider = new_rider(&other_phys[i - 1], Vf::new(x, at.y() + (on.y() - under_first.y()), z, 1.0), heading);
+            mods.ride(i, &mut rider.ride);
+            rider
         })
         .collect();
     for (i, r) in others.iter().enumerate() {
@@ -2122,7 +2152,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let recorder = args.record.as_ref().map(|path| {
         println!("recording to {}", path.display());
         // What the tape is of, for a human reading a directory of them and for a failure line.
-        Recorder::new(format!("{} on {} / {}", args.rider, args.track, args.bike))
+        let mut recorder = Recorder::new(format!("{} on {} / {}", args.rider, args.track, args.bike));
+        // A modified ride's tape carries its modifiers, so it replays on them (P55).
+        recorder.tape.modifiers = mods;
+        recorder
     });
 
     // ---- the window and the pad ---------------------------------------------------------------
@@ -2356,6 +2389,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             bike_model,
             body_model: own_body,
             parts,
+            modified: !mods.seat_is_original(i),
         });
     }
     rigs.insert(
@@ -2374,6 +2408,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             bike_model: CHASSIS.to_string(),
             body_model,
             parts: vehicle.parts.clone(),
+            modified: !mods.seat_is_original(0),
         },
     );
 
@@ -2507,6 +2542,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut engine = Engine::new();
     // The ride's first frame comes a world load after the menu's, as the original's does (P52).
     pace::after_load(&mut engine);
+    engine.time_scale = mods.time_scale();
     let tables = Arc::new(tables);
     let mut seats = vec![Seat {
         reports: [Report::missing(); PADS],
@@ -2554,6 +2590,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // the others' through one each here, which only ever look for Start while the ride runs.
     if let Some(front) = front.as_deref_mut() {
         front.menu.riders = world.seats.len();
+        front.menu.modified = !mods.is_original();
         front.menu.up = [menu::Machine::Bike; menu::SEATS_MAX];
         front.menu.switchable = [false; menu::SEATS_MAX];
         for (i, seat) in world.seats.iter().enumerate().take(menu::SEATS_MAX) {
@@ -2590,12 +2627,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let mut sim = world.seats[0].sim.clone();
                 if let Some(seat) = seat {
                     let bytes = disc.phy(&seat.pick.bike).ok_or(format!("the disc has no {} bike set", seat.pick.bike))?;
-                    sim.phy = Arc::new(Phy::read_bytes(&bytes, &tables.ride.curve));
+                    // The host's modifiers, 1P's for every seat: each seat's rider is a copy of
+                    // this machine's first, built on 1P's (P55).
+                    let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+                    mods.bike(0, &mut phy);
+                    sim.phy = Arc::new(phy);
                 }
                 sim.rng = room.seed;
                 sims.push(sim);
             }
-            Some(online::Online::lobby(net, &room, &me, sims)?)
+            let mut online = online::Online::lobby(net, &room, &me, sims)?;
+            online.time_scale = mods.time_scale();
+            Some(online)
         }
         None => None,
         Some(me) => {
@@ -2608,7 +2651,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 return Err("--online rides one local player outside the front end: drop --players and --menu".into());
             }
             let starts: Vec<Sim> = world.seats.iter().map(|s| s.sim.clone()).collect();
-            Some(online::Online::start(me, &args.peers, args.seats.as_deref(), &starts)?)
+            let mut online = online::Online::start(me, &args.peers, args.seats.as_deref(), &starts)?;
+            online.time_scale = mods.time_scale();
+            Some(online)
         }
     };
     let mut online_frames = 0u32;
@@ -3792,6 +3837,24 @@ fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
 ///
 /// Which means `--play a.p2m2 --phase second --record a.tape` converts one into the other, by riding
 /// it: the tape written is the pad the port was handed, frame for frame.
+/// The game modifiers a ride loads with (P55): a lobby ride's are its host's, sent in the room
+/// before the start; a `--play` tape's are the ones it was recorded on, so it replays as it rode;
+/// otherwise `--modifiers`' or the Settings screen's.
+fn ride_modifiers(args: &Args, room: Option<&openmx_net::room::Room>) -> Result<game_sim::modifiers::Mods, String> {
+    use game_sim::modifiers::Mods;
+    if let Some(room) = room {
+        return Mods::parse(&room.modifiers).map_err(|e| format!("the host's modifiers: {e}"));
+    }
+    if let Some(path) = &args.play {
+        let tape = read_tape(path, args.phase)?;
+        if !args.modifiers.is_original() && args.modifiers != tape.modifiers {
+            println!("modifiers: the tape's own, not --modifiers'");
+        }
+        return Ok(tape.modifiers);
+    }
+    Ok(args.modifiers)
+}
+
 fn read_tape(path: &std::path::Path, phase: TickPhase) -> Result<PadTape, String> {
     let named = |e: std::io::Error| format!("{}: {e}", path.display());
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("p2m2")) {
@@ -3941,6 +4004,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         camera: START_CAMERA.to_string(),
         moment: None,
         wrecks: true,
+        modifiers: game_sim::modifiers::Mods::original(),
         trace: None,
         trace_dt: None,
         trace_brake: false,
@@ -4087,6 +4151,10 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--display" => args.display = next("a display, like :0")?,
             "--no-wrecks" => args.wrecks = false,
+            "--modifiers" => {
+                args.modifiers =
+                    game_sim::modifiers::Mods::parse(&next("modifiers, like gravity=50")?).map_err(|e| format!("--modifiers: {e}"))?
+            }
             "--record" => args.record = Some(next("a path for the tape")?.into()),
             "--play" => args.play = Some(next("a tape to ride")?.into()),
             "--phase" => {
@@ -4224,6 +4292,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--hud] [--camera NAME]\n\
+                            [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--draw-fps N]\n\
@@ -4292,7 +4361,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                      display's refresh and raises it again when there is room. Without it,\n\
                      the front end's Settings row (Auto, 100%, 75%, 50%) says.\n\
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
-                     rider, tumbles the bike and puts you back on it); --moment draws one frame posed\n\
+                     rider, tumbles the bike and puts you back on it); --modifiers sets the\n\
+                     game modifiers, percentages of what the ride loads (a tape keeps its own);\n\
+                     --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\
                      nobody on the pad and prints the solver's own numbers, and --trace-brake\n\
                      or --trace-gas hold the brakes or the throttle while it does, --trace-stick X\n\

@@ -1140,12 +1140,15 @@ pub struct PadTape {
     pub name: String,
     /// One entry per frame, in order.
     pub frames: Vec<PadFrame>,
+    /// The game modifiers the ride was made with (P55), which a replay has to load the ride with to
+    /// ride it again. The original game's — every one at its default — unless the file says.
+    pub modifiers: crate::modifiers::Mods,
 }
 
 impl PadTape {
     /// An empty recording, named.
     pub fn new(name: impl Into<String>) -> PadTape {
-        PadTape { name: name.into(), frames: Vec::new() }
+        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default() }
     }
 
     /// Write down one frame: the port recording what it just played.
@@ -1249,6 +1252,7 @@ impl PadTape {
     /// # game-sim pad tape
     /// format 1
     /// tape freeride-two-minutes
+    /// modifiers gravity=50 bike_speed.1=200   # P55's game modifiers, only on a modified ride
     /// frame 0x3d0699a3 0x0079fffb7f7f7f7f0000000000000000ff000000  # dt, pad 0, [pad 1]
     /// frame 0x3d0699a3 *0x0040 -                   # … or a bitmask, and "-" for no pad at all
     /// ```
@@ -1282,6 +1286,11 @@ impl PadTape {
                     None => return err(n, "format wants a version number"),
                 },
                 "tape" => tape.name = line["tape".len()..].trim().to_string(),
+                // The game modifiers the ride was made with (P55), in their own text form.
+                "modifiers" => {
+                    tape.modifiers = crate::modifiers::Mods::parse(&line["modifiers".len()..])
+                        .map_err(|message| ParseError { line: n, message })?;
+                }
                 "frame" => {
                     let fields: Vec<&str> = word.collect();
                     if fields.is_empty() || fields.len() > 1 + PADS {
@@ -1311,6 +1320,10 @@ impl PadTape {
         let _ = writeln!(s, "format {FORMAT_VERSION}");
         if !self.name.is_empty() {
             let _ = writeln!(s, "tape {}", self.name);
+        }
+        // Only a modified ride says so, so the original's tapes are the bytes they always were.
+        if !self.modifiers.is_original() {
+            let _ = writeln!(s, "modifiers {}", self.modifiers.text());
         }
         for frame in &self.frames {
             let _ = write!(s, "frame 0x{:08x}", frame.dt);

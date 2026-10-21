@@ -707,6 +707,10 @@ pub mod wreck_sound;
 /// through it until it has.
 pub mod ghost;
 
+/// Game modifiers (P55): percentages on the loaded files' numbers, set before a ride starts, and
+/// nothing at all at their defaults.
+pub mod modifiers;
+
 #[cfg(test)]
 mod tests {
     use super::*;
