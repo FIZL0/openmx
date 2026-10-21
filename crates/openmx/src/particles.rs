@@ -40,8 +40,30 @@
 //!   wreck's dust where the hull hits the ground. Its flags are its own: no contact at all is
 //!   `NoContact`, which both entries disable.
 //!
-//! The tire dust (`Dust`) and the prop wash (`HelicopterDust`) are not ported: the list keeps them and
-//! [`PlaneFx`] skips them.
+//! * **Dust** (the three `Tire Dust`s, P60): on its node, and on its tire (`AttachedToTire`). The
+//!   manager gives each tire flags of its own the same way — `NoContact` with neither a ground nor an
+//!   object contact, `GroundContact`, `ObjectContact` — and an entry on a tire is also off while any
+//!   of its `Disable` bits are in its tire's. Then the entry's own frame: a ground contact latches it
+//!   on and an object contact off (neither leaves the latch as it was); unlatched, or with the strut's
+//!   compression `c` not past `MinCompressionThreshold`, it is off. Otherwise its rate is the file's
+//!   times `ModifierBase + ModifierScale × c`, and past `MinBurstCompressionThreshold` (with
+//!   `UseBurstDust`) it bursts: `BurstModifierScale × c` more on the rate, the growth's low end times
+//!   `GrowthMultiplier` (the span stays the file's) and the noise's x bounds times
+//!   `VelocityMultiplier` — and the noise's top y becomes its top *z* times it, as the original
+//!   writes it. Below the burst the growth and the noise are the file's again ([`DustKeys`]).
+//! * **HelicopterDust** (the prop wash under `PropDummy`): the ground under its point, and the height
+//!   `h` above it. Under `BeginFadeHeight` it emits at the file's rate, from there to `EndFadeHeight`
+//!   at the rate times `1 − (h − Begin) / (End − Begin)`, and above that nothing.
+//!
+//! **Zones.** `ZoneDescriptor` names a section of `mxparticlezones.dat` ([`ZONES`]): `Zone1` to
+//! `Zone16` a group of the sheet for each surface under the tire (or the prop), `none` for nothing,
+//! the `.emt`'s own group where a zone is not named. The disc's file names none, so every zone is the
+//! `.emt`'s group. A `none` turns the prop wash off; the tire dust's own frame turns its emitter back
+//! on regardless, as the original's does.
+//!
+//! **MatchTerrainContour**: a particle of such an `.emt` is put on the ground under where it would
+//! have started, raised by its emit point's extent's height — the prop wash's dust starts one to
+//! three feet off the ground, wherever the plane is.
 //!
 //! **Its own random numbers.** A particle is presentation: nothing here reads or draws from the
 //! simulation's `rand`, and nothing the simulation reads is written ([`Rng`]).
@@ -51,6 +73,14 @@
 use game_render::biplane::Emitter;
 use game_render::ini;
 use game_render::mat::{M4, V3, v3};
+
+/// The zones file: which group of the sheet each surface's dust is drawn from, by `ZoneDescriptor`.
+/// The original looks in the track's own folder first and then in `Tracks\`; the archives' suffix
+/// search finds whichever the track carries.
+pub const ZONES: &str = "mxparticlezones.dat";
+
+/// How many surface zones a zone descriptor names.
+pub const ZONE_COUNT: usize = 16;
 
 /// One particle's worth of a gravity scale: the original's `32.2`, feet a second squared.
 pub const GRAVITY: f32 = 32.2;
@@ -108,6 +138,8 @@ pub struct Emt {
     pub apply_emitter_velocity: bool,
     pub mirror_x: bool,
     pub mirror_y: bool,
+    /// `MatchTerrainContour`: each particle starts on the ground under it, raised by its extent.
+    pub matches_terrain: bool,
 }
 
 impl Default for Emt {
@@ -138,6 +170,7 @@ impl Default for Emt {
             apply_emitter_velocity: false,
             mirror_x: false,
             mirror_y: false,
+            matches_terrain: false,
         }
     }
 }
@@ -181,6 +214,7 @@ impl Emt {
             apply_emitter_velocity: flag("ApplyEmitterVelocity"),
             mirror_x: flag("RandomMirrorAboutX"),
             mirror_y: flag("RandomMirrorAboutY"),
+            matches_terrain: flag("MatchTerrainContour"),
         }
     }
 }
@@ -353,6 +387,27 @@ impl Source {
         rng: &mut Rng,
         out: &mut Vec<Particle>,
     ) {
+        self.emit_over(index, emt, frames, at, last, turn, velocity, moving, dt, rng, out, &mut |_| None);
+    }
+
+    /// [`Source::emit`] over a ground: `ground` is the height of the ground under a point, `None`
+    /// where there is none, which a `MatchTerrainContour` emitter puts its particles on.
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_over(
+        &mut self,
+        index: usize,
+        emt: &Emt,
+        frames: (usize, usize),
+        at: V3,
+        last: Option<V3>,
+        turn: Option<M4>,
+        velocity: V3,
+        moving: V3,
+        dt: f32,
+        rng: &mut Rng,
+        out: &mut Vec<Particle>,
+        ground: &mut dyn FnMut(V3) -> Option<f32>,
+    ) {
         let from = last.or(self.last).unwrap_or(at);
         self.last = Some(at);
         if dt <= 0.0 {
@@ -376,9 +431,14 @@ impl Source {
             let life = rng.between(emt.life);
             let (first, last) = frames;
             let frame = first + ((rng.unit() * (last + 1 - first) as f32) as usize).min(last - first);
+            let extent = turned(rng.spread(emt.extent));
+            let mut at = along.add(extent);
+            if emt.matches_terrain && let Some(y) = ground(at) {
+                at.y = y + extent.y;
+            }
             out.push(Particle {
                 emitter: index,
-                at: along.add(turned(rng.spread(emt.extent))),
+                at,
                 vel,
                 size: rng.between(emt.size),
                 growth: rng.between(emt.growth),
@@ -430,6 +490,119 @@ pub enum Kind {
     Exhaust { max_speed: f32 },
     /// At each contact of the collision model.
     CollisionModel,
+    /// On its node, by its tire's contact and compression.
+    Dust(DustKeys),
+    /// On its node, by its height over the ground.
+    HelicopterDust { begin: f32, end: f32 },
+}
+
+/// A tire dust's own keys, over the original's constructor defaults.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DustKeys {
+    /// `MinCompressionThreshold`: the strut must be compressed past this to raise dust.
+    pub min_compression: f32,
+    /// `MinBurstCompressionThreshold` and `UseBurstDust`: past this it bursts.
+    pub burst_compression: f32,
+    pub burst: bool,
+    /// `GrowthMultiplier`, `VelocityMultiplier`: the burst's growth and noise.
+    pub growth: f32,
+    pub velocity: f32,
+    /// `ModifierBase`, `ModifierScale`, `BurstModifierScale`: the rate's factor on the compression.
+    pub base: f32,
+    pub scale: f32,
+    pub burst_scale: f32,
+    /// `EmitterOffset`, in the node's frame.
+    pub offset: V3,
+}
+
+impl Default for DustKeys {
+    fn default() -> DustKeys {
+        DustKeys {
+            min_compression: 0.3,
+            burst_compression: 0.85,
+            burst: true,
+            growth: 2.0,
+            velocity: 5.0,
+            base: 0.5,
+            scale: 5.0,
+            burst_scale: 5.0,
+            offset: V3::default(),
+        }
+    }
+}
+
+impl DustKeys {
+    /// The keys off a list entry.
+    pub fn read(e: &Emitter) -> DustKeys {
+        let d = DustKeys::default();
+        let number = |key: &str, or: f32| e.key(key).and_then(|v| v.trim().parse().ok()).unwrap_or(or);
+        let offset = e
+            .key("EmitterOffset")
+            .and_then(|v| v.split(',').map(|p| p.trim().parse::<f32>().ok()).collect::<Option<Vec<_>>>())
+            .filter(|n| n.len() == 3)
+            .map_or(d.offset, |n| v3(n[0], n[1], n[2]));
+        DustKeys {
+            min_compression: number("MinCompressionThreshold", d.min_compression),
+            burst_compression: number("MinBurstCompressionThreshold", d.burst_compression),
+            burst: e.key("UseBurstDust").and_then(|v| v.trim().parse::<i32>().ok()).map_or(d.burst, |v| v != 0),
+            growth: number("GrowthMultiplier", d.growth),
+            velocity: number("VelocityMultiplier", d.velocity),
+            base: number("ModifierBase", d.base),
+            scale: number("ModifierScale", d.scale),
+            burst_scale: number("BurstModifierScale", d.burst_scale),
+            offset,
+        }
+    }
+
+    /// The `.emt` a frame emits with, off the file's `base`, at compression `c` (past the threshold).
+    pub fn apply(&self, base: &Emt, c: f32, emt: &mut Emt) {
+        let mut k = self.base + self.scale * c;
+        if self.burst {
+            if self.burst_compression < c {
+                k = k + self.burst_scale * c;
+                // The low end is scaled and the span is not recomputed: the file's span stands.
+                let low = base.growth.0 * self.growth;
+                emt.growth = (low, low + (base.growth.1 - base.growth.0));
+                let (lo, hi) = base.noise;
+                emt.noise = (
+                    v3(lo.x * self.velocity, lo.y, lo.z),
+                    // The top y is the file's top z scaled, as the original writes it.
+                    v3(hi.x * self.velocity, hi.z * self.velocity, hi.z),
+                );
+            } else {
+                emt.growth = base.growth;
+                emt.noise = base.noise;
+            }
+        }
+        emt.rate = (base.rate.0 * k, base.rate.1 * k);
+    }
+}
+
+/// What a zone of a zone descriptor draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Zone {
+    /// A group of the sheet, its first and last frame.
+    Group(usize, usize),
+    /// `none`: nothing.
+    Off,
+}
+
+/// A zone descriptor's sixteen zones out of the zones file's `text`, each `Zone<n>` read against
+/// `atlas`; a zone not named is `own`, the `.emt`'s group. A group the sheet does not have is the
+/// sheet's first group, as the original's lookup answers 0 for it.
+pub fn zones(text: Option<&str>, descriptor: &str, atlas: &Atlas, own: (usize, usize)) -> Vec<Zone> {
+    let sections = text.map(ini::parse).unwrap_or_default();
+    let section = sections.iter().find(|s| s.name.eq_ignore_ascii_case(descriptor));
+    (1..=ZONE_COUNT)
+        .map(|n| match section.and_then(|s| s.get(&format!("Zone{n}"))).map(|v| v.trim().trim_matches('"')) {
+            None => Zone::Group(own.0, own.1),
+            Some(v) if v.eq_ignore_ascii_case("none") => Zone::Off,
+            Some(v) => {
+                let (a, b) = atlas.group(v).or_else(|| atlas.groups.first().map(|g| (g.1, g.2))).unwrap_or(own);
+                Zone::Group(a, b)
+            }
+        })
+        .collect()
 }
 
 /// One entry the port emits from.
@@ -441,10 +614,47 @@ pub struct Entry {
     pub node: Option<String>,
     pub disable: u32,
     pub emt: Emt,
-    /// Its group's frames in the sheet.
+    /// Its group's frames in the sheet: the `.emt`'s, or its zone's.
     pub frames: (usize, usize),
     /// One source for a node's entry; one per contact for the collision model's.
     pub sources: Vec<Source>,
+    /// `AttachedToTire`: the tire whose flags it also answers to.
+    pub tire: Option<usize>,
+    /// Its descriptor's zones ([`zones`]), and the `.emt` as the file wrote it, which a tire dust
+    /// scales afresh every frame.
+    pub zones: Vec<Zone>,
+    pub file: Emt,
+    /// A tire dust's latch: on from a ground contact until an object contact or switched off.
+    pub latched: bool,
+}
+
+/// A tire as the manager reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TireFrame {
+    /// It touches the ground, and something else.
+    pub ground: bool,
+    pub object: bool,
+    /// How far its strut is compressed, feet.
+    pub compression: f32,
+    /// The surface under it.
+    pub zone: u8,
+}
+
+impl TireFrame {
+    /// The manager's flags for it.
+    pub fn flags(&self) -> u32 {
+        let mut f = 0;
+        if !self.ground && !self.object {
+            f |= Disable::NO_CONTACT;
+        }
+        if self.ground {
+            f |= Disable::GROUND_CONTACT;
+        }
+        if self.object {
+            f |= Disable::OBJECT_CONTACT;
+        }
+        f
+    }
 }
 
 /// What the plane is doing this frame, as the particles read it.
@@ -463,6 +673,8 @@ pub struct PlaneFrame {
     /// Where the collision model touches the ground and where it touches anything else.
     pub ground_contacts: Vec<V3>,
     pub object_contacts: Vec<V3>,
+    /// The three tires, front left, front right and tail, by `AttachedToTire`'s index.
+    pub tires: Vec<TireFrame>,
 }
 
 /// One particle as it is drawn: a square facing the camera.
@@ -494,11 +706,16 @@ impl PlaneFx {
     pub fn new(list: &[Emitter], atlas: Atlas, read: impl Fn(&str) -> Option<Vec<u8>>) -> PlaneFx {
         let mut entries = Vec::new();
         let mut skipped = Vec::new();
+        let zone_text = read(ZONES).map(|b| ini::text(&b));
         for e in list {
+            let number = |key: &str, or: f32| e.key(key).and_then(|v| v.trim().parse().ok()).unwrap_or(or);
             let kind = match e.kind.to_ascii_lowercase().as_str() {
                 "generic" => Kind::Generic,
                 "exhaust" => Kind::Exhaust { max_speed: e.max_speed },
                 "collisionmodel" => Kind::CollisionModel,
+                "dust" => Kind::Dust(DustKeys::read(e)),
+                // The constructor's 0 and 50 where the entry does not say.
+                "helicopterdust" => Kind::HelicopterDust { begin: number("BeginFadeHeight", 0.0), end: number("EndFadeHeight", 50.0) },
                 _ => {
                     skipped.push((e.name.clone(), e.kind.clone()));
                     continue;
@@ -512,31 +729,110 @@ impl PlaneFx {
                 skipped.push((e.name.clone(), format!("{}: no group {:?}", e.kind, emt.group)));
                 continue;
             };
+            let descriptor = e.key("ZoneDescriptor").unwrap_or("Default");
             entries.push(Entry {
                 name: e.name.clone(),
                 kind,
                 node: e.node.clone(),
                 disable: Disable::parse(&e.disable),
+                file: emt.clone(),
                 emt,
                 frames,
                 sources: Vec::new(),
+                tire: e.key("AttachedToTire").and_then(|v| v.trim().parse().ok()),
+                zones: zones(zone_text.as_deref(), descriptor, &atlas, frames),
+                latched: false,
             });
         }
         PlaneFx { entries, atlas, particles: Vec::new(), skipped, rng: Rng::new(0x5eed_0058) }
     }
 
     /// One frame of `dt` seconds: the particles already in the air first, then what each entry emits
-    /// this frame, as the original's manager runs them.
+    /// this frame, as the original's manager runs them. No ground: the prop wash, which asks for it,
+    /// is off. The tests' frame; the shell steps over its ground.
+    #[allow(dead_code)]
     pub fn step(&mut self, plane: &PlaneFrame, dt: f32) {
+        self.step_over(plane, dt, &mut |_| None);
+    }
+
+    /// [`PlaneFx::step`] over a ground: `ground` answers the height of the ground under a point and
+    /// its surface zone, `None` where there is none.
+    pub fn step_over(&mut self, plane: &PlaneFrame, dt: f32, ground: &mut dyn FnMut(V3) -> Option<(f32, u8)>) {
         let entries = &self.entries;
         self.particles.retain_mut(|p| p.step(&entries[p.emitter].emt, dt));
         let global = if plane.wrecked { Disable::WRECKING } else { Disable::NOT_WRECKING };
         for (index, entry) in self.entries.iter_mut().enumerate() {
+            // An entry on a tire answers to the tire's flags as well as the plane's.
+            let tire = entry.tire.and_then(|t| plane.tires.get(t)).copied();
+            let tire_off = tire.is_some_and(|t| entry.disable & t.flags() != 0);
+            match &entry.kind {
+                Kind::Dust(keys) => {
+                    let node = entry.node.as_ref().and_then(|n| plane.nodes.iter().find(|(name, _)| name.eq_ignore_ascii_case(n)));
+                    entry.sources.resize_with(1, Source::default);
+                    let (Some(t), Some((_, m)), false) = (tire, node, tire_off || entry.disable & global != 0) else {
+                        entry.latched = false;
+                        entry.sources[0].off();
+                        continue;
+                    };
+                    if let Some(Zone::Group(a, b)) = entry.zones.get(usize::from(t.zone)) {
+                        entry.frames = (*a, *b);
+                    }
+                    if t.ground {
+                        entry.latched = true;
+                    } else if t.object {
+                        entry.latched = false;
+                    }
+                    if !entry.latched || !(keys.min_compression < t.compression) {
+                        entry.sources[0].off();
+                        continue;
+                    }
+                    keys.apply(&entry.file, t.compression, &mut entry.emt);
+                    let at = m.point(keys.offset);
+                    let velocity = entry.emt.velocity;
+                    entry.sources[0].emit_over(index, &entry.emt, entry.frames, at, None, Some(*m), velocity, plane.vel, dt, &mut self.rng, &mut self.particles, &mut |p| ground(p).map(|(y, _)| y));
+                }
+                Kind::HelicopterDust { begin, end } => {
+                    let (begin, end) = (*begin, *end);
+                    let node = entry.node.as_ref().and_then(|n| plane.nodes.iter().find(|(name, _)| name.eq_ignore_ascii_case(n)));
+                    entry.sources.resize_with(1, Source::default);
+                    let (Some((_, m)), false) = (node, tire_off || entry.disable & global != 0) else {
+                        entry.sources[0].off();
+                        continue;
+                    };
+                    let at = m.point(v3(0.0, 0.0, 0.0));
+                    let Some((y, zone)) = ground(at) else {
+                        entry.sources[0].off();
+                        continue;
+                    };
+                    match entry.zones.get(usize::from(zone)) {
+                        Some(Zone::Off) => {
+                            entry.sources[0].off();
+                            continue;
+                        }
+                        Some(Zone::Group(a, b)) => entry.frames = (*a, *b),
+                        None => {}
+                    }
+                    let h = at.y - y;
+                    let base = entry.file.rate;
+                    if !(begin <= h) {
+                        entry.emt.rate = base;
+                    } else if h < end {
+                        let f = 1.0 - (h - begin) / (end - begin);
+                        entry.emt.rate = (base.0 * f, base.1 * f);
+                    } else {
+                        entry.sources[0].off();
+                        continue;
+                    }
+                    let velocity = entry.emt.velocity;
+                    entry.sources[0].emit_over(index, &entry.emt, entry.frames, at, None, Some(*m), velocity, plane.vel, dt, &mut self.rng, &mut self.particles, &mut |p| ground(p).map(|(y, _)| y));
+                }
+                _ => {}
+            }
             match entry.kind {
                 Kind::Generic | Kind::Exhaust { .. } => {
                     let node = entry.node.as_ref().and_then(|n| plane.nodes.iter().find(|(name, _)| name.eq_ignore_ascii_case(n)));
                     let mut velocity = entry.emt.velocity;
-                    let mut on = entry.disable & global == 0;
+                    let mut on = entry.disable & global == 0 && !tire_off;
                     if let Kind::Exhaust { max_speed } = entry.kind {
                         let f = plane.throttle * 0.5 * (max_speed - plane.airspeed) / max_speed.max(1e-6);
                         on &= f > 0.0;
@@ -576,6 +872,7 @@ impl PlaneFx {
                         source.emit(index, &entry.emt, entry.frames, at, Some(from), None, entry.emt.velocity, plane.vel, dt, &mut self.rng, &mut self.particles);
                     }
                 }
+                Kind::Dust(_) | Kind::HelicopterDust { .. } => {}
             }
         }
     }
