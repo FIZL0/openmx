@@ -30,6 +30,28 @@ pub struct Light {
     pub target: V3,
 }
 
+/// What the original's fog object subtracts from the fog's end before `Haziness` scales it, in feet:
+/// a constant its constructor and its split-screen reset both pass, not anything in the scene.
+const FOG_START_OFFSET: f32 = 64.0;
+
+/// Where the original's fog starts and ends, from a scene's `[Fog]` numbers.
+///
+/// The fog object ends the fog `Visibility` of the way from `MinimumFogDistance` to
+/// `MaximumFogDistance`, and starts it `1 - Haziness` of the way from the eye to 64 ft short of that
+/// end. The renderer is handed exactly this pair: nothing nearer than the start is fogged, the fog
+/// grows linearly to fully opaque at the end, and the race view's far clip plane is the end too. So
+/// with `Visibility` 1 (every scene but nat08) `MinimumFogDistance` plays no part at all: free09's
+/// 10..1000 at `Haziness` 0.6 is fog from 374.4 to 1000.
+///
+/// A split screen outside supercross passes `0.61 x MaximumFogDistance` as `max`.
+pub fn fog_range(min: f32, max: f32, visibility: f32, haziness: f32) -> (f32, f32) {
+    // The object's clamp: anything not above 0 (NaN too) is 0, anything from 1 up is 1.
+    let unit = |x: f32| if x > 0.0 { x.min(1.0) } else { 0.0 };
+    let end = min + unit(visibility) * (max - min);
+    let start = (1.0 - unit(haziness)) * (end - FOG_START_OFFSET);
+    (start, end)
+}
+
 /// One prop: a model name and the transform the scene places it with.
 #[derive(Clone, Debug)]
 pub struct Placement {
@@ -57,8 +79,13 @@ pub struct Scene {
     /// The terrain file this track draws its ground from.
     pub terrain: String,
     pub fog_color: [u8; 3],
+    /// `[Fog]`'s `MinimumFogDistance` and `MaximumFogDistance` as the file has them. They are not
+    /// where the fog starts and ends: [`Scene::fog_range`] is.
     pub fog_near: f32,
     pub fog_far: f32,
+    /// `[Fog]`'s `Visibility` and `Haziness`, fractions the original clamps to 0..1.
+    pub fog_visibility: f32,
+    pub fog_haziness: f32,
     pub lights: Vec<Light>,
     pub models: Vec<Placement>,
 }
@@ -76,6 +103,9 @@ impl Scene {
         let info = find("SceneInfo");
         let env = find("Environment");
         let fog = find("Fog");
+        // The fog's numbers as the original reads them: its `strtod` and then its double-to-float
+        // conversion, which truncates, so `Haziness=0.60` is the float just below 0.6.
+        let fog_number = |key: &str| fog.and_then(|s| s.get(key)).map(|v| game_sim::phy::number(v).0);
         let rgb = fog
             .and_then(|s| s.numbers("ColorRGB"))
             .filter(|n| n.len() >= 3)
@@ -124,13 +154,20 @@ impl Scene {
                 .unwrap_or("")
                 .to_string(),
             fog_color: rgb,
-            fog_near: fog.and_then(|s| s.number("MinimumFogDistance")).unwrap_or(5.0),
-            fog_far: fog
-                .and_then(|s| s.number("MaximumFogDistance"))
-                .unwrap_or(2000.0),
+            fog_near: fog_number("MinimumFogDistance").unwrap_or(5.0),
+            fog_far: fog_number("MaximumFogDistance").unwrap_or(2000.0),
+            // The original's reader defaults these two to 1 and 0.5; every scene on the disc has both.
+            fog_visibility: fog_number("Visibility").unwrap_or(1.0),
+            fog_haziness: fog_number("Haziness").unwrap_or(0.5),
             lights,
             models,
         }
+    }
+
+    /// Where the original's fog starts and ends, in feet from the eye: [`fog_range`] of this scene's
+    /// `[Fog]`.
+    pub fn fog_range(&self) -> (f32, f32) {
+        fog_range(self.fog_near, self.fog_far, self.fog_visibility, self.fog_haziness)
     }
 
     /// The direction the sun shines in, or a default from above and behind if the scene has no
@@ -371,6 +408,27 @@ mod tests {
         assert!(s.sun().y < 0.0, "{:?}", s.sun());
         // A prop with no vectors of its own still gets a usable transform.
         assert_eq!(s.models[1].transform().point(v3(0.0, 0.0, 0.0)), s.models[1].pos);
+    }
+
+    /// free09's `[Fog]` (10..1000, `Visibility` 1, `Haziness` 0.6) against what the save state of
+    /// `recording2.p2m2` holds in its renderer's fog pair, bit for bit; and nat08, the one scene whose
+    /// `Visibility` is under 1, where the minimum matters.
+    #[test]
+    fn the_fog_starts_where_the_haziness_puts_it() {
+        let s = Scene::parse(
+            "[Fog]\nColorRGB=150,151,139\nVisibility=1.00\nHaziness=0.60\n\
+             MinimumFogDistance=10.00\nMaximumFogDistance=1000.00\n",
+        );
+        let (start, end) = s.fog_range();
+        assert_eq!(s.fog_haziness.to_bits(), 0x3f19_9999, "0.6 truncated, as the original reads it");
+        assert_eq!((start.to_bits(), end.to_bits()), (0x43bb_3334, 0x447a_0000), "{start} {end}");
+        let (start, end) = fog_range(300.0, 450.0, 0.5, 0.8);
+        assert_eq!(end, 375.0);
+        assert!((start - 0.2 * (375.0 - 64.0)).abs() < 1e-3, "{start}");
+        // Out-of-range fractions clamp, and missing ones take the reader's defaults.
+        assert_eq!(fog_range(10.0, 1000.0, 2.0, -1.0), (936.0, 1000.0));
+        assert_eq!(fog_range(10.0, 1000.0, f32::NAN, f32::NAN), (-54.0, 10.0));
+        assert_eq!(Scene::parse(SCN).fog_range(), (0.5 * (2000.0 - 64.0), 2000.0));
     }
 
     #[test]
