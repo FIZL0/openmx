@@ -383,6 +383,7 @@ impl Wire for Rider {
             ragdoll_kit: _,
             ragdoll,
             skeleton: _,
+            drawn,
             wreck_sounds,
             animation,
             body,
@@ -405,6 +406,7 @@ impl Wire for Rider {
         racing.put(out);
         crash.put(out);
         ragdoll.put(out);
+        drawn.put(out);
         wreck_sounds.put(out);
         animation.put(out);
         body.put(out);
@@ -432,6 +434,7 @@ impl Wire for Rider {
             ragdoll_kit: None,
             ragdoll: Wire::take(r)?,
             skeleton: None,
+            drawn: Wire::take(r)?,
             wreck_sounds: Wire::take(r)?,
             animation: Wire::take(r)?,
             body: Wire::take(r)?,

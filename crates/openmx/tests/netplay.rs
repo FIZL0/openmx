@@ -219,6 +219,8 @@ struct Run<M: Machine> {
     /// Each machine's tick after every round.
     ran: Vec<Vec<usize>>,
     biggest: usize,
+    /// Each machine's datagrams and their bytes, sent in all (lost ones too).
+    sent: Vec<(u64, u64)>,
 }
 
 fn dumps() -> PathBuf {
@@ -244,6 +246,7 @@ fn run<M: Machine>(
         nets: names.iter().map(|me| Netplay::new(lineup.clone(), me, timing, dumps()).unwrap()).collect(),
         games: names.iter().map(|_| make(lineup.seats.len())).collect(),
         ran: vec![Vec::new(); names.len()],
+        sent: vec![(0, 0); names.len()],
         names,
         biggest: 0,
     };
@@ -270,6 +273,8 @@ fn run<M: Machine>(
             r.games[i].frame(np, &local);
             for (to, d) in np.outgoing() {
                 r.biggest = r.biggest.max(d.len());
+                r.sent[i].0 += 1;
+                r.sent[i].1 += d.len() as u64;
                 let out = link.outage.contains(&round) && (!link.oneway || i == 0);
                 if out || lost() || d.len() > DATAGRAM_MAX {
                     continue;
@@ -352,7 +357,10 @@ fn a_lineup_reads_and_names_its_host() {
     assert_eq!(l.peers(), ["host", "g", "k"]);
     assert_eq!(l.mine("g"), [2, 5]);
     assert_eq!(l.text(), "host,host,g,-,k,g");
-    assert!(Lineup::parse("a,b,c,d,e,f,g,h,i").is_err(), "nine seats");
+    let names = |n: usize| (0..n).map(|i| format!("p{i}")).collect::<Vec<_>>().join(",");
+    assert_eq!(Lineup::parse(&names(net::SEATS)).unwrap().seats.len(), net::SEATS, "as many as the cap");
+    let past = Lineup::parse(&names(net::SEATS + 1)).unwrap_err();
+    assert!(past.contains(&format!("the most is {}", net::SEATS)), "{past}");
     assert!(Lineup::parse("-,-").is_err(), "nobody");
 }
 
@@ -699,6 +707,7 @@ fn joined_mid_ride(link: &Link, joins: [u32; 2], rounds: u32) -> (Run<Ride>, Vec
         games: vec![Ride::new(1)],
         ran: vec![Vec::new()],
         biggest: 0,
+        sent: Vec::new(),
     };
     let mut host = Vec::new();
     let mut wire: Vec<(usize, u32, String, Vec<u8>)> = Vec::new();
@@ -1087,4 +1096,110 @@ fn the_online_hash_and_bytes_carry_the_ghost() {
     Rides { sims: &mut here.sims, world: &mut here.world, after: None, time_scale: None }.decode(&bytes).unwrap();
     assert_eq!(here.sims[0].rider.ghost, there.sims[0].rider.ghost);
     assert_eq!(here.hash(), there.hash());
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Sixteen riders (N12)
+// ---------------------------------------------------------------------------------------------------
+
+/// A machine whose frames are timed: the wall clock each took, session and ride together.
+struct Timed<M: Machine> {
+    m: M,
+    spent: Vec<std::time::Duration>,
+}
+
+impl<M: Machine> Machine for Timed<M> {
+    type S = M::S;
+    fn frame(&mut self, np: &mut Netplay<M::S>, local: &[Report]) {
+        let t0 = std::time::Instant::now();
+        self.m.frame(np, local);
+        self.spent.push(t0.elapsed());
+    }
+    fn hash(&self) -> u64 {
+        self.m.hash()
+    }
+}
+
+/// `peers` machines with `seats` seats between them, dealt round the table (seat `s` is machine
+/// `s % peers`'s), as a line-up.
+fn dealt(peers: usize, seats: usize) -> String {
+    let name = |p: usize| if p == 0 { "host".to_string() } else { format!("g{p}") };
+    (0..seats).map(|s| name(s % peers)).collect::<Vec<_>>().join(",")
+}
+
+/// `lineup` ridden `rounds` rounds over `link`, every machine's frames timed, and what it cost said:
+/// each machine's mean and worst frame, its re-runs, the datagrams and bytes it sent a tick, the
+/// ride's state in bytes (what a resync or a restart sends) and the time ggrs' save of it takes.
+fn measured(lineup: &str, link: &Link, rounds: u32) -> Run<Timed<Ride>> {
+    let r = run(lineup, Timing::default(), |n| Timed { m: Ride::new(n), spent: Vec::new() }, link, 0..rounds, |_, _, _| {});
+    let seats = r.nets[0].lineup.seats.len();
+    for (i, np) in r.nets.iter().enumerate() {
+        let spent = &r.games[i].spent;
+        let mean = spent.iter().sum::<std::time::Duration>() / spent.len() as u32;
+        let worst = spent.iter().max().unwrap();
+        let (n, bytes) = r.sent[i];
+        eprintln!(
+            "{seats} seats, {} machines: {}: frame mean {:.2} ms, worst {:.2} ms; {} re-run, {} held; sent {:.1} datagrams, {:.0} bytes a tick ({:.1} kB/s)",
+            r.names.len(),
+            np.me,
+            mean.as_secs_f64() * 1e3,
+            worst.as_secs_f64() * 1e3,
+            np.rb.reruns,
+            np.rb.held,
+            n as f64 / rounds as f64,
+            bytes as f64 / rounds as f64,
+            bytes as f64 / rounds as f64 * 30.0 / 1e3,
+        );
+    }
+    let mut sims = r.games[0].m.sims.clone();
+    let mut world = Flat::default();
+    let game = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None };
+    let t0 = std::time::Instant::now();
+    let saves = 100;
+    for _ in 0..saves {
+        std::hint::black_box(game.save());
+    }
+    eprintln!(
+        "{seats} seats: the state is {} bytes; ggrs' save of it takes {:.1} us; the biggest datagram {} bytes",
+        game.encode().unwrap().len(),
+        t0.elapsed().as_secs_f64() * 1e6 / saves as f64,
+        r.biggest
+    );
+    r
+}
+
+/// N12's acceptance: sixteen riders over four machines on a link that loses 5 % and holds the rest
+/// 100 ms ride a few hundred ticks with every settled tick the same pads and state everywhere, and
+/// ggrs' checksums (every 30th tick) never differ.
+#[test]
+fn sixteen_riders_on_four_peers() {
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    let r = measured(&dealt(4, 16), &link, 360);
+    for np in &r.nets {
+        assert_eq!(np.lineup.seats.len(), 16);
+        assert_eq!(np.lineup.mine(&np.me).len(), 4, "{}", np.me);
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+        assert_eq!(np.end, None, "{}", np.me);
+    }
+    assert!(r.biggest <= DATAGRAM_MAX, "a {}-byte datagram", r.biggest);
+    let n = r.agree(&[0, 1, 2, 3], 0);
+    assert!(n > 300, "only {n} ticks settled");
+    assert!(r.nets.iter().all(|np| np.rb.reruns > 0), "the guesses were put right somewhere");
+    // and the bikes move: sixteen of them, each its own ride
+    let at: std::collections::BTreeSet<u64> = r.games[0].m.sims.iter().map(|s| s.hash()).collect();
+    assert_eq!(at.len(), 16, "every seat a state of its own");
+}
+
+/// The measurement N12 asks for: sixteen machines, one rider each, the same link, and then the cap,
+/// every seat its own machine. Numbers only (the journal has them): `--ignored` to run.
+#[test]
+#[ignore]
+fn sixteen_machines_measured() {
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    for (peers, seats) in [(4, 8), (4, 16), (16, 16), (net::SEATS, net::SEATS)] {
+        let r = measured(&dealt(peers, seats), &link, 300);
+        let n = r.agree(&(0..peers).collect::<Vec<_>>(), 0);
+        assert!(r.nets.iter().all(|np| np.desyncs.is_empty()));
+        eprintln!("{seats} seats on {peers} machines: {n} ticks agreed");
+    }
 }

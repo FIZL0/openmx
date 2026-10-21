@@ -1,6 +1,7 @@
-//! **Online play** (N2): ggrs rollback between up to eight riders on up to eight machines, any number
-//! of them on one machine, taken from opentennis (`crates/hst-play/src/play/rollback.rs`, `resync.rs`,
-//! `recover.rs`, `netplay.rs`) with its numbers kept.
+//! **Online play** (N2): ggrs rollback between up to [`SEATS`] riders (N12: thirty-two) on as many
+//! machines, any number of them on one machine, taken from opentennis
+//! (`crates/hst-play/src/play/rollback.rs`, `resync.rs`, `recover.rs`, `netplay.rs`) with its numbers
+//! kept.
 //!
 //! Each machine runs the next tick at once on its own seats' pads (sent [`DELAY`] ticks ahead) and a
 //! guess for everyone else's (their last pads held). When a peer's real pads for a guessed tick arrive
@@ -64,8 +65,10 @@ pub const DELAY: usize = 1;
 pub const WINDOW: usize = 40;
 /// Hashes are compared every this many ticks.
 pub const HASH_EVERY: u32 = 30;
-/// The most seats a ride has (P35's seats; one rider each).
-pub const SEATS: usize = 8;
+/// The most seats a ride has, every machine's together (one rider each): the lobby's cap, which says
+/// what limits it. A ride's own count is its [`Lineup`]'s, a runtime number; this machine's seats of
+/// it are as many as its pads and its split screen have (`pad::SEATS`).
+pub const SEATS: usize = openmx_net::SEATS;
 
 /// The pad bytes a seat sends: bytes 0 to 19 of the pad library's report — status, mode, the button
 /// word, the four stick bytes and the twelve pressures, everything the original's poll reads. The

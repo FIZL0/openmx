@@ -124,8 +124,19 @@ fn the_online_screens_go_by_pad_and_the_network_s_word_alone() {
     assert_eq!(m.lobby.out.pop(), Some(Cmd::Ride { track: "free07".into(), wrecks: room.wrecks, biplane: false }));
     taps(&mut m, &mut r, &[Control::Down, Control::Down, Control::Right]);
     assert_eq!(m.lobby.out.pop(), Some(Cmd::Picks(vec![Pick::new("thq1", "pro125a")])));
+    // Past Private, the seats (N12): right opens one more, left from two goes round to the cap,
+    // and the next lobby this machine hosts opens with the last.
+    taps(&mut m, &mut r, &[Control::Down, Control::Down, Control::Right]);
+    assert_eq!(m.lobby.out.pop(), Some(Cmd::Seats(LOBBY_SEATS + 1)));
+    assert_eq!(m.settings.lobby_seats, LOBBY_SEATS + 1);
+    let mut two = room.clone();
+    two.seats.truncate(2);
+    m.heard(Event::Room(two));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.lobby.out.pop(), Some(Cmd::Seats(openmx_net::SEATS)));
+    m.heard(Event::Room(room.clone()));
     // Start is the host's.
-    taps(&mut m, &mut r, &[Control::Down, Control::Down, Control::Down, Control::Cross]);
+    taps(&mut m, &mut r, &[Control::Down, Control::Down, Control::Cross]);
     assert_eq!(m.lobby.out.pop(), Some(Cmd::Start));
     // Circle leaves the lobby for the online menu.
     tap(&mut m, &mut r, Control::Circle);

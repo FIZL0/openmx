@@ -5,8 +5,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The most players in one ride (S54's players, P35's seats).
-pub const SEATS: usize = 8;
+/// The most players in one ride (N12), every machine's together: the rollback's seats
+/// (`openmx::net::SEATS` is this), the lobby's and the state's. What really limits a ride is not this
+/// number but the work behind it, which grows with the seats: every machine re-runs every seat for each
+/// tick a guess was wrong, and the host relays every guest's inputs to every other guest. N12 measured
+/// sixteen riders on sixteen machines over a 100 ms link at 3 to 9 ms a frame (a tick is 33 ms) and 64
+/// kB/s from each, and thirty-two at 7 to 18 ms with worst frames past the tick; the journal
+/// (`sixteen-players`) has the numbers. A host opens 2 to this many ([`Room::resize`]).
+pub const SEATS: usize = 32;
 
 /// The host's own peer name in the seats (a guest's is its endpoint ID).
 pub const HOST: &str = "host";
@@ -92,16 +98,47 @@ impl Room {
 
     /// Seats `peer`'s players in the first open seats, all or none (false: not enough room).
     pub fn take(&mut self, peer: &str, picks: &[Pick]) -> bool {
-        if picks.is_empty() || picks.len() > self.open() {
-            return false;
+        self.seat(peer, picks).is_ok()
+    }
+
+    /// [`Room::take`] with the reason it can't: no players, or more than the seats left open, which a
+    /// room at the cap says is the most a ride has. The seats taken, in order.
+    pub fn seat(&mut self, peer: &str, picks: &[Pick]) -> Result<Vec<usize>, String> {
+        if picks.is_empty() {
+            return Err("No players to seat.".into());
         }
+        if picks.len() > self.open() {
+            let most = if self.seats.len() >= SEATS { ", the most a ride has".to_string() } else { String::new() };
+            return Err(format!(
+                "The lobby is full ({} seats open, {} wanted; {} seats{most}).",
+                self.open(),
+                picks.len(),
+                self.seats.len()
+            ));
+        }
+        let before = self.seats_of(peer);
         let mut picks = picks.iter();
         for s in self.seats.iter_mut().filter(|s| s.is_none()) {
             let Some(p) = picks.next() else { break };
             *s = Some(Seat { peer: peer.into(), pick: p.clone() });
         }
         self.changed();
-        true
+        Ok(self.seats_of(peer).into_iter().filter(|s| !before.contains(s)).collect())
+    }
+
+    /// The host's seat count, 2 to [`SEATS`]: open seats are added or taken off the end, and a taken
+    /// one is never taken away (a room fuller than `n` stays as big as its last taken seat needs).
+    pub fn resize(&mut self, n: usize) -> Result<(), String> {
+        if !(2..=SEATS).contains(&n) {
+            return Err(format!("{n} seats: a ride has 2 to {SEATS}."));
+        }
+        let last = self.seats.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+        if n < last {
+            return Err(format!("Seat {last} is taken: {last} seats at least."));
+        }
+        self.seats.resize(n, None);
+        self.changed();
+        Ok(())
     }
 
     /// `peer` gone: its seats open, its name and ready out.
@@ -237,6 +274,37 @@ mod tests {
         assert_eq!((r.open(), r.taken()), (3, 1));
         assert!(r.take("b", &[Pick::new("x", "y")]));
         assert_eq!(r.seats_of("b"), [1]);
+    }
+
+    /// N12: a room opens to the cap and no further, takes a sixteenth player and, full, says why it
+    /// takes no more; it grows and shrinks round its taken seats.
+    #[test]
+    fn a_room_takes_sixteen_and_refuses_past_the_cap() {
+        assert_eq!(Room::new("h", "free06", 100).seats.len(), SEATS, "opened at the cap at most");
+        let mut r = Room::new("h", "free06", 16);
+        assert!(r.take(HOST, &[Pick::new("thq1", "race125p")]));
+        for g in 1..15 {
+            assert_eq!(r.seat(&format!("g{g}"), &[Pick::new("thq2", "race125p")]), Ok(vec![g]));
+        }
+        assert_eq!(r.seat("sixteenth", &[Pick::new("thq3", "race125p")]), Ok(vec![15]), "the sixteenth");
+        assert_eq!(r.taken(), 16);
+        let full = r.seat("late", &[Pick::new("thq4", "race125p")]).unwrap_err();
+        assert_eq!(full, "The lobby is full (0 seats open, 1 wanted; 16 seats).");
+        assert_eq!(r.seat("nobody", &[]).unwrap_err(), "No players to seat.");
+        // the host opens more, up to the cap, and the room is full there for good
+        assert!(r.resize(SEATS + 1).unwrap_err().contains(&format!("a ride has 2 to {SEATS}")));
+        r.resize(SEATS).unwrap();
+        let rest: Vec<Pick> = (16..SEATS).map(|_| Pick::new("thq5", "race125p")).collect();
+        assert_eq!(r.seat("many", &rest).unwrap().len(), SEATS - 16);
+        let past = r.seat("late", &[Pick::new("thq4", "race125p")]).unwrap_err();
+        assert!(past.ends_with(&format!("{SEATS} seats, the most a ride has).")), "{past}");
+        assert!(r.resize(16).unwrap_err().starts_with(&format!("Seat {SEATS} is taken")));
+        r.free("many");
+        r.resize(16).unwrap();
+        assert_eq!((r.seats.len(), r.taken()), (16, 16));
+        assert!(r.resize(1).is_err(), "two at least");
+        // the board lists it as it is
+        assert_eq!((Listing::of("id", &r).taken, Listing::of("id", &r).seats), (16, 16));
     }
 
     #[test]
