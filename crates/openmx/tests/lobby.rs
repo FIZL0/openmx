@@ -455,7 +455,7 @@ fn a_freerides_pause_opens_it_online() {
     let quit = m.pause_rows().len() - 1;
     m.opening = Opening::Can;
     let rows = m.pause_rows();
-    assert_eq!(rows[rows.len() - 2..], ["Open to Online", "Quit"]);
+    assert_eq!(rows[rows.len() - 3..], ["Open to Online", &format!("Seats: {LOBBY_SEATS}"), "Quit"]);
     // six rows down from Resume: Open to Online, and the pause closes over a ride that goes on
     let mut acts = Vec::new();
     for _ in 0..quit {
@@ -474,8 +474,8 @@ fn a_freerides_pause_opens_it_online() {
     taps(&mut m, &mut r, &vec![Control::Down; quit]);
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.iter().all(|a| *a == Act::Stay) && m.screen() == Some(Screen::Pause), "{acts:?}");
-    // the last row is still Quit
-    let acts = taps_acts(&mut m, &mut r, &[Control::Down, Control::Cross]);
+    // the last row is still Quit, under Seats (N14)
+    let acts = taps_acts(&mut m, &mut r, &[Control::Down, Control::Down, Control::Cross]);
     assert!(acts.contains(&Act::Quit), "{acts:?}");
 
     // a guest dropping in
@@ -490,6 +490,45 @@ fn a_freerides_pause_opens_it_online() {
     assert!(!g.lobby.drop_in);
     assert_eq!(g.heard(Event::Start(riding, "guest-id".into())), Act::Online);
     assert!(!g.lobby.drop_in, "a ride that starts is not a drop-in");
+}
+
+/// N14: the pause of a ride that can be opened, or is, has a Seats row under the online row. Before
+/// opening it sets the lobby's pick the room opens with; opened, it asks the network, and shows the
+/// room's count once the network says it.
+#[test]
+fn an_opened_rides_pause_has_a_seats_row() {
+    use menu::Opening;
+    let (mut m, mut r) = fresh("Hosty", "thq1");
+    m.opening = Opening::Can;
+    m.pause();
+    let seats = m.pause_rows().len() - 2;
+    taps(&mut m, &mut r, &vec![Control::Down; seats]);
+    let acts = taps_acts(&mut m, &mut r, &[Control::Right, Control::Right, Control::Left, Control::Cross]);
+    assert!(acts.iter().all(|a| *a == Act::Stay) && m.screen() == Some(Screen::Pause), "{acts:?}");
+    assert_eq!(m.settings.lobby_seats, LOBBY_SEATS + 2);
+    assert_eq!(m.pause_rows()[seats], format!("Seats: {}", LOBBY_SEATS + 2));
+    assert!(m.lobby.out.is_empty(), "nothing to tell before the room is open: {:?}", m.lobby.out);
+    assert!(m.changed(), "the pick is saved as the lobby's is");
+    // round from two to the cap
+    m.settings.lobby_seats = 2;
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.lobby_seats, openmx_net::SEATS);
+
+    // opened: the room's own count, asked of the network
+    m.opening = Opening::Open;
+    let mut room = Room::new("Hosty", "free06", 5);
+    room.take(HOST, &[Pick::new("thq1", "race125p")]);
+    (room.riding, room.drop_in) = (true, true);
+    m.heard(Event::Room(room.clone()));
+    assert_eq!(m.pause_rows()[seats], "Seats: 5");
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.lobby.out.pop(), Some(Cmd::Seats(6)));
+    assert_eq!(m.pause_rows()[seats], "Seats: 5", "the room's count until the network says otherwise");
+    room.seats.resize(6, None);
+    m.heard(Event::Room(room));
+    assert_eq!(m.pause_rows()[seats], "Seats: 6");
+    assert_eq!(m.settings.lobby_seats, 6);
+    assert_eq!(m.screen(), Some(Screen::Pause));
 }
 
 fn taps_acts(menu: &mut Menu, reader: &mut Reader, controls: &[Control]) -> Vec<Act> {

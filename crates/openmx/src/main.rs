@@ -3064,6 +3064,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 for e in on.kept() {
                     front.menu.heard(e);
                 }
+                for c in std::mem::take(&mut front.menu.lobby.out) {
+                    on.command(c);
+                }
             }
             (on.dt(), true)
         } else {
