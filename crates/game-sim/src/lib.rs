@@ -711,6 +711,9 @@ pub mod ghost;
 /// nothing at all at their defaults.
 pub mod modifiers;
 
+/// Off the map: the bike's cannonball, the throw back toward the middle of a map a rider has left.
+pub mod off_map;
+
 #[cfg(test)]
 mod tests {
     use super::*;
