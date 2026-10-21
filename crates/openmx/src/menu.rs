@@ -37,6 +37,7 @@
 use crate::join::{self, Join, Opened, Outcome};
 use crate::roster::{self, Catalogue, Garage, Pick, Picks};
 use crate::split::{self, Split};
+use game_render::world::Graphics;
 use game_render::{Disc, Frame, Texture};
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use openmx_net::{Cmd, Event, HOST, Listing, Room};
@@ -193,6 +194,8 @@ pub struct Settings {
     /// The two volume sliders, `0..=VOLUME_MAX`.
     pub music_volume: u8,
     pub effects_volume: u8,
+    /// What the GPU draws of the track (V32): the whole map, or the original's fog and far clip.
+    pub graphics: Graphics,
 }
 
 /// The volume sliders' top step.
@@ -253,6 +256,7 @@ impl Default for Settings {
             music: "shuffle".into(),
             music_volume: 7,
             effects_volume: 8,
+            graphics: Graphics::default(),
         }
     }
 }
@@ -307,6 +311,7 @@ impl Settings {
                 "music" if !v.is_empty() => s.music = v.to_string(),
                 "music_volume" => s.music_volume = v.parse().map_or(s.music_volume, |n: u8| n.min(VOLUME_MAX)),
                 "effects_volume" => s.effects_volume = v.parse().map_or(s.effects_volume, |n: u8| n.min(VOLUME_MAX)),
+                "graphics" => s.graphics = Graphics::from_word(v).unwrap_or(s.graphics),
                 _ => {}
             }
         }
@@ -315,7 +320,7 @@ impl Settings {
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\n",
+            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\ngraphics = {}\n",
             self.name,
             self.overlay.word(),
             on_off(self.wrecks),
@@ -324,7 +329,8 @@ impl Settings {
             split_word(self.split),
             self.music,
             self.music_volume,
-            self.effects_volume
+            self.effects_volume,
+            self.graphics.word()
         )
     }
 
@@ -698,11 +704,13 @@ const MAIN_SETTINGS: usize = 4;
 /// machine a switch would go to.
 const PAUSE: [&str; 6] = ["Resume", "Restart", "Switch To Machine", "Settings", "Main Menu", "Quit"];
 const PAUSE_SWITCH: usize = 2;
-const SETTINGS_ROWS: usize = 7;
+const SETTINGS_ROWS: usize = 8;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
 const SETTINGS_MUSIC_VOLUME: usize = 5;
 const SETTINGS_EFFECTS_VOLUME: usize = 6;
+/// The graphics row (V32): the whole map or the original's fog.
+const SETTINGS_GRAPHICS: usize = 7;
 const CONTROLS_ROWS: usize = 1 + LAYOUT_ROWS;
 
 /// The on-screen keyboard: opentennis's four rows of ten, then a row of four commands.
@@ -1492,6 +1500,13 @@ impl Menu {
                                 (_, true) => (*v + 1).min(VOLUME_MAX),
                                 _ => (*v + 1) % (VOLUME_MAX + 1),
                             };
+                            self.changed = true;
+                        }
+                        SETTINGS_GRAPHICS => {
+                            let all = Graphics::ALL;
+                            let i = all.iter().position(|g| *g == self.settings.graphics).unwrap_or(0);
+                            let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
+                            self.settings.graphics = all[i];
                             self.changed = true;
                         }
                         _ => {}
@@ -2296,6 +2311,7 @@ impl Art {
                         format!("Music  {}", menu.music_label()),
                         format!("Music volume  {}", menu.settings.music_volume),
                         format!("Effects volume  {}", menu.settings.effects_volume),
+                        format!("Graphics  {}", menu.settings.graphics.label()),
                     ],
                     _ => std::iter::once(format!("Original throttle  {}", menu.controls.throttle.label()))
                         .chain(

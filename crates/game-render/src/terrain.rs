@@ -334,6 +334,168 @@ pub fn draw_terrain(frame: &mut Frame, terrain: &Terrain, camera: &Camera, light
     drawn
 }
 
+// ---- the ground's level of detail (V32) -----------------------------------------------------------
+//
+// With no fog the whole field is in view, a million cells of it on a freeride track and four times
+// that in a four-way split, so the GPU draws the field in square chunks and each chunk at a level of
+// detail: level `l` keeps every `2^l`-th corner of the chunk's grid, split two triangles a quad the
+// way the full grid is. A chunk's level is the coarsest whose worst height error, seen from the
+// camera, is under a pixel ([`lod_level`]), which is what keeps a change of level from being seen.
+// Two neighbours may differ by one level at most ([`lod_balance`]), and the finer one bends its edge
+// onto the coarser one's ([`lod_indices`]), so the two share every edge and leave no crack.
+
+/// A chunk's sides, as [`lod_indices`]'s `coarser` lists them: the row at the chunk's first `z`, the
+/// column at its last `x`, the row at its last `z` and the column at its first `x`.
+pub const SIDE_Z0: usize = 0;
+pub const SIDE_X1: usize = 1;
+pub const SIDE_Z1: usize = 2;
+pub const SIDE_X0: usize = 3;
+
+/// The coarsest level a chunk `cells` cells a side has: one quad.
+pub fn lod_levels(cells: u32) -> u32 {
+    cells.max(1).trailing_zeros()
+}
+
+/// A chunk's triangles at `level`, as indices into its `(cells + 1)²` corners, row by row along `x`.
+///
+/// `coarser[side]` says that the neighbour across that side is drawn one level coarser: every other
+/// corner of that edge is then moved onto the one before it, so the edge is the neighbour's own
+/// segments, and the triangles that collapse doing so are left out. `cells` is a power of two.
+pub fn lod_indices(cells: u32, level: u32, coarser: [bool; 4]) -> Vec<u32> {
+    lod_indices_where(cells, level, coarser, |_, _| true)
+}
+
+/// [`lod_indices`] for a chunk with holes in it: only the quads whose first corner, `(x, z)` of the
+/// grid, `keep` says yes to.
+pub fn lod_indices_where(cells: u32, level: u32, coarser: [bool; 4], keep: impl Fn(u32, u32) -> bool) -> Vec<u32> {
+    let step = 1u32 << level.min(lod_levels(cells));
+    // A chunk drawn as one quad has nothing coarser beside it.
+    let coarser = if step >= cells { [false; 4] } else { coarser };
+    let row = cells + 1;
+    let corner = |i: u32, j: u32| {
+        let (mut i, mut j) = (i, j);
+        // Odd along a coarser side: onto the even corner before it.
+        if (j == 0 && coarser[SIDE_Z0]) || (j == cells && coarser[SIDE_Z1]) {
+            if (i / step) % 2 == 1 {
+                i -= step;
+            }
+        }
+        if (i == 0 && coarser[SIDE_X0]) || (i == cells && coarser[SIDE_X1]) {
+            if (j / step) % 2 == 1 {
+                j -= step;
+            }
+        }
+        j * row + i
+    };
+    let mut out = Vec::with_capacity(((cells / step) * (cells / step) * 6) as usize);
+    for j in (0..cells).step_by(step as usize) {
+        for i in (0..cells).step_by(step as usize) {
+            if !keep(i, j) {
+                continue;
+            }
+            let (a, b, c, d) = (corner(i, j), corner(i + step, j), corner(i + step, j + step), corner(i, j + step));
+            for t in [[a, b, c], [a, c, d]] {
+                if t[0] != t[1] && t[1] != t[2] && t[0] != t[2] {
+                    out.extend(t);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How far, in height, each level of a chunk strays from its full grid: for every level, the most any
+/// corner of the full grid lies above or below that level's triangles. `heights` is the chunk's
+/// `(cells + 1)²` corners, row by row along `x`. Never smaller than a finer level's.
+pub fn lod_errors(heights: &[f32], cells: u32) -> Vec<f32> {
+    let row = (cells + 1) as usize;
+    let h = |i: u32, j: u32| heights[j as usize * row + i as usize];
+    let mut out: Vec<f32> = Vec::new();
+    for level in 0..=lod_levels(cells) {
+        let step = 1u32 << level;
+        let mut worst = out.last().copied().unwrap_or(0.0);
+        for j0 in (0..cells).step_by(step as usize) {
+            for i0 in (0..cells).step_by(step as usize) {
+                let (a, b, c, d) = (h(i0, j0), h(i0 + step, j0), h(i0 + step, j0 + step), h(i0, j0 + step));
+                for dj in 0..=step {
+                    for di in 0..=step {
+                        let (u, v) = (di as f32 / step as f32, dj as f32 / step as f32);
+                        // The split `lod_indices` makes: (0,0) (1,0) (1,1) below the diagonal, (0,0)
+                        // (1,1) (0,1) above it.
+                        let flat = if u >= v { a + (b - a) * u + (c - b) * v } else { a + (c - d) * u + (d - a) * v };
+                        worst = worst.max((h(i0 + di, j0 + dj) - flat).abs());
+                    }
+                }
+            }
+        }
+        out.push(worst);
+    }
+    out
+}
+
+/// The coarsest level whose error, `distance` away through a lens of `focal` pixels, is at most
+/// `pixels` pixels on screen. Level 0 when the camera is inside the chunk's sphere.
+pub fn lod_level(errors: &[f32], distance: f32, focal: f32, pixels: f32) -> u32 {
+    if distance <= 0.0 {
+        return 0;
+    }
+    let mut level = 0;
+    for (l, e) in errors.iter().enumerate() {
+        if e * focal <= pixels * distance {
+            level = l as u32;
+        } else {
+            break;
+        }
+    }
+    level
+}
+
+/// Make the levels of a grid of chunks, `across` by `along`, differ by at most one between any two
+/// side neighbours, by making the coarser of a pair finer — never coarser, so no chunk's error grows.
+pub fn lod_balance(levels: &mut [u32], across: usize, along: usize) {
+    loop {
+        let mut moved = false;
+        for z in 0..along {
+            for x in 0..across {
+                let here = z * across + x;
+                let mut cap = u32::MAX;
+                if x > 0 {
+                    cap = cap.min(levels[here - 1] + 1);
+                }
+                if x + 1 < across {
+                    cap = cap.min(levels[here + 1] + 1);
+                }
+                if z > 0 {
+                    cap = cap.min(levels[here - across] + 1);
+                }
+                if z + 1 < along {
+                    cap = cap.min(levels[here + across] + 1);
+                }
+                if levels[here] > cap {
+                    levels[here] = cap;
+                    moved = true;
+                }
+            }
+        }
+        if !moved {
+            return;
+        }
+    }
+}
+
+/// Which of a chunk's sides border a coarser neighbour, for [`lod_indices`]: `levels` as
+/// [`lod_balance`] left it.
+pub fn lod_coarser(levels: &[u32], across: usize, along: usize, x: usize, z: usize) -> [bool; 4] {
+    let here = levels[z * across + x];
+    let at = |x: usize, z: usize| levels[z * across + x] > here;
+    [
+        z > 0 && at(x, z - 1),
+        x + 1 < across && at(x + 1, z),
+        z + 1 < along && at(x, z + 1),
+        x > 0 && at(x - 1, z),
+    ]
+}
+
 /// A number from the file, little-endian like the machine that wrote it.
 fn le32(d: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
@@ -426,5 +588,128 @@ mod tests {
         // The props' own origins are a foot and a half up; the start line is what pins the ground.
         assert!((t.base - base).abs() < 1e-2, "base {}", t.base);
         assert!((t.height_at(6.0, 6.0) - scene.start.y).abs() < 1e-2);
+    }
+
+    /// The corners `lod_indices` uses, as (x, z) of the grid.
+    fn grid_at(index: u32, cells: u32) -> (i64, i64) {
+        ((index % (cells + 1)) as i64, (index / (cells + 1)) as i64)
+    }
+
+    /// Twice the signed area, across x and z, of each triangle.
+    fn areas(indices: &[u32], cells: u32) -> Vec<i64> {
+        indices
+            .chunks(3)
+            .map(|t| {
+                let [a, b, c] = [t[0], t[1], t[2]].map(|i| grid_at(i, cells));
+                (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+            })
+            .collect()
+    }
+
+    /// The segments of a side of the chunk that only one triangle has: what a neighbour must match.
+    fn open_edges(indices: &[u32], cells: u32, on_side: impl Fn((i64, i64)) -> bool) -> Vec<((i64, i64), (i64, i64))> {
+        let mut count: std::collections::HashMap<((i64, i64), (i64, i64)), u32> = Default::default();
+        for t in indices.chunks(3) {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let (a, b) = (grid_at(a, cells), grid_at(b, cells));
+                *count.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let mut out: Vec<_> = count.into_iter().filter(|(e, n)| *n == 1 && on_side(e.0) && on_side(e.1)).map(|(e, _)| e).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn every_level_and_stitch_tiles_the_chunk_with_no_gap_or_fold() {
+        let cells = 32;
+        assert_eq!(lod_levels(cells), 5);
+        assert_eq!(lod_indices(cells, 0, [false; 4]).len(), 32 * 32 * 6);
+        assert_eq!(lod_indices(cells, 5, [false; 4]).len(), 6);
+        for level in 0..=lod_levels(cells) {
+            for mask in 0..16u32 {
+                let coarser = [mask & 1 != 0, mask & 2 != 0, mask & 4 != 0, mask & 8 != 0];
+                let tris = lod_indices(cells, level, coarser);
+                let a = areas(&tris, cells);
+                // Every triangle wound the same way and none folded over, and together they cover the
+                // chunk exactly: nothing missing, nothing twice.
+                assert!(a.iter().all(|&a| a > 0), "level {level} mask {mask}: a folded or empty triangle");
+                assert_eq!(a.iter().sum::<i64>(), 2 * (cells * cells) as i64, "level {level} mask {mask}");
+            }
+        }
+    }
+
+    #[test]
+    fn neighbouring_chunks_share_their_edges() {
+        let cells = 16;
+        for level in 0..lod_levels(cells) {
+            // A finer chunk with a coarser one across its last x, both ways round of each side.
+            for (side, mine, theirs) in [
+                (SIDE_X1, (|p: (i64, i64)| p.0 == 16) as fn((i64, i64)) -> bool, (|p: (i64, i64)| p.0 == 0) as fn((i64, i64)) -> bool),
+                (SIDE_Z1, |p: (i64, i64)| p.1 == 16, |p: (i64, i64)| p.1 == 0),
+            ] {
+                let mut coarser = [false; 4];
+                coarser[side] = true;
+                let fine = open_edges(&lod_indices(cells, level, coarser), cells, mine);
+                let coarse = open_edges(&lod_indices(cells, level + 1, [false; 4]), cells, theirs);
+                // The same segments, the one chunk's side moved onto the other's.
+                let along = |e: &((i64, i64), (i64, i64))| if side == SIDE_X1 { (e.0.1, e.1.1) } else { (e.0.0, e.1.0) };
+                let fine: Vec<_> = fine.iter().map(along).collect();
+                let coarse: Vec<_> = coarse.iter().map(along).collect();
+                assert_eq!(fine, coarse, "level {level} side {side}");
+                assert_eq!(fine.len(), (cells >> (level + 1)) as usize);
+                // And with no stitch the finer side has twice the segments: the crack the stitch closes.
+                let open = open_edges(&lod_indices(cells, level, [false; 4]), cells, mine);
+                assert_eq!(open.len(), 2 * coarse.len());
+            }
+        }
+    }
+
+    #[test]
+    fn the_level_gets_coarser_with_distance() {
+        // A bumpy chunk: every other corner a foot up.
+        let cells = 16;
+        let heights: Vec<f32> = (0..17 * 17).map(|k| if (k % 17 + k / 17) % 2 == 1 { 1.0 } else { 0.0 }).collect();
+        let errors = lod_errors(&heights, cells);
+        assert_eq!(errors.len(), 5);
+        assert_eq!(errors[0], 0.0);
+        assert!(errors.windows(2).all(|w| w[0] <= w[1]), "{errors:?}");
+        assert!(errors[1] > 0.0);
+        let focal = 1000.0;
+        let mut last = 0;
+        for d in [0.0, 10.0, 100.0, 1000.0, 2000.0, 10_000.0] {
+            let l = lod_level(&errors, d, focal, 1.0);
+            assert!(l >= last, "{d}: {l} after {last}");
+            last = l;
+        }
+        assert_eq!(lod_level(&errors, 0.0, focal, 1.0), 0);
+        assert_eq!(lod_level(&errors, 10.0, focal, 1.0), 0);
+        // A foot of error is under a pixel past a thousand feet through a 1000-pixel lens.
+        assert_eq!(lod_level(&errors, 2000.0, focal, 1.0), 4);
+        // Flat ground is one quad wherever it is.
+        let flat = lod_errors(&vec![5.0; 17 * 17], cells);
+        assert_eq!(lod_level(&flat, 1.0, focal, 1.0), 4);
+    }
+
+    #[test]
+    fn balanced_neighbours_differ_by_one_at_most() {
+        let (across, along) = (5, 4);
+        let mut levels = vec![5; across * along];
+        levels[2 * across + 2] = 0;
+        lod_balance(&mut levels, across, along);
+        for z in 0..along {
+            for x in 0..across {
+                let l = levels[z * across + x];
+                if x + 1 < across {
+                    assert!(l.abs_diff(levels[z * across + x + 1]) <= 1);
+                }
+                if z + 1 < along {
+                    assert!(l.abs_diff(levels[(z + 1) * across + x]) <= 1);
+                }
+            }
+        }
+        assert_eq!(levels[2 * across + 2], 0);
+        assert_eq!(levels[2 * across + 3], 1);
+        assert_eq!(lod_coarser(&levels, across, along, 2, 2), [true; 4]);
     }
 }
