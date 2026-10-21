@@ -117,6 +117,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     rider.ragdoll_kit = here.ragdoll_kit.clone();
     rider.skeleton = here.skeleton.clone();
     rider.body_numbers = here.body_numbers;
+    rider.edge_armed = here.edge_armed;
     if others_riders.len() != sim.others.len() {
         return Err(format!("{} players in the state, {} here", 1 + others_riders.len(), sim.players()));
     }
@@ -128,6 +129,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.ragdoll_kit = p.rider.ragdoll_kit.clone();
         r.skeleton = p.rider.skeleton.clone();
         r.body_numbers = p.rider.body_numbers;
+        r.edge_armed = p.rider.edge_armed;
         p.rider = r;
     }
     *sim = Sim {
@@ -364,7 +366,7 @@ use crate::rider::Rider;
 
 impl Wire for Rider {
     /// The rider's disc-read constants (the stunt set, the clip table, the wreck files and the body's
-    /// numbers) are not sent: [`decode`] puts this machine's own back.
+    /// numbers) and the map edge's arm are not sent: [`decode`] puts this machine's own back.
     fn put(&self, out: &mut Vec<u8>) {
         let Rider {
             ride,
@@ -391,6 +393,7 @@ impl Wire for Rider {
             flight,
             airborne,
             ghost,
+            edge_armed: _,
         } = self;
         ride.put(out);
         tricks.put(out);
@@ -437,6 +440,7 @@ impl Wire for Rider {
             flight: Wire::take(r)?,
             airborne: Wire::take(r)?,
             ghost: Wire::take(r)?,
+            edge_armed: false,
         })
     }
 }
