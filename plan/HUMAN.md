@@ -56,7 +56,7 @@ goes through a menu.
       then `sudo chmod -R a+rX /opt/ghidra/Ghidra/Extensions/ghidra-emotionengine-reloaded` — the sleigh
       run writes the `.sla` root-readable-only, so without the chmod it fails identically.
 
-- [ ] **Give the kit's pad back its `/dev/uinput`.** Since the 2026-10-19 reboot `/dev/uinput` is
+- [x] **Give the kit's pad back its `/dev/uinput`.** Done by the user 2026-10-20 (`getfacl /dev/uinput` shows `user:rycs:rw-`): `./kit pad` can drive the original again, curves and all. Since the 2026-10-19 reboot `/dev/uinput` is
       `crw------- root`, so `./kit pad` cannot open it and no agent can drive the game's pad. P21 worked
       round it with a generated `.p2m2` played over the accessibility bus, which only does straight
       lines. Fix (2 minutes, `docs/TROUBLESHOOTING.md`): `sudo setfacl -m u:$USER:rw /dev/uinput` for
@@ -200,11 +200,11 @@ Two things that bite:
       (the playable shell — a window and a real pad) behind them. It sets the order everything before
       them is done in, and it puts two things out of the way until it is done: opponent AI and the race
       activities (S12) and the front end (S9), both stretch.
-- [ ] **What has to be exact, and what only has to look right.** The default in `AGENT.md` is: simulation
+- [x] **What has to be exact, and what only has to look right.** Answered 2026-10-20: the bike is exact, bit for bit, as planned. The default in `AGENT.md` is: simulation
       exact, rendering by eye, front end free. That fits the goal above, so it stands unless you say
       otherwise — the thing worth confirming is whether you want the *bike's* arithmetic bit-exact (which
       is the plan, and is slow) or merely close (which is faster and will drift).
-- [ ] **How far past the bike to go** — one track and one bike riding correctly is the near goal; whether
+- [x] **How far past the bike to go** Answered 2026-10-20: all of it — every bike, machine and track ("we should get them all"). — one track and one bike riding correctly is the near goal; whether
       this becomes the whole game, a mod platform, or a research record changes which tasks are worth
       doing after that.
 - [x] **A bail the original does not have (S29).** Answered 2026-10-20: match the original — no bail; S29 closed. MX Unleashed has no bail: no wreck entry reads the pad,
