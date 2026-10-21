@@ -135,8 +135,11 @@ pub fn div(a: f32, b: f32) -> f32 {
 }
 
 /// `vsqrt` into `Q`: the square root of `|x|`, chopped.
+#[allow(clippy::float_arithmetic)] // the model itself; a 24-bit root squares exactly in f64
 pub fn sqrt(x: f32) -> f32 {
-    chop(crate::libm::sqrtf(f32::from_bits(vu(x).to_bits() & 0x7fff_ffff)) as f64)
+    let x = f32::from_bits(vu(x).to_bits() & 0x7fff_ffff);
+    let r = crate::libm::sqrtf(x); // nearest; step toward zero when it rounded up
+    daz(if (r as f64) * (r as f64) > x as f64 { f32::from_bits(r.to_bits() - 1) } else { r })
 }
 
 /// `vrsqrt` into `Q`: `a / sqrt(|b|)`, chopped.
