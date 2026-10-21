@@ -723,6 +723,9 @@ struct Args {
     /// `--graphics original|full` (V32): the original's fog and far clip, or the whole map with a
     /// haze; the front end's setting when not given. Only the GPU draws `full`.
     graphics: Option<Graphics>,
+    /// `--render-scale auto|F`: the fraction of the frame the GPU draws the 3D at (V30); `None` is
+    /// auto, picked from the frames' time in a window and whole offscreen.
+    render_scale: Option<f32>,
     /// The pad seat each player reads, the front end's local game's (P43): player i rides seat
     /// `pad_of[i]`'s controller. Empty is seat i for player i, which is every ride outside one.
     pad_of: Vec<usize>,
@@ -997,6 +1000,10 @@ fn front_end(args: Args) -> Result<(), String> {
     let mut shot = args.shot.clone();
     let started = Instant::now();
     let mut shown = 0u32;
+    // The menu last drawn and the frame size it was drawn at, while it is still on the screen.
+    let mut shown_look: Option<(menu::Menu, usize, usize)> = None;
+    // The menu as GPU sprites, and whether the window's renderer has the menu's pictures.
+    let (mut menu_sprites, mut menu_images) = (Vec::new(), false);
     // What the menu's frames cost before their sleep, for `--timings` (P47).
     let mut busy = Duration::ZERO;
     let mut escape = false;
@@ -1222,11 +1229,32 @@ fn front_end(args: Args) -> Result<(), String> {
             break;
         }
         if matches!(act, Act::Ride(_) | Act::Online) {
+            (shown_look, menu_images) = (None, false);
             continue;
         }
-        frame.color.fill(0);
-        shell.front.art.draw(&shell.front.menu, &mut frame);
-        window.present(&frame.color, frame.width, frame.height)?;
+        // On the GPU the menu is sprites over its pictures, uploaded once (V30); the CPU draws it
+        // for the X window, and for a shot.
+        let shooting = shot.is_some() && shown >= args.shot_frame;
+        let look = (shell.front.menu.look(), frame.width, frame.height);
+        if let Some(w) = window.gpu().filter(|_| !shooting) {
+            if !menu_images {
+                w.renderer.set_images(&shell.front.art.images());
+                menu_images = true;
+            }
+            menu_sprites.clear();
+            shell.front.art.sprites(&shell.front.menu, (frame.width, frame.height), 0, &mut menu_sprites);
+            w.draw(frame.width, frame.height, |r, t| r.draw_sprites(t, &menu_sprites))?;
+            shown_look = None;
+        } else if shown_look.as_ref() != Some(&look) {
+            // Drawn again only when it looks different (V30): at 4K a menu is most of a tenth of a
+            // second to draw and send.
+            frame.color.fill(0);
+            shell.front.art.draw(&shell.front.menu, &mut frame);
+            window.present(&frame.color, frame.width, frame.height)?;
+            shown_look = Some(look);
+        } else {
+            window.present_again(&frame.color, frame.width, frame.height)?;
+        }
         if let Some(path) = shot.take_if(|_| shown >= args.shot_frame) {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -2360,6 +2388,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The GPU's per-frame lists, kept to reuse their room: the poses, the overlay and its layers.
     let mut gpu_poses: Vec<Vec<M4>> = Vec::new();
     let mut gpu_patches = Vec::new();
+    let mut gpu_sprites = Vec::new();
+    // The render scale (V30): as asked, or picked from the frames' time against the display's refresh.
+    let refresh = window.as_mut().and_then(|w| w.gpu()).and_then(|w| w.refresh).unwrap_or(60.0);
+    let mut auto_scale = game_render::gpu::AutoScale::new(Duration::from_secs_f32(0.8 / refresh));
+    if let Some(r) = renderer_of(&mut offscreen, window) {
+        r.render_scale = args.render_scale.unwrap_or(1.0);
+        println!(
+            "render scale: {}",
+            match args.render_scale {
+                Some(f) => format!("{f}"),
+                None if offscreen.is_some() => "1 (auto, offscreen)".into(),
+                None => format!("auto, for {refresh:.0} Hz"),
+            }
+        );
+    }
     let mut gpu_layers: Vec<layer::Layer> = (0..=args.players).map(|_| layer::Layer::new()).collect();
 
     // ---- the loop ------------------------------------------------------------------------------
@@ -2396,6 +2439,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // up. Art that does not load stops the ride with the reason (V28) — it used to say so on stderr
     // and ride on with no HUD, which is how a HUD went missing with nobody told why.
     let hud_art = overlay::Art::load(&mut disc).map_err(|e| format!("the original's HUD: {e}"))?;
+    // The GPU draws it as sprites from its pictures, uploaded once (V30).
+    // The front end's after them, for the pause (V30), which is why the HUD's are numbered from 0.
+    let menu_base = hud_art.images().len();
+    if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
+        let mut images = hud_art.images();
+        if let Some(front) = &front {
+            images.extend(front.art.images());
+        }
+        r.set_images(&images);
+    }
     let radar_span = overlay::radar_span(ground.spacing);
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut graphics = args.graphics.unwrap_or_default();
@@ -3040,6 +3093,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The overlay first: each view's HUD, and the pause over the whole frame.
             let draw_at = Instant::now();
             gpu_patches.clear();
+            gpu_sprites.clear();
             for (v, at) in rects.iter().enumerate().take(world.seats.len()) {
                 let (seat, rig) = (&world.seats[v], &mut rigs[v]);
                 let bike_up = seat.garage.up == Kind::Bike;
@@ -3060,20 +3114,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         rig.odometer.step([b.x(), b.y(), b.z()]);
                     }
                     let (window, gauges) = ((frame.width, frame.height), gauges(seat, rig));
-                    let draw = |f: &mut Frame| {
-                        art.draw(f, window, &ridden, v, radar_span, &gauges);
-                    };
-                    gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
+                    art.sprites(&mut gpu_sprites, (at.x, at.y, at.w, at.h), window, &ridden, v, radar_span, &gauges);
                 }
             }
             if let Some(front) = &front
                 && front.menu.screen().is_some()
             {
-                let draw = |f: &mut Frame| front.art.draw(&front.menu, f);
-                // Laid over the views' HUDs rather than written over them (V28).
-                if let Some(menu) = gpu_layers[args.players].patch(frame.width, frame.height, (0, 0), draw) {
-                    gpu_patches.push(layer::over(&gpu_patches, menu));
-                }
+                // As sprites (V30), after the HUDs' and so over them; the patches go under both.
+                front.art.sprites(&front.menu, (frame.width, frame.height), menu_base, &mut gpu_sprites);
             }
             perf.add(Stage::Draw, draw_at.elapsed());
 
@@ -3136,7 +3184,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             perf.lap(Stage::Scene, scene_at, spent);
 
             let draw_at = Instant::now();
-            let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, light: &light };
+            let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, sprites: &gpu_sprites, light: &light };
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
@@ -3160,8 +3208,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
                 (None, Some(w)) => {
                     w.renderer.set_graphics(graphics);
+                    let spent = Instant::now();
                     let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
                     waited = w.waited;
+                    if args.render_scale.is_none() {
+                        let was = w.renderer.render_scale;
+                        w.renderer.render_scale = auto_scale.frame(spent.elapsed());
+                        if w.renderer.render_scale != was {
+                            println!("render scale: {} (auto)", w.renderer.render_scale);
+                        }
+                    }
                     if shooting {
                         let t = w.renderer.offscreen(fw, fh);
                         let view = t.create_view(&Default::default());
@@ -3796,6 +3852,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         fps: false,
         renderer: Backend::default(),
         graphics: None,
+        render_scale: None,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(a) = argv.next() {
@@ -3876,6 +3933,18 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.graphics = Some(graphics);
             }
             "--renderer" => args.renderer = Backend::parse(&next("gpu or software")?)?,
+            "--render-scale" => {
+                let v = next("auto, or a fraction of the frame like 0.75")?;
+                args.render_scale = match v.as_str() {
+                    "auto" => None,
+                    _ => Some(
+                        v.parse::<f32>()
+                            .ok()
+                            .filter(|f| (game_render::gpu::MIN_SCALE..=1.0).contains(f))
+                            .ok_or_else(|| format!("--render-scale: auto, or a fraction from {} to 1, not {v:?}", game_render::gpu::MIN_SCALE))?,
+                    ),
+                };
+            }
             "--camera" => args.camera = next("a camera preset's name, like \"Freestyle Cam\"")?,
             "--moment" => {
                 let file: std::path::PathBuf = next("a moment file")?.into();
@@ -4029,6 +4098,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
                             [--biplane-controls new|original|new,original,...]\n\
                             [--bindings FILE] [--renderer gpu|software] [--graphics full|original] [--fps]\n\
+                            [--render-scale auto|0.5..1]\n\
                             [--no-sound]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
@@ -4082,7 +4152,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      the window is resized, wider or taller as the original's own 16:9 mode\n\
                      would draw it; --aspect 4:3 draws the largest 4:3 frame inside it instead,\n\
                      with bars. --size draws a fixed frame (640x448 is the PS2's), and --scale\n\
-                     draws each frame pixel N times across and down.\n\
+                     draws each frame pixel N times across and down. --render-scale draws the\n\
+                     3D at a fraction of the frame and stretches it over, the HUD and menus\n\
+                     still sharp; auto, the default, lowers it while the GPU misses the\n\
+                     display's refresh and raises it again when there is room.\n\
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
                      rider, tumbles the bike and puts you back on it); --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\

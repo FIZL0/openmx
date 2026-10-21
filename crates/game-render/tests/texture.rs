@@ -204,7 +204,7 @@ fn hard(scene: &Scene, assets: &Assets, camera: &Camera) -> Option<Vec<u8>> {
     gpu.render(
         &Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 },
         assets,
-        &Scene3 { views: &views, poses: &[], overlay: &[], light: &light },
+        &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light },
     );
     Some(gpu.read(&texture))
 }

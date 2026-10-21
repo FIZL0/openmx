@@ -38,6 +38,7 @@ use crate::join::{self, Join, Opened, Outcome};
 use crate::roster::{self, Catalogue, Garage, Pick, Picks};
 use crate::split::{self, Split};
 use game_render::world::Graphics;
+use game_render::gpu::{Shape, Sprite, clamp_of};
 use game_render::{Disc, Frame, Texture};
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use openmx_net::{Cmd, Event, HOST, Listing, Room};
@@ -1190,6 +1191,20 @@ impl Menu {
         self.stack.last().copied()
     }
 
+    /// The menu as [`Art::draw`] shows it (V30): itself, but with `tick` only as far as the screen
+    /// reads it — the splash's prompt breathes each frame, the track stills turn every
+    /// [`STILL_FRAMES`], the rest stand still — so two equal looks draw the same picture, and a menu
+    /// standing still is drawn once and kept.
+    pub fn look(&self) -> Menu {
+        let mut look = self.clone();
+        look.tick = match self.screen() {
+            Some(Screen::Splash) => self.tick,
+            Some(Screen::Tracks) => self.tick / STILL_FRAMES,
+            _ => 0,
+        };
+        look
+    }
+
     /// Whether a ride is running with nothing over it.
     pub fn riding(&self) -> bool {
         self.stack.is_empty()
@@ -2283,11 +2298,36 @@ impl Art {
         self.paint(menu, frame)
     }
 
+    /// Every picture [`Art::sprites`] counts into, in its order: the textures by name, the fonts'
+    /// atlases, the stills. The GPU takes them once ([`game_render::gpu::Renderer::set_images`]).
+    pub fn images(&self) -> Vec<&Texture> {
+        let mut names: Vec<&&str> = self.textures.keys().collect();
+        names.sort();
+        let mut all: Vec<&Texture> = names.into_iter().map(|n| &self.textures[*n]).collect();
+        all.extend([Face::Item, Face::Chosen, Face::Title, Face::Small].iter().filter_map(|f| self.fonts.get(f)).map(|f| &f.atlas));
+        all.extend(self.stills.iter().flatten());
+        all
+    }
+
+    /// [`Art::draw`] as the GPU draws it (V30): the menu's screen over a `size` frame as sprites into
+    /// `out`, whose pictures are [`Art::images`] counted from `base`. The same layout and the same
+    /// pictures; nothing is drawn on the CPU, so a 4K menu costs what a small one does.
+    pub fn sprites(&self, menu: &Menu, size: (usize, usize), base: usize, out: &mut Vec<Sprite>) {
+        let mut hollow = Frame { width: size.0, height: size.1, color: Vec::new(), depth: Vec::new() };
+        let images = self.images().into_iter().map(|t| t as *const Texture).collect();
+        self.paint_with(menu, &mut hollow, Some(SpriteInk { out, base, images }));
+    }
+
     fn paint(&self, menu: &Menu, frame: &mut Frame) -> Vec<Part> {
+        self.paint_with(menu, frame, None)
+    }
+
+    fn paint_with<'a>(&'a self, menu: &Menu, frame: &'a mut Frame, ink: Option<SpriteInk<'a>>) -> Vec<Part> {
         let Some(screen) = menu.screen() else {
             return Vec::new();
         };
         let mut p = Painter::new(self, frame);
+        p.sprites = ink;
         match screen {
             Screen::Pause => p.fill(p.whole(), [0, 0, 0, 140]),
             Screen::Tracks | Screen::Splash => {}
@@ -2438,13 +2478,22 @@ struct Painter<'a> {
     /// Where the layout's origin sits for the part being drawn, by its [`Anchor`].
     at: (f32, f32),
     parts: Vec<Part>,
+    /// Sprites to make instead of pixels (V30); the frame is then only its size.
+    sprites: Option<SpriteInk<'a>>,
+}
+
+/// Where a [`Painter`] puts its sprites, and the pictures they count into ([`Art::images`]).
+struct SpriteInk<'a> {
+    out: &'a mut Vec<Sprite>,
+    base: usize,
+    images: Vec<*const Texture>,
 }
 
 impl<'a> Painter<'a> {
     fn new(art: &'a Art, frame: &'a mut Frame) -> Painter<'a> {
         let (w, h) = (frame.width.max(1) as f32, frame.height.max(1) as f32);
         let s = (w / LAYOUT.0).min(h / LAYOUT.1);
-        Painter { art, frame, s, view: (w / s, h / s), at: (0.0, 0.0), parts: Vec::new() }
+        Painter { art, frame, s, view: (w / s, h / s), at: (0.0, 0.0), parts: Vec::new(), sprites: None }
     }
 
     /// Count the layout's numbers from `a` from here on.
@@ -2479,9 +2528,42 @@ impl<'a> Painter<'a> {
         let p = self.px(r);
         let (x0, x1) = span(p.x, p.x + p.w, self.frame.width);
         let (y0, y1) = span(p.y, p.y + p.h, self.frame.height);
+        if let Some(ink) = &mut self.sprites {
+            if x0 < x1 && y0 < y1 {
+                let [x0, x1, y0, y1] = [x0, x1, y0, y1].map(|n| n as f32);
+                ink.out.push(Sprite {
+                    corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                    uv: [[0.0; 2]; 4],
+                    local: [[0.0; 2]; 4],
+                    clamp: [0.0; 4],
+                    image: None,
+                    tint: colour,
+                    shape: Shape::Plain,
+                });
+            }
+            return;
+        }
+        // What `blend` makes of each byte, looked up a row at a time rather than worked out a pixel at
+        // a time (V30): a dimmed or black 4K screen was a fifth of a second of this.
+        let a = colour[3] as u32;
+        let lut: [[u8; 256]; 3] =
+            std::array::from_fn(|i| std::array::from_fn(|d| ((colour[i] as u32 * a + d as u32 * (255 - a)) / 255) as u8));
+        let width = self.frame.width;
         for y in y0..y1 {
-            for x in x0..x1 {
-                blend(self.frame, x, y, colour);
+            let row = &mut self.frame.color[(y * width + x0) * 3..(y * width + x1) * 3];
+            if a == 255 && !row.is_empty() {
+                // Opaque: the colour, doubled along the row.
+                row[..3].copy_from_slice(&colour[..3]);
+                let mut done = 3;
+                while done < row.len() {
+                    let n = done.min(row.len() - done);
+                    row.copy_within(..n, done);
+                    done += n;
+                }
+                continue;
+            }
+            for px in row.chunks_exact_mut(3) {
+                px.copy_from_slice(&[lut[0][px[0] as usize], lut[1][px[1] as usize], lut[2][px[2] as usize]]);
             }
         }
     }
@@ -2506,6 +2588,29 @@ impl<'a> Painter<'a> {
         let (fy0, fy1) = (p.y, p.y + p.h);
         let (x0, x1) = span(fx0, fx1, self.frame.width);
         let (y0, y1) = span(fy0, fy1, self.frame.height);
+        if let Some(ink) = &mut self.sprites {
+            // The pixels the CPU would fill, read where it would read them: each corner's texel is
+            // the stretch at that pixel edge, so a pixel's centre reads what the CPU's does.
+            let Some(image) = ink.images.iter().position(|&i| std::ptr::eq(i, t)) else { return };
+            if x0 >= x1 || y0 >= y1 {
+                return;
+            }
+            let u = |x: usize| src[0] + (x as f32 - fx0) / (fx1 - fx0) * (src[2] - src[0]);
+            let v = |y: usize| src[1] + (y as f32 - fy0) / (fy1 - fy0) * (src[3] - src[1]);
+            let mut sprite = Sprite::image(
+                ink.base + image,
+                t,
+                [u(x0), v(y0), u(x1), v(y1)],
+                [x0, y0, x1, y1].map(|n| n as f32),
+                tint,
+            );
+            sprite.clamp = clamp_of(t, src);
+            if put as usize == add as fn(&mut [u8], [u8; 4]) as usize {
+                sprite.shape = Shape::Glow;
+            }
+            ink.out.push(sprite);
+            return;
+        }
         let width = self.frame.width;
         // Rows `from..` of the frame, starting at `rows`' first byte.
         let paint = |rows: &mut [u8], from: usize| {
@@ -2535,8 +2640,12 @@ impl<'a> Painter<'a> {
         );
         let mut blits = self.art.blits.lock().unwrap_or_else(|e| e.into_inner());
         if big {
-            if let Some(done) = blits.iter().find(|b| b.key == key && b.before[..] == rows[..]) {
-                rows.copy_from_slice(&done.after);
+            if let Some(at) = blits.iter().position(|b| b.key == key && b.before[..] == rows[..]) {
+                rows.copy_from_slice(&blits[at].after);
+                // Last out (V30): the splash's breathing prompt makes two new ones a frame, which
+                // otherwise pushed the background out every other frame.
+                let done = blits.remove(at);
+                blits.push(done);
                 return;
             }
         }

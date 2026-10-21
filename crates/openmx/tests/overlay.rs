@@ -393,6 +393,60 @@ fn the_views_draw_the_riders() {
     assert!(marked >= 4, "only {marked} marks were clear of the arrows to look at");
 }
 
+/// How far apart two RGB frames are: the mean difference per channel, and the share of pixels with a
+/// channel more than 48 off.
+fn apart(a: &[u8], b: &[u8]) -> (f64, f64) {
+    let sum: u64 = a.iter().zip(b).map(|(&x, &y)| x.abs_diff(y) as u64).sum();
+    let off = a.chunks(3).zip(b.chunks(3)).filter(|(x, y)| x.iter().zip(y.iter()).any(|(&p, &q)| p.abs_diff(q) > 48)).count();
+    (sum as f64 / a.len() as f64, off as f64 / (a.len() / 3) as f64)
+}
+
+/// V30: the GPU draws the HUD as sprites the way the CPU draws it — one player's dial, needle, score,
+/// odometer and preload, and four views' readouts and radars, each in its own corner of the window.
+/// The shapes' edges are smoothed by distance rather than by four samples, so a few edge pixels may
+/// part; the rest is the same picture.
+#[test]
+fn the_gpu_draws_the_hud_as_the_cpu_does() {
+    let Some(art) = art() else { return };
+    let mut gpu = match game_render::gpu::Renderer::headless() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    gpu.set_images(&art.images());
+    let tables = Arc::new(Tables::build());
+    let span = overlay::radar_span(SPACING);
+    let mut one = rider(&tables, [0.0, 0.0], [0.0, 1.0]);
+    ride(&mut one, 200, true, 0.0);
+    let solo = ridden(std::slice::from_ref(&one));
+    let four = ridden(&four_riders(&tables));
+    let gauges = overlay::Gauges { feet: 1234.0, bike: true, score: 4321, preload: 0.6 };
+    let (w, h) = (1280usize, 720usize);
+    let texture = gpu.offscreen(w as u32, h as u32);
+    let view = texture.create_view(&Default::default());
+    let target = game_render::gpu::Target { view: &view, size: (w as u32, h as u32), frame: [0, 0, w as u32, h as u32], scale: 1 };
+    for (riders, views) in [(&solo, vec![(0, 0, w, h)]), (&four, (0..4).map(|v| ((v % 2) * w / 2, (v / 2) * h / 2, w / 2, h / 2)).collect())] {
+        let mut frame = Frame::new(w, h, [0, 0, 0]);
+        let mut sprites = Vec::new();
+        for (v, &(x, y, vw, vh)) in views.iter().enumerate() {
+            let mut part = Frame::new(vw, vh, [0, 0, 0]);
+            art.draw(&mut part, (w, h), riders, v, span, &gauges);
+            for row in 0..vh {
+                frame.color[3 * ((y + row) * w + x)..][..3 * vw].copy_from_slice(&part.color[3 * row * vw..][..3 * vw]);
+            }
+            art.sprites(&mut sprites, (x, y, vw, vh), (w, h), riders, v, span, &gauges);
+        }
+        gpu.draw_sprites(&target, &sprites);
+        let got = gpu.read(&texture);
+        let (mean, off) = apart(&frame.color, &got);
+        eprintln!("{} view(s): {} sprites, {mean:.3} apart on average, {:.4}% of pixels off", views.len(), sprites.len(), off * 100.0);
+        assert!(sprites.len() > 10);
+        assert!(mean < 0.5 && off < 0.001, "{} view(s): {mean:.3} apart on average, {:.3}% of pixels off", views.len(), off * 100.0);
+    }
+}
+
 /// Any shape of window (V24): the parts keep their size and go to the corners.
 #[test]
 fn a_wide_window_puts_the_parts_in_its_corners() {
