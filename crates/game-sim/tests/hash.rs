@@ -464,7 +464,8 @@ fn the_size_of_the_state_type_is_pinned() {
     // is half as wide, and the leaf count below is what holds on every target.
     // 9472 since S53: the rider's ragdoll kit, the bones of a wreck and the wreck sounds' picks, which
     // the walk names under `ragdoll` and `wreck_sounds` only when the rider carries a kit.
+    // 9480 since S61: the kit's wreck table and a wreck's fade and touching, walked with the bones.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 9472, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 9480, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 835, "the walk's leaf count moved with it");
 }
