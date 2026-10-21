@@ -497,6 +497,11 @@ impl State for Sim {
             let ghosts: Vec<crate::ghost::Ghost> = (0..self.players()).map(|i| self.rider_of(i).ghost).collect();
             w.list("ghosts", &ghosts);
         }
+        // The session markers (P88), only once they have been touched, so every walk pinned on a
+        // state that never used them is what it was.
+        if !self.markers.fresh() {
+            w.field("markers", &self.markers);
+        }
     }
 }
 

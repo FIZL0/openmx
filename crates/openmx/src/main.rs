@@ -203,6 +203,7 @@ use game_sim::biplane::Area;
 use game_sim::camera::{Preset, Race, Ridden, Switches};
 use game_sim::flight::Flight;
 use game_sim::input::{Control, PADS, Report};
+use game_sim::markers::{self, Spot};
 use game_sim::phy::{self, Phy};
 use game_sim::replay::{Head, PadTape, Recorder, TickPhase};
 use game_sim::ride::{self, Controls};
@@ -371,8 +372,9 @@ struct Seat {
 }
 
 impl Seat {
-    /// One player's pass: the pad, then the bike.
-    fn pass(&mut self, dt: F, place: &mut dyn sim_world::World) {
+    /// One player's pass: the pad, then the bike, then the d-pad's markers (P88) — `me` is this
+    /// seat and `spots` where every seat's rider was before the pass.
+    fn pass(&mut self, dt: F, place: &mut dyn sim_world::World, me: usize, spots: &[Spot]) {
         // Nobody's hands on the bars: the pad is not polled either, so the input manager's timers
         // and held buttons are where the pull left them, and the ride goes on from there when the
         // pad comes back.
@@ -392,8 +394,31 @@ impl Seat {
         self.said = rider::Frame::default();
         if self.riding {
             self.said = self.garage.step(&mut self.sim, dt, &controls, place);
+            if self.garage.up == Kind::Bike
+                && let Some(did) = markers::frame(&mut self.sim, me, spots, &controls)
+            {
+                println!("marker: {}", marker_line(did));
+            }
         }
         self.hands = controls;
+    }
+}
+
+/// How see-through a placed marker's bike is drawn for its owner (P88): faint, a fifth of solid.
+const MARKER_ALPHA: f32 = 0.2;
+
+/// A marker's tick (P88) as the console says it.
+fn marker_line(did: markers::Did) -> String {
+    use markers::{Did, Pick};
+    let what = |p: Pick| match p {
+        Pick::Slot(s) => format!("slot {}", s + 1),
+        Pick::Player(p) => format!("P{}", p + 1),
+    };
+    match did {
+        Did::Stepped(p) => what(p),
+        Did::Placed(s) => format!("placed in slot {}", s + 1),
+        Did::Teleported(p) => format!("to {}", what(p)),
+        Did::Refused(p) => format!("nothing on {}", what(p)),
     }
 }
 
@@ -565,8 +590,9 @@ impl<P: sim_world::World> Game for World<P> {
         {
             tape.frame(dt, &self.seats[0].reports);
         }
-        for seat in &mut self.seats {
-            seat.pass(dt, &mut self.place);
+        let spots: Vec<Spot> = self.seats.iter().map(|s| Spot::of(&s.sim.rider)).collect();
+        for (me, seat) in self.seats.iter_mut().enumerate() {
+            seat.pass(dt, &mut self.place, me, &spots);
         }
         true
     }
@@ -2788,6 +2814,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // each view's camera and the plane.
     let mut before: Vec<Shown> = Vec::new();
     let mut before_cameras: Vec<Camera> = Vec::new();
+    // Each view's markers' slot display (P88).
+    let mut banners: Vec<hud::MarkerBanner> = Vec::new();
     let mut before_plane: Option<M4> = None;
     // What the last tick left for the picture: whether it simulated, and each player's ride for the
     // camera and the overlay.
@@ -3318,6 +3346,36 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // tick before the last to the last by how far the wall clock is past it. Render-side only:
         // nothing below writes the simulation.
         let blend = pace::Blend(pacer.blend(Instant::now()));
+        // The markers' slot display (P88), each view its own player's: the selection, the slots, the
+        // label and the hold, or `None` while it is down. Online the selection's players are the
+        // session's seats, by the lineup's names.
+        banners.resize_with(world.seats.len(), hud::MarkerBanner::default);
+        let (names, players, mine) = match &online {
+            Some(on) => {
+                let (players, me) = on.seat_of();
+                (on.names(), players, Some(me))
+            }
+            None => (Vec::new(), world.seats.len(), None),
+        };
+        let shown_markers: Vec<Option<(markers::Pick, [bool; markers::SLOTS], String, u32)>> = world
+            .seats
+            .iter()
+            .zip(banners.iter_mut())
+            .enumerate()
+            .map(|(v, (seat, banner))| {
+                if seat.garage.up != Kind::Bike || (mine.is_some() && v > 0) {
+                    return None;
+                }
+                let m = &seat.sim.markers;
+                let pick = m.pick(mine.unwrap_or(v), players);
+                let filled: [bool; markers::SLOTS] = std::array::from_fn(|s| m.holds(s));
+                let pad = seat.sim.input.pad(0);
+                let holding = if seat.riding { markers::holding(pad, seat.sim.table(), &seat.hands) } else { 0 };
+                banner
+                    .update(Instant::now(), pick, filled, holding)
+                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names), holding))
+            })
+            .collect();
         let cameras: Vec<Camera> = cameras
             .iter()
             .enumerate()
@@ -3344,11 +3402,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                     _ => None,
                 };
-                if rig.hud.on {
+                let banner = shown_markers.get(v).and_then(Option::as_ref);
+                if rig.hud.on || banner.is_some() {
                     let hud = &rig.hud;
-                    let draw = |f: &mut Frame| hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
+                    let draw = |f: &mut Frame| {
+                        hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
+                        if let Some((pick, filled, label, holding)) = banner {
+                            hud::draw_markers(f, *pick, *filled, label, *holding);
+                        }
+                    };
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
-                } else if overlay_mode == menu::Overlay::Original {
+                }
+                if !rig.hud.on && overlay_mode == menu::Overlay::Original {
                     let art = &hud_art;
                     // The original's own HUD (V26), as the software path draws it.
                     let b = ridden[v].target.body_point;
@@ -3428,11 +3493,39 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for (model, at) in &traffic_at {
                 actors.push(Actor { model: model.as_str(), at: *at, pose: None, lod_from: None, alpha: 1.0 });
             }
+            // A view's own player's markers (P88), faint bikes where each was put down: in that
+            // player's view and nobody else's, so a view with any has the shared list and them.
+            let marked: Vec<Vec<Actor>> = world
+                .seats
+                .iter()
+                .zip(&rigs)
+                .enumerate()
+                .map(|(v, (seat, rig))| {
+                    let local = online.is_none() || v == 0;
+                    let ghosts: Vec<Actor> = seat
+                        .sim
+                        .markers
+                        .slots
+                        .iter()
+                        .flatten()
+                        .filter(|_| local && seat.garage.up == Kind::Bike)
+                        .map(|ride| Actor { model: rig.bike_model.as_str(), at: chassis_at(ride), pose: None, lod_from: None, alpha: MARKER_ALPHA })
+                        .collect();
+                    if ghosts.is_empty() { Vec::new() } else { actors.iter().cloned().chain(ghosts).collect() }
+                })
+                .collect();
             let views: Vec<View> = rects
                 .iter()
                 .zip(&cameras)
                 .take(world.seats.len())
-                .map(|(at, camera)| View { rect: [at.x as u32, at.y as u32, at.w as u32, at.h as u32], camera, actors: &actors })
+                .enumerate()
+                .map(|(v, (at, camera))| {
+                    let actors = match marked.get(v) {
+                        Some(own) if !own.is_empty() => own,
+                        _ => &actors,
+                    };
+                    View { rect: [at.x as u32, at.y as u32, at.w as u32, at.h as u32], camera, actors }
+                })
                 .collect();
             perf.lap(Stage::Scene, scene_at, spent);
 
@@ -3633,6 +3726,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 _ => None,
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
+            if let Some(Some((pick, filled, label, holding))) = shown_markers.get(v) {
+                hud::draw_markers(target, *pick, *filled, label, *holding);
+            }
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
             if !rig.hud.on && overlay_mode == menu::Overlay::Original {
                 let art = &hud_art;

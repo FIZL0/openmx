@@ -481,7 +481,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // Still 10520 with S72's wreck page, which the walk names under `page` only while one is up.
     // 10544 since S70: the skeleton's drawn matrices from the last riding tick, which the walk leaves
     // out with the skeleton they come from; the bones a wreck poses from them are walked.
+    // 10592 since P88: the session markers, five boxed rides and the selection, walked under
+    // `markers` only once a session has touched them (tests/markers.rs in openmx).
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 10544, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 10592, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
