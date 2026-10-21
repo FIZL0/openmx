@@ -115,6 +115,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     rider.clips = here.clips;
     rider.wreckage = here.wreckage;
     rider.ragdoll_kit = here.ragdoll_kit.clone();
+    rider.skeleton = here.skeleton.clone();
     rider.body_numbers = here.body_numbers;
     if others_riders.len() != sim.others.len() {
         return Err(format!("{} players in the state, {} here", 1 + others_riders.len(), sim.players()));
@@ -125,6 +126,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.clips = p.rider.clips;
         r.wreckage = p.rider.wreckage;
         r.ragdoll_kit = p.rider.ragdoll_kit.clone();
+        r.skeleton = p.rider.skeleton.clone();
         r.body_numbers = p.rider.body_numbers;
         p.rider = r;
     }
@@ -377,6 +379,7 @@ impl Wire for Rider {
             crash,
             ragdoll_kit: _,
             ragdoll,
+            skeleton: _,
             wreck_sounds,
             animation,
             body,
@@ -422,6 +425,7 @@ impl Wire for Rider {
             crash: Wire::take(r)?,
             ragdoll_kit: None,
             ragdoll: Wire::take(r)?,
+            skeleton: None,
             wreck_sounds: Wire::take(r)?,
             animation: Wire::take(r)?,
             body: Wire::take(r)?,
