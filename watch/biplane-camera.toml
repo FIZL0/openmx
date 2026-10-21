@@ -1,0 +1,128 @@
+# biplane-camera.toml — the original's camera behind the human's biplane recording (V29): the plane,
+# the block the camera reads off it, the plane camera's own state and the viewport it writes.
+#
+# Run as watch/biplane.toml is (its C7 playback script), with this spec in place of that one:
+#   ./kit pcsx2 with -- bash research/journal/2026-10-21-v29-biplane-camera/play_camera.sh \
+#       PID context/recordings/biplane.p2m2 10971 1718 context/capture/v29/biplane-camera.csv
+#
+# Fixed addresses, measured on biplane.p2m2's state and nothing else (research/oracle.txt, V29): the
+# plane camera (the derived race camera loaded with BiplaneCPresets.ini, preset 0 "Flight Cam 1") is
+# the object at 0x947fd0, the bike's own at 0x946c80; both write the viewport 0x946910. The camera's
+# target block is the plane's +0x8e0. If `plane_type` is not 1, the list moved.
+
+[watch]
+name        = "biplane-camera"
+description = "the human flying the biplane on Free06: the plane, its camera block, the camera, the eye"
+every       = 1          # one row per tick
+frames      = 1718
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "plane_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "body_pos"               # body +0x60: the centre of gravity
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "plane_xform"            # +0x600: the drawn transform, row 3 the model origin
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x600"
+type = "mat4"
+
+[[field]]
+name = "speed"                  # +0x598 |velocity|
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x598"
+type = "f32"
+
+# the camera's target block, plane +0x8e0
+[[field]]
+name = "tgt_point"
+addr = "0xc45330"
+type = "f32x4"
+
+[[field]]
+name = "tgt_fwd"
+addr = "0xc45350"
+type = "f32x4"
+
+[[field]]
+name = "tgt_up"
+addr = "0xc45360"
+type = "f32x4"
+
+[[field]]
+name = "tgt_vel"
+addr = "0xc45370"
+type = "f32x4"
+
+[[field]]
+name = "tgt_tail"               # +0x80..+0x8c of the block: lean and what follows it
+addr = "0xc453a0"
+type = "f32x4"
+
+[[field]]
+name = "tgt_flag_speed"         # +0xb0 airborne flag (u32), +0xb4 speed
+addr = "0xc453d0"
+type = "f32x4"
+
+# the plane camera
+[[field]]
+name = "cam_dyp"                # +0xd0 distance, +0xd4 yaw, +0xd8 pitch, +0xdc fov
+addr = "0x9480a0"
+type = "f32x4"
+
+[[field]]
+name = "cam_preset"             # +0x158
+addr = "0x948128"
+type = "u32"
+
+[[field]]
+name = "cam_lift"               # +0x18c
+addr = "0x94815c"
+type = "f32"
+
+[[field]]
+name = "bike_cam_dyp"           # the bike camera's +0xd0..: which of the two is live
+addr = "0x946d50"
+type = "f32x4"
+
+# the viewport the camera writes: +0x140 eye, +0x150 / +0x160 its two axes, +0x170 fov
+[[field]]
+name = "vp_eye"
+addr = "0x946a50"
+type = "f32x4"
+
+[[field]]
+name = "vp_dir"
+addr = "0x946a60"
+type = "f32x4"
+
+[[field]]
+name = "vp_up"
+addr = "0x946a70"
+type = "f32x4"
+
+[[field]]
+name = "vp_fov"
+addr = "0x946a80"
+type = "f32"
+
+[[field]]
+name = "render_eye"             # the render camera's eye (V2)
+addr = "0x46a570"
+type = "f32x4"
