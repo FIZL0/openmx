@@ -54,12 +54,13 @@ use serde::{Deserialize, Serialize};
 
 use link::{Link, Msg};
 
-/// The local input delay, ticks.
-pub const DELAY: usize = 2;
+/// The local input delay, ticks: one 30 Hz tick (N6), the 33 ms opentennis's two 60 Hz ticks are.
+pub const DELAY: usize = 1;
 /// How many ticks a machine may run on guessed pads before it waits (ggrs' prediction window).
-/// opentennis's B197: 80 (1.3 s), so the others ride on through a peer's 1 s hitch instead of
-/// stalling (ggrs' input queue holds 128).
-pub const WINDOW: usize = 80;
+/// opentennis's B197: 80 of its 60 Hz ticks (1.3 s), so the others ride on through a peer's 1 s
+/// hitch instead of stalling; here 40 of the ride's 30 Hz ones, the same 1.3 s (ggrs' input queue
+/// holds 128).
+pub const WINDOW: usize = 40;
 /// Hashes are compared every this many ticks.
 pub const HASH_EVERY: u32 = 30;
 /// The most seats a ride has (P35's seats; one rider each).
@@ -106,8 +107,10 @@ pub trait Game {
     type State: Clone + 'static;
     fn save(&self) -> Self::State;
     fn restore(&mut self, state: &Self::State);
-    /// One tick, every seat's pad in seat order (a seat nobody sits in has [`Report::missing`]).
-    fn step(&mut self, pads: &[Report]);
+    /// Tick `tick` (the ride's first is 0), every seat's pad in seat order (a seat nobody sits in has
+    /// [`Report::missing`]). The tick's number is the session's, so a rollback's re-run of it is
+    /// handed the same one: the ride's frame length goes by it ([`rides::tick_dt`]).
+    fn step(&mut self, tick: usize, pads: &[Report]);
     /// The state in 64 bits, the same on every machine.
     fn hash(&self) -> u64;
     fn encode(&self) -> Option<Vec<u8>>;
@@ -306,9 +309,10 @@ impl<S: Clone + 'static> Netplay<S> {
         out
     }
 
-    /// One frame of real time (`dt` seconds, a 60th at full speed): ggrs' upkeep, the recovery's
-    /// clocks, a state taken from the host, and then this frame's ticks — none, one, or two to catch
-    /// up — on `local`, this machine's seats' pads in seat order. Re-runs happen inside.
+    /// One tick of real time (`dt` seconds, `pace::TICK` on schedule: the shell calls it once per
+    /// tick the ride's 30 Hz clock owes): ggrs' upkeep, the recovery's clocks, a state taken from the
+    /// host, and then this call's ticks — none, one, or two to catch up — on `local`, this machine's
+    /// seats' pads in seat order. Re-runs happen inside.
     pub fn frame<G: Game<State = S>>(&mut self, game: &mut G, local: &[Report], dt: f32) {
         self.poll();
         recover::tick(self, dt);

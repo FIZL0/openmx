@@ -54,6 +54,7 @@ pub struct Online {
     sims: Vec<Sim>,
     /// This machine's first seat: the one the shell draws and its pad rides.
     seat: usize,
+    /// The frame length of the last tick run.
     dt: F,
     last: Instant,
     /// The hands this machine's seat last rode with.
@@ -95,7 +96,7 @@ impl Online {
             sims: starts.to_vec(),
             poses: vec![None; lineup.seats.len()],
             seat,
-            dt: rides::steady_dt(),
+            dt: rides::tick_dt(0),
             last: Instant::now(),
             hands: Controls::default(),
             shown: String::new(),
@@ -118,7 +119,7 @@ impl Online {
             poses: vec![None; sims.len()],
             sims,
             seat,
-            dt: rides::steady_dt(),
+            dt: rides::tick_dt(0),
             last: Instant::now(),
             hands: Controls::default(),
             shown: String::new(),
@@ -194,10 +195,10 @@ impl Online {
     }
 
     /// How far the ride went, and a hash to hold up against the other machines': the state before
-    /// the last tick every machine has every pad for that is a multiple of ten seconds.
+    /// the last tick every machine has every pad for that is a multiple of ten seconds (300 ticks).
     pub fn summary(&self) -> String {
         let settled = self.net.confirmed().max(0) as usize;
-        let at = settled / 600 * 600;
+        let at = settled / 300 * 300;
         let hash = match self.net.hashes.get(at) {
             Some(h) if at > 0 => format!(", state before tick {at} {h:#018x}"),
             _ => String::new(),
@@ -212,7 +213,7 @@ impl Online {
         (&self.net.hashes[..n], self.net.desyncs.len())
     }
 
-    /// The frame length every tick online is.
+    /// The frame length of the last tick run online (the 30 Hz cap, once a second of the ride is in).
     pub fn dt(&self) -> F {
         self.dt
     }
@@ -265,9 +266,10 @@ impl Online {
                     hands = Some(*c);
                 }
             };
-            let mut game = Rides { sims: &mut self.sims, world: place, dt: self.dt, after: Some(&mut after) };
+            let mut game = Rides { sims: &mut self.sims, world: place, after: Some(&mut after) };
             self.net.frame(&mut game, &local, real);
         }
+        self.dt = rides::tick_dt(self.net.tick().saturating_sub(1));
         for (to, d) in self.net.outgoing() {
             self.send(&to, &d);
         }

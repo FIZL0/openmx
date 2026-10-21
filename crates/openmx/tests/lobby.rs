@@ -397,19 +397,19 @@ fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_ends_i
     let mut ho = online::Online::lobby(hn.clone(), &hroom, &hme, sims(&hroom)).unwrap();
     let mut go = online::Online::lobby(gn.clone(), &groom, &gme, sims(&groom)).unwrap();
     let (mut hw, mut gw) = (Flat::default(), Flat::default());
-    // Four seconds of riding at 60 Hz: the host on the gas, the guest leaning.
+    // Four seconds of riding at the ride's 30 Hz (N6): the host on the gas, the guest leaning.
     let gas = Report::from_buttons(game_sim::input::Control::Cross.mask());
     let mut lean = Report::idle();
     lean.set_axis(2, 0xe0);
-    for _ in 0..240 {
+    for _ in 0..120 {
         ho.frame(gas, &mut hw, None).unwrap();
         go.frame(lean, &mut gw, None).unwrap();
-        std::thread::sleep(Duration::from_millis(16));
+        std::thread::sleep(Duration::from_millis(33));
     }
     let ((ha, hd), (ga, gd)) = (ho.settled(), go.settled());
     let both = ha.len().min(ga.len());
     println!("settled: host {} guest {} ticks; {}", ha.len(), ga.len(), ho.summary());
-    assert!(both >= 120, "only {both} ticks settled on both in 4 s");
+    assert!(both >= 60, "only {both} ticks settled on both in 4 s");
     assert_eq!(ha[..both], ga[..both], "the two machines' rides parted");
     assert_eq!((hd, gd), (0, 0), "desyncs");
     // The guest leaves from the pause: the host's ride ends, and what ended it is kept for its menu.
@@ -420,7 +420,7 @@ fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_ends_i
         if let Err(why) = ho.frame(gas, &mut hw, None) {
             break why;
         }
-        std::thread::sleep(Duration::from_millis(16));
+        std::thread::sleep(Duration::from_millis(33));
     };
     println!("host's ride ended: {why}");
     for e in ho.kept() {

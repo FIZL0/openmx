@@ -1,6 +1,6 @@
 // The browser's online peer, run in node (crates/openmx/tests/netplay_browser.rs): the module and glue tools/web.sh
 // builds, the page's `Online` (crates/openmx/src/web.rs) and the same frame loop web/worker.js runs — join by ticket
-// through the relay, ready once seated, a frame every 60th of a second by the clock.
+// through the relay, ready once seated, a frame every tick of the ride's 30 Hz clock (N6).
 //
 //   node peer.mjs <pkg dir> <relay url> <ticket> <ticks>
 //
@@ -48,6 +48,6 @@ setInterval(() => {
     state(s);
     told = now;
   }
-}, 1000 / 60);
+}, 1001 / 30);
 process.stdin.on('end', () => process.exit(0));
 process.stdin.resume();

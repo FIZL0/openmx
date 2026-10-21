@@ -2602,15 +2602,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The disc reads, texture decodes and bytes read by the end of the first frame: none should
     // follow.
     let mut loaded: Option<(game_render::tally::Tally, Option<u64>)> = None;
-    // The ride's ticks on their own schedule (P52): the original's 30 fps frame, or online the
-    // session's 60 Hz tick (`net::rollback::gate` counts every call as one), whatever the picture's
-    // rate. Each pass of the loop either runs one tick the wall clock owes, or — owing none —
-    // draws, blended between the last two ticks.
-    let step_length = match online {
-        Some(_) => Duration::from_nanos(1_000_000_000 / 60),
-        None => pace::TICK,
-    };
-    let mut pacer = pace::Pacer::new(step_length, started).most(args.frames).until(args.seconds);
+    // The ride's ticks on their own schedule (P52): the original's 30 fps frame, online too (N6:
+    // `net::rollback::gate` counts every call as a tick of real time, and each tick's `dt` is the
+    // one this schedule gives offline), whatever the picture's rate. Each pass of the loop either
+    // runs one tick the wall clock owes, or — owing none — draws, blended between the last two ticks.
+    let mut pacer = pace::Pacer::new(pace::TICK, started).most(args.frames).until(args.seconds);
     // What the tick before the last one showed, for the picture to blend from: each seat's pose,
     // each view's camera and the plane.
     let mut before: Vec<Shown> = Vec::new();
