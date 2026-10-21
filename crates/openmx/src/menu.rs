@@ -650,7 +650,8 @@ pub enum Layout {
     /// R2 the gas, L2 the brake, Select the camera; Cross and Square kept free.
     #[default]
     New,
-    /// The original's: Cross the gas, Square the brake, L1 the camera.
+    /// The original's: its binding table exactly — Cross the gas, Square the brake, L1 the clutch,
+    /// Select the camera (P73).
     Original,
 }
 
