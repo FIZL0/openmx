@@ -62,6 +62,14 @@ pub struct Placement {
     pub up: V3,
 }
 
+/// The model a `SLT=` line names, as the original's text reader hands it on: that reader drops every
+/// space, tab and line break outside brackets and quotes before it splits a line at `=`, so free06's
+/// `Free06_Power Line_A` (its high-tension wires) and free09's `Large Egg` load `free06_powerline_a.psg`
+/// and `largeegg.psg`. Kept with the spaces, both were names no file on the disc has, and neither drew.
+pub fn slt_name(value: &str) -> String {
+    value.chars().filter(|c| !matches!(c, ' ' | '\t' | '\r' | '\n')).collect()
+}
+
 impl Placement {
     /// Model space to world space.
     pub fn transform(&self) -> M4 {
@@ -133,7 +141,7 @@ impl Scene {
             } else if lower.starts_with("model") {
                 if let Some(name) = s.get("SLT") {
                     models.push(Placement {
-                        model: name.to_string(),
+                        model: slt_name(name),
                         pos: vec_of(Some(s), "Position", v3(0.0, 0.0, 0.0)),
                         look: vec_of(Some(s), "LookVector", v3(0.0, 0.0, 1.0)),
                         up: vec_of(Some(s), "UpVector", v3(0.0, 1.0, 0.0)),
