@@ -396,6 +396,8 @@ impl Wire for Rider {
             ghost,
             edge_armed: _,
             page,
+            put_back,
+            ragdoll_shown: _,
         } = self;
         ride.put(out);
         tricks.put(out);
@@ -416,6 +418,7 @@ impl Wire for Rider {
         airborne.put(out);
         ghost.put(out);
         page.put(out);
+        put_back.put(out);
     }
     fn take(r: &mut Reader<'_>) -> Result<Self, String> {
         Ok(Rider {
@@ -445,12 +448,15 @@ impl Wire for Rider {
             ghost: Wire::take(r)?,
             edge_armed: false,
             page: Wire::take(r)?,
+            put_back: Wire::take(r)?,
+            ragdoll_shown: None,
         })
     }
 }
 
 wire!(crate::Input { buttons, stick });
 wire!(crate::ghost::Ghost { clock, alpha, on });
+wire!(crate::rider::PutBack { placed, filled, held, wreck });
 wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fade, touching });
 wire!(crate::ragdoll_body::Fade { length, left });
 wire!(crate::ragdoll::Ragdoll { records, bones, joints, collisions, world, holds, bike_box, throwing, launch, ignores_bike, entered, stiff, riding, off_bike, flung, settled, roll, pins, pull });
