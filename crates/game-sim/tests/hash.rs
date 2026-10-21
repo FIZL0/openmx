@@ -479,9 +479,11 @@ fn the_size_of_the_state_type_is_pinned() {
     // 10520 since P79: `Sim::bindings`, the controller preset's table, a constant of the ride like
     // `Sim::phy` that the walk leaves out (tests/presets.rs: the hash does not move with it).
     // Still 10520 with S72's wreck page, which the walk names under `page` only while one is up.
-    // 10536 since S74: the put-back's two-tick hold on the body, which only the body reads and the
+    // 10544 since S70: the skeleton's drawn matrices from the last riding tick, which the walk leaves
+    // out with the skeleton they come from; the bones a wreck poses from them are walked.
+    // 10560 since S74: the put-back's two-tick hold on the body, which only the body reads and the
     // walk leaves out with it, and the bones drawn on a clock put-back's own tick, presentation.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 10536, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 10560, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

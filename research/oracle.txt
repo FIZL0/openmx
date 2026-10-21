@@ -4250,3 +4250,18 @@ screen_page_off boot 0x00200ab0 the screen's vt +0xa0, to 0x00200ac0: only the H
 #   (+0x630/+0x634 -> value) snapped to the request's 0.5/0.5, and node 0's local translation is
 #   joint 0's. From T+2 (chord) the nodes part from the joints: the riding body is the ragdoll's.
 #   The settle (+0x6b4) is kept through the put-back: 2 -> 0 skips the wreck's clean-up arm.
+
+# S70 — the wreck entry's hand-over from the riding skeleton (ragdoll_ride::Down::enter_from).
+#   rider_body_wreck_enter calls the actor's vt+0xa4 (rider_ragdoll_pose) with a1 = 0 (moving) and
+#   f12 = the tick's frame time (0.03333 on side-2604 -> 2605, hooked), then vt+0xa0 (the reset). No
+#   bone is given the bike's velocity there; only the throws of some reasons set velocities after.
+#   While riding, the skeleton IS the riding ragdoll: after each world step 0x0030f4c0 (not wreck
+#   mode) / vt+0xac 0x0024df80 (wreck mode) normalise every body's quaternion and set its node by
+#   transform_set_pose to body.pos less turn(q, cofg) (ragdoll_ride::node_of). So the nodes the pose
+#   reads on tick T are the bodies at the end of T-1 (to 0-4 ulps through node_of), and the drawn
+#   matrix (part +0x60) is the node at the end of the step before (rows tens of ulps off a quat
+#   matrix). On a tick whose row repeats (tip 2473) the drawn matrix is the last step's before it.
+#   The writer of part +0x60 per riding tick was not found. The starts the pose leaves on each body
+#   (+0x30 pos, +0x40 vel, +0x160 quat, +0x140 rates) survive the entry tick in RAM.
+#   tests/ragdoll_entry.rs: the port's pose from what the original's read == its starts bit for bit
+#   (side); from the captured bodies within NEAR on side/back/tip (front's 2599 row is torn).
