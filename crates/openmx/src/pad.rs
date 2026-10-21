@@ -293,7 +293,7 @@ pub struct Wiring {
     pub pressure: [Option<Control>; AXES],
     /// Which layout each seat rides on (P40): the new one, or the original's.
     pub schemes: [Scheme; SEATS],
-    /// How each seat's biplane stick reads upside down (P50).
+    /// How each seat's biplane stick reads (P50, P69).
     pub planes: [PlaneScheme; SEATS],
     /// A Nintendo pad's A and B by where they are (P53): B, the bottom one, is Cross and confirms,
     /// as on every other pad. Off, the default, they go by what they say — A, the right one, confirms
@@ -444,28 +444,39 @@ impl Scheme {
     }
 }
 
-/// How the biplane's stick reads while the plane is upside down (P50).
+/// How the biplane's stick reads at every attitude (P50, P69).
 ///
 /// The original never turns the plane's controls round: its input step (I6) and its control law
 /// (`game_sim::biplane::controls`, S34) read the stick, the d-pad and L1/R1 with the same sign at
-/// every attitude, and nothing in either looks at the roll but the elevator's fade near knife edge.
-/// The surfaces are the plane's own, though, and the camera that follows it keeps the world's up,
-/// so on the screen two of them turn round as the plane rolls past knife edge: the elevator
-/// (climb pulls the nose toward the pilot's head, which upside down is toward the ground) and the
-/// rudder (the pilot's left is the screen's right). The ailerons do not: a roll about the nose looks
-/// the same way round from behind whichever way up the plane is.
+/// every attitude, so their sign is already the plane's own: stick down pulls the nose toward the
+/// belly, L1 yaws to the pilot's left, whichever way up the plane is. One thing in it is not the
+/// plane's: the control law fades the elevator out by the roll while the nose is near level, from
+/// all of it at `ElevatorRampOffRollAngle` (30 degrees on the disc) to `MinElevator` (0 — the file
+/// does not set it) at `ElevatorOffRollAngle` (60), and back the same way past 120. On its side the
+/// original's plane does not answer the stick's y at all.
 ///
-/// Under [`PlaneScheme::New`] the shell turns those two back round in the pad's report while the
-/// plane is upside down ([`PlaneScheme::fly`]), so the stick means the same on the screen at every
-/// attitude; under [`PlaneScheme::Original`] the report reaches the plane as the pad said it. Like
-/// [`Scheme`], it is a remap before the simulation reads the pad, so the plane's simulation stays
-/// the original's and a tape records what it read.
+/// - [`PlaneScheme::New`], the default (P69): relative to the plane, never the camera. The report
+///   reaches the plane as the pad said it, and the plane's step lifts the fade
+///   ([`PlaneScheme::every_bank`], `vehicle::Plane::every_bank`), so down on the stick pulls the
+///   nose toward the belly by the same amount at every bank and attitude. A report cannot do that
+///   part: at knife edge the fade multiplies every stick and d-pad value by zero.
+/// - [`PlaneScheme::Screen`], P50's: relative to the follow camera, which keeps the world's up. Upside
+///   down the elevator and the rudder are turned back round in the report ([`PlaneScheme::fly`]),
+///   so they move the plane the same way on the screen; it changes over just past knife edge.
+/// - [`PlaneScheme::Original`]: the plane reads the pad as it is, faded as on the disc.
+///
+/// Like [`Scheme`], each is decided in the shell before the simulation reads the pad, so under the
+/// original's the plane's simulation is the original's bit for bit and a tape records what it read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PlaneScheme {
-    /// Upside down, the left stick's y, Up and Down, and L1 and R1 are each other's.
+    /// Relative to the plane (P69): the pad as it is, and the elevator at every bank.
     #[default]
     New,
-    /// The original's: the plane reads the pad as it is, at any attitude.
+    /// Relative to the screen (P50): upside down, the left stick's y, Up and Down, and L1 and R1
+    /// are each other's.
+    Screen,
+    /// The original's: the plane reads the pad as it is, at any attitude, and its elevator fades
+    /// out on its side.
     Original,
 }
 
@@ -474,20 +485,32 @@ impl PlaneScheme {
     pub fn word(self) -> &'static str {
         match self {
             PlaneScheme::New => "new",
+            PlaneScheme::Screen => "screen",
             PlaneScheme::Original => "original",
         }
     }
 
-    fn of(scheme: Scheme) -> PlaneScheme {
-        match scheme {
-            Scheme::New => PlaneScheme::New,
-            Scheme::Original => PlaneScheme::Original,
-        }
+    fn from_word(w: &str) -> Option<PlaneScheme> {
+        [PlaneScheme::New, PlaneScheme::Screen, PlaneScheme::Original]
+            .into_iter()
+            .find(|s| s.word().eq_ignore_ascii_case(w.trim()))
     }
 
-    /// `new`, `original`, or one per seat, the way [`Scheme::parse_list`] reads them.
+    /// `new`, `screen`, `original`, or one per seat, the way [`Scheme::parse_list`] reads them.
     pub fn parse_list(s: &str) -> Result<[PlaneScheme; SEATS], String> {
-        Scheme::parse_list(s).map(|list| list.map(PlaneScheme::of))
+        let words: Vec<&str> = s.split(',').collect();
+        if words.len() > SEATS {
+            return Err(format!("{s}: at most {SEATS} seats"));
+        }
+        let mut out = [PlaneScheme::default(); SEATS];
+        let mut last = PlaneScheme::default();
+        for (i, slot) in out.iter_mut().enumerate() {
+            if let Some(w) = words.get(i) {
+                last = PlaneScheme::from_word(w).ok_or_else(|| format!("{w}: new, screen or original"))?;
+            }
+            *slot = last;
+        }
+        Ok(out)
     }
 
     /// [`PlaneScheme::parse_list`]'s text back: one word when every seat agrees.
@@ -498,15 +521,23 @@ impl PlaneScheme {
         schemes.iter().map(|s| s.word()).collect::<Vec<_>>().join(",")
     }
 
+    /// Whether the plane's elevator answers the stick at every bank (P69): the plane-relative
+    /// scheme's half that a report cannot carry, which the plane's step applies
+    /// (`vehicle::Plane::every_bank`). Only under [`PlaneScheme::New`].
+    pub fn every_bank(self) -> bool {
+        self == PlaneScheme::New
+    }
+
     /// The report the plane is handed for a pad that reported `report`, `inverted` being whether the
     /// plane is upside down this frame (`vehicle::Plane::inverted`).
     ///
-    /// Upside down under the new scheme: the left stick's y byte is mirrored (`255 - b`, which the
-    /// poll's `-1 + 2b/255` reads as exactly the other side), and Up and Down, and L1 and R1, are
-    /// swapped, bit and pressure byte together. Everything else, and every report under the
-    /// original's or the right way up, is passed as it is. A pad that is not there is left alone.
+    /// Upside down under the screen's scheme: the left stick's y byte is mirrored (`255 - b`, which
+    /// the poll's `-1 + 2b/255` reads as exactly the other side), and Up and Down, and L1 and R1, are
+    /// swapped, bit and pressure byte together. Everything else, and every report under the plane's
+    /// or the original's or the right way up, is passed as it is. A pad that is not there is left
+    /// alone.
     pub fn fly(self, report: Report, inverted: bool) -> Report {
-        if self == PlaneScheme::Original || !inverted || report.status() == 0xff {
+        if self != PlaneScheme::Screen || !inverted || report.status() == 0xff {
             return report;
         }
         let mut out = report;
@@ -1969,7 +2000,7 @@ impl Seats {
         self.wiring.schemes[seat]
     }
 
-    /// How seat `seat`'s biplane stick reads upside down (P50).
+    /// How seat `seat`'s biplane stick reads (P50, P69).
     pub fn plane(&self, seat: usize) -> PlaneScheme {
         self.wiring.planes[seat]
     }
@@ -2558,14 +2589,15 @@ pub(crate) mod tests {
         assert_eq!([idle.elevator.to_bits(), idle.aileron.to_bits()], [0x8000_0000; 2]);
     }
 
-    /// P50, at the pad: upside down under the new biplane controls the plane's input step reads the
-    /// elevator and the rudder the other way round and everything else as it was — and under the
-    /// original's, or the right way up, the plane is handed the very report the pad made.
+    /// P50, at the pad: upside down under the screen's biplane controls the plane's input step reads
+    /// the elevator and the rudder the other way round and everything else as it was — and under the
+    /// plane's (P69) or the original's, at any attitude, or the right way up, the plane is handed the
+    /// very report the pad made.
     ///
     /// Over 20,000 generated reports: random buttons, pressures and stick bytes, through the game's
     /// own poll and I6's input step.
     #[test]
-    fn upside_down_the_new_biplane_controls_turn_the_elevator_and_rudder_round() {
+    fn upside_down_the_screen_biplane_controls_turn_the_elevator_and_rudder_round() {
         use game_sim::input::PlaneInput;
         let read = |report: Report| {
             let mut manager = Manager::connected();
@@ -2591,14 +2623,16 @@ pub(crate) mod tests {
                 report.set_axis(axis, next() as u8);
             }
 
-            // The original's, and either scheme the right way up: the same bytes, so the same
-            // simulation, bit for bit.
-            assert_eq!(PlaneScheme::Original.fly(report, true), report);
-            assert_eq!(PlaneScheme::Original.fly(report, false), report);
-            assert_eq!(PlaneScheme::New.fly(report, false), report);
+            // The original's and the plane's at any attitude, and the screen's the right way up:
+            // the same bytes, so the same report into the simulation, bit for bit.
+            for scheme in [PlaneScheme::Original, PlaneScheme::New] {
+                assert_eq!(scheme.fly(report, true), report);
+                assert_eq!(scheme.fly(report, false), report);
+            }
+            assert_eq!(PlaneScheme::Screen.fly(report, false), report);
 
-            let (up, down) = (read(report), read(PlaneScheme::New.fly(report, true)));
-            assert_eq!(PlaneScheme::New.fly(PlaneScheme::New.fly(report, true), true), report, "twice is not once undone");
+            let (up, down) = (read(report), read(PlaneScheme::Screen.fly(report, true)));
+            assert_eq!(PlaneScheme::Screen.fly(PlaneScheme::Screen.fly(report, true), true), report, "twice is not once undone");
             let bits = |i: &PlaneInput| [i.throttle_up, i.throttle_down, i.aileron].map(F::to_bits);
             assert_eq!(bits(&down), bits(&up), "the throttle or the ailerons moved: {report:?}");
             // Both held is the original's left-wins (and up-wins) either way round, and is the
@@ -2617,7 +2651,24 @@ pub(crate) mod tests {
             }
         }
         // A pad that is not there stays not there.
-        assert_eq!(PlaneScheme::New.fly(Report::missing(), true), Report::missing());
+        assert_eq!(PlaneScheme::Screen.fly(Report::missing(), true), Report::missing());
+    }
+
+    /// P69: the biplane's three schemes by name. `new` is the plane-relative default, which is what
+    /// a `controls.txt` saved before P69 says too; P50's screen-relative one is `screen`; and only
+    /// the default lifts the knife-edge fade.
+    #[test]
+    fn the_biplane_schemes_read_and_write_their_words() {
+        assert_eq!(PlaneScheme::default(), PlaneScheme::New);
+        let all = PlaneScheme::parse_list("new,screen,original").unwrap();
+        assert_eq!(&all[..3], &[PlaneScheme::New, PlaneScheme::Screen, PlaneScheme::Original]);
+        assert!(all[3..].iter().all(|s| *s == PlaneScheme::Original), "the last word is not the rest's");
+        assert_eq!(PlaneScheme::list_text(&all), "new,screen,original,original,original,original,original,original");
+        assert_eq!(PlaneScheme::list_text(&PlaneScheme::parse_list(" Screen ").unwrap()), "screen");
+        assert!(PlaneScheme::parse_list("sideways").is_err());
+        assert!(PlaneScheme::parse_list(&["new"; SEATS + 1].join(",")).is_err());
+        let lifts: Vec<bool> = all[..3].iter().map(|s| s.every_bank()).collect();
+        assert_eq!(lifts, [true, false, false]);
     }
 
     /// Nobody's hands on anything, for a test that only cares about one control.

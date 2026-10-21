@@ -363,7 +363,7 @@ struct Seat {
     /// What the rider did this frame, kept so the loop can print it after the pass.
     said: rider::Frame,
     /// Whether the plane was upside down when this frame's report was made, which turns the
-    /// biplane's stick round under the new biplane controls (P50, `pad::PlaneScheme::fly`).
+    /// biplane's stick round under the screen's biplane controls (P50, `pad::PlaneScheme::fly`).
     inverted: bool,
     /// The hands this pass was stepped with, kept for the body's own animation frame — which runs
     /// after the pass, off the same controls and the same `dt` (V18).
@@ -2810,9 +2810,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             None => idle.report(&pad::no_keys),
                         };
                         menu_reports.push((report, seats.taps(from)));
-                        // And the plane's stick turned round upside down (P50), off the attitude
-                        // the last step left, so the plane's simulation reads the original's pad.
+                        // And the plane's stick turned round upside down under the screen's scheme
+                        // (P50), off the attitude the last step left, so the plane's simulation
+                        // reads the original's pad; under the plane's (P69) the elevator answers at
+                        // every bank instead.
                         seat.inverted = seat.garage.inverted(seat.inverted);
+                        seat.garage.set_every_bank(seats.plane(from).every_bank());
                         let report = seats.plane(from).fly(seats.scheme(from).ride(report), seat.inverted);
                         seat.reports = [report, Report::missing()];
                         seat.waiting = now.get(from) == Some(&SeatInput::Waiting);
@@ -2829,6 +2832,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // A tape holds what the plane read, already turned round (P50); this is only
                     // the camera's, which reads the turned-round L1 back.
                     world.seats[0].inverted = world.seats[0].garage.inverted(world.seats[0].inverted);
+                    // The fade is not in the tape (P69): it rides under the command line's scheme,
+                    // so a plane tape plays back as it was made under the same --biplane-controls.
+                    world.seats[0].garage.set_every_bank(args.wiring.planes[0].every_bank());
                     world.seats[0].reports = frame.reports;
                     world.played_dt = Some(frame.dt());
                 }
@@ -4227,9 +4233,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                     Err(_) => args.controls = Some(v.into()),
                 }
             }
-            // How the biplane's stick reads upside down (P50), per seat like --controls.
+            // How the biplane's stick reads (P50, P69), per seat like --controls.
             "--biplane-controls" => {
-                let v = next("new, original, or one per seat (new,original)")?;
+                let v = next("new, screen, original, or one per seat (new,original)")?;
                 args.wiring.planes = PlaneScheme::parse_list(&v).map_err(|why| format!("--biplane-controls: {why}"))?;
                 args.plane_flag = true;
             }
@@ -4429,7 +4435,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
-                            [--biplane-controls new|original|new,original,...]\n\
+                            [--biplane-controls new|screen|original|new,original,...]\n\
                             [--bindings FILE] [--renderer gpu|software] [--graphics full|original] [--fps]\n\
                             [--render-scale auto|0.5..1]\n\
                             [--no-sound]\n\
@@ -4447,10 +4453,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                      name in the track's cpresets.ini (\"Race Cam 1\" unless asked).\n\
                      A trick is a gesture: hold Circle, Triangle and/or R1 and push the d-pad.\n\
                      L1 and R1 together put the bike back (the original's own chord).\n\
-                     Upside down in the biplane the stick's up and down, the d-pad's Up and\n\
-                     Down, and L1 and R1 swap, so they move the plane the same way on the screen\n\
-                     whichever way up it is; --biplane-controls original (or the Controls\n\
-                     screen) flies the original's, which never swaps them.\n\
+                     The biplane's stick is the plane's own: down pulls the nose toward its\n\
+                     belly and left rolls it left, at every bank and upside down too.\n\
+                     --biplane-controls original (or the Controls screen) flies the original's,\n\
+                     whose stick stops pitching the plane on its side; --biplane-controls screen\n\
+                     swaps the stick's up and down, Up and Down, and L1 and R1 upside down, so\n\
+                     they move the plane the same way on the screen.\n\
                      On the keyboard, under the new layout: WASD the left stick (A/D steer, W/S\n\
                      lean), YUIO the right stick, Space gas, Shift brake, Q/E L1/R1, Tab or C\n\
                      the camera, arrows the d-pad, HJKL the face buttons (H Square, J Cross,\n\
