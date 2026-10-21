@@ -9,8 +9,10 @@
 //! byte of the four objects, the generator's state and the wreck asked for are compared.
 //!
 //! The bike's air drag (`+0x6a8`) is halved by the original's throw and doubled again by its put-back,
-//! with no simulation of the bike between the two. The port leaves it out, so the harness halves its
-//! copy itself to compare the rest of the bike.
+//! with no simulation of the bike between the two (S71). The port keeps the halving as a flag on the
+//! ride and [`off_map::drag`] as the value the ground step reads, so the harness writes that value
+//! back into the bike to compare it with the rest, and [`the_put_back_doubles_the_drag_back`] runs the
+//! original's put-back over the same.
 
 use game_sim::biplane::Area;
 use game_sim::chassis::Chassis;
@@ -238,7 +240,7 @@ fn the_map_edge_is_the_originals() {
             for k in 0..3 {
                 ee.set_f32(NODE + 0x70 + 4 * k, origin.0[k as usize]);
             }
-            ee.set_f32(BIKE + bike::DRAG, (F(drag) * F(0.5)).0);
+            ee.set_f32(BIKE + bike::DRAG, off_map::drag(F(drag), true).0);
         }
         let ported = snapshot(&ee);
         for (o, p) in after.iter().zip(&ported) {
@@ -257,6 +259,82 @@ fn the_entry_spin_is_three_units() {
     let v = off_map::entry_spin(&mut rng, 0.25);
     assert_eq!(v.0, [copy.unit().0, copy.unit().0, copy.unit().0, 0.25]);
     assert_eq!(rng, copy);
+}
+
+/// **The put-back's half of the drag** (S71): the original's bike unwreck run over 12,000 bikes, each
+/// with its drag where the port says it is — [`off_map::drag`] of a `.phy` drag, halved when the bike
+/// is down as a cannonball (reason 13) and not otherwise — leaves the `.phy`'s drag, bit for bit, the
+/// value the port reads once its flag is down. The drags are the stock bikes' kind, any bit pattern, and
+/// the smallest normals, whose halving the PS2 flushes to zero: there the original's put-back leaves a
+/// zero where the port has the drag back, and those are counted (no `.phy` has a drag that small), as are
+/// the top-exponent patterns, which the doubling overflows and the FPU clamps (no `.phy` drag either). The
+/// unwreck's other work is not this file's: its slot calls and the trick queue's reset are stubbed.
+#[test]
+fn the_put_back_doubles_the_drag_back() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let unwreck = addr("bike_unwreck").unwrap();
+    const WRECK: u32 = 0x0120_9000;
+    const WRECK_VTABLE: u32 = 0x0120_a000;
+    const STUB: u32 = 0x0120_b000;
+    /// The trick queue's reset, which the unwreck runs on the bike's queue.
+    const QUEUE_RESET: u32 = 0x0025_a4b0;
+    ee.hooks.insert(STUB, Box::new(|_| {}));
+    ee.hooks.insert(QUEUE_RESET, Box::new(|_| {}));
+    let mut pick = Pick(0x5710_d7a6_0b1c_e5ed);
+    let (mut thrown, mut flushed, mut clamped, mut other) = (0, 0, 0, 0);
+    const CASES: u32 = 12_000;
+    for case in 0..CASES {
+        for &(_, base, len) in &REGIONS[..2] {
+            for o in (0..len).step_by(4) {
+                ee.set_u32(base + o, if pick.one_in(2) { 0 } else { pick.next() as u32 });
+            }
+        }
+        ee.set_u32(BIKE + bike::VTABLE, VTABLE);
+        for slot in [0x114, 0x118, 0x138] {
+            ee.set_u32(VTABLE + slot, STUB);
+        }
+        ee.set_u32(BIKE + bike::CHASSIS, CHASSIS);
+        ee.set_u32(BIKE + 0x7a8, WRECK);
+        ee.set_u32(WRECK + 0x38, WRECK_VTABLE);
+        ee.set_u32(WRECK_VTABLE + 0x120, STUB);
+
+        let riding = match pick.next() % 4 {
+            0 => F(pick.range(0.0, 0.2)),
+            1 => F(f32::from_bits(pick.next() as u32)),
+            2 => F(f32::from_bits(0x0080_0000 + (pick.next() as u32 % 0x0180_0000))),
+            _ => F([0.025f32, 0.02, 0.05, 0.0][(pick.next() % 4) as usize]),
+        };
+        let reason = [13u32, 13, 13, 0, 5, 1][(pick.next() % 6) as usize];
+        let halved = reason == 13;
+        ee.set_u32(BIKE + bike::REASON, reason);
+        ee.set_f32(BIKE + bike::DRAG, off_map::drag(riding, halved).0);
+        ee.call(unwreck, &[BIKE as u64, 1], &[], 10_000);
+
+        let original = ee.u32_at(BIKE + bike::DRAG);
+        assert_eq!(ee.u32_at(BIKE + bike::REASON), 0, "case {case}: the reason cleared");
+        let port = off_map::drag(riding, false).0.to_bits();
+        if halved && off_map::drag(riding, true).0.abs() == 0.0 && riding.0.abs() != 0.0 {
+            // The halving flushed: the original divides a zero.
+            assert_eq!(original & 0x7fff_ffff, 0, "case {case}: {riding:?} flushed");
+            assert!(riding.0.abs() < f32::from_bits(0x0100_0000), "case {case}: {riding:?} is no small normal");
+            flushed += 1;
+            continue;
+        }
+        if halved && riding.0.to_bits() & 0x7f80_0000 == 0x7f80_0000 {
+            // The top exponent, which the PS2 reads as a number: halved it is one, doubled back it
+            // overflows, and the FPU clamps it to the largest of its sign.
+            assert_eq!(original, riding.0.to_bits() & 0x8000_0000 | 0x7f7f_ffff, "case {case}: {riding:?} clamped");
+            clamped += 1;
+            continue;
+        }
+        assert_eq!(original, port, "case {case}: reason {reason}, drag {riding:?} ({:#010x})", riding.0.to_bits());
+        if halved { thrown += 1 } else { other += 1 }
+    }
+    println!(
+        "{CASES} put-backs: {thrown} cannonballs doubled back, {other} others untouched, {flushed} flushed by the \
+         halving, {clamped} top-exponent drags clamped by the doubling"
+    );
+    assert!(thrown > 4000 && other > 4000 && flushed > 50, "{thrown} doubled back, {other} untouched, {flushed} flushed");
 }
 
 /// One capture of `watch/s59-edge.toml`, by column name.
@@ -305,6 +383,9 @@ fn bits(v: Vf) -> [u32; 4] {
 ///   bit; it asks for the wreck page as the clock passes `CannonballWreckTime`, and the put-back's
 ///   tick — the page's, three rows on, which the port does not model — reads the speed limit
 ///   [`off_map::unwreck`] gives.
+/// - **The drag** (S71): the bike's air drag is the riding one on the row before the throw, the
+///   port's halved [`off_map::drag`] on every row from the throw's to the one before the put-back,
+///   and the riding one again from the put-back's row, bit for bit.
 ///
 /// Each capture missing is skipped, and the test with them.
 #[test]
@@ -359,6 +440,8 @@ fn the_original_rides_off_each_edge() {
         assert_eq!(bits(ch.ang_vel), bits(c.v(t, "ang_vel")), "{name}: the throw's spin");
         assert_eq!(ch.max_speed_sq.0.to_bits(), c.f(t, "max_speed_sq").0.to_bits(), "{name}: 350²");
         assert_eq!(bits(origin)[..3], bits(cofg)[..3], "{name}: the transform onto the cofg");
+        let riding = c.f(before, "drag");
+        assert_eq!(c.f(t, "drag").0.to_bits(), off_map::drag(riding, true).0.to_bits(), "{name}: the throw halves the drag");
         let spin = off_map::entry_spin(&mut after, 1.0);
         let body = c.v(t, "wreck_spin");
         assert_eq!(
@@ -456,6 +539,10 @@ fn the_original_rides_off_each_edge() {
         assert_eq!(ch.max_speed_sq.0, 122500.0, "{name}: thrown until the put-back");
         off_map::unwreck(&mut ch);
         assert_eq!(ch.max_speed_sq.0.to_bits(), c.f(back, "max_speed_sq").0.to_bits(), "{name}: 135² again");
+        for r in t..back {
+            assert_eq!(c.f(r, "drag").0.to_bits(), off_map::drag(riding, true).0.to_bits(), "{name} row {r}: halved");
+        }
+        assert_eq!(c.f(back, "drag").0.to_bits(), off_map::drag(riding, false).0.to_bits(), "{name}: the drag doubled back");
         println!(
             "{name}: thrown at frame {} by the cofg {:?} ({k} draws in); {at} ticks to the page's put-back \
              (the throw's is tick 1), latched on tick {}, the page asked for on tick {}, and the put-back {} rows after it \
@@ -472,6 +559,38 @@ fn the_original_rides_off_each_edge() {
         println!("skipped: no S59 captures");
     }
 }
+
+/// A wreck body and the rider's half of a wreck, plausible numbers in the files' shape (tests/ride.rs'
+/// own, not the disc's).
+const WRECK_PART: &str = "
+[PhysicsPart1]
+Type = RigidBody
+Name = wreck_physics
+Weight = 250.0
+CollisionWeight = 0.0001
+GravityScale = 1.0
+InertiaScale = 1.0, 1.0, 1.0
+SpringStiffness = 5.0
+SpringDamping = 0.4
+MaxPenetration = 0.5
+CofG = 0.0, 1.5, 0.0
+SpringMomentScale = 1.0, 1.0, 1.0
+FrictionMomentScale = 1.0, 1.0, 1.0
+FrictionZone1 = 0.5
+Radius = 1.0
+AccelerationThreshold = 0.01
+AngularAccelerationThreshold = 0.01
+";
+const RIDER_WRECKS: &str = "
+[Wrecks]
+HitBottomForceTime = 0.1
+HitBottomHandHoldTime = 0.3
+HitBottomForce = 0.0, 800.0, 0.0
+GroundAngularRateDamping = 1.0
+RiderFlailHeight = 3.0
+RiderRollTime = 0.75
+RiderRollSpeed = 0.0
+";
 
 /// A flat floor with free09's extent: [`Flat`] answers no area, so the edge never runs on it.
 struct Edged(game_sim::world::Flat);
@@ -502,6 +621,10 @@ fn a_rider_past_the_margin_is_thrown_back() {
     let p = Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.ride.curve);
     let at = Vf::new(3456.0, 1.0, 100.0, 1.0);
     let mut r = Rider::new(&p, game_sim::stock::MOUNTS, at, Vf::new(0.0, 0.0, -1.0, 0.0), Set::default());
+    // A wreck body, so that the clock can put the bike back: tests/ride.rs' made-up one.
+    let part = game_sim::phy::Part::read_bytes(WRECK_PART.as_bytes(), "PhysicsPart1");
+    let wrecks = game_sim::phy::Wrecks::read_bytes(RIDER_WRECKS.as_bytes());
+    r.carries_wreck(part, wrecks, part.inertia(Vf::new(2.5, 4.0, 7.0, 1.0)));
     let mut world = Edged(game_sim::world::Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) });
     let dt = F(1.0 / 60.0);
 
@@ -510,12 +633,21 @@ fn a_rider_past_the_margin_is_thrown_back() {
     assert_eq!(r.ride.chassis.max_speed_sq.0.to_bits(), (off_map::THROWN_MAX_SPEED * off_map::THROWN_MAX_SPEED).0.to_bits());
     let v = r.ride.chassis.vel;
     assert!(v.z() > 0.0 && v.y() > 0.0, "thrown {v:?}: not toward the middle, nor up");
+    assert!(r.ride.drag_halved, "the throw halves the bike's drag");
 
     // The chord does not cut a cannonball short: only the clock puts this bike back.
     for k in 1..120 {
         let hands = Controls { respawn: k % 10 == 0, ..Controls::default() };
         assert!(!r.frame(&p, &tables, &hands, dt, &mut world).respawned, "the chord cut the cannonball short at {k}");
+        assert!(r.ride.drag_halved, "the drag doubled back while down, at {k}");
     }
+    // The clock's put-back doubles it back.
+    let mut k = 0;
+    while !r.frame(&p, &tables, &Controls::default(), dt, &mut world).respawned {
+        k += 1;
+        assert!(k < 3000, "no put-back in 50 s");
+    }
+    assert!(!r.ride.drag_halved, "the put-back left the drag halved");
 
     // The put-back gives the chassis the riding speed limit again, whatever it was: here a chord on
     // a rider who is riding, with the thrown limit left on the chassis.
