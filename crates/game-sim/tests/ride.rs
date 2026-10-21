@@ -27,6 +27,8 @@
 //! bike where the disc is present and skip where it is not.
 
 use game_sim::collide::{Bundle, Record};
+use std::cell::RefCell;
+use std::rc::Rc;
 use game_sim::hash::{self, Dump};
 use game_sim::phy::{self, Phy};
 use game_sim::r#move::{self as mv, Frame};
@@ -4350,34 +4352,191 @@ fn back_capture(text: &str) -> (u32, Vec<BackTick>) {
 
 /// The bike's terrain: the world its record's ground query is asked of.
 const BIKE_TERRAIN: u32 = 0x7ac;
+/// The bike's probe bundle, which the record's overhead probe and its clearance ring both fill, and the
+/// search list its mesh query walks.
+const BIKE_BUNDLE: u32 = 0x1484;
+const BIKE_LIST: u32 = 0x1488;
+const BIKE_SEARCH: u32 = 0x148c;
+/// The mesh query's broad-phase cache on the bike: how far the bundle may move before the search list
+/// is gathered again, and how far the last query had moved it.
+const BIKE_CACHE_REACH: u32 = 0x13a4;
+const BIKE_CACHE_MOVED: u32 = 0x13a8;
 
-/// **The original's ground under the put-back** — [`World::ground`] answered by the game's own
+/// **The original's world under the put-back** — [`World::ground`] answered by the game's own
 /// `ground_query`, run in the interpreter on the save state's RAM against the bike's own terrain, with
-/// no normal or record pointer past the two the record's update hands it. Nothing is solid: the
-/// clearance probes the ring sends out are not this ground's to answer, so a tick the original refused
-/// is not compared ([`the_put_back_record_is_kept_bit_for_bit`] counts them).
+/// no normal or record pointer past the two the record's update hands it; and [`World::solid`] and
+/// [`World::crowded`] (S75) answered by the game's own mesh query, `put_back_solid`, on the bike's own
+/// bundle and search list.
+///
+/// `solid` writes the port's bundle into the bike's — count, origins, directions, lengths, centre and
+/// radius, where the record's update and the clearance write them — and asks. Before a ring of more
+/// than one probe it re-files the bundle in the world first when the query before regathered, as
+/// `put_back_clear` does. `crowded` asks the same query with no probes at all, so that nothing but a
+/// placed group or a checkpoint can refuse.
 struct TheOriginalsTerrain {
     ee: ps2_oracle::Ee,
+    bike: u32,
     terrain: u32,
     query: u32,
+    mesh: Option<OriginalsMeshes>,
+    /// Rings the original refused with no probe past the first meeting anything, and how many times
+    /// [`World::crowded`] said yes: the two have to agree.
+    unsaid: u32,
+    crowded: u32,
+    /// Queries asked, and how many of them met anything.
+    asked: u32,
+    met: u32,
+}
+
+/// The addresses [`TheOriginalsTerrain::solid`] calls and hands over.
+struct OriginalsMeshes {
+    solid: u32,
+    sweep: u32,
+    refile: u32,
+    ring: u32,
+    over: u32,
+}
+
+impl OriginalsMeshes {
+    fn load() -> Result<OriginalsMeshes, String> {
+        Ok(OriginalsMeshes {
+            solid: ps2_oracle::addr("put_back_solid")?,
+            sweep: ps2_oracle::addr("bundle_sweep_object")?,
+            refile: ps2_oracle::addr("put_back_refile")?,
+            ring: ps2_oracle::addr("put_back_ring_filter")?,
+            over: ps2_oracle::addr("put_back_over_filter")?,
+        })
+    }
+}
+
+/// What one object that met the bundle left in the record: probe 0's point and normal, and every
+/// probe's flag.
+type Answer = (Vf, Vf, Vec<bool>);
+
+impl TheOriginalsTerrain {
+    /// Run the original's query on a bundle: whether it refused, and the answer of every object that
+    /// met the bundle, in the order it swept them.
+    ///
+    /// The query sweeps the bundle against one object at a time, and each sweep clears the record's
+    /// flags and fractions before it starts — so what it acts on is each object's answer as it comes,
+    /// and the record after the last object is that object's alone. The per-object sweep is hooked to
+    /// run as itself and hand over, for every object that answered, the record's probe-0 point and
+    /// normal (which that sweep does not clear: the query reads them all the same) and its flags.
+    fn ask(&mut self, bundle: &Bundle) -> (bool, Vec<Answer>) {
+        let m = self.mesh.as_ref().expect("asked with no mesh query");
+        let (ee, bike) = (&mut self.ee, self.bike);
+        let b = ee.u32_at(bike + BIKE_BUNDLE);
+        let n = bundle.count as u32;
+        ee.set_u32(b + 0x120, n);
+        let (lengths, origins, dirs) = (ee.u32_at(b + 0x134), ee.u32_at(b + 0x138), ee.u32_at(b + 0x13c));
+        for (i, p) in bundle.probes[..bundle.count].iter().enumerate() {
+            let i = i as u32;
+            set_quad(ee, origins + 16 * i, p.origin);
+            set_quad(ee, dirs + 16 * i, p.dir);
+            ee.set_u32(lengths + 4 * i, p.length.0.to_bits());
+        }
+        set_quad(ee, b + 0x150, bundle.centre);
+        ee.set_u32(b + 0x160, bundle.radius.0.to_bits());
+        let filter = if n == 1 { m.over } else { m.ring };
+        if n > 1 && ee.f32_at(bike + BIKE_CACHE_REACH) < ee.f32_at(bike + BIKE_CACHE_MOVED) {
+            ee.call(m.refile, &[b, b + 0x150, filter].map(u64::from), &[bundle.radius.0], 50_000_000);
+        }
+
+        let answers: Rc<RefCell<Vec<Answer>>> = Rc::default();
+        let (sweep, heard) = (m.sweep, answers.clone());
+        ee.hooks.insert(
+            sweep,
+            Box::new(move |ee: &mut ps2_oracle::Ee| {
+                let (args, ra, sp, stack) = ([ee.r(4), ee.r(5), ee.r(6)], ee.r(31), ee.r(29), ee.stack);
+                ee.stack = (sp as u32 - 0x40) & !0xf;
+                ee.call(sweep, &args, &[], 100_000_000);
+                let met = ee.v0();
+                // The interpreter files the hook back under the `pc` it leaves, so leave it here.
+                (ee.stack, ee.pc) = (stack, sweep);
+                ee.set(29, sp);
+                ee.set(31, ra);
+                ee.set(2, met);
+                if met != 0 {
+                    let (bundle, record) = (args[0] as u32, args[2] as u32);
+                    let flags = ee.u32_at(record + 0xa4);
+                    let hit = (0..ee.u32_at(bundle + 0x120)).map(|k| ee.u32_at(flags + 4 * k) != 0).collect();
+                    heard.borrow_mut().push((quad_at(ee, ee.u32_at(record + 0x98)), quad_at(ee, ee.u32_at(record + 0x94)), hit));
+                }
+            }),
+        );
+        let (y, normal) = (ee.scratch(2), ee.scratch(3));
+        ee.set_f32(y, -1.0e30);
+        let args = [bike, ee.u32_at(bike + BIKE_SEARCH), filter, b, normal, y].map(u64::from);
+        ee.call(m.solid, &args, &[], 400_000_000);
+        ee.hooks.remove(&sweep);
+        let refused = ee.v0() != 0;
+        let answers = answers.take();
+
+        // The query's own `y` and normal are the highest probe-0 point any answer left, and its normal.
+        if let Some(top) = answers.iter().max_by(|a, b| a.0.y().total_cmp(&b.0.y())) {
+            assert_eq!(ee.f32_at(y).to_bits(), top.0.y().to_bits(), "the query's own y");
+            assert!(same_bits(quad_at(ee, normal), top.1), "the query's own normal");
+        }
+        (refused, answers)
+    }
+}
+
+fn set_quad(ee: &mut ps2_oracle::Ee, a: u32, v: Vf) {
+    for k in 0..4 {
+        ee.set_u32(a + 4 * k, v[k as usize].to_bits());
+    }
+}
+
+fn quad_at(ee: &ps2_oracle::Ee, a: u32) -> Vf {
+    Vf::new(ee.f32_at(a), ee.f32_at(a + 4), ee.f32_at(a + 8), ee.f32_at(a + 12))
 }
 
 impl World for TheOriginalsTerrain {
     fn ground(&mut self, at: Vf) -> (Vf, Vf) {
         let ee = &mut self.ee;
         let (point, normal) = (ee.scratch(0), ee.scratch(1));
-        for k in 0..4 {
-            ee.set_f32(point + 4 * k, at[k as usize]);
-            ee.set_f32(normal + 4 * k, 0.0);
-        }
+        set_quad(ee, point, at);
+        set_quad(ee, normal, Vf::ZERO);
         let args = [self.terrain, point, normal, 0, 0].map(u64::from);
         ee.call(self.query, &args, &[], 50_000_000);
-        let quad = |a: u32| Vf::new(ee.f32_at(a), ee.f32_at(a + 4), ee.f32_at(a + 8), ee.f32_at(a + 12));
-        (quad(point), quad(normal))
+        (quad_at(ee, point), quad_at(ee, normal))
     }
 
-    fn solid(&mut self, _: &Bundle, _: &mut Record) -> bool {
-        false
+    /// Probe 0 is answered as the query answers its own `y`: the highest point any object that met the
+    /// bundle left in it, with that object's normal; the others by their flags, any object's.
+    fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
+        if self.mesh.is_none() {
+            return false;
+        }
+        let (refused, answers) = self.ask(bundle);
+        for (point, normal, hit) in &answers {
+            if !record.hit[0] || F(record.point[0].y()) < F(point.y()) {
+                (record.point[0], record.normal[0]) = (*point, *normal);
+            }
+            record.hit[0] = true;
+            for (k, &h) in hit.iter().enumerate().skip(1) {
+                record.hit[k] |= h;
+            }
+        }
+        let flagged = record.hit[1..bundle.count].iter().any(|&h| h);
+        assert!(refused || !flagged, "the query met something with a ring probe and did not refuse");
+        if bundle.count > 1 && refused && !flagged {
+            self.unsaid += 1;
+        }
+        self.asked += 1;
+        self.met += u32::from(record.hit[0]);
+        true
+    }
+
+    fn crowded(&mut self, centre: Vf, radius: F) -> bool {
+        if self.mesh.is_none() {
+            return false;
+        }
+        let none = Bundle { count: 0, centre, radius, ..Bundle::default() };
+        let (refused, answers) = self.ask(&none);
+        assert!(answers.iter().all(|a| a.2.is_empty()), "a bundle with no probes met something");
+        self.crowded += u32::from(refused);
+        refused
     }
 }
 
@@ -4404,7 +4563,14 @@ fn back_run(name: &str, slot: u32) -> Option<(Vec<BackTick>, TheOriginalsTerrain
         println!("no context/s66/{name}: no put-back verdict for it");
         return None;
     };
-    let ram = kit.ctx("states").join(format!("SLUS-20767 (9866FE54).{slot:02}.eeMemory.bin"));
+    // The state each capture started from: kept beside the captures under the track's name (S75), as
+    // the numbered slots are each emulator copy's own and another copy's slot 6 is another state.
+    let beside = kit.ctx("s66").join(format!("{}.eeMemory.bin", &name[..6]));
+    let ram = if beside.exists() {
+        beside
+    } else {
+        kit.ctx("states").join(format!("SLUS-20767 (9866FE54).{slot:02}.eeMemory.bin"))
+    };
     let mut ee = match ps2_oracle::Ee::from_ram(&ram) {
         Ok(ee) => ee,
         Err(why) => {
@@ -4419,7 +4585,8 @@ fn back_run(name: &str, slot: u32) -> Option<(Vec<BackTick>, TheOriginalsTerrain
     ee.set(28, u64::from(gp));
     let (bike, rows) = back_capture(&text);
     let terrain = ee.u32_at(bike + BIKE_TERRAIN);
-    Some((rows, TheOriginalsTerrain { ee, terrain, query }))
+    let mesh = OriginalsMeshes::load().map_err(|why| println!("{why}: the put-back's solid answers nothing")).ok();
+    Some((rows, TheOriginalsTerrain { ee, bike, terrain, query, mesh, unsaid: 0, crowded: 0, asked: 0, met: 0 }))
 }
 
 fn same_bits(a: Vf, b: Vf) -> bool {
@@ -4428,6 +4595,111 @@ fn same_bits(a: Vf, b: Vf) -> bool {
 
 fn show(v: Vf) -> String {
     format!("{:08x} {:08x} {:08x} {:08x}", v[0].to_bits(), v[1].to_bits(), v[2].to_bits(), v[3].to_bits())
+}
+
+/// The original's world with nothing solid in it: what a refused tick would have kept, had nothing
+/// stood in the way — which says whether a refusal was the meshes' or the ground's slope.
+struct NoSolid<'a>(&'a mut TheOriginalsTerrain);
+
+impl World for NoSolid<'_> {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.0.ground(at)
+    }
+
+    fn solid(&mut self, _: &Bundle, _: &mut Record) -> bool {
+        false
+    }
+}
+
+/// **The ticks the original held its record on** (S75): with the meshes answered by the original's own
+/// query, the port has to hold the record on them too. Each held tick is tried from the same probes
+/// and headings [`the_put_back_record_is_kept_bit_for_bit`] tries a kept one with — this row's and
+/// the one before's, the wreck part's too while down — and it is held when one of them is refused, or
+/// keeps the record on the bits it already had. A refusal is the meshes' when the same probe over a
+/// world with nothing solid would have been kept.
+#[derive(Default)]
+struct Refusals {
+    /// Refused by something solid: an overhead mesh, a ring probe meeting one.
+    by_solid: u32,
+    /// Refused with nothing solid in the way: the ground's slope.
+    by_ground: u32,
+    /// Kept on the very bits it held.
+    in_place: u32,
+    /// Ticks of a cannonball, which the port does not keep a record in.
+    cannonball: u32,
+    /// The port moved the record where the original held it.
+    moved: Vec<String>,
+}
+
+impl Refusals {
+    fn hold(
+        &mut self,
+        name: &str,
+        before: &BackTick,
+        now: &BackTick,
+        world: &mut TheOriginalsTerrain,
+        p: &Phy,
+        tables: &Tables,
+    ) {
+        const CANNONBALL: u32 = 13;
+        if now.reason == CANNONBALL || before.reason == CANNONBALL {
+            self.cannonball += 1;
+            return;
+        }
+        let down = now.reason != 0 || before.reason != 0;
+        let probe = |r: &BackTick, part: bool| {
+            if part { r.part } else { Vf::new(r.e0.x(), r.centre.y(), r.e0.z(), r.e0.w()) }
+        };
+        let was = game_sim::ride::Back { at: before.rec[0], facing: before.rec[1], up: before.rec[2] };
+        let mut tried = Vec::new();
+        for (from, part) in [(now, false), (before, false), (now, true), (before, true)] {
+            if part && !down {
+                continue;
+            }
+            for heading in [now.heading, before.heading, now.row, before.row] {
+                let mut ride = rider(p);
+                ride.back = was;
+                if !ride.keep_back(probe(from, part), heading, world, &tables.curve) {
+                    let mut bare = rider(p);
+                    bare.back = was;
+                    if bare.keep_back(probe(from, part), heading, &mut NoSolid(world), &tables.curve) {
+                        self.by_solid += 1;
+                    } else {
+                        self.by_ground += 1;
+                    }
+                    return;
+                }
+                if same_bits(ride.back.at, now.rec[0]) && same_bits(ride.back.up, now.rec[2]) {
+                    self.in_place += 1;
+                    return;
+                }
+                tried.push(show(ride.back.at));
+            }
+        }
+        self.moved.push(format!(
+            "{name} frame {} ({}): the original held {}; the port kept {tried:?}",
+            now.frame,
+            if down { "down" } else { "riding" },
+            show(now.rec[0])
+        ));
+    }
+
+    /// Say what the held ticks came to, and hold them: none moved, and every ring the query refused
+    /// with no probe flagged was one [`World::crowded`] refused too.
+    fn verdict(&self, name: &str, held: u32, world: &TheOriginalsTerrain) {
+        let (unsaid, crowded) = (world.unsaid, world.crowded);
+        println!(
+            "{name}: of {held} held, {} refused by a mesh, {} by the slope, {} kept in place, {} in a \
+             cannonball, {} moved; {unsaid} refusals the record did not say, {crowded} crowded",
+            self.by_solid,
+            self.by_ground,
+            self.in_place,
+            self.cannonball,
+            self.moved.len()
+        );
+        assert!(self.moved.is_empty(), "{name}: {:#?}", self.moved);
+        assert_eq!(unsaid, crowded, "{name}: the original's query refused rings its record and crowding do not say");
+    }
 }
 
 /// **The put-back record, tick for tick** (S66): on every captured tick the original moved its record,
@@ -4442,17 +4714,19 @@ fn the_put_back_record_is_kept_bit_for_bit() {
     for (name, slot) in BACK_CAPTURES {
         let Some((rows, mut world)) = back_run(name, slot) else { continue };
         let (mut here, mut held, mut unseen, mut unfaced) = (0, 0, 0, 0);
+        let mut refusals = Refusals::default();
         for i in 1..rows.len() {
             let (before, now) = (&rows[i - 1], &rows[i]);
             if now.frame != before.frame + 1 {
                 continue; // a tick lost between them
             }
-            if same_bits(now.rec[0], before.rec[0]) {
-                held += 1; // refused, or not moved: the clearance is not this world's to answer
-                continue;
-            }
             if now.applied[0].to_bits() != before.applied[0].to_bits() {
                 continue; // the put-back tick itself
+            }
+            if same_bits(now.rec[0], before.rec[0]) {
+                held += 1;
+                refusals.hold(name, before, now, &mut world, &p, &tables);
+                continue;
             }
             // A row is read while the game runs, so it can hold this tick's sweep with the record
             // the tick before left, and the race manager's heading from either side of the physics:
@@ -4507,6 +4781,8 @@ fn the_put_back_record_is_kept_bit_for_bit() {
         }
         println!("{name}: {here} ticks kept bit for bit ({unfaced} of them off a heading no row holds), \
                   {held} held, {unseen} off a probe no row holds");
+        println!("{name}: {} mesh queries, {} met something", world.asked, world.met);
+        refusals.verdict(name, held, &world);
         assert!(unfaced * 20 <= here, "{name}: {unfaced} of {here} headings matched no row's");
         assert!(unseen * 20 <= here, "{name}: {unseen} of {here} probes matched no row's");
         compared += here;
@@ -4562,5 +4838,159 @@ fn every_captured_put_back_lands_where_the_original_put_the_bike() {
     }
     if landed > 0 {
         assert!(landed >= 5, "only {landed} put-backs compared");
+    }
+}
+
+// --- the put-back's clearance against the original's meshes (S75) ---------------------------------
+//
+// The captures above never ride near anything the original's put-back query looks at: its search list
+// holds the world's actors, and the ones it sweeps (type 2, flagged collidable, not masked off) were all
+// hundreds of feet from both tracks' paths, so no captured tick was refused by a mesh. These cases are
+// generated where it does: around every such object the bike's search list holds in the save state,
+// the original's own record update runs in the interpreter, and the port's runs over the original's
+// ground and mesh query, from the same probe, heading and record.
+
+/// A small generator of cases: xorshift64*.
+struct Cases(u64);
+
+impl Cases {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    /// Uniform in `[-1, 1)`.
+    fn unit(&mut self) -> f32 {
+        (self.next() >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+    }
+}
+
+/// Where the record's update reads its riding probe: the collision record's sweep point and the
+/// body's centre height; the reason, the cannonball's wreck kind, and the record and its raise.
+const BIKE_SWEEP: u32 = 0x7d0;
+const BIKE_BODY: u32 = 0x7a4;
+const BIKE_REASON: u32 = 0x748;
+const BIKE_WRECK_KIND: u32 = 0xc84;
+const BIKE_RECORD: u32 = 0x3b0;
+const BIKE_RAISE: u32 = 0x13a0;
+
+/// **The put-back's clearance refuses where the original's does** (S75): ten thousand probes around the
+/// things the original's mesh query sweeps, on free06 and free09, each kept or refused by the port's
+/// [`Ride::keep_back`] exactly as by the original's record update — and where kept, kept on the same
+/// point, heading and up to the bit.
+#[test]
+fn the_put_back_clearance_refuses_where_the_original_does() {
+    const CASES: usize = 5_000;
+    let tables = Tables::build();
+    let p = bike(&tables);
+    let mut total = 0;
+    for name in ["free06-ride2.txt", "free09-ride2.txt"] {
+        let Some((_, mut world)) = back_run(name, 0) else { continue };
+        let Ok(keep) = ps2_oracle::addr("put_back_keep") else {
+            println!("research/oracle.txt has no put_back_keep: no clearance verdict");
+            return;
+        };
+        if world.mesh.is_none() {
+            return;
+        }
+        let bike = world.bike;
+        assert_eq!(world.ee.u32_at(bike + BIKE_RAISE), 0, "{name}: the record's raise is not zero here");
+        assert_eq!(world.ee.u32_at(bike + BIKE_REASON), 0, "{name}: the state is not riding");
+        assert_ne!(world.ee.u32_at(bike + BIKE_WRECK_KIND), 13, "{name}: the state is in a cannonball");
+
+        // What the query sweeps: the search list's flagged, unmasked objects, centre and radius.
+        let ee = &world.ee;
+        let list = ee.u32_at(bike + BIKE_LIST);
+        let (arr, count) = (ee.u32_at(list), ee.u32_at(list + 4));
+        let mask = ee.u32_at(ps2_oracle::addr("put_back_mask").expect("put_back_mask in research/oracle.txt"));
+        let things: Vec<(f32, f32, f32)> = (0..count)
+            .map(|k| ee.u32_at(arr + 8 * k))
+            .filter(|&o| ee.u8_at(o + 2) == 2 && ee.u8_at(o + 0x31) & 1 != 0 && ee.u32_at(o + 0x84) & mask == 0)
+            .map(|o| (ee.f32_at(o + 0x40), ee.f32_at(o + 0x48), ee.f32_at(o + 0x60)))
+            .collect();
+        assert!(!things.is_empty(), "{name}: the search list sweeps nothing");
+
+        let mut cases = Cases(0x5375_0000 ^ total as u64 ^ u64::from(bike));
+        let (mut kept, mut by_solid, mut by_ground) = (0, 0, 0);
+        for i in 0..CASES {
+            let (cx, cz, r) = things[i % things.len()];
+            // A point on or around the thing's sphere, out to the ring's reach past it, at a body's
+            // height (two to eight feet) over the ground there.
+            let reach = r + 50.0;
+            let (x, z) = (cx + cases.unit() * reach, cz + cases.unit() * reach);
+            let (under, _) = world.ground(Vf::new(x, 0.0, z, 1.0));
+            let at = Vf::new(x, under.y() + 5.0 + 3.0 * cases.unit(), z, 1.0);
+            let a = cases.unit() * std::f32::consts::PI;
+            let heading = Vf::new(a.sin(), 0.2 * cases.unit(), a.cos(), 1.0);
+            let was = game_sim::ride::Back {
+                at: Vf::new(-1.0, -2.0, -3.0, 1.0),
+                facing: Vf::new(0.0, 0.0, 1.0, 1.0),
+                up: Vf::new(0.0, 1.0, 0.0, 0.0),
+            };
+
+            // The original: the probe where its update reads it, the record where it keeps it.
+            let ee = &mut world.ee;
+            let sweep = ee.u32_at(bike + BIKE_SWEEP) + 0xe0;
+            let body = ee.u32_at(bike + BIKE_BODY) + 0x64;
+            let quad = |ee: &mut ps2_oracle::Ee, a: u32, v: Vf| {
+                for k in 0..4 {
+                    ee.set_u32(a + 4 * k, v[k as usize].to_bits());
+                }
+            };
+            quad(ee, sweep, at);
+            ee.set_u32(body, at.y().to_bits());
+            quad(ee, bike + BIKE_RECORD, was.at);
+            quad(ee, bike + BIKE_RECORD + 0x10, was.facing);
+            quad(ee, bike + BIKE_RECORD + 0x20, was.up);
+            let h = ee.scratch(3);
+            quad(ee, h, heading);
+            ee.call(keep, &[bike, h, h].map(u64::from), &[], 400_000_000);
+            let read = |ee: &ps2_oracle::Ee, a: u32| Vf::new(ee.f32_at(a), ee.f32_at(a + 4), ee.f32_at(a + 8), ee.f32_at(a + 12));
+            let theirs = [read(ee, bike + BIKE_RECORD), read(ee, bike + BIKE_RECORD + 0x10), read(ee, bike + BIKE_RECORD + 0x20)];
+            let they_kept = !same_bits(theirs[0], was.at);
+
+            // The port, over the original's ground and meshes, from the same record.
+            let mut ride = rider(&p);
+            ride.back = was;
+            let we_kept = ride.keep_back(at, heading, &mut world, &tables.curve);
+            assert_eq!(
+                we_kept, they_kept,
+                "{name} case {i}: probe {} heading {}: the original {} it, the port {} it",
+                show(at),
+                show(heading),
+                if they_kept { "kept" } else { "refused" },
+                if we_kept { "kept" } else { "refused" }
+            );
+            if we_kept {
+                for (k, (ours, theirs)) in [ride.back.at, ride.back.facing, ride.back.up].into_iter().zip(theirs).enumerate() {
+                    assert!(same_bits(ours, theirs), "{name} case {i}: record word {k}: port {} original {}", show(ours), show(theirs));
+                }
+                kept += 1;
+            } else {
+                let mut bare = rider(&p);
+                bare.back = was;
+                if bare.keep_back(at, heading, &mut NoSolid(&mut world), &tables.curve) {
+                    by_solid += 1;
+                } else {
+                    by_ground += 1;
+                }
+            }
+        }
+        println!(
+            "{name}: {CASES} probes around {} things: {kept} kept bit for bit, {by_solid} refused by a mesh, \
+             {by_ground} by the ground; {} refusals the record did not say, {} rings crowded",
+            things.len(),
+            world.unsaid,
+            world.crowded
+        );
+        assert!(by_solid * 20 >= CASES, "{name}: only {by_solid} of {CASES} probes met a mesh");
+        assert!(kept * 20 >= CASES, "{name}: only {kept} of {CASES} probes were kept");
+        assert_eq!(world.unsaid, world.crowded, "{name}: the original's query refused rings its record and crowding do not say");
+        total += CASES;
+    }
+    if total > 0 {
+        assert!(total >= 10_000, "only {total} probes compared");
     }
 }
