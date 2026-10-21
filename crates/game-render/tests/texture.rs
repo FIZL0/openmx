@@ -156,6 +156,8 @@ fn one_quad(texture: Texture, u: (f32, f32), v: f32, clamp: [bool; 2]) -> (Scene
         fog_color: [0, 0, 0],
         fog_near: 1.0e5,
         fog_far: 2.0e5,
+        fog_visibility: 1.0,
+        fog_haziness: 0.0,
         lights: Vec::new(),
         models: vec![Placement {
             model: "quad".into(),

@@ -2338,7 +2338,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             at.elapsed().as_secs_f32()
         );
         // What the graphics setting makes of the disc's fog (V32): the original's is its fog and far
-        // clip as the scene file gives them, the whole map's a haze that never hides it.
+        // clip as the original works them out of the scene file (V33), the whole map's a haze that
+        // never hides it.
         let shown = args.graphics.unwrap_or_default();
         r.set_graphics(shown);
         let lit = Lighting::of(&look);
