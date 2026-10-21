@@ -23,6 +23,14 @@ mod join;
 #[path = "../src/split.rs"]
 #[allow(dead_code)]
 mod split;
+// The shell's pad layer, for P53's presses between frames: a binary crate's module, compiled in by
+// path as tests/ride.rs does, its own unit tests coming with it.
+#[allow(dead_code)]
+#[path = "../src/window.rs"]
+mod window;
+#[allow(dead_code)]
+#[path = "../src/pad.rs"]
+mod pad;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, Screen, Settings};
@@ -219,6 +227,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         layouts: [Layout::New, Layout::Original, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New],
         // And another flying the original's biplane (P50).
         planes: [Layout::New, Layout::New, Layout::Original, Layout::New, Layout::New, Layout::New, Layout::New, Layout::New],
+        // A Nintendo pad's B as Cross, by where it sits (P53).
+        nintendo_positions: true,
     };
     menu::save(&dir, &settings, &controls).unwrap();
     assert_eq!(menu::load(&dir), (settings, controls));
@@ -1044,4 +1054,153 @@ fn the_sound_rows_pick_the_music_and_the_volumes() {
     // An older file, with no sound keys, opens on the defaults.
     let old = Settings::parse("name = Old\n");
     assert_eq!((old.music.as_str(), old.music_volume, old.effects_volume), ("shuffle", 7, 8));
+}
+
+// ---- presses between frames, and pads that are not Xbox pads (P53) --------------------------------
+
+/// The menu frames of a ride, at the frame rate of the user's 4K GPU window: a press and release
+/// that both land between two of them are in neither frame's report, only in its taps — and the
+/// reader takes them as the press they were.
+#[test]
+fn a_press_and_release_between_two_frames_still_opens_the_pause_and_moves_its_cursor() {
+    let (mut m, mut r) = fresh();
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    // The held state alone, as before: the pad was at rest at both frames, so nothing happened.
+    m.step(r.read(&Report::idle()));
+    assert!(m.riding());
+    // With the frame's taps: Start, then Down twice inside one frame, then Cross.
+    m.step(r.read_taps(&Report::idle(), Control::Start.mask()));
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.cursor(Screen::Pause), 0);
+    m.step(r.read_taps(&Report::idle(), Control::Down.mask()));
+    assert_eq!(m.cursor(Screen::Pause), 1);
+    m.step(r.read_taps(&Report::idle(), 0));
+    assert_eq!(m.cursor(Screen::Pause), 1);
+    let act = m.step(r.read_taps(&Report::idle(), Control::Cross.mask()));
+    assert_eq!(act, Act::Restart);
+    // A press still held at the frame is one press, not two: the tap and the held bit together.
+    m.pause();
+    let down = Report::from_buttons(Control::Down.mask());
+    m.step(r.read_taps(&Report::idle(), 0));
+    let at = m.cursor(Screen::Pause);
+    m.step(r.read_taps(&down, Control::Down.mask()));
+    assert_eq!(m.cursor(Screen::Pause), at + 1);
+}
+
+/// A Switch Pro Controller in hid-nintendo's own numbering, its keys and axes from the module.
+fn pro_controller(dev: &std::path::Path, sys: &std::path::Path, node: &str) -> pad::tests::FakePad {
+    let name = "Nintendo Switch Pro Controller";
+    pad::tests::sys_device(sys, node, name, (0x057e, 0x2009), &pad::tests::PRO_KEYS, &pad::tests::PRO_ABS, &[]);
+    let mut pro = pad::tests::FakePad::plug(dev, node);
+    pro.init(14, &[0; 6]);
+    pro
+}
+
+/// The ride's frame of the shell's seats, as main.rs takes it: 1P's report as the pad sent it, its
+/// presses since the last frame, and the report the ride's scheme makes of it.
+fn seat_frame(seats: &mut pad::Seats) -> (Report, u16) {
+    let now = pad::tests::frame(seats, &|_| false);
+    (now[0].report(), seats.taps(0))
+}
+
+/// The user's pad, seated as 1P, in a ride: its + opens the pause, the hat's down moves the cursor,
+/// and A takes the row — tapped between frames, and held across them. The report the new scheme
+/// rides on has no Cross in it (R2 is the gas there), which is why the pause reads the pad's own.
+#[test]
+fn a_seated_pad_s_start_opens_the_pause_and_its_d_pad_and_cross_work_it() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let root = pad::tests::scratch("menu-pause");
+    let (dev, sys) = (root.join("dev"), root.join("sys"));
+    std::fs::create_dir_all(&dev).unwrap();
+    let mut pro = pro_controller(&dev, &sys, "js0");
+    let mut seats = pad::tests::seats_in(&dev, &sys, pad::Wiring::default());
+    let id = match &pad::tests::devices_now(&mut seats, &|_| false)[1].0 {
+        pad::Device::Pad(id) => id.clone(),
+        other => panic!("{other:?}"),
+    };
+    seats.set_first(Some(pad::Device::Pad(id)));
+
+    let (mut m, mut r) = fresh();
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    let mut step = |m: &mut Menu, seats: &mut pad::Seats| {
+        let (report, taps) = seat_frame(seats);
+        m.step_seats(&[r.read_taps(&report, taps)])
+    };
+    step(&mut m, &mut seats);
+
+    // + (js 10), down and up before the frame.
+    pro.button(10, true);
+    pro.button(10, false);
+    step(&mut m, &mut seats);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    // The hat's down, the same.
+    pro.axis(5, i16::MAX);
+    pro.axis(5, 0);
+    step(&mut m, &mut seats);
+    assert_eq!(m.cursor(Screen::Pause), 1);
+    // A (js 1), held across a frame: the scheme's report has lost it, the pad's own has not.
+    pro.button(1, true);
+    let (report, taps) = seat_frame(&mut seats);
+    assert!(report.buttons() & Control::Cross.mask() != 0);
+    assert!(pad::Scheme::New.ride(report).buttons() & Control::Cross.mask() == 0, "the new scheme moves R2 onto Cross and Cross off");
+    let act = m.step_seats(&[r.read_taps(&report, taps)]);
+    assert_eq!(act, Act::Restart);
+    pro.button(1, false);
+    seat_frame(&mut seats);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// The splash at any frame rate: an idle pad plugged in first (a virtual one some program left,
+/// its stick wandering), and the user's pad's A pressed for three 60 Hz ticks somewhere — the
+/// menu's frames every tick, or every twelfth (5 fps), at every phase. The user's pad is 1P.
+#[test]
+fn on_the_splash_a_pad_s_cross_makes_it_1p_even_while_an_idle_virtual_pad_is_plugged_in_at_any_frame_rate() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let root = pad::tests::scratch("menu-splash");
+    let (dev, sys) = (root.join("dev"), root.join("sys"));
+    std::fs::create_dir_all(&dev).unwrap();
+    pad::tests::sys_device(&sys, "js0", "Microsoft X-Box 360 pad", (0x045e, 0x028e), &pad::tests::XPAD_KEYS, &pad::tests::PAD_ABS, &[]);
+    let mut idle = pad::tests::FakePad::plug(&dev, "js0");
+    idle.init(11, &[0, 0, -32767, 0, 0, -32767, 0, 0]);
+    let mut pro = pro_controller(&dev, &sys, "js1");
+    let dev_of = |d: pad::Device<String>| match d {
+        pad::Device::Keys => Dev::Keys,
+        pad::Device::Pad(id) => Dev::Pad(id),
+    };
+    for every in [1u32, 2, 3, 4, 6, 12] {
+        for phase in 0..every {
+            let mut seats = pad::tests::seats_in(&dev, &sys, pad::Wiring::default());
+            let (mut m, mut readers) = on_the_splash();
+            let mut users = None;
+            for tick in 0..120u32 {
+                // The idle pad's stick, every tick.
+                let wander = |k: u32| (((tick * k) % 160) as i32 - 80) * 250;
+                idle.axis(0, wander(7) as i16);
+                idle.axis(1, wander(13) as i16);
+                if tick == 60 + phase {
+                    pro.button(1, true);
+                }
+                if tick == 63 + phase {
+                    pro.button(1, false);
+                }
+                if tick % every != 0 {
+                    continue;
+                }
+                let got = pad::tests::devices_now(&mut seats, &|_| false);
+                users = users.or_else(|| got.iter().map(|(d, _, _)| d).nth(2).cloned().map(dev_of));
+                let reports: Vec<(Dev, Report, u16)> = got.into_iter().map(|(d, r, t)| (dev_of(d), r, t)).collect();
+                m.step_devices(&readers.read_taps(&reports));
+                if tick < 60 {
+                    assert_eq!(m.p1(), None, "every {every} phase {phase} tick {tick}");
+                }
+            }
+            assert_eq!(m.p1(), users.as_ref(), "every {every} phase {phase}");
+            assert!(users.is_some());
+        }
+    }
+    std::fs::remove_dir_all(&root).unwrap();
 }

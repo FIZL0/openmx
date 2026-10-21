@@ -27,6 +27,8 @@ struct State {
     window: Option<Arc<Window>>,
     failed: Option<String>,
     keys: [bool; KEYCODES],
+    /// Keys pressed since the last poll, down now or not (P53): a tap inside one slow frame.
+    tapped: [bool; KEYCODES],
     size: (u32, u32),
     resized: bool,
     closed: bool,
@@ -72,6 +74,9 @@ impl ApplicationHandler for State {
                     && let Some(held) = self.keys.get_mut(code as usize + 8)
                 {
                     *held = event.state == ElementState::Pressed;
+                    if *held && !event.repeat {
+                        self.tapped[code as usize + 8] = true;
+                    }
                 }
             }
             WindowEvent::Focused(false) => self.keys = [false; KEYCODES],
@@ -110,6 +115,7 @@ impl GpuWindow {
             window: None,
             failed: None,
             keys: [false; KEYCODES],
+            tapped: [false; KEYCODES],
             size: (1, 1),
             resized: false,
             closed: false,
@@ -188,6 +194,7 @@ impl GpuWindow {
 
     /// Take in whatever the window has said, without waiting.
     pub fn poll(&mut self) {
+        self.state.tapped = [false; KEYCODES];
         if let PumpStatus::Exit(_) = self.events.pump_app_events(Some(Duration::ZERO), &mut self.state) {
             self.state.closed = true;
         }
@@ -200,6 +207,11 @@ impl GpuWindow {
 
     pub fn held(&self, code: u8) -> bool {
         self.state.keys[code as usize]
+    }
+
+    /// Whether a key went down during the last poll, whether or not it is still down.
+    pub fn tapped(&self, code: u8) -> bool {
+        self.state.tapped[code as usize]
     }
 
     /// Whether the window has changed size since this was last asked.
