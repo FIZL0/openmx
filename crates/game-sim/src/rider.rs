@@ -69,6 +69,7 @@ use crate::state;
 use crate::wreck_sound;
 use crate::wreck_page;
 use crate::ghost::Ghost;
+use crate::score::{self, Score};
 use std::sync::Arc;
 use crate::trick::{self, AngleTable, Set, Trick, Tricks, Wreck};
 use crate::vehicle_anim;
@@ -302,6 +303,8 @@ pub struct Rider {
     /// thrown for one more tick while the bike is already standing on the put-back record.
     /// Presentation only — nothing simulated reads it, and the next [`Rider::frame`] drops it.
     pub ragdoll_shown: Option<Box<Down>>,
+    /// The rider's points (S79): the combo being scored and the total banked.
+    pub score: Score,
 }
 
 impl Rider {
@@ -354,6 +357,7 @@ impl Rider {
             page: wreck_page::Page::default(),
             put_back: PutBack::default(),
             ragdoll_shown: None,
+            score: Score::default(),
         }
     }
 
@@ -431,7 +435,7 @@ impl Rider {
         let Rider {
             ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
             flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, wreck_sounds, idles, ghost, edge_armed, page,
-            put_back, ragdoll_shown, ..
+            put_back, ragdoll_shown, score, ..
         } = self;
         *ragdoll_shown = None;
         let mut sense = *sense;
@@ -447,6 +451,9 @@ impl Rider {
         // (S66): the bike is set down on the put-back record and this frame's physics runs from there.
         if c.respawn && state.chord_allowed(sense.ai_route) {
             state.take_chord();
+            // The original's reset request ends the rider's jump first, which is the points' wreck:
+            // the combo is lost whether or not the put-back happens (S79).
+            score.wrecked();
             if state.request_reset(state::Kind::Wrecked, false, sense.owner) == Some(state::Reset::Now) {
                 state.respawn();
                 ride.place_back();
@@ -459,6 +466,8 @@ impl Rider {
                 out.respawned = true;
                 ghost.start();
                 put_back.place();
+                // The put-back's unwreck cuts a trick short, which after the request finds nothing.
+                score.aborted();
             }
         }
 
@@ -470,6 +479,10 @@ impl Rider {
             Some(kit) if state.wreck.is_none() => Some(ragdoll_ride::nodes(kit, skeleton.as_deref(), &ride.transform())),
             _ => None,
         };
+
+        // The rider's slow test, which the original works out at the top of its tick on the speed the
+        // bike's last update left: before this frame's moves it (S79).
+        let slow = ride.air.contact_vel.z() < score::SLOW;
 
         // 2 — the physics, only while the rider is not down. The respawn is the machine's to order,
         // so the bike's own chord is taken out of the controls it is handed here and read below.
@@ -552,7 +565,19 @@ impl Rider {
             frozen: false,
             progress: tricks.progress,
         };
-        tricks.update(dt, set, bike, false, ride::noise);
+        let clocked = tricks.update(dt, set, bike, false, ride::noise);
+        // The clocks' three calls on the rider, which score (S79). The wheels are this frame's, the
+        // wreck is the one the rider was in before this frame's machine.
+        let at_clocks = Self::score_sense(ride, slow, state.wreck.is_some());
+        if clocked.stopped_before {
+            score.finished();
+        }
+        if let Some(id) = clocked.started {
+            score.start(id.0, &at_clocks);
+        }
+        if clocked.stopped {
+            score.finished();
+        }
         let pose = motion::Pose {
             lean: ride.held.lean.0,
             fore_aft: ride.held.lean.1,
@@ -701,6 +726,8 @@ impl Rider {
             // its drop velocity, the wheel loads zeroed, the camera and the rumble — is not ported.
             tricks.reset();
             *flight = Trick::NONE;
+            // The rider's own wreck entry: the trick and the combo both lost (S79).
+            score.wrecked();
         } else if was_airborne && !ride.air.airborne {
             out.landed = (*flight != Trick::NONE).then_some(*flight);
             *flight = Trick::NONE;
@@ -721,6 +748,7 @@ impl Rider {
             out.respawned = true;
             ghost.start();
             put_back.place();
+            score.aborted();
         }
         // 7 — the wreck page's fader, which updates after the bike: a request raises it and its
         // first update is this tick's, and the draw after its third puts the bike back
@@ -757,7 +785,27 @@ impl Rider {
                 *drawn = ragdoll_ride::drawn(&nodes);
             }
         }
+        // 8 — the points (S79): the rider's tick, on the frame's wheels and wreck, and then the
+        // manager's, which in the original runs after every rider's and touches only this one's card.
+        score.frame(dt, &Self::score_sense(ride, slow, state.wreck.is_some()));
+        score.grow(dt);
         out
+    }
+
+    /// What the points read off the bike (S79): its wheels, its air, and the chassis' up and
+    /// forward axes' heights for the backflip watch.
+    fn score_sense(ride: &Ride, slow: bool, wrecked: bool) -> score::Sense {
+        let m = ride.transform();
+        score::Sense {
+            front: ride.front.w.contact,
+            rear: ride.rear.w.contact,
+            airborne: ride.air.airborne,
+            hang_time: ride.air.hang_time,
+            slow,
+            wrecked,
+            up_y: F(m.0[1].y()),
+            forward_y: F(m.0[2].y()),
+        }
     }
 
     /// **One frame of the rider's own animation** (S27): the body actor's selection, the step it
@@ -928,6 +976,11 @@ impl State for Rider {
                 w.i32("crash_last", self.wreck_sounds.crash.last);
                 w.i32("fall_last", self.wreck_sounds.fall.last);
             });
+        }
+        // The points (S79), once anything has scored or started to: a rider who never has hashes as
+        // before, as a rider who is up hashes as one who has never been down.
+        if self.score != Score::default() {
+            w.group("score", |w| hash::State::walk(&self.score, w));
         }
     }
 }
