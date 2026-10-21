@@ -4,9 +4,10 @@
 //! It is the first clause of the original's bike wreck test, ahead of everything `crate::air`
 //! ports, and the one clause that runs while the rider is already down. Three things gate it: wrecks
 //! are on at all ([`crate::state::Sense::wrecks_enabled`]), the bike is one the clause is armed on, and
-//! the reason the rider is down for is not already this one. The bike's builder arms it for the bike
-//! a player rides and leaves it off for the AI's, which is the port's
-//! [`crate::state::Owner::human`].
+//! the reason the rider is down for is not already this one. The bike's builder arms it ([`armed`],
+//! S73) for a bike built for a player, at an outdoor event (nationals or free ride), and leaves it off
+//! for the AI's, a ghost's and every bike in a supercross stadium. The port keeps the answer on the
+//! rider ([`crate::rider::Rider::edge_armed`]).
 //!
 //! # The test
 //!
@@ -78,6 +79,40 @@ pub fn drag(riding: F, thrown: bool) -> F {
 const SPIN_X: F = F(0.5);
 const SPIN_Y: F = F(f32::from_bits(0x3ecc_cccd));
 const SPIN_Z: f32 = f32::from_bits(0x3ca3_d70a);
+
+/// Who a bike is built for: the bike builder's fourth argument, which the vehicle loader takes off the
+/// player's kind (a player 0, the AI 1, a ghost 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Built {
+    Player,
+    Ai,
+    Ghost,
+}
+
+/// The event's league, its first word: which set of tracks the event is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum League {
+    /// The stadiums.
+    Supercross,
+    /// The outdoor tracks.
+    Nationals,
+    /// The free-ride areas, the only ones the port rides.
+    FreeRide,
+}
+
+/// **Whether the bike builder arms the map edge** (S73): only on a player's bike, and only at an
+/// outdoor event. The builder writes the flag for every bike it builds — off for the AI's whatever the
+/// league, and off in a stadium (whose ground has no edge to ride off) — so nothing is left over from
+/// the bike's constructor, which clears it too.
+pub fn armed(built: Built, league: League) -> bool {
+    match built {
+        Built::Ai => false,
+        _ => match league {
+            League::Nationals | League::FreeRide => built == Built::Player,
+            League::Supercross => false,
+        },
+    }
+}
 
 /// Whether the bike is off the map: the rider's main bone (unless it is [`NOTHING`], bit for bit)
 /// or the chassis' centre of gravity within [`MARGIN`] of the edge or past it. Both are asked, the

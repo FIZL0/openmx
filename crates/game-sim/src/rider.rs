@@ -238,6 +238,10 @@ pub struct Rider {
     /// The bike's ghost after a put-back (P57, S63): see-through for three seconds, passing through
     /// the other riders, its clock held while it is inside one.
     pub ghost: Ghost,
+    /// The map edge is armed on this bike (S73): [`off_map::armed`] of who the bike was built for and
+    /// the event's league, which the bike's builder decides once and nothing changes afterwards. A
+    /// constant of the session, like the stunt set: not sent with a snapshot, and not hashed.
+    pub edge_armed: bool,
 }
 
 impl Rider {
@@ -284,6 +288,8 @@ impl Rider {
             flight: Trick::NONE,
             airborne: false,
             ghost: Ghost::default(),
+            // A player's bike on a free-ride area, the only event the port has.
+            edge_armed: off_map::armed(off_map::Built::Player, off_map::League::FreeRide),
         }
     }
 
@@ -345,7 +351,7 @@ impl Rider {
         let mut out = Frame::default();
         let Rider {
             ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
-            flight, airborne, ragdoll_kit, ragdoll, skeleton, wreck_sounds, idles, ghost, ..
+            flight, airborne, ragdoll_kit, ragdoll, skeleton, wreck_sounds, idles, ghost, edge_armed, ..
         } = self;
         let mut sense = *sense;
 
@@ -519,11 +525,9 @@ impl Rider {
         let hits = if state.wreck.is_none() { ride::hits_among(ride, world, rivals) } else { Vec::new() };
         let touched = ride.touching || !hits.is_empty();
         let (mass, height) = (F::ONE / ride.chassis.inv_mass, F(ride.chassis.cofg_world.y()));
-        // The map edge (S59): armed on a player's bike, on a map with an edge, and not for a rider
-        // already shot off it. Its two points are the rider's main bone and the chassis.
-        let edge = world
-            .area()
-            .filter(|_| sense.owner.is_some_and(|o| o.human) && state.wreck != Some(Wreck::CANNONBALL));
+        // The map edge (S59): armed on the bike by its builder (S73), on a map with an edge, and not
+        // for a rider already shot off it. Its two points are the rider's main bone and the chassis.
+        let edge = world.area().filter(|_| *edge_armed && state.wreck != Some(Wreck::CANNONBALL));
         let bone = Self::main_bone(ride, ragdoll_kit.as_deref(), ragdoll.as_ref(), crash.as_ref());
         let thrown = &mut ride.chassis;
         let origin = &mut ride.origin;

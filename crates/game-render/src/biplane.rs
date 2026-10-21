@@ -207,6 +207,16 @@ pub struct Emitter {
     /// `HasCollision`: the collision model's particles meet the ground (P61). The wreck's chunks say
     /// `TRUE`; off where the entry does not say.
     pub has_collision: bool,
+    /// Every `key = value` of the section, as written: the keys a type reads for itself (a tire
+    /// dust's `AttachedToTire` and `MinCompressionThreshold`, the prop wash's fade heights, P60).
+    pub keys: Vec<(String, String)>,
+}
+
+impl Emitter {
+    /// A key of the section, ignoring case.
+    pub fn key(&self, key: &str) -> Option<&str> {
+        self.keys.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str())
+    }
 }
 
 /// Read the emitter list: one [`Emitter`] per `[section]`, in the file's order.
@@ -222,6 +232,7 @@ pub fn emitters(text: &str) -> Vec<Emitter> {
             continue;
         };
         let value = value.trim().to_string();
+        e.keys.push((key.trim().to_string(), value.clone()));
         match key.trim().to_ascii_lowercase().as_str() {
             "type" => e.kind = value,
             "emitter" => e.emitter = value,
