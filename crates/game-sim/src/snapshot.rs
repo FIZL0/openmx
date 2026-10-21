@@ -439,7 +439,8 @@ impl Wire for Rider {
 
 wire!(crate::Input { buttons, stick });
 wire!(crate::ghost::Ghost { clock, alpha, on });
-wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed });
+wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fade, touching });
+wire!(crate::ragdoll_body::Fade { length, left });
 wire!(crate::ragdoll::Ragdoll { records, bones, joints, collisions, world, holds, bike_box, throwing, launch, ignores_bike, entered, stiff, riding, off_bike, flung, settled, roll, pins, pull });
 wire!(crate::ragdoll::Records { parts, joints, collisions });
 wire!(crate::ragdoll::PartRecord { ride_mass, wreck_mass, ride_inertia, wreck_inertia, ride_angular_damping, settled_angular_damping, limp_angular_damping });

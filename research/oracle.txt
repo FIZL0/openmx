@@ -3867,3 +3867,24 @@ vehicle_fx_collision_init boot 0x003d73e0 a CollisionModel entry: loads its .emt
 #                                         ORs 0x200 into the emitter's flags (the chunks say TRUE)
 ini_switch           boot 0x0014b3f0 an int/switch key: T/F by first letter, ON/OFF, Y/N by first
 #                                    letter (all ignoring case), else strtol base 0
+
+# S61 — rider_body_update's whole tick, ported as crates/game-sim/src/ragdoll_body.rs (Actor::tick)
+#   and held against the Ee tick from the same RAM in crates/game-sim/tests/ragdoll_wrecks.rs
+#   (the_ports_tick_is_the_originals, ..._to_rest: 35 + 874 ticks of the s56 captures, every bone
+#   lane, pin, joint, contact, flag, hold, box and frame bit-exact; 12 ticks with a moving hit skipped).
+#   The order inside rider_body_mode's wreck arm, as ported: throw clock (+0x6bc/+0x6c0 count down,
+#   the hands let go when +0x6c0 runs out), touching = any bone collision's +0x14, roll +0x490 runs
+#   while touching, off_bike +0x6b0 once the main bone is more than 1 + the bike's radius (+0x60 of
+#   [request+0x1ac]) from its centre (+0x40), ground_query, the settle test above, then the fade:
+#   every stiffening restarts the torques' fade (+0x648 = its length), which counts down by dt after.
+#   Outside the wreck the main bone's orientation is request quat (x) the main bone's rest, and that
+#   rest is the one the skeleton held *before* its own update this tick; the step reads the rests
+#   *after* it (the skeleton updates between the mode machine and rider_physics_update). Hooking
+#   the body's vt+0xac (the bone quaternions' normalisation, run right after the world step) is
+#   where the test reads the step-time rests.
+#   The tail (0x0024e250): the impact is the sum of the nine bone collisions' dv in the order
+#   2,3,4,6,5,8,7,1,0, added with vadd.xyz -- its w stays 1 (./kit dis 0x0024eb8c).
+#   Correction to S56's "the damping/settle switch 1 each time": the settle switch draws nothing;
+#   the draw seen on the settle tick is the animation selection (vt+0xa8) that runs after it.
+#   The ride machine's gate (+0xd3c on the rider) is still *not* the body's +0x6b4: S26 saw it come
+#   on with the body at 42 ft/s, so Down::settles keeps S53's hands-off-and-touching inference.

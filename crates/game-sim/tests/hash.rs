@@ -468,7 +468,8 @@ fn the_size_of_the_state_type_is_pinned() {
     // frame and its side force per pound of load, thirty-one leaves a wheel. 9728 since S63: the
     // rider's put-back ghost, which the walk names under `ghosts` only when there are other riders,
     // the one thing it reaches in the simulation.
+    // 9736 since S61: the kit's wreck table and a wreck's fade and touching, walked with the bones.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 9728, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 9736, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 897, "the walk's leaf count moved with it");
 }
