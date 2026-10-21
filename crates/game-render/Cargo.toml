@@ -23,7 +23,13 @@ pollster = { version = "1", optional = true }
 [features]
 default = ["gpu"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+# The browser's backends (P48): WebGPU, which wgpu has by default, and WebGL2 where a browser has no
+# WebGPU. Only a wasm32 build can use it.
+webgl = ["gpu", "wgpu/webgl"]
 
 [dev-dependencies]
 # The oracle is a *test* dependency: the port must not need the game's code to draw a frame.
 ps2-oracle = { path = "../ps2-oracle" }
+# wgpu's own shader translator, to write every shader out as WebGL2's GLSL ES 3.00 in a test (P48):
+# what WebGL2 cannot take fails there rather than in a browser.
+naga = { version = "30", features = ["wgsl-in", "glsl-out"] }
