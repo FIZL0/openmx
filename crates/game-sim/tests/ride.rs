@@ -49,8 +49,8 @@ fn bike(tables: &Tables) -> Phy {
     Phy::read_bytes(BIKE.as_bytes(), &tables.curve)
 }
 
-fn mounts(p: &Phy) -> (Vf, Vf) {
-    (p.front.body_tire_force_position, p.rear.body_tire_force_position)
+fn mounts(_: &Phy) -> (Vf, Vf) {
+    game_sim::stock::MOUNTS
 }
 
 /// A rider on the start line, facing +z, a foot above a flat floor.
@@ -354,9 +354,11 @@ fn the_walk_names_every_field_once() {
     // purpose when the ride gains state, and the per-tick hashes of every fixture move with them.
     // P30 moved both (472 and 1800 before it): the held stick's squared copy, its d-pad flags, the
     // rate-limited lean and the flick's 32-sample ring. P33 moved both again (543 and 2088 before
-    // it): each wheel's steering axis and its tire's three slip flags.
-    assert_eq!(dump.fields.len(), 557, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2120, "the ride's own size");
+    // it): each wheel's steering axis and its tire's three slip flags. S58 moved both again (557 and
+    // 2120 before it): each wheel's gyro, turn angle, the three velocities and forces the spin step
+    // keeps, its contact frame and its side force per pound of load.
+    assert_eq!(dump.fields.len(), 619, "the walk's leaves");
+    assert_eq!(std::mem::size_of::<Ride>(), 2368, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");
@@ -384,15 +386,19 @@ fn the_walk_names_every_field_once() {
 //     damper past the two-step integrator's stability limit, which turns into a limit cycle that
 //     alternates sign every substep.
 //
-// What replaces it is a tire bounded by what friction can do: a force that may null the contact
-// patch's slide inside one substep but never reverse it. That bound is unconditional, so the tests
-// below are not calibration — they are the two statements it makes, plus the original's own numbers.
+// What replaced it was a tire bounded by what friction can do: a force that may null the contact
+// patch's slide inside one substep but never reverse it. S58 took that bound out with the rest of the
+// stand-in, because the original has none: its spin step pushes with the per-surface law whole, and
+// a slide past the cap gets the flat skid force. What keeps the original's bike still is its own
+// geometry — the tire's force goes on the chassis a short way under the centre of gravity, at
+// `BodyTireForcePosition`, which the stand-in bike now does too — so the tests below are the bike's
+// statements, not the bound's, plus the original's own numbers.
 //
 // The original's come from the idle capture: S8 recorded sixty seconds of the acceptance run's start
 // with the pad untouched for all of it, and the original creeps forward off the start line without
 // turning, sliding or rolling to any degree worth the name. `the_port_idles_no_livelier_than_the_
 // original` reads those bounds back out of the capture rather than hard-coding them, because they are
-// the disc's numbers; the three tests before it hold to the same orders of magnitude without needing
+// the disc's numbers; the two tests before it hold to the same orders of magnitude without needing
 // it, so a checkout with no `context/` still fails if the defect comes back.
 
 /// Ten seconds of a frame rate, which is both the engine's clamped 60 Hz step and the 30 Hz the
@@ -493,8 +499,12 @@ fn a_dropped_bike_stands_still() {
         let d = idle(BIKE, dt, 0, frames);
         assert!(d.moved < 0.5, "{at}: a bike nobody touched wandered {} ft", d.moved);
         assert!(d.roll_peak < 0.1, "{at}: roll reached {} rad", d.roll_peak);
-        assert!(d.yaw_rate < 0.02, "{at}: it turned at {} rad/s", d.yaw_rate);
-        assert!(d.slide < 0.02, "{at}: its tires slid sideways at {} ft/s", d.slide);
+        // 0.03 and 0.2, not 0.02 and 0.02, since S58: at 30 Hz the drop's landing puts 0.025 rad/s of
+        // turn and 0.14 ft/s of slide into the bike for a few frames before the original's tire law
+        // takes them out — it has no bound on the impulse, which the stand-in had — and the settled
+        // bike below and the capture's own bounds are what hold the standing still itself.
+        assert!(d.yaw_rate < 0.03, "{at}: it turned at {} rad/s", d.yaw_rate);
+        assert!(d.slide < 0.2, "{at}: its tires slid sideways at {} ft/s", d.slide);
         assert!(d.speed < 0.2, "{at}: it reached {} ft/s", d.speed);
 
         // And after two seconds of settling, which is the state the capture's bike is in, it is not
@@ -505,47 +515,14 @@ fn a_dropped_bike_stands_still() {
     }
 }
 
-/// The test bike with a hundred times the cornering stiffness on both tires. The keys are spelled out
-/// so that renumbering the `.phy` fails here, by name, rather than silently handing the tests below the
-/// unmodified bike and passing.
-fn stiffened() -> String {
-    let mut out = BIKE.to_string();
-    let keys = [
-        ("SideForce1 = 0.2\n", "SideForce1 = 20.0\n"),
-        ("SideForce1 = 0.25", "SideForce1 = 25.0"),
-    ];
-    for (key, hundredfold) in keys {
-        assert!(out.contains(key), "freeride-bike.phy.txt no longer has `{}`", key.trim_end());
-        out = out.replace(key, hundredfold);
-    }
-    out
-}
-
-#[test]
-fn no_cornering_stiffness_can_make_the_bike_spin() {
-    // A hundred times the cornering stiffness, which no surface on the disc has and every explicit
-    // damper would blow up on. The tire's force is bounded by the slide it is there to kill, so this
-    // bike stands as still as the last one — the bound is what the test is, not the number.
-    let wild = stiffened();
-
-    for (dt, frames) in IDLE_RATES {
-        let at = format!("{frames} frames of {}", dt.0);
-        let d = idle(&wild, dt, 0, frames);
-        assert!(d.moved < 0.5, "{at}: a stiff bike nobody touched wandered {} ft", d.moved);
-        assert!(d.yaw_rate < 0.02, "{at}: a stiff bike turned at {} rad/s", d.yaw_rate);
-        assert!(d.slide < 0.02, "{at}: a stiff bike slid at {} ft/s", d.slide);
-    }
-}
-
 #[test]
 fn a_tire_kills_a_slide_and_never_reverses_it() {
-    // Shoved sideways at twenty feet a second, which is a real slide and not a settling transient: the
-    // one thing friction may not do is push back harder than the slide it is resisting. So the slide
-    // decays, monotonically, to nothing — and it does that at both frame rates and at a hundred times
-    // the stiffness, because the bound is on the impulse and not on the gain.
-    let wild = stiffened();
-
-    for phy in [BIKE, &wild] {
+    // Shoved sideways at twenty feet a second, which is a real slide and not a settling transient: both
+    // tires go past their cap and push with the flat skid force, and once the slide is back under it
+    // the linear law takes it the rest of the way. So the slide decays, monotonically, to nothing, at
+    // both frame rates. (Before S58 this ran at a hundred times the stiffness too, which only the
+    // stand-in's bound on the impulse could hold; the original's law, unbounded, chatters there.)
+    for phy in [BIKE] {
         for (dt, _) in IDLE_RATES {
             let tables = Tables::build();
             let p = Phy::read_bytes(phy.as_bytes(), &tables.curve);
@@ -1089,7 +1066,8 @@ CrossupWreckTime = 0.3
 ///    ground. The minute was written before that was known and rode the unpatched bike; it now rides
 ///    the same copy section (8) does. [`ride_the_minute`] keeps the mounts from the unpatched file,
 ///    the way section (8)'s harness does. Untangling the key's two jobs is P8's journal's open
-///    question, not this file's.
+///    question, not this file's. **S58 untangled them**: the fixture now carries this arm itself and
+///    the mounts are [`game_sim::stock::MOUNTS`], so the patch finds nothing to replace.
 ///
 /// Neither patch is a claim about the disc's file: the first is a shape, the second is a calibration,
 /// and `the_minutes_numbers_are_the_originals` is what keeps the second honest.
@@ -1362,6 +1340,7 @@ fn ride_the_minute(phy: &str) -> Minute {
     let p = Phy::read_bytes(phy.as_bytes(), &tables.ride.curve);
     // The mounts come from the unpatched file, as in section (8): `ridden_bike`'s third patch moves
     // `BodyTireForcePosition`, which this crate reads as the drive force's arm *and* as the mounts.
+    // (Since S58 the mounts are `stock::MOUNTS` and the patch is a no-op; see `ridden_bike`.)
     let geom = Phy::read_bytes(BIKE.as_bytes(), &tables.ride.curve);
     let at = Vf::new(0.0, 1.0, 0.0, 1.0);
     let mut r = Rider::new(&p, mounts(&geom), at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
@@ -1589,7 +1568,10 @@ fn it_takes_the_jump_and_lands_on_its_wheels() {
 
     // Through the air the right way up — a bike that leaves a lip rotating is a bike that lands on
     // its head, and the port's own wreck test is what would catch it afterwards rather than here.
-    assert!(flattest(&jump) > 0.6, "in the air the bike got to up {}", flattest(&jump));
+    // 0.6 until S58. The bike leaves this lip pitching down at 0.8 rad/s and nothing in the air
+    // takes that out, so it comes down at up 0.58 now that its tires are the original's; the landing
+    // below, which is what "on its wheels" means, still holds whole.
+    assert!(flattest(&jump) > 0.5, "in the air the bike got to up {}", flattest(&jump));
 
     // And down: landed with a second of the leg still to run, upright, still rolling, never having
     // wrecked. Measured from the last airborne tick rather than over the leg's own last second,
@@ -1673,7 +1655,10 @@ fn it_flips_off_the_lip() {
     let ridden = ride_the_flip(&p, wheels, &tables, FLIP_RAMP, &THE_FLIP, 420);
     let flip: Vec<&Seat> = ridden.iter().collect();
     let lip = flip.iter().filter(|t| t.lip).count();
-    assert!(lip > 20, "the flip's ramp only held the lip for {lip} ticks");
+    // Sixteen ticks since S58: the disc's tires grip the way the original's do now, so the bike
+    // reaches this 25 ft ramp at 76 ft/s rather than slower, and the ramp goes by sooner. Twelve is
+    // the floor that still leaves the two gestures below room to land on it.
+    assert!(lip > 12, "the flip's ramp only held the lip for {lip} ticks");
 
     // Both gestures went off with the lip under the wheels: `air.rs` cannot fire either anywhere
     // else, so these hold the ride to having reached the lip with the stick in the right place,
@@ -2105,6 +2090,10 @@ fn the_minutes_numbers_are_the_originals() {
 // wheelbase. Read as the first job it is an arm a foot *above* the body origin, which is a bike whose
 // drive force shoves its own nose into the ground. So the launch runs on a copy of the file with that
 // one key set to a tuning arm of the right shape, and keeps the mounts the rest of the file stands on.
+//
+// Since S58 the key does one job: the fixture's value is that tuning arm and the mounts are
+// [`game_sim::stock::MOUNTS`], so `launch_bike` below replaces nothing and is kept only so the
+// section's harness reads as it did.
 
 /// The file's bike with the drive force's arm set to a tuning arm rather than to the wheel mount the
 /// rest of the crate reads that key as — see the section's head.

@@ -93,7 +93,7 @@ const HEAD: usize = 10;
 fn a_hundred_ticks_is_a_known_constant() {
     // The hash of a hundred ticks of the stand-in bike on a level floor, as a literal: the same
     // value `Sim::hash`'s own test carries.
-    const HUNDRED_TICKS: u64 = 0x4667_aeed_f29f_5957;
+    const HUNDRED_TICKS: u64 = 0x4634_626b_e719_914c;
 
     let mut sim = Sim::new(1);
     for _ in 0..100 {
@@ -463,8 +463,10 @@ fn the_size_of_the_state_type_is_pinned() {
     // reads through, so nothing left it. The size is a 64-bit one: on wasm32 every `Vec` and `usize`
     // is half as wide, and the leaf count below is what holds on every target.
     // 9472 since S53: the rider's ragdoll kit, the bones of a wreck and the wreck sounds' picks, which
-    // the walk names under `ragdoll` and `wreck_sounds` only when the rider carries a kit.
+    // the walk names under `ragdoll` and `wreck_sounds` only when the rider carries a kit. 9720
+    // since S58: each wheel's gyro, turn angle, the spin step's velocities and forces, its contact
+    // frame and its side force per pound of load, thirty-one leaves a wheel.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 9472, "Sim grew or shrank: does its walk still cover every field?");
-    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 835, "the walk's leaf count moved with it");
+    assert_eq!(size_of::<Sim>(), 9720, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 897, "the walk's leaf count moved with it");
 }
