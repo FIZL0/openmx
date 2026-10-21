@@ -394,8 +394,8 @@ impl Rider {
             // own branch follows a ragdoll flag this port does not have; with it clear the original
             // keeps the record where it was, which is what this does.
             if state.wreck != Some(Wreck::CANNONBALL) {
-                let heading = crate::math::quat_to_mat4(down.body.quat, down.origin).0[2];
-                ride.keep_back(down.body.cofg_world, heading, world, &t.ride.curve);
+                let heading = crate::math::quat_to_mat4(down.bike.body.quat, down.origin).0[2];
+                ride.keep_back(down.bike.body.position, heading, world, &t.ride.curve);
             }
             // The rider's bones, when there are any: they let go of the bars on their own clock.
             if let (Some(kit), Some(doll)) = (ragdoll_kit.as_ref(), ragdoll.as_mut()) {

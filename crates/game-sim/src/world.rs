@@ -34,6 +34,7 @@
 
 use crate::camera::{Obstacle, Obstacles, Surface};
 use crate::collide::{self, Bundle, MeshRef, Probe, Record};
+use crate::contact_search::{Cell, Heightfield, TerrainField};
 use crate::math::{self, Mat4};
 use crate::track::{self, Mesh, Placement, Terrain, TerrainLayout};
 use ps2_float::{Dest, F, Vf, vu};
@@ -74,6 +75,55 @@ pub trait World {
     fn area(&self) -> Option<crate::biplane::Area> {
         None
     }
+
+    /// The terrain as a collision object's search reads it: the wreck bike's heightfield rays
+    /// ([`crate::wreck_bike`]). A world that has no terrain of its own is sampled through
+    /// [`World::ground`], a cell a unit wide ([`Sampled`]).
+    fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
+        Some(Box::new(Sampled(std::cell::RefCell::new(self))))
+    }
+}
+
+/// Any world as a heightfield: each cell's corners a unit apart, at the height and with the normal
+/// [`World::ground`] gives there. The port's own, for the worlds tests build; a track is read as the
+/// terrain object reads it ([`Ground::field`]).
+pub struct Sampled<'a, W: World + ?Sized>(pub std::cell::RefCell<&'a mut W>);
+
+impl<W: World + ?Sized> Heightfield for Sampled<'_, W> {
+    fn min(&self) -> Vf {
+        Vf::new(-f32::MAX, 0.0, -f32::MAX, 1.0)
+    }
+    fn max(&self) -> Vf {
+        Vf::new(f32::MAX, 0.0, f32::MAX, 1.0)
+    }
+    fn per_sample(&self) -> F {
+        F::ONE
+    }
+    fn height_scale(&self) -> F {
+        F::ONE
+    }
+    fn coarse(&self) -> bool {
+        false
+    }
+    fn split_one_way(&self) -> bool {
+        true
+    }
+    fn cell(&self, ix: i32, iz: i32, _step: i32) -> Option<Cell> {
+        let mut w = self.0.borrow_mut();
+        let mut heights = [0.0; 4];
+        let mut normals = [Vf::ZERO; 4];
+        for (k, (dx, dz)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+            let at = Vf::new(fpu_i32(ix.wrapping_add(dx)), 0.0, fpu_i32(iz.wrapping_add(dz)), 1.0);
+            let (on, n) = w.ground(at);
+            heights[k] = on.y();
+            normals[k] = n;
+        }
+        Some(Cell { heights: Vf(heights), normals, surfaces: [0; 4] })
+    }
+}
+
+fn fpu_i32(i: i32) -> f32 {
+    F::from(i).0
 }
 
 /// A flat plane at a height, with nothing standing on it. What a fixture rides.
@@ -96,6 +146,36 @@ impl World for Flat {
 
     fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
         false
+    }
+
+    fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
+        Some(Box::new(*self))
+    }
+}
+
+/// The plane as a heightfield of one-unit cells reaching as far as a float does, every corner at its
+/// height and facing its normal.
+impl Heightfield for Flat {
+    fn min(&self) -> Vf {
+        Vf::new(-f32::MAX, 0.0, -f32::MAX, 1.0)
+    }
+    fn max(&self) -> Vf {
+        Vf::new(f32::MAX, 0.0, f32::MAX, 1.0)
+    }
+    fn per_sample(&self) -> F {
+        F::ONE
+    }
+    fn height_scale(&self) -> F {
+        F::ONE
+    }
+    fn coarse(&self) -> bool {
+        false
+    }
+    fn split_one_way(&self) -> bool {
+        true
+    }
+    fn cell(&self, _ix: i32, _iz: i32, _step: i32) -> Option<Cell> {
+        Some(Cell { heights: Vf::splat(self.y.0), normals: [self.normal; 4], surfaces: [0; 4] })
     }
 }
 
@@ -154,6 +234,22 @@ impl<'a> Ground<'a> {
             F::from((self.samples_x - 1) as i32) * self.spacing,
             F::from((self.samples_z - 1) as i32) * self.spacing,
         )
+    }
+
+    /// The terrain as the terrain object's own query reads it: the box it covers (a sample's width
+    /// past the last sample, as the game's object has it), a sample per [`Ground::spacing`], heights
+    /// scaled by the same, one sample to a cell and every cell split the same way.
+    pub fn field(&self) -> TerrainField<'_> {
+        let (x, z) = (F::from(self.samples_x as i32) * self.spacing, F::from(self.samples_z as i32) * self.spacing);
+        TerrainField {
+            terrain: self.terrain,
+            min: Vf::new(0.0, 0.0, 0.0, 1.0),
+            max: Vf::new(x.0, 0.0, z.0, 1.0),
+            per_sample: F::ONE / self.spacing,
+            height_scale: self.spacing,
+            coarse: false,
+            split_one_way: true,
+        }
     }
 
     /// The ground under a world point: the cell's four corners, blended.
@@ -215,6 +311,10 @@ impl World for Ground<'_> {
 
     fn area(&self) -> Option<crate::biplane::Area> {
         Some(self.area)
+    }
+
+    fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
+        Some(Box::new(self.field()))
     }
 
     fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
@@ -396,6 +496,10 @@ impl World for Place<'_> {
 
     fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
         self.props.sweep(bundle, record)
+    }
+
+    fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
+        self.ground.heightfield()
     }
 }
 
