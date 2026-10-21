@@ -509,3 +509,30 @@ fn the_preload_meter_follows_the_preload() {
     assert_eq!(overlay::preload_fill(true, 30.0, 10.0, 1.0, 1.0), 1.0);
     assert_eq!(overlay::preload_fill(true, 10.0, 0.0, 1.0, 1.0), 0.0);
 }
+
+/// Each rider's name and number from the garage (P86): the view's own under the score, the others'
+/// numbers beside their marks; a rider with neither has nothing written.
+#[test]
+fn the_riders_names_and_numbers_are_drawn() {
+    let Some(mut art) = art() else { return };
+    let tables = Arc::new(Tables::build());
+    let sims = four_riders(&tables);
+    let riders = ridden(&sims);
+    let tag = |name: &str, number: &str| overlay::Tag { name: name.into(), number: number.into() };
+    art.tags = vec![tag("Kaito", "72"), tag("", "5"), tag("Ann", ""), tag("", "")];
+    let mut blank = Frame::new(320, 224, [255, 255, 255]);
+    let mut view = Frame::new(320, 224, [255, 255, 255]);
+    let drawn = art.draw(&mut view, (640, 448), &riders, 0, overlay::radar_span(SPACING), &bike(0.0));
+    assert_eq!(drawn.tag.as_deref(), Some("#72 Kaito"));
+    assert_eq!(drawn.mark_tags, [(1, "5".to_string()), (2, "A".to_string())]);
+    art.tags.clear();
+    let bare = art.draw(&mut blank, (640, 448), &riders, 0, overlay::radar_span(SPACING), &bike(0.0));
+    assert_eq!((bare.tag, bare.mark_tags.len()), (None, 0));
+    assert_ne!(view.color, blank.color, "the tags drew");
+    let drawn = {
+        art.tags = vec![tag("Kaito", "72"), tag("", "5")];
+        art.draw(&mut Frame::new(320, 224, [0, 0, 0]), (640, 448), &riders, 1, overlay::radar_span(SPACING), &bike(0.0))
+    };
+    assert_eq!(drawn.tag.as_deref(), Some("#5"));
+    assert_eq!(drawn.mark_tags, [(0, "72".to_string())], "seats past the tags have none");
+}

@@ -17,6 +17,10 @@ mod vehicle;
 #[path = "../src/roster.rs"]
 #[allow(dead_code)]
 mod roster;
+// The look painted onto the ride (P86).
+#[path = "../src/dress.rs"]
+#[allow(dead_code)]
+mod dress;
 #[path = "../src/join.rs"]
 #[allow(dead_code)]
 mod join;
@@ -838,6 +842,161 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     }
     assert_ne!(seen[0].0, seen[1].0, "the two seats ride the same .phy");
     assert_ne!(seen[0].1, seen[1].1, "the two seats wear the same gear");
+}
+
+// ---- the rider's look (P86) ----------------------------------------------------------------------
+
+/// `n` taps of `control` on a seat's garage column; seat 0 is the menu's own pad.
+fn taps(m: &mut Menu, reader: &mut Reader, seat: usize, control: Control, n: usize) {
+    for _ in 0..n {
+        match seat {
+            0 => {
+                tap(m, reader, control);
+            }
+            _ => tap_garage_seat(m, reader, seat, control),
+        }
+    }
+}
+
+/// Type `text` on a seat's open keys from the cursor at the first key: walk to each character's key,
+/// Cross on it.
+fn type_on_keys(m: &mut Menu, reader: &mut Reader, seat: usize, text: &str) {
+    for c in text.chars() {
+        let e = m.garage(seat).unwrap().entry.clone().expect("the keys are open");
+        let keys = e.keys();
+        let (row, col) = keys
+            .iter()
+            .enumerate()
+            .find_map(|(r, k)| k.find(c.to_ascii_lowercase()).map(|i| (r, i)))
+            .unwrap_or_else(|| panic!("no key for {c:?}"));
+        let (at_row, at_col) = e.key;
+        let down = (row + keys.len() + 1 - at_row) % (keys.len() + 1);
+        taps(m, reader, seat, Control::Down, down);
+        let now = m.garage(seat).unwrap().entry.as_ref().unwrap().key;
+        assert_eq!(now.0, row, "walked down to {c:?}'s row from ({at_row}, {at_col})");
+        let width = keys[row].len();
+        taps(m, reader, seat, Control::Right, (col + width - now.1) % width);
+        assert_eq!(m.garage(seat).unwrap().entry.as_ref().unwrap().key, (row, col));
+        taps(m, reader, seat, Control::Cross, 1);
+    }
+}
+
+#[test]
+fn a_seat_dresses_its_rider_saves_the_look_and_a_second_seat_rides_it_after_a_restart() {
+    use roster::{Catalogue, Piece, Picks, Presets, Row, ROWS};
+
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let catalogue = Catalogue::read(&mut disc).unwrap();
+    assert!(!catalogue.wardrobe.outfits.is_empty() && Piece::ALL.iter().all(|&p| catalogue.wardrobe.pieces[p as usize].len() > 1));
+    let row = |r: Row| ROWS.iter().position(|&x| x == r).unwrap();
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::default()).with_looks(Presets::default());
+    m.step(reader.read(&Report::idle()));
+    let mut two = Reader::new();
+    m.step_seat(1, two.read(&Report::idle()));
+    m.seated = 2;
+    taps(&mut m, &mut reader, 0, Control::Down, 3);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Garage));
+    let stock = m.garage(0).unwrap().pick.clone();
+
+    // Seat 1: the next colours, the next jersey and pants.
+    taps(&mut m, &mut reader, 0, Control::Down, row(Row::Colours));
+    tap(&mut m, &mut reader, Control::Right);
+    tap(&mut m, &mut reader, Control::Down);
+    tap(&mut m, &mut reader, Control::Right);
+    // Its name: Cross opens the keys, the letters, Start keeps them.
+    tap(&mut m, &mut reader, Control::Down);
+    assert_eq!(m.garage(0).unwrap().row, row(Row::Name));
+    tap(&mut m, &mut reader, Control::Cross);
+    type_on_keys(&mut m, &mut reader, 0, "Kaito");
+    assert_eq!(m.screen(), Some(Screen::Garage), "typing does not leave the garage");
+    tap(&mut m, &mut reader, Control::Start);
+    assert_eq!(m.garage(0).unwrap().entry, None);
+    // Its number: one key too many is deleted with Square, then Done on the command row.
+    tap(&mut m, &mut reader, Control::Down);
+    tap(&mut m, &mut reader, Control::Cross);
+    type_on_keys(&mut m, &mut reader, 0, "720");
+    tap(&mut m, &mut reader, Control::Square);
+    let e = m.garage(0).unwrap().entry.clone().unwrap();
+    taps(&mut m, &mut reader, 0, Control::Down, e.keys().len() - e.key.0);
+    let e = m.garage(0).unwrap().entry.clone().unwrap();
+    let done = e.commands().iter().position(|c| *c == "Done").unwrap();
+    taps(&mut m, &mut reader, 0, Control::Right, (done + e.commands().len() - e.key.1) % e.commands().len());
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.garage(0).unwrap().entry, None, "Done closes the keys");
+    // A helmet, the second goggles and the last boots.
+    tap(&mut m, &mut reader, Control::Down);
+    tap(&mut m, &mut reader, Control::Right);
+    tap(&mut m, &mut reader, Control::Down);
+    taps(&mut m, &mut reader, 0, Control::Right, 2);
+    taps(&mut m, &mut reader, 0, Control::Down, 2);
+    tap(&mut m, &mut reader, Control::Left);
+    let one = m.garage(0).unwrap().pick.clone();
+    println!("seat 1: {} | {}", one.rider, one.look.text());
+    assert_eq!((one.look.name.as_str(), one.look.number.as_str()), ("Kaito", "72"));
+    assert_ne!(one.rider, stock.rider, "the colours changed the gear set");
+    assert!(!one.look.outfit.is_empty());
+    assert!(Piece::ALL.iter().filter(|&&p| p != Piece::Gloves).all(|&p| !one.look.piece(p).is_empty()), "{:?}", one.look);
+    assert_eq!(one.look.piece(Piece::Gloves), "", "gloves stay the gear set's");
+    assert_eq!(one.look.piece(Piece::Boots), catalogue.wardrobe.pieces[Piece::Boots as usize].last().unwrap());
+
+    // Cross on Preset saves it under its name and number.
+    tap(&mut m, &mut reader, Control::Down);
+    assert_eq!(m.garage(0).unwrap().row, row(Row::Preset));
+    tap(&mut m, &mut reader, Control::Cross);
+    assert!(m.take_looks_changed());
+    assert_eq!(m.looks.keys(), ["Kaito 72"]);
+    assert_eq!(m.screen(), Some(Screen::Garage), "saving does not leave the garage");
+
+    // Seat 2, on its own pad: up from the top is the Preset row, right loads the saved look.
+    tap_garage_seat(&mut m, &mut two, 1, Control::Up);
+    assert_eq!(m.garage(1).unwrap().row, row(Row::Preset));
+    assert_ne!(m.garage(1).unwrap().pick.look, one.look);
+    tap_garage_seat(&mut m, &mut two, 1, Control::Right);
+    let loaded = m.garage(1).unwrap().pick.clone();
+    assert_eq!((&loaded.bike, loaded.set, &loaded.rider, &loaded.look, loaded.preset.as_str()), (&one.bike, one.set, &one.rider, &one.look, "Kaito 72"));
+
+    // Circle leaves; the picks carry the looks into the ride.
+    tap(&mut m, &mut reader, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    let picks = m.ride_picks(2).unwrap();
+    assert_eq!(picks[0].look, picks[1].look);
+    assert_eq!(picks[0].preset, "Kaito 72", "the first seat's save is its pick too");
+    assert_eq!(m.lobby.pick.look, one.look.text(), "the online pick sends the look");
+
+    // The ride dresses both alike: the same body repaint and the same painted name and number.
+    let mut kit = dress::Kit::open(&mut disc);
+    let dressed: Vec<_> = picks
+        .iter()
+        .map(|p| {
+            let rider = catalogue.rider(&p.rider).unwrap();
+            let suit = game_render::rider::Suit { materials: rider.suit.clone(), ..Default::default() };
+            let tex = kit.texture(&p.rider, &p.look, &p.bike).expect("a name to paint");
+            (kit.repaint(&suit, &p.look), tex.rgba)
+        })
+        .collect();
+    assert_eq!(dressed[0], dressed[1]);
+    assert!(dressed[0].1.chunks(4).any(|t| t[3] > 0), "the name and number drew");
+
+    // A restart: the files written and read back by a fresh menu, where a seat with no pick of its
+    // own loads the look by its name.
+    let dir = scratch("looks");
+    m.picks.save(&dir).unwrap();
+    m.looks.save(&dir).unwrap();
+    let again = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::load(&dir)).with_looks(Presets::load(&dir));
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(again.looks, m.looks);
+    assert_eq!(again.ride_picks(2).unwrap(), picks, "each seat's look and preset pick are remembered");
+    let mut third = roster::Garage::new(&catalogue, &roster::Pick::default());
+    assert!(third.load_preset(&catalogue, &again.looks, "kaito 72"));
+    assert_eq!(third.pick, picks[1]);
 }
 
 // ---- the splash (P46) ----------------------------------------------------------------------------

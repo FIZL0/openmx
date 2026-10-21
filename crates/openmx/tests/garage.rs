@@ -145,7 +145,7 @@ fn a_picked_bike_and_rider_reach_the_ride_per_seat() {
     let Some(mut disc) = disc() else { return };
     let c = Catalogue::read(&mut disc).unwrap();
     let seat = |bike: &str, set: &str, rider: &str| {
-        c.fit(&Pick { bike: bike.into(), set: Set::from_word(set).unwrap(), rider: rider.into() })
+        c.fit(&Pick { bike: bike.into(), set: Set::from_word(set).unwrap(), rider: rider.into(), ..Pick::default() })
     };
     let wanted = Picks([
         Pick::default(),
