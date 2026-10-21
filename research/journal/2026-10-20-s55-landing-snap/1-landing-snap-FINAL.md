@@ -83,3 +83,25 @@ Task S55. 2026-10-20.
 
 - P52 for the dt half. If a snap is still seen after P52, look at the rider body's blend at the
   touchdown restart, and at the camera.
+
+## After P52 (2026-10-21)
+
+Was the landing snap P52 all along? **Partly, not all of it.**
+
+- The chassis-fade snap fixed above was real, and it was not about the clock. It turned the bike 45°
+  in one frame on a steady headless clock too.
+- The rest was P52's.
+  - At 60 fps drawn, the old loop's dt average was about 1/60. The offline ride was not the
+    original's 30 Hz ride (every capture row is dt 0.03333), so its landings could not match.
+  - At low frame rates each tick was one picture. The original's one-to-two-tick velocity swing onto
+    the heading (rows 341 and 1614 above) was held on screen for a whole slow frame, in slow motion,
+    with nothing drawn between.
+- P52 fixes both.
+  - The sim now runs 30 ticks a second on a steady PS2 clock, so every tick is on the cap from the
+    first second, whatever the picture rate. `crates/openmx/tests/fixed_rate.rs` proves 5 fps and
+    60 fps land on the same state with the same dt.
+  - The picture interpolates bike, chassis, rider and camera between the last two ticks.
+  - So a one-tick swing is now drawn over 33 ms of pictures, not as a jump.
+- Not done in P52: the rider body's blend at the touchdown restart, and the camera at touchdown. If a
+  snap is still seen, those are next. See P52's journal
+  (`research/journal/2026-10-21-p52-fixed-sim-rate`).

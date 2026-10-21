@@ -34,7 +34,8 @@ pub enum Stage {
     Present,
     /// `--shot`'s file and the line a second.
     Log,
-    /// Sleeping out the rest of the 60 Hz frame.
+    /// Sleeping out the rest of a picture under `--draw-fps` (a headless ride's 60 a second). The
+    /// ticks a frame runs are in `Input` to `Camera`, however many the wall clock owed it (P52).
     Pace,
 }
 
