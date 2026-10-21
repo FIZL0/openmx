@@ -6,12 +6,18 @@
 //     starts without asking for the disc again;
 //   * the picked File itself through FileReaderSync, for a browser that refuses OPFS (a private window): nothing is
 //     copied and the disc is asked for again next visit.
-// The module's host calls (crates/openmx/src/web.rs says what each one is) are answered below; that list and
-// crates/openmx/tests/web/host.mjs, which answers them in node for the tests, are kept call for call alike.
+// The module's host calls (crates/openmx/src/web.rs says what each one is) are answered below, on the global
+// `openmx` wasm-bindgen's glue calls them on; that list and crates/openmx/tests/web/host.mjs, which answers them in
+// node for the tests, are kept call for call alike. A module worker: the glue is an ES module.
+//
+// Online (N4): `{ online }` joins or hosts a lobby through a relay and rides once the host starts, at 60 frames a
+// second on this thread's timer; the page's seat rides a pad nobody holds (web.rs says why). It needs no disc.
 //
 // Messages in:  { import: File }            copy the disc into OPFS, then start
 //               { start: { canvas?, file? } } start on the OPFS copy, or on `file` when given
+//               { online: { name, relay, codes?, join?, host?, bike, ticks? } }
 // Messages out: { progress: [done, total] } | { started: true } | { error: String } | { missing: true }
+//               { online: state } (Online.state(), a few times a second) | { ticks: String } (once `ticks` settled)
 
 const DISC = 'disc.iso';
 // What one read of the picked file asks for when it is being copied: big enough that a 2 GB image is a few hundred
@@ -20,6 +26,35 @@ const CHUNK = 8 << 20;
 
 let canvas;
 let context;
+// What the host calls read: the disc once there is one.
+let disc = { size: 0, read: () => -1 };
+
+globalThis.openmx = {
+  disc_size: () => disc.size,
+  disc_read: (at, into) => {
+    try {
+      return disc.read(at, into);
+    } catch {
+      return -1;
+    }
+  },
+  present: (rgba, w, h) => {
+    if (!canvas) return;
+    if (canvas.width !== w || canvas.height !== h) [canvas.width, canvas.height] = [w, h];
+    context.putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+  },
+  log: line => console.log(line),
+};
+
+// The module, once: wasm-bindgen's glue fetches pkg/openmx_web_bg.wasm beside itself.
+let loaded;
+function game() {
+  loaded ??= import('./pkg/openmx_web.js').then(async glue => {
+    await glue.default();
+    return glue;
+  });
+  return loaded;
+}
 
 async function opfs() {
   return navigator.storage.getDirectory();
@@ -79,39 +114,60 @@ async function openDisc(file) {
 }
 
 async function start(file) {
-  const disc = await openDisc(file);
-  if (!disc) {
+  const opened = await openDisc(file);
+  if (!opened) {
     postMessage({ missing: true });
     return;
   }
-  let memory;
-  const bytes = (ptr, len) => new Uint8Array(memory.buffer, ptr, len);
-  const imports = {
-    openmx: {
-      disc_size: () => disc.size,
-      disc_read: (at, ptr, len) => {
-        try {
-          return disc.read(at, bytes(ptr, len));
-        } catch {
-          return -1;
-        }
-      },
-      present: (ptr, w, h) => {
-        if (canvas.width !== w || canvas.height !== h) [canvas.width, canvas.height] = [w, h];
-        context.putImageData(new ImageData(new Uint8ClampedArray(bytes(ptr, w * h * 4)), w, h), 0, 0);
-      },
-      log: (ptr, len) => console.log(new TextDecoder().decode(bytes(ptr, len))),
-    },
-  };
-  const { instance } = await WebAssembly.instantiateStreaming(fetch('pkg/openmx_web.wasm'), imports);
-  memory = instance.exports.memory;
-  const err = instance.exports.openmx_start(canvas.width, canvas.height);
+  disc = opened;
+  const glue = await game();
+  const err = glue.openmx_start(canvas.width, canvas.height);
   if (err) {
-    postMessage({ error: new TextDecoder().decode(bytes(instance.exports.openmx_message(), err)) });
+    postMessage({ error: err });
     return;
   }
-  instance.exports.openmx_frame();
+  glue.openmx_frame();
   postMessage({ started: true });
+}
+
+// A ride against other machines: join (a room code or ticket) or host (that many seats), then a frame every 60th of
+// a second by the clock, ready as soon as seated; a host starts once every seat is taken and ready. `ticks`: post
+// the first that many ticks' lines once settled.
+async function online({ name, relay, codes, join, host, bike, ticks }) {
+  const glue = await game();
+  const net = new glue.Online(name || 'Browser', relay || '', codes ?? undefined);
+  if (join) net.join(join, bike || 'race125p');
+  else net.host(Number(host) || 2, bike || 'race125p');
+  let last = performance.now();
+  let told = 0;
+  let readied = false;
+  let sent = false;
+  let started = false;
+  setInterval(() => {
+    const now = performance.now();
+    net.frame(Math.min((now - last) / 1000, 0.25));
+    last = now;
+    const s = net.state();
+    if (join && !readied && s.taken > 1) {
+      net.ready(true);
+      readied = true;
+    }
+    // hosting: start as soon as every seat is taken and every guest is ready
+    if (host && !started && s.taken >= Number(host) && s.ready) {
+      net.start();
+      started = true;
+    }
+    // settled can be ahead of the ticks run here: wait for every line
+    const lines = ticks && !sent && s.confirmed >= Number(ticks) ? net.ticks(0, Number(ticks)) : '';
+    if (lines && lines.split('\n').filter(Boolean).length === Number(ticks)) {
+      postMessage({ ticks: lines });
+      sent = true;
+    }
+    if (now - told > 250) {
+      postMessage({ online: s });
+      told = now;
+    }
+  }, 1000 / 60);
 }
 
 onmessage = async ({ data }) => {
@@ -123,6 +179,8 @@ onmessage = async ({ data }) => {
         context = canvas.getContext('2d');
       }
       await start(data.start.file);
+    } else if (data.online) {
+      await online(data.online);
     } else if (data.import) {
       await importDisc(data.import);
       await start();

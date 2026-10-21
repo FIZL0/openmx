@@ -10,10 +10,21 @@
 //! listing; once it stops, the code goes stale and is free again. Anyone may overwrite a code's item (the key is
 //! public): the joiner still dials the ticket's endpoint, which QUIC authenticates.
 
-use std::time::{Duration, SystemTime};
+// In a browser (N4) there is no DHT and no mDNS, so their halves go unused there.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports, unused_variables, unreachable_code))]
+
+use std::time::Duration;
 
 use iroh::SecretKey;
+#[cfg(not(target_arch = "wasm32"))]
 use n0_mainline::{Dht, MutableItem, SigningKey};
+use n0_future::time::SystemTime;
+
+/// A browser has no UDP socket, so no DHT (N4): codes go through the pkarr relays only. A stand-in nobody can make, so
+/// the code that reads the DHT reads the same everywhere.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+pub enum Dht {}
 
 /// The codes' symbols: digits and capitals without the look-alikes 0/O and 1/I (32^4 ≈ 1M codes).
 pub const SYMBOLS: &[u8; 32] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -117,15 +128,25 @@ pub type Found = Result<Option<(String, i64)>, String>;
 
 impl Codes {
     pub fn new(dht: Option<Dht>, servers: Vec<String>) -> Codes {
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = rustls::crypto::ring::default_provider().install_default();
+        #[cfg(not(target_arch = "wasm32"))]
         let http = reqwest::Client::builder().timeout(Duration::from_secs(25)).build().expect("the HTTP client");
+        // the page's fetch, which has no timeout of its own to set (a lookup's caller bounds it)
+        #[cfg(target_arch = "wasm32")]
+        let http = reqwest::Client::new();
         Codes { dht, servers: servers.into_iter().map(|s| s.trim_end_matches('/').to_string()).filter(|s| !s.is_empty()).collect(), http }
     }
 
     async fn dht_get(&self, code: &str) -> Found {
         let Some(dht) = &self.dht else { return Ok(None) };
-        let item = dht.get_mutable_most_recent(code_key(code).public().as_bytes(), None).await.map_err(|e| format!("the DHT: {e}"))?;
-        Ok(item.and_then(|i| Some((txt_of(i.value())?, i.seq()))))
+        #[cfg(target_arch = "wasm32")]
+        match *dht {}
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let item = dht.get_mutable_most_recent(code_key(code).public().as_bytes(), None).await.map_err(|e| format!("the DHT: {e}"))?;
+            Ok(item.and_then(|i| Some((txt_of(i.value())?, i.seq()))))
+        }
     }
 
     /// The record under `name` on the first relay that answers.
@@ -177,8 +198,13 @@ impl Codes {
     pub async fn publish(&self, code: &str, ticket: &str) -> Result<(), String> {
         let dht = async {
             let Some(dht) = &self.dht else { return Err("no DHT".to_string()) };
-            let item = MutableItem::new(&SigningKey::from_bytes(&code_key(code).to_bytes()), &dns_txt(ticket), unix_micros(), None);
-            dht.put_mutable(item, None).await.map(|_| ()).map_err(|e| format!("the DHT: {e}"))
+            #[cfg(target_arch = "wasm32")]
+            match *dht {}
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let item = MutableItem::new(&SigningKey::from_bytes(&code_key(code).to_bytes()), &dns_txt(ticket), unix_micros(), None);
+                dht.put_mutable(item, None).await.map(|_| ()).map_err(|e| format!("the DHT: {e}"))
+            }
         };
         let relays = async { if self.servers.is_empty() { Err("no code server".to_string()) } else { self.relay_put(code, ticket).await } };
         match tokio::join!(dht, relays) {
@@ -191,7 +217,7 @@ impl Codes {
     /// `show`.
     pub async fn roll(&self, mut code: String, ticket: &str, show: impl Fn(&str)) -> Result<String, String> {
         for _ in 0..5 {
-            match tokio::time::timeout(Duration::from_secs(15), self.lookup(&code)).await {
+            match n0_future::time::timeout(Duration::from_secs(15), self.lookup(&code)).await {
                 Ok(Ok(Some((_, seq)))) if fresh(seq) => {
                     code = new_short();
                     show(&code);

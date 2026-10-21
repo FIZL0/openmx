@@ -3,7 +3,7 @@
 //! host, which cleans it, rate-limits it and passes it on with the sender's lobby name. It never enters the ride's
 //! input, so the simulation and the replays never see it.
 
-use std::time::{Duration, Instant};
+use n0_future::time::{Duration, Instant};
 
 /// A line's most characters.
 pub const MAX: usize = 80;

@@ -2,7 +2,7 @@
 // the network is not there. Network first, so a new build is what an online visit gets. The disc is in OPFS, never in
 // this cache: nothing from the disc is hosted or fetched.
 const CACHE = 'openmx';
-const SHELL = ['./', 'worker.js', 'manifest.webmanifest', 'icon.svg', 'pkg/openmx_web.wasm'];
+const SHELL = ['./', 'worker.js', 'manifest.webmanifest', 'icon.svg', 'pkg/openmx_web.js', 'pkg/openmx_web_bg.wasm'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

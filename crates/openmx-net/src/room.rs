@@ -197,7 +197,7 @@ pub fn quick_pick(list: &[Listing], need: usize) -> Vec<Listing> {
 }
 
 pub(crate) fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    n0_future::time::SystemTime::now().duration_since(n0_future::time::SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]

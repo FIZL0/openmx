@@ -2,12 +2,14 @@
 //! desktop draws from the same disc.
 //!
 //! * [`the_shell_builds_for_the_browser`] builds `crates/openmx/src/web.rs` for
-//!   `wasm32-unknown-unknown` through `tools/web.sh` — the same script a release uses — and reads the
-//!   module's import section: everything it asks the page for must be one of the four host calls
-//!   `web/worker.js` supplies. An import from anywhere else (`env`, `__wbindgen_*`, a WASI function)
-//!   is a module the page cannot instantiate, and this is the only test that would see it.
+//!   `wasm32-unknown-unknown` through `tools/web.sh` — the same script a release uses, wasm-bindgen
+//!   and all — and reads the module's import section: everything it imports must come from
+//!   wasm-bindgen's glue, and the glue must ask the page for exactly the four host calls
+//!   `web/worker.js` supplies. An import from anywhere else (`env`: a C dependency's missing symbol,
+//!   a WASI function) is a module the page cannot instantiate, and this is the only test that would
+//!   see it.
 //! * [`the_browser_draws_what_the_desktop_draws`] runs that module in node with `tests/web/host.mjs`
-//!   standing in for the worker — the same imports, a file in place of the OPFS handle — over the
+//!   standing in for the worker — the same host calls, a file in place of the OPFS handle — over the
 //!   user's own disc, and compares its frame with [`openmx_web::start_line`] drawn natively. Rendering
 //!   is "looks right" in this project (AGENT.md), so the comparison has a tolerance, and what it
 //!   measured is printed.
@@ -24,11 +26,14 @@ use std::sync::OnceLock;
 use game_render::disc::{Disc, configured_image};
 use openmx_web::{TRACK, rgba, start_line};
 
-/// The four host calls `web/worker.js` supplies, under the import module the module names.
+/// The four host calls `web/worker.js` supplies, on its global `openmx`.
 const HOST_CALLS: [&str; 4] = ["disc_size", "disc_read", "present", "log"];
 
-/// What the page calls.
-const EXPORTS: [&str; 4] = ["memory", "openmx_start", "openmx_frame", "openmx_message"];
+/// The module wasm-bindgen's glue answers the imports under (`--target web`).
+const GLUE: &str = "./openmx_web_bg.js";
+
+/// What the page calls, through the glue: the picture, and the online ride (`Online`'s methods).
+const EXPORTS: [&str; 9] = ["memory", "openmx_start", "openmx_frame", "online_new", "online_host", "online_join", "online_frame", "online_state", "online_ticks"];
 
 /// The frame both sides draw: the PS2's own.
 const SIZE: (usize, usize) = (640, 448);
@@ -37,8 +42,9 @@ fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// `tools/web.sh --check`, once per test binary: the path of the module it built.
-fn built() -> &'static PathBuf {
+/// `tools/web.sh --check`, once per test binary: the directory of the module and its glue
+/// (`openmx_web_bg.wasm`, `openmx_web.js`).
+pub fn built() -> &'static PathBuf {
     static WASM: OnceLock<PathBuf> = OnceLock::new();
     WASM.get_or_init(|| {
         let script = repo().join("tools/web.sh");
@@ -46,7 +52,7 @@ fn built() -> &'static PathBuf {
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success(), "{} --check failed:\n{text}", script.display());
         let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).lines().last().unwrap_or("").trim());
-        assert!(path.is_file(), "tools/web.sh --check named no module:\n{text}");
+        assert!(path.join("openmx_web_bg.wasm").is_file() && path.join("openmx_web.js").is_file(), "tools/web.sh --check named no module:\n{text}");
         path
     })
 }
@@ -113,18 +119,20 @@ fn interface(wasm: &[u8]) -> (Vec<(String, String, u8)>, Vec<String>) {
 
 #[test]
 fn the_shell_builds_for_the_browser() {
-    let wasm = std::fs::read(built()).expect("read the module");
+    let wasm = std::fs::read(built().join("openmx_web_bg.wasm")).expect("read the module");
+    let glue = std::fs::read_to_string(built().join("openmx_web.js")).expect("read the glue");
     let (imports, exports) = interface(&wasm);
-    println!("{} bytes; imports {imports:?}; exports {exports:?}", wasm.len());
+    println!("{} bytes; {} imports; exports {:?}", wasm.len(), imports.len(), exports.iter().filter(|e| !e.starts_with("__") && !e.contains("closure")).collect::<Vec<_>>());
     for (module, field, _) in &imports {
-        assert!(
-            module == "openmx" && HOST_CALLS.contains(&field.as_str()),
-            "the browser build imports {module}.{field}, which web/worker.js does not supply"
-        );
+        assert!(module == GLUE, "the browser build imports {module}.{field}, which nothing in the page supplies");
     }
-    for call in HOST_CALLS {
-        assert!(imports.iter().any(|(_, f, _)| f == call), "{call} is no longer imported: is worker.js stale?");
-    }
+    // the page's own calls, as the glue makes them: `openmx.<name>(`, and nothing else on `openmx`
+    let mut asked: Vec<&str> = glue.split("openmx.").skip(1).filter_map(|r| r.split('(').next()).filter(|n| n.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())).collect();
+    asked.sort();
+    asked.dedup();
+    let mut want = HOST_CALLS.to_vec();
+    want.sort();
+    assert_eq!(asked, want, "the glue asks the page for other calls than web/worker.js supplies");
     for export in EXPORTS {
         assert!(exports.iter().any(|e| e == export), "the browser build does not export {export}");
     }

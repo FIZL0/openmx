@@ -2,7 +2,7 @@
 //! and the few host calls a page answers in place of a file system and a window (N4).
 //!
 //! ```sh
-//! tools/web.sh            # web/pkg/openmx_web.wasm, then serve web/ on localhost
+//! tools/web.sh            # web/pkg/openmx_web.js + openmx_web_bg.wasm, then serve web/ on localhost
 //! ```
 //!
 //! The page (`web/index.html`) asks for the user's own disc once and copies it into the browser's
@@ -13,16 +13,26 @@
 //!
 //! # The host calls
 //!
-//! No `wasm-bindgen`: the workspace has no dependency outside itself, and what crosses the boundary is
-//! four numbers-only functions the worker supplies under the import module `openmx`:
+//! Through `wasm-bindgen`, as opentennis's build is (`tools/web.sh` runs its CLI): ggrs takes its
+//! clock and its random numbers from the page through it, and so does iroh. The page's own four are
+//! on the worker's global `openmx` object:
 //!
-//! * `disc_size() -> f64` and `disc_read(at: f64, ptr, len) -> i32` — the image, by offset, out of
-//!   the OPFS file (an `f64` because the disc is larger than an `i32` can address, and JavaScript's
-//!   numbers are exact up to 2^53);
-//! * `present(ptr, width, height)` — one RGBA frame, which the worker puts into its canvas;
-//! * `log(ptr, len)` — a UTF-8 line for the console, and where a panic's message goes.
+//! * `disc_size() -> number` and `disc_read(at, into: Uint8Array) -> number` — the image, by offset,
+//!   out of the OPFS file (`at` a JavaScript number, exact up to 2^53, as the disc is larger than an
+//!   `i32` can address);
+//! * `present(rgba: Uint8Array, width, height)` — one frame, which the worker puts into its canvas;
+//! * `log(line)` — a line for the console, and where a panic's message goes.
 //!
-//! and it calls back the exports below (`openmx_start`, `openmx_frame`, `openmx_message`, …).
+//! and it calls back the exports below: `openmx_start` and `openmx_frame` for the picture, and
+//! [`Online`](host::Online) for a ride against other machines.
+//!
+//! # Online
+//!
+//! [`peer::Peer`]: N2's rollback session over N3's iroh transport, which in a browser is relay-only —
+//! the page has no UDP socket, so every packet goes through the relay over a WebSocket, as
+//! opentennis's does. The desktop rides the same [`peer`] code, so a page and a desktop are just two
+//! peers of one lobby, joined by its ticket or room code; `crates/openmx/tests/netplay/browser.rs` has
+//! them agree on every tick's hash.
 //!
 //! # What it draws, for now
 //!
@@ -38,6 +48,11 @@
 // asks for go unused here.
 #[allow(dead_code)]
 mod ground;
+// The desktop shell's own online session (N2), compiled into this build too (N4).
+#[allow(dead_code)]
+#[path = "net/mod.rs"]
+pub mod net;
+pub mod peer;
 
 use game_render::disc::{Disc, Res};
 use game_render::mat::v3;
@@ -130,19 +145,29 @@ mod host {
     use super::*;
     use std::cell::RefCell;
     use std::io::{Read, Seek, SeekFrom};
+    use std::sync::Arc;
 
-    #[link(wasm_import_module = "openmx")]
-    unsafe extern "C" {
+    use js_sys::{Object, Reflect};
+    use openmx_net::{Board, Cmd, Names, Net, Online as Settings, Pick, Relay, Room, HOST};
+    use wasm_bindgen::prelude::*;
+
+    use crate::peer::{self, Peer};
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = openmx)]
         fn disc_size() -> f64;
-        fn disc_read(at: f64, ptr: *mut u8, len: u32) -> i32;
-        fn present(ptr: *const u8, width: u32, height: u32);
-        fn log(ptr: *const u8, len: u32);
+        #[wasm_bindgen(js_namespace = openmx)]
+        fn disc_read(at: f64, into: &mut [u8]) -> i32;
+        #[wasm_bindgen(js_namespace = openmx)]
+        fn present(rgba: &[u8], width: u32, height: u32);
+        #[wasm_bindgen(js_namespace = openmx, js_name = log)]
+        fn host_log(line: &str);
     }
 
     /// One line to the page's console.
     pub fn say(text: &str) {
-        // SAFETY: the host reads `len` bytes at `ptr` and keeps nothing.
-        unsafe { log(text.as_ptr(), text.len() as u32) }
+        host_log(text)
     }
 
     /// The disc the page copied into OPFS, read through the worker's synchronous access handle.
@@ -153,8 +178,7 @@ mod host {
 
     impl Read for HostImage {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            // SAFETY: the host writes at most `len` bytes at `ptr`, which is `buf`.
-            let n = unsafe { disc_read(self.at as f64, buf.as_mut_ptr(), buf.len() as u32) };
+            let n = disc_read(self.at as f64, buf);
             if n < 0 {
                 return Err(std::io::Error::other(format!("the browser's copy of the disc refused a read at {}", self.at)));
             }
@@ -182,52 +206,137 @@ mod host {
     struct State {
         frame: Option<Frame>,
         rgba: Vec<u8>,
-        message: String,
     }
 
     thread_local! {
         static STATE: RefCell<State> = RefCell::new(State::default());
     }
 
-    /// Open the disc, draw the start line into a `width` x `height` frame and present it. Zero when
-    /// it worked; otherwise the length of [`openmx_message`]'s text, which says why.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn openmx_start(width: u32, height: u32) -> u32 {
+    fn hook() {
         std::panic::set_hook(Box::new(|info| say(&format!("openmx: {info}"))));
-        // SAFETY: a plain call with no arguments.
-        let size = unsafe { disc_size() } as u64;
+    }
+
+    /// Open the disc, draw the start line into a `width` x `height` frame and keep it. Empty when it
+    /// worked; otherwise why not.
+    #[wasm_bindgen]
+    pub fn openmx_start(width: u32, height: u32) -> String {
+        hook();
+        let size = disc_size() as u64;
         let drawn = Disc::read_from(Box::new(HostImage { at: 0, size }))
             .and_then(|mut disc| start_line(&mut disc, TRACK, width.max(1) as usize, height.max(1) as usize));
         STATE.with_borrow_mut(|s| match drawn {
             Ok(frame) => {
                 s.frame = Some(frame);
-                s.message.clear();
-                0
+                String::new()
             }
             Err(e) => {
-                s.message = format!("disc: {e}");
-                say(&s.message);
-                s.message.len() as u32
+                let why = format!("disc: {e}");
+                say(&why);
+                why
             }
         })
     }
 
     /// Hand the page the current frame.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn openmx_frame() {
+    #[wasm_bindgen]
+    pub fn openmx_frame() {
         STATE.with_borrow_mut(|s| {
-            let State { frame, rgba: out, .. } = s;
+            let State { frame, rgba: out } = s;
             if let Some(frame) = frame {
                 rgba(frame, out);
-                // SAFETY: `out` holds width * height * 4 bytes and outlives the call.
-                unsafe { present(out.as_ptr(), frame.width as u32, frame.height as u32) }
+                present(out, frame.width as u32, frame.height as u32);
             }
         })
     }
 
-    /// Where the last error's text is (UTF-8, [`openmx_start`]'s return is its length).
-    #[unsafe(no_mangle)]
-    pub extern "C" fn openmx_message() -> *const u8 {
-        STATE.with_borrow(|s| s.message.as_ptr())
+    /// A ride against other machines (N4): this page's endpoint in a lobby, and once the host
+    /// starts, the session. The page's seat rides [`peer::mash`] for now — the browser has no ride
+    /// of its own on screen to steer yet.
+    #[wasm_bindgen]
+    pub struct Online {
+        peer: Peer,
+    }
+
+    #[wasm_bindgen]
+    impl Online {
+        /// `relay`: the relay's URL, or empty for n0's public ones. `code_servers`: the pkarr
+        /// relays asked for room codes, comma-separated (`None`: relay.pkarr.org; empty: none, so
+        /// only tickets join).
+        #[wasm_bindgen(constructor)]
+        pub fn new(name: String, relay: String, code_servers: Option<String>) -> Online {
+            hook();
+            let relay = if relay.is_empty() { Relay::N0 } else { Relay::Own(relay) };
+            let code_servers = code_servers.map(|c| c.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect());
+            let cfg = Settings { name, relay, board: Board::Off, lan: false, code_servers, relay_only: true, ..Settings::default() };
+            let mut peer = Peer::new(Net::start(cfg, Arc::new(Names)));
+            // a browser has no file system for a desync's report: it goes to the console instead
+            peer.dumps = std::path::PathBuf::new();
+            Online { peer }
+        }
+
+        /// Host a lobby of `seats` with this page in the first.
+        pub fn host(&self, seats: u32, bike: String) {
+            let mut r = Room::new("", TRACK, seats.clamp(2, openmx_net::SEATS as u32) as usize);
+            r.take(HOST, &[Pick::new("thq1", &bike)]);
+            self.peer.net.send(Cmd::Host(r));
+        }
+
+        /// Join by room code or ticket, one seat.
+        pub fn join(&self, code: String, bike: String) {
+            self.peer.net.send(Cmd::Join(code, vec![Pick::new("thq1", &bike)]));
+        }
+
+        pub fn ready(&self, on: bool) {
+            self.peer.net.send(Cmd::Prepared(on));
+        }
+
+        /// The host's Start.
+        pub fn start(&self) {
+            self.peer.net.send(Cmd::Start);
+        }
+
+        pub fn leave(&self) {
+            self.peer.net.send(Cmd::Leave);
+        }
+
+        /// One frame of `dt` seconds.
+        pub fn frame(&mut self, dt: f32) {
+            self.peer.frame(&peer::mash, dt);
+            for line in self.peer.said.drain(..) {
+                say(&line);
+            }
+        }
+
+        /// Where things are: `status`, `ticket`, `code`, `taken`, `ready` (every guest), `riding`,
+        /// `me`, `tick`, `confirmed`, `desyncs`, `failed`, `too_big`.
+        pub fn state(&self) -> Object {
+            let o = Object::new();
+            let set = |k: &str, v: JsValue| {
+                let _ = Reflect::set(&o, &k.into(), &v);
+            };
+            let p = &self.peer;
+            set("status", p.status.as_str().into());
+            set("ticket", p.ticket.as_str().into());
+            set("code", p.room.as_ref().map_or("", |r| r.short.as_str()).into());
+            set("taken", (p.room.as_ref().map_or(0, Room::taken) as u32).into());
+            set("ready", p.room.as_ref().is_some_and(Room::all_ready).into());
+            set("riding", p.riding.is_some().into());
+            if let Some(r) = &p.riding {
+                set("me", r.np.me.as_str().into());
+                set("tick", (r.np.tick() as u32).into());
+                set("confirmed", (r.np.confirmed() as f64).into());
+                set("desyncs", (r.np.desyncs.len() as u32).into());
+            }
+            set("failed", p.failed.as_deref().map_or(JsValue::NULL, JsValue::from));
+            set("too_big", p.too_big.into());
+            o
+        }
+
+        /// Ticks `from..to` as ridden here, one line each: the state's hash before the tick and the
+        /// FNV-1a of every seat's pad bytes it ran on, both hex — for holding up against another
+        /// machine's ([`peer::ticks`]).
+        pub fn ticks(&self, from: u32, to: u32) -> String {
+            self.peer.riding.as_ref().map_or(String::new(), |r| peer::ticks(&r.np, from as usize, to as usize))
+        }
     }
 }
