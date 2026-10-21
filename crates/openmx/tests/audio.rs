@@ -175,6 +175,7 @@ fn the_music_sources_are_listed_and_switched() {
 
     let mut mixer = Mixer::new(music);
     mixer.music_volume = 1.0;
+    mixer.folder_volume = 1.0;
     // Off is silence.
     assert_eq!(rms(&listen(&mut mixer)), 0.0);
     assert_eq!(mixer.music.now(), None);
@@ -197,9 +198,13 @@ fn the_music_sources_are_listed_and_switched() {
     }
     assert_eq!(mixer.music.now(), Some("folder:a-high.wav"));
 
-    // The music slider.
-    mixer.music_volume = 0.0;
+    // The music slider — the folder's songs are under User Soundtracks' since P56, as the
+    // original's ripped songs are, and the disc's slider leaves them be.
+    mixer.folder_volume = 0.0;
     assert_eq!(rms(&listen(&mut mixer)), 0.0);
+    mixer.music_volume = 0.0;
+    mixer.folder_volume = 1.0;
+    assert!(rms(&listen(&mut mixer)) > 3000.0);
     mixer.music_volume = 1.0;
 
     // Shuffle keeps going from song to song.
@@ -350,6 +355,7 @@ fn ride(sounds: &BikeSounds) -> Vec<Heard> {
     let mut sim = Sim::with_rider(0, tables, phy, rider);
     let mut mixer = Mixer::new(Music::new(Vec::new(), 1));
     mixer.effects_volume = 1.0;
+    mixer.engine_volume = 1.0;
     let mut engine = Engine::new(7);
     let dt = F(1.0 / 60.0);
     let mut out = Vec::new();
@@ -964,6 +970,7 @@ fn the_originals_ride_replays() {
     }
     let mut mixer = Mixer::new(Music::new(Vec::new(), 1));
     mixer.effects_volume = 1.0;
+    mixer.engine_volume = 1.0;
     mixer.listeners = vec![audio::Listener { at: [0.0, 5.0, -10.0], right: [1.0, 0.0, 0.0] }];
     let mut engine = Engine::new(7);
     let (mut pcm, mut same, mut rows, mut timeline) = (Vec::new(), 0, 0, String::new());

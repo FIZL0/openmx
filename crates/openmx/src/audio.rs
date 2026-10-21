@@ -377,12 +377,25 @@ pub struct Play {
     pub at: Option<[f32; 3]>,
     pub near: f32,
     pub far: f32,
+    /// Which of the volume sliders it is under.
+    pub bus: Bus,
 }
 
 impl Default for Play {
     fn default() -> Play {
-        Play { gain: 1.0, pitch: 1.0, looping: false, at: None, near: 30.0, far: 150.0 }
+        Play { gain: 1.0, pitch: 1.0, looping: false, at: None, near: 30.0, far: 150.0, bus: Bus::Effects }
     }
+}
+
+/// The sliders a sound can be under besides the music's: the original's Game Audio Options page has
+/// Sound FX, Crowd and Engine (P56), and Menu FX, which this shell has no sounds for yet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Bus {
+    #[default]
+    Effects,
+    Engine,
+    Crowd,
+    Menu,
 }
 
 struct Voice {
@@ -415,9 +428,14 @@ pub struct Mixer {
     next: VoiceId,
     pub listeners: Vec<Listener>,
     pub music: Music,
-    /// `0..=1`, the settings' two sliders.
+    /// `0..=1`, the settings' sliders (P56): the music's — the disc's songs and any source but the
+    /// folder — the user's own folder's (the original's "User Soundtracks"), and each [`Bus`]'s.
     pub music_volume: f32,
+    pub folder_volume: f32,
     pub effects_volume: f32,
+    pub engine_volume: f32,
+    pub crowd_volume: f32,
+    pub menu_volume: f32,
     /// Samples rendered since the start.
     pub rendered: u64,
 }
@@ -430,7 +448,11 @@ impl Mixer {
             listeners: vec![Listener::default()],
             music,
             music_volume: 0.8,
+            folder_volume: 0.8,
             effects_volume: 0.8,
+            engine_volume: 0.8,
+            crowd_volume: 0.8,
+            menu_volume: 0.8,
             rendered: 0,
         }
     }
@@ -526,7 +548,7 @@ impl Mixer {
     /// and side, and no side at all when more than one is listening (split screen has no one left or
     /// right).
     fn gains(&self, p: &Play) -> [f32; 2] {
-        let g = p.gain * self.effects_volume;
+        let g = p.gain * self.bus_volume(p.bus);
         let Some(at) = p.at else { return [g, g] };
         let mut best = (f32::MAX, 0.0);
         for l in &self.listeners {
@@ -542,11 +564,34 @@ impl Mixer {
         [g * fade * (1.0 - pan).min(1.0), g * fade * (1.0 + pan).min(1.0)]
     }
 
+    /// A bus's slider.
+    pub fn bus_volume(&self, bus: Bus) -> f32 {
+        match bus {
+            Bus::Effects => self.effects_volume,
+            Bus::Engine => self.engine_volume,
+            Bus::Crowd => self.crowd_volume,
+            Bus::Menu => self.menu_volume,
+        }
+    }
+
+    /// The gain the song playing is mixed at: the folder's slider for the user's own files, the
+    /// music's for the rest — the original's split, where the songs past the disc's thirteen take the
+    /// ripped music's volume and the rest the music's.
+    pub fn music_gain(&self) -> f32 {
+        match self.music.now() {
+            Some(id) if id.starts_with(FOLDER) => self.folder_volume,
+            _ => self.music_volume,
+        }
+    }
+
     /// Mix `out.len() / 2` stereo frames.
     pub fn render(&mut self, out: &mut [i16]) {
         let frames = out.len() / 2;
         let mut acc = vec![0f32; frames * 2];
-        self.music.mix(&mut acc, self.music_volume);
+        // The song can change inside the mix; it is mixed at the gain of the one playing as it starts.
+        self.music.tend();
+        let gain = self.music_gain();
+        self.music.mix(&mut acc, gain);
         // About 5 ms to reach a new gain: no clicks, and a stop is gone well inside a frame.
         let ease = 1.0 - (-1.0 / (0.005 * RATE as f32)).exp();
         let targets: Vec<[f32; 2]> = self
@@ -872,11 +917,17 @@ pub fn wav(b: &[u8]) -> Option<Clip> {
     None
 }
 
+/// The folder source's ids' prefix.
+const FOLDER: &str = "folder:";
+
 /// What the settings ask the music to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pick {
     Off,
     Shuffle,
+    /// Every song in the sources' order, from the one after the last (P56): the original's play
+    /// list, which runs through `music.pb`'s songs in turn.
+    Order,
     /// One song, over and over.
     Track(String),
 }
@@ -887,6 +938,7 @@ impl Pick {
         match word.trim() {
             "off" => Pick::Off,
             "" | "shuffle" => Pick::Shuffle,
+            "order" => Pick::Order,
             id => Pick::Track(id.to_string()),
         }
     }
@@ -895,6 +947,7 @@ impl Pick {
         match self {
             Pick::Off => "off".to_string(),
             Pick::Shuffle => "shuffle".to_string(),
+            Pick::Order => "order".to_string(),
             Pick::Track(id) => id.clone(),
         }
     }
@@ -906,6 +959,8 @@ pub struct Music {
     pick: Pick,
     dice: Dice,
     last: Option<String>,
+    /// A song asked for by name (P56's pause), which plays next whatever the pick would choose.
+    asked: Option<String>,
     playing: Option<(String, Box<dyn Stream>)>,
     opening: Option<(String, Receiver<Result<Box<dyn Stream>, String>>)>,
     /// Open songs on the mixer's own thread (tests) rather than a helper's.
@@ -923,6 +978,7 @@ impl Music {
             pick: Pick::Off,
             dice: Dice::new(seed),
             last: None,
+            asked: None,
             playing: None,
             opening: None,
             wait: false,
@@ -958,7 +1014,7 @@ impl Music {
         if pick == self.pick {
             return;
         }
-        let keep = matches!((&pick, self.now()), (Pick::Shuffle, Some(_)) if self.pick != Pick::Off);
+        let keep = matches!((&pick, self.now()), (Pick::Shuffle | Pick::Order, Some(_)) if self.pick != Pick::Off);
         self.pick = pick;
         if !keep {
             self.playing = None;
@@ -972,10 +1028,26 @@ impl Music {
         self.opening = None;
     }
 
+    /// Play `id` now, and then go on as the pick says (P56): under Shuffle or In Order the song after
+    /// it is the pick's, and under Off nothing follows it.
+    pub fn play_now(&mut self, id: &str) {
+        self.asked = Some(id.to_string());
+        self.next();
+    }
+
     fn choose(&mut self) -> Option<String> {
+        if let Some(id) = self.asked.take() {
+            return Some(id);
+        }
         match &self.pick {
             Pick::Off => None,
             Pick::Track(id) => Some(id.clone()),
+            Pick::Order => {
+                let all = self.tracks();
+                let after = self.last.as_deref().and_then(|l| all.iter().position(|t| t.id == l));
+                let i = after.map_or(0, |i| (i + 1) % all.len().max(1));
+                all.get(i).map(|t| t.id.clone())
+            }
             Pick::Shuffle => {
                 let all = self.tracks();
                 if all.is_empty() {
@@ -996,7 +1068,7 @@ impl Music {
     }
 
     /// Start the next song if none is playing, and take one that has finished opening.
-    fn tend(&mut self) {
+    pub fn tend(&mut self) {
         if let Some((id, rx)) = self.opening.take() {
             match rx.try_recv() {
                 Ok(Ok(stream)) => {
@@ -1616,6 +1688,7 @@ impl Bench<'_> {
             at: Some(self.at),
             near: self.sounds.near,
             far: self.sounds.far,
+            bus: Bus::Engine,
         };
         Some(self.mixer.play(clip, play))
     }
@@ -1810,7 +1883,7 @@ impl PlaneNote {
     pub fn update(&mut self, mixer: &mut Mixer, e: &LoopEngine, note: f32, at: [f32; 3]) {
         if self.voices.is_empty() {
             for l in &e.loops {
-                let play = Play { gain: 0.0, looping: true, at: Some(at), near: e.near, far: e.far, ..Play::default() };
+                let play = Play { gain: 0.0, looping: true, at: Some(at), near: e.near, far: e.far, bus: Bus::Engine, ..Play::default() };
                 self.voices.push(mixer.play(l.clip.clone(), play));
             }
         }
@@ -2031,7 +2104,7 @@ impl Sound {
                 self.world_voices.push(m.play(clip.clone(), play));
             }
             if let Some((clip, _)) = self.world.crowd_bed.pick(&mut self.dice, &mut self.last[0]) {
-                self.world_voices.push(m.play(clip, Play { gain: 0.5, looping: true, ..Play::default() }));
+                self.world_voices.push(m.play(clip, Play { gain: 0.5, looping: true, bus: Bus::Crowd, ..Play::default() }));
             }
         }
         for (clip, cycle, percent) in &self.world.random {
@@ -2068,7 +2141,7 @@ impl Sound {
                     m.play(clip, bike);
                 }
                 if let Some((clip, _)) = self.world.oh.pick(&mut self.dice, &mut self.last[1]) {
-                    m.play(clip, Play { gain: 0.6, ..Play::default() });
+                    m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
                 }
             }
             if h.grounded && !s.was_grounded && f.wreck.is_none() {
@@ -2077,7 +2150,7 @@ impl Sound {
                 }
                 if f.landed_trick {
                     if let Some((clip, _)) = self.world.cheer.pick(&mut self.dice, &mut self.last[2]) {
-                        m.play(clip, Play { gain: 0.6, ..Play::default() });
+                        m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
                     }
                 }
             }
@@ -2262,10 +2335,21 @@ pub fn sources(disc: Option<(&mut Disc, PathBuf)>, settings_dir: &Path) -> Vec<A
     out
 }
 
-/// A slider's step (`0..=10`) as a gain.
-pub fn volume(step: u8) -> f32 {
-    let v = step.min(10) as f32 / 10.0;
-    v * v
+/// A slider's value (`0..=100`) as a gain: the original's, which hands the sound system `value / 100`.
+pub fn volume(value: u8) -> f32 {
+    value.min(100) as f32 / 100.0
+}
+
+/// Every slider of the original's Game Audio Options page (P56), `0..=100` each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Levels {
+    pub music: u8,
+    /// The user's own folder: the original's "User Soundtracks" (its ripped music).
+    pub folder: u8,
+    pub effects: u8,
+    pub crowd: u8,
+    pub engine: u8,
+    pub menu: u8,
 }
 
 /// **The shell's sound**, which outlives a ride under the front end: the mixer with the music in it,
@@ -2300,15 +2384,44 @@ impl Speakers {
         self._out.as_ref().map(|_| self.mixer.clone())
     }
 
-    /// The settings' music pick (`off`, `shuffle` or a track's id) and the two sliders' steps.
-    pub fn apply(&self, pick: &str, music: u8, effects: u8) {
+    /// The settings' music pick (`off`, `shuffle`, `order` or a track's id) and the sliders.
+    pub fn apply(&self, pick: &str, levels: Levels) {
         let Ok(mut m) = self.mixer.lock() else { return };
         let want = Pick::parse(pick);
         if *m.music.pick() != want {
             m.music.set_pick(want);
         }
-        m.music_volume = volume(music);
-        m.effects_volume = volume(effects);
+        m.music_volume = volume(levels.music);
+        m.folder_volume = volume(levels.folder);
+        m.effects_volume = volume(levels.effects);
+        m.crowd_volume = volume(levels.crowd);
+        m.engine_volume = volume(levels.engine);
+        m.menu_volume = volume(levels.menu);
+    }
+
+    /// The mixer whether or not anything renders it, for a test to listen to.
+    #[allow(dead_code)]
+    pub fn mixer(&self) -> &Arc<Mutex<Mixer>> {
+        &self.mixer
+    }
+
+    /// Play a song now (the pause's song row, P56).
+    pub fn play_now(&self, id: &str) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.music.play_now(id);
+        }
+    }
+
+    /// On to the next song (the pause's Skip Song).
+    pub fn skip(&self) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.music.next();
+        }
+    }
+
+    /// The song playing, by id.
+    pub fn now(&self) -> Option<String> {
+        self.mixer.lock().ok()?.music.now().map(str::to_string)
     }
 
     /// Every track the sources have, as the settings' choices: `(id, label)`.
