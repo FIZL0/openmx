@@ -42,7 +42,7 @@ def rt(name: str) -> Path:
 def instance() -> str:
     """Which PCSX2 copy this process talks to: "" = the user's own, "1".."N" = a kit-managed copy.
 
-    Set by the parallel runner (KIT_PCSX2=N) so several agents never touch each other's emulator.
+    Set per slot by `./kit run` (KIT_PCSX2=N) so several agents never touch each other's emulator.
     """
     return os.environ.get('KIT_PCSX2', '')
 

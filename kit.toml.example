@@ -61,6 +61,20 @@ push = "origin"
 # `false`: a run's merges stay local until you push them (it logs the `git push` to run).
 push_merge = true
 
+[run]
+# A merge conflict `./kit run` cannot join mechanically (anything that is not a file of one record
+# per line) goes to an agent session in the merge worktree, which resolves it; the run then tests and
+# pushes it as usual. `false` parks those branches as wip/<ID> for a human.
+fix_merges = true
+fix_timeout = 1200          # seconds one of those may take before the merge is left for a human
+fix_model   = ""            # empty: the model the run's agents use
+
+# `./kit run` and `./kit plan` are agent-runner (https://github.com/FIZL0/agent-runner); the kit's
+# settings for it are in ps2kit/runner.toml. Any of its keys can be overridden here, table by table:
+# [agent-runner.run]
+# slots = 4
+# weekly_max = 80
+
 [paths]
 context = "context"           # private, git-ignored: disc files, dumps, captures, RAM images
 journal = "research/journal"  # notes, in git (no game data)

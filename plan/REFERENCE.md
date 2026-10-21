@@ -168,12 +168,12 @@ task.
 ## Running a long session unattended
 
 `./kit run` keeps N agents going through `plan/TODO.md` (see `docs/WORKFLOW.md` → *Long and unattended
-runs*, and the module docstring in `ps2kit/runner.py` for the picking rules). What matters when reading the
+runs*, and agent-runner's README for the picking rules). What matters when reading the
 results in the morning:
 
 - Each task got **one** attempt. A task that comes back blocked has a reason on its line.
 - A session that only hit the usage limit was discarded, not counted — its task is still open.
-- A branch that could not be merged is still there as `task/<ID>`, with the reason in `context/notes/run.log`.
+- A branch that could not be merged is parked as `wip/<ID>` (pushed; the task stays open), with the reason in `context/notes/ledger.md`.
 - `context/notes/slotN.log` is slot N's session output; `./kit plan` shows what landed.
 
 The hooks in `.claude/settings.json` are what keep those sessions cheap: `ps2kit/hooks/guard.py` refuses the

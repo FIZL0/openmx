@@ -39,8 +39,20 @@ python3 --version          # must be 3.11 or newer
 ./kit                      # should print the command list
 ```
 
-Nothing to install. Everything static — reading the disc, the ELFs, the decompilation, the task list —
-runs on a stock Python with no packages at all.
+Reading the disc, the ELFs and the decompilation runs on a stock Python with no packages. The task list
+(`./kit plan`, `./kit done`) and the unattended run (`./kit run`) use
+[agent-runner](https://github.com/FIZL0/agent-runner), a stdlib-only package; install it for the Python
+that runs `./kit`:
+
+```sh
+pip install --user git+https://github.com/FIZL0/agent-runner@v0.4.1
+```
+
+On a distribution that refuses `pip install --user` (externally managed Python, e.g. Arch), add
+`--break-system-packages`: agent-runner has no dependencies and installs only into `~/.local`, so it
+cannot conflict with system packages.
+`uv tool install` and `pipx` put it in an isolated environment the kit cannot import from, so they do not
+work here.
 
 Two optional packages, each needed by exactly one feature:
 
