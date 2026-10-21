@@ -3770,6 +3770,34 @@ rider_body_update boot 0x0024e640 (dt in f12, the actor in a0) the body actor's 
 #   recorder then logs the previous tick again under the next counter (rng and bones identical).
 #   VU0 vsqrt (and so vrsqrt) is chopped under PCSX2 (Roundmode 3), not rounded: with nearest the
 #   Ee's tick missed the captured bones by 1 ulp in 207..261 lanes; chopped, every lane matches.
+# S62 — the ragdoll against moving collidables (ragdoll_contact::push_out_against / moving / NodeBox,
+#   proved in tests/ragdoll_contact.rs on generated cases; the replay is tests/ragdoll_bike.rs).
+#   bone_collision_push_out's moving paths (the "not ported" above) are contact.rs's relative velocity:
+#   other +0x70 null -> (0,0,0,1); a mover (+0x7c, class +0x1b0 == 2) -> vt +0xbc spin and +0xb8
+#   velocity at the node +0x254 about the origin +0x190; a collision object with +0x80 and a body
+#   +0xf4 -> body q +0x170, centre +0x60, rates +0x1b0, vel +0x70; on a vehicle -> chassis +0xf0, node
+#   +0xf8. It writes the object's +0xa0. The bone's velocity relative to that is what gets pushed; the
+#   sweep uses the solve's last scene contact's other. bike_box_solve's +0x14 path: clamp in the
+#   node's frame, then body pos = place(node, p) and body vel = rotate(node, p): the position, not the
+#   velocity, is turned into the velocity (disassembly; the decompile reads as rotate(v)). Kept.
+#   The wreck bike, by chain: the request's (actor +0x488) +0x1ac -> B (0x00dfdca0 in recording2's
+#   heap); rigid body at B-0x780 (+0x60 pos, +0x170 quat, +0x1b0 rates: S56's missed 0x00dfd580/690/
+#   6d0), collision objects at B-0x580 and B+0x670; watch/s56-ragdoll.toml's bike_a/bike_b carry
+#   B-0x980..B+0xb80. S56's 0x00e37xxx / 0x011b16xx / 0x01672xxx-0x01673xxx reads are broad-phase list
+#   nodes relinked every tick (one at 0x011b170c holds B, B-0x580 and B+0x670): no chain reaches them,
+#   so the spec carries their 4 KB pools absolutely (w0e37000, w11b1000, w1672800, w1673800, and
+#   w0601800 for 0x00601900); the heap is laid out the same from the same save state.
+#   Replays (context/capture/s62, research/s62_wreck.py): side 2607, back 2477 and tip 2472 hold every
+#   bone through the wreck, the put-back (~79 ticks in) and on (side to 3146, where the riding body's
+#   rows start to alternate; back and tip to the capture's end); front 2602 holds to 2627 and parts
+#   at 2628 in every lane with no push-out in the tick, nothing new read that the tick does not write
+#   or the capture lay in, and the request/bike/pools from the row before do not mend it (not found);
+#   front3 (another front wreck, states from 2630) holds through its end, 2687. In these wrecks the
+#   bones' push-outs are almost all against the ground path; the scene push-out ran once a wreck,
+#   against other = 0. The bike body's rates are read in front 2611, 2620..2627, side 2615, front3
+#   2631. A slow tip-over was not reached: the game holds a slow or standing bike upright (no ground
+#   roll limit; ground pitch limits not met up to ~60 deg), every wreck tried entered at 30+ ft/s.
+#   Loading a wreck's state and holding the same pad does not ride the same wreck again (front3).
 # P57: the bike's put-back ghost (S57's "timer not found" above, and its 0.7-1 s is wrong: it is 3 s).
 # Live on copy 3 (freeride state 8, the journal's capture/ghost_watch.py). Every put-back of the bike,
 # the wreck's own (kind 1) and L1+R1's alike, runs player_respawn -> bike_unwreck 0x00252ee0(kind) ->
