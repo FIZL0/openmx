@@ -109,6 +109,29 @@ fn join_move_and_leave() {
 }
 
 #[test]
+fn start_needs_the_host_and_one_more() {
+    // From the menu, one seat in play is not a local game (P51); two is.
+    let mut screen = Join::new(ON_SCREEN, Opened::Menu);
+    let (mut a, mut b) = (Pad::new("a"), Pad::new("b"));
+    a.tap(&mut screen, &[Control::Cross]);
+    assert!(!screen.can_start());
+    assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Stay]);
+    b.tap(&mut screen, &[Control::Cross]);
+    assert!(screen.can_start());
+    assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Done]);
+    // a gone seat is still a rider, and counts
+    screen.update(&["a"]);
+    assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Done]);
+    // left again: alone
+    screen.update(&["a", "b"]);
+    b.tap(&mut screen, &[Control::Circle]);
+    assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Stay]);
+    // From the pause the ride goes on with whoever is left.
+    let mut screen = Join::with(&[Some("a")], ON_SCREEN, Opened::Pause);
+    assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Done]);
+}
+
+#[test]
 fn eight_seats_when_the_screen_has_them() {
     let mut screen = Join::new(join::MOST, Opened::Menu);
     let ids = ["0", "1", "2", "3", "4", "5", "6", "7", "8"];

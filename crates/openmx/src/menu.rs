@@ -1514,6 +1514,10 @@ impl Menu {
             Screen::Split => {
                 self.main();
                 self.open_join();
+                // A local game is two at least (P51): pad seat 1 joins beside the host.
+                if !self.join.can_start() {
+                    self.join.press(&1, join::Press::Join);
+                }
                 self.walk_join(0, Press { start: true, ..Press::default() });
             }
             s => self.stack = vec![Screen::Main, s],
@@ -3356,7 +3360,10 @@ impl<'a> Painter<'a> {
         if seats.iter().any(|s| matches!(s, join::Seat::Gone(_))) {
             buttons.insert(0, ("nav_square_off", "Let Go"));
         }
-        buttons.push(("nav_start_off", "Ride"));
+        // A local game is two or more (P51): Ride shows once the host has somebody to ride with.
+        if menu.join.can_start() {
+            buttons.push(("nav_start_off", "Ride"));
+        }
         self.legend(&buttons);
     }
 
