@@ -1,0 +1,364 @@
+# s79-score.toml — S79: watch/acceptance.toml's columns (so a capture of it replays like an acceptance
+# capture) plus the rider's score card, contacts and backflip stage: what the original scores for each
+# trick, combo, landing and wreck, tick by tick.
+#
+#   ./kit pcsx2 with -- bash research/journal/2026-10-21-s79-trick-points/play_capture.sh \
+#       PID context/recordings/recording2.p2m2 2374 1894 context/capture/s79/recording2-score.csv \
+#       watch/s79-score.toml
+#
+# The card, the manager and every rider field below are on the human's rider (the same chain as
+# acceptance.toml's rider columns). The card's head node is null until the first trick of a combo.
+
+[watch]
+name        = "s79-score"
+description = "the acceptance columns, and the rider's score card: what each trick, combo and landing scored"
+every       = 1          # one row per frame, always: the fixture needs every frame's input
+frames      = 1811       # the acceptance recording is 3621 fields = 1811 ticks; --frames overrides
+
+[setup]
+state  = 8               # the acceptance recording's own save state, copied into the scratch slot
+warmup = 10              # let the state settle before the first row
+
+# --- when the frame was, and how long the game thought it was ---------------------------------------
+[[field]]
+name = "frame_counter"            # the app object's own tick counter, +1 per tick
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"                       # the dt the simulation was given; 1/30 in play
+addr = "@frame_dt"
+type = "f32"
+
+# The C library's 64-bit LCG state (R5): the number a replay has to start from, because the game draws
+# from it and the port must draw the same. `Fixture::seed` is 32 bits wide, so only the low half of it
+# survives into a fixture file today — see S8's journal entry.
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+# --- the input, as the game's own input manager holds it ---------------------------------------------
+# Sixteen controls, 0x18 bytes each; `held` is 1 while down. This is the input the simulation reads, so
+# it is the one a fixture is built from: no bit permutation to guess, unlike the wire word below.
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+# --- the input, as libpad left it on the wire -------------------------------------------------------
+# Both 0x80-byte halves of port 0's buffer and both stamps, because `scePadRead` takes the half with
+# the larger stamp and a PINE row is sampled *after* the tick — by which time the IOP has refreshed the
+# other half, so the half the game actually read is the one with the *smaller* stamp (C5 measured this
+# on 300 of 300 rows). Bytes [2..3] are the button word, active low; [4..7] are RX RY LX LY, centre
+# 0x7f. The sticks come from here because the control state has no axes.
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+# --- the bike: what the port is judged on -----------------------------------------------------------
+# R6's chain, one arrow at a time: the GameManager singleton -> the actor manager (+0x34) -> its list
+# head (+0x34) -> *eight* `next` hops (+0x8) -> that node's item (+0x0) -> a field of the actor.
+#
+# Eight, not five. S8 measured the list in the acceptance recording's own save state: a freeride area
+# on Free09 holds **four** type-4 vehicles — the human's and three AI riders — and the fifth list entry
+# is an AI's, flying past at 27 units/s while the human's bike idles. The only field that tells them
+# apart is the control source on the player record (`-> 0x20 -> 0x34`): 1 is a local human, 2 is an AI.
+# `bike_type == 4` and a non-null player both read true on an AI's vehicle, so they are not enough; the
+# capture carries `bike_ctl_src` and S8's reader refuses a capture whose every row is not 1.
+[[field]]
+name = "bike_type"                # +0x00: must read 4 (a vehicle) or the hop count is wrong
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "bike_ctl_src"             # +0x20 -> +0x34: the player record's control source; 1 = local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "bike_player"              # +0x20: the player record it belongs to; 0 means nobody is riding it
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "bike_vel"                 # +0x130: velocity, world units per second
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x4"
+
+[[field]]
+name = "bike_xform"               # +0x180: 4x4 world transform; row 3 (+0x1b0) is the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+
+# --- the rider, so one playback also answers S14's open question -------------------------------------
+# The human says there is a collision with an NPC rider somewhere in this minute, and S14 could not
+# measure which frame: the number in use is an inference from the tape's idle window (video ~1019,
+# tick ~510). The wreck reason below settles it with no second sitting at the GUI — the first row where
+# `wreck_reason` is not 0 is the contact, and it bounds the tick-exact window the acceptance test can
+# claim. Two hops land on the human's *rider* (the type-2 actor that carries the ride state), where the
+# eight hops above land on the vehicle; the two guards say so on every row.
+[[field]]
+name = "rider_type"               # +0x00: 2 = a rider
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "rider_ctl_src"            # +0x20 -> +0x34: 1 = a local human, 2 = an AI
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+required = true
+
+[[field]]
+name = "wreck_reason"             # +0x748: 0 while riding; the wreck reason while being put back on
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+# +0x550: `g_peak`, the per-lane signed max-by-magnitude body-frame acceleration over the frame's
+# substeps — the column S22 fixed the port against on a standing bike. On a real minute of riding it is
+# the reference for every jump and landing in the tape, which is worth having from the same capture.
+[[field]]
+name = "g_peak"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x550"
+type = "f32x4"
+
+# --- the rider in the air and mid-trick (C6, for the second recording) ------------------------------
+# The second human recording (`context/recordings/recording2.p2m2`) has bails, tricks and backflips in
+# it, and the four tasks after C6 need to see them tick by tick. All of these sit on the rider actor —
+# the same object S10's air step and S11's trick machine are handed — so they share the two-hop chain
+# above. The offsets are S10's and S11's (research/journal/2026-10-15-s10-s10-air,
+# research/journal/2026-10-15-s11-s11-tricks); every one is a 32-bit word unless the type says so.
+#
+# The air step (`bike_air_state`): which wheels touch, written once per substep, so a row holds the
+# last substep's answer.
+[[field]]
+name = "on_ground"                # +0x574: either wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x574"
+type = "u32"
+
+[[field]]
+name = "both_wheels"              # +0x578: both wheels touch
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x578"
+type = "u32"
+
+[[field]]
+name = "airborne"                 # +0x57c: neither wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x57c"
+type = "u32"
+
+# The backflip (`bike_backflip`). Two words make its state: `flip_on` 0 / `flip_arm` 0 is waiting for a
+# lip; 0 / 1 is armed (the stick went forward on the lip); 1 / 0 is fired and inside the 0.6 s grace in
+# which the wheels have to leave the ground (`flip_grace` counts it down); 1 / 1 is turning. The torque
+# is the vector added to the chassis while it turns; `flip_torqued` is 1 on a frame it was, and
+# `flip_ramp` is 1 from the first turning frame until the control ramp starts.
+[[field]]
+name = "flip_torqued"             # +0x4f4
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f4"
+type = "u32"
+
+[[field]]
+name = "flip_ramp"                # +0x4f8
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f8"
+type = "u32"
+
+[[field]]
+name = "flip_on"                  # +0x4fc: fired
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4fc"
+type = "u32"
+
+[[field]]
+name = "flip_arm"                 # +0x500: armed before firing, off the ground after
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x500"
+type = "u32"
+
+[[field]]
+name = "flip_grace"               # +0x50c: seconds left to leave the ground after firing
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x50c"
+type = "f32"
+
+[[field]]
+name = "flip_torque"              # +0x520: the torque, added to the chassis' +0x140 while it turns
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x520"
+type = "f32x4"
+
+# The trick machine (`pad_to_gesture`, `stunt_request`, `stunt_clocks`). Ids 0..23 are the 24 gesture
+# slots, (group-1)*4 + (direction-1); 24 is the backflip, 25 the wheelie/lean, 26 the stoppie and 28
+# "nothing" (what a reset writes).
+[[field]]
+name = "fresh"                    # +0x750: just put back on the bike; no trick may start
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x750"
+type = "u32"
+
+[[field]]
+name = "trick_latched"            # +0x864: the requested id as packed for the network, read by the clocks
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x864"
+type = "u32"
+
+[[field]]
+name = "trick_group"              # +0x9fc: the button group held, 0..6
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9fc"
+type = "u32"
+
+[[field]]
+name = "trick_dir"                # +0xa00: the direction, 0 none, 1 up, 2 down, 3 left, 4 right
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa00"
+type = "u32"
+
+[[field]]
+name = "trick_count"              # +0xa04: the request count
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa04"
+type = "u32"
+
+[[field]]
+name = "trick_running"            # +0xa0c: in progress
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa0c"
+type = "u32"
+
+[[field]]
+name = "trick_safe"               # +0xa10: past SafeTime, a landing now is not a wreck
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa10"
+type = "u32"
+
+[[field]]
+name = "trick_armed"              # +0xa18
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa18"
+type = "u32"
+
+[[field]]
+name = "trick_elapsed"            # +0xa1c: seconds into the running trick
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa1c"
+type = "f32"
+
+[[field]]
+name = "trick_id"                 # +0xa78: the id the clocks are running
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa78"
+type = "u32"
+
+[[field]]
+name = "trick_req"                # +0xa7c: the id requested
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa7c"
+type = "u32"
+
+# --- S79: the score ---------------------------------------------------------------------------------
+# The rider's score card hangs off +0xf9c and the score manager off +0xfa0. The card's head node is
+# the trick scoring now (or last): +0x0 flags (1 valid, 4 floor to the granularity), +0x4 the trick
+# id, +0x8 points, +0xc base, +0x10 points a second, +0x14 multiplier, +0x1c seconds held,
+# +0x20 granularity, +0x24 the next node.
+
+[[field]]
+name = "front_contact"            # +0x7b0 -> +0xdc: the front wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xdc"
+type = "u32"
+
+[[field]]
+name = "rear_contact"             # +0x7b4 -> +0xdc: the rear wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xdc"
+type = "u32"
+
+[[field]]
+name = "contact_speed"            # +0x438: the contact velocity's forward lane; < +0x13f8 is slow
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x438"
+type = "f32"
+
+[[field]]
+name = "hang_time"                # +0x4f0: seconds since the wheels left the ground
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f0"
+type = "f32"
+
+[[field]]
+name = "body_up_y"                # chassis +0x254 transform, row 1 y
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x254 -> 0x94"
+type = "f32"
+
+[[field]]
+name = "body_fwd_y"               # chassis +0x254 transform, row 2 y
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x254 -> 0xa4"
+type = "f32"
+
+[[field]]
+name = "flip_stage"               # +0x1400: the backflip's 0..3
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x1400"
+type = "u32"
+
+[[field]]
+name = "wheelie_time"             # +0x13f0
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x13f0"
+type = "f32"
+
+[[field]]
+name = "stoppie_time"             # +0x13f4
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x13f4"
+type = "f32"
+
+[[field]]
+name = "card_flags"               # card +0x8: 0x20 combo open, 0x40 a trick scoring, 0x80 growing
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf9c -> 0x8"
+type = "u32"
+
+[[field]]
+name = "card_count"               # card +0xcc: tricks in the combo
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf9c -> 0xcc"
+type = "u32"
+
+[[field]]
+name = "card_combo_time"          # card +0xd8
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf9c -> 0xd8"
+type = "f32"
+
+[[field]]
+name = "card_total"               # card +0xdc: the banked score
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf9c -> 0xdc"
+type = "f32"
+
+[[field]]
+name = "card_combo"               # card +0xe0: the open combo's points
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf9c -> 0xe0"
+type = "f32"
+
+[[field]]
+name = "node_flags"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf9c -> 0xc8 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "node_id"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf9c -> 0xc8 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "node_points"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf9c -> 0xc8 -> 0x8"
+type = "f32"
+
+[[field]]
+name = "node_time"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf9c -> 0xc8 -> 0x1c"
+type = "f32"
+
+[[field]]
+name = "mgr_clock"                # manager +0xf8: seconds it has ticked
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xfa0 -> 0xf8"
+type = "f32"

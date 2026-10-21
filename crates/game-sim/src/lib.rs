@@ -722,6 +722,10 @@ pub mod modifiers;
 /// Off the map: the bike's cannonball, the throw back toward the middle of a map a rider has left.
 pub mod off_map;
 
+/// The points (S79): what a trick, a wheelie, a stoppie and a backflip score, the combo they add up
+/// in, and the rider's total it is banked into — or lost from, on a wreck.
+pub mod score;
+
 #[cfg(test)]
 mod tests {
     use super::*;

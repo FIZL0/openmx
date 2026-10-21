@@ -474,7 +474,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // 9792 since S66: the bike's put-back record, its point, heading and up.
     // 10208 since S69: a wreck's bike is the original's body and collision object, rays and contacts
     // in place of the stand-in chassis, walked under `ride.crash.body` only while there is a wreck.
+    // 10256 since S79: the rider's points, its card and combo, walked under `score` only once it has
+    // scored or started a combo, so the fresh state's leaves stay.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 10208, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 10256, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
