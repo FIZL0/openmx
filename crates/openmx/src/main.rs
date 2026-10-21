@@ -2956,7 +2956,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         front.menu.note = Some("Open to Online rides the bike: switch to it first.".into());
                     } else {
                         let settings = &front.menu.settings;
-                        let mut room = openmx_net::Room::new(&settings.name, &args.track, menu::LOBBY_SEATS);
+                        let mut room = openmx_net::Room::new(&settings.name, &args.track, settings.lobby_seats);
                         room.wrecks = args.wrecks && settings.wrecks;
                         room.modifiers = mods.text();
                         let pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
