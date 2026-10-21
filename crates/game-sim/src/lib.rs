@@ -628,6 +628,8 @@ pub mod ragdoll_contact;
 pub mod ragdoll_pose;
 /// The ragdoll run in the ride while the rider is down (S53).
 pub mod ragdoll_ride;
+/// The rider body actor's whole tick round the ragdoll's step: the mode machine and the settle (S61).
+pub mod ragdoll_body;
 
 /// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
