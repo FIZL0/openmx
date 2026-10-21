@@ -4059,3 +4059,115 @@ fn stacked_riders_joust() {
 fn a_ninth_rider_is_refused() {
     stacked(9, 20.0);
 }
+
+// --- S55: crooked landings ----------------------------------------------------------------------------
+
+/// One crooked landing off P29's cross-laid ramp: the run-up on the throttle, then from the first
+/// airborne frame the stick held at `stick` (and the throttle with it) until the bike has been down
+/// `after` ticks. Answers every tick from three before the touchdown to `after` past it: the
+/// attitude, the crossup in degrees and whether the bike is down — the columns
+/// `research/s55_landing.py` reads off the original's capture.
+fn crooked_landing(stick: (f32, f32), after: usize) -> Option<Vec<((f32, f32, f32), f32, bool)>> {
+    let tables = rider::Tables::build();
+    let (p, wheels, fork) = the_disc_125_and_fork(&tables)?;
+    let mut r = Rider::new(&p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    r.ride.front.steer_axis = fork;
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let held = Controls { stick: (F(stick.0), F(stick.1)), ..gas.clone() };
+    let mut world = floor();
+    for _ in 0..60 {
+        r.frame(&p, &tables, &Controls::default(), DISC_DT, &mut world);
+    }
+    let across = 20f32.to_radians();
+    let mut jump = Jump {
+        origin: r.ride.position(),
+        dir: Vf::new(across.sin(), 0.0, across.cos(), 0.0),
+        start: 150.0,
+        slope: 0.5,
+        length: 20.0,
+    };
+    let mut rows = Vec::new();
+    let (mut flown, mut down) = (0usize, None);
+    for k in 0..900 {
+        let hands = if flown > 0 { &held } else { &gas };
+        let f = r.frame(&p, &tables, hands, DISC_DT, &mut jump);
+        assert!(f.wreck.is_none(), "tick {k}: wrecked: {:?}", f.wreck);
+        let on = r.ride.air.on_ground;
+        flown += usize::from(!on);
+        rows.push((attitude(&r), r.ride.air.crossup.0.to_degrees(), on));
+        if on && flown > 0 && down.is_none() {
+            down = Some(rows.len() - 1);
+        }
+        if down.is_some_and(|d| rows.len() > d + after) {
+            break;
+        }
+    }
+    let d = down.expect("the bike never came down");
+    Some(rows[d - 3..].to_vec())
+}
+
+/// The most the original's attitude moves in one tick through a touchdown, degrees, over the nine
+/// landings of recording2's trick capture that are neither a put-back nor a wreck
+/// (`research/s55_landing.py recording2-tricks`): the heading 10.54 (tick 222), the roll 13.25 (tick
+/// 1657, landed rolled 50°). A landing that moved further in one tick than these is the snap S55 is
+/// about.
+const ORIGINAL_LANDING_TURN: (f32, f32) = (10.54, 13.25);
+
+/// The original's crossup two ticks after touching down, at worst, degrees: −25.0° → −7.05°
+/// (tick 1614), 28.9° → 2.6° (341, which slid one tick more first, to 46.5°), 23.8° → 3.7° (1109).
+/// The ground takes the slide out on the tick or two it bites, by the speed it costs.
+const ORIGINAL_LANDING_CROSSUP: f32 = 7.05;
+
+/// **S55.** race125p comes down crooked — 30° sideways, and rolled 27° with a 24° crossup — and
+/// lands the way the original does: the slide is gone two ticks after the touchdown, while the heading
+/// and the roll come round over the ticks after it, no faster than the original's ever do.
+///
+/// The user saw the bike and rider "snapped straight" on landing. The simulation does not do it: the
+/// body's attitude eases through the touchdown here as it does in the capture, and what the original
+/// does in one tick — the velocity swung onto the heading — the port does too. The snap was the
+/// drawn chassis dropping its airborne crossup pose in one frame (`game_render::vehicle::Chassis`),
+/// and the shell's wall-clock `dt` (P52) can add one of its own. This holds the simulation's half.
+#[test]
+fn it_lands_crooked_without_a_snap() {
+    // (the stick in the air, what the landing is)
+    for (stick, what) in [((0.5f32, 0.0f32), "sideways"), ((-0.5, 0.0), "rolled")] {
+        let Some(rows) = crooked_landing(stick, 8) else {
+            println!("no race125p.phy or 125_faisst wheels on a disc in context/iso — skipped");
+            return;
+        };
+        let trace: Vec<String> = rows
+            .iter()
+            .map(|((y, _, r), c, on)| format!("{}{y:+.1}/{r:+.1}/{c:+.1}", if *on { "" } else { "^" }))
+            .collect();
+        println!("{what} (stick {stick:?}), yaw/roll/crossup from 3 ticks before: {}", trace.join(" "));
+        let ((_, _, roll), cross, _) = rows[2];
+        assert!(!rows[2].2 && rows[3].2, "{what}: row 3 is not the touchdown");
+        // A crooked landing to judge.
+        assert!(cross.abs() > 20.0, "{what}: came down only {cross} deg crossed up");
+        if what == "rolled" {
+            assert!(roll.abs() > 20.0, "{what}: came down rolled only {roll} deg");
+        }
+        // No tick moves the body further than the original's ever does through a touchdown.
+        for (k, pair) in rows.windows(2).enumerate() {
+            let ((y0, _, r0), _, _) = pair[0];
+            let ((y1, _, r1), _, _) = pair[1];
+            let turn = (wrap((y1 - y0).to_radians()).to_degrees().abs(), (r1 - r0).abs());
+            assert!(
+                turn.0 <= ORIGINAL_LANDING_TURN.0 && turn.1 <= ORIGINAL_LANDING_TURN.1,
+                "{what}: tick {} the heading turned {:.2} and the roll {:.2} deg in one tick; the \
+                 original's most through a touchdown is {:?}",
+                k as i32 - 2,
+                turn.0,
+                turn.1,
+                ORIGINAL_LANDING_TURN
+            );
+        }
+        // And the slide is gone two ticks after the touchdown, as the original's is.
+        let after = rows[5].1;
+        assert!(
+            after.abs() <= ORIGINAL_LANDING_CROSSUP,
+            "{what}: still {after} deg crossed up two ticks after landing; the original is inside \
+             {ORIGINAL_LANDING_CROSSUP}"
+        );
+    }
+}

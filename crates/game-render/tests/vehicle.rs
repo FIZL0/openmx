@@ -840,3 +840,59 @@ fn a_hands_off_flight_draws_the_bike_square() {
         "the chassis is drawn turned {most_riding} deg off a level hands-off flight"
     );
 }
+
+/// **S55.** A crossed-up flight lands and the chassis eases square rather than snapping. In the air the
+/// `Bike` node is twisted by `bike_air`'s crossup sweep; on touching down the machine restarts into
+/// a grounded state, whose blend has no clip for the chassis and fades out of the snapshot over the
+/// restart's ramp. The port used to draw the rest shape at once and throw the fade away, so the bike
+/// (and the rider on it) turned 45° in one frame on landing — the snap the user saw.
+///
+/// Matched by eye, not to a capture: the original's drawn chassis is not in RAM where P29 looked.
+#[test]
+fn a_crossed_up_landing_eases_the_bike_square() {
+    let Some(mut disc) = disc() else { return };
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let build = sub(&mut disc);
+    let mut riding = chassis(&mut disc, &set, &build.mcf);
+    let root = riding.stance.set.skeleton.find(ROOT).expect("the chassis has a Bike node");
+    let mut r = ride(&p, &riding, &set);
+    let mut world = Flat::default();
+    let turned = |m: &M4| -> f32 {
+        let len = |i: usize| (m.0[i][0] * m.0[i][0] + m.0[i][1] * m.0[i][1] + m.0[i][2] * m.0[i][2]).sqrt();
+        let trace = m.0[0][0] / len(0) + m.0[1][1] / len(1) + m.0[2][2] / len(2);
+        ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees()
+    };
+    // Thrown forward and up, the stick held across the whole flight to cross it up.
+    let c = Controls { stick: (F(0.6), F::ZERO), ..Controls::default() };
+    let fwd = r.ride.axes().0;
+    r.ride.chassis.vel = Vf::new(fwd.x() * 50.0, 15.0, fwd.z() * 50.0, 0.0);
+    let (mut flew, mut landed) = (0usize, None);
+    let mut shown = Vec::new();
+    for _ in 0..200 {
+        r.frame(&p, &tables, &c, FRAME, &mut world);
+        let want = Chassis::want(&r.ride, &r.tricks);
+        riding.frame(FRAME, want, &Chassis::riding(&r), Drive::of(&r.ride));
+        let on = r.ride.air.on_ground;
+        if !on && landed.is_none() {
+            flew += 1;
+        }
+        if on && flew > 30 && landed.is_none() {
+            landed = Some(shown.len());
+        }
+        shown.push(turned(&riding.world[root]));
+    }
+    let landed = landed.expect("the throw never came down");
+    let at = shown[landed - 1];
+    let after = &shown[landed - 1..(landed + 30).min(shown.len())];
+    let step = after.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+    println!(
+        "{flew} airborne frames; the Bike node turned {at:.2} deg on the last of them, then {:?}",
+        after.iter().map(|a| format!("{a:.2}")).collect::<Vec<_>>()
+    );
+    // Measured: 45.16 deg, then 3.01 deg a frame down to 0 over the restart's 14-frame ramp.
+    assert!(at > 30.0, "the flight was not crossed up, so this proves nothing: {at} deg");
+    assert!(step < 5.0, "the chassis turned {step} deg in one frame after landing");
+    assert!(*after.last().unwrap() < 1.0, "the chassis never came square: {after:?}");
+}
