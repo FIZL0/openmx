@@ -280,15 +280,19 @@ added beside them:
     emitter list it would attach (none drawn: there are no particles yet). Drawn through `--moment`
     with `vehicle biplane` (V21)
 - `openmx` — the playable shell: the binary a person rides. A window, a real pad, the ported simulation
-  at the game's own 60 Hz, and the freeride area drawn with the renderer, with no emulator, no fixture
+  at the game's own 30 Hz, and the freeride area drawn with the renderer, with no emulator, no fixture
   and no menu in the way (P1).
   - `main.rs` — the loop: the disc's track and bike, the scene read twice (the simulation's reader for
     the spawn, the terrain and the collision placements, the renderer's for props, lights and fog),
     then a frame of `tick::Engine::step` — which polls the pad through `input::Manager` and steps
     `game_sim::ride::Ride` on the disc's own `.phy` — followed by `game_sim::camera`'s follow camera,
-    the draw, the present and the pace to 60 Hz (P2). `--record` writes every simulated frame's pad to
+    the draw and the present (P2). The ticks run on their own 30 Hz schedule and the picture between
+    them, as fast as it can (P52). `--record` writes every simulated frame's pad to
     a tape and `--play` rides one — a tape of the shell or a human's `.p2m2` — at the tape's own frame
     lengths, so a control complaint is a file somebody else can ride (P7).
+  - `pace.rs` — the ride's clock (P52): ticks on the original's 30 fps schedule whatever the drawn
+    rate, each reading the Timer 0 a steady PS2 reads, a catch-up cap, and the render-side blend
+    between the last two ticks.
   - `window.rs` — a window with no dependencies: the X11 wire protocol over the display's unix socket,
     a window, a graphics context, keyboard events, and the frame pushed across as one `PutImage` a band.
   - `pad.rs` — the host's pad: Linux's joystick events and the keyboard, folded into the 32-byte
