@@ -69,6 +69,15 @@ pub trait World {
     /// looked at — the record says what was hit.
     fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool;
 
+    /// Whether the put-back's clearance query refuses a spot with none of its probes meeting anything
+    /// (S75): the original's query also refuses when a placed group it has gathered within `radius` of
+    /// `centre` has a part whose cell, on the ground plane, is within twenty feet of it — and, in a
+    /// race, when a checkpoint is near. A world with no placed groups and no race answers no.
+    fn crowded(&mut self, centre: Vf, radius: F) -> bool {
+        let _ = (centre, radius);
+        false
+    }
+
     /// How big the map is, as the bike's map-edge test measures it ([`crate::off_map`]): the
     /// terrain's root cells times 256 times its sample spacing. `None` for a world with no edge, which
     /// is every world but a track's.
