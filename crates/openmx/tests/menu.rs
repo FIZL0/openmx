@@ -25,7 +25,7 @@ mod join;
 mod split;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
-use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Press, Reader, Readers, Screen, Settings};
+use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, Screen, Settings};
 use vehicle::{Garage, Kind, Plane, Spawn};
 use std::collections::{HashSet, VecDeque};
 
@@ -191,7 +191,7 @@ fn the_settings_file_reads_back_as_it_was_written() {
     let dir = scratch("files");
     let settings = Settings {
         name: "Ricky C".into(),
-        overlay: true,
+        overlay: Overlay::Debug,
         wrecks: false,
         track: "free11".into(),
         machines: [
@@ -266,7 +266,7 @@ fn what_the_pad_sets_is_what_the_file_says() {
     tap(&mut m, &mut r, Control::Start);
     assert_eq!(m.screen(), Some(Screen::Settings));
     assert_eq!(m.settings.name, "Mx");
-    // Overlay on, wrecks off, and the throttle onto L2 (Cross, then left from Cross wraps to L2).
+    // Overlay on to debug, wrecks off, and the throttle onto L2 (Cross, then left from Cross wraps to L2).
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Cross);
     tap(&mut m, &mut r, Control::Down);
@@ -283,7 +283,7 @@ fn what_the_pad_sets_is_what_the_file_says() {
     let (settings, controls) = menu::load(&dir);
     assert_eq!(
         settings,
-        Settings { name: "Mx".into(), overlay: true, wrecks: false, ..Settings::default() }
+        Settings { name: "Mx".into(), overlay: Overlay::Debug, wrecks: false, ..Settings::default() }
     );
     assert_eq!(controls.throttle, Gas::L2);
     // And a menu opened on what was read is the menu that wrote it.

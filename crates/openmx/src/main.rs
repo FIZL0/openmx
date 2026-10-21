@@ -107,10 +107,12 @@
 //! trigger's own control for the session; and the keyboard's throttle key ramps open over a third of
 //! a second rather than stepping, so a stab is part throttle on a machine with no pad at all.
 //!
-//! **H** draws the riding overlay ([`hud`]), which `--hud` starts on: the sixteen controls as the
-//! port's own input manager holds them, both sticks where its dead zone put them, and beside them
-//! the numbers the ride is running on. It is debugging furniture and matches nothing on the disc,
-//! which is why it is behind a flag and why with the flag off it draws nothing at all.
+//! Over each view is the original's own HUD ([`overlay`], V26): its speedometer and its radar with
+//! every other rider on it, off the disc's art. **H** swaps it for the debug overlay ([`hud`]), which
+//! `--hud` (`--overlay debug`) starts on: the sixteen controls as the port's own input manager holds
+//! them, both sticks where its dead zone put them, and beside them the numbers the ride is running
+//! on. That one is debugging furniture and matches nothing on the disc. `--overlay none`, or the
+//! front end's setting, draws neither until H.
 //!
 //! **M** swaps between the bike and the track's biplane, as does the pause's "Switch To Machine" for
 //! the player who opened it, and `--vehicle biplane` or the ride setup's machine pick starts in the
@@ -154,14 +156,16 @@ mod chase;
 mod gpuwin;
 mod ground;
 mod hud;
+// What the CPU still draws over the GPU's picture (P44), as patches.
+mod layer;
 mod lobby;
 // The join screen (P38's rules), which the front end's local game seats its players through (P43).
 mod join;
 mod menu;
 mod moment;
-mod overlay;
 mod net;
 mod online;
+mod overlay;
 mod pad;
 mod perf;
 mod split;
@@ -407,6 +411,8 @@ struct Rig {
     camera: Race,
     plane_camera: Option<Race>,
     hud: Hud,
+    /// The distance this player's odometer shows, under the original's overlay (V26).
+    odometer: overlay::Odometer,
     bike_model: String,
     body_model: Option<String>,
     /// What bolts onto this player's chassis, each part under the model name it is drawn from: the
@@ -486,6 +492,9 @@ struct Args {
     /// Draw the riding overlay (P6): the pad as the simulation reads it and the numbers beside it.
     /// Off by default and off is free, because it is debugging furniture and not part of the game.
     hud: bool,
+    /// `--overlay original|debug|none` (V26): which overlay a ride draws, the original's HUD by
+    /// default. Unset, the front end's setting decides; `--hud` is `--overlay debug`.
+    overlay: Option<menu::Overlay>,
     /// `--camera NAME`: which of the track's camera presets to start on, by the name its
     /// `cpresets.ini` gives it. The default is the one the original itself is on in a freeride (P14).
     camera: String,
@@ -831,7 +840,9 @@ fn front_end(args: Args) -> Result<(), String> {
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
-                a.hud = args.hud || shell.front.menu.settings.overlay;
+                let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
+                a.overlay = Some(overlay);
+                a.hud = overlay == menu::Overlay::Debug;
                 a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
                 a.wiring = shell.front.wiring();
                 // The ride setup's machine for 1P (P41), unless `--vehicle biplane` asked for the plane
@@ -892,7 +903,9 @@ fn front_end(args: Args) -> Result<(), String> {
             if let Some((room, _)) = shell.front.menu.lobby.start.clone() {
                 let mut a = args.clone();
                 a.track = room.track.clone();
-                a.hud = args.hud || shell.front.menu.settings.overlay;
+                let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
+                a.overlay = Some(overlay);
+                a.hud = overlay == menu::Overlay::Debug;
                 a.wrecks = room.wrecks;
                 a.wiring = shell.front.wiring();
                 a.shot = None;
@@ -2045,6 +2058,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             camera: Race { cam: camera.cam.clone() },
             plane_camera: None,
             hud: Hud::new(args.hud),
+            odometer: overlay::Odometer::default(),
             bike_model,
             body_model: own_body,
             parts,
@@ -2061,6 +2075,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // the window rather than inside the simulation's `World`, and it reads the port's own
             // values at draw time instead of being fed them.
             hud: Hud::new(args.hud),
+            odometer: overlay::Odometer::default(),
             bike_model: CHASSIS.to_string(),
             body_model,
             parts: vehicle.parts.clone(),
@@ -2086,7 +2101,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The GPU's per-frame lists, kept to reuse their room: the poses, the overlay and its layers.
     let mut gpu_poses: Vec<Vec<M4>> = Vec::new();
     let mut gpu_patches = Vec::new();
-    let mut gpu_layers: Vec<overlay::Layer> = (0..=args.players).map(|_| overlay::Layer::new()).collect();
+    let mut gpu_layers: Vec<layer::Layer> = (0..=args.players).map(|_| layer::Layer::new()).collect();
 
     // ---- the loop ------------------------------------------------------------------------------
     let light = Lighting::of(&look);
@@ -2118,6 +2133,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if display != Display::Television {
         set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
     }
+    // The original's HUD (V26): its art off the disc, the world its radar covers, and which overlay is
+    // up. A disc without the art rides on with no HUD rather than not at all.
+    let hud_art = match overlay::Art::load(&mut disc) {
+        Ok(art) => Some(art),
+        Err(e) => {
+            eprintln!("the original's overlay: {e}");
+            None
+        }
+    };
+    let radar_span = overlay::radar_span(ground.spacing);
+    let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut frame = Frame::new(width, height, look.fog_color);
     // The views (V22): where each player's goes in the frame, and a frame of its own size for each to
     // be drawn into. A full screen has none — its one view is drawn straight into the frame, as it
@@ -2384,8 +2410,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             escape = esc;
             let act = front.menu.step_seats(&presses);
             if front.menu.changed() {
+                overlay_mode = front.menu.settings.overlay;
                 for rig in &mut rigs {
-                    rig.hud.on = front.menu.settings.overlay;
+                    rig.hud.on = overlay_mode == menu::Overlay::Debug;
                 }
                 for seat in &mut world.seats {
                     seat.sim.rider.sense.wrecks_enabled = args.wrecks && front.menu.settings.wrecks;
@@ -2646,6 +2673,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
+                } else if let (Some(art), menu::Overlay::Original) = (&hud_art, overlay_mode) {
+                    // The original's own HUD (V26), as the software path draws it.
+                    let b = ridden[v].target.body_point;
+                    if seat.riding && simulated {
+                        rig.odometer.step([b.x(), b.y(), b.z()]);
+                    }
+                    let (window, feet) = ((frame.width, frame.height), rig.odometer.feet);
+                    let draw = |f: &mut Frame| {
+                        art.draw(f, window, &ridden, v, radar_span, feet);
+                    };
+                    gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
                 }
             }
             if let Some(front) = &front
@@ -2903,6 +2941,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 _ => None,
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
+            // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
+            if let (Some(art), false, menu::Overlay::Original) = (&hud_art, rig.hud.on, overlay_mode) {
+                let b = ridden[v].target.body_point;
+                if seat.riding && simulated {
+                    rig.odometer.step([b.x(), b.y(), b.z()]);
+                }
+                art.draw(target, (width, height), &ridden, v, radar_span, rig.odometer.feet);
+            }
             if let Some(view) = view_frames.get(v) {
                 split::put(&mut frame, view, *at);
             }
@@ -3263,6 +3309,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         shot: None,
         shot_frame: 0,
         hud: false,
+        overlay: None,
         camera: START_CAMERA.to_string(),
         moment: None,
         wrecks: true,
@@ -3358,7 +3405,18 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .parse()
                     .map_err(|_| "--shot-frame: not a frame number")?;
             }
-            "--hud" => args.hud = true,
+            "--hud" => {
+                args.hud = true;
+                args.overlay = Some(menu::Overlay::Debug);
+            }
+            "--overlay" => {
+                let word = next("original, debug or none")?;
+                let overlay = menu::Overlay::from_word(&word)
+                    .filter(|o| o.word() == word)
+                    .ok_or_else(|| format!("--overlay: {word:?} is not original, debug or none"))?;
+                args.hud = overlay == menu::Overlay::Debug;
+                args.overlay = Some(overlay);
+            }
             "--fps" => args.fps = true,
             "--renderer" => args.renderer = Backend::parse(&next("gpu or software")?)?,
             "--camera" => args.camera = next("a camera preset's name, like \"Freestyle Cam\"")?,
@@ -3496,7 +3554,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--hud] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--hud] [--camera NAME]\n\
                             [--shot-frame N] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
@@ -3522,7 +3580,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      pressure byte): a key ramps it, --throttle r2 rides it on a trigger instead,\n\
                      giving up that trigger's own control, and --pad-pressure says which joystick\n\
                      axes a pad reports its buttons' own pressures on.\n\
-                     H toggles the riding overlay, which --hud starts on.\n\
+                     H toggles the debug overlay, which --hud (--overlay debug) starts on.\n\
                      Up to eight seats: every pad plugged in takes the next one, the keyboard\n\
                      beside 1P's, or --pads says each seat's (k the keyboard, a number the pad\n\
                      in the order found, - nobody). A pad pulled out pauses its player until it\n\

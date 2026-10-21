@@ -170,8 +170,8 @@ pub const TRACKS: [(&str, &str); 5] = [
 pub struct Settings {
     /// The rider's name, typed on the on-screen keyboard.
     pub name: String,
-    /// The riding overlay (`hud`), which H toggles in a ride.
-    pub overlay: bool,
+    /// Which overlay a ride draws (V26), `--overlay`'s word; H toggles the debug one in a ride.
+    pub overlay: Overlay,
     /// Whether a ride wrecks at all.
     pub wrecks: bool,
     /// The last track ridden, which the track pick opens on.
@@ -229,7 +229,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             name: "Rider".into(),
-            overlay: false,
+            overlay: Overlay::Original,
             wrecks: true,
             track: TRACKS[0].0.into(),
             machines: [Machine::Bike; SEATS_MAX],
@@ -273,7 +273,7 @@ impl Settings {
                         s.name = name;
                     }
                 }
-                "overlay" => s.overlay = v != "off",
+                "overlay" => s.overlay = Overlay::from_word(v).unwrap_or(s.overlay),
                 "wrecks" => s.wrecks = v != "off",
                 "track" if TRACKS.iter().any(|t| t.0 == v) => s.track = v.to_string(),
                 // One word a seat, 1P's first; a seat the line does not reach rides the bike.
@@ -295,7 +295,7 @@ impl Settings {
         format!(
             "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\n",
             self.name,
-            on_off(self.overlay),
+            self.overlay.word(),
             on_off(self.wrecks),
             self.track,
             self.machines.map(Machine::word).join(" "),
@@ -317,6 +317,49 @@ fn clean_name(v: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// Which overlay a ride draws over each view, as `--overlay` spells it (V26).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Overlay {
+    /// The original's own HUD: its speedometer and its radar, off the disc (`overlay.rs`).
+    #[default]
+    Original,
+    /// The shell's debug HUD (`hud.rs`).
+    Debug,
+    /// Nothing over the picture.
+    None,
+}
+
+impl Overlay {
+    pub const ALL: [Overlay; 3] = [Overlay::Original, Overlay::Debug, Overlay::None];
+
+    /// The file's word, which is also `--overlay`'s.
+    pub fn word(self) -> &'static str {
+        match self {
+            Overlay::Original => "original",
+            Overlay::Debug => "debug",
+            Overlay::None => "none",
+        }
+    }
+
+    /// A word back, and the two P36 wrote before there were three: `on` was the debug HUD, and `off`
+    /// was no debug HUD, which is now the original's.
+    pub fn from_word(w: &str) -> Option<Overlay> {
+        match w {
+            "on" => Some(Overlay::Debug),
+            "off" => Some(Overlay::Original),
+            _ => Overlay::ALL.into_iter().find(|o| o.word() == w),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Overlay::Original => "Original",
+            Overlay::Debug => "Debug",
+            Overlay::None => "None",
+        }
+    }
 }
 
 /// Where the throttle comes from, as `--throttle` spells it.
@@ -1297,7 +1340,10 @@ impl Menu {
                     match at {
                         0 if p.ok => self.open_keyboard(),
                         1 => {
-                            self.settings.overlay = !self.settings.overlay;
+                            let all = Overlay::ALL;
+                            let i = all.iter().position(|o| *o == self.settings.overlay).unwrap_or(0);
+                            let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
+                            self.settings.overlay = all[i];
                             self.changed = true;
                         }
                         2 => {
@@ -1801,15 +1847,15 @@ impl Lobby {
 
 /// One character of a `.cel` font: its box in the atlas and how far it moves the pen.
 #[derive(Clone, Debug)]
-struct Glyph {
+pub(crate) struct Glyph {
     /// Left, top, right, bottom in atlas texels.
-    uv: [f32; 4],
+    pub(crate) uv: [f32; 4],
     /// Pen to the box's left edge, the box's width, and the box's right edge to the next pen.
-    before: f32,
-    width: f32,
-    after: f32,
+    pub(crate) before: f32,
+    pub(crate) width: f32,
+    pub(crate) after: f32,
     /// The following character, and how much nearer (negative) it sits.
-    kern: Vec<(u32, f32)>,
+    pub(crate) kern: Vec<(u32, f32)>,
 }
 
 /// A `.cel` font and its atlas.
@@ -1823,9 +1869,9 @@ struct Glyph {
 ///
 /// The box's width is the `width` field to the texel in every glyph looked at. Bytes after the last
 /// glyph (some hundreds in each font) are not read. Glyph 0 is the box drawn for a missing code.
-struct Font {
+pub(crate) struct Font {
     glyphs: HashMap<u32, Glyph>,
-    atlas: Texture,
+    pub(crate) atlas: Texture,
 }
 
 fn le16(d: &[u8], at: usize) -> Option<u16> {
@@ -1837,7 +1883,7 @@ fn le32(d: &[u8], at: usize) -> Option<u32> {
 }
 
 impl Font {
-    fn parse(cel: &[u8], atlas: Texture) -> Result<Font, String> {
+    pub(crate) fn parse(cel: &[u8], atlas: Texture) -> Result<Font, String> {
         let bad = || "a .cel font cut short".to_string();
         let count = le32(cel, 8).ok_or_else(bad)? as usize;
         let (aw, ah) = (atlas.width as f32, atlas.height as f32);
@@ -1866,7 +1912,7 @@ impl Font {
         Ok(Font { glyphs, atlas })
     }
 
-    fn glyph(&self, c: char) -> &Glyph {
+    pub(crate) fn glyph(&self, c: char) -> &Glyph {
         self.glyphs
             .get(&(c as u32))
             .or_else(|| self.glyphs.get(&0))
@@ -1874,7 +1920,7 @@ impl Font {
     }
 
     /// How wide `text` is, in layout pixels.
-    fn measure(&self, text: &str) -> f32 {
+    pub(crate) fn measure(&self, text: &str) -> f32 {
         let mut w = 0.0;
         let mut chars = text.chars().peekable();
         while let Some(c) = chars.next() {
@@ -2084,7 +2130,7 @@ impl Art {
                 let rows: Vec<String> = match screen {
                     Screen::Settings => vec![
                         format!("Name  {}", menu.settings.name),
-                        format!("Overlay  {}", if menu.settings.overlay { "On" } else { "Off" }),
+                        format!("Overlay  {}", menu.settings.overlay.label()),
                         format!("Wrecks  {}", if menu.settings.wrecks { "On" } else { "Off" }),
                         "Controls".to_string(),
                     ],
@@ -2783,11 +2829,11 @@ impl Painter<'_> {
 }
 
 /// The pixels a span of layout covers, clipped to the frame.
-fn span(a: f32, b: f32, n: usize) -> (usize, usize) {
+pub(crate) fn span(a: f32, b: f32, n: usize) -> (usize, usize) {
     (a.round().clamp(0.0, n as f32) as usize, b.round().clamp(0.0, n as f32) as usize)
 }
 
-fn blend(frame: &mut Frame, x: usize, y: usize, c: [u8; 4]) {
+pub(crate) fn blend(frame: &mut Frame, x: usize, y: usize, c: [u8; 4]) {
     let at = 3 * (y * frame.width + x);
     let a = c[3] as u32;
     for i in 0..3 {
@@ -2807,7 +2853,7 @@ fn add(frame: &mut Frame, x: usize, y: usize, c: [u8; 4]) {
 
 /// The texel at `u, v` (texels), blended from its four neighbours and kept inside `src` so a glyph
 /// does not bleed in its neighbour in the atlas.
-fn bilinear(t: &Texture, u: f32, v: f32, src: [f32; 4]) -> [u8; 4] {
+pub(crate) fn bilinear(t: &Texture, u: f32, v: f32, src: [f32; 4]) -> [u8; 4] {
     let lo_x = src[0].min(src[2]).max(0.0);
     let hi_x = (src[0].max(src[2]) - 1.0).min(t.width as f32 - 1.0).max(lo_x);
     let lo_y = src[1].min(src[3]).max(0.0);
