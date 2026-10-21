@@ -1,4 +1,4 @@
-# 1 — edge gate (PART)
+# 1 — edge gate (FINAL)
 
 Task S73. 2026-10-21.
 
