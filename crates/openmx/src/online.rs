@@ -19,6 +19,13 @@
 //! A datagram too big for that path goes on the lobby's reliable stream instead, addressed, and every
 //! other peer but the one it is for drops it. A peer dropping or the host ending the ride ends it here,
 //! and what else the network said on the way is kept for the menu's lobby.
+//!
+//! A local freeride opened to online players from its pause (N10, [`Online::open`]) is the host's
+//! ride of one, its session started at the tick it opened on, hosting a lobby that takes peers on
+//! while it rides: each that passes the handshake ([`openmx_net::Event::Arrived`]) is handed to the
+//! session, which takes it on at a tick with its seats spawned where the ride started
+//! ([`crate::net::admit`]). The peer rides in with [`Online::drop_in`]: no seat until the host's
+//! state comes.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -65,6 +72,10 @@ pub struct Online {
     shown: String,
     /// The host's time-scale modifier (P55), which every machine scales the same ticks by.
     pub time_scale: Option<F>,
+    /// A ride opened to online players (N10): a joiner's seats' state as each spawns (one seat in
+    /// [`game_sim::snapshot`]'s codec), and the peers handed to the session not taken on yet.
+    spawn: Option<Vec<u8>>,
+    arrived: Vec<String>,
 }
 
 impl Online {
@@ -96,13 +107,15 @@ impl Online {
             net,
             wire: Wire::Udp(udp),
             sims: starts.to_vec(),
-            poses: vec![None; lineup.seats.len()],
+            poses: vec![None; crate::net::SEATS],
             seat,
             dt: rides::tick_dt(0),
             last: Instant::now(),
             hands: Controls::default(),
             shown: String::new(),
             time_scale: None,
+            spawn: None,
+            arrived: Vec::new(),
         })
     }
 
@@ -119,7 +132,7 @@ impl Online {
         Ok(Online {
             net: session,
             wire: Wire::Lobby { net, kept: Vec::new() },
-            poses: vec![None; sims.len()],
+            poses: vec![None; crate::net::SEATS],
             sims,
             seat,
             dt: rides::tick_dt(0),
@@ -127,7 +140,64 @@ impl Online {
             hands: Controls::default(),
             shown: String::new(),
             time_scale: None,
+            spawn: None,
+            arrived: Vec::new(),
         })
+    }
+
+    /// A local freeride opened to online players (N10): the host's ride of one from here on, `sim`
+    /// its seat as it is now, over `net`, which hosts the room. `spawn` is a seat where the ride
+    /// starts, which every peer that joins rides in from.
+    pub fn open(net: Arc<openmx_net::Net>, sim: Sim, spawn: &Sim) -> Result<Online, String> {
+        let me = openmx_net::HOST;
+        let session = Netplay::new(Lineup { seats: vec![Some(me.to_string())] }, me, Timing::default(), crate::net::desync::dumps())?;
+        println!("online: the ride is open to online players");
+        Ok(Online {
+            net: session,
+            wire: Wire::Lobby { net, kept: Vec::new() },
+            poses: vec![None; crate::net::SEATS],
+            sims: vec![sim],
+            seat: 0,
+            dt: rides::tick_dt(0),
+            last: Instant::now(),
+            hands: Controls::default(),
+            shown: String::new(),
+            time_scale: None,
+            spawn: Some(game_sim::snapshot::encode(spawn)),
+            arrived: Vec::new(),
+        })
+    }
+
+    /// Into a ride under way (N10), as `me` in `room`: no seat until the host takes this machine on
+    /// and sends the ride's state. `first` is the host's first seat's rider and bike, whose
+    /// constants every seat of the ride is decoded onto ([`Rides`]).
+    pub fn drop_in(net: Arc<openmx_net::Net>, room: &openmx_net::Room, me: &str, first: Sim) -> Result<Online, String> {
+        let session = Netplay::joining(openmx_net::HOST, me, Timing::default(), crate::net::desync::dumps())?;
+        println!("online: dropping in on {}'s ride, waiting for the host", room.name);
+        Ok(Online {
+            net: session,
+            wire: Wire::Lobby { net, kept: Vec::new() },
+            poses: vec![None; crate::net::SEATS],
+            sims: vec![first],
+            seat: 0,
+            dt: rides::tick_dt(0),
+            last: Instant::now(),
+            hands: Controls::default(),
+            shown: String::new(),
+            time_scale: None,
+            spawn: None,
+            arrived: Vec::new(),
+        })
+    }
+
+    /// Whether this machine has a seat in the ride yet (a drop-in waits for the host's state).
+    pub fn seated(&self) -> bool {
+        !self.net.waiting()
+    }
+
+    /// The riders in the ride now (each machine's seats; a drop-in's grow as peers join).
+    pub fn riders(&self) -> usize {
+        self.net.lineup.seats.iter().flatten().count()
     }
 
     /// What the lobby's network said during the ride that was not the ride's, for the menu.
@@ -142,6 +212,11 @@ impl Online {
     /// the lobby (the others go back to theirs). Whether this machine is still in a lobby after.
     pub fn leave(&self) -> bool {
         let Wire::Lobby { net, .. } = &self.wire else { return false };
+        // an opened freeride's room was only ever the ride: it closes with it
+        if self.spawn.is_some() {
+            net.send(openmx_net::Cmd::Leave);
+            return false;
+        }
         if self.net.me == openmx_net::HOST {
             net.send(openmx_net::Cmd::Lobby);
             true
@@ -156,6 +231,8 @@ impl Online {
     fn receive(&mut self) -> Result<Vec<(String, Vec<u8>)>, String> {
         use openmx_net::Event;
         let me = self.net.me.clone();
+        let session = &mut self.net;
+        let (spawn, arrived) = (&self.spawn, &mut self.arrived);
         match &mut self.wire {
             Wire::Udp(udp) => udp.receive(),
             Wire::Lobby { net, kept } => {
@@ -177,6 +254,22 @@ impl Online {
                         }
                         Event::Room(ref r) if !r.riding => {
                             end.get_or_insert_with(|| "the host ended the ride".to_string());
+                            kept.push(e);
+                        }
+                        // a peer into the opened ride: the session takes it on once it hears it
+                        Event::Arrived { ref peer, ref seats } if let Some(spawn) = spawn => {
+                            match session.admit(peer, seats, spawn.clone()) {
+                                Ok(()) => arrived.push(peer.clone()),
+                                Err(why) => println!("online: {peer} cannot join: {why}"),
+                            }
+                            kept.push(e);
+                        }
+                        Event::Room(ref r) => {
+                            // one that left before it was taken on
+                            let seated = r.peers();
+                            for p in arrived.extract_if(.., |p| !seated.contains(p)) {
+                                session.unadmit(&p);
+                            }
                             kept.push(e);
                         }
                         e => kept.push(e),

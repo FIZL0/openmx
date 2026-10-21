@@ -2639,7 +2639,29 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // line-up and the seed are the host's, every seat rides its own bike set's `.phy` — the bytes the
     // handshake hashed — and the session goes over the lobby's connection.
     let from_lobby = front.as_deref().and_then(|f| f.menu.lobby.start.clone().zip(f.network.net()));
+    let drop_in = front.as_deref().is_some_and(|f| f.menu.lobby.drop_in);
+    // Where the ride starts, for a peer that drops in on it once it is opened online (N10).
+    let spawn = world.seats[0].sim.clone();
     let mut online = match &args.online {
+        // Into a ride under way (N10): every seat is the host's first's bike, on this machine's
+        // constants for it, and the ride's state comes from the host.
+        None if from_lobby.is_some() && drop_in => {
+            let ((room, me), net) = from_lobby.expect("checked");
+            if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike || world.seats.len() != 1 {
+                return Err("dropping in on an online ride rides one player's bike and no tape: drop --play, --record, --vehicle and --players".into());
+            }
+            let disc = &front.as_deref().expect("from the lobby").network.disc;
+            let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
+            let bytes = disc.phy(&first.pick.bike).ok_or(format!("the disc has no {} bike set", first.pick.bike))?;
+            let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+            mods.bike(0, &mut phy);
+            let mut sim = world.seats[0].sim.clone();
+            sim.phy = Arc::new(phy);
+            sim.rng = room.seed;
+            let mut online = online::Online::drop_in(net, &room, &me, sim)?;
+            online.time_scale = mods.time_scale();
+            Some(online)
+        }
         None if from_lobby.is_some() => {
             let ((room, me), net) = from_lobby.expect("checked");
             if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike {
@@ -2684,6 +2706,19 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
     };
     let mut online_frames = 0u32;
+    // The pause offers "Open to Online" (N10) on a local freeride of one player on the bike set the
+    // disc's own lookup gives (what a joiner's machine loads for it), outside any lobby.
+    if let Some(front) = front.as_deref_mut() {
+        let set = args.set.unwrap_or(roster::Set::FREERIDE).word();
+        let can = online.is_none()
+            && head.is_none()
+            && world.tape.is_none()
+            && world.seats.len() == 1
+            && args.phy.is_none()
+            && front.menu.lobby.room.is_none()
+            && front.network.disc.phy(&set).is_some_and(|b| *b == phy_bytes);
+        front.menu.opening = if can { menu::Opening::Can } else { menu::Opening::No };
+    }
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
     let mut seated = vec![true; world.seats.len()];
 
@@ -2914,7 +2949,31 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         front.menu.switched(i, menu::Machine::from_word(up.name()).unwrap_or_default());
                     }
                 }
-                Act::Stay | Act::Resume | Act::Ride(_) | Act::Switch(_) | Act::Online => {}
+                // Open to online players (N10): host a lobby on this ride, which rides on as the
+                // session's from here, alone until a peer drops in.
+                Act::OpenOnline if online.is_none() && front.menu.opening == menu::Opening::Can => {
+                    if world.seats[0].garage.up != Kind::Bike {
+                        front.menu.note = Some("Open to Online rides the bike: switch to it first.".into());
+                    } else {
+                        let settings = &front.menu.settings;
+                        let mut room = openmx_net::Room::new(&settings.name, &args.track, menu::LOBBY_SEATS);
+                        room.wrecks = args.wrecks && settings.wrecks;
+                        room.modifiers = mods.text();
+                        let pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
+                        room.take(openmx_net::HOST, &[pick]);
+                        (room.riding, room.drop_in) = (true, true);
+                        let net = front.network.open(&mut front.menu, room);
+                        match online::Online::open(net, world.seats[0].sim.clone(), &spawn) {
+                            Ok(mut on) => {
+                                on.time_scale = mods.time_scale();
+                                online = Some(on);
+                                front.menu.opening = menu::Opening::Open;
+                            }
+                            Err(e) => front.menu.note = Some(format!("Could not open the ride: {e}")),
+                        }
+                    }
+                }
+                Act::Stay | Act::Resume | Act::Ride(_) | Act::Switch(_) | Act::Online | Act::OpenOnline => {}
             }
             for seat in &mut world.seats {
                 seat.riding = front.menu.riding();
@@ -2952,6 +3011,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             world.seats[0].hands = on.hands;
             world.seats[0].said = rider::Frame::default();
+            // An opened ride's lobby (N10) is the pause's to show: its code, who is in.
+            if let Some(front) = front.as_deref_mut()
+                && front.menu.opening == menu::Opening::Open
+            {
+                for e in on.kept() {
+                    front.menu.heard(e);
+                }
+            }
             (on.dt(), true)
         } else {
         // One frame of the game's own fixed update, which calls `World::simulate` inside itself.
@@ -3668,12 +3735,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         println!("ride hash {:#018x}", game_sim::hash::of(&world.seats[0].sim.rider.ride));
     }
 
+    let opened = front.as_deref().is_some_and(|f| f.menu.opening == menu::Opening::Open);
+    if let Some(front) = front.as_deref_mut() {
+        front.menu.opening = menu::Opening::No;
+    }
     if let Some(on) = &mut online {
         println!("{}", on.summary());
         // What the lobby said while the ride ran (a drop, the lobby as it is now, chat) is the menu's.
         if let Some(front) = front.as_deref_mut() {
             for e in on.kept() {
                 front.menu.heard(e);
+            }
+            // an opened freeride's room closed with it (`Online::leave`): no lobby to go back to
+            if opened {
+                on.leave();
+                front.menu.lobby.room = None;
+                front.menu.lobby.code.clear();
             }
         }
     }

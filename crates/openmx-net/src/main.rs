@@ -103,7 +103,7 @@ fn main() {
             Event::Me(_) => {}
             Event::Found(list) => {
                 for l in &list {
-                    println!("  {}  {:<24} {:<10} {}/{}{}", if l.code.is_empty() { "----" } else { &l.code }, l.name, l.track, l.taken, l.seats, if l.same_build() { "" } else { "  (another version)" });
+                    println!("  {}  {:<24} {:<10} {}/{}{}", if l.code.is_empty() { "----" } else { &l.code }, l.name, l.track, l.taken, l.seats, if !l.same_build() { "  (another version)" } else if l.riding { "  (riding: drop in)" } else { "" });
                 }
                 println!("{} lobbies.", list.len());
                 found += 1;
@@ -126,6 +126,8 @@ fn main() {
                 }
             }
             Event::Start(r, me) => println!("The ride starts (seed {:08x}, you are {me}). `lobby` (host) ends it.", r.seed),
+            Event::DropIn(r, me) => println!("Into the ride under way on {} (you are {me}).", r.track),
+            Event::Arrived { peer, seats } => println!("{peer} is in, on seat {seats:?}: a ride takes it on."),
             Event::Dropped(why) => println!("{why}"),
             Event::Failed(why) => {
                 println!("{why}");

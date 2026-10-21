@@ -1,7 +1,9 @@
 //! A peer joining the ride under way (N10): nobody's ride restarts, and every machine takes the
 //! join on at one tick.
 //!
-//! The host decides when. At the first frame it can (no restart or resync in flight), it takes its
+//! The host decides when. At the first frame it can (no restart or resync in flight) once it has heard
+//! from the joiner — any datagram: a joiner's game sends keep-alives once its ride is loaded, and a
+//! peer taken on before that would hold every other machine up for its load — it takes its
 //! state before the last tick every seat's pads are in for — [`super::rollback::confirmed`], what a
 //! resync sends — puts the joiner's seats into it, each a new rider in the spawn state the caller
 //! handed over ([`super::Game::seat`]), and sends that state with the new line-up as a restart
@@ -25,12 +27,27 @@ pub struct Admit {
     pending: Vec<(String, Vec<usize>, Vec<u8>)>,
     /// Every join this machine sent: (peer, the tick it joined at).
     pub joins: Vec<(String, u32)>,
+    /// The peers heard from: a pending join goes ahead once its peer is among them.
+    heard: std::collections::BTreeSet<String>,
 }
 
 impl Admit {
     /// Joins asked for and not taken on yet.
     pub fn pending(&self) -> usize {
         self.pending.len()
+    }
+
+    /// A datagram came from `peer`.
+    pub fn heard(&mut self, peer: &str) {
+        if self.pending.iter().any(|p| p.0 == peer) && !self.heard.contains(peer) {
+            self.heard.insert(peer.to_string());
+        }
+    }
+
+    /// `peer` will not come after all (it left the lobby before it was taken on).
+    pub fn forget(&mut self, peer: &str) {
+        self.pending.retain(|p| p.0 != peer);
+        self.heard.remove(peer);
     }
 }
 
@@ -55,13 +72,18 @@ pub(super) fn ask<S: Clone + 'static>(np: &mut Netplay<S>, peer: &str, seats: &[
 
 /// The host, after a frame's ticks: the joins asked for go out and are taken on, if this frame can.
 pub(super) fn run<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay<S>, game: &mut G) {
-    if !np.host() || np.admit.pending.is_empty() || np.end.is_some() || np.recover.ready.is_some() || np.resync.due || np.resync.sent {
+    if !np.host() || !np.admit.pending.iter().any(|p| np.admit.heard.contains(&p.0)) || np.end.is_some() || np.recover.ready.is_some() || np.resync.due || np.resync.sent {
         return;
     }
     // no settled state this frame: the next
     let Some((tick, data)) = rollback::confirmed(np, game) else { return };
     let now = game.save();
-    let pending = std::mem::take(&mut np.admit.pending);
+    let (pending, waiting) = std::mem::take(&mut np.admit.pending).into_iter().partition(|p| np.admit.heard.contains(&p.0));
+    np.admit.pending = waiting;
+    let pending: Vec<(String, Vec<usize>, Vec<u8>)> = pending;
+    for p in &pending {
+        np.admit.heard.remove(&p.0);
+    }
     let grown = grow(np, game, &data, &pending);
     game.restore(&now);
     let (lineup, data) = match grown {
