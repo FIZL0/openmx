@@ -130,6 +130,11 @@ pub struct Plane {
     /// The flight has been put back at the spawn since the last reset (which cannot place it itself:
     /// placing measures, and the measure's table is the `Sim`'s).
     pub placed: bool,
+    /// The stick's elevator answers at every bank (P69, `pad::PlaneScheme::every_bank`): the
+    /// plane-relative scheme lifts the original's knife-edge fade for each step by flying it as if the
+    /// file's `MinElevator` were 1, which makes the fade exactly 1 at every roll. Off, the flight
+    /// reads its file as the original does.
+    pub every_bank: bool,
 }
 
 impl Plane {
@@ -144,6 +149,7 @@ impl Plane {
             vel: Vf::new(0.0, 0.0, 0.0, 0.0),
             flight: None,
             placed: false,
+            every_bank: false,
         }
     }
 
@@ -158,8 +164,8 @@ impl Plane {
     /// The swap's unwreck-and-reset: back to the spawn transform, at rest. The flight is put back by
     /// the next step ([`Flight::reset`]), which is the one with the `Sim`'s tables.
     pub fn reset(&mut self) {
-        let flight = self.flight.take();
-        *self = Plane { flight, ..Plane::parked(self.spawn) };
+        let (flight, every_bank) = (self.flight.take(), self.every_bank);
+        *self = Plane { flight, every_bank, ..Plane::parked(self.spawn) };
     }
 
     /// One frame of the plane with the controller on it: the reset chord ([`Flight::reset_chord`],
@@ -176,7 +182,14 @@ impl Plane {
         // new one moves the gas and the brake, not the shoulder buttons.
         let chord = f.reset_chord(Controls::from_pad(sim.input.pad(0)).respawn, &sim.tables.ride.acos);
         let wrecked = f.crash.reason != 0;
+        // The control law's fade runs from 1 down to `MinElevator`; with that 1 too it is 1 at every
+        // roll. Put back after the frame, so the flight still holds its file's value.
+        let min_elevator = f.joystick.min_elevator;
+        if self.every_bank {
+            f.joystick.min_elevator = F::ONE;
+        }
         f.frame(dt, flight::pad(sim.input.pad(0)), world, &sim.tables.ride);
+        f.joystick.min_elevator = min_elevator;
         let recovered = wrecked && f.crash.reason == 0;
         let (quat, origin) = f.pose();
         let nose = f.measure.forward;
@@ -272,6 +285,14 @@ impl Garage {
         match (self.up, &self.plane) {
             (Kind::Biplane, Some(plane)) => plane.inverted(was),
             _ => false,
+        }
+    }
+
+    /// Whether the plane's elevator answers at every bank (P69): the seat's biplane scheme, which the
+    /// shell sets before each pass ([`Plane::every_bank`]). A garage with no plane has nothing to set.
+    pub fn set_every_bank(&mut self, on: bool) {
+        if let Some(plane) = &mut self.plane {
+            plane.every_bank = on;
         }
     }
 

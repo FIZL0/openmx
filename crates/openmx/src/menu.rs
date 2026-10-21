@@ -685,12 +685,12 @@ impl Layout {
     }
 }
 
-/// What a seat's Controls row says of its biplane (P50): its stick holds still on the screen upside
-/// down, or turns round with the plane as the original's does.
+/// What a seat's Controls row says of its biplane (P50, P69): its stick is the plane's own at every
+/// bank, or the original's, which stops pitching the plane on its side.
 fn plane_label(l: Layout) -> &'static str {
     match l {
-        Layout::New => "plane steady",
-        Layout::Original => "plane flips",
+        Layout::New => "plane relative",
+        Layout::Original => "plane original",
     }
 }
 
@@ -728,8 +728,9 @@ pub struct Controls {
     pub pressure: String,
     /// `--controls`' layout per seat, 1P first.
     pub layouts: [Layout; SEATS],
-    /// `--biplane-controls`' per seat (P50): under `New` the biplane's stick is turned round while
-    /// the plane is upside down, under `Original` it never is, as on the disc.
+    /// `--biplane-controls`' per seat (P50, P69): under `New` the biplane's stick is relative to the
+    /// plane at every bank, under `Original` it is the disc's. P50's screen-relative scheme is
+    /// `--biplane-controls screen` only, not a choice here.
     pub planes: [Layout; SEATS],
     /// `--preset`'s per seat (P79): which of the original's four controller presets the seat's bike
     /// rides on under the `Original` layout, 0 the shipped one. The original's Controller Presets
@@ -789,8 +790,8 @@ impl Controls {
              # pressure is --pad-pressure's axis:control list, or none; layout is new or original,\n\
              # or one per seat (new,original,...) — new is R2 gas, L2 brake, Select camera, with\n\
              # Cross and Square kept free; original is the game's own (P40); biplane is new or\n\
-             # original, or one per seat — new turns the plane's stick round upside down so it\n\
-             # moves the plane the same way on the screen, original never does (P50); nintendo is\n\
+             # original, or one per seat — new is the plane's own stick at every bank, down\n\
+             # always pulling the nose toward its belly; original is the disc's (P50, P69); nintendo is\n\
              # labels (a Switch pad's A confirms and B goes back) or positions (B, the bottom one,\n\
              # confirms) (P53); preset is the original's controller preset, 0 to 3, or one per seat,\n\
              # read under the original layout only — 0 is the shipped one (P79)\n\
