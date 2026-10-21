@@ -1,0 +1,6 @@
+# gas, stick forward from 1000 ms
+down cross
+sleep 1000
+stick l 0 -1
+sleep 5000
+release

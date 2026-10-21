@@ -1,0 +1,7 @@
+# gas 1.5 s, then off the gas, stick hard right
+down cross
+sleep 1500
+up cross
+stick l 1 0
+sleep 6000
+release

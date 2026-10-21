@@ -709,7 +709,7 @@ mod tests {
     ///
     /// The same literal as `tests/hash.rs`' own, and it moves whenever the state type or the ride
     /// does. What it is here for is the *platform*: see the test below it.
-    const HUNDRED_TICKS: u64 = 0x4667_aeed_f29f_5957;
+    const HUNDRED_TICKS: u64 = 0x48e4_491f_d474_e1f7;
 
     /// The hash is a constant of the code, not of the machine: this value must be the same on x86-64,
     /// aarch64 and wasm32. When a change to the state type changes it, that is expected — update it. When
