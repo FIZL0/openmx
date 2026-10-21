@@ -30,10 +30,12 @@
 use game_render::raster::Frame;
 use game_sim::bindings::Table;
 use game_sim::input::{AXIS_FULL, Axis, AxisRange, Control, Pad, PlaneCommand, PlaneInput};
+use game_sim::markers::{Pick, SLOTS};
 use game_sim::ride::Controls;
 use game_sim::rider::Rider;
 use game_sim::state::Phase;
 use game_sim::trick::Wreck;
+use std::time::{Duration, Instant};
 
 /// The overlay, and the two things about the ride that are events rather than state: the last trick
 /// and the last wreck. Everything else is read off the port at draw time.
@@ -498,6 +500,81 @@ fn outline(frame: &mut Frame, x: i32, y: i32, w: i32, h: i32, color: [u8; 3]) {
     fill(frame, x, y + h - 1, w, 1, color);
     fill(frame, x, y, 1, h, color);
     fill(frame, x + w - 1, y, 1, h, color);
+}
+
+/// **The markers' slot display** (P88): the five slots and the other players, shown for a while
+/// whenever the selection or a slot changes, and for as long as a d-pad direction is held towards a
+/// marker. Drawn whether or not the overlay above is on: it is the markers' only feedback. The
+/// port's own, like the markers themselves.
+#[derive(Clone, Debug, Default)]
+pub struct MarkerBanner {
+    /// What was shown last: the selection and which slots hold a marker.
+    seen: Option<(Pick, [bool; SLOTS])>,
+    /// Until when it stays up.
+    until: Option<Instant>,
+}
+
+impl MarkerBanner {
+    /// How long it stays up after a change or a hold.
+    pub const SHOWN: Duration = Duration::from_millis(2000);
+
+    /// This frame's markers, and whether to draw them: up for [`MarkerBanner::SHOWN`] after the
+    /// selection or a slot changes (not on the first frame, which has nothing to change from) and
+    /// while `holding` — a d-pad direction's held milliseconds ([`game_sim::markers::holding`]) —
+    /// is not 0.
+    pub fn update(&mut self, now: Instant, pick: Pick, filled: [bool; SLOTS], holding: u32) -> bool {
+        let seen = Some((pick, filled));
+        if (self.seen.is_some() && self.seen != seen) || holding > 0 {
+            self.until = Some(now + MarkerBanner::SHOWN);
+        }
+        self.seen = seen;
+        self.until.is_some_and(|until| now < until)
+    }
+}
+
+/// What the slot display says about the selection: the slot and whether it holds a marker, or the
+/// player by their name — `P1`, `P2`… for a seat with none.
+pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>]) -> String {
+    match pick {
+        Pick::Slot(s) => format!("marker {} {}", s + 1, if filled[s] { "set" } else { "empty" }),
+        Pick::Player(p) => match names.get(p).and_then(|n| n.as_deref()).filter(|n| !n.trim().is_empty()) {
+            Some(name) => format!("to {name}"),
+            None => format!("to P{}", p + 1),
+        },
+    }
+}
+
+/// The slot display, top centre of `frame`: five boxes — solid where a marker is, the selected one
+/// ringed — the label under them, and under that how far the d-pad's hold is towards firing.
+pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, holding: u32) {
+    let scale = (frame.height as i32 / 224).max(1);
+    let (boxw, gap) = (7 * scale, 3 * scale);
+    let row = SLOTS as i32 * boxw + (SLOTS as i32 - 1) * gap;
+    let label_w = label.chars().count() as i32 * 4 * scale;
+    let w = row.max(label_w) + 2 * PAD * scale;
+    let h = boxw + 5 * scale + 2 * scale + 6 * scale + 2 * PAD * scale;
+    let (x, y) = ((frame.width as i32 - w) / 2, 8 * scale);
+    panel(frame, x, y, w, h);
+    let (bx, by) = (x + (w - row) / 2, y + PAD * scale);
+    for (i, &set) in filled.iter().enumerate() {
+        let at = bx + i as i32 * (boxw + gap);
+        let ink = if pick == Pick::Slot(i) { PRESSED } else { DIM };
+        if set {
+            fill(frame, at + scale, by + scale, boxw - 2 * scale, boxw - 2 * scale, HELD);
+        }
+        outline(frame, at, by, boxw, boxw, ink);
+        if pick == Pick::Slot(i) {
+            outline(frame, at - scale, by - scale, boxw + 2 * scale, boxw + 2 * scale, ink);
+        }
+    }
+    let ty = by + boxw + 2 * scale;
+    let ink = if matches!(pick, Pick::Player(_)) { PRESSED } else { INK };
+    text(frame, x + (w - label_w) / 2, ty, label, ink, scale);
+    let bar_y = ty + 7 * scale;
+    let full = row;
+    fill(frame, bx, bar_y, full, scale, EMPTY);
+    let done = full * holding.min(game_sim::markers::HOLD_MS) as i32 / game_sim::markers::HOLD_MS as i32;
+    fill(frame, bx, bar_y, done, scale, if holding >= game_sim::markers::HOLD_MS { PRESSED } else { HELD });
 }
 
 /// The panel: the scene behind it taken down towards black, so the dirt still shows through and the

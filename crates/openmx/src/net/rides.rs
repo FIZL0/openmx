@@ -14,6 +14,7 @@
 use std::sync::{Arc, OnceLock};
 
 use game_sim::input::{PADS, Report};
+use game_sim::markers::{self, Spot};
 use game_sim::ride::Controls;
 use game_sim::tick::{Engine, Timer0, clock_ms};
 use game_sim::world::World;
@@ -50,11 +51,15 @@ impl Game for Rides<'_> {
 
     fn step(&mut self, tick: usize, pads: &[Report]) {
         let dt = game_sim::modifiers::scaled_dt(tick_dt(tick), self.time_scale);
+        // Where every seat's rider is before anybody's tick, which is where a marker's Up rides to
+        // (P88): the same on every machine, as every seat's state is.
+        let spots: Vec<Spot> = self.sims.iter().map(|s| Spot::of(&s.rider)).collect();
         for (seat, sim) in self.sims.iter_mut().enumerate() {
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());
             let hands = sim.poll(dt, &reports);
             sim.step(dt, &hands, self.world);
+            markers::frame(sim, seat, &spots, &hands);
             if let Some(after) = &mut self.after {
                 after(seat, dt, sim, &hands);
             }

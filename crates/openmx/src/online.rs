@@ -321,6 +321,17 @@ impl Online {
         std::iter::once(self.seat).chain((0..self.sims.len()).filter(|&s| s != self.seat)).collect()
     }
 
+    /// Every seat's player by name, `None` for an empty seat: what the markers' slot display calls
+    /// the other players (P88).
+    pub fn names(&self) -> Vec<Option<String>> {
+        (0..self.sims.len()).map(|s| self.net.lineup.seats.get(s).cloned().flatten()).collect()
+    }
+
+    /// How many seats the ride has, and which is this machine's: the markers' `players` and `me`.
+    pub fn seat_of(&self) -> (usize, usize) {
+        (self.sims.len(), self.seat)
+    }
+
     /// Shell seat `d` after the frame: its state into `sim`, its pose onto `body`. Whether anyone
     /// sits in it — an empty seat's bike rides on with an unplugged pad, and is not drawn.
     pub fn show(&self, d: usize, sim: &mut Sim, body: Option<&mut Body>) -> bool {

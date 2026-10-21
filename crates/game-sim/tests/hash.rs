@@ -485,7 +485,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // scored or started a combo, so the fresh state's leaves stay.
     // 10608 since S74: the put-back's two-tick hold on the body, which only the body reads and the
     // walk leaves out with it, and the bones drawn on a clock put-back's own tick, presentation.
+    // 10656 since P88: the session markers, five boxed rides and the selection, walked under
+    // `markers` only once a session has touched them (tests/markers.rs in openmx).
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 10608, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 10656, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
