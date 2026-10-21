@@ -764,6 +764,7 @@ fn sees(planes: &[[f32; 4]; 5], c: V3, r: f32) -> bool {
 impl Renderer {
     /// A renderer with no window, drawing offscreen in [`OFFSCREEN`]: for the tests and `--headless`.
     /// Fails with the reason where there is no adapter to draw with.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn headless() -> Result<Renderer, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -776,19 +777,29 @@ impl Renderer {
         Renderer::new(&adapter, OFFSCREEN)
     }
 
-    /// A renderer on `adapter`, drawing into textures of `format`.
+    /// A renderer on `adapter`, drawing into textures of `format`: [`Renderer::request`], waited for.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(adapter: &wgpu::Adapter, format: wgpu::TextureFormat) -> Result<Renderer, String> {
+        pollster::block_on(Renderer::request(adapter, format))
+    }
+
+    /// A renderer on `adapter`, drawing into textures of `format`, once the device is granted. The
+    /// one wait in making a renderer; a browser cannot block on it, so it is a future its page drives
+    /// (P48), where the desktop waits on it in [`Renderer::new`].
+    pub async fn request(adapter: &wgpu::Adapter, format: wgpu::TextureFormat) -> Result<Renderer, String> {
         let info = adapter.get_info();
         // WebGL2's limits, raised to the size of texture this adapter can take: what is drawn here can
         // be drawn in a browser.
         let limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("openmx"),
-            required_features: wgpu::Features::empty(),
-            required_limits: limits,
-            ..Default::default()
-        }))
-        .map_err(|e| format!("{}: no device: {e}", info.name))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("openmx"),
+                required_features: wgpu::Features::empty(),
+                required_limits: limits,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("{}: no device: {e}", info.name))?;
         let adapter_name = format!("{} ({:?})", info.name, info.backend);
 
         let mesh_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2567,4 +2578,73 @@ mod tests {
         assert!(hard.chunks_exact(3).filter(|p| p != &scene.fog_color).count() > 1000);
     }
 
+
+    /// Every shader, written out as the GLSL ES 3.00 wgpu's WebGL2 backend hands the browser (P48):
+    /// WebGL2 has no storage buffers, no compute and no textures read without a sampler in GLSL's
+    /// sense, and a shader that needs any of them fails to translate here. The ground's is written
+    /// with every paint layer WebGL2 can sample beside the light map, and every blend a pass can ask.
+    #[test]
+    fn every_shader_translates_for_webgl2() {
+        use naga::back::glsl;
+        let layer = || Texture { width: 1, height: 1, rgba: vec![0; 4] };
+        let max = wgpu::Limits::downlevel_webgl2_defaults().max_sampled_textures_per_shader_stage as usize;
+        let passes = (0..max - 1)
+            .map(|i| crate::splat::Pass {
+                texture: i,
+                scale: [0.5, 0.25],
+                angle: 0.3,
+                turn: 0.3f32.sin_cos(),
+                reads: (true, true),
+                rgba: [128.0; 4],
+                blend: [None, Some([0, 1, 0, 1]), Some([1, 2, 1, 0]), Some([2, 0, 2, 2])][i % 4],
+                fixed: 64.0,
+            })
+            .collect();
+        let shadow = crate::splat::Shadow { tiles: vec![layer()], across: 1, x0: -10.0, x1: 10.0, z0: -10.0, z1: 10.0 };
+        let paint = Splat { textures: (0..max - 1).map(|_| layer()).collect(), passes, shadow: Some(shadow) };
+        let shaders = [
+            ("mesh", MESH_WGSL.to_string()),
+            ("sky", SKY_WGSL.to_string()),
+            ("place", PLACE_WGSL.to_string()),
+            ("ground, painted", ground_wgsl(Some(&paint), [200.0, 180.0, 150.0])),
+            ("ground, bare", ground_wgsl(None, [200.0, 180.0, 150.0])),
+        ];
+        let mut written = 0;
+        let mut translate = |name: &str, source: &str| -> Result<(), String> {
+            let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            let options = glsl::Options {
+                version: glsl::Version::Embedded { version: 300, is_webgl: true },
+                writer_flags: glsl::WriterFlags::ADJUST_COORDINATE_SPACE | glsl::WriterFlags::FORCE_POINT_SIZE,
+                ..Default::default()
+            };
+            for entry in &module.entry_points {
+                assert!(
+                    matches!(entry.stage, naga::ShaderStage::Vertex | naga::ShaderStage::Fragment),
+                    "{name}: a {:?} shader, which WebGL2 does not have",
+                    entry.stage
+                );
+                let pipeline = glsl::PipelineOptions { shader_stage: entry.stage, entry_point: entry.name.clone(), multiview: None };
+                let mut out = String::new();
+                glsl::Writer::new(&mut out, &module, &info, &options, &pipeline, Default::default())
+                    .and_then(|mut w| w.write())
+                    .map_err(|e| format!("{name}, {}: not GLSL ES 3.00: {e}", entry.name))?;
+                assert!(out.starts_with("#version 300 es"), "{name}, {}: {}", entry.name, &out[..40.min(out.len())]);
+                assert!(!out.contains("buffer "), "{name}, {}: a storage buffer", entry.name);
+                written += 1;
+            }
+            Ok(())
+        };
+        for (name, source) in &shaders {
+            translate(name, source).unwrap();
+        }
+        // The check bites: a storage buffer, which WebGPU has and WebGL2 does not, is refused.
+        let storage = "@group(0) @binding(0) var<storage, read> palette: array<vec4f>;\n\
+                       @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f { return palette[i]; }\n";
+        assert!(translate("storage", storage).is_err());
+        // mesh: vs + its fragment entries; sky, place, and the two grounds: one of each at least.
+        assert!(written >= 2 * shaders.len(), "only {written} entry points written");
+    }
 }
