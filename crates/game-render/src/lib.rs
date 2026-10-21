@@ -18,6 +18,7 @@
 //!   biplane.rs   the biplane: its model, the prop cone its state calls for, the pilot, its emitters
 //!   ini.rs       the plain-text format `.psm` and `.scn` share
 //!   scene.rs     `.scn` scenes (start point, fog, lights, 1506 placed props) and `.psm` materials
+//!   toy.rs       `.toy` moving scenery: the cars that drive a clip's path, free06's train among them
 //!   world.rs     a track in memory: models, materials and textures matched up by name, and drawn
 //!   rider.rs     the rider: its `.sub`, the `.mcf` it names, its skeleton and how it bolts on
 //!   chassis.rs   where the renderer put the bike, measured against where the solver put it
@@ -51,6 +52,7 @@ pub mod sky;
 pub mod splat;
 pub mod tally;
 pub mod terrain;
+pub mod toy;
 pub mod vehicle;
 pub mod world;
 

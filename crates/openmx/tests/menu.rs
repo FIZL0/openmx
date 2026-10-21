@@ -240,6 +240,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         // Gravity halved for everyone and 2P's bike twice as fast (P55), and a preset kept by name.
         modifiers: Mods::parse("gravity=50 bike_speed.2=200").unwrap(),
         presets: vec![("Moon".into(), Mods::parse("gravity=20").unwrap())],
+        // A lobby of sixteen (N12).
+        lobby_seats: 16,
     };
     let controls = Controls {
         throttle: Gas::R2,
