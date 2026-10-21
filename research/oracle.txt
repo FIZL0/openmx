@@ -3842,3 +3842,21 @@ wheel_hinge_torque boot 0x0025d0f0 (scale in f12, wheel, torque) the torque unro
 # 1/(r * (r * ((m/2) * 6/12))) with m = (6/12) * 2*pi*r*r, 0.614 for race125p; TireInertia (+0x68)
 # only feeds the gyroscopic torque. WheelFriction is a rolling torque -fade*WheelFriction, never grip;
 # grip is MaxDriveForce*load, past which the tire spins (or locks) and pushes SkidDriveForce*load.
+# P56 — the in-ride Game Audio Options page (ui\audiooptions.lyt in the ride UI archives, page
+# [AudioOptions] of ui\mxingame.pag), read for crates/openmx/src/menu.rs. Rows: 0 song (left/right
+# moves the song index modulo the count, a 1.0 s countdown then previews it), 1 preset (5, cycled),
+# then six sliders at profile +0xb0 music, +0xb2 sound FX, +0xb3 crowd, +0xb4 engine, +0xb5 menu FX,
+# +0xb1 ripped (user) music; each 0..100 by 5, a move sets the preset to Custom and applies at once.
+pause_audio_init    boot 0x00298410 builds the page's rows and reads the profile's mix
+pause_audio_update  boot 0x00299360 the frame: the song preview's countdown
+pause_audio_input   boot 0x00299400 left/right on the rows, as above
+pause_audio_close   boot 0x0029a7c0 accept plays the chosen song (music vt+0xa0) and writes the mix
+#                                   to the profile (+0x144); cancel puts the song and the mix back
+pause_audio_preset  boot 0x002afe90 copies preset i's six ints (music, ripped, sfx, crowd, engine,
+#                                   ui) into the mix
+pause_audio_music   boot 0x001fdf90 a song's volume: playlist index < 13 (the disc's) the music
+#                                   slider's, the rest the ripped one's, as value / 100
+pause_audio_index   boot 0x00102670 a song's playlist index
+# The presets, out of a save state's RAM (the app's +0x3d4 table, entries 0x18 apart from +0x14),
+# music/ripped/sfx/crowd/engine/ui: Game 70/70/80/45/60/100, Rock-n-Roll 100/100/100/0/60/100,
+# Night-time 0/0/50/30/50/50, Engine 0/0/80/35/75/100, Custom (starts as Game).
