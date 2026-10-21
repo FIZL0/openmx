@@ -413,6 +413,25 @@ fn switch_machine(seat: &mut Seat, rig: &mut Rig) -> Option<Kind> {
     }
 }
 
+/// What the original's HUD shows of a player's own ride (V26, V28): their odometer, which machine is
+/// up, how hard a preload is shoving the bike, and the score. The port keeps no stunt score yet, so
+/// the score reads 0 — what the original's shows until a trick lands.
+fn gauges(seat: &Seat, rig: &Rig) -> overlay::Gauges {
+    let (air, p) = (&seat.sim.rider.ride.air, &seat.sim.phy.air);
+    overlay::Gauges {
+        feet: rig.odometer.feet,
+        bike: seat.garage.up == Kind::Bike,
+        preload: overlay::preload_fill(
+            air.preload_firing,
+            air.preload_force.y(),
+            p.max_preload.0,
+            air.preload_timer.0,
+            p.preload_time.0,
+        ),
+        score: 0,
+    }
+}
+
 /// One local player's half of the picture (V22): the body and bike posed for them, the cameras that
 /// follow them, their overlay, and the models their pose is skinned into — the first player's are the
 /// ones the archives loaded, every other player's a copy under a name of its own.
@@ -2249,14 +2268,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
     }
     // The original's HUD (V26): its art off the disc, the world its radar covers, and which overlay is
-    // up. A disc without the art rides on with no HUD rather than not at all.
-    let hud_art = match overlay::Art::load(&mut disc) {
-        Ok(art) => Some(art),
-        Err(e) => {
-            eprintln!("the original's overlay: {e}");
-            None
-        }
-    };
+    // up. Art that does not load stops the ride with the reason (V28) — it used to say so on stderr
+    // and ride on with no HUD, which is how a HUD went missing with nobody told why.
+    let hud_art = overlay::Art::load(&mut disc).map_err(|e| format!("the original's HUD: {e}"))?;
     let radar_span = overlay::radar_span(ground.spacing);
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut frame = Frame::new(width, height, look.fog_color);
@@ -2827,15 +2841,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
-                } else if let (Some(art), menu::Overlay::Original) = (&hud_art, overlay_mode) {
+                } else if overlay_mode == menu::Overlay::Original {
+                    let art = &hud_art;
                     // The original's own HUD (V26), as the software path draws it.
                     let b = ridden[v].target.body_point;
                     if seat.riding && simulated {
                         rig.odometer.step([b.x(), b.y(), b.z()]);
                     }
-                    let (window, feet) = ((frame.width, frame.height), rig.odometer.feet);
+                    let (window, gauges) = ((frame.width, frame.height), gauges(seat, rig));
                     let draw = |f: &mut Frame| {
-                        art.draw(f, window, &ridden, v, radar_span, feet);
+                        art.draw(f, window, &ridden, v, radar_span, &gauges);
                     };
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
                 }
@@ -2844,7 +2859,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 && front.menu.screen().is_some()
             {
                 let draw = |f: &mut Frame| front.art.draw(&front.menu, f);
-                gpu_patches.extend(gpu_layers[args.players].patch(frame.width, frame.height, (0, 0), draw));
+                // Laid over the views' HUDs rather than written over them (V28).
+                if let Some(menu) = gpu_layers[args.players].patch(frame.width, frame.height, (0, 0), draw) {
+                    gpu_patches.push(layer::over(&gpu_patches, menu));
+                }
             }
             perf.add(Stage::Draw, draw_at.elapsed());
 
@@ -3103,12 +3121,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
-            if let (Some(art), false, menu::Overlay::Original) = (&hud_art, rig.hud.on, overlay_mode) {
+            if !rig.hud.on && overlay_mode == menu::Overlay::Original {
+                let art = &hud_art;
                 let b = ridden[v].target.body_point;
                 if seat.riding && simulated {
                     rig.odometer.step([b.x(), b.y(), b.z()]);
                 }
-                art.draw(target, (width, height), &ridden, v, radar_span, rig.odometer.feet);
+                art.draw(target, (width, height), &ridden, v, radar_span, &gauges(seat, rig));
             }
             if let Some(view) = view_frames.get(v) {
                 split::put(&mut frame, view, *at);

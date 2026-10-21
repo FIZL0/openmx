@@ -14,7 +14,17 @@
 //!   its middle; and an 8x8 `map_icon_hit_freestyle` for every other rider, at their bearing and
 //!   distance off the rider's nose, `RadarRadius` 104 over a world `192` terrain samples across.
 //!
-//! What the numbers are, and where they come from, is in `research/oracle.txt` (V26). The pure
+//! - **The score** (`ui\stuntscoreoverlays.lyt`'s `Score`, at 14,48 from the top-left, and
+//!   `Overlay_1p_Score.fsh`): a dark bar, its label end darker, `SCORE` in `eurostileboldbold_12` and
+//!   the number in `eurostileboldbold_14`, both 200,200,200. The bar is a Flash movie's shapes,
+//!   which nothing here plays, so it is drawn to the original's own picture by eye (V28), at the
+//!   movie's own tints (black at 0x80 over the label, 0x66 over the rest).
+//! - **The preload meter** (`speedometer.lyt`'s `PreloadMeter`, `Ingame_Preloadmeter.fsh`): the dark
+//!   capsule right of the dial, black at the movie's 0xb3, likewise drawn by eye (V28). The plane has
+//!   neither it nor the odometer: the original's biplane shows the dial alone. A split view
+//!   has none (its own layouts were not followed).
+//!
+//! What the numbers are, and where they come from, is in `research/oracle.txt` (V26, V28). The pure
 //! parts — [`mph`], [`speed_text`], [`needle_degrees`], [`odometer_text`] and [`radar_mark`] — take
 //! plain numbers, so `tests/overlay.rs` can hold them to the riders without a disc.
 //!
@@ -83,6 +93,23 @@ const TEXT: [u8; 4] = [204, 204, 204, 255];
 /// The digital readout's right edge and top.
 const DIGITAL: (f32, f32) = (588.0, 329.0);
 
+/// The score bar (left, top, width, height), from the view's top-left, where its darker label end
+/// stops, and the label's and the number's left edges and tops — measured off the original's frame.
+const SCORE_BAR: (f32, f32, f32, f32) = (14.0, 25.0, 168.0, 20.5);
+const SCORE_LABEL_END: f32 = 82.0;
+const SCORE_LABEL: (f32, f32) = (31.0, 26.5);
+const SCORE_TEXT: (f32, f32) = (88.0, 28.0);
+/// The movie's tints over its black shapes: the label end's, the rest's, the preload meter's.
+const SCORE_LABEL_SHADE: u8 = 0x80;
+const SCORE_SHADE: u8 = 0x66;
+const PRELOAD_SHADE: u8 = 0xb3;
+const SCORE_COLOUR: [u8; 4] = [200, 200, 200, 255];
+/// The preload meter's capsule, from the view's bottom-right, and the colour of its charge.
+const PRELOAD_METER: (f32, f32, f32, f32) = (599.0, 314.0, 20.0, 85.0);
+const PRELOAD_COLOUR: [u8; 4] = [255, 153, 0, 255];
+/// How far the charge sits inside the capsule.
+const PRELOAD_INSET: f32 = 3.0;
+
 /// The width and height the two parts need between them, in layout pixels: the radar's left edge at
 /// 23 to the dial's right at 608 counted from the other side, and the dial's top to the bottom.
 const NEEDS: (f32, f32) = (151.0 + 160.0, 150.0);
@@ -106,6 +133,34 @@ pub fn needle_degrees(speed: f32) -> f32 {
 pub fn odometer_text(feet: f32) -> String {
     let miles = feet * MILES_PER_FOOT;
     if miles >= 0.1 { format!("{miles:07.1}") } else { "00000.0".into() }
+}
+
+/// The score's text: the number, unpadded.
+pub fn score_text(score: u32) -> String {
+    score.to_string()
+}
+
+/// How full the preload meter is, `0..=1`: the shove a preload is giving, as a share of the bike's
+/// `MaxPreload`, running down with its timer — `force` and `timer` the preload's own, `max` and
+/// `time` the `.phy`'s `MaxPreload` and `PreloadTime`. Empty unless it `firing`.
+pub fn preload_fill(firing: bool, force: f32, max: f32, timer: f32, time: f32) -> f32 {
+    if !firing || max <= 0.0 || time <= 0.0 {
+        return 0.0;
+    }
+    ((force / max) * (timer / time)).clamp(0.0, 1.0)
+}
+
+/// What the view's own rider shows besides where everybody is.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Gauges {
+    /// The odometer's distance, in feet.
+    pub feet: f32,
+    /// On the bike: the dial's odometer and the preload meter. The plane has the dial alone.
+    pub bike: bool,
+    /// The preload meter, [`preload_fill`].
+    pub preload: f32,
+    /// The stunt score.
+    pub score: u32,
 }
 
 /// The world the radar covers across, for a terrain's sample spacing.
@@ -174,8 +229,10 @@ pub struct Art {
     textures: HashMap<&'static str, Texture>,
     /// `yearlingdashboldoblique_55`, the digital readout's.
     digits: Font,
-    /// `eurostileboldbold_14`, the odometer's.
+    /// `eurostileboldbold_14`, the odometer's and the score's number's.
     small: Font,
+    /// `eurostileboldbold_12`, the score's label.
+    label: Font,
 }
 
 const TEXTURES: [&str; 6] = [
@@ -201,12 +258,13 @@ impl Art {
                 .map_err(|e| format!("{name}.pst: {e}"))?;
             Font::parse(&cel, atlas).map_err(|e| format!("{name}.cel: {e}"))
         };
-        Ok(Art { digits: font("yearlingdashboldoblique_55")?, small: font("eurostileboldbold_14")?, textures })
+        let (digits, small) = (font("yearlingdashboldoblique_55")?, font("eurostileboldbold_14")?);
+        Ok(Art { digits, small, label: font("eurostileboldbold_12")?, textures })
     }
 
     /// Draw view `v`'s HUD into `frame`, which is that view's picture: `riders` is every rider's
-    /// camera target in seat order, `span` the radar's ([`radar_span`]), `feet` the view's rider's
-    /// odometer and `window` the whole window's size, which sets the parts' scale.
+    /// camera target in seat order, `span` the radar's ([`radar_span`]), `gauges` the view's rider's
+    /// own and `window` the whole window's size, which sets the parts' scale.
     pub fn draw(
         &self,
         frame: &mut Frame,
@@ -214,7 +272,7 @@ impl Art {
         riders: &[Ridden],
         v: usize,
         span: f32,
-        feet: f32,
+        gauges: &Gauges,
     ) -> Drawn {
         let mut pen = Pen::new(frame, window);
         let me = &riders[v];
@@ -241,8 +299,31 @@ impl Art {
         drawn.player = pen.px(RADAR_AT);
         drawn.turn = turn;
 
-        // The speedometer: the dial with its needle and odometer for one rider, the number for more.
+        // The score, top left.
+        pen.corner = Corner::TopLeft;
+        let (x, y, w, h) = SCORE_BAR;
+        pen.capsule((x, y, w, h), |lx| [0, 0, 0, if lx < SCORE_LABEL_END { SCORE_LABEL_SHADE } else { SCORE_SHADE }]);
+        pen.text(&self.label, "SCORE", SCORE_LABEL.0, SCORE_LABEL.1, false, SCORE_COLOUR);
+        let score = score_text(gauges.score);
+        pen.text(&self.small, &score, SCORE_TEXT.0, SCORE_TEXT.1, false, SCORE_COLOUR);
+        drawn.score = score;
+
+        // The speedometer: the dial with its needle and odometer for one rider, the number for more;
+        // and on the bike, the preload meter beside it. Split, the original moves the meter by
+        // layouts of its own not followed here, and where the dial's is it would cover the number:
+        // a split view has no meter.
         pen.corner = Corner::BottomRight;
+        if gauges.bike && riders.len() < 2 {
+            let (x, y, w, h) = PRELOAD_METER;
+            pen.capsule((x, y, w, h), |_| [0, 0, 0, PRELOAD_SHADE]);
+            let fill = gauges.preload.clamp(0.0, 1.0);
+            if fill > 0.0 {
+                let (i, inner) = (PRELOAD_INSET, h - 2.0 * PRELOAD_INSET);
+                let top = y + i + inner * (1.0 - fill);
+                pen.capsule((x + i, top, w - 2.0 * i, y + h - i - top), |_| PRELOAD_COLOUR);
+            }
+            drawn.preload = Some(fill);
+        }
         if riders.len() >= 2 {
             let text = speed_text(speed);
             pen.text(&self.digits, &text, DIGITAL.0, DIGITAL.1, true, TEXT);
@@ -257,13 +338,15 @@ impl Art {
                 pen.pin(t, PIVOT, PIN_SIZE);
             }
             drawn.needle = Some(degrees);
-            if let Some(t) = self.textures.get("odometer_background") {
-                pen.blit(t, (ODOMETER.0, ODOMETER.1, 128.0, 32.0), [255; 4]);
+            if gauges.bike {
+                if let Some(t) = self.textures.get("odometer_background") {
+                    pen.blit(t, (ODOMETER.0, ODOMETER.1, 128.0, 32.0), [255; 4]);
+                }
+                let miles = odometer_text(gauges.feet);
+                pen.text(&self.small, "00000.0", ODOMETER_TEXT.0, ODOMETER_TEXT.2, false, ODOMETER_GHOST);
+                pen.text(&self.small, &miles, ODOMETER_TEXT.1, ODOMETER_TEXT.2, true, TEXT);
+                drawn.odometer = Some(miles);
             }
-            let miles = odometer_text(feet);
-            pen.text(&self.small, "00000.0", ODOMETER_TEXT.0, ODOMETER_TEXT.2, false, ODOMETER_GHOST);
-            pen.text(&self.small, &miles, ODOMETER_TEXT.1, ODOMETER_TEXT.2, true, TEXT);
-            drawn.odometer = Some(miles);
         }
         drawn.scale = pen.s;
         drawn
@@ -285,6 +368,10 @@ pub struct Drawn {
     /// The needle's angle, when the dial was drawn.
     pub needle: Option<f32>,
     pub odometer: Option<String>,
+    /// The score's number.
+    pub score: String,
+    /// How full the preload meter was drawn, when it was (the bike's).
+    pub preload: Option<f32>,
     /// The middle of the radar, where the rider's own arrow is.
     pub player: (f32, f32),
     /// Every other rider's mark: their seat and the middle of their mark.
@@ -297,6 +384,7 @@ pub struct Drawn {
 
 #[derive(Clone, Copy)]
 enum Corner {
+    TopLeft,
     BottomLeft,
     BottomRight,
 }
@@ -321,6 +409,7 @@ impl<'a> Pen<'a> {
         let (w, h) = (self.frame.width as f32, self.frame.height as f32);
         let y = h - (LAYOUT.1 - at.1) * self.s;
         match self.corner {
+            Corner::TopLeft => (at.0 * self.s, at.1 * self.s),
             Corner::BottomLeft => (at.0 * self.s, y),
             Corner::BottomRight => (w - (LAYOUT.0 - at.0) * self.s, y),
         }
@@ -398,6 +487,39 @@ impl<'a> Pen<'a> {
                 }
                 if hits > 0 {
                     let mut c = NEEDLE_COLOUR;
+                    c[3] = (c[3] as u32 * hits / 4) as u8;
+                    blend(self.frame, x, y, c);
+                }
+            }
+        }
+    }
+
+    /// A capsule over a layout box (left, top, width, height): a rectangle whose shorter sides are
+    /// half circles, its edges smoothed by four samples a pixel, coloured by `colour` of the layout x.
+    fn capsule(&mut self, r: (f32, f32, f32, f32), colour: impl Fn(f32) -> [u8; 4]) {
+        let (fx0, fy0) = self.px((r.0, r.1));
+        let (fw, fh) = (r.2 * self.s, r.3 * self.s);
+        let rad = fw.min(fh) / 2.0;
+        let (x0, x1) = span(fx0, fx0 + fw, self.frame.width);
+        let (y0, y1) = span(fy0, fy0 + fh, self.frame.height);
+        // The segment the capsule is every point within `rad` of.
+        let (ax, ay, bx, by) = if fw >= fh {
+            (fx0 + rad, fy0 + rad, fx0 + fw - rad, fy0 + rad)
+        } else {
+            (fx0 + rad, fy0 + rad, fx0 + rad, fy0 + fh - rad)
+        };
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let mut hits = 0;
+                for (ox, oy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                    let (px, py) = (x as f32 + ox, y as f32 + oy);
+                    let (qx, qy) = (px.clamp(ax.min(bx), ax.max(bx)), py.clamp(ay.min(by), ay.max(by)));
+                    if (px - qx).powi(2) + (py - qy).powi(2) <= rad * rad {
+                        hits += 1;
+                    }
+                }
+                if hits > 0 {
+                    let mut c = colour(r.0 + (x as f32 + 0.5 - fx0) / self.s);
                     c[3] = (c[3] as u32 * hits / 4) as u8;
                     blend(self.frame, x, y, c);
                 }

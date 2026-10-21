@@ -227,6 +227,12 @@ fn the_settings_file_reads_back_as_it_was_written() {
     assert_eq!(menu::load(&empty), (Settings::default(), Controls::default()));
     std::fs::write(empty.join(menu::SETTINGS_FILE), "track = nowhere\nwrecks\n= on\n").unwrap();
     assert_eq!(menu::load(&empty).0, Settings::default());
+    // A file saved before V26 (P36's `overlay = on`, the debug HUD then the only one) rides the
+    // original's HUD (V28), and so does its `off`.
+    for word in ["on", "off"] {
+        std::fs::write(empty.join(menu::SETTINGS_FILE), format!("name = Rider\noverlay = {word}\nwrecks = on\n")).unwrap();
+        assert_eq!(menu::load(&empty).0.overlay, Overlay::Original, "overlay = {word}");
+    }
     // The defaults themselves round trip too.
     menu::save(&empty, &Settings::default(), &Controls::default()).unwrap();
     assert_eq!(menu::load(&empty), (Settings::default(), Controls::default()));
