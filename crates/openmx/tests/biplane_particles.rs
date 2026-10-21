@@ -367,14 +367,15 @@ fn the_discs_biplane_particles() {
     // The exhaust has no gate of its own.
     assert_eq!(fx.entries[3].emt.min_speed, 0.0);
     // P61: only the chunks meet the ground — by their entry's `HasCollision = TRUE`, as
-    // `wreckchunks.emt` has no `GroundLevel` — keeping 0.6 of their velocity. The dust and the smoke
-    // take the wind, which the track's system holds at nothing.
+    // `wreckchunks.emt` has no `GroundLevel` — keeping 0.6 of their velocity. The dusts (the wreck's,
+    // P60's three tires' and the prop wash's) and the smoke take the wind, which the track's system
+    // holds at nothing.
     let chunks = &fx.entries[1];
     assert_eq!((chunks.emt.collides, chunks.emt.restitution, chunks.emt.gravity), (true, 0.6, 2.0));
     assert!(list.iter().any(|e| e.name == "Vehicle Chunks" && e.has_collision));
     assert!(fx.entries.iter().filter(|e| e.name != "Vehicle Chunks").all(|e| !e.emt.collides));
     let winded: Vec<&str> = fx.entries.iter().filter(|e| e.emt.wind).map(|e| e.name.as_str()).collect();
-    assert_eq!(winded, ["Vehicle Dust", "Smoke"]);
+    assert_eq!(winded, ["Vehicle Dust", "Smoke", "Front Left Tire Dust", "Front Right Tire Dust", "Rear Tire Dust", "Dust"]);
     assert_eq!(fx.wind, V3::default());
 
     // Flown through: the smoke runs over 35 ft/s and stops on the wreck; the dust needs a contact.
