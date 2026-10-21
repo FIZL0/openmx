@@ -191,11 +191,22 @@ pub struct Settings {
     pub machines: [Machine; SEATS_MAX],
     /// How a local game of two shares the screen, the split layout's pick (P43): `--split`'s.
     pub split: Split,
-    /// The music (P42): `off`, `shuffle`, or one song's id (`disc:headstrong`, `folder:mine.wav`).
+    /// The music (P42): `off`, `shuffle`, `order` (P56), or one song's id, repeated
+    /// (`disc:headstrong`, `folder:mine.wav`).
     pub music: String,
-    /// The two volume sliders, `0..=VOLUME_MAX`.
+    /// The volume sliders, `0..=VOLUME_MAX` in steps of [`VOLUME_STEP`]: the original's Game Audio
+    /// Options page's six (P56) — Music, User Soundtracks (the user's own folder), Sound FX, Crowd,
+    /// Engine and Menu FX.
     pub music_volume: u8,
     pub effects_volume: u8,
+    pub folder_volume: u8,
+    pub crowd_volume: u8,
+    pub engine_volume: u8,
+    pub menu_volume: u8,
+    /// The page's Audio Presets row: which mix the sliders were last set from.
+    pub mix: Mix,
+    /// The Custom Mix's sliders, in [`Mix::levels`]' order: what they were when one was last moved.
+    pub custom: [u8; 6],
     /// What the GPU draws of the track (V32): the whole map, or the original's fog and far clip.
     pub graphics: Graphics,
     /// The fraction of the frame the GPU draws the 3D at (V34): `--render-scale`'s, as a choice of four.
@@ -256,8 +267,62 @@ impl RenderScale {
     }
 }
 
-/// The volume sliders' top step.
-pub const VOLUME_MAX: u8 = 10;
+/// The volume sliders' top, and the step a press moves them: the original's 0 to 100 by fives.
+pub const VOLUME_MAX: u8 = 100;
+pub const VOLUME_STEP: u8 = 5;
+
+/// The original's audio presets (P56), in its order, each a value for
+/// the six sliders, read out of a save state's RAM (journal pause-music) — and Custom, the user's own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mix {
+    #[default]
+    Game,
+    RockNRoll,
+    Nighttime,
+    Engine,
+    Custom,
+}
+
+impl Mix {
+    pub const ALL: [Mix; 5] = [Mix::Game, Mix::RockNRoll, Mix::Nighttime, Mix::Engine, Mix::Custom];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Mix::Game => "game",
+            Mix::RockNRoll => "rock",
+            Mix::Nighttime => "night",
+            Mix::Engine => "engine",
+            Mix::Custom => "custom",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Mix> {
+        Mix::ALL.into_iter().find(|m| m.word() == w)
+    }
+
+    /// The disc's English names for them.
+    pub fn label(self) -> &'static str {
+        match self {
+            Mix::Game => "Game Mix",
+            Mix::RockNRoll => "Rock-n-Roll Mix",
+            Mix::Nighttime => "Night-time Mix",
+            Mix::Engine => "Engine Mix",
+            Mix::Custom => "Custom Mix",
+        }
+    }
+
+    /// A preset's sliders — music, user soundtracks, sound FX, crowd, engine, menu FX — or `None`
+    /// for Custom, which is the user's.
+    pub fn levels(self) -> Option<[u8; 6]> {
+        match self {
+            Mix::Game => Some([70, 70, 80, 45, 60, 100]),
+            Mix::RockNRoll => Some([100, 100, 100, 0, 60, 100]),
+            Mix::Nighttime => Some([0, 0, 50, 30, 50, 50]),
+            Mix::Engine => Some([0, 0, 80, 35, 75, 100]),
+            Mix::Custom => None,
+        }
+    }
+}
 
 /// The most players a ride seats, as P35's seats count them.
 pub const SEATS_MAX: usize = 8;
@@ -312,8 +377,14 @@ impl Default for Settings {
             machines: [Machine::Bike; SEATS_MAX],
             split: Split::default(),
             music: "shuffle".into(),
-            music_volume: 7,
-            effects_volume: 8,
+            music_volume: 70,
+            effects_volume: 80,
+            folder_volume: 70,
+            crowd_volume: 45,
+            engine_volume: 60,
+            menu_volume: 100,
+            mix: Mix::Game,
+            custom: [70, 70, 80, 45, 60, 100],
             graphics: Graphics::default(),
             render_scale: RenderScale::default(),
             modifiers: Mods::original(),
@@ -349,6 +420,13 @@ impl Settings {
     /// an older or hand-edited file still opens.
     pub fn parse(text: &str) -> Settings {
         let mut s = Settings::default();
+        // A file from before P56 has no mix, and its two sliders count to 10.
+        let tens = !pairs(text).any(|(k, _)| k == "mix");
+        let level = |v: &str, was: u8| match v.parse::<u8>() {
+            Ok(n) if tens => n.min(10) * 10,
+            Ok(n) => n.min(VOLUME_MAX),
+            Err(_) => was,
+        };
         for (k, v) in pairs(text) {
             match k {
                 "name" => {
@@ -370,8 +448,18 @@ impl Settings {
                 }
                 "split" => s.split = Split::parse(v).unwrap_or(s.split),
                 "music" if !v.is_empty() => s.music = v.to_string(),
-                "music_volume" => s.music_volume = v.parse().map_or(s.music_volume, |n: u8| n.min(VOLUME_MAX)),
-                "effects_volume" => s.effects_volume = v.parse().map_or(s.effects_volume, |n: u8| n.min(VOLUME_MAX)),
+                "music_volume" => s.music_volume = level(v, s.music_volume),
+                "effects_volume" => s.effects_volume = level(v, s.effects_volume),
+                "folder_volume" => s.folder_volume = level(v, s.folder_volume),
+                "crowd_volume" => s.crowd_volume = level(v, s.crowd_volume),
+                "engine_volume" => s.engine_volume = level(v, s.engine_volume),
+                "menu_volume" => s.menu_volume = level(v, s.menu_volume),
+                "mix" => s.mix = Mix::from_word(v).unwrap_or(s.mix),
+                "custom" => {
+                    for (i, n) in v.split_whitespace().take(6).enumerate() {
+                        s.custom[i] = n.parse::<u8>().map_or(s.custom[i], |n| n.min(VOLUME_MAX));
+                    }
+                }
                 "graphics" => s.graphics = Graphics::from_word(v).unwrap_or(s.graphics),
                 "render_scale" => s.render_scale = RenderScale::from_word(v).unwrap_or(s.render_scale),
                 // A line it cannot read leaves the original game rather than half a set (P55).
@@ -390,12 +478,48 @@ impl Settings {
                 _ => {}
             }
         }
+        // An older file's two sliders are a mix of the user's own.
+        if tens && text.contains("_volume") {
+            s.mix = Mix::Custom;
+            s.custom = s.levels();
+        }
         s
+    }
+
+    /// The six sliders in [`Mix::levels`]' order.
+    pub fn levels(&self) -> [u8; 6] {
+        [self.music_volume, self.folder_volume, self.effects_volume, self.crowd_volume, self.engine_volume, self.menu_volume]
+    }
+
+    fn set_levels(&mut self, l: [u8; 6]) {
+        [self.music_volume, self.folder_volume, self.effects_volume, self.crowd_volume, self.engine_volume, self.menu_volume] = l;
+    }
+
+    /// One slider (in [`Mix::levels`]' order) a step down or up — or, with neither, a step up and
+    /// round from the top to nothing, as Cross steps a row — which makes the mix the user's own.
+    fn nudge(&mut self, slider: usize, down: bool, up: bool) {
+        let mut l = self.levels();
+        let v = l[slider];
+        l[slider] = match (down, up) {
+            (true, _) => v.saturating_sub(VOLUME_STEP),
+            (_, true) => (v + VOLUME_STEP).min(VOLUME_MAX),
+            _ if v >= VOLUME_MAX => 0,
+            _ => (v + VOLUME_STEP).min(VOLUME_MAX),
+        };
+        self.set_levels(l);
+        self.mix = Mix::Custom;
+        self.custom = l;
+    }
+
+    /// The Audio Presets row: a preset sets every slider, and Custom brings the user's back.
+    fn set_mix(&mut self, mix: Mix) {
+        self.mix = mix;
+        self.set_levels(mix.levels().unwrap_or(self.custom));
     }
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\ngraphics = {}\nrender_scale = {}\n",
+            "# openmx's front end (P36)\nname = {}\noverlay = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\nfolder_volume = {}\ncrowd_volume = {}\nengine_volume = {}\nmenu_volume = {}\nmix = {}\ncustom = {}\ngraphics = {}\nrender_scale = {}\n",
             self.name,
             self.overlay.word(),
             on_off(self.wrecks),
@@ -405,6 +529,12 @@ impl Settings {
             self.music,
             self.music_volume,
             self.effects_volume,
+            self.folder_volume,
+            self.crowd_volume,
+            self.engine_volume,
+            self.menu_volume,
+            self.mix.word(),
+            self.custom.map(|n| n.to_string()).join(" "),
             self.graphics.word(),
             self.render_scale.word()
         ) + &self.modifiers_text()
@@ -719,10 +849,13 @@ pub enum Screen {
     Split,
     /// The game modifiers (P55), under Settings.
     Modifiers,
+    /// The pause's Game Audio Options (P56): the original's page of a song, a preset and six
+    /// sliders.
+    Audio,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 14] = [
+    pub const ALL: [Screen; 15] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -737,6 +870,7 @@ impl Screen {
         Screen::Games,
         Screen::Lobby,
         Screen::Modifiers,
+        Screen::Audio,
     ];
 
     fn index(self) -> usize {
@@ -760,6 +894,7 @@ impl Screen {
             Screen::Join => "join",
             Screen::Split => "split",
             Screen::Modifiers => "modifiers",
+            Screen::Audio => "audio",
         }
     }
 
@@ -783,6 +918,7 @@ impl Screen {
             Screen::Join => "Local Game",
             Screen::Split => "Split Screen",
             Screen::Modifiers => "Game Modifiers",
+            Screen::Audio => "Game Audio Options",
         }
     }
 }
@@ -795,9 +931,22 @@ const MAIN_ONLINE: usize = 2;
 const MAIN_GARAGE: usize = 3;
 const MAIN_SETTINGS: usize = 4;
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
-/// machine a switch would go to.
-const PAUSE: [&str; 6] = ["Resume", "Restart", "Switch To Machine", "Settings", "Main Menu", "Quit"];
+/// machine a switch would go to; the fourth its "Game Audio Options" (P56).
+const PAUSE: [&str; 7] = ["Resume", "Restart", "Switch To Machine", "Game Audio Options", "Settings", "Main Menu", "Quit"];
 const PAUSE_SWITCH: usize = 2;
+const PAUSE_AUDIO: usize = 3;
+const PAUSE_SETTINGS: usize = 4;
+const PAUSE_MAIN: usize = 5;
+/// The Game Audio Options page's rows (P56): the original's Song, Audio Presets and six sliders in
+/// its order, with Skip Song and Play Order, which are this port's, beside the song.
+const AUDIO: [&str; 10] = ["Song", "Skip Song", "Play Order", "Audio Presets", "Music", "Sound FX", "Crowd", "Engine", "Menu FX", "User Soundtracks"];
+const AUDIO_SONG: usize = 0;
+const AUDIO_SKIP: usize = 1;
+const AUDIO_ORDER: usize = 2;
+const AUDIO_PRESET: usize = 3;
+const AUDIO_SLIDERS: usize = 4;
+/// Which of [`Mix::levels`]' sliders each slider row is.
+const AUDIO_SLIDER: [usize; 6] = [0, 2, 3, 4, 5, 1];
 const SETTINGS_ROWS: usize = 10;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
@@ -886,6 +1035,15 @@ pub const CLAIMED_FRAMES: u32 = 72;
 
 /// The splash's Quit popup's rows.
 const QUIT_ROWS: [&str; 2] = ["Quit", "Stay"];
+
+/// What the pause's song rows ask of the music (P56), beside the settings it changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Tune {
+    /// Play this song now.
+    Play(String),
+    /// On to the next song.
+    Skip,
+}
 
 /// What a frame of the menu asks of the shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -986,6 +1144,12 @@ pub struct Menu {
     /// The ride under the menu has a modifier off the original game's, as the shell tells it: the
     /// pause says so.
     pub modified: bool,
+    /// The song playing, by id, as the shell last said (P56).
+    pub music_now: Option<String>,
+    /// The song the Game Audio Options' song row is on, in [`Menu::music_choices`].
+    music_at: usize,
+    /// What the song rows asked since [`Menu::take_tunes`] last took it.
+    tunes: Vec<Tune>,
 }
 
 /// A local game as the ride takes it (P43): one player a seat in play, in seat order, each on the
@@ -1070,12 +1234,19 @@ impl Menu {
             mod_seat: 0,
             mod_preset: 0,
             modified: false,
+            music_now: None,
+            music_at: 0,
+            tunes: Vec::new(),
         }
     }
 
-    /// The music row's choices: Off, Shuffle, then every song, as `(settings word, label)`.
+    /// The music row's choices: Off, Shuffle, In Order, then every song, as `(settings word, label)`.
     pub fn music_options(&self) -> Vec<(String, String)> {
-        let mut out = vec![("off".to_string(), "Off".to_string()), ("shuffle".to_string(), "Shuffle".to_string())];
+        let mut out = vec![
+            ("off".to_string(), "Off".to_string()),
+            ("shuffle".to_string(), "Shuffle".to_string()),
+            ("order".to_string(), "In Order".to_string()),
+        ];
         out.extend(self.music_choices.iter().cloned());
         out
     }
@@ -1086,6 +1257,141 @@ impl Menu {
         match all.iter().find(|(id, _)| *id == self.settings.music) {
             Some((_, label)) => label.clone(),
             None => self.settings.music.clone(),
+        }
+    }
+
+    /// What the Game Audio Options' song rows asked of the music since this was last asked (P56).
+    pub fn take_tunes(&mut self) -> Vec<Tune> {
+        std::mem::take(&mut self.tunes)
+    }
+
+    /// A song's label, by id.
+    fn song_label(&self, id: &str) -> String {
+        match self.music_choices.iter().find(|(i, _)| i == id) {
+            Some((_, label)) => label.clone(),
+            None => id.to_string(),
+        }
+    }
+
+    /// The song row's song, by id.
+    fn song_at(&self) -> Option<&str> {
+        self.music_choices.get(self.music_at).map(|(id, _)| id.as_str())
+    }
+
+    /// The Play Order row's word for the pick: Repeat Song for one song's id.
+    fn play_order(&self) -> &'static str {
+        match self.settings.music.as_str() {
+            "off" => "Off",
+            "" | "shuffle" => "Shuffle",
+            "order" => "In Order",
+            _ => "Repeat Song",
+        }
+    }
+
+    /// The Game Audio Options' rows as drawn.
+    pub fn audio_rows(&self) -> Vec<String> {
+        let song = self.song_at().map_or("No Song Playing".to_string(), |id| self.song_label(id));
+        let l = self.settings.levels();
+        AUDIO
+            .iter()
+            .enumerate()
+            .map(|(i, row)| match i {
+                AUDIO_SONG => format!("{row}  {song}"),
+                AUDIO_SKIP => row.to_string(),
+                AUDIO_ORDER => format!("{row}  {}", self.play_order()),
+                AUDIO_PRESET => format!("{row}  {}", self.settings.mix.label()),
+                _ => format!("{row}  {}", l[AUDIO_SLIDER[i - AUDIO_SLIDERS]]),
+            })
+            .collect()
+    }
+
+    /// The ticker under the page: the song playing.
+    pub fn audio_ticker(&self) -> String {
+        match &self.music_now {
+            Some(id) => format!("Now playing {}", self.song_label(id)),
+            None => "No Song Playing".to_string(),
+        }
+    }
+
+    fn open_audio(&mut self) {
+        // The song row starts on the song playing.
+        if let Some(i) = self.music_now.as_ref().and_then(|now| self.music_choices.iter().position(|(id, _)| id == now)) {
+            self.music_at = i;
+        }
+        self.push(Screen::Audio);
+    }
+
+    /// One press on the Game Audio Options page (P56). Every change takes at once, as the original's
+    /// does; Circle goes back to the pause with them kept.
+    fn audio(&mut self, p: Press, at: usize) {
+        let side = p.left || p.right;
+        if p.back {
+            self.pop();
+            return;
+        }
+        if !(p.ok || side) {
+            return;
+        }
+        let songs = self.music_choices.len();
+        let repeat = !matches!(self.settings.music.as_str(), "off" | "" | "shuffle" | "order");
+        match at {
+            AUDIO_SONG if side => {
+                if songs > 0 {
+                    let i = self.music_at.min(songs - 1);
+                    self.music_at = if p.left { (i + songs - 1) % songs } else { (i + 1) % songs };
+                }
+            }
+            AUDIO_SONG => {
+                let Some(id) = self.song_at().map(str::to_string) else { return };
+                // A song picked with the music off starts it, in order from there; one picked under
+                // Repeat Song is the song repeated.
+                if self.settings.music == "off" {
+                    self.settings.music = "order".into();
+                } else if repeat {
+                    self.settings.music = id.clone();
+                }
+                self.tunes.push(Tune::Play(id));
+                self.changed = true;
+            }
+            AUDIO_SKIP if p.ok => {
+                if repeat {
+                    if songs == 0 {
+                        return;
+                    }
+                    let i = self.music_choices.iter().position(|(id, _)| *id == self.settings.music);
+                    let i = i.map_or(0, |i| (i + 1) % songs);
+                    self.music_at = i;
+                    self.settings.music = self.music_choices[i].0.clone();
+                } else if self.settings.music != "off" {
+                    self.tunes.push(Tune::Skip);
+                }
+                self.changed = true;
+            }
+            AUDIO_ORDER => {
+                let mut all = vec!["order".to_string(), "shuffle".to_string()];
+                let held = self.song_at().map(str::to_string).or_else(|| self.music_now.clone());
+                if let Some(id) = &held {
+                    all.push(if repeat { self.settings.music.clone() } else { id.clone() });
+                }
+                all.push("off".into());
+                let n = all.len();
+                let i = if repeat { 2 } else { all.iter().position(|w| *w == self.settings.music).unwrap_or(1) };
+                let i = if p.left { (i + n - 1) % n } else { (i + 1) % n };
+                self.settings.music = all[i].clone();
+                self.changed = true;
+            }
+            AUDIO_PRESET => {
+                let all = Mix::ALL;
+                let i = all.iter().position(|m| *m == self.settings.mix).unwrap_or(0);
+                let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
+                self.settings.set_mix(all[i]);
+                self.changed = true;
+            }
+            AUDIO_SKIP => {}
+            _ => {
+                self.settings.nudge(AUDIO_SLIDER[at - AUDIO_SLIDERS], p.left, p.right);
+                self.changed = true;
+            }
         }
     }
 
@@ -1496,6 +1802,10 @@ impl Menu {
             Screen::Splash => self.splash(),
             Screen::Main => self.main(),
             Screen::Pause => self.pause(),
+            Screen::Audio => {
+                self.pause();
+                self.open_audio();
+            }
             Screen::Controls => self.stack = vec![Screen::Main, Screen::Settings, Screen::Controls],
             Screen::Modifiers => self.stack = vec![Screen::Main, Screen::Settings, Screen::Modifiers],
             Screen::Keyboard => {
@@ -1555,6 +1865,7 @@ impl Menu {
             Screen::Lobby => self.lobby.items().len(),
             Screen::Join => join::ON_SCREEN,
             Screen::Split => layouts(self.riders).len(),
+            Screen::Audio => AUDIO.len(),
         }
     }
 
@@ -1755,16 +2066,7 @@ impl Menu {
                             self.changed = true;
                         }
                         SETTINGS_MUSIC_VOLUME | SETTINGS_EFFECTS_VOLUME => {
-                            let v = if at == SETTINGS_MUSIC_VOLUME {
-                                &mut self.settings.music_volume
-                            } else {
-                                &mut self.settings.effects_volume
-                            };
-                            *v = match (p.left, p.right) {
-                                (true, _) => v.saturating_sub(1),
-                                (_, true) => (*v + 1).min(VOLUME_MAX),
-                                _ => (*v + 1) % (VOLUME_MAX + 1),
-                            };
+                            self.settings.nudge(if at == SETTINGS_MUSIC_VOLUME { 0 } else { 2 }, p.left, p.right);
                             self.changed = true;
                         }
                         SETTINGS_GRAPHICS => {
@@ -1827,8 +2129,9 @@ impl Menu {
                                 return Act::Switch(self.pauser);
                             }
                         }
-                        3 => self.push(Screen::Settings),
-                        4 => {
+                        PAUSE_AUDIO => self.open_audio(),
+                        PAUSE_SETTINGS => self.push(Screen::Settings),
+                        PAUSE_MAIN => {
                             self.main();
                             return Act::MainMenu;
                         }
@@ -1837,6 +2140,7 @@ impl Menu {
                 }
             }
             Screen::Modifiers => self.walk_modifiers(p, at),
+            Screen::Audio => self.audio(p, at),
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
@@ -2595,7 +2899,7 @@ impl Art {
         let mut p = Painter::new(self, frame);
         p.sprites = ink;
         match screen {
-            Screen::Pause => p.fill(p.whole(), [0, 0, 0, 140]),
+            Screen::Pause | Screen::Audio => p.fill(p.whole(), [0, 0, 0, 140]),
             Screen::Tracks | Screen::Splash => {}
             _ => p.background(),
         }
@@ -2688,6 +2992,22 @@ impl Art {
                 p.title(screen.title());
                 p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
             }
+            Screen::Audio => {
+                p.column();
+                let at = menu.cursor(screen);
+                let bar = p.list(&menu.audio_rows(), at);
+                if at != AUDIO_SKIP {
+                    p.tex("arrow_left_off", rect(bar.x - 36.0, bar.y, 32.0, 32.0), CHOSEN);
+                    p.tex("arrow_right_off", rect(bar.x + bar.w + 4.0, bar.y, 32.0, 32.0), CHOSEN);
+                }
+                p.logo();
+                match menu.riders > 1 {
+                    true => p.title(&format!("{}P {}", menu.pauser + 1, screen.title())),
+                    false => p.title(screen.title()),
+                }
+                let ok = if at == AUDIO_SONG || at == AUDIO_SKIP { "Play" } else { "Change" };
+                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", ok)]);
+            }
             Screen::Tracks => p.tracks(menu),
             Screen::Keyboard => p.keyboard(menu),
             Screen::Garage => p.garage(menu),
@@ -2722,6 +3042,7 @@ impl Art {
         let ticker = match &menu.note {
             Some(n) => n.clone(),
             None if screen == Screen::Splash => return p.parts,
+            None if screen == Screen::Audio => menu.audio_ticker(),
             None if online && !menu.lobby.status.is_empty() => menu.lobby.status.clone(),
             None if screen == Screen::Modifiers => menu.modifier_help(),
             None => format!("Riding as {}", menu.settings.name),

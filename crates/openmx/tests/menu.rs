@@ -31,6 +31,10 @@ mod window;
 #[allow(dead_code)]
 #[path = "../src/pad.rs"]
 mod pad;
+// The shell's sound, for the pause's music page (P56).
+#[allow(dead_code)]
+#[path = "../src/audio.rs"]
+mod audio;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, RenderScale, Screen, Settings};
@@ -140,8 +144,9 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     assert!(m.riding());
     tap(&mut m, &mut r, Control::Start);
     assert_eq!(m.screen(), Some(Screen::Pause));
-    // Settings from the pause (past the machine switch, P41), and back to it.
-    for _ in 0..3 {
+    // Settings from the pause (past the machine switch, P41, and the audio options, P56), and back
+    // to it.
+    for _ in 0..4 {
         tap(&mut m, &mut r, Control::Down);
     }
     tap(&mut m, &mut r, Control::Cross);
@@ -149,12 +154,13 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Pause));
     // Restart and Main Menu.
-    tap(&mut m, &mut r, Control::Up);
-    tap(&mut m, &mut r, Control::Up);
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Up);
+    }
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Restart), "{acts:?}");
     tap(&mut m, &mut r, Control::Start);
-    for _ in 0..4 {
+    for _ in 0..5 {
         tap(&mut m, &mut r, Control::Down);
     }
     let acts = tap(&mut m, &mut r, Control::Cross);
@@ -221,8 +227,14 @@ fn the_settings_file_reads_back_as_it_was_written() {
         ],
         split: split::Split::SideBySide,
         music: "disc:headstrong".into(),
-        music_volume: 3,
-        effects_volume: 10,
+        music_volume: 35,
+        effects_volume: 100,
+        folder_volume: 5,
+        crowd_volume: 0,
+        engine_volume: 90,
+        menu_volume: 55,
+        mix: menu::Mix::Custom,
+        custom: [35, 5, 100, 0, 90, 55],
         graphics: Graphics::Original,
         render_scale: RenderScale::ThreeQuarters,
         // Gravity halved for everyone and 2P's bike twice as fast (P55), and a preset kept by name.
@@ -692,6 +704,7 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                         | Screen::Lobby
                         | Screen::Split
                         | Screen::Modifiers
+                        | Screen::Audio
                 );
                 if lists {
                     assert_eq!(logos.len(), 1, "{screen:?} at {w}x{h}: no logo");
@@ -705,9 +718,9 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
             }
         }
     }
-    // Four list screens, the three online ones (N3), the split layout (P43), the game modifiers (P55)
-    // and the keyboard, twelve looks each, at four shapes.
-    assert_eq!(pills, 10 * 12 * 4);
+    // Four list screens, the three online ones (N3), the split layout (P43), the game modifiers (P55),
+    // the keyboard and the pause's audio options (P56), twelve looks each, at four shapes.
+    assert_eq!(pills, 11 * 12 * 4);
 }
 
 /// [`tap`] on another seat's pad, which only the garage hears.
@@ -1267,6 +1280,8 @@ fn the_sound_rows_pick_the_music_and_the_volumes() {
     assert_eq!(m.settings.music, "shuffle");
     assert_eq!(m.music_label(), "Shuffle");
     tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.music_label(), "In Order");
+    tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.music, "disc:ooc");
     assert_eq!(m.music_label(), "Out of Control - Hoobastank");
     tap(&mut m, &mut r, Control::Right);
@@ -1274,24 +1289,29 @@ fn the_sound_rows_pick_the_music_and_the_volumes() {
     assert_eq!(m.settings.music, "off", "past the last song it wraps to Off");
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.music, "folder:mine.wav");
-    // The music volume, down to nothing and no further.
+    // The music volume, down to nothing and no further, by fives from 70 (P56).
     tap(&mut m, &mut r, Control::Down);
-    for _ in 0..12 {
+    for _ in 0..16 {
         tap(&mut m, &mut r, Control::Left);
     }
     assert_eq!(m.settings.music_volume, 0);
     // The effects, up to the top and no further.
     tap(&mut m, &mut r, Control::Down);
-    for _ in 0..12 {
+    for _ in 0..6 {
         tap(&mut m, &mut r, Control::Right);
     }
     assert_eq!(m.settings.effects_volume, menu::VOLUME_MAX);
     assert!(m.take_changed());
     let back = Settings::parse(&m.settings.text());
-    assert_eq!((back.music.as_str(), back.music_volume, back.effects_volume), ("folder:mine.wav", 0, 10));
-    // An older file, with no sound keys, opens on the defaults.
+    assert_eq!((back.music.as_str(), back.music_volume, back.effects_volume), ("folder:mine.wav", 0, 100));
+    assert_eq!(back.mix, menu::Mix::Custom, "a slider moved is the user's own mix");
+    // An older file, with no sound keys, opens on the defaults: the original's Game Mix.
     let old = Settings::parse("name = Old\n");
-    assert_eq!((old.music.as_str(), old.music_volume, old.effects_volume), ("shuffle", 7, 8));
+    assert_eq!((old.music.as_str(), old.music_volume, old.effects_volume), ("shuffle", 70, 80));
+    assert_eq!(old.mix, menu::Mix::Game);
+    // One from before P56 counted its two sliders to ten.
+    let tens = Settings::parse("music_volume = 3\neffects_volume = 10\n");
+    assert_eq!((tens.music_volume, tens.effects_volume, tens.mix), (30, 100, menu::Mix::Custom));
 }
 
 // ---- presses between frames, and pads that are not Xbox pads (P53) --------------------------------
@@ -1518,4 +1538,197 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     std::fs::remove_dir_all(dir).ok();
     // A modifier line the reader cannot make sense of is the original game, not half a set.
     assert!(Settings::parse("modifiers = gravity=50 warp=9\n").modifiers.is_original());
+}
+
+// ---- the pause's Game Audio Options (P56) -----------------------------------------------------------
+
+/// Songs that never end, each its own level, so which one is playing is heard as well as named.
+struct Hum;
+
+struct Level(i16, usize);
+
+impl audio::Stream for Level {
+    fn rate(&self) -> u32 {
+        audio::RATE
+    }
+    fn read(&mut self, out: &mut [i16]) -> usize {
+        let n = (out.len() / 2).min(self.1);
+        out[..n * 2].fill(self.0);
+        self.1 -= n;
+        n
+    }
+}
+
+impl audio::MusicSource for Hum {
+    fn name(&self) -> &str {
+        "hum"
+    }
+    fn tracks(&self) -> Vec<audio::Track> {
+        ["one", "two", "three"]
+            .into_iter()
+            .map(|t| audio::Track { id: format!("hum:{t}"), title: t.to_string(), artist: "Hum".into() })
+            .collect()
+    }
+    fn open(&self, id: &str) -> Result<Box<dyn audio::Stream>, String> {
+        let level = match id {
+            "hum:one" => 1000,
+            "hum:two" => 2000,
+            "hum:three" => 3000,
+            _ => return Err(format!("no {id}")),
+        };
+        Ok(Box::new(Level(level, audio::RATE as usize * 600)))
+    }
+}
+
+/// The shell's sound, as `start_sound` makes it, on [`Hum`]'s songs and with nothing playing it out.
+fn hum_speakers(settings: &Settings) -> audio::Speakers {
+    let mut music = audio::Music::new(vec![std::sync::Arc::new(Hum)], 5);
+    music.wait = true;
+    let speakers = audio::Speakers::start(music, false);
+    speakers.apply(&settings.music, levels(settings));
+    speakers
+}
+
+/// main.rs's `levels`.
+fn levels(s: &Settings) -> audio::Levels {
+    audio::Levels {
+        music: s.music_volume,
+        folder: s.folder_volume,
+        effects: s.effects_volume,
+        crowd: s.crowd_volume,
+        engine: s.engine_volume,
+        menu: s.menu_volume,
+    }
+}
+
+/// A tenth of a second of the mix.
+fn hum_listen(speakers: &audio::Speakers) -> Vec<i16> {
+    let mut out = vec![0i16; audio::RATE as usize / 10 * 2];
+    speakers.mixer().lock().unwrap().render(&mut out);
+    out
+}
+
+/// [`tap`] with the shell's sound around it, as its menu loop has it: the song playing told to the
+/// menu before each frame, and after one that changed the settings, `Front::hear` and the save.
+fn tap_heard(m: &mut Menu, r: &mut Reader, speakers: &audio::Speakers, dir: &std::path::Path, control: Control) {
+    for report in [Report::from_buttons(control.mask()), Report::idle()] {
+        m.music_now = speakers.now();
+        m.step(r.read(&report));
+        if m.changed() {
+            speakers.apply(&m.settings.music, levels(&m.settings));
+            for tune in m.take_tunes() {
+                match tune {
+                    menu::Tune::Play(id) => speakers.play_now(&id),
+                    menu::Tune::Skip => speakers.skip(),
+                }
+            }
+            if m.take_changed() {
+                menu::save(dir, &m.settings, &m.controls).unwrap();
+            }
+        }
+        hum_listen(speakers);
+    }
+}
+
+#[test]
+fn the_pause_picks_a_song_skips_it_and_its_music_slider_is_kept() {
+    let dir = scratch("p56");
+    let (mut m, mut r) = fresh();
+    let speakers = hum_speakers(&m.settings);
+    m.music_choices = speakers.choices();
+    let tap = |m: &mut Menu, r: &mut Reader, c: Control| tap_heard(m, r, &speakers, &dir, c);
+    // A ride, and its pause.
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    tap(&mut m, &mut r, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.pause_rows()[3], "Game Audio Options");
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Audio));
+    // The shuffle the defaults ask for is playing, and the song row starts on its song.
+    let first = speakers.now().expect("a song under Shuffle");
+    let rows = m.audio_rows();
+    assert_eq!(rows[0], format!("Song  {}", m.music_choices.iter().find(|c| c.0 == first).unwrap().1));
+    assert_eq!(rows[3..].to_vec(), ["Audio Presets  Game Mix", "Music  70", "Sound FX  80", "Crowd  45", "Engine  60", "Menu FX  100", "User Soundtracks  70"]);
+    assert_eq!(m.audio_ticker(), format!("Now playing {}", m.music_choices.iter().find(|c| c.0 == first).unwrap().1));
+
+    // Right steps the row to the next song without playing it; Cross plays it.
+    let ids: Vec<String> = m.music_choices.iter().map(|c| c.0.clone()).collect();
+    let at = ids.iter().position(|i| *i == first).unwrap();
+    let picked = ids[(at + 1) % ids.len()].clone();
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(speakers.now().as_deref(), Some(first.as_str()));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(speakers.now(), Some(picked.clone()), "the song picked plays");
+    let level = |id: &str| match id {
+        "hum:one" => 1000.0,
+        "hum:two" => 2000.0,
+        _ => 3000.0,
+    };
+    let heard = hum_listen(&speakers);
+    assert!((heard[100] as f32 - level(&picked) * 0.7).abs() <= 2.0, "it is heard at the music's 70: {}", heard[100]);
+
+    // In Order, then Skip Song: the song after it.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.audio_rows()[2], "Play Order  In Order");
+    assert_eq!(speakers.now(), Some(picked.clone()), "the order changing keeps the song");
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Cross);
+    let next = ids[(ids.iter().position(|i| *i == picked).unwrap() + 1) % ids.len()].clone();
+    assert_eq!(speakers.now(), Some(next.clone()), "skip moves to the next");
+
+    // The music slider, down a step: the mixer's music gain with it, while paused, and the mix is
+    // the user's own.
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    assert!(m.audio_rows()[m.cursor(Screen::Audio)].starts_with("Music  "));
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.music_volume, 60);
+    assert_eq!(m.settings.mix, menu::Mix::Custom);
+    assert_eq!(speakers.mixer().lock().unwrap().music_gain(), 0.6);
+    let heard = hum_listen(&speakers);
+    assert!((heard[100] as f32 - level(&next) * 0.6).abs() <= 2.0, "{}", heard[100]);
+    // Back is the pause, the ride still paused under it.
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+
+    // A restart: the settings read back from where the shell saved them, into a new sound.
+    let (settings, controls) = menu::load(&dir);
+    assert_eq!((settings.music.as_str(), settings.music_volume, settings.mix), ("order", 60, menu::Mix::Custom));
+    let again = hum_speakers(&settings);
+    let mut m = Menu::new(settings, controls);
+    m.music_choices = again.choices();
+    assert_eq!(again.mixer().lock().unwrap().music_gain(), 0.6);
+    m.open(Screen::Audio);
+    assert_eq!(m.audio_rows()[4], "Music  60");
+    assert_eq!(m.audio_rows()[3], "Audio Presets  Custom Mix");
+
+    // The presets set every slider, and Custom brings the user's back.
+    let (mut m, mut r) = (m, Reader::new());
+    m.step(r.read(&Report::idle()));
+    let tap = |m: &mut Menu, r: &mut Reader, c: Control| tap_heard(m, r, &again, &dir, c);
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.mix, menu::Mix::Game);
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.mix, menu::Mix::Nighttime);
+    assert_eq!(m.settings.levels(), [0, 0, 50, 30, 50, 50]);
+    let mixer = again.mixer().lock().unwrap();
+    assert_eq!((mixer.music_volume, mixer.effects_volume, mixer.crowd_volume, mixer.engine_volume), (0.0, 0.5, 0.3, 0.5));
+    drop(mixer);
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.mix, menu::Mix::Custom);
+    assert_eq!(m.settings.music_volume, 60);
 }

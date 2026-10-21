@@ -867,10 +867,17 @@ impl Front {
         w
     }
 
-    /// The settings' music pick and volumes, into the sound (P42).
-    fn hear(&self) {
+    /// The settings' music pick and volumes, into the sound (P42), and what the pause's song rows
+    /// asked of the music (P56).
+    fn hear(&mut self) {
         let s = &self.menu.settings;
-        self.sound.apply(&s.music, s.music_volume, s.effects_volume);
+        self.sound.apply(&s.music, levels(s));
+        for tune in self.menu.take_tunes() {
+            match tune {
+                menu::Tune::Play(id) => self.sound.play_now(&id),
+                menu::Tune::Skip => self.sound.skip(),
+            }
+        }
     }
 
     /// Write the settings when the menu changed them, saying so if it could not.
@@ -922,8 +929,20 @@ fn start_sound(args: &Args, disc: &mut Disc, dir: &std::path::Path, settings: &m
         audio::folder(dir).display()
     );
     let speakers = audio::Speakers::start(music, args.sound && !args.headless);
-    speakers.apply(&settings.music, settings.music_volume, settings.effects_volume);
+    speakers.apply(&settings.music, levels(settings));
     speakers
+}
+
+/// The settings' sliders as the sound takes them (P56).
+fn levels(s: &menu::Settings) -> audio::Levels {
+    audio::Levels {
+        music: s.music_volume,
+        folder: s.folder_volume,
+        effects: s.effects_volume,
+        crowd: s.crowd_volume,
+        engine: s.engine_volume,
+        menu: s.menu_volume,
+    }
 }
 
 /// How a ride under the front end ended.
@@ -1215,6 +1234,7 @@ fn front_end(args: Args) -> Result<(), String> {
             shell.front.menu.step_seat(i, p);
         }
         let before = shell.front.menu.p1().cloned();
+        shell.front.menu.music_now = shell.front.sound.now();
         act = shell.front.menu.step_devices(&presses);
         let after = shell.front.menu.p1().cloned();
         if after != before {
@@ -2838,6 +2858,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
             }
             escape = esc;
+            front.menu.music_now = front.sound.now();
             let act = front.menu.step_seats(&presses);
             if front.menu.changed() {
                 overlay_mode = front.menu.settings.overlay;
