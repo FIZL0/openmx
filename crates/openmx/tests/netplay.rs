@@ -519,6 +519,59 @@ fn the_ride_says_every_seat_in_bytes() {
     assert_eq!(mine.hash(), before, "a refused state writes nothing");
 }
 
+/// N13: each seat's controller preset is a constant of the ride that every machine must hold the same.
+/// It rides in the ride's bytes, so a state decoded onto seats built on preset 0 (a resync, a
+/// restart, the seats a join adds) reads each seat through its own; a joiner's seats spawn on the
+/// presets its spawn says; and it matters — the same pads on another preset are another ride.
+#[test]
+fn every_seat_rides_its_own_preset_and_says_it_in_bytes() {
+    let mut world = Flat::default();
+    let mut there = sims(3);
+    for (sim, p) in there.iter_mut().zip([1, 0, 2]) {
+        sim.set_presets([p, 0]);
+    }
+    let pads = |t: usize| (0..3).map(|s| mash(s, t)).collect::<Vec<_>>();
+    let mut game = Rides { sims: &mut there, world: &mut world, after: None, time_scale: None };
+    for t in 0..300 {
+        game.step(t, &pads(t));
+    }
+    let bytes = game.encode().unwrap();
+    let mut here = sims(2);
+    let mut world2 = Flat::default();
+    let mut mine = Rides { sims: &mut here, world: &mut world2, after: None, time_scale: None };
+    mine.decode(&bytes).unwrap();
+    assert_eq!(mine.sims.iter().map(rides::preset).collect::<Vec<_>>(), [Some(1), Some(0), Some(2)], "the third seat grown, too");
+    assert_eq!(mine.hash(), game.hash());
+    let mut shipped: Vec<Sim> = mine.sims.clone();
+    for t in 300..600 {
+        mine.step(t, &pads(t));
+        game.step(t, &pads(t));
+    }
+    assert_eq!(mine.hash(), game.hash(), "the same presets ride as one");
+    // the same state and pads with every seat on the shipped table: preset 1's Square is not a brake
+    for sim in &mut shipped {
+        sim.set_presets([0, 0]);
+    }
+    let mut world3 = Flat::default();
+    let mut off = Rides { sims: &mut shipped, world: &mut world3, after: None, time_scale: None };
+    for t in 300..600 {
+        off.step(t, &pads(t));
+    }
+    assert_ne!(off.sims[0].hash(), game.sims[0].hash(), "seat 1 on preset 0 is another ride");
+    assert_eq!(off.sims[1].hash(), game.sims[1].hash(), "seat 2 was on preset 0 all along");
+
+    // a joiner's seats, each on its own preset; one the list leaves out on the spawn's
+    let spawn = rides::seat_bytes(&sims(1)[0]);
+    mine.seat(3, &rides::spawn_on(&spawn, &[(3, 3), (4, 2)])).unwrap();
+    mine.seat(4, &rides::spawn_on(&spawn, &[(3, 3), (4, 2)])).unwrap();
+    mine.seat(5, &rides::spawn_on(&spawn, &[])).unwrap();
+    assert_eq!(mine.sims[3..].iter().map(rides::preset).collect::<Vec<_>>(), [Some(3), Some(2), Some(0)]);
+    // and a preset the original has not is refused
+    let mut bad = rides::seat_bytes(&sims(1)[0]);
+    bad[0] = game_sim::bindings::PRESETS as u8;
+    assert!(rides::from_seat_bytes(&mut sims(1)[0], &bad).unwrap_err().contains("controller preset"));
+}
+
 /// [`mash`]'s pads are a ride as the game reads them (N9): every seat's bike is on the gas nearly
 /// every tick at more than one pressure, brakes now and then, holds a stunt on the chord, and the
 /// d-pad is touched only by the chord (up), not held throughout. And the bikes get going.
@@ -700,11 +753,14 @@ fn on_the_ride_a_silent_peers_seat_empties_and_the_others_ride_on() {
 /// first seat's own tick count after every round.
 fn joined_mid_ride(link: &Link, joins: [u32; 2], rounds: u32) -> (Run<Ride>, Vec<(usize, u64)>) {
     ggrs::clock::drive(true);
-    let spawn = game_sim::snapshot::encode(&sims(1)[0]);
+    let spawn = rides::seat_bytes(&sims(1)[0]);
+    // every rider on a controller preset of their own (N13): the host's on 3, g's 2, k's 1 and 0
+    let mut first = Ride::new(1);
+    first.sims[0].set_presets([3, 0]);
     let mut r: Run<Ride> = Run {
         names: vec!["host".into()],
         nets: vec![Netplay::new(Lineup::parse("host").unwrap(), "host", Timing::default(), dumps()).unwrap()],
-        games: vec![Ride::new(1)],
+        games: vec![first],
         ran: vec![Vec::new()],
         biggest: 0,
         sent: Vec::new(),
@@ -719,7 +775,7 @@ fn joined_mid_ride(link: &Link, joins: [u32; 2], rounds: u32) -> (Run<Ride>, Vec
         (rng >> 11) as f64 / (1u64 << 53) as f64 <= link.loss
     };
     for round in 0..rounds {
-        for (who, seats, at) in [("g", vec![1], joins[0]), ("k", vec![2, 3], joins[1])] {
+        for (who, seats, at, presets) in [("g", vec![1], joins[0], vec![(1, 2)]), ("k", vec![2, 3], joins[1], vec![(2, 1), (3, 0)])] {
             if round == at {
                 r.names.push(who.into());
                 r.nets.push(Netplay::joining("host", who, Timing::default(), dumps()).unwrap());
@@ -727,7 +783,7 @@ fn joined_mid_ride(link: &Link, joins: [u32; 2], rounds: u32) -> (Run<Ride>, Vec
                 r.ran.push(Vec::new());
             }
             if round + 30 == at {
-                r.nets[0].admit(who, &seats, spawn.clone()).unwrap();
+                r.nets[0].admit(who, &seats, rides::spawn_on(&spawn, &presets)).unwrap();
             }
         }
         for (to, at, from, d) in std::mem::take(&mut wire) {
@@ -785,6 +841,8 @@ fn a_freeride_opened_online_takes_two_peers_mid_ride() {
     assert_eq!((h.recover.restarts, g.recover.restarts, k.recover.restarts), (2, 2, 1));
     for i in 0..3 {
         assert_eq!(r.games[i].sims.len(), 4, "{}: every seat a bike", r.names[i]);
+        let presets: Vec<Option<usize>> = r.games[i].sims.iter().map(rides::preset).collect();
+        assert_eq!(presets, [Some(3), Some(2), Some(1), Some(0)], "{}: every seat on its rider's preset (N13)", r.names[i]);
     }
 
     // the host: the first join at the tick it was at once g was heard (a keep-alive, half a second
@@ -872,8 +930,10 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
     for p in &mut peers {
         p.dumps = tmp.clone();
     }
+    // every rider on a controller preset of their own (N13), which the room carries to every machine
+    let on = |rider: &str, bike: &str, preset: u8| Pick { preset, ..Pick::new(rider, bike) };
     let mut room = Room::new("Hosty", "free06", 4);
-    room.take(HOST, &[Pick::new("thq1", "race125p")]);
+    room.take(HOST, &[on("thq1", "race125p", 3)]);
     peers[0].open(room).unwrap();
 
     let frame = Duration::from_nanos(1_001_000_000_000 / 30_000);
@@ -901,11 +961,11 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
         // g once the host has ridden two seconds alone and its code is out; k ten seconds after g is in
         if !asked[0] && tick >= 60 && !short.is_empty() {
             assert!(peers[0].room.as_ref().unwrap().riding, "the room is the ride");
-            peers[1].net.send(Cmd::Join(short.clone(), vec![Pick::new("thq2", "pro250a")]));
+            peers[1].net.send(Cmd::Join(short.clone(), vec![on("thq2", "pro250a", 2)]));
             asked[0] = true;
         }
         if !asked[1] && joins == 1 && tick >= h.np.admit.joins[0].1 as usize + 300 {
-            peers[2].net.send(Cmd::Join(short.clone(), vec![Pick::new("thq3", "race125p"), Pick::new("thq4", "race125p")]));
+            peers[2].net.send(Cmd::Join(short.clone(), vec![on("thq3", "race125p", 1), on("thq4", "race125p", 0)]));
             asked[1] = true;
         }
         if joins == 2 && h.np.confirmed() > h.np.admit.joins[1].1 as i64 + 300 && peers.iter().all(|p| p.riding.as_ref().is_some_and(|r| r.np.confirmed() > h.np.admit.joins[1].1 as i64 + 300)) {
@@ -937,6 +997,11 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
     assert!(r.seats.iter().flatten().all(|s| s.pick.bike == "race125p"), "{:?}", r.seats);
     assert_eq!(r.seats_of(&g.me), [1]);
     assert_eq!(r.seats_of(&k.me), [2, 3]);
+    // and every machine reads each seat through its rider's controller preset (N13)
+    for (i, ride) in rides.iter().enumerate() {
+        let presets: Vec<Option<usize>> = ride.sims.iter().map(net::rides::preset).collect();
+        assert_eq!(presets, [Some(3), Some(2), Some(1), Some(0)], "peer {i}");
+    }
 
     // from each join on, the machines in the ride ran the same ticks
     let settled = |nps: &[&net::Netplay<rides::State>]| nps.iter().map(|np| np.confirmed().max(0) as usize).min().unwrap();

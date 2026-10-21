@@ -495,3 +495,38 @@ fn a_freerides_pause_opens_it_online() {
 fn taps_acts(menu: &mut Menu, reader: &mut Reader, controls: &[Control]) -> Vec<Act> {
     controls.iter().flat_map(|&c| tap(menu, reader, c)).collect()
 }
+
+/// N13: this machine's player's controller preset rides in its pick — the lobby it hosts or joins
+/// says it, a change in an open lobby goes out as a repick, and a ride under way keeps the preset it
+/// started on.
+#[test]
+fn the_players_controller_preset_rides_in_the_pick() {
+    let (mut m, mut r) = fresh("Guesty", "thq2");
+    m.lobby.preset(2);
+    assert!(m.lobby.out.is_empty(), "no lobby yet: nothing to tell");
+    to_online(&mut m, &mut r);
+    taps(&mut m, &mut r, &[Control::Down, Control::Down, Control::Down, Control::Cross]);
+    type_text(&mut m, &mut r, "ab2c");
+    let on = |preset: u8| Pick { preset, ..Pick::new("thq2", "race125p") };
+    assert_eq!(m.lobby.out.pop(), Some(Cmd::Join("AB2C".into(), vec![on(2)])));
+    m.heard(Event::Me("guest-id".into()));
+    m.heard(Event::Room(guest_room()));
+    m.lobby.preset(2);
+    assert!(m.lobby.out.is_empty(), "the same preset: nothing new");
+    m.lobby.preset(9);
+    assert_eq!(m.lobby.out.pop(), Some(Cmd::Picks(vec![on(3)])), "the original has four");
+    m.lobby.preset(0);
+    assert_eq!(m.lobby.out.pop(), Some(Cmd::Picks(vec![on(0)])));
+    let mut riding = guest_room();
+    riding.riding = true;
+    m.heard(Event::Room(riding));
+    m.lobby.preset(1);
+    assert!(m.lobby.out.is_empty(), "a ride under way keeps its presets");
+    // back in the lobby, it hears of the change once
+    m.back_from_online();
+    m.heard(Event::Room(guest_room()));
+    m.lobby.preset(1);
+    assert_eq!(m.lobby.out.pop(), Some(Cmd::Picks(vec![on(1)])));
+    m.lobby.preset(1);
+    assert!(m.lobby.out.is_empty());
+}
