@@ -35,7 +35,7 @@ Decide this per area once, write it here, and then stop relitigating it. A sensi
 - **Rendering: ours, and fast.** The original is a reference for what the world looks like, not a spec
   for how it is drawn: match by eye, never 1:1, and choose the optimised way over the faithful one. The
   GPU renderer is the default and must run well on desktop, in the browser (wasm) and later on phones;
-  the software rasteriser is a reference and fallback only. Do not replay the GS's rasterisation, and do
+  the software rasteriser is a reference and fallback only. The game logic runs at the original's rate, bit for bit, and the picture does not: draw well above 60 fps, up to the monitor's refresh, interpolating between simulation ticks on the render side only (user, 2026-10-20). Do not replay the GS's rasterisation, and do
   not open follow-up tasks to chase render differences — note them and move on (user, 2026-10-20).
 - **Menus and front-end: yours to design.** The original is a reference, not a spec.
 - **Presentation: feels right.** Cameras, cutaways, effects, audio cues — match by eye. Just check they
