@@ -295,6 +295,10 @@ pub struct Wiring {
     pub schemes: [Scheme; SEATS],
     /// How each seat's biplane stick reads upside down (P50).
     pub planes: [PlaneScheme; SEATS],
+    /// Each seat's controller preset under the original's layout (P79): which of the original's four
+    /// binding presets its bike is read through ([`game_sim::bindings::PRESET_CONTROLS`]), 0 the
+    /// shipped one. The new layout rides preset 0 whatever this says ([`Scheme::preset`]).
+    pub presets: [usize; SEATS],
     /// A Nintendo pad's A and B by where they are (P53): B, the bottom one, is Cross and confirms,
     /// as on every other pad. Off, the default, they go by what they say — A, the right one, confirms
     /// and B goes back, the way a Switch player's thumb expects ([`Pads::nintendo`]).
@@ -308,6 +312,7 @@ impl Default for Wiring {
             pressure: [None; AXES],
             schemes: [Scheme::default(); SEATS],
             planes: [PlaneScheme::default(); SEATS],
+            presets: [0; SEATS],
             nintendo_positions: false,
         }
     }
@@ -379,6 +384,39 @@ impl Scheme {
         schemes.iter().map(|s| s.word()).collect::<Vec<_>>().join(",")
     }
 
+    /// The controller preset a seat on this scheme rides on, `preset` being the one it picked (P79):
+    /// the pick under the original's layout, and preset 0 under the new one, whose remap is written
+    /// against the shipped table.
+    pub fn preset(self, preset: usize) -> usize {
+        match self {
+            Scheme::Original => preset.min(game_sim::bindings::PRESETS - 1),
+            Scheme::New => 0,
+        }
+    }
+
+    /// `--preset`'s value: one of the original's four controller presets (`0` to `3`), or one per
+    /// seat (`0,2,…`); seats past the list ride the last one.
+    pub fn parse_presets(s: &str) -> Result<[usize; SEATS], String> {
+        let words: Vec<&str> = s.split(',').collect();
+        if words.len() > SEATS {
+            return Err(format!("{s}: at most {SEATS} seats"));
+        }
+        let mut out = [0; SEATS];
+        let mut last = 0;
+        for (i, slot) in out.iter_mut().enumerate() {
+            if let Some(w) = words.get(i) {
+                last = w
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|p| *p < game_sim::bindings::PRESETS)
+                    .ok_or_else(|| format!("{w}: a preset from 0 to {}", game_sim::bindings::PRESETS - 1))?;
+            }
+            *slot = last;
+        }
+        Ok(out)
+    }
+
     /// The control the shell changes the camera on, read off the remapped report: the shipped
     /// table's next-camera command, Select, under either scheme (P73: the original's is Select, not
     /// L1, which is its clutch and half its reset chord).
@@ -390,10 +428,15 @@ impl Scheme {
     /// the original's, [`Command::RIDE`] on the shipped table's bindings; under the new one the same
     /// commands, the gas and the brake moved to R2 and L2. In [`Command::RIDE`]'s order.
     pub fn commands(self) -> Vec<(Command, Control)> {
+        self.commands_on(&Table::SHIPPED)
+    }
+
+    /// [`Scheme::commands`] on another table: a controller preset's (P79).
+    pub fn commands_on(self, table: &Table) -> Vec<(Command, Control)> {
         Command::RIDE
             .into_iter()
             .filter_map(|c| {
-                let bound = Table::SHIPPED.control(0, c)?;
+                let bound = table.control(0, c)?;
                 let on = match (self, bound) {
                     (Scheme::New, Control::Cross) => Control::R2,
                     (Scheme::New, Control::Square) => Control::L2,
@@ -409,7 +452,12 @@ impl Scheme {
     /// handler decides it: the command's press, with neither look-back nor the other camera held.
     /// Under the new scheme those two have no button, so it is Select's press alone.
     pub fn changes_camera(self, pad: &game_sim::input::Pad) -> bool {
-        let t = &Table::SHIPPED;
+        self.changes_camera_on(pad, &Table::SHIPPED)
+    }
+
+    /// [`Scheme::changes_camera`] through a seat's own table (P79): under presets 2 and 3 the two
+    /// commands that hold the camera back are on other buttons.
+    pub fn changes_camera_on(self, pad: &game_sim::input::Pad, t: &Table) -> bool {
         t.pressed(pad, Command::NEXT_CAMERA) && !t.held(pad, Command::LOOK_BACK) && !t.held(pad, Command::OTHER_CAMERA)
     }
 
@@ -1709,6 +1757,11 @@ impl Bindings {
     /// does in a ride, as `(what, keys)` pairs, from these bindings — so a `controls.txt` that moved
     /// a key shows where it moved to. The pad's buttons are not here.
     pub fn keyboard_layout(&self, scheme: Scheme) -> Vec<(String, String)> {
+        self.keyboard_layout_on(scheme, &Table::SHIPPED)
+    }
+
+    /// [`Bindings::keyboard_layout`] with the commands on a controller preset's table (P79).
+    pub fn keyboard_layout_on(&self, scheme: Scheme, table: &Table) -> Vec<(String, String)> {
         let lines = &self.lines[layout_at(scheme)];
         let keys = |line: usize| -> Vec<String> {
             let mut out: Vec<String> = Vec::new();
@@ -1734,7 +1787,7 @@ impl Bindings {
         // The original's commands by their names (P73), each on the control the scheme puts it on;
         // the d-pad's four as one row, the reset chord's two halves as one, the pause with the
         // shell's own Escape beside it.
-        let commands = scheme.commands();
+        let commands = scheme.commands_on(table);
         let on = |c: Command| commands.iter().find(|(x, _)| *x == c).map(|(_, control)| *control);
         let named = |c: Command| {
             let name = c.name().unwrap_or("");
@@ -2057,6 +2110,16 @@ impl Seats {
     /// The keyboard's layout under `scheme`, for the Controls screen ([`Bindings::keyboard_layout`]).
     pub fn keyboard_layout(&self, scheme: Scheme) -> Vec<(String, String)> {
         self.bindings.keyboard_layout(scheme)
+    }
+
+    /// The keyboard's layout under `scheme` on a controller preset (P79), for the Controls screen.
+    pub fn keyboard_layout_on(&self, scheme: Scheme, preset: usize) -> Vec<(String, String)> {
+        self.bindings.keyboard_layout_on(scheme, &Table::built([scheme.preset(preset), 0]))
+    }
+
+    /// Seat `seat`'s controller preset (P79), as its layout rides it: 0 under the new layout.
+    pub fn preset(&self, seat: usize) -> usize {
+        self.wiring.schemes[seat].preset(self.wiring.presets[seat])
     }
 
     /// The keyboard's report this frame when it drives no seat — a pad is 1P — for the pause, which
@@ -3179,6 +3242,49 @@ pub(crate) mod tests {
         assert!(!original.contains_key("Left stick"), "the original's left stick has no keys");
         let (b, _) = Bindings::parse("r2 = G PadR1\n");
         assert_eq!(rows(&b, Scheme::New)["Gas"], "G");
+    }
+
+    /// P79: the Controls screen's list under the original's other controller presets is each
+    /// preset's table — preset 1's gas and brake swapped, preset 2's third trick on preset 0's
+    /// clutch key — and the reset chord stays on L1 + R1's keys on every one. The new layout rides
+    /// preset 0 whatever was picked.
+    #[test]
+    fn the_controls_screen_lists_each_presets_commands() {
+        let b = Bindings::default();
+        let rows = |p: usize| {
+            b.keyboard_layout_on(Scheme::Original, &Table::built([p, 0])).into_iter().collect::<std::collections::HashMap<_, _>>()
+        };
+        let shipped = rows(0);
+        assert_eq!(shipped, b.keyboard_layout(Scheme::Original).into_iter().collect(), "preset 0 is the shipped list");
+        assert_eq!((rows(1)["Gas"].as_str(), rows(1)["Brake"].as_str()), (shipped["Brake"].as_str(), shipped["Gas"].as_str()));
+        assert_eq!(rows(2)["Trick 3"], shipped["Clutch"]);
+        for p in 0..game_sim::bindings::PRESETS {
+            assert_eq!(rows(p)["Reset"], shipped["Reset"], "preset {p}");
+            assert_eq!(rows(p)["Camera"], shipped["Camera"], "preset {p}");
+        }
+        assert_eq!(Scheme::New.preset(3), 0);
+        assert_eq!(Scheme::Original.preset(3), 3);
+        assert_eq!(Scheme::parse_presets("2"), Ok([2; SEATS]));
+        assert_eq!(Scheme::parse_presets("0,3"), Ok([0, 3, 3, 3, 3, 3, 3, 3]));
+        assert!(Scheme::parse_presets("4").is_err() && Scheme::parse_presets("x").is_err());
+        assert!(Scheme::parse_presets("0,0,0,0,0,0,0,0,0").is_err());
+    }
+
+    /// P79: the camera button is Select on every preset, held back by the preset's own look-back
+    /// and other-camera buttons: L1 under preset 3, R1 under 2 and 3, and no longer R2 there.
+    #[test]
+    fn each_preset_holds_the_camera_back_on_its_own_buttons() {
+        let changes = |preset: usize, hold: Control| {
+            let t = Table::built([preset, 0]);
+            let mut manager = Manager::connected();
+            manager.tick(F(FRAME), &[Report::from_buttons(hold.mask()); PADS]);
+            manager.tick(F(FRAME), &[Report::from_buttons(hold.mask() | Control::Select.mask()); PADS]);
+            Scheme::Original.changes_camera_on(manager.pad(0), &t)
+        };
+        assert!(!changes(0, Control::L2) && !changes(0, Control::R2) && changes(0, Control::L1) && changes(0, Control::R1));
+        assert!(!changes(2, Control::L2) && !changes(2, Control::R1) && changes(2, Control::R2));
+        assert!(!changes(3, Control::L1) && !changes(3, Control::R1) && changes(3, Control::L2) && changes(3, Control::R2));
+        assert!(changes(1, Control::Cross), "nothing held back but the two commands");
     }
 
     #[test]

@@ -472,7 +472,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // 9744 since S65: the skeleton the shell last drew, an input like the controls that the walk
     // leaves out; the bones it poses are walked.
     // 9792 since S66: the bike's put-back record, its point, heading and up.
+    // 10104 since P79: `Sim::bindings`, the controller preset's table, a constant of the ride like
+    // `Sim::phy` that the walk leaves out (tests/presets.rs: the hash does not move with it).
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 9792, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 10104, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

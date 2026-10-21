@@ -682,6 +682,23 @@ fn plane_label(l: Layout) -> &'static str {
     }
 }
 
+/// Every choice a seat's Controls row steps through (P79): (layout, controller preset, biplane), the
+/// new layout first on preset 0, then the original's on presets 0 to 3, each with the biplane's two.
+fn seat_choices() -> Vec<(Layout, usize, Layout)> {
+    let planes = [Layout::New, Layout::Original];
+    let new = planes.map(|plane| (Layout::New, 0, plane));
+    let original = (0..PRESETS).flat_map(|p| planes.map(move |plane| (Layout::Original, p, plane)));
+    new.into_iter().chain(original).collect()
+}
+
+/// Where [`Menu::keyboard`] keeps the keyboard of a layout on a controller preset (P79).
+pub fn keyboard_at(layout: Layout, preset: usize) -> usize {
+    match layout {
+        Layout::New => 0,
+        Layout::Original => 1 + preset.min(PRESETS - 1),
+    }
+}
+
 /// How many seats the file holds a layout for: the shell's `pad::SEATS`.
 pub const SEATS: usize = 8;
 
@@ -702,6 +719,10 @@ pub struct Controls {
     /// `--biplane-controls`' per seat (P50): under `New` the biplane's stick is turned round while
     /// the plane is upside down, under `Original` it never is, as on the disc.
     pub planes: [Layout; SEATS],
+    /// `--preset`'s per seat (P79): which of the original's four controller presets the seat's bike
+    /// rides on under the `Original` layout, 0 the shipped one. The original's Controller Presets
+    /// screen picks it; here it is the seat's row. Under `New` it is 0 and not read.
+    pub presets: [usize; SEATS],
     /// A Nintendo pad's A and B by position (`nintendo = positions`): B, the bottom one, confirms.
     /// The default (`labels`) has A confirm and B go back, as on a Switch (P53).
     pub nintendo_positions: bool,
@@ -739,6 +760,11 @@ impl Controls {
                         c.planes = planes;
                     }
                 }
+                "preset" => {
+                    if let Some(presets) = per_seat_preset(v) {
+                        c.presets = presets;
+                    }
+                }
                 _ => {}
             }
         }
@@ -754,14 +780,16 @@ impl Controls {
              # original, or one per seat — new turns the plane's stick round upside down so it\n\
              # moves the plane the same way on the screen, original never does (P50); nintendo is\n\
              # labels (a Switch pad's A confirms and B goes back) or positions (B, the bottom one,\n\
-             # confirms) (P53)\n\
-             throttle = {}\npad = {}\npressure = {}\nlayout = {}\nbiplane = {}\nnintendo = {}\n",
+             # confirms) (P53); preset is the original's controller preset, 0 to 3, or one per seat,\n\
+             # read under the original layout only — 0 is the shipped one (P79)\n\
+             throttle = {}\npad = {}\npressure = {}\nlayout = {}\nbiplane = {}\nnintendo = {}\npreset = {}\n",
             self.throttle.word(),
             self.pad.as_deref().unwrap_or("auto"),
             if self.pressure.is_empty() { "none" } else { &self.pressure },
             self.layout_text(),
             seat_text(&self.planes),
             if self.nintendo_positions { "positions" } else { "labels" },
+            preset_text(&self.presets),
         )
     }
 
@@ -788,6 +816,44 @@ fn per_seat(v: &str) -> Option<[Layout; SEATS]> {
         *slot = last;
     }
     Some(out)
+}
+
+/// A `controls.txt` `preset` value (P79): one of the original's four controller presets for every
+/// seat, or one per seat with the last carried on; `None` for anything else.
+fn per_seat_preset(v: &str) -> Option<[usize; SEATS]> {
+    let words: Vec<Option<usize>> =
+        v.split(',').map(|w| w.trim().parse::<usize>().ok().filter(|p| *p < PRESETS)).collect();
+    if !words.iter().all(Option::is_some) || words.len() > SEATS {
+        return None;
+    }
+    let mut out = [0; SEATS];
+    let mut last = 0;
+    for (i, slot) in out.iter_mut().enumerate() {
+        last = words.get(i).copied().flatten().unwrap_or(last);
+        *slot = last;
+    }
+    Some(out)
+}
+
+/// [`per_seat_preset`]'s text back: one number when every seat agrees.
+fn preset_text(presets: &[usize; SEATS]) -> String {
+    if presets.iter().all(|p| *p == presets[0]) {
+        return presets[0].to_string();
+    }
+    presets.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",")
+}
+
+/// How many controller presets the original has: `game_sim::bindings::PRESETS`, which this file
+/// cannot name because `tests/menu.rs` compiles it on its own.
+pub const PRESETS: usize = 4;
+
+/// A seat's layout and its controller preset as its Controls row says them (P79): the original's
+/// shipped preset is plain `Original`, the other three name their number.
+pub fn controls_label(l: Layout, preset: usize) -> String {
+    match (l, preset) {
+        (Layout::Original, p) if p > 0 => format!("Original preset {p}"),
+        _ => l.label().to_string(),
+    }
 }
 
 /// [`per_seat`]'s text back: one word when every seat agrees.
@@ -1127,9 +1193,10 @@ pub struct Menu {
     /// splash lists both, so a pad that cannot become 1P — or one that should not — shows (P53).
     pub heard: Vec<String>,
     pub skipped: Vec<String>,
-    /// The keyboard under each layout, in [`Layout::ALL`]'s order, as the shell's bindings have it
-    /// (P54): what each key does in a ride, for the Controls screen. Empty without a shell.
-    pub keyboard: [Vec<(String, String)>; 2],
+    /// The keyboard under each layout, as the shell's bindings have it (P54): what each key does in
+    /// a ride, for the Controls screen. The new layout first, then the original's on each of its
+    /// controller presets, 0 to 3 (P79) — [`keyboard_at`]'s order. Empty without a shell.
+    pub keyboard: [Vec<(String, String)>; 1 + PRESETS],
     /// The local game the ride setup is for, once the join screen is done; none for a Free Ride.
     party: Option<Party>,
     /// How many ride a Free Ride, which is `--players`: the shell says, and a Free Ride after a
@@ -1228,7 +1295,7 @@ impl Menu {
             devices: Vec::new(),
             heard: Vec::new(),
             skipped: Vec::new(),
-            keyboard: [Vec::new(), Vec::new()],
+            keyboard: Default::default(),
             party: None,
             free_riders: 1,
             music_choices: Vec::new(),
@@ -2098,14 +2165,16 @@ impl Menu {
                     self.controls.throttle = Gas::ALL[i];
                     self.changed = true;
                 } else if (p.ok || side) && at <= LAYOUT_ROWS {
-                    // A seat's row holds its layout and its biplane's (P50): four together, stepped
-                    // through as one, the biplane's the faster. The screen has no room for a second
-                    // row a seat.
+                    // A seat's row holds its layout, its controller preset under the original's
+                    // (P79) and its biplane's (P50), stepped through as one, the biplane's the
+                    // fastest: the new layout, then the original's on each of its four presets in
+                    // turn. The screen has no room for a second row a seat.
                     let i = at - 1;
-                    let both = [(Layout::New, Layout::New), (Layout::New, Layout::Original), (Layout::Original, Layout::New), (Layout::Original, Layout::Original)];
-                    let now = both.iter().position(|b| *b == (self.controls.layouts[i], self.controls.planes[i])).unwrap_or(0);
-                    let next = if p.left { (now + both.len() - 1) % both.len() } else { (now + 1) % both.len() };
-                    (self.controls.layouts[i], self.controls.planes[i]) = both[next];
+                    let all = seat_choices();
+                    let preset = if self.controls.layouts[i] == Layout::Original { self.controls.presets[i] } else { 0 };
+                    let now = all.iter().position(|b| *b == (self.controls.layouts[i], preset, self.controls.planes[i])).unwrap_or(0);
+                    let next = if p.left { (now + all.len() - 1) % all.len() } else { (now + 1) % all.len() };
+                    (self.controls.layouts[i], self.controls.presets[i], self.controls.planes[i]) = all[next];
                     self.changed = true;
                 }
             }
@@ -2947,7 +3016,9 @@ impl Art {
                                 .iter()
                                 .zip(&menu.controls.planes)
                                 .enumerate()
-                                .map(|(i, (l, plane))| format!("{}P controls  {}  {}", i + 1, l.label(), plane_label(*plane))),
+                                .map(|(i, (l, plane))| {
+                                    format!("{}P controls  {}  {}", i + 1, controls_label(*l, menu.controls.presets[i]), plane_label(*plane))
+                                }),
                         )
                         .collect(),
                 };
@@ -3715,13 +3786,12 @@ impl<'a> Painter<'a> {
     fn keyboard_layout(&mut self, menu: &Menu, at: usize) {
         let seat = at.saturating_sub(1).min(LAYOUT_ROWS - 1);
         let layout = menu.controls.layouts[seat];
-        let i = Layout::ALL.iter().position(|l| *l == layout).unwrap_or(0);
-        let rows = &menu.keyboard[i];
+        let rows = &menu.keyboard[keyboard_at(layout, menu.controls.presets[seat])];
         if rows.is_empty() {
             return;
         }
         self.anchor(Anchor::BottomRight);
-        let title = format!("{}P keyboard  {}", seat + 1, layout.label());
+        let title = format!("{}P keyboard  {}", seat + 1, controls_label(layout, menu.controls.presets[seat]));
         self.text(Face::Small, &title, KEYS_X, item_y(0), Align::Centre, CHOSEN);
         for (n, (what, keys)) in rows.iter().enumerate() {
             let y = item_y(0) + KEYS_ROW * (n + 1) as f32;

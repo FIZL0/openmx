@@ -28,6 +28,7 @@
 //! of a millisecond), and with the flag off it is one `if` and no pixels at all.
 
 use game_render::raster::Frame;
+use game_sim::bindings::Table;
 use game_sim::input::{AXIS_FULL, Axis, AxisRange, Control, Pad, PlaneCommand, PlaneInput};
 use game_sim::ride::Controls;
 use game_sim::rider::Rider;
@@ -58,6 +59,9 @@ pub struct Hud {
     /// the plane is up and flying (P31). The first column's top two lines show these instead of the
     /// bike's speed and engine.
     pub flight: Option<(f32, f32)>,
+    /// The binding table the bike's commands are read through, the seat's controller preset (P79):
+    /// the shell sets it every frame from [`game_sim::Sim::table`].
+    pub bindings: Table,
 }
 
 impl Hud {
@@ -70,6 +74,7 @@ impl Hud {
             camera: "-".to_string(),
             vehicle: "bike".to_string(),
             flight: None,
+            bindings: Table::SHIPPED,
         }
     }
 
@@ -267,11 +272,11 @@ impl Hud {
     /// The three commands that ramp: what the pad asked for this frame, as a marker, against what the
     /// bike is holding, as the bar.
     ///
-    /// Both sides come from the port — [`Controls::from_pad`] is the shell's own binding and
+    /// Both sides come from the port — [`Controls::through`] the seat's table is the shell's own binding and
     /// [`game_sim::ride::Held`] the `.phy`'s own rate limit — so a bar behind its marker is the
     /// rate limit doing its job and not a dropped input.
     fn commands(&self, frame: &mut Frame, x: i32, y: i32, pad: &Pad, rider: &Rider) {
-        let want = Controls::from_pad(pad);
+        let want = Controls::through(pad, &self.bindings);
         let held = &rider.ride.held;
         let rows = [
             ("gas", want.gas.0, held.gas.0),
