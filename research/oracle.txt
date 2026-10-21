@@ -4143,6 +4143,34 @@ put_back_solid              boot 0x0027df50 (bike, y in/out, normal out, ...) th
 #                                           +0x13a8).
 put_back_gate               boot 0x0027e410 (bike, point) a bounds table at 0x00420c00 used only when
 #                                           two config words are zero; passed on free06 and free09.
+# S75 — put_back_solid read whole, and driven from the record test's world (crates/game-sim/tests/
+#   ride.rs, TheOriginalsTerrain::solid). Args: (bike, bike +0x148c, filter, bundle = bike +0x1484,
+#   normal out or 0, y in/out). The bundle as the put-back fills it: +0x120 count, *(+0x134) lengths,
+#   *(+0x138) origins, *(+0x13c) directions, +0x150 centre, +0x160 radius; the record *(+0x6c) is
+#   cleared over the count (+0xa4 flags, +0x98 points, +0x94 normals, +0xa8 fractions, all zero).
+#   Broad phase: |+0x150 - bike +0x1390|^2 -> bike +0x13a8; past bike +0x13a4 the list at bike +0x1488
+#   is regathered (collision_search_gather, mode 1 when the race record's +0x40 is 1, else 3) and
+#   +0x1390 moves to the centre. Each entry (object, distance) under the bundle's radius: type 2 with
+#   +0x31 & 1 and not (+0x84 & the word at 0x004e2130) -> 0x0011c210 (bundle, object, record), and
+#   on a hit y = max(y, record point 0's y) (normal copied with it), and any flag 1..count-1 refuses;
+#   type 3 -> each part (group_part_count/group_part) whose u16 cell x/z at +8/+0xc times the world's
+#   cell size is within 20 of the centre refuses; then mode 1 with race flag 1: any checkpoint within
+#   sqrt(r^2/4 + 100) refuses. Returns the refusal. The overhead probe ignores it and reads only y.
+#   The filter argument is not read in it; put_back_clear passes it to put_back_refile.
+put_back_refile             boot 0x001ab310 (bundle, centre, filter; radius in f12) -> 0x001adc70 on
+#                                           the bundle's +4: re-files the bundle in the world's tree;
+#                                           put_back_clear calls it before the ring when bike +0x13a4 <
+#                                           +0x13a8, i.e. after a query that regathered
+put_back_ring_filter        boot 0x00420d80 the filter quad put_back_clear hands put_back_solid/refile
+put_back_over_filter        boot 0x00420db0 the filter quad put_back_keep's overhead probe hands it
+bundle_sweep_object         boot 0x0011c210 (bundle, object, record) -> met: nothing unless the object
+#                                           is +0x31 & 1 and its sphere (+0x40, +0x60) meets the bundle's
+#                                           (+0x150, +0x160); clears the record's flags (+0xa4) and
+#                                           fractions (to -1) and its tally first, never its points or
+#                                           normals; then by the object's class at +0x68 (2, 3: nothing).
+#                                           put_back_solid reads its answer object by object.
+put_back_mask               boot 0x004e2130 the word put_back_solid masks an object's +0x84 with: a hit
+#                                           there skips it (the bike's own, 0x10000, in both states)
 hand_reset_thunk            boot 0x00281930 this -= 80, into player_hand_reset: the input interface's
 #                                           slot (vtable 0x00454fb0), so the chord runs before the
 #                                           update (0x00281950 -> 0x0027c890, slot at 0x00454f84).
