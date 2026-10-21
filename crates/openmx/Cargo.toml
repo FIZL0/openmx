@@ -52,3 +52,5 @@ js-sys = "0.3"
 # tests/netplay_browser.rs's local relay: iroh's own relay server, as crates/openmx-net's tests run it
 iroh-relay = { version = "1.3", features = ["server"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+# tests/audio.rs runs the original's engine note over a save state (P49)
+ps2-oracle = { path = "../ps2-oracle" }
