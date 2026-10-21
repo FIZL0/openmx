@@ -956,6 +956,30 @@ impl Body {
         Some(Ragdolled { rig: Rig { parts, hands }, nodes })
     }
 
+    /// **The skeleton as this body last posed it, as the ragdoll reads it** (S65): each part's node
+    /// in the bike's frame and its rest, worked out as [`Body::ragdoll_rig`] works out the riding
+    /// pose's, from the pose [`Body::ride`] last wrote. The simulation's wreck is posed from it
+    /// ([`game_sim::rider::Rider::skeleton`]).
+    pub fn ragdoll_posed(&self, doll: &Ragdolled) -> game_sim::ragdoll_ride::Posed {
+        use game_sim::ragdoll_pose::Bone as Placed;
+        let skeleton = &self.rig.set.skeleton;
+        let locals = skeleton.locals(&self.rig.set.pose);
+        let world = skeleton.compose(&locals);
+        let row = |r: [f32; 4], w: f32| Vf::new(r[0], r[1], r[2], w);
+        let mut posed = game_sim::ragdoll_ride::Posed::default();
+        for &node in &doll.nodes {
+            let (Some(m), Some(local)) = (world.get(node), locals.get(node)) else { break };
+            let rows = local.0.map(|r| row(r, r[3]));
+            let q = game_sim::math::mat4_to_quat(&game_sim::math::Mat4(rows));
+            let (x, y, z, w) = (q.x(), q.y(), q.z(), q.w());
+            let n = (x * x + y * y + z * z + w * w).sqrt();
+            let k = if w < 0.0 { -1.0 / n } else { 1.0 / n };
+            posed.bones.push(Placed { at: row(m.0[3], 1.0), forward: row(m.0[2], 0.0), up: row(m.0[1], 0.0) });
+            posed.rests.push(Vf::new(x * k, y * k, z * k, w * k));
+        }
+        posed
+    }
+
     /// Write the body into `loaded` **from the ragdoll's bones**, as it is drawn while the rider is
     /// down: each part's node at its bone ([`game_sim::ragdoll_ride::Down::nodes`], in the world),
     /// every other node at its riding-pose place under its parent. The triangles are left in the

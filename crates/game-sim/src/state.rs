@@ -166,8 +166,12 @@ pub struct Sense {
     /// written during a wreck by the rider's own side of it, and a player bike's copy of it
     /// (`player + 0xd3c`) reads 1 part way through every wreck: 18, 22 and 26 ticks after the entry
     /// across three measured reason-5 wrecks. So the automatic reset is not out of reach for a bike —
-    /// it is the normal way back, and the hand chord only cuts it short. [`crate::ride::Crash`] is
-    /// what sets this in the port, and its docs have the measurements.
+    /// it is the normal way back, and the hand chord only cuts it short. Its writer is the rider body
+    /// actor (S65): the end of its tick copies its touching flag (a bone of the ragdoll on something)
+    /// into the request it shares with the bike, which is that word. The bike updates first, so this
+    /// is the flag the previous tick left. The ragdoll sets it in the port
+    /// ([`crate::ragdoll_ride::Down::settles`]); a rider down as one point has
+    /// [`crate::ride::Crash`]'s reading of it.
     pub settles: bool,
 }
 
