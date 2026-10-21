@@ -60,6 +60,37 @@ pub fn parse(text: &str) -> Vec<Section> {
     out
 }
 
+/// A switch the way the original's reader takes one (P61), ignoring case: a value starting with `T` is
+/// on and one starting with `F` off, then `ON` and `OFF` whole, then `Y` and `N` by the first letter,
+/// and anything else is read as a number, on when it is not 0. So `TRUE` is on, and so is `1`.
+pub fn switch(value: &str) -> bool {
+    let v = value.trim().to_ascii_uppercase();
+    match () {
+        _ if v.starts_with('T') => true,
+        _ if v.starts_with('F') => false,
+        _ if v == "ON" => true,
+        _ if v == "OFF" => false,
+        _ if v.starts_with('Y') => true,
+        _ if v.starts_with('N') => false,
+        _ => {
+            // A C `strtol` with base 0: a sign, then hex after `0x`, octal after a `0`, or decimal,
+            // as far as the digits go.
+            let (negative, digits) = match v.strip_prefix('-') {
+                Some(rest) => (true, rest),
+                None => (false, v.strip_prefix('+').unwrap_or(&v)),
+            };
+            let (radix, digits) = match digits.strip_prefix("0X") {
+                Some(hex) => (16, hex),
+                None if digits.starts_with('0') => (8, digits),
+                None => (10, digits),
+            };
+            let end = digits.find(|c: char| !c.is_digit(radix)).unwrap_or(digits.len());
+            let n = i64::from_str_radix(&digits[..end], radix).unwrap_or(0);
+            (if negative { -n } else { n }) != 0
+        }
+    }
+}
+
 /// Decode as text the way the disc writes it: ASCII, with the odd high byte in a name.
 pub fn text(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
@@ -68,6 +99,16 @@ pub fn text(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_switch_reads_like_the_originals() {
+        for on in ["T", "TRUE", "t", " True ", "ON", "on", "Y", "yes", "1", "-2", "0x10", "7abc"] {
+            assert!(switch(on), "{on:?}");
+        }
+        for off in ["F", "FALSE", "f", "OFF", "N", "no", "0", "", "abc", "0x0", "00"] {
+            assert!(!switch(off), "{off:?}");
+        }
+    }
 
     #[test]
     fn sections_keep_their_order_and_lose_their_comments() {
