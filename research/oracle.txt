@@ -4002,6 +4002,15 @@ mxbike_unwreck boot 0x0027bb20 the motocross bike's unwreck slot (vtable 0x00455
 bike_edge_armed_by boot 0x0027aa70 the bike builder: +0x570 = 1 when its a3 is 0 and the event's
 #                                  first word (league) is 1 or 2, else 0. RAM: the player's bike 1, the
 #                                  AI's 0 (rec-start, acc-start)
+#   S73 — the gate decoded (0x0027ac4c..0x0027aca8, bike in s3, a3 in s1). a3 == 1: +0x570 = 0. Else the
+#   league word *(*(*(app_pointer)+0x3d4)+0xc): 1 or 2 -> (a3 == 0); 0 -> 0; anything else leaves the
+#   word (the vehicle base ctor 0x0024f420 clears it). The only caller, the vehicle loader's bike
+#   spawner 0x0020e0b0 (called from vehicle_build_load at 0x0020a048), hands a3 through from the
+#   loader's per-player array, which it fills off the player's kind (+0x34): kind 1 (a human, pad i)
+#   -> 0, kind 2 (the AI) -> 1, kind 3 (the ghost spawn_racers makes for activity type 3) -> 2. So:
+#   armed = a player's bike at league 1 (nationals) or 2 (free), never in supercross (0), never the
+#   AI's or the ghost's. Port: off_map::armed + Rider::edge_armed; proof crates/game-sim/tests/
+#   edge_armed.rs runs the gate itself over 12,000 (a3, league, prior word) cases.
 body_publish boot 0x0024e250 the body actor's last call: the request block's +0x1c0 (= bike+0xd40)
 #                             = the main bone body's +0x60, [[actor+0x2f4]+0xa4]+0x60. Riding, it sat
 #                             (-0.07, +1.74, -1.19) from the chassis' +0x60 in rec-start's RAM
