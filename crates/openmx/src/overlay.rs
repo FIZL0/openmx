@@ -238,6 +238,36 @@ pub struct Art {
     small: Font,
     /// `eurostileboldbold_12`, the score's label.
     label: Font,
+    /// Each seat's rider's name and number (P86), in seat order: the view's own under the score,
+    /// another's number beside their radar mark. The original's free ride has one rider and no such
+    /// thing; where they go is the port's.
+    pub tags: Vec<Tag>,
+}
+
+/// A rider's name and number as the HUD shows them (P86).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tag {
+    pub name: String,
+    pub number: String,
+}
+
+impl Tag {
+    /// `#72 Kaito`, the number or the name alone when that is all there is.
+    pub fn text(&self) -> String {
+        match (self.number.is_empty(), self.name.is_empty()) {
+            (false, false) => format!("#{} {}", self.number, self.name),
+            (false, true) => format!("#{}", self.number),
+            _ => self.name.clone(),
+        }
+    }
+
+    /// What the radar writes beside a rider's mark: the number, or the name's first letter.
+    pub fn mark(&self) -> String {
+        match self.number.is_empty() {
+            false => self.number.clone(),
+            true => self.name.chars().next().map(String::from).unwrap_or_default(),
+        }
+    }
 }
 
 /// The fonts' atlases' places in [`Art::images`], after the textures.
@@ -269,7 +299,7 @@ impl Art {
             Font::parse(&cel, atlas).map_err(|e| format!("{name}.cel: {e}"))
         };
         let (digits, small) = (font("yearlingdashboldoblique_55")?, font("eurostileboldbold_14")?);
-        Ok(Art { digits, small, label: font("eurostileboldbold_12")?, textures })
+        Ok(Art { digits, small, label: font("eurostileboldbold_12")?, textures, tags: Vec::new() })
     }
 
     /// Draw view `v`'s HUD into `frame`, which is that view's picture: `riders` is every rider's
@@ -337,6 +367,11 @@ impl Art {
             let at = radar_mark(own, forward, [r.target.body_point.x(), r.target.body_point.z()], span);
             self.icon(pen, "map_icon_hit_freestyle", at, MARK_SIZE, HUMAN_MARK);
             drawn.marks.push((i, pen.px(at)));
+            if let Some(tag) = self.tags.get(i).map(Tag::mark).filter(|t| !t.is_empty()) {
+                let (x, y) = (at.0 + MARK_SIZE / 2.0 + 1.0, at.1 - MARK_SIZE);
+                pen.text((&self.label, LABEL), &tag, x, y, false, HUMAN_MARK);
+                drawn.mark_tags.push((i, tag));
+            }
         }
         self.icon(pen, "map_icon_player_freestyle", RADAR_AT, PLAYER_SIZE, PLAYER_COLOUR);
         drawn.player = pen.px(RADAR_AT);
@@ -355,6 +390,11 @@ impl Art {
         if gauges.modified {
             pen.text((&self.label, LABEL), "MODIFIED", SCORE_LABEL.0, SCORE_LABEL.1 + MODIFIED_DROP, false, SCORE_COLOUR);
             drawn.modified = true;
+        }
+        if let Some(tag) = self.tags.get(v).map(Tag::text).filter(|t| !t.is_empty()) {
+            let drop = if gauges.modified { 2.0 } else { 1.0 } * MODIFIED_DROP;
+            pen.text((&self.label, LABEL), &tag, SCORE_LABEL.0, SCORE_LABEL.1 + drop, false, SCORE_COLOUR);
+            drawn.tag = Some(tag);
         }
 
         // The speedometer: the dial with its needle and odometer for one rider, the number for more;
@@ -437,6 +477,10 @@ pub struct Drawn {
     pub scale: f32,
     /// The modified-ride mark was drawn.
     pub modified: bool,
+    /// The view's own rider's name and number, when drawn (P86).
+    pub tag: Option<String>,
+    /// What was written beside each other rider's mark: their seat and their number.
+    pub mark_tags: Vec<(usize, String)>,
 }
 
 #[derive(Clone, Copy)]

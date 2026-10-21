@@ -1190,6 +1190,10 @@ pub struct Menu {
     pub seated: usize,
     /// The picks changed since [`Menu::take_picks_changed`] last said so.
     picks_changed: bool,
+    /// The saved looks (P86), as `riders.txt` keeps them.
+    pub looks: roster::Presets,
+    /// A seat saved a look since [`Menu::take_looks_changed`] last said so.
+    looks_changed: bool,
     /// Online play's side of the menu (N3).
     pub lobby: Lobby,
     /// The pause's "Open to Online" (N10), as the shell says the ride under it stands.
@@ -1307,6 +1311,8 @@ impl Menu {
             garages: Vec::new(),
             seated: 1,
             picks_changed: false,
+            looks: roster::Presets::default(),
+            looks_changed: false,
             lobby: Lobby::default(),
             opening: Opening::No,
             p1: None,
@@ -1545,6 +1551,18 @@ impl Menu {
         self
     }
 
+    /// The saved looks the garage's Preset row loads (P86).
+    pub fn with_looks(mut self, looks: roster::Presets) -> Menu {
+        self.looks = looks;
+        self
+    }
+
+    /// Whether a seat saved a look since the last time this was asked, which is when the shell
+    /// writes `riders.txt`.
+    pub fn take_looks_changed(&mut self) -> bool {
+        std::mem::take(&mut self.looks_changed)
+    }
+
     /// Whether the picks changed since the last time this was asked, which is when the shell writes
     /// `garage.txt`.
     pub fn take_picks_changed(&mut self) -> bool {
@@ -1580,6 +1598,8 @@ impl Menu {
                 self.picks_changed = true;
             }
         }
+        // Online this machine's first seat is its rider (N3), in its look (P86).
+        self.lobby.pick.look = self.picks.0[0].look.text();
         self.pop();
     }
 
@@ -1594,7 +1614,49 @@ impl Menu {
         if seat == 0 || seat >= self.seated || self.screen() != Some(Screen::Garage) {
             return;
         }
+        self.press_garage(seat, p);
+    }
+
+    /// A seat's press on its column (P86): while it types a name or number the keys have it — Cross
+    /// types, Square deletes, Start keeps the text and Circle drops it — and otherwise Cross acts on
+    /// the row and the d-pad walks it. True when the seat asked to leave the screen.
+    fn press_garage(&mut self, seat: usize, p: Press) -> bool {
+        let Some(g) = self.garages.get_mut(seat) else { return false };
+        if let Some(e) = &mut g.entry {
+            if p.up || p.down {
+                e.walk(if p.up { -1 } else { 1 }, 0);
+            } else if p.left || p.right {
+                e.walk(0, if p.left { -1 } else { 1 });
+            } else if p.ok {
+                g.cross(&mut self.looks);
+            } else if p.delete {
+                e.delete();
+            } else if p.start {
+                g.finish_entry();
+            } else if p.back {
+                g.cancel_entry();
+            }
+            return false;
+        }
+        if p.ok {
+            return match g.cross(&mut self.looks) {
+                roster::Cross::Leave => true,
+                roster::Cross::Saved => {
+                    self.looks_changed = true;
+                    false
+                }
+                roster::Cross::Stay => false,
+            };
+        }
+        if p.back || p.start {
+            return true;
+        }
+        if (p.left || p.right) && roster::ROWS[g.row] == roster::Row::Preset {
+            g.turn_preset(&self.catalogue, &self.looks, if p.left { -1 } else { 1 });
+            return false;
+        }
         self.walk_garage(seat, p);
+        false
     }
 
     /// Up and down choose a seat's row, left and right change it.
@@ -2036,11 +2098,10 @@ impl Menu {
         }
         if screen == Screen::Garage {
             // Cross, Circle and Start all leave it: a pick is made by turning it, so there is
-            // nothing to confirm and nothing to cancel.
-            if p.ok || p.back || p.start {
+            // nothing to confirm and nothing to cancel — but for the rows Cross acts on (P86), the
+            // name and number it types and the look it saves.
+            if self.press_garage(0, p) {
                 self.close_garage();
-            } else {
-                self.walk_garage(0, p);
             }
             return Act::Stay;
         }
@@ -2711,7 +2772,15 @@ impl Lobby {
             "Not ready"
         };
         let ping = room.ping.get(&seat.peer).map_or(String::new(), |ms| format!("  {ms} ms"));
-        format!("{}  {name}  {}  {}  {state}{ping}", i + 1, seat.pick.rider, self.bike_label(&seat.pick.bike))
+        // The rider's own name and number from their look (P86), before the gear set they wear.
+        let look = roster::Look::parse(&seat.pick.look);
+        let rider = match (look.number.is_empty(), look.name.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => format!("{}  ", look.name),
+            (false, true) => format!("#{}  ", look.number),
+            (false, false) => format!("#{} {}  ", look.number, look.name),
+        };
+        format!("{}  {name}  {rider}{}  {}  {state}{ping}", i + 1, seat.pick.rider, self.bike_label(&seat.pick.bike))
     }
 }
 
@@ -2789,6 +2858,11 @@ impl Font {
             .get(&(c as u32))
             .or_else(|| self.glyphs.get(&0))
             .unwrap_or_else(|| self.glyphs.values().next().unwrap())
+    }
+
+    /// Whether the font has a glyph of its own for `c`, rather than the missing box (P86).
+    pub(crate) fn has(&self, c: char) -> bool {
+        self.glyphs.contains_key(&(c as u32))
     }
 
     /// How wide `text` is, in layout pixels.
@@ -3185,6 +3259,14 @@ fn garage_y(i: usize) -> f32 {
     88.0 + 38.0 * i as f32
 }
 
+/// How many of the garage's rows show at once, and the first of them with the cursor on `row`: the
+/// window follows the cursor, keeping it in the middle where it can.
+const GARAGE_SHOWN: usize = 7;
+
+fn garage_top(row: usize) -> usize {
+    row.saturating_sub(GARAGE_SHOWN / 2 - 1).min(roster::ROWS.len().saturating_sub(GARAGE_SHOWN))
+}
+
 fn garage_label(row: roster::Row) -> &'static str {
     match row {
         roster::Row::Class => "Class",
@@ -3194,6 +3276,15 @@ fn garage_label(row: roster::Row) -> &'static str {
         roster::Row::Tuning => "Tuning",
         roster::Row::Rider => "Rider",
         roster::Row::Colours => "Colours",
+        // The original's custom rider screen's own words (P86).
+        roster::Row::Outfit => "Jersey Pants",
+        roster::Row::Name => "Name",
+        roster::Row::Number => "Number",
+        roster::Row::Piece(roster::Piece::Helmet) => "Helmet",
+        roster::Row::Piece(roster::Piece::Goggles) => "Goggle",
+        roster::Row::Piece(roster::Piece::Gloves) => "Glove",
+        roster::Row::Piece(roster::Piece::Boots) => "Boot",
+        roster::Row::Preset => "Preset",
     }
 }
 
@@ -3644,12 +3735,24 @@ impl<'a> Painter<'a> {
             self.text(Face::Item, &format!("Player {}", seat + 1), centre, 64.0, Align::Centre, CHOSEN);
             let Some(g) = menu.garage(seat) else { continue };
             let bar = w - 16.0;
-            let y = garage_y(g.row) - 3.0;
+            // The rows scroll with the cursor (P86 made them fifteen), a window of them at a time.
+            let top = garage_top(g.row);
+            let y = garage_y(g.row - top) - 3.0;
             self.tex("mainmenu_highlight_off_shadow", rect(x + 18.0, y + 10.0, bar, 40.0), [0, 0, 0, 110]);
             self.tex("mainmenu_highlight", rect(x + 8.0, y, bar, 40.0), CHOSEN);
-            for (i, row) in roster::ROWS.iter().enumerate() {
+            if top > 0 {
+                self.tex("arrow_up_off", rect(centre - 10.0, garage_y(0) - 22.0, 20.0, 20.0), ITEM);
+            }
+            if top + GARAGE_SHOWN < roster::ROWS.len() && g.entry.is_none() {
+                self.tex("arrow_down_off", rect(centre - 10.0, garage_y(GARAGE_SHOWN) - 4.0, 20.0, 20.0), ITEM);
+            }
+            for (i, row) in roster::ROWS.iter().enumerate().skip(top).take(GARAGE_SHOWN) {
+                // The keys take the place of the rows below the one being typed.
+                if g.entry.is_some() && i > g.row {
+                    break;
+                }
                 let on = i == g.row;
-                let y = garage_y(i);
+                let y = garage_y(i - top);
                 let colour = if on { CHOSEN } else { ITEM };
                 self.text(Face::Small, garage_label(*row), centre, y, Align::Centre, colour);
                 let value = g.value(&menu.catalogue, *row);
@@ -3660,9 +3763,54 @@ impl<'a> Painter<'a> {
                     self.tex("arrow_right_off", rect(x + w - 30.0, y + 4.0, 24.0, 24.0), CHOSEN);
                 }
             }
+            if let Some(e) = &g.entry {
+                self.garage_keys(e, x + 8.0, garage_y(g.row - top) + 40.0, bar);
+            }
         }
         self.title(Screen::Garage.title());
-        self.legend(&[("nav_x_off", "Done")]);
+        let typing = menu.garage(0).is_some_and(|g| g.entry.is_some());
+        let on = menu.garage(0).map(|g| roster::ROWS[g.row]);
+        if typing {
+            self.legend(&[("nav_square_off", "Delete"), ("nav_circle_off", "Cancel"), ("nav_x_off", "Type")]);
+        } else if matches!(on, Some(roster::Row::Name | roster::Row::Number)) {
+            self.legend(&[("nav_circle_off", "Done"), ("nav_x_off", "Type")]);
+        } else if on == Some(roster::Row::Preset) {
+            self.legend(&[("nav_circle_off", "Done"), ("nav_x_off", "Save")]);
+        } else {
+            self.legend(&[("nav_x_off", "Done")]);
+        }
+    }
+
+    /// A seat's keys for its name or number (P86), in its own column under the row being typed: the
+    /// front end's keyboard's rows, or the number pad's, and the commands under them.
+    fn garage_keys(&mut self, e: &roster::Entry, x: f32, y: f32, w: f32) {
+        let rows = e.keys();
+        let h = 22.0 * (rows.len() + 1) as f32 + 8.0;
+        self.fill(rect(x, y, w, h), [0, 0, 0, 210]);
+        for (r, keys) in rows.iter().enumerate() {
+            let cell = w / keys.len() as f32;
+            for (c, k) in keys.chars().enumerate() {
+                let (kx, ky) = (x + cell * c as f32, y + 4.0 + 22.0 * r as f32);
+                let on = e.key == (r, c);
+                if on {
+                    self.fill(rect(kx + 1.0, ky, cell - 2.0, 21.0), [160, 30, 20, 255]);
+                }
+                let colour = if on { CHOSEN } else { ITEM };
+                self.text(Face::Small, &k.to_string(), kx + cell / 2.0, ky + 1.0, Align::Centre, colour);
+            }
+        }
+        let commands = e.commands();
+        let cell = w / commands.len() as f32;
+        let ky = y + 4.0 + 22.0 * rows.len() as f32;
+        for (c, label) in commands.iter().enumerate() {
+            let kx = x + cell * c as f32;
+            let on = e.key == (rows.len(), c);
+            if on {
+                self.fill(rect(kx + 1.0, ky, cell - 2.0, 21.0), [160, 30, 20, 255]);
+            }
+            let colour = if on { CHOSEN } else { ITEM };
+            self.text(Face::Small, label, kx + cell / 2.0, ky + 1.0, Align::Centre, colour);
+        }
     }
 
     /// The splash (P46): a track's still from the disc, dimmed, the logo over it, and what to

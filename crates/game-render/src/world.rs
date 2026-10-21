@@ -143,6 +143,9 @@ pub struct Assets {
     /// chassis it shares with every other bike.
     renames: HashMap<String, String>,
     missing: Vec<String>,
+    /// Textures made rather than read, by file name lower-cased: a rider's own name and number
+    /// painted over `NameDefault.pst` (P86). Answers before the archives do.
+    made: HashMap<String, Texture>,
 }
 
 impl Assets {
@@ -153,6 +156,15 @@ impl Assets {
             self.renames
                 .insert(from.to_ascii_lowercase(), to.to_string());
         }
+    }
+
+    /// Answer a texture file with `texture` from now on instead of reading it, or read it again with
+    /// `None`. Like [`Assets::rename_materials`] it is for models loaded after it.
+    pub fn make_texture(&mut self, file: &str, texture: Option<Texture>) {
+        match texture {
+            Some(t) => self.made.insert(file.to_ascii_lowercase(), t),
+            None => self.made.remove(&file.to_ascii_lowercase()),
+        };
     }
 
     /// Load one model by the name a scene uses for it, from the first archive that has it. Returns
@@ -250,7 +262,8 @@ impl Assets {
                 self.by_name.insert(asked.to_string(), i);
                 return (Some(i), surface);
             }
-            let Some(texture) = read(&file).and_then(|b| decode_texture(&file, &b)) else {
+            let made = self.made.get(&file.to_ascii_lowercase()).cloned();
+            let Some(texture) = made.or_else(|| read(&file).and_then(|b| decode_texture(&file, &b))) else {
                 continue;
             };
             let i = self.textures.len();

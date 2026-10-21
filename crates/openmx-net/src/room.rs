@@ -17,11 +17,16 @@ pub const HOST: &str = "host";
 pub struct Pick {
     pub rider: String,
     pub bike: String,
+    /// What the rider wears over the gear set and their name and number (P86), as the garage writes
+    /// a look in `garage.txt`: `outfit, helmet, goggles, gloves, boots, number, name`. Empty is the
+    /// gear set as it comes, and what an older build sends.
+    #[serde(default)]
+    pub look: String,
 }
 
 impl Pick {
     pub fn new(rider: &str, bike: &str) -> Pick {
-        Pick { rider: rider.into(), bike: bike.into() }
+        Pick { rider: rider.into(), bike: bike.into(), look: String::new() }
     }
 }
 
