@@ -707,6 +707,10 @@ pub mod noise;
 /// generator it costs.
 pub mod wreck_sound;
 
+/// The wreck bike (S69): `Wreckbike.phy`'s body and collision object, and the world node's tick that
+/// moves them.
+pub mod wreck_bike;
+
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.
 pub mod ghost;
