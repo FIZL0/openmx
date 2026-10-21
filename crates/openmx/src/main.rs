@@ -2899,9 +2899,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         perf.add(Stage::Sim, sim_at.elapsed());
         stages.mark(stages::Stage::Sim);
         // The plane's particles (P58): a frame of them for each frame the plane was simulated, off
-        // where it is now. Nothing here reads or writes the simulation.
+        // where it is now. Nothing here writes the simulation; the ones that collide ask the ride's own
+        // terrain query for the ground under them (P61), which reads the terrain and nothing else.
         if simulated && let (Some((fx, binds)), Some(plane)) = (&mut plane_fx, &world.seats[0].garage.plane) {
-            fx.step(&plane_fx_frame(plane, binds), dt.0);
+            let place = &mut world.place;
+            let mut ground = |p: V3| Some(sim_world::World::ground(place, Vf::new(p.x, p.y, p.z, 1.0)).0.y());
+            fx.step_over(&plane_fx_frame(plane, binds), dt.0, &mut ground);
         }
         let (scene_at, spent) = (Instant::now(), perf.spent());
 

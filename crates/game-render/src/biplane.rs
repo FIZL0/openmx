@@ -204,6 +204,9 @@ pub struct Emitter {
     /// An exhaust's `MaxSpeed`: the airspeed, feet a second, at which it stops (P58). 0 where the
     /// entry does not say.
     pub max_speed: f32,
+    /// `HasCollision`: the collision model's particles meet the ground (P61). The wreck's chunks say
+    /// `TRUE`; off where the entry does not say.
+    pub has_collision: bool,
 }
 
 /// Read the emitter list: one [`Emitter`] per `[section]`, in the file's order.
@@ -225,6 +228,7 @@ pub fn emitters(text: &str) -> Vec<Emitter> {
             "attachedtosoultree" => e.node = Some(value),
             "disable" => e.disable = value,
             "maxspeed" => e.max_speed = value.parse().unwrap_or(0.0),
+            "hascollision" => e.has_collision = crate::ini::switch(&value),
             _ => {}
         }
     }
