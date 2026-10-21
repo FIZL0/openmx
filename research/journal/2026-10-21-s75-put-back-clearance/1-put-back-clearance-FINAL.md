@@ -71,7 +71,7 @@ Function oracle in the interpreter, against the save states' RAM:
 
 - **The game's own `World` is not the original's query.** `Place::solid` sweeps the port's scene props,
   and `crowded` is always no there. Which meshes the original's search list holds, its flags and mask,
-  and its placed groups are matched only in the test world, from RAM. That is follow-up S80.
+  and its placed groups are matched only in the test world, from RAM. That is follow-up S83.
 - **Checkpoints in a race.** Both states are freeride, so the race-mode branch never ran.
 - **Captured refusals by a mesh: none.** No captured tick came near a swept object. Real-ride mesh
   refusals rest on the generated probes alone.
@@ -90,4 +90,4 @@ Function oracle in the interpreter, against the save states' RAM:
 
 ## Next
 
-Finish: `./kit done S75`. The in-game query is S80.
+Finish: `./kit done S75`. The in-game query is S83.

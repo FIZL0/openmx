@@ -76,12 +76,12 @@ Task S72. 2026-10-21.
   put-back, so its black draw respawns the bike a second time. This comes from the disassembly and
   was not captured. The port puts the bike back again, in place, with the ghost restarted. Where the
   original places it (player_respawn's own placement, perhaps the spawn) is not measured. Filed as
-  S81.
+  S84.
 - **Milliseconds are modelled as an update count.** The original adds whole ms of real frame time.
   The port counts three updates. They agree for any mix of 33 and 34 ms frames (always three), but a
   frame long enough to skip a tick (a slow frame, 50+ ms) would reach black in two updates in the
   original and still take three in the port. That was not seen and not modelled.
-- **The black fade is not drawn by the shell.** It is ported as timing only. Filed as S74.
+- **The black fade is not drawn by the shell.** It is ported as timing only. Filed as S85.
 - **One page per rider.** The original's fader belongs to the screen (`which` = current screen !=
   the player's screen). Split-screen and two riders on one screen are not modelled. In netplay every
   rider is now "a local human with a screen" in the simulation, which is the same on every peer but
@@ -97,4 +97,4 @@ Task S72. 2026-10-21.
 
 ## Next
 
-Done. Follow-ups: S74 (the shell's fade), S81 (the chord during the fade out).
+Done. Follow-ups: S85 (the shell's fade), S84 (the chord during the fade out).
