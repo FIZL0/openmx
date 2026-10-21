@@ -336,6 +336,22 @@ impl Rider {
         // 1 — the top of the player's update: the hand-reset latch is dropped.
         state.frame_start();
 
+        // 1b — the L1+R1 put-back, which the original takes in its input phase, before the update
+        // (S66): the bike is set down on the put-back record and this frame's physics runs from there.
+        if c.respawn && state.chord_allowed(sense.ai_route) {
+            state.take_chord();
+            if state.request_reset(state::Kind::Wrecked, false, sense.owner) == Some(state::Reset::Now) {
+                state.respawn();
+                ride.place_back();
+                *crash = None;
+                *ragdoll = None;
+                tricks.reset();
+                *flight = Trick::NONE;
+                out.respawned = true;
+                ghost.start();
+            }
+        }
+
         // 2 — the physics, only while the rider is not down. The respawn is the machine's to order,
         // so the bike's own chord is taken out of the controls it is handed here and read below.
         let was_airborne = *airborne;
@@ -348,6 +364,14 @@ impl Rider {
             let held = down.holding;
             down.step(dt, &w.part, &w.wrecks, world);
             out.separated = held && !down.holding;
+            // The put-back record goes on being kept while the rider is down, off the wreck body: its
+            // centre is the probe and its forward row the heading (S66). Not in a cannonball, whose
+            // own branch follows a ragdoll flag this port does not have; with it clear the original
+            // keeps the record where it was, which is what this does.
+            if state.wreck != Some(Wreck::CANNONBALL) {
+                let heading = crate::math::quat_to_mat4(down.body.quat, down.origin).0[2];
+                ride.keep_back(down.body.cofg_world, heading, world, &t.ride.curve);
+            }
             // The rider's bones, when there are any: they let go of the bars on their own clock.
             if let (Some(kit), Some(doll)) = (ragdoll_kit.as_ref(), ragdoll.as_mut()) {
                 let held = doll.ragdoll.holds[0] || doll.ragdoll.holds[1];
@@ -369,23 +393,6 @@ impl Rider {
             trick::Buttons { trick: c.trick, dpad: c.dpad },
             down,
         );
-        if c.respawn && state.chord_allowed(sense.ai_route) {
-            state.take_chord();
-            if state.request_reset(state::Kind::Wrecked, false, sense.owner) == Some(state::Reset::Now) {
-                state.respawn();
-                let (at, facing) = match crash.as_ref() {
-                    Some(down) => down.rest(),
-                    None => (ride.spawn, ride.spawn_facing),
-                };
-                ride.place(at, facing);
-                *crash = None;
-                *ragdoll = None;
-                tricks.reset();
-                *flight = Trick::NONE;
-                out.respawned = true;
-                ghost.start();
-            }
-        }
 
         // 4 — the request, then the idle for the frames with nothing asked for. The gate in front of
         // the idle is the original's: it only applies on the riding branch, and a wrecked rider's
@@ -543,14 +550,10 @@ impl Rider {
         }
         if verdict.reset == Some(state::Reset::Now) {
             // The machine has done its own half; the bike's placement is the caller's. It goes back
-            // to **where the wreck ended up** and not to the spawn — see [`Crash::rest`], which is
-            // measured — and to the spawn only for a rider who was put down without a wreck body
-            // under them (no wreck files, or [`crate::state::Wreck::NO_CONTROL`] before the first).
-            let (at, facing) = match crash.as_ref() {
-                Some(down) => down.rest(),
-                None => (ride.spawn, ride.spawn_facing),
-            };
-            ride.place(at, facing);
+            // onto the put-back record (S66), which the wreck body kept up to date while the rider
+            // was down — **where the wreck ended up**, as [`Crash::rest`] measured — and which still
+            // holds the last spot ridden over for a rider put down without a wreck body under them.
+            ride.place_back();
             *crash = None;
             *ragdoll = None;
             tricks.reset();

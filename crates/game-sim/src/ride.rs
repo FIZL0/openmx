@@ -139,7 +139,7 @@ pub struct Controls {
     pub dpad: [bool; trick::DPAD],
     /// The rider is balancing on one wheel.
     pub balance: bool,
-    /// Put the bike back on the start line.
+    /// Put the bike back: on [`Ride::back`], the last spot the bike was kept fit to stand on (S66).
     pub respawn: bool,
 }
 
@@ -529,6 +529,46 @@ impl Wheel {
     }
 }
 
+// --- the put-back -----------------------------------------------------------------------------------
+
+/// **Where a put-back sets the bike down** (S66): the original's record of the last good spot. Both
+/// the L1+R1 chord and the machine's own reset after a wreck place the bike here, unchanged, and
+/// [`Ride::keep_back`] rewrites it every frame the ground under the bike is fit to stand on — so a
+/// put-back lands where the bike last was, and at the ride's start only when it has not been
+/// anywhere else (`research/journal/2026-10-21-s66-hand-reset-position`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Back {
+    /// On the ground: the probe's `x`, `z` and `w`, the ground's height.
+    pub at: Vf,
+    /// The heading with its height taken out, unit length, `w` the heading's.
+    pub facing: Vf,
+    /// The ground's normal there, as the ground query wrote it — the up the bike is stood on.
+    pub up: Vf,
+}
+
+impl Default for Back {
+    fn default() -> Back {
+        Back { at: NOTHING, facing: Vf::new(0.0, 0.0, 1.0, 1.0), up: UP }
+    }
+}
+
+/// Where the record's probe stands on the bike while it is riding: the bike collision record's sweep
+/// offset, three feet up the chassis' own up axis, taken through the transform the frame starts with.
+const BACK_PROBE: Vf = Vf::new(0.0, 3.0, 0.0, 1.0);
+/// A spot whose ground normal is not steeper than this is not kept.
+const BACK_LEVEL: f32 = 0.8;
+/// The height the record's point is raised along the old up: a word of the bike's that its
+/// constructor leaves zero and both captured tracks kept zero.
+const BACK_RAISE: f32 = 0.0;
+/// The clearance test's ring: fourteen probes — one straight down, twelve around at knee height, one
+/// along the heading at head height — within forty feet.
+const BACK_PROBES: usize = 14;
+const BACK_REACH: f32 = 40.0;
+/// The probe above the spot reaches this far over it, and the query around it is this wide.
+const BACK_OVER: f32 = 10.0;
+const BACK_OVER_REACH: f32 = 1000.0;
+const DOWN: Vf = Vf::new(0.0, -1.0, 0.0, 1.0);
+
 // --- the bike ---------------------------------------------------------------------------------------
 
 /// The whole bike: every word of state one ride carries.
@@ -566,6 +606,8 @@ pub struct Ride {
     /// Where the bike goes back to, and which way it faces there.
     pub spawn: Vf,
     pub spawn_facing: Vf,
+    /// Where a put-back sets the bike down (S66), kept up to date by [`Ride::keep_back`].
+    pub back: Back,
     /// What the last sweep found, kept for the frame after it: the nearest prop's distance, which the
     /// ground step reads as `node_distance`.
     pub near: F,
@@ -632,6 +674,8 @@ impl Ride {
             held: Held::default(),
             spawn: at,
             spawn_facing: facing,
+            // The constructor's record is the spawn, stood upright.
+            back: Back { at, facing, up: UP },
             near: F::ONE,
             touching: false,
             stunt: false,
@@ -643,7 +687,20 @@ impl Ride {
     /// Put the bike down at a point, pointed a way, stopped: the respawn, less the ride state
     /// machine's own clocks (S5's, and P3's to wire).
     pub fn place(&mut self, at: Vf, facing: Vf) {
-        let m = math::basis(at, facing, UP, true, false);
+        self.place_on(at, facing, UP);
+    }
+
+    /// **The put-back** (S66): the bike set down on [`Ride::back`] — its point, its heading, and the
+    /// ground's normal as the up, which the look-at keeps while the heading is turned square to it.
+    pub fn place_back(&mut self) {
+        let Back { at, facing, up } = self.back;
+        self.place_on(at, facing, up);
+    }
+
+    /// [`Ride::place`] with an up axis: the look-at orthogonalises and keeps the up, the original's
+    /// model setup with its two flags.
+    pub fn place_on(&mut self, at: Vf, facing: Vf, up: Vf) {
+        let m = math::basis(at, facing, up, true, false);
         self.chassis.quat = math::mat4_to_quat(&m);
         self.origin = Vf::new(at.x(), at.y(), at.z(), 1.0);
         self.chassis.cofg_world = math::transform_point(&m, self.chassis.cofg);
@@ -673,6 +730,48 @@ impl Ride {
         self.rear.w.last_compression = F::ZERO;
         self.front.mv.spin = F::ZERO;
         self.rear.mv.spin = F::ZERO;
+    }
+
+    /// **The put-back record's update** (S66), once a frame after the bike has moved: the original's
+    /// race manager hands the bike its heading, and the bike looks under a probe for a spot fit to be
+    /// put back on.
+    ///
+    /// `at` is the probe — while riding [`Ride::frame`]'s own (the sweep point the frame started
+    /// with, at the body's height), while down the wreck body's centre — and `heading` the bike's
+    /// forward row as the frame left it. The spot is the ground straight under the probe. It is kept
+    /// only when nothing solid stands over it between the probe and the ground, nothing stands in the
+    /// way of [`clear`]'s ring of probes around it, and the ground there is no steeper than
+    /// [`BACK_LEVEL`]; otherwise the record keeps the last spot that was. `true` when it moved.
+    pub fn keep_back(&mut self, at: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> bool {
+        let (under, _) = world.ground(at);
+        let ground = F(under.y());
+
+        // Anything solid between the probe and the ground under it, and the spot is under a roof.
+        let mut over = Bundle { count: 1, centre: at, radius: F(BACK_OVER_REACH), ..Bundle::default() };
+        over.probes[0] = Probe {
+            origin: Vf::new(at.x(), (F(at.y()) + F(BACK_OVER)).0, at.z(), 1.0),
+            dir: DOWN,
+            length: (F(at.y()) - ground) + F(BACK_OVER),
+        };
+        let mut found = Record::new();
+        world.solid(&over, &mut found);
+        if found.hit[0] && ground < F(found.point[0].y()) {
+            return false;
+        }
+
+        let spot = Vf::new(at.x(), ground.0, at.z(), at.w());
+        let Some((spot, normal)) = clear(spot, heading, world, curve) else {
+            return false;
+        };
+        if !(F(normal.y()) > F(BACK_LEVEL)) {
+            return false;
+        }
+        self.back = Back {
+            at: add_xyz(spot, scale(self.back.up, F(BACK_RAISE))),
+            facing: flat_unit(heading),
+            up: normal,
+        };
+        true
     }
 
     /// Where the bike is: the chassis transform's origin, which is what a camera and a model ride on.
@@ -770,6 +869,59 @@ fn held_transform(node: &[Vf; 3], quat: Vf, origin: Vf) -> Mat4 {
         return math::quat_to_mat4(quat, origin);
     }
     Mat4([node[0], node[1], node[2], origin])
+}
+
+/// `v` with its height taken out and the rest made unit length, `w` kept: the `vmul`/`vadday`/`vmaddz`
+/// sum of squares and `vrsqrt` the put-back's heading is flattened with (S66).
+fn flat_unit(v: Vf) -> Vf {
+    let flat = Vf::new(v.x(), 0.0, v.z(), v.w());
+    flat.merge(Dest::XYZ, flat.mul_q(vu::rsqrt(1.0, vu::dot3(flat.0, flat.0))))
+}
+
+/// **The put-back's clearance test** around a spot (S66), and the ground there.
+///
+/// Fourteen probes go out from the spot together: one straight down from ten feet over it, twenty
+/// long; twelve level ones three feet up, twenty long, fanned out around the heading by the game's
+/// `{cos, sin}` table; and one along the heading six and a half feet up, from twenty feet behind to
+/// twenty ahead. The ground query then moves the spot onto the ground and says its normal. The probe
+/// straight down only lifts the spot — onto anything solid it meets above the ground, with that
+/// thing's normal; any of the other thirteen meeting something refuses the spot.
+fn clear(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> Option<(Vf, Vf)> {
+    let flat = flat_unit(heading);
+    let (fx, fz) = (F(flat.x()), F(flat.z()));
+    let y = F(spot.y());
+    let mut ring = Bundle { count: BACK_PROBES, centre: spot, radius: F(BACK_REACH), ..Bundle::default() };
+    ring.probes[0] = Probe {
+        origin: Vf::new(spot.x(), (y + F(10.0)).0, spot.z(), 1.0),
+        dir: DOWN,
+        length: F(20.0),
+    };
+    let around = BACK_PROBES - 1;
+    for i in 1..around {
+        let a = ((F(fpu::from_i32(i as i32)) - F::ONE) * F(6.2831855)) / F(fpu::from_i32(around as i32));
+        let (cos, sin) = curve.coarse(a);
+        ring.probes[i] = Probe {
+            origin: Vf::new(spot.x(), (y + F(3.0)).0, spot.z(), 1.0),
+            dir: Vf::new((fz * sin + fx * cos).0, 0.0, (fz * cos - fx * sin).0, 1.0),
+            length: F(20.0),
+        };
+    }
+    let lift = Vf::new(6.5, 6.5, 6.5, 6.5).bc(Field::X);
+    let back = Vf::new(20.0, 20.0, 20.0, 20.0).bc(Field::X);
+    ring.probes[around] = Probe { origin: spot.add(UP.mul(lift)).sub(flat.mul(back)), dir: flat, length: F(40.0) };
+
+    let (on, mut normal) = world.ground(spot);
+    let mut spot = Vf::new(spot.x(), on.y(), spot.z(), spot.w());
+    let mut found = Record::new();
+    world.solid(&ring, &mut found);
+    if found.hit[0] && F(spot.y()) < F(found.point[0].y()) {
+        spot = Vf::new(spot.x(), found.point[0].y(), spot.z(), spot.w());
+        normal = found.normal[0];
+    }
+    if found.hit[1..BACK_PROBES].iter().any(|&hit| hit) {
+        return None;
+    }
+    Some((spot, normal))
 }
 
 /// The transform helper that sets a frame's axes, keeping where the frame is: the original hands its
@@ -1178,8 +1330,7 @@ impl Ride {
     pub fn frame(&mut self, p: &Phy, tables: &Tables, c: &Controls, dt: F,
                  world: &mut dyn World) -> Vec<mv::Call> {
         if c.respawn {
-            let (at, facing) = (self.spawn, self.spawn_facing);
-            self.place(at, facing);
+            self.place_back();
         }
         let Ride {
             mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
@@ -1198,6 +1349,8 @@ impl Ride {
         // The chassis' transform as the last frame left it — the no-hander's roll included, which the
         // body's quaternion only takes in at its next integration (P32).
         let body = held_transform(node, chassis.quat, *origin);
+        // The put-back's probe: the sweep's point, three feet up the frame as it started (S66).
+        let swept = math::transform_point(&body, BACK_PROBE);
 
         let mut out = Out { chassis: body };
 
@@ -1489,6 +1642,11 @@ impl Ride {
         let ac = air_chassis!();
         air::contact(&p.air, air, &ac, &astep, &tables.acos);
 
+        // The race manager's turn, after the bike has moved: the put-back record (S66).
+        let probe = Vf::new(swept.x(), chassis.cofg_world.y(), swept.z(), swept.w());
+        let heading = node[2];
+        self.keep_back(probe, heading, world, &tables.curve);
+
         calls
     }
 }
@@ -1726,6 +1884,9 @@ impl State for Ride {
         });
         w.vf("spawn", self.spawn);
         w.vf("spawn_facing", self.spawn_facing);
+        w.vf("back.at", self.back.at);
+        w.vf("back.facing", self.back.facing);
+        w.vf("back.up", self.back.up);
         w.f("near", self.near);
         w.bool("touching", self.touching);
         w.bool("stunt", self.stunt);

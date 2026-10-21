@@ -3888,3 +3888,44 @@ ini_switch           boot 0x0014b3f0 an int/switch key: T/F by first letter, ON/
 #   the draw seen on the settle tick is the animation selection (vt+0xa8) that runs after it.
 #   The ride machine's gate (+0xd3c on the rider) is still *not* the body's +0x6b4: S26 saw it come
 #   on with the body at 42 ft/s, so Down::settles keeps S53's hands-off-and-touching inference.
+
+# S66 — the bike's put-back record and where L1+R1 / the wreck clock put the bike, ported as
+#   ride::Ride::keep_back / place_back (crates/game-sim/src/ride.rs) and held bit for bit in
+#   crates/game-sim/tests/ride.rs (the_put_back_record_is_kept_bit_for_bit: 1975 ticks of five
+#   captures on free06 and free09, riding and down; every_captured_put_back_lands_where_the_original_put_the_bike: 9).
+put_back_keep               boot 0x0027e9d0 (bike, point, heading) -> kept: the race manager's call
+#                                           after the physics; heading = race +0x120 (the node's
+#                                           row 2). Probe, freeride: x/z/w of the collision record
+#                                           +0x7d0 -> +0xe0 (the sweep's point, node(T-1) applied to
+#                                           (0,3,0,1)) with y = body +0x7a4 -> +0x64 riding; the
+#                                           ragdoll part *(+0x7a8 -> +0x124) +0x40 while +0x748 != 0.
+#                                           ground_query on +0x7ac; an overhead probe (radius 1000,
+#                                           from y+10 down, (y-ground)+10 long) above the ground
+#                                           refuses. +0xc84 != 13: put_back_clear, and normal.y > 0.8
+#                                           keeps +0x3b0 = spot + up_old * +0x13a0 (vmulx/vadd xyz),
+#                                           +0x3c0 = heading flattened (vrsqrt), +0x3d0 = the normal,
+#                                           +0x1380 = race +0xa0; the checkpoint +0x1350 copy only in
+#                                           race modes. +0xc84 == 13 and *(*(+0x7a8 -> +0x120)+0x40):
+#                                           the body node's translation, mode 1, normal straight in.
+put_back_clear              boot 0x0027e530 (bike, spot in/out, heading, normal out, mode) -> clear:
+#                                           14 probes in one bundle, radius 40: down from y+10 (20);
+#                                           12 level at y+3 (20) fanned by the curve table's entry
+#                                           with no correction at ((i-1)*2pi)/13; one along the flat
+#                                           heading from 20 behind at y+6.5 (40). ground_query, then
+#                                           put_back_solid; probe 0 only lifts the spot.
+put_back_solid              boot 0x0027df50 (bike, y in/out, normal out, ...) the bundle against the
+#                                           meshes (type 2, +0x31 & 1), type-3 groups inside 20 ft,
+#                                           and in mode 1 the checkpoints; broad phase cached on
+#                                           +0x1390 / +0x13a4 (refreshed by 0x001ab310 when +0x13a4 <
+#                                           +0x13a8).
+put_back_gate               boot 0x0027e410 (bike, point) a bounds table at 0x00420c00 used only when
+#                                           two config words are zero; passed on free06 and free09.
+hand_reset_thunk            boot 0x00281930 this -= 80, into player_hand_reset: the input interface's
+#                                           slot (vtable 0x00454fb0), so the chord runs before the
+#                                           update (0x00281950 -> 0x0027c890, slot at 0x00454f84).
+#   Measured: the put-back applies +0x3b0 as it stood the tick before (5 chord, 4 clock resets, 2
+#   tracks); ghost_start(this, 0) places the node at +0x3b0 exactly and orients it by
+#   basis(+0x3c0, +0x3d0, orthogonalise, keep_forward=0), +0x5e0 = +0x3b0. player_hand_reset in
+#   mode 3 asks the player (+0x20, vt+0xac) for the name bits of "StuntCompetition" (0x00433b80)
+#   and "HitFreeride" (0x00433b98) when 0x004e1df8 is set; answered, the reset; otherwise
+#   0x003a6dc0 instead (not ported; the captures all took the reset).
