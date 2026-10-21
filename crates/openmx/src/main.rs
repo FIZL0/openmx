@@ -1779,9 +1779,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // node by name and writes each one's place, in that node's frame, straight into the wheel's
     // `+0xa0`; "Shocks" and "Handlebars" go the same way into the front wheel's steering axis
     // (S22, `research/oracle.txt`). `BodyTireForcePosition` is a different field of the `.phy`: it
-    // lands at the wheel's `+0xb0`, which neither the suspension nor the tire step ever reads. The
-    // original has no fallback here — a bike always has a model — so the one below is the port's own,
-    // for a `.phy` whose model has no such node.
+    // lands at the wheel's `+0xb0`, which the suspension never reads: it is the arm the spin step puts
+    // the tire's force in on (S58). The original has no fallback here — a bike always has a model — so
+    // the one below is the port's own, for a `.phy` whose model has no such node: the stock bike's hubs.
     // `--trace-at`: start somewhere else on the ground, facing a heading in degrees the way a capture's
     // `atan2(m20, m22)` reads it — P15's flat stretch, which the start line is not.
     let (at, heading) = match args.trace_at {
@@ -1799,8 +1799,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         Some(Vf::new(w.0[3][0], w.0[3][1], w.0[3][2], 1.0))
     };
     let mounts = (
-        node_at("TireFront").unwrap_or(phy.front.body_tire_force_position),
-        node_at("TireRear").unwrap_or(phy.rear.body_tire_force_position),
+        node_at("TireFront").unwrap_or(game_sim::stock::MOUNTS.0),
+        node_at("TireRear").unwrap_or(game_sim::stock::MOUNTS.1),
     );
     let new_rider = |phy: &Phy, at: Vf, heading: Vf| -> Rider {
         let mut rider = Rider::new(phy, mounts, at, heading, stunts.clone());

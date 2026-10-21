@@ -84,8 +84,6 @@ fn ridden_bike() -> String {
             "XAxisRateLimit = 6\nSteerScale1 = 1.0\nSteerScale2 = 0.05\nSteerSpeed1 = 5\nSteerSpeed2 = 50\n",
         ),
         ("Drag = 0.5", "Drag = 0.037"),
-        ("BodyTireForcePosition = 0.0, 1.1, 2.1", "BodyTireForcePosition = 0.0, -0.3, 0.8"),
-        ("BodyTireForcePosition = 0.0, 1.1, -2.1", "BodyTireForcePosition = 0.0, -0.3, -0.8"),
     ] {
         assert!(out.contains(key), "game_sim::stock::BIKE no longer has `{}`", key.trim_end());
         out = out.replace(key, with);

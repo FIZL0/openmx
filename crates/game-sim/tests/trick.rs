@@ -1265,7 +1265,7 @@ struct Flown {
 ///
 /// `ask_at` past the end of the script is a drop with nobody touching the pad.
 fn flight(p: &Phy, t: &rider::Tables, set: &Set, ask_at: usize, gesture: (u8, Dir), frames: usize) -> Flown {
-    let mounts = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+    let mounts = game_sim::stock::MOUNTS;
     let at = Vf::new(0.0, DROP, 0.0, 1.0);
     let mut r = rider::Rider::new(p, mounts, at, Vf::new(0.0, 0.0, 1.0, 0.0), set.clone());
     let mut world = Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };

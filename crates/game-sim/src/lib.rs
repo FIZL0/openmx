@@ -155,9 +155,8 @@ impl Sim {
 
     /// A state built around a bike somebody has read off a disc: the shell's constructor.
     ///
-    /// `set` is the rider's own 24 stunts ([`trick::Stunts::selection`]); the wheel mounts come off
-    /// the bike's `.phy` the way [`stock::mounts`] takes them, because the model's own wheel nodes
-    /// are the renderer's side of the disc.
+    /// `set` is the rider's own 24 stunts ([`trick::Stunts::selection`]); the wheel mounts are
+    /// [`stock::mounts`]'s, because the model's own wheel nodes are the renderer's side of the disc.
     pub fn ride(
         seed: u32,
         tables: Arc<Tables>,
@@ -709,7 +708,7 @@ mod tests {
     ///
     /// The same literal as `tests/hash.rs`' own, and it moves whenever the state type or the ride
     /// does. What it is here for is the *platform*: see the test below it.
-    const HUNDRED_TICKS: u64 = 0x48e4_491f_d474_e1f7;
+    const HUNDRED_TICKS: u64 = 0x4fe3_589c_fa99_5379;
 
     /// The hash is a constant of the code, not of the machine: this value must be the same on x86-64,
     /// aarch64 and wasm32. When a change to the state type changes it, that is expected — update it. When
