@@ -415,7 +415,7 @@ def push(cwd: Path, branch: str, shared: bool = False) -> str:
     does not turn a finished task into a failed one.
 
     `shared=True` is the one exception: a `./kit run` publishing a merge that passed its test gate, when
-    `[git] push_merge` is on (see `runner.merge`).
+    `[git] push_merge` is on (agent-runner tests every merge).
 
     It merges rather than rebases when the remote has moved: the worktree branches of a `./kit run` are
     based on these commits, and rebasing the branch they came from turns every later merge into a fight.
@@ -483,7 +483,7 @@ def cmd_done(argv: list[str]) -> int:
                     help='commit even though the address audit found something (say why in the journal)')
     a = ap.parse_args(argv)
 
-    from ps2kit import plan  # function-local by design: plan.py is a leaf, so no import cycle
+    from ps2kit import plan  # function-local: it needs agent-runner, which only the plan commands do
     c = cfg(False)
     cwd = Path.cwd() if (Path.cwd() / '.git').exists() else ROOT
 

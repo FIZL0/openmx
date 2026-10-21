@@ -172,7 +172,7 @@ Read its journal entry and `./kit plan` — a blocked task is a result, with its
 stopped for no recorded reason, that is a bug in the run, not in the task.
 
 **Two agents edited the same file**
-Pick tasks for different files: `./kit run 3 --different-files`. Worktrees make the conflict a merge
+Pick tasks for different files: `./kit run 3` (mode `d`, the default). Worktrees make the conflict a merge
 rather than corruption, but it is still wasted work.
 
 **An agent is waiting on an interactive prompt**

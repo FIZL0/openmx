@@ -31,10 +31,10 @@ modules that only talk to each other through the interfaces below.
 | `probe.py` | finding things | `find_vsync()`, `find_changed()`, `chase()`, `cmd_probe(argv)` |
 | `record.py` | captures | `Watch` (a spec), `record()`, `cmd_record(argv)` |
 | `oracle.py` | the Rust oracle | `cmd_oracle(argv)` |
-| `plan.py` | the task list | `main(argv)` plus the functions `next_task/brief/tick/block/add/move/note` |
+| `plan.py` | the task list (agent-runner's plan) | `main(argv)`, `tick/block` |
 | `journal.py` | notes | `cmd_journal(argv)` |
 | `checks.py` | tests, commits | `cmd_check(argv)`, `cmd_done(argv)` |
-| `runner.py` | unattended runs | `cmd_run(argv)` |
+| `runner.py` + `runner.toml` | unattended runs (agent-runner) | `cmd_run/cmd_stop(argv)`, `settings()`, `use()` |
 | `setup.py` | first-time setup | `main(argv)`, `doctor(argv)`, `symbols(argv)` |
 
 Every `cmd_*(argv)` takes the argument list after the subcommand, parses it with
@@ -85,7 +85,9 @@ no `kit.toml` present.
 ## Dependencies
 
 The kit runs on a stock Python 3.11+ with no packages at all for everything static (disc, ELF,
-decompilation, plan, journal, checks). Optional extras, each needed by exactly one thing:
+decompilation, journal, checks). The task list and the unattended run need
+[agent-runner](https://github.com/FIZL0/agent-runner) v0.4.1 (stdlib only; SETUP.md step 1). Optional
+extras, each needed by exactly one thing:
 
 | Package | Needed for |
 |---|---|
@@ -104,7 +106,7 @@ and no `kit.toml`.
 
 | Script | Covers |
 |---|---|
-| `python3 tests/test_plan.py` | the task list, the runner's task picker, which merge conflicts it resolves itself, and the queue it hands the rest to |
+| `python3 tests/test_plan.py` | the kit's settings for agent-runner, the oracle join, the journal, the guard |
 | `python3 tests/test_static.py` | the static layer against inputs it builds itself: a disc image, a MIPS blob, a Ghidra dump |
 | `python3 tests/test_live.py` | the live layer against a fake emulator it builds itself: PINE framing, the pad language, RAM search, launch |
 | `python3 tests/test_record.py` | the watch-spec parser, region coalescing, torn-frame handling |

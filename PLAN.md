@@ -81,13 +81,11 @@ task is still open is the one that confuses the next session most, and the state
 only on this disk is the one that loses work outright.
 
 Pushing your own branch is nobody's manual step: `./kit done` pushes the branch you are on when it is a
-task's own (an agent's `task/<ID>` from its worktree, a topic branch here), and a `./kit run` pushes the
-branch of any task it could not merge itself, before handing it to the master. Publishing the **shared** branch stays a
-decision somebody makes: neither a wrap-up nor a run pushes it, and a wrap-up in the main checkout prints
-the one-line `git push` instead. A merged `task/<ID>` is dropped from the remote, but only once the remote
-actually holds the merge — before that, the branch is the only copy of that work the remote has. A remote
-that has moved is merged in first, never rebased, because the run's worktree branches are based on those
-commits. A push that fails is a logged line and nothing more. Turn it off with `[git] push = false`.
+task's own (an agent's `task/<ID>` from its worktree, a topic branch here). The **shared** branch is pushed
+only by `./kit run`, after a merge has passed the test gate (`[git] push_merge`, on by default); a wrap-up
+in the main checkout prints the one-line `git push` instead. A merged `task/<ID>` is dropped from the remote
+once the remote holds the merge. A push that fails is a logged line and nothing more. Turn it all off with
+`[git] push = false`.
 
 ## Code map
 
@@ -103,7 +101,8 @@ Keep this current. It exists so nobody greps the repo to find where something li
   `decomp.py` read the dumps one function at a time
 - live: `pine.py` PCSX2 memory · `pad.py` virtual controller · `emu.py` launch/stop/screenshot/states ·
   `probe.py` find addresses · `record.py` declarative captures
-- workflow: `plan.py` · `journal.py` · `checks.py` · `runner.py` unattended runs · `oracle.py` ·
+- workflow: `plan.py` · `journal.py` · `checks.py` · `runner.py` + `runner.toml` the kit's settings for
+  [agent-runner](https://github.com/FIZL0/agent-runner), which runs `./kit plan` and `./kit run` · `oracle.py` ·
   `setup.py` setup and doctor · `hooks/` the context guards
 
 `watch/` — capture specs (`*.toml`), one per thing you record. `research/` — your own scripts and notes,
@@ -315,20 +314,21 @@ project.
 ```sh
 ./kit run once                  # one task, then stop
 ./kit run 3                     # three agents at a time, each in its own worktree
-./kit run 3 --mode d            # ... picking tasks that touch different files
+./kit run 3 --mode p            # ... strictly in TODO.md order (mode d, the default, keeps them off each other's files)
+./kit run --dry-run 3           # what would start, and why the rest wait
+./kit stop                      # running tasks finish and merge, nothing new starts
 ```
 
-Each agent gets a git worktree on a `task/<ID>` branch, so three can build and test without fighting over
-one target directory. Tasks are picked to avoid working on the same files, and each branch is merged when
-its session ends.
+The loop is [agent-runner](https://github.com/FIZL0/agent-runner) (install: SETUP.md step 1). Each agent
+gets a git worktree on a `task/<ID>` branch and its own emulator copy (`KIT_PCSX2=N`), and each branch is
+merged in a separate merge worktree when its session ends, tested, and pushed.
 
-A merge that is not append-only text goes to the **master**: one more long-lived session, in the main
-checkout and its own tmux window, handed those branches one at a time. It exists because a run skips tasks
-whose branch is still waiting to be merged — so without it a few conflicts stop the critical path until
-somebody wakes up. It resolves, runs the tests, ticks the task, drops the branch, and writes a line in
-`context/notes/master.md` saying what it decided. It does not publish the shared branch: that stays the
-decision above. See `docs/WORKFLOW.md` for what to expect from a long run and how to pick up the pieces
-afterwards.
+**A conflict the runner cannot join goes to an agent session, not to you.** Files where a line is a whole
+record (the task list, the journal, the oracle's address list) are joined mechanically; a name given two
+addresses in the address list is refused (`./kit oracle join`). Anything else gets one session per merge in
+the merge worktree, which resolves and commits; the runner then tests it as usual. A branch that session
+gives up on is parked as `wip/<ID>` and the task opens again. `[run] fix_merges = false` parks them all.
+See `docs/WORKFLOW.md` for what to expect from a long run and how to pick up the pieces afterwards.
 
 ## When blocked
 

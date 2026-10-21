@@ -234,6 +234,24 @@ class Config:
     def build_error_re(self) -> re.Pattern:
         return re.compile(self.raw.get('build', {}).get('build_error') or r'^error(\[E[0-9]+\])?:|: error:')
 
+    # --- [run] ----------------------------------------------------------------
+    @property
+    def fix_merges(self) -> bool:
+        """Whether a conflict the runner cannot join goes to an agent session instead of to a human.
+        `[run] fix_merges = false` leaves every such merge for a human."""
+        return bool(self.raw.get('run', {}).get('fix_merges', True))
+
+    @property
+    def fix_timeout(self) -> int:
+        """Seconds a merge fixer may take before the merge is left for a human instead."""
+        return int(self.raw.get('run', {}).get('fix_timeout', 1200))
+
+    @property
+    def fix_model(self) -> str:
+        """The model that fixes merges. The default is the one the run's agents use."""
+        return str(self.raw.get('run', {}).get('fix_model')
+                   or os.environ.get('KIT_MODEL') or 'opus')
+
     # --- [git] ----------------------------------------------------------------
     @property
     def push_remote(self) -> str | None:
@@ -241,8 +259,9 @@ class Config:
 
         `./kit done` pushes the branch it committed on, and a run pushes the branch of a task whose merge
         it left for a human, so a task's own work is never only on this machine. The shared branch is
-        never pushed for you — see `checks.push`. `push = false` turns all of it off; a string names a
-        remote other than origin. A repo with no such remote configured is the same as off, silently.
+        pushed only by a run, after a merge passed the test gate (`push_merge`). `push = false` turns all
+        of it off; a string names a remote other than origin. A repo with no such remote configured is the
+        same as off, silently.
         """
         v = self.raw.get('git', {}).get('push', True)
         return None if v is False else (str(v) if isinstance(v, str) else 'origin')
