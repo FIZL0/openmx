@@ -23,8 +23,10 @@
 //! The pose is the shell's. The original poses the bones from the live animated skeleton at the
 //! frame of the wreck. This port has no skeleton in the simulation, so the shell hands over one
 //! riding pose ([`Rig`]) and, where it draws the body, the pose it last drew ([`Posed`], S65); the
-//! wreck starts from that wherever the bike is. The bones start with the
-//! bike's velocity and no spin, where the original takes both from the skeleton's last frame. The
+//! wreck starts from that wherever the bike is. The bones take their velocity and spin from how
+//! far that pose's nodes moved since the tick before (S70), as the original's do from its
+//! skeleton's; the original's skeleton is its riding ragdoll's bodies, which the port does not
+//! run while riding, so the motion is the shell's pose's and the bike's, not the original's. The
 //! holds follow the points where the hands were on the wreck bike, carried with its body; the
 //! original's follow the bike's own dummies. The rest of what is not 1:1 is listed on each item.
 
@@ -260,6 +262,32 @@ pub fn bike_centre(m: &Mat4, centre: Vf) -> Vf {
     Vf::new(p.x(), p.y(), p.z(), 1.0)
 }
 
+/// **A riding part's node, off its bone body** (S70): where the original's riding ragdoll puts the
+/// skeleton after each step. The body's orientation is normalised in place (through the reciprocal
+/// square root), and the node sits at the body's position less its centre of mass turned by it.
+/// Returns the node's position and the normalised orientation.
+pub fn node_of(position: Vf, quat: Vf, cofg: Vf) -> (Vf, Vf) {
+    let q = normalize(quat);
+    (position.sub(turn(q, cofg)), q)
+}
+
+/// **The skeleton's nodes in the world**, as the wreck entry's pose reads them: `posed`'s (or,
+/// without one, the [`Rig`]'s fixed riding pose) carried by the bike's transform `m`.
+pub fn nodes(kit: &Kit, posed: Option<&Posed>, m: &Mat4) -> Vec<Bone> {
+    (0..kit.rig.parts.len().min(PARTS))
+        .map(|i| match posed.and_then(|p| p.bones.get(i)) {
+            Some(b) => Bone { at: math::transform_point(m, b.at), forward: rotate(m, b.forward), up: rotate(m, b.up) },
+            None => kit.rig.place(m, i),
+        })
+        .collect()
+}
+
+/// **Each node's drawn matrix**: the world matrix the wreck entry's pose measures the node's move
+/// and turn from, built from the node's position and two axes as the pose builds its own.
+pub fn drawn(nodes: &[Bone]) -> Vec<Mat4> {
+    nodes.iter().map(|b| math::basis(b.at, b.forward, b.up, false, true)).collect()
+}
+
 /// **The skeleton as the shell last posed it** (S65): each part's node in the bike's frame and its
 /// rest orientation, the same two things [`RigPart::bone`] and [`RigPart::rest`] hold for the fixed
 /// riding pose. A wreck that has one is posed from it and its step pulls towards its rests, as the
@@ -305,8 +333,9 @@ impl Down {
     /// ride's transform), reset, and handed to the wreck entry for `reason`. The bike's numbers are
     /// the wreck body's, which `crash` has just been entered with.
     ///
-    /// Every bone starts with the bike's velocity and no rates. The entry then gives some reasons
-    /// their own.
+    /// With no skeleton history every bone starts with the bike's velocity and no rates (the
+    /// port's own; [`Down::enter_from`] is the original's hand-over). The entry then gives some
+    /// reasons their own.
     #[allow(clippy::too_many_arguments)]
     pub fn enter(
         kit: &Kit,
@@ -321,7 +350,9 @@ impl Down {
         Down::enter_posed(kit, None, m, crash, throw, reason, wrecks, rng, world)
     }
 
-    /// [`Down::enter`], the bones put where `posed` has them when there is one (S65).
+    /// [`Down::enter`], the bones put where `posed` has them when there is one (S65). With no
+    /// previous frame, the bones start with the bike's velocity and no rates: the port's own, for a
+    /// wreck with no skeleton history (see [`Down::enter_from`]).
     #[allow(clippy::too_many_arguments)]
     pub fn enter_posed(
         kit: &Kit,
@@ -334,26 +365,52 @@ impl Down {
         rng: &mut Rng,
         world: &mut dyn World,
     ) -> Down {
+        Down::enter_from(kit, &nodes(kit, posed, m), None, F::ZERO, crash, throw, reason, wrecks, rng, world)
+    }
+
+    /// **The wreck entered from the riding skeleton** (S70): the original's wreck entry, which
+    /// poses every bone where the skeleton's node is now (`now`, in the world) and takes its
+    /// velocity and rates from how far the node moved and turned since the node's matrix was last
+    /// drawn (`before`, the same nodes one tick earlier), over the tick's `dt`. That is the
+    /// riding pose's motion, not the bike's: the original hands no bone the bike's velocity
+    /// here, and only some reasons' throws do afterwards.
+    ///
+    /// Without `before` the bones start still, then take the bike's velocity, which is what the
+    /// port did before it kept the skeleton's last frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enter_from(
+        kit: &Kit,
+        now: &[Bone],
+        before: Option<&[Mat4]>,
+        dt: F,
+        crash: &crate::ride::Crash,
+        throw: Throw,
+        reason: i32,
+        wrecks: &Wrecks,
+        rng: &mut Rng,
+        world: &mut dyn World,
+    ) -> Down {
         let mut ragdoll = kit.ragdoll.clone();
         let t = &kit.tables;
         let mut starts = [Start::default(); PARTS];
         let mut drawn = [Mat4([Vf::ZERO; 4]); PARTS];
-        let places: Vec<Bone> = (0..kit.rig.parts.len().min(PARTS))
-            .map(|i| match posed.and_then(|p| p.bones.get(i)) {
-                Some(b) => Bone { at: math::transform_point(m, b.at), forward: rotate(m, b.forward), up: rotate(m, b.up) },
-                None => kit.rig.place(m, i),
-            })
-            .collect();
+        if let Some(before) = before {
+            for (d, b) in drawn.iter_mut().zip(before) {
+                *d = *b;
+            }
+        }
         ragdoll_pose::pose_all(
-            places.iter().zip(&kit.rig.parts).zip(drawn.iter_mut().zip(starts.iter_mut())).map(|((b, p), (d, s))| (b, p.cofg, d, s)),
-            true,
-            F::ZERO,
+            now.iter().zip(&kit.rig.parts).zip(drawn.iter_mut().zip(starts.iter_mut())).map(|((b, p), (d, s))| (b, p.cofg, d, s)),
+            before.is_none(),
+            dt,
             &t.acos,
             &t.curve,
         );
         ragdoll_pose::reset(ragdoll.bones.iter_mut().map(|b| &mut b.body).zip(starts.iter()));
-        for b in &mut ragdoll.bones {
-            b.body.velocity = crash.body.vel;
+        if before.is_none() {
+            for b in &mut ragdoll.bones {
+                b.body.velocity = crash.body.vel;
+            }
         }
         let bike = Bike { velocity: crash.body.vel, rates: crash.body.ang_vel, hit_velocity: crash.body.vel };
         ragdoll.wreck_enter(reason, &bike, wrecks, rng);
