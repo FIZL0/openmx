@@ -351,6 +351,58 @@ fn every_screen_draws_from_the_disc() {
     }
 }
 
+/// How far apart two RGB frames are: the mean difference per channel, and the share of pixels with a
+/// channel more than 32 off.
+fn apart(a: &[u8], b: &[u8]) -> (f64, f64) {
+    let sum: u64 = a.iter().zip(b).map(|(&x, &y)| x.abs_diff(y) as u64).sum();
+    let off = a.chunks(3).zip(b.chunks(3)).filter(|(x, y)| x.iter().zip(y.iter()).any(|(&p, &q)| p.abs_diff(q) > 32)).count();
+    (sum as f64 / a.len() as f64, off as f64 / (a.len() / 3) as f64)
+}
+
+/// V30: the GPU draws every screen as sprites the way the CPU draws it into a frame — the same
+/// boxes, the same texels read, the same blending — so a 4K menu costs the CPU a few thousand
+/// vertices instead of a frame drawn and sent.
+#[test]
+fn the_gpu_draws_every_screen_as_the_cpu_does() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let mut gpu = match game_render::gpu::Renderer::headless() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let art = menu::Art::load(&mut disc).expect("the menus' art");
+    gpu.set_images(&art.images());
+    // Two shapes: the layout's own scaled up, and a wide one whose sides the layout leaves.
+    for (w, h) in [(1280usize, 896usize), (1600, 720)] {
+        let texture = gpu.offscreen(w as u32, h as u32);
+        let view = texture.create_view(&Default::default());
+        let target = game_render::gpu::Target { view: &view, size: (w as u32, h as u32), frame: [0, 0, w as u32, h as u32], scale: 1 };
+        for s in Screen::ALL {
+            let mut m = Menu::new(Settings::default(), Controls::default());
+            m.open(s);
+            m.tick = 40;
+            let mut frame = game_render::Frame::new(w, h, [0, 0, 0]);
+            art.draw(&m, &mut frame);
+            let mut sprites = Vec::new();
+            art.sprites(&m, (w, h), 0, &mut sprites);
+            gpu.draw_sprites(&target, &sprites);
+            let got = gpu.read(&texture);
+            let (mean, off) = apart(&frame.color, &got);
+            eprintln!("{s:?} {w}x{h}: {} sprites, {mean:.3} apart on average, {:.4}% of pixels off", sprites.len(), off * 100.0);
+            assert!(sprites.len() > 3, "{s:?}: {} sprites", sprites.len());
+            assert!(mean < 1.0 && off < 0.002, "{s:?} {w}x{h}: {mean:.3} apart on average, {:.3}% of pixels off", off * 100.0);
+        }
+    }
+}
+
 /// A track's `machine.txt` with a plane for each of two players, in the disc's shape and with
 /// numbers of this file's own.
 const MACHINES: &str = "[Machines]\nNumberOfMachines = 2\n\n\

@@ -27,10 +27,19 @@
 //! buffers, no compute, no instance offsets — so the same code can draw in a browser through WebGPU
 //! or WebGL2.
 //!
-//! The HUD and the menus are still drawn by the CPU into frames ([`crate::raster::Frame`]) and laid
-//! over the picture as an overlay ([`Patch`]): they are few pixels and cheap.
+//! The original's HUD is drawn as sprites ([`Sprite`], V30): quads cut from pictures uploaded once.
+//! The debug HUD and the menus are still drawn by the CPU into frames ([`crate::raster::Frame`]) and
+//! laid over the picture as an overlay ([`Patch`]).
+//!
+//! The views can be drawn at a fraction of the frame's size and stretched over it
+//! ([`Renderer::render_scale`], V30), with the sprites and the overlay laid on at full size.
 
 pub use wgpu;
+
+mod scale;
+mod sprite;
+pub use scale::{AutoScale, MIN_SCALE};
+pub use sprite::{Shape, Sprite, clamp_of};
 
 use crate::mat::{M4, V3, v3};
 use crate::psg::Model;
@@ -267,18 +276,30 @@ impl Patch {
     /// `width` by `height` and placed at `at` in the frame; `None` where it touched no pixel. Only the
     /// rectangle it touched is kept.
     pub fn of(black: &[u8], white: &[u8], width: usize, height: usize, at: (u32, u32)) -> Option<Patch> {
+        // Untouched as a whole, folded rather than stopped at the first touched byte so that it runs
+        // a vector at a time (V30): a 4K layer is fifty megabytes to look through.
+        let blank = |b: &[u8], w: &[u8]| b.iter().fold(0, |a, &c| a | c) == 0 && w.iter().fold(255, |a, &c| a & c) == 255;
         let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
         for y in 0..height {
             let row = y * width * 3;
             let (b, w) = (&black[row..row + width * 3], &white[row..row + width * 3]);
-            if b.iter().all(|&c| c == 0) && w.iter().all(|&c| c == 255) {
+            if blank(b, w) {
                 continue;
             }
-            let first = (0..width).find(|&x| b[x * 3..x * 3 + 3] != [0; 3] || w[x * 3..x * 3 + 3] != [255; 3]);
-            let last = (0..width).rev().find(|&x| b[x * 3..x * 3 + 3] != [0; 3] || w[x * 3..x * 3 + 3] != [255; 3]);
-            if let (Some(f), Some(l)) = (first, last) {
-                (x0, x1, y0, y1) = (x0.min(f), x1.max(l + 1), y0.min(y), y + 1);
+            let touched = |x: usize| b[x * 3..x * 3 + 3] != [0; 3] || w[x * 3..x * 3 + 3] != [255; 3];
+            // Only what lies outside the columns found so far can widen them.
+            let left = x0.min(width);
+            if !blank(&b[..left * 3], &w[..left * 3])
+                && let Some(f) = (0..left).find(|&x| touched(x))
+            {
+                x0 = f;
             }
+            if !blank(&b[x1 * 3..], &w[x1 * 3..])
+                && let Some(l) = (x1..width).rev().find(|&x| touched(x))
+            {
+                x1 = l + 1;
+            }
+            (y0, y1) = (y0.min(y), y + 1);
         }
         if x0 >= x1 {
             return None;
@@ -305,6 +326,8 @@ pub struct Scene3<'a> {
     /// The node matrices of each posed actor, as skinning reads them (`skin::skin`'s `world`).
     pub poses: &'a [Vec<M4>],
     pub overlay: &'a [Patch],
+    /// Drawn over the views and the overlay, in order ([`Renderer::set_images`]' pictures).
+    pub sprites: &'a [Sprite],
     pub light: &'a Lighting,
 }
 
@@ -374,6 +397,10 @@ pub struct Renderer {
     batches: Vec<Batch>,
     flat: Vec<InstanceRaw>,
     blit: Option<Blit>,
+    sprites: sprite::Sprites,
+    upscale: scale::Upscale,
+    /// The fraction of the frame's size the views are drawn at, [`MIN_SCALE`] to 1 (V30).
+    pub render_scale: f32,
 }
 
 /// A prop the scene places, as culling needs it.
@@ -401,6 +428,9 @@ struct Overlay {
     bind: wgpu::BindGroup,
     /// What was written last frame, to be put back to "no overlay" first.
     last: Vec<[u32; 4]>,
+    /// The patches written last frame (V30): the same again — a pause standing still — is left in
+    /// the textures rather than written over them, which at 4K was a quarter of a gigabyte a second.
+    kept: Vec<Patch>,
 }
 
 struct Blit {
@@ -454,6 +484,33 @@ fn depth_state(write: bool, compare: wgpu::CompareFunction) -> wgpu::DepthStenci
         stencil: Default::default(),
         bias: Default::default(),
     }
+}
+
+/// A pass over `color` and `depth`, both cleared: black, and far.
+fn begin_pass<'e>(encoder: &'e mut wgpu::CommandEncoder, color: &wgpu::TextureView, depth: &wgpu::TextureView, label: &str) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: color,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Discard,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
 }
 
 /// A matrix as four texels, its rows in order.
@@ -993,6 +1050,8 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let sprites = sprite::Sprites::new(&device, &queue, format, &clamp_sampler);
+        let upscale = scale::Upscale::new(&device, format);
         Ok(Renderer {
             device,
             queue,
@@ -1039,6 +1098,9 @@ impl Renderer {
             batches: Vec::new(),
             flat: Vec::new(),
             blit: None,
+            sprites,
+            upscale,
+            render_scale: 1.0,
         })
     }
 
@@ -1683,142 +1745,200 @@ impl Renderer {
         }
         self.write_overlay(target, frame.overlay);
 
-        let depth = self.depth_for(target.size);
+        let place = PlaceUniform {
+            origin: [target.frame[0] as f32, target.frame[1] as f32],
+            scale: target.scale.max(1) as f32,
+            _pad: 0.0,
+        };
+        let sprites = self.sprites.prepare(&self.device, &self.queue, place, target.size, frame.sprites);
         let mut drawn = Drawn {
             triangles: vec![0; views.len()],
             draws: 0,
         };
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("frame"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            let stride = std::mem::size_of::<InstanceRaw>() as u64;
-            let mut b = 0;
-            for (v, view) in views.iter().enumerate() {
-                let [x, y, w, h] = view.rect;
-                let s = target.scale;
-                let (x, y, w, h) = (target.frame[0] + x * s, target.frame[1] + y * s, w * s, h * s);
-                if w == 0 || h == 0 || x + w > target.size.0 || y + h > target.size.1 {
-                    continue;
-                }
-                pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
-                pass.set_scissor_rect(x, y, w, h);
-                let offset = [(v as u64 * VIEW_STRIDE) as u32];
-                // The backdrop: the sky, or the fog's colour.
-                pass.set_pipeline(&self.sky_pipeline);
-                pass.set_bind_group(0, &self.view_bind, &offset);
-                pass.set_bind_group(1, &self.sky_bind, &[]);
-                pass.draw(0..3, 0..1);
-                drawn.draws += 1;
-                // The ground, in runs of the chunks this view sees.
-                if let Some(ground) = &self.ground {
-                    pass.set_pipeline(&ground.pipeline);
-                    pass.set_bind_group(0, &self.view_bind, &offset);
-                    pass.set_bind_group(1, &ground.bind, &[]);
-                    pass.set_vertex_buffer(0, ground.vertices.slice(..));
-                    pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    let eye = view.camera.eye;
-                    let mut run: Option<(u32, u32)> = None;
-                    for c in &ground.chunks {
-                        let seen = c.centre.sub(eye).len() - c.radius <= light.fog_far && sees(&planes[v], c.centre, c.radius);
-                        run = match (run, seen) {
-                            (Some((first, end)), true) if end == c.first => Some((first, c.first + c.count)),
-                            (Some((first, end)), true) => {
-                                pass.draw_indexed(first..end, 0, 0..1);
-                                drawn.draws += 1;
-                                drawn.triangles[v] += ((end - first) / 3) as usize;
-                                Some((c.first, c.first + c.count))
-                            }
-                            (None, true) => Some((c.first, c.first + c.count)),
-                            (r, false) => {
-                                if let Some((first, end)) = r {
-                                    pass.draw_indexed(first..end, 0, 0..1);
-                                    drawn.draws += 1;
-                                    drawn.triangles[v] += ((end - first) / 3) as usize;
-                                }
-                                None
-                            }
-                        };
-                    }
-                    if let Some((first, end)) = run {
-                        pass.draw_indexed(first..end, 0, 0..1);
-                        drawn.draws += 1;
-                        drawn.triangles[v] += ((end - first) / 3) as usize;
-                    }
-                }
-                // The models: the opaque runs of every batch, then the translucent ones over them.
-                let end = (b..self.batches.len()).find(|&i| self.batches[i].view != v).unwrap_or(self.batches.len());
-                let mine = &self.batches[b..end];
-                b = end;
-                for blended in [false, true] {
-                    let mut current: Option<PipelineKey> = None;
-                    let mut bound: Option<usize> = None;
-                    for batch in mine {
-                        let model = &self.models[batch.model];
-                        let ranges = model.group(batch.group);
-                        if !ranges.iter().any(|r| r.blended == blended) {
-                            continue;
-                        }
-                        pass.set_vertex_buffer(0, model.vertices.slice(..));
-                        // The batch's own copies, from the start of the buffer slice: WebGL2 has no
-                        // first instance to draw from.
-                        pass.set_vertex_buffer(1, self.instances.slice(batch.first as u64 * stride..(batch.first + batch.count) as u64 * stride));
-                        for r in ranges.iter().filter(|r| r.blended == blended) {
-                            let material = &self.materials[r.material];
-                            if current != Some(material.pipeline) {
-                                pass.set_pipeline(&self.pipelines[&material.pipeline]);
-                                pass.set_bind_group(0, &self.view_bind, &offset);
-                                current = Some(material.pipeline);
-                            }
-                            if bound != Some(r.material) {
-                                pass.set_bind_group(1, &material.bind, &[]);
-                                bound = Some(r.material);
-                            }
-                            pass.draw(r.start..r.start + r.count, 0..batch.count);
-                            drawn.draws += 1;
-                            drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
-                        }
-                    }
-                }
-            }
-            // The overlay, over the whole frame.
-            if let Some(overlay) = &self.overlay
-                && !frame.overlay.is_empty()
+        let scale = scale::quantise(self.render_scale);
+        let [fx, fy, fw, fh] = target.frame;
+        if scale < 1.0 && fw > 0 && fh > 0 {
+            // The views into the low texture, each view's edges scaled and rounded so they still meet;
+            // then the low texture stretched over the frame, and the overlay over that at full size.
+            let size = scale::scaled((fw, fh), scale);
+            let (low, low_depth) = self.upscale.low(&self.device, self.format, &self.clamp_sampler, size);
             {
-                let [x, y, w, h] = target.frame;
-                pass.set_viewport(0.0, 0.0, target.size.0 as f32, target.size.1 as f32, 0.0, 1.0);
-                pass.set_scissor_rect(x, y, w.min(target.size.0 - x), h.min(target.size.1 - y));
-                for pipeline in [&self.overlay_mul, &self.overlay_add] {
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, &overlay.bind, &[]);
-                    pass.draw(0..3, 0..1);
-                    drawn.draws += 1;
-                }
+                let mut pass = begin_pass(&mut encoder, &low, &low_depth, "views");
+                let (kx, ky) = (size.0 as f32 / fw as f32, size.1 as f32 / fh as f32);
+                let s = target.scale;
+                let rect = |[x, y, w, h]: [u32; 4]| {
+                    let (x0, y0) = (((x * s) as f32 * kx).round() as u32, ((y * s) as f32 * ky).round() as u32);
+                    let (x1, y1) = ((((x + w) * s) as f32 * kx).round() as u32, (((y + h) * s) as f32 * ky).round() as u32);
+                    [x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)]
+                };
+                self.draw_views(&mut pass, views, &planes, light, rect, size, &mut drawn);
             }
+            let depth = self.depth_for(target.size);
+            let mut pass = begin_pass(&mut encoder, target.view, &depth, "frame");
+            pass.set_scissor_rect(fx, fy, fw.min(target.size.0.saturating_sub(fx)), fh.min(target.size.1.saturating_sub(fy)));
+            self.upscale.draw(&self.queue, &mut pass, target.frame);
+            drawn.draws += 1;
+            self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
+        } else {
+            let depth = self.depth_for(target.size);
+            let mut pass = begin_pass(&mut encoder, target.view, &depth, "frame");
+            let s = target.scale;
+            let rect = |[x, y, w, h]: [u32; 4]| [fx + x * s, fy + y * s, w * s, h * s];
+            self.draw_views(&mut pass, views, &planes, light, rect, target.size, &mut drawn);
+            self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         }
         self.queue.submit([encoder.finish()]);
         drawn
+    }
+
+    /// Every view into `pass`, each at `rect` of its frame rectangle, inside a target of `bounds`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_views(
+        &self,
+        pass: &mut wgpu::RenderPass,
+        views: &[View],
+        planes: &[[[f32; 4]; 5]],
+        light: &Lighting,
+        rect: impl Fn([u32; 4]) -> [u32; 4],
+        bounds: (u32, u32),
+        drawn: &mut Drawn,
+    ) {
+        let stride = std::mem::size_of::<InstanceRaw>() as u64;
+        let mut b = 0;
+        for (v, view) in views.iter().enumerate() {
+            let [x, y, w, h] = rect(view.rect);
+            if w == 0 || h == 0 || x + w > bounds.0 || y + h > bounds.1 {
+                continue;
+            }
+            pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(x, y, w, h);
+            let offset = [(v as u64 * VIEW_STRIDE) as u32];
+            // The backdrop: the sky, or the fog's colour.
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.set_bind_group(0, &self.view_bind, &offset);
+            pass.set_bind_group(1, &self.sky_bind, &[]);
+            pass.draw(0..3, 0..1);
+            drawn.draws += 1;
+            // The ground, in runs of the chunks this view sees.
+            if let Some(ground) = &self.ground {
+                pass.set_pipeline(&ground.pipeline);
+                pass.set_bind_group(0, &self.view_bind, &offset);
+                pass.set_bind_group(1, &ground.bind, &[]);
+                pass.set_vertex_buffer(0, ground.vertices.slice(..));
+                pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
+                let eye = view.camera.eye;
+                let mut run: Option<(u32, u32)> = None;
+                for c in &ground.chunks {
+                    let seen = c.centre.sub(eye).len() - c.radius <= light.fog_far && sees(&planes[v], c.centre, c.radius);
+                    run = match (run, seen) {
+                        (Some((first, end)), true) if end == c.first => Some((first, c.first + c.count)),
+                        (Some((first, end)), true) => {
+                            pass.draw_indexed(first..end, 0, 0..1);
+                            drawn.draws += 1;
+                            drawn.triangles[v] += ((end - first) / 3) as usize;
+                            Some((c.first, c.first + c.count))
+                        }
+                        (None, true) => Some((c.first, c.first + c.count)),
+                        (r, false) => {
+                            if let Some((first, end)) = r {
+                                pass.draw_indexed(first..end, 0, 0..1);
+                                drawn.draws += 1;
+                                drawn.triangles[v] += ((end - first) / 3) as usize;
+                            }
+                            None
+                        }
+                    };
+                }
+                if let Some((first, end)) = run {
+                    pass.draw_indexed(first..end, 0, 0..1);
+                    drawn.draws += 1;
+                    drawn.triangles[v] += ((end - first) / 3) as usize;
+                }
+            }
+            // The models: the opaque runs of every batch, then the translucent ones over them.
+            let end = (b..self.batches.len()).find(|&i| self.batches[i].view != v).unwrap_or(self.batches.len());
+            let mine = &self.batches[b..end];
+            b = end;
+            for blended in [false, true] {
+                let mut current: Option<PipelineKey> = None;
+                let mut bound: Option<usize> = None;
+                for batch in mine {
+                    let model = &self.models[batch.model];
+                    let ranges = model.group(batch.group);
+                    if !ranges.iter().any(|r| r.blended == blended) {
+                        continue;
+                    }
+                    pass.set_vertex_buffer(0, model.vertices.slice(..));
+                    // The batch's own copies, from the start of the buffer slice: WebGL2 has no
+                    // first instance to draw from.
+                    pass.set_vertex_buffer(1, self.instances.slice(batch.first as u64 * stride..(batch.first + batch.count) as u64 * stride));
+                    for r in ranges.iter().filter(|r| r.blended == blended) {
+                        let material = &self.materials[r.material];
+                        if current != Some(material.pipeline) {
+                            pass.set_pipeline(&self.pipelines[&material.pipeline]);
+                            pass.set_bind_group(0, &self.view_bind, &offset);
+                            current = Some(material.pipeline);
+                        }
+                        if bound != Some(r.material) {
+                            pass.set_bind_group(1, &material.bind, &[]);
+                            bound = Some(r.material);
+                        }
+                        pass.draw(r.start..r.start + r.count, 0..batch.count);
+                        drawn.draws += 1;
+                        drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The overlay's patches, then the sprites, over the whole frame: the sprites last, as the pause
+    /// is one of them and goes over everything, a debug HUD's patch too.
+    fn draw_overlay(&self, pass: &mut wgpu::RenderPass, target: &Target, frame: &Scene3, sprites: bool, drawn: &mut Drawn) {
+        let [x, y, w, h] = target.frame;
+        pass.set_viewport(0.0, 0.0, target.size.0 as f32, target.size.1 as f32, 0.0, 1.0);
+        pass.set_scissor_rect(x, y, w.min(target.size.0.saturating_sub(x)), h.min(target.size.1.saturating_sub(y)));
+        if let Some(overlay) = &self.overlay
+            && !frame.overlay.is_empty()
+        {
+            for pipeline in [&self.overlay_mul, &self.overlay_add] {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &overlay.bind, &[]);
+                pass.draw(0..3, 0..1);
+                drawn.draws += 1;
+            }
+        }
+        if sprites {
+            drawn.draws += self.sprites.draw(pass);
+        }
+    }
+
+    /// Sprites alone on `target`, black round and under them (V30): the front end's menus, which
+    /// have no world under them.
+    pub fn draw_sprites(&mut self, target: &Target, sprites: &[Sprite]) {
+        let place = PlaceUniform {
+            origin: [target.frame[0] as f32, target.frame[1] as f32],
+            scale: target.scale.max(1) as f32,
+            _pad: 0.0,
+        };
+        let any = self.sprites.prepare(&self.device, &self.queue, place, target.size, sprites);
+        let depth = self.depth_for(target.size);
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = begin_pass(&mut encoder, target.view, &depth, "sprites");
+            let [x, y, w, h] = target.frame;
+            pass.set_scissor_rect(x, y, w.min(target.size.0.saturating_sub(x)), h.min(target.size.1.saturating_sub(y)));
+            if any {
+                self.sprites.draw(&mut pass);
+            }
+        }
+        self.queue.submit([encoder.finish()]);
+    }
+
+    /// The pictures [`Sprite::image`] counts into, uploaded now and kept: the HUD's art.
+    pub fn set_images(&mut self, images: &[&Texture]) {
+        self.sprites.set_images(&self.device, &self.queue, &self.clamp_sampler, images);
     }
 
     /// Put this frame's overlay patches into the overlay textures, after putting last frame's back.
@@ -1862,6 +1982,7 @@ impl Renderer {
                 place,
                 bind,
                 last: Vec::new(),
+                kept: Vec::new(),
             });
         }
         let overlay = self.overlay.as_mut().expect("made above");
@@ -1871,6 +1992,10 @@ impl Renderer {
             _pad: 0.0,
         };
         self.queue.write_buffer(&overlay.place, 0, bytemuck::bytes_of(&place));
+        if overlay.kept.as_slice() == patches {
+            return;
+        }
+        overlay.kept = patches.to_vec();
         let clip = |r: [u32; 4]| {
             let (x, y) = (r[0].min(size.0), r[1].min(size.1));
             [x, y, r[2].min(size.0 - x), r[3].min(size.1 - y)]
@@ -1990,6 +2115,13 @@ impl Renderer {
             return;
         }
         write_layer(&self.queue, &blit.texture, 0, 0, (width.max(1), height.max(1)), 4, &blit.rgba);
+        self.blit_again(target);
+    }
+
+    /// Put the frame [`Renderer::blit`] last put on a target on `target` again, without sending it
+    /// (V30): a menu standing still at 4K is 33 megabytes a frame less to convert and upload.
+    pub fn blit_again(&mut self, target: &Target) {
+        let Some(blit) = self.blit.as_ref() else { return };
         let place = PlaceUniform {
             origin: [target.frame[0] as f32, target.frame[1] as f32],
             scale: target.scale.max(1) as f32,
@@ -2381,6 +2513,43 @@ mod tests {
         assert!(Patch::of(&vec![0; 12], &vec![255; 12], 2, 2, (0, 0)).is_none());
     }
 
+    /// [`Patch::of`]'s quick search (V30) finds the rectangle the plain one does: every row and column
+    /// looked at, for layers touched in scattered spots of every size.
+    #[test]
+    fn an_overlay_finds_the_rectangle_the_plain_search_finds() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..500 {
+            let (w, h) = (1 + next(40), 1 + next(30));
+            let mut black = vec![0u8; w * h * 3];
+            let mut white = vec![255u8; w * h * 3];
+            for _ in 0..next(6) {
+                let (x, y, c) = (next(w), next(h), next(3));
+                match next(2) {
+                    0 => black[(y * w + x) * 3 + c] = 1 + next(255) as u8,
+                    _ => white[(y * w + x) * 3 + c] = next(255) as u8,
+                }
+            }
+            let touched = |x: usize, y: usize| {
+                let i = (y * w + x) * 3;
+                black[i..i + 3] != [0; 3] || white[i..i + 3] != [255; 3]
+            };
+            let spots: Vec<(usize, usize)> = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| touched(x, y)).collect();
+            let found = Patch::of(&black, &white, w, h, (3, 5)).map(|p| p.rect);
+            let plain = (!spots.is_empty()).then(|| {
+                let (x0, x1) = (spots.iter().map(|s| s.0).min().unwrap(), spots.iter().map(|s| s.0).max().unwrap());
+                let (y0, y1) = (spots.iter().map(|s| s.1).min().unwrap(), spots.iter().map(|s| s.1).max().unwrap());
+                [3 + x0 as u32, 5 + y0 as u32, (x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32]
+            });
+            assert_eq!(found, plain, "{w}x{h}, touched at {spots:?}");
+        }
+    }
+
     #[test]
     fn the_frustum_sees_in_front_and_not_behind() {
         let camera = Camera {
@@ -2569,6 +2738,7 @@ mod tests {
                 views: &views,
                 poses: &[],
                 overlay: &[],
+                sprites: &[],
                 light: &light,
             },
         );
@@ -2597,6 +2767,119 @@ mod tests {
     }
 
 
+    /// [`known_scene`] with a HUD's worth of sprites over it (V30): a picture, plain panels, a disc,
+    /// a dial's needle, a capsule bar and a glow, the kinds the HUD and the menus are drawn with.
+    fn known_frame(gpu: &mut Renderer, target: &Target, assets: &Assets, scene: &Scene, camera: &Camera) -> Drawn {
+        let picture = Texture { width: 8, height: 8, rgba: (0..64u8).flat_map(|i| [i * 4, 255 - i * 4, 128, 255]).collect() };
+        gpu.set_images(&[&picture]);
+        let (w, h) = (target.frame[2] as f32, target.frame[3] as f32);
+        let mut sprites = vec![
+            Sprite::image(0, &picture, [0.0, 0.0, 8.0, 8.0], [w * 0.05, h * 0.05, w * 0.2, h * 0.2], [255; 4]),
+            Sprite::image(0, &picture, [2.0, 2.0, 6.0, 6.0], [w * 0.7, h * 0.1, w * 0.9, h * 0.3], [255, 255, 255, 160]),
+        ];
+        // A quad from (x0, y0) to (x1, y1) whose shape is placed with its origin at `o`.
+        let panel = |[x0, y0, x1, y1]: [f32; 4], o: [f32; 2], tint: [u8; 4], shape: Shape| {
+            let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+            Sprite { corners, uv: [[0.0; 2]; 4], local: corners.map(|[x, y]| [x - o[0], y - o[1]]), clamp: [0.0; 4], image: None, tint, shape }
+        };
+        sprites.push(panel([0.0, h * 0.85, w, h], [0.0, h * 0.85], [0, 0, 0, 140], Shape::Plain));
+        let (cx, cy, r) = (w * 0.2, h * 0.7, h * 0.1);
+        sprites.push(panel([cx - r, cy - r, cx + r, cy + r], [cx, cy], [250, 200, 40, 220], Shape::Disc { radius: r }));
+        let needle = Shape::Needle { tail: r * 0.2, tip: r * 0.9, tail_half: r * 0.08, tip_half: r * 0.02 };
+        sprites.push(panel([cx - r, cy - r, cx + r, cy + r], [cx, cy], [255, 40, 40, 255], needle));
+        let capsule = Shape::Capsule { size: [w * 0.3, h * 0.04], split: w * 0.18, right: [60, 60, 60, 200] };
+        sprites.push(panel([w * 0.6, h * 0.9, w * 0.9, h * 0.94], [w * 0.6, h * 0.9], [40, 220, 90, 255], capsule));
+        sprites.push(panel([w * 0.4, h * 0.4, w * 0.6, h * 0.5], [w * 0.4, h * 0.4], [255, 255, 200, 90], Shape::Glow));
+        let views = [View { rect: [0, 0, target.frame[2], target.frame[3]], camera, actors: &[] }];
+        let light = Lighting::of(scene);
+        gpu.render(target, assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &sprites, light: &light })
+    }
+
+    /// A 4K frame of a known scene and its HUD, start to finish on the GPU, inside a 120 Hz frame's
+    /// time (V30) — the shell at 3840x2160 took 196 ms a frame when its HUD was drawn on the CPU.
+    #[test]
+    fn a_4k_frame_fits_in_a_120hz_frame() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (scene, assets, camera) = known_scene();
+        let (w, h) = (3840u32, 2160u32);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+        // The first frames build the pipelines' state and the depth buffer; they are not timed.
+        for _ in 0..3 {
+            known_frame(&mut gpu, &target, &assets, &scene, &camera);
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let frames = 30;
+        let started = std::time::Instant::now();
+        for _ in 0..frames {
+            let drawn = known_frame(&mut gpu, &target, &assets, &scene, &camera);
+            assert!(drawn.triangles[0] > 0);
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let each = started.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+        eprintln!("a 3840x2160 frame in {each:.2} ms");
+        assert!(each < 1000.0 / 120.0, "a 3840x2160 frame took {each:.2} ms, over a 120 Hz frame's 8.33");
+        // It drew the scene and the HUD, not an empty frame.
+        let pixels = gpu.read(&texture);
+        assert!(pixels.chunks_exact(3).filter(|p| p != &scene.fog_color).count() > (w * h / 10) as usize);
+    }
+
+    /// The views drawn at half size and stretched over the frame (V30's render scale) come out as the
+    /// full-size frame does but for the softness of the stretch, with the HUD at full size over both.
+    #[test]
+    fn a_frame_at_half_scale_looks_like_the_full_frame() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (scene, assets, camera) = known_scene();
+        let (w, h) = (640u32, 360u32);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        let shot = |gpu: &mut Renderer, scale: f32| {
+            gpu.render_scale = scale;
+            let texture = gpu.offscreen(w, h);
+            let view = texture.create_view(&Default::default());
+            let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+            known_frame(gpu, &target, &assets, &scene, &camera);
+            gpu.read(&texture)
+        };
+        let full = shot(&mut gpu, 1.0);
+        let half = shot(&mut gpu, 0.5);
+        let (mut sum, mut off, mut changed) = (0u64, 0, 0);
+        for (a, b) in full.chunks_exact(3).zip(half.chunks_exact(3)) {
+            let d = a.iter().zip(b).map(|(&a, &b)| (a as i32 - b as i32).abs()).max().unwrap_or(0);
+            sum += d as u64;
+            off += (d > 40) as usize;
+            changed += (d > 0) as usize;
+        }
+        let n = (w * h) as f64;
+        let (mean, share) = (sum as f64 / n, off as f64 / n);
+        eprintln!("half scale: mean {mean:.2}, {:.3}% over 40, {:.1}% changed", share * 100.0, changed as f64 / n * 100.0);
+        if let Ok(dir) = std::env::var("GPU_TEST_PNG") {
+            let _ = crate::png::write_rgb(&std::path::Path::new(&dir).join("full.png"), w as usize, h as usize, &full);
+            let _ = crate::png::write_rgb(&std::path::Path::new(&dir).join("half.png"), w as usize, h as usize, &half);
+        }
+        // The stretch did happen: edges in the scene are softer.
+        assert!(changed > 100, "the half-scale frame is the full one, pixel for pixel");
+        // Only along the scene's edges does a pixel part by much; the flat colours, the fog and the
+        // HUD, drawn at full size either way, agree.
+        assert!(mean < 1.0, "mean difference {mean:.2}");
+        assert!(share < 0.01, "{:.2}% of pixels differ by more than 40", share * 100.0);
+    }
+
     /// Every shader, written out as the GLSL ES 3.00 wgpu's WebGL2 backend hands the browser (P48):
     /// WebGL2 has no storage buffers, no compute and no textures read without a sampler in GLSL's
     /// sense, and a shader that needs any of them fails to translate here. The ground's is written
@@ -2624,6 +2907,8 @@ mod tests {
             ("mesh", MESH_WGSL.to_string()),
             ("sky", SKY_WGSL.to_string()),
             ("place", PLACE_WGSL.to_string()),
+            ("sprite", sprite::SPRITE_WGSL.to_string()),
+            ("upscale", scale::UPSCALE_WGSL.to_string()),
             ("ground, painted", ground_wgsl(Some(&paint), [200.0, 180.0, 150.0])),
             ("ground, bare", ground_wgsl(None, [200.0, 180.0, 150.0])),
         ];

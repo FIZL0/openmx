@@ -41,6 +41,7 @@
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 
+use game_render::gpu::{Shape, Sprite, clamp_of};
 use game_render::{Disc, Frame, Texture};
 use game_sim::camera::Ridden;
 
@@ -235,6 +236,11 @@ pub struct Art {
     label: Font,
 }
 
+/// The fonts' atlases' places in [`Art::images`], after the textures.
+const DIGITS: usize = TEXTURES.len();
+const SMALL: usize = TEXTURES.len() + 1;
+const LABEL: usize = TEXTURES.len() + 2;
+
 const TEXTURES: [&str; 6] = [
     "speedometer_analog",
     "speedometer_needlepin",
@@ -274,7 +280,40 @@ impl Art {
         span: f32,
         gauges: &Gauges,
     ) -> Drawn {
-        let mut pen = Pen::new(frame, window);
+        let (w, h) = (frame.width, frame.height);
+        self.paint(&mut Pen::new(Ink::Frame(frame), (w, h), window), riders, v, span, gauges)
+    }
+
+    /// Every picture [`Art::sprites`] counts into, in its order: the textures, then the three fonts'
+    /// atlases. The GPU takes them once ([`game_render::gpu::Renderer::set_images`]).
+    pub fn images(&self) -> Vec<&Texture> {
+        let mut all: Vec<&Texture> = TEXTURES.iter().filter_map(|n| self.textures.get(n)).collect();
+        if all.len() != TEXTURES.len() {
+            return Vec::new();
+        }
+        all.extend([&self.digits.atlas, &self.small.atlas, &self.label.atlas]);
+        all
+    }
+
+    /// [`Art::draw`] as the GPU draws it (V30): view `v`'s HUD as sprites into `out`, for a view
+    /// whose rectangle in the frame is `view` (x, y, width, height). The same layout, the same
+    /// scale, the same pictures; nothing is drawn on the CPU.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sprites(
+        &self,
+        out: &mut Vec<Sprite>,
+        view: (usize, usize, usize, usize),
+        window: (usize, usize),
+        riders: &[Ridden],
+        v: usize,
+        span: f32,
+        gauges: &Gauges,
+    ) -> Drawn {
+        let ink = Ink::Sprites { out, at: (view.0 as f32, view.1 as f32) };
+        self.paint(&mut Pen::new(ink, (view.2, view.3), window), riders, v, span, gauges)
+    }
+
+    fn paint(&self, pen: &mut Pen, riders: &[Ridden], v: usize, span: f32, gauges: &Gauges) -> Drawn {
         let me = &riders[v];
         let speed = me.speed.0;
         let mut drawn = Drawn::default();
@@ -284,7 +323,7 @@ impl Art {
         let forward = [me.target.forward.x(), me.target.forward.z()];
         let turn = radar_turn(forward);
         pen.corner = Corner::BottomLeft;
-        if let Some(t) = self.textures.get("freestyle_radar") {
+        if let Some(t) = self.texture("freestyle_radar") {
             pen.turned(t, RADAR_AT, RADAR_SIZE, turn);
         }
         for (i, r) in riders.iter().enumerate() {
@@ -292,20 +331,20 @@ impl Art {
                 continue;
             }
             let at = radar_mark(own, forward, [r.target.body_point.x(), r.target.body_point.z()], span);
-            self.icon(&mut pen, "map_icon_hit_freestyle", at, MARK_SIZE, HUMAN_MARK);
+            self.icon(pen, "map_icon_hit_freestyle", at, MARK_SIZE, HUMAN_MARK);
             drawn.marks.push((i, pen.px(at)));
         }
-        self.icon(&mut pen, "map_icon_player_freestyle", RADAR_AT, PLAYER_SIZE, PLAYER_COLOUR);
+        self.icon(pen, "map_icon_player_freestyle", RADAR_AT, PLAYER_SIZE, PLAYER_COLOUR);
         drawn.player = pen.px(RADAR_AT);
         drawn.turn = turn;
 
         // The score, top left.
         pen.corner = Corner::TopLeft;
         let (x, y, w, h) = SCORE_BAR;
-        pen.capsule((x, y, w, h), |lx| [0, 0, 0, if lx < SCORE_LABEL_END { SCORE_LABEL_SHADE } else { SCORE_SHADE }]);
-        pen.text(&self.label, "SCORE", SCORE_LABEL.0, SCORE_LABEL.1, false, SCORE_COLOUR);
+        pen.capsule((x, y, w, h), [0, 0, 0, SCORE_LABEL_SHADE], SCORE_LABEL_END, [0, 0, 0, SCORE_SHADE]);
+        pen.text((&self.label, LABEL), "SCORE", SCORE_LABEL.0, SCORE_LABEL.1, false, SCORE_COLOUR);
         let score = score_text(gauges.score);
-        pen.text(&self.small, &score, SCORE_TEXT.0, SCORE_TEXT.1, false, SCORE_COLOUR);
+        pen.text((&self.small, SMALL), &score, SCORE_TEXT.0, SCORE_TEXT.1, false, SCORE_COLOUR);
         drawn.score = score;
 
         // The speedometer: the dial with its needle and odometer for one rider, the number for more;
@@ -315,36 +354,36 @@ impl Art {
         pen.corner = Corner::BottomRight;
         if gauges.bike && riders.len() < 2 {
             let (x, y, w, h) = PRELOAD_METER;
-            pen.capsule((x, y, w, h), |_| [0, 0, 0, PRELOAD_SHADE]);
+            pen.capsule((x, y, w, h), [0, 0, 0, PRELOAD_SHADE], f32::MAX, [0; 4]);
             let fill = gauges.preload.clamp(0.0, 1.0);
             if fill > 0.0 {
                 let (i, inner) = (PRELOAD_INSET, h - 2.0 * PRELOAD_INSET);
                 let top = y + i + inner * (1.0 - fill);
-                pen.capsule((x + i, top, w - 2.0 * i, y + h - i - top), |_| PRELOAD_COLOUR);
+                pen.capsule((x + i, top, w - 2.0 * i, y + h - i - top), PRELOAD_COLOUR, f32::MAX, [0; 4]);
             }
             drawn.preload = Some(fill);
         }
         if riders.len() >= 2 {
             let text = speed_text(speed);
-            pen.text(&self.digits, &text, DIGITAL.0, DIGITAL.1, true, TEXT);
+            pen.text((&self.digits, DIGITS), &text, DIGITAL.0, DIGITAL.1, true, TEXT);
             drawn.speed = Some(text);
         } else {
-            if let Some(t) = self.textures.get("speedometer_analog") {
+            if let Some(t) = self.texture("speedometer_analog") {
                 pen.blit(t, (DIAL.0, DIAL.1, 128.0, 128.0), [255; 4]);
             }
             let degrees = needle_degrees(speed);
             pen.needle(PIVOT, degrees);
-            if let Some(t) = self.textures.get("speedometer_needlepin") {
+            if let Some(t) = self.texture("speedometer_needlepin") {
                 pen.pin(t, PIVOT, PIN_SIZE);
             }
             drawn.needle = Some(degrees);
             if gauges.bike {
-                if let Some(t) = self.textures.get("odometer_background") {
+                if let Some(t) = self.texture("odometer_background") {
                     pen.blit(t, (ODOMETER.0, ODOMETER.1, 128.0, 32.0), [255; 4]);
                 }
                 let miles = odometer_text(gauges.feet);
-                pen.text(&self.small, "00000.0", ODOMETER_TEXT.0, ODOMETER_TEXT.2, false, ODOMETER_GHOST);
-                pen.text(&self.small, &miles, ODOMETER_TEXT.1, ODOMETER_TEXT.2, true, TEXT);
+                pen.text((&self.small, SMALL), "00000.0", ODOMETER_TEXT.0, ODOMETER_TEXT.2, false, ODOMETER_GHOST);
+                pen.text((&self.small, SMALL), &miles, ODOMETER_TEXT.1, ODOMETER_TEXT.2, true, TEXT);
                 drawn.odometer = Some(miles);
             }
         }
@@ -352,9 +391,15 @@ impl Art {
         drawn
     }
 
+    /// A texture by name, and its place in [`Art::images`].
+    fn texture(&self, name: &str) -> Option<(&Texture, usize)> {
+        let i = TEXTURES.iter().position(|n| *n == name)?;
+        Some((self.textures.get(name)?, i))
+    }
+
     /// A texture `size` square centred on `at`.
     fn icon(&self, pen: &mut Pen, name: &str, at: (f32, f32), size: f32, tint: [u8; 4]) {
-        if let Some(t) = self.textures.get(name) {
+        if let Some(t) = self.texture(name) {
             pen.blit(t, (at.0 - size / 2.0, at.1 - size / 2.0, size, size), tint);
         }
     }
@@ -389,24 +434,36 @@ enum Corner {
     BottomRight,
 }
 
-/// A view's frame, and the scale and corner the layout's numbers are put in it by.
+/// Where a [`Pen`] puts what it draws: into a frame's pixels, or as sprites at `at` in the frame.
+enum Ink<'a> {
+    Frame(&'a mut Frame),
+    Sprites { out: &'a mut Vec<Sprite>, at: (f32, f32) },
+}
+
+/// A picture and its place in [`Art::images`].
+type Image<'t> = (&'t Texture, usize);
+
+/// A view, and the scale and corner the layout's numbers are put in it by.
 struct Pen<'a> {
-    frame: &'a mut Frame,
+    ink: Ink<'a>,
+    /// The view's size in pixels.
+    w: usize,
+    h: usize,
     s: f32,
     corner: Corner,
 }
 
 impl<'a> Pen<'a> {
-    fn new(frame: &'a mut Frame, window: (usize, usize)) -> Pen<'a> {
-        let (w, h) = (frame.width.max(1) as f32, frame.height.max(1) as f32);
+    fn new(ink: Ink<'a>, (w, h): (usize, usize), window: (usize, usize)) -> Pen<'a> {
+        let (fw, fh) = (w.max(1) as f32, h.max(1) as f32);
         let whole = (window.0.max(1) as f32 / LAYOUT.0).min(window.1.max(1) as f32 / LAYOUT.1);
-        let s = whole.min(w / NEEDS.0).min(h / NEEDS.1);
-        Pen { frame, s, corner: Corner::BottomLeft }
+        let s = whole.min(fw / NEEDS.0).min(fh / NEEDS.1);
+        Pen { ink, w, h, s, corner: Corner::BottomLeft }
     }
 
     /// A layout point in the view's pixels, counted from the current corner.
     fn px(&self, at: (f32, f32)) -> (f32, f32) {
-        let (w, h) = (self.frame.width as f32, self.frame.height as f32);
+        let (w, h) = (self.w as f32, self.h as f32);
         let y = h - (LAYOUT.1 - at.1) * self.s;
         match self.corner {
             Corner::TopLeft => (at.0 * self.s, at.1 * self.s),
@@ -415,37 +472,69 @@ impl<'a> Pen<'a> {
         }
     }
 
+    /// A sprite whose corners are `corners` in the view's pixels.
+    fn sprite(&mut self, mut sprite: Sprite) {
+        if let Ink::Sprites { out, at } = &mut self.ink {
+            for c in &mut sprite.corners {
+                (c[0], c[1]) = (c[0] + at.0, c[1] + at.1);
+            }
+            out.push(sprite);
+        }
+    }
+
     /// A whole texture over a layout box (left, top, width, height), multiplied by `tint`.
-    fn blit(&mut self, t: &Texture, r: (f32, f32, f32, f32), tint: [u8; 4]) {
-        let src = [0.0, 0.0, t.width as f32, t.height as f32];
+    fn blit(&mut self, t: Image, r: (f32, f32, f32, f32), tint: [u8; 4]) {
+        let src = [0.0, 0.0, t.0.width as f32, t.0.height as f32];
         self.blit_src(t, src, r, tint);
     }
 
-    fn blit_src(&mut self, t: &Texture, src: [f32; 4], r: (f32, f32, f32, f32), tint: [u8; 4]) {
+    fn blit_src(&mut self, (t, image): Image, src: [f32; 4], r: (f32, f32, f32, f32), tint: [u8; 4]) {
         let (fx0, fy0) = self.px((r.0, r.1));
         let (fx1, fy1) = (fx0 + r.2 * self.s, fy0 + r.3 * self.s);
-        let (x0, x1) = span(fx0, fx1, self.frame.width);
-        let (y0, y1) = span(fy0, fy1, self.frame.height);
+        let frame = match &mut self.ink {
+            Ink::Frame(frame) => frame,
+            Ink::Sprites { .. } => return self.sprite(Sprite::image(image, t, src, [fx0, fy0, fx1, fy1], tint)),
+        };
+        let (x0, x1) = span(fx0, fx1, frame.width);
+        let (y0, y1) = span(fy0, fy1, frame.height);
         for y in y0..y1 {
             let v = src[1] + (y as f32 + 0.5 - fy0) / (fy1 - fy0) * (src[3] - src[1]);
             for x in x0..x1 {
                 let u = src[0] + (x as f32 + 0.5 - fx0) / (fx1 - fx0) * (src[2] - src[0]);
                 let c = bilinear(t, u, v, src);
                 let mul = |i: usize| (c[i] as u32 * tint[i] as u32 / 255) as u8;
-                blend(self.frame, x, y, [mul(0), mul(1), mul(2), mul(3)]);
+                blend(frame, x, y, [mul(0), mul(1), mul(2), mul(3)]);
             }
         }
     }
 
     /// A `size` square texture centred on `at`, turned clockwise by `turn` radians.
-    fn turned(&mut self, t: &Texture, at: (f32, f32), size: f32, turn: f32) {
+    fn turned(&mut self, (t, image): Image, at: (f32, f32), size: f32, turn: f32) {
         let (cx, cy) = self.px(at);
-        let reach = size * self.s * std::f32::consts::FRAC_1_SQRT_2;
-        let (x0, x1) = span(cx - reach, cx + reach, self.frame.width);
-        let (y0, y1) = span(cy - reach, cy + reach, self.frame.height);
         let (sin, cos) = turn.sin_cos();
         let (tw, th) = (t.width as f32, t.height as f32);
         let all = [0.0, 0.0, tw, th];
+        let frame = match &mut self.ink {
+            Ink::Frame(frame) => frame,
+            Ink::Sprites { .. } => {
+                // The texture's square, its corners turned out of the texture's own frame into the
+                // view's: the inverse of the turn the pixels below are read back through.
+                let half = size * self.s / 2.0;
+                let corner = |lx: f32, ly: f32| [cx + lx * cos - ly * sin, cy + lx * sin + ly * cos];
+                return self.sprite(Sprite {
+                    corners: [corner(-half, -half), corner(half, -half), corner(half, half), corner(-half, half)],
+                    uv: [[0.0, 0.0], [tw, 0.0], [tw, th], [0.0, th]],
+                    local: [[0.0; 2]; 4],
+                    clamp: clamp_of(t, all),
+                    image: Some(image),
+                    tint: [255; 4],
+                    shape: Shape::Plain,
+                });
+            }
+        };
+        let reach = size * self.s * std::f32::consts::FRAC_1_SQRT_2;
+        let (x0, x1) = span(cx - reach, cx + reach, frame.width);
+        let (y0, y1) = span(cy - reach, cy + reach, frame.height);
         for y in y0..y1 {
             for x in x0..x1 {
                 let (dx, dy) = ((x as f32 + 0.5 - cx) / self.s, (y as f32 + 0.5 - cy) / self.s);
@@ -455,7 +544,7 @@ impl<'a> Pen<'a> {
                 if !(0.0..tw).contains(&u) || !(0.0..th).contains(&v) {
                     continue;
                 }
-                blend(self.frame, x, y, bilinear(t, u, v, all));
+                blend(frame, x, y, bilinear(t, u, v, all));
             }
         }
     }
@@ -467,14 +556,39 @@ impl<'a> Pen<'a> {
         let a = -degrees.to_radians();
         // Along the needle towards its tip, and across it, on a screen whose y runs down.
         let (dx, dy) = (a.sin(), -a.cos());
-        let reach = NEEDLE_TIP.0.max(NEEDLE_TAIL.0) * self.s + 1.0;
-        let (x0, x1) = span(cx - reach, cx + reach, self.frame.width);
-        let (y0, y1) = span(cy - reach, cy + reach, self.frame.height);
+        let s = self.s;
+        let frame = match &mut self.ink {
+            Ink::Frame(frame) => frame,
+            Ink::Sprites { .. } => {
+                // The bar's box in its own pixels, a pixel wider all round for the smoothed edge.
+                let (back, front) = (-NEEDLE_TAIL.0 * s - 1.0, NEEDLE_TIP.0 * s + 1.0);
+                let side = NEEDLE_TAIL.1.max(NEEDLE_TIP.1) * s + 1.0;
+                let local = [[back, -side], [front, -side], [front, side], [back, side]];
+                let corner = |[along, across]: [f32; 2]| [cx + along * dx - across * dy, cy + along * dy + across * dx];
+                return self.sprite(Sprite {
+                    corners: local.map(corner),
+                    uv: [[0.0; 2]; 4],
+                    local,
+                    clamp: [0.0; 4],
+                    image: None,
+                    tint: NEEDLE_COLOUR,
+                    shape: Shape::Needle {
+                        tail: NEEDLE_TAIL.0 * s,
+                        tip: NEEDLE_TIP.0 * s,
+                        tail_half: NEEDLE_TAIL.1 * s,
+                        tip_half: NEEDLE_TIP.1 * s,
+                    },
+                });
+            }
+        };
+        let reach = NEEDLE_TIP.0.max(NEEDLE_TAIL.0) * s + 1.0;
+        let (x0, x1) = span(cx - reach, cx + reach, frame.width);
+        let (y0, y1) = span(cy - reach, cy + reach, frame.height);
         for y in y0..y1 {
             for x in x0..x1 {
                 let mut hits = 0;
                 for (ox, oy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
-                    let (px, py) = ((x as f32 + ox - cx) / self.s, (y as f32 + oy - cy) / self.s);
+                    let (px, py) = ((x as f32 + ox - cx) / s, (y as f32 + oy - cy) / s);
                     let along = px * dx + py * dy;
                     let across = (px * -dy + py * dx).abs();
                     if along < -NEEDLE_TAIL.0 || along > NEEDLE_TIP.0 {
@@ -488,20 +602,38 @@ impl<'a> Pen<'a> {
                 if hits > 0 {
                     let mut c = NEEDLE_COLOUR;
                     c[3] = (c[3] as u32 * hits / 4) as u8;
-                    blend(self.frame, x, y, c);
+                    blend(frame, x, y, c);
                 }
             }
         }
     }
 
     /// A capsule over a layout box (left, top, width, height): a rectangle whose shorter sides are
-    /// half circles, its edges smoothed by four samples a pixel, coloured by `colour` of the layout x.
-    fn capsule(&mut self, r: (f32, f32, f32, f32), colour: impl Fn(f32) -> [u8; 4]) {
+    /// half circles, its edges smoothed by four samples a pixel, `left` up to the layout x `split`
+    /// and `right` from there on.
+    fn capsule(&mut self, r: (f32, f32, f32, f32), left: [u8; 4], split: f32, right: [u8; 4]) {
         let (fx0, fy0) = self.px((r.0, r.1));
         let (fw, fh) = (r.2 * self.s, r.3 * self.s);
+        let s = self.s;
+        let frame = match &mut self.ink {
+            Ink::Frame(frame) => frame,
+            Ink::Sprites { .. } => {
+                let local = [[-1.0, -1.0], [fw + 1.0, -1.0], [fw + 1.0, fh + 1.0], [-1.0, fh + 1.0]];
+                let split = if split == f32::MAX { f32::MAX } else { (split - r.0) * s };
+                return self.sprite(Sprite {
+                    corners: local.map(|[x, y]| [fx0 + x, fy0 + y]),
+                    uv: [[0.0; 2]; 4],
+                    local,
+                    clamp: [0.0; 4],
+                    image: None,
+                    tint: left,
+                    shape: Shape::Capsule { size: [fw, fh], split, right },
+                });
+            }
+        };
         let rad = fw.min(fh) / 2.0;
-        let (x0, x1) = span(fx0, fx0 + fw, self.frame.width);
-        let (y0, y1) = span(fy0, fy0 + fh, self.frame.height);
+        let (x0, x1) = span(fx0, fx0 + fw, frame.width);
+        let (y0, y1) = span(fy0, fy0 + fh, frame.height);
         // The segment the capsule is every point within `rad` of.
         let (ax, ay, bx, by) = if fw >= fh {
             (fx0 + rad, fy0 + rad, fx0 + fw - rad, fy0 + rad)
@@ -519,9 +651,10 @@ impl<'a> Pen<'a> {
                     }
                 }
                 if hits > 0 {
-                    let mut c = colour(r.0 + (x as f32 + 0.5 - fx0) / self.s);
+                    let lx = r.0 + (x as f32 + 0.5 - fx0) / s;
+                    let mut c = if lx < split { left } else { right };
                     c[3] = (c[3] as u32 * hits / 4) as u8;
-                    blend(self.frame, x, y, c);
+                    blend(frame, x, y, c);
                 }
             }
         }
@@ -529,12 +662,27 @@ impl<'a> Pen<'a> {
 
     /// The needle's pin: its texture over a disc `size` across centred on `at`, the round cap the
     /// pin's mesh is.
-    fn pin(&mut self, t: &Texture, at: (f32, f32), size: f32) {
+    fn pin(&mut self, (t, image): Image, at: (f32, f32), size: f32) {
         let (cx, cy) = self.px(at);
         let r = size * self.s / 2.0;
-        let (x0, x1) = span(cx - r, cx + r, self.frame.width);
-        let (y0, y1) = span(cy - r, cy + r, self.frame.height);
         let all = [0.0, 0.0, t.width as f32, t.height as f32];
+        let frame = match &mut self.ink {
+            Ink::Frame(frame) => frame,
+            Ink::Sprites { .. } => {
+                let local = [[-r, -r], [r, -r], [r, r], [-r, r]];
+                return self.sprite(Sprite {
+                    corners: local.map(|[x, y]| [cx + x, cy + y]),
+                    uv: [[0.0, 0.0], [all[2], 0.0], [all[2], all[3]], [0.0, all[3]]],
+                    local,
+                    clamp: clamp_of(t, all),
+                    image: Some(image),
+                    tint: [255; 4],
+                    shape: Shape::Disc { radius: r },
+                });
+            }
+        };
+        let (x0, x1) = span(cx - r, cx + r, frame.width);
+        let (y0, y1) = span(cy - r, cy + r, frame.height);
         for y in y0..y1 {
             for x in x0..x1 {
                 let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
@@ -542,7 +690,7 @@ impl<'a> Pen<'a> {
                     continue;
                 }
                 let (u, v) = ((dx / r + 1.0) / 2.0 * all[2], (dy / r + 1.0) / 2.0 * all[3]);
-                blend(self.frame, x, y, bilinear(t, u, v, all));
+                blend(frame, x, y, bilinear(t, u, v, all));
             }
         }
     }
@@ -550,7 +698,7 @@ impl<'a> Pen<'a> {
     /// `text` with its top at `y` and its left edge at `x`; or, when `right`, its last character
     /// starting at `x`. That is how the layouts' right-justified numbers read: the odometer's miles
     /// (`X=573`) lie exactly over its dim `00000.0` (`X=501`, seven 12-pixel digits) only so.
-    fn text(&mut self, font: &Font, text: &str, x: f32, y: f32, right: bool, colour: [u8; 4]) {
+    fn text(&mut self, (font, image): (&Font, usize), text: &str, x: f32, y: f32, right: bool, colour: [u8; 4]) {
         let but_last = text.char_indices().last().map_or("", |(i, _)| &text[..i]);
         let mut pen = if right { x - font.measure(but_last) } else { x };
         let mut chars = text.chars().peekable();
@@ -559,7 +707,7 @@ impl<'a> Pen<'a> {
             pen += g.before;
             if c != ' ' {
                 let h = g.uv[3] - g.uv[1];
-                self.blit_src(&font.atlas, g.uv, (pen, y, g.width, h), colour);
+                self.blit_src((&font.atlas, image), g.uv, (pen, y, g.width, h), colour);
             }
             pen += g.width + g.after;
             if let Some(&n) = chars.peek() {

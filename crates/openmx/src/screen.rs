@@ -139,6 +139,17 @@ impl Screen {
         out
     }
 
+    /// Show `rgb` again, unchanged since the last [`Screen::present`] (V30): the GPU window puts up
+    /// the copy it already has; the X one has none, and sends it.
+    pub fn present_again(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<(), String> {
+        let out = match &mut self.inner {
+            Inner::X(w) => w.present(rgb, width, height),
+            Inner::Gpu(w) => w.present_again(width, height),
+        };
+        self.sync();
+        out
+    }
+
     /// The GPU window, where the GPU draws.
     pub fn gpu(&mut self) -> Option<&mut GpuWindow> {
         match &mut self.inner {

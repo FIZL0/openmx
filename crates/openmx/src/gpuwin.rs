@@ -102,6 +102,8 @@ pub struct GpuWindow {
     /// How long the last [`GpuWindow::draw`] waited on the surface: for a frame to draw into, and to
     /// show it. `--fps` counts it as the present.
     pub waited: Duration,
+    /// The display's refresh in hertz, where it says (V30): what `--render-scale auto` aims at.
+    pub refresh: Option<f32>,
 }
 
 impl GpuWindow {
@@ -133,6 +135,11 @@ impl GpuWindow {
             return Err(e);
         }
         let window = state.window.clone().ok_or("the window never opened")?;
+        let refresh = window
+            .current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz())
+            .map(|mhz| mhz as f32 / 1000.0)
+            .filter(|hz| *hz >= 30.0);
         let screen = window
             .current_monitor()
             .map_or((state.size.0 as usize, state.size.1 as usize), |m| (m.size().width as usize, m.size().height as usize));
@@ -189,6 +196,7 @@ impl GpuWindow {
             scale,
             screen,
             waited: Duration::ZERO,
+            refresh,
         })
     }
 
@@ -268,5 +276,10 @@ impl GpuWindow {
     pub fn present(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<(), String> {
         self.draw(width, height, |r, target| r.blit(target, rgb, width as u32, height as u32))
             .map(|_| ())
+    }
+
+    /// Show the frame [`GpuWindow::present`] last showed, which the GPU still has (V30).
+    pub fn present_again(&mut self, width: usize, height: usize) -> Result<(), String> {
+        self.draw(width, height, |r, target| r.blit_again(target)).map(|_| ())
     }
 }
