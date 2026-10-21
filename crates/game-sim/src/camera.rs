@@ -299,6 +299,14 @@ impl CurveTable {
         sin + F(CURVE_STEP) * cos * (s - F(fpu::from_i32(i)))
     }
 
+    /// The cosine and sine of `angle` off the entry below it, with no correction: the lookup the
+    /// put-back's ring of probes is fanned out by (S66).
+    pub(crate) fn coarse(&self, angle: F) -> (F, F) {
+        let a = wrap_turn(wrap_turn(angle));
+        let i = ((F(PI) + a) * CURVE_INV_STEP).to_i32();
+        (F(self.0[i as usize][0]), F(self.0[i as usize][1]))
+    }
+
     /// The sine of `angle` off the entry below it, with no correction: the lookup the quaternion's
     /// axis and angle divides by.
     pub(crate) fn coarse_sin(&self, angle: F) -> F {
