@@ -1460,8 +1460,8 @@ fn a_biplane_session_flies() {
     );
 }
 
-/// P50: upside down, the new biplane controls move the plane on the screen the way they move it the
-/// right way up, and the original's reach the plane's simulation unchanged.
+/// P50: upside down, the screen's biplane controls move the plane on the screen the way they move it
+/// the right way up, and the original's reach the plane's simulation unchanged.
 ///
 /// The shell's pass, as `main.rs` makes it: the plane's attitude after the last step says whether
 /// it is upside down (`Plane::inverted`), and the seat's `PlaneScheme` turns the report round before
@@ -1472,7 +1472,7 @@ fn a_biplane_session_flies() {
 /// the heading for the left rudder. Under the new scheme each goes the same way upside down as the
 /// right way up; under the original's both go the other way, which is the original's flip.
 #[test]
-fn upside_down_the_new_biplane_controls_fly_the_way_they_do_upright() {
+fn upside_down_the_screen_biplane_controls_fly_the_way_they_do_upright() {
     use pad::PlaneScheme;
     let Some(file) = the_discs_plane() else { return };
     let flight = game_sim::flight::Flight::new(&file);
@@ -1485,6 +1485,7 @@ fn upside_down_the_new_biplane_controls_fly_the_way_they_do_upright() {
     // One frame of the shell: the remap off the attitude, then the pass.
     let shell = |sim: &mut Sim, garage: &mut Garage, inverted: &mut bool, scheme: PlaneScheme, report: Report, world: &mut Jump| {
         *inverted = garage.inverted(*inverted);
+        garage.set_every_bank(scheme.every_bank());
         pass(sim, garage, scheme.fly(report, *inverted), world);
     };
     let gas = Report::from_buttons(Control::Cross.mask());
@@ -1495,7 +1496,7 @@ fn upside_down_the_new_biplane_controls_fly_the_way_they_do_upright() {
     };
     let mut inverted = false;
     for _ in 0..30 * 60 {
-        shell(&mut sim, &mut garage, &mut inverted, PlaneScheme::New, gas, &mut world);
+        shell(&mut sim, &mut garage, &mut inverted, PlaneScheme::Screen, gas, &mut world);
     }
     let plane = garage.plane.clone().unwrap();
     assert!(!plane.on_ground() && plane.up.y() > 0.9, "thirty seconds of gas and the plane is not flying level");
@@ -1506,7 +1507,7 @@ fn upside_down_the_new_biplane_controls_fly_the_way_they_do_upright() {
     // Full stick rolls it with the nose falling away, so its up gets to about -0.8 at the most:
     // -0.75 is well past where the shell calls it upside down.
     while garage.plane.as_ref().unwrap().up.y() > -0.75 {
-        shell(&mut sim, &mut garage, &mut inverted, PlaneScheme::New, with_stick(gas, 0xff, AXIS_CENTRE), &mut world);
+        shell(&mut sim, &mut garage, &mut inverted, PlaneScheme::Screen, with_stick(gas, 0xff, AXIS_CENTRE), &mut world);
         frames += 1;
         assert!(frames < 5 * 60, "five seconds of full right stick and the plane did not roll over");
     }
@@ -1540,13 +1541,13 @@ fn upside_down_the_new_biplane_controls_fly_the_way_they_do_upright() {
         (pull_rise - rise, left_turn - turn)
     };
 
-    let (climb, yaw) = effect(&upright, false, PlaneScheme::New);
+    let (climb, yaw) = effect(&upright, false, PlaneScheme::Screen);
     assert!(climb > 0.01, "the right way up a pulled stick does not lift the nose ({climb})");
     assert!(yaw.abs() > 1e-3, "the right way up the left rudder does not turn the plane ({yaw})");
     assert_eq!(effect(&upright, false, PlaneScheme::Original), (climb, yaw), "the right way up the schemes differ");
 
-    let (new_climb, new_yaw) = effect(&upside_down, true, PlaneScheme::New);
-    assert!(new_climb > 0.01, "upside down a pulled stick does not lift the nose under the new controls ({new_climb})");
+    let (new_climb, new_yaw) = effect(&upside_down, true, PlaneScheme::Screen);
+    assert!(new_climb > 0.01, "upside down a pulled stick does not lift the nose under the screen's controls ({new_climb})");
     assert!(new_yaw.signum() == yaw.signum() && new_yaw.abs() > 1e-3, "upside down the left rudder turns {new_yaw}, upright {yaw}");
     let (old_climb, old_yaw) = effect(&upside_down, true, PlaneScheme::Original);
     assert!(old_climb < -0.01, "upside down the original's pulled stick does not drop the nose ({old_climb})");
@@ -1563,9 +1564,113 @@ fn upside_down_the_new_biplane_controls_fly_the_way_they_do_upright() {
         assert_eq!(through, garage.plane.unwrap(), "the original's biplane controls changed what the plane read");
     }
     println!(
-        "biplane upside down: pulled stick lifts the nose {climb:.4} upright, {new_climb:.4} new, {old_climb:.4} original; \
-         left rudder turns {yaw:.4} upright, {new_yaw:.4} new, {old_yaw:.4} original ({frames} frames to roll over)"
+        "biplane upside down: pulled stick lifts the nose {climb:.4} upright, {new_climb:.4} screen, {old_climb:.4} original; \
+         left rudder turns {yaw:.4} upright, {new_yaw:.4} screen, {old_yaw:.4} original ({frames} frames to roll over)"
     );
+}
+
+/// P69: the plane's own stick, at every bank. Under the default biplane controls, down on the stick
+/// pulls the nose up as the plane sees it — toward its own up, the pilot's head, the belly leading —
+/// upright, banked 45, 90 and 135 degrees, and upside down; and the stick's y has its say at each,
+/// where under the original's it has none at all on its side, which is the fade the default lifts.
+///
+/// The shell's pass as `main.rs` makes it (the attitude, the scheme's elevator, the remap, the pass)
+/// on the disc's `biplane.phy`: thirty seconds of gas get it flying level, then full right stick rolls
+/// it, stopping at each bank in turn. From each, half a second is flown with the stick pulled
+/// and again with it pushed, and each is read as the nose's turn toward the plane's up as it was when
+/// it began. Pulled has to turn it that way; pulled against pushed is the stick's authority. (Pulled
+/// against a centred stick would not do: banked, the original's autopilot already holds the
+/// elevator at its stop for the turn with the stick centred, so a pull there adds nothing.)
+#[test]
+fn the_default_biplane_stick_pulls_the_nose_toward_the_planes_up_at_every_bank() {
+    use pad::PlaneScheme;
+    let Some(file) = the_discs_plane() else { return };
+    let flight = game_sim::flight::Flight::new(&file);
+    let lowest = flight.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min);
+    let spawn = Spawn { at: Vf::new(400.0, -lowest, -300.0, 1.0), facing: Vf::new(0.0, 0.0, -1.0, 0.0) };
+    let mut sim = the_minutes_bike();
+    let mut garage = Garage::new(Kind::Biplane, Some(Plane::flying(spawn, flight))).unwrap();
+    let mut world = Jump::nothing();
+    let shell = |sim: &mut Sim, garage: &mut Garage, inverted: &mut bool, scheme: PlaneScheme, report: Report, world: &mut Jump| {
+        *inverted = garage.inverted(*inverted);
+        garage.set_every_bank(scheme.every_bank());
+        pass(sim, garage, scheme.fly(report, *inverted), world);
+    };
+    let gas = Report::from_buttons(Control::Cross.mask());
+    let with_stick = |mut r: Report, x: u8, y: u8| {
+        r.set_axis(2, x);
+        r.set_axis(3, y);
+        r
+    };
+    let mut inverted = false;
+    for _ in 0..30 * 60 {
+        shell(&mut sim, &mut garage, &mut inverted, PlaneScheme::New, gas, &mut world);
+    }
+    let plane = garage.plane.clone().unwrap();
+    assert!(!plane.on_ground() && plane.up.y() > 0.9, "thirty seconds of gas and the plane is not flying level");
+
+    let roll = |g: &Garage| g.plane.as_ref().unwrap().flight.as_ref().unwrap().attitude.roll.0.abs().to_degrees();
+    let nose_y = |g: &Garage| g.plane.as_ref().unwrap().flight.as_ref().unwrap().attitude.nose_y.0;
+    // The nose's turn toward the plane's up in half a second of the pulled stick, and the same less
+    // the pushed stick's.
+    // Half a second: the autopilot's integrator, wound to its stop by the roll, takes about a third
+    // of one to come off it.
+    const FRAMES: usize = 30;
+    let pull = |from: &(Sim, Garage, bool), scheme: PlaneScheme| {
+        let plane = from.1.plane.as_ref().unwrap();
+        let toward_up = |f: Vf| f.x() * plane.up.x() + f.y() * plane.up.y() + f.z() * plane.up.z();
+        let fly = |report: Report| {
+            let (mut sim, mut garage, mut inverted) = from.clone();
+            let mut world = Jump::nothing();
+            for _ in 0..FRAMES {
+                shell(&mut sim, &mut garage, &mut inverted, scheme, report, &mut world);
+            }
+            toward_up(garage.plane.unwrap().facing) - toward_up(plane.facing)
+        };
+        let pulled = fly(with_stick(gas, AXIS_CENTRE, 0xff));
+        (pulled, pulled - fly(with_stick(gas, AXIS_CENTRE, 0x00)))
+    };
+
+    let mut lines = Vec::new();
+    let mut upright = None;
+    let mut frames = 0;
+    for bank in [0.0, 45.0, 90.0, 135.0, 172.0] {
+        while roll(&garage) < bank {
+            shell(&mut sim, &mut garage, &mut inverted, PlaneScheme::New, with_stick(gas, 0xff, AXIS_CENTRE), &mut world);
+            frames += 1;
+            assert!(frames < 5 * 60, "five seconds of full right stick and the plane is not banked {bank}");
+        }
+        assert!(!garage.plane.as_ref().unwrap().on_ground());
+        let at = (sim.clone(), garage.clone(), inverted);
+        let ((new, new_say), (original, original_say)) = (pull(&at, PlaneScheme::New), pull(&at, PlaneScheme::Original));
+        lines.push(format!(
+            "{bank:>5}: roll {:.1} nose_y {:.2}: pulled {new:.4}, against pushed {new_say:.4}; original {original:.4}, {original_say:.4}",
+            roll(&garage),
+            nose_y(&garage)
+        ));
+        let upright = *upright.get_or_insert(new_say);
+        let r = roll(&garage);
+        assert!(new > 0.002, "banked {bank} (roll {r:.1}) the pulled stick turns the nose {new:.4} toward the plane's up");
+        // A quarter, not all: banked, the autopilot's coordinated-turn pull (the original's, which
+        // the default keeps) takes some of the stick's range with the stick centred.
+        assert!(new_say > 0.25 * upright, "banked {bank} (roll {r:.1}) the stick's y moves the nose {new_say:.4}, {upright:.4} upright");
+        assert!(new_say >= original_say, "banked {bank} the plane's stick has less say than the original's");
+        if bank == 45.0 {
+            // Half faded, and the turn's pull on top: the original's stick all but lost.
+            assert!(original_say < 0.1 * new_say, "at 45 the original's stick moved the nose {original_say:.4}, the plane's {new_say:.4}");
+        }
+        if bank == 90.0 {
+            // On its side, with the nose near level, the original's fade leaves the stick nothing.
+            assert!(nose_y(&garage).abs() < 0.8, "the nose is too steep for the original's fade");
+            assert_eq!(original_say, 0.0, "on its side the original's stick moved the nose");
+        }
+        if bank == 0.0 {
+            assert_eq!((new, new_say), (original, original_say), "the right way up the plane's and the original's differ");
+        }
+    }
+    // The flight still holds its file's value: the lift is the step's, not the plane's.
+    assert_eq!(garage.plane.as_ref().unwrap().flight.as_ref().unwrap().joystick.min_elevator, F::ZERO);
+    println!("biplane, the pulled stick's turn toward the plane's up ({frames} frames rolling):\n{}", lines.join("\n"));
 }
 
 /// A swap mid-session swaps, the way the original's swap does (R8): ride the bike off its start
