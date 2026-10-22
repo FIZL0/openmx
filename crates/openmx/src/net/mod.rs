@@ -126,6 +126,13 @@ pub trait Game {
     fn seat(&mut self, _seat: usize, _spawn: &[u8]) -> Result<(), String> {
         Err("this ride's seats cannot change".into())
     }
+    /// The game's modifiers (P55) go from `was` to `to`, both in the game's own text, on the state
+    /// just decoded from a restart ([`admit`]) — every machine at the same tick (P100). A machine
+    /// already on `to` with `was` the same changes nothing. A game without modifiers can only take
+    /// "no change".
+    fn remodify(&mut self, was: &str, to: &str) -> Result<(), String> {
+        if was == to { Ok(()) } else { Err("this ride's modifiers cannot change".into()) }
+    }
 }
 
 /// Who sits where: each seat's peer, or nobody. Every machine starts with the same line-up (the
@@ -225,6 +232,11 @@ pub struct Netplay<S: Clone + 'static> {
     pub said: Vec<String>,
     /// Peers joining the ride under way (N10): the host's queue, and every join so far.
     pub admit: admit::Admit,
+    /// The game's modifiers as every machine rides them (P100), in the game's own text: the host's
+    /// to set when the ride starts; each change the host makes goes out with a restart.
+    pub mods: String,
+    /// Every change of the modifiers this machine took: (the tick it took them at, the new set).
+    pub remods: Vec<(u32, String)>,
 }
 
 impl<S: Clone + 'static> Netplay<S> {
@@ -252,6 +264,8 @@ impl<S: Clone + 'static> Netplay<S> {
             notice: String::new(),
             said: Vec::new(),
             admit: admit::Admit::default(),
+            mods: String::new(),
+            remods: Vec::new(),
         })
     }
 
@@ -279,6 +293,17 @@ impl<S: Clone + 'static> Netplay<S> {
     /// from: [`admit`].
     pub fn admit(&mut self, peer: &str, seats: &[usize], spawn: Vec<u8>) -> Result<(), String> {
         admit::ask(self, peer, seats, spawn)
+    }
+
+    /// The host: the ride's modifiers become `to` (the game's own text), on every machine at one tick
+    /// — the first frame that can take a restart, as a join is taken ([`admit`]). A second change
+    /// before then replaces the first; a change back to the set ridden now is no change.
+    pub fn remodify(&mut self, to: String) -> Result<(), String> {
+        if !self.host() || self.waiting() {
+            return Err("only the host changes the modifiers".into());
+        }
+        self.admit.mods = (to != self.mods).then_some(to);
+        Ok(())
     }
 
     /// The host: a join asked for and not taken on yet is off (the peer left first).
@@ -333,7 +358,7 @@ impl<S: Clone + 'static> Netplay<S> {
     fn take(&mut self, from: &str, m: Msg) {
         match m {
             Msg::State { .. } | Msg::Resynced(_) => resync::heard(self, from, m),
-            Msg::Away { .. } | Msg::Restart { .. } => recover::heard(self, from, m),
+            Msg::Away { .. } | Msg::Restart { .. } | Msg::Mods { .. } => recover::heard(self, from, m),
             Msg::End(why) => self.finish(why),
         }
     }
