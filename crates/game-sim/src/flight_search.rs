@@ -8,8 +8,12 @@
 //! along the segment the plane flew since a moment ago. [`Scene`] answers both over the track's props
 //! ([`crate::world::Props`]) the way the original's search does:
 //!
-//! 1. **the candidates** — every prop as a collidable, with its distance from the ray probe's centre
-//!    less its reach, nearest first ([`Scene::new`]);
+//! 1. **the candidates** — the world the plane is in, as the broad phase holds it ([`world`]): the
+//!    props in the static tree laid over the track's field ([`crate::broad_build`]), the probes in the
+//!    moving list; and the plane's nearby search ([`search`]) filled from it by S45's
+//!    [`broad_phase::gather`] around the ray probe — gathered again only once the probe's reach leaves
+//!    the bound, else kept and its distances measured again — in the order the tree's walk meets them
+//!    (S96; [`Scene::new`]);
 //! 2. **the search** — S44's [`world_search::search_nearby`] over that list, once with each probe:
 //!    its clear, the reach test against the probe's radius, the pair filter, then the probe's own
 //!    narrow phase — S46's [`ray_probe::pair`] or S47's [`sweep_probe::pair`] — and the listeners;
@@ -34,21 +38,40 @@ use crate::ray_probe::{self, Facet, Matrix, RayProbe};
 use crate::sweep_probe::{self, SweepProbe};
 use crate::track::{self, Node};
 use crate::world::{Prop, Props};
-use crate::world_search::{self, Candidate, Categories, Class, Collidable, Narrow, Nearby, flags};
+use crate::broad_build;
+use crate::broad_phase::{self, Blocks, Broad, Pair, Placement, Space, Structure, Tables, more_flags};
+use crate::world_search::{self, Categories, Class, Collidable, Narrow, Nearby, flags};
 use ps2_float::{Dest, F, Vf, vu};
 
 /// The plane's ray collision file, in the machines' archive.
 pub const BIPLANE_RAYS: &str = "Biplane\\col\\biplanem.col";
 
-/// A scenery mesh's category (`+0x84`): what every collision mesh a track places is in, read off
-/// biplane.p2m2's save state (the 23 meshes around the plane).
-pub const SCENERY: u32 = 0x48;
+/// A scenery mesh's category (`+0x84`): what every collision mesh a track's scene places is in, read
+/// off biplane.p2m2's save state (its 353 meshes in the tree). The 23 meshes nearest the plane there,
+/// category 0x48, are the track's toys — the train and the machines — which the port does not have as
+/// collidables (S96).
+pub const SCENERY: u32 = 0x220;
+
+/// A scenery mesh's flag byte: struck, and gathered only within the search's bound.
+const SCENERY_FLAGS: u8 = flags::ENABLED | more_flags::WITHIN_BOUND;
+
+/// The plane's nearby search as its collision object is built with it: the box queried is
+/// `2 × SEARCH_LEAST` across, the bound may grow to `SEARCH_EXTRA`, and at most `SEARCH_CAPACITY`
+/// candidates are kept (biplane.p2m2's save state).
+pub const SEARCH_LEAST: f32 = 10.0;
+pub const SEARCH_EXTRA: f32 = 30.0;
+pub const SEARCH_CAPACITY: i32 = 128;
+
+/// The world's static tree: its smallest node at least this wide; and the moving list's block size.
+pub const TREE_LEAST: f32 = 96.0;
+pub const MOVING_BLOCK: i32 = 1024;
 
 /// The categories of the probes' own collidables, and what they collide with (`+0x84`, `+0xcc`).
 pub const PROBE: u32 = 0x8;
 pub const PROBE_COLLIDES_WITH: u32 = 0xffff_ffff;
 
-/// The global mask the hit listener tests a struck category against (0x40 in every state).
+/// The global mask the hit listener tests a struck category against (0x40 in every state). The toys'
+/// category has it; the scene's meshes' does not.
 pub const WAKE_MASK: u32 = 0x40;
 
 /// The plane's mask of categories its crash test spares from the speed rule: the "VEHICLE" surface
@@ -126,10 +149,107 @@ fn any_category() -> Categories {
     Categories { mode: 1, list: Vec::new() }
 }
 
-/// The two probes' slots in [`Scene`]'s collidables; the props follow, prop `i` at `FIRST + i`.
-const RAY: usize = 0;
-const SWEEP: usize = 1;
-const FIRST: usize = 2;
+/// The two probes' slots in [`world`]'s collidables; the props follow, prop `i` at `FIRST + i`.
+pub const RAY: usize = 0;
+pub const SWEEP: usize = 1;
+pub const FIRST: usize = 2;
+
+/// The plane's nearby search, empty, as its collision object is built with it.
+pub fn search() -> broad_phase::Search {
+    broad_phase::Search {
+        least: F(SEARCH_LEAST),
+        extra: F(SEARCH_EXTRA),
+        capacity: SEARCH_CAPACITY,
+        ..broad_phase::Search::default()
+    }
+}
+
+fn four(v: Vf) -> [F; 4] {
+    [F(v.x()), F(v.y()), F(v.z()), F(v.w())]
+}
+
+/// A prop's box in the world: its root node's through its frame, or a point where it has no tree.
+pub fn prop_box(p: &Prop) -> ([F; 4], [F; 4]) {
+    match p.mesh.nodes.first() {
+        Some(n) => broad_build::mesh_box(&p.to_world, n.centre, n.half_extent),
+        None => (four(p.centre), [F::ZERO, F::ZERO, F::ZERO, F::ONE]),
+    }
+}
+
+/// The ground-plane box the world's tree is laid over: the field's, or, in a world without one, the
+/// props' boxes together (and the unit square). A field without edges — the port's own worlds' — is
+/// no field here.
+fn tree_box(props: &[Prop], field: Option<([F; 2], [F; 2])>) -> ([F; 2], [F; 2]) {
+    const EDGE: f32 = 16_777_216.0;
+    if let Some((lo, hi)) = field
+        && lo.iter().chain(&hi).all(|&v| -EDGE < v && v < EDGE)
+    {
+        return (lo, hi);
+    }
+    let (mut lo, mut hi) = ([F::ZERO; 2], [F::ONE; 2]);
+    for p in props {
+        let (c, h) = prop_box(p);
+        for (k, i) in [(0, 0), (1, 2)] {
+            lo[k] = lo[k].min(c[i] - h[i]);
+            hi[k] = hi[k].max(c[i] + h[i]);
+        }
+    }
+    (lo, hi)
+}
+
+/// The world as the plane's broad phase holds it, with the ray probe's reach at `centre`, `radius`:
+/// one table, its static tree holding the props in scene order (category [`SCENERY`], gathered only
+/// within the bound) and its moving list the two probes, which nothing strikes. `field` is the
+/// terrain's box on the ground plane (`x`, `z`), which the tree is laid over.
+pub fn world(props: &[Prop], field: Option<([F; 2], [F; 2])>, centre: Vf, radius: F) -> (Broad, Vec<Collidable>) {
+    let probe = |flags, radius| Collidable {
+        class: Class::Object,
+        flags,
+        nearby: true,
+        radius,
+        category: PROBE,
+        collides_with: PROBE_COLLIDES_WITH,
+        categories: any_category(),
+        ..Collidable::default()
+    };
+    let mut objects = vec![probe(RAY_FLAGS, radius), probe(SWEEP_FLAGS, F::ZERO)];
+    let at = Placement { space: Some(0), centre: four(centre), ..Placement::default() };
+    let mut places = vec![at.clone(), at];
+    let (lo, hi) = tree_box(props, field);
+    let (mut tree, cell_size) = broad_build::tree_over(lo, hi, F(TREE_LEAST));
+    // It reports the box its cells cover, which is what the gather's bound is measured in.
+    tree.flags = 2;
+    for (i, p) in props.iter().enumerate() {
+        objects.push(Collidable {
+            class: Class::Object,
+            flags: SCENERY_FLAGS,
+            nearby: true,
+            radius: p.radius,
+            category: SCENERY,
+            collides_with: PROBE_COLLIDES_WITH,
+            categories: any_category(),
+            ..Collidable::default()
+        });
+        // At its box's centre, which is what the gather measures from (the sum's order is the box's,
+        // so not quite [`Prop::centre`]).
+        let (c, h) = prop_box(p);
+        places.push(Placement { centre: c, ..Placement::default() });
+        let key = broad_build::key(&tree, hi, c, h);
+        broad_build::insert(&mut tree, FIRST + i, key);
+    }
+    let mut block = vec![None; MOVING_BLOCK as usize];
+    (block[RAY], block[SWEEP]) = (Some(RAY), Some(SWEEP));
+    let list = Blocks { size: MOVING_BLOCK, last: 2, blocks: Some(vec![block]), ..Blocks::default() };
+    let broad = Broad {
+        spaces: vec![Space { next: None, tables: 0 }],
+        tables: vec![Tables { own: Pair { fixed: Some(0), moving: Some(1) }, subs: Vec::new() }],
+        structures: vec![Structure::Tree(tree), Structure::List(list)],
+        cell_size,
+        places,
+        ..Broad::default()
+    };
+    (broad, objects)
+}
 
 /// The world the plane searches, for one frame: the track's props as collidables, the candidates
 /// gathered around the ray probe, and the two probes' state.
@@ -145,38 +265,25 @@ pub struct Scene<'a> {
 }
 
 impl<'a> Scene<'a> {
-    /// The props as collidables and the candidates around the ray probe placed at `node`.
-    pub fn new(props: Option<&'a Props>, rays: &'a Rays, node: &Frame) -> Scene<'a> {
+    /// The world around the ray probe placed at `node` ([`world`]), and the plane's nearby `search`
+    /// filled from it ([`broad_phase::gather`], both kinds of structure). A list that names more
+    /// collidables than this world has was gathered in another one, and is gathered again.
+    pub fn new(
+        props: Option<&'a Props>,
+        field: Option<([F; 2], [F; 2])>,
+        rays: &'a Rays,
+        node: &Frame,
+        search: &mut broad_phase::Search,
+    ) -> Scene<'a> {
         let props = props.map_or(&[][..], |p| &p.props[..]);
         let transform = matrix(node);
         let (centre, radius) = reach(rays, &transform);
-        let probe = |flags, radius| Collidable {
-            class: Class::Object,
-            flags,
-            radius,
-            category: PROBE,
-            collides_with: PROBE_COLLIDES_WITH,
-            categories: any_category(),
-            ..Collidable::default()
-        };
-        let mut objects = vec![probe(RAY_FLAGS, radius), probe(SWEEP_FLAGS, F::ZERO)];
-        let mut found = Vec::new();
-        for (i, p) in props.iter().enumerate() {
-            objects.push(Collidable {
-                class: Class::Object,
-                flags: flags::ENABLED,
-                nearby: true,
-                radius: p.radius,
-                category: SCENERY,
-                collides_with: PROBE_COLLIDES_WITH,
-                categories: any_category(),
-                ..Collidable::default()
-            });
-            let d = p.centre.sub(centre);
-            let gap = length(Vf::new(d.x(), d.y(), d.z(), 0.0)) - p.radius;
-            found.push(Candidate { object: FIRST + i, distance: F::ZERO.max(gap) });
+        let (mut broad, mut objects) = world(props, field, centre, radius);
+        if search.nearby.found.iter().any(|c| objects.len() <= c.object) {
+            search.built = false;
+            search.nearby.found.clear();
         }
-        found.sort_by(|a, b| a.distance.0.total_cmp(&b.distance.0));
+        broad_phase::gather(&mut objects, &mut broad, search, RAY, 3);
         let ray = ray_probe::Record {
             listed: true,
             capacity: rays.segments.len(),
@@ -184,7 +291,8 @@ impl<'a> Scene<'a> {
             ..ray_probe::Record::default()
         };
         let sweep = SweepProbe::default();
-        Scene { props, rays, transform, objects, nearby: Nearby { found, prepare: false }, facets: vec![None; props.len()], ray, sweep }
+        let nearby = search.nearby.clone();
+        Scene { props, rays, transform, objects, nearby, facets: vec![None; props.len()], ray, sweep }
     }
 
     /// Prop `i`'s triangles in the ray probe's form, packed once a frame.
