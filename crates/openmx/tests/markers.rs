@@ -4,6 +4,9 @@
 //! `net::rides::Rides::step`). The stand-in bike on a flat floor, at the 30 Hz clamp. Left and Right
 //! fire on the press, the tick they go down (P93); Down and Up on the tick their held timer crosses
 //! `markers::HOLD_MS`, 200 ms (P106).
+//!
+//! P107's at the end: the plane's own set, flown as `Seat::pass` flies it — the garage's step, then
+//! `Garage::markers` — on the disc's biplane over a flat floor (skipped without a disc).
 
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
@@ -29,6 +32,9 @@ mod overlay;
 #[allow(dead_code)]
 #[path = "../src/net/mod.rs"]
 mod net;
+#[path = "../src/saved_markers.rs"]
+#[allow(dead_code)]
+mod saved_markers;
 #[path = "../src/aspect.rs"]
 #[allow(dead_code)]
 mod aspect;
@@ -146,8 +152,9 @@ fn down_places_a_marker_after_its_hold() {
     let s = sim.input.pad(0).control(Control::Down);
     assert!(s.held_ms > 1000, "held {} ms", s.held_ms);
     let marker = sim.markers.slots[0].as_ref().expect("a marker in slot 1");
+    let ride = marker.ride().expect("a bike's marker");
     assert_eq!(Some(hash::of(&**marker)), kept, "the marker is the bike as the firing tick left it");
-    assert!(F(marker.chassis.vel.z()).abs() > F(1.0), "the marker kept no speed");
+    assert!(F(ride.chassis.vel.z()).abs() > F(1.0), "the marker kept no speed");
     assert!((1..SLOTS).all(|s| !sim.markers.holds(s)));
     // Each hold is one more: let go, a second hold places again, a held Right steps once, on its press.
     assert_eq!(tick(&mut sim, GAS), None, "the release fired");
@@ -338,7 +345,7 @@ fn up_lands_on_the_marker_ghosted() {
     assert_eq!(what(&did), vec![Did::Placed(0)]);
     // The placement was on the hold's last tick; the tick after it let go. Ride the one after that
     // again from a copy of the marker for the comparison below.
-    let marker = (**sim.markers.slots[0].as_ref().unwrap()).clone();
+    let marker = sim.markers.slots[0].as_ref().unwrap().ride().unwrap().clone();
     // Away from it, and down in a heap: the teleport takes the rider out of a wreck too.
     for _ in 0..60 {
         tick(&mut sim, GAS);
@@ -379,7 +386,7 @@ fn the_tick_after_a_teleport_is_the_tick_after_the_placement() {
     let mut placed = sim.clone();
     // `hold` let go on the tick after the placement: ride the placement's state forward again from
     // the marker itself, then compare that tick with one more after a teleport.
-    placed.rider.ride = (**sim.markers.slots[0].as_ref().unwrap()).clone();
+    placed.rider.ride = sim.markers.slots[0].as_ref().unwrap().ride().unwrap().clone();
     let mut a = placed.clone();
     tick(&mut a, GAS);
     for _ in 0..30 {
@@ -389,7 +396,7 @@ fn the_tick_after_a_teleport_is_the_tick_after_the_placement() {
     assert_eq!(what(&did), vec![Did::Teleported(Pick::Slot(0))]);
     // `hold` rode one more tick after the teleport, on gas: so did `a` after the placement.
     let mut b = placed.clone();
-    b.rider.teleport((**sim.markers.slots[0].as_ref().unwrap()).clone());
+    b.rider.teleport(sim.markers.slots[0].as_ref().unwrap().ride().unwrap().clone());
     tick(&mut b, GAS);
     assert_eq!(hash::of(&a.rider.ride), hash::of(&b.rider.ride), "the run-up did not repeat");
 }
@@ -648,4 +655,324 @@ fn a_filled_slot_has_a_radar_mark() {
     assert!((post.distance - 60.5).abs() < 1.0);
     let away = game_render::world::Camera { at: game_render::v3(at.x(), at.y() + 8.0, at.z() - 120.0), ..toward };
     assert_eq!(overlay::marker_post(&away, (640, 448), [at.x(), at.y(), at.z()]), None, "behind the eye");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// P107: a set per machine.
+// ---------------------------------------------------------------------------------------------------
+
+use vehicle::{Garage, Kind, Plane, Spawn};
+
+/// The disc's biplane, or `None` (said) without a disc.
+fn the_discs_plane() -> Option<game_sim::flight::Flight> {
+    use game_render::disc::Disc;
+    let mut disc = match Disc::open_configured() {
+        Ok(disc) => disc,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return None;
+        }
+    };
+    let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res"))?.name.clone();
+    let res = disc.res(&name).expect("machine.res");
+    let bytes = res.read_suffix(game_sim::phy::BIPLANE_PHY).expect("machine.res carries biplane.phy");
+    Some(game_sim::flight::Flight::new(&game_sim::phy::Plane::read_bytes(&bytes)))
+}
+
+/// A stand-in bike and the disc's plane parked beside it on the flat floor, the garage on `up`.
+fn hangar(up: Kind) -> Option<(Sim, Garage)> {
+    let flight = the_discs_plane()?;
+    let lowest = flight.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min);
+    let spawn = Spawn { at: Vf::new(400.0, -lowest, -300.0, 1.0), facing: Vf::new(0.0, 0.0, -1.0, 0.0) };
+    Some((Sim::new(0x107), Garage::new(up, Some(Plane::flying(spawn, flight))).unwrap()))
+}
+
+/// One shell pass for player 1 as `Seat::pass` runs it: the poll with the d-pad out of the ride, the
+/// garage's step on whichever machine is up, then the bike's markers or the plane's.
+fn pass(sim: &mut Sim, garage: &mut Garage, report: Report) -> Option<Did> {
+    let mut world = Flat::default();
+    let spots = [garage.spot(sim, &mut world)];
+    let reports = [report, Report::missing()];
+    let controls = sim.poll(DT, &reports).stick_alone();
+    garage.step(sim, DT, &controls, &mut world);
+    if garage.up == Kind::Bike {
+        return markers::frame(sim, 0, &spots, &controls);
+    }
+    garage.markers(sim, 0, &spots, &[], &mut world)
+}
+
+/// Down or Up held through [`pass`]es until it fires at [`HOLD_MS`] (P106), the way a player puts a
+/// marker down or rides back: what fired, or `None` if nothing did in a second.
+fn hold_pass(sim: &mut Sim, garage: &mut Garage, buttons: u16) -> Option<Did> {
+    (0..30).find_map(|_| pass(sim, garage, Report::from_buttons(buttons)))
+}
+
+fn flight(garage: &Garage) -> &game_sim::flight::Flight {
+    garage.plane.as_ref().and_then(|p| p.flight.as_ref()).expect("a flight")
+}
+
+fn stick(buttons: u16, y: u8) -> Report {
+    let mut r = Report::from_buttons(buttons);
+    r.set_axis(3, y);
+    r
+}
+
+/// Thirty seconds of gas from the spawn: the plane in the air.
+fn airborne(sim: &mut Sim, garage: &mut Garage) {
+    for _ in 0..30 * 30 {
+        pass(sim, garage, Report::from_buttons(GAS));
+    }
+    let plane = garage.plane.as_ref().unwrap();
+    assert!(!plane.on_ground() && flight(garage).crash.reason == 0, "thirty seconds of gas and the plane is not flying");
+}
+
+/// P107: a plane's marker is its whole flight. Down in the air keeps the flight as the tick left it;
+/// flown away and wrecked into the floor, Up puts the plane back into it — out of the wreck, in the
+/// air, bit for bit — and the ticks after it are the ticks after the placement flown again, hash
+/// for hash. And the d-pad flies nothing: the plane on the same stick with the d-pad held is the
+/// same plane.
+#[test]
+fn a_plane_marker_restores_the_flight_bit_for_bit() {
+    let Some((mut sim, mut garage)) = hangar(Kind::Biplane) else { return };
+    airborne(&mut sim, &mut garage);
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Down.mask()), Some(Did::Placed(0)));
+    let kept = flight(&garage).clone();
+    let mark = sim.markers.slots[0].as_deref().expect("a marker in slot 1");
+    assert_eq!(mark.vehicle(), markers::Vehicle::Plane);
+    assert!(mark.flight() == Some(&kept), "the marker is not the flight as the tick left it");
+    assert_eq!(hash::of(mark), hash::of(&kept));
+    assert!(!sim.markers.any_on(markers::Vehicle::Bike), "the plane's marker went in the bike's set");
+
+    // The ride on from the placement, pulling: what the put-back has to fly again.
+    let script: Vec<Report> = (0..40).map(|k| stick(GAS, if k < 20 { 0xff } else { 0x60 })).collect();
+    let ride_on = |sim: &mut Sim, garage: &mut Garage| -> Vec<u64> {
+        script.iter().map(|&r| {
+            pass(sim, garage, r);
+            hash::of(flight(garage))
+        }).collect()
+    };
+    let (mut a, mut b) = (sim.clone(), garage.clone());
+    let want = ride_on(&mut a, &mut b);
+    // The same ride with the whole d-pad held is the same flight: the plane does not read it.
+    let (mut a, mut b) = (sim.clone(), garage.clone());
+    let dpad = Control::Left.mask() | Control::Up.mask();
+    let with_dpad: Vec<u64> = script.iter().map(|r| {
+        let mut held = Report::from_buttons(r.buttons() | dpad);
+        held.set_axis(3, r.axis(3));
+        pass(&mut a, &mut b, held);
+        hash::of(flight(&b))
+    }).collect();
+    assert_eq!(with_dpad, want, "the d-pad flew the plane");
+
+    // Away, nose down to the floor, and wrecked. The plane here has no ray probe (the disc's
+    // collision object is not loaded), so the floor stops its wheels but nothing wrecks it: the wreck
+    // is put on by hand, the state the put-back has to take it out of.
+    for _ in 0..30 {
+        pass(&mut sim, &mut garage, stick(GAS, 0xff));
+    }
+    let ticks = 90;
+    for _ in 0..ticks {
+        pass(&mut sim, &mut garage, stick(GAS, 0x00));
+    }
+    let wrecked_at = flight(&garage).pose().1;
+    garage.plane.as_mut().unwrap().flight.as_mut().unwrap().crash.reason = 1;
+
+    // Up: back into the flight it kept, out of the wreck, in the air.
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Up.mask()), Some(Did::Teleported(Pick::Slot(0))));
+    assert!(*flight(&garage) == kept, "the put-back is not the flight it kept");
+    assert_eq!(hash::of(flight(&garage)), hash::of(&kept));
+    let plane = garage.plane.as_ref().unwrap();
+    assert!(!plane.on_ground() && flight(&garage).crash.reason == 0);
+    assert_eq!(plane.at.to_bits()[..3], markers::Mark::Plane(kept.clone()).position().to_bits()[..3], "drawn where it was put back");
+    assert_ne!(wrecked_at.to_bits(), kept.pose().1.to_bits());
+    assert_eq!(ride_on(&mut sim, &mut garage), want, "the ticks after the put-back are not the ticks after the placement");
+    println!("plane marker: kept at {:?}, wrecked {ticks} ticks into a dive, put back and flown {} ticks bit for bit", kept.pose().1, want.len());
+}
+
+/// P107: the bike and the plane have five slots and a selection each, never shared. Switching
+/// machine shows the other's set — its slots, its selection, its radar marks — and an Up on a slot
+/// only ever finds that machine's marker.
+#[test]
+fn bike_and_plane_slots_do_not_share_and_a_switch_shows_the_other_set() {
+    let Some((mut sim, mut garage)) = hangar(Kind::Bike) else { return };
+    for _ in 0..45 {
+        pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    }
+    // The bike: a marker in slot 1, the selection stepped to slot 2.
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Down.mask()), Some(Did::Placed(0)));
+    pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    assert_eq!(pass(&mut sim, &mut garage, Report::from_buttons(GAS | Control::Right.mask())), Some(Did::Stepped(Pick::Slot(1))));
+    let bike_mark = hash::of(sim.markers.slots[0].as_deref().unwrap());
+    assert!(sim.markers.slots[0].as_deref().unwrap().ride().is_some());
+
+    // Onto the plane: its own set, empty and on its first slot.
+    let mut world = Flat::default();
+    garage.switch(Kind::Biplane, &mut sim, &mut world).unwrap();
+    assert_eq!(sim.markers.on, markers::Vehicle::Plane);
+    assert!(sim.markers.slots.iter().all(Option::is_none) && sim.markers.at == 0, "the plane shows the bike's set");
+    assert!(overlay::marker_blips(&sim.markers, sim.markers.pick(0, 1)).is_empty(), "the bike's marker is on the plane's radar");
+    for _ in 0..3 {
+        pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    }
+    // Up on the plane's slot 1 finds nothing: the bike's marker there is not the plane's.
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Up.mask()), Some(Did::Refused(Pick::Slot(0))));
+    // The plane's own: two steps right, a marker in slot 3.
+    for _ in 0..2 {
+        pass(&mut sim, &mut garage, Report::from_buttons(GAS | Control::Right.mask()));
+        pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    }
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Down.mask()), Some(Did::Placed(2)));
+    let plane_mark = hash::of(sim.markers.slots[2].as_deref().unwrap());
+    let blips = overlay::marker_blips(&sim.markers, sim.markers.pick(0, 1));
+    assert_eq!(blips.len(), 1, "the plane's radar has its one marker");
+    assert!(!sim.markers.holds(0) && sim.markers.holds(2) && sim.markers.at == 2);
+
+    // Back on the bike: the bike's set as it was left, the plane's waiting beside it.
+    pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    garage.switch(Kind::Bike, &mut sim, &mut world).unwrap();
+    assert_eq!(sim.markers.on, markers::Vehicle::Bike);
+    assert!(sim.markers.holds(0) && !sim.markers.holds(2) && sim.markers.at == 1, "the bike's set is not as it was left");
+    assert_eq!(hash::of(sim.markers.slots[0].as_deref().unwrap()), bike_mark);
+    let plane_slots = sim.markers.slots_of(markers::Vehicle::Plane).expect("the plane's set kept");
+    assert_eq!(plane_slots[2].as_deref().map(hash::of), Some(plane_mark));
+    assert_eq!(overlay::marker_blips(&sim.markers, sim.markers.pick(0, 1)).len(), 1, "the bike's radar has its one marker");
+    // Up on the bike's slot 1 rides the bike back; on the plane's slot 3 would be nothing here.
+    pass(&mut sim, &mut garage, Report::from_buttons(GAS | Control::Left.mask()));
+    pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Up.mask()), Some(Did::Teleported(Pick::Slot(0))));
+    pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    for _ in 0..2 {
+        pass(&mut sim, &mut garage, Report::from_buttons(GAS | Control::Right.mask()));
+        pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    }
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Up.mask()), Some(Did::Refused(Pick::Slot(2))));
+    // And back on the plane, its selection is where it was left too.
+    garage.switch(Kind::Biplane, &mut sim, &mut world).unwrap();
+    assert!(sim.markers.holds(2) && !sim.markers.holds(0) && sim.markers.at == 2);
+}
+
+/// P107: saved and loaded per machine. The plane's markers are kept in a file of their own beside
+/// the bike's (`<profile>.biplane.markers`), named by the plane's `.phy`; a placement on one machine
+/// writes only its file; a ride loads both back, each into its own set. A tape and a pick carry
+/// both, and with the bike's alone carry the bytes they did before (P99's).
+#[test]
+fn saved_and_reloaded_per_machine() {
+    let Some((mut sim, mut garage)) = hangar(Kind::Bike) else { return };
+    assert_eq!(saved_markers::bike_word(game_sim::phy::BIPLANE_PHY), markers::PLANE, "the plane's markers are not named by its .phy");
+    let dir = std::env::temp_dir().join(format!("openmx-p107-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    const TRACK: &str = "free06";
+    const BIKE: &str = "race125p";
+    let mut kept = saved_markers::Kept::new(TRACK, "1P", BIKE, &sim.markers);
+    let bike_file = saved_markers::path_of(&dir, TRACK, "1P", markers::Vehicle::Bike);
+    let plane_file = saved_markers::path_of(&dir, TRACK, "1P", markers::Vehicle::Plane);
+    assert_eq!(bike_file, saved_markers::path(&dir, TRACK, "1P"));
+    assert_ne!(bike_file, plane_file);
+
+    for _ in 0..45 {
+        pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    }
+    hold_pass(&mut sim, &mut garage, GAS | Control::Down.mask());
+    assert!(kept.frame(&dir, &sim.markers).is_some());
+    assert!(bike_file.exists() && !plane_file.exists(), "a bike marker wrote the plane's file");
+    let bike_bytes = std::fs::read(&bike_file).unwrap();
+    // The bike's alone on a tape or a pick: its file, as P99 carried it.
+    assert_eq!(sim.markers.to_files(&saved_markers::names(BIKE)), sim.markers.to_file(BIKE));
+
+    let mut world = Flat::default();
+    garage.switch(Kind::Biplane, &mut sim, &mut world).unwrap();
+    for _ in 0..3 {
+        pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    }
+    pass(&mut sim, &mut garage, Report::from_buttons(GAS | Control::Right.mask()));
+    hold_pass(&mut sim, &mut garage, GAS | Control::Down.mask());
+    assert!(sim.markers.holds(1));
+    assert_eq!(kept.frame(&dir, &sim.markers).as_deref().map(|l| l.lines().count()), Some(1), "one file written");
+    assert!(plane_file.exists());
+    assert_eq!(std::fs::read(&bike_file).unwrap(), bike_bytes, "a plane marker rewrote the bike's file");
+
+    // A ride loads both, each its own machine's, on its first slot.
+    let words = saved_markers::signatures(&sim.markers);
+    let mut back = saved_markers::load(&dir, TRACK, "1P", BIKE);
+    assert_eq!(saved_markers::signatures(&back), words);
+    assert_eq!(back.on, markers::Vehicle::Bike);
+    assert!(back.holds(0) && back.slots[0].as_deref().unwrap().ride().is_some());
+    back.up(markers::Vehicle::Plane);
+    assert!(back.holds(1) && !back.holds(0) && back.slots[1].as_deref().unwrap().flight().is_some());
+    // The plane's kept flight is the flight, every field the codec carries.
+    let live = sim.markers.slots[1].as_deref().unwrap().flight().unwrap();
+    let read = back.slots[1].as_deref().unwrap().flight().unwrap();
+    assert_eq!(hash::of(read), hash::of(live));
+    // Another bike's file is not loaded; the plane's still is.
+    let other = saved_markers::load(&dir, TRACK, "1P", "race250f");
+    assert!(!other.any_on(markers::Vehicle::Bike) && other.any_on(markers::Vehicle::Plane));
+
+    // A tape and a pick carry both.
+    let tape = sim.markers.to_files(&saved_markers::names(BIKE));
+    let (_, from_tape) = markers::Markers::read_file(&tape).unwrap();
+    assert_eq!(saved_markers::signatures(&from_tape), words);
+    let pick = saved_markers::to_pick(&sim.markers, BIKE, TRACK);
+    assert_eq!(saved_markers::signatures(&saved_markers::from_pick(&pick, BIKE, TRACK)), words);
+    let wire = saved_markers::to_wire(&sim.markers, BIKE, TRACK);
+    assert_eq!(saved_markers::signatures(&saved_markers::from_wire(&wire, BIKE, TRACK)), words);
+    // A cut bundle reads as nothing, never a crash.
+    for cut in [8, 12, tape.len() / 2, tape.len() - 1] {
+        assert!(markers::Markers::read_file(&tape[..cut]).is_err(), "cut at {cut} read");
+    }
+    // P99's version-1 bike file still reads, as the bike's.
+    let mut v1 = sim.markers.to_file(BIKE);
+    v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+    let kind_at = 16 + BIKE.len();
+    v1.remove(kind_at);
+    let old = markers::Markers::from_file(&v1, BIKE).expect("a P99 file");
+    assert_eq!(saved_markers::signatures(&old)[0], words[0]);
+
+    // Cleared, both files go.
+    saved_markers::save(&dir, TRACK, "1P", BIKE, &Default::default()).unwrap();
+    assert!(!bike_file.exists() && !plane_file.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P107 online: a seat's plane markers are its `Sim`'s, as the bike's are — placed and put back
+/// through the lane (`vehicle::fly_lane`, `vehicle::lane_markers`), carried by a snapshot both sets
+/// at once, and hashed.
+#[test]
+fn online_a_planes_markers_ride_the_lane_and_the_snapshot() {
+    let Some((mut sim, garage)) = hangar(Kind::Biplane) else { return };
+    let template = garage.plane.as_ref().unwrap().flight.clone().unwrap();
+    let bay = garage.plane.as_ref().unwrap().spawn;
+    vehicle::start_lane(&template, bay, &mut sim);
+    let wanted = vehicle::Wanted::default();
+    let mut world = Flat::default();
+    let mut tick = |sim: &mut Sim, report: Report| {
+        let spots = [vehicle::lane_spot(sim, &mut world)];
+        sim.poll(DT, &[report, Report::missing()]);
+        vehicle::fly_lane(sim, DT, wanted, &mut world);
+        vehicle::lane_markers(sim, 0, &spots, &[true], &mut world)
+    };
+    for _ in 0..30 * 30 {
+        tick(&mut sim, Report::from_buttons(GAS));
+    }
+    assert_eq!((0..30).find_map(|_| tick(&mut sim, Report::from_buttons(GAS | Control::Down.mask()))), Some(Did::Placed(0)));
+    let kept = sim.plane.clone().unwrap();
+    let before = sim.hash();
+    assert_ne!(before, { let mut s = sim.clone(); s.markers = Default::default(); s.hash() }, "the plane's markers are not in the hash");
+
+    // A snapshot carries the plane's set and the bike's waiting one.
+    let mut both = sim.clone();
+    let mut bike_set = markers::Set { on: markers::Vehicle::Bike, ..Default::default() };
+    bike_set.slots[3] = Some(Box::new(markers::Mark::Bike(sim.rider.ride.clone())));
+    both.markers.put(bike_set);
+    let bytes = game_sim::snapshot::encode(&both);
+    let mut back = sim.clone();
+    back.markers = Default::default();
+    game_sim::snapshot::decode(&mut back, &bytes).unwrap();
+    assert_eq!(back.hash(), both.hash());
+    assert!(back.markers.slots_of(markers::Vehicle::Bike).unwrap()[3].is_some());
+
+    for _ in 0..30 {
+        tick(&mut sim, stick(GAS, 0x00));
+    }
+    assert_eq!((0..30).find_map(|_| tick(&mut sim, Report::from_buttons(GAS | Control::Up.mask()))), Some(Did::Teleported(Pick::Slot(0))));
+    assert!(sim.plane.as_ref() == Some(&kept), "the lane's put-back is not the flight it kept");
 }
