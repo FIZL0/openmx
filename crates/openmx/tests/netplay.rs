@@ -1268,3 +1268,63 @@ fn sixteen_machines_measured() {
         eprintln!("{seats} seats on {peers} machines: {n} ticks agreed");
     }
 }
+
+/// N15: the `--peer` UDP path has no room or handshake, so each machine's datagrams carry its own
+/// seats' controller presets ahead of the session's bytes ([`net::udp`]'s card). Three machines on
+/// localhost's real UDP, each with its seats built on preset 0 the way `--online` starts them, the
+/// host on 3, g on 2 and k's two seats on 1 and 0: every machine builds every seat on its own
+/// machine's preset before the first tick (ggrs ticks only once it has heard every peer), and from
+/// then on every machine agrees on every settled tick.
+#[test]
+fn every_seat_rides_its_own_preset_over_peer_udp() {
+    use net::udp::Udp;
+
+    let lineup = Lineup::parse("host,g,k,k").unwrap();
+    let names = lineup.peers();
+    let cards: [&[u8]; 3] = [&[3], &[2], &[1, 0]];
+    let local: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let mut udps: Vec<Udp> = cards.iter().map(|c| Udp::bind_as(local, vec![], "n15", c).unwrap()).collect();
+    let ats: Vec<_> = udps.iter().map(|u| u.at()).collect();
+    for (i, u) in udps.iter_mut().enumerate() {
+        u.meet((0..3).filter(|&j| j != i).map(|j| (names[j].clone(), ats[j])).collect());
+    }
+    ggrs::clock::drive(true);
+    let mut nets: Vec<Netplay<rides::State>> = names.iter().map(|me| Netplay::new(lineup.clone(), me, Timing::default(), dumps()).unwrap()).collect();
+    let mut games: Vec<Ride> = (0..3).map(|_| Ride::new(4)).collect();
+    let mut owed = vec![true; 3];
+    for _ in 0..240 {
+        for i in 0..3 {
+            for (from, d) in udps[i].receive().unwrap() {
+                nets[i].heard(&from, &d);
+            }
+            // what `Online::frame` does before the session runs
+            if owed[i] && let Some(presets) = udps[i].presets(&lineup, &names[i]).unwrap() {
+                for (sim, &p) in games[i].sims.iter_mut().zip(&presets) {
+                    sim.set_presets([p as usize, 0]);
+                }
+                owed[i] = false;
+            }
+            let np = &mut nets[i];
+            let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| mash(s, np.tick())).collect();
+            games[i].frame(np, &local);
+            assert!(!owed[i] || np.tick() == 0, "{} ticked before every preset came", names[i]);
+            for (to, d) in np.outgoing() {
+                udps[i].send(&to, &d);
+            }
+            np.said.clear();
+        }
+        ggrs::clock::advance(ROUND);
+    }
+    ggrs::clock::drive(false);
+    for (i, game) in games.iter().enumerate() {
+        let presets: Vec<Option<usize>> = game.sims.iter().map(rides::preset).collect();
+        assert_eq!(presets, [Some(3), Some(2), Some(1), Some(0)], "{}: every seat on its machine's preset", names[i]);
+    }
+    let settled = nets.iter().map(|np| (np.confirmed().max(0) as usize).min(np.hashes.len())).min().unwrap();
+    assert!(settled > 150, "{settled} ticks settled");
+    for np in &nets[1..] {
+        assert_eq!(np.hashes[..settled], nets[0].hashes[..settled], "{}: the state before every settled tick", np.me);
+        assert_eq!(np.log[..settled], nets[0].log[..settled], "{}: the pads", np.me);
+    }
+    assert!(nets.iter().all(|np| np.desyncs.is_empty() && np.end.is_none()));
+}
