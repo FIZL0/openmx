@@ -61,7 +61,8 @@ impl Screen {
         title: &str,
     ) -> Result<Screen, String> {
         let inner = match backend {
-            Backend::Gpu => match GpuWindow::open(size, scale, title) {
+            // VSync on until the loop says otherwise (P90): the settings' default.
+            Backend::Gpu => match GpuWindow::open(size, scale, title, true) {
                 Ok(w) => Inner::Gpu(Box::new(w)),
                 Err(e) => {
                     println!("renderer: no GPU window ({e}); drawing in software");
@@ -148,6 +149,30 @@ impl Screen {
         };
         self.sync();
         out
+    }
+
+    /// Present waiting for the display, or not (P90). The X11 window has no such wait: there the
+    /// loop paces VSync itself ([`crate::pace::frame_floor`]).
+    pub fn set_vsync(&mut self, vsync: bool) {
+        if let Inner::Gpu(w) = &mut self.inner {
+            w.set_vsync(vsync);
+        }
+    }
+
+    /// Whether a present waits for the display's refresh.
+    pub fn waits(&self) -> bool {
+        match &self.inner {
+            Inner::X(_) => false,
+            Inner::Gpu(w) => w.waits(),
+        }
+    }
+
+    /// The display's refresh in hertz, where the window can tell.
+    pub fn refresh(&self) -> Option<f32> {
+        match &self.inner {
+            Inner::X(_) => None,
+            Inner::Gpu(w) => w.refresh,
+        }
     }
 
     /// The GPU window, where the GPU draws.

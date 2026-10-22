@@ -37,7 +37,7 @@ mod pad;
 mod audio;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
-use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, Overlay, Press, Reader, Readers, RenderScale, Screen, Settings, Speedometer};
+use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, FrameLimit, Overlay, Press, Reader, Readers, RenderScale, Screen, Settings, Speedometer};
 use vehicle::{Garage, Kind, Plane, Spawn};
 use game_render::world::Graphics;
 use game_sim::modifiers::{Knob, Mods};
@@ -238,6 +238,9 @@ fn the_settings_file_reads_back_as_it_was_written() {
         graphics: Graphics::Original,
         render_scale: RenderScale::ThreeQuarters,
         speedometer: Speedometer::Analog,
+        // VSync off and a hand-written limit the row does not offer (P90).
+        vsync: false,
+        frame_limit: FrameLimit::Fps(75),
         // Gravity halved for everyone and 2P's bike twice as fast (P55), and a preset kept by name.
         modifiers: Mods::parse("gravity=50 bike_speed.2=200").unwrap(),
         presets: vec![("Moon".into(), Mods::parse("gravity=20").unwrap())],
@@ -391,6 +394,75 @@ fn the_render_scale_row_cycles_and_is_saved() {
     let dir = scratch("render-scale");
     std::fs::write(dir.join(menu::SETTINGS_FILE), "name = Rider\ngraphics = full\n").unwrap();
     assert_eq!(menu::load(&dir).0.render_scale, RenderScale::Auto);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// P90: a fresh settings file has VSync on and no frame limit; the two rows under the speedometer's
+/// change by pad input, and what they say is saved and read back.
+#[test]
+fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
+    let (mut m, mut r) = fresh();
+    assert!(m.settings.vsync, "VSync on unless turned off");
+    assert_eq!(m.settings.frame_limit, FrameLimit::Off);
+    let dir = scratch("vsync");
+    assert!(menu::load(&dir).0.vsync, "no file is VSync on");
+    std::fs::write(dir.join(menu::SETTINGS_FILE), "name = Rider\nrender_scale = 75\n").unwrap();
+    assert!(menu::load(&dir).0.vsync, "a file from before P90 is VSync on");
+    assert_eq!(menu::load(&dir).0.frame_limit, FrameLimit::Off);
+
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    for _ in 0..10 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert!(!m.settings.vsync);
+    assert_eq!(m.settings.speedometer, Speedometer::Digital, "the speedometer's row is untouched");
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.vsync);
+    tap(&mut m, &mut r, Control::Left);
+    assert!(!m.settings.vsync);
+
+    tap(&mut m, &mut r, Control::Down);
+    let mut seen = Vec::new();
+    for _ in 0..FrameLimit::ALL.len() {
+        tap(&mut m, &mut r, Control::Right);
+        assert!(m.take_changed());
+        seen.push(m.settings.frame_limit);
+    }
+    assert_eq!(seen[..6], FrameLimit::ALL[1..]);
+    assert_eq!(seen[6], FrameLimit::Off, "round from the refresh rate to off");
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.frame_limit, FrameLimit::Refresh);
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.frame_limit, FrameLimit::Fps(144));
+    assert!(!m.settings.vsync, "the VSync row is untouched");
+    // The next row is still the modifiers', and the last.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+
+    let text = m.settings.text();
+    assert!(text.contains("vsync = off\n") && text.contains("frame_limit = 144\n"), "{text}");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let back = menu::load(&dir).0;
+    assert_eq!((back.vsync, back.frame_limit), (false, FrameLimit::Fps(144)));
+    for limit in FrameLimit::ALL {
+        assert_eq!(FrameLimit::from_word(&limit.word()), Some(limit));
+        let s = Settings { frame_limit: limit, ..Settings::default() };
+        assert_eq!(Settings::parse(&s.text()).frame_limit, limit);
+    }
+    assert_eq!(FrameLimit::from_word("90fps"), Some(FrameLimit::Fps(90)));
+    assert_eq!(Settings::parse("frame_limit = fast\n").frame_limit, FrameLimit::Off);
+    assert_eq!(Settings::parse("frame_limit = 5000\n").frame_limit, FrameLimit::Off);
+    assert_eq!(FrameLimit::Refresh.fps(165.0), Some(165.0));
+    assert_eq!(FrameLimit::Fps(60).fps(165.0), Some(60.0));
+    assert_eq!(FrameLimit::Off.fps(165.0), None);
     std::fs::remove_dir_all(dir).ok();
 }
 
