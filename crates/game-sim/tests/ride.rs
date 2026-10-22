@@ -3920,15 +3920,20 @@ fn it_straightens_after_a_slide() {
 
 // --- S54: more than one rider -----------------------------------------------------------------------
 
-/// A session of `n` riders on the stand-in bike, wrecks on: player 1 is the seed's own rider at the
-/// stock spawn and player `i` stands `i × rise` above it, moving at a velocity of its own, so that
-/// each one's head ray reaches into the body of the one above it.
+/// A session of `n` riders on the stand-in bike, wrecks on, stacked `rise` apart with the last
+/// player at the stock spawn and player 1 (the seed's own rider) on top, the others moving at
+/// velocities of their own, so that each one's head ray reaches into the body of the one above it —
+/// the player before it, which the last-player-first step (S88) has not moved yet.
 fn stacked(n: usize, rise: f32) -> game_sim::Sim {
     let mut sim = game_sim::Sim::new(0x5354);
     sim.rider.sense.wrecks_enabled = true;
+    if n > 1 {
+        let top = Vf::new(SPAWN.x(), SPAWN.y() + rise * (n - 1) as f32, SPAWN.z(), 1.0);
+        sim.rider.ride.place(top, game_sim::stock::FACING);
+    }
     let mounts = game_sim::stock::mounts(&sim.phy);
     for i in 1..n {
-        let at = Vf::new(SPAWN.x(), SPAWN.y() + rise * i as f32, SPAWN.z(), 1.0);
+        let at = Vf::new(SPAWN.x(), SPAWN.y() + rise * (n - 1 - i) as f32, SPAWN.z(), 1.0);
         let mut r = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Set::default());
         r.ride.chassis.vel = Vf::new(i as f32, 0.0, 2.0 * i as f32, 0.0);
         let phy = (*sim.phy).clone();
@@ -3962,11 +3967,11 @@ fn one_rider_hashes_as_before() {
     assert!(Dump::of(&a).get("players.len").is_none(), "a one-player walk has no players group");
 }
 
-/// The order is player order, each rider's whole frame before the next one's: a two-rider step is
-/// player 1's frame against player 2 where it stood, then player 2's against player 1 where it now
-/// is — rebuilt by hand here and compared word for word.
+/// The order is the last player first, each rider's whole frame before the next one's (S88): a
+/// two-rider step is player 2's frame against player 1 where it stood, then player 1's against
+/// player 2 where it now is — rebuilt by hand here and compared word for word.
 #[test]
-fn two_riders_step_in_player_order() {
+fn two_riders_step_the_last_player_first() {
     let mut a = stacked(2, 12.0);
     let mut b = a.clone();
     let dt = F(game_sim::tick::DeltaTime::CAP_30);
@@ -3975,11 +3980,11 @@ fn two_riders_step_in_player_order() {
         a.step_all(dt, &c, &mut Flat::default());
         let tables = b.tables.clone();
         let up = |r: &Rider| r.state.wreck.is_none();
-        let r2: Vec<_> = Some(&b.others[0].rider).filter(|r| up(r)).map(|r| r.ride.rival()).into_iter().collect();
-        b.rider.frame_among(&b.phy, &tables, &c[0], dt, &mut Flat::default(), &r2);
         let r1: Vec<_> = Some(&b.rider).filter(|r| up(r)).map(|r| r.ride.rival()).into_iter().collect();
         let p = &mut b.others[0];
         p.rider.frame_among(&p.phy, &tables, &c[1], dt, &mut Flat::default(), &r1);
+        let r2: Vec<_> = Some(&b.others[0].rider).filter(|r| up(r)).map(|r| r.ride.rival()).into_iter().collect();
+        b.rider.frame_among(&b.phy, &tables, &c[0], dt, &mut Flat::default(), &r2);
         b.ticks += 1;
         assert_eq!(a.hash(), b.hash(), "tick {}", k + 1);
     }
@@ -4017,7 +4022,8 @@ fn two_and_four_riders_are_deterministic() {
 /// ray reaches into the body of the one above, whose chassis is higher by more than the bike's
 /// `JoustWreckHeight` (2): every rider with one above them comes off with reason 7, thrown at the
 /// velocity of the rider who landed on them — taken **before** that rider's own frame, which is the
-/// step order showing. The top one has nobody above and does not joust.
+/// step order showing (the one below is the later player, stepped first). The top one, player 1,
+/// has nobody above and does not joust.
 #[test]
 fn stacked_riders_joust() {
     let dt = F(game_sim::tick::DeltaTime::CAP_30);
@@ -4026,11 +4032,11 @@ fn stacked_riders_joust() {
         let mut sim = stacked(n, 3.0);
         let before: Vec<Vf> = (0..n).map(|i| sim.rider_of(i).ride.chassis.vel).collect();
         let frames = sim.step_all(dt, &vec![Controls::default(); n], &mut Flat::default());
-        for i in 0..n - 1 {
-            assert_eq!(frames[i].wreck, joust, "{n} riders: player {} under player {}", i + 1, i + 2);
-            assert_eq!(sim.rider_of(i).ride.air.wreck_impact, before[i + 1], "{n} riders: player {}", i + 1);
+        for i in 1..n {
+            assert_eq!(frames[i].wreck, joust, "{n} riders: player {} under player {}", i + 1, i);
+            assert_eq!(sim.rider_of(i).ride.air.wreck_impact, before[i - 1], "{n} riders: player {}", i + 1);
         }
-        assert_ne!(frames[n - 1].wreck, joust, "{n} riders: the top rider has nobody above");
+        assert_ne!(frames[0].wreck, joust, "{n} riders: the top rider has nobody above");
     }
     // Side by side the heights are level: the head ray touches, and it is no joust.
     let mut sim = game_sim::Sim::new(0x5354);
@@ -4084,22 +4090,23 @@ fn a_ghost_passes_through_another_rider() {
     let still = vec![Controls::default(); 2];
     let mut sim = stacked(2, 3.0);
     let frames = sim.step_all(dt, &still, &mut Flat::default());
-    assert_eq!(frames[0].wreck, joust, "the stack without a ghost");
+    assert_eq!(frames[1].wreck, joust, "the stack without a ghost");
     for ghost in [0, 1] {
         let mut sim = stacked(2, 3.0);
         if ghost == 0 { sim.rider.ghost.start() } else { sim.others[0].rider.ghost.start() }
         let frames = sim.step_all(dt, &still, &mut Flat::default());
-        assert_ne!(frames[0].wreck, joust, "player {} a ghost: the head ray struck the other rider", ghost + 1);
+        assert_ne!(frames[1].wreck, joust, "player {} a ghost: the head ray struck the other rider", ghost + 1);
         assert!(sim.rider_of(ghost).ghost.on);
     }
     // Nor can it run out in there: half a tick left, and inside the rider above, it is still a ghost
     // after the tick — the clock that would have ended it did not count — and still struck nobody.
     let mut sim = stacked(2, 3.0);
     let half = F(dt.0 / 2.0);
-    sim.rider.ghost = Ghost { clock: half, alpha: F(0.9), on: true };
+    sim.others[0].rider.ghost = Ghost { clock: half, alpha: F(0.9), on: true };
     let frames = sim.step_all(dt, &still, &mut Flat::default());
-    assert_eq!((sim.rider.ghost.clock, sim.rider.ghost.on), (half, true), "the clock ran out inside");
-    assert_ne!(frames[0].wreck, joust);
+    let g = sim.others[0].rider.ghost;
+    assert_eq!((g.clock, g.on), (half, true), "the clock ran out inside");
+    assert_ne!(frames[1].wreck, joust);
 }
 
 /// S63: the ghost's clock stands still for as long as its body is inside another rider's, and runs
