@@ -1148,12 +1148,17 @@ pub struct PadTape {
     /// which is not on the tape. Empty for a ride that kept the set it loaded with, which is every tape
     /// before P98.
     pub changes: Vec<(usize, crate::modifiers::Mods)>,
+    /// The first player switched machine while the ride went on (P102), in tick order: `(k, word)`
+    /// is the machine they are put on before frame `k` is stepped, by the shell's word for it
+    /// (`bike`, `biplane`). The simulation here knows no machines: the shell answers them. Empty
+    /// for a ride on one machine, which is every tape before P102.
+    pub switches: Vec<(usize, String)>,
 }
 
 impl PadTape {
     /// An empty recording, named.
     pub fn new(name: impl Into<String>) -> PadTape {
-        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new() }
+        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new() }
     }
 
     /// The modifiers frame `k` rides on: the set the ride loaded with, as the changes before it left
@@ -1165,6 +1170,11 @@ impl PadTape {
     /// The change put on just before frame `k`, if there is one there.
     pub fn change_at(&self, k: usize) -> Option<crate::modifiers::Mods> {
         self.changes.iter().rev().find(|(at, _)| *at == k).map(|(_, m)| *m)
+    }
+
+    /// The machines the first player is switched to just before frame `k`, in the order they were.
+    pub fn switches_at(&self, k: usize) -> impl Iterator<Item = &str> {
+        self.switches.iter().filter(move |(at, _)| *at == k).map(|(_, w)| w.as_str())
     }
 
     /// Write down one frame: the port recording what it just played.
@@ -1270,6 +1280,7 @@ impl PadTape {
     /// tape freeride-two-minutes
     /// modifiers gravity=50 bike_speed.1=200   # P55's game modifiers, only on a modified ride
     /// modifiers_from 600 gravity=100            # P98: frames 600 on ride on these (empty: the original's)
+    /// switch 900 biplane                        # P102: the first player is put on this before frame 900
     /// frame 0x3d0699a3 0x0079fffb7f7f7f7f0000000000000000ff000000  # dt, pad 0, [pad 1]
     /// frame 0x3d0699a3 *0x0040 -                   # … or a bitmask, and "-" for no pad at all
     /// ```
@@ -1321,6 +1332,17 @@ impl PadTape {
                         .map_err(|message| ParseError { line: n, message })?;
                     tape.changes.push((at, mods));
                 }
+                // A switch of machine in the ride (P102): the frame it comes before, then the machine.
+                "switch" => {
+                    let (Some(at), Some(machine), None) = (word.next().and_then(parse_u64), word.next(), word.next()) else {
+                        return err(n, "switch wants the frame it comes before, then the machine");
+                    };
+                    let at = at as usize;
+                    if tape.switches.last().is_some_and(|(last, _)| *last > at) {
+                        return err(n, format!("switch {at} comes after a later one"));
+                    }
+                    tape.switches.push((at, machine.to_string()));
+                }
                 "frame" => {
                     let fields: Vec<&str> = word.collect();
                     if fields.is_empty() || fields.len() > 1 + PADS {
@@ -1357,6 +1379,9 @@ impl PadTape {
         }
         for (at, mods) in &self.changes {
             let _ = writeln!(s, "modifiers_from {at} {}", mods.text());
+        }
+        for (at, machine) in &self.switches {
+            let _ = writeln!(s, "switch {at} {machine}");
         }
         for frame in &self.frames {
             let _ = write!(s, "frame 0x{:08x}", frame.dt);
@@ -2072,6 +2097,13 @@ impl Recorder {
         self.tape.changes.push((at, mods));
     }
 
+    /// Write down that the first player switched to `machine` (P102, the shell's word for it): the
+    /// frames recorded from here on are ridden on it.
+    pub fn switch(&mut self, machine: &str) {
+        let at = self.tape.len();
+        self.tape.switches.push((at, machine.to_string()));
+    }
+
     /// How many frames have been recorded.
     pub fn len(&self) -> usize {
         self.tape.len()
@@ -2135,6 +2167,12 @@ impl Head {
     /// the recording changed them there.
     pub fn change(&self) -> Option<crate::modifiers::Mods> {
         self.tape.change_at(self.at)
+    }
+
+    /// The machines the first player is switched to before the frame [`Head::next`] hands out next
+    /// (P102), in order, where the recording switched there.
+    pub fn switches(&self) -> Vec<String> {
+        self.tape.switches_at(self.at).map(str::to_string).collect()
     }
 }
 
