@@ -1860,6 +1860,20 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         Some(doll) => println!("ragdoll: {} parts off the riding pose", doll.nodes.len()),
         None => println!("ragdoll: none — a wreck is ridden out as one point"),
     }
+    // The bike's two collision files (S78): its body rays, and the frame other riders' rays strike.
+    // Looked for by their whole path, which `wreckbikef.col` does not end in.
+    let bike_col = archives
+        .iter()
+        .find_map(|a| {
+            use game_sim::bike_col::{MODEL, rays_file, shape_file};
+            Some((a.read_suffix(&rays_file(MODEL)).ok()?, a.read_suffix(&shape_file(MODEL)).ok()?))
+        })
+        .and_then(|(rays, shape)| game_sim::bike_col::BikeCol::load(&rays, &shape).ok())
+        .map(Arc::new);
+    match &bike_col {
+        Some(_) => println!("rider contact: the bikes push each other apart"),
+        None => println!("rider contact: no bike collision files — the riders pass through each other"),
+    }
 
     // ---- the bike that moves (V9) ---------------------------------------------------------------
     // The chassis' own animation: the `.sub`'s `[Objects] MCF`, the clips the sixty-state machine
@@ -2174,6 +2188,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         if let Some(kit) = &ragdoll_kit {
             rider.carries_ragdoll(Arc::clone(kit));
+        }
+        if let Some(col) = &bike_col {
+            rider.carries_bike_col(Arc::clone(col));
         }
         rider
     };
