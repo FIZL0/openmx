@@ -1,7 +1,7 @@
 //! The plane's candidates in the original's order (S96), against biplane.p2m2's save state and the disc.
 //!
 //! S48 sorted the track's props by distance; the original hands them out in the order its broad
-//! phase's walk meets them, and that order is made when the world is built. Three proofs:
+//! phase's walk meets them, and that order is made when the world is built. Four proofs:
 //!
 //! 1. **the tree** — free06's scene props, put in the port's tree ([`flight_search::world`]), sit in
 //!    the save state's tree node for node and, within each node, in the same order; the tree is laid
@@ -12,6 +12,9 @@
 //! 3. **the 34** — the save state's own list: the port's world with the moving objects it does not
 //!    have (the toys, the bikes, the race gates) put in as the state has them, gathered where the state
 //!    gathered and measured where its probe is now, is the state's 34 candidates, in order, bit for bit.
+//! 4. **when** (S99) — a second state, saved with the moving objects' centres copied at the moment the
+//!    plane's post listener gathered: with those centres every distance is the state's, and with the
+//!    ones it holds only the objects that moved after the gather are apart.
 
 use std::collections::HashMap;
 
@@ -516,3 +519,140 @@ fn the_states_34_candidates_out_of_the_ports_world() {
     }
 }
 
+
+/// The second biplane state (S99): biplane.p2m2's, six ticks on, saved while a hook at the plane's
+/// search refresh copied every moving-list object's centre into spare RAM just before the gather.
+const LATER: &str = "biplane_later.eeMemory.bin";
+/// That copy: a count, then eight records of a tick, the list's length, each slot's centre (16 bytes
+/// a slot) and each slot's word.
+const COPIES: u32 = 0x01fc_0000;
+const TICK: u32 = 0x0047_9d04;
+
+fn later() -> Option<Ee> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let path = kit.ctx("states").join(LATER);
+    if !path.exists() {
+        skip(&format!("{} is not there: `./kit state ram` of context/recordings/biplane_later.p2s (S99)", path.display()));
+        return None;
+    }
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    Some(ee)
+}
+
+/// The state's list, gathered by the port out of its own world plus the state's moving objects (as
+/// in the 34), each moving object at `centre_of(its slot, it)` — no slot for a candidate that has left
+/// the list: (object, distance bits) for the port's list and the state's.
+fn the_list_with(ee: &Ee, props: &Props, field: ([F; 2], [F; 2]), centre_of: impl Fn(Option<usize>, u32) -> [F; 4]) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
+    let p = the_plane(ee);
+    let n = ee.i32_at(p.search + search_at::COUNT) as u32;
+    let found = ee.u32_at(p.search + search_at::FOUND);
+    let theirs: Vec<(u32, u32)> = (0..n).map(|k| (ee.u32_at(found + 8 * k), ee.u32_at(found + 8 * k + 4))).collect();
+
+    let (mut broad, mut objects) =
+        flight_search::world(&props.props, Some(field), Vf::new(0.0, 0.0, 0.0, 1.0), F(ee.f32_at(p.ray + at::RADIUS)));
+    let mut index = scenery_index(ee, &broad, &objects, p.tree);
+    index.insert(p.ray, RAY);
+    index.insert(p.sweep, SWEEP);
+
+    let size = ee.i32_at(p.list + tree_at::LIST_SIZE);
+    let last = ee.i32_at(p.list + tree_at::LIST_LAST);
+    assert_eq!(ee.i32_at(p.list + tree_at::LIST_COUNT), 1, "the moving list's blocks");
+    let block = ee.u32_at(ee.u32_at(p.list + tree_at::LIST_BLOCKS));
+    let mut slots: Vec<u32> = (0..last as u32).map(|k| ee.u32_at(block + 4 * k)).collect();
+    // A candidate no list holds has left the world; it was gathered from the first free slot.
+    let gone: Vec<u32> = theirs.iter().map(|c| c.0).filter(|o| !slots.contains(o)).collect();
+    assert!(gone.len() <= 1, "the candidates no list holds: {gone:x?}");
+    let mut gone_slot = None;
+    if let Some(&g) = gone.first() {
+        assert_eq!(ee.u32_at(g + at::SPACE), 0, "the one gone has left the world");
+        let k = (0..slots.len()).find(|&k| slots[k] & 2 != 0).expect("a free slot");
+        slots[k] = g;
+        gone_slot = Some(k);
+    }
+
+    let mut stand_ins = Vec::new();
+    for (k, &o) in slots.iter().enumerate() {
+        if o & 2 == 0 && !index.contains_key(&o) {
+            index.insert(o, objects.len() + stand_ins.len());
+            stand_ins.push((k, o));
+        }
+    }
+    for &(k, o) in &stand_ins {
+        objects.push(collidable_of(ee, o, &index));
+        let centre = centre_of(if Some(k) == gone_slot { None } else { Some(k) }, o);
+        broad.places.push(game_sim::broad_phase::Placement { centre, ..Default::default() });
+    }
+    let ray = collidable_of(ee, p.ray, &index);
+    objects[RAY].objects = ray.objects;
+    let mut block: Vec<Option<usize>> = slots.iter().map(|o| if o & 2 == 0 { index.get(o).copied() } else { None }).collect();
+    block.resize(size as usize, None);
+    broad.structures[1] = Structure::List(Blocks { size, last, blocks: Some(vec![block]), ..Blocks::default() });
+
+    // Built where the state's list was built, then kept and measured again where the ray probe is.
+    let mut search = flight_search::search();
+    broad.places[RAY].centre = vec4(ee, p.search + search_at::CENTRE);
+    gather(&mut objects, &mut broad, &mut search, RAY, 3);
+    assert_eq!(search.bound.to_bits(), ee.u32_at(p.search + search_at::BOUND), "the bound");
+    broad.places[RAY].centre = vec4(ee, p.ray + at::CENTRE);
+    gather(&mut objects, &mut broad, &mut search, RAY, 3);
+    let addr_of: HashMap<usize, u32> = index.iter().map(|(&a, &i)| (i, a)).collect();
+    let got = search.nearby.found.iter().map(|c: &Candidate| (addr_of[&c.object], c.distance.to_bits())).collect();
+    (got, theirs)
+}
+
+/// **When the list is gathered** (S99): once a tick, in the plane's dynamics-world post listener —
+/// after every contact search and the substeps, before the other bodies' posts — around the ray
+/// probe's reach at the stepped pose. A second state, six ticks on from the first, holds the centres
+/// the moving objects (and the plane's candidates) had at that moment: with them, the port's gather is the state's list, all 34,
+/// in order, every distance bit for bit. With the centres the state holds (the toys and bikes have
+/// posted and moved since), exactly the four that moved are apart — S96's five stale distances.
+#[test]
+fn the_plane_gathers_in_its_post_before_the_others_move() {
+    let Some(ee) = later() else { return };
+    let Some((props, field)) = free06() else { return };
+    let copies = ee.u32_at(COPIES);
+    assert!(copies > 0, "the state's copies of the moving centres");
+    let copy = COPIES + 0x100 + ((copies - 1) & 7) * 0x1000;
+    // The save fell between this tick's gather and the next: the last copy is of this tick.
+    assert_eq!(ee.u32_at(copy), ee.u32_at(TICK), "the last copy's tick");
+    let p = the_plane(&ee);
+    let last = ee.u32_at(p.list + tree_at::LIST_LAST);
+    assert_eq!(ee.u32_at(copy + 4), last, "the copied list's length");
+    let block = ee.u32_at(ee.u32_at(p.list + tree_at::LIST_BLOCKS));
+    for k in 0..last {
+        assert_eq!(ee.u32_at(copy + 0x810 + 4 * k), ee.u32_at(block + 4 * k), "the copied list's slot {k}");
+    }
+    // The gather is built where the search's centre is and is kept; it has not moved since the first state.
+    let first = plane();
+    if let Some(first) = &first {
+        let q = the_plane(first);
+        assert_eq!(bits(vec4(first, q.search + search_at::CENTRE)), bits(vec4(&ee, p.search + search_at::CENTRE)), "the build centre");
+    }
+
+    // A candidate out of the list (a bike that has left the world and still drives) by its place in
+    // the plane's list, copied too.
+    let theirs_at = |o: u32| (0..ee.u32_at(copy + 0xa00)).find(|&i| ee.u32_at(ee.u32_at(p.search + search_at::FOUND) + 8 * i) == o);
+    let (got, theirs) = the_list_with(&ee, &props, field, |k, o| match k {
+        Some(k) => vec4(&ee, copy + 0x10 + 16 * k as u32),
+        None => vec4(&ee, copy + 0xa10 + 16 * theirs_at(o).expect("the gone one in the plane's list")),
+    });
+    assert_eq!(theirs.len(), 34, "the state's list");
+    assert_eq!(ee.u32_at(copy + 0xa00), 34, "the copied list's candidates");
+    let order = |l: &[(u32, u32)]| l.iter().map(|c| c.0).collect::<Vec<_>>();
+    assert_eq!(order(&got), order(&theirs), "the state's 34, in order");
+    let off: Vec<(usize, u32, f32, f32)> = (0..got.len())
+        .filter(|&k| got[k].1 != theirs[k].1)
+        .map(|k| (k, got[k].0, f32::from_bits(got[k].1), f32::from_bits(theirs[k].1)))
+        .collect();
+    assert_eq!(off, [], "every distance, bit for bit, at the centres of the gather");
+
+    // The centres the state holds: apart are exactly the objects that moved after the gather.
+    let moved: Vec<usize> =
+        (0..theirs.len()).filter(|&i| bits(vec4(&ee, copy + 0xa10 + 16 * i as u32)) != bits(vec4(&ee, theirs[i].0 + at::CENTRE))).collect();
+    let (now, _) = the_list_with(&ee, &props, field, |_, o| vec4(&ee, o + at::CENTRE));
+    assert_eq!(order(&now), order(&theirs), "the order does not hang on the centres");
+    let apart: Vec<usize> = (0..now.len()).filter(|&k| now[k].1 != theirs[k].1).collect();
+    assert_eq!(apart, moved, "the candidates apart at the state's centres are the ones that moved");
+    assert_eq!(apart.len(), 5, "S96's five: they moved after the plane's gather");
+}
