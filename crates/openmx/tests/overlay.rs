@@ -43,6 +43,7 @@ use game_sim::trick::Set;
 use game_sim::world::World;
 use game_sim::{Sim, stock};
 use ps2_float::{F, Vf};
+use std::f32::consts::{PI, TAU};
 use std::sync::Arc;
 
 const DT: F = F(1.0 / 60.0);
@@ -336,7 +337,7 @@ fn bike(feet: f32) -> overlay::Gauges {
 
 /// What the views draw is what the ride says: one player's readout, or the dial and needle when
 /// asked for, at its speed, four players' readouts at theirs, and each view's marks, in the view's pixels, where the riders are —
-/// drawn there in the human riders' cyan.
+/// drawn there in the human riders' yellow.
 #[test]
 fn the_views_draw_the_riders() {
     let Some(art) = art() else { return };
@@ -388,11 +389,12 @@ fn the_views_draw_the_riders() {
                 (x - want.0).abs() < 0.01 && (y - (want.1 - up)).abs() < 0.01,
                 "view {v}: rider {i}'s mark at {x},{y}, wanted {want:?}"
             );
-            // Clear of the arrow, the mark is there in the frame and it is cyan.
+            // Clear of the arrow, the mark is there in the frame and it is yellow (P92: the original's
+            // colour words are 0xAARRGGBB, which V26 read the other way round, as cyan).
             if (x - drawn.player.0).abs() > 12.0 || (y - drawn.player.1).abs() > 12.0 {
                 let at = 3 * (y as usize * view.width + x as usize);
                 let c = &view.color[at..at + 3];
-                assert!(c[0] < 90 && c[1] > 150 && c[2] > 150, "view {v}: rider {i}'s mark is {c:?}");
+                assert!(c[0] > 150 && c[1] > 150 && c[2] < 90, "view {v}: rider {i}'s mark is {c:?}");
                 marked += 1;
             }
         }
@@ -414,7 +416,9 @@ fn apart(a: &[u8], b: &[u8]) -> (f64, f64) {
 /// part; the rest is the same picture.
 #[test]
 fn the_gpu_draws_the_hud_as_the_cpu_does() {
-    let Some(art) = art() else { return };
+    let Some(mut art) = art() else { return };
+    // Every kind of the radar's other icons in every view (P92), the markers' gates turned.
+    art.radar = vec![every_icon([0.0, 0.0]); 4];
     let mut gpu = match game_render::gpu::Renderer::headless() {
         Ok(g) => g,
         Err(e) => {
@@ -617,4 +621,217 @@ fn the_riders_names_and_numbers_are_drawn() {
     };
     assert_eq!(drawn.tag.as_deref(), Some("#5"));
     assert_eq!(drawn.mark_tags, [(0, "72".to_string())], "seats past the tags have none");
+}
+
+// ---- the radar's other icons (P92) -------------------------------------------------------------
+
+/// One of every kind of icon, spread round `at` at distances inside and outside half the span.
+fn every_icon(at: [f32; 2]) -> Vec<overlay::Blip> {
+    use overlay::{Activity, Blip, Icon};
+    use vehicle::Machine;
+    let kinds = [
+        Icon::Activity(Activity::Hit),
+        Icon::Activity(Activity::Run),
+        Icon::Activity(Activity::Race),
+        Icon::Activity(Activity::Stunt),
+        Icon::Machine(Machine::Biplane, 0),
+        Icon::Machine(Machine::Biplane, 1),
+        Icon::Machine(Machine::Helicopter, 0),
+        Icon::Machine(Machine::Buggy, 1),
+        Icon::Machine(Machine::Monster, 0),
+        Icon::Machine(Machine::Baja, 1),
+        Icon::Bike,
+        Icon::Point { done: false },
+        Icon::Point { done: true },
+        Icon::Marker { facing: [0.0, 1.0], selected: false },
+        Icon::Marker { facing: [1.0, 1.0], selected: true },
+    ];
+    let n = kinds.len() as f32;
+    kinds
+        .into_iter()
+        .enumerate()
+        .map(|(i, icon)| {
+            let (a, d) = (i as f32 / n * TAU, 60.0 + 70.0 * i as f32);
+            Blip { icon, at: [at[0] + d * a.sin(), at[1] + d * a.cos()] }
+        })
+        .collect()
+}
+
+/// Every kind of icon goes where [`overlay::radar_mark`] puts a rider there — so held to the ring
+/// past half the span, as the original clamps its distance for all of them — in its own texture, at
+/// its own size and in the original's colour for it.
+#[test]
+fn each_icon_kind_is_placed_by_radar_mark() {
+    use overlay::{Activity, Icon};
+    use vehicle::Machine;
+    let span = overlay::radar_span(SPACING);
+    let (own, forward) = ([100.0, -40.0], [0.6, 0.8]);
+    let mut seen = std::collections::HashSet::new();
+    for blip in every_icon(own) {
+        let p = overlay::radar_icon(own, forward, blip, span);
+        assert_eq!(p.at, overlay::radar_mark(own, forward, blip.at, span), "{blip:?}");
+        let off = ((p.at.0 - overlay::RADAR_AT.0).powi(2) + (p.at.1 - overlay::RADAR_AT.1).powi(2)).sqrt();
+        let d = ((blip.at[0] - own[0]).powi(2) + (blip.at[1] - own[1]).powi(2)).sqrt();
+        if d >= span / 2.0 {
+            assert!((off - overlay::RADAR_RADIUS / 2.0).abs() < 1e-3, "{blip:?} past the span is off the ring: {off}");
+        } else {
+            assert!((off - d * overlay::RADAR_RADIUS / span).abs() < 1e-3, "{blip:?} at {d} drawn {off} out");
+        }
+        let (texture, tint) = match blip.icon {
+            Icon::Activity(Activity::Hit) => ("map_icon_h", [0x6e, 0xa6, 0x37, 255]),
+            Icon::Activity(Activity::Run) => ("map_icon_r", [0xff, 0x99, 0x33, 255]),
+            Icon::Activity(Activity::Race) => ("map_icon_m", [0x33, 0x73, 0xcc, 255]),
+            Icon::Activity(Activity::Stunt) => ("map_icon_s", [0x81, 0x3b, 0xb5, 255]),
+            Icon::Machine(Machine::Biplane, 0) => ("map_icon_bplane", [0xe4, 0x19, 0x1a, 255]),
+            Icon::Machine(Machine::Biplane, _) => ("map_icon_bplane", [0xe7, 0xc1, 0x13, 255]),
+            Icon::Machine(Machine::Helicopter, _) => ("map_icon_heli", [0x4c, 0x90, 0xbc, 255]),
+            Icon::Machine(Machine::Buggy, _) => ("map_icon_buggy", [0x84, 0x8b, 0x6b, 255]),
+            Icon::Machine(Machine::Monster, _) => ("map_icon_monster", [0xa1, 0xcc, 0x29, 255]),
+            Icon::Machine(Machine::Baja, _) => ("map_icon_trophy", [0xe0, 0x98, 0x0e, 255]),
+            Icon::Bike => ("map_icon_bike", [0xc8, 0xc8, 0xc8, 255]),
+            Icon::Point { done: false } => ("map_icon_hit_freestyle", [0x30, 0xcf, 0x00, 255]),
+            Icon::Point { done: true } => ("map_icon_hit_freestyle", [0x70, 0x70, 0x70, 255]),
+            Icon::Marker { selected: false, .. } => ("map_icon_gate", [200, 200, 200, 255]),
+            Icon::Marker { selected: true, .. } => ("map_icon_gate", [255, 255, 255, 255]),
+        };
+        assert_eq!((p.texture, p.tint), (texture, tint), "{blip:?}");
+        let size = match blip.icon {
+            Icon::Activity(_) => (overlay::zone_size(d, span), overlay::zone_size(d, span)),
+            Icon::Machine(..) | Icon::Bike => (32.0, 32.0),
+            Icon::Point { .. } => (8.0, 8.0),
+            Icon::Marker { .. } => (32.0, 8.0),
+        };
+        assert_eq!(p.size, size, "{blip:?}");
+        if !matches!(blip.icon, Icon::Marker { .. }) {
+            assert_eq!(p.turn, 0.0, "{blip:?} is not turned");
+        }
+        seen.insert(texture);
+    }
+    assert_eq!(seen.len(), 12, "every texture of the set: {seen:?}");
+}
+
+/// The activities' icons grow as they near: half size from half the span out, four fifths from
+/// within a fifth of it, and between, `0.3` more than the share of half the span they are nearer by.
+#[test]
+fn an_activitys_icon_grows_as_it_nears() {
+    let span = overlay::radar_span(SPACING);
+    let r = span / 2.0;
+    for (d, want) in [(r * 3.0, 16.0), (r, 16.0), (r * 0.8, 16.0), (r * 0.65, 20.8), (r * 0.5, 25.6), (0.0, 25.6)] {
+        let got = overlay::zone_size(d, span);
+        assert!((got - want).abs() < 1e-3, "{d}: {got}, wanted {want}");
+    }
+}
+
+/// A marker's gate lies across the way it faces, turned with the rose: one facing the rider's way
+/// is level, one facing the rider's right stands upright, one facing back is level again.
+#[test]
+fn a_markers_gate_turns_with_the_rose() {
+    use overlay::{Blip, Icon};
+    let span = overlay::radar_span(SPACING);
+    let forward = [0.8, -0.6];
+    let right = [-0.6, -0.8];
+    for (facing, want) in [(forward, 0.0), (right, PI / 2.0), ([-0.8, 0.6], PI)] {
+        let icon = Icon::Marker { facing, selected: false };
+        let p = overlay::radar_icon([0.0, 0.0], forward, Blip { icon, at: [10.0, 10.0] }, span);
+        let off = (p.turn - want).rem_euclid(TAU);
+        assert!(off < 1e-4 || TAU - off < 1e-4, "facing {facing:?}: turned {}, wanted {want}", p.turn);
+    }
+    // The rider's right is the radar's right: a marker straight to the right is drawn right of the
+    // middle, on the level.
+    let p = overlay::radar_icon([0.0, 0.0], forward, Blip { icon: Icon::Bike, at: [-60.0, -80.0] }, span);
+    assert!(p.at.0 > overlay::RADAR_AT.0 + 1.0 && (p.at.1 - overlay::RADAR_AT.1).abs() < 1e-3, "{:?}", p.at);
+}
+
+/// `hit.dat`'s start zones, read as the disc writes them (free07's `Type = Hit` spaced, the rest
+/// not), and the ones a player who has started nothing is shown: the first of each activity, and no
+/// machine race from inside a machine.
+#[test]
+fn the_start_zones_are_the_first_of_each_activity() {
+    use overlay::Activity::*;
+    let text = "[HitData]\nHitDBFilename = free.hit\n\n[Activity Start Zones]\nASZCount = 6\n\n\
+        [ASZ 1]\nPosition = 2922.0, 332.0, 2768.0, 1.000000\nLookVector = -0.25, 0.0, 0.97, 1.0\nType = Hit\n\n\
+        [ASZ 2]\nPosition = 3053.0, 244.0, 2635.0, 1.000000\nType=Hit\n\n\
+        [ASZ 3]\nPosition = 4479.0, 0.0, 2324.0, 1.000000\nType=Run\n\n\
+        [ASZ 4]\nType=Race\nPosition = 2627.0, 0.0, 2685.0, 1.000000\n\n\
+        [ASZ 5]\nPosition = 1.0, 2.0, 3.0, 1.0\nType=Bowling\n\n\
+        [ASZ 6]\nPosition = 3220.0, 0.0, 3089.0, 1.000000\r\nType=Stunt\r\n";
+    let zones = overlay::zones(text);
+    let got: Vec<_> = zones.iter().map(|z| (z.activity, z.at)).collect();
+    assert_eq!(
+        got,
+        [(Hit, [2922.0, 2768.0]), (Hit, [3053.0, 2635.0]), (Run, [4479.0, 2324.0]), (Race, [2627.0, 2685.0]), (Stunt, [3220.0, 3089.0])]
+    );
+    let shown = |m| overlay::shown_zones(&zones, m).iter().map(|z| (z.activity, z.at[0])).collect::<Vec<_>>();
+    assert_eq!(shown(false), [(Hit, 2922.0), (Run, 4479.0), (Race, 2627.0), (Stunt, 3220.0)]);
+    assert_eq!(shown(true), [(Hit, 2922.0), (Run, 4479.0), (Stunt, 3220.0)]);
+    assert!(overlay::zones("[HitData]\nType=Hit\nPosition = 1, 2, 3\n").is_empty(), "only the [ASZ n] sections");
+}
+
+/// On the disc: every freeride track has its twelve start zones, five hits, five runs, a race and a
+/// stunt competition — free06's first of each where the original's own save has them (the human's
+/// biplane state, `research/oracle.txt` P92).
+#[test]
+fn the_freeride_tracks_have_their_start_zones() {
+    use overlay::Activity::*;
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped, no disc: {e}");
+            return;
+        }
+    };
+    for track in ["free06", "free07", "free09", "free10", "free11"] {
+        let res = disc.res(&format!("Tracks\\{track}_2.res")).unwrap_or_else(|e| panic!("{track}: {e}"));
+        let text = res.read_suffix(&format!("{track}\\hit.dat")).unwrap_or_else(|e| panic!("{track}: {e}"));
+        let zones = overlay::zones(&String::from_utf8_lossy(&text));
+        let count = |a| zones.iter().filter(|z| z.activity == a).count();
+        assert_eq!([count(Hit), count(Run), count(Race), count(Stunt)], [5, 5, 1, 1], "{track}");
+        if track == "free06" {
+            let first: Vec<_> = overlay::shown_zones(&zones, false).iter().map(|z| z.at).collect();
+            assert_eq!(first, [[2922.0, 2768.0], [4479.0, 2324.0], [2627.0, 2685.0], [3220.0, 3089.0]]);
+        }
+    }
+}
+
+/// Drawn: each icon of [`Art::radar`]'s view goes into the view where `radar_icon` says, in its own
+/// texture and colour, under the riders' marks and the arrow; another view's are not drawn there.
+#[test]
+fn the_radar_draws_its_icons() {
+    let Some(mut art) = art() else { return };
+    let tables = Arc::new(Tables::build());
+    let span = overlay::radar_span(SPACING);
+    let sims = four_riders(&tables);
+    let riders = ridden(&sims);
+    let own = ground(riders[0].target.body_point);
+    let forward = ground(riders[0].target.forward);
+    let blips = every_icon(own);
+    art.radar = vec![blips.clone()];
+    let mut frame = Frame::new(1280, 896, [0, 0, 0]);
+    let drawn = art.draw(&mut frame, (1280, 896), &riders, 0, span, &bike(0.0));
+    assert_eq!(drawn.icons.len(), blips.len());
+    for (&(icon, (x, y)), blip) in drawn.icons.iter().zip(&blips) {
+        assert_eq!(icon, blip.icon);
+        let want = overlay::radar_icon(own, forward, *blip, span).at;
+        // From the view's bottom-left, at the view's scale.
+        let px = (want.0 * drawn.scale, 896.0 - (448.0 - want.1) * drawn.scale);
+        assert!(
+            (x - px.0).abs() < 0.01 && (y - px.1).abs() < 0.01,
+            "{icon:?} at {x},{y}, wanted {want:?} at scale {}",
+            drawn.scale
+        );
+    }
+    // The GPU's sprites carry each icon's colour, and the gates are turned (not axis-aligned).
+    let mut sprites = Vec::new();
+    art.sprites(&mut sprites, (0, 0, 1280, 896), (1280, 896), &riders, 0, span, &bike(0.0));
+    for blip in &blips {
+        let p = overlay::radar_icon(own, forward, *blip, span);
+        assert!(sprites.iter().any(|s| s.tint == p.tint), "{blip:?}: no sprite in {:?}", p.tint);
+    }
+    let gates: Vec<_> = sprites.iter().filter(|s| s.tint == [255, 255, 255, 255] && s.uv[2] == [32.0, 8.0]).collect();
+    assert_eq!(gates.len(), 1, "the selected marker's gate");
+    let c = gates[0].corners;
+    assert!((c[0][1] - c[1][1]).abs() > 1.0, "the selected gate faces off the rider's way, so it is turned: {c:?}");
+    // Another view's icons are its own.
+    let none = art.draw(&mut Frame::new(640, 448, [0, 0, 0]), (1280, 896), &riders, 1, span, &bike(0.0));
+    assert!(none.icons.is_empty());
 }

@@ -469,6 +469,39 @@ fn gauges(seat: &Seat, rig: &Rig, speedometer: menu::Speedometer) -> overlay::Ga
     }
 }
 
+/// What view `v`'s radar marks besides the riders (P92): the activities' start zones as the original
+/// shows them to a player who has started none (`zones`, [`overlay::shown_zones`]), every plane
+/// standing with nobody in it, every bike whose rider is in the plane — the view's own too, as the
+/// original marks its own player's — and the view's own player's session markers (P88), the selected
+/// one brighter. `me` and `players` are the markers' selection's, as the slot display takes them.
+fn radar_blips(seats: &[Seat], v: usize, zones: &[overlay::Zone], me: usize, players: usize) -> Vec<overlay::Blip> {
+    use overlay::{Blip, Icon};
+    let ground = |at: Vf| [at.x(), at.z()];
+    let view = &seats[v];
+    // In the original's order, each over the one before: the machines, the bikes, the zones.
+    let mut out = Vec::new();
+    for seat in seats.iter().filter(|s| s.garage.up == Kind::Bike) {
+        if let Some(plane) = &seat.garage.plane {
+            out.push(Blip { icon: Icon::Machine(vehicle::Machine::Biplane, plane.livery), at: ground(plane.at) });
+        }
+    }
+    for seat in seats.iter().filter(|s| s.garage.up != Kind::Bike) {
+        out.push(Blip { icon: Icon::Bike, at: ground(seat.sim.rider.ride.position()) });
+    }
+    let zones = overlay::shown_zones(zones, view.garage.up != Kind::Bike);
+    out.extend(zones.into_iter().map(|z| Blip { icon: Icon::Activity(z.activity), at: z.at }));
+    let m = &view.sim.markers;
+    let pick = m.pick(me, players);
+    for (slot, ride) in m.slots.iter().enumerate() {
+        if let Some(ride) = ride {
+            let facing = ground(ride.axes().0);
+            let selected = pick == markers::Pick::Slot(slot);
+            out.push(Blip { icon: Icon::Marker { facing, selected }, at: ground(ride.position()) });
+        }
+    }
+    out
+}
+
 /// One local player's half of the picture (V22): the body and bike posed for them, the cameras that
 /// follow them, their overlay, and the models their pose is skinned into — the first player's are the
 /// ones the archives loaded, every other player's a copy under a name of its own.
@@ -2748,6 +2781,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         r.set_images(&images);
     }
     let radar_span = overlay::radar_span(ground.spacing);
+    // The activities' start zones the radar marks (P92): the track's `hit.dat`, in its second
+    // archive. A track with none (the MX tracks) marks none.
+    let radar_zones = archives
+        .iter()
+        .find_map(|a| a.read_suffix(&format!("{}\\hit.dat", args.track)).ok())
+        .map(|b| overlay::zones(&String::from_utf8_lossy(&b)))
+        .unwrap_or_default();
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut speedometer = args.speedometer.unwrap_or_default();
     let mut graphics = args.graphics.unwrap_or_default();
@@ -3564,6 +3604,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     .then(|| (pick, filled, hud::marker_label(pick, filled, &names), holding))
             })
             .collect();
+        // The radar's other icons, each view its own (P92).
+        hud_art.radar =
+            (0..world.seats.len()).map(|v| radar_blips(&world.seats, v, &radar_zones, mine.unwrap_or(v), players)).collect();
         let cameras: Vec<Camera> = cameras
             .iter()
             .enumerate()

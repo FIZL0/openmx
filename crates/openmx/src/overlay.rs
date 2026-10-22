@@ -17,7 +17,12 @@
 //! - **The radar** (`ui\freestyleradar.lyr`): `freestyle_radar`, a compass rose 128x128 centred on
 //!   87,363 and turned so the rider's heading is up; the yellow `map_icon_player_freestyle` fixed at
 //!   its middle; and an 8x8 `map_icon_hit_freestyle` for every other rider, at their bearing and
-//!   distance off the rider's nose, `RadarRadius` 104 over a world `192` terrain samples across.
+//!   distance off the rider's nose, `RadarRadius` 104 over a world `192` terrain samples across —
+//!   yellow for a human, red for an AI rider. Under them the rest of the original's set (P92,
+//!   [`Icon`]): each activity's start zone off the track's `hit.dat` (`map_icon_h`, `_r`, `_m`, `_s`,
+//!   growing as they near, [`zone_size`]), a machine or a bike standing with nobody on it (32x32,
+//!   the machine's in its livery's colour), and the port's session markers (P88) on the activities'
+//!   gate, `map_icon_gate`. Everything past half the span stays on the ring.
 //!
 //! - **The score** (`ui\stuntscoreoverlays.lyt`'s `Score`, at 14,48 from the top-left, and
 //!   `Overlay_1p_Score.fsh`): a dark bar, its label end darker, `SCORE` in `eurostileboldbold_12` and
@@ -51,6 +56,7 @@ use game_render::{Disc, Frame, Texture};
 use game_sim::camera::Ridden;
 
 use crate::menu::{Font, Speedometer, bilinear, blend, span};
+use crate::vehicle::Machine;
 
 /// The layouts' screen.
 pub const LAYOUT: (f32, f32) = (640.0, 448.0);
@@ -78,9 +84,13 @@ const RADAR_SIZE: f32 = 128.0;
 const PLAYER_SIZE: f32 = 16.0;
 const MARK_SIZE: f32 = 8.0;
 const PLAYER_COLOUR: [u8; 4] = [255, 255, 0, 255];
-/// The colour the radar code gives another human's mark; an AI rider's would be `[0, 0, 255, 255]`,
-/// but every rider here is a player.
-pub const HUMAN_MARK: [u8; 4] = [0, 255, 255, 255];
+/// The colour the radar code gives another human's mark, its word `0xffffff00`; an AI rider's is
+/// `0xffff0000`, [`AI_MARK`], but every rider here is a player. The original's UI colour words are
+/// `0xAARRGGBB` (P92: its AI riders' marks are red on its own screen), so this is yellow.
+pub const HUMAN_MARK: [u8; 4] = [255, 255, 0, 255];
+/// An AI rider's mark, red.
+#[allow(dead_code)] // the tests', until a ride has AI riders
+pub const AI_MARK: [u8; 4] = [255, 0, 0, 255];
 
 /// The dial and the needle's pivot, from the view's bottom-right.
 const DIAL: (f32, f32) = (480.0, 301.0);
@@ -265,6 +275,201 @@ pub fn radar_mark(own: [f32; 2], forward: [f32; 2], other: [f32; 2], span: f32) 
     (RADAR_AT.0 + r * a.sin(), RADAR_AT.1 - r * a.cos())
 }
 
+// ---- the radar's other icons (P92) -------------------------------------------------------------
+
+/// The four free-ride activities whose start zones the radar marks: `hit.dat`'s `Type`s, in the
+/// original's own numbering (1 to 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Activity {
+    /// `Hit`, the hit progression: `map_icon_h`.
+    Hit,
+    /// `Run`: `map_icon_r`.
+    Run,
+    /// `Race`, the machine race: `map_icon_m`.
+    Race,
+    /// `Stunt`, the stunt competition: `map_icon_s`.
+    Stunt,
+}
+
+impl Activity {
+    pub const ALL: [Activity; 4] = [Activity::Hit, Activity::Run, Activity::Race, Activity::Stunt];
+
+    /// `hit.dat`'s word for it.
+    pub fn of(word: &str) -> Option<Activity> {
+        match word {
+            "Hit" => Some(Activity::Hit),
+            "Run" => Some(Activity::Run),
+            "Race" => Some(Activity::Race),
+            "Stunt" => Some(Activity::Stunt),
+            _ => None,
+        }
+    }
+}
+
+/// One of `hit.dat`'s `[Activity Start Zones]`: where an activity starts, on the ground.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Zone {
+    pub activity: Activity,
+    /// `Position`'s `x` and `z`.
+    pub at: [f32; 2],
+}
+
+/// The start zones of a track's `hit.dat` (`tracks\<track>\hit.dat` in its `_2.res`), in the file's
+/// order: each `[ASZ n]` section's `Position` and `Type`. A section with a type this does not know,
+/// or no position, is left out.
+pub fn zones(text: &str) -> Vec<Zone> {
+    let mut out = Vec::new();
+    let mut section: Option<(Option<[f32; 2]>, Option<Activity>)> = None;
+    let mut close = |section: &mut Option<(Option<[f32; 2]>, Option<Activity>)>| {
+        if let Some((Some(at), Some(activity))) = section.take() {
+            out.push(Zone { activity, at });
+        }
+    };
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            close(&mut section);
+            section = line.starts_with("[ASZ ").then_some((None, None));
+            continue;
+        }
+        let (Some(s), Some((key, value))) = (section.as_mut(), line.split_once('=')) else { continue };
+        match key.trim() {
+            "Position" => {
+                let v: Vec<f32> = value.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+                if v.len() >= 3 {
+                    s.0 = Some([v[0], v[2]]);
+                }
+            }
+            "Type" => s.1 = Activity::of(value.trim()),
+            _ => {}
+        }
+    }
+    close(&mut section);
+    out
+}
+
+/// The start zones the radar shows a player, as the original's shows a player who has started none
+/// of them: the first zone of each activity (its progression's first), and not the machine race's
+/// while the player is in a machine — the original's swap into one hides it, and out again shows it.
+pub fn shown_zones(zones: &[Zone], in_machine: bool) -> Vec<Zone> {
+    Activity::ALL
+        .iter()
+        .filter(|&&a| !(in_machine && a == Activity::Race))
+        .filter_map(|&a| zones.iter().find(|z| z.activity == a).copied())
+        .collect()
+}
+
+/// Something the radar marks besides the riders.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Icon {
+    /// An activity's start zone.
+    Activity(Activity),
+    /// A machine standing with nobody in it, and its livery ([`crate::vehicle::livery`]): the first
+    /// player's colour or the second's.
+    Machine(Machine, usize),
+    /// A bike standing while its rider is in a machine.
+    Bike,
+    /// One of an activity's points to hit, `done` once it has been: the 8x8 dot the riders' marks are.
+    #[allow(dead_code)] // the tests', until the activities are ported
+    Point { done: bool },
+    /// A session marker (P88), the port's own: its gate turned to the way the marker faces (`x`, `z`),
+    /// brighter when the selection is on it.
+    Marker { facing: [f32; 2], selected: bool },
+}
+
+/// An icon and where it is in the world (`x`, `z`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Blip {
+    pub icon: Icon,
+    pub at: [f32; 2],
+}
+
+/// How an icon is drawn: its texture, its middle in layout pixels from the view's bottom-left, its
+/// width and height there, its colour, and how far it is turned clockwise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placed {
+    pub texture: &'static str,
+    pub at: (f32, f32),
+    pub size: (f32, f32),
+    pub tint: [u8; 4],
+    pub turn: f32,
+}
+
+/// The machine and activity icons' size, `32x32`, and the activity points' and gates'.
+pub const ICON_SIZE: f32 = 32.0;
+const GATE_SIZE: (f32, f32) = (32.0, 8.0);
+/// An activity icon's scale: `0.3` more than the share of half the span it is nearer than, between
+/// `0.5` and `0.8`.
+const ZONE_SCALE: (f32, f32, f32) = (0.3, 0.5, 0.8);
+/// The original's colour words, `0xAARRGGBB`.
+const ZONE_COLOURS: [[u8; 4]; 4] = [[0x6e, 0xa6, 0x37, 255], [0xff, 0x99, 0x33, 255], [0x33, 0x73, 0xcc, 255], [0x81, 0x3b, 0xb5, 255]];
+const BIKE_COLOUR: [u8; 4] = [0xc8, 0xc8, 0xc8, 255];
+const POINT_COLOURS: [[u8; 4]; 2] = [[0x30, 0xcf, 0x00, 255], [0x70, 0x70, 0x70, 255]];
+/// A session marker's gate: the gates' grey, and full white when selected.
+const MARKER_COLOURS: [[u8; 4]; 2] = [[200, 200, 200, 255], [255, 255, 255, 255]];
+
+/// How big an activity's icon is drawn at `distance` off the rider on a radar spanning `span`: the
+/// original grows it as it nears, [`ZONE_SCALE`] of [`ICON_SIZE`].
+pub fn zone_size(distance: f32, span: f32) -> f32 {
+    let r = span / 2.0;
+    let d = distance.min(r);
+    let (more, least, most) = ZONE_SCALE;
+    ICON_SIZE * (more + (r - d) / r).clamp(least, most)
+}
+
+/// A machine's colours in its two liveries.
+pub fn machine_colour(machine: Machine, livery: usize) -> [u8; 4] {
+    let [a, b] = match machine {
+        Machine::Biplane => [[0xe4, 0x19, 0x1a, 255], [0xe7, 0xc1, 0x13, 255]],
+        Machine::Helicopter => [[0x4c, 0x90, 0xbc, 255], [0x86, 0xd0, 0x36, 255]],
+        Machine::Buggy => [[0xd5, 0xab, 0x0c, 255], [0x84, 0x8b, 0x6b, 255]],
+        Machine::Monster => [[0xa1, 0xcc, 0x29, 255], [0xe8, 0x94, 0x27, 255]],
+        Machine::Baja => [[0xa4, 0x00, 0x00, 255], [0xe0, 0x98, 0x0e, 255]],
+    };
+    if livery % 2 == 0 { a } else { b }
+}
+
+/// An icon's texture in `fstyleui.res`'s `ui\tex`.
+pub fn icon_texture(icon: Icon) -> &'static str {
+    match icon {
+        Icon::Activity(Activity::Hit) => "map_icon_h",
+        Icon::Activity(Activity::Run) => "map_icon_r",
+        Icon::Activity(Activity::Race) => "map_icon_m",
+        Icon::Activity(Activity::Stunt) => "map_icon_s",
+        Icon::Machine(Machine::Biplane, _) => "map_icon_bplane",
+        Icon::Machine(Machine::Helicopter, _) => "map_icon_heli",
+        Icon::Machine(Machine::Buggy, _) => "map_icon_buggy",
+        Icon::Machine(Machine::Monster, _) => "map_icon_monster",
+        Icon::Machine(Machine::Baja, _) => "map_icon_trophy",
+        Icon::Bike => "map_icon_bike",
+        Icon::Point { .. } => "map_icon_hit_freestyle",
+        Icon::Marker { .. } => "map_icon_gate",
+    }
+}
+
+/// Where and how `blip` goes on the radar of a rider at `own` facing `forward`, the radar spanning
+/// `span`: at [`radar_mark`], held to the ring past half the span as the riders are, at its kind's
+/// size and colour.
+pub fn radar_icon(own: [f32; 2], forward: [f32; 2], blip: Blip, span: f32) -> Placed {
+    let at = radar_mark(own, forward, blip.at, span);
+    let square = |s: f32| (s, s);
+    let (size, tint, turn) = match blip.icon {
+        Icon::Activity(a) => {
+            let d = ((blip.at[0] - own[0]).powi(2) + (blip.at[1] - own[1]).powi(2)).sqrt();
+            let k = Activity::ALL.iter().position(|&x| x == a).unwrap_or(0);
+            (square(zone_size(d, span)), ZONE_COLOURS[k], 0.0)
+        }
+        Icon::Machine(m, livery) => (square(ICON_SIZE), machine_colour(m, livery), 0.0),
+        Icon::Bike => (square(ICON_SIZE), BIKE_COLOUR, 0.0),
+        Icon::Point { done } => (square(MARK_SIZE), POINT_COLOURS[done as usize], 0.0),
+        Icon::Marker { facing, selected } => {
+            // The gate across the way the marker faces, turned with the rose.
+            let turn = (radar_turn(forward) + bearing(facing[0], facing[1])).rem_euclid(TAU);
+            (GATE_SIZE, MARKER_COLOURS[selected as usize], turn)
+        }
+    };
+    Placed { texture: icon_texture(blip.icon), at, size, tint, turn }
+}
+
 /// The distance a rider has covered, which the odometer shows. The original keeps it in its
 /// statistics tracker; this adds up the rider's path a frame at a time.
 #[derive(Clone, Debug, Default)]
@@ -301,6 +506,9 @@ pub struct Art {
     /// another's number beside their radar mark. The original's free ride has one rider and no such
     /// thing; where they go is the port's.
     pub tags: Vec<Tag>,
+    /// What each view's radar marks besides the riders (P92), in view order: start zones, standing
+    /// machines and bikes, markers. A view past the end marks none.
+    pub radar: Vec<Vec<Blip>>,
 }
 
 /// A rider's name and number as the HUD shows them (P86).
@@ -334,13 +542,25 @@ const DIGITS: usize = TEXTURES.len();
 const SMALL: usize = TEXTURES.len() + 1;
 const LABEL: usize = TEXTURES.len() + 2;
 
-const TEXTURES: [&str; 6] = [
+const TEXTURES: [&str; 17] = [
     "speedometer_analog",
     "speedometer_needlepin",
     "odometer_background",
     "freestyle_radar",
     "map_icon_player_freestyle",
     "map_icon_hit_freestyle",
+    // The radar's other icons (P92), [`icon_texture`].
+    "map_icon_h",
+    "map_icon_r",
+    "map_icon_m",
+    "map_icon_s",
+    "map_icon_bplane",
+    "map_icon_heli",
+    "map_icon_buggy",
+    "map_icon_monster",
+    "map_icon_trophy",
+    "map_icon_bike",
+    "map_icon_gate",
 ];
 
 impl Art {
@@ -358,7 +578,7 @@ impl Art {
             Font::parse(&cel, atlas).map_err(|e| format!("{name}.cel: {e}"))
         };
         let (digits, small) = (font("yearlingdashboldoblique_55")?, font("eurostileboldbold_14")?);
-        Ok(Art { digits, small, label: font("eurostileboldbold_12")?, textures, tags: Vec::new() })
+        Ok(Art { digits, small, label: font("eurostileboldbold_12")?, textures, tags: Vec::new(), radar: Vec::new() })
     }
 
     /// Draw view `v`'s HUD into `frame`, which is that view's picture: `riders` is every rider's
@@ -420,7 +640,15 @@ impl Art {
         let turn = radar_turn(forward);
         pen.corner = Corner::BottomLeft;
         if let Some(t) = self.texture("freestyle_radar") {
-            pen.turned(t, RADAR_AT, RADAR_SIZE, turn);
+            pen.turned(t, RADAR_AT, (RADAR_SIZE, RADAR_SIZE), turn, [255; 4]);
+        }
+        // Under the riders' marks: the start zones, the standing machines, the markers (P92).
+        for &blip in self.radar.get(v).into_iter().flatten() {
+            let p = radar_icon(own, forward, blip, span);
+            if let Some(t) = self.texture(p.texture) {
+                pen.turned(t, p.at, p.size, p.turn, p.tint);
+            }
+            drawn.icons.push((blip.icon, pen.px(p.at)));
         }
         for (i, r) in riders.iter().enumerate() {
             if i == v {
@@ -554,6 +782,8 @@ pub struct Drawn {
     pub tag: Option<String>,
     /// What was written beside each other rider's mark: their seat and their number.
     pub mark_tags: Vec<(usize, String)>,
+    /// The radar's other icons (P92), in [`Art::radar`]'s order, and the middle of each.
+    pub icons: Vec<(Icon, (f32, f32))>,
 }
 
 #[derive(Clone, Copy)]
@@ -637,8 +867,9 @@ impl<'a> Pen<'a> {
         }
     }
 
-    /// A `size` square texture centred on `at`, turned clockwise by `turn` radians.
-    fn turned(&mut self, (t, image): Image, at: (f32, f32), size: f32, turn: f32) {
+    /// A texture `size` (width, height) centred on `at`, turned clockwise by `turn` radians and
+    /// multiplied by `tint`.
+    fn turned(&mut self, (t, image): Image, at: (f32, f32), size: (f32, f32), turn: f32, tint: [u8; 4]) {
         let (cx, cy) = self.px(at);
         let (sin, cos) = turn.sin_cos();
         let (tw, th) = (t.width as f32, t.height as f32);
@@ -648,20 +879,20 @@ impl<'a> Pen<'a> {
             Ink::Sprites { .. } => {
                 // The texture's square, its corners turned out of the texture's own frame into the
                 // view's: the inverse of the turn the pixels below are read back through.
-                let half = size * self.s / 2.0;
+                let (hw, hh) = (size.0 * self.s / 2.0, size.1 * self.s / 2.0);
                 let corner = |lx: f32, ly: f32| [cx + lx * cos - ly * sin, cy + lx * sin + ly * cos];
                 return self.sprite(Sprite {
-                    corners: [corner(-half, -half), corner(half, -half), corner(half, half), corner(-half, half)],
+                    corners: [corner(-hw, -hh), corner(hw, -hh), corner(hw, hh), corner(-hw, hh)],
                     uv: [[0.0, 0.0], [tw, 0.0], [tw, th], [0.0, th]],
                     local: [[0.0; 2]; 4],
                     clamp: clamp_of(t, all),
                     image: Some(image),
-                    tint: [255; 4],
+                    tint,
                     shape: Shape::Plain,
                 });
             }
         };
-        let reach = size * self.s * std::f32::consts::FRAC_1_SQRT_2;
+        let reach = size.0.hypot(size.1) * self.s / 2.0;
         let (x0, x1) = span(cx - reach, cx + reach, frame.width);
         let (y0, y1) = span(cy - reach, cy + reach, frame.height);
         for y in y0..y1 {
@@ -669,11 +900,13 @@ impl<'a> Pen<'a> {
                 let (dx, dy) = ((x as f32 + 0.5 - cx) / self.s, (y as f32 + 0.5 - cy) / self.s);
                 // Back through the turn into the texture's own square.
                 let (lx, ly) = (dx * cos + dy * sin, -dx * sin + dy * cos);
-                let (u, v) = ((lx / size + 0.5) * tw, (ly / size + 0.5) * th);
+                let (u, v) = ((lx / size.0 + 0.5) * tw, (ly / size.1 + 0.5) * th);
                 if !(0.0..tw).contains(&u) || !(0.0..th).contains(&v) {
                     continue;
                 }
-                blend(frame, x, y, bilinear(t, u, v, all));
+                let c = bilinear(t, u, v, all);
+                let mul = |i: usize| (c[i] as u32 * tint[i] as u32 / 255) as u8;
+                blend(frame, x, y, [mul(0), mul(1), mul(2), mul(3)]);
             }
         }
     }
