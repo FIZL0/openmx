@@ -45,6 +45,7 @@ use game_sim::flight::Flight;
 use ps2_float::F;
 
 use crate::net::rides::{self, Modded, Rides};
+use crate::vehicle::{self, Spawn};
 use crate::net::udp::{self, Udp};
 use crate::net::{Lineup, Netplay, Timing};
 
@@ -94,6 +95,8 @@ pub struct Online {
     /// of, and the disc's `biplane.phy` before the modifiers, which a change rebuilds it from.
     plane: Option<Flight>,
     stock_plane: Option<game_sim::phy::Plane>,
+    /// Each seat's own bay in the ride's lot (N18), where a seat that starts in the plane stands.
+    bays: Vec<Spawn>,
 }
 
 impl Online {
@@ -105,7 +108,8 @@ impl Online {
     /// `--online`, `--peer`s and `--seats`, seat `s` starting as `starts[s]` (every machine must
     /// hand the same ones), this machine's first seat on controller preset `preset` and any other
     /// of its seats (no pad) on 0 — each machine's own, which its datagrams tell the others (N15).
-    pub fn start(me: &str, peers: &[String], seats: Option<&str>, starts: &[Sim], preset: u8) -> Result<Online, String> {
+    /// That first seat starts in the biplane if `plane` (N18, `--vehicle biplane`), told the same way.
+    pub fn start(me: &str, peers: &[String], seats: Option<&str>, starts: &[Sim], preset: u8, plane: bool) -> Result<Online, String> {
         let (me, at) = udp::named(me)?;
         let peers = peers.iter().map(|p| udp::named(p)).collect::<Result<Vec<_>, _>>()?;
         let seats = seats.ok_or("--online wants --seats, like host,g")?;
@@ -120,7 +124,7 @@ impl Online {
             return Err(format!("{} seats and {} riders to start them", lineup.seats.len(), starts.len()));
         }
         let net = Netplay::new(lineup.clone(), &me, Timing::default(), crate::net::desync::dumps())?;
-        let card: Vec<u8> = (0..lineup.mine(&me).len()).map(|i| if i == 0 { preset } else { 0 }).collect();
+        let card: Vec<u8> = (0..lineup.mine(&me).len()).map(|i| if i == 0 { preset | if plane { udp::PLANE } else { 0 } } else { 0 }).collect();
         let udp = Udp::bind(at, peers, &card)?;
         println!("online: {me} on {at}, seat {} of {} ({})", seat + 1, lineup.seats.len(), lineup.text());
         Ok(Online {
@@ -142,6 +146,7 @@ impl Online {
             stock: Vec::new(),
             plane: None,
             stock_plane: None,
+            bays: Vec::new(),
         })
     }
 
@@ -152,13 +157,16 @@ impl Online {
         if !self.presets_owed {
             return Ok(());
         }
-        if let Some(presets) = udp.presets(&self.net.lineup, &self.net.me)? {
+        // and each seat's starting machine (N18), which every machine has by the same tick
+        let heard = udp.presets(&self.net.lineup, &self.net.me)?.zip(udp.planes(&self.net.lineup, &self.net.me)?);
+        if let Some((presets, planes)) = heard {
             for (sim, &p) in self.sims.iter_mut().zip(&presets) {
                 sim.set_presets([p as usize, 0]);
             }
             if presets.iter().any(|&p| p != 0) {
                 println!("online: controller presets {}", presets.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
             }
+            self.start_planes(&planes)?;
             self.presets_owed = false;
         } else if self.net.tick() > 0 {
             return Err("the ride started before every peer said its controller preset".into());
@@ -195,6 +203,7 @@ impl Online {
             stock: Vec::new(),
             plane: None,
             stock_plane: None,
+            bays: Vec::new(),
         })
     }
 
@@ -224,6 +233,7 @@ impl Online {
             stock: Vec::new(),
             plane: None,
             stock_plane: None,
+            bays: Vec::new(),
         })
     }
 
@@ -252,6 +262,7 @@ impl Online {
             stock: Vec::new(),
             plane: None,
             stock_plane: None,
+            bays: Vec::new(),
         })
     }
 
@@ -272,6 +283,46 @@ impl Online {
     pub fn planes(&mut self, stock: Option<game_sim::phy::Plane>, like: Option<&Flight>) {
         self.plane = stock.as_ref().zip(like).map(|(s, l)| rides::plane_on(s, &self.mods, l));
         self.stock_plane = stock;
+    }
+
+    /// Each seat's own bay in the ride's lot (N18): seat `s` stands in `bays[s]` if it starts in the
+    /// plane ([`Online::start_planes`]). Every machine parks the same lot off the same disc.
+    pub fn bays(&mut self, bays: Vec<Spawn>) {
+        self.bays = bays;
+    }
+
+    /// The seats `flies` says start the ride in the biplane (N18): each takes a copy of the ride's
+    /// plane ([`Online::planes`], called first) into its [`Sim::plane`], standing in its own bay
+    /// ([`Online::bays`]), before the first tick, so every machine's tick 0 has it — the lobby's
+    /// ride from its picks' machine, `--peer`s' from their cards ([`crate::net::udp::PLANE`]). A
+    /// ride with no plane, or no bay for the seat, starts the seat on the bike and says so; every
+    /// machine has the same disc, and so does the same.
+    pub fn start_planes(&mut self, flies: &[bool]) -> Result<(), String> {
+        if self.net.tick() > 0 {
+            return Err("the ride started before every seat's machine was known".into());
+        }
+        for (s, sim) in self.sims.iter_mut().enumerate().filter(|&(s, _)| flies.get(s) == Some(&true)) {
+            match (&self.plane, self.bays.get(s)) {
+                (Some(template), Some(&bay)) => vehicle::start_lane(template, bay, sim),
+                _ => println!("online: seat {} picked the biplane, but this ride has none for it; the bike", s + 1),
+            }
+        }
+        let n = self.sims.iter().filter(|s| s.plane.is_some()).count();
+        if n > 0 {
+            println!("online: {n} {} in the biplane", if n == 1 { "seat starts" } else { "seats start" });
+        }
+        Ok(())
+    }
+
+    /// Whether every seat's starting machine is in the ride yet (N18): `--peer`s say theirs with
+    /// their controller presets, before the first tick; every other ride knows them from the start.
+    pub fn machines_known(&self) -> bool {
+        !self.presets_owed
+    }
+
+    /// Which seats of the lobby's `room` start in the biplane (N18): each taken seat's pick's machine.
+    pub fn picked_planes(room: &openmx_net::Room) -> Vec<bool> {
+        room.seats.iter().map(|s| s.as_ref().is_some_and(|s| s.pick.machine == vehicle::Kind::Biplane.name())).collect()
     }
 
     /// The modifiers the ride is on now: the host's last change once every machine took it.
