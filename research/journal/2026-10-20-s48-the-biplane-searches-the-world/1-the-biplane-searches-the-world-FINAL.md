@@ -1,4 +1,4 @@
-# 1 — the biplane searches the world (PART)
+# 1 — the biplane searches the world (FINAL)
 
 Task S48. 2026-10-20 (blocked), 2026-10-21 (done). User, 2026-10-21: "the biplane has no collision at
 all in the shell — it flies through the ground and everything; priority".
