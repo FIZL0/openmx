@@ -1291,6 +1291,12 @@ engine_ctor boot 0x00246b70 zeroes the engine and sets +0x40/+0x5c/+0x80/+0x84/+
 ground_query boot 0x001dc960 (world, point in/out, normal out, flags, record) -> moves the point onto
 #                            the surface under it and writes that surface's normal. Eighty-four
 #                            callers across the game: the world's query, not the wheel's
+#                            S64: on the terrain its height and normal are contact_search::ground's
+#                            triangle split (not Ground::at's bilinear); the save-state run's wheel
+#                            lanes (load point, normal, compression) agree with it to tick 22.
+#                            Air state on the rider, bike_air_state 0x00251d20: +0x574 on_ground,
+#                            +0x578 both_wheels, +0x57c airborne, +0x580 was_airborne, +0x4f0
+#                            hang_time, +0x430 contact_vel, +0x600 crossup
 wheel_set_contact boot 0x0025b250 (wheel, owner, vehicle) -> wheel+0xd4 = 1 with the two objects the
 #                                 contact belongs to at +0x1f0 and +0x1f4
 wheel_surface_drag boot 0x0025c390 (wheel; dt is still in f12 but is not read) -> the rolling

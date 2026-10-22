@@ -3022,6 +3022,13 @@ fn acceptance_capture_text() -> Option<(PathBuf, String)> {
 /// the drawn bike (a re-recording, or the drawn root's pose ported), the wheels' spin and compression
 /// and the trick state at row 0, which nothing in the capture carries; and S3's movement and S10's air
 /// are not yet 1:1.
+///
+/// S64 took the ground's arithmetic and the wheels off that list: [`game_sim::world::World::ground`]
+/// is the triangle split now, and started from the save state's whole bike (both wheels and the air
+/// state too) the chassis' run agrees with the original's on every lane at tick 0 and parts at tick 1
+/// only by ulps — and on its position not until tick 23
+/// ([`the_save_state_run_starts_from_the_originals_wheels`]). What holds this one at 0 is the drawn
+/// bike alone.
 const ACCEPTANCE_AGREES_THROUGH: u64 = 0;
 
 /// What a replay of the real acceptance fixture means today, in one line, and what makes it fail.
@@ -6329,4 +6336,414 @@ fn the_plane_flies_frame_for_frame_like_the_original() {
         }
     }
     println!("30 frames of the plane, word for word with dynamics_world_step");
+}
+
+// ===================================================================================================
+// S64 — a replay that starts from the original's whole wheel state
+// ===================================================================================================
+//
+// A capture's start is the chassis and the pads. Everything the spin step and the suspension carry from
+// one tick to the next — each wheel's spin, angle, slip flags, contact frame, local velocity and force,
+// compression — started from the port's defaults, so no replay could agree past its first step
+// whatever the tire law did. The recording's save state holds every one of those words; these read
+// them into the port's wheels, and the chassis' with them.
+
+impl SaveState {
+    fn vf(&self, a: u32) -> Option<Vf> {
+        let [x, y, z, w] = self.quad(a)?;
+        Some(Vf::new(f32::from_bits(x), f32::from_bits(y), f32::from_bits(z), f32::from_bits(w)))
+    }
+
+    fn flag(&self, a: u32) -> Option<bool> {
+        Some(self.word(a)? != 0)
+    }
+
+    /// The human's front wheel (`0`) or rear (`1`).
+    fn wheel_at(&self, which: usize) -> Option<u32> {
+        self.rider_at([0x7b0, 0x7b4][which])
+    }
+
+    /// **One wheel's whole state as the original held it**, into the port's [`game_sim::ride::Wheel`]:
+    /// every word the spin step (`tire::spin_integrate`'s, S58) and the suspension read back on the
+    /// next substep, at the offsets `spin.rs` and `wheel.rs` prove them at. What the port builds from
+    /// the `.phy` — the radius, the rates, the limits, the mount — is left as built:
+    /// [`the_acceptance_bike_hangs_its_wheels_where_the_original_does`] and the oracles say those agree.
+    fn seed_wheel(&self, which: usize, wh: &mut game_sim::ride::Wheel) -> Option<()> {
+        let a = self.wheel_at(which)?;
+        let s = &mut wh.w;
+        s.mount_world = self.vf(a + 0x150)?;
+        s.probe_end = self.vf(a + 0x100)?;
+        s.probe_end_world = self.vf(a + 0x160)?;
+        s.ground_normal = self.vf(a + 0x200)?;
+        s.ray_hit = self.word(a + 0xd0)? as i32;
+        s.swept_contact = self.word(a + 0xd4)? as i32;
+        s.terrain_wins = self.word(a + 0xd8)? as i32;
+        s.contact = self.flag(a + 0xdc)?;
+        s.ray_steps = self.word(a + 0xec)? as i32;
+        s.compression = self.float(a + 0xf0)?;
+        s.last_compression = self.float(a + 0xf4)?;
+        s.spring_force = self.float(a + 0xf8)?;
+        s.contact_point = self.vf(a + 0x120)?;
+        s.contact_normal = self.vf(a + 0x130)?;
+        s.load_point = self.vf(a + 0x140)?;
+        s.contact_velocity = self.vf(a + 0x170)?;
+        s.chassis_velocity = self.vf(a + 0x180)?;
+        s.balancing = self.flag(a + 0x3c)?;
+        s.steer_torque = self.float(a + 0x6c)?;
+        s.steer_angle = self.float(a + 0x8ac)?;
+        s.steer_rate = self.float(a + 0x8b0)?;
+        let m = &mut wh.mv;
+        m.spin = self.float(a + 0x1d4)?;
+        m.contact = s.contact;
+        m.contact_normal = s.contact_normal;
+        m.drive_torque = self.float(a + 0x210)?;
+        m.balancing = s.balancing;
+        // The seven words and three quads `wheel_clear` empties, in its order (`r#move::Fresh`).
+        for (k, o) in [0xd0, 0xd4, 0x1f0, 0x1f4, 0xf0, 0xf8, 0x1a0].into_iter().enumerate() {
+            m.fresh.scalars[k] = self.word(a + o)?;
+        }
+        for (k, o) in [0x170, 0x1b0, 0x1c0].into_iter().enumerate() {
+            m.fresh.vectors[k] = self.vf(a + o)?;
+        }
+        wh.surface = self.word(a + 0x110)? as u8;
+        wh.angle = self.float(a + 0x1d0)?;
+        wh.chassis_local_velocity = self.vf(a + 0x190)?;
+        wh.local_velocity = self.vf(a + 0x840)?;
+        wh.local_force = self.vf(a + 0x850)?;
+        for r in 0..4 {
+            wh.frame[r] = self.vf(a + 0x8d0 + 16 * r as u32)?;
+        }
+        wh.side_per_load = self.float(a + 0x234)?;
+        wh.slip = game_sim::tire::Slip {
+            spinning: self.flag(a + 0xe0)?,
+            locked: self.flag(a + 0xe4)?,
+            sliding: self.flag(a + 0xe8)?,
+        };
+        wh.mv.spin_from_torque = wh.slip.spinning;
+        Some(())
+    }
+
+    /// Both wheels, front then rear.
+    fn seed_wheels(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        self.seed_wheel(0, &mut ride.front)?;
+        self.seed_wheel(1, &mut ride.rear)
+    }
+}
+
+impl SaveState {
+    /// **The chassis as the original held it**: the body's whole integrator state off the rider's
+    /// `+0x7a4`, at the offsets `chassis.rs` documents, and the chassis node's world transform
+    /// (`+0x254`, its matrix at `+0x80`) as the ride's node and origin. The inverse inertia and the
+    /// limits are the `.phy`'s and are left as the port built them.
+    fn seed_chassis(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        let c = self.rider_at(0x7a4)?;
+        let node = self.word(c + 0x254)?;
+        let ch = &mut ride.chassis;
+        ch.speed = self.float(c + 0x34)?;
+        ch.cofg_world = self.vf(c + 0x60)?;
+        ch.accel = self.vf(c + 0x70)?;
+        ch.ang_accel = self.vf(c + 0x80)?;
+        ch.euler = self.vf(c + 0x90)?;
+        ch.force = self.vf(c + 0x130)?;
+        ch.torque = self.vf(c + 0x140)?;
+        ch.impulse = self.vf(c + 0x150)?;
+        ch.correction = self.vf(c + 0x160)?;
+        ch.cofg = self.vf(c + 0x190)?;
+        ch.quat = self.vf(c + 0x1a0)?;
+        ch.awake = self.word(c + 0x1b4)? as i32;
+        ch.contacts = self.word(c + 0x1e0)? as i32;
+        ch.vel = self.vf(c + 0x260)?;
+        ch.local_vel = self.vf(c + 0x270)?;
+        ch.world_ang_vel = self.vf(c + 0x280)?;
+        ch.ang_vel = self.vf(c + 0x290)?;
+        for k in 0..3 {
+            ch.free[k] = self.word(c + 0x2a0 + 4 * k as u32)? as i32;
+            ch.ang_free[k] = self.word(c + 0x2ac + 4 * k as u32)? as i32;
+        }
+        let three = |at: u32| -> Option<[F; 3]> {
+            Some([self.float(at)?, self.float(at + 4)?, self.float(at + 8)?])
+        };
+        ch.pos_hist.dx = three(c + 0x2b8)?;
+        ch.pos_hist.prev = three(c + 0x2c4)?;
+        ch.vel_hist.dx = three(c + 0x2d0)?;
+        ch.vel_hist.prev = three(c + 0x2dc)?;
+        for k in 0..4 {
+            ch.quat_hist.dx[k] = self.float(c + 0x2f0 + 4 * k as u32)?;
+            ch.quat_hist.prev[k] = self.float(c + 0x300 + 4 * k as u32)?;
+        }
+        ch.ang_hist.dx = three(c + 0x310)?;
+        ch.ang_hist.prev = three(c + 0x31c)?;
+        ride.node = [self.vf(node + 0x80)?, self.vf(node + 0x90)?, self.vf(node + 0xa0)?];
+        ride.origin = self.vf(node + 0xb0)?;
+        Some(())
+    }
+
+    /// What the engine wrote last frame (`+0xa0` torque, `+0xa4` at the wheel, `+0xac` the road's
+    /// revs): outputs the next frame overwrites, seeded so tick 0 is the image word for word.
+    fn seed_engine_outputs(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        let e = self.rider_at(0x7b8)?;
+        ride.engine.torque = self.float(e + 0xa0)?;
+        ride.engine.wheel_torque = self.float(e + 0xa4)?;
+        ride.engine.road_rpm = self.float(e + 0xac)?;
+        Some(())
+    }
+
+    /// The balance and the pitch controller's memory off the rider (`r#move::Ride`'s offsets).
+    fn seed_balance(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        let r = self.rider;
+        let mv = &mut ride.mv;
+        mv.g_peak = self.vf(r + 0x550)?;
+        mv.balance_inertia = self.float(r + 0xa4c)?;
+        mv.balance_command = self.float(r + 0xa60)?;
+        mv.balance_point = self.float(r + 0xa64)?;
+        mv.balance_noise_time = self.float(r + 0xa6c)?;
+        mv.pitch_integral = self.float(r + 0x724)?;
+        mv.stoppie = self.flag(r + 0x728)?;
+        Some(())
+    }
+
+    /// The air state off the rider: which wheels touch (`+0x574`
+    /// either, `+0x578` both), airborne (`+0x57c`) and last frame's (`+0x580`), the hang time
+    /// (`+0x4f0`), the contact patch's velocity (`+0x430`) and the crossup angle (`+0x600`). Left
+    /// at its default the port starts in the air, and its first ground step frees the roll axis
+    /// (`ang_free.z`) for a tick the original keeps it locked.
+    fn seed_air(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        let r = self.rider;
+        let air = &mut ride.air;
+        air.on_ground = self.flag(r + 0x574)?;
+        air.both_wheels = self.flag(r + 0x578)?;
+        air.airborne = self.flag(r + 0x57c)?;
+        air.was_airborne = self.flag(r + 0x580)?;
+        air.hang_time = self.float(r + 0x4f0)?;
+        air.contact_vel = self.vf(r + 0x430)?;
+        air.crossup = self.float(r + 0x600)?;
+        Some(())
+    }
+}
+
+/// `watch/s8-start.toml`'s capture: the recording's own save state run on with an idle pad, which is
+/// the acceptance run's first 28 ticks (the human first touches the pad at frame 2803), with the
+/// chassis and the wheels beside the drawn bike.
+const S8_START: &str = "s8-start";
+
+/// Its first frame is read *before* the frame's tick: row 0 is the save state itself (its `f_spin`
+/// is the image's word for word), and every row after it is read after its frame. So row 0 is tick 0,
+/// and a later row's tick is its frame less the save state's.
+fn save_state_ticks(cap: &Capture, saved: u64) -> Result<Vec<u64>, String> {
+    let first: u64 = cell(cap, 0, column(cap, "frame_counter")?)
+        .parse()
+        .map_err(|_| "frame_counter is not a number".to_string())?;
+    if first != saved + 1 {
+        return Err(format!("the capture starts at frame {first}, not the one after the save state's {saved}"));
+    }
+    let ticks = ticks_of(cap)?;
+    Ok(ticks.iter().enumerate().map(|(row, &t)| if row == 0 { 0 } else { t + 1 }).collect())
+}
+
+/// The lanes of `watch/s8-start.toml` (and S64's `watch/s64-wheels.toml`) as the port's walk names
+/// them.
+fn chassis_lanes() -> Vec<(String, String)> {
+    let mut lanes = Vec::new();
+    fn quad(lanes: &mut Vec<(String, String)>, col: &str, path: &str, n: usize) {
+        for (i, x) in ["x", "y", "z", "w"].iter().enumerate().take(n) {
+            lanes.push((format!("{col}.{x}"), format!("{path}[{i}]")));
+        }
+    }
+    quad(&mut lanes, "ch_vel", "rider.ride.chassis.vel", 3);
+    quad(&mut lanes, "ch_quat", "rider.ride.chassis.quat", 4);
+    quad(&mut lanes, "ch_cofg", "rider.ride.chassis.cofg_world", 3);
+    quad(&mut lanes, "ch_cofg_local", "rider.ride.chassis.cofg", 3);
+    quad(&mut lanes, "ch_ang_vel", "rider.ride.chassis.world_ang_vel", 3);
+    quad(&mut lanes, "ch_world_ang_vel", "rider.ride.chassis.ang_vel", 3);
+    quad(&mut lanes, "ch_body_vel", "rider.ride.chassis.local_vel", 3);
+    for (col, wheel) in [("f", "front"), ("r", "rear")] {
+        quad(&mut lanes, &format!("{col}_load_point"), &format!("rider.ride.{wheel}.w.load_point"), 3);
+        quad(&mut lanes, &format!("{col}_normal"), &format!("rider.ride.{wheel}.w.ground_normal"), 3);
+        quad(&mut lanes, &format!("{col}_contact_vel"), &format!("rider.ride.{wheel}.w.contact_velocity"), 3);
+    }
+    for (i, x) in ["0", "1", "2"].iter().enumerate() {
+        lanes.push((format!("ch_xform.m3{x}"), format!("rider.ride.origin[{i}]")));
+    }
+    for (col, wheel) in [("f", "front"), ("r", "rear")] {
+        lanes.push((format!("{col}_comp"), format!("rider.ride.{wheel}.w.compression")));
+        lanes.push((format!("{col}_last_comp"), format!("rider.ride.{wheel}.w.last_compression")));
+        lanes.push((format!("{col}_spring_force"), format!("rider.ride.{wheel}.w.spring_force")));
+        lanes.push((format!("{col}_spin"), format!("rider.ride.{wheel}.mv.spin")));
+    }
+    for (col, path) in [("eng_rpm", "rpm"), ("eng_road_rpm", "road_rpm"), ("eng_torque", "torque"), ("eng_wheel_torque", "wheel_torque")] {
+        lanes.push((col.into(), format!("rider.ride.engine.{path}")));
+    }
+    // S64's tire half, which only `s64-wheels.csv` carries.
+    for (col, wheel) in [("f", "front"), ("r", "rear")] {
+        quad(&mut lanes, &format!("{col}_local_vel"), &format!("rider.ride.{wheel}.local_velocity"), 3);
+        quad(&mut lanes, &format!("{col}_local_force"), &format!("rider.ride.{wheel}.local_force"), 3);
+        for (c, path) in [("angle", "angle"), ("side_per_load", "side_per_load"), ("drive_torque", "mv.drive_torque")] {
+            lanes.push((format!("{col}_{c}"), format!("rider.ride.{wheel}.{path}")));
+        }
+    }
+    lanes.push(("f_steer".into(), "rider.ride.front.w.steer_angle".into()));
+    lanes.push(("f_steer_rate".into(), "rider.ride.front.w.steer_rate".into()));
+    lanes.push(("balance_command".into(), "rider.ride.mv.balance_command".into()));
+    lanes.push(("balance_point".into(), "rider.ride.mv.balance_point".into()));
+    // And the chassis integrator's histories, which the walk names by lane rather than by index.
+    for (col, path, n) in [("pos", "pos_hist", 3), ("vel", "vel_hist", 3), ("quat", "quat_hist", 4), ("ang", "ang_hist", 3)] {
+        for x in ["x", "y", "z", "w"].iter().take(n) {
+            lanes.push((format!("ch_{col}_hist.{x}"), format!("rider.ride.chassis.{path}.{x}")));
+            lanes.push((format!("ch_{col}_hist_prev.{x}"), format!("rider.ride.chassis.{path}.prev.{x}")));
+        }
+    }
+    lanes
+}
+
+/// `watch/s64-wheels.toml`'s slip flags, as the port's walk names them.
+fn slip_lanes() -> Vec<(String, String)> {
+    let mut lanes = Vec::new();
+    for (col, wheel) in [("f", "front"), ("r", "rear")] {
+        for flag in ["spinning", "locked", "sliding"] {
+            lanes.push((format!("{col}_{flag}"), format!("rider.ride.{wheel}.slip.{flag}")));
+        }
+    }
+    lanes
+}
+
+/// S64's capture: `watch/s64-wheels.toml` — s8-start's fields and the tire half of each wheel — run
+/// at a quarter speed (`NominalScalar` 0.25, and `settle_ms` 240 so the rider is there), in a
+/// subfolder so the readers of `context/capture/` do not take it for theirs. At full speed the
+/// recorder reads a frame after its tick and misses tick 1 outright (s8-start's first row is the save
+/// state, its second already tick 2); at a quarter it reads each frame before its tick, so a row at
+/// counter `c` is tick `c - saved - 1` and its first row, 2775, is tick 1.
+const S64_WHEELS: &str = "s64-slow/s64-wheels-quarter";
+
+/// The ticks of [`S64_WHEELS`]'s rows, one short: a row is the tick its counter says unless the recorder
+/// was late for it — the state after its frame, not before — which shows as the row after it being
+/// the same state over again (2818 and 2869 in the capture this was written against, a doubled step
+/// into the row and none out of it). That row is a tick later. The last row has nothing after it to
+/// tell by, and is left out.
+fn quarter_ticks(cap: &Capture, saved: u64) -> Result<Vec<u64>, String> {
+    let counter = column(cap, "frame_counter")?;
+    let vsync = column(cap, "frame").ok();
+    let n = cap.rows.len();
+    let same = |r: usize| (0..cap.columns.len()).filter(|&c| c != counter && Some(c) != vsync).all(|c| cell(cap, r, c) == cell(cap, r + 1, c));
+    (0..n.saturating_sub(1))
+        .map(|r| {
+            let c: u64 = cell(cap, r, counter).parse().map_err(|_| "frame_counter is not a number".to_string())?;
+            let t = c.checked_sub(saved + 1).ok_or_else(|| format!("row {r} is at frame {c}, before the save state's {saved}"))?;
+            Ok(if same(r) { t + 1 } else { t })
+        })
+        .collect()
+}
+
+/// `w`'s samples on `ticks` (and `shift` later), cut to as many rows as there are ticks.
+fn retick(mut w: Watch, ticks: &[u64], shift: u64) -> Watch {
+    w.samples.truncate(ticks.len());
+    for (s, &t) in w.samples.iter_mut().zip(ticks) {
+        s.tick = t + shift;
+    }
+    w
+}
+
+/// The tick [`the_save_state_run_starts_from_the_originals_wheels`] agrees through on every lane: tick
+/// 0 is the save state word for word, and tick 1 parts by ulps on the lateral terms (`vel[0]`, the tire
+/// forces' `x`) and by more on two — the roll quaternion's `z` (1.3e-3 of it) and the pitch's angular
+/// acceleration (1.3%) — which seeding the balance and the pitch integral did not move. S64's journal
+/// entry has the numbers. A ratchet: parting at or before it fails, agreeing further asks to raise it.
+const SAVE_STATE_AGREES_THROUGH: u64 = 0;
+
+/// The tick the same run's bike agrees through on its position (`rider.ride.origin`, the chassis
+/// transform's translation): `x` and `z` hold on every tick of the capture, `y` parts by an ulp of
+/// 208 at tick 22. Before S64 it parted at tick 1, by 0.00086.
+const SAVE_STATE_POSITION_AGREES_THROUGH: u64 = 21;
+
+/// **The acceptance run's first ticks, started from the save state's whole bike** — the chassis'
+/// integrator, both wheels ([`SaveState::seed_wheel`]), the air state, the drivetrain and the
+/// balance — and compared lane by lane against the chassis and the wheels the original moved
+/// ([`S64_WHEELS`], or `watch/s8-start.toml`'s capture where that is all there is), rather than against
+/// the drawn bike the acceptance capture watches.
+#[test]
+fn the_save_state_run_starts_from_the_originals_wheels() {
+    let Some((_, acc)) = acceptance_capture() else { return };
+    let Some(st) = SaveState::open().filter(|s| s.leads(&acc)) else { return };
+    let dir = private_dir("capture");
+    let Some((name, text)) = [S64_WHEELS, S8_START].iter().find_map(|n| {
+        std::fs::read_to_string(dir.join(format!("{n}.csv"))).ok().map(|t| (*n, t))
+    }) else {
+        println!("no {S64_WHEELS}.csv — `watch/s64-wheels.toml` says how it is recorded");
+        return;
+    };
+    let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+    let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+    let ticks = if name == S64_WHEELS { quarter_ticks(&cap, saved) } else { save_state_ticks(&cap, saved) };
+    let ticks = ticks.unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+    let seed = acceptance_fixture(&acc).map(|f| f.seed).unwrap_or(0);
+    in_the_world_of(&acc, |world, named, bike| {
+        let mut sim = acceptance_start(&acc, seed, bike).unwrap();
+        let ride = &mut sim.rider.ride;
+        st.seed_chassis(ride).expect("the chassis");
+        st.seed_wheels(ride).expect("both wheels");
+        st.seed_balance(ride).expect("the balance");
+        st.seed_engine_outputs(ride).expect("the engine");
+        st.seed_air(ride).expect("the air state");
+        let mut watches = Vec::new();
+        for (col, path) in chassis_lanes() {
+            let Ok(w) = cap.float(&col, &path) else { continue };
+            watches.push(retick(w, &ticks, 0));
+        }
+        // The chassis' speed is measured at the top of a frame, from the velocity the frame before
+        // left (`chassis::measure`). The original's rows carry it already measured — every row's
+        // `ch_speed` is the length of its own `ch_vel`, the save state's too — and the port's is
+        // measured a tick later: a row's speed is the port's on the tick after it.
+        if let Ok(w) = cap.float("ch_speed", "rider.ride.chassis.speed") {
+            watches.push(retick(w, &ticks, 1));
+        }
+        for (col, path) in slip_lanes() {
+            let Ok(w) = cap.bool(&col, &path) else { continue };
+            watches.push(retick(w, &ticks, 0));
+        }
+        let last = *ticks.last().unwrap() as usize + 1;
+        let f = Fixture {
+            name: format!("{name} from the save state"),
+            seed,
+            start: Some(sim),
+            inputs: vec![Input::default(); last],
+            watches,
+            world: Some(named.clone()),
+            ..Default::default()
+        };
+        let parts = |f: &Fixture, world: &mut dyn game_sim::world::World| match replay::verify_in(f, world) {
+            Ok(_) => {
+                println!("{}: agrees on every tick", f.name);
+                None
+            }
+            Err(d) => {
+                println!("{}: {d}", f.name);
+                Some(d.tick)
+            }
+        };
+        let whole = parts(&f, world);
+        let mut bike_at = None::<u64>;
+        for w in &f.watches {
+            let one = Fixture { name: format!("  {}", w.path), watches: vec![w.clone()], hashes: Vec::new(), ..f.clone() };
+            let t = parts(&one, world);
+            if w.path.starts_with("rider.ride.origin[") {
+                bike_at = match (bike_at, t) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+            }
+        }
+        let ratchet = |what: &str, at: Option<u64>, through: u64, name: &str| match at {
+            Some(t) if t <= through => panic!(
+                "{what} parts from the original at tick {t}, at or before {name} = {through}: a regression"
+            ),
+            Some(t) if t > through + 1 => println!("{what} now agrees through tick {}: raise {name}", t - 1),
+            None => println!("{what} agrees on every tick: raise {name}"),
+            _ => {}
+        };
+        // The ratchets are S64's capture's: s8-start's has no tick 1 and fewer lanes.
+        if name != S64_WHEELS {
+            return;
+        }
+        ratchet("the save-state run", whole, SAVE_STATE_AGREES_THROUGH, "SAVE_STATE_AGREES_THROUGH");
+        ratchet("its bike's position", bike_at, SAVE_STATE_POSITION_AGREES_THROUGH, "SAVE_STATE_POSITION_AGREES_THROUGH");
+    });
 }
