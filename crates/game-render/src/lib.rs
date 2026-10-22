@@ -18,6 +18,7 @@
 //!   biplane.rs   the biplane: its model, the prop cone its state calls for, the pilot, its emitters
 //!   ini.rs       the plain-text format `.psm` and `.scn` share
 //!   scene.rs     `.scn` scenes (start point, fog, lights, 1506 placed props) and `.psm` materials
+//!   eco.rs       `.esb` ecosystems: a track's trees and bushes, as models near and pictures far
 //!   toy.rs       `.toy` moving scenery: the cars that drive a clip's path, free06's train among them
 //!   world.rs     a track in memory: models, materials and textures matched up by name, and drawn
 //!   rider.rs     the rider: its `.sub`, the `.mcf` it names, its skeleton and how it bolts on
@@ -36,6 +37,7 @@ pub mod anim;
 pub mod biplane;
 pub mod chassis;
 pub mod disc;
+pub mod eco;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod ini;

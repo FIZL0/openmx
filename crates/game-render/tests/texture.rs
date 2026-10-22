@@ -165,6 +165,7 @@ fn one_quad(texture: Texture, u: (f32, f32), v: f32, clamp: [bool; 2]) -> (Scene
             look: v3(0.0, 0.0, 1.0),
             up: v3(0.0, 1.0, 0.0),
         }],
+        ..Scene::parse("")
     };
     let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 1.2, near: 0.1, far: 1000.0 };
     (scene, assets, camera)

@@ -86,7 +86,7 @@ pub fn start_line(disc: &mut Disc, track_name: &str, width: usize, height: usize
         .clone();
     let scn_bytes = archives[0].read(&scn)?;
     let place = track::Scene::parse(&scn_bytes)?;
-    let look = view::Scene::parse(&ini::text(&scn_bytes));
+    let mut look = view::Scene::parse(&ini::text(&scn_bytes));
     let terrain_bytes = terrain_bytes(&archives[0], &place.terrain_file)?;
     let ground = Ground::new(track::Terrain::parse(&terrain_bytes)?, &place.terrain);
 
@@ -97,6 +97,8 @@ pub fn start_line(disc: &mut Disc, track_name: &str, width: usize, height: usize
     for name in &names {
         assets.load_placed(&archives, name);
     }
+    let extent = game_render::eco::extent(&place.terrain, &track::Terrain::parse(&terrain_bytes)?);
+    look.ecosystem = game_render::eco::Grove::load(&archives, &look, extent, &mut assets)?;
 
     let spawn = v3(place.start[0].0, place.start[1].0, place.start[2].0);
     let facing = v3(place.start_direction[0].0, place.start_direction[1].0, place.start_direction[2].0);

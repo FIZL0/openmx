@@ -1448,7 +1448,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The same file read twice, by two readers that want different things out of it: the simulation's
     // reader for the spawn and the terrain's layout, the renderer's for the props, lights and fog.
     let place = track::Scene::parse(&scn_bytes)?;
-    let look = view::Scene::parse(&ini::text(&scn_bytes));
+    let mut look = view::Scene::parse(&ini::text(&scn_bytes));
 
     let terrain_bytes = terrain_bytes(&archives[0], &place.terrain_file)?;
     // The same file parsed twice, because the two sides of it are owned by different crates: the
@@ -1506,6 +1506,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     names.dedup();
     for name in &names {
         assets.load_placed(&archives, name);
+    }
+    // The trees and bushes the scene's ecosystem scatters over the ground (V48).
+    match game_render::eco::Grove::load(&archives, &look, game_render::eco::extent(&place.terrain, &sim_terrain), &mut assets) {
+        Ok(grove) => look.ecosystem = grove,
+        Err(e) => println!("ecosystem: {e}"),
     }
     let has_bike = assets.load(&archives, CHASSIS);
     for part in &vehicle.parts {
