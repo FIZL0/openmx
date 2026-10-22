@@ -618,13 +618,21 @@ pub struct Terrain<'a> {
     pub levels: u32,
     /// How many leaf blocks the file holds.
     pub blocks: u32,
+    /// The images stored between the blocks and the tree. The free tracks carry none; the nationals
+    /// carry 32 or 48.
+    pub textures: Vec<TerrainTexture<'a>>,
     palette_at: Option<usize>,
     blocks_at: usize,
     root_at: usize,
 }
 
 impl<'a> Terrain<'a> {
-    /// Read a `.trn` header and check that its blocks account exactly for the space in front of its tree.
+    /// Read a `.trn` header and check that its blocks and textures account exactly for the space in
+    /// front of its tree.
+    ///
+    /// The loader reads the blocks, then a count of textures and that many of them, one after another,
+    /// and then the tree. The word table ahead of the blocks says where each texture starts; the
+    /// loader skips it, and the reader here checks it against where each one does start.
     pub fn parse(bytes: &'a [u8]) -> Result<Terrain<'a>, String> {
         let mut r = Reader::new(bytes, "a terrain");
         let tag = r.take(4)?;
@@ -653,21 +661,34 @@ impl<'a> Terrain<'a> {
         }
         // One word per block, in front of the blocks themselves and not read by anything here.
         r.skip(declared as usize * 4)?;
-        let textures = r.i32()?;
-        let _textures_again = r.i32()?;
-        if textures < 0 {
-            return Err(format!("terrain texture count {textures}"));
+        let table = r.i32()?;
+        let stored = r.i32()?;
+        if table < 0 || stored < 0 {
+            return Err(format!("terrain texture counts {table}, {stored}"));
         }
-        r.skip(textures as usize * 4)?;
+        let mut starts = Vec::with_capacity(table as usize);
+        for _ in 0..table {
+            starts.push(r.u32()? as usize);
+        }
 
         let blocks_at = r.at;
-        let blocks_end = blocks_at
-            .checked_add(blocks as usize * BLOCK_BYTES)
-            .ok_or("the terrain's blocks overflow")?;
-        if blocks_end != tree_at as usize {
+        r.skip(blocks as usize * BLOCK_BYTES)
+            .map_err(|_| format!("{blocks} blocks of {BLOCK_BYTES} from {blocks_at} overrun the file"))?;
+        let blocks_end = r.at;
+        let mut textures = Vec::with_capacity(stored as usize);
+        for i in 0..stored as usize {
+            if let Some(&want) = starts.get(i) {
+                if want != r.at {
+                    return Err(format!("terrain texture {i} starts at {}, but its table says {want}", r.at));
+                }
+            }
+            textures.push(TerrainTexture::read(&mut r).map_err(|e| format!("terrain texture {i}: {e}"))?);
+        }
+        if r.at != tree_at as usize {
             return Err(format!(
-                "{blocks} blocks of {BLOCK_BYTES} from {blocks_at} end at {blocks_end}, \
-                 but the tree starts at {tree_at}"
+                "{blocks} blocks of {BLOCK_BYTES} from {blocks_at} end at {blocks_end} and {stored} \
+                 textures after them at {}, but the tree starts at {tree_at}",
+                r.at
             ));
         }
         if tree_at as usize + NODE_BYTES > bytes.len() {
@@ -681,6 +702,7 @@ impl<'a> Terrain<'a> {
             scale,
             levels: levels as u32,
             blocks: blocks as u32,
+            textures,
             palette_at,
             blocks_at,
             root_at: tree_at as usize,
@@ -819,6 +841,53 @@ impl TerrainNode {
             let relief = F::from(i32::from(raw).wrapping_sub(base));
             self.height_scale * (F::from(base) + self.vertical_scale * relief)
         }
+    }
+}
+
+/// One image a terrain file carries, as the game's texture reader takes it: a format word, a level
+/// count, and per level a 16-byte header — width, height, byte count, and a word the reader does not
+/// use — followed by that many bytes.
+///
+/// Every one on this disc is format 39, one level of 256×256 bytes, a byte to a pixel.
+/// Formats 39 and 40 are the two whose levels the reader takes whole like this; the others are refused.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerrainTexture<'a> {
+    /// The pixel format word the terrain loader hands the texture reader.
+    pub format: u32,
+    /// The levels in the order the file stores them.
+    pub levels: Vec<TextureLevel<'a>>,
+}
+
+/// One level of a [`TerrainTexture`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureLevel<'a> {
+    pub width: u32,
+    pub height: u32,
+    /// The header's fourth word, which the reader does not use: a pointer left over from the tool that
+    /// wrote the file.
+    pub unread: u32,
+    pub pixels: &'a [u8],
+}
+
+impl<'a> TerrainTexture<'a> {
+    fn read(r: &mut Reader<'a>) -> Result<TerrainTexture<'a>, String> {
+        let format = r.u32()?;
+        // The reader's two palette formats take their levels some other way, and no terrain on this
+        // disc uses them, so only the two whose layout is read here are accepted.
+        if format != 39 && format != 40 {
+            return Err(format!("format {format}"));
+        }
+        let count = r.u32()?;
+        let mut levels = Vec::new();
+        for _ in 0..count {
+            let width = r.u32()?;
+            let height = r.u32()?;
+            let size = r.u32()?;
+            let unread = r.u32()?;
+            let pixels = r.take(size as usize)?;
+            levels.push(TextureLevel { width, height, unread, pixels });
+        }
+        Ok(TerrainTexture { format, levels })
     }
 }
 
