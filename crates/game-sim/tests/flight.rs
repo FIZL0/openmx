@@ -224,10 +224,11 @@ fn a_plane_ride_is_a_lane_and_a_bike_ride_is_not_moved_by_it() {
     assert_eq!(flying.ticks, 1);
     assert_eq!(flying.bike_pos().to_bits(), pos.to_bits(), "the parked bike moved");
     assert_eq!(flying.bike_vel().to_bits(), vel.to_bits(), "the parked bike's velocity changed");
-    // Hands off the pad, so the controls zero the pad and hold the throttle: the plane was stepped,
-    // and its throttle is where it was.
+    // The frame steps on the pad the last input step stored, the gas held, and only then stores this
+    // one, hands off (S94: the original's order): the plane was stepped, its throttle opened by one
+    // frame's increment, and the pad it holds now is the idle one.
     let after = flying.plane.as_ref().map(|p| p.surfaces.throttle);
-    assert_eq!(after, before, "a hands-off frame moved the throttle");
+    assert_eq!(after, before.map(|t| t + F(0.35) * F(game_sim::tick::DeltaTime::CAP_30)), "the stored press did not open the throttle");
     assert_eq!(flying.plane.as_ref().map(|p| p.pad.forward), Some(F::ZERO));
 }
 
