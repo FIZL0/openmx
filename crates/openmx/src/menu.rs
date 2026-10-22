@@ -1143,15 +1143,18 @@ const MAIN_ONLINE: usize = 2;
 const MAIN_GARAGE: usize = 3;
 const MAIN_SETTINGS: usize = 4;
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
-/// machine a switch would go to; the fourth its "Game Audio Options" (P56).
-const PAUSE: [&str; 7] = ["Resume", "Restart", "Switch To Machine", "Game Audio Options", "Settings", "Main Menu", "Quit"];
+/// machine a switch would go to; the fourth its "Game Audio Options" (P56). "Clear Markers" is the
+/// port's (P99): the pausing player's session markers on this track, the saved ones with them.
+const PAUSE: [&str; 8] =
+    ["Resume", "Restart", "Switch To Machine", "Game Audio Options", "Settings", "Main Menu", "Clear Markers", "Quit"];
 const PAUSE_SWITCH: usize = 2;
 const PAUSE_AUDIO: usize = 3;
 const PAUSE_SETTINGS: usize = 4;
 const PAUSE_MAIN: usize = 5;
+const PAUSE_MARKERS: usize = 6;
 /// The pause's "Open to Online" row (N10), before Quit, on a ride that can be opened
 /// ([`Menu::opening`]); Quit moves down one under it.
-const PAUSE_OPEN: usize = 6;
+const PAUSE_OPEN: usize = 7;
 const PAUSE_OPEN_ROW: &str = "Open to Online";
 /// The pause's Seats row (N14), under the online row: the seats the room opens with, then, opened,
 /// the room's own, as the lobby's Seats row sets them.
@@ -1302,6 +1305,9 @@ pub enum Act {
     Online,
     /// Open the ride under the pause to online players (N10): host a lobby on it, and carry on.
     OpenOnline,
+    /// Clear this seat's player's session markers on the ride's track, kept and placed (P99); the
+    /// pause stays open.
+    ClearMarkers(usize),
 }
 
 /// The front end's state: which screens are open, where each one's cursor is, and the settings it
@@ -2523,6 +2529,7 @@ impl Menu {
                         }
                         PAUSE_AUDIO => self.open_audio(),
                         PAUSE_SETTINGS => self.push(Screen::Settings),
+                        PAUSE_MARKERS => return Act::ClearMarkers(self.pauser),
                         PAUSE_MAIN => {
                             self.main();
                             return Act::MainMenu;
@@ -3008,6 +3015,16 @@ impl Lobby {
         if self.repick && self.room.as_ref().is_some_and(|r| !r.riding) && self.start.is_none() {
             self.out.push(Cmd::Picks(vec![self.pick.clone()]));
             self.repick = false;
+        }
+    }
+
+    /// This machine's player's saved markers on the room's track as its pick's (P99,
+    /// `saved_markers::to_pick`), which every machine starts the player's seat on: the shell's every
+    /// frame. A change goes out with [`Lobby::preset`]'s, on the same terms.
+    pub fn set_markers(&mut self, text: String) {
+        if self.pick.markers != text {
+            self.pick.markers = text;
+            self.repick = self.room.is_some();
         }
     }
 

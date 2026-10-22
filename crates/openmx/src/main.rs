@@ -178,6 +178,7 @@ mod perf;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
 mod same_ride;
+mod saved_markers;
 mod split;
 mod stages;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
@@ -1160,7 +1161,12 @@ fn front_end(args: Args) -> Result<(), String> {
     let mut busy = Duration::ZERO;
     let mut limiter = pace::Limiter::default();
     let mut escape = false;
+    // 1P's saved markers on the lobby's track, for this machine's pick (P99).
+    let mut pick_markers = saved_markers::PickMarkers::default();
     loop {
+        if matches!(act, Act::Ride(_) | Act::Online) {
+            pick_markers.stale();
+        }
         if let Act::Ride(track) = &act {
             shell.front.reader.reset();
             shell.front.keys_reader.reset();
@@ -1398,6 +1404,14 @@ fn front_end(args: Args) -> Result<(), String> {
             seats.set_wiring(shell.front.wiring());
             shell.front.hear();
             shell.front.save();
+        }
+        // 1P's saved markers on the room's track into this machine's lobby pick (P99), so every
+        // machine starts the ride with them; the preset's line below sends a changed pick.
+        if let Some(track) = shell.front.menu.lobby.room.as_ref().map(|r| r.track.clone()) {
+            let profile = saved_markers::profile(&roster::clean_rider_name(&shell.front.menu.picks.0[0].look.name), 0);
+            let bike = shell.front.menu.lobby.pick.bike.clone();
+            let text = pick_markers.of(&shell.front.dir, &track, &profile, &bike).to_string();
+            shell.front.menu.lobby.set_markers(text);
         }
         // 1P's controller preset into this machine's lobby pick (N13), for every machine's ride.
         shell.front.menu.lobby.preset(seats.preset(args.pad_seat(0)));
@@ -1665,6 +1679,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Each player's file as the disc has it, which a change of modifiers in the ride builds the
     // bike's numbers again from (P98).
     let mut stock_phys: Vec<Phy> = vec![stock_phy.clone()];
+    // Each player's bike as their saved markers name it (P99): its `.phy`'s name.
+    let mut bike_words: Vec<String> = vec![saved_markers::bike_word(&phy_member)];
     let mut other_riders: Vec<Option<(String, String)>> = Vec::new();
     // Online every seat of `--seats` is a rider on this track, each machine's in the same places
     // (N5): seat `s` starts where local player `s + 1` would, on the first's bike.
@@ -1683,6 +1699,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
                 let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
                 stock_phys.push(phy.clone());
+                bike_words.push(saved_markers::bike_word(&member));
                 mods.bike(i, &mut phy);
                 other_phys.push(phy);
                 let rider = member_ending(&disc, &format!("{}.res", pick.rider)).ok();
@@ -1691,6 +1708,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             None => {
                 let mut phy = stock_phy.clone();
                 stock_phys.push(stock_phy.clone());
+                bike_words.push(bike_words[0].clone());
                 mods.bike(i, &mut phy);
                 other_phys.push(phy);
                 other_riders.push(None);
@@ -2957,6 +2975,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // it and the handshake held every machine to; an open seat's is 0.
                 sim.set_presets([seat.as_ref().map_or(0, |s| s.pick.preset as usize), 0]);
                 sim.rng = room.seed;
+                // Each player's saved markers on this track (P99), as their pick brought them to every
+                // machine: every seat starts the ride with the same slots everywhere. An open seat's
+                // are none.
+                sim.markers = seat.as_ref().map_or_else(Default::default, |s| saved_markers::from_pick(&s.pick.markers, &s.pick.bike, &room.track));
                 sims.push(sim);
             }
             let mine = room.seats.iter().flatten().find(|s| s.peer == me).map_or(0, |s| s.pick.preset as usize);
@@ -2988,6 +3010,40 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
     };
     let mut online_frames = 0u32;
+    // The session markers kept between rides (P99), in `markers/` beside `settings.txt`. A played
+    // tape starts its first player on the markers it was made with and keeps nothing — its ride is
+    // the tape's, not the player's; online the seats' came with the lobby's picks and this machine's
+    // seat is kept as it is placed; otherwise every local player starts on the ones they kept on
+    // this track, and keeps what they place.
+    let markers_dir = front.as_deref().map_or_else(|| menu::store_dir(Disc::configured_path().ok().as_deref()), |f| f.dir.clone());
+    let rider_names: Vec<String> = std::iter::once(&args.look).chain(args.others.iter().map(|p| &p.look)).map(|l| roster::clean_rider_name(&l.name)).collect();
+    let profile_of = |i: usize| saved_markers::profile(rider_names.get(i).map_or("", String::as_str), i);
+    let mut kept_markers: Vec<Option<saved_markers::Kept>> = vec![None; world.seats.len()];
+    if let Some(head) = &head {
+        if let Some(m) = head.tape.start_markers().map_err(|e| format!("the tape's markers: {e}"))? {
+            println!("markers: the tape's, {} placed", m.slots.iter().flatten().count());
+            world.seats[0].sim.markers = m;
+        }
+    } else if online.is_some() {
+        let first = &world.seats[0].sim.markers;
+        kept_markers[0] = Some(saved_markers::Kept::new(&args.track, &profile_of(0), &bike_words[0], first));
+    } else {
+        for (i, seat) in world.seats.iter_mut().enumerate() {
+            let bike = bike_words.get(i).unwrap_or(&bike_words[0]);
+            seat.sim.markers = saved_markers::load(&markers_dir, &args.track, &profile_of(i), bike);
+            let placed = seat.sim.markers.slots.iter().flatten().count();
+            if placed > 0 {
+                println!("markers: {} on {}: {placed} kept", profile_of(i), args.track);
+            }
+            kept_markers[i] = Some(saved_markers::Kept::new(&args.track, &profile_of(i), bike, &seat.sim.markers));
+        }
+    }
+    // A tape carries the markers its first player started with, and replays on them.
+    if let Some(tape) = &mut world.tape
+        && !world.seats[0].sim.markers.slots.iter().all(Option::is_none)
+    {
+        tape.tape.markers = world.seats[0].sim.markers.to_file(&bike_words[0]);
+    }
     // The pause offers "Open to Online" (N10) on a local freeride of one player on the bike set the
     // disc's own lookup gives (what a joiner's machine loads for it), outside any lobby.
     if let Some(front) = front.as_deref_mut() {
@@ -3098,6 +3154,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 tape.modifiers(mods);
             }
             println!("modifiers: {} (the tape's, from frame {})", mods.text(), head.as_ref().map_or(0, Head::at));
+        }
+        // The recording's first player cleared their markers from the pause before this frame (P99).
+        if head.as_ref().is_some_and(Head::cleared) && !world.seats[0].sim.markers.slots.iter().all(Option::is_none) {
+            world.seats[0].sim.markers.clear();
+            if let Some(tape) = &mut world.tape {
+                tape.markers_cleared();
+            }
+            println!("markers: cleared (the tape's, before frame {})", head.as_ref().map_or(0, Head::at));
         }
         match &mut head {
             // The seats', otherwise: seat i feeds player i's own pad port (V22's players). A seat
@@ -3303,7 +3367,42 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         }
                     }
                 }
-                Act::Stay | Act::Resume | Act::Ride(_) | Act::Switch(_) | Act::Online | Act::OpenOnline => {}
+                // The pausing player's markers on this track (P99): offline the ride's slots and the
+                // file, and a tape being written clears there too; online only the file — the
+                // ride's slots are the session's, and stay until it ends.
+                Act::ClearMarkers(i) if head.is_none() => {
+                    let profile = profile_of(i);
+                    let bike = bike_words.get(i).unwrap_or(&bike_words[0]);
+                    match saved_markers::save(&markers_dir, &args.track, &profile, bike, &Default::default()) {
+                        Err(e) => front.menu.note = Some(format!("Could not clear the markers: {e}")),
+                        Ok(()) if online.is_some() => {
+                            if let (Some(Some(kept)), Some(seat)) = (kept_markers.get_mut(i), world.seats.get(i)) {
+                                kept.last = saved_markers::signature(&seat.sim.markers);
+                            }
+                            front.menu.note = Some(format!("{profile}'s saved markers on this track cleared; the ride keeps its own until it ends."));
+                        }
+                        Ok(()) => {
+                            if let Some(seat) = world.seats.get_mut(i) {
+                                seat.sim.markers.clear();
+                                if let Some(Some(kept)) = kept_markers.get_mut(i) {
+                                    kept.last = saved_markers::signature(&seat.sim.markers);
+                                }
+                            }
+                            if let Some(tape) = world.tape.as_mut().filter(|_| i == 0) {
+                                tape.markers_cleared();
+                            }
+                            front.menu.note = Some(format!("{profile}'s markers on this track cleared."));
+                        }
+                    }
+                    println!("markers: {profile} on {} cleared", args.track);
+                }
+                Act::Stay
+                | Act::Resume
+                | Act::Ride(_)
+                | Act::Switch(_)
+                | Act::Online
+                | Act::OpenOnline
+                | Act::ClearMarkers(_) => {}
             }
             // The pause closing on modifiers the player changed in it: the ride takes them now, from
             // where it is (P98), and a tape being written takes the change at the tick it is on.
@@ -3391,6 +3490,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         };
         perf.add(Stage::Sim, sim_at.elapsed());
         stages.mark(stages::Stage::Sim);
+        // A slot placed or cleared this frame writes its player's file (P99).
+        for (kept, seat) in kept_markers.iter_mut().zip(&world.seats) {
+            if let Some(line) = kept.as_mut().and_then(|k| k.frame(&markers_dir, &seat.sim.markers)) {
+                println!("{line}");
+            }
+        }
         // The plane's particles (P58): a frame of them for each frame the plane was simulated, off
         // where it is now. Nothing here writes the simulation; the ones that collide ask the ride's own
         // terrain query for the ground under them (P61), which reads the terrain and nothing else.

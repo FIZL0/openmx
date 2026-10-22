@@ -34,11 +34,17 @@ pub struct Pick {
     /// gear set as it comes, and what an older build sends.
     #[serde(default)]
     pub look: String,
+    /// The player's session markers saved on the room's track (P99), so every machine starts the
+    /// ride with the same slots: the markers file's bytes in hex (`openmx`'s `saved_markers`), empty
+    /// for none and from an older build. Not in the handshake: the handshake already holds every
+    /// machine to one build, and one build reads the same bytes the same way.
+    #[serde(default)]
+    pub markers: String,
 }
 
 impl Pick {
     pub fn new(rider: &str, bike: &str) -> Pick {
-        Pick { rider: rider.into(), bike: bike.into(), preset: 0, look: String::new() }
+        Pick { rider: rider.into(), bike: bike.into(), preset: 0, look: String::new(), markers: String::new() }
     }
 }
 
