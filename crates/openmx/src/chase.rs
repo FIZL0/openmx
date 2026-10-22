@@ -207,6 +207,11 @@ pub struct WreckCamera {
     /// Each target's point last frame, for the velocity of the ones that are differenced.
     pub last: [Option<[f32; 3]>; 2],
     pub bike_vel: [f32; 3],
+    /// The player's framing (P82): its distances are the original's times this share — the bike's
+    /// distance slider — and its field-of-view limits move by `fov_shift`, as the follow camera's do.
+    /// 1 and 0 are the original's, to the bit.
+    pub scale: f32,
+    pub fov_shift: f32,
 }
 
 fn v3(v: Vf) -> [f32; 3] {
@@ -268,7 +273,35 @@ impl WreckCamera {
             heading: None,
             last: [None; 2],
             bike_vel: [0.0; 3],
+            scale: 1.0,
+            fov_shift: 0.0,
         }
+    }
+
+    /// The nearest the eye sits and the farthest, under the player's framing (P82).
+    pub fn min_distance(&self) -> f32 {
+        WRECK_MIN_DISTANCE * self.scale
+    }
+
+    pub fn max_distance(&self) -> f32 {
+        WRECK_MAX_DISTANCE * self.scale
+    }
+
+    /// The field of view's two limits, under the player's framing (P82).
+    pub fn min_fov(&self) -> f32 {
+        WRECK_MIN_FOV + self.fov_shift
+    }
+
+    pub fn max_fov(&self) -> f32 {
+        WRECK_MAX_FOV + self.fov_shift
+    }
+
+    /// Frame it as the player has the follow camera framed (P82): `framing`'s distance share and
+    /// field-of-view offset. The height share has nothing to scale here: the wreck camera's height
+    /// is its aim's pitch and its floor above the ground, which stay the original's.
+    pub fn frame(&mut self, framing: Framing) {
+        self.scale = framing.distance;
+        self.fov_shift = framing.fov;
     }
 
     /// The look-at's vertical lag, as a share of the other two.
@@ -307,8 +340,8 @@ impl WreckCamera {
         self.distance = length(away);
         self.direction = unit(away);
         self.look_at = v3(look_at);
-        self.distance_offset = (self.distance - WRECK_MIN_DISTANCE).clamp(0.0, WRECK_MAX_DISTANCE - WRECK_MIN_DISTANCE);
-        self.distance = WRECK_MIN_DISTANCE + self.distance_offset;
+        self.distance_offset = (self.distance - self.min_distance()).clamp(0.0, self.max_distance() - self.min_distance());
+        self.distance = self.min_distance() + self.distance_offset;
         self.spread = 0.0;
         self.fov_offset = 0.0;
         self.base_fov = fov;
@@ -391,7 +424,7 @@ impl WreckCamera {
         let apart = length(sub(v3(targets.bike), v3(targets.rider)));
         let counted = apart < self.radius();
         let was = if self.spread == 0.0 { apart } else { self.spread };
-        let (spread, grew) = if counted { (apart, apart - was) } else { (WRECK_MIN_DISTANCE * 1.5, 0.0) };
+        let (spread, grew) = if counted { (apart, apart - was) } else { (self.min_distance() * 1.5, 0.0) };
         self.spread = spread;
         let fov = self.fov_step(grew);
         self.distance_step(grew, dt);
@@ -440,8 +473,8 @@ impl WreckCamera {
         }
 
         // The eye: the point, out along the direction by the distance.
-        self.distance = (WRECK_MIN_DISTANCE + self.distance_offset).clamp(WRECK_MIN_DISTANCE, WRECK_MAX_DISTANCE);
-        self.distance_offset = self.distance - WRECK_MIN_DISTANCE;
+        self.distance = (self.min_distance() + self.distance_offset).clamp(self.min_distance(), self.max_distance());
+        self.distance_offset = self.distance - self.min_distance();
         let eye = add(point, mul(self.direction, self.distance));
 
         let dt = F(dt);
@@ -466,20 +499,20 @@ impl WreckCamera {
         if step.abs() >= 0.1 || self.fov_offset <= 0.0 {
             self.fov_offset += step;
         } else {
-            let span = WRECK_MAX_DISTANCE - WRECK_MIN_DISTANCE;
-            let out = (WRECK_MAX_DISTANCE - (WRECK_MIN_DISTANCE + self.distance_offset)) / span;
-            self.fov_offset = WRECK_MIN_FOV + (WRECK_MAX_FOV - WRECK_MIN_FOV) * out - self.base_fov;
+            let span = self.max_distance() - self.min_distance();
+            let out = (self.max_distance() - (self.min_distance() + self.distance_offset)) / span;
+            self.fov_offset = self.min_fov() + (self.max_fov() - self.min_fov()) * out - self.base_fov;
         }
         // The clamp, with the original's slip: past the widest the offset is set to the clamp's span,
         // not to what would reach the widest, and the field of view holds at the widest until the
         // offset walks back.
         let fov = self.base_fov + self.fov_offset;
-        if fov > WRECK_MAX_FOV {
-            self.fov_offset = WRECK_MAX_FOV - WRECK_MIN_FOV;
-            WRECK_MAX_FOV
-        } else if fov < WRECK_MIN_FOV {
+        if fov > self.max_fov() {
+            self.fov_offset = self.max_fov() - self.min_fov();
+            self.max_fov()
+        } else if fov < self.min_fov() {
             self.fov_offset = 0.0;
-            WRECK_MIN_FOV
+            self.min_fov()
         } else {
             fov
         }
@@ -490,9 +523,9 @@ impl WreckCamera {
     fn distance_step(&mut self, grew: f32, dt: f32) {
         let mut step = grew / 10.0;
         if grew <= 0.9 {
-            let wide = (self.base_fov + self.fov_offset - 20.0).max(WRECK_MIN_FOV);
-            let fits = WRECK_MIN_DISTANCE.max(self.spread / ((wide * 0.5).to_radians().tan() * 2.0));
-            let gap = fits - (WRECK_MIN_DISTANCE + self.distance_offset);
+            let wide = (self.base_fov + self.fov_offset - 20.0).max(self.min_fov());
+            let fits = self.min_distance().max(self.spread / ((wide * 0.5).to_radians().tan() * 2.0));
+            let gap = fits - (self.min_distance() + self.distance_offset);
             if gap > 0.0 || -gap < self.distance_offset {
                 step += gap * ease(WRECK_AIM_EASE, dt);
             }
@@ -507,4 +540,66 @@ impl WreckCamera {
         let wide = (fov - 20.0).max(WRECK_MIN_FOV);
         WRECK_MIN_DISTANCE.max(spread / ((wide * 0.5).to_radians().tan() * 2.0))
     }
+}
+
+// --- the player's framing (P82) --------------------------------------------------------------------
+
+/// How a player has the follow camera framed (P82): the settings' Camera page, a view laid over the
+/// original's presets. The simulation never sees it; the camera reads the presets it makes.
+///
+/// [`Framing::ORIGINAL`] is the original's, and [`framed`] hands it the presets untouched, so at that
+/// notch every number the camera reads is the disc's to the bit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Framing {
+    /// Degrees added to the preset's field of view, and to its two limits with it.
+    pub fov: f32,
+    /// The eye's distance behind the target point, as a share of the preset's: 1 is the original's.
+    pub distance: f32,
+    /// The eye's height above the target point, as a share of the preset's.
+    pub height: f32,
+}
+
+impl Framing {
+    pub const ORIGINAL: Framing = Framing { fov: 0.0, distance: 1.0, height: 1.0 };
+
+    pub fn is_original(&self) -> bool {
+        *self == Framing::ORIGINAL
+    }
+}
+
+/// The presets as `framing` has them.
+///
+/// The preset puts the eye `FollowingDistance` out from the target point along the heading pitched up
+/// by `AngleX`: that much behind it (the distance times the pitch's cosine) and that much above it
+/// (times its sine). The two shares scale those two legs apart, and the preset's distance and pitch
+/// are made again from the new legs, so the slider for one does not move the other. The two distance
+/// limits and the reverse ramp's distance scale with the distance; the field of view and its limits
+/// move by the offset. Everything else — the lags, the look-ahead, the swings — is the preset's.
+pub fn framed(presets: &[game_sim::camera::Preset], framing: Framing) -> Vec<game_sim::camera::Preset> {
+    if framing.is_original() {
+        return presets.to_vec();
+    }
+    presets
+        .iter()
+        .map(|p| {
+            let mut p = p.clone();
+            let (d, pitch) = (p.following_distance.0, p.angle_x.0);
+            let behind = d * pitch.cos() * framing.distance;
+            let above = d * pitch.sin() * framing.height;
+            let out = behind.hypot(above);
+            // A preset with no distance has no legs to scale: its limits take the distance's share.
+            let k = if d > 0.0 { out / d } else { framing.distance };
+            if d > 0.0 {
+                p.angle_x = F(above.atan2(behind));
+            }
+            p.following_distance = F(out);
+            p.min_following_distance = F(p.min_following_distance.0 * k);
+            p.max_following_distance = F(p.max_following_distance.0 * k);
+            p.reverse_following_offset = F(p.reverse_following_offset.0 * k);
+            p.fov = F(p.fov.0 + framing.fov);
+            p.min_fov = F(p.min_fov.0 + framing.fov);
+            p.max_fov = F(p.max_fov.0 + framing.fov);
+            p
+        })
+        .collect()
 }
