@@ -593,7 +593,7 @@ wire!(crate::broad_phase::Search { nearby, centre, bound, least, extra, no_group
 wire!(crate::world_search::Nearby { found, prepare });
 wire!(crate::world_search::Candidate { object, distance });
 wire!(crate::contact_search::Record { search_ground, search, sweep_back, touching, touching_other, on_ground, on_object, damp, rest_linear, rest_angular, offset, lead, push_out, facing, swept_from, swept_to, node, contacts, capacity, nearby, rays, sweeps, struck });
-wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt, drag_halved });
+wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt, drag_halved, riding_speed_sq });
 wire!(crate::ride::Back { at, facing, up });
 wire!(crate::rider_anim::Body { veh, player, ready, picked, look, looking, settled, machine });
 wire!(crate::state::Ride { wreck, counting, elapsed, kind, pending, fresh, wrecking, wrecks, entries });

@@ -491,7 +491,10 @@ fn the_size_of_the_state_type_is_pinned() {
     // that has a ray probe; the probe's geometry is the disc's and is left out.
     // 11232 since S96: the plane's nearby search, kept from frame to frame, walked under
     // `plane.collision` with it.
+    // 11240 since P97: the ride's riding speed limit, which a put-back gives the chassis back — a
+    // constant of the ride its builder (and a speed modifier) decides, left out like S73's arm; the
+    // chassis' own limit it is copied into is walked.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11232, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11240, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
