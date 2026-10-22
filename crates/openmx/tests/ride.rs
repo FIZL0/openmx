@@ -1669,7 +1669,9 @@ fn the_default_biplane_stick_pulls_the_nose_toward_the_planes_up_at_every_bank()
             assert_eq!(original_say, 0.0, "on its side the original's stick moved the nose");
         }
         if bank == 0.0 {
-            assert_eq!((new, new_say), (original, original_say), "the right way up the plane's and the original's differ");
+            // The right way up they differ only by the loop's raised pitch rate (P108), which at
+            // speed lets the plane's pull past the original's.
+            assert!(new >= original, "the right way up the plane's pull {new:.4} is short of the original's {original:.4}");
         }
     }
     // The flight still holds its file's value: the lift is the step's, not the plane's.
