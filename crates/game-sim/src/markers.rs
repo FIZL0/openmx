@@ -237,3 +237,66 @@ impl State for Markers {
 }
 
 const SLOT_NAMES: [&str; SLOTS] = ["slot0", "slot1", "slot2", "slot3", "slot4"];
+
+// ---------------------------------------------------------------------------------------------------
+// Saved between sessions (P99).
+// ---------------------------------------------------------------------------------------------------
+
+/// What a saved-markers file begins with.
+const FILE_MAGIC: [u8; 8] = *b"OMXmarks";
+
+/// The saved-markers file's format. Bump it when the file changes shape; a file of another version
+/// is dropped ([`Markers::from_file`] says why), never read as this one. A change to the ride's own
+/// codec is caught too: the slots are [`crate::snapshot::encode_slots`]'s, which carries the
+/// snapshot's format and must read back to the last byte.
+pub const FILE_VERSION: u32 = 1;
+
+impl Markers {
+    /// Every slot emptied (P99, the pause's Clear Markers), the selection left where it is.
+    pub fn clear(&mut self) {
+        self.slots = Default::default();
+    }
+
+    /// The slots as a file, for keeping between sessions: [`FILE_MAGIC`], [`FILE_VERSION`], the bike
+    /// they were placed on (`bike`, the `.phy`'s name — a marker is the whole bike, and another bike's
+    /// is no use to this one), then the slots. The selection is not kept: a ride starts on the first
+    /// slot.
+    pub fn to_file(&self, bike: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 * 1024);
+        out.extend_from_slice(&FILE_MAGIC);
+        out.extend_from_slice(&FILE_VERSION.to_le_bytes());
+        out.extend_from_slice(&(bike.len() as u32).to_le_bytes());
+        out.extend_from_slice(bike.as_bytes());
+        out.extend_from_slice(&crate::snapshot::encode_slots(&self.slots));
+        out
+    }
+
+    /// [`Markers::to_file`]'s bytes back, on the first slot, if they are this format's and `bike`'s;
+    /// an error saying why not otherwise, for the caller to drop the file on.
+    pub fn from_file(bytes: &[u8], bike: &str) -> Result<Markers, String> {
+        let (named, markers) = Markers::read_file(bytes)?;
+        if named != bike {
+            return Err(format!("markers of the {named} bike, not the {bike}"));
+        }
+        Ok(markers)
+    }
+
+    /// [`Markers::to_file`]'s bytes back whatever bike they name, and the bike: a tape's
+    /// ([`crate::replay::PadTape::markers`]), which rides the bike it was made on.
+    pub fn read_file(bytes: &[u8]) -> Result<(String, Markers), String> {
+        let head = FILE_MAGIC.len() + 8;
+        if bytes.len() < head || bytes[..FILE_MAGIC.len()] != FILE_MAGIC {
+            return Err("not a markers file".into());
+        }
+        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+        let version = word(FILE_MAGIC.len());
+        if version != FILE_VERSION {
+            return Err(format!("markers format {version}, this build reads {FILE_VERSION}"));
+        }
+        let n = word(FILE_MAGIC.len() + 4) as usize;
+        let end = head.checked_add(n).filter(|&e| e <= bytes.len()).ok_or("the markers file ends early")?;
+        let named = String::from_utf8(bytes[head..end].to_vec()).map_err(|_| "the markers file's bike is not text")?;
+        let slots = crate::snapshot::decode_slots(&bytes[end..])?;
+        Ok((named, Markers { slots, at: 0 }))
+    }
+}

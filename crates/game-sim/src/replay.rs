@@ -1153,12 +1153,20 @@ pub struct PadTape {
     /// (`bike`, `biplane`). The simulation here knows no machines: the shell answers them. Empty
     /// for a ride on one machine, which is every tape before P102.
     pub switches: Vec<(usize, String)>,
+    /// The first player's session markers as the ride started with them (P99): the saved-markers
+    /// file's bytes ([`crate::markers::Markers::to_file`]), which a replay loads instead of whatever
+    /// is saved on the machine it plays on. Empty for a ride that started with none, which is every
+    /// tape before P99.
+    pub markers: Vec<u8>,
+    /// The frames the first player's markers were cleared before (P99, from the pause, which is not
+    /// on the tape), in order: a replay empties the slots there as the ride did.
+    pub cleared: Vec<usize>,
 }
 
 impl PadTape {
     /// An empty recording, named.
     pub fn new(name: impl Into<String>) -> PadTape {
-        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new() }
+        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new() }
     }
 
     /// The modifiers frame `k` rides on: the set the ride loaded with, as the changes before it left
@@ -1175,6 +1183,16 @@ impl PadTape {
     /// The machines the first player is switched to just before frame `k`, in the order they were.
     pub fn switches_at(&self, k: usize) -> impl Iterator<Item = &str> {
         self.switches.iter().filter(move |(at, _)| *at == k).map(|(_, w)| w.as_str())
+    }
+
+    /// The markers the tape's ride started with (P99), `None` for a tape that says none, and an
+    /// error for markers this build cannot read (another version's): a replay without them would not
+    /// be the ride the tape is of.
+    pub fn start_markers(&self) -> Result<Option<crate::markers::Markers>, String> {
+        if self.markers.is_empty() {
+            return Ok(None);
+        }
+        crate::markers::Markers::read_file(&self.markers).map(|(_, m)| Some(m))
     }
 
     /// Write down one frame: the port recording what it just played.
@@ -1343,6 +1361,26 @@ impl PadTape {
                     }
                     tape.switches.push((at, machine.to_string()));
                 }
+                // The markers the ride started with (P99): the markers file's bytes, in hex.
+                "markers" => {
+                    let hex = word.next().unwrap_or("");
+                    if hex.len() % 2 != 0 || word.next().is_some() {
+                        return err(n, "markers wants one run of hex bytes");
+                    }
+                    let bytes: Option<Vec<u8>> =
+                        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()).collect();
+                    tape.markers = bytes.ok_or_else(|| ParseError { line: n, message: "markers wants hex bytes".into() })?;
+                }
+                // The first player's markers cleared before this frame (P99).
+                "markers_cleared" => {
+                    let Some(at) = word.next().and_then(parse_u64) else {
+                        return err(n, "markers_cleared wants the frame it takes before");
+                    };
+                    if tape.cleared.last().is_some_and(|&last| last as u64 > at) {
+                        return err(n, format!("markers_cleared {at} comes after a later one"));
+                    }
+                    tape.cleared.push(at as usize);
+                }
                 "frame" => {
                     let fields: Vec<&str> = word.collect();
                     if fields.is_empty() || fields.len() > 1 + PADS {
@@ -1382,6 +1420,17 @@ impl PadTape {
         }
         for (at, machine) in &self.switches {
             let _ = writeln!(s, "switch {at} {machine}");
+        }
+        // Only a ride that started with markers says so (P99), for the same reason.
+        if !self.markers.is_empty() {
+            let _ = write!(s, "markers ");
+            for byte in &self.markers {
+                let _ = write!(s, "{byte:02x}");
+            }
+            let _ = writeln!(s);
+        }
+        for at in &self.cleared {
+            let _ = writeln!(s, "markers_cleared {at}");
         }
         for frame in &self.frames {
             let _ = write!(s, "frame 0x{:08x}", frame.dt);
@@ -1570,10 +1619,17 @@ pub fn play(tape: &PadTape, seed: u32) -> Playback {
     play_from(tape, Sim::new(seed))
 }
 
-/// Play a whole recording into a run that starts from `sim`.
+/// Play a whole recording into a run that starts from `sim`, with the markers the tape started with
+/// when it says (P99). Panics on markers this build cannot read ([`PadTape::start_markers`]).
 pub fn play_from(tape: &PadTape, sim: Sim) -> Playback {
     let mut run = Playback::from_state(sim);
-    for frame in &tape.frames {
+    if let Some(markers) = tape.start_markers().expect("the tape's markers") {
+        run.sim.markers = markers;
+    }
+    for (k, frame) in tape.frames.iter().enumerate() {
+        if tape.cleared.contains(&k) {
+            run.sim.markers.clear();
+        }
         run.advance(frame);
     }
     run
@@ -2104,6 +2160,15 @@ impl Recorder {
         self.tape.switches.push((at, machine.to_string()));
     }
 
+    /// Write down that the first player's markers were cleared (P99): before the frame recorded
+    /// next.
+    pub fn markers_cleared(&mut self) {
+        let at = self.tape.len();
+        if self.tape.cleared.last() != Some(&at) {
+            self.tape.cleared.push(at);
+        }
+    }
+
     /// How many frames have been recorded.
     pub fn len(&self) -> usize {
         self.tape.len()
@@ -2173,6 +2238,12 @@ impl Head {
     /// (P102), in order, where the recording switched there.
     pub fn switches(&self) -> Vec<String> {
         self.tape.switches_at(self.at).map(str::to_string).collect()
+    }
+
+    /// Whether the recording cleared the first player's markers before the frame [`Head::next`]
+    /// hands out next (P99).
+    pub fn cleared(&self) -> bool {
+        self.tape.cleared.contains(&self.at)
     }
 }
 
