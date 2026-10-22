@@ -735,6 +735,10 @@ pub mod world;
 /// and the frame [`Sim::step`] runs while the plane has the controller.
 pub mod flight;
 
+/// The biplane's world search (S48): its collision object's ray and sweep probes against the
+/// track's collision meshes.
+pub mod flight_search;
+
 /// The engine's shared smooth noise: 1-D gradient noise over tables the game builds off its own
 /// `rand()` on the first sample, which the plane's engine note and the rider's balance wobble read.
 pub mod noise;

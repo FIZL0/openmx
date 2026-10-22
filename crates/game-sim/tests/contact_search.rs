@@ -404,7 +404,7 @@ impl Search for Fake {
         self.log.push(Call::Search { probe: Probe::Sweep, nearby });
         self.swept
     }
-    fn moved(&mut self) {
+    fn moved(&mut self, _node: &game_sim::contact::Node) {
         self.log.push(Call::Moved(Probe::Rays));
     }
     fn velocity(&self, struck: &Struck) -> Vf {

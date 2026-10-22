@@ -487,7 +487,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // walk leaves out with it, and the bones drawn on a clock put-back's own tick, presentation.
     // 10656 since P88: the session markers, five boxed rides and the selection, walked under
     // `markers` only once a session has touched them (tests/markers.rs in openmx).
+    // 11160 since S48: the plane's collision object, walked under `plane.collision` only on a plane
+    // that has a ray probe; the probe's geometry is the disc's and is left out.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 10656, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11160, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

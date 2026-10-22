@@ -22,9 +22,10 @@
 //!    switch), the crash test ([`Crash`]) with the wreck and the recovery it asks for, then the
 //!    measure's flight half, which is what next frame's listeners read ([`Measure`]).
 //!
-//! What it does not have, and why, is in [`Flight::frame`]'s own docs: no contact with anything but
-//! the ground under the three wheels, because the collision search the response would read is
-//! S45/S46/S48's. The pad it is handed is the recorded one, through I6's mapping ([`pad`]). The
+//! Before the world steps, the plane's collision object searches (S48, [`Flight::frame`]): the sweep
+//! back, its ray probe against the terrain and against the track's collision meshes
+//! ([`crate::flight_search`]). The force listener resolves the contacts it found, and the crash test
+//! reads whether there were any. The pad it is handed is the recorded one, through I6's mapping ([`pad`]). The
 //! acceptance run over C7's capture (`the_biplane_acceptance_run` in `tests/replay.rs`) says how far
 //! it agrees, lane by lane, on every `./kit check` that has the capture.
 
@@ -38,6 +39,11 @@ use crate::biplane::{
 use crate::camera::CurveTable;
 use crate::chassis::{CLEAR, turn};
 use crate::collide::{Bundle, Record};
+use crate::contact::{self, Collider, Weighed};
+use crate::contact_search;
+use crate::flight_search::{self, Rays, Scene, VEHICLE};
+use crate::wreck_bike::{self, node_of};
+use std::sync::Arc;
 use crate::hash::{State, Walk};
 use crate::input::{self, PlaneInput};
 use crate::math::{basis, mat4_to_quat};
@@ -64,6 +70,16 @@ const DENSITY: f32 = f32::from_bits(0x3b1b_c5c4);
 /// reads, so the built value is carried (the precedent is the bike wreck's `ride::WRECK_INERTIA`).
 /// `tests/flight.rs` holds it to the state.
 const INV_INERTIA: Vf = Vf([f32::from_bits(0x39b9_06ac), f32::from_bits(0x3932_509d), f32::from_bits(0x3988_4ac4), 1.0]);
+
+/// The body's inertia tensor, which the collision object's own is scaled from (C7's save state, the
+/// body's `+0x110`): what [`INV_INERTIA`] is the inverse of, as the original keeps both.
+const INERTIA: Vf = Vf([f32::from_bits(0x4531_1971), f32::from_bits(0x45b7_c3ca), f32::from_bits(0x4570_6cc5), 1.0]);
+
+/// The plane's collidable's categories (the collision object's `+0x1f8`, its `+0x84`) and the object's
+/// actor and collides-with masks (`+0x110`, `+0x114`), off C7's save state: not keys of the file.
+pub const COLLIDABLE: u32 = 0x0004_2058;
+pub const ACTORS: u32 = 8;
+pub const COLLIDES_WITH: u32 = 0xffff_ffff;
 
 /// How much a wreck spins the body up (S36's `Plane::wreck`).
 const WRECK_SPIN: f32 = 4.0;
@@ -126,6 +142,12 @@ pub struct Flight {
     /// The game's `rand()`, as far as the plane draws from it: the noise's tables and the throw's
     /// spins.
     pub rng: Rng,
+    /// The collision object (S48): its response, its search's record with the contacts of the frame,
+    /// and the ray probe out of `biplanem.col` it searches the world with. A plane built with no ray
+    /// probe ([`Flight::new`] alone) has no collision at all but its wheels.
+    pub collider: Collider,
+    pub record: contact_search::Record,
+    pub rays: Option<Arc<Rays>>,
 }
 
 impl Flight {
@@ -240,7 +262,23 @@ impl Flight {
         // The two front legs take the brake and the tail wheel the steer: the pointers the original's
         // gear keeps to the plane's brake and steer words.
         f.tires = [0, 1, 2].map(|k| tire(&plane.gear[k], k < 2, k == 2));
+        f.collider = Collider {
+            collidable: Some(COLLIDABLE),
+            actors: ACTORS,
+            collides_with: COLLIDES_WITH,
+            ..wreck_bike::collider(m, m.mass, f.body.inv_mass, INERTIA)
+        };
+        f.record = contact_search::Record { rays: None, capacity: 0, ..wreck_bike::record(m, node_of(&f.body)) };
         f
+    }
+
+    /// The plane with its collision object's ray probe: the rays of `Biplane\col\biplanem.col`
+    /// ([`Rays::of`]), which is what the original's plane loader builds the probe from.
+    pub fn with_rays(mut self, rays: Rays) -> Flight {
+        self.record.rays = Some(rays.pairs());
+        self.record.capacity = rays.segments.len();
+        self.rays = Some(Arc::new(rays));
+        self
     }
 
     /// The plane stood at `origin` (the model's, which is where `machine.txt` parks it) with its nose
@@ -299,19 +337,32 @@ impl Flight {
     /// One frame of the plane, `pad` being what its input step made of the controller, over
     /// `world`'s ground.
     ///
-    /// The world step and its listeners as the module's docs list them. Two things the original's
-    /// frame has are not here:
+    /// The collision object's search first (S48), then the world step and its
+    /// listeners as the module's docs list them; the force listener resolves the search's contacts
+    /// inside [`collision_force`], and the crash test is told whether there were any. A plane with no
+    /// ray probe ([`Flight::new`] without [`Flight::with_rays`]) has no search: it meets the world
+    /// only with its wheels, and can only crash by being thrown back from the map's edge.
     ///
-    /// * **The collision response is empty.** The original resolves its collision object's contacts
-    ///   inside the force listener ([`collision_force`]); the search that would fill that list is
-    ///   S45/S46/S48's and not ported, so the plane touches the world only through its three wheels,
-    ///   and the crash test never sees a contact — a plane cannot crash into anything, only be thrown
-    ///   back from the map's edge.
-    /// * **What is not simulation**: the touchdown sound, the surfaces' and the pilot's animation
+    /// Not here: **what is not simulation**, the touchdown sound, the surfaces' and the pilot's animation
     ///   (S35's, the renderer's), the engine sound the prop rpm is written from, the pad's rumble.
     pub fn frame(&mut self, dt: F, pad: Pad, ground: &mut dyn world::World, tables: &ride::Tables) {
         self.pad = pad;
+        self.search(dt, ground);
         WORLD.step(dt, &mut Listeners { plane: self, ground: Ground(ground), tables });
+    }
+
+    /// The collision object's search, before the world steps (the plane's world node, as the wreck
+    /// bike's runs it): its contacts emptied, then the sweep back, the rays against the terrain and
+    /// the rays against the track's collision meshes ([`contact_search::collide`] over
+    /// [`flight_search::Scene`]). The transform is where the body stood after last frame's post
+    /// listener, which is where the original's post listener leaves it.
+    fn search(&mut self, dt: F, world: &mut dyn world::World) {
+        let Some(rays) = self.rays.clone() else { return };
+        self.record.node = node_of(&self.body);
+        contact_search::clear(&mut self.record, Some(&mut self.body));
+        let (field, props) = world.collision();
+        let mut scene = Scene::new(props, &rays, &self.record.node);
+        contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
     }
 
     /// The preforce listener.
@@ -325,7 +376,10 @@ impl Flight {
 
     /// The force listener, one substep of `h`.
     fn forces(&mut self, h: F, ground: &mut Ground<'_>, curve: &CurveTable) {
-        collision_force(&mut self.body, self.gravity, |_| {});
+        let (collider, contacts, mass) = (&mut self.collider, &mut self.record.contacts, self.mass);
+        collision_force(&mut self.body, self.gravity, |body| {
+            contact::resolve(collider, &mut Weighed { body, mass }, contacts, &mut [], &[], true);
+        });
         if self.crash.reason == 0 {
             self.attitude = self.measure.attitude(self.attitude.flown, &self.body);
             autopilot(&self.pad, &mut self.surfaces, &self.joystick, &self.autopilot, &self.attitude, curve, h);
@@ -358,7 +412,9 @@ impl Flight {
         let (_touchdown, true_speed) = self.measure.contacts(wheels, false);
         self.aero.true_speed = true_speed;
         let m = &self.measure;
-        let c = CrashContact { touching: false, ignored: false, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()) };
+        // What the world rays last struck, in the plane's mask of categories the speed rule spares.
+        let ignored = self.record.struck.is_some_and(|o| flight_search::category(o) & VEHICLE != 0);
+        let c = CrashContact { touching: self.record.touching, ignored, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()) };
         let b = &mut self.body;
         let out = self.crash.step_in(&c, self.area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut self.edge_scale, &mut self.rng, dt);
         if out.wreck.is_some() {
@@ -755,5 +811,29 @@ impl State for Flight {
         w.f("edge_scale", self.edge_scale);
         w.bool("noise", self.noise.is_some());
         w.u64("rng", self.rng.state());
+        // The collision object (S48), only on a plane that has one, so a plane without a ray probe
+        // walks as it did: what the resolve and the search leave from one frame to the next. Its
+        // tuning is the file's, and the ray probe's geometry the disc's.
+        if self.rays.is_some() {
+            let (c, r) = (&self.collider, &self.record);
+            w.group("collision", |w| {
+                w.f("normal_speed", c.normal_speed);
+                w.vf("relative", c.relative);
+                w.vf("cofg_world", c.cofg_world);
+                w.bool("touching", r.touching);
+                w.bool("on_ground", r.on_ground);
+                w.bool("on_object", r.on_object);
+                w.bool("touching_other", r.touching_other);
+                w.vf("swept_from", r.swept_from);
+                w.vf("swept_to", r.swept_to);
+                for (k, row) in r.node.rows.iter().enumerate() {
+                    w.vf(["row0", "row1", "row2"][k], *row);
+                }
+                w.vf("origin", r.node.origin);
+                w.u32("contacts", r.contacts.len() as u32);
+                w.bool("struck", r.struck.is_some());
+                w.u32("struck_object", r.struck.map_or(0, |o| o as u32));
+            });
+        }
     }
 }

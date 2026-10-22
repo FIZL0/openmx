@@ -324,8 +324,8 @@ pub trait Search {
     /// Set the sweep probe to the segment, place it, search with it, and return its hit if its "hit"
     /// flag is up.
     fn sweep(&mut self, from: Vf, to: Vf, nearby: bool) -> Option<Swept>;
-    /// Place the ray probe again, after the sweep moved the body.
-    fn moved(&mut self);
+    /// Place the ray probe again at the object's node, after the sweep moved the body.
+    fn moved(&mut self, node: &Node);
     /// The velocity of what the sweep struck: its collision object's body (or vehicle chassis), or,
     /// with none, its mover's.
     fn velocity(&self, struck: &Struck) -> Vf;
@@ -358,7 +358,7 @@ pub fn sweep_back(rec: &mut Record, body: &mut Body, search: &mut dyn Search, dt
     body.position = at;
     rec.node.origin = rec.node.origin.merge(Dest::XYZ, at);
     if rec.rays.is_some() {
-        search.moved();
+        search.moved(&rec.node);
     }
     rec.swept_to = at;
 }
