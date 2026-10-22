@@ -489,10 +489,11 @@ const ROUND_STICK_CENTRE: f32 = 0.005;
 /// What [`Plane::step`] scales the autopilot's `MaxPitchRate` by under the round stick (P108). The
 /// file's 1.25 radians a second is less than full elevator pitches the biplane at speed, so the loop
 /// reached it and took the elevator back off: banked 90 degrees at 121 ft/s, a held full pull turned
-/// the plane 34 degrees in a second where full elevator turns it 75. At 2.5 times the loop asks for
-/// more than full elevator reaches at any speed the plane flies, so a full pull is full elevator, and
-/// a partial pull still asks the loop for a rate.
-const ROUND_STICK_PITCH_RATE: f32 = 2.5;
+/// the plane 34 degrees in a second where full elevator turns it 75. At 2.5 times the loop asked for
+/// more than full elevator reaches at any speed the plane flies, which the user found pulled a little
+/// too hard (2026-10-22); 2.0 keeps most of that pull, and a partial pull still asks the loop for a
+/// rate.
+const ROUND_STICK_PITCH_RATE: f32 = 2.0;
 
 /// The biplane: where it was parked, where it is, and the flight that moves it.
 #[derive(Clone, Debug, PartialEq)]
