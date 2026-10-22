@@ -4414,3 +4414,21 @@ scene_read_environment      boot 0x001a7b30 [Environment]: EcosystemFile, EcoDis
 #   +0x140/144 v top/bottom, +0x148 trunk u, +0x14c 0.5/half.y, +0x150 1/half.x, +0x184 a colour word.
 #   The camera: +0x140/+0x148 eye x/z, +0x150/+0x158 forward x/z, +0x170 the fov in degrees (85 in the
 #   biplane state, against the 77 the distances are tuned at).
+# S77 — the put-back after a shootoff (reason 13): put_back_keep's cannonball branch, ported as
+#   ride::Ride::keep_back_thrown (crates/game-sim/src/ride.rs), wired in rider.rs after the bike's whole
+#   update; proved in crates/game-sim/tests/ride.rs (the_record_follows_the_wreck_bike_through_a_shootoff:
+#   96 moved + 4 held over three free09 edges; each_captured_post_shootoff_put_back_lands_bit_exact_at_the_landing).
+#   Captures: research/s77_edge_back.py (context/s77/free09-{east,north,west}.txt; slots 7, 6, 7).
+#   Gate: +0xc84 == 13 (the request's reason, from before the tick's verdict) and *(*(+0x7a8)+0x120)+0x40
+#     != 0. *(rag +0x120) is the wreck bike's collision record (part wrapper +0x8c0, vtable 0x00454a00);
+#     +0x40 is its touched word (+0x48 the ground's), contact_search::Record::touching in the port.
+#   The overhead test (common to both branches) stands on the part *(rag +0x124)+0x40 since +0x748 != 0.
+#   Spot = chassis +0x254 (the node at bike +0x18) +0xb0 xyz, w = a stack word the function never writes (0 on every captured
+#   tick); heading = that node's +0xa0 as (x, 0, z, stale) through vmul/vadda/vmadd/vrsqrt/vmulq.xyz.
+#   put_back_clear(bike, &spot, &heading, bike +0x3d0, 1): the normal goes straight into the record,
+#   kept or not (4 refused ticks on the west edge changed +0x3d0 alone). Kept: +0x3b0 = the spot as the
+#   clear left it (no +0x13a0 raise), +0x3c0 = the heading flattened once; no normal.y > 0.8 test.
+#   The throw's own tick has +0xc84 = 0 and +0x748 = 13: the riding branch on the part (not ported).
+#   The touched word goes 0 for good some ticks before the clock's put-back on all three captures (the
+#   captured node rose away from the ground after it), so the record freezes on the last touch, and the
+#   put-back at +0x794 = 5.0995 lands on it (2137-2743 ft inside the map).

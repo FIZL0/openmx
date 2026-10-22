@@ -674,3 +674,48 @@ fn a_rider_past_the_margin_is_thrown_back() {
     let riding = off_map::RIDING_MAX_SPEED * off_map::RIDING_MAX_SPEED;
     assert_eq!(r.ride.chassis.max_speed_sq.0.to_bits(), riding.0.to_bits());
 }
+
+/// **The put-back after a shootoff lands where the bike came down** (S77): the wreck bike keeps the
+/// put-back record while it touches the ground, as the original's cannonball branch does, so the
+/// clock's put-back sets the bike down on the last spot the wreck bike touched — far inside the map,
+/// not back at the edge it was thrown from.
+#[test]
+fn the_put_back_after_a_cannonball_lands_where_the_bike_came_down() {
+    use game_sim::phy::Phy;
+    use game_sim::ride::Controls;
+    use game_sim::rider::{self, Rider};
+    use game_sim::trick::{Set, Wreck};
+
+    let tables = rider::Tables::build();
+    let p = Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.ride.curve);
+    let edge = Vf::new(3456.0, 1.0, 100.0, 1.0);
+    let mut r = Rider::new(&p, game_sim::stock::MOUNTS, edge, Vf::new(0.0, 0.0, -1.0, 0.0), Set::default());
+    let part = game_sim::phy::Part::read_bytes(WRECK_PART.as_bytes(), "PhysicsPart1");
+    let wrecks = game_sim::phy::Wrecks::read_bytes(RIDER_WRECKS.as_bytes());
+    r.carries_wreck(part, wrecks, part.inertia(Vf::new(2.5, 4.0, 7.0, 1.0)));
+    let mut world = Edged(game_sim::world::Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) });
+    let dt = F(1.0 / 60.0);
+
+    assert_eq!(r.frame(&p, &tables, &Controls::default(), dt, &mut world).wreck, Some(Wreck::CANNONBALL));
+    let kept_at_the_edge = r.ride.back;
+    let (mut landed, mut touched) = (None, 0);
+    let mut k = 0;
+    while !r.frame(&p, &tables, &Controls::default(), dt, &mut world).respawned {
+        let down = r.crash.as_ref().expect("down until the put-back");
+        if down.bike.record.touching {
+            landed = Some(down.bike.record.node.origin);
+            touched += 1;
+            assert_eq!(r.ride.back.at.x().to_bits(), down.bike.record.node.origin.x().to_bits(), "the record off the wreck bike at {k}");
+            assert_eq!(r.ride.back.at.z().to_bits(), down.bike.record.node.origin.z().to_bits(), "the record off the wreck bike at {k}");
+        } else if touched == 0 {
+            assert_eq!(r.ride.back, kept_at_the_edge, "the record moved in the air at {k}");
+        }
+        k += 1;
+        assert!(k < 3000, "no put-back in 50 s");
+    }
+    let landed = landed.expect("the wreck bike never came down");
+    let at = r.ride.position();
+    assert_eq!((at.x().to_bits(), at.z().to_bits()), (landed.x().to_bits(), landed.z().to_bits()), "put back off the landing");
+    assert!(at.z() - edge.z() > 100.0, "put back at {at:?}, beside the edge it left ({edge:?})");
+    println!("thrown from z {}, came down {touched} ticks, put back at {at:?}", edge.z());
+}

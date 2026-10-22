@@ -524,6 +524,9 @@ impl Rider {
         // The settle gate the machine reads at the end of the bike's update, as the body's step left
         // it last tick: the rider's tick, which writes it, runs after the bike's (S65).
         let gate = ragdoll.as_ref().map(Down::settles);
+        // A cannonball's record update, when this tick's has one: the wreck part's point, and the
+        // wreck bike's translation and forward row (S77).
+        let mut thrown_keep = None;
         if state.wreck.is_none() {
             ride.frame(p, &t.ride, &Controls { respawn: false, ..*c }, dt, world);
         } else if let (Some(w), Some(down)) = (wreckage.as_ref(), crash.as_mut()) {
@@ -534,12 +537,15 @@ impl Rider {
             down.step(dt, &w.part, &w.wrecks, world);
             out.separated = held && !down.holding;
             // The put-back record goes on being kept while the rider is down, off the wreck body: its
-            // centre is the probe and its forward row the heading (S66). Not in a cannonball, whose
-            // own branch follows a ragdoll flag this port does not have; with it clear the original
-            // keeps the record where it was, which is what this does.
+            // centre is the probe and its forward row the heading (S66). A cannonball has its own
+            // branch, on the wreck bike's transform and only while it touches something (S77); the
+            // original takes it after the whole update, so it is kept below, after the verdict.
             if state.wreck != Some(Wreck::CANNONBALL) {
                 let heading = crate::math::quat_to_mat4(down.bike.body.quat, down.origin).0[2];
                 ride.keep_back(down.bike.body.position, heading, world, &t.ride.curve);
+            } else if down.bike.record.touching {
+                let node = &down.bike.record.node;
+                thrown_keep = Some((down.bike.body.position, node.origin, node.rows[2]));
             }
             // The rider's bones, when there are any: they let go of the bars on their own clock.
             if let (Some(kit), Some(doll)) = (ragdoll_kit.as_ref(), ragdoll.as_mut()) {
@@ -811,6 +817,13 @@ impl Rider {
             out.respawned = true;
             ghost.start();
             put_back.place();
+        }
+        // The cannonball's record update (S77), which the race manager runs after the bike's whole
+        // update: kept while the wreck bike touches, so the put-back lands where it came down. A
+        // tick that put the bike back has placed it off the record as it stood, and keeps no more
+        // (**not measured**: no captured put-back tick had the wreck bike touching).
+        if let Some((over, at, forward)) = thrown_keep.filter(|_| !out.respawned) {
+            ride.keep_back_thrown(over, at, forward, world, &t.ride.curve);
         }
         // The nodes' drawn matrices for the next tick's entry: none once the rider is down or put
         // back, where the next riding tick starts a fresh history.
