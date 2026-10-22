@@ -236,6 +236,17 @@ pub fn spawn_on(spawn: &[u8], presets: &[(usize, u8)]) -> Vec<u8> {
     out
 }
 
+/// A joiner's seat (P105): `spawn` ([`seat_bytes`] of where the ride starts) decoded onto `first`'s
+/// constants with `markers` — the joiner's player's saved markers, as its handshake brought them —
+/// put on it, in [`seat_bytes`] again, for [`spawn_on`]. The state every machine is sent at the join
+/// carries them, so every machine seats the same slots.
+pub fn spawn_marked(first: &Sim, spawn: &[u8], markers: markers::Markers) -> Result<Vec<u8>, String> {
+    let mut sim = first.clone();
+    from_seat_bytes(&mut sim, spawn)?;
+    sim.markers = markers;
+    Ok(seat_bytes(&sim))
+}
+
 /// Which controller preset a seat's bike is read through: the one whose table on pad 0 (and the
 /// shipped one on pad 1, which no online seat reads) is the seat's.
 pub fn preset(sim: &Sim) -> Option<usize> {

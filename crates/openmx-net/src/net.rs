@@ -800,6 +800,15 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>) 
                         let Some(i) = joined.iter().position(|j| j.peer == peer) else { continue };
                         match h.check(&Handshake::of(&room, &*cx.disc)) {
                             Ok(()) => {
+                                // its saved markers (P105) into its first seat's pick, which the
+                                // ride reads them from as it takes the peer on
+                                if !h.markers.is_empty()
+                                    && let Some(seat) = room.seats.iter_mut().flatten().find(|s| s.peer == peer)
+                                {
+                                    seat.pick.markers = h.markers.clone();
+                                    broadcast(&joined, &Msg::Room(room.clone()));
+                                    cx.say(Event::Room(room.clone()));
+                                }
                                 joined[i].link.send(&Msg::DropIn(room.clone()));
                                 cx.say(Event::Arrived { peer: peer.clone(), seats: room.seats_of(&peer) });
                             }
@@ -1142,7 +1151,14 @@ async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedR
                     cx.say(Event::Room(r));
                 }
                 Ok(Msg::Start(r)) => {
-                    link.send(&Msg::Shake(Handshake::of(&r, &*cx.disc)));
+                    let mut shake = Handshake::of(&r, &*cx.disc);
+                    // into a ride under way: this player's saved markers on its track and bike (P105)
+                    if r.riding && r.drop_in
+                        && let Some(first) = r.seats.iter().flatten().next()
+                    {
+                        shake.markers = cx.disc.markers(&r.track, &first.pick.bike);
+                    }
+                    link.send(&Msg::Shake(shake));
                     cx.say(Event::Status("Starting: checking the ride with the host...".into()));
                 }
                 Ok(Msg::Go(r)) => {
