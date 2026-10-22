@@ -1486,6 +1486,7 @@ fn upside_down_the_screen_biplane_controls_fly_the_way_they_do_upright() {
     let shell = |sim: &mut Sim, garage: &mut Garage, inverted: &mut bool, scheme: PlaneScheme, report: Report, world: &mut Jump| {
         *inverted = garage.inverted(*inverted);
         garage.set_every_bank(scheme.every_bank());
+        garage.set_round_stick(scheme.round_stick());
         pass(sim, garage, scheme.fly(report, *inverted), world);
     };
     let gas = Report::from_buttons(Control::Cross.mask());
@@ -1594,6 +1595,7 @@ fn the_default_biplane_stick_pulls_the_nose_toward_the_planes_up_at_every_bank()
     let shell = |sim: &mut Sim, garage: &mut Garage, inverted: &mut bool, scheme: PlaneScheme, report: Report, world: &mut Jump| {
         *inverted = garage.inverted(*inverted);
         garage.set_every_bank(scheme.every_bank());
+        garage.set_round_stick(scheme.round_stick());
         pass(sim, garage, scheme.fly(report, *inverted), world);
     };
     let gas = Report::from_buttons(Control::Cross.mask());
@@ -1656,8 +1658,10 @@ fn the_default_biplane_stick_pulls_the_nose_toward_the_planes_up_at_every_bank()
         assert!(new_say > 0.25 * upright, "banked {bank} (roll {r:.1}) the stick's y moves the nose {new_say:.4}, {upright:.4} upright");
         assert!(new_say >= original_say, "banked {bank} the plane's stick has less say than the original's");
         if bank == 45.0 {
-            // Half faded, and the turn's pull on top: the original's stick all but lost.
-            assert!(original_say < 0.1 * new_say, "at 45 the original's stick moved the nose {original_say:.4}, the plane's {new_say:.4}");
+            // Half faded, and the turn's pull on top: the original's stick all but lost. (A fifth
+            // since P89: the plane-relative roll-in keeps its pitch loop and gets here with the
+            // nose up, where the original's stick has a little more to work with.)
+            assert!(original_say < 0.2 * new_say, "at 45 the original's stick moved the nose {original_say:.4}, the plane's {new_say:.4}");
         }
         if bank == 90.0 {
             // On its side, with the nose near level, the original's fade leaves the stick nothing.
@@ -1974,4 +1978,192 @@ fn l1_and_r1_put_the_bike_back_as_a_ghost() {
         pass(&mut sim, &mut garage, chord, &mut world);
     }
     assert_eq!(sim.rider.ghost, held, "the bike's ghost moved while the plane had the controller");
+}
+
+/// The plane-relative scheme reads the plane's stick round (P89): over every pair of stick bytes,
+/// what [`vehicle::round_stick`] hands the plane against what the original's input step does. Along
+/// an axis it is the original's; off one, the elevator and the aileron keep the stick's own
+/// proportion, neither drops out while the stick is past the dead zone, the edge of a round gate is
+/// full travel in every direction, and the d-pad still wins.
+///
+/// The original's square reading is why a held diagonal fought itself: a round gate's corner
+/// (0.71 on each axis) is under a quarter of the pull and of the roll, which this asserts too.
+#[test]
+fn the_plane_reads_its_stick_round() {
+    use game_sim::flight;
+    let mut sim = the_minutes_bike();
+    let mut read = |report: Report| {
+        sim.poll(DT, &[report, Report::missing()]);
+        let input = sim.input.pad(0);
+        let original = flight::pad(input);
+        (original, vehicle::round_stick(input, original))
+    };
+    let gas = Report::from_buttons(Control::Cross.mask());
+    let stick = |base: Report, x: u8, y: u8| {
+        let mut r = base;
+        r.set_axis(2, x);
+        r.set_axis(3, y);
+        r
+    };
+    // The original's arithmetic for one byte with no dead zone.
+    let axis = |b: u8| -1.0 + (b as f32 / 255.0) * 2.0;
+    let centred = |b: u8| b == AXIS_CENTRE || b == AXIS_CENTRE + 1;
+    let mut both = 0;
+    for x in 0..=255u8 {
+        for y in 0..=255u8 {
+            let (original, round) = read(stick(gas, x, y));
+            let (e, a) = (round.elevator.0, round.aileron.0);
+            assert_eq!([round.forward, round.back, round.rudder], [original.forward, original.back, original.rudder]);
+            if centred(x) || centred(y) {
+                for (r, o) in [(e, original.elevator.0), (a, original.aileron.0)] {
+                    assert!((r - o).abs() <= 1e-6, "along an axis ({x}, {y}) the round stick reads {r}, the original {o}");
+                }
+                continue;
+            }
+            let (sx, sy) = (axis(x), axis(y));
+            if sx.hypot(sy) <= 0.3 {
+                assert_eq!([e, a], [0.0; 2], "({x}, {y}) is inside the dead zone");
+                continue;
+            }
+            both += 1;
+            assert!(e != 0.0 && a != 0.0, "({x}, {y}) past the dead zone dropped an axis: elevator {e}, aileron {a}");
+            assert_eq!((-e.signum(), -a.signum()), (sy.signum(), sx.signum()), "({x}, {y}) turned round");
+            assert!(e.abs() <= 1.0 && a.abs() <= 1.0);
+            let (want, got) = (sy / sx, e / a);
+            assert!((got - want).abs() <= 1e-5 * want.abs().max(1.0), "({x}, {y}): elevator over aileron {got}, the stick's {want}");
+        }
+    }
+    assert!(both > 40_000, "only {both} pairs off both axes and out of the dead zone");
+
+    // The edge of a round gate, all the way round: the longer axis is full travel.
+    for step in 0..360 {
+        let t = (step as f32).to_radians();
+        let byte = |c: f32| (127.5 + 127.5 * c).round().clamp(0.0, 255.0) as u8;
+        let (_, round) = read(stick(gas, byte(t.cos()), byte(t.sin())));
+        let full = round.elevator.0.abs().max(round.aileron.0.abs());
+        assert!(full >= 0.95, "at {step} degrees round the gate the stick is only {full} of its travel");
+    }
+    // A round gate's four corners: the full pull or push and the full roll, where the original
+    // had under a quarter of either.
+    for (x, y) in [(37, 217), (217, 217), (37, 37), (217, 37)] {
+        let (original, round) = read(stick(gas, x, y));
+        assert!(round.elevator.0.abs() >= 0.95 && round.aileron.0.abs() >= 0.95, "corner ({x}, {y}): {round:?}");
+        assert!(original.elevator.0.abs() < 0.25 && original.aileron.0.abs() < 0.25, "corner ({x}, {y}) under the original: {original:?}");
+    }
+    // The d-pad's bank and climb win over the stick, one field each, as they do in the input step.
+    let dpad = Report::from_buttons(Control::Cross.mask() | Control::Left.mask());
+    let (original, round) = read(stick(dpad, 255, 255));
+    assert_eq!(round.aileron, original.aileron, "the d-pad's bank");
+    assert_eq!(original.aileron, F::ONE);
+    assert!(round.elevator.0 < -0.95, "the stick's pull went with the d-pad's bank: {round:?}");
+    let dpad = Report::from_buttons(Control::Cross.mask() | Control::Up.mask());
+    let (original, round) = read(stick(dpad, 255, 255));
+    assert_eq!(round.elevator, original.elevator, "the d-pad's dive");
+    assert!(round.aileron.0 < -0.95, "the stick's roll went with the d-pad's dive: {round:?}");
+}
+
+/// A held diagonal pulls (or pushes) and rolls together, every tick, under the plane-relative scheme
+/// (P89): from level flight the plane is held at each of the four corners — a round gate's, a
+/// square one's and the keyboard's two arrows — and at half tilts, and from the moment the
+/// surfaces have come round the body's pitch rate and roll rate each keep the stick's sign on every
+/// tick, the commands never let go, and a half tilt is the same part of each.
+///
+/// Under the original's reading the round gate's corner is a fifth of each and the pitch loop is
+/// off (the aileron is out of `AileronDeadZone`), so the pull is less than the loop's own trim and
+/// the nose falls while the stick is pulled: the fight the user saw, which this shows first.
+#[test]
+fn a_held_diagonal_pulls_and_rolls_together_every_tick() {
+    use pad::PlaneScheme;
+    let Some(file) = the_discs_plane() else { return };
+    let flight = game_sim::flight::Flight::new(&file);
+    let lowest = flight.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min);
+    let spawn = Spawn { at: Vf::new(400.0, -lowest, -300.0, 1.0), facing: Vf::new(0.0, 0.0, -1.0, 0.0) };
+    let mut sim = the_minutes_bike();
+    let mut garage = Garage::new(Kind::Biplane, Some(Plane::flying(spawn, flight))).unwrap();
+    let mut world = Jump::nothing();
+    let gas = Report::from_buttons(Control::Cross.mask());
+    for _ in 0..30 * 60 {
+        pass(&mut sim, &mut garage, gas, &mut world);
+    }
+    assert!(!garage.plane.as_ref().unwrap().on_ground(), "thirty seconds of gas and the plane is not flying");
+    let level = (sim, garage);
+
+    // Two seconds from level, the shell's way round: scheme, then poll and pass.
+    const TICKS: usize = 120;
+    // The rate limits bring the surfaces round in seven ticks; the body answers inside a fifth of a
+    // second more.
+    const SETTLED: usize = 20;
+    let fly = |report: Report, scheme: PlaneScheme| {
+        let (mut sim, mut garage) = level.clone();
+        let mut world = Jump::nothing();
+        let mut inverted = false;
+        let mut ticks = Vec::with_capacity(TICKS);
+        for _ in 0..TICKS {
+            inverted = garage.inverted(inverted);
+            garage.set_every_bank(scheme.every_bank());
+            garage.set_round_stick(scheme.round_stick());
+            pass(&mut sim, &mut garage, scheme.fly(report, inverted), &mut world);
+            let plane = garage.plane.as_ref().unwrap();
+            assert!(!plane.on_ground(), "the plane came down");
+            let f = plane.flight.as_ref().unwrap();
+            ticks.push((f.pad, f.surfaces, f.body.rates.x(), f.body.rates.z()));
+        }
+        ticks
+    };
+    let stick = |x: i32, y: i32| {
+        let mut r = gas;
+        r.set_axis(2, (AXIS_CENTRE as i32 + x).clamp(0, 255) as u8);
+        r.set_axis(3, (AXIS_CENTRE as i32 + y).clamp(0, 255) as u8);
+        r
+    };
+    let arrows = |c: &[Control]| Report::from_buttons(c.iter().fold(Control::Cross.mask(), |m, c| m | c.mask()));
+
+    // The fight, under the original's reading: a round gate's down-left corner, and the nose falls.
+    let original = fly(stick(-90, 90), PlaneScheme::Original);
+    let falling = original[SETTLED..].iter().filter(|t| t.2 > 0.0).count();
+    assert!(falling > TICKS / 2, "under the original the round corner's nose fell on only {falling} ticks");
+
+    let mut lines = Vec::new();
+    // (name, report, x and y signs, whether full on both)
+    let mut cases: Vec<(String, Report, (f32, f32), bool)> = Vec::new();
+    for (sx, sy) in [(-1, 1), (1, 1), (-1, -1), (1, -1)] {
+        let corner = |n: i32, what: &str| (format!("{what} ({sx:+}, {sy:+})"), stick(sx * n, sy * n), (sx as f32, sy as f32));
+        let (name, r, s) = corner(90, "round corner");
+        cases.push((name, r, s, true));
+        let (name, r, s) = corner(128, "square corner");
+        cases.push((name, r, s, true));
+        let (name, r, s) = corner(64, "three-quarter tilt");
+        cases.push((name, r, s, false));
+        let (name, r, s) = corner(45, "half tilt");
+        cases.push((name, r, s, false));
+        let x = if sx < 0 { Control::Left } else { Control::Right };
+        let y = if sy < 0 { Control::Up } else { Control::Down };
+        cases.push((format!("arrows ({sx:+}, {sy:+})"), arrows(&[x, y]), (sx as f32, sy as f32), true));
+    }
+    for (name, report, (sx, sy), full) in cases {
+        let ticks = fly(report, PlaneScheme::New);
+        let (pad, ..) = ticks[0];
+        // The stick's own signs: down is a climb (a negative elevator, the nose up, a negative pitch
+        // rate) and left a left roll (a positive aileron and roll rate).
+        assert_eq!((pad.elevator.0.signum(), pad.aileron.0.signum()), (-sy, -sx), "{name}: {pad:?}");
+        if full {
+            assert!(pad.elevator.0.abs() >= 0.95 && pad.aileron.0.abs() >= 0.95, "{name} is not the full pull and roll: {pad:?}");
+        } else {
+            assert!((pad.elevator.0.abs() - pad.aileron.0.abs()).abs() < 0.01, "{name} is not the same part of each: {pad:?}");
+        }
+        for (t, (p, s, pitch, roll)) in ticks.iter().enumerate() {
+            assert_eq!((p.elevator, p.aileron), (pad.elevator, pad.aileron), "{name}: the pad moved at tick {t}");
+            if t >= SETTLED {
+                assert_eq!(s.aileron.0.signum(), -sx, "{name}: the aileron let go at tick {t}: {s:?}");
+                assert_eq!(pitch.signum(), -sy, "{name}: the pitch rate {pitch} dropped out at tick {t}");
+                assert_eq!(roll.signum(), -sx, "{name}: the roll rate {roll} dropped out at tick {t}");
+            }
+        }
+        let (fewest_pitch, fewest_roll) = ticks[SETTLED..].iter().fold((f32::MAX, f32::MAX), |(p, r), t| (p.min(t.2.abs()), r.min(t.3.abs())));
+        lines.push(format!(
+            "{name:>28}: elevator {:+.3} aileron {:+.3}; slowest pitch {fewest_pitch:.4}, roll {fewest_roll:.4} rad/s",
+            pad.elevator.0, pad.aileron.0
+        ));
+    }
+    println!("biplane, held diagonals from level ({TICKS} ticks, settled at {SETTLED}):\n{}", lines.join("\n"));
 }

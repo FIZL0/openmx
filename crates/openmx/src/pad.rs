@@ -507,7 +507,10 @@ impl Scheme {
 ///   reaches the plane as the pad said it, and the plane's step lifts the fade
 ///   ([`PlaneScheme::every_bank`], `vehicle::Plane::every_bank`), so down on the stick pulls the
 ///   nose toward the belly by the same amount at every bank and attitude. A report cannot do that
-///   part: at knife edge the fade multiplies every stick and d-pad value by zero.
+///   part: at knife edge the fade multiplies every stick and d-pad value by zero. Since P89 the
+///   step also reads the stick round and keeps the pitch loop whatever the aileron does
+///   ([`PlaneScheme::round_stick`], `vehicle::round_stick`), so a held diagonal pulls and rolls
+///   together instead of a fifth of each with the nose falling.
 /// - [`PlaneScheme::Screen`], P50's: relative to the follow camera, which keeps the world's up. Upside
 ///   down the elevator and the rudder are turned back round in the report ([`PlaneScheme::fly`]),
 ///   so they move the plane the same way on the screen; it changes over just past knife edge.
@@ -573,6 +576,14 @@ impl PlaneScheme {
     /// scheme's half that a report cannot carry, which the plane's step applies
     /// (`vehicle::Plane::every_bank`). Only under [`PlaneScheme::New`].
     pub fn every_bank(self) -> bool {
+        self == PlaneScheme::New
+    }
+
+    /// Whether the plane reads its stick round and keeps its pitch loop at any roll (P89): the
+    /// plane-relative scheme's other half, also the plane's step's (`vehicle::Plane::round_stick`),
+    /// because what the stick means is the input step's arithmetic and not a report's bytes. Only
+    /// under [`PlaneScheme::New`].
+    pub fn round_stick(self) -> bool {
         self == PlaneScheme::New
     }
 
