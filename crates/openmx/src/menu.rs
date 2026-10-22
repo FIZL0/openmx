@@ -1390,6 +1390,10 @@ pub struct Menu {
     /// The ride under the menu has a modifier off the original game's, as the shell tells it: the
     /// pause says so.
     pub modified: bool,
+    /// Why the ride under the pause cannot take a change of modifiers (P98), as the shell says: online,
+    /// or riding a tape. With it set the pause's modifiers screen shows them and does not change them;
+    /// without it a change takes the moment the pause closes. The main menu's screen is never held.
+    pub mods_lock: Option<String>,
     /// The song playing, by id, as the shell last said (P56).
     pub music_now: Option<String>,
     /// The song the Game Audio Options' song row is on, in [`Menu::music_choices`].
@@ -1483,6 +1487,7 @@ impl Menu {
             mod_seat: 0,
             mod_preset: 0,
             modified: false,
+            mods_lock: None,
             music_now: None,
             music_at: 0,
             tunes: Vec::new(),
@@ -1965,7 +1970,9 @@ impl Menu {
 
     /// The modifiers' screen (P55): Square or the arrows step a slider by ten percent, Cross on a
     /// toggle-like row does it, and the last rows load, save and delete presets and put every
-    /// modifier back. What it sets is the next ride's: a ride already going keeps what it loaded with.
+    /// modifier back. What it sets is the next ride's, and under the pause the ride's own from the
+    /// moment the pause closes (P98) — unless the shell holds them ([`Menu::mods_lock`]), when the
+    /// rows that would change them do nothing and the ticker says why.
     fn walk_modifiers(&mut self, p: Press, at: usize) {
         if p.back {
             self.pop();
@@ -1973,6 +1980,10 @@ impl Menu {
         }
         let side = p.left || p.right;
         if !(p.ok || side) {
+            return;
+        }
+        let sets = (MODIFIERS_KNOBS..MODIFIERS_PRESET).contains(&at) || (at == MODIFIERS_PRESET && !side) || at == MODIFIERS_RESET;
+        if sets && self.mods_held().is_some() {
             return;
         }
         let presets = self.settings.presets.len();
@@ -2023,6 +2034,14 @@ impl Menu {
         }
     }
 
+    /// Why the modifiers cannot be changed here: the ride under the pause holds them (P98).
+    fn mods_held(&self) -> Option<&str> {
+        match self.stack.first() {
+            Some(Screen::Pause) => self.mods_lock.as_deref(),
+            _ => None,
+        }
+    }
+
     /// A modifier's value on its row: the chosen player's, or with every player chosen 1P's.
     fn knob_value(&self, knob: Knob) -> u16 {
         self.settings.modifiers.get(self.mod_seat.saturating_sub(1), knob)
@@ -2056,7 +2075,12 @@ impl Menu {
                 && self.mod_seat == 0
                 && (1..SEATS_MAX).any(|s| self.settings.modifiers.get(s, knob) != self.settings.modifiers.get(0, knob));
             let value = self.knob_value(knob);
-            let mark = if value == game_sim::modifiers::ORIGINAL { "" } else { " *" };
+            let mark = match (value == game_sim::modifiers::ORIGINAL, self.mods_held().is_some()) {
+                (true, false) => "",
+                (false, false) => " *",
+                (true, true) => "  Held",
+                (false, true) => " *  Held",
+            };
             rows.push(match mixed {
                 true => format!("{}  Mixed", knob.label()),
                 false => format!("{}  {value}%{mark}", knob.label()),
@@ -2074,14 +2098,22 @@ impl Menu {
 
     /// The modifiers' ticker: what the row's modifier scales, and when it takes.
     pub fn modifier_help(&self) -> String {
+        if let Some(why) = self.mods_held() {
+            return why.to_string();
+        }
         let at = self.cursor(Screen::Modifiers);
+        let when = match self.stack.first() {
+            Some(Screen::Pause) => "from when the pause closes",
+            _ => "from the next one",
+        };
         match at {
             _ if (MODIFIERS_KNOBS..MODIFIERS_PRESET).contains(&at) => {
                 let knob = Knob::ALL[at - MODIFIERS_KNOBS];
                 let whose = if knob.per_seat() { "each player's" } else { "everyone's" };
-                format!("{} for {whose} ride, from the next one", knob.blurb())
+                format!("{} for {whose} ride, {when}", knob.blurb())
             }
-            _ => "Modifiers take on the next ride or restart".to_string(),
+            _ if self.stack.first() == Some(&Screen::Pause) => "Modifiers take when the pause closes".to_string(),
+            _ => "Modifiers take on the next ride".to_string(),
         }
     }
 

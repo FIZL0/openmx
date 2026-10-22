@@ -3,8 +3,10 @@
 //! Every modifier is a percentage on one or more fields the loaders fill — the bike's `.phy`
 //! ([`Phy`]), the biplane's ([`phy::Plane`]), the integrator's speed limit the ride is built with
 //! ([`Ride`]) and the engine's time-scale object ([`crate::tick::Engine::time_scale`]). They are
-//! applied to those values once, when a ride is set up, and never inside the simulation: no step
-//! of the ride has a branch for them, so a modified ride is the original's code on other numbers.
+//! applied to those values when a ride is set up, and again between two ticks when the ride's pause
+//! closes on a changed set ([`Mods::rebike`], [`Mods::replane`], P98) — never inside the simulation:
+//! no step of the ride has a branch for them, so a modified ride is the original's code on other
+//! numbers.
 //!
 //! **At 100% a modifier touches nothing.** Each one is skipped outright at its default rather than
 //! multiplied by one, so a ride whose modifiers are all at their defaults ([`Mods::is_original`])
@@ -22,8 +24,10 @@
 use crate::MAX_PLAYERS;
 use crate::phy::{self, Phy};
 use crate::r#move as mv;
+use crate::off_map;
 use crate::ride::Ride;
 use ps2_float::F;
+use std::sync::Arc;
 
 /// One modifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -368,11 +372,47 @@ impl Mods {
     /// constant rather than the file's, raised with [`Knob::BikeSpeed`] so the limit is not what
     /// stops a faster bike.
     pub fn ride(&self, seat: usize, ride: &mut Ride) {
-        if let Some(k) = self.factor(seat, Knob::BikeSpeed)
-            && k > F::ONE
-        {
-            ride.chassis.max_speed_sq = ride.chassis.max_speed_sq * (k * k);
+        ride.chassis.max_speed_sq = self.speed_limit(seat, ride.chassis.max_speed_sq);
+    }
+
+    /// The integrator's squared speed limit [`Mods::ride`] leaves a ride built with `limit`.
+    fn speed_limit(&self, seat: usize, limit: F) -> F {
+        match self.factor(seat, Knob::BikeSpeed) {
+            Some(k) if k > F::ONE => limit * (k * k),
+            _ => limit,
         }
+    }
+
+    /// **Player `seat`'s ride, moved onto these modifiers while it goes on** (P98): the bike's file
+    /// built again from its stock bytes `stock` with these on it ([`Mods::bike`]), handed to the ride
+    /// as its new `.phy`, and what the ride copied out of the old one when it was built taken again
+    /// ([`Ride::retune`]). `was` is the set the ride had: the speed limit [`Mods::ride`] raised for it
+    /// is moved to this set's, unless a wreck holds its own limit just now (the put-back sets the
+    /// riding one, as it does on any ride). The bike is not moved, not stopped and not put back: the
+    /// next tick steps it from where it is on the new numbers.
+    pub fn rebike(&self, was: &Mods, seat: usize, stock: &Phy, phy: &mut Arc<Phy>, ride: &mut Ride) {
+        let mut file = stock.clone();
+        self.bike(seat, &mut file);
+        ride.retune(&file);
+        let riding = off_map::RIDING_MAX_SPEED * off_map::RIDING_MAX_SPEED;
+        if ride.chassis.max_speed_sq == was.speed_limit(seat, riding) {
+            ride.chassis.max_speed_sq = self.speed_limit(seat, riding);
+        }
+        *phy = Arc::new(file);
+    }
+
+    /// [`Mods::rebike`] on a one-player simulation's rider, as player `seat`.
+    pub fn resim(&self, was: &Mods, seat: usize, stock: &Phy, sim: &mut crate::Sim) {
+        self.rebike(was, seat, stock, &mut sim.phy, &mut sim.rider.ride);
+    }
+
+    /// Player `seat`'s biplane moved onto these modifiers in flight (P98): its stock file `stock`
+    /// with these on it ([`Mods::plane`]), and the flight retuned to it where it is
+    /// ([`crate::flight::Flight::retune`]).
+    pub fn replane(&self, seat: usize, stock: &phy::Plane, flight: &mut crate::flight::Flight) {
+        let mut plane = *stock;
+        self.plane(seat, &mut plane);
+        flight.retune(&plane);
     }
 
     /// Player `seat`'s biplane, on the loaded file, before its flight is built from it.
