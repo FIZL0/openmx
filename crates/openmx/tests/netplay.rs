@@ -1785,3 +1785,36 @@ fn a_seat_starts_the_ride_in_the_plane_on_every_machine() {
     assert_eq!(flew, BACK_ON_THE_BIKE + 1, "flown alike from tick 0 to the bike's pad");
     assert_eq!(back, Some(BACK_ON_THE_BIKE + 1), "g's seat back on its bike a tick after it asked (the input delay)");
 }
+
+/// N19: a joiner's seat that picked the plane comes in through [`rides::spawn_flying`] and
+/// [`Game::seat`] as N18's start has it — the plane in the seat's own bay, its flight `==` the one
+/// [`vehicle::start_lane`] puts there (which N18 holds to the offline shell's start tick for tick) —
+/// on its own controller preset, with the joiner's saved markers kept and the ride's other seats
+/// untouched; a seat that picked the bike comes in on it.
+#[test]
+fn a_joiner_that_picked_the_plane_is_seated_flying_from_its_bay() {
+    let Some(file) = the_discs_plane() else { return };
+    let mut template = game_sim::flight::Flight::new(&file);
+    let first = &sims(1)[0];
+    let spawn = rides::seat_bytes(first);
+    let mut marks = game_sim::markers::Markers::default();
+    marks.slots[0] = Some(Box::new(game_sim::markers::Mark::Bike(first.rider.ride.clone())));
+    let marked = rides::spawn_marked(first, &spawn, marks).unwrap();
+    let flying = rides::spawn_flying(first, &marked, &template, bay(2, &template)).unwrap();
+    let mut seats = sims(1);
+    let mut world = Flat::default();
+    let mut game = Rides { sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut template) };
+    game.seat(2, &rides::spawn_on(&flying, &[(2, 3)])).unwrap();
+    game.seat(1, &rides::spawn_on(&spawn, &[(1, 1)])).unwrap();
+    let template = game_sim::flight::Flight::new(&file);
+    let mut want = first.clone();
+    vehicle::start_lane(&template, bay(2, &template), &mut want);
+    assert_eq!(seats.len(), 3);
+    assert_eq!(seats[2].plane, want.plane, "the joiner's flight is N18's start in its bay");
+    let at = seats[2].plane.as_ref().map(|f| f.spawn).unwrap();
+    assert_eq!((at.0, at.1), (bay(2, &template).at, bay(2, &template).facing));
+    assert_eq!(rides::preset(&seats[2]), Some(3), "on its own preset");
+    assert!(seats[2].markers.slots[0].is_some() && seats[1].markers.slots[0].is_none(), "with its saved markers");
+    assert!(seats[0].plane.is_none() && seats[1].plane.is_none(), "the others on their bikes");
+    assert_eq!(rides::preset(&seats[1]), Some(1));
+}

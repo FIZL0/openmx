@@ -36,10 +36,16 @@ fn node(out: &mut Vec<u8>, block: u16, children_at: u32) {
     word(out, children_at);
 }
 
-/// A flat terrain at height 0, two levels as the disc's are (a one-level tree is MX vs. ATV's and the
-/// port's ground sizes it at 16 samples, not 256): one root cell, one block all of its 16×16 leaves
-/// share, no palette, no texture pages, 4 feet a sample.
+/// A flat terrain at height 0, two levels as the disc's are: one root cell, one block all of its 16×16
+/// leaves share, no palette, no texture pages, 4 feet a sample.
 fn flat_terrain() -> Vec<u8> {
+    flat_terrain_of(2)
+}
+
+/// The same flat terrain as a tree of `levels` (1 or 2). One level is MX vs. ATV's supercross and
+/// freestyle maps' shape: the root's 16×16 cells are the leaves themselves, 256 samples a side under
+/// a scene's `TerrainWidth=1` just as the two-level tree's one root cell is.
+fn flat_terrain_of(levels: u32) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"PLN\0");
     out.push(b'7');
@@ -49,7 +55,7 @@ fn flat_terrain() -> Vec<u8> {
     out.extend_from_slice(&name);
     word(&mut out, 0); // no palette
     single(&mut out, 4.0);
-    word(&mut out, 2); // two levels
+    word(&mut out, levels);
     let tree_slot = out.len();
     word(&mut out, 0);
     word(&mut out, 1); // the words in front of the blocks
@@ -68,6 +74,17 @@ fn flat_terrain() -> Vec<u8> {
     out.extend(std::iter::repeat_n(0x81u8, 289));
     let tree_at = out.len() as u32;
     out[tree_slot..tree_slot + 4].copy_from_slice(&tree_at.to_le_bytes());
+    if levels == 1 {
+        // The root, whose 16×16 children are all the one leaf.
+        let root_children = tree_at + 97;
+        let leaf_at = root_children + 256 * 4;
+        node(&mut out, 0, root_children);
+        for _ in 0..256 {
+            word(&mut out, leaf_at);
+        }
+        node(&mut out, 0, 0);
+        return out;
+    }
     // The root's one cell the scene's width of 1 covers, and its 16×16 leaves.
     let root_children = tree_at + 97;
     let cell_at = root_children + 256 * 4;
@@ -169,10 +186,15 @@ fn write(root: &Path, rel: &str, bytes: impl AsRef<[u8]>) {
 
 /// A good track mod, `md2_flat`, in `mods/tracks/`.
 fn good(tracks: &Path, id: &str) {
+    good_of(tracks, id, 2);
+}
+
+/// A good track mod whose terrain is a tree of `levels`.
+fn good_of(tracks: &Path, id: &str, levels: u32) {
     let dir = tracks.join(id);
     write(&dir, "mod.json", mod_json(id));
     write(&dir, "Env/MDFLAT/MDFLAT.scn", scene());
-    write(&dir, "Env/MDFLAT/MDFLAT.ps2.trn", flat_terrain());
+    write(&dir, "Env/MDFLAT/MDFLAT.ps2.trn", flat_terrain_of(levels));
     write(&dir, "Col/mdwall.col", wall_col());
 }
 
@@ -373,4 +395,45 @@ fn a_disc_ride_is_the_same_with_or_without_mods() {
     assert_eq!(line(&with, "ride hash"), line(&off, "ride hash"));
     assert_eq!(line(&with, "ride hash"), line(&none, "ride hash"));
     println!("{}", line(&with, "ride hash"));
+}
+
+/// MD12: a one-level terrain under `TerrainWidth=1` (MX vs. ATV's supercross and freestyle maps) is
+/// 256 samples a side, as the standard has it, not `16^levels` = 16: the ground the ride stands on
+/// is as big as the two-level one's, and the rider starting 300 feet in is on the map and rides.
+#[test]
+fn a_one_level_terrain_is_256_samples_a_side() {
+    let one = flat_terrain_of(1);
+    let terrain = game_sim::track::Terrain::parse(&one).expect("the one-level terrain parses");
+    assert_eq!((terrain.levels, terrain.blocks), (1, 1));
+    for (sx, sz) in [(0, 0), (128, 77), (254, 254)] {
+        let cell = terrain.cell(sx, sz, 1).expect("a cell");
+        assert!(cell.height.iter().all(|h| h.0 == 0.0), "{sx},{sz}");
+    }
+    // Past the root's sixteen cells there is no tree.
+    assert!(terrain.cell(256, 0, 1).is_none());
+    let scene = game_sim::track::Scene::parse(scene().as_bytes()).unwrap();
+    let two = flat_terrain();
+    let two = game_sim::track::Terrain::parse(&two).unwrap();
+    for t in [&terrain, &two] {
+        let ground = game_sim::world::Ground::new(t, &scene.terrain);
+        assert_eq!((ground.samples_x, ground.samples_z), (256, 256), "{} levels", t.levels);
+        // The spawn, 512 feet across and 300 in, stands on the ground.
+        let hit = ground.at(ps2_float::F(512.0), ps2_float::F(300.0)).expect("ground under the start");
+        assert_eq!(hit.y.0, 0.0);
+        assert!(ground.at(ps2_float::F(1019.0), ps2_float::F(1019.0)).is_some());
+    }
+
+    // And the shell rides it as it rides the two-level one.
+    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md12").join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    good_of(&mods.join("tracks"), "md12_onelevel", 1);
+    let tape = throttle_tape(150);
+    let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
+    let Some((ok, said)) = shell(&["--track", "md12_onelevel", "--mods", mods_arg, "--play", tape, "--seconds", "20"]) else { return };
+    assert!(ok, "the one-level mod did not ride:\n{said}");
+    println!("{said}");
+    assert!(line(&said, "MD2 Flat: 0 props, 1 collision shapes").contains("ground 1020 x 1020 feet in 256 x 256 samples"), "\n{said}");
+    assert!(line(&said, "start: ").starts_with("start: 512, "), "\n{said}");
+    let end: Vec<f32> = line(&said, "end: ")[5..].split(", ").map(|v| v.trim().parse().unwrap()).collect();
+    assert!(end[2] > 400.0 && end[1].abs() < 20.0 && (end[0] - 512.0).abs() < 100.0, "{end:?}\n{said}");
 }

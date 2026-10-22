@@ -3,9 +3,12 @@
 //! 1:1 with — only the d-pad it shares with the ride, which keeps every meaning it has there.
 //!
 //! Each player has [`SLOTS`] markers for the session, and a selection that steps through them and
-//! then through the other players in the ride — a seat nobody rides is skipped (P94). All four are a d-pad direction's **press** (P93): each fires on
-//! the tick the direction goes down ([`crate::bindings::Table::pressed`]) and once, however long it
-//! is held after:
+//! then through the other players in the ride — a seat nobody rides is skipped (P94). Left and
+//! Right are a d-pad direction's **press** (P93): each fires on the tick the direction goes down
+//! ([`crate::bindings::Table::pressed`]). Down and Up, which put a marker down and ride the bike away,
+//! are a **hold of [`HOLD_MS`]** (P106, P88's hold at 200 ms rather than 250), read off the input
+//! layer's own held timer ([`crate::input::ControlState::held_ms`]) and fired on the tick that timer
+//! crosses it — a shorter tap does nothing. Each fires once, however long it is held after:
 //!
 //! - **Down** puts a marker in the selected slot: the whole bike as the tick left it ([`Ride`]) —
 //!   where it is, which way it faces, its speed and its spin — so a run-up repeats;
@@ -17,9 +20,8 @@
 //! it instead of the stick: the shell rides on [`Controls::stick_alone`], so the left stick alone
 //! leans and steers and a d-pad press moves no bike. Its gesture meaning stays — a press with a trick
 //! button down is a trick's gesture and not a marker's, so it fires nothing, and the bike reads it
-//! as the original does. Up and Down fire on the press too, with no hold against an accidental
-//! teleport: with the d-pad out of the steering nothing else in a ride asks for it, so a press is
-//! meant (see the P93 journal).
+//! as the original does. P93 had Up and Down fire on the press too; P106 put their hold back, against
+//! a brushed d-pad placing over a marker or teleporting (see both journals).
 //!
 //! A teleport sets the bike down the way a put-back does ([`crate::rider::Rider::teleport`]): out of
 //! any wreck, the trick machine cleared, and ghosted (P57's poof, S63's pass-through), so a rider
@@ -50,6 +52,9 @@ use crate::Sim;
 
 /// How many markers each player has.
 pub const SLOTS: usize = 5;
+
+/// How long Down or Up is held before it fires, in the input layer's milliseconds (P106).
+pub const HOLD_MS: u32 = 200;
 
 /// One player's markers: the slots and what is selected, of the machine that is up, and every other
 /// machine's set beside them (P107).
@@ -326,8 +331,8 @@ impl Markers {
 }
 
 /// The four d-pad directions that fired this tick — left, right, up, down — off the pad the player's
-/// controls were read from: each the tick it went down. None with a trick button down, which makes
-/// the d-pad a trick's gesture.
+/// controls were read from: Left and Right the tick they went down, Up and Down the tick their held
+/// timer crosses [`HOLD_MS`]. None with a trick button down, which makes the d-pad a trick's gesture.
 pub fn fired(pad: &crate::input::Pad, table: &crate::bindings::Table, hands: &Controls) -> [bool; 4] {
     if hands.trick.iter().any(|&t| t) {
         return [false; 4];
@@ -336,15 +341,39 @@ pub fn fired(pad: &crate::input::Pad, table: &crate::bindings::Table, hands: &Co
 }
 
 /// The four directions that fired this tick on any machine, gesture or not: [`fired`]'s test once
-/// the trick buttons have had their say. The plane has no tricks, so in it this is the whole test.
+/// the trick buttons have had their say (Left and Right on the press, Up and Down at [`HOLD_MS`]).
+/// The plane has no tricks, so in it this is the whole test.
 fn pressed(pad: &crate::input::Pad, table: &crate::bindings::Table) -> [bool; 4] {
-    DIRECTIONS.map(|c| table.pressed(pad, c))
+    let crossed = |c| {
+        table.control(pad.index as usize, c).is_some_and(|control| {
+            let s = pad.control(control);
+            s.is_held() && s.prev_held_ms < HOLD_MS && s.held_ms >= HOLD_MS
+        })
+    };
+    [table.pressed(pad, Command::LEFT), table.pressed(pad, Command::RIGHT), crossed(Command::UP), crossed(Command::DOWN)]
 }
 
 /// Whether a d-pad direction is down for the markers, for a display that stays up while it is: none
 /// with a trick button down.
 pub fn held(pad: &crate::input::Pad, table: &crate::bindings::Table, hands: &Controls) -> bool {
     !hands.trick.iter().any(|&t| t) && DIRECTIONS.iter().any(|&c| table.held(pad, c))
+}
+
+/// How far Down or Up is through its hold, `0..=HOLD_MS`, for a bar that fills while the player
+/// holds: the longer-held of the two, 0 with neither held or a trick button down. Left and Right fire
+/// on the press and have no hold to show.
+pub fn holding(pad: &crate::input::Pad, table: &crate::bindings::Table, hands: &Controls) -> u32 {
+    if hands.trick.iter().any(|&t| t) {
+        return 0;
+    }
+    [Command::UP, Command::DOWN]
+        .iter()
+        .filter_map(|&c| table.control(pad.index as usize, c))
+        .map(|control| pad.control(control))
+        .filter(|s| s.is_held())
+        .map(|s| s.held_ms.min(HOLD_MS))
+        .max()
+        .unwrap_or(0)
 }
 
 const DIRECTIONS: [Command; 4] = [Command::LEFT, Command::RIGHT, Command::UP, Command::DOWN];

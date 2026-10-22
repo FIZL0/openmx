@@ -39,9 +39,11 @@ use crate::math::{self, Mat4};
 use crate::track::{self, Mesh, Placement, Terrain, TerrainLayout};
 use ps2_float::{Dest, F, Vf, vu};
 
-/// How many samples a terrain tree's leaf holds along one side, which is also how many cells: the
-/// shared seventeenth sample belongs to the next leaf along.
-const LEAF_SAMPLES: u32 = 16;
+/// How many terrain samples one unit of the scene's `TerrainWidth` (or `TerrainBreadth`) is: the game's
+/// map edge is width × 256 × scale whatever the tree's depth. On a two-level tree that is one root cell;
+/// a one-level tree (MX vs. ATV's supercross and freestyle maps) is 16 root cells of 16 samples and
+/// says `TerrainWidth=1`, so counting `16^levels` would make it 16 samples a side.
+pub const SAMPLES_PER_WIDTH: u32 = 256;
 
 /// The height a ground query answers with where there is no ground: far enough below anything a wheel
 /// can reach that [`wheel::suspension`]'s "the ground is below the probe's end" test refuses it.
@@ -243,14 +245,12 @@ pub struct Ground<'a> {
 
 impl<'a> Ground<'a> {
     /// The ground of one track: its terrain file, and the scene's own statement of how many root cells
-    /// it has. Each level of the tree is sixteen cells across, so a field is `width × 16^levels`
-    /// samples.
+    /// it has. A field is `width × 256` samples ([`SAMPLES_PER_WIDTH`]), whatever the tree's depth.
     pub fn new(terrain: &'a Terrain<'a>, layout: &TerrainLayout) -> Ground<'a> {
-        let per_root = LEAF_SAMPLES.pow(terrain.levels);
         Ground {
             spacing: terrain.scale,
-            samples_x: layout.width.max(1) * per_root,
-            samples_z: layout.breadth.max(1) * per_root,
+            samples_x: layout.width.max(1) * SAMPLES_PER_WIDTH,
+            samples_z: layout.breadth.max(1) * SAMPLES_PER_WIDTH,
             area: crate::biplane::Area::new(
                 F(layout.width as f32),
                 F(layout.breadth as f32),

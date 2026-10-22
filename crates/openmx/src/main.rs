@@ -178,6 +178,7 @@ mod pace;
 mod pad;
 mod particles;
 mod perf;
+mod portal;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
 mod same_ride;
@@ -248,15 +249,6 @@ const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 /// The PS2's own frame, which `--size 640x448` asks for and which a drawing with no window to fit
 /// (`--moment`) is made at.
 const PS2_FRAME: (usize, usize) = (640, 448);
-
-/// How far around the rider the ground is drawn, in terrain samples.
-///
-/// The scene's fog is the real limit and the draw culls against it, but `free06`'s fog is further away
-/// than a software rasteriser can fill at 60 Hz, so the dirt fades out at a radius instead. Nine feet
-/// a sample makes this about a hundred and twenty yards of ground in every direction.
-const GROUND_RADIUS: u32 = 44;
-/// How many cells a side of the ground the GPU draws or culls at once (P44).
-const GROUND_CHUNK: u32 = 32;
 
 /// The near clip plane the frame is drawn with, in feet, and the number the follow camera is handed
 /// as its distance floor, because the original's call site hands its camera the near plane of the
@@ -428,8 +420,8 @@ const MARKER_ALPHA: f32 = 0.2;
 const RIDER_GROUP: usize = 0;
 
 /// A view's markers' slot display while it is up (P88): the selection, which slots hold a marker,
-/// the label, and the other players in the ride by seat (P94).
-type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>);
+/// the label, the other players in the ride by seat (P94), and how far a Down or Up hold is (P106).
+type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u32);
 
 /// A marker's tick (P88) as the console says it.
 fn marker_line(did: markers::Did) -> String {
@@ -534,19 +526,21 @@ fn radar_blips(seats: &[Seat], bays: &[vehicle::Bay], v: usize, zones: &[overlay
     out
 }
 
-/// Where view `v`'s player's session markers' posts stand in a `size` view through `camera` (P94):
-/// each filled slot's, with its slot and whether the selection (`pick`) is on it. None for a view
-/// that shows no markers.
-fn marker_posts(seat: &Seat, camera: &Camera, size: (usize, usize), pick: Option<markers::Pick>) -> Vec<(overlay::Post, usize, bool)> {
-    let Some(pick) = pick else { return Vec::new() };
-    let slots = seat.sim.markers.slots.iter().enumerate();
-    slots
-        .filter_map(|(slot, ride)| {
-            let at = ride.as_ref()?.position();
-            let post = overlay::marker_post(camera, size, [at.x(), at.y(), at.z()])?;
-            Some((post, slot, pick == markers::Pick::Slot(slot)))
-        })
-        .collect()
+/// The ground's height under `x`, `z` for a portal's disc (V51), from the ride's own terrain query
+/// looking down from `y`; `None` off the terrain, where the query answers its no-ground depth.
+fn portal_ground(place: &mut dyn sim_world::World, x: f32, y: f32, z: f32) -> Option<f32> {
+    let (on, _) = place.ground(Vf::new(x, y, z, 1.0));
+    (on.y() > -1.0e5).then(|| on.y())
+}
+
+/// What view `v` sees of the portals (V51): the start zones the original shows its player (not the
+/// machine race's while they are in a machine, [`portal::shown`]) and the player's own markers'.
+fn portal_glows(art: &portal::Art, zones: &[portal::Portal], marked: &[Option<portal::Portal>], in_machine: bool, camera: &Camera, seconds: f32) -> Vec<game_render::glow::Glow> {
+    let (eye, at) = (camera.eye, camera.at);
+    let forward = [at.x - eye.x, at.y - eye.y, at.z - eye.z];
+    let race = |p: &&portal::Portal| in_machine && p.kind == portal::Kind::Zone(overlay::Activity::Race);
+    let shown = zones.iter().filter(|p| !race(p)).chain(marked.iter().flatten());
+    shown.flat_map(|p| p.glows(art, [eye.x, eye.y, eye.z], forward, seconds)).collect()
 }
 
 /// One local player's half of the picture (V22): the body and bike posed for them, the cameras that
@@ -2330,7 +2324,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // No window to fit, so the PS2's own frame unless `--size` says otherwise.
             width: args.size.unwrap_or(PS2_FRAME).0,
             height: args.size.unwrap_or(PS2_FRAME).1,
-            ground_radius: GROUND_RADIUS,
+            ground_radius: ground.radius(),
             chassis: CHASSIS,
             plane: plane.as_ref(),
             pilot,
@@ -2859,7 +2853,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Everything the GPU draws, uploaded once: the props, the sky, the whole ground and every model.
     if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
         let at = Instant::now();
-        let chunks = ground.chunks(GROUND_CHUNK);
+        let chunks = ground.chunks(ground.chunk_cells());
         r.forget_assets();
         r.set_scene(&look);
         r.set_sky(sky.as_ref());
@@ -2963,7 +2957,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         r.set_images(&images);
     }
-    let radar_span = overlay::radar_span(ground.spacing);
+    // The radar's world is the scene's terrain scales' (MD3): the original reads the larger of the
+    // two the map edge measures with, which on the disc is the terrain file's own spacing.
+    let radar_span = overlay::radar_span(place.terrain.width_scale.0.max(place.terrain.breadth_scale.0));
+    let edge = Area::new(
+        F(place.terrain.width as f32),
+        F(place.terrain.breadth as f32),
+        place.terrain.width_scale,
+        place.terrain.breadth_scale,
+    );
+    println!(
+        "map: {:.0} x {:.0} feet to its edge, shot back from {:.0} feet short of it; radar {:.0} feet across",
+        edge.width.0,
+        edge.depth.0,
+        game_sim::off_map::MARGIN.0,
+        radar_span
+    );
     // The activities' start zones the radar marks (P92): the track's `hit.dat`, in its second
     // archive. A track with none (the MX tracks) marks none.
     let radar_zones = archives
@@ -2971,6 +2980,24 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         .find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok())
         .map(|b| overlay::zones(&String::from_utf8_lossy(&b)))
         .unwrap_or_default();
+    // And drawn in the world (V51) as the original draws them, the session markers as small ones:
+    // the same file's zones, and the portal's art out of the same archive — or, on a track whose
+    // archive lacks the numbers (the MX tracks'), a free-ride track's, which has them all.
+    let zone_spots = archives
+        .iter()
+        .find_map(|a| a.read_suffix(&format!("{}\\hit.dat", args.track)).ok())
+        .map(|b| portal::spots(&String::from_utf8_lossy(&b)))
+        .unwrap_or_default();
+    let portal_art = {
+        let read = |archives: &[Res], name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
+        let own = portal::Art::load(|name| read(&archives, name)).filter(portal::Art::numbered);
+        own.or_else(|| {
+            let free = [disc.res(&member_ending(&disc, portal::ART_ARCHIVE).ok()?).ok()?];
+            portal::Art::load(|name| read(&free, name))
+        })
+    };
+    // The GPU's copy of its pictures, uploaded with the first frame's glows.
+    let mut glow_textures = portal_art.as_ref().map(|a| a.textures.clone());
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut speedometer = args.speedometer.unwrap_or_default();
     let mut graphics = args.graphics.unwrap_or_default();
@@ -3038,6 +3065,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         });
     }
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
+    // The start zones' portals (V51), laid over the ground once: they never move.
+    let zone_portals: Vec<portal::Portal> = portal::shown(&zone_spots, false)
+        .iter()
+        .map(|spot| portal::Portal::zone(spot, |x, z| portal_ground(&mut world.place, x, spot.at[1] + 50.0, z)))
+        .collect();
+    let mut marked_portals: Vec<[Option<portal::Portal>; markers::SLOTS]> = vec![Default::default(); world.seats.len()];
 
     for (seat, rig) in world.seats.iter().zip(&mut rigs) {
         rig.hud.note_vehicle(seat.garage.up.name());
@@ -3084,11 +3117,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut lobby_planes: Option<Vec<bool>> = None;
     let mut online = match &args.online {
         // Into a ride under way (N10): every seat is the host's first's bike, on this machine's
-        // constants for it, and the ride's state comes from the host.
+        // constants for it, and the ride's state comes from the host — this machine's seat in the
+        // plane if its setup picked it (N19), which its pick tells the host.
         None if from_lobby.is_some() && drop_in => {
             let ((room, me), net) = from_lobby.expect("checked");
-            if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike || world.seats.len() != 1 {
-                return Err("dropping in on an online ride rides one player's bike and no tape: drop --play, --record, --vehicle and --players".into());
+            if head.is_some() || world.tape.is_some() || world.seats.len() != 1 {
+                return Err("dropping in on an online ride rides one player and no tape: drop --play, --record and --players".into());
             }
             let disc = &front.as_deref().expect("from the lobby").network.disc;
             let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
@@ -3186,7 +3220,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         on.planes(stock_plane, plane_like.as_ref());
         // Each seat that starts in the plane stands in its own bay at tick 0 (N18): the lobby's
         // now, from the picks; `--peer`s' once every peer's card has said its own.
-        on.bays(online_bays);
+        on.bays(online_bays.clone());
         if let Some(flies) = &lobby_planes {
             on.start_planes(flies)?;
         }
@@ -3615,6 +3649,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             Ok(mut on) => {
                                 on.modifiers(mods, stock_phys[..1].to_vec());
                                 on.planes(stock_plane, plane_like.as_ref());
+                                // a joiner whose setup picked the plane rides in from its own bay (N19)
+                                on.bays(online_bays.clone());
                                 online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some(on.host()));
                                 online = Some(on);
@@ -4007,7 +4043,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // and the long side widens (`view_fov`).
                     fov: aspect::fov(view.fov.0, view_w, view_h),
                     near: NEAR_CLIP,
-                    far: 4000.0,
+                    // The software renderer's far plane: 4,000 feet, or the scene's fog's end where
+                    // that is further (MD3: a mod's map may fog out past it). The GPU's is its own
+                    // (`Graphics::far_clip`).
+                    far: light.fog_far.max(4000.0),
                 },
                 None => Camera::behind(pos, bike_look),
             });
@@ -4082,10 +4121,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let filled: [bool; markers::SLOTS] = std::array::from_fn(|s| m.holds(s));
                 let pad = seat.sim.input.pad(0);
                 let held = seat.riding && markers::held(pad, seat.sim.table(), &seat.hands);
+                let holding = if seat.riding { markers::holding(pad, seat.sim.table(), &seat.hands) } else { 0 };
                 let others = markers::Markers::others(mine.unwrap_or(v), riding.len(), &riding);
                 banner
                     .update(Instant::now(), pick, filled, held)
-                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names), others))
+                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names), others, holding))
             })
             .collect();
         // The bays shown (P103), drawn below and marked on the radar.
@@ -4105,6 +4145,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if let (Some(pose), Some(at), Some(camera)) = (args.shot_pose, rects.first(), cameras.first_mut()) {
             *camera = pose.camera(at.w, at.h, NEAR_CLIP, camera.far);
         }
+        // The start zones' and the markers' portals (V51), each view its own: its player's markers,
+        // and the zones that player is shown.
+        for (v, seat) in world.seats.iter().enumerate() {
+            portal::markers(&mut marked_portals[v], &seat.sim.markers, picks[v], |x, y, z| portal_ground(&mut world.place, x, y, z));
+        }
+        let glows: Vec<Vec<game_render::glow::Glow>> = match &portal_art {
+            Some(art) => (0..world.seats.len())
+                .map(|v| {
+                    let in_machine = world.seats[v].garage.up != Kind::Bike;
+                    let seconds = started.elapsed().as_secs_f32();
+                    cameras.get(v).map_or_else(Vec::new, |c| portal_glows(art, &zone_portals, &marked_portals[v], in_machine, c, seconds))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
 
         // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
         // own shape and put into the window's frame; a full screen's one view is the frame itself.
@@ -4127,14 +4182,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     _ => None,
                 };
                 let banner = shown_markers.get(v).and_then(Option::as_ref);
-                let posts = marker_posts(seat, &cameras[v], (at.w, at.h), picks[v]);
-                if rig.hud.on || banner.is_some() || !posts.is_empty() {
+                if rig.hud.on || banner.is_some() {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| {
-                        hud::draw_marker_posts(f, &posts);
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
-                        if let Some((pick, filled, label, others)) = banner {
-                            hud::draw_markers(f, *pick, *filled, label, others);
+                        if let Some((pick, filled, label, others, holding)) = banner {
+                            hud::draw_markers(f, *pick, *filled, label, others, *holding);
                         }
                     };
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
@@ -4289,6 +4342,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let view = t.create_view(&Default::default());
                     r.set_graphics(graphics);
                     set_plane_sprites(r, &mut fx_sheet, &sprites);
+                    set_glows(r, &mut glow_textures, &glows);
                     let d = r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
                     // Nothing else waits on a frame nobody sees: without this the queue runs ahead,
                     // and the times would be the CPU's alone.
@@ -4304,6 +4358,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (None, Some(w)) => {
                     w.renderer.set_graphics(graphics);
                     set_plane_sprites(&mut w.renderer, &mut fx_sheet, &sprites);
+                    set_glows(&mut w.renderer, &mut glow_textures, &glows);
                     let spent = Instant::now();
                     let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
                     waited = w.waited;
@@ -4349,7 +4404,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let draw_at = Instant::now();
             clear(target, look.fog_color);
             stages.mark(stages::Stage::Sky);
-            let mut tris = ground.draw(target, camera, &light, pos, GROUND_RADIUS);
+            let mut tris = ground.draw(target, camera, &light, pos, ground.radius());
             stages.mark(stages::Stage::Ground);
             // The sky after the ground and before anything that blends (P47): it only paints where
             // nothing is drawn, and the ground is opaque, so it is the same picture as the sky first
@@ -4459,6 +4514,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let (Some((fx, _)), Some(sheet)) = (&plane_fx, &soft_sheet) {
                 tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx), &light);
             }
+            // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
+            if let (Some(art), Some(glows)) = (&portal_art, glows.get(v)) {
+                tris += game_render::glow::draw(target, camera, &art.textures, glows);
+            }
             stages.mark(stages::Stage::Scene);
             // And the overlay over the top of it, after everything with a depth test and before anything
             // that reads the frame: what the window shows and what `--shot` writes are the same picture.
@@ -4470,11 +4529,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                 _ => None,
             };
-            let posts = marker_posts(seat, camera, (target.width, target.height), picks[v]);
-            hud::draw_marker_posts(target, &posts);
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
-            if let Some(Some((pick, filled, label, others))) = shown_markers.get(v) {
-                hud::draw_markers(target, *pick, *filled, label, others);
+            if let Some(Some((pick, filled, label, others, holding))) = shown_markers.get(v) {
+                hud::draw_markers(target, *pick, *filled, label, others, *holding);
             }
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
             if !rig.hud.on && overlay_mode == menu::Overlay::Original {
@@ -5121,6 +5178,14 @@ fn set_plane_sprites(r: &mut Renderer, sheet: &mut Option<game_render::pst::Text
         r.set_sprite_sheet(&sheet);
     }
     r.set_sprites(sprites);
+}
+
+/// This frame's portals into `r` (V51), their pictures first if they have not been uploaded yet.
+fn set_glows(r: &mut Renderer, textures: &mut Option<Vec<game_render::pst::Texture>>, glows: &[Vec<game_render::glow::Glow>]) {
+    if let Some(textures) = textures.take() {
+        r.set_glow_textures(&textures);
+    }
+    r.set_glows(glows);
 }
 
 /// The command line. `Ok(None)` means `--help` was asked for and the shell should not start.

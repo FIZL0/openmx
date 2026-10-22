@@ -5584,8 +5584,11 @@ fn nearest_opponent(
 // now survives the fixture (it was clamped to `0xfe`), and two kinds of C7 row are not checked: a
 // row read before the game stepped ([`unstepped_rows`]), and the pad lanes of a row read between
 // the world step and the input step ([`read_before_the_input_step`]). The run then agrees through
-// tick 261 and parts at 262 by one ulp of `body.rate[0]`, on the first tick the pitch loop's output
-// is neither clamped nor bypassed. Over the port's own ground ([`Ground::at`], one ulp low under
+// tick 261 and parted at 262 by one ulp of `body.rate[0]`, on the first tick the pitch loop's output
+// is neither clamped nor bypassed. S104 seeded the original's world step from the port's tick-261
+// flight: every input of the autopilot agreed but the `{cos, sin}` table its turn term reads, which
+// the port built in single precision. Built like the game's (fdlibm in double, chopped), the run
+// agrees through tick 691 and parts at 692, the plane's first crash, on `engine.power`. Over the port's own ground ([`Ground::at`], one ulp low under
 // the plane) it parts at tick 1; the run prints both.
 
 /// The capture's file name in [`acceptance_dirs`] — C7's playback of `biplane.p2m2`.
@@ -5594,8 +5597,8 @@ const BIPLANE_ACCEPTANCE: &str = "biplane";
 /// **The last tick of the biplane recording the port is known to agree with the original on.** The
 /// same contract as [`ACCEPTANCE_AGREES_THROUGH`]: further prints a line asking for it to be raised,
 /// short of it fails. Tick 0 is the start state: the capture's second row, over the save state stepped
-/// to it. 261 is the last tick before an ulp of the body's roll rate parts it (S94).
-const BIPLANE_AGREES_THROUGH: u64 = 261;
+/// to it. 691 is the last tick before the plane's first crash parts it (S104; S94 left it at 261).
+const BIPLANE_AGREES_THROUGH: u64 = 691;
 
 /// The container of the area the plane was flown over. Not found by [`recorded_on`]: that fits a
 /// *bike's* rows, and a plane's minute is mostly air. Named instead, and checked against the plane's own

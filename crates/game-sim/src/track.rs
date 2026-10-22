@@ -133,7 +133,8 @@ pub struct Scene {
 /// How big the terrain is and how its samples map to world units.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TerrainLayout {
-    /// Root cells across and along. Each is one child of the terrain tree's root.
+    /// 256-sample units across and along ([`crate::world::SAMPLES_PER_WIDTH`]). On a two-level tree
+    /// each is one child of the terrain tree's root; a one-level tree is 1, its sixteen root cells.
     pub width: u32,
     pub breadth: u32,
     /// World units per terrain sample, across and along.

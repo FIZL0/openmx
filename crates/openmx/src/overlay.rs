@@ -418,17 +418,25 @@ const MARKER_EDGE: [u8; 4] = [0, 0, 0, 200];
 /// The slot's number on a marker's disc.
 const MARKER_INK: [u8; 4] = [0, 0, 0, 255];
 
+/// An activity's colour, its radar icon's and its start zone's in the world (V51).
+pub fn activity_colour(activity: Activity) -> [u8; 4] {
+    ZONE_COLOURS[Activity::ALL.iter().position(|&a| a == activity).unwrap_or(0)]
+}
+
 /// A session marker slot's colour (P94).
 pub fn marker_colour(slot: usize) -> [u8; 4] {
     MARKER_COLOURS[slot % MARKER_COLOURS.len()]
 }
 
 /// How tall a session marker's post stands over where its bike was put down, in feet: two bikes'
-/// lengths, so it shows over the bike's ghost and over a rise.
+/// lengths, so it shows over the bike's ghost and over a rise. Since V51 a marker is drawn as a small
+/// start-zone portal (`crate::portal`) and nothing draws a post: the tests still place points with it.
+#[allow(dead_code)]
 pub const POST_HEIGHT: f32 = 15.0;
 
 /// A session marker's post as a view sees it (P94): its foot and its top in the view's pixels, and
 /// how far it is from the eye.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Post {
     pub foot: (f32, f32),
@@ -439,6 +447,7 @@ pub struct Post {
 /// Where the post of a marker put down `at` stands in a `width` by `height` view through `camera`,
 /// or `None` where it is behind the eye or wholly off the view's sides. Through the hills: the post
 /// is drawn over the picture, so a marker shows from anywhere it is in front of the camera.
+#[allow(dead_code)]
 pub fn marker_post(camera: &game_render::world::Camera, (width, height): (usize, usize), at: [f32; 3]) -> Option<Post> {
     let m = camera.view_projection(width.max(1), height.max(1));
     let (w, h) = (width as f32, height as f32);
