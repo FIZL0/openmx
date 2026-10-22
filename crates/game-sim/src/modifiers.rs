@@ -478,9 +478,10 @@ impl Mods {
     /// built again from its stock bytes `stock` with these on it ([`Mods::bike`]), handed to the ride
     /// as its new `.phy`, and what the ride copied out of the old one when it was built taken again
     /// ([`Ride::retune`]). `was` is the set the ride had: the speed limit [`Mods::ride`] raised for it
-    /// is moved to this set's, unless a wreck holds its own limit just now (the put-back sets the
-    /// riding one, as it does on any ride). The bike is not moved, not stopped and not put back: the
-    /// next tick steps it from where it is on the new numbers.
+    /// is moved to this set's, unless a wreck holds its own limit just now; the put-back's riding
+    /// limit ([`Ride::riding_speed_sq`]) moves either way, so the put-back after that wreck sets
+    /// this set's (P101). The bike is not moved, not stopped and not put back: the next tick steps it
+    /// from where it is on the new numbers.
     pub fn rebike(&self, was: &Mods, seat: usize, stock: &Phy, phy: &mut Arc<Phy>, ride: &mut Ride) {
         let mut file = stock.clone();
         self.bike(seat, &mut file);
