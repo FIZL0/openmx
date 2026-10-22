@@ -369,7 +369,7 @@ impl Online {
         let Some(all) = udp.markers(&self.net.lineup, &self.net.me) else { return false };
         for (s, (sim, bytes)) in self.sims.iter_mut().zip(&all).enumerate() {
             sim.markers = crate::saved_markers::from_wire(bytes, &marks.bike, &marks.track);
-            let placed = sim.markers.slots.iter().flatten().count();
+            let placed = sim.markers.placed();
             if placed > 0 {
                 println!("online: seat {} starts on {placed} saved markers", s + 1);
             }
@@ -455,6 +455,7 @@ impl Online {
         let session = &mut self.net;
         let (spawn, arrived, room) = (&self.spawn, &mut self.arrived, &mut self.room);
         let first = self.sims.first();
+        let (template, bays) = (self.plane.as_ref(), &self.bays);
         match &mut self.wire {
             Wire::Udp(udp) => udp.receive(),
             Wire::Lobby { net, kept } => {
@@ -498,7 +499,7 @@ impl Online {
                                 ([_], Some(seat)) if !seat.pick.markers.is_empty() => {
                                     let track = room.as_ref().map_or("", |r| r.track.as_str());
                                     let m = crate::saved_markers::from_pick(&seat.pick.markers, &seat.pick.bike, track);
-                                    let placed = m.slots.iter().flatten().count();
+                                    let placed = m.placed();
                                     match first.map(|f| rides::spawn_marked(f, spawn, m)) {
                                         Some(Ok(b)) if placed > 0 => {
                                             println!("online: {peer} rides in on {placed} saved markers");
@@ -514,6 +515,33 @@ impl Online {
                                 _ => None,
                             };
                             let spawn = marked.as_deref().unwrap_or(spawn);
+                            // the joiner's setup machine (N19), as its pick says it: a seat that
+                            // picked the plane rides in flying from its own bay, in the state
+                            // every machine is sent, as a lobby ride's seat starts in it (N18)
+                            let flying = match (seats.as_slice(), seats.first().and_then(|&s| pick(s))) {
+                                ([s], Some(seat)) if seat.pick.machine == vehicle::Kind::Biplane.name() => match (first, template, bays.get(*s)) {
+                                    (Some(f), Some(t), Some(&bay)) => match rides::spawn_flying(f, spawn, t, bay) {
+                                        Ok(b) => {
+                                            println!("online: {peer} rides in on the biplane");
+                                            Some(b)
+                                        }
+                                        Err(why) => {
+                                            println!("online: {peer}'s biplane: {why}");
+                                            None
+                                        }
+                                    },
+                                    _ => {
+                                        println!("online: {peer} picked the biplane, but this ride has none for seat {}; the bike", s + 1);
+                                        None
+                                    }
+                                },
+                                (seats, _) if seats.len() > 1 && seats.iter().any(|&s| pick(s).is_some_and(|seat| seat.pick.machine == vehicle::Kind::Biplane.name())) => {
+                                    println!("online: {peer} brings {} seats, which ride in on the bike", seats.len());
+                                    None
+                                }
+                                _ => None,
+                            };
+                            let spawn = flying.as_deref().unwrap_or(spawn);
                             match session.admit(peer, seats, rides::spawn_on(spawn, &presets)) {
                                 Ok(()) => arrived.push(peer.clone()),
                                 Err(why) => println!("online: {peer} cannot join: {why}"),

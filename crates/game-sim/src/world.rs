@@ -8,7 +8,10 @@
 //!   comes out of the terrain object's own query, which D6 ported ([`track::Terrain::cell`]) down to
 //!   the four corners of a cell; what is *not* ported is how the game picks a point inside the cell,
 //!   because that lives in the terrain collision class nobody has read yet. [`Ground::at`] blends the
-//!   cell bilinearly, which is this module's own arithmetic and is marked as such.
+//!   cell bilinearly, which is this module's own arithmetic and is marked as such. The ride's query
+//!   itself, [`World::ground`] on a [`Ground`], is not that since S64: it is the original's own
+//!   triangle split ([`crate::contact_search::ground`]), and `Ground::at` only says whether a point
+//!   is on the field.
 //! * **The sweep.** The scene lists a collision mesh for every solid thing on the track — three
 //!   hundred and fifty-three of them on `free06` — each with a position and a pair of axes. S4 ported
 //!   the sweep itself ([`collide::sweep`]), which works in one mesh's own space, so [`Props`] is the
@@ -39,9 +42,11 @@ use crate::math::{self, Mat4};
 use crate::track::{self, Mesh, Placement, Terrain, TerrainLayout};
 use ps2_float::{Dest, F, Vf, vu};
 
-/// How many samples a terrain tree's leaf holds along one side, which is also how many cells: the
-/// shared seventeenth sample belongs to the next leaf along.
-const LEAF_SAMPLES: u32 = 16;
+/// How many terrain samples one unit of the scene's `TerrainWidth` (or `TerrainBreadth`) is: the game's
+/// map edge is width × 256 × scale whatever the tree's depth. On a two-level tree that is one root cell;
+/// a one-level tree (MX vs. ATV's supercross and freestyle maps) is 16 root cells of 16 samples and
+/// says `TerrainWidth=1`, so counting `16^levels` would make it 16 samples a side.
+pub const SAMPLES_PER_WIDTH: u32 = 256;
 
 /// The height a ground query answers with where there is no ground: far enough below anything a wheel
 /// can reach that [`wheel::suspension`]'s "the ground is below the probe's end" test refuses it.
@@ -251,14 +256,12 @@ pub struct Ground<'a> {
 
 impl<'a> Ground<'a> {
     /// The ground of one track: its terrain file, and the scene's own statement of how many root cells
-    /// it has. Each level of the tree is sixteen cells across, so a field is `width × 16^levels`
-    /// samples.
+    /// it has. A field is `width × 256` samples ([`SAMPLES_PER_WIDTH`]), whatever the tree's depth.
     pub fn new(terrain: &'a Terrain<'a>, layout: &TerrainLayout) -> Ground<'a> {
-        let per_root = LEAF_SAMPLES.pow(terrain.levels);
         Ground {
             spacing: terrain.scale,
-            samples_x: layout.width.max(1) * per_root,
-            samples_z: layout.breadth.max(1) * per_root,
+            samples_x: layout.width.max(1) * SAMPLES_PER_WIDTH,
+            samples_z: layout.breadth.max(1) * SAMPLES_PER_WIDTH,
             area: crate::biplane::Area::new(
                 F(layout.width as f32),
                 F(layout.breadth as f32),
@@ -339,11 +342,20 @@ impl<'a> Ground<'a> {
 }
 
 impl World for Ground<'_> {
+    /// The world's ground query as the original's is (`ground_query`, S64): the terrain object's own
+    /// heightfield arithmetic over [`Ground::field`] — the cell split into two triangles, the corner
+    /// normals blended by weight and normalised — which is [`crate::contact_search::ground`]. The
+    /// point keeps its `x`, `z` and `w` and takes the ground's `y`.
+    ///
+    /// Off the field the original's query leaves the point where it was (and so a wheel past the edge
+    /// finds ground at its own probe's end); this keeps [`Ground::at`]'s answer there instead, no
+    /// ground at all, which is what keeps a rider on the map. See S64's journal entry.
     fn ground(&mut self, at: Vf) -> (Vf, Vf) {
-        match self.at(F(at.x()), F(at.z())) {
-            Some(hit) => (Vf::new(at.x(), hit.y.0, at.z(), 1.0), hit.normal),
-            None => (Vf::new(at.x(), NO_GROUND, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0)),
+        if self.at(F(at.x()).max(F::ZERO), F(at.z()).max(F::ZERO)).is_none() {
+            return (Vf::new(at.x(), NO_GROUND, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0));
         }
+        let g = crate::contact_search::ground(&self.field(), at);
+        (g.point, g.normal)
     }
 
     fn surface(&mut self, at: Vf) -> u8 {

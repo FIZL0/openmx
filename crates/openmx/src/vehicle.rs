@@ -58,7 +58,7 @@ use game_sim::flight::{self, Flight};
 use game_sim::phy::Ini;
 use game_sim::ride::Controls;
 use game_sim::rider;
-use game_sim::markers::Spot;
+use game_sim::markers::{self, Did, Pick, Spot};
 use game_sim::world::World;
 use ps2_float::{F, Vf};
 
@@ -482,6 +482,17 @@ pub fn round_stick(input: &game_sim::input::Pad, mut pad: game_sim::biplane::Pad
     pad
 }
 
+/// `pad` with its four d-pad directions let go (P107): what the shell's plane flies on, the d-pad
+/// being the session markers' (`game_sim::markers::fly`). Everything else is the pad as it was.
+pub fn without_dpad(pad: &game_sim::input::Pad) -> game_sim::input::Pad {
+    use game_sim::input::{Control, ControlState};
+    let mut pad = pad.clone();
+    for c in [Control::Up, Control::Down, Control::Left, Control::Right] {
+        pad.controls[c.index()] = ControlState::default();
+    }
+    pad
+}
+
 /// How far from 0 an axis read without a dead zone can be and still be the centre byte or its
 /// neighbour (one byte is `2/255` of the travel): [`round_stick`].
 const ROUND_STICK_CENTRE: f32 = 0.005;
@@ -489,10 +500,11 @@ const ROUND_STICK_CENTRE: f32 = 0.005;
 /// What [`Plane::step`] scales the autopilot's `MaxPitchRate` by under the round stick (P108). The
 /// file's 1.25 radians a second is less than full elevator pitches the biplane at speed, so the loop
 /// reached it and took the elevator back off: banked 90 degrees at 121 ft/s, a held full pull turned
-/// the plane 34 degrees in a second where full elevator turns it 75. At 2.5 times the loop asks for
-/// more than full elevator reaches at any speed the plane flies, so a full pull is full elevator, and
-/// a partial pull still asks the loop for a rate.
-const ROUND_STICK_PITCH_RATE: f32 = 2.5;
+/// the plane 34 degrees in a second where full elevator turns it 75. At 2.5 times the loop asked for
+/// more than full elevator reaches at any speed the plane flies, which the user found pulled a little
+/// too hard (2026-10-22); 2.0 keeps most of that pull, and a partial pull still asks the loop for a
+/// rate.
+const ROUND_STICK_PITCH_RATE: f32 = 2.0;
 
 /// The biplane: where it was parked, where it is, and the flight that moves it.
 #[derive(Clone, Debug, PartialEq)]
@@ -606,9 +618,12 @@ impl Plane {
         // than a slow one. All three put back after the frame.
         let (dead_zone, feed_forward, max_pitch_rate) =
             (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate);
-        let mut pad = flight::pad(sim.input.pad(0));
+        // The d-pad is the session markers' (P107), as the bike's has been since P93: the plane
+        // reads the pad without it, under every scheme, and the left stick alone banks and climbs.
+        let input = without_dpad(sim.input.pad(0));
+        let mut pad = flight::pad(&input);
         if self.round_stick {
-            pad = round_stick(sim.input.pad(0), pad);
+            pad = round_stick(&input, pad);
             let held = ((dead_zone + dead_zone - pad.aileron.abs()) / dead_zone).max(F::ZERO).min(F::ONE);
             f.autopilot.aileron_dead_zone = F(2.0);
             f.autopilot.feed_forward = feed_forward * held;
@@ -721,6 +736,35 @@ fn ground_under(world: &mut dyn World, at: Vf) -> Option<f32> {
     (on.y() > NO_GROUND).then_some(on.y())
 }
 
+/// The plane put down landed at `spot` (P102's switch onto it, P107's marker onto a player): nose
+/// along `spot`'s heading, level — its bay's heading where that points straight up or down — on its
+/// wheels on the ground and at rest ([`Plane::rest_height`]), unwrecked and its throttle shut, as a
+/// parked plane stands. Its flight is put there by its next step ([`Plane::reset`]). `None`, and
+/// nothing moves, with no ground there.
+fn land(plane: &mut Plane, spot: Spot, world: &mut dyn World) -> Option<()> {
+    let ground = ground_under(world, spot.at)?;
+    let bay_ground = ground_under(world, plane.bay.at).unwrap_or(plane.bay.at.y());
+    let facing = level(spot.forward).or_else(|| level(plane.bay.facing)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+    let y = ground + plane.rest_height(bay_ground);
+    plane.spawn = Spawn { at: Vf::new(spot.at.x(), y, spot.at.z(), 1.0), facing };
+    plane.reset();
+    Some(())
+}
+
+/// A plane's marker as the plane it kept (P107), to draw see-through where it was put down: in
+/// `livery`, at the flight's pose.
+pub fn marked_plane(flight: &Flight, livery: usize) -> Plane {
+    Plane { livery, ..Plane::around(flight.clone()) }
+}
+
+/// The markers' word for a machine (P107): each has its own set.
+pub fn markers_of(kind: Kind) -> markers::Vehicle {
+    match kind {
+        Kind::Bike => markers::Vehicle::Bike,
+        Kind::Biplane => markers::Vehicle::Plane,
+    }
+}
+
 /// Where the bike stands when it is put under `plane` (P102's switch, P104's marker): on the ground
 /// under it, upright, along its heading flattened — the bike's own while the plane points straight
 /// up or down — or `None` with no ground there.
@@ -776,13 +820,7 @@ impl Garage {
         match to {
             Kind::Biplane => {
                 let plane = self.plane.as_mut().ok_or("this track's machine.txt parks no biplane")?;
-                let spot = Spot::of(&sim.rider);
-                let ground = ground_under(world, spot.at).ok_or("there is no ground under the bike to land the plane on")?;
-                let bay_ground = ground_under(world, plane.bay.at).unwrap_or(plane.bay.at.y());
-                let facing = level(spot.forward).or_else(|| level(plane.bay.facing)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
-                let y = ground + plane.rest_height(bay_ground);
-                plane.spawn = Spawn { at: Vf::new(spot.at.x(), y, spot.at.z(), 1.0), facing };
-                plane.reset();
+                land(plane, Spot::of(&sim.rider), world).ok_or("there is no ground under the bike to land the plane on")?;
                 self.taken = true;
             }
             Kind::Bike => {
@@ -793,7 +831,33 @@ impl Garage {
             }
         }
         self.up = to;
+        // Each machine its own markers (P107): the set shown is the one of the machine up.
+        sim.markers.up(markers_of(to));
         Ok(to)
+    }
+
+    /// **One tick of the plane's markers** (P107), after the pass that flew it: [`markers::fly`] on
+    /// the plane's own set, the pad the seat polled, and an Up onto another player landed where they
+    /// are (`spots[p]`, [`Garage::spot`]'s), as the switch onto the plane lands it by the bike —
+    /// refused with no ground there. A put-back's flight stands as it is: the plane's spawn is the
+    /// flight's own again, and its drawn transform off it. Nothing with the bike up.
+    pub fn markers(&mut self, sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], world: &mut dyn World) -> Option<Did> {
+        let (Kind::Biplane, Some(plane)) = (self.up, &mut self.plane) else { return None };
+        let f = plane.flight.as_mut()?;
+        let did = markers::fly(&mut sim.markers, f, sim.input.pad(0), me, spots, riding);
+        Some(match did? {
+            Did::Teleported(Pick::Slot(_)) => {
+                plane.placed = true;
+                plane.spawn = Spawn { at: f.spawn.0, facing: f.spawn.1 };
+                plane.pose();
+                did?
+            }
+            Did::Teleported(Pick::Player(p)) => match land(plane, spots[p], world) {
+                Some(()) => did?,
+                None => Did::Refused(Pick::Player(p)),
+            },
+            other => other,
+        })
     }
 
     /// **Where the player is**, for a marker's Up onto them (P104): with the bike up, the bike's
@@ -975,6 +1039,40 @@ pub fn fly_lane(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World) -> 
     let respawned = plane.step(sim, dt, world);
     sim.plane = plane.flight.take();
     respawned
+}
+
+/// **Where an online seat is**, for another player's marker Up onto them (P107): [`Garage::spot`]
+/// for a seat whose plane is its [`Sim::plane`] — under the plane while it flies, the bike's spot on
+/// the bike.
+pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
+    match &sim.plane {
+        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true }.spot(sim, world),
+        None => Spot::of(&sim.rider),
+    }
+}
+
+/// One tick of an online seat's plane markers (P107): [`Garage::markers`] on the flight in its
+/// [`Sim::plane`]. An Up onto another player lands the plane where they are and places its flight
+/// there at once, as [`switch_lane`] does. Nothing on the bike.
+pub fn lane_markers(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], world: &mut dyn World) -> Option<Did> {
+    let mut f = sim.plane.take()?;
+    let mut did = markers::fly(&mut sim.markers, &mut f, sim.input.pad(0), me, spots, riding);
+    if let Some(Did::Teleported(Pick::Player(p))) = did {
+        let mut plane = Plane::around(f);
+        f = match land(&mut plane, spots[p], world) {
+            Some(()) => {
+                let mut f = plane.flight.take().expect("the landing keeps the flight");
+                f.reset(plane.spawn.at, plane.spawn.facing, &sim.tables.ride.acos);
+                f
+            }
+            None => {
+                did = Some(Did::Refused(Pick::Player(p)));
+                plane.flight.take().expect("the landing keeps the flight")
+            }
+        };
+    }
+    sim.plane = Some(f);
+    did
 }
 
 impl Garage {

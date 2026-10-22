@@ -20,13 +20,15 @@
 use game_render::mat::{V3, v3};
 use game_render::raster::{Batch, Frame, Mode, Shade};
 use game_render::splat::Splat;
+use game_render::terrain::Pages;
 #[cfg(not(target_arch = "wasm32"))]
 use game_render::gpu::{GroundChunk, GroundVertex};
 use game_render::world::{Camera, Lighting};
 use game_sim::track::{Terrain, TerrainLayout};
 
-/// How many samples a terrain tree's leaf holds along one side, which is also how many cells: the
-/// shared seventeenth sample belongs to the next leaf along.
+/// How many samples a terrain tree's leaf holds along one side (game_render::terrain's `LEAF`), at any
+/// depth: a field's `width x 256` samples are sixteen leaves per unit of width, which on a one-level
+/// tree are the root's own cells (MD12).
 const LEAF_SAMPLES: u32 = 16;
 
 /// The colour the ground is painted where the track has no paint of its own ([`Splat`]).
@@ -55,6 +57,8 @@ pub const CHUNK_FEET: f32 = 288.0;
 const PAINTED: u32 = 0;
 const BAKED: u32 = 1;
 const UNPAINTED: u32 = 2;
+/// A mod track's cell, painted from its terrain's own pages (MD4).
+const PAGED: u32 = 3;
 
 /// The terrain, and what the scene says about how big it is.
 pub struct Ground<'a> {
@@ -66,22 +70,25 @@ pub struct Ground<'a> {
     pub samples_z: u32,
     /// The track's own ground paint and baked light (V25), where it has them.
     pub paint: Option<Splat>,
+    /// A mod track's own terrain pages and detail map (MD4), where it has them and no splat.
+    pub pages: Option<Pages>,
 }
 
 impl<'a> Ground<'a> {
     /// The ground of one track: its terrain file, and the scene's own statement of how many root
     /// cells it has.
     ///
-    /// The sample count is the tree's shape rather than a number in the file: each level of the tree
-    /// is sixteen cells across, so a field is `width x 16^levels` samples.
+    /// A field is `width x 256` samples, as the simulation's ground has it, whatever the tree's depth
+    /// ([`game_sim::world::SAMPLES_PER_WIDTH`]).
     pub fn new(terrain: Terrain<'a>, layout: &TerrainLayout) -> Ground<'a> {
-        let per_root = LEAF_SAMPLES.pow(terrain.levels);
+        let per_width = game_sim::world::SAMPLES_PER_WIDTH;
         Ground {
             spacing: terrain.scale.0,
-            samples_x: layout.width.max(1) * per_root,
-            samples_z: layout.breadth.max(1) * per_root,
+            samples_x: layout.width.max(1) * per_width,
+            samples_z: layout.breadth.max(1) * per_width,
             terrain,
             paint: None,
+            pages: None,
         }
     }
 
@@ -99,6 +106,14 @@ impl<'a> Ground<'a> {
     /// [`CHUNK_FEET`] in this ground's cells, a power of two as [`Ground::chunks`] makes them.
     pub fn chunk_cells(&self) -> u32 {
         ((CHUNK_FEET / self.spacing.max(1.0e-3)).round() as u32).max(1).next_power_of_two()
+    }
+
+    /// Paint a mod track's ground from its terrain's own pages, with `detail` over them repeating
+    /// every `multiplier` samples (MD4). A terrain without pages stays as it was.
+    pub fn paged(mut self, detail: Option<game_render::pst::Texture>, multiplier: f32) -> Ground<'a> {
+        let leaves = (self.samples_x / LEAF_SAMPLES, self.samples_z / LEAF_SAMPLES);
+        self.pages = Pages::of(&self.terrain, self.spacing, leaves).map(|p| p.with_detail(detail, multiplier));
+        self
     }
 
     /// How big the field is in world units.
@@ -244,6 +259,8 @@ impl<'a> Ground<'a> {
                     .paint
                     .as_ref()
                     .is_some_and(|p| p.light(middle.x, middle.z).is_some());
+                let paged = self.paint.is_none()
+                    && self.pages.as_ref().is_some_and(|p| p.page_at(middle.x, middle.z).is_some());
                 let shade = corner.map(|(i, dx, dz): (usize, u32, u32)| {
                     let point = v3(
                         x0 + dx as f32 * self.spacing,
@@ -261,6 +278,7 @@ impl<'a> Ground<'a> {
                         lit[k] = match (&self.paint, baked) {
                             (Some(_), true) => 1.0,
                             (Some(_), false) => sunlit,
+                            (None, _) if paged => sunlit,
                             (None, _) => sunlit * DIRT[k] / 255.0,
                         };
                     }
@@ -281,6 +299,7 @@ impl<'a> Ground<'a> {
                 let tag = match (&self.paint, baked) {
                     (Some(_), true) => BAKED,
                     (Some(_), false) => PAINTED,
+                    (None, _) if paged => PAGED,
                     (None, _) => UNPAINTED,
                 };
                 for tri in [[0, 1, 2], [0, 2, 3]] {
@@ -291,6 +310,10 @@ impl<'a> Ground<'a> {
             }
         }
         let paint = |tag: u32, x: f32, z: f32| match &self.paint {
+            None if tag == PAGED => {
+                let c = self.pages.as_ref().and_then(|p| p.paint(x, z)).unwrap_or([255; 3]);
+                [c[0], c[1], c[2], 255]
+            }
             Some(splat) if tag != UNPAINTED => {
                 let c = splat.paint(x, z);
                 let l = if tag == BAKED { splat.light(x, z).unwrap_or(1.0) } else { 1.0 };

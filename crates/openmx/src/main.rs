@@ -404,6 +404,10 @@ impl Seat {
             {
                 println!("marker: {}", marker_line(did));
             }
+            // The plane's own set (P107), on the d-pad the plane no longer reads.
+            if let Some(did) = self.garage.markers(&mut self.sim, me, spots, &[], place) {
+                println!("marker: {}", marker_line(did));
+            }
         }
         self.hands = controls;
     }
@@ -418,8 +422,8 @@ const MARKER_ALPHA: f32 = 0.2;
 const RIDER_GROUP: usize = 0;
 
 /// A view's markers' slot display while it is up (P88): the selection, which slots hold a marker,
-/// the label, and the other players in the ride by seat (P94).
-type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>);
+/// the label, the other players in the ride by seat (P94), and how far a Down or Up hold is (P106).
+type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u32);
 
 /// A marker's tick (P88) as the console says it.
 fn marker_line(did: markers::Did) -> String {
@@ -1674,6 +1678,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let extent = ground.extent();
         ground.painted(game_render::splat::Splat::load(&archives, &stem, extent))
     };
+    // A mod track with no splat is painted from its terrain's own pages, as MX vs. ATV draws its maps
+    // (MD4). The disc's tracks keep their own ground.
+    let ground = match &modded {
+        Some(_) if ground.paint.is_none() => {
+            let detail = game_render::terrain::Pages::load_detail(&archives[..1], &stem);
+            let ground = ground.paged(detail, game_render::terrain::detail_multiplier(&ini::text(&scn_bytes)));
+            if let Some(p) = &ground.pages {
+                let paged = p.page_of.iter().filter(|p| p.is_some()).count();
+                let detail = if p.detail.is_some() { "with" } else { "without" };
+                println!("ground: {} terrain pages on {paged} of {} leaves, {detail} a detail map", p.pages.len(), p.page_of.len());
+            }
+            ground
+        }
+        _ => ground,
+    };
     let sim_terrain = track::Terrain::parse(&terrain_bytes)?;
     // A world's ground (MD8): every tile and join, each asked in its own coordinates.
     let mut tiled = match &world_mod {
@@ -2884,13 +2903,20 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let at = Instant::now();
         // A world's ground is every piece's, unpainted: each tile's paint is its own (MD9).
         let (chunks, paint) = match (&world_mod, &sim) {
-            (Some(w), Land::Tiles(t)) => (worlds::chunks(w, t, ground.chunk_cells()), None),
-            _ => (ground.chunks(ground.chunk_cells()), ground.paint.as_ref()),
+            (Some(w), Land::Tiles(t)) => (worlds::chunks(w, t, ground.chunk_cells()), game_render::gpu::GroundPaint::Bare),
+            _ => {
+                let paint = match (&ground.paint, &ground.pages) {
+                    (Some(splat), _) => game_render::gpu::GroundPaint::Splat(splat),
+                    (None, Some(pages)) => game_render::gpu::GroundPaint::Pages(pages),
+                    (None, None) => game_render::gpu::GroundPaint::Bare,
+                };
+                (ground.chunks(ground.chunk_cells()), paint)
+            }
         };
         r.forget_assets();
         r.set_scene(&look);
         r.set_sky(sky.as_ref());
-        r.set_ground(&chunks, paint, ground::DIRT)?;
+        r.set_ground_painted(&chunks, paint, ground::DIRT)?;
         r.upload_all(&assets);
         let (models, materials, textures) = r.uploaded();
         println!(
@@ -3151,11 +3177,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut lobby_planes: Option<Vec<bool>> = None;
     let mut online = match &args.online {
         // Into a ride under way (N10): every seat is the host's first's bike, on this machine's
-        // constants for it, and the ride's state comes from the host.
+        // constants for it, and the ride's state comes from the host — this machine's seat in the
+        // plane if its setup picked it (N19), which its pick tells the host.
         None if from_lobby.is_some() && drop_in => {
             let ((room, me), net) = from_lobby.expect("checked");
-            if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike || world.seats.len() != 1 {
-                return Err("dropping in on an online ride rides one player's bike and no tape: drop --play, --record, --vehicle and --players".into());
+            if head.is_some() || world.tape.is_some() || world.seats.len() != 1 {
+                return Err("dropping in on an online ride rides one player and no tape: drop --play, --record and --players".into());
             }
             let disc = &front.as_deref().expect("from the lobby").network.disc;
             let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
@@ -3253,7 +3280,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         on.planes(stock_plane, plane_like.as_ref());
         // Each seat that starts in the plane stands in its own bay at tick 0 (N18): the lobby's
         // now, from the picks; `--peer`s' once every peer's card has said its own.
-        on.bays(online_bays);
+        on.bays(online_bays.clone());
         if let Some(flies) = &lobby_planes {
             on.start_planes(flies)?;
         }
@@ -3271,7 +3298,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut kept_markers: Vec<Option<saved_markers::Kept>> = vec![None; world.seats.len()];
     if let Some(head) = &head {
         if let Some(m) = head.tape.start_markers().map_err(|e| format!("the tape's markers: {e}"))? {
-            println!("markers: the tape's, {} placed", m.slots.iter().flatten().count());
+            println!("markers: the tape's, {} placed", m.placed());
             world.seats[0].sim.markers = m;
         }
     } else if online.is_some() {
@@ -3281,18 +3308,23 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         for (i, seat) in world.seats.iter_mut().enumerate() {
             let bike = bike_words.get(i).unwrap_or(&bike_words[0]);
             seat.sim.markers = saved_markers::load(&markers_dir, &args.track, &profile_of(i), bike);
-            let placed = seat.sim.markers.slots.iter().flatten().count();
+            let placed = seat.sim.markers.placed();
             if placed > 0 {
                 println!("markers: {} on {}: {placed} kept", profile_of(i), args.track);
             }
             kept_markers[i] = Some(saved_markers::Kept::new(&args.track, &profile_of(i), bike, &seat.sim.markers));
         }
     }
-    // A tape carries the markers its first player started with, and replays on them.
+    // Each seat shows the set of the machine it starts on (P107): a ride may start in the plane.
+    for seat in &mut world.seats {
+        let up = if seat.sim.plane.is_some() { Kind::Biplane } else { seat.garage.up };
+        seat.sim.markers.up(vehicle::markers_of(up));
+    }
+    // A tape carries the markers its first player started with, every machine's, and replays on them.
     if let Some(tape) = &mut world.tape
-        && !world.seats[0].sim.markers.slots.iter().all(Option::is_none)
+        && world.seats[0].sim.markers.any()
     {
-        tape.tape.markers = world.seats[0].sim.markers.to_file(&bike_words[0]);
+        tape.tape.markers = world.seats[0].sim.markers.to_files(&saved_markers::names(&bike_words[0]));
     }
     // The pause offers "Open to Online" (N10) on a local freeride of one player on the bike set the
     // disc's own lookup gives (what a joiner's machine loads for it), outside any lobby.
@@ -3423,7 +3455,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
         // The recording's first player cleared their markers from the pause before this frame (P99).
-        if head.as_ref().is_some_and(Head::cleared) && !world.seats[0].sim.markers.slots.iter().all(Option::is_none) {
+        if head.as_ref().is_some_and(Head::cleared) && world.seats[0].sim.markers.any() {
             world.seats[0].sim.markers.clear();
             if let Some(tape) = &mut world.tape {
                 tape.markers_cleared();
@@ -3677,6 +3709,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             Ok(mut on) => {
                                 on.modifiers(mods, stock_phys[..1].to_vec());
                                 on.planes(stock_plane, plane_like.as_ref());
+                                // a joiner whose setup picked the plane rides in from its own bay (N19)
+                                on.bays(online_bays.clone());
                                 online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some(on.host()));
                                 online = Some(on);
@@ -4162,10 +4196,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let filled: [bool; markers::SLOTS] = std::array::from_fn(|s| m.holds(s));
                 let pad = seat.sim.input.pad(0);
                 let held = seat.riding && markers::held(pad, seat.sim.table(), &seat.hands);
+                let holding = if seat.riding { markers::holding(pad, seat.sim.table(), &seat.hands) } else { 0 };
                 let others = markers::Markers::others(mine.unwrap_or(v), riding.len(), &riding);
                 banner
                     .update(Instant::now(), pick, filled, held)
-                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names), others))
+                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names), others, holding))
             })
             .collect();
         // The bays shown (P103), drawn below and marked on the radar.
@@ -4226,8 +4261,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| {
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
-                        if let Some((pick, filled, label, others)) = banner {
-                            hud::draw_markers(f, *pick, *filled, label, others);
+                        if let Some((pick, filled, label, others, holding)) = banner {
+                            hud::draw_markers(f, *pick, *filled, label, others, *holding);
                         }
                     };
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
@@ -4335,15 +4370,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 .enumerate()
                 .map(|(v, (seat, rig))| {
                     let local = online.is_none() || v == 0;
-                    let ghosts: Vec<Actor> = seat
-                        .sim
-                        .markers
-                        .slots
-                        .iter()
-                        .flatten()
-                        .filter(|_| local && seat.garage.up == Kind::Bike)
+                    // The machine up's set only (P107): a plane's markers are faint planes.
+                    let marks = seat.sim.markers.slots.iter().flatten().filter(|_| local);
+                    let mut ghosts: Vec<Actor> = marks
+                        .clone()
+                        .filter_map(|m| m.ride())
+                        .filter(|_| seat.garage.up == Kind::Bike)
                         .map(|ride| Actor { model: rig.bike_model.as_str(), at: chassis_at(ride), pose: None, lod_from: None, alpha: MARKER_ALPHA })
                         .collect();
+                    let livery = seat.garage.plane.as_ref().map_or(0, |p| p.livery);
+                    for f in marks.filter_map(|m| m.flight()).filter(|_| seat.garage.up == Kind::Biplane) {
+                        let plane = vehicle::marked_plane(f, livery);
+                        let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
+                        for (model, at) in drawn.turned_parts(plane_at(&plane), plane.prop_angle().map(|a| a.0)) {
+                            ghosts.push(Actor { model, at, pose: None, lod_from: None, alpha: MARKER_ALPHA });
+                        }
+                    }
                     if ghosts.is_empty() { Vec::new() } else { actors.iter().cloned().chain(ghosts).collect() }
                 })
                 .collect();
@@ -4563,8 +4605,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 _ => None,
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
-            if let Some(Some((pick, filled, label, others))) = shown_markers.get(v) {
-                hud::draw_markers(target, *pick, *filled, label, others);
+            if let Some(Some((pick, filled, label, others, holding))) = shown_markers.get(v) {
+                hud::draw_markers(target, *pick, *filled, label, others, *holding);
             }
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
             if !rig.hud.on && overlay_mode == menu::Overlay::Original {
