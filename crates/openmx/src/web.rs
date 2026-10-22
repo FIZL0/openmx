@@ -53,6 +53,9 @@ mod ground;
 #[path = "net/mod.rs"]
 pub mod net;
 pub mod peer;
+// The machines (N17): a seat's switch online is the session's, so the session needs them.
+#[allow(dead_code, unused_imports)]
+mod vehicle;
 
 use game_render::disc::{Disc, Res};
 use game_render::mat::v3;

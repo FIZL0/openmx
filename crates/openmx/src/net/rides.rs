@@ -17,11 +17,13 @@ use game_sim::input::{PADS, Report};
 use game_sim::markers::{self, Spot};
 use game_sim::ride::Controls;
 use game_sim::tick::{Engine, Timer0, clock_ms};
+use game_sim::flight::Flight;
 use game_sim::world::World;
 use game_sim::{Input, Sim};
 use ps2_float::F;
 
 use super::Game;
+use crate::vehicle::{self, Wanted};
 
 /// The seats' states: what ggrs keeps a copy of every tick (each [`Sim`] shares its tables).
 pub type State = Arc<Vec<Sim>>;
@@ -36,6 +38,10 @@ pub struct Rides<'a> {
     /// The host's time-scale modifier (P55), [`game_sim::modifiers::Mods::time_scale`]: `None`, the
     /// original's, leaves [`tick_dt`] as it is.
     pub time_scale: Option<F>,
+    /// The ride's biplane as built and never flown (N17, [`plane_on`]), which a seat's switch to
+    /// the plane takes a copy of into its [`Sim::plane`]: `None` on a track that parks none, or a
+    /// ride with no `biplane.phy`, where a seat asking for the plane stays on its bike.
+    pub plane: Option<&'a mut Flight>,
 }
 
 impl Game for Rides<'_> {
@@ -60,8 +66,21 @@ impl Game for Rides<'_> {
         for (seat, sim) in self.sims.iter_mut().enumerate() {
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());
+            // The machine the seat's player wants (N17), switched to before the tick's step, as
+            // the shell switches between frames offline (P102). A switch that cannot be had (no
+            // plane, no ground) leaves the seat where it is, and is asked again next tick.
+            let wanted = Wanted::of(reports[0].0[super::SWITCH]);
+            if let Some(to) = wanted.to {
+                let _ = vehicle::switch_lane(to, self.plane.as_deref(), sim, self.world);
+            }
             // The shell's hands, the d-pad the markers' and not the ride's (P93).
             let hands = sim.poll(dt, &reports).stick_alone();
+            // On the plane the bike is not stepped, its markers do not run and its rider's body
+            // does not move, as offline (`Seat::pass`).
+            if sim.plane.is_some() {
+                vehicle::fly_lane(sim, dt, wanted, self.world);
+                continue;
+            }
             sim.step(dt, &hands, self.world);
             markers::frame_among(sim, seat, &spots, &riding, &hands);
             if let Some(after) = &mut self.after {
@@ -123,6 +142,7 @@ impl Game for Rides<'_> {
         if at != bytes.len() {
             return Err(format!("{} bytes left over after the seats", bytes.len() - at));
         }
+        sims.iter_mut().for_each(|sim| self.probe(sim));
         *self.sims = sims;
         Ok(())
     }
@@ -142,6 +162,7 @@ impl Game for Rides<'_> {
         if let Some(p) = presets.chunks(2).find(|p| p[0] as usize == seat) {
             sim.set_presets([p[1] as usize, 0]);
         }
+        self.probe(&mut sim);
         while self.sims.len() < seat {
             self.sims.push(sim.clone());
         }
@@ -151,6 +172,33 @@ impl Game for Rides<'_> {
         }
         Ok(())
     }
+}
+
+impl Rides<'_> {
+    /// A seat decoded flying (N17) whose plane came without its ray probe, a constant of the disc
+    /// the codec leaves out and puts back only onto a seat that was flying here too: the ride's own.
+    fn probe(&self, sim: &mut Sim) {
+        if let (Some(f), Some(t)) = (sim.plane.as_mut(), self.plane.as_deref())
+            && f.rays.is_none()
+        {
+            f.rays = t.rays.clone();
+        }
+    }
+}
+
+/// The ride's biplane for [`Rides::plane`] (N17): `stock`, the disc's `biplane.phy`, on 1P's
+/// modifiers `mods` (every seat's online, [`Modded`]), built as the shell builds a seat's plane — the
+/// flight off the file, then the ray probe and the track's area of `like` (any plane of this ride's) —
+/// so every machine, and a machine the host's change rebuilt it on, holds the same one.
+pub fn plane_on(stock: &game_sim::phy::Plane, mods: &game_sim::modifiers::Mods, like: &Flight) -> Flight {
+    let mut file = *stock;
+    mods.plane(0, &mut file);
+    let mut f = Flight::new(&file);
+    if let Some(rays) = &like.rays {
+        f = f.with_rays((**rays).clone());
+    }
+    f.area = like.area;
+    f
 }
 
 /// One seat in bytes (N13): its controller preset (P79), which its binding table is built on,
@@ -238,6 +286,9 @@ pub struct Modded<'a, 'b> {
     /// [`Rides::seat`] and [`Rides::decode`] build it on the first seat's constants.
     pub stock: &'a [game_sim::phy::Phy],
     pub mods: &'a mut game_sim::modifiers::Mods,
+    /// The disc's `biplane.phy` before any modifier (N17), which [`Rides::plane`] and every seat's
+    /// plane in flight are moved onto a change from; `None` with no plane in the ride.
+    pub stock_plane: Option<&'a game_sim::phy::Plane>,
 }
 
 impl Game for Modded<'_, '_> {
@@ -284,6 +335,14 @@ impl Game for Modded<'_, '_> {
         let first = self.stock.first().ok_or("no stock bike file to build the modifiers on")?;
         for (seat, sim) in self.rides.sims.iter_mut().enumerate() {
             to.resim(&was, 0, self.stock.get(seat).unwrap_or(first), sim);
+            // A plane in flight retuned where it is, as the pause does offline (P98, `replane`).
+            if let (Some(file), Some(f)) = (self.stock_plane, sim.plane.as_mut()) {
+                to.replane(0, file, f);
+            }
+        }
+        // And the plane a switch takes from here built on the new set.
+        if let (Some(file), Some(t)) = (self.stock_plane, self.rides.plane.as_deref_mut()) {
+            *t = plane_on(file, &to, t);
         }
         *self.mods = to;
         self.rides.time_scale = to.time_scale();

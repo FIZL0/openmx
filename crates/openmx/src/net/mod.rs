@@ -19,7 +19,8 @@
 //!   tests drive the same session over it.
 //! * A seat's pad goes on the wire as the **original's own pad bytes** ([`wire`]): the twenty bytes
 //!   of [`Report`] the game's poll reads, so a pad that rode here rides the same on every machine,
-//!   pressures and all.
+//!   pressures and all — and one byte of the shell's after them, [`SWITCH`]: the machine the
+//!   seat's player wants (N17), so a switch is an input at a tick like a button.
 //! * [`Netplay`] is one machine's whole session: ggrs' (in [`rollback`]), the messages beside it
 //!   ([`link`]), and the resync and recovery bookkeeping. It speaks in datagrams to named peers and
 //!   nothing else ([`Netplay::heard`], [`Netplay::outgoing`]): which socket carries them is the
@@ -71,9 +72,16 @@ pub const HASH_EVERY: u32 = 30;
 pub const SEATS: usize = openmx_net::SEATS;
 
 /// The pad bytes a seat sends: bytes 0 to 19 of the pad library's report — status, mode, the button
-/// word, the four stick bytes and the twelve pressures, everything the original's poll reads. The
-/// report's last twelve bytes are never read by the game and never set by this shell.
-pub const WIRE: usize = 20;
+/// word, the four stick bytes and the twelve pressures, everything the original's poll reads — and
+/// the shell's own byte after them, [`SWITCH`]. The report's last twelve bytes are never read by the
+/// game; the shell sets only the first of them, and only online.
+pub const WIRE: usize = 21;
+
+/// The report byte that carries a seat's machine switch online (N17): the machine its player wants
+/// and their biplane scheme, [`crate::vehicle::Wanted::byte`]. The first byte past what the original's
+/// poll reads, so the switch rides the same rollback input as the pad and lands on every machine
+/// at the same tick; 0, an idle pad's, asks for nothing.
+pub const SWITCH: usize = 20;
 
 /// A seat's pad on the wire ([`wire`]); an idle pad by default, which is what ggrs assumes for a
 /// seat before its first real one.
