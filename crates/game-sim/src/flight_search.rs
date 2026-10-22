@@ -264,10 +264,32 @@ pub struct Scene<'a> {
     sweep: SweepProbe,
 }
 
+/// The plane's nearby `search` refilled ([`broad_phase::gather`], both kinds of structure) around
+/// the ray probe placed at `node`, in the world [`world`] builds there: what the original's plane does
+/// once a tick in its post listener, after the world step, from the pose the step left (S99). The
+/// next frame's [`Scene`] searches with what it gathered.
+pub fn refresh(props: Option<&Props>, field: Option<([F; 2], [F; 2])>, rays: &Rays, node: &Frame, search: &mut broad_phase::Search) {
+    let props = props.map_or(&[][..], |p| &p.props[..]);
+    let (centre, radius) = reach(rays, &matrix(node));
+    let (mut broad, mut objects) = world(props, field, centre, radius);
+    refill(&mut objects, &mut broad, search);
+}
+
+/// The gather, after forgetting a list that names more collidables than this world has (it was
+/// gathered in another one).
+fn refill(objects: &mut [Collidable], broad: &mut Broad, search: &mut broad_phase::Search) {
+    if search.nearby.found.iter().any(|c| objects.len() <= c.object) {
+        search.built = false;
+        search.nearby.found.clear();
+    }
+    broad_phase::gather(objects, broad, search, RAY, 3);
+}
+
 impl<'a> Scene<'a> {
-    /// The world around the ray probe placed at `node` ([`world`]), and the plane's nearby `search`
-    /// filled from it ([`broad_phase::gather`], both kinds of structure). A list that names more
-    /// collidables than this world has was gathered in another one, and is gathered again.
+    /// The world around the ray probe placed at `node` ([`world`]), searched with the plane's nearby
+    /// `search` as last [`refresh`]ed. A list never gathered, or one that names more collidables than
+    /// this world has, is gathered here first: the first frame's seed, which the original's spawn
+    /// does somewhere not found.
     pub fn new(
         props: Option<&'a Props>,
         field: Option<([F; 2], [F; 2])>,
@@ -279,11 +301,9 @@ impl<'a> Scene<'a> {
         let transform = matrix(node);
         let (centre, radius) = reach(rays, &transform);
         let (mut broad, mut objects) = world(props, field, centre, radius);
-        if search.nearby.found.iter().any(|c| objects.len() <= c.object) {
-            search.built = false;
-            search.nearby.found.clear();
+        if !search.built || search.nearby.found.iter().any(|c| objects.len() <= c.object) {
+            refill(&mut objects, &mut broad, search);
         }
-        broad_phase::gather(&mut objects, &mut broad, search, RAY, 3);
         let ray = ray_probe::Record {
             listed: true,
             capacity: rays.segments.len(),
