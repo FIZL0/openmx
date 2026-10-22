@@ -1,15 +1,15 @@
 # split.toml — two riders in the original's split screen (S93), for the two-rider fixtures.
 #
-# The user's two split-screen recordings (context/recordings/splitscreen.p2m2, the long ride, and
+# The user's two split-screen recordings (context/recordings/split/splitscreen.p2m2, the long ride, and
 # splitscreen2_shortcolision.p2m2, riders colliding) are played back on a copy and captured with this
 # spec, one row per tick, by research/s93/play_capture.sh (C6's recipe with this spec):
 #
 #   export WAYLAND_DISPLAY=wayland-1 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 QT_ACCESSIBILITY=1
 #   ./kit pcsx2 start
-#   ./kit pcsx2 with -- bash research/s93/play_capture.sh PID context/recordings/splitscreen.p2m2 \
+#   ./kit pcsx2 with -- bash research/s93/play_capture.sh PID context/recordings/split/splitscreen.p2m2 \
 #       3113 2444 context/capture/split/splitscreen.csv
 #   ./kit pcsx2 with -- bash research/s93/play_capture.sh PID \
-#       context/recordings/splitscreen2_shortcolision.p2m2 5765 388 \
+#       context/recordings/split/splitscreen2_shortcolision.p2m2 5765 388 \
 #       context/capture/split/splitscreen2.csv
 #
 # FIRST is the state's frame_counter + 1; N is the tape's fields / 2. crates/game-sim/tests/split.rs
