@@ -1098,16 +1098,15 @@ impl PadFrame {
         p.held_mask()
     }
 
-    /// The left stick of `pad` as it arrived, with the centre byte taken off: `(-127..=127, …)`, right
-    /// and down positive, as the report's bytes are.
+    /// The left stick of `pad` as it arrived, with the centre byte taken off: `(-127..=128, …)`, right
+    /// and down positive, as the report's bytes are, and +128 (`0xff`) wrapped to -128 as
+    /// [`Input::stick`] holds it (S94: clamped to 127, a full stick replayed as `0xfe`).
     ///
     /// The raw arrival value, and nothing else: the dead zone, the curve and whatever history the game
     /// keeps of it are the port's business, not the recording's.
     pub fn stick(&self, pad: usize) -> (i8, i8) {
         let report = &self.reports[pad];
-        let axis = |b: u8| {
-            (i16::from(b) - i16::from(input::AXIS_CENTRE)).clamp(-127, 127) as i8
-        };
+        let axis = |b: u8| b.wrapping_sub(input::AXIS_CENTRE) as i8;
         (axis(report.axis(2)), axis(report.axis(3)))
     }
 
