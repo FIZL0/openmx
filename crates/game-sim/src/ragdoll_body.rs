@@ -704,6 +704,8 @@ pub fn wreck_arm(
         let d = p.merge(Dest::XYZ, p.sub(centre));
         if !(length(d) <= F::ONE + radius) {
             doll.off_bike = true;
+            // Every bone collision's sphere takes the bike off its ignore list (S105).
+            doll.ignores_bike = false;
         }
     }
     let main = doll.bones[MAIN].body;

@@ -1,0 +1,408 @@
+//! **The bones against the wreck bike** (S105): the scene test a bone's sphere makes against the wreck
+//! bike's collision mesh (`wreckbikef.col`), and the [`Scene`] that answers a ride's ragdoll with it.
+//!
+//! The original stands each bone's sphere collider at the bone and pairs it with what its search
+//! gathered; against a mesh collidable the pair walks the mesh's box tree in the collidable's frame,
+//! takes the first triangle under the sphere whose plane it reaches, keeps the nearest of them in the
+//! sphere's record, and hands the hit back through the frame. Every sphere test of S62's five wrecks
+//! that hit anything hit this one mesh (the bike's own body object), so a ride's scene is the bike.
+//!
+//! The bike is gathered for the bones as the original gathers it: one search for all of them, once
+//! a frame in the wreck, round the first collision's sphere ([`BikeSearch`]), in the track's tree
+//! where the bike stands ([`Cells`]), and only once the bones are off the bike (until then every
+//! sphere ignores it). A sphere is tested against the mesh only when the search reaches it.
+//!
+//! What is not here: the hierarchy class of collision file, which the wreck bike is not; the swept
+//! test, which S62's wrecks never needed against the bike; and the bike leaving the broad phase,
+//! which the s62 states show some 400 frames after the wreck and nothing here models.
+
+#![deny(clippy::float_arithmetic)]
+
+use crate::biplane::Body;
+use crate::broad_build;
+use crate::broad_phase::{Broad, Pair, Placement, Quadtree, Query, Space, Structure, Tables};
+use crate::collide::MeshRef;
+use crate::contact::{Collider, Node, Other, Side, Weighed};
+use crate::math::Mat4;
+use crate::ragdoll_contact::{Against, Scene, moving};
+use crate::track::{self, Child};
+use ps2_float::{Acc, Dest, F, Vf, fpu, vu};
+
+/// **The wreck bike's collision mesh**: its box tree, its triangles' normals as the loader packs
+/// them, and its vertices.
+#[derive(Clone, Debug)]
+pub struct Bike {
+    pub mesh: track::Mesh,
+    /// Each triangle's normal in the loader's 16-bit form, which the test unpacks again.
+    pub normals: Vec<[i16; 3]>,
+}
+
+/// One sphere's hit on the mesh, in the bike's frame and in the world.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Touch {
+    /// The sphere's centre's distance from the triangle's plane.
+    pub distance: F,
+    /// The point on the plane under the centre, and the plane's normal (unit, `w` one), in the
+    /// mesh's frame: what the sphere's record holds.
+    pub local: (Vf, Vf),
+    /// The same two through the frame: what the push-out is handed.
+    pub world: (Vf, Vf),
+}
+
+impl Bike {
+    /// The mesh out of its collision file. `None` when the file does not read as a mesh or has no
+    /// nodes.
+    pub fn parse(col: &[u8]) -> Option<Bike> {
+        let mesh = track::Mesh::parse(col).ok()?;
+        mesh.nodes.first()?;
+        let normals = mesh.triangles.iter().map(|t| crate::flight_search::pack_normal(t.normal)).collect();
+        Some(Bike { mesh, normals })
+    }
+
+    /// **A sphere at `centre` (world) of `radius` against the mesh in `frame`**: the original's
+    /// sphere-on-mesh pair with a fresh record (one contact at most). The squared radius is the
+    /// collider's own, `radius * radius` through the FPU.
+    pub fn touch(&self, frame: &Node, centre: Vf, radius: F) -> Option<Touch> {
+        let r2 = F(fpu::mul(radius.0, radius.0));
+        let mut best = None;
+        self.descend(0, frame, centre, radius, r2, &mut best);
+        let (distance, normal, point) = best?;
+        Some(Touch { distance, local: (point, normal), world: (frame.place(point), frame.rotate(normal)) })
+    }
+
+    /// The tree walk from `word`: a node's box is tested, then its first child, and its second only
+    /// when the first answers no. A leaf answers yes when the sphere touches its triangle and the
+    /// record took it, or was full; no when the hit was no nearer than the one the record holds.
+    fn descend(&self, word: u16, frame: &Node, centre: Vf, r: F, r2: F, best: &mut Option<(F, Vf, Vf)>) -> bool {
+        let mesh = MeshRef::of(&self.mesh);
+        match child(word) {
+            Child::Node(i) => {
+                let Some(node) = self.mesh.nodes.get(usize::from(i)) else { return false };
+                if !box_reached(node, frame, centre, r, r2) {
+                    return false;
+                }
+                self.descend(node.children[0], frame, centre, r, r2, best)
+                    || self.descend(node.children[1], frame, centre, r, r2, best)
+            }
+            Child::Leaf(i) => {
+                let (Some(t), Some(&packed)) = (mesh.triangles.get(usize::from(i)), self.normals.get(usize::from(i))) else {
+                    return false;
+                };
+                let c = frame.unplace(centre);
+                let n = unpack(packed);
+                let [a, b, d] = t.vertices.map(|v| mesh.vertex(v));
+                let dist = dot(n, minus(c, a));
+                if dist.0 < 0.0 || !(dist.0 <= r.0) {
+                    return false;
+                }
+                let p = minus(c, n.merge(Dest::XYZ, n.mul(Vf::splat(dist.0))));
+                let hit = inside(p, n, [a, b, d])
+                    || edge(c, a, b).abs().0 < r.0
+                    || edge(c, b, d).abs().0 < r.0
+                    || edge(c, d, a).abs().0 < r.0;
+                if !hit {
+                    return false;
+                }
+                match best {
+                    Some((held, ..)) if !(dist.0 < held.0) => false,
+                    _ => {
+                        *best = Some((dist, unit(n), p));
+                        true
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// What a child word points at: the top bit marks a triangle.
+fn child(word: u16) -> Child {
+    if word & 0x8000 == 0 { Child::Node(word) } else { Child::Leaf(word & 0x7fff) }
+}
+
+/// **A tree node's box against the sphere**: the centre into the mesh's frame and off the box's
+/// centre, every lane's magnitude, and out when any axis is past the half extent by more than the
+/// radius; else the part past the box, squared, inside the squared radius.
+fn box_reached(node: &track::Node, frame: &Node, centre: Vf, r: F, r2: F) -> bool {
+    let [cx, cy, cz] = node.centre.map(|c| c.0);
+    let [hx, hy, hz] = node.half_extent.map(|h| h.0);
+    let local = frame.unplace(centre);
+    let a = bits_abs(minus(local, Vf::new(cx, cy, cz, 0.0)));
+    let half = Vf::new(hx, hy, hz, 0.0);
+    let past = minus(a, half);
+    let past = past.merge(Dest::XYZ, past.sub(Vf::splat(r.0)));
+    if !(past.x() <= 0.0) || !(past.y() <= 0.0) || !(past.z() <= 0.0) {
+        return false;
+    }
+    let out = minus(a, a.mini(half));
+    let s = Acc::mula(out.x(), out.x()).madda(out.y(), out.y()).madd(out.z(), out.z());
+    !(r2.0 <= s.0)
+}
+
+/// **Whether `p`, on the plane, is inside the triangle**: the corner tests round `b` and then round
+/// `c`, each `n · (e × q)` and `n · (q × e')` not negative.
+fn inside(p: Vf, n: Vf, [a, b, c]: [Vf; 3]) -> bool {
+    let n = Vf::new(n.x(), n.y(), n.z(), 0.0);
+    let round = |at: Vf, e1: Vf, e2: Vf| {
+        let (e1, e2, q) = (minus(e1, at), minus(e2, at), minus(p, at));
+        !(dot(n, cross(e1, q)).0 < 0.0) && !(dot(n, cross(q, e2)).0 < 0.0)
+    };
+    round(b, c, a) && round(c, a, b)
+}
+
+/// **The distance from `p` to the edge from `b` to `a`**, through the FPU: the far end's square is
+/// the original's `|w|² + 2 w·e + |e|²`, with the sign of the middle term as it is written.
+fn edge(p: Vf, a: Vf, b: Vf) -> F {
+    let e = minus(a, b);
+    let w = minus(p, b);
+    let along = dot(w, e).0;
+    let ww = dot(w, w).0;
+    if along <= 0.0 {
+        return F(fpu::sqrt(ww));
+    }
+    let ee = dot(e, e).0;
+    if !(along < ee) {
+        return F(fpu::sqrt(fpu::add(ee, fpu::add(ww, fpu::mul(2.0, along)))));
+    }
+    let t = fpu::div(along, ee);
+    let tt = fpu::mul(t, t);
+    let k = fpu::mul(fpu::mul(2.0, t), along);
+    F(fpu::sqrt(fpu::madd(fpu::suba(ww, k), ee, tt)))
+}
+
+/// A triangle's packed normal as the loader's helper unpacks it: each short onto `768.0`'s bits,
+/// less `768.0` through the FPU, and `w` one.
+fn unpack(n: [i16; 3]) -> Vf {
+    let one = |s: i16| fpu::sub(f32::from_bits(0x4440_0000u32.wrapping_add(s as i32 as u32)), 768.0);
+    Vf::new(one(n[0]), one(n[1]), one(n[2]), 1.0)
+}
+
+/// `vmul.xyz`, `vadday.x`, `vmaddz.x` (by one), `vrsqrt`, `vmulq.xyz`: unit length, `w` kept.
+fn unit(v: Vf) -> Vf {
+    let sq = v.mul(v);
+    let len2 = vu::madd(vu::add(sq.x(), sq.y()), 1.0, sq.z());
+    let q = vu::rsqrt(1.0, len2);
+    v.merge(Dest::XYZ, v.mul(Vf::splat(q)))
+}
+
+/// `a.xyz − b.xyz`, `w` from `a`.
+fn minus(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, a.sub(b))
+}
+
+/// `vopmula a, b` / `vopmsub a ← b, a`, `.xyz`: `a × b`, `w` from `a`.
+fn cross(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(a, b), b, a))
+}
+
+/// The FPU's three-term dot product, `mula.s` / `madda.s` / `madd.s`, in this operand order.
+fn dot(a: Vf, b: Vf) -> F {
+    Acc::mula(a.x(), b.x()).madda(a.y(), b.y()).madd(a.z(), b.z())
+}
+
+/// The sign bits cleared, every lane (`pand` with `0x7fffffff`: nothing flushed).
+fn bits_abs(v: Vf) -> Vf {
+    Vf(v.0.map(|x| f32::from_bits(x.to_bits() & 0x7fff_ffff)))
+}
+
+/// The bones' search's box half side, which is also the least its bound is (`+0x24`), and the reach
+/// the bound may grow to (`+0x28`).
+const SEARCH_LEAST: f32 = 10.0;
+const SEARCH_EXTRA: f32 = 30.0;
+
+/// **The track's tree**, which the bones' search queries for the bike and measures its bound in: the
+/// tree the broad phase lays over the terrain's box on the ground plane, as
+/// [`broad_build::tree_over`] lays it, empty but for the bike.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cells {
+    pub tree: Quadtree,
+    /// The far corner the tree was laid to, and the world size of a cell.
+    pub hi: [F; 2],
+    pub size: F,
+}
+
+impl Cells {
+    /// The tree over the box `lo`..`hi` (`x`, `z`).
+    pub fn over(lo: [F; 2], hi: [F; 2]) -> Cells {
+        let (mut tree, size) = broad_build::tree_over(lo, hi, F(crate::flight_search::TREE_LEAST));
+        // It reports the box its cells cover, which is what the gather's bound is measured in.
+        tree.flags = 2;
+        Cells { tree, hi, size }
+    }
+
+    /// The tree over a terrain's box; `None` for a field with no edge (one a test samples off a
+    /// world), which a track's tree is not laid over.
+    pub fn of(field: &dyn crate::contact_search::Heightfield) -> Option<Cells> {
+        const EDGE: f32 = 16_777_216.0;
+        let (lo, hi) = (field.min(), field.max());
+        let (lo, hi) = ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())]);
+        lo.iter().chain(&hi).all(|&v| -EDGE < v && v < EDGE).then(|| Cells::over(lo, hi))
+    }
+
+    /// Where the bike goes in the tree, standing at `frame`: [`broad_build::key`] of its mesh's root
+    /// box through the frame ([`crate::flight_search::bike_box`]).
+    pub fn key(&self, bike: &Bike, frame: &Mat4) -> u32 {
+        let (c, h) = crate::flight_search::bike_box(&bike.mesh, frame);
+        broad_build::key(&self.tree, self.hi, c, h)
+    }
+
+    /// **The search's query round `probe`**: the box of side `2 × least` round it through the tree
+    /// with the bike put under `key`; whether the bike comes out, and the box the cells cover
+    /// (`x`, `z`; in cells times the cell size, the tree's origin not added back; zero for a box off
+    /// the tree).
+    fn query(&self, probe: Vf, key: u32) -> (bool, [F; 2], [F; 2]) {
+        let mut tree = self.tree.clone();
+        broad_build::insert(&mut tree, 0, key);
+        let mut broad = Broad {
+            spaces: vec![Space { next: None, tables: 0 }],
+            tables: vec![Tables { own: Pair { fixed: Some(0), moving: None }, subs: Vec::new() }],
+            structures: vec![Structure::Tree(tree)],
+            cell_size: self.size,
+            places: vec![Placement::default()],
+            ..Broad::default()
+        };
+        let centre = [F(probe.x()), F(probe.y()), F(probe.z()), F(probe.w())];
+        let half = [F(SEARCH_LEAST), F(SEARCH_LEAST), F(SEARCH_LEAST), F::ONE];
+        let (mut lo, mut hi) = ([F::ZERO; 4], [F::ZERO; 4]);
+        let mut q = Query::begin(&mut broad, 0, 1, centre, half, Some((&mut lo, &mut hi)), true);
+        let mut found = false;
+        while let Some(o) = q.next(&mut broad, Some((&mut lo, &mut hi))) {
+            found |= o == 0;
+        }
+        q.end(&mut broad);
+        (found, [lo[0], lo[2]], [hi[0], hi[2]])
+    }
+}
+
+/// **What the bones' search holds of the wreck bike** (S105). The original gathers one search for
+/// all the bone colliders, once a frame before the off-bike test, around the first collision's
+/// sphere where it last stood. While that sphere's reach stays inside the bound of where the list was
+/// gathered, the list is only measured again; otherwise it is gathered anew, and the bike is in it
+/// only if the bones no longer ignore it then and the query's cells reach where it is in the track's
+/// tree. A bone's sphere is paired with the bike only when the
+/// bike is listed and its distance in the list is within the sphere's radius.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BikeSearch {
+    /// Where the first collision's sphere last stood (`+0x40`); `None` until it has.
+    pub stood: Option<Vf>,
+    /// `+0x10`: the probe's centre when the list was gathered; `+0x20` the bound; `+0x30` built.
+    pub centre: Vf,
+    pub bound: F,
+    pub built: bool,
+    /// The bike is in the list, at `distance` (how far its sphere's reach is from the probe).
+    pub listed: bool,
+    pub distance: F,
+}
+
+impl BikeSearch {
+    /// **The frame's gather**, the probe of `reach` where the first sphere last stood, the bike's
+    /// sphere at `bike` and in the tree under `key` ([`Cells::key`]); `offered` is whether the pair
+    /// filter lets the bike through (the bones no longer ignore it). Nothing before the sphere has
+    /// stood anywhere.
+    pub fn gather(&mut self, cells: Option<&Cells>, reach: F, bike: (Vf, F), key: u32, offered: bool) {
+        let Some(probe) = self.stood else { return };
+        if self.built && length(minus(probe, self.centre)) + reach < self.bound {
+            self.distance = reach_distance(bike, probe);
+            return;
+        }
+        // Without a tree the bike is anywhere the query looks, and the bound is its least.
+        let (found, [lo_x, lo_z], [hi_x, hi_z]) = cells.map_or((true, [F::ZERO; 2], [F::ZERO; 2]), |c| c.query(probe, key));
+        let (x, z) = (F(probe.x()), F(probe.z()));
+        self.centre = probe;
+        self.bound = (x - lo_x).min(z - lo_z).min(hi_x - x).min(hi_z - z).min(F(SEARCH_EXTRA).max(reach)).max(F(SEARCH_LEAST));
+        self.listed = offered && found;
+        self.distance = reach_distance(bike, probe);
+        self.built = true;
+    }
+
+    /// Whether a sphere of `radius` is paired with the bike.
+    pub fn reaches(&self, radius: F) -> bool {
+        self.listed && self.distance <= radius
+    }
+}
+
+/// How far the reach of the sphere `(centre, radius)` is from `p`; never below 0.
+fn reach_distance((centre, radius): (Vf, F), p: Vf) -> F {
+    F::ZERO.max(length(minus(centre, p)) - radius)
+}
+
+/// The broad phase's length, `mula`/`madda`/`madd` then the root.
+fn length(d: Vf) -> F {
+    Acc::mula(d.x(), d.x()).madda(d.y(), d.y()).madd(d.z(), d.z()).sqrt()
+}
+
+/// **A ride's ragdoll scene: the wreck bike**, standing in its frame. A bone that touches the mesh
+/// is with the bike's own body object, and the push-out measures the bone against the bike's body
+/// there.
+pub struct WreckBikeScene<'a> {
+    pub mesh: &'a Bike,
+    pub frame: Node,
+    /// The bike's body and its collision object, copied: the velocity query writes the object's
+    /// centre of mass in the world, which the bike's own resolution rewrites before it reads it.
+    pub body: Body,
+    pub collider: Collider,
+    pub mass: F,
+    /// What the bones' search holds of the bike this frame.
+    pub search: BikeSearch,
+    /// Every centre a sphere was stood at this frame, in the order the step stood them.
+    pub stood: Vec<Vf>,
+}
+
+impl<'a> WreckBikeScene<'a> {
+    /// The scene of `bike` (its mesh) standing at `frame` (the ride's transform of the wreck bike), a
+    /// sphere paired with it as `search` says.
+    pub fn new(mesh: &'a Bike, frame: &Mat4, bike: &crate::wreck_bike::WreckBike, search: BikeSearch) -> WreckBikeScene<'a> {
+        WreckBikeScene {
+            mesh,
+            frame: Node { rows: [frame.0[0], frame.0[1], frame.0[2]], origin: frame.0[3] },
+            body: bike.body.clone(),
+            collider: bike.collider.clone(),
+            mass: bike.mass,
+            search,
+            stood: Vec::new(),
+        }
+    }
+}
+
+impl Scene for WreckBikeScene<'_> {
+    fn touching(&mut self, centre: Vf, radius: F) -> Option<Vec<(Vf, Vf)>> {
+        self.stood.push(centre);
+        if !self.search.reaches(radius) {
+            return None;
+        }
+        self.mesh.touch(&self.frame, centre, radius).map(|t| vec![t.world])
+    }
+
+    fn other(&mut self, i: usize) -> Option<usize> {
+        (i == 0).then_some(0)
+    }
+
+    fn velocity(&mut self, _other: usize, at: Vf) -> Vf {
+        let mut w = Weighed { body: &mut self.body, mass: self.mass };
+        moving(at, Against::Other(&mut Other { collider: &mut self.collider, side: Side::Body(&mut w) }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_packed_normal_unpacks_to_itself() {
+        for c in [0.0f32, 1.0, -1.0, 0.5, -0.7071, 0.3333] {
+            let n = crate::flight_search::pack_normal([F(c), F(0.0), F(c)]);
+            let u = unpack(n);
+            assert_eq!(crate::flight_search::pack_normal([F(u.x()), F(u.y()), F(u.z())]), n, "{c}");
+            assert_eq!(u.w(), 1.0);
+        }
+    }
+
+    #[test]
+    fn the_far_end_keeps_the_originals_sign() {
+        // Past the far end the original adds the middle term where the distance would subtract it.
+        let d = edge(Vf::new(3.0, 1.0, 0.0, 1.0), Vf::new(1.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 0.0, 1.0));
+        assert_eq!(d.0, fpu::sqrt(17.0));
+        let mid = edge(Vf::new(0.5, 2.0, 0.0, 1.0), Vf::new(1.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 0.0, 1.0));
+        assert_eq!(mid.0, 2.0);
+    }
+}
