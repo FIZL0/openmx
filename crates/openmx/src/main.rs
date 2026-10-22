@@ -1936,8 +1936,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // scrapers, the other freeride tracks' trailers. Drawn, not ridden into: they reach nothing in the
     // simulation, and their clock is the scene's own, summed from the ticks' `dt` below.
     let traffic = game_render::toy::Traffic::load(&archives, &args.track, &mut |p| car_ground(&mut sim, p));
+    // A car's model object is a scene prop's, so its pose stands in for the file's root node: the
+    // train's turned cars (train_car_03/04/05 carry a half turn there) are drawn without it (V46).
     for (car, _) in &traffic.cars {
-        assets.load(&archives, car.stem());
+        assets.load_placed(&archives, car.stem());
     }
     if !traffic.cars.is_empty() || !traffic.skipped.is_empty() {
         println!("traffic: {} cars on clips, {} left out", traffic.cars.len(), traffic.skipped.len());
