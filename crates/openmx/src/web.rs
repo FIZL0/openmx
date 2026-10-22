@@ -69,10 +69,6 @@ use ground::Ground;
 /// The track the desktop shell starts on when nothing else is said.
 pub const TRACK: &str = "free06";
 
-/// How many samples round the camera's target the ground is drawn to: the desktop shell's own
-/// radius, so the two pictures are the same picture.
-const GROUND_RADIUS: u32 = 44;
-
 /// The place the ride starts in, drawn into a `width` x `height` frame: terrain, then props.
 ///
 /// The same function on both sides of the boundary — the desktop's test draws it natively and in
@@ -107,7 +103,8 @@ pub fn start_line(disc: &mut Disc, track_name: &str, width: usize, height: usize
     let facing = v3(place.start_direction[0].0, place.start_direction[1].0, place.start_direction[2].0);
     let camera = Camera::behind(spawn, facing);
     let mut frame = Frame::new(width, height, look.fog_color);
-    ground.draw(&mut frame, &camera, &Lighting::of(&look), spawn, GROUND_RADIUS);
+    // The desktop shell's own radius, so the two pictures are the same picture.
+    ground.draw(&mut frame, &camera, &Lighting::of(&look), spawn, ground.radius());
     draw_scene(&mut frame, &look, &assets, &[], &camera);
     Ok(frame)
 }
