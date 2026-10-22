@@ -4667,3 +4667,23 @@ collision_tree_build boot 0x00111ee0 (nodes out, facets out, matrix out, quadwor
 #     other +0x40 (r +0x170, r² +0x174): node test 0x00106b10, leaf 0x00105e80 (end within r, else the
 #     closest approach along the unit segment within r and inside its length); writes only +0x80 = 1.0.
 #     Not on any bike's path (no bike collidable is kind 5), so not ported.
+# MD5 — collision class 1, the hierarchy (crates/game-sim/src/track.rs Hierarchy; proof in
+# crates/game-sim/tests/collision_hierarchy.rs). collision_file_load reads no file-level surface word for
+# it; the body is a part count (object +0x200), a word it drops, then per part a bone index (clamped to
+# the owner skeleton's bone count - 1; bones flattened from the root by 0x001b3420 count / 0x001b35b0),
+# the surface word from version 2 (its low byte to part +0x89) and collision_mesh_load's mesh body. A part
+# whose vertex count (u16 at part +0x23c) is 0 is dropped and the next takes its slot. Parts are 0x250-byte
+# mesh collidables (+0x78 the hierarchy, +0x230 the bone or 0). Callers: scene_collision_read (owner 0),
+# the animated toy (owner its model's skeleton), the machine race gate init, and two others not read.
+collision_hierarchy_new boot 0x001ee690 (0x220 bytes, vtable 0x00451c10) shape kind 1
+collision_hierarchy_load boot 0x001efca0 (this, owner, file, version) reads the parts, then a 0x34-byte
+#                        summary at +0x218: part triangles/nodes/counts/points/transforms/surface bytes
+collision_hierarchy_read boot 0x001effe0 (this, file, version) the per-part loop above
+collision_hierarchy_split boot 0x001eea50 (hierarchy, count*) -> an array of fresh mesh collidables, one
+#                         per part, copying each part's arrays, transform and +0x230 bone
+animated_toy_collision boot 0x00119070 a toy's model (0x00143970) and, with HasCollision, its .col by
+#                      collision_file_load(model skeleton, name, 5); kind 1 is split, and each part gets an
+#                      800-byte rigid body (0x001dd580) bound to its bone (its vtable +0x74) and added as a
+#                      child node of the toy (node_add_child); the part's +0x7c is that body
+animated_toy_read boot 0x002144d0 an [AnimatedToyN] section: MCFName, InitialMotion, InitialFrame,
+#                 InitialTime, HasCollision, CameraCollision, AnimateWhenNotVisible, UpdateSearch, ...
