@@ -457,14 +457,12 @@ impl Gen {
 
 /// The engine's `{cos, sin}` table, against the one the game's own startup code builds.
 ///
-/// This is the only proof in the file with a tolerance in it, and the reason is in the module's docs:
-/// the game widens each angle to double, calls the SDK's double-precision `cos` and `sin`, and rounds
-/// back, and this crate has no double transcendentals to do the same with. What the test says is how
-/// far apart the two tables are — and the answer, printed, is what a reader has to decide is small
-/// enough to aim a camera with.
+/// Bit-exact: the game widens each angle to double, calls the SDK's double-precision `cos` and `sin`
+/// (fdlibm's) and chops back to `f32`, and the port does the same since S104. Before that the port
+/// used single-precision ones and two entries in three were an ulp off, which the biplane's
+/// autopilot reads.
 #[test]
-#[allow(clippy::float_arithmetic)]
-fn the_curve_table_is_the_games_own_to_a_rounding() {
+fn the_curve_table_is_the_games_own() {
     let Some(mut ee) = game_or_skip() else { return };
     ee.hooks.insert(addr("mem_alloc").unwrap(), Box::new(|ee| ee.set(2, CURVE as u64)));
     ee.call(addr("curve_table_build").unwrap(), &[], &[], 2_000_000_000);
@@ -474,38 +472,19 @@ fn the_curve_table_is_the_games_own_to_a_rounding() {
 
     let ours = CurveTable::build();
     assert_eq!(ours.entries().len(), CURVE_ENTRIES + 1, "6000 entries plus the duplicated last one");
-    let (mut exact, mut worst, mut worst_at) = (0usize, 0.0f32, 0usize);
-    for (i, e) in ours.entries().iter().take(CURVE_ENTRIES).enumerate() {
+    let mut checked = 0;
+    for (i, e) in ours.entries().iter().enumerate() {
         let theirs = [ee.f32_at(CURVE + 8 * i as u32), ee.f32_at(CURVE + 8 * i as u32 + 4)];
-        if theirs == *e {
-            exact += 1;
-        }
-        for k in 0..2 {
-            let d = (theirs[k] - e[k]).abs();
-            if d > worst {
-                worst = d;
-                worst_at = i;
-            }
-        }
+        assert_eq!(
+            [theirs[0].to_bits(), theirs[1].to_bits()],
+            [e[0].to_bits(), e[1].to_bits()],
+            "entry {i}: the game's {theirs:?}, the port's {e:?}"
+        );
+        checked += 1;
     }
-    println!(
-        "{exact} of {CURVE_ENTRIES} entries are bit-exact; the worst is entry {worst_at}, off by {worst:e}"
-    );
-    assert!(worst < 1e-6, "entry {worst_at} is off by {worst:e}, which is more than a rounding");
-    // The duplicated last entry: the game builds 6000 and then copies the last one into a 6001st, so
-    // that an index that rounds up off the end still reads something. Each table's duplicate is
-    // checked against its own last entry, since the entries themselves are only equal to a rounding.
-    let last = CURVE_ENTRIES as u32 - 1;
-    assert_eq!(
-        [ee.f32_at(CURVE + 8 * (last + 1)), ee.f32_at(CURVE + 8 * (last + 1) + 4)],
-        [ee.f32_at(CURVE + 8 * last), ee.f32_at(CURVE + 8 * last + 4)],
-        "the game's 6001st entry is not a copy of its 6000th"
-    );
-    assert_eq!(
-        ours.entries()[CURVE_ENTRIES],
-        ours.entries()[CURVE_ENTRIES - 1],
-        "the port's 6001st entry is not a copy of its 6000th"
-    );
+    // The 6001st is the copy of the last one the game makes so that an index rounding up off the end
+    // still reads something; it is compared above with the rest.
+    assert_eq!(checked, CURVE_ENTRIES + 1);
 }
 
 /// The rotation every part of the game uses, and the one the camera turns its heading by twice.
