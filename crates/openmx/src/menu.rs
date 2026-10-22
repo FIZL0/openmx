@@ -213,6 +213,11 @@ pub struct Settings {
     pub graphics: Graphics,
     /// The fraction of the frame the GPU draws the 3D at (V34): `--render-scale`'s, as a choice of four.
     pub render_scale: RenderScale,
+    /// Whether the picture waits for the display (P90): presented once a refresh, never torn. On
+    /// unless turned off.
+    pub vsync: bool,
+    /// The most pictures a second (P90): with VSync off, or below the refresh with it on.
+    pub frame_limit: FrameLimit,
     /// The game modifiers the next ride loads with (P55): the original game's unless changed.
     pub modifiers: Mods,
     /// Modifier presets saved by name, in the order they were saved.
@@ -268,6 +273,85 @@ impl RenderScale {
             RenderScale::Full => Some(1.0),
             RenderScale::ThreeQuarters => Some(0.75),
             RenderScale::Half => Some(0.5),
+        }
+    }
+}
+
+/// The settings' frame limit (P90): the most pictures drawn a second. Only the picture's rate: the
+/// ride's ticks are [`crate::pace`]'s 30 Hz whatever this says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrameLimit {
+    /// None of its own: the display's refresh with VSync on, as fast as it draws without.
+    #[default]
+    Off,
+    /// This many a second. The row offers [`FrameLimit::ALL`]'s; the file and `--fps-limit` take any.
+    Fps(u16),
+    /// The display's refresh, which with VSync off is a limit that does not wait for it.
+    Refresh,
+}
+
+impl FrameLimit {
+    pub const ALL: [FrameLimit; 7] = [
+        FrameLimit::Off,
+        FrameLimit::Fps(30),
+        FrameLimit::Fps(60),
+        FrameLimit::Fps(120),
+        FrameLimit::Fps(144),
+        FrameLimit::Fps(240),
+        FrameLimit::Refresh,
+    ];
+
+    /// The settings file's and `--fps-limit`'s word: `off`, `refresh`, or the number.
+    pub fn word(self) -> String {
+        match self {
+            FrameLimit::Off => "off".into(),
+            FrameLimit::Fps(n) => n.to_string(),
+            FrameLimit::Refresh => "refresh".into(),
+        }
+    }
+
+    /// A word of the file's: `off`, `refresh`, or a number from 1 to 1000, `fps` after it or not.
+    pub fn from_word(w: &str) -> Option<FrameLimit> {
+        match w.trim().trim_end_matches("fps").trim() {
+            "off" | "0" => Some(FrameLimit::Off),
+            "refresh" => Some(FrameLimit::Refresh),
+            n => n.parse::<u16>().ok().filter(|n| (1..=1000).contains(n)).map(FrameLimit::Fps),
+        }
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            FrameLimit::Off => "Off".into(),
+            FrameLimit::Fps(n) => format!("{n} fps"),
+            FrameLimit::Refresh => "Refresh rate".into(),
+        }
+    }
+
+    /// The pictures a second it allows on a display of `refresh` hertz; `None` for no limit.
+    pub fn fps(self, refresh: f32) -> Option<f32> {
+        match self {
+            FrameLimit::Off => None,
+            FrameLimit::Fps(n) => Some(f32::from(n)),
+            FrameLimit::Refresh => Some(refresh),
+        }
+    }
+
+    /// The row's next choice, or the one before; a number the row does not offer steps to the
+    /// first above it, or below.
+    fn step(self, back: bool) -> FrameLimit {
+        let all = FrameLimit::ALL;
+        let n = all.len();
+        match all.iter().position(|l| *l == self) {
+            Some(i) if back => all[(i + n - 1) % n],
+            Some(i) => all[(i + 1) % n],
+            None => {
+                let FrameLimit::Fps(fps) = self else { return FrameLimit::Off };
+                let listed = |l: &&FrameLimit| matches!(l, FrameLimit::Fps(m) if if back { *m < fps } else { *m > fps });
+                match back {
+                    true => all.iter().rev().find(listed).copied().unwrap_or(FrameLimit::Off),
+                    false => all.iter().find(listed).copied().unwrap_or(FrameLimit::Refresh),
+                }
+            }
         }
     }
 }
@@ -393,6 +477,8 @@ impl Default for Settings {
             custom: [70, 70, 80, 45, 60, 100],
             graphics: Graphics::default(),
             render_scale: RenderScale::default(),
+            vsync: true,
+            frame_limit: FrameLimit::default(),
             modifiers: Mods::original(),
             presets: Vec::new(),
             lobby_seats: LOBBY_SEATS,
@@ -470,6 +556,8 @@ impl Settings {
                 }
                 "graphics" => s.graphics = Graphics::from_word(v).unwrap_or(s.graphics),
                 "render_scale" => s.render_scale = RenderScale::from_word(v).unwrap_or(s.render_scale),
+                "vsync" => s.vsync = v != "off",
+                "frame_limit" => s.frame_limit = FrameLimit::from_word(v).unwrap_or(s.frame_limit),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
                 "modifiers" => s.modifiers = Mods::parse(v).unwrap_or_default(),
@@ -547,8 +635,14 @@ impl Settings {
             self.custom.map(|n| n.to_string()).join(" "),
             self.graphics.word(),
             self.render_scale.word()
-        ) + &self.lobby_seats_text()
+        ) + &self.display_text()
+            + &self.lobby_seats_text()
             + &self.modifiers_text()
+    }
+
+    /// The picture's pacing (P90): VSync and the frame limit.
+    fn display_text(&self) -> String {
+        format!("vsync = {}\nframe_limit = {}\n", on_off(self.vsync), self.frame_limit.word())
     }
 
     /// The lobby's seat count (N12), only when it is not the usual [`LOBBY_SEATS`], so a file from
@@ -1081,7 +1175,7 @@ const AUDIO_PRESET: usize = 3;
 const AUDIO_SLIDERS: usize = 4;
 /// Which of [`Mix::levels`]' sliders each slider row is.
 const AUDIO_SLIDER: [usize; 6] = [0, 2, 3, 4, 5, 1];
-const SETTINGS_ROWS: usize = 11;
+const SETTINGS_ROWS: usize = 13;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
 const SETTINGS_MUSIC_VOLUME: usize = 5;
@@ -1092,8 +1186,11 @@ const SETTINGS_GRAPHICS: usize = 7;
 const SETTINGS_RENDER_SCALE: usize = 8;
 /// The speedometer's style (V42), under the render scale's.
 const SETTINGS_SPEEDOMETER: usize = 9;
+/// VSync and the frame limit (P90), under the speedometer's.
+const SETTINGS_VSYNC: usize = 10;
+const SETTINGS_FRAME_LIMIT: usize = 11;
 /// The game modifiers' screen (P55), the last row.
-const SETTINGS_MODIFIERS: usize = 10;
+const SETTINGS_MODIFIERS: usize = 12;
 /// The modifiers' screen: whose they are, every modifier, then the presets and the reset.
 const MODIFIERS_SEAT: usize = 0;
 const MODIFIERS_KNOBS: usize = 1;
@@ -2240,6 +2337,14 @@ impl Menu {
                             self.settings.speedometer = all[i];
                             self.changed = true;
                         }
+                        SETTINGS_VSYNC => {
+                            self.settings.vsync = !self.settings.vsync;
+                            self.changed = true;
+                        }
+                        SETTINGS_FRAME_LIMIT => {
+                            self.settings.frame_limit = self.settings.frame_limit.step(p.left);
+                            self.changed = true;
+                        }
                         _ => {}
                     }
                 }
@@ -3154,6 +3259,8 @@ impl Art {
                         format!("Graphics  {}", menu.settings.graphics.label()),
                         format!("Render scale  {}", menu.settings.render_scale.label()),
                         format!("Speedometer  {}", menu.settings.speedometer.label()),
+                        format!("VSync  {}", if menu.settings.vsync { "On" } else { "Off" }),
+                        format!("Frame limit  {}", menu.settings.frame_limit.label()),
                         format!(
                             "Game Modifiers  {}",
                             if menu.settings.modifiers.is_original() { "Original" } else { "Modified" }

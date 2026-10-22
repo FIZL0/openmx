@@ -146,6 +146,48 @@ impl Pacer {
     }
 }
 
+/// The least time one picture takes (P90), from the VSync and frame limit settings: `limit` is the
+/// most pictures a second, if any, and `refresh` the display's. `waits` is whether the present itself
+/// waits for the display when VSync is on — wgpu's Fifo does; the X11 window's `PutImage` does not,
+/// so there VSync is a pace of the refresh's own. None of it reaches the ticks: [`Pacer`] owes them
+/// by the wall clock whatever the picture's rate.
+pub fn frame_floor(vsync: bool, limit: Option<f32>, refresh: f32, waits: bool) -> Option<Duration> {
+    let limit = limit.filter(|fps| *fps > 0.0);
+    let fps = match (vsync, limit) {
+        // The present holds it to the refresh; only a limit below that is the loop's to keep.
+        (true, limit) if waits => limit.filter(|fps| *fps < refresh),
+        (true, limit) => Some(limit.map_or(refresh, |fps| fps.min(refresh))),
+        (false, limit) => limit,
+    };
+    fps.map(|fps| Duration::from_secs_f64(1.0 / f64::from(fps)))
+}
+
+/// Holds the pictures to a floor (P90): each frame ends no sooner than the floor after the last
+/// one's end was due, so a frame limit of 60 is sixty pictures a second on average, the sleep's own
+/// lateness not piling up. Behind, it starts again from now rather than hurrying to catch up.
+#[derive(Default)]
+pub struct Limiter {
+    last: Option<Instant>,
+}
+
+impl Limiter {
+    /// Sleep until this frame is due, `floor` after the last; none at all with no floor.
+    pub fn wait(&mut self, floor: Option<Duration>) {
+        let now = Instant::now();
+        let Some(floor) = floor else {
+            self.last = Some(now);
+            return;
+        };
+        match self.last.map(|last| last + floor) {
+            Some(due) if due > now => {
+                std::thread::sleep(due - now);
+                self.last = Some(due);
+            }
+            _ => self.last = Some(now),
+        }
+    }
+}
+
 /// A move longer than this between two ticks is a jump — a respawn, a swap, a camera cut — and is
 /// shown where it lands rather than slid across. Faster than anything in the game rides or flies
 /// (a bike at full speed covers about four feet a tick, the plane about eight).
@@ -319,6 +361,71 @@ mod tests {
         assert_eq!(n, 1, "a ten-second stall runs one tick, not three hundred");
         assert!(!p.owed(start + Duration::from_secs(10)));
         assert!(p.owed(start + Duration::from_secs(10) + TICK));
+    }
+
+    /// P90: the VSync and frame limit settings, as a floor on the picture's time.
+    #[test]
+    fn the_settings_make_the_pictures_floor() {
+        let ms = |d: Option<Duration>| d.map(|d| (d.as_secs_f64() * 1000.0 * 10.0).round() / 10.0);
+        // VSync on, a present that waits: nothing for the loop to keep but a limit below the refresh.
+        assert_eq!(frame_floor(true, None, 144.0, true), None);
+        assert_eq!(frame_floor(true, Some(240.0), 144.0, true), None);
+        assert_eq!(frame_floor(true, Some(144.0), 144.0, true), None);
+        assert_eq!(ms(frame_floor(true, Some(60.0), 144.0, true)), Some(16.7));
+        // One that does not: the refresh's own pace, or the limit's below it.
+        assert_eq!(ms(frame_floor(true, None, 60.0, false)), Some(16.7));
+        assert_eq!(ms(frame_floor(true, Some(240.0), 60.0, false)), Some(16.7));
+        assert_eq!(ms(frame_floor(true, Some(30.0), 60.0, false)), Some(33.3));
+        // VSync off: the limit alone, or as fast as it draws.
+        assert_eq!(frame_floor(false, None, 60.0, true), None);
+        assert_eq!(ms(frame_floor(false, Some(120.0), 60.0, true)), Some(8.3));
+        assert_eq!(ms(frame_floor(false, Some(120.0), 60.0, false)), Some(8.3));
+    }
+
+    /// P90: a 60 fps limit sleeps each frame to about 16.7 ms, and the ride under it is the same
+    /// ticks as one drawn uncapped or at any other limit: the same count, each reading the same clock.
+    #[test]
+    fn a_60_fps_limit_sleeps_the_frame_and_leaves_the_ticks_alone() {
+        let floor = frame_floor(false, Some(60.0), 144.0, true);
+        let mut limiter = Limiter::default();
+        limiter.wait(floor);
+        let start = Instant::now();
+        let mut frames = Vec::new();
+        for _ in 0..30 {
+            let top = Instant::now();
+            // A frame's work, well under the floor.
+            std::thread::sleep(Duration::from_millis(2));
+            limiter.wait(floor);
+            frames.push(top.elapsed());
+        }
+        let mean = start.elapsed().as_secs_f64() * 1000.0 / 30.0;
+        assert!((16.6..17.5).contains(&mean), "a frame took {mean:.2} ms on average");
+        assert!(frames.iter().all(|f| *f >= Duration::from_micros(16_000)), "a frame ended early: {frames:?}");
+
+        // The ticks over three seconds of wall clock, drawn at each limit (and uncapped, at 1 ms a
+        // picture): the same ticks, and the engine's dt for each the same bits.
+        let start = Instant::now();
+        let ride = |floor: Duration| {
+            let mut pacer = Pacer::new(TICK, start);
+            let mut engine = Engine::new();
+            after_load(&mut engine);
+            let mut dts = Vec::new();
+            let mut now = start;
+            while now <= start + Duration::from_secs(3) {
+                while pacer.owed(now) {
+                    dts.push(engine.step(tick_clock(pacer.ticks()), Input::default(), &mut Idle).dt.0.to_bits());
+                    pacer.ran();
+                }
+                now += floor;
+            }
+            dts
+        };
+        let uncapped = ride(Duration::from_millis(1));
+        assert_eq!(uncapped.len() as u64, 3_000_000_000 / TICK.as_nanos() as u64 + 1);
+        for fps in [30.0, 60.0, 120.0, 144.0, 240.0] {
+            let floor = frame_floor(false, Some(fps), 60.0, true).unwrap();
+            assert_eq!(ride(floor), uncapped, "the ride drawn at {fps} fps");
+        }
     }
 
     /// Halfway round a quarter turn the model is still its own size, and a jump is shown where it
