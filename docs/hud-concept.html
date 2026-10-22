@@ -43,9 +43,9 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
   background: linear-gradient(90deg, rgba(0,0,0,.5) 0 9.4em, rgba(0,0,0,.4) 9.4em); }
 .score .lab { width: 9.4em; text-align: center; font-weight: 800; font-size: 1em; letter-spacing: .14em; color: var(--grey); }
 .score .num { padding-left: .7em; font-weight: 800; font-size: 1.25em; color: var(--grey); font-variant-numeric: tabular-nums; }
-.score.flash { animation: scoreflash .7s ease-out; }
+.score.lit { animation: scoreflash .7s ease-out; }
 @keyframes scoreflash { 0% { box-shadow: inset 0 0 0 .14em var(--orange); } 100% { box-shadow: inset 0 0 0 .14em transparent; } }
-.score.flash .num { animation: scoreink .7s ease-out; }
+.score.lit .num { animation: scoreink .7s ease-out; }
 @keyframes scoreink { 0% { color: var(--orange); } 100% { color: var(--grey); } }
 .tag { position: absolute; left: 3.6em; top: 4.9em; font-size: .8em; letter-spacing: .14em; color: var(--grey); }
 
@@ -467,7 +467,7 @@ function land(v) {
   const add = chainPts(v) * v.chain.length, from = v.score, t0 = performance.now();
   if (v.challenge) v.challenge.got += add;
   const step = now => { const k = Math.min(1, (now - t0) / 700); v.score = Math.round(from + add * k); v.q(".score .num").textContent = v.score.toLocaleString("en-US"); if (k < 1) requestAnimationFrame(step); };
-  requestAnimationFrame(step); const n = v.q(".score"); n.classList.remove("flash"); void n.offsetWidth; n.classList.add("flash");
+  requestAnimationFrame(step); const n = v.q(".score"); n.classList.remove("lit"); void n.offsetWidth; n.classList.add("lit");
   later(v, "clear", 1800, () => { v.chain = []; v.verdict = ""; renderTrick(v); });
 }
 function bail(v) {
