@@ -1,4 +1,4 @@
-# 1 — modifiers apply from the pause (PART)
+# 1 — modifiers apply from the pause (FINAL)
 
 Task P98. 2026-10-21.
 
