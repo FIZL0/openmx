@@ -4594,3 +4594,31 @@ collision_tree_build boot 0x00111ee0 (nodes out, facets out, matrix out, quadwor
 #   — nine trees; the game keeps the file's species slot n (and a plant's species byte) at n - 1.
 #   Bike: the eleven body rays (+0x7c4, flags 0x12/0x32/0x52) search placed groups; the sweep probe
 #   (+0x7cc, flags 0x13) does not. put_back_solid's group rule is S75's.
+# S86 — the riding bike's collidables (crates/game-sim/src/bike_col.rs; tests crates/game-sim/tests/bike_col.rs).
+#   Loader 0x00252ff0: dir "%sCol" of "Bike\" -> "Bike\Col\"; "%sm.col"/"%sf.col" of bike +0x28c, an
+#   inline string, "bike" for both split-screen players (S93's P2 rides another rider and .phy, not
+#   another collision file). Both files come out of Tracks\free09_ss_2.res for the split ride.
+#   +0x7c0 = f.col through 0x001ed1e0 -> 0x001edda0: an ordinary 0x250-byte mesh collidable (+0x68 0,
+#     constructor 0x001ecf50), then 0x00119a40(c, 5) — that 5 is +0x116 bits (4|1 -> ENABLED), not the
+#     narrow-phase kind S78's note read it as; +0x84 = bike +0x394 | +0x390 | [0x468f50] | [0x468f68],
+#     +0x80 = bike +0x80 (the record's side).
+#   +0x7c4 = m.col rays (kind 2), 0x00119a40(c, 2), +0x84 = [0x468f50]; +0x7c8 a second ray probe with
+#     no file (+0x84 0 before the start words), +0xe8 list [0x100, bike +0x390]; +0x7cc the sweep (kind 3),
+#     +0x84 = [0x468f50], +0x116 bit 0. Record +0x7d0: +0x110 = +0x390 | [0x468f50], +0x114 = ~0.
+#   Lists: 0x0011add0 sets +0xd0 mode, 0x0011ade0 appends an object; 0x0011b070 sets +0xe8 mode;
+#     0x0011b080 adds a category (returns if listed, else first 0 slot, else grows); 0x0011b160 zeroes
+#     the first equal slot. The ghost switch 0x00250580(bike, _, on): on -> +0xb7c 2, +0x7dc = +0x7e0, and
+#     0x0011b080 of [0x468f68] on +0x7c4's and +0x7cc's +0xe8 lists; off -> +0xb7c 1, +0x7dc 0, and
+#     0x0011b160 of it on both (0x00250950 removes it too). So a bike that was a ghost shows [0] there
+#     (s93-short/long P1 and P2) and one that never was shows an empty list (splitscreen).
+#   0x0027aa70 (the bike builder, from 0x0020e0b0) ORs [0x4e2128] | [0x4e2130] into +0x7c0, +0x7c4,
+#     +0x7c8's +0x84 and the wreck part's (+0x7a8)+0x128 collidable.
+#   S93's three images (P1 vehicle 0x00c1f810, P2 0x012e3ad0, the same in each): [0x468f50] 8,
+#     [0x468f68] 0x40, [0x4e2128] 0x8000, [0x4e2130] 0x10000; +0x390 0x2000, +0x394 0x80000;
+#     +0x84: f 0x9a048, rays 0x18008, second 0x18000, sweep 8; +0xcc all ~0; +0x116 (search bit 0x10
+#     dropped) 0x04/0x02/0x02/0x03; +0x60 f 4.3035 (root half diagonal, FPU), rays 4.7327 (reach).
+#     Wreck part: collidable +0x84 0x9a058, object +0x110 8, +0x114 0x40000 (S69's, unchanged).
+#   0x00109ee0 (the narrow-phase table's case 5, from 0x001ebe70): a ray tree against a sphere at
+#     other +0x40 (r +0x170, r² +0x174): node test 0x00106b10, leaf 0x00105e80 (end within r, else the
+#     closest approach along the unit segment within r and inside its length); writes only +0x80 = 1.0.
+#     Not on any bike's path (no bike collidable is kind 5), so not ported.
