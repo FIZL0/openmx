@@ -4724,3 +4724,21 @@ asz_icons_frame             boot 0x00325280 per frame (from 0x003266c0, the zone
 #                                           40, all turned to the camera's facing
 asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle/cylinder/number/word,
 #                                           bits 4|2 (done) checkmark and disk
+# ---------------------------------------------------------------------------------------------------
+# S88 — two riders colliding in the split screen, replayed (crates/game-sim/tests/rider_rider_capture.rs;
+# journal research/journal/2026-10-22-s88-rider-rider-capture). Comments only: every name is above.
+#   The level's collision node in the split free09 images is 0x0061e720; its object list is
+#   [biplane 0x0060b1f0, 0x00c97be0, P1's record, P2's record]. collision_node_update (0x0026f800, node,
+#   dt = @frame_dt) from the image of the tick before a contact lands on the contact's capture row, both
+#   chassis bit for bit (centre +0x60, force +0x130, moment +0x140, shock +0x170, twist +0x180,
+#   vel +0x260, rates +0x290 off the vehicle's +0x7a4), at 3403, 3414 and 5998.
+#   ORDER: in all seven S93 images, and S88's 3413, the riders' resolves (0x00270dc0, a0 = record,
+#   a1 = first substep) run P2 (1), P2 (0), P1 (1), P1 (0): P2's vehicle updates whole before P1's, so
+#   P1 meets P2's chassis already pushed. This overturns S54's static "player order" for the vehicles;
+#   the port's Sim::step_all steps the last player first. More than two players is not seen.
+#   A DOWNED rider's riding record leaves the node's list (the wreck bike's body object, +0xf0 0 and
+#   +0xf4 set, takes its place: 0x01333240 at 3413) and is not resolved, but its collidable stays in the
+#   broad phase: at 3414 P2's own rays strike P1's frozen frame (other = P1's riding record) and the
+#   mirror goes into that record. Not ported (follow-up).
+#   Capture rows tear: 5998's P1 is P1 as P2's update left it (before P1's own); 3403's P1 wreck reason
+#   (1, set inside the tick) shows at 3404.

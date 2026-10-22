@@ -1,7 +1,7 @@
 //! A scripted ride of several riders, for the snapshot tests and the platform vectors (N1).
 //!
 //! One [`Sim`] holding [`PLAYERS`] riders (S54's [`Sim::add_player`]), stepped together by
-//! [`Sim::step_all`] in player order, so they are in one another's way the way a session's riders
+//! [`Sim::step_all`] (the last player first), so they are in one another's way the way a session's riders
 //! are: what it proves is that every part of the session's state — every rider's, the pads', the
 //! order they ride in — saves, restores, encodes and hashes the same, with the riders in different
 //! states at once.
@@ -167,7 +167,7 @@ pub fn hands(input: Input) -> Controls {
     Controls::from_pad(pad.pad(0))
 }
 
-/// One tick of every rider, in player order, over the kickers: the first [`PADS`] on the [`Sim`]'s
+/// One tick of every rider, the last player first, over the kickers: the first [`PADS`] on the [`Sim`]'s
 /// own pads, the rest on [`hands`].
 pub fn step(sim: &mut Sim, inputs: &[Input], seen: &mut Seen) {
     let dt = F(game_sim::tick::DeltaTime::CAP_30);
