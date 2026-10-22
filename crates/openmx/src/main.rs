@@ -2892,6 +2892,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         // every bank instead.
                         seat.inverted = seat.garage.inverted(seat.inverted);
                         seat.garage.set_every_bank(seats.plane(from).every_bank());
+                        seat.garage.set_round_stick(seats.plane(from).round_stick());
                         let report = seats.plane(from).fly(seats.scheme(from).ride(report), seat.inverted);
                         seat.reports = [report, Report::missing()];
                         // The bike's commands through the seat's controller preset (P79); online, where
@@ -2914,6 +2915,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // The fade is not in the tape (P69): it rides under the command line's scheme,
                     // so a plane tape plays back as it was made under the same --biplane-controls.
                     world.seats[0].garage.set_every_bank(args.wiring.planes[0].every_bank());
+                    world.seats[0].garage.set_round_stick(args.wiring.planes[0].round_stick());
                     world.seats[0].reports = frame.reports;
                     // A tape holds the pad, not the table: the controller preset is --preset's
                     // (P79), whichever layout is said, because the tape is already past the layout.
