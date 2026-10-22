@@ -451,6 +451,8 @@ pub struct Renderer {
     overlay: Option<Overlay>,
     ground: Option<GpuGround>,
     props: Vec<Prop>,
+    /// The scene's trees and bushes (V48), drawn with the props.
+    grove: Option<crate::eco::Grove>,
     /// How far the world is drawn (V32), and how far apart the ground's two farthest points are.
     graphics: Graphics,
     span: f32,
@@ -1214,6 +1216,7 @@ impl Renderer {
             overlay: None,
             ground: None,
             props: Vec::new(),
+            grove: None,
             graphics: Graphics::default(),
             span: 0.0,
             scratch: Vec::new(),
@@ -1238,6 +1241,7 @@ impl Renderer {
                 at: p.transform(),
             })
             .collect();
+        self.grove = scene.ecosystem.clone();
     }
 
     /// The sky behind every view, or none: the fog's colour instead.
@@ -1433,6 +1437,7 @@ impl Renderer {
         self.statics.truncate(1);
         self.statics_written = 0;
         self.props.clear();
+        self.grove = None;
     }
 
     /// Wait for everything submitted so far to be drawn.
@@ -1815,6 +1820,12 @@ impl Renderer {
                 self.model(assets, a.model);
             }
         }
+        if let Some(g) = &self.grove {
+            let names: Vec<String> = g.models.iter().chain(&g.billboards).filter(|n| !self.model_ids.contains_key(*n)).cloned().collect();
+            for name in names {
+                self.model(assets, &name);
+            }
+        }
         let pose_starts = self.write_palette(frame.poses);
 
         let mut uniforms = vec![0u8; (VIEW_STRIDE as usize) * views.len()];
@@ -1907,6 +1918,26 @@ impl Renderer {
                 };
                 let key = ((v as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
                 self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette }));
+            }
+            // The trees and bushes: each a model near, a picture far and both between (V48), the
+            // pictures coming in see-through as the actors' ghosts are drawn.
+            if let Some(grove) = &self.grove {
+                let mut plants = Vec::new();
+                grove.draws(camera, crate::eco::horizontal_fov(camera, w as f32 / h.max(1) as f32), cull.reach, &mut plants);
+                for d in &plants {
+                    let Some(Some(m)) = self.model_ids.get(d.model).copied() else { continue };
+                    let model = &self.models[m];
+                    // The model's reach from its origin, at the plant's largest scale.
+                    let row = |r: usize| v3(d.at.0[r][0], d.at.0[r][1], d.at.0[r][2]);
+                    let centre = row(3);
+                    let radius = model.radius * row(0).len().max(row(1).len()).max(row(2).len());
+                    if !cull.sees(centre, radius) || !cull.big_enough(centre, radius, PROP_PIXELS) {
+                        continue;
+                    }
+                    let ghost = if d.alpha < 1.0 { d.alpha.to_bits() } else { 0 };
+                    let key = ((v as u64) << 48) | ((m as u64) << 16);
+                    self.scratch.push((key, ghost, InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes] }));
+                }
             }
             ground_counts[v] = self.ground_for(v, &cull, focal, &mut drawn);
         }
@@ -2989,6 +3020,7 @@ mod tests {
                     up: v3(0.0, 1.0, 0.0),
                 },
             ],
+            ..Scene::parse("")
         };
         let camera = Camera {
             eye: v3(0.0, 1.5, 0.0),
