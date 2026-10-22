@@ -21,8 +21,9 @@
 //!   yellow for a human, red for an AI rider. Under them the rest of the original's set (P92,
 //!   [`Icon`]): each activity's start zone off the track's `hit.dat` (`map_icon_h`, `_r`, `_m`, `_s`,
 //!   growing as they near, [`zone_size`]), a machine or a bike standing with nobody on it (32x32,
-//!   the machine's in its livery's colour), and the port's session markers (P88) on the activities'
-//!   gate, `map_icon_gate`. Everything past half the span stays on the ring.
+//!   the machine's in its livery's colour), and the port's session markers (P88): a numbered disc
+//!   in each slot's own colour (P94), nothing like the original's set. Everything past half the
+//!   span stays on the ring.
 //!
 //! - **The score** (`ui\stuntscoreoverlays.lyt`'s `Score`, at 14,48 from the top-left, and
 //!   `Overlay_1p_Score.fsh`): a dark bar, its label end darker, `SCORE` in `eurostileboldbold_12` and
@@ -371,9 +372,10 @@ pub enum Icon {
     /// One of an activity's points to hit, `done` once it has been: the 8x8 dot the riders' marks are.
     #[allow(dead_code)] // the tests', until the activities are ported
     Point { done: bool },
-    /// A session marker (P88), the port's own: its gate turned to the way the marker faces (`x`, `z`),
-    /// brighter when the selection is on it.
-    Marker { facing: [f32; 2], selected: bool },
+    /// A session marker (P88), the port's own: a disc in its slot's colour ([`marker_colour`]) with
+    /// the slot's number on it, ringed white when the selection is on it (P94). Nothing in the
+    /// original's set is round, numbered or in these colours, and a rider's mark is a small dot.
+    Marker { slot: usize, selected: bool },
 }
 
 /// An icon and where it is in the world (`x`, `z`).
@@ -394,9 +396,8 @@ pub struct Placed {
     pub turn: f32,
 }
 
-/// The machine and activity icons' size, `32x32`, and the activity points' and gates'.
+/// The machine and activity icons' size, `32x32`.
 pub const ICON_SIZE: f32 = 32.0;
-const GATE_SIZE: (f32, f32) = (32.0, 8.0);
 /// An activity icon's scale: `0.3` more than the share of half the span it is nearer than, between
 /// `0.5` and `0.8`.
 const ZONE_SCALE: (f32, f32, f32) = (0.3, 0.5, 0.8);
@@ -404,8 +405,65 @@ const ZONE_SCALE: (f32, f32, f32) = (0.3, 0.5, 0.8);
 const ZONE_COLOURS: [[u8; 4]; 4] = [[0x6e, 0xa6, 0x37, 255], [0xff, 0x99, 0x33, 255], [0x33, 0x73, 0xcc, 255], [0x81, 0x3b, 0xb5, 255]];
 const BIKE_COLOUR: [u8; 4] = [0xc8, 0xc8, 0xc8, 255];
 const POINT_COLOURS: [[u8; 4]; 2] = [[0x30, 0xcf, 0x00, 255], [0x70, 0x70, 0x70, 255]];
-/// A session marker's gate: the gates' grey, and full white when selected.
-const MARKER_COLOURS: [[u8; 4]; 2] = [[200, 200, 200, 255], [255, 255, 255, 255]];
+/// The session markers' slots' colours (P94), one a slot, on the radar and on the posts in the world:
+/// none of them the original's icons' or its riders' colours.
+pub const MARKER_COLOURS: [[u8; 4]; game_sim::markers::SLOTS] =
+    [[0x00, 0xdc, 0xff, 255], [0xff, 0x3c, 0xc8, 255], [0xb4, 0xff, 0x3c, 255], [0xff, 0x78, 0x50, 255], [0x96, 0x82, 0xff, 255]];
+/// A marker's disc across, and its selected ring's.
+pub const MARKER_SIZE: f32 = 13.0;
+const MARKER_RING: f32 = 17.0;
+/// The ring round the selected marker, and the edge round the rest so each reads on the rose.
+const MARKER_RING_COLOUR: [u8; 4] = [255, 255, 255, 255];
+const MARKER_EDGE: [u8; 4] = [0, 0, 0, 200];
+/// The slot's number on a marker's disc.
+const MARKER_INK: [u8; 4] = [0, 0, 0, 255];
+
+/// A session marker slot's colour (P94).
+pub fn marker_colour(slot: usize) -> [u8; 4] {
+    MARKER_COLOURS[slot % MARKER_COLOURS.len()]
+}
+
+/// How tall a session marker's post stands over where its bike was put down, in feet: two bikes'
+/// lengths, so it shows over the bike's ghost and over a rise.
+pub const POST_HEIGHT: f32 = 15.0;
+
+/// A session marker's post as a view sees it (P94): its foot and its top in the view's pixels, and
+/// how far it is from the eye.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Post {
+    pub foot: (f32, f32),
+    pub top: (f32, f32),
+    pub distance: f32,
+}
+
+/// Where the post of a marker put down `at` stands in a `width` by `height` view through `camera`,
+/// or `None` where it is behind the eye or wholly off the view's sides. Through the hills: the post
+/// is drawn over the picture, so a marker shows from anywhere it is in front of the camera.
+pub fn marker_post(camera: &game_render::world::Camera, (width, height): (usize, usize), at: [f32; 3]) -> Option<Post> {
+    let m = camera.view_projection(width.max(1), height.max(1));
+    let (w, h) = (width as f32, height as f32);
+    let screen = |p: [f32; 3]| {
+        let c = m.clip(game_render::v3(p[0], p[1], p[2]));
+        (c[3] > camera.near).then(|| ((c[0] / c[3] * 0.5 + 0.5) * w, (0.5 - c[1] / c[3] * 0.5) * h))
+    };
+    let foot = screen(at)?;
+    let top = screen([at[0], at[1] + POST_HEIGHT, at[2]])?;
+    if foot.0.max(top.0) < 0.0 || foot.0.min(top.0) > w || foot.1.max(top.1) < 0.0 || foot.1.min(top.1) > h {
+        return None;
+    }
+    let e = camera.eye;
+    let distance = ((at[0] - e.x).powi(2) + (at[1] - e.y).powi(2) + (at[2] - e.z).powi(2)).sqrt();
+    Some(Post { foot, top, distance })
+}
+
+/// The radar icons of a player's session markers (P88): one a filled slot, where its bike was put
+/// down (`x`, `z`), the selected one ringed (P94).
+pub fn marker_blips(markers: &game_sim::markers::Markers, pick: game_sim::markers::Pick) -> Vec<Blip> {
+    let ground = |at: ps2_float::Vf| [at.x(), at.z()];
+    let selected = |slot| pick == game_sim::markers::Pick::Slot(slot);
+    let slots = markers.slots.iter().enumerate();
+    slots.filter_map(|(slot, ride)| ride.as_ref().map(|r| Blip { icon: Icon::Marker { slot, selected: selected(slot) }, at: ground(r.position()) })).collect()
+}
 
 /// How big an activity's icon is drawn at `distance` off the rider on a radar spanning `span`: the
 /// original grows it as it nears, [`ZONE_SCALE`] of [`ICON_SIZE`].
@@ -442,7 +500,8 @@ pub fn icon_texture(icon: Icon) -> &'static str {
         Icon::Machine(Machine::Baja, _) => "map_icon_trophy",
         Icon::Bike => "map_icon_bike",
         Icon::Point { .. } => "map_icon_hit_freestyle",
-        Icon::Marker { .. } => "map_icon_gate",
+        // Drawn, not a texture: [`Art::paint`] makes the disc and writes its number.
+        Icon::Marker { .. } => "",
     }
 }
 
@@ -461,11 +520,7 @@ pub fn radar_icon(own: [f32; 2], forward: [f32; 2], blip: Blip, span: f32) -> Pl
         Icon::Machine(m, livery) => (square(ICON_SIZE), machine_colour(m, livery), 0.0),
         Icon::Bike => (square(ICON_SIZE), BIKE_COLOUR, 0.0),
         Icon::Point { done } => (square(MARK_SIZE), POINT_COLOURS[done as usize], 0.0),
-        Icon::Marker { facing, selected } => {
-            // The gate across the way the marker faces, turned with the rose.
-            let turn = (radar_turn(forward) + bearing(facing[0], facing[1])).rem_euclid(TAU);
-            (GATE_SIZE, MARKER_COLOURS[selected as usize], turn)
-        }
+        Icon::Marker { slot, selected } => (square(if selected { MARKER_RING } else { MARKER_SIZE }), marker_colour(slot), 0.0),
     };
     Placed { texture: icon_texture(blip.icon), at, size, tint, turn }
 }
@@ -542,7 +597,7 @@ const DIGITS: usize = TEXTURES.len();
 const SMALL: usize = TEXTURES.len() + 1;
 const LABEL: usize = TEXTURES.len() + 2;
 
-const TEXTURES: [&str; 17] = [
+const TEXTURES: [&str; 16] = [
     "speedometer_analog",
     "speedometer_needlepin",
     "odometer_background",
@@ -560,7 +615,6 @@ const TEXTURES: [&str; 17] = [
     "map_icon_monster",
     "map_icon_trophy",
     "map_icon_bike",
-    "map_icon_gate",
 ];
 
 impl Art {
@@ -645,7 +699,9 @@ impl Art {
         // Under the riders' marks: the start zones, the standing machines, the markers (P92).
         for &blip in self.radar.get(v).into_iter().flatten() {
             let p = radar_icon(own, forward, blip, span);
-            if let Some(t) = self.texture(p.texture) {
+            if let Icon::Marker { slot, selected } = blip.icon {
+                self.marker(pen, p.at, slot, selected);
+            } else if let Some(t) = self.texture(p.texture) {
                 pen.turned(t, p.at, p.size, p.turn, p.tint);
             }
             drawn.icons.push((blip.icon, pen.px(p.at)));
@@ -744,6 +800,21 @@ impl Art {
     fn texture(&self, name: &str) -> Option<(&Texture, usize)> {
         let i = TEXTURES.iter().position(|n| *n == name)?;
         Some((self.textures.get(name)?, i))
+    }
+
+    /// A session marker's radar icon (P94) centred on `at`: the ring or the dark edge, the disc in
+    /// the slot's colour, and the slot's number on it.
+    fn marker(&self, pen: &mut Pen, at: (f32, f32), slot: usize, selected: bool) {
+        let disc = |pen: &mut Pen, d: f32, c: [u8; 4]| pen.capsule((at.0 - d / 2.0, at.1 - d / 2.0, d, d), c, f32::MAX, [0; 4]);
+        match selected {
+            true => disc(pen, MARKER_RING, MARKER_RING_COLOUR),
+            false => disc(pen, MARKER_SIZE + 2.0, MARKER_EDGE),
+        }
+        disc(pen, MARKER_SIZE, marker_colour(slot));
+        let number = (slot + 1).to_string();
+        let g = self.label.glyph(number.chars().next().unwrap_or('1'));
+        let (w, h) = (self.label.measure(&number), g.uv[3] - g.uv[1]);
+        pen.text((&self.label, LABEL), &number, at.0 - w / 2.0, at.1 - h / 2.0, false, MARKER_INK);
     }
 
     /// A texture `size` square centred on `at`.

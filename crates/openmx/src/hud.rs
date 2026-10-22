@@ -544,13 +544,17 @@ pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>])
     }
 }
 
-/// The slot display, top centre of `frame`: five boxes — solid where a marker is, the selected one
-/// ringed — and the label under them. The markers fire on the press (P93), so there is no hold to
-/// show filling.
-pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str) {
+/// The slot display, top centre of `frame`: five boxes — solid in the slot's colour where a marker
+/// is (P94: the colour of its post and its radar mark), the selected one ringed — then a box for each
+/// other player in the ride, `P2`… by seat (`others`, P94: a seat nobody rides is not listed), and
+/// the label under them. The markers fire on the press (P93), so there is no hold to show filling.
+pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, others: &[usize]) {
     let scale = (frame.height as i32 / 224).max(1);
     let (boxw, gap) = (7 * scale, 3 * scale);
-    let row = SLOTS as i32 * boxw + (SLOTS as i32 - 1) * gap;
+    let tags: Vec<String> = others.iter().map(|p| format!("P{}", p + 1)).collect();
+    let tag_w = |t: &str| t.chars().count() as i32 * 4 * scale + 2 * scale;
+    let players: i32 = tags.iter().map(|t| gap + tag_w(t)).sum();
+    let row = SLOTS as i32 * boxw + (SLOTS as i32 - 1) * gap + players;
     let label_w = label.chars().count() as i32 * 4 * scale;
     let w = row.max(label_w) + 2 * PAD * scale;
     let h = boxw + 2 * scale + 6 * scale + 2 * PAD * scale;
@@ -561,17 +565,77 @@ pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label:
         let at = bx + i as i32 * (boxw + gap);
         let ink = if pick == Pick::Slot(i) { PRESSED } else { DIM };
         if set {
-            fill(frame, at + scale, by + scale, boxw - 2 * scale, boxw - 2 * scale, HELD);
+            fill(frame, at + scale, by + scale, boxw - 2 * scale, boxw - 2 * scale, slot_colour(i));
         }
         outline(frame, at, by, boxw, boxw, ink);
         if pick == Pick::Slot(i) {
             outline(frame, at - scale, by - scale, boxw + 2 * scale, boxw + 2 * scale, ink);
         }
     }
+    let mut at = bx + SLOTS as i32 * (boxw + gap) - gap;
+    for (&p, tag) in others.iter().zip(&tags) {
+        at += gap;
+        let (tw, on) = (tag_w(tag), pick == Pick::Player(p));
+        let ink = if on { PRESSED } else { DIM };
+        outline(frame, at, by, tw, boxw, ink);
+        if on {
+            outline(frame, at - scale, by - scale, tw + 2 * scale, boxw + 2 * scale, ink);
+        }
+        text(frame, at + scale + scale / 2, by + scale, tag, ink, scale);
+        at += tw;
+    }
     let ty = by + boxw + 2 * scale;
     let ink = if matches!(pick, Pick::Player(_)) { PRESSED } else { INK };
     text(frame, x + (w - label_w) / 2, ty, label, ink, scale);
 }
+
+/// A marker slot's colour (P94), [`crate::overlay::MARKER_COLOURS`], in this overlay's bytes.
+fn slot_colour(slot: usize) -> [u8; 3] {
+    let [r, g, b, _] = crate::overlay::marker_colour(slot);
+    [r, g, b]
+}
+
+/// **The markers' posts in the world** (P94): over a view's picture, a post standing where each of
+/// the view's player's markers was put down, a flag at its top in the slot's colour with the slot's
+/// number on it, the selected one's flag bigger and ringed white. `posts` are
+/// [`crate::overlay::marker_post`]'s with each one's slot and whether it is selected. They are drawn
+/// over the picture, so a marker shows through a hill and from across the track; the far ones first,
+/// so a near one is over them. The port's own, like the markers.
+pub fn draw_marker_posts(frame: &mut Frame, posts: &[(crate::overlay::Post, usize, bool)]) {
+    let scale = (frame.height as i32 / 224).max(1);
+    let mut order: Vec<&(crate::overlay::Post, usize, bool)> = posts.iter().collect();
+    order.sort_by(|a, b| b.0.distance.total_cmp(&a.0.distance));
+    for &&(post, slot, selected) in &order {
+        let colour = slot_colour(slot);
+        // The pole, a row at a time from the top to the foot, dark edged so it reads on the sky.
+        let ((tx, ty), (fx, fy)) = (post.top, post.foot);
+        let (y0, y1) = (ty.min(fy).round() as i32, ty.max(fy).round() as i32);
+        let pole = scale.max(1);
+        for y in y0.max(0)..=y1.min(frame.height as i32) {
+            let k = if y1 > y0 { (y - y0) as f32 / (y1 - y0) as f32 } else { 0.0 };
+            let (from, to) = if ty <= fy { (tx, fx) } else { (fx, tx) };
+            let x = (from + (to - from) * k).round() as i32;
+            fill(frame, x - pole, y, 2 * pole + 1, 1, POST_EDGE);
+            fill(frame, x - pole / 2, y, pole, 1, colour);
+        }
+        // The flag off the pole's top, its number on it.
+        let s = if selected { scale + (scale + 1) / 2 } else { scale };
+        let number = (slot + 1).to_string();
+        let (w, h) = (number.chars().count() as i32 * 4 * s + 3 * s, 9 * s);
+        let (x, y) = (tx.round() as i32 + pole / 2 + 1, ty.round() as i32);
+        if selected {
+            outline(frame, x - 2 * scale, y - 2 * scale, w + 4 * scale, h + 4 * scale, INK);
+            outline(frame, x - scale, y - scale, w + 2 * scale, h + 2 * scale, INK);
+        } else {
+            outline(frame, x - 1, y - 1, w + 2, h + 2, POST_EDGE);
+        }
+        fill(frame, x, y, w, h, colour);
+        text(frame, x + 2 * s, y + 2 * s, &number, POST_EDGE, s);
+    }
+}
+
+/// A post's edge and its flag's number.
+const POST_EDGE: [u8; 3] = [16, 16, 18];
 
 /// The panel: the scene behind it taken down towards black, so the dirt still shows through and the
 /// text on top of it still reads. One multiply-add a pixel, in bytes.
