@@ -457,6 +457,19 @@ fn switch_machine(seat: &mut Seat, rig: &mut Rig, to: Kind, place: &mut dyn sim_
     }
 }
 
+/// The machine the original's switch pop-up offers this seat (P103), among the bays shown: only to a
+/// rider on the bike, the one machine the port parks nothing of, and only a machine this seat's
+/// garage has (its own copy is what the switch spawns on it).
+fn seat_offer(seat: &Seat, bays: &[vehicle::Bay]) -> Option<Machine> {
+    if !seat.riding || seat.garage.up != Kind::Bike {
+        return None;
+    }
+    let rider = &seat.sim.rider;
+    let speed = rider.ride.chassis.speed.0;
+    vehicle::offer(bays, seat.garage.up, rider.ride.position(), speed, rider.crash.is_some())
+        .filter(|m| m.kind().is_some_and(|k| seat.garage.machines().contains(&k)))
+}
+
 /// What the original's HUD shows of a player's own ride (V26, V28): their odometer, which machine is
 /// up, how hard a preload is shoving the bike, and the score. The port keeps no stunt score yet, so
 /// the score reads 0 — what the original's shows until a trick lands.
@@ -480,20 +493,19 @@ fn gauges(seat: &Seat, rig: &Rig, speedometer: menu::Speedometer) -> overlay::Ga
 
 /// What view `v`'s radar marks besides the riders (P92): the activities' start zones as the original
 /// shows them to a player who has started none (`zones`, [`overlay::shown_zones`]), every plane
-/// standing with nobody in it, every bike whose rider is in the plane — the view's own too, as the
-/// original marks its own player's — and the view's own player's session markers (P88), the selected
-/// one brighter. `me` and `players` are the markers' selection's, as the slot display takes them.
-fn radar_blips(seats: &[Seat], v: usize, zones: &[overlay::Zone], me: usize, players: usize) -> Vec<overlay::Blip> {
+/// standing with nobody in it — every bay shown (P103), `bays` — every bike whose rider is in the
+/// plane — the view's own too, as the original marks its own player's — and the view's own player's
+/// session markers (P88), the selected one brighter. `me` and `players` are the markers' selection's,
+/// as the slot display takes them.
+fn radar_blips(seats: &[Seat], bays: &[vehicle::Bay], v: usize, zones: &[overlay::Zone], me: usize, players: usize) -> Vec<overlay::Blip> {
     use overlay::{Blip, Icon};
     let ground = |at: Vf| [at.x(), at.z()];
     let view = &seats[v];
     // In the original's order, each over the one before: the machines, the bikes, the zones.
     let mut out = Vec::new();
-    // A plane left, and a bike left, are nowhere (P102): only a plane still in its bay is marked.
-    for seat in seats.iter().filter(|s| s.garage.up == Kind::Bike) {
-        if let Some(plane) = seat.garage.plane_shown() {
-            out.push(Blip { icon: Icon::Machine(vehicle::Machine::Biplane, plane.livery), at: ground(plane.at) });
-        }
+    // A plane left, and a bike left, are nowhere (P102): the machines standing are the bays'.
+    for bay in bays {
+        out.push(Blip { icon: Icon::Machine(bay.machine, bay.livery), at: ground(bay.spawn.at) });
     }
     let zones = overlay::shown_zones(zones, view.garage.up != Kind::Bike);
     out.extend(zones.into_iter().map(|z| Blip { icon: Icon::Activity(z.activity), at: z.at }));
@@ -2903,6 +2915,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut hud_key = false;
     // M swaps machines, on its edge the same way (P19).
     let mut swap_key = false;
+    // Each seat's Circle as the last frame had it, for the bays' pop-up (P103).
+    let mut answers: Vec<vehicle::Answer> = Vec::new();
     // A key's state for the frame: down, or tapped since the last poll (P53), so a tap inside one
     // slow frame still presses.
     let held = |window: &Option<Screen>, code: u8| window.as_ref().is_some_and(|w| w.pressed(code));
@@ -3216,6 +3230,29 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
         swap_key = swap_now;
+        // The bays (P103): the lot's machines standing see-through where they are parked, unless the
+        // settings turned them off. Riding up to one offers it, and Circle — the button the
+        // original's pop-up shows, its pad's own, not as a scheme moved it — takes it, through the
+        // same switch as the key and the pause. Not on a played tape, whose switches are its own
+        // lines, nor online, where the ride is the bike's.
+        let bays = vehicle::bays_shown(&lot, front.as_deref().is_none_or(|f| f.menu.settings.bays));
+        let offering = head.is_none() && online.is_none() && front.as_deref().is_none_or(|f| f.menu.riding());
+        answers.resize(world.seats.len(), vehicle::Answer::default());
+        for (i, answer) in answers.iter_mut().enumerate() {
+            let (report, taps) = menu_reports.get(i).copied().unwrap_or((world.seats[i].reports[0], 0));
+            let circle = Control::Circle.mask();
+            let held = report.status() != 0xff && report.buttons() & circle != 0;
+            let offered = seat_offer(&world.seats[i], &bays).filter(|_| offering);
+            let Some(to) = answer.take(held, taps & circle != 0, offered) else { continue };
+            if let Some(up) = switch_machine(&mut world.seats[i], &mut rigs[i], to, &mut world.place) {
+                if let (0, Some(tape)) = (i, &mut world.tape) {
+                    tape.switch(up.name());
+                }
+                if let Some(front) = front.as_deref_mut() {
+                    front.menu.switched(i, menu::Machine::from_word(up.name()).unwrap_or_default());
+                }
+            }
+        }
         stages.mark(stages::Stage::Input);
 
         // The pause, under the front end: Start or Escape opens it, and while it is open the ride is
@@ -3687,9 +3724,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     .then(|| (pick, filled, hud::marker_label(pick, filled, &names)))
             })
             .collect();
+        // The bays shown (P103), drawn below and marked on the radar.
+        let bays = vehicle::bays_shown(&lot, front.as_deref().is_none_or(|f| f.menu.settings.bays));
         // The radar's other icons, each view its own (P92).
         hud_art.radar =
-            (0..world.seats.len()).map(|v| radar_blips(&world.seats, v, &radar_zones, mine.unwrap_or(v), players)).collect();
+            (0..world.seats.len()).map(|v| radar_blips(&world.seats, &bays, v, &radar_zones, mine.unwrap_or(v), players)).collect();
+        // And the switch pop-up, each view its own player's (P103), as the input stage's take reads it.
+        let offering = head.is_none() && online.is_none() && front.as_deref().is_none_or(|f| f.menu.riding());
+        hud_art.offers = world.seats.iter().map(|seat| offering.then(|| seat_offer(seat, &bays)).flatten()).collect();
         let cameras: Vec<Camera> = cameras
             .iter()
             .enumerate()
@@ -3800,14 +3842,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     });
                 }
             }
-            // Every player's plane, in its own livery (P87): flown, or in its bay until it is taken.
+            // Every player's plane, in its own livery (P87), while it is flown.
             for (p, seat) in world.seats.iter().enumerate() {
-                let Some(plane) = seat.garage.plane_shown() else { continue };
+                let Some(plane) = seat.garage.plane_flown() else { continue };
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 let before = before_planes.get(p).copied().flatten();
                 let at = before.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
                 for (model, at) in drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)) {
                     actors.push(Actor { model, at, pose: None, lod_from: None, alpha: 1.0 });
+                }
+            }
+            // And every bay's, see-through where it is parked (P103), the put-back ghost's path.
+            for bay in &bays {
+                let plane = vehicle::bay_plane(bay);
+                let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
+                for (model, at) in drawn.turned_parts(plane_at(&plane), plane.prop_angle().map(|a| a.0)) {
+                    actors.push(Actor { model, at, pose: None, lod_from: None, alpha: vehicle::BAY_ALPHA });
                 }
             }
             for (model, at) in &traffic_at {
@@ -4012,11 +4062,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                 }
             }
-            // The plane stands parked in its bay until it is taken, and from then is drawn only while
-            // it is flown (P102). At its body's pose, nose and up off the plane's own measure, with the
-            // prop at the engine's angle (S35) — or the bent cone, unturned, once it is wrecked.
+            // The plane is drawn only while it is flown (P102). At its body's pose, nose and up off the
+            // plane's own measure, with the prop at the engine's angle (S35) — or the bent cone,
+            // unturned, once it is wrecked. The bays' see-through planes (P103) are the GPU's alone:
+            // this path draws solid or nothing, and a solid one would be a machine that is not there.
             for (p, seat) in world.seats.iter().enumerate() {
-                let Some(plane) = seat.garage.plane_shown() else { continue };
+                let Some(plane) = seat.garage.plane_flown() else { continue };
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 let before = before_planes.get(p).copied().flatten();
                 let at = before.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));

@@ -218,6 +218,10 @@ pub struct Settings {
     pub vsync: bool,
     /// The most pictures a second (P90): with VSync off, or below the refresh with it on.
     pub frame_limit: FrameLimit,
+    /// Whether the lot's machines stand at their bays (P103): drawn see-through there, and offered by
+    /// the original's pop-up when the rider stops beside one. Off, neither is; the pause's switch
+    /// stays. On unless turned off.
+    pub bays: bool,
     /// The game modifiers the next ride loads with (P55): the original game's unless changed.
     pub modifiers: Mods,
     /// Modifier presets saved by name, in the order they were saved.
@@ -479,6 +483,7 @@ impl Default for Settings {
             render_scale: RenderScale::default(),
             vsync: true,
             frame_limit: FrameLimit::default(),
+            bays: true,
             modifiers: Mods::original(),
             presets: Vec::new(),
             lobby_seats: LOBBY_SEATS,
@@ -558,6 +563,7 @@ impl Settings {
                 "render_scale" => s.render_scale = RenderScale::from_word(v).unwrap_or(s.render_scale),
                 "vsync" => s.vsync = v != "off",
                 "frame_limit" => s.frame_limit = FrameLimit::from_word(v).unwrap_or(s.frame_limit),
+                "machine_bays" => s.bays = v != "off",
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
                 "modifiers" => s.modifiers = Mods::parse(v).unwrap_or_default(),
@@ -636,6 +642,7 @@ impl Settings {
             self.graphics.word(),
             self.render_scale.word()
         ) + &self.display_text()
+            + &self.bays_text()
             + &self.lobby_seats_text()
             + &self.modifiers_text()
     }
@@ -643,6 +650,12 @@ impl Settings {
     /// The picture's pacing (P90): VSync and the frame limit.
     fn display_text(&self) -> String {
         format!("vsync = {}\nframe_limit = {}\n", on_off(self.vsync), self.frame_limit.word())
+    }
+
+    /// The machines' bays (P103), only when they are off, so a file from before them is written as
+    /// it was.
+    fn bays_text(&self) -> String {
+        if self.bays { String::new() } else { "machine_bays = off\n".into() }
     }
 
     /// The lobby's seat count (N12), only when it is not the usual [`LOBBY_SEATS`], so a file from
@@ -1178,7 +1191,7 @@ const AUDIO_PRESET: usize = 3;
 const AUDIO_SLIDERS: usize = 4;
 /// Which of [`Mix::levels`]' sliders each slider row is.
 const AUDIO_SLIDER: [usize; 6] = [0, 2, 3, 4, 5, 1];
-const SETTINGS_ROWS: usize = 13;
+const SETTINGS_ROWS: usize = 14;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
 const SETTINGS_MUSIC_VOLUME: usize = 5;
@@ -1192,8 +1205,10 @@ const SETTINGS_SPEEDOMETER: usize = 9;
 /// VSync and the frame limit (P90), under the speedometer's.
 const SETTINGS_VSYNC: usize = 10;
 const SETTINGS_FRAME_LIMIT: usize = 11;
+/// The machines at their bays (P103), above the modifiers'.
+const SETTINGS_BAYS: usize = 12;
 /// The game modifiers' screen (P55), the last row.
-const SETTINGS_MODIFIERS: usize = 12;
+const SETTINGS_MODIFIERS: usize = 13;
 /// The modifiers' screen: whose they are, every modifier, then the presets and the reset.
 const MODIFIERS_SEAT: usize = 0;
 const MODIFIERS_KNOBS: usize = 1;
@@ -2489,6 +2504,10 @@ impl Menu {
                             self.settings.frame_limit = self.settings.frame_limit.step(p.left);
                             self.changed = true;
                         }
+                        SETTINGS_BAYS => {
+                            self.settings.bays = !self.settings.bays;
+                            self.changed = true;
+                        }
                         _ => {}
                     }
                 }
@@ -3452,6 +3471,7 @@ impl Art {
                         format!("Speedometer  {}", menu.settings.speedometer.label()),
                         format!("VSync  {}", if menu.settings.vsync { "On" } else { "Off" }),
                         format!("Frame limit  {}", menu.settings.frame_limit.label()),
+                        format!("Machines at bays  {}", if menu.settings.bays { "On" } else { "Off" }),
                         format!(
                             "Game Modifiers  {}",
                             if menu.settings.modifiers.is_original() { "Original" } else { "Modified" }
