@@ -1820,6 +1820,57 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     assert!(Settings::parse("modifiers = gravity=50 warp=9\n").modifiers.is_original());
 }
 
+/// P98: the modifiers screen under the ride's pause sets the ride's modifiers, which take when the
+/// pause closes, and says so; a ride the shell holds them on (online, a played tape) shows them and
+/// does not change them, and says why.
+#[test]
+fn the_pauses_modifiers_take_when_it_closes_unless_held() {
+    let (mut m, mut r) = fresh();
+    m.pause();
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    let gravity = 1 + Knob::ALL.iter().position(|k| *k == Knob::Gravity).unwrap();
+    for _ in 0..gravity {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    assert!(m.modifier_help().contains("when the pause closes"), "{}", m.modifier_help());
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90);
+    assert!(m.take_changed());
+    // Held: the arrows, Cross and Reset To Original leave them be, and the ticker says why.
+    m.mods_lock = Some("Online the ride keeps its modifiers".into());
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90);
+    assert_eq!(m.modifier_help(), "Online the ride keeps its modifiers");
+    assert!(m.modifier_rows()[gravity].ends_with("Held"), "{:?}", m.modifier_rows());
+    while m.cursor(Screen::Modifiers) != Knob::ALL.len() + 4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90, "Reset To Original went through the hold");
+    // Out to the ride: Back twice, then Resume.
+    tap(&mut m, &mut r, Control::Circle);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    while m.cursor(Screen::Pause) != 0 {
+        tap(&mut m, &mut r, Control::Up);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    // The main menu's screen is never held: what it sets is the next ride's.
+    m.main();
+    m.open(Screen::Modifiers);
+    assert!(m.modifier_help().contains("next"), "{}", m.modifier_help());
+    assert!(!m.modifier_rows()[gravity].contains("Held"), "{:?}", m.modifier_rows());
+}
+
 // ---- the pause's Game Audio Options (P56) -----------------------------------------------------------
 
 /// Songs that never end, each its own level, so which one is playing is heard as well as named.

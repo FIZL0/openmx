@@ -689,6 +689,37 @@ impl Ride {
         ride
     }
 
+    /// **The bike's numbers changed under a ride going on** (P98): what [`Ride::new`] copied out of the
+    /// `.phy` at the start, taken again from `p`, and nothing the ride has done since touched. The
+    /// engine's tuning (its curve, gearing, clutch and braking, with the gear's ratio worked out again
+    /// for the gear it is in) and each wheel's damping, which is built off the file's spring; the rest
+    /// of what the step reads of the file it reads off the `.phy` every tick. Everything the game
+    /// modifiers ([`crate::modifiers`]) reach is one of those, so a ride retuned onto a modified file
+    /// rides on, from where it is, as one built on it would. The integrator's speed limit is the
+    /// ride's own and not the file's: [`crate::modifiers::Mods::rebike`] moves it.
+    pub fn retune(&mut self, p: &Phy) {
+        let fresh = Ride::new(p, (self.front.w.mount, self.rear.w.mount), self.spawn, self.spawn_facing);
+        let (e, f) = (&mut self.engine, &fresh.engine);
+        e.gears = f.gears;
+        e.final_drive = f.final_drive;
+        e.gear_ratios = f.gear_ratios;
+        e.rev_limit = f.rev_limit;
+        e.idle_throttle = f.idle_throttle;
+        e.engine_braking = f.engine_braking;
+        e.inv_inertia = f.inv_inertia;
+        e.clutch_static = f.clutch_static;
+        e.clutch_kinetic = f.clutch_kinetic;
+        e.min_rpm = f.min_rpm;
+        e.curve_rpm = f.curve_rpm;
+        e.curve_torque = f.curve_torque;
+        let gear = e.gear;
+        mv::set_gear(e, gear);
+        for (w, f) in [(&mut self.front, &fresh.front), (&mut self.rear, &fresh.rear)] {
+            w.w.damping_out = f.w.damping_out;
+            w.w.damping_in = f.w.damping_in;
+        }
+    }
+
     /// Put the bike down at a point, pointed a way, stopped: the respawn, less the ride state
     /// machine's own clocks (S5's, and P3's to wire).
     pub fn place(&mut self, at: Vf, facing: Vf) {
