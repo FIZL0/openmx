@@ -660,7 +660,7 @@ impl<P: sim_world::World> Game for World<P> {
         {
             tape.frame(dt, &self.seats[0].reports);
         }
-        let spots: Vec<Spot> = self.seats.iter().map(|s| Spot::of(&s.sim.rider)).collect();
+        let spots: Vec<Spot> = self.seats.iter().map(|s| s.garage.spot(&s.sim, &mut self.place)).collect();
         for (me, seat) in self.seats.iter_mut().enumerate() {
             seat.pass(dt, &mut self.place, me, &spots);
         }

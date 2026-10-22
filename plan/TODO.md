@@ -29,7 +29,6 @@ The first four phases are tooling and feel like a detour from the port. They are
 port that converges and one that is 90 % done forever: every task after them is proved with what they
 build. Do them in order; inside a later phase, tasks that touch different files can go in any order.
 
-- [ ] **P104** a marker teleport onto a player who is flying lands on their plane's spot, not the bike they left (markers::Spot::of reads the rider; P102 journal)
 - [ ] **N17** switching machine online: carry P102's switch (bike/biplane) as a rollback input at a tick, with the plane in the session state, so an online player can take the plane; today the pause refuses it online (P102 journal)
 - [ ] **P105** Saved session markers for --peer online rides and drop-in joiners (P99 carries them only in a lobby pick): send a joiner's saved markers with its join so every machine seats them the same
 - [ ] **S99** When the plane's search refills: plane_refresh_search's own caller was not found (S96), so the port gathers once a frame from the ray probe's current reach before the probes run. Find who calls it (and on what clock) and prove the frame's gather order against a second biplane state a few frames on. → crates/game-sim/src/flight.rs search | t: tests/flight_candidates.rs
