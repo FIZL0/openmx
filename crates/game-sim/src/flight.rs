@@ -43,7 +43,7 @@ use crate::collide::{Bundle, Record};
 use crate::contact::{self, Collider, Weighed};
 use crate::broad_phase;
 use crate::contact_search;
-use crate::flight_search::{self, Rays, Scene, VEHICLE};
+use crate::flight_search::{self, Bikes, Rays, Scene, VEHICLE};
 use crate::wreck_bike::{self, node_of};
 use std::sync::Arc;
 use crate::hash::{State, Walk};
@@ -53,6 +53,7 @@ use crate::noise::SmoothNoise;
 use crate::phy;
 use crate::ride;
 use crate::rng::Rng;
+use crate::track;
 use crate::world;
 use ps2_float::{Dest, F, Vf};
 
@@ -153,6 +154,9 @@ pub struct Flight {
     /// The collision object's nearby search (S96): what the broad phase last gathered around the ray
     /// probe, kept from frame to frame while the probe stays within its bound.
     pub nearby: broad_phase::Search,
+    /// The ride's bikes' collision mesh (S95, `bike\col\bikef.col`): with it the other riders' bikes
+    /// are in the plane's world ([`Flight::frame_among`]). Geometry off the disc, like the rays.
+    pub bike: Option<Arc<track::Mesh>>,
 }
 
 impl Flight {
@@ -303,6 +307,13 @@ impl Flight {
         self
     }
 
+    /// The plane with the ride's bikes' collision mesh ([`flight_search::BIKE_COLLISION`]), so the
+    /// other riders' bikes are in its world.
+    pub fn with_bike(mut self, mesh: track::Mesh) -> Flight {
+        self.bike = Some(Arc::new(mesh));
+        self
+    }
+
     /// The plane stood at `origin` (the model's, which is where `machine.txt` parks it) with its nose
     /// along `facing` and its wings level, at rest; then measured, so that the first frame's wheels
     /// are placed by where it now is. Also where a recovered wreck is put back.
@@ -368,9 +379,28 @@ impl Flight {
     /// Not here: **what is not simulation**, the touchdown sound, the surfaces' and the pilot's animation
     ///   (S35's, the renderer's), the engine sound the prop rpm is written from, the pad's rumble.
     pub fn frame(&mut self, dt: F, pad: Pad, ground: &mut dyn world::World, tables: &ride::Tables) {
+        self.frame_among(dt, pad, ground, tables, &[]);
+    }
+
+    /// [`Flight::frame`] in a ride with other riders' `bikes` in it, in player order (S95): with the
+    /// bikes' mesh ([`Flight::with_bike`]) they are collidables in the plane's search and its post's
+    /// gather, and a plane that strikes one is spared by its crash test as by any vehicle. Answers
+    /// what each bike's struck listener kept this frame ([`flight_search::bike_struck`]): the
+    /// category of the probe that struck it, for the bike's wreck test ([`flight_search::struck_wreck`]).
+    pub fn frame_among(
+        &mut self,
+        dt: F,
+        pad: Pad,
+        ground: &mut dyn world::World,
+        tables: &ride::Tables,
+        bikes: &[flight_search::Bike],
+    ) -> Vec<Option<u32>> {
         self.pad = pad;
-        self.search(dt, ground);
-        WORLD.step(dt, &mut Listeners { plane: self, ground: Ground(ground), tables });
+        let mesh = self.bike.clone();
+        let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
+        let struck = self.search(dt, ground, bikes);
+        WORLD.step(dt, &mut Listeners { plane: self, ground: Ground(ground), tables, bikes });
+        struck
     }
 
     /// The collision object's search, before the world steps (the plane's world node, as the wreck
@@ -378,14 +408,16 @@ impl Flight {
     /// the rays against the track's collision meshes ([`contact_search::collide`] over
     /// [`flight_search::Scene`]). The transform is where the body stood after last frame's post
     /// listener, which is where the original's post listener leaves it.
-    fn search(&mut self, dt: F, world: &mut dyn world::World) {
-        let Some(rays) = self.rays.clone() else { return };
+    fn search(&mut self, dt: F, world: &mut dyn world::World, bikes: Option<Bikes<'_>>) -> Vec<Option<u32>> {
+        let none = vec![None; bikes.map_or(0, |b| b.bikes.len())];
+        let Some(rays) = self.rays.clone() else { return none };
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let (field, props) = world.collision();
         let bounds = field.as_deref().map(field_box);
-        let mut scene = Scene::new(props, bounds, &rays, &self.record.node, &mut self.nearby);
+        let mut scene = Scene::among(props, bikes, bounds, &rays, &self.record.node, &mut self.nearby);
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
+        scene.struck
     }
 
     /// The search's refill (S99), first in the post listener: the original's body post sets the
@@ -393,11 +425,11 @@ impl Flight {
     /// the ray probe's reach there ([`flight_search::refresh`]), before the measure, the crash test
     /// and any unwreck — so the frame after a recovery searches with the list gathered where the
     /// plane came down. Once a world step, before the other bodies' posts move them.
-    fn refresh(&mut self, world: &mut dyn world::World) {
+    fn refresh(&mut self, world: &mut dyn world::World, bikes: Option<Bikes<'_>>) {
         let Some(rays) = self.rays.as_ref() else { return };
         let (field, props) = world.collision();
         let bounds = field.as_deref().map(field_box);
-        flight_search::refresh(props, bounds, rays, &node_of(&self.body), &mut self.nearby);
+        flight_search::refresh_among(props, bikes.as_ref(), bounds, rays, &node_of(&self.body), &mut self.nearby);
     }
 
     /// The preforce listener.
@@ -555,6 +587,7 @@ struct Listeners<'a> {
     plane: &'a mut Flight,
     ground: Ground<'a>,
     tables: &'a ride::Tables,
+    bikes: Option<Bikes<'a>>,
 }
 
 impl Dynamics for Listeners<'_> {
@@ -581,7 +614,7 @@ impl Dynamics for Listeners<'_> {
     }
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
-        self.plane.refresh(&mut *self.ground.0);
+        self.plane.refresh(&mut *self.ground.0, self.bikes);
         self.plane.post(dt, &self.tables.acos);
     }
 }
