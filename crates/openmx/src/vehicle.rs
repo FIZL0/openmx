@@ -486,6 +486,14 @@ pub fn round_stick(input: &game_sim::input::Pad, mut pad: game_sim::biplane::Pad
 /// neighbour (one byte is `2/255` of the travel): [`round_stick`].
 const ROUND_STICK_CENTRE: f32 = 0.005;
 
+/// What [`Plane::step`] scales the autopilot's `MaxPitchRate` by under the round stick (P108). The
+/// file's 1.25 radians a second is less than full elevator pitches the biplane at speed, so the loop
+/// reached it and took the elevator back off: banked 90 degrees at 121 ft/s, a held full pull turned
+/// the plane 34 degrees in a second where full elevator turns it 75. At 2.5 times the loop asks for
+/// more than full elevator reaches at any speed the plane flies, so a full pull is full elevator, and
+/// a partial pull still asks the loop for a rate.
+const ROUND_STICK_PITCH_RATE: f32 = 2.5;
+
 /// The biplane: where it was parked, where it is, and the flight that moves it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plane {
@@ -593,17 +601,23 @@ impl Plane {
         // that is held, not one being rolled through: past the dead zone it fades out over the same
         // width again, or a held roll would have it pushing as the plane goes over the top (it is a
         // push banked past 110 degrees). Both put back after the frame.
-        let (dead_zone, feed_forward) = (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward);
+        // The loop's full-stick pitch rate is raised too (P108): at the file's own the loop reaches
+        // it at speed and takes the elevator back off, so a hard pull on its side turned no faster
+        // than a slow one. All three put back after the frame.
+        let (dead_zone, feed_forward, max_pitch_rate) =
+            (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate);
         let mut pad = flight::pad(sim.input.pad(0));
         if self.round_stick {
             pad = round_stick(sim.input.pad(0), pad);
             let held = ((dead_zone + dead_zone - pad.aileron.abs()) / dead_zone).max(F::ZERO).min(F::ONE);
             f.autopilot.aileron_dead_zone = F(2.0);
             f.autopilot.feed_forward = feed_forward * held;
+            f.autopilot.max_pitch_rate = max_pitch_rate * F(ROUND_STICK_PITCH_RATE);
         }
         f.frame(dt, pad, world, &sim.tables.ride);
         f.joystick.min_elevator = min_elevator;
-        (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward) = (dead_zone, feed_forward);
+        (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate) =
+            (dead_zone, feed_forward, max_pitch_rate);
         let recovered = wrecked && f.crash.reason == 0;
         self.pose();
         chord || recovered
