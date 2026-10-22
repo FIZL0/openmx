@@ -259,6 +259,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
             c[2] = menu::CameraView { fov: -5, distance: 140, height: 95, plane_distance: 100, plane_height: 180 };
             c
         },
+        // The mods folder not read (MD2).
+        mods: false,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -462,7 +464,8 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     assert!(!m.settings.bays);
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.settings.bays);
-    // Then the camera's (P82), and after it the modifiers', still the last.
+    // Then the mods folder's (MD2), the camera's (P82), and after it the modifiers', still the last.
+    tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Cross);
@@ -2225,4 +2228,59 @@ fn the_controls_row_offers_the_originals_presets() {
     // Where the Controls screen keeps each one's keyboard list.
     assert_eq!(menu::keyboard_at(n, 2), 0);
     assert_eq!((0..4).map(|p| menu::keyboard_at(o, p)).collect::<Vec<_>>(), [1, 2, 3, 4]);
+}
+
+/// MD2: the track pick lists the mods folder's tracks after the disc's, a mod rides by its id, and
+/// the Mods row turns the folder off and is saved. With no mods the pick is the disc's five.
+#[test]
+fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.track_count(), menu::TRACKS.len());
+    for (i, t) in menu::TRACKS.iter().enumerate() {
+        assert_eq!(m.track_at(i), *t);
+    }
+    assert!(m.settings.mods, "the folder is read unless asked");
+    assert!(!m.settings.text().contains("mods"), "a file without mods says nothing of them");
+
+    m.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into())]);
+    assert_eq!(m.track_count(), menu::TRACKS.len() + 1);
+    assert_eq!(m.track_at(menu::TRACKS.len()), ("md2_flat", "MD2 Flat"));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "left from the first wraps to the mod");
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("md2_flat".into())), "{acts:?}");
+    assert_eq!(m.settings.track, "md2_flat");
+    // The mod is the track the file opens on next time, while the folder still has it.
+    let again = Settings::parse(&m.settings.text());
+    assert_eq!(again.track, "md2_flat");
+    let mut next = Menu::new(again, Controls::default());
+    next.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into())]);
+    assert_eq!(next.cursor(Screen::Tracks), menu::TRACKS.len());
+    // Gone from the folder, it opens on the first track; a name that cannot be a mod's is not kept.
+    next.set_mod_tracks(Vec::new());
+    assert_eq!(next.cursor(Screen::Tracks), 0);
+    assert_eq!(Settings::parse("track = ../free06\n").track, Settings::default().track);
+
+    // The Mods row: three up from the top of Settings, past Modifiers and Camera.
+    let (mut m, mut r) = fresh();
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Up);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_changed());
+    assert!(!m.settings.mods);
+    assert!(m.settings.text().contains("mods = off\n"));
+    let dir = scratch("mods");
+    menu::save(&dir, &m.settings, &Controls::default()).unwrap();
+    assert!(!menu::load(&dir).0.mods);
+    std::fs::remove_dir_all(&dir).unwrap();
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.settings.mods);
 }
