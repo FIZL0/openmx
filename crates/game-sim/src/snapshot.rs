@@ -130,6 +130,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     }
     if let (Some(p), Some(here)) = (plane.as_mut(), sim.plane.as_ref()) {
         p.rays = here.rays.clone();
+        p.bike = here.bike.clone();
     }
     let here = &sim.rider;
     rider.set = here.set.clone();
@@ -518,7 +519,7 @@ wire!(crate::rider_anim::Clocked { played, snapshot });
 /// rider's set; [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
-        let Self { joystick, autopilot, engine, aero, body, measure, tires, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _, nearby } = self;
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _, nearby, bike: _ } = self;
         joystick.put(out);
         autopilot.put(out);
         engine.put(out);
@@ -573,6 +574,7 @@ impl Wire for crate::flight::Flight {
             record: Wire::take(r)?,
             rays: None,
             nearby: Wire::take(r)?,
+            bike: None,
         })
     }
 }
