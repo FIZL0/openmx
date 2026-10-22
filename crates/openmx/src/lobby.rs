@@ -29,6 +29,9 @@ use crate::roster;
 pub struct DiscFiles {
     bikes: Mutex<HashMap<String, Option<Arc<Vec<u8>>>>>,
     tracks: Mutex<HashMap<String, Option<u64>>>,
+    /// Whose saved markers a ride this machine drops in on brings (P105): the settings' folder and
+    /// 1P's profile (`saved_markers::profile`), as the front end last said them.
+    markers: Mutex<Option<(PathBuf, String)>>,
 }
 
 /// The disc's member ending in `suffix`, the shortest (the shell's own rule: the menus keep deeper
@@ -101,6 +104,22 @@ impl openmx_net::Disc for DiscFiles {
 
     fn bike(&self, set: &str) -> Option<u64> {
         self.phy(set).map(|b| fnv(&b))
+    }
+
+    fn markers(&self, track: &str, bike: &str) -> String {
+        let Some((dir, profile)) = self.markers.lock().unwrap().clone() else { return String::new() };
+        crate::saved_markers::to_pick(&crate::saved_markers::load(&dir, track, &profile, bike), bike, track)
+    }
+}
+
+impl DiscFiles {
+    /// The player whose saved markers a ride this machine drops in on brings (P105): `profile`'s in
+    /// the settings' folder `dir`. The front end's, every frame.
+    pub fn bring_markers(&self, dir: &Path, profile: &str) {
+        let mut m = self.markers.lock().unwrap();
+        if m.as_ref().is_none_or(|(d, p)| d != dir || p != profile) {
+            *m = Some((dir.to_path_buf(), profile.to_string()));
+        }
     }
 }
 
