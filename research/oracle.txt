@@ -3526,10 +3526,67 @@ radar_update                boot 0x0035d3e0 world W = max(terrain+0x538, +0x53c)
 radar_place_riders          boot 0x0035e4d0 every rider but the viewer: rel = theirs - own (x,z),
 #                                           d = min(|rel|, W/2), r = d*104/W, a = angle(rel) - angle(f)
 #                                           wrapped to +-pi, mark at (cx + r sin a, cy - r cos a);
-#                                           map_icon_hit_freestyle 8x8, colour bytes 00 00 ff ff (AI) or
-#                                           00 ff ff ff when the rider's +0x34 player kind is 1 (human)
-radar_place_activities      boot 0x0035efa0 the H/R/S/M activity icons (37a66e/3399ff/cc7333/b53b81),
-#                                           scale clamp(0.3+(r-d)/r, 0.5, 0.8); not ported
+#                                           map_icon_hit_freestyle 8x8, colour word 0xffff0000 (AI) or
+#                                           0xffffff00 when the rider's +0x34 player kind is 1 (human).
+#                                           P92: UI colour words are 0xAARRGGBB (red AI dots on the
+#                                           original's own screen), so AI red and human yellow; V26 read
+#                                           the memory bytes (00 00 ff ff / 00 ff ff ff) as RGBA, cyan
+radar_place_activities      boot 0x0035efa0 (radar, rel x/z, forward x/z, colour, type): the same
+#                                           r/a as the riders' marks, scale clamp(0.3+(R-d)/R, 0.5, 0.8)
+#                                           with R = W/2, d = min(|rel|, R) (consts 0x004214c0/c8/d0);
+#                                           32x32 icon. Ported P92 (overlay::radar_icon, zone_size)
+# --- P92: the rest of the radar's icons, read for crates/openmx/src/overlay.rs. Proved against
+#     first_recording's RAM (free09: H/R/M/S at 74.7,362.0 / 36.5,350.6 / 105.3,337.7 / 35.0,361.4,
+#     scales .8/.5/.7/.5, which the port's formula gives to 0.1 px off the player's bike 4310,3320)
+#     and biplane.ram (free06 in the plane: the parked bike 54.2,393.0, port 54.1,393.2), and two
+#     PCSX2 screenshots of the same states ---
+radar_icons_build           boot 0x0035bb70 the icon container (radar+0x3c): +0x50 a pool of 20
+#                                           map_icon_hit_freestyle 8x8 (default 0xff56ae00), machines
+#                                           +0x8c/+0x90 (32x32, scale 1), bikes +0x94/+0x98
+#                                           map_icon_bike 0xffc8c8c8, H pool +0x54 (5) 0xff6ea637, R pool
+#                                           +0x6c (5) 0xffff9933, M +0x84 0xff3373cc, S +0x88 0xff813bb5.
+#                                           Machine icon per the event's kind (+0x11c P1, +0x128 P2) and
+#                                           copy (+0x124/+0x130; copy 0 or 2 the first colour): biplane
+#                                           map_icon_bplane 0xffe4191a/0xffe7c113, heli 0xff4c90bc/
+#                                           0xff86d036, buggy 0xffd5ab0c/0xff848b6b, monster 0xffa1cc29/
+#                                           0xffe89427, kind 5 map_icon_trophy 0xffa40000/0xffe0980e.
+#                                           Built in this order (machines, bikes, H, R, M, S): the
+#                                           screenshots show S over H and the riders' dots over all
+radar_icon_pool_grow        boot 0x0035c4e0 refills a pool past its count
+radar_icon_place            boot 0x0035c640 (x, y, scale, container, type, colour): type 1 H, 2 R,
+#                                           3 M, 4 S; sets +0x90 (y at +0, x at +4), +0x60 scale, +0x68
+radar_icon_place_machine    boot 0x0035c850 machine kind 0 (bike) into +0x94/+0x98, kinds 1-5 into
+#                                           +0x8c/+0x90 when they are the event's P1/P2 machine
+radar_place_machine         boot 0x0035eac0 the machine's r/a as the riders'; called from radar_update
+#                                           for every machine in game+0x3cc+0x90 (+4 kind, +8 model,
+#                                           model+0x18 its transform) that is kind 0 or unlocked (the
+#                                           unlock record named by the table 0x00420930, +0x14 == 0, or
+#                                           the manager's +0x5c set), and nobody rides (model+0x20 null
+#                                           or its +0x6c0 parked flag set), and the rider answers the
+#                                           0x0043fc40 interface. first_recording's parked monster truck
+#                                           (locked in that save) is not placed; biplane.ram's bike is
+radar_activity_flags        boot 0x0035d3e0 radar_update walks *(0x004e2778)+0x44's activity list
+#                                           (count +0x3c; +0x50 position, +0x78 type, +0x48 the hits):
+#                                           a zone is placed when its per-player flag byte has 1 and 4;
+#                                           flag 2 with the event's +0x116 dims it to alpha 0x6e. In
+#                                           every RAM image of the human's save only the first zone of
+#                                           each type has 1|4; the race's (M) is cleared while the player
+#                                           is in a machine (biplane.ram) by the swap 0x003601b0, which
+#                                           toggles it through 0x003aa640. 0x004e2778 is this rider and
+#                                           activity manager (+0x30 riders, +0x38 the list, +0x3c/+0x44
+#                                           the activities): its name network_session above looks wrong
+radar_activity_flag_set     boot 0x003aa460 per-player flag setters of an activity: 0x003aa460,
+#                                           0x003aa530, 0x003aa640 (the race's shown bit), 0x003aa840
+radar_machine_point         boot 0x0035df50 the layout's Machine Point/Arrow (red, 8x8 / 16x16): in a
+#                                           mode (radar+0x88 != 0) pointing at one vehicle, the point
+#                                           inside W/2, past it the arrow on the rim turned toward it.
+#                                           Not ported: an activity's
+radar_gates                 boot 0x0035f480 Current/Next/Previous Gate Point (map_icon_gate 32x8,
+#                                           200,200,200) or Arrow at the rim: an activity's gates; the
+#                                           current gate's alpha = timer(+0xb0) * 255 / 0.5, the timer
+#                                           run down by dt, so it fades in and out; the next gate's colour
+#                                           lerps. Not ported (no activities); the port's session markers
+#                                           (P88) borrow map_icon_gate
 # --- V28: the rest of the riding HUD, read for crates/openmx/src/overlay.rs (score bar, preload meter).
 #     Both are Flash movies (Overlay_1p_Score.fsh, ingame_preloadmeter.fsh) the port has no player
 #     for; their shapes, tints (black 0x80/0x66 score, ~0xb3 meter) and text colour 200,200,200 were
