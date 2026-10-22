@@ -774,3 +774,31 @@ impl Wire for crate::motion::Blend {
         })
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The session markers' slots on their own (P99).
+// ---------------------------------------------------------------------------------------------------
+
+/// A player's five marker slots as bytes, for the saved-markers file ([`crate::markers::Markers::to_file`]):
+/// [`MAGIC`] first, then each slot's [`crate::ride::Ride`] in [`encode`]'s codec, so a slot reads back
+/// as the bike it was, bit for bit.
+pub fn encode_slots(slots: &[Option<Box<crate::ride::Ride>>; crate::markers::SLOTS]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 * 1024);
+    out.extend_from_slice(&MAGIC);
+    slots.put(&mut out);
+    out
+}
+
+/// [`encode_slots`]'s bytes back, all of them or an error: another build's codec ([`MAGIC`]), a
+/// file cut short, or bytes left over — which is what a field added to the ride makes of an old file.
+pub fn decode_slots(bytes: &[u8]) -> Result<[Option<Box<crate::ride::Ride>>; crate::markers::SLOTS], String> {
+    let mut r = Reader { bytes, at: 0 };
+    if r.bytes(4)? != MAGIC {
+        return Err("not a ride state (or another build's)".into());
+    }
+    let slots = Wire::take(&mut r)?;
+    if r.at != bytes.len() {
+        return Err(format!("{} bytes left over after the slots", bytes.len() - r.at));
+    }
+    Ok(slots)
+}
