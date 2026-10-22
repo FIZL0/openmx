@@ -503,8 +503,8 @@ fn outline(frame: &mut Frame, x: i32, y: i32, w: i32, h: i32, color: [u8; 3]) {
 }
 
 /// **The markers' slot display** (P88): the five slots and the other players, shown for a while
-/// whenever the selection or a slot changes, and for as long as a d-pad direction is held towards a
-/// marker. Drawn whether or not the overlay above is on: it is the markers' only feedback. The
+/// whenever the selection or a slot changes, and for as long as a d-pad direction is held for the
+/// markers. Drawn whether or not the overlay above is on: it is the markers' only feedback. The
 /// port's own, like the markers themselves.
 #[derive(Clone, Debug, Default)]
 pub struct MarkerBanner {
@@ -520,11 +520,11 @@ impl MarkerBanner {
 
     /// This frame's markers, and whether to draw them: up for [`MarkerBanner::SHOWN`] after the
     /// selection or a slot changes (not on the first frame, which has nothing to change from) and
-    /// while `holding` — a d-pad direction's held milliseconds ([`game_sim::markers::holding`]) —
-    /// is not 0.
-    pub fn update(&mut self, now: Instant, pick: Pick, filled: [bool; SLOTS], holding: u32) -> bool {
+    /// while `held`, a d-pad direction down for the markers ([`game_sim::markers::held`]) — so a
+    /// press that changes nothing (Up on an empty slot) still shows what it was on.
+    pub fn update(&mut self, now: Instant, pick: Pick, filled: [bool; SLOTS], held: bool) -> bool {
         let seen = Some((pick, filled));
-        if (self.seen.is_some() && self.seen != seen) || holding > 0 {
+        if (self.seen.is_some() && self.seen != seen) || held {
             self.until = Some(now + MarkerBanner::SHOWN);
         }
         self.seen = seen;
@@ -545,14 +545,15 @@ pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>])
 }
 
 /// The slot display, top centre of `frame`: five boxes — solid where a marker is, the selected one
-/// ringed — the label under them, and under that how far the d-pad's hold is towards firing.
-pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, holding: u32) {
+/// ringed — and the label under them. The markers fire on the press (P93), so there is no hold to
+/// show filling.
+pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str) {
     let scale = (frame.height as i32 / 224).max(1);
     let (boxw, gap) = (7 * scale, 3 * scale);
     let row = SLOTS as i32 * boxw + (SLOTS as i32 - 1) * gap;
     let label_w = label.chars().count() as i32 * 4 * scale;
     let w = row.max(label_w) + 2 * PAD * scale;
-    let h = boxw + 5 * scale + 2 * scale + 6 * scale + 2 * PAD * scale;
+    let h = boxw + 2 * scale + 6 * scale + 2 * PAD * scale;
     let (x, y) = ((frame.width as i32 - w) / 2, 8 * scale);
     panel(frame, x, y, w, h);
     let (bx, by) = (x + (w - row) / 2, y + PAD * scale);
@@ -570,11 +571,6 @@ pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label:
     let ty = by + boxw + 2 * scale;
     let ink = if matches!(pick, Pick::Player(_)) { PRESSED } else { INK };
     text(frame, x + (w - label_w) / 2, ty, label, ink, scale);
-    let bar_y = ty + 7 * scale;
-    let full = row;
-    fill(frame, bx, bar_y, full, scale, EMPTY);
-    let done = full * holding.min(game_sim::markers::HOLD_MS) as i32 / game_sim::markers::HOLD_MS as i32;
-    fill(frame, bx, bar_y, done, scale, if holding >= game_sim::markers::HOLD_MS { PRESSED } else { HELD });
 }
 
 /// The panel: the scene behind it taken down towards black, so the dirt still shows through and the

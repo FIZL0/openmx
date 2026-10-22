@@ -388,7 +388,8 @@ impl Seat {
         // The game's poll, with the frame's dt: this is what turns report bytes into held controls,
         // press and release edges, and stick axes with the game's own dead zone — and then the
         // rider's hands off it, because which button means what lives in the ride and not here.
-        let controls = self.sim.poll(dt, &self.reports);
+        // The d-pad is the markers' and not the ride's (P93): the stick alone steers.
+        let controls = self.sim.poll(dt, &self.reports).stick_alone();
 
         if self.start_freezes && self.sim.input.pad(0).pressed(Control::Start) {
             self.riding = !self.riding;
@@ -3553,7 +3554,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             None => (Vec::new(), world.seats.len(), None),
         };
-        let shown_markers: Vec<Option<(markers::Pick, [bool; markers::SLOTS], String, u32)>> = world
+        let shown_markers: Vec<Option<(markers::Pick, [bool; markers::SLOTS], String)>> = world
             .seats
             .iter()
             .zip(banners.iter_mut())
@@ -3566,10 +3567,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let pick = m.pick(mine.unwrap_or(v), players);
                 let filled: [bool; markers::SLOTS] = std::array::from_fn(|s| m.holds(s));
                 let pad = seat.sim.input.pad(0);
-                let holding = if seat.riding { markers::holding(pad, seat.sim.table(), &seat.hands) } else { 0 };
+                let held = seat.riding && markers::held(pad, seat.sim.table(), &seat.hands);
                 banner
-                    .update(Instant::now(), pick, filled, holding)
-                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names), holding))
+                    .update(Instant::now(), pick, filled, held)
+                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names)))
             })
             .collect();
         let cameras: Vec<Camera> = cameras
@@ -3603,8 +3604,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| {
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
-                        if let Some((pick, filled, label, holding)) = banner {
-                            hud::draw_markers(f, *pick, *filled, label, *holding);
+                        if let Some((pick, filled, label)) = banner {
+                            hud::draw_markers(f, *pick, *filled, label);
                         }
                     };
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
@@ -3925,8 +3926,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 _ => None,
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
-            if let Some(Some((pick, filled, label, holding))) = shown_markers.get(v) {
-                hud::draw_markers(target, *pick, *filled, label, *holding);
+            if let Some(Some((pick, filled, label))) = shown_markers.get(v) {
+                hud::draw_markers(target, *pick, *filled, label);
             }
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
             if !rig.hud.on && overlay_mode == menu::Overlay::Original {
