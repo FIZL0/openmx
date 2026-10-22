@@ -124,6 +124,13 @@ pub fn outside(area: &Area, rider: Vf, cofg: Vf) -> bool {
     by_rider || by_bike
 }
 
+/// [`outside`]'s two points against a world's holes ([`crate::world::World::off_world`], MD8): the
+/// same margin, the same skipped bone. Always `false` on one terrain, whose only edge is the area's.
+pub fn off_world(world: &dyn crate::world::World, rider: Vf, cofg: Vf) -> bool {
+    let unset = rider.0.iter().zip(NOTHING.0.iter()).all(|(a, b)| a.to_bits() == b.to_bits());
+    (!unset && world.off_world(rider, MARGIN)) || world.off_world(cofg, MARGIN)
+}
+
 /// **The throw**, on the chassis and the transform's origin: see the module header. Draws twice from
 /// `rng`.
 pub fn throw(area: &Area, ch: &mut Chassis, origin: &mut Vf, rng: &mut Rng) {

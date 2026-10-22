@@ -706,6 +706,8 @@ impl Rider {
         // for a rider already shot off it. Its two points are the rider's main bone and the chassis.
         let edge = world.area().filter(|_| *edge_armed && state.wreck != Some(Wreck::CANNONBALL));
         let bone = Self::main_bone(ride, ragdoll_kit.as_deref(), ragdoll.as_ref(), crash.as_ref());
+        // A world of several terrains has holes inside its rectangle as well (MD8), asked the same.
+        let holed = edge.is_some() && off_map::off_world(&*world, bone, ride.chassis.cofg_world);
         let thrown = &mut ride.chassis;
         let origin = &mut ride.origin;
         let air = &mut ride.air;
@@ -723,7 +725,7 @@ impl Rider {
                 }
                 // The first clause, and the only one that runs for a rider already down: off the
                 // map, the bike is thrown back and nothing else is asked.
-                if let Some(area) = edge.filter(|a| off_map::outside(a, bone, thrown.cofg_world)) {
+                if let Some(area) = edge.filter(|a| holed || off_map::outside(a, bone, thrown.cofg_world)) {
                     off_map::throw(&area, thrown, origin, ragdoll_ride::generator(idles));
                     *drag_halved = true;
                     return Some(Wreck::CANNONBALL);

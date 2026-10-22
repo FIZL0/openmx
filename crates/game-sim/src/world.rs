@@ -45,7 +45,7 @@ const LEAF_SAMPLES: u32 = 16;
 
 /// The height a ground query answers with where there is no ground: far enough below anything a wheel
 /// can reach that [`wheel::suspension`]'s "the ground is below the probe's end" test refuses it.
-const NO_GROUND: f32 = -1.0e6;
+pub(crate) const NO_GROUND: f32 = -1.0e6;
 
 /// Everything outside the bike that one frame of the ride asks about.
 ///
@@ -100,6 +100,14 @@ pub trait World {
     /// is every world but a track's.
     fn area(&self) -> Option<crate::biplane::Area> {
         None
+    }
+
+    /// Whether a point, or one `margin` from it along `x` or `z`, is over a hole in the world (MD8):
+    /// inside [`World::area`]'s rectangle but on no ground. Only a world of several terrains has
+    /// holes ([`crate::tiles::Tiled`]); the rectangle's own edge is [`crate::off_map::outside`]'s.
+    fn off_world(&self, at: Vf, margin: F) -> bool {
+        let _ = (at, margin);
+        false
     }
 
     /// The terrain as a collision object's search reads it: the wreck bike's heightfield rays
@@ -441,6 +449,12 @@ impl Props {
     /// the three rules [`collide`]'s leaf uses: a probe keeps its nearest hit, the bundle latches its
     /// nearest, and the push-out is the travel left over along the normal.
     pub fn sweep(&self, bundle: &Bundle, record: &mut Record) -> bool {
+        self.sweep_owned(bundle, record, 0)
+    }
+
+    /// [`Props::sweep`] with the owner numbers starting at `first` rather than 0: one tile's props
+    /// among a world's (MD8), numbered after the tiles before it.
+    pub fn sweep_owned(&self, bundle: &Bundle, record: &mut Record, first: i32) -> bool {
         let mut looked = false;
         for (owner, prop) in self.props.iter().enumerate() {
             if prop.radius == F::ZERO && prop.mesh.nodes.is_empty() {
@@ -458,7 +472,7 @@ impl Props {
                 continue;
             }
             looked = true;
-            merge(record, bundle, prop, &scratch, owner as i32);
+            merge(record, bundle, prop, &scratch, first.wrapping_add(owner as i32));
         }
         looked
     }
@@ -620,45 +634,48 @@ impl Ground<'_> {
     /// Off the edge of the field there is no ground and so no hit, which is the same answer
     /// [`Ground::at`] gives the ride's suspension there.
     pub fn under(&self, start: Vf, end: Vf) -> Option<(F, Obstacle)> {
-        let span = sub3(end, start);
-        let len = length(span);
-        if len <= F::ZERO || self.clearance(start)? <= F::ZERO {
-            return None;
-        }
-        let per_step = self.spacing / F::from(STEPS_PER_SAMPLE);
-        let steps = (len / per_step).to_i32().clamp(1, MAX_STEPS);
-        let mut lo = F::ZERO;
-        for i in 1..=steps {
-            let hi = F::from(i) / F::from(steps);
-            let Some(clear) = self.clearance(along(start, span, hi)) else {
-                // Off the field: nothing to hit, and nothing to bracket a crossing against either.
-                lo = hi;
-                continue;
-            };
-            if clear > F::ZERO {
-                lo = hi;
-                continue;
-            }
-            // Bracketed: the segment was above the dirt at `lo` and is under it at `hi`.
-            let (mut lo, mut hi) = (lo, hi);
-            for _ in 0..HALVINGS {
-                let mid = (lo + hi) / F(2.0);
-                match self.clearance(along(start, span, mid)) {
-                    Some(c) if c > F::ZERO => lo = mid,
-                    _ => hi = mid,
-                }
-            }
-            let point = along(start, span, hi);
-            let hit = self.at(F(point.x()), F(point.z()))?;
-            return Some((hi, Obstacle { point: Vf::new(point.x(), hit.y.0, point.z(), 1.0), normal: hit.normal }));
-        }
-        None
+        march(self.spacing, start, end, |x, z| self.at(x, z))
     }
+}
 
-    /// How far a world point is above the dirt, or `None` where there is no dirt under it.
-    fn clearance(&self, at: Vf) -> Option<F> {
-        self.at(F(at.x()), F(at.z())).map(|hit| F(at.y()) - hit.y)
+/// [`Ground::under`]'s march over any ground: `at` answers the ground under a world point, and
+/// `spacing` is the finest sample spacing it has. A world of several terrains ([`crate::tiles`])
+/// marches its own ground with it.
+pub fn march(spacing: F, start: Vf, end: Vf, at: impl Fn(F, F) -> Option<Hit>) -> Option<(F, Obstacle)> {
+    let clearance = |p: Vf| at(F(p.x()), F(p.z())).map(|hit| F(p.y()) - hit.y);
+    let span = sub3(end, start);
+    let len = length(span);
+    if len <= F::ZERO || clearance(start)? <= F::ZERO {
+        return None;
     }
+    let per_step = spacing / F::from(STEPS_PER_SAMPLE);
+    let steps = (len / per_step).to_i32().clamp(1, MAX_STEPS);
+    let mut lo = F::ZERO;
+    for i in 1..=steps {
+        let hi = F::from(i) / F::from(steps);
+        let Some(clear) = clearance(along(start, span, hi)) else {
+            // Off the field: nothing to hit, and nothing to bracket a crossing against either.
+            lo = hi;
+            continue;
+        };
+        if clear > F::ZERO {
+            lo = hi;
+            continue;
+        }
+        // Bracketed: the segment was above the dirt at `lo` and is under it at `hi`.
+        let (mut lo, mut hi) = (lo, hi);
+        for _ in 0..HALVINGS {
+            let mid = (lo + hi) / F(2.0);
+            match clearance(along(start, span, mid)) {
+                Some(c) if c > F::ZERO => lo = mid,
+                _ => hi = mid,
+            }
+        }
+        let point = along(start, span, hi);
+        let hit = at(F(point.x()), F(point.z()))?;
+        return Some((hi, Obstacle { point: Vf::new(point.x(), hit.y.0, point.z(), 1.0), normal: hit.normal }));
+    }
+    None
 }
 
 impl Obstacles for Ground<'_> {
