@@ -512,6 +512,13 @@ impl Plane {
         f.joystick.min_elevator = min_elevator;
         (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward) = (dead_zone, feed_forward);
         let recovered = wrecked && f.crash.reason == 0;
+        self.pose();
+        chord || recovered
+    }
+
+    /// The drawn transform off the flight's body: where it is, its nose, its up and its velocity.
+    fn pose(&mut self) {
+        let Some(f) = &self.flight else { return };
         let (quat, origin) = f.pose();
         let nose = f.measure.forward;
         (self.quat, self.at) = (quat, Vf::new(origin.x(), origin.y(), origin.z(), 1.0));
@@ -520,7 +527,15 @@ impl Plane {
         self.up = Vf::new(up.x(), up.y(), up.z(), 0.0);
         let v = f.body.velocity;
         self.vel = Vf::new(v.x(), v.y(), v.z(), 0.0);
-        chord || recovered
+    }
+
+    /// A plane round a flight already placed (N17's online seat, whose flight is its [`Sim::plane`]):
+    /// its spawn the flight's own, the transform off its body, flown on the pad.
+    fn around(flight: Flight) -> Plane {
+        let (at, facing) = flight.spawn;
+        let mut plane = Plane { placed: true, ..Plane::flying(Spawn { at, facing }, flight) };
+        plane.pose();
+        plane
     }
 
     /// Whether the plane is standing on something: any wheel down at the last measure. A plane with
@@ -715,6 +730,126 @@ impl Garage {
             // controller from does not count its ghost down either.
             _ => sim.step(dt, controls, world),
         }
+    }
+}
+
+/// **The switch online** (N17): a seat's machine is a rollback input, and its plane is session state.
+///
+/// Online a seat's whole state is its [`Sim`], which the session saves, rolls back, hashes and sends:
+/// so the plane a seat flies is the `Sim`'s own lane, [`Sim::plane`] — `None` on the bike — and not a
+/// [`Garage`] beside it. What the player asks for travels in the seat's pad, one byte past the
+/// original's ([`Wanted`]), and every machine switches the seat at the tick that byte first asks
+/// for another machine than the one the seat is on ([`switch_lane`]), as P102's switch does offline.
+/// The shell's garage only follows the lane for the picture ([`Garage::follow`]).
+///
+/// The byte says which machine the player wants, not that they pressed something: a pad ggrs has
+/// to guess repeats the last one, and a guessed repeat of "the plane" is the plane already up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Wanted {
+    /// The machine the player last picked, `None` before they picked one (the seat stays on what
+    /// it is on: an idle pad, an unplugged one, a peer's before its first).
+    pub to: Option<Kind>,
+    /// The seat's biplane scheme ([`Plane::every_bank`], [`Plane::round_stick`]): how its plane reads
+    /// its stick is the seat's choice on its own machine, and a step on every machine must read it
+    /// the same, so it rides in the same byte, a tick at a time.
+    pub every_bank: bool,
+    pub round_stick: bool,
+}
+
+impl Wanted {
+    /// The byte: the machine in the low two bits (0 none, 1 the bike, 2 the biplane), then the
+    /// two scheme bits.
+    pub fn byte(self) -> u8 {
+        let to = match self.to {
+            None => 0,
+            Some(Kind::Bike) => 1,
+            Some(Kind::Biplane) => 2,
+        };
+        to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3
+    }
+
+    /// [`Wanted::byte`] read back; a machine number this build does not know is no pick.
+    pub fn of(byte: u8) -> Wanted {
+        let to = match byte & 3 {
+            1 => Some(Kind::Bike),
+            2 => Some(Kind::Biplane),
+            _ => None,
+        };
+        Wanted { to, every_bank: byte & 4 != 0, round_stick: byte & 8 != 0 }
+    }
+}
+
+/// The machine a seat's [`Sim`] is on online: the plane while its lane holds one.
+pub fn lane_up(sim: &Sim) -> Kind {
+    if sim.plane.is_some() { Kind::Biplane } else { Kind::Bike }
+}
+
+/// [`Garage::switch`] for a seat whose plane is its [`Sim::plane`] (N17): onto the plane, a copy of
+/// `template` (the ride's biplane as built, never flown) put down where the bike is, landed and at
+/// rest, into the lane; onto the bike, the bike stood under the plane and the lane emptied. The
+/// same spawn as offline, which is the same [`Garage::switch`]; the flight is placed at once rather
+/// than by the next step, which is the same thing a tick earlier in the same tick. `Err`, and nothing
+/// moves, where offline refuses too, or there is no template to take the plane from.
+pub fn switch_lane(to: Kind, template: Option<&Flight>, sim: &mut Sim, world: &mut dyn World) -> Result<Kind, String> {
+    let up = lane_up(sim);
+    if to == up {
+        return Ok(to);
+    }
+    let plane = match sim.plane.take() {
+        Some(f) => Plane::around(f),
+        None => {
+            let f = template.ok_or("this ride has no biplane to take")?.clone();
+            Plane::flying(Spawn { at: f.spawn.0, facing: f.spawn.1 }, f)
+        }
+    };
+    let mut garage = Garage { up, plane: Some(plane), taken: true };
+    let result = garage.switch(to, sim, world);
+    let mut plane = garage.plane.take().expect("the switch keeps the plane");
+    if garage.up == Kind::Biplane {
+        let spawn = plane.spawn;
+        if let Some(f) = &mut plane.flight {
+            f.reset(spawn.at, spawn.facing, &sim.tables.ride.acos);
+        }
+        sim.plane = plane.flight.take();
+    }
+    result
+}
+
+/// One tick of a seat's plane online (N17): [`Plane::step`] on the flight in its [`Sim::plane`], the
+/// seat's pad and its biplane scheme, the bike not stepped. Whether the reset chord or a wreck's
+/// recovery put the plane back this tick. A seat on the bike does nothing.
+pub fn fly_lane(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World) -> bool {
+    let Some(f) = sim.plane.take() else { return false };
+    let mut plane = Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, ..Plane::around(f) };
+    let respawned = plane.step(sim, dt, world);
+    sim.plane = plane.flight.take();
+    respawned
+}
+
+impl Garage {
+    /// The shell's garage following a seat online (N17): the machine its [`Sim`]'s lane says is up,
+    /// and the plane drawn where that flight is. The plane keeps this seat's livery and scheme. The
+    /// machine now up when that changed (the shell snaps the camera onto it), `None` otherwise.
+    pub fn follow(&mut self, sim: &Sim) -> Option<Kind> {
+        let up = lane_up(sim);
+        match (&sim.plane, &mut self.plane) {
+            (Some(f), Some(plane)) => {
+                plane.flight = Some(f.clone());
+                plane.placed = true;
+                plane.spawn = Spawn { at: f.spawn.0, facing: f.spawn.1 };
+                plane.pose();
+                self.taken = true;
+            }
+            // A seat this machine parked no plane for (a track with fewer bays than seats) is
+            // still drawn in the one it flies, in the plain livery.
+            (Some(f), None) => {
+                self.plane = Some(Plane::around(f.clone()));
+                self.taken = true;
+            }
+            (None, _) => {}
+        }
+        let was = std::mem::replace(&mut self.up, up);
+        (was != up).then_some(up)
     }
 }
 
