@@ -97,7 +97,21 @@ pub struct Online {
     stock_plane: Option<game_sim::phy::Plane>,
     /// Each seat's own bay in the ride's lot (N18), where a seat that starts in the plane stands.
     bays: Vec<Spawn>,
+    /// `--peer`s (P105): every machine's saved markers, which the session waits on.
+    marks: Option<Marks>,
 }
+
+/// `--peer`s' saved markers (P105): the track and bike they are read back for, whether every
+/// peer's are still to come, and when this machine last offered its own.
+struct Marks {
+    track: String,
+    bike: String,
+    owed: bool,
+    offered: Option<Instant>,
+}
+
+/// How often a `--peer` machine offers its saved markers again until its ride ticks.
+const OFFER_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl Online {
     /// How many seats `--seats` names, before the session starts: the shell makes a rider for each.
@@ -147,6 +161,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
+            marks: Some(Marks { track: String::new(), bike: String::new(), owed: true, offered: None }),
         })
     }
 
@@ -204,6 +219,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
+            marks: None,
         })
     }
 
@@ -234,6 +250,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
+            marks: None,
         })
     }
 
@@ -263,6 +280,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
+            marks: None,
         })
     }
 
@@ -323,6 +341,41 @@ impl Online {
     /// Which seats of the lobby's `room` start in the biplane (N18): each taken seat's pick's machine.
     pub fn picked_planes(room: &openmx_net::Room) -> Vec<bool> {
         room.seats.iter().map(|s| s.as_ref().is_some_and(|s| s.pick.machine == vehicle::Kind::Biplane.name())).collect()
+    }
+
+    /// `--peer`s (P105): this machine's player's saved markers on `track` for `bike`, which every
+    /// machine's first seat for it starts the ride with — sent to every peer before the first tick,
+    /// as every peer's come here. Not called, this machine's first seat brings none.
+    pub fn saved_markers(&mut self, mine: &game_sim::markers::Markers, track: &str, bike: &str) {
+        if let (Wire::Udp(udp), Some(marks)) = (&mut self.wire, &mut self.marks) {
+            udp.set_markers(crate::saved_markers::to_wire(mine, bike, track));
+            (marks.track, marks.bike) = (track.to_string(), bike.to_string());
+        }
+    }
+
+    /// `--peer`s (P105): offer this machine's saved markers until the ride ticks, and take every
+    /// seat's once every peer's are in. `false` while some are still to come: the session hears
+    /// nothing and runs nothing until then, so no peer synchronises with this machine — and no ride
+    /// ticks — before every machine has every seat's.
+    fn take_markers(&mut self) -> bool {
+        let (Wire::Udp(udp), Some(marks)) = (&mut self.wire, &mut self.marks) else { return true };
+        if self.net.tick() == 0 && marks.offered.is_none_or(|t| t.elapsed() >= OFFER_EVERY) {
+            udp.offer();
+            marks.offered = Some(Instant::now());
+        }
+        if !marks.owed {
+            return true;
+        }
+        let Some(all) = udp.markers(&self.net.lineup, &self.net.me) else { return false };
+        for (s, (sim, bytes)) in self.sims.iter_mut().zip(&all).enumerate() {
+            sim.markers = crate::saved_markers::from_wire(bytes, &marks.bike, &marks.track);
+            let placed = sim.markers.slots.iter().flatten().count();
+            if placed > 0 {
+                println!("online: seat {} starts on {placed} saved markers", s + 1);
+            }
+        }
+        marks.owed = false;
+        true
     }
 
     /// The modifiers the ride is on now: the host's last change once every machine took it.
@@ -401,6 +454,8 @@ impl Online {
         let me = self.net.me.clone();
         let session = &mut self.net;
         let (spawn, arrived, room) = (&self.spawn, &mut self.arrived, &mut self.room);
+        let first = self.sims.first();
+        let (template, bays) = (self.plane.as_ref(), &self.bays);
         match &mut self.wire {
             Wire::Udp(udp) => udp.receive(),
             Wire::Lobby { net, kept } => {
@@ -438,6 +493,55 @@ impl Online {
                                     }
                                 })
                                 .collect();
+                            // the joiner's player's saved markers (P105), as its handshake put
+                            // them in its pick: on its seat, in the state every machine is sent
+                            let marked = match (seats.as_slice(), seats.first().and_then(|&s| pick(s))) {
+                                ([_], Some(seat)) if !seat.pick.markers.is_empty() => {
+                                    let track = room.as_ref().map_or("", |r| r.track.as_str());
+                                    let m = crate::saved_markers::from_pick(&seat.pick.markers, &seat.pick.bike, track);
+                                    let placed = m.slots.iter().flatten().count();
+                                    match first.map(|f| rides::spawn_marked(f, spawn, m)) {
+                                        Some(Ok(b)) if placed > 0 => {
+                                            println!("online: {peer} rides in on {placed} saved markers");
+                                            Some(b)
+                                        }
+                                        Some(Err(why)) => {
+                                            println!("online: {peer}'s saved markers: {why}");
+                                            None
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            };
+                            let spawn = marked.as_deref().unwrap_or(spawn);
+                            // the joiner's setup machine (N19), as its pick says it: a seat that
+                            // picked the plane rides in flying from its own bay, in the state
+                            // every machine is sent, as a lobby ride's seat starts in it (N18)
+                            let flying = match (seats.as_slice(), seats.first().and_then(|&s| pick(s))) {
+                                ([s], Some(seat)) if seat.pick.machine == vehicle::Kind::Biplane.name() => match (first, template, bays.get(*s)) {
+                                    (Some(f), Some(t), Some(&bay)) => match rides::spawn_flying(f, spawn, t, bay) {
+                                        Ok(b) => {
+                                            println!("online: {peer} rides in on the biplane");
+                                            Some(b)
+                                        }
+                                        Err(why) => {
+                                            println!("online: {peer}'s biplane: {why}");
+                                            None
+                                        }
+                                    },
+                                    _ => {
+                                        println!("online: {peer} picked the biplane, but this ride has none for seat {}; the bike", s + 1);
+                                        None
+                                    }
+                                },
+                                (seats, _) if seats.len() > 1 && seats.iter().any(|&s| pick(s).is_some_and(|seat| seat.pick.machine == vehicle::Kind::Biplane.name())) => {
+                                    println!("online: {peer} brings {} seats, which ride in on the bike", seats.len());
+                                    None
+                                }
+                                _ => None,
+                            };
+                            let spawn = flying.as_deref().unwrap_or(spawn);
                             match session.admit(peer, seats, rides::spawn_on(spawn, &presets)) {
                                 Ok(()) => arrived.push(peer.clone()),
                                 Err(why) => println!("online: {peer} cannot join: {why}"),
@@ -535,6 +639,10 @@ impl Online {
                 return Err(format!("online: {why}"));
             }
         };
+        if !self.take_markers() {
+            self.last = Instant::now();
+            return Ok(());
+        }
         for (from, d) in came {
             self.net.heard(&from, &d);
         }

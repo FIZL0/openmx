@@ -72,6 +72,8 @@ use crate::world::{Flat, World};
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
 pub struct Input {
     pub buttons: u16,
+    /// The left stick's two bytes less the centre, right and down positive, modulo 256: full right
+    /// or down (`0xff`, +128) is the one an `i8` cannot hold, and wraps to -128 (S94).
     pub stick: (i8, i8),
 }
 
@@ -338,7 +340,14 @@ impl Sim {
             return vec![self.step(dt, &controls[0], world)];
         }
         let mut frames = Vec::with_capacity(controls.len());
+        // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
+        let mut lists = self.bike_contacts(dt);
         for (i, c) in controls.iter().enumerate() {
+            let mut bump = lists
+                .as_mut()
+                .map(|l| std::mem::take(&mut l[i]))
+                .filter(|l| !l.is_empty())
+                .map(|l| self.bump(i, l));
             let rivals: Vec<ride::Rival> = (0..self.players())
                 .filter(|&j| j != i)
                 .map(|j| self.rider_of(j))
@@ -350,11 +359,14 @@ impl Sim {
                 .collect();
             let tables = &self.tables;
             let frame = if i == 0 {
-                self.rider.frame_among(&self.phy, tables, c, dt, world, &rivals)
+                self.rider.frame_bumped(&self.phy, tables, c, dt, world, &rivals, bump.as_mut())
             } else {
                 let p = &mut self.others[i - 1];
-                p.rider.frame_among(&p.phy, tables, c, dt, world, &rivals)
+                p.rider.frame_bumped(&p.phy, tables, c, dt, world, &rivals, bump.as_mut())
             };
+            if let Some(b) = &bump {
+                self.bumped(b);
+            }
             frames.push(frame);
         }
         self.ticks += 1;
@@ -404,7 +416,8 @@ impl Sim {
     /// that needs the strengths is a [`replay::PadTape`] and not a list of [`Input`]s.
     pub fn reports(input: Input) -> [Report; PADS] {
         let mut report = Report::from_buttons(input.buttons);
-        let byte = |v: i8| (i16::from(AXIS_CENTRE) + i16::from(v)).clamp(0, 255) as u8;
+        // Modulo 256, as [`Input::stick`] holds it: -128 is `0xff`, not a second `0x00`.
+        let byte = |v: i8| AXIS_CENTRE.wrapping_add(v as u8);
         report.set_axis(2, byte(input.stick.0));
         report.set_axis(3, byte(input.stick.1));
         let mut reports = [Report::missing(); PADS];
@@ -801,6 +814,10 @@ pub mod score;
 /// the disc, with the masks the ride gives them.
 pub mod bike_col;
 
+/// Rider against rider (S78): the bikes' body rays against each other's frames, and the contacts
+/// resolved in each bike's ground step.
+pub mod rider_contact;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,7 +828,7 @@ mod tests {
     ///
     /// The same literal as `tests/hash.rs`' own, and it moves whenever the state type or the ride
     /// does. What it is here for is the *platform*: see the test below it.
-    const HUNDRED_TICKS: u64 = 0x09a0_2520_1f3f_518b;
+    const HUNDRED_TICKS: u64 = 0xca79_69b7_f369_929d;
 
     /// The hash is a constant of the code, not of the machine: this value must be the same on x86-64,
     /// aarch64 and wasm32. When a change to the state type changes it, that is expected — update it. When

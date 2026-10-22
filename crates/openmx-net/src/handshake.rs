@@ -22,6 +22,12 @@ pub trait Disc: Send + Sync {
     fn bike(&self, _set: &str) -> Option<u64> {
         None
     }
+    /// This machine's player's saved markers on `track` for the bike set `bike`, as a pick carries
+    /// them ([`crate::room::Pick::markers`]), for a ride it drops in on (P105): empty for none, and
+    /// where nothing is saved (the terminal lobby).
+    fn markers(&self, _track: &str, _bike: &str) -> String {
+        String::new()
+    }
 }
 
 /// No disc: the handshake compares names only.
@@ -49,6 +55,12 @@ pub struct Handshake {
     pub presets: Vec<u8>,
     /// The host's pick; a peer's own is ignored (it rides the host's).
     pub seed: u32,
+    /// A peer dropping in on a ride under way (P105): its player's saved markers on the ride's track
+    /// and bike set ([`Disc::markers`]), which the host puts in its pick before the ride takes it on —
+    /// it joined before it knew the track, and the room takes no new pick once riding. Not compared:
+    /// they are the peer's own, and every machine is sent them in the ride's state.
+    #[serde(default)]
+    pub markers: String,
 }
 
 /// The build: two builds can't be trusted to simulate alike. The crate's version and "dev" unless the shell stamps
@@ -77,6 +89,7 @@ impl Handshake {
             biplane: room.biplane,
             presets: room.seats.iter().flatten().map(|s| s.pick.preset).collect(),
             seed: room.seed,
+            markers: String::new(),
         }
     }
 
@@ -135,6 +148,7 @@ mod tests {
             biplane: false,
             presets: vec![0, 2],
             seed: 99,
+            markers: String::new(),
         }
     }
 

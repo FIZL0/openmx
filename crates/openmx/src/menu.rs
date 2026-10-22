@@ -229,6 +229,12 @@ pub struct Settings {
     /// The seats a lobby or an opened ride this machine hosts has (N12), the lobby's Seats row's:
     /// 2 to [`openmx_net::SEATS`], everyone's together.
     pub lobby_seats: usize,
+    /// Each seat's camera (P82), the Camera page's: the field of view, and how far behind and how
+    /// high above the bike and the biplane the follow cameras sit. 1P's first.
+    pub cameras: [CameraView; SEATS_MAX],
+    /// Whether the shell reads the `mods/` folder beside this file (MD2): Off, nothing is read from it
+    /// and the pick is the disc's alone. On unless turned off.
+    pub mods: bool,
 }
 
 /// The settings' render scale (V34): auto, picked from the frames' time against the display's
@@ -417,6 +423,121 @@ impl Mix {
     }
 }
 
+/// One player's camera (P82), as the Camera page sets it: the field of view's offset from the
+/// original's, in degrees, and how far behind and how high above its machine each follow camera sits,
+/// the bike's and the biplane's, in percent of the original's. The menu knows numbers only; the shell
+/// lays them over the original's presets (`chase::framed`), and at [`CameraView::ORIGINAL`] it hands
+/// the camera the disc's numbers untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CameraView {
+    pub fov: i16,
+    pub distance: u16,
+    pub height: u16,
+    pub plane_distance: u16,
+    pub plane_height: u16,
+}
+
+/// The field of view slider's span and step, in degrees off the original's.
+pub const CAMERA_FOV: (i16, i16) = (-10, 20);
+/// The distance and height sliders' span and step, in percent of the original's.
+pub const CAMERA_SHARE: (u16, u16) = (50, 200);
+pub const CAMERA_STEP: u16 = 5;
+
+impl CameraView {
+    /// The original's numbers, each slider's Original notch.
+    pub const ORIGINAL: CameraView = CameraView { fov: 0, distance: 100, height: 100, plane_distance: 100, plane_height: 100 };
+    /// What ships (user, 2026-10-21: "the default cameras sit a bit further out"): somewhat further
+    /// back, a little higher, a few degrees wider, picked by eye in the shell (journal
+    /// camera-fov-settings).
+    pub const DEFAULT: CameraView = CameraView { fov: 4, distance: 115, height: 110, plane_distance: 120, plane_height: 115 };
+
+    /// The five numbers, fov first, as `settings.txt` keeps them.
+    pub fn text(&self) -> String {
+        format!("{} {} {} {} {}", self.fov, self.distance, self.height, self.plane_distance, self.plane_height)
+    }
+
+    /// [`CameraView::text`] back, each number held to its slider's span; `None` unless it is five
+    /// numbers.
+    pub fn parse(v: &str) -> Option<CameraView> {
+        let n: Vec<i32> = v.split_whitespace().map(|w| w.parse::<i32>().ok()).collect::<Option<_>>()?;
+        let [fov, distance, height, plane_distance, plane_height] = n[..] else { return None };
+        let share = |v: i32| v.clamp(CAMERA_SHARE.0 as i32, CAMERA_SHARE.1 as i32) as u16;
+        Some(CameraView {
+            fov: fov.clamp(CAMERA_FOV.0 as i32, CAMERA_FOV.1 as i32) as i16,
+            distance: share(distance),
+            height: share(height),
+            plane_distance: share(plane_distance),
+            plane_height: share(plane_height),
+        })
+    }
+
+    /// The `camera` line's value: one set for every seat, or one a seat with the last carried on.
+    pub fn parse_seats(v: &str) -> Option<[CameraView; SEATS_MAX]> {
+        let views: Vec<CameraView> = v.split(',').map(CameraView::parse).collect::<Option<_>>()?;
+        if views.is_empty() || views.len() > SEATS_MAX {
+            return None;
+        }
+        Some(std::array::from_fn(|i| views[i.min(views.len() - 1)]))
+    }
+
+    /// Slider `slider` ([`CAMERA_SLIDERS`]' order) as a number: degrees, or percent.
+    pub fn get(&self, slider: usize) -> i32 {
+        match slider {
+            0 => self.fov as i32,
+            1 => self.distance as i32,
+            2 => self.height as i32,
+            3 => self.plane_distance as i32,
+            _ => self.plane_height as i32,
+        }
+    }
+
+    fn set(&mut self, slider: usize, v: i32) {
+        let share = |v: i32| v.clamp(CAMERA_SHARE.0 as i32, CAMERA_SHARE.1 as i32) as u16;
+        match slider {
+            0 => self.fov = v.clamp(CAMERA_FOV.0 as i32, CAMERA_FOV.1 as i32) as i16,
+            1 => self.distance = share(v),
+            2 => self.height = share(v),
+            3 => self.plane_distance = share(v),
+            _ => self.plane_height = share(v),
+        }
+    }
+
+    /// Slider `slider` a step left or right, held at its ends; with neither, back to the original's.
+    fn step(&mut self, slider: usize, left: bool, right: bool) {
+        let step = if slider == 0 { 1 } else { CAMERA_STEP as i32 };
+        let v = self.get(slider);
+        let to = match (left, right) {
+            (true, _) => v - step,
+            (_, true) => v + step,
+            _ => CameraView::ORIGINAL.get(slider),
+        };
+        self.set(slider, to);
+    }
+
+    /// A slider's value as its row shows it: `Original` on the original's notch.
+    pub fn label(&self, slider: usize) -> String {
+        let v = self.get(slider);
+        match slider {
+            _ if v == CameraView::ORIGINAL.get(slider) => "Original".to_string(),
+            0 => format!("{v:+} deg"),
+            _ => format!("{v}%"),
+        }
+    }
+
+    /// The bike's camera as the shell frames it: (degrees added, distance share, height share).
+    pub fn bike(&self) -> (f32, f32, f32) {
+        (self.fov as f32, self.distance as f32 / 100.0, self.height as f32 / 100.0)
+    }
+
+    /// The biplane's.
+    pub fn plane(&self) -> (f32, f32, f32) {
+        (self.fov as f32, self.plane_distance as f32 / 100.0, self.plane_height as f32 / 100.0)
+    }
+}
+
+/// The Camera page's sliders (P82), in [`CameraView::get`]'s order.
+pub const CAMERA_SLIDERS: [&str; 5] = ["Field of view", "Bike distance", "Bike height", "Biplane distance", "Biplane height"];
+
 /// The most players a ride seats, as P35's seats count them.
 pub const SEATS_MAX: usize = 8;
 
@@ -487,6 +608,8 @@ impl Default for Settings {
             modifiers: Mods::original(),
             presets: Vec::new(),
             lobby_seats: LOBBY_SEATS,
+            cameras: [CameraView::DEFAULT; SEATS_MAX],
+            mods: true,
         }
     }
 }
@@ -536,7 +659,7 @@ impl Settings {
                 "overlay" => s.overlay = Overlay::from_word(v).unwrap_or(s.overlay),
                 "speedometer" => s.speedometer = Speedometer::from_word(v).unwrap_or(s.speedometer),
                 "wrecks" => s.wrecks = v != "off",
-                "track" if TRACKS.iter().any(|t| t.0 == v) => s.track = v.to_string(),
+                "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // One word a seat, 1P's first; a seat the line does not reach rides the bike.
                 "machines" => {
                     for (i, w) in v.split_whitespace().take(SEATS_MAX).enumerate() {
@@ -564,6 +687,8 @@ impl Settings {
                 "vsync" => s.vsync = v != "off",
                 "frame_limit" => s.frame_limit = FrameLimit::from_word(v).unwrap_or(s.frame_limit),
                 "machine_bays" => s.bays = v != "off",
+                "mods" => s.mods = v != "off",
+                "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
                 "modifiers" => s.modifiers = Mods::parse(v).unwrap_or_default(),
@@ -643,7 +768,9 @@ impl Settings {
             self.render_scale.word()
         ) + &self.display_text()
             + &self.bays_text()
+            + &self.mods_text()
             + &self.lobby_seats_text()
+            + &self.cameras_text()
             + &self.modifiers_text()
     }
 
@@ -658,10 +785,28 @@ impl Settings {
         if self.bays { String::new() } else { "machine_bays = off\n".into() }
     }
 
+    /// The mods' switch (MD2), only when it is off, so a file from before it is written as it was.
+    fn mods_text(&self) -> String {
+        if self.mods { String::new() } else { "mods = off\n".into() }
+    }
+
     /// The lobby's seat count (N12), only when it is not the usual [`LOBBY_SEATS`], so a file from
     /// before it is written as it was.
     fn lobby_seats_text(&self) -> String {
         if self.lobby_seats == LOBBY_SEATS { String::new() } else { format!("lobby_seats = {}\n", self.lobby_seats) }
+    }
+
+    /// The cameras' line (P82), only when a seat's is not the shipped default, so a file from before
+    /// them is written as it was: one seat's five numbers for every seat, or one set a seat.
+    fn cameras_text(&self) -> String {
+        if self.cameras.iter().all(|c| *c == CameraView::DEFAULT) {
+            return String::new();
+        }
+        let n = match self.cameras.iter().rposition(|c| *c != self.cameras[SEATS_MAX - 1]) {
+            Some(i) => i + 2,
+            None => 1,
+        };
+        format!("camera = {}\n", self.cameras[..n].iter().map(CameraView::text).collect::<Vec<_>>().join(", "))
     }
 
     /// The modifiers' lines (P55): the set the next ride loads, and the presets. Nothing at all for
@@ -681,6 +826,15 @@ impl Settings {
     pub fn track_index(&self) -> usize {
         TRACKS.iter().position(|t| t.0 == self.track).unwrap_or(0)
     }
+}
+
+/// Whether a settings file's `track` may be a track mod's id (MD2): `[a-z0-9_]`, 1 to 40 of them,
+/// `<prefix>_<map>` — `track_mods::valid_id`'s rule, which this file is compiled without. Whether
+/// the mod is there is the pick's to find out; a track it does not list opens on the first.
+fn mod_id(v: &str) -> bool {
+    (1..=40).contains(&v.len())
+        && v.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && v.trim_matches('_').contains('_')
 }
 
 /// What a name may hold: the keyboard's own characters, at most [`NAME_MAX`] of them.
@@ -1077,10 +1231,13 @@ pub enum Screen {
     /// The pause's Game Audio Options (P56): the original's page of a song, a preset and six
     /// sliders.
     Audio,
+    /// The cameras (P82), under Settings: the field of view and the follow cameras' distance and
+    /// height, per player.
+    Camera,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 15] = [
+    pub const ALL: [Screen; 16] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -1096,6 +1253,7 @@ impl Screen {
         Screen::Lobby,
         Screen::Modifiers,
         Screen::Audio,
+        Screen::Camera,
     ];
 
     fn index(self) -> usize {
@@ -1120,6 +1278,7 @@ impl Screen {
             Screen::Split => "split",
             Screen::Modifiers => "modifiers",
             Screen::Audio => "audio",
+            Screen::Camera => "camera",
         }
     }
 
@@ -1144,6 +1303,7 @@ impl Screen {
             Screen::Split => "Split Screen",
             Screen::Modifiers => "Game Modifiers",
             Screen::Audio => "Game Audio Options",
+            Screen::Camera => "Camera",
         }
     }
 }
@@ -1194,7 +1354,7 @@ const AUDIO_PRESET: usize = 3;
 const AUDIO_SLIDERS: usize = 4;
 /// Which of [`Mix::levels`]' sliders each slider row is.
 const AUDIO_SLIDER: [usize; 6] = [0, 2, 3, 4, 5, 1];
-const SETTINGS_ROWS: usize = 14;
+const SETTINGS_ROWS: usize = 16;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
 const SETTINGS_MUSIC_VOLUME: usize = 5;
@@ -1211,7 +1371,17 @@ const SETTINGS_FRAME_LIMIT: usize = 11;
 /// The machines at their bays (P103), above the modifiers'.
 const SETTINGS_BAYS: usize = 12;
 /// The game modifiers' screen (P55), the last row.
-const SETTINGS_MODIFIERS: usize = 13;
+const SETTINGS_MODIFIERS: usize = 15;
+/// The cameras' screen (P82), above the modifiers', which stay the last row.
+const SETTINGS_CAMERA: usize = 14;
+/// Whether the `mods/` folder is read (MD2), under the bays'.
+const SETTINGS_MODS: usize = 13;
+/// The cameras' screen: whose they are, the five sliders, and the two resets.
+const CAMERA_SEAT: usize = 0;
+const CAMERA_FIRST: usize = 1;
+const CAMERA_DEFAULT: usize = CAMERA_FIRST + CAMERA_SLIDERS.len();
+const CAMERA_ORIGINAL: usize = CAMERA_DEFAULT + 1;
+const CAMERA_ROWS: usize = CAMERA_ORIGINAL + 1;
 /// The modifiers' screen: whose they are, every modifier, then the presets and the reset.
 const MODIFIERS_SEAT: usize = 0;
 const MODIFIERS_KNOBS: usize = 1;
@@ -1331,6 +1501,10 @@ pub enum Act {
 pub struct Menu {
     pub settings: Settings,
     pub controls: Controls,
+    /// The track mods that read (MD2), `(id, name)`, which the track pick lists after the disc's
+    /// [`TRACKS`]: empty with no `mods/` folder or with the Mods setting off. Set with
+    /// [`Menu::set_mod_tracks`].
+    pub mod_tracks: Vec<(String, String)>,
     /// Open screens, the one shown last. Empty is a ride with nothing over it.
     stack: Vec<Screen>,
     /// Each screen's row, in [`Screen::ALL`]'s order.
@@ -1411,6 +1585,8 @@ pub struct Menu {
     /// the preset its row is on.
     mod_seat: usize,
     mod_preset: usize,
+    /// The Camera page (P82): whose cameras it sets, 0 every player's, then 1P on.
+    cam_seat: usize,
     /// The ride under the menu has a modifier off the original game's, as the shell tells it: the
     /// pause says so.
     pub modified: bool,
@@ -1474,6 +1650,7 @@ impl Menu {
         Menu {
             settings,
             controls,
+            mod_tracks: Vec::new(),
             stack: vec![Screen::Main],
             cursor,
             typing: String::new(),
@@ -1511,6 +1688,7 @@ impl Menu {
             music_choices: Vec::new(),
             mod_seat: 0,
             mod_preset: 0,
+            cam_seat: 0,
             modified: false,
             mods_lock: None,
             music_now: None,
@@ -2008,6 +2186,82 @@ impl Menu {
         }
     }
 
+    /// The Camera page (P82): left and right step the row's slider, held at its ends; Cross puts it
+    /// back to the original's. The seat row picks whose cameras (every player's, or one's), and the
+    /// last two rows put them all to the shipped default or to the original's. Every change takes in
+    /// the ride at once.
+    fn walk_camera(&mut self, p: Press, at: usize) {
+        if p.back {
+            self.pop();
+            return;
+        }
+        let side = p.left || p.right;
+        if !(p.ok || side) {
+            return;
+        }
+        let seats: Vec<usize> = match self.cam_seat {
+            0 => (0..SEATS_MAX).collect(),
+            s => vec![s - 1],
+        };
+        match at {
+            CAMERA_SEAT => {
+                let n = SEATS_MAX + 1;
+                self.cam_seat = if p.left { (self.cam_seat + n - 1) % n } else { (self.cam_seat + 1) % n };
+                return;
+            }
+            CAMERA_DEFAULT | CAMERA_ORIGINAL if !p.ok => return,
+            CAMERA_DEFAULT | CAMERA_ORIGINAL => {
+                let to = if at == CAMERA_DEFAULT { CameraView::DEFAULT } else { CameraView::ORIGINAL };
+                for s in seats {
+                    self.settings.cameras[s] = to;
+                }
+            }
+            _ => {
+                // Every player's: each steps from the shown one's, 1P's, so a mixed set comes together.
+                let slider = at - CAMERA_FIRST;
+                let mut v = self.settings.cameras[seats[0]];
+                v.step(slider, p.left, p.right);
+                for s in seats {
+                    self.settings.cameras[s].set(slider, v.get(slider));
+                }
+            }
+        }
+        self.changed = true;
+    }
+
+    /// The Camera page's rows as drawn.
+    pub fn camera_rows(&self) -> Vec<String> {
+        let seat = match self.cam_seat {
+            0 => "Every Player".to_string(),
+            s => format!("{s}P"),
+        };
+        let shown = self.settings.cameras[self.cam_seat.saturating_sub(1)];
+        let mut rows = vec![format!("Player  {seat}")];
+        for (i, name) in CAMERA_SLIDERS.iter().enumerate() {
+            let mixed = self.cam_seat == 0 && self.settings.cameras.iter().any(|c| c.get(i) != shown.get(i));
+            rows.push(match mixed {
+                true => format!("{name}  Mixed"),
+                false => format!("{name}  {}", shown.label(i)),
+            });
+        }
+        rows.push("Reset To Default".to_string());
+        rows.push("Reset To Original".to_string());
+        rows
+    }
+
+    /// What the Settings page's Camera row says of the cameras: the shipped default, the original's,
+    /// or the player's own.
+    pub fn camera_label(&self) -> &'static str {
+        let c = &self.settings.cameras;
+        if c.iter().all(|v| *v == CameraView::DEFAULT) {
+            "Default"
+        } else if c.iter().all(|v| *v == CameraView::ORIGINAL) {
+            "Original"
+        } else {
+            "Custom"
+        }
+    }
+
     /// The modifiers' screen (P55): Square or the arrows step a slider by ten percent, Cross on a
     /// toggle-like row does it, and the last rows load, save and delete presets and put every
     /// modifier back. What it sets is the next ride's, and under the pause the ride's own from the
@@ -2221,6 +2475,7 @@ impl Menu {
             }
             Screen::Controls => self.stack = vec![Screen::Main, Screen::Settings, Screen::Controls],
             Screen::Modifiers => self.stack = vec![Screen::Main, Screen::Settings, Screen::Modifiers],
+            Screen::Camera => self.stack = vec![Screen::Main, Screen::Settings, Screen::Camera],
             Screen::Keyboard => {
                 self.stack = vec![Screen::Main, Screen::Settings];
                 self.open_keyboard();
@@ -2266,7 +2521,7 @@ impl Menu {
         match screen {
             Screen::Splash => 1,
             Screen::Main => MAIN.len(),
-            Screen::Tracks => TRACKS.len(),
+            Screen::Tracks => self.track_count(),
             Screen::Settings => SETTINGS_ROWS,
             Screen::Controls => CONTROLS_ROWS,
             Screen::Modifiers => MODIFIERS_ROWS,
@@ -2279,6 +2534,7 @@ impl Menu {
             Screen::Join => join::ON_SCREEN,
             Screen::Split => layouts(self.riders).len(),
             Screen::Audio => AUDIO.len(),
+            Screen::Camera => CAMERA_ROWS,
         }
     }
 
@@ -2391,7 +2647,7 @@ impl Menu {
                     if self.party.take().is_some() {
                         self.riders = self.free_riders;
                     }
-                    self.cursor[Screen::Tracks.index()] = self.settings.track_index();
+                    self.cursor[Screen::Tracks.index()] = self.track_index();
                     self.tick = 0;
                     self.push(Screen::Tracks);
                 }
@@ -2419,7 +2675,7 @@ impl Menu {
                     if let Some(party) = &mut self.party {
                         party.split = split;
                     }
-                    self.cursor[Screen::Tracks.index()] = self.settings.track_index();
+                    self.cursor[Screen::Tracks.index()] = self.track_index();
                     self.tick = 0;
                     self.push(Screen::Tracks);
                 }
@@ -2438,7 +2694,7 @@ impl Menu {
                     return Act::Stay;
                 }
                 if p.ok || p.start {
-                    let track = TRACKS[at].0.to_string();
+                    let track = self.track_at(at).0.to_string();
                     if self.settings.track != track {
                         self.settings.track = track.clone();
                         self.changed = true;
@@ -2469,6 +2725,7 @@ impl Menu {
                         }
                         3 if p.ok => self.push(Screen::Controls),
                         SETTINGS_MODIFIERS if p.ok => self.push(Screen::Modifiers),
+                        SETTINGS_CAMERA if p.ok => self.push(Screen::Camera),
                         SETTINGS_MUSIC => {
                             let all = self.music_options();
                             let n = all.len();
@@ -2512,6 +2769,10 @@ impl Menu {
                         }
                         SETTINGS_BAYS => {
                             self.settings.bays = !self.settings.bays;
+                            self.changed = true;
+                        }
+                        SETTINGS_MODS => {
+                            self.settings.mods = !self.settings.mods;
                             self.changed = true;
                         }
                         _ => {}
@@ -2594,6 +2855,7 @@ impl Menu {
             }
             Screen::Modifiers => self.walk_modifiers(p, at),
             Screen::Audio => self.audio(p, at),
+            Screen::Camera => self.walk_camera(p, at),
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
@@ -3034,7 +3296,9 @@ impl Lobby {
 
     /// A lobby for this machine's player to open: the last free-ride track, the settings' wrecks.
     fn room_for(&self, settings: &Settings) -> Room {
-        let mut room = Room::new(&settings.name, &settings.track, settings.lobby_seats);
+        // A track mod is not ridden online until MD6: a lobby opens on the disc's tracks only.
+        let track = if TRACKS.iter().any(|t| t.0 == settings.track) { settings.track.as_str() } else { TRACKS[0].0 };
+        let mut room = Room::new(&settings.name, track, settings.lobby_seats);
         room.wrecks = settings.wrecks;
         room.modifiers = settings.modifiers.text();
         room.take(HOST, std::slice::from_ref(&self.pick));
@@ -3287,6 +3551,37 @@ const TEXTURES: [&str; 16] = [
     "nav_start_off",
 ];
 
+// ---- the track mods' place in the pick (MD2) -------------------------------------------------------
+
+impl Menu {
+    /// The tracks the pick lists: the disc's [`TRACKS`], then the mods'.
+    pub fn track_count(&self) -> usize {
+        TRACKS.len() + self.mod_tracks.len()
+    }
+
+    /// The pick's track `at`, `(id, name)`: a disc track's archive and town, or a mod's id and name.
+    pub fn track_at(&self, at: usize) -> (&str, &str) {
+        match TRACKS.get(at) {
+            Some(&(id, name)) => (id, name),
+            None => self
+                .mod_tracks
+                .get(at - TRACKS.len())
+                .map_or(TRACKS[0], |(id, name)| (id.as_str(), name.as_str())),
+        }
+    }
+
+    /// The pick's index of [`Settings::track`], the first track's where the pick does not list it.
+    pub fn track_index(&self) -> usize {
+        (0..self.track_count()).find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(0)
+    }
+
+    /// The mods the pick lists after the disc's (MD2), the pick's cursor kept on its track.
+    pub fn set_mod_tracks(&mut self, tracks: Vec<(String, String)>) {
+        self.mod_tracks = tracks;
+        self.cursor[Screen::Tracks.index()] = self.track_index();
+    }
+}
+
 /// The stills per track in `UI\trackpreview.res`.
 const STILLS: usize = 5;
 /// Frames each still shows for on the track pick.
@@ -3500,6 +3795,8 @@ impl Art {
                         format!("VSync  {}", if menu.settings.vsync { "On" } else { "Off" }),
                         format!("Frame limit  {}", menu.settings.frame_limit.label()),
                         format!("Machines at bays  {}", if menu.settings.bays { "On" } else { "Off" }),
+                        format!("Mods  {}", if menu.settings.mods { "On" } else { "Off" }),
+                        format!("Camera  {}", menu.camera_label()),
                         format!(
                             "Game Modifiers  {}",
                             if menu.settings.modifiers.is_original() { "Original" } else { "Modified" }
@@ -3522,7 +3819,7 @@ impl Art {
                 let bar = p.scrolled(&rows, at);
                 // A row with choices wears the arrows either side of its pill.
                 let choice = match screen {
-                    Screen::Settings => at == 1 || at == 2 || (at >= SETTINGS_MUSIC && at != SETTINGS_MODIFIERS),
+                    Screen::Settings => at == 1 || at == 2 || (at >= SETTINGS_MUSIC && at != SETTINGS_MODIFIERS && at != SETTINGS_CAMERA),
                     _ => true,
                 };
                 if choice {
@@ -3552,6 +3849,18 @@ impl Art {
                 let at = menu.cursor(screen);
                 let bar = p.scrolled(&menu.modifier_rows(), at);
                 if at < MODIFIERS_PRESET || (at == MODIFIERS_PRESET && menu.settings.presets.len() > 1) {
+                    p.tex("arrow_left_off", rect(bar.x - 36.0, bar.y, 32.0, 32.0), CHOSEN);
+                    p.tex("arrow_right_off", rect(bar.x + bar.w + 4.0, bar.y, 32.0, 32.0), CHOSEN);
+                }
+                p.logo();
+                p.title(screen.title());
+                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
+            }
+            Screen::Camera => {
+                p.column();
+                let at = menu.cursor(screen);
+                let bar = p.scrolled(&menu.camera_rows(), at);
+                if at < CAMERA_DEFAULT {
                     p.tex("arrow_left_off", rect(bar.x - 36.0, bar.y, 32.0, 32.0), CHOSEN);
                     p.tex("arrow_right_off", rect(bar.x + bar.w + 4.0, bar.y, 32.0, 32.0), CHOSEN);
                 }
@@ -3612,6 +3921,7 @@ impl Art {
             None if screen == Screen::Audio => menu.audio_ticker(),
             None if online && !menu.lobby.status.is_empty() => menu.lobby.status.clone(),
             None if screen == Screen::Modifiers => menu.modifier_help(),
+            None if screen == Screen::Camera => "Cross puts a slider back to the original's".to_string(),
             None => format!("Riding as {}", menu.settings.name),
         };
         p.anchor(Anchor::BottomLeft);
@@ -4036,7 +4346,8 @@ impl<'a> Painter<'a> {
         let (vw, vh) = self.view;
         self.fill(self.whole(), BLACK);
         let band = rect(0.0, 49.0, vw, vh - 49.0 - 90.0);
-        let stills = &self.art.stills[at];
+        // A mod's track has no stills (MD2): its band stays black under its name.
+        let stills: &[_] = self.art.stills.get(at).map_or(&[], |s| s.as_slice());
         if !stills.is_empty() {
             let still = &stills[(menu.tick / STILL_FRAMES) as usize % stills.len()];
             // The band's shape cut from the still's middle, never stretched.
@@ -4055,13 +4366,13 @@ impl<'a> Painter<'a> {
         // The masks: a dark top band and the bottom one the legend sits on.
         self.fill(rect(0.0, 0.0, vw, 49.0), [0, 0, 0, 200]);
         self.fill(rect(0.0, vh - 90.0, vw, 90.0), [0, 0, 0, 200]);
-        let (_, name) = TRACKS[at];
+        let (_, name) = menu.track_at(at);
         let mid = vw / 2.0;
         self.text(Face::Title, name, mid, 8.0, Align::Centre, CHOSEN);
         let w = self.art.fonts[&Face::Title].measure(name);
         self.tex("arrow_left_off", rect(mid - w / 2.0 - 44.0, 9.0, 32.0, 32.0), CHOSEN);
         self.tex("arrow_right_off", rect(mid + w / 2.0 + 12.0, 9.0, 32.0, 32.0), CHOSEN);
-        let count = format!("Freeride {} of {}", at + 1, TRACKS.len());
+        let count = format!("Freeride {} of {}", at + 1, menu.track_count());
         self.text(Face::Small, &count, mid, vh - 118.0, Align::Centre, ITEM);
         // The machine each player starts on (P41), in a panel over the stills' right edge: one line
         // a rider, the one Square changes in the chosen colour between up and down arrows when there

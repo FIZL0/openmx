@@ -457,14 +457,12 @@ impl Gen {
 
 /// The engine's `{cos, sin}` table, against the one the game's own startup code builds.
 ///
-/// This is the only proof in the file with a tolerance in it, and the reason is in the module's docs:
-/// the game widens each angle to double, calls the SDK's double-precision `cos` and `sin`, and rounds
-/// back, and this crate has no double transcendentals to do the same with. What the test says is how
-/// far apart the two tables are — and the answer, printed, is what a reader has to decide is small
-/// enough to aim a camera with.
+/// Bit-exact: the game widens each angle to double, calls the SDK's double-precision `cos` and `sin`
+/// (fdlibm's) and chops back to `f32`, and the port does the same since S104. Before that the port
+/// used single-precision ones and two entries in three were an ulp off, which the biplane's
+/// autopilot reads.
 #[test]
-#[allow(clippy::float_arithmetic)]
-fn the_curve_table_is_the_games_own_to_a_rounding() {
+fn the_curve_table_is_the_games_own() {
     let Some(mut ee) = game_or_skip() else { return };
     ee.hooks.insert(addr("mem_alloc").unwrap(), Box::new(|ee| ee.set(2, CURVE as u64)));
     ee.call(addr("curve_table_build").unwrap(), &[], &[], 2_000_000_000);
@@ -474,38 +472,19 @@ fn the_curve_table_is_the_games_own_to_a_rounding() {
 
     let ours = CurveTable::build();
     assert_eq!(ours.entries().len(), CURVE_ENTRIES + 1, "6000 entries plus the duplicated last one");
-    let (mut exact, mut worst, mut worst_at) = (0usize, 0.0f32, 0usize);
-    for (i, e) in ours.entries().iter().take(CURVE_ENTRIES).enumerate() {
+    let mut checked = 0;
+    for (i, e) in ours.entries().iter().enumerate() {
         let theirs = [ee.f32_at(CURVE + 8 * i as u32), ee.f32_at(CURVE + 8 * i as u32 + 4)];
-        if theirs == *e {
-            exact += 1;
-        }
-        for k in 0..2 {
-            let d = (theirs[k] - e[k]).abs();
-            if d > worst {
-                worst = d;
-                worst_at = i;
-            }
-        }
+        assert_eq!(
+            [theirs[0].to_bits(), theirs[1].to_bits()],
+            [e[0].to_bits(), e[1].to_bits()],
+            "entry {i}: the game's {theirs:?}, the port's {e:?}"
+        );
+        checked += 1;
     }
-    println!(
-        "{exact} of {CURVE_ENTRIES} entries are bit-exact; the worst is entry {worst_at}, off by {worst:e}"
-    );
-    assert!(worst < 1e-6, "entry {worst_at} is off by {worst:e}, which is more than a rounding");
-    // The duplicated last entry: the game builds 6000 and then copies the last one into a 6001st, so
-    // that an index that rounds up off the end still reads something. Each table's duplicate is
-    // checked against its own last entry, since the entries themselves are only equal to a rounding.
-    let last = CURVE_ENTRIES as u32 - 1;
-    assert_eq!(
-        [ee.f32_at(CURVE + 8 * (last + 1)), ee.f32_at(CURVE + 8 * (last + 1) + 4)],
-        [ee.f32_at(CURVE + 8 * last), ee.f32_at(CURVE + 8 * last + 4)],
-        "the game's 6001st entry is not a copy of its 6000th"
-    );
-    assert_eq!(
-        ours.entries()[CURVE_ENTRIES],
-        ours.entries()[CURVE_ENTRIES - 1],
-        "the port's 6001st entry is not a copy of its 6000th"
-    );
+    // The 6001st is the copy of the last one the game makes so that an index rounding up off the end
+    // still reads something; it is compared above with the rest.
+    assert_eq!(checked, CURVE_ENTRIES + 1);
 }
 
 /// The rotation every part of the game uses, and the one the camera turns its heading by twice.
@@ -1530,16 +1509,21 @@ fn race_same(case: usize, what: &str, theirs: &[u32], ours: &[u32]) {
 /// Of that tail only the lift at `+0x18c` is ever read while the ground probe is hooked — the world
 /// pointer at `+0x184` is what the real probe would read, and a hooked probe does not. The rest is
 /// written so that both snapshots hold the same bytes rather than whatever the case before left.
+///
+/// The eye's floor (slot `+0x108`) is the derived class's too, with its world pointer left null so
+/// that it does nothing; a proof that wants the floor puts a world there ([`RACE_WORLD`]) and hooks the
+/// ground query.
 fn poke_race(ee: &mut Ee, r: &Race) {
     poke(ee, &r.cam);
+    ee.set_u32(VTABLE + 0x108, addr("race_camera_frame_setup").unwrap());
     ee.set_u32(VTABLE + 0x10c, addr("race_camera_ground_probe").unwrap());
     for o in (0x180..0x1c4).step_by(4) {
         ee.set_u32(CAM + o, 0);
     }
     ee.set_f32(CAM + 0x18c, r.cam.ground_lift.0);
     ee.set_f32(CAM + 0x19c, 1.0);
-    ee.set_f32(CAM + 0x1a0, 3.0);
-    ee.set_f32(CAM + 0x1a4, f32::MAX);
+    ee.set_f32(CAM + 0x1a0, r.cam.min_height.0);
+    ee.set_f32(CAM + 0x1a4, r.cam.ceiling.0);
     ee.set_u32(CAM + 0x1a8, 0xffff_ffff);
     ee.set_u32(CAM + 0x1ac, 1);
 }
@@ -1807,13 +1791,126 @@ fn the_race_position_is_the_games_own() {
     assert!(still > 100, "the generator did not reach the standing-still lead");
 }
 
+/// A world the race camera can ask: a surface a fixed distance above or below every point it is
+/// asked about, as [`Dirt`] is, but noting *every* point in order — the frame asks up to three times,
+/// once for the look-at's probe and twice for the eye's floor — and able to be no world at all, which
+/// is the original's null world pointer.
+struct Terrain {
+    rise: F,
+    world: bool,
+    asked: Vec<Vf>,
+}
+
+impl Surface for Terrain {
+    fn on_surface(&mut self, point: Vf) -> Vf {
+        self.asked.push(point);
+        Vf::new(point.x(), (F(point.y()) + self.rise).0, point.z(), point.w())
+    }
+
+    fn has_ground(&self) -> bool {
+        self.world
+    }
+}
+
+/// A world pointer for the race camera's `+0x184`, never dereferenced: the one call that would is
+/// hooked.
+const RACE_WORLD: u32 = 0x0122_8000;
+
+/// The eye's floor, run: slot `+0x108` of the race camera (S103), the routine the base filter calls
+/// on the position before and after the lags. The world's ground query is hooked to put the surface a
+/// chosen distance from the eye, as the ground probe's proof does, so what is run is everything
+/// around the query — the floor out of the near plane and the least height, the ceiling, the lift,
+/// and the pitch lock — over every arm: under the floor and not, a ceiling that bites, the lock asked
+/// for and not, and no world at all. The collision object is null, as it is on every race camera read
+/// live, so the segment probe's block is skipped in the original as it is absent in the port.
+#[test]
+fn the_eyes_floor_is_the_games_own() {
+    let Some((mut ee, _, _)) = harness() else { return };
+    let rise = Rc::new(RefCell::new(F::ZERO));
+    let asked = Rc::new(RefCell::new(Vec::<Vf>::new()));
+    {
+        let (rise, asked) = (rise.clone(), asked.clone());
+        ee.hooks.insert(
+            addr("ground_query").unwrap(),
+            Box::new(move |ee| {
+                let p = ee.r(5) as u32;
+                let at = get_v(ee, p);
+                asked.borrow_mut().push(at);
+                ee.set_f32(p + 4, (F(at.y()) + *rise.borrow()).0);
+            }),
+        );
+    }
+    let mut g = Gen(0x5eed_0103);
+    let (mut lifted, mut clear, mut capped, mut worldless) = (0usize, 0usize, 0usize, 0usize);
+    for case in 0..CASES {
+        let mut r = Race { cam: g.cam() };
+        r.cam.min_height = if g.b() { F(2.0) } else { g.maybe_zero(0.0, 8.0) };
+        let eye = g.vec(-200.0, 200.0);
+        r.cam.ceiling = if g.one_in(4) { F(eye.y()) + g.f(-10.0, 10.0) } else { F::MAX };
+        let near = if g.one_in(4) { F(2.4) } else { g.f(0.0, 5.0) };
+        let ground_rise = g.f(-15.0, 15.0);
+        let lock = g.b();
+        let world = !g.one_in(4);
+        *rise.borrow_mut() = ground_rise;
+
+        let mut mine = Race { cam: r.cam.clone() };
+        let mut ours = eye;
+        let mut terrain = Terrain { rise: ground_rise, world, asked: Vec::new() };
+        mine.keep_off_the_ground(&mut ours, near, lock, &mut terrain);
+
+        race_reset(&mut ee);
+        poke_race(&mut ee, &r);
+        ee.set_u32(CAM + 0x184, if world { RACE_WORLD } else { 0 });
+        ee.set_f32(VIEWPORT + 0x19c, near.0);
+        put_v(&mut ee, SCR_POSITION, eye);
+        put_v(&mut ee, SCR_TARGET, g.vec(-200.0, 200.0));
+        asked.borrow_mut().clear();
+        ee.call(
+            addr("race_camera_frame_setup").unwrap(),
+            &[CAM as u64, SCR_POSITION as u64, SCR_TARGET as u64, 1, lock as u64],
+            &[],
+            100_000,
+        );
+        race_only_touched(&ee).unwrap();
+        assert_eq!(ee.r(2), 1, "case {case}: the slot asked to lift always answers 1");
+        let theirs = race_snap(&ee);
+        let theirs_asked = asked.borrow().clone();
+
+        let target = get_v(&ee, SCR_TARGET);
+        race_reset(&mut ee);
+        poke_race(&mut ee, &mine);
+        ee.set_u32(CAM + 0x184, if world { RACE_WORLD } else { 0 });
+        put_v(&mut ee, SCR_POSITION, ours);
+        put_v(&mut ee, SCR_TARGET, target);
+        race_same(case, "the eye's floor", &theirs, &race_snap(&ee));
+        let bits = |v: &Vec<Vf>| -> Vec<[u32; 4]> {
+            v.iter().map(|a| [a.x().to_bits(), a.y().to_bits(), a.z().to_bits(), a.w().to_bits()]).collect()
+        };
+        assert_eq!(bits(&theirs_asked), bits(&terrain.asked), "case {case}: the point the ground was asked about");
+
+        if !world {
+            worldless += 1;
+        } else if ours.y() != eye.y() && F(eye.y()) < r.cam.ceiling {
+            lifted += 1;
+        } else if ours.y() == eye.y() {
+            clear += 1;
+        }
+        if F(eye.y()) > r.cam.ceiling && world {
+            capped += 1;
+        }
+    }
+    println!("{lifted} lifted, {clear} clear, {capped} capped, {worldless} had no world");
+    assert!(lifted > 100 && clear > 100 && capped > 100 && worldless > 100, "the generator missed an arm");
+}
+
 /// One frame of the camera the disc actually creates, end to end — which is the frame the picture on
 /// screen comes out of, and the one every later camera comparison is measured against.
 ///
 /// The hooks are `one_frame_is_the_games_own`'s three, which is how the view leaves the camera, plus
-/// the ground probe, which is hooked for the reason the look-at's proof above gives. Everything else
-/// — the distance floor at four and a half near planes, the two velocity switches, the reverse sign
-/// test, the lead and the standing-still branch — is run.
+/// the ground probe, which is hooked for the reason the look-at's proof above gives, and the world's
+/// ground query, which the eye's floor asks before and after the lags (S103). Everything else — the
+/// distance floor at four and a half near planes, the two velocity switches, the reverse sign test,
+/// the lead, the standing-still branch, and the eye's floor itself — is run.
 #[test]
 fn one_race_frame_is_the_games_own() {
     let Some((mut ee, curve, _)) = harness() else { return };
@@ -1841,24 +1938,39 @@ fn one_race_frame_is_the_games_own() {
         );
     }
     ee.hooks.insert(addr("camera_base_update").unwrap(), Box::new(|_| {}));
-    let asked = Rc::new(RefCell::new(Vf::ZERO));
+    // Every point the frame asks the ground about, in order: the probe's (hooked whole, as the
+    // look-at's proof does) and the eye's floor's, twice (the world's ground query, hooked).
+    let asked = Rc::new(RefCell::new(Vec::<Vf>::new()));
     let answer = Rc::new(RefCell::new(0.0f32));
+    let rise = Rc::new(RefCell::new(F::ZERO));
     {
         let (asked, answer) = (asked.clone(), answer.clone());
         ee.hooks.insert(
             addr("race_camera_ground_probe").unwrap(),
             Box::new(move |ee| {
                 let (cam, p) = (ee.r(4) as u32, ee.r(5) as u32);
-                *asked.borrow_mut() = get_v(ee, p);
+                asked.borrow_mut().push(get_v(ee, p));
                 ee.set_f32(cam + 0x18c, *answer.borrow());
                 ee.set_f(0, *answer.borrow());
+            }),
+        );
+    }
+    {
+        let (asked, rise) = (asked.clone(), rise.clone());
+        ee.hooks.insert(
+            addr("ground_query").unwrap(),
+            Box::new(move |ee| {
+                let p = ee.r(5) as u32;
+                let at = get_v(ee, p);
+                asked.borrow_mut().push(at);
+                ee.set_f32(p + 4, (F(at.y()) + *rise.borrow()).0);
             }),
         );
     }
 
     let mut g = Gen(0x5eed_0104);
     let (mut from_vel, mut reversed, mut zeroed) = (0usize, 0usize, 0usize);
-    let (mut stills, mut floored) = (0usize, 0usize);
+    let (mut stills, mut floored, mut lifted) = (0usize, 0usize, 0usize);
     for case in 0..CASES {
         let mut r = Race { cam: g.cam() };
         let rider = ridden(&mut g);
@@ -1873,13 +1985,20 @@ fn one_race_frame_is_the_games_own() {
             short_viewport: short && !mode_is_3 && !sub_flag,
             ..switches
         };
-        let rise = g.f(-20.0, 20.0);
+        let ground_rise = g.f(-20.0, 20.0);
+        *rise.borrow_mut() = ground_rise;
+        let world = !g.one_in(4);
+        r.cam.min_height = if g.b() { F(2.0) } else { g.f(0.0, 8.0) };
+        r.cam.ceiling = if g.one_in(4) { g.f(-50.0, 50.0) } else { F::MAX };
 
         // The port first again, to work out the lift the hook has to hand the original.
         let mut mine = Race { cam: r.cam.clone() };
-        let mut dirt = Dirt { rise, asked: Vf::ZERO };
+        let mut dirt = Terrain { rise: ground_rise, world, asked: Vec::new() };
         let ours_view = mine.update(dt, &rider, near, &curve, switches, &mut dirt);
         *answer.borrow_mut() = mine.cam.ground_lift.0;
+        if mine.cam.pitch_down_locked {
+            lifted += 1;
+        }
 
         race_reset(&mut ee);
         poke_race(&mut ee, &r);
@@ -1887,15 +2006,17 @@ fn one_race_frame_is_the_games_own() {
         poke_app(&mut ee, switches.no_look_ahead, mode_is_3, sub_flag);
         poke_viewport_shape(&mut ee, short, &mut g);
         ee.set_f32(VIEWPORT + 0x19c, near.0);
+        ee.set_u32(CAM + 0x184, if world { RACE_WORLD } else { 0 });
         *view.borrow_mut() = View::default();
-        *asked.borrow_mut() = Vf::ZERO;
+        asked.borrow_mut().clear();
         ee.call(addr("race_camera_update").unwrap(), &[CAM as u64], &[dt.0], 1_000_000);
         race_only_touched(&ee).unwrap();
-        let (theirs, theirs_view, theirs_asked) = (race_snap(&ee), *view.borrow(), *asked.borrow());
+        let (theirs, theirs_view, theirs_asked) = (race_snap(&ee), *view.borrow(), asked.borrow().clone());
 
         r = mine;
         race_reset(&mut ee);
         poke_race(&mut ee, &r);
+        ee.set_u32(CAM + 0x184, if world { RACE_WORLD } else { 0 });
         race_same(case, "one race frame", &theirs, &race_snap(&ee));
         for (k, a, b) in [
             ("position", theirs_view.position, ours_view.position),
@@ -1912,11 +2033,10 @@ fn one_race_frame_is_the_games_own() {
             ours_view.fov.0.to_bits(),
             "case {case}: the view's field of view"
         );
-        assert_eq!(
-            [theirs_asked.x().to_bits(), theirs_asked.y().to_bits(), theirs_asked.z().to_bits()],
-            [dirt.asked.x().to_bits(), dirt.asked.y().to_bits(), dirt.asked.z().to_bits()],
-            "case {case}: the point the ground probe was asked about"
-        );
+        let bits = |v: &Vec<Vf>| -> Vec<[u32; 3]> {
+            v.iter().map(|a| [a.x().to_bits(), a.y().to_bits(), a.z().to_bits()]).collect()
+        };
+        assert_eq!(bits(&theirs_asked), bits(&dirt.asked), "case {case}: the points the ground was asked about");
 
         if rider.airborne && rider.speed > 20.0 {
             from_vel += 1;
@@ -1947,10 +2067,10 @@ fn one_race_frame_is_the_games_own() {
     println!(
         "{from_vel} of {CASES} cases took the heading off the velocity, {reversed} tested the \
          velocity's sign and {zeroed} of those threw it away, {stills} stood still, {floored} had \
-         the near plane beat the preset's minimum distance"
+         the near plane beat the preset's minimum distance, {lifted} lifted the raw eye off the ground"
     );
     assert!(
-        from_vel > 100 && zeroed > 100 && stills > 100 && floored > 100,
+        from_vel > 100 && zeroed > 100 && stills > 100 && floored > 100 && lifted > 100,
         "the generator did not reach the frame's branches"
     );
 }

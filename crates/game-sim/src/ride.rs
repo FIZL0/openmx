@@ -1452,6 +1452,14 @@ impl Ride {
     /// [`mv::step`]'s own list to show that this spine has not drifted from it.
     pub fn frame(&mut self, p: &Phy, tables: &Tables, c: &Controls, dt: F,
                  world: &mut dyn World) -> Vec<mv::Call> {
+        self.frame_bumped(p, tables, c, dt, world, None)
+    }
+
+    /// [`Ride::frame`] with the other riders' contacts (S78): `bump`'s list is resolved against the
+    /// chassis where the substep opens its collision record, which is the original's ground step's
+    /// call. With none it is `frame`.
+    pub fn frame_bumped(&mut self, p: &Phy, tables: &Tables, c: &Controls, dt: F,
+                        world: &mut dyn World, mut bump: Option<&mut crate::rider_contact::Bump>) -> Vec<mv::Call> {
         if c.respawn {
             self.place_back();
         }
@@ -1716,6 +1724,32 @@ impl Ride {
             // The collision record is opened per substep in the original and kept across the frame's
             // meshes; here one is made where it is swept, so there is nothing to open.
             calls.push(mv::Call::CollisionBegin(k == 0));
+            if let Some(b) = bump.as_deref_mut() {
+                let i = &chassis.inv_inertia.rows;
+                let mut own = crate::contact::Ridden {
+                    chassis: crate::contact::Vehicle {
+                        node: crate::rider_contact::node(&out.chassis),
+                        cofg: mvc.cofg,
+                        mass: p.mass.mass,
+                        inv_mass: chassis.inv_mass,
+                        inv_inertia: [F(i[0].x()), F(i[1].y()), F(i[2].z())],
+                        velocity: mvc.vel,
+                        rates: mvc.ang_vel,
+                        shock: mvc.accel,
+                        twist: mvc.ang_accel,
+                    },
+                    position: chassis.cofg_world,
+                    force: mvc.force,
+                    torque: mvc.torque,
+                };
+                b.resolve(&mut own, k == 0);
+                mvc.vel = own.chassis.velocity;
+                mvc.ang_vel = own.chassis.rates;
+                mvc.accel = own.chassis.shock;
+                mvc.ang_accel = own.chassis.twist;
+                mvc.force = own.force;
+                mvc.torque = own.torque;
+            }
             calls.push(mv::Call::Unrotate(mvc.accel));
             // The answer to the call just handed over, and the whole of what the wreck test judges a
             // landing on: the impact accumulator at `+0x170`, brought back into the bike's own frame

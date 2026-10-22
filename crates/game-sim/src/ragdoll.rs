@@ -585,8 +585,8 @@ pub struct Tables {
 }
 
 impl Tables {
-    /// All three built the way the startup code builds them. The curve table's entries can sit a
-    /// bit off the game's (see [`CurveTable::build`]); the two arc cosines are the game's.
+    /// All three built the way the startup code builds them. The curve table is the game's to the bit
+    /// since S104 (see [`CurveTable::build`]); the two arc cosines are the game's.
     pub fn build() -> Tables {
         Tables { curve: CurveTable::build(), acos: AcosTable::build(), fine: FineAcos::build() }
     }

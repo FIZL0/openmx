@@ -2096,9 +2096,37 @@ race_camera_split_mode      boot 0x004211a0 the word race_camera_aim's second tr
 # + (vel * dt) * 10.0. No dead yaw swing in it; the base's is dead code.
 #
 race_camera_frame_setup     boot 0x0021e4d0 vtable slot 0x108, the override of camera_frame_noop's
-#                                           `return 1`: a real routine that rebuilds the probe bundle
-#                                           and collides it. The frame never calls it, so it is not
-#                                           ported; the only caller of slot 0x108 is elsewhere
+#                                           `return 1`. S24 read it as unreached; it is not: the base
+#                                           filter calls slot 0x108 on the position before and after
+#                                           the lags. It is the eye's floor — see S103 below. Ported
+#                                           as camera::Race::keep_off_the_ground
+#
+# --- S103: what keeps the race camera's eye out of the ground --------------------------------------
+# camera_filter (unoverridden) opens with slot0x108(cam, position, target, 1, 1) on the raw position
+# and, in the arm that runs the lags, ends with slot0x108(cam, &lagged, target, 1, 0) on the lagged
+# position (w 1.0) before writing it out. The lags keep the unlifted lagged value. In the base class
+# the slot is camera_frame_noop; in the race camera it is race_camera_frame_setup, which is (args cam,
+# &eye, target, lift, lock):
+#   floor = max.s(viewport+0x19c * 2.0, cam+0x1a0)
+#   if cam+0xe8 (collision object): segment probe from target (or last frame's start +0x190 after a
+#     hit) less its unit direction, stretched to 2*floor when shorter than floor, through the
+#     object's moved/collide (0x00119be0, 0x0011a9d0, with the +0xec filter 0x00218b80); a hit
+#     (callback 0x0021e190, byte-identical to camera_probe_hit) puts eye = hit + normal * floor
+#   if cam+0x184 (world): ground_query on the eye as handed in; y = min.s(eye.y, cam+0x1a4);
+#     if (y - ground < floor) { if lock: cam+0x16c = 1; if lift: eye.y = ground + floor }
+#     else if lock: cam+0x16c = 0.                                     returns 1 (0: under, no lift)
+# cam+0x16c is the flag camera_nudge tests before letting the stick pitch down (Follow's
+# pitch_down_locked). The derived nudge 0x0021f770 does not read it.
+race_camera_setup           boot 0x0021e270 (f12 0.55, f13 ceiling, f14 0.6, f15 2.0, cam, ...) from
+#                                           race_camera_create: cam+0x1a0 = f15 (2.0, over the ctor's
+#                                           3.0), cam+0x1a4 = f13 = 200.0 when the scene's fog record
+#                                           +0x1c (MaximumFogDistance) > 1500, else FLT_MAX
+race_camera_probe_hit       boot 0x0021e190 the derived make-probe 0x0021e350's hit callback
+# Live, three states (first_recording, recording2, biplane), both race camera objects in each:
+# +0xe8 = 0 and +0xec = 0 (the collision object is never made — slot 0xdc, which makes it, has no
+# caller in the race's setup), +0x184 = the world, +0x1a0 = 2.0, +0x1a4 = FLT_MAX, viewport near 2.4.
+# So on the disc the floor is 4.8 ft over the ground under the eye and the segment probe never runs.
+# free09's fog record +0x1c reads 1000.0, the biplane state's 768.0.
 
 # ---------------------------------------------------------------------------------------------------
 # S25 — the vehicle's own animation state machine, which is the only live caller of what S20 ported:
@@ -4639,3 +4667,54 @@ collision_tree_build boot 0x00111ee0 (nodes out, facets out, matrix out, quadwor
 #     other +0x40 (r +0x170, r² +0x174): node test 0x00106b10, leaf 0x00105e80 (end within r, else the
 #     closest approach along the unit segment within r and inside its length); writes only +0x80 = 1.0.
 #     Not on any bike's path (no bike collidable is kind 5), so not ported.
+# MD5 — collision class 1, the hierarchy (crates/game-sim/src/track.rs Hierarchy; proof in
+# crates/game-sim/tests/collision_hierarchy.rs). collision_file_load reads no file-level surface word for
+# it; the body is a part count (object +0x200), a word it drops, then per part a bone index (clamped to
+# the owner skeleton's bone count - 1; bones flattened from the root by 0x001b3420 count / 0x001b35b0),
+# the surface word from version 2 (its low byte to part +0x89) and collision_mesh_load's mesh body. A part
+# whose vertex count (u16 at part +0x23c) is 0 is dropped and the next takes its slot. Parts are 0x250-byte
+# mesh collidables (+0x78 the hierarchy, +0x230 the bone or 0). Callers: scene_collision_read (owner 0),
+# the animated toy (owner its model's skeleton), the machine race gate init, and two others not read.
+collision_hierarchy_new boot 0x001ee690 (0x220 bytes, vtable 0x00451c10) shape kind 1
+collision_hierarchy_load boot 0x001efca0 (this, owner, file, version) reads the parts, then a 0x34-byte
+#                        summary at +0x218: part triangles/nodes/counts/points/transforms/surface bytes
+collision_hierarchy_read boot 0x001effe0 (this, file, version) the per-part loop above
+collision_hierarchy_split boot 0x001eea50 (hierarchy, count*) -> an array of fresh mesh collidables, one
+#                         per part, copying each part's arrays, transform and +0x230 bone
+animated_toy_collision boot 0x00119070 a toy's model (0x00143970) and, with HasCollision, its .col by
+#                      collision_file_load(model skeleton, name, 5); kind 1 is split, and each part gets an
+#                      800-byte rigid body (0x001dd580) bound to its bone (its vtable +0x74) and added as a
+#                      child node of the toy (node_add_child); the part's +0x7c is that body
+animated_toy_read boot 0x002144d0 an [AnimatedToyN] section: MCFName, InitialMotion, InitialFrame,
+#                 InitialTime, HasCollision, CameraCollision, AnimateWhenNotVisible, UpdateSearch, ...
+# --- V51: the activities' start zones in the world, read for crates/openmx/src/portal.rs. Checked by
+#     eye against PCSX2 at free09 (recording2's state: the RACE and STUNT columns from afar, the hit
+#     zone's green disc and column from inside it) ---
+asz_load                    boot 0x00326330 reads hit.dat's [Activity Start Zones] ASZCount and each
+#                                           [ASZ n] into a 0xa0-byte zone (vtable 0x4598e0)
+asz_read                    boot 0x003259b0 one [ASZ n]: Position +0x20, LookVector +0x30, Scale +0x40
+#                                           (x) / +0x48 (z), Type -> +0x78 (Hit 1, Run 2, Race 3,
+#                                           Stunt 4), HitSetID's place in [Progression HitSets] (Hit)
+#                                           or [Run HitSets] (Run) -> +0x70 (0 Race/Stunt, -1 none),
+#                                           StringID, AIDifficulty. Colours (float bits): Hit 0x6ea637,
+#                                           Run 0xff9933, Race 0x3373cc, Stunt 0x813bb5 (the radar's)
+asz_build_hit               boot 0x003256f0 the zone's hit object (+0x4c, vtable 0x459af0): +0x38
+#                                           hitzone_start_circle with its material swapped to
+#                                           hitzone_start_activity_circle (0x001a16d0), +0x3c
+#                                           hitzone_landing_cylinder, +0x30 the trigger box. Vtable
+#                                           +0x88 colours the circle at alpha 0.6, +0x94 the cylinder
+#                                           at 0.5
+asz_icon_part               boot 0x00324ff0 one icon part via 0x00325070 (model, scene add, colour
+#                                           0x001a1af0, alpha 0x001a1b20): slot 0 startzone_%d (index+1,
+#                                           Hit/Run), 1 startzone_hit/run/race/stunt, 2
+#                                           startzone_checkmark (white), 3 startzone_disk; tint, 0.6
+asz_place                   boot 0x00323220 circle at (x, 0, z) along the look vector, up (0,1,0),
+#                                           scale (sx, 1, sz), model +0xc4/+0xd4 = 50.0 (draped?);
+#                                           cylinder at y + 112.5 - 25, scale (sx-1, 225, sz-1)
+asz_icons_frame             boot 0x00325280 per frame (from 0x003266c0, the zones walked with the
+#                                           camera's +0x140 position and +0x150 facing): d the flat
+#                                           distance, h = min(d/500, 1)*75 + 15; number at y+h scale
+#                                           20, checkmark/disk y+h+30 scale 20, type word y+h+15 scale
+#                                           40, all turned to the camera's facing
+asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle/cylinder/number/word,
+#                                           bits 4|2 (done) checkmark and disk

@@ -64,6 +64,8 @@ use wgpu::util::DeviceExt;
 mod sprites;
 pub use sprites::Sprite as Particle;
 
+mod glows;
+
 /// The format of the depth buffer.
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The format an offscreen frame is drawn in: plain bytes, as the rasteriser's are.
@@ -468,6 +470,8 @@ pub struct Renderer {
     pub render_scale: f32,
     /// The particle sheet and this frame's particles (P58).
     particles: Option<sprites::Sprites>,
+    /// The glow textures and this frame's glows (V51).
+    glows: Option<glows::Glows>,
 }
 
 /// A prop the scene places, as culling needs it.
@@ -1227,6 +1231,7 @@ impl Renderer {
             upscale,
             render_scale: 1.0,
             particles: None,
+            glows: None,
         })
     }
 
@@ -2217,6 +2222,10 @@ impl Renderer {
                 && particles.draw(pass, &self.view_bind, &offset)
             {
                 drawn.draws += 1;
+            }
+            // The start zones' and markers' glows, over the particles (V51).
+            if let Some(glows) = &self.glows {
+                drawn.draws += glows.draw(pass, &self.view_bind, &offset, v);
             }
         }
     }
@@ -3420,6 +3429,7 @@ mod tests {
             ("sky", SKY_WGSL.to_string()),
             ("place", PLACE_WGSL.to_string()),
             ("sprite", sprite::SPRITE_WGSL.to_string()),
+            ("glow", format!("{VIEW_WGSL}{}", glows::GLOW_WGSL)),
             ("upscale", scale::UPSCALE_WGSL.to_string()),
             ("ground, painted", ground_wgsl(Some(&paint), [200.0, 180.0, 150.0])),
             ("ground, bare", ground_wgsl(None, [200.0, 180.0, 150.0])),

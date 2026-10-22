@@ -93,7 +93,7 @@ const HEAD: usize = 10;
 fn a_hundred_ticks_is_a_known_constant() {
     // The hash of a hundred ticks of the stand-in bike on a level floor, as a literal: the same
     // value `Sim::hash`'s own test carries.
-    const HUNDRED_TICKS: u64 = 0x09a0_2520_1f3f_518b;
+    const HUNDRED_TICKS: u64 = 0xca79_69b7_f369_929d;
 
     let mut sim = Sim::new(1);
     for _ in 0..100 {
@@ -496,7 +496,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // chassis' own limit it is copied into is walked.
     // 11248 since S95: the plane's copy of the bikes' collision mesh, the disc's, left out as the
     // ray probe's geometry is.
+    // 11256 since S78: the rider's bike collision files (rays and frame), the disc's, which the
+    // rider-to-rider search reads and the walk leaves out like the ragdoll kit.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11248, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11256, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
