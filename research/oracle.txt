@@ -3260,7 +3260,34 @@ scene_collision_read boot 0x001aa760 a .scn collision placement: Position/Look/U
 # The plane's search (record +0x10c): least 10, extra 30, capacity 128, no_groups 0. Its 34 candidates are
 # all moving-list objects in list order: 23 toys (category 0x48), 3 bikes (one has left the world, its slot
 # a free link now), 8 machine race gates (category 0x200020; gate init 0x003b0a70, the machine race
-# 0x003a2e90). plane_refresh_search's own caller was not found.
+# 0x003a2e90). plane_refresh_search's own caller was not found. (S99: found, the block below.)
+# S99 — when the plane's search refills (crates/game-sim/src/flight.rs refresh, flight_search.rs refresh;
+# proof in tests/flight_candidates.rs over a second state, biplane_later.p2s). How it was found is in
+# research/journal/2026-10-22-s99-when-the-planes-search-refills.
+# Callers of vt +0x110 on the plane's collision owner: body_wrapper_post 0x0015b070 (call 0x0015b180, its
+# last step before +0x78 = 0, so only when the body is enabled), the asleep check 0x0015b2a0 (interface
+# thunk 0x0015c2b0 at owner+0x50, dt in f12: refreshes only while the body sleeps, word at *(+0x110) == 0,
+# and +0x6c is set) and the wake 0x0015b790 (vt +0x124). Five single-slot interface vptrs sit at
+# owner+0x40..+0x50 (vtables 0x0044e7e0/7ec/7f8/808/814, this-adjusting thunks 0x0015c260..0x0015c2b0).
+probe_object_moved boot 0x00119be0 (probe) probe vt +0xa8 -- for the ray probe class (vtable 0x00451a90)
+#                              0x001ec750: the node's (+0x164) world matrix via 0x001b2a50, then vt +0xac
+#                              recomputes the reach (+0x40/+0x60) -- then 0x00119d00 (vt +0xa4 box, and
+#                              0x001ab310 moves it in its table)
+# The clock, from a live trace (call hooks at the entries, biplane state, ticks 10993..11004 alike): per
+# 30 Hz tick, every collision record's contact search first (collision_record_collide 0x002708a0 from
+# 0x0026f874; the plane's record first, collide_against_search on its sweep, then its ray probe), then
+# dynamics_world_step 0x001f29a0 (world 0x0060b278, from 0x0026f8dc) and its post listeners: the plane's
+# body_wrapper_post (from biplane_measure 0x00352980, its first step) refreshes and gathers its search --
+# once a tick, around the ray probe's reach at the stepped pose -- then the two driving toys' posts (from
+# 0x001f2c00) refresh their own, then other gathers and the bike world (0x0030f7ec, world 0x00a83830).
+# So S96's five stale distances are the objects that move after the plane's gather in the same tick (the
+# two toys in their posts, the bikes in their world) -- proven bit for bit with a state saved holding the
+# centres copied at the plane's refresh.
+# Recovery does not gather: biplane_unwreck 0x003536e0 -> plane vt +0x198 (mxbiplane_reset 0x00355b00) ->
+# 0x00351df0 -> 0x0015a030 takes the probes out and puts them back (0x001ab1d0, 0x00119c60) but does not
+# call the refresh. The recovery comes after the body post (the crash step's, later in the post listener
+# as the port has it) or before the frame (the reset chord): either way the next search uses the list
+# gathered before the put-back (read from the code, not seen live: no recovery in the traced ticks).
 
 # S47 — the sweep probe's narrow phase (crates/game-sim/src/sweep_probe.rs, proofs in
 # tests/sweep_probe.rs). sphere_probe_clear: count = min(+0x120, 16); per segment the ends +0x128
@@ -3394,9 +3421,10 @@ block_list_restart boot 0x001ab9c0 block list vt +0x3c
 block_list_end boot 0x001ab9f0 block list vt +0x40
 point_distance boot 0x0011c170 (reach f12, probe, point) ground-plane distance less both reaches, >= 0
 pair_distance boot 0x0011c1b0 (a, b) distance less both reaches, >= 0
-plane_refresh_search boot 0x0015b210 the plane collision owner's (plane+0x50) vt +0x108: marks its
-#                              probes moved, then collision_search_gather(+0x11c = plane+0x16c, the
-#                              ray probe +0x130, 3) -- what refills the plane's nearby search
+plane_refresh_search boot 0x0015b210 the plane collision owner's (plane+0x50) vt +0x110 off its vptr at
+#                              +0x38 (vtable 0x0045b2ac; S96's +0x108 was off +0x10): marks its probes
+#                              moved, then collision_search_gather(+0x11c = plane+0x16c, the ray probe
+#                              +0x130, 3) -- what refills the plane's nearby search; callers in S99's block
 
 # ---------------------------------------------------------------------------------------------------
 # R9 — the two-player game, read statically from the decompilation and the disc: nothing here was run

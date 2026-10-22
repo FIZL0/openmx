@@ -18,13 +18,14 @@
 //!    the plane is not wrecked — the autopilot, the engine and the aerodynamics, each force handed to
 //!    the body in its own frame; then the three tires' ground probes and the three tires' forces;
 //! 3. the body integrated and its accumulators emptied, every substep; the plane has no constraints;
-//! 4. *post*, once: the measure's contact half (grounded off the wheels, the aero model's true-speed
-//!    switch), the crash test ([`Crash`]) with the wreck and the recovery it asks for, then the
-//!    measure's flight half, which is what next frame's listeners read ([`Measure`]).
+//! 4. *post*, once: the search refilled around the stepped pose (S99), the
+//!    measure's contact half (grounded off the wheels, the aero model's true-speed switch), the crash
+//!    test ([`Crash`]) with the wreck and the recovery it asks for, then the measure's flight half,
+//!    which is what next frame's listeners read ([`Measure`]).
 //!
 //! Before the world steps, the plane's collision object searches (S48, [`Flight::frame`]): the sweep
 //! back, its ray probe against the terrain and against the track's collision meshes
-//! ([`crate::flight_search`]). The force listener resolves the contacts it found, and the crash test
+//! ([`crate::flight_search`]), among the candidates last frame's post listener gathered. The force listener resolves the contacts it found, and the crash test
 //! reads whether there were any. The pad it is handed is the recorded one, through I6's mapping ([`pad`]). The
 //! acceptance run over C7's capture (`the_biplane_acceptance_run` in `tests/replay.rs`) says how far
 //! it agrees, lane by lane, on every `./kit check` that has the capture.
@@ -382,12 +383,21 @@ impl Flight {
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let (field, props) = world.collision();
-        let bounds = field.as_deref().map(|f| {
-            let (lo, hi) = (f.min(), f.max());
-            ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
-        });
+        let bounds = field.as_deref().map(field_box);
         let mut scene = Scene::new(props, bounds, &rays, &self.record.node, &mut self.nearby);
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
+    }
+
+    /// The search's refill (S99), first in the post listener: the original's body post sets the
+    /// plane's pose from the stepped body and has the collision object gather its nearby list around
+    /// the ray probe's reach there ([`flight_search::refresh`]), before the measure, the crash test
+    /// and any unwreck — so the frame after a recovery searches with the list gathered where the
+    /// plane came down. Once a world step, before the other bodies' posts move them.
+    fn refresh(&mut self, world: &mut dyn world::World) {
+        let Some(rays) = self.rays.as_ref() else { return };
+        let (field, props) = world.collision();
+        let bounds = field.as_deref().map(field_box);
+        flight_search::refresh(props, bounds, rays, &node_of(&self.body), &mut self.nearby);
     }
 
     /// The preforce listener.
@@ -534,6 +544,12 @@ impl world::World for Ground<'_> {
     }
 }
 
+/// A heightfield's box on the ground plane, (x, z) low and high.
+fn field_box(f: &(dyn contact_search::Heightfield + '_)) -> ([F; 2], [F; 2]) {
+    let (lo, hi) = (f.min(), f.max());
+    ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+}
+
 /// The plane's lists in the dynamics world: one body, one listener of each kind, no constraints.
 struct Listeners<'a> {
     plane: &'a mut Flight,
@@ -565,6 +581,7 @@ impl Dynamics for Listeners<'_> {
     }
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
+        self.plane.refresh(&mut *self.ground.0);
         self.plane.post(dt, &self.tables.acos);
     }
 }
