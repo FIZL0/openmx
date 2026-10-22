@@ -100,6 +100,43 @@ def _ini_set(path: Path, section: str, key: str, value) -> None:
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8', errors='surrogateescape')
 
 
+def _ini_set_in(path: Path, section: str, key: str, value) -> None:
+    """Set one key inside `section` only, adding the section or the key if absent.
+
+    For the pad sections: `[Pad1]` and `[Pad2]` share every key name, so `_ini_set`'s find-it-anywhere
+    would edit Pad1's `Up` when asked for Pad2's.
+    """
+    if not path.exists():
+        raise SystemExit(f'no PCSX2 ini at {path}\nStart PCSX2 once so it writes its config, then retry.')
+    lines = path.read_text(encoding='utf-8', errors='surrogateescape').splitlines()
+    start = next((i for i, l in enumerate(lines) if l.strip() == f'[{section}]'), None)
+    if start is None:
+        lines += ['', f'[{section}]', f'{key} = {value}']
+    else:
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith('[')), len(lines))
+        pat = re.compile(rf'\s*{re.escape(key)}\s*=')
+        hit = next((i for i in range(start + 1, end) if pat.match(lines[i])), None)
+        if hit is not None:
+            lines[hit] = f'{key} = {value}'
+        else:
+            while end > start + 1 and not lines[end - 1].strip():
+                end -= 1        # keep the blank line between sections below the new key
+            lines.insert(end, f'{key} = {value}')
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8', errors='surrogateescape')
+
+
+def _ini_get_in(path: Path, section: str, key: str, default: str = '') -> str:
+    if not path.exists():
+        return default
+    inside = False
+    for l in path.read_text(encoding='utf-8', errors='surrogateescape').splitlines():
+        if l.lstrip().startswith('['):
+            inside = l.strip() == f'[{section}]'
+        elif inside and re.match(rf'\s*{re.escape(key)}\s*=', l):
+            return l.split('=', 1)[1].strip()
+    return default
+
+
 def _ini_del(path: Path, key: str) -> None:
     if not path.exists():
         return
@@ -241,6 +278,11 @@ PAD1_SDL = {
     'RLeft': 'SDL-0/-RightX', 'RRight': 'SDL-0/+RightX',
 }
 
+# Port 2 as a DualShock2 on the second SDL pad. A user's ini usually ships `[Pad2] Type = None`, and with
+# that a two-pad .p2m2 plays with P2 unplugged: the capture looks fine and rides one rider. The copy's
+# SDL filter only lets its own kit pad through, so SDL-1 is normally absent and P2 is driven by the tape.
+PAD2_SDL = {k: v.replace('SDL-0/', 'SDL-1/') for k, v in PAD1_SDL.items()}
+
 
 def copy_config(n: int) -> Path:
     """Create (or refresh) kit copy `n` from the user's own PCSX2 config, and return its config dir.
@@ -285,8 +327,11 @@ def copy_config(n: int) -> Path:
         ('Folders', 'Savestates', str(dst / 'savestates')),
         ('Folders', 'MemoryCards', str(dst / 'memcards')),
         ('Folders', 'Snapshots', str(dst / 'snaps')),
-    ] + [('Pad1', k, v) for k, v in PAD1_SDL.items()]:
+    ]:
         _ini_set(ini, section, key, value)
+    for section, binds in (('Pad1', PAD1_SDL), ('Pad2', {'Type': 'DualShock2', **PAD2_SDL})):
+        for key, value in binds.items():
+            _ini_set_in(ini, section, key, value)
     _ini_del(ini, 'FrameAdvance')   # frame-advance bound to a pad button pauses copies by accident
     for sub in ('savestates', 'memcards', 'snaps', 'logs'):
         (dst / sub).mkdir(parents=True, exist_ok=True)
