@@ -59,9 +59,25 @@ fn folder(name: &str) -> PathBuf {
     dir
 }
 
-/// `d` pressed for a tick on the gas and let go for one: what the press fired.
+/// How many ticks Down or Up is held at 30 Hz before it fires (P106): the press's tick and seven
+/// more, the timer crossing `markers::HOLD_MS` on the last.
+const HOLD_TICKS: usize = 8;
+
+/// `buttons` held for [`HOLD_TICKS`]: what the last tick fired, nothing having fired before it.
+fn held(sim: &mut Sim, buttons: u16, mut tape: Option<&mut Recorder>) -> Option<Did> {
+    for k in 1..HOLD_TICKS {
+        assert_eq!(tick(sim, buttons, tape.as_deref_mut()), None, "fired before the hold, on tick {k}");
+    }
+    tick(sim, buttons, tape)
+}
+
+/// `d` pressed on the gas — Left and Right for a tick, Down and Up held until they fire — and let go
+/// for one: what it fired.
 fn press(sim: &mut Sim, d: Control, mut tape: Option<&mut Recorder>) -> Option<Did> {
-    let did = tick(sim, GAS | d.mask(), tape.as_deref_mut());
+    let did = match d {
+        Control::Up | Control::Down => held(sim, GAS | d.mask(), tape.as_deref_mut()),
+        _ => tick(sim, GAS | d.mask(), tape.as_deref_mut()),
+    };
     tick(sim, GAS, tape);
     did
 }
@@ -79,7 +95,7 @@ fn a_marker_kept_rides_back_bit_for_bit_in_the_next_ride() {
     let mut first = moving();
     let mut kept = saved_markers::Kept::new(TRACK, &profile, BIKE, &first.markers);
     assert_eq!(kept.frame(&dir, &first.markers), None, "nothing placed, nothing written");
-    let placed = tick(&mut first, GAS | Control::Down.mask(), None);
+    let placed = held(&mut first, GAS | Control::Down.mask(), None);
     assert_eq!(placed, Some(Did::Placed(0)));
     let at_placement = first.rider.ride.clone();
     let after: Vec<u64> = (0..30)
@@ -109,7 +125,7 @@ fn a_marker_kept_rides_back_bit_for_bit_in_the_next_ride() {
     for _ in 0..20 {
         tick(&mut next, GAS, None);
     }
-    assert_eq!(tick(&mut next, GAS | Control::Up.mask(), None), Some(Did::Teleported(Pick::Slot(0))));
+    assert_eq!(held(&mut next, GAS | Control::Up.mask(), None), Some(Did::Teleported(Pick::Slot(0))));
     assert_eq!(hash::of(&next.rider.ride), hash::of(&at_placement), "the teleport is not the bike the marker kept");
     let p = (next.rider.ride.position(), at_placement.position());
     assert_eq!((p.0.x().to_bits(), p.0.y().to_bits(), p.0.z().to_bits()), (p.1.x().to_bits(), p.1.y().to_bits(), p.1.z().to_bits()));
@@ -129,7 +145,7 @@ fn another_track_starts_empty() {
     let profile = saved_markers::profile("Ryan", 0);
     assert_eq!(profile, "Ryan");
     let mut kept = saved_markers::Kept::new(TRACK, &profile, BIKE, &sim.markers);
-    assert_eq!(tick(&mut sim, GAS | Control::Down.mask(), None), Some(Did::Placed(0)));
+    assert_eq!(held(&mut sim, GAS | Control::Down.mask(), None), Some(Did::Placed(0)));
     kept.frame(&dir, &sim.markers).expect("written");
 
     assert!(saved_markers::load(&dir, "free09", &profile, BIKE).fresh(), "another track has the marker");
@@ -154,7 +170,7 @@ fn another_track_starts_empty() {
 #[test]
 fn another_format_is_dropped() {
     let mut sim = moving();
-    tick(&mut sim, GAS | Control::Down.mask(), None);
+    held(&mut sim, GAS | Control::Down.mask(), None);
     let good = sim.markers.to_file(BIKE);
     assert!(Markers::from_file(&good, BIKE).is_ok());
     let mut version = good.clone();
@@ -192,7 +208,7 @@ fn a_tape_replays_with_the_files_gone() {
     // A ride that keeps two markers, as the shell would.
     let mut before = moving();
     let mut kept = saved_markers::Kept::new(TRACK, "1P", BIKE, &before.markers);
-    tick(&mut before, GAS | Control::Down.mask(), None);
+    held(&mut before, GAS | Control::Down.mask(), None);
     press(&mut before, Control::Right, None);
     for _ in 0..15 {
         tick(&mut before, GAS, None);
@@ -209,11 +225,16 @@ fn a_tape_replays_with_the_files_gone() {
     rec.tape.markers = live.markers.to_file(BIKE);
     let mut hashes = Vec::new();
     let mut did = Vec::new();
+    let (up, down) = ([GAS | Control::Up.mask(); HOLD_TICKS], [GAS | Control::Down.mask(); HOLD_TICKS]);
     let script: Vec<u16> = [GAS; 20]
         .into_iter()
-        .chain([GAS | Control::Up.mask(), GAS, GAS, GAS | Control::Right.mask(), GAS, GAS | Control::Up.mask()])
+        .chain(up)
+        .chain([GAS, GAS, GAS | Control::Right.mask(), GAS])
+        .chain(up)
         .chain([GAS; 10])
-        .chain([GAS | Control::Right.mask(), GAS, GAS | Control::Down.mask(), GAS, GAS])
+        .chain([GAS | Control::Right.mask(), GAS])
+        .chain(down)
+        .chain([GAS, GAS])
         .collect();
     for &b in &script {
         did.push(tick(&mut live, b, Some(&mut rec)));
@@ -221,7 +242,7 @@ fn a_tape_replays_with_the_files_gone() {
     }
     live.markers.clear();
     rec.markers_cleared();
-    for &b in &[GAS | Control::Left.mask(), GAS, GAS | Control::Up.mask(), GAS, GAS] {
+    for &b in [GAS | Control::Left.mask(), GAS].iter().chain(&up).chain(&[GAS, GAS]) {
         did.push(tick(&mut live, b, Some(&mut rec)));
         hashes.push(live.hash());
     }
