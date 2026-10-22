@@ -79,6 +79,8 @@ pub struct Online {
     /// The room as the network last said it, for the controller preset of a peer that arrives
     /// (N13): its seat's pick says it, and the network seats a joiner before it arrives.
     room: Option<openmx_net::Room>,
+    /// `--peer`s (N15): every seat's controller preset is not known yet, and the first tick waits on it.
+    presets_owed: bool,
 }
 
 impl Online {
@@ -88,8 +90,9 @@ impl Online {
     }
 
     /// `--online`, `--peer`s and `--seats`, seat `s` starting as `starts[s]` (every machine must
-    /// hand the same ones).
-    pub fn start(me: &str, peers: &[String], seats: Option<&str>, starts: &[Sim]) -> Result<Online, String> {
+    /// hand the same ones), this machine's first seat on controller preset `preset` and any other
+    /// of its seats (no pad) on 0 — each machine's own, which its datagrams tell the others (N15).
+    pub fn start(me: &str, peers: &[String], seats: Option<&str>, starts: &[Sim], preset: u8) -> Result<Online, String> {
         let (me, at) = udp::named(me)?;
         let peers = peers.iter().map(|p| udp::named(p)).collect::<Result<Vec<_>, _>>()?;
         let seats = seats.ok_or("--online wants --seats, like host,g")?;
@@ -104,7 +107,8 @@ impl Online {
             return Err(format!("{} seats and {} riders to start them", lineup.seats.len(), starts.len()));
         }
         let net = Netplay::new(lineup.clone(), &me, Timing::default(), crate::net::desync::dumps())?;
-        let udp = Udp::bind(at, peers)?;
+        let card: Vec<u8> = (0..lineup.mine(&me).len()).map(|i| if i == 0 { preset } else { 0 }).collect();
+        let udp = Udp::bind(at, peers, &card)?;
         println!("online: {me} on {at}, seat {} of {} ({})", seat + 1, lineup.seats.len(), lineup.text());
         Ok(Online {
             net,
@@ -120,7 +124,29 @@ impl Online {
             spawn: None,
             arrived: Vec::new(),
             room: None,
+            presets_owed: true,
         })
+    }
+
+    /// `--peer`s (N15): every seat's table on its machine's controller preset, once every peer has
+    /// said its own — before the first tick, which ggrs runs only once it has heard every peer.
+    fn take_presets(&mut self) -> Result<(), String> {
+        let Wire::Udp(udp) = &self.wire else { return Ok(()) };
+        if !self.presets_owed {
+            return Ok(());
+        }
+        if let Some(presets) = udp.presets(&self.net.lineup, &self.net.me)? {
+            for (sim, &p) in self.sims.iter_mut().zip(&presets) {
+                sim.set_presets([p as usize, 0]);
+            }
+            if presets.iter().any(|&p| p != 0) {
+                println!("online: controller presets {}", presets.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
+            }
+            self.presets_owed = false;
+        } else if self.net.tick() > 0 {
+            return Err("the ride started before every peer said its controller preset".into());
+        }
+        Ok(())
     }
 
     /// The lobby's ride (N3): its line-up, this machine as `me` in it, and a [`Sim`] a seat, each on
@@ -147,6 +173,7 @@ impl Online {
             spawn: None,
             arrived: Vec::new(),
             room: None,
+            presets_owed: false,
         })
     }
 
@@ -171,6 +198,7 @@ impl Online {
             spawn: Some(rides::seat_bytes(spawn)),
             arrived: Vec::new(),
             room: None,
+            presets_owed: false,
         })
     }
 
@@ -194,6 +222,7 @@ impl Online {
             spawn: None,
             arrived: Vec::new(),
             room: None,
+            presets_owed: false,
         })
     }
 
@@ -385,6 +414,10 @@ impl Online {
         for (from, d) in came {
             self.net.heard(&from, &d);
         }
+        if let Err(why) = self.take_presets() {
+            self.net.finish(why.clone());
+            return Err(format!("online: {why}"));
+        }
         let mine = self.net.lineup.mine(&self.net.me);
         let local: Vec<Report> = mine.iter().map(|&s| if s == self.seat { pad } else { Report::idle() }).collect();
         let real = std::mem::replace(&mut self.last, Instant::now()).elapsed().as_secs_f32();
@@ -404,6 +437,9 @@ impl Online {
             };
             let mut game = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale };
             self.net.frame(&mut game, &local, real);
+        }
+        if let Err(why) = self.take_presets() {
+            self.net.finish(why);
         }
         self.dt = game_sim::modifiers::scaled_dt(rides::tick_dt(self.net.tick().saturating_sub(1)), self.time_scale);
         for (to, d) in self.net.outgoing() {
