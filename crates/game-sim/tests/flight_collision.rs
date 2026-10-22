@@ -295,13 +295,14 @@ fn face_normals_pack_as_the_loader_packs_them() {
 }
 
 /// **The masks the listeners and the crash test read**: the hit listener's global mask, and the
-/// plane's crash mask, which spares vehicles — a scenery mesh is in the first and not the second.
+/// plane's crash mask, which spares vehicles — a scenery mesh is in neither (S96: the meshes S48 read
+/// as scenery, in the first, are the track's toys).
 #[test]
 fn the_masks_are_the_originals() {
     let Some(ee) = image() else { return };
     assert_eq!(ee.u32_at(GLOBAL_MASK), WAKE_MASK, "the global mask");
     assert_eq!(ee.u32_at(PLANE + CRASH_MASK), VEHICLE, "the plane's crash mask");
-    assert_ne!(flight_search::SCENERY & WAKE_MASK, 0);
+    assert_eq!(flight_search::SCENERY & WAKE_MASK, 0);
     assert_eq!(flight_search::SCENERY & VEHICLE, 0);
 }
 
