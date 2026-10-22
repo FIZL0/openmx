@@ -188,6 +188,7 @@ mod shot_pose;
 mod split;
 mod stages;
 mod track_mods;
+mod worlds;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
 #[allow(dead_code)]
@@ -223,6 +224,7 @@ use game_sim::rng::Rng;
 use game_sim::state::Phase;
 use game_sim::tick::{Engine, Game, Outcome};
 use game_sim::trick::{Set, Stunts};
+use game_sim::tiles::Land;
 use game_sim::world::Place;
 use game_sim::{Input, Sim, track, world as sim_world};
 use ps2_float::{F, Vf};
@@ -1574,9 +1576,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // A track the disc does not have is a track mod's (MD2), looked for in the mods folder only
     // then, so a disc track's ride reads nothing from it.
     let track_member = member_ending(&disc, &format!("{}.res", args.track));
+    // A world mod (MD8) is several track mods as one ground: the ride is dressed and lit from its
+    // home tile's folder, as a track mod's is, and the simulation asks every tile.
+    let mut world_mod: Option<worlds::WorldMod> = None;
     let modded = match &track_member {
         Ok(_) => None,
         Err(e) => match mods_dir(&args) {
+            Some(dir) if worlds::is_world(&dir, &args.track) => {
+                let w = worlds::find(&dir, &args.track).map_err(|m| format!("{e}, and {m}"))?;
+                let home = w.home_track();
+                world_mod = Some(w);
+                Some(home)
+            }
             Some(dir) => Some(track_mods::find(&dir, &args.track).map_err(|m| format!("{e}, and {m}"))?),
             None => return Err(e.clone()),
         },
@@ -1647,7 +1658,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(t) = &modded {
         t.place_spawn(&mut place)?;
     }
+    if let Some(w) = &world_mod {
+        w.place_spawn(&mut place)?;
+    }
     let mut look = view::Scene::parse(&ini::text(&scn_bytes));
+    if let Some(w) = &world_mod {
+        worlds::move_look(&mut look, w.home_at());
+    }
 
     let terrain_bytes = terrain_bytes(&archives[0], &place.terrain_file)?;
     // The same file parsed twice, because the two sides of it are owned by different crates: the
@@ -1658,6 +1675,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         ground.painted(game_render::splat::Splat::load(&archives, &stem, extent))
     };
     let sim_terrain = track::Terrain::parse(&terrain_bytes)?;
+    // A world's ground (MD8): every tile and join, each asked in its own coordinates.
+    let mut tiled = match &world_mod {
+        Some(w) => {
+            let t = w.tiled(game_sim::tiles::Reach::DESKTOP)?;
+            println!("{}", w.line(&t));
+            Some(Box::new(t))
+        }
+        None => None,
+    };
+    let world_area = tiled.as_ref().map(|t| t.area);
     // The sky the scene names, behind everything (V25); the fog colour where it has none.
     let sky = game_render::sky::Sky::load(&archives, &ini::text(&scn_bytes));
     let (extent_x, extent_z) = ground.extent();
@@ -1712,6 +1739,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     // The trees and bushes the scene's ecosystem scatters over the ground (V48).
     match game_render::eco::Grove::load(&archives, &look, &place.terrain, &sim_terrain, &mut assets) {
+        // A world's (MD8) would stand in the home tile's coordinates, and only its: none yet.
+        Ok(_) if world_mod.is_some() => println!("ecosystem: not drawn in a world"),
         Ok(grove) => look.ecosystem = grove,
         Err(e) => println!("ecosystem: {e}"),
     }
@@ -2070,6 +2099,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             let t = &place.terrain;
             flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
+            if let Some(area) = world_area {
+                flight.area = Some(area);
+            }
             flight
         })
     };
@@ -2169,9 +2201,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let facing = point(place.start_direction).norm();
     let at = Vf::new(spawn.x, spawn.y, spawn.z, 1.0);
     let heading = Vf::new(facing.x, facing.y, facing.z, 0.0);
-    let mut sim = Place {
-        ground: sim_world::Ground::new(&sim_terrain, &place.terrain),
-        props,
+    // The world's ground and its pieces' shapes in place of the one track's (MD8).
+    let mut sim = match tiled.take() {
+        Some(t) => Land::Tiles(t),
+        None => Land::Track(Place { ground: sim_world::Ground::new(&sim_terrain, &place.terrain), props }),
     };
     // The cars the track's `.toy` drives along their clips (V41): free06's train, its trucks and
     // scrapers, the other freeride tracks' trailers. Drawn, not ridden into: they reach nothing in the
@@ -2849,11 +2882,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Everything the GPU draws, uploaded once: the props, the sky, the whole ground and every model.
     if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
         let at = Instant::now();
-        let chunks = ground.chunks(ground.chunk_cells());
+        // A world's ground is every piece's, unpainted: each tile's paint is its own (MD9).
+        let (chunks, paint) = match (&world_mod, &sim) {
+            (Some(w), Land::Tiles(t)) => (worlds::chunks(w, t, ground.chunk_cells()), None),
+            _ => (ground.chunks(ground.chunk_cells()), ground.paint.as_ref()),
+        };
         r.forget_assets();
         r.set_scene(&look);
         r.set_sky(sky.as_ref());
-        r.set_ground(&chunks, ground.paint.as_ref(), ground::DIRT)?;
+        r.set_ground(&chunks, paint, ground::DIRT)?;
         r.upload_all(&assets);
         let (models, materials, textures) = r.uploaded();
         println!(
@@ -2956,12 +2993,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The radar's world is the scene's terrain scales' (MD3): the original reads the larger of the
     // two the map edge measures with, which on the disc is the terrain file's own spacing.
     let radar_span = overlay::radar_span(place.terrain.width_scale.0.max(place.terrain.breadth_scale.0));
-    let edge = Area::new(
+    // A world's edge is its whole rectangle's (MD8), and so is the radar's ground.
+    let edge = sim_world::World::area(&sim).unwrap_or_else(|| Area::new(
         F(place.terrain.width as f32),
         F(place.terrain.breadth as f32),
         place.terrain.width_scale,
         place.terrain.breadth_scale,
-    );
+    ));
     println!(
         "map: {:.0} x {:.0} feet to its edge, shot back from {:.0} feet short of it; radar {:.0} feet across",
         edge.width.0,
@@ -3827,6 +3865,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         if simulated {
             traffic_time += f64::from(dt.0);
+        }
+        // A world loads the tiles ahead of the riders and lets the far ones go (MD8).
+        if simulated && matches!(world.place, Land::Tiles(_)) {
+            let near: Vec<Vf> = world
+                .seats
+                .iter()
+                .flat_map(|s| [Some(game_sim::markers::Spot::of(&s.sim.rider).at), s.garage.plane.as_ref().map(|p| p.at)])
+                .flatten()
+                .collect();
+            if let Some(t) = world.place.tiled() {
+                t.stream(&near);
+                for line in t.take_log() {
+                    println!("{line}");
+                }
+            }
         }
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
