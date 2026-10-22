@@ -40,6 +40,7 @@ use crate::camera::CurveTable;
 use crate::chassis::{CLEAR, turn};
 use crate::collide::{Bundle, Record};
 use crate::contact::{self, Collider, Weighed};
+use crate::broad_phase;
 use crate::contact_search;
 use crate::flight_search::{self, Rays, Scene, VEHICLE};
 use crate::wreck_bike::{self, node_of};
@@ -148,6 +149,9 @@ pub struct Flight {
     pub collider: Collider,
     pub record: contact_search::Record,
     pub rays: Option<Arc<Rays>>,
+    /// The collision object's nearby search (S96): what the broad phase last gathered around the ray
+    /// probe, kept from frame to frame while the probe stays within its bound.
+    pub nearby: broad_phase::Search,
 }
 
 impl Flight {
@@ -278,6 +282,7 @@ impl Flight {
         self.record.rays = Some(rays.pairs());
         self.record.capacity = rays.segments.len();
         self.rays = Some(Arc::new(rays));
+        self.nearby = flight_search::search();
         self
     }
 
@@ -361,7 +366,11 @@ impl Flight {
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let (field, props) = world.collision();
-        let mut scene = Scene::new(props, &rays, &self.record.node);
+        let bounds = field.as_deref().map(|f| {
+            let (lo, hi) = (f.min(), f.max());
+            ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+        });
+        let mut scene = Scene::new(props, bounds, &rays, &self.record.node, &mut self.nearby);
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
     }
 
@@ -833,6 +842,13 @@ impl State for Flight {
                 w.u32("contacts", r.contacts.len() as u32);
                 w.bool("struck", r.struck.is_some());
                 w.u32("struck_object", r.struck.map_or(0, |o| o as u32));
+                let n = &self.nearby;
+                w.bool("nearby_built", n.built);
+                for (k, c) in n.centre.iter().enumerate() {
+                    w.f(["nearby_x", "nearby_y", "nearby_z", "nearby_w"][k], *c);
+                }
+                w.f("nearby_bound", n.bound);
+                w.u32("nearby_found", n.nearby.found.len() as u32);
             });
         }
     }

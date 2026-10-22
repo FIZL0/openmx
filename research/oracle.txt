@@ -3219,6 +3219,49 @@ collision_mesh_load boot 0x001eded0 a .col's meshes: each facet normal packs to 
 # The crash test is biplane_wreck_check's: a struck object whose surface category meets +0x580 (0x2000,
 # VEHICLE) does not wreck.
 
+# S96 — the plane's candidate order (crates/game-sim/src/broad_build.rs, flight_search.rs world/search;
+# proofs in tests/flight_candidates.rs over biplane.p2m2_SaveState and the disc). How it was found is in
+# research/journal/2026-10-21-s96-the-planes-candidate-order.
+broad_tree_ctor boot 0x00195d00 the static quadtree over a ground-plane box: scale = 32768 /
+#                              (float)(int) the longer extent; levels halve from 16384 cells until
+#                              (int)(least * scale) >= the level's size, or 12 levels; max = levels - 1.
+#                              Tree +0x30/+0x38 lo x/z, +0x34/+0x3c hi x/z, +0x48/+0x4c extent, +0x58 the
+#                              smallest node's side in cells, +0x5c scale, +0x94 root; flags +0x14 (0x30033
+#                              in the state: bit 1 = its queries report their box)
+world_tree_make boot 0x001c9d80 called from the level build 0x001a4540 with least-node width 96.0 over
+#                              the terrain field's box (free06: 0..6912 both ways, 6 levels, cell 256)
+broad_tree_key boot 0x00196110 a box's key: clamped to lo..hi, 0 when x1 < 0, !(x0 <= extent.x), z1 < 0 or
+#                              !(z0 <= extent.z); the first level the box does not fit both ways (capped
+#                              at max), cells masked to it, one level up if a masked span still exceeds
+#                              the side; corner bits 0x10 always, 0x20 z spills, 0x40 x spills, 0x80 both;
+#                              x0/z0 clamped to 0x7fff; key = level | corners | z0 << 5 | x0 << 17
+broad_tree_insert boot 0x00196320 per corner bit, down level+1 steps from bit 0x4000, child 2*xbit + zbit,
+#                              nodes made where missing (node +0 children array of 4, +4 chunk chain)
+broad_chunk_add boot 0x00196c20 the first empty slot of the node's chunks (chunk +0 next, +4..+0x10 four
+#                              slots), else a new chunk appended at the end
+mesh_collidable_bounds boot 0x001edce0 a mesh collidable's box: the matrix at +0x120, the root node of the
+#                              mesh at +0x234 (+0xc centre, +0x18 half); centre = T + r0*c.x + r1*c.y +
+#                              r2*c.z on the VU ACC (adda T, madda r0, madda r1, madd r2), half = |r0*h.x|
+#                              + |r1*h.y| + |r2*h.z| (adda, maddw by 1); both w 1. The centre is +0x40,
+#                              which is what the gather measures from (not the FPU transform_point's)
+scene_collision_read boot 0x001aa760 a .scn collision placement: Position/Look/Up through ini_quadword
+#                              (strtok, strtod, the truncating double_to_float 0x00418700 per lane) and
+#                              mat4_basis(out, pos, look, up, orthogonalise 0, keep_forward 1). The port's
+#                              track.rs had rounded to nearest and world.rs orthogonalised: 345 of free06's
+#                              353 meshes were a bit out before S96
+# Adding to the world: 0x00119c60 -> 0x001adb70, which calls 0x001ae000 (into the table's other/sub
+# tables) only when its 4th argument is set; the plane's table has no sub tables in the state (not ported).
+# The state's world (the ray probe's space +4 is its table, table +0x34 the tree, +0x38 the moving list:
+# +0x30 block size 1024, +0x34 blocks 1, +0x38 last 122, +0x3c the block array; a free slot holds a link
+# with bit 1 set): 353 scene meshes, category 0x220, flags 0x0c (some 0x1c/0x4c/0x8c: 0x10/0x20 a search's
+# marks, 0x40/0x80 unread by the search), +0x31 bit 0 set, mask 0xffffffff, empty object and category lists
+# (mode 1), class 2, in 769 node entries over 416 nodes. Class-3 placed groups (bushes, models of 0 parts)
+# are in the tree too and take gather capacity only.
+# The plane's search (record +0x10c): least 10, extra 30, capacity 128, no_groups 0. Its 34 candidates are
+# all moving-list objects in list order: 23 toys (category 0x48), 3 bikes (one has left the world, its slot
+# a free link now), 8 machine race gates (category 0x200020; gate init 0x003b0a70, the machine race
+# 0x003a2e90). plane_refresh_search's own caller was not found.
+
 # S47 — the sweep probe's narrow phase (crates/game-sim/src/sweep_probe.rs, proofs in
 # tests/sweep_probe.rs). sphere_probe_clear: count = min(+0x120, 16); per segment the ends +0x128
 # (32 bytes a segment) through their nodes +0x124 (two pointers a segment; the node's world matrix is

@@ -518,7 +518,7 @@ wire!(crate::rider_anim::Clocked { played, snapshot });
 /// rider's set; [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
-        let Self { joystick, autopilot, engine, aero, body, measure, tires, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _ } = self;
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _, nearby } = self;
         joystick.put(out);
         autopilot.put(out);
         engine.put(out);
@@ -543,6 +543,7 @@ impl Wire for crate::flight::Flight {
         rng.put(out);
         collider.put(out);
         record.put(out);
+        nearby.put(out);
     }
     fn take(r: &mut Reader<'_>) -> Result<Self, String> {
         Ok(Self {
@@ -571,6 +572,7 @@ impl Wire for crate::flight::Flight {
             collider: Wire::take(r)?,
             record: Wire::take(r)?,
             rays: None,
+            nearby: Wire::take(r)?,
         })
     }
 }
@@ -587,6 +589,9 @@ wire!(crate::contact::Collider { damp, damp_linear, damp_angular, mass, inv_mass
 wire!(crate::contact::Response { stiffness, damping, restitution, angular, friction, spring_mask, friction_mask });
 wire!(crate::contact::Contact { kind, from, on_body, normal, point, arm, other_arm, surface, other, mover });
 wire!(crate::contact::Node { rows, origin });
+wire!(crate::broad_phase::Search { nearby, centre, bound, least, extra, no_groups, built, capacity });
+wire!(crate::world_search::Nearby { found, prepare });
+wire!(crate::world_search::Candidate { object, distance });
 wire!(crate::contact_search::Record { search_ground, search, sweep_back, touching, touching_other, on_ground, on_object, damp, rest_linear, rest_angular, offset, lead, push_out, facing, swept_from, swept_to, node, contacts, capacity, nearby, rays, sweeps, struck });
 wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt, drag_halved });
 wire!(crate::ride::Back { at, facing, up });
