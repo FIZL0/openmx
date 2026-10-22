@@ -204,17 +204,11 @@ fn every_scene_that_names_an_ecosystem_reads_it_to_the_last_byte() {
         let Some(file) = look.ecosystem_file.as_deref() else { continue };
         let Ok(place) = track::Scene::parse(&bytes) else { continue };
         let terrain_file = terrain_bytes(&archives[0], &place.terrain_file);
-        // The nationals' ground does not read in the sim yet, so neither does the map's size: their
-        // files are read through for their layout, the plants' places in units of the map.
-        let extent = match track::Terrain::parse(&terrain_file) {
-            Ok(terrain) => Some(eco::extent(&place.terrain, &terrain)),
-            Err(why) => {
-                println!("{t}: the terrain does not read ({why}), so the plants are not placed");
-                None
-            }
-        };
+        // Every terrain reads, the nationals' with their textures (S98), so every map has its size.
+        let terrain = track::Terrain::parse(&terrain_file).unwrap_or_else(|why| panic!("{t}: the terrain: {why}"));
+        let extent = eco::extent(&place.terrain, &terrain);
         let esb = archives.iter().find_map(|a| a.read_suffix(file).ok()).unwrap_or_else(|| panic!("{t}: no {file}"));
-        let e = Ecosystem::parse(&esb, extent.unwrap_or(65536.0)).unwrap_or_else(|why| panic!("{t}: {why}"));
+        let e = Ecosystem::parse(&esb, extent).unwrap_or_else(|why| panic!("{t}: {why}"));
         let models: std::collections::BTreeSet<&str> = e.species.iter().map(|s| s.model.as_str()).collect();
         println!("{t}: {file}, {} species, {} plants, {models:?}", e.species.len(), e.plants.len());
         read.push(t.clone());
@@ -388,4 +382,50 @@ fn near_plants_matrices_are_the_originals() {
     }
     println!("{} near plants' matrices: {:?}", checked.len(), &checked[..checked.len().min(8)]);
     assert!(checked.len() >= 3, "{} near plants in the state", checked.len());
+}
+
+/// nat19's ground reads, textures and all, and its plants stand on it (S98). The nationals carry their
+/// ground's pictures in the terrain file, between the blocks and the tree: 32 of them on nat19, each one
+/// level of 256×256 bytes, and the table in front of the blocks says where each starts.
+#[test]
+fn nat19s_terrain_reads_and_its_plants_stand_on_it() {
+    let Some(mut disc) = disc() else { return };
+    let archives = archives(&mut disc, "nat19");
+    let bytes = scn(&archives[0]).expect("nat19's scene");
+    let place = track::Scene::parse(&bytes).expect("the sim's scene");
+    let terrain_file = terrain_bytes(&archives[0], &place.terrain_file);
+    let terrain = track::Terrain::parse(&terrain_file).expect("nat19's terrain");
+    assert_eq!((terrain.blocks, terrain.levels, terrain.scale.0), (538, 2, 4.5));
+    assert_eq!(terrain.textures.len(), 32);
+    for tex in &terrain.textures {
+        assert_eq!((tex.format, tex.levels.len()), (39, 1));
+        let level = tex.levels[0];
+        assert_eq!((level.width, level.height, level.pixels.len()), (256, 256, 65536));
+    }
+    // Five root cells each way, 16² samples a root, 4.5 feet a sample.
+    let extent = eco::extent(&place.terrain, &terrain);
+    assert_eq!(extent, 5760.0);
+
+    let t = track(&mut disc, "nat19");
+    let e = &t.grove.ecosystem;
+    let snapped = e.plants.iter().filter(|p| p.snap).count();
+    let mut off: Vec<f32> = e.plants.iter().map(|p| p.pos.y - eco::ground_under(&t.layout, &terrain, p.pos)).collect();
+    off.sort_by(f32::total_cmp);
+    let median = off[off.len() / 2];
+    println!("nat19: {} plants, {snapped} stood; above the ground least {}, median {median}, most {}", off.len(), off[0], off[off.len() - 1]);
+    assert_eq!((e.plants.len(), snapped), (12785, 12785), "nat19 asks for every plant to be stood");
+    assert!(off[0] > -0.09 && off[off.len() - 1] <= 0.0, "{}..{}", off[0], off[off.len() - 1]);
+
+    // The map's size is the one the positions are 65536ths of: the plants spread over all of it and
+    // none past its edge, which a wrong extent would not do.
+    let (most_x, most_z) = e.plants.iter().fold((0f32, 0f32), |(x, z), p| (x.max(p.pos.x), z.max(p.pos.z)));
+    println!("nat19: plants out to x {most_x}, z {most_z} of {extent}");
+    assert!(e.plants.iter().all(|p| p.pos.x >= 0.0 && p.pos.z >= 0.0 && p.pos.x < extent && p.pos.z < extent));
+    assert!(most_x > 0.9 * extent && most_z > 0.9 * extent, "{most_x} {most_z}");
+
+    // And every plant's model and billboard stands on the ground the bike would ride, sunk by less
+    // than one 65536th of the map, as free06's do.
+    let (low, high) = worst_off_the_ground(&t);
+    println!("nat19: bases from {low} to {high} feet off the ground");
+    assert!(low > -0.09 && high <= 0.0, "{low}..{high}");
 }
