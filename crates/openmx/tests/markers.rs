@@ -4,6 +4,31 @@
 //! `net::rides::Rides::step`). The stand-in bike on a flat floor, at the 30 Hz clamp. Since P93 all
 //! four directions fire on the press, the tick a direction goes down.
 
+#[path = "../src/menu.rs"]
+#[allow(dead_code)]
+mod menu;
+#[path = "../src/vehicle.rs"]
+#[allow(dead_code)]
+mod vehicle;
+#[path = "../src/roster.rs"]
+#[allow(dead_code)]
+mod roster;
+#[path = "../src/chase.rs"]
+#[allow(dead_code)]
+mod chase;
+#[path = "../src/join.rs"]
+#[allow(dead_code)]
+mod join;
+#[path = "../src/split.rs"]
+#[allow(dead_code)]
+mod split;
+#[path = "../src/overlay.rs"]
+#[allow(dead_code)]
+mod overlay;
+#[allow(dead_code)]
+#[path = "../src/net/mod.rs"]
+mod net;
+
 use game_sim::input::{Control, PADS, Report};
 use game_sim::markers::{self, Did, Pick, SLOTS, Spot};
 use game_sim::ride::Controls;
@@ -344,4 +369,131 @@ fn markers_go_with_a_snapshot_and_cost_nothing_untouched() {
     let mut back = three_riders();
     game_sim::snapshot::decode(&mut back, &bytes).unwrap();
     assert_eq!(back.hash(), three.hash());
+}
+
+/// One tick as [`tick`], player 1's markers told who is in the ride (`riding`, P94).
+fn tick_among(sim: &mut Sim, buttons: u16, riding: &[bool]) -> Option<Did> {
+    let spots: Vec<Spot> = (0..sim.players()).map(|i| Spot::of(sim.rider_of(i))).collect();
+    let mut hands: Vec<Controls> = sim.poll_all(DT, &pads(buttons)).into_iter().map(Controls::stick_alone).collect();
+    hands.resize(sim.players(), Controls::default());
+    sim.step_all(DT, &hands, &mut Flat::default());
+    markers::frame_among(sim, 0, &spots, riding, &hands[0])
+}
+
+/// P94: a seat not in the ride is never a pick. With seat 2 of three empty, Right steps through the
+/// five slots, then seat 3, then round, and Left from the first slot is seat 3 — seat 2 is never on
+/// it — and every other player's list leaves it out too. A selection left on a seat that stops
+/// riding moves to the next rider, or to the first slot when there is none.
+#[test]
+fn a_seat_not_riding_is_never_a_pick() {
+    let mut sim = three_riders();
+    let riding = [true, false, true];
+    let mut seen = vec![sim.markers.pick_among(0, &riding)];
+    for _ in 0..SLOTS + 2 {
+        let did = [tick_among(&mut sim, Control::Right.mask(), &riding), tick_among(&mut sim, 0, &riding)];
+        let [(0, Did::Stepped(p))] = fired(&did)[..] else { panic!("{did:?}") };
+        seen.push(p);
+    }
+    let want: Vec<Pick> = (0..SLOTS).map(Pick::Slot).chain([Pick::Player(2), Pick::Slot(0), Pick::Slot(1)]).collect();
+    assert_eq!(seen, want);
+    for _ in 0..2 {
+        tick_among(&mut sim, Control::Left.mask(), &riding);
+        tick_among(&mut sim, 0, &riding);
+    }
+    assert_eq!(sim.markers.pick_among(0, &riding), Pick::Player(2), "Left from the first slot");
+    assert_eq!(markers::Markers::others(0, 3, &riding), vec![2]);
+    assert_eq!(markers::Markers::others(2, 3, &riding), vec![0]);
+    // Up on the empty seat cannot happen; Up on seat 3 lands there.
+    let did = [tick_among(&mut sim, Control::Up.mask(), &riding), tick_among(&mut sim, 0, &riding)];
+    assert_eq!(fired(&did), vec![(0, Did::Teleported(Pick::Player(2)))]);
+
+    // Everybody riding, the first place past the slots is seat 2; with seat 2 out it is seat 3, and
+    // with both out the first slot.
+    let m = markers::Markers { at: SLOTS as u8, ..Default::default() };
+    assert_eq!(m.pick_among(0, &[true; 3]), Pick::Player(1));
+    assert_eq!(m.pick_among(0, &riding), Pick::Player(2));
+    assert_eq!(m.pick_among(0, &[true, false, false]), Pick::Slot(0));
+    // Nobody else in the ride: the slots alone, round.
+    let mut alone = three_riders();
+    for _ in 0..SLOTS {
+        tick_among(&mut alone, Control::Right.mask(), &[true, false, false]);
+        tick_among(&mut alone, 0, &[true, false, false]);
+    }
+    assert_eq!(alone.markers.pick_among(0, &[true, false, false]), Pick::Slot(0));
+}
+
+/// P94, online: a seat nobody sits in has the missing pad (`net::Game::step`), and the session's
+/// tick ([`net::rides::Rides`]) leaves it out of the markers' places — the same count on every
+/// machine, as the pads are the session's. Seven presses of Right from the first slot are round to
+/// the second slot with seat 2 empty, and to the first with everybody in.
+#[test]
+fn online_an_empty_seat_is_never_a_pick() {
+    use net::Game;
+    let ride = |seat2: Report| {
+        let first = Sim::new(1);
+        let mut sims: Vec<Sim> = (0..3).map(|_| first.clone()).collect();
+        let mut world = Flat::default();
+        let mut rides = net::rides::Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None };
+        let mut seen = Vec::new();
+        for t in 0..2 * (SLOTS + 2) {
+            let me = if t % 2 == 0 { Report::from_buttons(Control::Right.mask()) } else { Report::from_buttons(0) };
+            rides.step(t, &[me, seat2, Report::from_buttons(0)]);
+            if t % 2 == 0 {
+                seen.push(rides.sims[0].markers.at);
+            }
+        }
+        seen
+    };
+    // Seven places with everybody in (five slots, two players), round to the first on the seventh.
+    assert_eq!(ride(Report::from_buttons(0)), vec![1, 2, 3, 4, 5, 6, 0], "everybody riding");
+    assert_eq!(ride(Report::missing()), vec![1, 2, 3, 4, 5, 0, 1], "seat 2 empty: one place fewer, round");
+}
+
+/// P94: a filled slot has a radar mark and an empty one has none — each in its slot's colour, at
+/// where its bike was put down, the selected one ringed — and a post in the world that stands over
+/// it in a view looking at it, and not in one looking away.
+#[test]
+fn a_filled_slot_has_a_radar_mark() {
+    let mut sim = moving();
+    hold(&mut sim, Control::Down, GAS, 0);
+    for _ in 0..2 {
+        hold(&mut sim, Control::Right, GAS, 0);
+    }
+    for _ in 0..15 {
+        tick(&mut sim, GAS);
+    }
+    hold(&mut sim, Control::Down, GAS, 0);
+    assert!(sim.markers.holds(0) && sim.markers.holds(2) && !sim.markers.holds(1));
+    let pick = sim.markers.pick(0, 1);
+    assert_eq!(pick, Pick::Slot(2));
+    let blips = overlay::marker_blips(&sim.markers, pick);
+    let got: Vec<(usize, bool)> = blips
+        .iter()
+        .map(|b| match b.icon {
+            overlay::Icon::Marker { slot, selected } => (slot, selected),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(got, vec![(0, false), (2, true)], "a mark a filled slot, the selected one ringed");
+    for (b, (slot, _)) in blips.iter().zip(&got) {
+        let at = sim.markers.slots[*slot].as_ref().unwrap().position();
+        assert_eq!(b.at, [at.x(), at.z()]);
+        let span = overlay::radar_span(2.0);
+        let placed = overlay::radar_icon([at.x(), at.z() - 20.0], [0.0, 1.0], *b, span);
+        assert_eq!(placed.tint, overlay::MARKER_COLOURS[*slot]);
+        assert!((placed.at.1 - overlay::RADAR_AT.1) < -1.0, "a marker ahead is drawn above the middle: {placed:?}");
+    }
+    assert_ne!(overlay::MARKER_COLOURS[0], overlay::MARKER_COLOURS[2]);
+    assert!(overlay::marker_blips(&markers::Markers::default(), Pick::Slot(0)).is_empty());
+
+    // Its post, from 60 ft behind the marker looking at it, and from beside it looking away.
+    let at = sim.markers.slots[0].as_ref().unwrap().position();
+    let foot = game_render::v3(at.x(), at.y(), at.z());
+    let toward = game_render::world::Camera { eye: game_render::v3(at.x(), at.y() + 8.0, at.z() - 60.0), at: foot, fov: 1.0, near: 0.05, far: 4000.0 };
+    let post = overlay::marker_post(&toward, (640, 448), [at.x(), at.y(), at.z()]).expect("a post in view");
+    assert!(post.top.1 < post.foot.1 - 20.0, "the post stands up: {post:?}");
+    assert!((post.foot.0 - 320.0).abs() < 2.0 && (post.top.0 - 320.0).abs() < 2.0, "{post:?}");
+    assert!((post.distance - 60.5).abs() < 1.0);
+    let away = game_render::world::Camera { at: game_render::v3(at.x(), at.y() + 8.0, at.z() - 120.0), ..toward };
+    assert_eq!(overlay::marker_post(&away, (640, 448), [at.x(), at.y(), at.z()]), None, "behind the eye");
 }

@@ -643,8 +643,8 @@ fn every_icon(at: [f32; 2]) -> Vec<overlay::Blip> {
         Icon::Bike,
         Icon::Point { done: false },
         Icon::Point { done: true },
-        Icon::Marker { facing: [0.0, 1.0], selected: false },
-        Icon::Marker { facing: [1.0, 1.0], selected: true },
+        Icon::Marker { slot: 0, selected: false },
+        Icon::Marker { slot: 3, selected: true },
     ];
     let n = kinds.len() as f32;
     kinds
@@ -691,23 +691,22 @@ fn each_icon_kind_is_placed_by_radar_mark() {
             Icon::Bike => ("map_icon_bike", [0xc8, 0xc8, 0xc8, 255]),
             Icon::Point { done: false } => ("map_icon_hit_freestyle", [0x30, 0xcf, 0x00, 255]),
             Icon::Point { done: true } => ("map_icon_hit_freestyle", [0x70, 0x70, 0x70, 255]),
-            Icon::Marker { selected: false, .. } => ("map_icon_gate", [200, 200, 200, 255]),
-            Icon::Marker { selected: true, .. } => ("map_icon_gate", [255, 255, 255, 255]),
+            // The port's own (P94): drawn, no texture of the set, in its slot's colour.
+            Icon::Marker { slot, .. } => ("", overlay::MARKER_COLOURS[slot]),
         };
         assert_eq!((p.texture, p.tint), (texture, tint), "{blip:?}");
         let size = match blip.icon {
             Icon::Activity(_) => (overlay::zone_size(d, span), overlay::zone_size(d, span)),
             Icon::Machine(..) | Icon::Bike => (32.0, 32.0),
             Icon::Point { .. } => (8.0, 8.0),
-            Icon::Marker { .. } => (32.0, 8.0),
+            Icon::Marker { selected: false, .. } => (13.0, 13.0),
+            Icon::Marker { selected: true, .. } => (17.0, 17.0),
         };
         assert_eq!(p.size, size, "{blip:?}");
-        if !matches!(blip.icon, Icon::Marker { .. }) {
-            assert_eq!(p.turn, 0.0, "{blip:?} is not turned");
-        }
+        assert_eq!(p.turn, 0.0, "{blip:?} is not turned");
         seen.insert(texture);
     }
-    assert_eq!(seen.len(), 12, "every texture of the set: {seen:?}");
+    assert_eq!(seen.len(), 12, "every texture of the set, and the markers' none: {seen:?}");
 }
 
 /// The activities' icons grow as they near: half size from half the span out, four fifths from
@@ -722,22 +721,26 @@ fn an_activitys_icon_grows_as_it_nears() {
     }
 }
 
-/// A marker's gate lies across the way it faces, turned with the rose: one facing the rider's way
-/// is level, one facing the rider's right stands upright, one facing back is level again.
+/// A marker's radar icon is its slot's (P94): each slot its own colour, none of them a colour of
+/// the original's icons or riders, and the selected one drawn bigger for its ring. The rider's right
+/// is the radar's right: a marker straight to the right is drawn right of the middle, on the level.
 #[test]
-fn a_markers_gate_turns_with_the_rose() {
+fn a_markers_icon_is_its_slots() {
     use overlay::{Blip, Icon};
     let span = overlay::radar_span(SPACING);
     let forward = [0.8, -0.6];
-    let right = [-0.6, -0.8];
-    for (facing, want) in [(forward, 0.0), (right, PI / 2.0), ([-0.8, 0.6], PI)] {
-        let icon = Icon::Marker { facing, selected: false };
-        let p = overlay::radar_icon([0.0, 0.0], forward, Blip { icon, at: [10.0, 10.0] }, span);
-        let off = (p.turn - want).rem_euclid(TAU);
-        assert!(off < 1e-4 || TAU - off < 1e-4, "facing {facing:?}: turned {}, wanted {want}", p.turn);
+    let colours: Vec<[u8; 4]> = (0..game_sim::markers::SLOTS)
+        .map(|slot| overlay::radar_icon([0.0, 0.0], forward, Blip { icon: Icon::Marker { slot, selected: false }, at: [10.0, 10.0] }, span).tint)
+        .collect();
+    for (i, c) in colours.iter().enumerate() {
+        assert!(colours[..i].iter().all(|o| o != c), "slot {} shares a colour: {colours:?}", i + 1);
+        // The rider's mark (yellow), an AI's (red), the bikes' grey and the original's set's colours.
+        let theirs = [[0xff, 0xff, 0x00, 255], [0xff, 0x00, 0x00, 255], [0xc8, 0xc8, 0xc8, 255], [0x6e, 0xa6, 0x37, 255], [0xff, 0x99, 0x33, 255], [0x33, 0x73, 0xcc, 255], [0x81, 0x3b, 0xb5, 255], [0x30, 0xcf, 0x00, 255]];
+        assert!(!theirs.contains(c), "slot {} is in one of the original's colours", i + 1);
     }
-    // The rider's right is the radar's right: a marker straight to the right is drawn right of the
-    // middle, on the level.
+    let plain = overlay::radar_icon([0.0, 0.0], forward, Blip { icon: Icon::Marker { slot: 2, selected: false }, at: [10.0, 10.0] }, span);
+    let picked = overlay::radar_icon([0.0, 0.0], forward, Blip { icon: Icon::Marker { slot: 2, selected: true }, at: [10.0, 10.0] }, span);
+    assert!(picked.size.0 > plain.size.0 && picked.tint == plain.tint && picked.at == plain.at);
     let p = overlay::radar_icon([0.0, 0.0], forward, Blip { icon: Icon::Bike, at: [-60.0, -80.0] }, span);
     assert!(p.at.0 > overlay::RADAR_AT.0 + 1.0 && (p.at.1 - overlay::RADAR_AT.1).abs() < 1e-3, "{:?}", p.at);
 }
@@ -820,17 +823,17 @@ fn the_radar_draws_its_icons() {
             drawn.scale
         );
     }
-    // The GPU's sprites carry each icon's colour, and the gates are turned (not axis-aligned).
+    // The GPU's sprites carry each icon's colour, and the markers are discs (P94).
     let mut sprites = Vec::new();
     art.sprites(&mut sprites, (0, 0, 1280, 896), (1280, 896), &riders, 0, span, &bike(0.0));
     for blip in &blips {
         let p = overlay::radar_icon(own, forward, *blip, span);
         assert!(sprites.iter().any(|s| s.tint == p.tint), "{blip:?}: no sprite in {:?}", p.tint);
     }
-    let gates: Vec<_> = sprites.iter().filter(|s| s.tint == [255, 255, 255, 255] && s.uv[2] == [32.0, 8.0]).collect();
-    assert_eq!(gates.len(), 1, "the selected marker's gate");
-    let c = gates[0].corners;
-    assert!((c[0][1] - c[1][1]).abs() > 1.0, "the selected gate faces off the rider's way, so it is turned: {c:?}");
+    let disc = |s: &&game_render::gpu::Sprite| matches!(s.shape, game_render::gpu::Shape::Capsule { .. });
+    let discs = |tint: [u8; 4]| sprites.iter().filter(disc).filter(|s| s.tint == tint).count();
+    assert_eq!(discs([255, 255, 255, 255]), 1, "the selected marker's ring");
+    assert_eq!((discs(overlay::MARKER_COLOURS[0]), discs(overlay::MARKER_COLOURS[3])), (1, 1), "a disc a marker");
     // Another view's icons are its own.
     let none = art.draw(&mut Frame::new(640, 448, [0, 0, 0]), (1280, 896), &riders, 1, span, &bike(0.0));
     assert!(none.icons.is_empty());
