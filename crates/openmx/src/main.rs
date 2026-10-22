@@ -552,6 +552,9 @@ struct Rig {
     plane_camera: Option<Race>,
     /// The camera the screen switches to while this player's rider is down (V31).
     wreck_camera: chase::WreckCamera,
+    /// How this player's two follow cameras' presets are framed now (P82), the bike's and the
+    /// plane's: the original's as they were read, until the frame lays the player's own over them.
+    framing: (chase::Framing, chase::Framing),
     hud: Hud,
     /// The distance this player's odometer shows, under the original's overlay (V26).
     odometer: overlay::Odometer,
@@ -710,6 +713,10 @@ struct Args {
     /// `--camera NAME`: which of the track's camera presets to start on, by the name its
     /// `cpresets.ini` gives it. The default is the one the original itself is on in a freeride (P14).
     camera: String,
+    /// `--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT` (P82): every player's camera
+    /// framing, over the front end's Camera page. Unset, the page's, and without a front end the
+    /// shipped default.
+    camera_view: Option<menu::CameraView>,
     /// Draw one frame posed from a moment of the original (V2) instead of riding: the moment file
     /// and the path to write that frame to.
     moment: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -2740,6 +2747,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // Their own plane's camera, on the same presets as the first player's (P87).
             plane_camera: plane_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
             wreck_camera: chase::WreckCamera::new(false),
+            framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
             bike_model,
@@ -2756,6 +2764,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             camera,
             plane_camera,
             wreck_camera: chase::WreckCamera::new(false),
+            framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             // The riding overlay (P6). It is the shell's own furniture, so it is created here beside
             // the window rather than inside the simulation's `World`, and it reads the port's own
             // values at draw time instead of being fed them.
@@ -3791,6 +3800,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 continue;
             }
 
+            // The player's framing (P82), laid over the original's presets the frame it changes: the
+            // command line's, or the Camera page's — live, so a change under the pause shows as it is
+            // made — or without a front end the shipped default.
+            let view = args
+                .camera_view
+                .or_else(|| front.as_deref().map(|f| f.menu.settings.cameras[i.min(menu::SEATS_MAX - 1)]))
+                .unwrap_or(menu::CameraView::DEFAULT);
+            if framings(view) != rig.framing {
+                let bike = cpresets.as_deref().map(|b| layout_presets(b, layout, display, "cpresets.ini")).unwrap_or_default();
+                let plane = plane_presets.as_deref().map(|b| layout_presets(b, layout, display, PLANE_PRESETS)).unwrap_or_default();
+                println!("{who}camera view: {}", view.text());
+                frame_rig(rig, &bike, &plane, framings(view));
+            }
+            rig.wreck_camera.frame(rig.framing.0);
+
             // The camera, after the frame, which is where the original's viewport updates it: the shell
             // picks the preset, the ported camera does everything else.
             // Whichever machine has the controller has the camera: the bike's, on the track's presets, or
@@ -4692,6 +4716,18 @@ fn layout_presets(bytes: &[u8], layout: Layout, display: Display, file: &str) ->
 /// and the preset each camera is on re-set from the new copy — the original's own reload when a
 /// camera's split changes, which keeps the preset and clears the player's nudges.
 fn set_display(rigs: &mut [Rig], layout: Layout, display: Display, bike: Option<&[u8]>, plane: Option<&[u8]>) {
+    let bike = bike.map(|b| layout_presets(b, layout, display, "cpresets.ini")).unwrap_or_default();
+    let plane = plane.map(|b| layout_presets(b, layout, display, PLANE_PRESETS)).unwrap_or_default();
+    for rig in rigs {
+        let framing = rig.framing;
+        frame_rig(rig, &bike, &plane, framing);
+    }
+}
+
+/// A player's cameras onto the original's presets `bike` and `plane` as `framing` frames them (P82):
+/// the same reload as [`set_display`]'s, which keeps the preset each camera is on and clears the
+/// player's nudges. At [`chase::Framing::ORIGINAL`] the presets are the file's, untouched.
+fn frame_rig(rig: &mut Rig, bike: &[Preset], plane: &[Preset], framing: (chase::Framing, chase::Framing)) {
     let reload = |cam: &mut Race, presets: &[Preset]| {
         if presets.is_empty() || cam.cam.presets.is_empty() {
             return;
@@ -4702,14 +4738,17 @@ fn set_display(rigs: &mut [Rig], layout: Layout, display: Display, bike: Option<
         cam.cam.previous = at;
         cam.cam.set_preset(at);
     };
-    let bike = bike.map(|b| layout_presets(b, layout, display, "cpresets.ini")).unwrap_or_default();
-    let plane = plane.map(|b| layout_presets(b, layout, display, PLANE_PRESETS)).unwrap_or_default();
-    for rig in rigs {
-        reload(&mut rig.camera, &bike);
-        if let Some(cam) = &mut rig.plane_camera {
-            reload(cam, &plane);
-        }
+    reload(&mut rig.camera, &chase::framed(bike, framing.0));
+    if let Some(cam) = &mut rig.plane_camera {
+        reload(cam, &chase::framed(plane, framing.1));
     }
+    rig.framing = framing;
+}
+
+/// A player's Camera page (P82) as the shell frames their bike's camera and their plane's with it.
+fn framings(v: menu::CameraView) -> (chase::Framing, chase::Framing) {
+    let f = |(fov, distance, height): (f32, f32, f32)| chase::Framing { fov, distance, height };
+    (f(v.bike()), f(v.plane()))
 }
 
 /// The terrain file a scene asks for. Most scenes name it `SX02.trn`, but what the archive holds is
@@ -4971,6 +5010,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         overlay: None,
         speedometer: None,
         camera: START_CAMERA.to_string(),
+        camera_view: None,
         moment: None,
         wrecks: true,
         modifiers: game_sim::modifiers::Mods::original(),
@@ -5129,6 +5169,15 @@ fn parse_args() -> Result<Option<Args>, String> {
                 };
             }
             "--camera" => args.camera = next("a camera preset's name, like \"Freestyle Cam\"")?,
+            "--camera-view" => {
+                let v = next("original, default, or five numbers: fov,distance,height,plane distance,plane height")?;
+                args.camera_view = Some(match v.as_str() {
+                    "original" => menu::CameraView::ORIGINAL,
+                    "default" => menu::CameraView::DEFAULT,
+                    _ => menu::CameraView::parse(&v.replace(',', " "))
+                        .ok_or_else(|| format!("--camera-view: original, default or five numbers like 4,115,110,120,115, not {v:?}"))?,
+                });
+            }
             "--moment" => {
                 let file: std::path::PathBuf = next("a moment file")?.into();
                 let out: std::path::PathBuf = next("a path for the frame")?.into();
@@ -5290,6 +5339,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--speedometer digital|analog] [--hud] [--camera NAME]\n\
+                            [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
@@ -5314,6 +5364,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      and leans, the d-pad preloads, L3 balances, R3 reverses, Start freezes,\n\
                      Escape quits. --camera starts on a camera preset by its\n\
                      name in the track's cpresets.ini (\"Race Cam 1\" unless asked).\n\
+                     --camera-view frames every player's cameras (the Camera page's, P82):\n\
+                     original is the disc's numbers exactly; five numbers are degrees added to\n\
+                     the field of view and the bike's and the biplane's distance and height in\n\
+                     percent of the original's. Unset, the settings' or the shipped default.\n\
                      A trick is a gesture: hold Circle, Triangle and/or R1 and push the d-pad.\n\
                      L1 and R1 together put the bike back (the original's own chord).\n\
                      The biplane's stick is the plane's own: down pulls the nose toward its\n\
