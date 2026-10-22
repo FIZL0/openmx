@@ -797,6 +797,10 @@ pub mod wreck_page;
 /// in, and the rider's total it is banked into — or lost from, on a wreck.
 pub mod score;
 
+/// The riding bike's collidables (S86): its body rays and the shape other riders' rays strike, off
+/// the disc, with the masks the ride gives them.
+pub mod bike_col;
+
 #[cfg(test)]
 mod tests {
     use super::*;
