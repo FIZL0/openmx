@@ -1945,6 +1945,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         println!("traffic: {} cars on clips, {} left out", traffic.cars.len(), traffic.skipped.len());
     }
     let mut traffic_time = 0.0f64;
+    // The scene's clock at the tick before the last, which the picture blends from (V47).
+    let mut traffic_before = 0.0f64;
     let mut traffic_at: Vec<(String, M4)> = Vec::new();
     // Where the wheels hang off the chassis, which is where each suspension ray starts: the **bike
     // model's own wheel nodes**. `bike_attach_nodes` looks "TireFront" and "TireRear" up in the bike's
@@ -3186,6 +3188,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         before = world.seats.iter().zip(&rigs).map(|(seat, rig)| Shown::of(seat, rig, &assets, ragdolled.as_ref(), gpu_on)).collect();
         before_cameras.clone_from(&cameras);
         before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
+        traffic_before = traffic_time;
         let sim_at = Instant::now();
         let dt: F;
         (dt, simulated) = if let Some(on) = &mut online {
@@ -3248,10 +3251,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let place = &mut world.place;
             fx.step_over(&plane_fx_frame(plane, binds), dt.0, &mut |at| plane_fx_ground(place, at));
         }
-        if simulated && !traffic.cars.is_empty() {
+        if simulated {
             traffic_time += f64::from(dt.0);
-            let place = &mut world.place;
-            traffic_at = traffic.placed(traffic_time, &mut |p| car_ground(place, p));
         }
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
@@ -3472,6 +3473,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // tick before the last to the last by how far the wall clock is past it. Render-side only:
         // nothing below writes the simulation.
         let blend = pace::Blend(pacer.blend(Instant::now()));
+        // The path cars at the picture's own moment (V47): their clips read at the clock between the
+        // last two ticks, as far along as the bike's blend, so they move every frame drawn.
+        if !traffic.cars.is_empty() {
+            let place = &mut world.place;
+            let shown = game_render::toy::between(traffic_before, traffic_time, blend.0);
+            traffic_at = traffic.placed(shown, &mut |p| car_ground(place, p));
+        }
         // The markers' slot display (P88), each view its own player's: the selection, the slots, the
         // label and the hold, or `None` while it is down. Online the selection's players are the
         // session's seats, by the lineup's names.

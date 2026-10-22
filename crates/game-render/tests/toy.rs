@@ -333,3 +333,81 @@ fn the_trains_turned_cars_are_drawn_without_their_files_root_turn() {
         }
     }
 }
+
+/// The train as the shell draws it (V47): ticks at the game's 30 a second, each adding its `dt` to
+/// the scene's clock, and the picture at a monitor's rate in between, at the clock as far between the
+/// last two ticks as the bike's blend is. Over five seconds from the biplane state's clock every car
+/// moves every frame by a steady step — none repeated, none doubled — and every pair of cars keeps its
+/// coupling. The same frames drawn at the last tick's clock, as the shell used to, repeat.
+#[test]
+fn the_train_moves_every_frame_drawn_and_stays_coupled() {
+    let Some(mut disc) = disc() else { return };
+    let res = track(&mut disc, "free06");
+    let (scene, terrain) = ground_of(&res);
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let mut on_ground = |p: V3| match ground.at(F(p.x), F(p.z)) {
+        Some(hit) => (v3(p.x, hit.y.0, p.z), v3(hit.normal.x(), hit.normal.y(), hit.normal.z())),
+        None => (p, v3(0.0, 1.0, 0.0)),
+    };
+    let train = toy::Traffic {
+        cars: cars(&res, "free06").into_iter().filter(|(c, _)| c.mot.eq_ignore_ascii_case("train_spline.mot")).collect(),
+        skipped: Vec::new(),
+    };
+    assert_eq!(train.cars.len(), FREE06_TRAIN.len(), "the train's cars");
+    let at = |placed: &[(String, game_render::mat::M4)]| -> Vec<V3> {
+        placed.iter().map(|(_, m)| v3(m.0[3][0], m.0[3][1], m.0[3][2])).collect()
+    };
+    // The scene's clock after `n` ticks, summed from each tick's `dt` as the shell sums it.
+    let dt = 1.0f32 / 30.0;
+    let ticked = |n: u64| (0..n).fold(0.0f64, |t, _| t + f64::from(dt));
+    let start = 21.892_4f64;
+    let first = (start / f64::from(dt)) as u64;
+    for hz in [60.0f64, 144.0, 165.0] {
+        let frames = (5.0 * hz) as u64;
+        let mut shown: Vec<Vec<V3>> = Vec::new();
+        let mut stepped: Vec<Vec<V3>> = Vec::new();
+        for f in 0..frames {
+            // The wall clock past the first tick, and the ticks the pacer has run by then.
+            let wall = f as f64 / hz + 0.25 / hz;
+            let done = first + (wall * 30.0).floor() as u64 + 1;
+            let by = ((wall * 30.0).fract()) as f32;
+            let (before, last) = (ticked(done - 1), ticked(done));
+            shown.push(at(&train.placed(toy::between(before, last, by), &mut on_ground)));
+            stepped.push(at(&train.placed(last, &mut on_ground)));
+        }
+        let steps = |frames: &[Vec<V3>], car: usize| -> Vec<f32> {
+            frames.windows(2).map(|w| w[1][car].sub(w[0][car]).len()).collect()
+        };
+        for car in 0..train.cars.len() {
+            let s = steps(&shown, car);
+            let mean = s.iter().sum::<f32>() / s.len() as f32;
+            assert!(mean > 0.05, "{hz} Hz, car {car}: the train is moving ({mean} ft a frame)");
+            for (i, w) in s.windows(2).enumerate() {
+                let ratio = w[1] / w[0];
+                assert!(
+                    (0.9..1.1).contains(&ratio),
+                    "{hz} Hz, car {car}, frame {}: a step of {} after {} (a repeat or a jump)",
+                    i + 1,
+                    w[1],
+                    w[0]
+                );
+            }
+            // The coupling: the gap to the car ahead is its lag's share of the path, which the lag
+            // walk's straight-line reading of each segment lets breathe by a tenth of a foot or two
+            // over the seconds — the original's own walk — but never moves from one frame to the next.
+            if car > 0 {
+                let want = train.cars[car].0.lag - train.cars[car - 1].0.lag;
+                let gap: Vec<f32> = shown.iter().map(|p| p[car].sub(p[car - 1]).len()).collect();
+                for (i, w) in gap.windows(2).enumerate() {
+                    assert!((w[0] - want).abs() < 0.5, "{hz} Hz, cars {} and {car}: {} ft apart, lag {want}", car - 1, w[0]);
+                    assert!((w[1] - w[0]).abs() < 0.01, "{hz} Hz, cars {} and {car}, frame {}: the coupling {} then {}", car - 1, i + 1, w[0], w[1]);
+                }
+            }
+        }
+        if hz < 100.0 {
+            println!("{hz} Hz: steady, first car's step {:.4} ft", steps(&shown, 0)[0]);
+        }
+        let repeats = steps(&stepped, 0).iter().filter(|s| **s == 0.0).count();
+        assert!(repeats > 0, "{hz} Hz: drawn at the tick's clock the train repeats frames");
+    }
+}
