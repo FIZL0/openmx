@@ -38,7 +38,8 @@
 //! filters forget their start geometrically (a half and a fifth per frame), so after that many frames
 //! what is left of the start is below a float's last bit, and the car's pose is a function of its clock
 //! alone. That is what a rollback wants, and it is a choice, not a finding. The clock itself is the
-//! caller's: the ride's elapsed time in, [`clock`] out.
+//! caller's: the ride's elapsed time in, [`clock`] out. A picture between two scene updates asks at
+//! the clock between them ([`between`]), so the cars move every frame drawn, not every update.
 
 use crate::ini::{self, Section};
 use crate::mat::{M4, V3, v3};
@@ -151,6 +152,17 @@ pub fn clock(elapsed: f64, time_scale: f32, last: f32) -> f32 {
         return 0.0;
     }
     (elapsed * time_scale as f64).rem_euclid(last as f64) as f32
+}
+
+/// The scene's clock as a picture between two scene updates shows it (V47): `before` is the clock
+/// the update before the last left, `last` the last's, and `by` how far the picture is from one to
+/// the other — the bike's blend, so the cars and the bike are drawn at the same moment. The cars are
+/// then placed at that clock, their clip's curve and their lags evaluated there, rather than their
+/// matrices slid between two placements: a car on a bend stays on its rails, and every car of the
+/// train reads the one clock, so they stay coupled. A picture drawn at the update's own clock would
+/// show each placement for as many frames as fall in an update, and the train would move in stutters.
+pub fn between(before: f64, last: f64, by: f32) -> f64 {
+    before + (last - before) * f64::from(by.clamp(0.0, 1.0))
 }
 
 impl Path {
