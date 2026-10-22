@@ -4367,3 +4367,25 @@ rider_score_trick_abort     boot 0x00280d70 (rider) rider vt+0x114: the trick an
 #     apply: r = at - (chassis+0x60 + cofg_world); torque +0x140 += node.unrotate(r x f) * mask,
 #       force +0x130 += f (xyz only, from the disassembly).
 #   The wreck it causes is reason 7 (joust), already ported by S54 (air::hit_wreck over ride::hits_among).
+
+# ---------------------------------------------------------------------------------------------------
+# V48 — the ecosystem: a scene's .esb trees and bushes. research/journal/*-v48-map-ecosystem has how.
+ecosystem_load_esb          boot 0x0012acb0 (name, EcoDistance2D, EcoDistance3D, ShrubberyDistLimit, light) from the scene loader
+ecosystem_read_header       boot 0x0012aa30 version, 256 species slots, shrubbery, probability map, then the plants
+ecosystem_read_species      boot 0x0012a3d0 one slot: names, size triples, atlas rect, three words, v2 tail, solids
+ecosystem_read_plants       boot 0x0012b470 9-byte plants: slot (bit 7 snap), u16 x y z times the scale, i8 height, i8 width
+ecosystem_species_models    boot 0x00129180 a species' model and billboard, scales 0.5/half.y and 1/half.x
+ecosystem_frame             boot 0x0012bbd0 per frame: fov-stretched distance, fade byte, turn on entry, depth buckets
+ecosystem_model_item        boot 0x001e04b0 a near plant's matrix: turned by its two shorts, scaled to width and height
+scene_read_environment      boot 0x001a7b30 [Environment]: EcosystemFile, EcoDistance2D/3D (180/120), ShrubberyDistLimit (400)
+#   The ecosystem object's pointer is the word at 0x0046a5f8; the camera is *(*0x0048a560).
+#   Object: +0xb0 EcoDistance2D, +0xb4 EcoDistance3D, +0xb8 ShrubberyDistLimit, +0xd4 feet per position
+#   unit (extent/65536, 0.10546875 on free09), +0x68 the plants (0x1c each), +0xa0 their count, +0x94 the
+#   256 species pointers, +0x104 the frame counter.
+#   Plant: +8/+0xa/+0xc position u16s, +0xe species slot, +0xf fade byte (0 near, 0x80 far), +0x10/+0x11 the
+#   size bytes, +0x12 bit 0 "drawn flat", bit 1 a bend state at +0x80 + 0x50*[+0x13]; +0x14/+0x16 the turn
+#   (cos, sin)*32767 taken from the camera's forward (+0x158, -+0x150) when the plant changes side.
+#   Species: +0x100/104/108 height mean/min/max, +0x10c/110/114 width mean/min/max, +0x138/13c u0/u1,
+#   +0x140/144 v top/bottom, +0x148 trunk u, +0x14c 0.5/half.y, +0x150 1/half.x, +0x184 a colour word.
+#   The camera: +0x140/+0x148 eye x/z, +0x150/+0x158 forward x/z, +0x170 the fov in degrees (85 in the
+#   biplane state, against the 77 the distances are tuned at).
