@@ -64,7 +64,12 @@ struct Capture {
 
 impl Capture {
     fn load(name: &str) -> Option<Capture> {
-        let text = std::fs::read_to_string(ctx(&format!("capture/s56/{name}.csv"))?).expect("read the capture");
+        Capture::load_in("s56", name)
+    }
+
+    /// A capture of `context/capture/<dir>`.
+    fn load_in(dir: &str, name: &str) -> Option<Capture> {
+        let text = std::fs::read_to_string(ctx(&format!("capture/{dir}/{name}.csv"))?).expect("read the capture");
         let mut lines = text.lines();
         let cols: HashMap<String, usize> =
             lines.next().expect("a header").split(',').enumerate().map(|(i, c)| (c.to_string(), i)).collect();
@@ -110,10 +115,14 @@ impl Capture {
 }
 
 fn state(w: &Wreck) -> Option<Ee> {
-    let path = ctx(&format!("capture/s56/{}-{}.ee.bin", w.name, w.frame))?;
+    state_in("s56", w)
+}
+
+fn state_in(dir: &str, w: &Wreck) -> Option<Ee> {
+    let path = ctx(&format!("capture/{dir}/{}-{}.ee.bin", w.name, w.frame))?;
     let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
     ee.set(28, u64::from(addr("boot_gp").unwrap()));
-    if let Some(spr) = ctx(&format!("capture/s56/{}-{}.spr.bin", w.name, w.frame)) {
+    if let Some(spr) = ctx(&format!("capture/{dir}/{}-{}.spr.bin", w.name, w.frame)) {
         ee.spr = std::fs::read(spr).expect("the scratchpad");
     }
     assert_eq!(ee.u32_at(ACTOR + 0x2e0), 18, "no rider body actor at {ACTOR:#x}");
@@ -160,11 +169,16 @@ fn set_bytes(ee: &mut Ee, a: u32, bytes: &[u8]) {
 
 /// What the body's update reads off the rest of the game in tick `frame`, laid into `ee` from the
 /// capture: the riding request (and the hand dummies 0x200 before it) and the bike centre its +0x1ac
-/// points at.
+/// points at. An s62 capture carries the wreck bike's whole object round that pointer too (S62:
+/// `bike_a` from 0x980 before it, `bike_b` from 0x680 after it), and the broad phase's pools.
 fn lay_in(ee: &mut Ee, cap: &Capture, frame: u32) {
     let req = ee.u32_at(ACTOR + 0x488);
     set_bytes(ee, req - 0x200, &cap.bytes(frame, "req_area"));
     let far = ee.u32_at(req + 0x1ac);
+    if cap.cols.contains_key("bike_a") {
+        set_bytes(ee, far - 0x980, &cap.bytes(frame, "bike_a"));
+        set_bytes(ee, far + 0x680, &cap.bytes(frame, "bike_b"));
+    }
     set_bytes(ee, far, &cap.bytes(frame, "req_far"));
     for (col, _) in cap.cols.iter().filter(|(c, _)| c.starts_with('w') && c.len() == 8) {
         let at = u32::from_str_radix(&col[1..], 16).expect("a world block's address");
@@ -406,7 +420,8 @@ use game_sim::math::Mat4;
 use game_sim::phy::{Throw, Wrecks};
 use game_sim::ragdoll::{self, Bone, Collision, Joint, Launch, Pin, Ragdoll, Records, Tables};
 use game_sim::ragdoll_body::{Actor, Cut, Fade, Look, Outside, Request, Scenery, Skeleton};
-use game_sim::ragdoll_contact::{Contact, Scene, Sphere};
+use game_sim::contact::{Collider, Mover, Node, Other, Side, Vehicle, Weighed};
+use game_sim::ragdoll_contact::{Against, Contact, Scene, Sphere, moving};
 use game_sim::rider_anim::Mode;
 use ps2_float::F;
 use std::cell::RefCell;
@@ -923,8 +938,11 @@ fn through(ee: &mut Ee) {
 struct Heard {
     /// The ground queries: the point asked about, and the point and normal answered.
     ground: VecDeque<([u32; 4], Vf, Vf)>,
-    /// Each bone collision's sphere against the scene: its centre, and the hits.
-    spheres: VecDeque<([u32; 4], Option<Vec<(Vf, Vf)>>)>,
+    /// Each bone collision's sphere against the scene: its centre, the hits, and what each hit is
+    /// with when that is another collidable (the record names it).
+    spheres: VecDeque<([u32; 4], Option<Vec<(Vf, Vf)>>, Vec<Option<Moving>>)>,
+    /// The others of the last sphere test the port made.
+    last: Vec<Option<Moving>>,
     /// Each sweep: the segment, and the hit.
     segments: VecDeque<(([u32; 4], [u32; 4]), Option<(Vf, Vf)>)>,
     centre: [u32; 4],
@@ -937,9 +955,88 @@ struct Heard {
     rests: Option<[Vf; ragdoll::PARTS]>,
     /// What the port asked that the original did not.
     odd: Vec<String>,
-    /// The sphere hits against another collider (the record names it), which the port's contact has
-    /// no push-out for.
+    /// The sphere hits against another collider (the record names it).
     moving: usize,
+}
+
+/// The other side of a sphere's hit, read off the original's RAM as the hit was made: what the
+/// push-out measures the bone's velocity against (S62, research/oracle.txt).
+#[derive(Clone)]
+enum Moving {
+    Still,
+    Mover(Mover),
+    Body(Collider, Body),
+    Vehicle(Collider, Vehicle),
+}
+
+impl Moving {
+    /// The collidable at `c`: its collision object (`+0x80`) on a dynamics body (`+0xf4`) or on a
+    /// vehicle's chassis (`+0xf0`, its transform `+0xf8`), else its owner (`+0x7c`) when that is a
+    /// mover (class `+0x1b0` is 2).
+    fn of(ee: &mut Ee, c: u32) -> Moving {
+        let (owner, object) = (ee.u32_at(c + 0x7c), ee.u32_at(c + 0x80));
+        let node_at = |ee: &Ee, n: u32| {
+            assert_ne!(ee.u32_at(n + 0x110), 0, "a transform not up to date at {n:#x}");
+            Node { rows: [0, 1, 2].map(|k| quad(ee, n + 0x80 + 0x10 * k)), origin: quad(ee, n + 0xb0) }
+        };
+        if object != 0 {
+            let collider = Collider { cofg: quad(ee, object + 0x90), cofg_world: quad(ee, object + 0xa0), ..Collider::default() };
+            let body = ee.u32_at(object + 0xf4);
+            if body != 0 {
+                use body_at::*;
+                let b = Body {
+                    position: quad(ee, body + POSITION),
+                    velocity: quad(ee, body + VELOCITY),
+                    quat: quad(ee, body + QUAT),
+                    rates: quad(ee, body + RATES),
+                    ..Body::default()
+                };
+                return Moving::Body(collider, b);
+            }
+            let v = ee.u32_at(object + 0xf0);
+            let vehicle = Vehicle {
+                node: node_at(ee, ee.u32_at(object + 0xf8)),
+                cofg: quad(ee, v + 0x190),
+                velocity: quad(ee, v + 0x260),
+                rates: quad(ee, v + 0x290),
+                ..Vehicle::default()
+            };
+            return Moving::Vehicle(collider, vehicle);
+        }
+        if owner == 0 || ee.u32_at(owner + 0x1b0) != 2 {
+            return Moving::Still;
+        }
+        // The mover's spin and velocity are its two virtuals' answers.
+        let vtable = ee.u32_at(owner + 8);
+        let out = ee.scratch(0);
+        let mut ask = |ee: &mut Ee, slot: u32| {
+            let (pc, ra, sp, steps, stack) = (ee.pc, ee.r(31), ee.r(29), ee.steps, ee.stack);
+            ee.stack = (sp as u32 - 0x800) & !0xf;
+            ee.call(ee.u32_at(vtable + slot), &[u64::from(out), u64::from(owner)], &[], 2_000_000_000);
+            ee.set(31, ra);
+            ee.set(29, sp);
+            (ee.steps, ee.stack, ee.pc) = (steps, stack, pc);
+            quad(ee, out)
+        };
+        let spin = ask(ee, 0xbc);
+        let velocity = ask(ee, 0xb8);
+        Moving::Mover(Mover { spin, velocity, node: node_at(ee, ee.u32_at(owner + 0x254)), origin: quad(ee, owner + 0x190) })
+    }
+
+    /// Its velocity at `at`, as the port's push-out has it.
+    fn at(&self, at: Vf) -> Vf {
+        match self.clone() {
+            Moving::Still => moving(at, Against::Still),
+            Moving::Mover(m) => moving(at, Against::Mover(&m)),
+            Moving::Body(mut collider, mut body) => {
+                let mut w = Weighed { body: &mut body, mass: F::ONE };
+                moving(at, Against::Other(&mut Other { collider: &mut collider, side: Side::Body(&mut w) }))
+            }
+            Moving::Vehicle(mut collider, mut vehicle) => {
+                moving(at, Against::Other(&mut Other { collider: &mut collider, side: Side::Vehicle(&mut vehicle) }))
+            }
+        }
+    }
 }
 
 /// Every call of the update's that reaches the world, hooked to run as it is and to write down
@@ -990,16 +1087,13 @@ fn listen(ee: &mut Ee) -> Rc<RefCell<Heard>> {
                 let s = h.segment;
                 h.segments.push_back((s, answer));
             } else if spheres.contains(&c) {
-                let answer = hit.then(|| {
-                    (0..ee.u32_at(rec + 4))
-                        .map(|i| {
-                            h.moving += usize::from(ee.u32_at(rec + 0x90 + 4 * i) != 0);
-                            (quad(ee, rec + 0x60 + 0x10 * i), quad(ee, rec + 0x30 + 0x10 * i))
-                        })
-                        .collect()
-                });
+                let n = if hit { ee.u32_at(rec + 4) } else { 0 };
+                let answer = hit.then(|| (0..n).map(|i| (quad(ee, rec + 0x60 + 0x10 * i), quad(ee, rec + 0x30 + 0x10 * i))).collect());
+                let others: Vec<u32> = (0..n).map(|i| ee.u32_at(rec + 0x90 + 4 * i)).collect();
+                h.moving += others.iter().filter(|&&o| o != 0).count();
+                let others = others.into_iter().map(|o| (o != 0).then(|| Moving::of(ee, o))).collect();
                 let c = h.centre;
-                h.spheres.push_back((c, answer));
+                h.spheres.push_back((c, answer, others));
             }
         }) as Box<dyn FnMut(&mut Ee)>
     };
@@ -1067,17 +1161,26 @@ impl Scene for Replay<'_> {
     fn touching(&mut self, centre: Vf, _radius: F) -> Option<Vec<(Vf, Vf)>> {
         let mut h = self.0.borrow_mut();
         match h.spheres.pop_front() {
-            Some((asked, hits)) => {
+            Some((asked, hits, others)) => {
                 if asked != bits(centre) {
                     h.odd.push(format!("a sphere at {centre:?}, the original's at {asked:x?}"));
                 }
+                h.last = others;
                 hits
             }
             None => {
                 h.odd.push(format!("a sphere at {centre:?}, which the original did not test"));
+                h.last.clear();
                 None
             }
         }
+    }
+    fn other(&mut self, i: usize) -> Option<usize> {
+        self.0.borrow().last.get(i).and_then(Option::as_ref).map(|_| i)
+    }
+    fn velocity(&mut self, other: usize, at: Vf) -> Vf {
+        let h = self.0.borrow();
+        h.last[other].as_ref().expect("an other the port named").at(at)
     }
     fn sweep(&mut self, from: Vf, to: Vf) -> Option<(Vf, Vf)> {
         let mut h = self.0.borrow_mut();
@@ -1197,10 +1300,15 @@ fn written(a: &Actor) -> Vec<(String, u32)> {
 
 /// The tick the S56 replay ran, rerun with the world's calls listened to; then the port's tick off
 /// the RAM the original started from, with the original's answers. Every number the update writes
-/// is compared, and what the tail hands the request. `Err` holds how many of the original's sphere
-/// hits were against another collider: the port has no push-out for those, and the tick is not
-/// compared.
-fn port_tick(ee: &mut Ee, cap: &Capture, frame: u32, draws_before: u32, drew: Option<u32>) -> Result<Vec<String>, usize> {
+/// is compared, and what the tail hands the request. A sphere's hit against another collidable is
+/// answered with that collidable as the original's RAM had it (S62), and the port's push-out measures
+/// the bone against its velocity.
+///
+/// With `carried`, the port's actor is its own from the tick before (the first tick takes the
+/// original's): the port runs the wreck on its own state, and only the world's answers are the
+/// original's. The second number is how many of the original's sphere hits were with another
+/// collidable.
+fn port_tick(ee: &mut Ee, cap: &Capture, frame: u32, draws_before: u32, drew: Option<u32>, carried: Option<&mut Option<Actor>>) -> (Vec<String>, usize) {
     let update = addr("rider_body_update").unwrap();
     let dt = cap.get(frame, "dt");
     let mut r = Rng::from_state(cap.int(frame - 1, "rng_state"));
@@ -1233,12 +1341,8 @@ fn port_tick(ee: &mut Ee, cap: &Capture, frame: u32, draws_before: u32, drew: Op
     let req = ee.u32_at(ACTOR + at::BIKE);
     let game_tail = (ee.u32_at(req + req_at::TOUCHING) != 0, bits(quad(ee, req + req_at::IMPACT)), bits(quad(ee, req + req_at::MAIN)));
 
-    let moving = heard.borrow().moving;
-    if moving > 0 {
-        after.back(ee);
-        return Err(moving);
-    }
-    let mut port = actor;
+    let mut carried = carried;
+    let mut port = carried.as_mut().and_then(|c| c.take()).unwrap_or(actor);
     let (points, at_step) = (heard.borrow().points, heard.borrow().rests);
     let skeleton = Skeleton { points: points.map(|p| p.unwrap_or_default()), rests: at_step.unwrap_or(rests), main_rest: rests[0] };
     let mut rng = Rng::from_state(r.state());
@@ -1269,10 +1373,14 @@ fn port_tick(ee: &mut Ee, cap: &Capture, frame: u32, draws_before: u32, drew: Op
         out.push(format!("the tail {port_tail:x?} want {game_tail:x?}"));
     }
     out.extend(h.odd.iter().cloned());
+    let moving = h.moving;
     drop(h);
+    if let Some(c) = carried {
+        *c = Some(port);
+    }
     // The original's state goes on to the next tick, whatever the port made of this one.
     after.back(ee);
-    Ok(out)
+    (out, moving)
 }
 
 /// What the ticks compared went through, so that a pass on fewer fails.
@@ -1324,7 +1432,7 @@ fn the_ports_tick_is_the_originals() {
             before.back(&mut ee);
             lay_in(&mut ee, &cap, frame);
             let was = actor_of(&ee);
-            let d = port_tick(&mut ee, &cap, frame, n, Some(drew)).unwrap_or_else(|k| panic!("{name}: {frame}: {k} moving hits"));
+            let (d, _) = port_tick(&mut ee, &cap, frame, n, Some(drew), None);
             assert!(d.is_empty(), "{name}: tick {frame} parts in {} numbers: {:#?}", d.len(), &d[..d.len().min(12)]);
             went.add(&was, &ee);
         }
@@ -1341,7 +1449,7 @@ fn the_ports_tick_is_the_originals() {
 #[test]
 fn the_ports_tick_is_the_originals_to_rest() {
     let mut went = Went::default();
-    let mut skipped = 0;
+    let mut hits = 0;
     for (w, (name, to)) in WRECKS.iter().zip(EXACT_TO) {
         let Some(cap) = Capture::load(w.name) else { return };
         let Some(mut ee) = state(w) else { return };
@@ -1356,24 +1464,80 @@ fn the_ports_tick_is_the_originals_to_rest() {
             } else {
                 lay_in(&mut ee, &cap, frame);
                 let was = actor_of(&ee);
-                match port_tick(&mut ee, &cap, frame, 0, None) {
-                    Ok(d) => {
-                        if !d.is_empty() {
-                            note(&format!("{name} {frame}:\n  {}", d.join("\n  ")));
-                        }
-                        assert!(d.is_empty(), "{name}: tick {frame} parts in {} numbers: {:#?}", d.len(), &d[..d.len().min(12)]);
-                        went.add(&was, &ee);
-                    }
-                    Err(_) => skipped += 1,
+                let (d, moving) = port_tick(&mut ee, &cap, frame, 0, None, None);
+                hits += usize::from(moving > 0);
+                if !d.is_empty() {
+                    note(&format!("{name} {frame}:\n  {}", d.join("\n  ")));
                 }
+                assert!(d.is_empty(), "{name}: tick {frame} parts in {} numbers: {:#?}", d.len(), &d[..d.len().min(12)]);
+                went.add(&was, &ee);
             }
             frame += 1;
         }
     }
-    eprintln!("{went:?}, {skipped} ticks with a moving hit not compared");
+    eprintln!("{went:?}, {hits} ticks with a moving hit");
     // Every capture comes to rest: the settle test throws in all four, and the flung, landed and
     // settled arms each run.
     assert!(went.ticks >= 850 && went.settles == 4, "{went:?}");
     assert!(went.flung > 0 && went.landed > 0 && went.settled > 0 && went.off_bike > 0, "{went:?}");
-    assert!(skipped < 20, "{skipped} ticks with a moving hit");
+    // The ticks S61 left out, a bone's hit against another collidable (S62): compared too.
+    assert!(hits >= 12, "{hits} ticks with a moving hit");
+}
+
+/// S62's captures (`research/s62_wreck.py`, context/capture/s62): each wreck's first state, and the
+/// last tick the original's own update holds every captured bone through with the wreck bike's
+/// object and the broad phase's pools laid in (tests/ragdoll_bike.rs).
+const S62: [(&str, u32, u32); 5] =
+    [("front", 2602, 2627), ("side", 2607, 3146), ("back", 2477, 3179), ("tip", 2472, 3179), ("front3", 2630, 2687)];
+
+/// **The port replays each s62 wreck through the bike to the rider at rest** (S62): from each
+/// wreck's first state the port's actor runs on its own state, tick after tick, handed only the
+/// world's answers the original heard (the ground, the scene's hits and what each is with, the
+/// sweeps, the skeleton), and every number the update writes is compared with the original's tick,
+/// bit for bit. Up to the last tick the original holds the capture through, that is the game's own
+/// wreck; past it (front's last 553 ticks) the original runs on in the oracle from its own state.
+#[test]
+fn the_port_replays_the_wrecks_through_the_bike() {
+    let mut went = Went::default();
+    let (mut hits, mut exact) = (0, 0);
+    for (name, start, to) in S62 {
+        let w = Wreck { name, frame: start };
+        let Some(cap) = Capture::load_in("s62", name) else { return };
+        let Some(mut ee) = state_in("s62", &w) else { return };
+        let mut port = None;
+        let settles = went.settles;
+        let mut frame = start + 1;
+        while cap.has(frame) {
+            if repeated(&cap, frame) {
+                frame += 1;
+                continue;
+            }
+            let (n, drew) = if frame <= to {
+                let before = Snapshot::of(&ee);
+                let (n, drew) = originals_tick(&mut ee, &cap, frame).unwrap_or_else(|d| panic!("{name}: {frame}: {:?}", &d[..d.len().min(4)]));
+                before.back(&mut ee);
+                exact += 1;
+                (n, Some(drew))
+            } else {
+                (0, None)
+            };
+            lay_in(&mut ee, &cap, frame);
+            let was = actor_of(&ee);
+            let (d, moving) = port_tick(&mut ee, &cap, frame, n, drew, Some(&mut port));
+            hits += usize::from(moving > 0);
+            if !d.is_empty() {
+                note(&format!("s62 {name} {frame}:\n  {}", d.join("\n  ")));
+            }
+            assert!(d.is_empty(), "{name}: tick {frame} parts in {} numbers: {:#?}", d.len(), &d[..d.len().min(12)]);
+            went.add(&was, &ee);
+            frame += 1;
+        }
+        eprintln!("{name}: {start}..{}, the capture's own to {to}, settles {}", frame - 1, went.settles - settles);
+    }
+    eprintln!("{went:?}, {exact} ticks the capture's own, {hits} with a moving hit");
+    // Every wreck through to the bones at rest, each settling once (front3's state is from inside its
+    // wreck, so four entries), and the hits against the wreck bike's body: told they
+    // were with the still scenery instead, the port parts at front's 2611.
+    assert!(went.ticks >= 2600 && exact >= 2000 && went.entries == 4 && went.settles == 5 && went.settled > 2500, "{went:?}, {exact} exact");
+    assert!(hits >= 11, "{hits} ticks with a moving hit");
 }
