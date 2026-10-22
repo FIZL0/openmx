@@ -25,10 +25,6 @@ use game_render::gpu::{GroundChunk, GroundVertex};
 use game_render::world::{Camera, Lighting};
 use game_sim::track::{Terrain, TerrainLayout};
 
-/// How many samples a terrain tree's leaf holds along one side, which is also how many cells: the
-/// shared seventeenth sample belongs to the next leaf along.
-const LEAF_SAMPLES: u32 = 16;
-
 /// The colour the ground is painted where the track has no paint of its own ([`Splat`]).
 ///
 /// The `.trn` carries a 1 MiB image and a 256-colour palette for it, but which of its tiles a cell
@@ -59,14 +55,14 @@ impl<'a> Ground<'a> {
     /// The ground of one track: its terrain file, and the scene's own statement of how many root
     /// cells it has.
     ///
-    /// The sample count is the tree's shape rather than a number in the file: each level of the tree
-    /// is sixteen cells across, so a field is `width x 16^levels` samples.
+    /// A field is `width x 256` samples, as the simulation's ground has it, whatever the tree's depth
+    /// ([`game_sim::world::SAMPLES_PER_WIDTH`]).
     pub fn new(terrain: Terrain<'a>, layout: &TerrainLayout) -> Ground<'a> {
-        let per_root = LEAF_SAMPLES.pow(terrain.levels);
+        let per_width = game_sim::world::SAMPLES_PER_WIDTH;
         Ground {
             spacing: terrain.scale.0,
-            samples_x: layout.width.max(1) * per_root,
-            samples_z: layout.breadth.max(1) * per_root,
+            samples_x: layout.width.max(1) * per_width,
+            samples_z: layout.breadth.max(1) * per_width,
             terrain,
             paint: None,
         }
