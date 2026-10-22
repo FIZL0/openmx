@@ -250,6 +250,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         presets: vec![("Moon".into(), Mods::parse("gravity=20").unwrap())],
         // A lobby of sixteen (N12).
         lobby_seats: 16,
+        // No machines at their bays (P103).
+        bays: false,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -446,7 +448,14 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.frame_limit, FrameLimit::Fps(144));
     assert!(!m.settings.vsync, "the VSync row is untouched");
-    // The next row is still the modifiers', and the last.
+    // The next row is the machines at their bays' (P103), which Cross turns off and on.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_changed());
+    assert!(!m.settings.bays);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.bays);
+    // And the one after it is still the modifiers', and the last.
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));

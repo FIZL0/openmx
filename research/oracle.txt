@@ -2808,6 +2808,16 @@ freeride_switch_commit boot 0x003601b0 (prompt, player) the prompt's answer: mac
 #                                      prompt's machine, then the camera and a kind-numbered
 #                                      message (biplane 0x13). The pause menu's "Switch To Machine:
 #                                      %s" (0x0028fcf0) calls the same swap
+# P103, live on free09 (PCSX2, a Monster Truck unlocked by setting read32(0x4e2778)+0x5c, the cheat
+#   flag freeride_near_machine also lets through): the prompt is the Flash popup free_popup_1.fsh, in
+#   layout px of 640x448 a rounded (r 10) black panel at alpha ~0x94, (181,317,280,84); the question
+#   in yearlingdashbold_20, grey ~200, two centred lines inking from tops 336 and 356, squeezed to
+#   0.9 of the font's width (line one 215 px), broken after "switch"; a black pill (253,385,136,33)
+#   with nav_circle_off's 16 px button at (278,395) and "Accept" in yearlingdashextrabold_18 at
+#   (301,398). Circle answers it: the truck actor 0xe1e210 took the human's driver 0x12939f0 and a
+#   "Monster Truck Driving Controls" card showed; Cross does nothing. A first 150 ms Circle closed
+#   the prompt without a swap, unexplained; a 300 ms one after a state reload swapped.
+#   Journal 2026-10-22-p103.
 machine_swap boot 0x00210b90 (world, controller, &current, old, new, player, ...) the old machine
 #                            loses the controller (+0x14 = 0); if it is the bike its model nodes are
 #                            hidden (0x0027d670 with 0 clears bit 0x40) and 0x0027b9f0 runs. No
