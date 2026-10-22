@@ -14,6 +14,11 @@
 //! Some are a player's own (one player's bike faster than the rest), [`Knob::per_seat`]; the rest are
 //! the world's (gravity, air drag, time), held once for everyone in seat 0's slot.
 //!
+//! P95 split acceleration from top speed: [`Knob::BikeAccel`] beside the bike's two, and the
+//! biplane's one speed knob into [`Knob::PlaneAccel`] and [`Knob::PlaneTopSpeed`]. The old
+//! [`Knob::PlaneSpeed`] stays, off the menu ([`Knob::MENU`]), so a preset or a tape that carries
+//! `plane_speed` still loads and rides the numbers it was made with.
+//!
 //! The text form ([`Mods::text`], [`Mods::parse`]) is what a tape, a preset and the online lobby
 //! carry: `word=percent` for a world modifier, `word.N=percent` for player N's, only the ones off
 //! their default. An empty text is the original game.
@@ -29,6 +34,7 @@ use ps2_float::F;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Knob {
     BikeSpeed,
+    BikeAccel,
     BikePower,
     Grip,
     Suspension,
@@ -37,13 +43,15 @@ pub enum Knob {
     Jump,
     CrashTolerance,
     PlaneSpeed,
+    PlaneAccel,
+    PlaneTopSpeed,
     Gravity,
     AirDrag,
     TimeScale,
 }
 
 /// How many modifiers there are.
-pub const KNOBS: usize = 12;
+pub const KNOBS: usize = 15;
 
 /// A modifier's default, which leaves its fields untouched: 100%.
 pub const ORIGINAL: u16 = 100;
@@ -55,6 +63,7 @@ pub const MOST: u16 = 500;
 impl Knob {
     pub const ALL: [Knob; KNOBS] = [
         Knob::BikeSpeed,
+        Knob::BikeAccel,
         Knob::BikePower,
         Knob::Grip,
         Knob::Suspension,
@@ -63,6 +72,27 @@ impl Knob {
         Knob::Jump,
         Knob::CrashTolerance,
         Knob::PlaneSpeed,
+        Knob::PlaneAccel,
+        Knob::PlaneTopSpeed,
+        Knob::Gravity,
+        Knob::AirDrag,
+        Knob::TimeScale,
+    ];
+
+    /// The ones the menu has a row for, in its order: all but [`Knob::PlaneSpeed`], which P95 split
+    /// into the biplane's acceleration and top speed and which only an older preset or tape still sets.
+    pub const MENU: [Knob; KNOBS - 1] = [
+        Knob::BikeSpeed,
+        Knob::BikeAccel,
+        Knob::BikePower,
+        Knob::Grip,
+        Knob::Suspension,
+        Knob::AirControl,
+        Knob::SpinRate,
+        Knob::Jump,
+        Knob::CrashTolerance,
+        Knob::PlaneAccel,
+        Knob::PlaneTopSpeed,
         Knob::Gravity,
         Knob::AirDrag,
         Knob::TimeScale,
@@ -76,6 +106,7 @@ impl Knob {
     pub fn word(self) -> &'static str {
         match self {
             Knob::BikeSpeed => "bike_speed",
+            Knob::BikeAccel => "bike_accel",
             Knob::BikePower => "bike_power",
             Knob::Grip => "grip",
             Knob::Suspension => "suspension",
@@ -84,6 +115,8 @@ impl Knob {
             Knob::Jump => "jump",
             Knob::CrashTolerance => "crash_tolerance",
             Knob::PlaneSpeed => "plane_speed",
+            Knob::PlaneAccel => "plane_accel",
+            Knob::PlaneTopSpeed => "plane_top_speed",
             Knob::Gravity => "gravity",
             Knob::AirDrag => "air_drag",
             Knob::TimeScale => "time_scale",
@@ -98,6 +131,7 @@ impl Knob {
     pub fn label(self) -> &'static str {
         match self {
             Knob::BikeSpeed => "Bike top speed",
+            Knob::BikeAccel => "Bike acceleration",
             Knob::BikePower => "Engine power",
             Knob::Grip => "Tyre grip",
             Knob::Suspension => "Suspension",
@@ -106,6 +140,8 @@ impl Knob {
             Knob::Jump => "Jump strength",
             Knob::CrashTolerance => "Crash tolerance",
             Knob::PlaneSpeed => "Biplane speed",
+            Knob::PlaneAccel => "Biplane acceleration",
+            Knob::PlaneTopSpeed => "Biplane top speed",
             Knob::Gravity => "Gravity",
             Knob::AirDrag => "Air drag",
             Knob::TimeScale => "Time scale",
@@ -130,6 +166,7 @@ impl Knob {
     pub fn blurb(self) -> &'static str {
         match self {
             Knob::BikeSpeed => "engine power and top speed",
+            Knob::BikeAccel => "how fast the bike gets up to speed, not its top",
             Knob::BikePower => "engine torque, top speed as geared",
             Knob::Grip => "every tire's grip on every surface",
             Knob::Suspension => "spring stiffness",
@@ -138,6 +175,8 @@ impl Knob {
             Knob::Jump => "preload, the jump off the lip",
             Knob::CrashTolerance => "the speeds a landing wrecks at",
             Knob::PlaneSpeed => "biplane thrust and top speed",
+            Knob::PlaneAccel => "how fast the biplane gets up to speed, not its top",
+            Knob::PlaneTopSpeed => "the biplane's top speed",
             Knob::Gravity => "gravity, bike and biplane",
             Knob::AirDrag => "air drag, bike and biplane",
             Knob::TimeScale => "how fast the game runs",
@@ -150,6 +189,7 @@ impl Knob {
             Knob::BikeSpeed => {
                 "[Engine] HP curve (torque), ClutchStatic/KineticFriction, EngineBraking x k; FinalGearRatio / k; [Aerodynamics] Drag / k^2; ReverseSpeed, MaxClutchTorqueScaleSpeed x k; the integrator's speed limit x k"
             }
+            Knob::BikeAccel => "[Engine] HP curve (torque), ClutchStatic/KineticFriction x k; [Aerodynamics] Drag, every tire surface's WheelDrag, WheelFriction x k",
             Knob::BikePower => "[Engine] HP curve (torque), ClutchStatic/KineticFriction x k",
             Knob::Grip => "every tire surface's SideForce, SlippingSideForce, MaxDriveForce, MaxSideForce, MaxSlippingSideForce, Skid*Force x k",
             Knob::Suspension => "[Front/Rear Tire] Spring, SpringWhenStopped x k",
@@ -158,6 +198,8 @@ impl Knob {
             Knob::Jump => "[Preload] MaxPreload x k",
             Knob::CrashTolerance => "[Wrecks] Front/Back/Side/RacingDown/FreestyleDown/NoHander WreckSpeedLimit x k",
             Knob::PlaneSpeed => "biplane [Engine] MaxPower, MinPropEfficiencySpeed x k; [Aerodynamics] CD0 / k^2",
+            Knob::PlaneAccel => "biplane [Engine] MaxPower x k; [Aerodynamics] CD0, CD1, CDde x k",
+            Knob::PlaneTopSpeed => "biplane [Aerodynamics] CD0 / k^3",
             Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane GravityScale x k",
             Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0 x k",
             Knob::TimeScale => "the engine's time-scale object: dt + (k - 1) dt",
@@ -276,6 +318,22 @@ impl Mods {
         if let Some(k) = self.factor(seat, Knob::BikePower) {
             engine_power(phy, k);
         }
+        if let Some(k) = self.factor(seat, Knob::BikeAccel) {
+            // k times the torque and k times everything that holds the bike back on the flat: the
+            // air's drag, the tires' rolling drag and their wheel friction. The force left over to
+            // speed the bike up is k times the file's at every speed below the top, and the top,
+            // where the drive meets the drag, is where it was (to the tires' slip: within 2%). The
+            // stock bike tops out on the drag, well under its rev limit in top gear, so the gearing
+            // is left alone.
+            engine_power(phy, k);
+            phy.mv.drag = phy.mv.drag * k;
+            for tire in [&mut phy.front, &mut phy.rear] {
+                for s in &mut tire.surfaces {
+                    s.wheel_drag = s.wheel_drag * k;
+                    s.wheel_friction = s.wheel_friction * k;
+                }
+            }
+        }
         if let Some(k) = self.factor(seat, Knob::BikeSpeed) {
             // The torque and the gearing move together, so the force at the wheel at any revs is
             // the file's and the wheel turns k times as fast for them; the drag is taken down so that
@@ -383,6 +441,22 @@ impl Mods {
             plane.engine.max_power = plane.engine.max_power * k;
             plane.engine.min_prop_efficiency_speed = plane.engine.min_prop_efficiency_speed * k;
             plane.aero.cd0 = plane.aero.cd0 / (k * k);
+        }
+        if let Some(k) = self.factor(seat, Knob::PlaneAccel) {
+            // k times the power and k times every drag coefficient: thrust less drag is k times the
+            // file's at every speed, so the plane gets up to speed k times as hard and tops out where
+            // the file's does.
+            plane.engine.max_power = plane.engine.max_power * k;
+            plane.aero.cd0 = plane.aero.cd0 * k;
+            plane.aero.cd1 = plane.aero.cd1 * k;
+            plane.aero.cd_de = plane.aero.cd_de * k;
+        }
+        if let Some(k) = self.factor(seat, Knob::PlaneTopSpeed) {
+            // The power is the drag times the speed, and the drag at a speed goes with its square, so
+            // the speed the file's power holds goes with the cube root of 1 / CD0: CD0 / k^3 tops out
+            // at k times the speed. Low down the drag is small beside the thrust, so the getting
+            // there is near enough the file's.
+            plane.aero.cd0 = plane.aero.cd0 / (k * k * k);
         }
         if let Some(k) = self.factor(seat, Knob::Gravity) {
             plane.mass_properties.gravity_scale = plane.mass_properties.gravity_scale * k;
