@@ -1946,6 +1946,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The derived class, not the base one: the base camera's frame is dead code on the disc (S24),
     // and this is the frame the picture comes out of.
     let mut camera = Race::new(presets, reverse_speed);
+    // The eye's ceiling, which the race's setup sets off the scene's fog (S103).
+    camera.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
     // The preset the session starts on, by name rather than by its place in the file. A name the
     // file does not have is an error rather than a quiet fall back to the first record, so that a
     // typo cannot pass for the camera it named.
@@ -2086,6 +2088,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 .unwrap_or_default();
             println!("biplane: {} camera presets in {PLANE_PRESETS}", presets.len());
             let mut cam = Race::new(presets, reverse_speed);
+            cam.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
             if let Some(start) = Preset::find(&cam.cam.presets, PLANE_CAMERA) {
                 cam.cam.set_preset(start);
             }
@@ -3897,10 +3900,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let view = if presets == 0 {
                 None
             } else {
-                // The camera's one question about the world: the ground under the look-at point, which
-                // the track answers (S23). Without it the view sinks into the dirt on the first dip.
-                // This frame has no obstacle push-out — the base class's did, and the base class's
-                // frame is not the one the disc runs.
+                // The camera's two questions about the world, both the ground under a point, which
+                // the track answers: under the look-at point (S23), without which the view sinks into
+                // the dirt on the first dip, and under the eye, which keeps it 4.8 ft over the ground
+                // (S103). This frame has no obstacle push-out — the base class's did, and the base
+                // class's frame is not the one the disc runs.
                 Some(follow.update(
                     dt,
                     &rider,

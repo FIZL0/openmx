@@ -2096,9 +2096,37 @@ race_camera_split_mode      boot 0x004211a0 the word race_camera_aim's second tr
 # + (vel * dt) * 10.0. No dead yaw swing in it; the base's is dead code.
 #
 race_camera_frame_setup     boot 0x0021e4d0 vtable slot 0x108, the override of camera_frame_noop's
-#                                           `return 1`: a real routine that rebuilds the probe bundle
-#                                           and collides it. The frame never calls it, so it is not
-#                                           ported; the only caller of slot 0x108 is elsewhere
+#                                           `return 1`. S24 read it as unreached; it is not: the base
+#                                           filter calls slot 0x108 on the position before and after
+#                                           the lags. It is the eye's floor — see S103 below. Ported
+#                                           as camera::Race::keep_off_the_ground
+#
+# --- S103: what keeps the race camera's eye out of the ground --------------------------------------
+# camera_filter (unoverridden) opens with slot0x108(cam, position, target, 1, 1) on the raw position
+# and, in the arm that runs the lags, ends with slot0x108(cam, &lagged, target, 1, 0) on the lagged
+# position (w 1.0) before writing it out. The lags keep the unlifted lagged value. In the base class
+# the slot is camera_frame_noop; in the race camera it is race_camera_frame_setup, which is (args cam,
+# &eye, target, lift, lock):
+#   floor = max.s(viewport+0x19c * 2.0, cam+0x1a0)
+#   if cam+0xe8 (collision object): segment probe from target (or last frame's start +0x190 after a
+#     hit) less its unit direction, stretched to 2*floor when shorter than floor, through the
+#     object's moved/collide (0x00119be0, 0x0011a9d0, with the +0xec filter 0x00218b80); a hit
+#     (callback 0x0021e190, byte-identical to camera_probe_hit) puts eye = hit + normal * floor
+#   if cam+0x184 (world): ground_query on the eye as handed in; y = min.s(eye.y, cam+0x1a4);
+#     if (y - ground < floor) { if lock: cam+0x16c = 1; if lift: eye.y = ground + floor }
+#     else if lock: cam+0x16c = 0.                                     returns 1 (0: under, no lift)
+# cam+0x16c is the flag camera_nudge tests before letting the stick pitch down (Follow's
+# pitch_down_locked). The derived nudge 0x0021f770 does not read it.
+race_camera_setup           boot 0x0021e270 (f12 0.55, f13 ceiling, f14 0.6, f15 2.0, cam, ...) from
+#                                           race_camera_create: cam+0x1a0 = f15 (2.0, over the ctor's
+#                                           3.0), cam+0x1a4 = f13 = 200.0 when the scene's fog record
+#                                           +0x1c (MaximumFogDistance) > 1500, else FLT_MAX
+race_camera_probe_hit       boot 0x0021e190 the derived make-probe 0x0021e350's hit callback
+# Live, three states (first_recording, recording2, biplane), both race camera objects in each:
+# +0xe8 = 0 and +0xec = 0 (the collision object is never made — slot 0xdc, which makes it, has no
+# caller in the race's setup), +0x184 = the world, +0x1a0 = 2.0, +0x1a4 = FLT_MAX, viewport near 2.4.
+# So on the disc the floor is 4.8 ft over the ground under the eye and the segment probe never runs.
+# free09's fog record +0x1c reads 1000.0, the biplane state's 768.0.
 
 # ---------------------------------------------------------------------------------------------------
 # S25 — the vehicle's own animation state machine, which is the only live caller of what S20 ported:
