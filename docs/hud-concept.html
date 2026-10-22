@@ -14,8 +14,10 @@
   --x: #4a7be0; --o: #e0473f; --sq: #d872b8; --tri: #3cbf93;
   --you: #ffd23a;                     /* the original's yellow player / human marks */
   --ai: #ef3b30;                      /* its red AI marks */
-  --hit: #f0954a; --run: #4aa8e0; --race: #e0473f; --stunt: #d872b8;
+  --hit: #4ccf4c; --run: #ff8a1c; --race: #e0473f; --stunt: #b04cff;  /* as the disc's map_icon_h/r/m/s read: green, orange, red, purple */
   --land: #7fe0a0; --bail: #ff5a4e;
+  --orange: #ff9900;                  /* the original's trick text and preload charge, 255,153,0 */
+  --grey: #c8c8c8;                    /* its score text, 200,200,200 */
   --slot1: #00dcff; --slot2: #ff3cc8; --slot3: #b4ff3c; --slot4: #ff7850; --slot5: #9682ff;  /* overlay::MARKER_COLOURS (P94) */
   --face: "OMX", "M PLUS Rounded 1c", "Arial Rounded MT Bold", system-ui, sans-serif;
 }
@@ -36,16 +38,20 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
 .scene { position: absolute; inset: 0; width: 100%; height: 100%; }
 .t { display: inline-block; transform: skewX(-11deg); }
 
-/* score, top left */
-.score { position: absolute; left: 3.2em; top: 2.6em; display: grid; gap: .1em; }
-.score .lab { font-size: .95em; letter-spacing: .22em; color: var(--bone); text-shadow: 0 .08em 0 rgba(0,0,0,.6); }
-.score .num { font-weight: 800; font-size: 3.1em; line-height: .95; color: var(--chalk); font-variant-numeric: tabular-nums; text-shadow: .06em .08em 0 rgba(0,0,0,.45); }
-.score .num.bump { animation: bump .45s ease-out; }
-@keyframes bump { 0% { color: var(--land); transform: scale(1.12); transform-origin: left center; } 100% { color: var(--chalk); transform: none; } }
+/* score, top left: stuntscoreoverlays.lyt's Score at 14,48, a dark capsule with a darker label end */
+.score { position: absolute; left: 1.75em; top: 2.5em; width: 21em; height: 2.1em; border-radius: 999px; display: flex; align-items: center; overflow: hidden;
+  background: linear-gradient(90deg, rgba(0,0,0,.5) 0 9.4em, rgba(0,0,0,.4) 9.4em); }
+.score .lab { width: 9.4em; text-align: center; font-weight: 800; font-size: 1em; letter-spacing: .14em; color: var(--grey); }
+.score .num { padding-left: .7em; font-weight: 800; font-size: 1.25em; color: var(--grey); font-variant-numeric: tabular-nums; }
+.score.flash { animation: scoreflash .7s ease-out; }
+@keyframes scoreflash { 0% { box-shadow: inset 0 0 0 .14em var(--orange); } 100% { box-shadow: inset 0 0 0 .14em transparent; } }
+.score.flash .num { animation: scoreink .7s ease-out; }
+@keyframes scoreink { 0% { color: var(--orange); } 100% { color: var(--grey); } }
+.tag { position: absolute; left: 3.6em; top: 4.9em; font-size: .8em; letter-spacing: .14em; color: var(--grey); }
 
 /* the marker menu + camera, top right: up while the d-pad works the markers, gone 2 s after */
 .tr { position: absolute; right: 3.2em; top: 2.6em; display: grid; justify-items: end; gap: .7em; }
-.mk { display: grid; gap: .45em; justify-items: stretch; padding: .55em .7em .5em; border-radius: 1.2em; background: var(--glass-hi); border: .1em solid rgba(245,240,232,.22);
+.mk { display: grid; gap: .45em; justify-items: stretch; padding: .55em .8em .5em; border-radius: 1.2em; background: rgba(0,0,0,.5);
   opacity: 0; transform: translateY(-.5em); transition: opacity .25s, transform .25s; }
 .mk.show { opacity: 1; transform: none; }
 .mk .head { display: flex; justify-content: space-between; align-items: baseline; gap: 1em; font-size: .72em; letter-spacing: .16em; color: var(--dust); }
@@ -60,7 +66,7 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
 .mk .pl i { font-style: normal; color: var(--dust); margin-right: .3em; }
 .mk .pl.on { color: var(--chalk); border-color: var(--chalk); background: linear-gradient(180deg, var(--maroon-hi) 0%, var(--maroon) 45%, var(--maroon-lo) 100%); box-shadow: inset 0 .1em 0 rgba(255,255,255,.22), .15em .18em 0 rgba(0,0,0,.33); }
 .mk .pl.on i { color: var(--bone); }
-.mk .label { font-weight: 800; font-size: 1.05em; color: var(--chalk); }
+.mk .label { font-weight: 800; font-size: 1.05em; color: var(--grey); }
 .mk .label small { font-weight: 700; font-size: .78em; color: var(--dust); margin-left: .4em; }
 .mk .hold { height: .3em; border-radius: 999px; background: rgba(255,255,255,.12); overflow: hidden; }
 .mk .hold b { display: block; height: 100%; width: 0; background: var(--bone); }
@@ -71,66 +77,66 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
 .flash { position: absolute; inset: 0; background: radial-gradient(circle at 50% 70%, rgba(245,240,232,.7), rgba(245,240,232,0) 60%); opacity: 0; pointer-events: none; }
 .flash.go { animation: poof .5s ease-out; }
 @keyframes poof { 0% { opacity: 1; } 100% { opacity: 0; } }
-.cam { display: flex; align-items: center; gap: .5em; padding: .35em .9em .35em .45em; border-radius: 999px; background: var(--glass-hi); color: var(--chalk); font-size: 1.1em; opacity: 0; transform: translateY(-.4em); transition: opacity .25s, transform .25s; }
+.cam { display: flex; align-items: center; gap: .5em; padding: .35em .9em .35em .45em; border-radius: 999px; background: rgba(0,0,0,.5); color: var(--grey); font-size: 1.1em; opacity: 0; transform: translateY(-.4em); transition: opacity .25s, transform .25s; }
 .cam.show { opacity: 1; transform: none; }
 .shoulder { font-size: .7em; font-weight: 800; color: var(--ink); background: var(--bone); border-radius: .35em; padding: .12em .4em; }
 
 /* the challenge clock, top centre */
-.clock { position: absolute; left: 50%; top: 2.4em; transform: translateX(-50%); display: flex; align-items: center; gap: .9em; padding: .4em 1.1em; border-radius: 999px; background: var(--glass-hi); border: .1em solid rgba(245,240,232,.25); color: var(--chalk); white-space: nowrap; }
+.clock { position: absolute; left: 50%; top: 2.5em; transform: translateX(-50%); display: flex; align-items: center; gap: .9em; padding: .3em 1.1em; border-radius: 999px; background: rgba(0,0,0,.5); color: var(--grey); white-space: nowrap; }
 .clock .k { font-size: 1em; color: var(--c); }
 .clock .time { font-weight: 800; font-size: 1.6em; font-variant-numeric: tabular-nums; }
 .clock .goal { font-size: .95em; color: var(--bone); font-variant-numeric: tabular-nums; }
 .clock .bar { width: 6em; height: .45em; border-radius: 999px; background: rgba(255,255,255,.15); overflow: hidden; }
 .clock .bar b { display: block; height: 100%; background: var(--c); width: 0; transition: width .3s; }
 
-/* the trick popup, upper centre (the original's points popup) */
-.trick { position: absolute; left: 50%; top: 7.2em; transform: translateX(-50%); display: grid; justify-items: center; gap: .25em; text-align: center; white-space: nowrap; }
-.trick .chain { font-weight: 800; font-size: 2.1em; color: var(--chalk); text-shadow: .07em .09em 0 rgba(0,0,0,.5), 0 0 .4em rgba(0,0,0,.35); }
+/* the trick popup, low centre: the Stunt and Stunt Combo movies at 320,373, the trick's name over
+   its points in orange bold oblique, popping in; under the rider, over the prompts */
+.trick { position: absolute; left: 50%; top: 37.4em; transform: translate(-50%, -50%); display: grid; justify-items: center; gap: .05em; text-align: center; white-space: nowrap; }
+.trick .chain, .trick .p { font-weight: 800; color: var(--orange); font-style: normal;
+  text-shadow: -.06em -.06em 0 #2a1200, .06em -.06em 0 #2a1200, -.06em .06em 0 #2a1200, .06em .06em 0 #2a1200, .08em .12em .1em rgba(0,0,0,.5); }
+.trick .chain { font-size: 1.9em; }
 .trick .chain span { display: inline-block; }
-.trick .chain span.new { animation: pop .35s cubic-bezier(.2,1.6,.4,1); }
-.trick .chain .plus { color: var(--ember); margin: 0 .25em; }
-@keyframes pop { 0% { transform: scale(.4); opacity: 0; } 100% { transform: none; opacity: 1; } }
-.trick .pts { display: flex; align-items: center; gap: .5em; }
-.trick .pts .p { font-weight: 800; font-size: 1.5em; color: var(--chalk); font-variant-numeric: tabular-nums; text-shadow: .06em .08em 0 rgba(0,0,0,.5); }
-.mult { font-weight: 800; font-size: 1.15em; color: var(--chalk); padding: .1em .55em .15em; border-radius: 999px; border: .1em solid var(--chalk);
-  background: linear-gradient(180deg, var(--maroon-hi) 0%, var(--maroon) 45%, var(--maroon-lo) 100%);
-  box-shadow: inset 0 .12em 0 rgba(255,255,255,.22), .18em .2em 0 rgba(0,0,0,.33); }
-.trick .verdict { font-weight: 800; font-size: 1.3em; letter-spacing: .16em; opacity: 0; }
-.trick.landed .verdict { color: var(--land); opacity: 1; }
+.trick .chain span.new, .trick .p.new { animation: pop .3s cubic-bezier(.2,1.5,.4,1); }
+.trick .chain .plus { color: #ffd8a0; margin: 0 .2em; }
+@keyframes pop { 0% { transform: scale(1.9); opacity: .1; } 100% { transform: none; opacity: 1; } }
+.trick .pts { display: flex; align-items: center; gap: .45em; }
+.trick .p { font-size: 1.7em; font-variant-numeric: tabular-nums; }
+.mult { font-weight: 800; font-size: 1.3em; color: #ffd8a0; text-shadow: .06em .08em 0 rgba(0,0,0,.6); }
+.trick .verdict { font-weight: 800; font-size: 1.15em; letter-spacing: .14em; opacity: 0; text-shadow: .06em .08em 0 rgba(0,0,0,.6); }
+.trick.landed .verdict { color: #fff2d8; opacity: 1; }
 .trick.bailed .verdict { color: var(--bail); opacity: 1; }
-.trick.bailed .chain, .trick.bailed .pts .p { text-decoration: line-through; text-decoration-thickness: .08em; opacity: .55; }
-.trick.out { opacity: 0; transition: opacity .5s .9s; }
-.trick.landed .p { color: var(--land); }
+.trick.bailed .chain, .trick.bailed .pts .p { color: #8a8a8a; text-decoration: line-through; text-decoration-thickness: .08em; }
+.trick.landed .chain, .trick.landed .p { animation: landpulse .5s ease-out; }
+@keyframes landpulse { 0% { transform: scale(1.18); } 100% { transform: none; } }
+.trick.out { opacity: 0; transition: opacity .4s .8s; }
 
 /* minimap, bottom left (where freestyleradar sits) */
-.radar { position: absolute; left: 2.6em; bottom: 2.4em; width: 11.4em; height: 11.4em; filter: drop-shadow(.22em .26em 0 rgba(0,0,0,.35)); }
+.radar { position: absolute; left: 2.4em; bottom: 2.6em; width: 12.4em; height: 12.4em; }
 .radar svg { width: 100%; height: 100%; overflow: visible; }
 .where { position: absolute; left: 50%; bottom: -1.5em; transform: translateX(-50%); font-size: .85em; color: var(--chalk); white-space: nowrap; text-shadow: 0 .08em 0 rgba(0,0,0,.7); }
 
-/* speedometer, bottom right */
-.speedo { position: absolute; right: 3.2em; bottom: 2.6em; display: grid; justify-items: end; gap: .35em; }
-.digital { display: flex; align-items: flex-end; gap: .45em; }
-.digital .v { font-weight: 800; font-size: 5.6em; line-height: .8; color: var(--chalk); font-variant-numeric: tabular-nums; text-shadow: .05em .06em 0 rgba(0,0,0,.45); min-width: 1.75em; text-align: right; }
-.digital .u { font-size: 1.05em; letter-spacing: .14em; color: var(--bone); padding-bottom: .25em; }
-.pre { display: flex; align-items: center; gap: .5em; font-size: .8em; color: var(--bone); letter-spacing: .14em; }
-.pre .cap { width: 10.5em; height: .8em; border-radius: 999px; background: var(--glass-hi); border: .12em solid rgba(245,240,232,.5); overflow: hidden; }
-.pre .cap b { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--ember), #ffd8a0); border-radius: 999px; }
-.pre .cap b.full { background: linear-gradient(90deg, var(--land), #e8ffd8); }
+/* speedometer, bottom right: the dial (the original's default) or the digital readout, the preload
+   meter standing right of either: a dark capsule charging orange from the bottom */
+.speedo { position: absolute; right: 2.2em; bottom: 2.4em; display: flex; align-items: flex-end; gap: .9em; }
+.digital { display: flex; align-items: flex-end; padding-bottom: .6em; }
+.digital .v { font-weight: 800; font-size: 5.4em; line-height: .8; color: #fff; font-variant-numeric: tabular-nums; text-shadow: .05em .06em 0 rgba(0,0,0,.45); min-width: 1.8em; text-align: right; }
+.pre { width: 2.5em; height: 8.5em; border-radius: 999px; background: rgba(0,0,0,.7); padding: .3em; display: flex; align-items: flex-end; margin-bottom: 2.2em; }
+.pre b { display: block; width: 100%; height: 0; border-radius: 999px; background: var(--orange); }
 .analog { width: 13em; height: 13em; display: none; }
-.analog svg { width: 100%; height: 100%; overflow: visible; filter: drop-shadow(.2em .25em 0 rgba(0,0,0,.35)); }
+.analog svg { width: 100%; height: 100%; overflow: visible; }
 .speedo.is-analog .analog { display: block; }
 .speedo.is-analog .digital { display: none; }
 
 /* prompts: low, small, out of the bike's way */
 .prompts { position: absolute; left: 50%; bottom: 1.6em; transform: translateX(-50%); display: flex; gap: .8em; align-items: center; white-space: nowrap; }
-.prompt { display: flex; align-items: center; gap: .6em; padding: .3em .45em .3em .35em; border-radius: 999px; background: var(--glass-hi); border: .1em solid rgba(245,240,232,.22); color: var(--chalk); font-size: 1em; animation: rise .3s ease-out; }
+.prompt { display: flex; align-items: center; gap: .6em; padding: .3em .3em .3em .35em; border-radius: .8em; background: rgba(0,0,0,.45); color: #fff; font-size: 1em; animation: rise .3s ease-out; }
 @keyframes rise { 0% { transform: translateY(.8em); opacity: 0; } 100% { transform: none; opacity: 1; } }
 .prompt .ico { width: 1.9em; height: 1.9em; border-radius: 50%; display: grid; place-items: center; background: var(--c); color: var(--ink); font-weight: 800; font-size: .95em; flex: none; }
 .prompt .ico svg { width: 1.25em; height: 1.25em; }
 .prompt .what { display: grid; line-height: 1.1; }
 .prompt .what b { font-weight: 800; font-size: 1em; }
 .prompt .what small { font-size: .72em; color: var(--bone); }
-.prompt .act { display: flex; align-items: center; gap: .35em; font-size: .85em; color: var(--bone); padding-left: .55em; border-left: .08em solid rgba(245,240,232,.2); margin-left: .1em; }
+.prompt .act { display: flex; align-items: center; gap: .35em; font-size: .85em; color: #fff; font-weight: 800; background: #000; border-radius: 999px; padding: .2em .8em .2em .25em; margin-left: .2em; }
 .btn { position: relative; display: inline-grid; place-items: center; width: 1.6em; height: 1.6em; border-radius: 50%; background: #1b1410; border: .1em solid rgba(255,255,255,.6); vertical-align: middle; }
 .btn svg { width: 60%; height: 60%; }
 .btn.x svg path { stroke: var(--x); } .btn.o svg circle { stroke: var(--o); } .btn.sq svg rect { stroke: var(--sq); } .btn.tri svg path { stroke: var(--tri); }
@@ -162,7 +168,7 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
 <div class="page">
   <div class="top">
     <h1>open<b>MX</b> · ride HUD concept</h1>
-    <p>Our font, vector panels, the original's layout. Press the buttons or use the keys shown.</p>
+    <p>Second cut: the original's score bar, popups, dial and preload meter, set in our font. Press the buttons or use the keys shown.</p>
   </div>
   <div class="screen" id="screen"></div>
 
@@ -187,8 +193,8 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
       <button data-do="plane">Machine: Bike</button>
     </div>
     <div class="row"><span>Settings</span>
-      <button data-set="speedo" data-v="0" aria-pressed="true">Digital</button>
-      <button data-set="speedo" data-v="1">Analog</button>
+      <button data-set="speedo" data-v="1" aria-pressed="true">Analog</button>
+      <button data-set="speedo" data-v="0">Digital</button>
       <button data-set="map" data-v="1" aria-pressed="true">Minimap on</button>
       <button data-set="map" data-v="0">Minimap off</button>
       <button data-set="scale" data-v="0.85">HUD 85%</button>
@@ -202,16 +208,18 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
   </div>
 
   <div class="notes">
-    <div class="card"><h3>Where things sit</h3><ul>
-      <li>The original's corners are kept. Score is top left, the radar bottom left (freestyleradar's 87,363) and the speed bottom right, all inside a 4% title-safe margin.</li>
-      <li>The trick popup sits in the upper centre, clear of the bike and the horizon line.</li>
-      <li>Prompts are one low strip at the bottom centre, below the rider. They're a third the height of the original's centred dialog box and never cover the bike or the line ahead.</li>
+    <div class="card"><h3>Where things sit (the disc's layouts)</h3><ul>
+      <li>Score sits top left at 14,48, as <code>stuntscoreoverlays.lyt</code>'s Score has it.</li>
+      <li>The trick popup centres at 320,373 of 640×448 (the Stunt and Stunt Combo movies), low in the screen and under the rider, not above.</li>
+      <li>The radar is bottom left. The dial or readout is bottom right, with the preload meter standing to its right.</li>
+      <li>Prompts are one low strip under the popup. Ours (the marker menu, the camera name) take the top right, which the original leaves empty.</li>
       <li>Everything is sized in view-height ems, so split screen and the V52 HUD scale are a single multiplier.</li>
     </ul></div>
-    <div class="card"><h3>Points popup (P68)</h3><ul>
-      <li>Each trick joins the chain with a pop, and the multiplier pill counts the links.</li>
-      <li>A landing turns it green, then the total counts into SCORE. A bail strikes it through in red and nothing is banked.</li>
-      <li>The trick names here are placeholders. The real ones come from the disc's strings once P68 reads them; only Wheelie, Stoppie and BackFlip are named in <code>trick.rs</code> so far.</li>
+    <div class="card"><h3>Score and the points popup (P68)</h3><ul>
+      <li>The score is the original's bar: a dark see-through capsule with a darker label end, and <code>SCORE</code> and the number in 200,200,200 (<code>overlay_score.fsh</code>). Landing a trick flashes it orange (the movie's SuccessDone) while the total counts up.</li>
+      <li>The popup is the movies' own: the trick's name over its points, in orange 255,153,0 bold oblique (<code>overlay_stunt1_1.fsh</code>'s text colour, set in yearlingdashboldoblique_18). It pops in from large and faint, as the movie's scale and alpha keys run.</li>
+      <li>A combo (<code>overlay_stunt2_1.fsh</code>) is the names joined with + over the combo's points and its count. A landing pulses it and banks <code>head × count</code>; a bail greys it out and banks nothing (score_combo_end).</li>
+      <li>The trick names here are placeholders. The real ones come from the disc's strings once P68 reads them.</li>
     </ul></div>
     <div class="card"><h3>Minimap</h3><ul>
       <li>It's heading-up like the original, so the rose turns and the player arrow stays fixed. N rides the rim.</li>
@@ -233,7 +241,11 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
       <li>A teleport poofs the screen. Markers appear on the radar in the same colours and numbers.</li>
       <li>Overlay None hides it (P117).</li>
     </ul></div>
-    <div class="card"><h3>Speed and preload</h3><ul>
+    <div class="card"><h3>Speed and preload (V42, V53)</h3><ul>
+      <li>The preload meter is the original's: a dark capsule 20×85 standing right of the speed, charging orange (255,153,0) from the bottom as the preload fires (<code>overlay::preload_fill</code>).</li>
+      <li>The dial is the default, as on the disc. It has white dashes from 0 to 100, an orange needle off a grey hub, and the odometer's <code>%07.1f</code> in a dark capsule. Digital is the big white oblique number alone.</li>
+    </ul></div>
+    <div class="card" hidden><h3>old</h3><ul>
       <li>Digital is a big slanted readout in our face, with no bitmap yearlingdash.</li>
       <li>Analog is a vector dial with the odometer (V42).</li>
       <li>The preload capsule fills while pumping and turns green when full (V53).</li>
@@ -273,7 +285,7 @@ function scene(seed) {
     <path d="M62 52 L98 52 L150 90 L10 90Z" fill="url(#dirt${seed})"/>
     <path d="M78 52 C 76 64, 70 76, 62 90 M82 52 C 86 64, 94 76, 104 90" stroke="#3e2716" stroke-opacity=".35" stroke-width=".7" fill="none"/>
     <path d="M90 55 l7 -2.5 l4 2.5Z" fill="#6e4b31"/>
-    <g transform="translate(80 70)">
+    <g transform="translate(80 60) scale(.95)">
       <ellipse cx="0" cy="10.5" rx="9" ry="1.6" fill="#000" opacity=".25"/>
       <rect x="-1.6" y="2.5" width="3.2" height="8.2" rx="1.4" fill="#1b1410"/>
       <path d="M-6 1.5 Q0 -1 6 1.5 L4.5 4 L-4.5 4Z" fill="#c2141c"/>
@@ -305,44 +317,43 @@ function radarSVG(v) {
       continue;
     }
     const at = `transform="translate(${px.toFixed(1)} ${py.toFixed(1)})"`;
-    if (b.k === "zone") blips += `<g ${at}><circle r="7.5" fill="${b.c}" stroke="#f5f0e8" stroke-width="1.4"/><text y="3.4" text-anchor="middle" font-size="9.5" font-weight="800" fill="#050302" font-family="OMX, sans-serif">${b.L}</text></g>`;
+    if (b.k === "zone") blips += `<g ${at}><circle r="7.5" fill="#000" fill-opacity=".6" stroke="${b.c}" stroke-width="2"/><text y="3.6" text-anchor="middle" font-size="10" font-weight="800" fill="${b.c}" font-family="OMX, sans-serif">${b.L}</text></g>`;
     else if (b.k === "mark") blips += `<g ${at}>${b.on ? '<circle r="8.6" fill="none" stroke="#f5f0e8" stroke-width="1.6"/>' : ""}<circle r="6" fill="${SLOTC[b.n - 1]}" stroke="#050302" stroke-width="1.2"/><text y="3" text-anchor="middle" font-size="8" font-weight="800" fill="#050302" font-family="OMX, sans-serif">${b.n}</text></g>`;
     else if (b.k === "plane") blips += `<g ${at} transform-origin="0 0"><rect x="-7" y="-7" width="14" height="14" rx="4" fill="${b.c}" stroke="#050302" stroke-width="1"/><g transform="translate(-6 -6) scale(.6)">${PLANE.replace(/<\/?svg[^>]*>/g, "")}</g></g>`;
     else if (b.k === "truck") blips += `<g ${at}><rect x="-7" y="-7" width="14" height="14" rx="4" fill="${b.c}" stroke="#050302" stroke-width="1"/><g transform="translate(-6 -6) scale(.6)">${TRUCK.replace(/<\/?svg[^>]*>/g, "")}</g></g>`;
-    else blips += `<circle ${at} r="3.6" fill="${b.k === "human" ? "var(--you)" : "var(--ai)"}" stroke="#050302" stroke-width="1.2"/>`;
+    else blips += `<circle ${at} r="4" fill="${b.k === "human" ? "var(--you)" : "var(--ai)"}"/>`;
   }
-  let ticks = "";
-  for (let i = 0; i < 36; i++) { const a = i * Math.PI / 18 + h, big = i % 9 === 0; ticks += `<line x1="${(Math.sin(a) * (R - (big ? 7 : 4))).toFixed(1)}" y1="${(-Math.cos(a) * (R - (big ? 7 : 4))).toFixed(1)}" x2="${(Math.sin(a) * R).toFixed(1)}" y2="${(-Math.cos(a) * R).toFixed(1)}" stroke="#f5f0e8" stroke-opacity="${big ? .9 : .35}" stroke-width="${big ? 1.6 : 1}"/>`; }
-  const nx = Math.sin(h) * (R + 9), ny = -Math.cos(h) * (R + 9);
-  return `<svg viewBox="-100 -100 200 200"><defs><clipPath id="rc${v.id}"><circle r="${R}"/></clipPath>
-    <radialGradient id="rg${v.id}"><stop offset="0" stop-color="#2a1408" stop-opacity=".55"/><stop offset="1" stop-color="#0e0703" stop-opacity=".82"/></radialGradient></defs>
-    <circle r="${R}" fill="url(#rg${v.id})"/>
-    <g clip-path="url(#rc${v.id})" opacity=".18" stroke="#f5f0e8" fill="none"><circle r="${R / 3}"/><circle r="${R * 2 / 3}"/></g>
-    <path d="M0 0 L-26 -82 A86 86 0 0 1 26 -82Z" fill="#f5f0e8" opacity=".07"/>
-    ${ticks}${blips}
-    <circle r="${R}" fill="none" stroke="#f5f0e8" stroke-width="2.2"/>
-    <g transform="translate(${nx.toFixed(1)} ${ny.toFixed(1)})"><circle r="7" fill="#8e0f17" stroke="#f5f0e8" stroke-width="1.4"/><text y="3.3" text-anchor="middle" font-size="9" font-weight="800" fill="#f5f0e8" font-family="OMX, sans-serif">N</text></g>
-    <path d="M0 -8 L6 6 L0 3 L-6 6Z" fill="var(--you)" stroke="#050302" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
+  // the original's rose: a dark disc, two thin axes and N E S W outside the rim, all turning with the heading
+  let rose = "";
+  for (const [k, L] of [[0, "N"], [1, "E"], [2, "S"], [3, "W"]]) {
+    const a = h + k * Math.PI / 2, ex = Math.sin(a), ey = -Math.cos(a);
+    rose += `<text x="${(ex * (R + 9)).toFixed(1)}" y="${(ey * (R + 9) + 4.5).toFixed(1)}" text-anchor="middle" font-size="13" font-weight="800" fill="#fff" stroke="#000" stroke-width="2.6" paint-order="stroke" font-family="OMX, sans-serif" font-style="italic">${L}</text>`;
+    if (k < 2) rose += `<line x1="${(ex * R).toFixed(1)}" y1="${(ey * R).toFixed(1)}" x2="${(-ex * R).toFixed(1)}" y2="${(-ey * R).toFixed(1)}" stroke="#c8c8c8" stroke-opacity=".55" stroke-width="1.1"/>`;
+  }
+  return `<svg viewBox="-100 -100 200 200"><circle r="${R}" fill="#000" fill-opacity=".55"/>
+    ${rose}${blips}
+    <path d="M0 -9 L7 6 L0 3 L-7 6Z" fill="var(--you)" stroke="#1b3fa8" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
 }
 
-/* ---- analog dial: 0..80 mph over 240°, odometer under the hub ---- */
+/* ---- the analog dial, as the original draws it: white dashes, 0..100 round from lower left to lower
+   right, an orange needle off a grey hub, and the odometer's "%07.1f" in a dark capsule under it ---- */
 function dialSVG(v) {
-  const a0 = -210, span = 240, mx = 80, ang = s => (a0 + span * Math.min(s, mx) / mx) * Math.PI / 180;
+  const a0 = 130, span = 280, mx = 100, ang = s => (a0 + span * Math.min(s, mx) / mx) * Math.PI / 180;
   let t = "";
-  for (let s = 0; s <= mx; s += 5) { const a = ang(s), big = s % 10 === 0, r1 = big ? 70 : 76;
-    t += `<line x1="${(Math.cos(a) * r1).toFixed(1)}" y1="${(Math.sin(a) * r1).toFixed(1)}" x2="${(Math.cos(a) * 84).toFixed(1)}" y2="${(Math.sin(a) * 84).toFixed(1)}" stroke="${s >= 70 ? "#e0473f" : "#f5f0e8"}" stroke-width="${big ? 2.6 : 1.2}"/>`;
-    if (big) t += `<text x="${(Math.cos(a) * 57).toFixed(1)}" y="${(Math.sin(a) * 57 + 4).toFixed(1)}" text-anchor="middle" font-size="12" font-weight="800" fill="#d8cfc2" font-family="OMX, sans-serif">${s}</text>`; }
-  const a = ang(v.speed), odo = String(Math.floor(v.odo * 10)).padStart(5, "0");
-  return `<svg viewBox="-100 -100 200 200"><circle r="92" fill="#0e0703" fill-opacity=".72" stroke="#f5f0e8" stroke-width="2.4"/>${t}
-    <rect x="-24" y="26" width="48" height="16" rx="3" fill="#050302" stroke="#f5f0e8" stroke-opacity=".4"/>
-    <text x="0" y="38.5" text-anchor="middle" font-size="12" font-weight="800" fill="#f5f0e8" font-family="OMX, sans-serif" letter-spacing="1.5">${odo.slice(0, 4)}<tspan fill="#f0954a">${odo.slice(4)}</tspan></text>
-    <text x="0" y="58" text-anchor="middle" font-size="9" fill="#9c8f80" font-family="OMX, sans-serif" letter-spacing="2">MPH</text>
-    <line x1="${(-Math.cos(a) * 12).toFixed(1)}" y1="${(-Math.sin(a) * 12).toFixed(1)}" x2="${(Math.cos(a) * 80).toFixed(1)}" y2="${(Math.sin(a) * 80).toFixed(1)}" stroke="#e0473f" stroke-width="3.6" stroke-linecap="round"/>
-    <circle r="8" fill="#8e0f17" stroke="#f5f0e8" stroke-width="2"/></svg>`;
+  for (let s = 0; s <= mx; s += 10) { const a = ang(s), c = Math.cos(a), n = Math.sin(a);
+    t += `<line x1="${(c * 60).toFixed(1)}" y1="${(n * 60).toFixed(1)}" x2="${(c * 70).toFixed(1)}" y2="${(n * 70).toFixed(1)}" stroke="#fff" stroke-width="5" stroke-linecap="round"/>`;
+    t += `<text x="${(c * 86).toFixed(1)}" y="${(n * 86 + 4.5).toFixed(1)}" text-anchor="middle" font-size="13" font-weight="700" fill="#fff" stroke="#000" stroke-width="2" paint-order="stroke" font-family="OMX, sans-serif">${s}</text>`; }
+  const a = ang(v.speed), odo = v.odo.toFixed(1).padStart(7, "0");
+  const tip = [Math.cos(a) * 64, Math.sin(a) * 64], side = [Math.cos(a + Math.PI / 2) * 4.5, Math.sin(a + Math.PI / 2) * 4.5];
+  return `<svg viewBox="-100 -100 200 200">${t}
+    <path d="M${side[0].toFixed(1)} ${side[1].toFixed(1)} L${tip[0].toFixed(1)} ${tip[1].toFixed(1)} L${(-side[0]).toFixed(1)} ${(-side[1]).toFixed(1)}Z" fill="var(--orange)" stroke="#5a2a00" stroke-width="1"/>
+    <circle r="11" fill="#6b6b6b" stroke="#2b2b2b" stroke-width="2"/><circle r="5" cx="-2" cy="-2" fill="#9a9a9a"/>
+    <rect x="-40" y="56" width="80" height="22" rx="11" fill="#000" fill-opacity=".7"/>
+    <text x="0" y="72" text-anchor="middle" font-size="15" font-weight="800" fill="#fff" font-family="OMX, sans-serif" letter-spacing="1.6">${odo}</text></svg>`;
 }
 
 /* ---- state ---- */
-const O = { speedo: 0, map: 1, scale: 1, overlay: 1, split: 0 };
+const O = { speedo: 1, map: 1, scale: 1, overlay: 1, split: 0 };
 function makeView(id) {
   return { id, seed: id + 1, speed: 34, target: 40, heading: .4, x: 0, y: 0, odo: 142.3, score: id ? 48200 : 128450, chain: [], verdict: "", pre: 0, pumping: false,
     cam: 0, camT: 0, bay: false, zone: false, hold: 0, holding: false, challenge: null, el: null,
@@ -359,13 +370,12 @@ function build() {
   for (const v of V.slice(0, O.split ? 2 : 1)) {
     const el = document.createElement("div"); el.className = "view";
     el.innerHTML = scene(v.seed) + `<div class="hud">
-      <div class="score"><span class="lab t">SCORE</span><span class="num t">0</span></div>
+      <div class="score"><span class="lab">SCORE</span><span class="num">0</span></div>
       <div class="flash"></div><div class="tr"><div class="mk"></div><div class="cam"><span class="shoulder">L1</span><span class="t name"></span></div></div>
       <div class="clock" hidden></div>
       <div class="trick"><div class="chain t"></div><div class="pts"><span class="p t"></span><span class="mult t" hidden></span></div><div class="verdict t"></div></div>
       <div class="radar"></div>
-      <div class="speedo"><div class="pre"><span class="t">PRELOAD</span><span class="cap"><b></b></span></div>
-        <div class="digital"><span class="v t">0</span><span class="u t">MPH</span></div><div class="analog"></div></div>
+      <div class="speedo"><div class="digital"><span class="v t">0</span></div><div class="analog"></div><div class="pre"><b></b></div></div>
       <div class="prompts"></div></div>`;
     scr.appendChild(el); v.el = el;
     v.q = sel => el.querySelector(sel);
@@ -418,14 +428,15 @@ function renderTrick(v, fresh) {
   t.className = "trick" + (v.verdict ? " " + v.verdict : "") + (n || v.verdict ? "" : " out");
   if (!n) { t.querySelector(".chain").innerHTML = ""; t.querySelector(".p").textContent = ""; t.querySelector(".mult").hidden = true; t.querySelector(".verdict").textContent = ""; return; }
   t.querySelector(".chain").innerHTML = v.chain.map(([name], i) => (i ? '<span class="plus">+</span>' : "") + `<span class="${fresh && i === n - 1 ? "new" : ""}">${name}</span>`).join("");
-  const m = t.querySelector(".mult"); m.hidden = n < 2; m.textContent = "×" + n;
+  const m = t.querySelector(".mult"); m.hidden = n < 2 || v.verdict === "bailed"; m.textContent = "x" + n;
+  const pe = t.querySelector(".p"); if (fresh) { pe.classList.remove("new"); void pe.offsetWidth; pe.classList.add("new"); }
   t.querySelector(".p").textContent = (v.verdict === "landed" ? "+" : "") + (chainPts(v) * (v.verdict === "landed" ? n : 1)).toLocaleString("en-US");
   t.querySelector(".verdict").textContent = v.verdict === "landed" ? "LANDED" : v.verdict === "bailed" ? "BAILED" : "";
 }
 const ACT = { name: "Stunt Competition", c: "var(--stunt)", L: "S", goal: 5000, time: 60 };
 function renderPrompts(v) {
   let h = "";
-  if (v.bay) h += `<div class="prompt"><span class="ico" style="--c:#ffd8a0">${PLANE}</span><span class="what"><b class="t">Biplane</b><small>parked here</small></span><span class="act">${BTN.o()}<span class="t">Switch</span></span></div>`;
+  if (v.bay) h += `<div class="prompt"><span class="ico" style="--c:#ffd8a0">${PLANE}</span><span class="what"><b class="t">Biplane</b><small>parked here</small></span><span class="act">${BTN.o()}<span class="t">Accept</span></span></div>`;
   if (v.zone && !v.challenge) h += `<div class="prompt"><span class="ico" style="--c:${ACT.c}">${ACT.L}</span><span class="what"><b class="t">${ACT.name}</b><small>${ACT.goal.toLocaleString("en-US")} pts in ${ACT.time} s</small></span><span class="act">${BTN.o(true)}<span class="t">Hold to start</span></span></div>`;
   v.q(".prompts").innerHTML = h;
 }
@@ -453,7 +464,7 @@ function land(v) {
   const add = chainPts(v) * v.chain.length, from = v.score, t0 = performance.now();
   if (v.challenge) v.challenge.got += add;
   const step = now => { const k = Math.min(1, (now - t0) / 700); v.score = Math.round(from + add * k); v.q(".score .num").textContent = v.score.toLocaleString("en-US"); if (k < 1) requestAnimationFrame(step); };
-  requestAnimationFrame(step); const n = v.q(".score .num"); n.classList.remove("bump"); void n.offsetWidth; n.classList.add("bump");
+  requestAnimationFrame(step); const n = v.q(".score"); n.classList.remove("flash"); void n.offsetWidth; n.classList.add("flash");
   later(v, "clear", 1800, () => { v.chain = []; v.verdict = ""; renderTrick(v); });
 }
 function bail(v) {
@@ -498,7 +509,7 @@ function frame(now) {
     if (Math.hypot(v.x, v.y) > 380) { v.x *= .97; v.y *= .97; }
     v.odo += v.speed * dt / 3600;
     v.pre = v.pumping ? Math.min(1, v.pre + dt * 1.4) : Math.max(0, v.pre - dt * 1.8);
-    const b = v.q(".pre .cap b"); b.style.width = (v.pre * 100).toFixed(1) + "%"; b.classList.toggle("full", v.pre >= 1);
+    v.q(".pre b").style.height = (v.pre * 100).toFixed(1) + "%";
     v.q(".digital .v").textContent = Math.round(v.speed);
     if (O.speedo) v.q(".analog").innerHTML = dialSVG(v);
     if (O.map) v.q(".radar").innerHTML = radarSVG(v);
