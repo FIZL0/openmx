@@ -104,12 +104,25 @@ pub struct GpuWindow {
     pub waited: Duration,
     /// The display's refresh in hertz, where it says (V30): what `--render-scale auto` aims at.
     pub refresh: Option<f32>,
+    /// The present modes the surface offers, for [`GpuWindow::set_vsync`].
+    modes: Vec<wgpu::PresentMode>,
+}
+
+/// How the surface presents (P90): with VSync, Fifo — once a refresh, every adapter has it. Without,
+/// the newest frame replaces any not yet shown (Mailbox), which never tears, or, where there is no
+/// Mailbox, Immediate; Fifo again where there is neither.
+fn present_mode(vsync: bool, modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    let off = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate];
+    match vsync {
+        true => wgpu::PresentMode::Fifo,
+        false => off.into_iter().find(|m| modes.contains(m)).unwrap_or(wgpu::PresentMode::Fifo),
+    }
 }
 
 impl GpuWindow {
     /// Open a window as [`crate::window::Window::open`] does — for frames of `size` at `scale`, or
-    /// the whole screen — and a device to draw into it with.
-    pub fn open(size: Option<(usize, usize)>, scale: usize, title: &str) -> Result<GpuWindow, String> {
+    /// the whole screen — and a device to draw into it with, presenting with `vsync` or without.
+    pub fn open(size: Option<(usize, usize)>, scale: usize, title: &str, vsync: bool) -> Result<GpuWindow, String> {
         let mut events = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
         let mut state = State {
             title: title.to_string(),
@@ -163,12 +176,7 @@ impl GpuWindow {
             .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
             .or_else(|| caps.formats.first().copied())
             .ok_or("the surface takes no format")?;
-        // The loop paces itself at 60 Hz; a present that waits for the display would double that wait,
-        // so the newest frame replaces any not yet shown, and the display still never tears.
-        let present_mode = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
-            .into_iter()
-            .find(|m| caps.present_modes.contains(m))
-            .unwrap_or(wgpu::PresentMode::Fifo);
+        let present_mode = present_mode(vsync, &caps.present_modes);
         let renderer = Renderer::new(&adapter, format)?;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -197,7 +205,24 @@ impl GpuWindow {
             screen,
             waited: Duration::ZERO,
             refresh,
+            modes: caps.present_modes,
         })
+    }
+
+    /// Whether the present waits for the display (P90): applied live, the surface configured again
+    /// only when the mode changes.
+    pub fn set_vsync(&mut self, vsync: bool) {
+        let mode = present_mode(vsync, &self.modes);
+        if mode != self.config.present_mode {
+            self.config.present_mode = mode;
+            self.surface.configure(&self.renderer.device, &self.config);
+            println!("gpu: presenting {mode:?}");
+        }
+    }
+
+    /// Whether the present waits for the display's refresh: Fifo does.
+    pub fn waits(&self) -> bool {
+        self.config.present_mode == wgpu::PresentMode::Fifo
     }
 
     /// Take in whatever the window has said, without waiting.

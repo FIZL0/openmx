@@ -743,6 +743,10 @@ struct Args {
     /// display takes them and a headless ride draws 60. The ride's ticks are 30 a second either way
     /// (P52).
     draw_fps: Option<f32>,
+    /// `--vsync on|off` (P90): whether the picture waits for the display; the settings' when not given.
+    vsync: Option<bool>,
+    /// `--fps-limit off|N|refresh` (P90): the most pictures a second; the settings' when not given.
+    fps_limit: Option<menu::FrameLimit>,
     /// `--menu`: the front end, whatever else is asked.
     menu: bool,
     /// Whether a flag picked a ride, which skips the front end unless `--menu` says otherwise.
@@ -799,10 +803,35 @@ impl Args {
         }
     }
 
+    /// VSync and the frame limit (P90): `--vsync` and `--fps-limit` where given, else `settings`'.
+    fn pacing(&self, settings: &menu::Settings) -> (bool, menu::FrameLimit) {
+        (self.vsync.unwrap_or(settings.vsync), self.fps_limit.unwrap_or(settings.frame_limit))
+    }
+
     /// The pad seat player `i` reads.
     fn pad_seat(&self, i: usize) -> usize {
         self.pad_of.get(i).copied().unwrap_or(i)
     }
+}
+
+/// The window presented with VSync or without, live, and the least time a picture takes for the
+/// frame limit (P90, [`pace::frame_floor`]). A display that does not say its refresh is taken as 60.
+fn picture_floor(window: &mut Screen, (vsync, limit): (bool, menu::FrameLimit)) -> Option<Duration> {
+    window.set_vsync(vsync);
+    let refresh = window.refresh().unwrap_or(60.0);
+    pace::frame_floor(vsync, limit.fps(refresh), refresh, window.waits())
+}
+
+/// The menu's floor (P90): its counts — the key repeat, the slideshow — are 60 Hz frames, so it
+/// keeps 60 whatever the ride's picture does, and only a lower limit slows it. A present that waits
+/// on a 60 Hz display is that pace already, and a sleep on top of it would miss refreshes.
+fn menu_floor(window: &Screen, picture: Option<Duration>) -> Option<Duration> {
+    let refresh = window.refresh().unwrap_or(60.0);
+    let own = match window.waits() && (refresh - 60.0).abs() < 1.0 {
+        true => None,
+        false => Some(FRAME),
+    };
+    own.max(picture)
 }
 
 /// The garage's picks on a ride (P37): the first seat's bike, set and rider are the ride's own, and
@@ -1090,6 +1119,7 @@ fn front_end(args: Args) -> Result<(), String> {
     let (mut menu_sprites, mut menu_images) = (Vec::new(), false);
     // What the menu's frames cost before their sleep, for `--timings` (P47).
     let mut busy = Duration::ZERO;
+    let mut limiter = pace::Limiter::default();
     let mut escape = false;
     loop {
         if let Act::Ride(track) = &act {
@@ -1379,9 +1409,9 @@ fn front_end(args: Args) -> Result<(), String> {
                 break;
             }
         }
-        if let Some(rest) = FRAME.checked_sub(top.elapsed()) {
-            std::thread::sleep(rest);
-        }
+        let window = shell.window.as_mut().expect("the front end has a window");
+        let floor = picture_floor(window, args.pacing(&shell.front.menu.settings));
+        limiter.wait(args.draw_frame().or(menu_floor(window, floor)));
     }
     if args.timings {
         let ms = busy.as_secs_f64() * 1000.0 / shown.max(1) as f64;
@@ -2950,6 +2980,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut simulated = false;
     let mut ridden: Vec<Ridden> = Vec::with_capacity(args.players);
     let mut top = Instant::now();
+    let mut limiter = pace::Limiter::default();
+    // The settings a ride without the front end paces its picture by (P90).
+    let ride_settings = match (&front, &window) {
+        (None, Some(_)) => menu::load(&menu::store_dir(Disc::configured_path().ok().as_deref())).0,
+        _ => menu::Settings::default(),
+    };
     perf.begin();
     loop {
         if pacer.owed(Instant::now()) {
@@ -3981,9 +4017,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // for the display's refresh — or `--draw-fps`', which a headless ride, with no display to
         // wait for, takes as 60. The ticks owed meanwhile all run before the next picture, so a slow
         // picture is a jumpier one and never a slower game.
-        if let Some(rest) = args.draw_frame().and_then(|frame| frame.checked_sub(top.elapsed())) {
-            std::thread::sleep(rest);
-        }
+        // VSync and the frame limit (P90), from the front end's settings as they are now, or the
+        // file's for a ride without one; `--draw-fps` wins over both.
+        let floor = match window.as_mut() {
+            Some(w) => picture_floor(w, args.pacing(front.as_ref().map_or(&ride_settings, |f| &f.menu.settings))),
+            None => None,
+        };
+        limiter.wait(args.draw_frame().or(floor));
         stages.mark(stages::Stage::Pace);
         stages.frame();
         loaded.get_or_insert_with(|| (game_render::tally::Tally::now(), stages::bytes_read_mark()));
@@ -4482,6 +4522,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         headless: false,
         frames: None,
         draw_fps: None,
+        vsync: None,
+        fps_limit: None,
         online: None,
         peers: Vec::new(),
         seats: None,
@@ -4694,6 +4736,19 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
                 args.draw_fps = Some(fps);
             }
+            "--vsync" => {
+                args.vsync = Some(match next("on or off")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    w => return Err(format!("--vsync: on or off, not {w:?}")),
+                })
+            }
+            "--fps-limit" => {
+                let w = next("off, a number of pictures a second, or refresh")?;
+                args.fps_limit = Some(
+                    menu::FrameLimit::from_word(&w).ok_or_else(|| format!("--fps-limit: off, 1 to 1000, or refresh, not {w:?}"))?,
+                );
+            }
             "--online" => args.online = Some(next("this machine, like host@0.0.0.0:7000")?),
             "--peer" => args.peers.push(next("another machine, like g@192.168.1.20:7000")?),
             "--seats" => args.seats = Some(next("who sits where, like host,g,g")?),
@@ -4759,7 +4814,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
-                            [--draw-fps N]\n\
+                            [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
@@ -4829,6 +4884,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                      still sharp; auto, the default, lowers it while the GPU misses the\n\
                      display's refresh and raises it again when there is room. Without it,\n\
                      the front end's Settings row (Auto, 100%, 75%, 50%) says.\n\
+                     --vsync off draws without waiting for the display (it may tear), and\n\
+                     --fps-limit draws at most N pictures a second, or the display's refresh;\n\
+                     a limit under the refresh holds with VSync on too. Without them the\n\
+                     Settings rows say (VSync On, Frame limit Off). The ride's 30 Hz ticks are\n\
+                     the same at any of them; --draw-fps, a test's fixed rate, wins over both.\n\
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
                      rider, tumbles the bike and puts you back on it); --modifiers sets the\n\
                      game modifiers, percentages of what the ride loads (a tape keeps its own);\n\
