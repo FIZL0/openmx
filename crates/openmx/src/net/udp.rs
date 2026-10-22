@@ -12,6 +12,12 @@
 //! tick before it has heard every peer (ggrs' sync is round trips), so every machine has every
 //! seat's preset by the first tick, and builds each seat's table on it ([`Udp::presets`]), as the
 //! lobby's ride does from the room's picks (N13).
+//!
+//! Each machine's player's saved markers (P105, `saved_markers`) are too big for a card: they go in
+//! pieces of their own ([`MARKS`] ahead of the same id and card, then the whole's length, the piece's
+//! index and its bytes), every peer's offered again and again ([`Udp::offer`]) until the ride ticks.
+//! A machine holds its session back until it has every peer's ([`Udp::markers`]) — so no peer can
+//! finish ggrs' sync with it, and no ride can tick, before every machine has every seat's markers.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -19,10 +25,22 @@ use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use super::Lineup;
 
 /// The first bytes of every datagram on this path.
-pub const MAGIC: &[u8; 3] = b"omp";
+pub const MAGIC: &[u8; 3] = b"omq";
 
 /// The first bytes of a datagram from a build from N7 to N14, which sent no card.
 pub const NO_CARD: &[u8; 3] = b"omx";
+
+/// The first bytes of a datagram from a build from N15 to P104, which sent no saved markers.
+pub const NO_MARKERS: &[u8; 3] = b"omp";
+
+/// The first bytes of a piece of a machine's saved markers (P105).
+pub const MARKS: &[u8; 3] = b"omk";
+
+/// A piece of the saved markers' bytes: with the head it is well inside a datagram anywhere.
+pub const MARKS_PIECE: usize = 1024;
+
+/// The most saved-marker bytes a peer may send: five slots are about 12 KB.
+pub const MARKS_MAX: usize = 1 << 20;
 
 pub struct Udp {
     sock: UdpSocket,
@@ -34,6 +52,47 @@ pub struct Udp {
     card: Vec<u8>,
     /// Each peer's card, as its last datagram said it.
     cards: HashMap<String, Vec<u8>>,
+    /// This machine's saved markers (P105), for its first seat: empty for none.
+    marks: Vec<u8>,
+    /// Each peer's, as far as its pieces have come.
+    theirs: HashMap<String, Gathered>,
+}
+
+/// A peer's saved markers coming in pieces.
+#[derive(Debug)]
+struct Gathered {
+    data: Vec<u8>,
+    have: Vec<bool>,
+}
+
+impl Gathered {
+    fn whole(&self) -> Option<&[u8]> {
+        self.have.iter().all(|&h| h).then_some(&self.data[..])
+    }
+}
+
+/// How many pieces `len` bytes of saved markers go in: one at least, which says "none".
+fn pieces(len: usize) -> usize {
+    len.div_ceil(MARKS_PIECE).max(1)
+}
+
+/// A piece `d` (after the head) into `peer`'s markers in `theirs`; a piece of another length than
+/// the ones before it starts them again, and one that does not fit is dropped.
+fn gather(theirs: &mut HashMap<String, Gathered>, peer: &str, d: &[u8]) {
+    let (Some(len), Some(index)) = (d.get(..4), d.get(4..6)) else { return };
+    let len = u32::from_le_bytes(len.try_into().expect("four")) as usize;
+    let index = u16::from_le_bytes(index.try_into().expect("two")) as usize;
+    let bytes = &d[6..];
+    let start = index * MARKS_PIECE;
+    if len > MARKS_MAX || index >= pieces(len) || bytes.len() != len.saturating_sub(start).min(MARKS_PIECE) {
+        return;
+    }
+    let g = theirs.entry(peer.to_string()).or_insert_with(|| Gathered { data: vec![0; len], have: vec![false; pieces(len)] });
+    if g.data.len() != len {
+        *g = Gathered { data: vec![0; len], have: vec![false; pieces(len)] };
+    }
+    g.data[start..start + bytes.len()].copy_from_slice(bytes);
+    g.have[index] = true;
 }
 
 /// `name@host:port`.
@@ -46,7 +105,12 @@ pub fn named(s: &str) -> Result<(String, SocketAddr), String> {
 /// The build id a datagram carries, its card and the session's bytes after them; `None` when it
 /// carries none.
 pub fn untagged(d: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
-    let rest = d.strip_prefix(MAGIC)?;
+    tagged(MAGIC, d)
+}
+
+/// [`untagged`] for the datagrams that start with `magic`.
+fn tagged<'a>(magic: &[u8; 3], d: &'a [u8]) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+    let rest = d.strip_prefix(magic)?;
     let (&n, rest) = rest.split_first()?;
     let (id, rest) = rest.split_at_checked(n as usize)?;
     let (&n, rest) = rest.split_first()?;
@@ -67,7 +131,7 @@ impl Udp {
         let id = &build.as_bytes()[..build.len().min(255)];
         let card = &card[..card.len().min(255)];
         let head = [&MAGIC[..], &[id.len() as u8], id, &[card.len() as u8], card].concat();
-        Ok(Udp { sock, peers, head, card: card.to_vec(), cards: HashMap::new() })
+        Ok(Udp { sock, peers, head, card: card.to_vec(), cards: HashMap::new(), marks: Vec::new(), theirs: HashMap::new() })
     }
 
     /// The peers this machine talks to from now on: the tests', which bind every machine first.
@@ -107,6 +171,40 @@ impl Udp {
         Ok(Some(presets))
     }
 
+    /// This machine's saved markers (P105), which [`Udp::offer`] sends: its first seat's, in
+    /// whatever form the shell reads them back in (`saved_markers::to_wire`), empty for none.
+    pub fn set_markers(&mut self, marks: Vec<u8>) {
+        self.marks = marks;
+        self.marks.truncate(MARKS_MAX);
+    }
+
+    /// Every piece of this machine's saved markers to every peer: the shell's, every so often until
+    /// its ride ticks — by then every peer has them, or it would not have synchronised.
+    pub fn offer(&self) {
+        let len = (self.marks.len() as u32).to_le_bytes();
+        for i in 0..pieces(self.marks.len()) {
+            let bytes = &self.marks[(i * MARKS_PIECE).min(self.marks.len())..((i + 1) * MARKS_PIECE).min(self.marks.len())];
+            let d = [&MARKS[..], &self.head[MAGIC.len()..], &len, &(i as u16).to_le_bytes(), bytes].concat();
+            for (_, a) in &self.peers {
+                let _ = self.sock.send_to(&d, a);
+            }
+        }
+    }
+
+    /// Every seat's saved markers in `lineup`, this machine being `me`, once every peer's have all
+    /// come (`None` until then): each machine's first seat's as it sent them, any other seat's and an
+    /// empty seat's none (empty).
+    pub fn markers(&self, lineup: &Lineup, me: &str) -> Option<Vec<Vec<u8>>> {
+        let mut out = vec![Vec::new(); lineup.seats.len()];
+        for p in lineup.peers() {
+            let marks = if p == me { &self.marks[..] } else { self.theirs.get(&p)?.whole()? };
+            if let Some(&s) = lineup.mine(&p).first() {
+                out[s] = marks.to_vec();
+            }
+        }
+        Some(out)
+    }
+
     pub fn send(&self, to: &str, data: &[u8]) {
         if let Some((_, a)) = self.peers.iter().find(|p| p.0 == to) {
             // a full buffer or an unreachable peer is a lost datagram, which the session expects
@@ -122,17 +220,25 @@ impl Udp {
         let mut buf = [0u8; 2048];
         while let Ok((n, from)) = self.sock.recv_from(&mut buf) {
             let Some((p, _)) = self.peers.iter().find(|p| p.1 == from) else { continue };
-            let refused = match untagged(&buf[..n]) {
-                Some((id, card, data)) if id == mine => {
+            let tag = untagged(&buf[..n]).map(|t| (false, t)).or_else(|| tagged(MARKS, &buf[..n]).map(|t| (true, t)));
+            let refused = match tag {
+                Some((piece, (id, card, data))) if id == mine => {
                     if self.cards.get(p).is_none_or(|c| c != card) {
                         self.cards.insert(p.clone(), card.to_vec());
                     }
-                    got.push((p.clone(), data.to_vec()));
+                    match piece {
+                        true => gather(&mut self.theirs, p, data),
+                        false => got.push((p.clone(), data.to_vec())),
+                    }
                     continue;
                 }
-                Some((id, _, _)) => format!(
+                Some((_, (id, _, _))) => format!(
                     "{p} runs build \"{}\" and this machine \"{}\": two builds can't ride together",
                     String::from_utf8_lossy(id),
+                    String::from_utf8_lossy(mine)
+                ),
+                None if buf[..n].starts_with(NO_MARKERS) => format!(
+                    "{p} sends no saved markers (a build from before P105) and this machine runs \"{}\": two builds can't ride together",
                     String::from_utf8_lossy(mine)
                 ),
                 None if buf[..n].starts_with(NO_CARD) => format!(
@@ -271,6 +377,67 @@ mod tests {
         bad.send("host", b"w");
         wait(&mut host).unwrap();
         assert!(host.presets(&lineup, "host").unwrap_err().contains("k rides controller preset"));
+    }
+
+    #[test]
+    fn a_build_before_the_saved_markers_is_refused() {
+        let (mut a, g) = pair("0.1.0 dev, 30 Hz");
+        // N15's to P104's: the same id and card, under the magic before P105's
+        let d = [&NO_MARKERS[..], &[16], b"0.1.0 dev, 30 Hz", &[1, 0], b"\x01session"].concat();
+        g.send_to(&d, a.sock.local_addr().unwrap()).unwrap();
+        let why = wait(&mut a).unwrap_err();
+        assert!(why.contains("g sends no saved markers (a build from before P105)"), "{why}");
+    }
+
+    /// P105: each machine's saved markers reach every peer in pieces, whatever order they come in
+    /// and however often; nothing is known of a peer until every piece of its is in, and a piece
+    /// that does not fit is dropped. A machine with none says so in one piece, and the markers
+    /// never reach the session.
+    #[test]
+    fn every_seat_has_its_saved_markers_once_every_piece_is_in() {
+        let lineup = Lineup::parse("host,g,-,k,k").unwrap();
+        let mut host = Udp::bind_as(local(), vec![], "b", &[3]).unwrap();
+        let mut g = Udp::bind_as(local(), vec![("host".into(), host.at())], "b", &[2]).unwrap();
+        let k = Udp::bind_as(local(), vec![("host".into(), host.at())], "b", &[1, 0]).unwrap();
+        host.meet(vec![("g".into(), g.at()), ("k".into(), k.at())]);
+        let big: Vec<u8> = (0..3 * MARKS_PIECE + 17).map(|i| (i * 7 % 251) as u8).collect();
+        host.set_markers(b"the host's".to_vec());
+        g.set_markers(big.clone());
+        assert_eq!(host.markers(&lineup, "host"), None, "nobody heard yet");
+
+        // g's pieces by hand, from a socket standing in for it: the last first, one twice, and one cut short (dropped)
+        let n = pieces(big.len());
+        assert_eq!(n, 4);
+        let piece = |i: usize, bytes: &[u8]| [&MARKS[..], &g.head[MAGIC.len()..], &(big.len() as u32).to_le_bytes(), &(i as u16).to_le_bytes(), bytes].concat();
+        let raw = UdpSocket::bind(local()).unwrap();
+        let of = |i: usize| &big[i * MARKS_PIECE..((i + 1) * MARKS_PIECE).min(big.len())];
+        host.meet(vec![("g".into(), raw.local_addr().unwrap()), ("k".into(), k.at())]);
+        for d in [piece(3, of(3)), piece(1, of(1)), piece(1, of(1)), piece(0, &of(0)[1..]), piece(0, of(0))] {
+            raw.send_to(&d, host.at()).unwrap();
+        }
+        assert_eq!(wait(&mut host), Ok(Vec::new()), "the pieces are not the session's");
+        assert!(!host.theirs["g"].have[2], "{:?}", host.theirs["g"].have);
+        assert_eq!(host.markers(&lineup, "host"), None, "g's third piece is still out");
+        raw.send_to(&piece(2, of(2)), host.at()).unwrap();
+        wait(&mut host).unwrap();
+        assert_eq!(host.markers(&lineup, "host"), None, "k not heard yet");
+
+        // k has none: one empty piece, from offer
+        k.offer();
+        wait(&mut host).unwrap();
+        let want: Vec<Vec<u8>> = vec![b"the host's".to_vec(), big.clone(), vec![], vec![], vec![]];
+        assert_eq!(host.markers(&lineup, "host"), Some(want.clone()));
+        assert_eq!(host.cards.get("k").map(|c| &c[..]), Some(&[1u8, 0][..]), "a piece carries the card too");
+
+        // and the host's own reach g by offer, whole
+        host.meet(vec![("g".into(), g.at()), ("k".into(), k.at())]);
+        host.offer();
+        let until = Instant::now() + Duration::from_secs(2);
+        while g.theirs.get("host").and_then(Gathered::whole).is_none() && Instant::now() < until {
+            g.receive().unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(g.theirs.get("host").and_then(Gathered::whole), Some(&b"the host's"[..]));
     }
 
     #[test]

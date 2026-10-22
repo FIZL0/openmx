@@ -1422,8 +1422,10 @@ fn front_end(args: Args) -> Result<(), String> {
         }
         // 1P's saved markers on the room's track into this machine's lobby pick (P99), so every
         // machine starts the ride with them; the preset's line below sends a changed pick.
+        let profile = saved_markers::profile(&roster::clean_rider_name(&shell.front.menu.picks.0[0].look.name), 0);
+        // and a ride this machine drops in on brings them with its handshake (P105)
+        shell.front.network.disc.bring_markers(&shell.front.dir, &profile);
         if let Some(track) = shell.front.menu.lobby.room.as_ref().map(|r| r.track.clone()) {
-            let profile = saved_markers::profile(&roster::clean_rider_name(&shell.front.menu.picks.0[0].look.name), 0);
             let bike = shell.front.menu.lobby.pick.bike.clone();
             let text = pick_markers.of(&shell.front.dir, &track, &profile, &bike).to_string();
             shell.front.menu.lobby.set_markers(text);
@@ -2963,6 +2965,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let mut sim = world.seats[0].sim.clone();
             sim.phy = Arc::new(phy);
             sim.rng = room.seed;
+            // its saved markers came with its handshake on the ride's bike, and are kept on it (P105)
+            bike_words[0] = first.pick.bike.clone();
             let mut online = online::Online::drop_in(net, &room, &me, sim)?;
             online.modifiers(mods, vec![stock]);
             Some(online)
@@ -3027,14 +3031,20 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let here = pad_seats.as_ref().map_or(presets[0], |s| s.preset(args.pad_seat(0)));
             let mut online = online::Online::start(me, &args.peers, args.seats.as_deref(), &starts, here as u8)?;
             online.modifiers(mods, stock_phys.clone());
+            // this machine's player's saved markers on the track (P105), which every machine's
+            // seat for it starts on: they go to every peer before the first tick
+            let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
+            let profile = saved_markers::profile(&roster::clean_rider_name(&args.look.name), 0);
+            let mine = saved_markers::load(&dir, &args.track, &profile, &bike_words[0]);
+            online.saved_markers(&mine, &args.track, &bike_words[0]);
             Some(online)
         }
     };
     let mut online_frames = 0u32;
     // The session markers kept between rides (P99), in `markers/` beside `settings.txt`. A played
     // tape starts its first player on the markers it was made with and keeps nothing — its ride is
-    // the tape's, not the player's; online the seats' came with the lobby's picks and this machine's
-    // seat is kept as it is placed; otherwise every local player starts on the ones they kept on
+    // the tape's, not the player's; online the seats' came with the lobby's picks, a drop-in's handshake
+    // or the `--peer`s' pieces (P105) and this machine's seat is kept as it is placed; otherwise every local player starts on the ones they kept on
     // this track, and keeps what they place.
     let markers_dir = front.as_deref().map_or_else(|| menu::store_dir(Disc::configured_path().ok().as_deref()), |f| f.dir.clone());
     let rider_names: Vec<String> = std::iter::once(&args.look).chain(args.others.iter().map(|p| &p.look)).map(|l| roster::clean_rider_name(&l.name)).collect();
