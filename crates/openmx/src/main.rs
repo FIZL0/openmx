@@ -421,8 +421,8 @@ const MARKER_ALPHA: f32 = 0.2;
 const RIDER_GROUP: usize = 0;
 
 /// A view's markers' slot display while it is up (P88): the selection, which slots hold a marker,
-/// the label, and the other players in the ride by seat (P94).
-type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>);
+/// the label, the other players in the ride by seat (P94), and how far a Down or Up hold is (P106).
+type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u32);
 
 /// A marker's tick (P88) as the console says it.
 fn marker_line(did: markers::Did) -> String {
@@ -3962,10 +3962,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let filled: [bool; markers::SLOTS] = std::array::from_fn(|s| m.holds(s));
                 let pad = seat.sim.input.pad(0);
                 let held = seat.riding && markers::held(pad, seat.sim.table(), &seat.hands);
+                let holding = if seat.riding { markers::holding(pad, seat.sim.table(), &seat.hands) } else { 0 };
                 let others = markers::Markers::others(mine.unwrap_or(v), riding.len(), &riding);
                 banner
                     .update(Instant::now(), pick, filled, held)
-                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names), others))
+                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names), others, holding))
             })
             .collect();
         // The bays shown (P103), drawn below and marked on the radar.
@@ -4008,8 +4009,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let draw = |f: &mut Frame| {
                         hud::draw_marker_posts(f, &posts);
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
-                        if let Some((pick, filled, label, others)) = banner {
-                            hud::draw_markers(f, *pick, *filled, label, others);
+                        if let Some((pick, filled, label, others, holding)) = banner {
+                            hud::draw_markers(f, *pick, *filled, label, others, *holding);
                         }
                     };
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
@@ -4341,8 +4342,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let posts = marker_posts(seat, camera, (target.width, target.height), picks[v]);
             hud::draw_marker_posts(target, &posts);
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
-            if let Some(Some((pick, filled, label, others))) = shown_markers.get(v) {
-                hud::draw_markers(target, *pick, *filled, label, others);
+            if let Some(Some((pick, filled, label, others, holding))) = shown_markers.get(v) {
+                hud::draw_markers(target, *pick, *filled, label, others, *holding);
             }
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
             if !rig.hud.on && overlay_mode == menu::Overlay::Original {

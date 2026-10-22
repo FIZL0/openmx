@@ -547,8 +547,10 @@ pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>])
 /// The slot display, top centre of `frame`: five boxes — solid in the slot's colour where a marker
 /// is (P94: the colour of its post and its radar mark), the selected one ringed — then a box for each
 /// other player in the ride, `P2`… by seat (`others`, P94: a seat nobody rides is not listed), and
-/// the label under them. The markers fire on the press (P93), so there is no hold to show filling.
-pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, others: &[usize]) {
+/// the label under them, and under that how far a Down or Up hold is towards firing (`holding`,
+/// [`game_sim::markers::holding`]: P88's bar, back with the hold in P106; Left and Right fire on the
+/// press and leave it empty).
+pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, others: &[usize], holding: u32) {
     let scale = (frame.height as i32 / 224).max(1);
     let (boxw, gap) = (7 * scale, 3 * scale);
     let tags: Vec<String> = others.iter().map(|p| format!("P{}", p + 1)).collect();
@@ -557,7 +559,7 @@ pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label:
     let row = SLOTS as i32 * boxw + (SLOTS as i32 - 1) * gap + players;
     let label_w = label.chars().count() as i32 * 4 * scale;
     let w = row.max(label_w) + 2 * PAD * scale;
-    let h = boxw + 2 * scale + 6 * scale + 2 * PAD * scale;
+    let h = boxw + 5 * scale + 2 * scale + 6 * scale + 2 * PAD * scale;
     let (x, y) = ((frame.width as i32 - w) / 2, 8 * scale);
     panel(frame, x, y, w, h);
     let (bx, by) = (x + (w - row) / 2, y + PAD * scale);
@@ -587,6 +589,11 @@ pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label:
     let ty = by + boxw + 2 * scale;
     let ink = if matches!(pick, Pick::Player(_)) { PRESSED } else { INK };
     text(frame, x + (w - label_w) / 2, ty, label, ink, scale);
+    let bar_y = ty + 7 * scale;
+    let hold = game_sim::markers::HOLD_MS;
+    fill(frame, bx, bar_y, row, scale, EMPTY);
+    let done = row * holding.min(hold) as i32 / hold as i32;
+    fill(frame, bx, bar_y, done, scale, if holding >= hold { PRESSED } else { HELD });
 }
 
 /// A marker slot's colour (P94), [`crate::overlay::MARKER_COLOURS`], in this overlay's bytes.
