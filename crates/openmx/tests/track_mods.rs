@@ -1,0 +1,376 @@
+//! MD2: a track mod — a folder under `mods/tracks/<id>/` in openmx-mods' standard layout — lists in
+//! the pick, loads and rides; a broken one is one log line and left out; and with no mods (no folder,
+//! or the switch off) a disc track's ride is the same ride, hash for hash.
+//!
+//! The mod is written by the test: a flat two-level PLN v7 terrain of its own (256 samples a side,
+//! 4 feet a sample), a scene naming it as `MDFLAT.trn` the way a disc scene names its `.ps2.trn`, and
+//! one wall `.col` the scene places. No byte of it comes off a disc. The rides go through the shell's
+//! own binary headless, as `tests/switch_tape.rs`'s do, and skip without the disc, since the bike, its
+//! physics and the rider are the disc's.
+
+#[path = "../src/track_mods.rs"]
+#[allow(dead_code)]
+mod track_mods;
+
+use game_render::disc::Res;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn word(out: &mut Vec<u8>, w: u32) {
+    out.extend_from_slice(&w.to_le_bytes());
+}
+
+fn single(out: &mut Vec<u8>, f: f32) {
+    word(out, f.to_bits());
+}
+
+/// A terrain node: full relief, half a unit a raw height, the block and the children's table.
+fn node(out: &mut Vec<u8>, block: u16, children_at: u32) {
+    for f in [1.0, 0.5, 0.0, 0.0] {
+        single(out, f);
+    }
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&block.to_le_bytes());
+    out.extend_from_slice(&[0; 4 + 64 + 4]);
+    out.push(1);
+    word(out, children_at);
+}
+
+/// A flat terrain at height 0, two levels as the disc's are (a one-level tree is MX vs. ATV's and the
+/// port's ground sizes it at 16 samples, not 256): one root cell, one block all of its 16×16 leaves
+/// share, no palette, no texture pages, 4 feet a sample.
+fn flat_terrain() -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"PLN\0");
+    out.push(b'7');
+    out.extend_from_slice(b"ps2\0");
+    let mut name = [0u8; 32];
+    name[..6].copy_from_slice(b"mdflat");
+    out.extend_from_slice(&name);
+    word(&mut out, 0); // no palette
+    single(&mut out, 4.0);
+    word(&mut out, 2); // two levels
+    let tree_slot = out.len();
+    word(&mut out, 0);
+    word(&mut out, 1); // the words in front of the blocks
+    word(&mut out, 1); // blocks
+    word(&mut out, 0);
+    word(&mut out, 0); // no texture table
+    word(&mut out, 0); // and no pages
+    // The block: its base, 17 rows of 20 heights (17 used), a normal a sample, a byte a sample not
+    // read, and the surfaces.
+    word(&mut out, 0);
+    out.extend(std::iter::repeat_n(0u8, 17 * 20 * 2));
+    for _ in 0..289 {
+        out.extend_from_slice(&[0, 127, 0]);
+    }
+    out.extend(std::iter::repeat_n(0u8, 289));
+    out.extend(std::iter::repeat_n(0x81u8, 289));
+    let tree_at = out.len() as u32;
+    out[tree_slot..tree_slot + 4].copy_from_slice(&tree_at.to_le_bytes());
+    // The root's one cell the scene's width of 1 covers, and its 16×16 leaves.
+    let root_children = tree_at + 97;
+    let cell_at = root_children + 256 * 4;
+    let cell_children = cell_at + 97;
+    let leaf_at = cell_children + 256 * 4;
+    node(&mut out, 0, root_children);
+    word(&mut out, cell_at);
+    for _ in 1..256 {
+        word(&mut out, 0);
+    }
+    node(&mut out, 0, cell_children);
+    for _ in 0..256 {
+        word(&mut out, leaf_at);
+    }
+    node(&mut out, 0, 0);
+    out
+}
+
+/// A wall: two triangles in the x-y plane, 40 feet wide and 20 high, facing -z.
+fn wall_col() -> Vec<u8> {
+    let mut out = Vec::new();
+    word(&mut out, 1234);
+    out.extend_from_slice(b"col\0");
+    word(&mut out, 2); // version
+    word(&mut out, 0); // a mesh
+    word(&mut out, 1); // its surface
+    for v in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]] {
+        v.into_iter().for_each(|f| single(&mut out, f));
+    }
+    word(&mut out, 0); // the transform's fourth column
+    word(&mut out, 4); // vertices
+    word(&mut out, 1); // nodes
+    word(&mut out, 2); // triangles
+    word(&mut out, 0); // wide
+    for v in [[-20.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 20.0, 0.0], [-20.0, 20.0, 0.0]] {
+        v.into_iter().for_each(|f| single(&mut out, f));
+    }
+    word(&mut out, 0); // no normals
+    single(&mut out, 400.0);
+    [0.0, 10.0, 0.0, 20.0, 10.0, 0.5].into_iter().for_each(|f| single(&mut out, f));
+    out.extend_from_slice(&0x8000u16.to_le_bytes());
+    out.extend_from_slice(&0x8001u16.to_le_bytes());
+    for tri in [[0u16, 1, 2], [0, 2, 3]] {
+        single(&mut out, 0.0);
+        [0.0, 0.0, -1.0].into_iter().for_each(|f| single(&mut out, f));
+        tri.into_iter().for_each(|i| out.extend_from_slice(&i.to_le_bytes()));
+    }
+    out
+}
+
+/// The scene, CRLF INI as the disc's: the start 300 feet in, facing +z, and the wall off to the side.
+fn scene() -> String {
+    [
+        "[SceneInfo]",
+        "SceneName=MD2 Flat",
+        "DefaultStartPosition=512.00,5.00,300.00",
+        "DefaultStartDirection=0.00,0.00,1.00",
+        "[Environment]",
+        "TerrainFile=MDFLAT.trn",
+        "TerrainWidth=1",
+        "TerrainBreadth=1",
+        "TerrainWidthScale=4.00",
+        "TerrainBreadthScale=4.00",
+        "TerrainBorderWidth=0.00",
+        "MinDivisionSize=16.00",
+        "[Fog]",
+        "ColorRGB=150,151,139",
+        "[CollisionObjects]",
+        "NumberOfCollisionObjects=1",
+        "[Object1]",
+        "COL=mdwall.col",
+        "Position=700.00,0.00,500.00",
+        "",
+    ]
+    .join("\r\n")
+}
+
+fn mod_json(id: &str) -> String {
+    format!(
+        r#"{{
+  "standard": 1,
+  "kind": "track",
+  "id": "{id}",
+  "name": "MD2 Flat",
+  "source": {{"game": "Real elevation", "data": "generated by openmx's MD2 test", "date": "2026-10-22"}},
+  "version": "1.0.0",
+  "author": "crates/openmx/tests/track_mods.rs",
+  "permission": "public-domain",
+  "todo": []
+}}"#
+    )
+}
+
+fn write(root: &Path, rel: &str, bytes: impl AsRef<[u8]>) {
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A good track mod, `md2_flat`, in `mods/tracks/`.
+fn good(tracks: &Path, id: &str) {
+    let dir = tracks.join(id);
+    write(&dir, "mod.json", mod_json(id));
+    write(&dir, "Env/MDFLAT/MDFLAT.scn", scene());
+    write(&dir, "Env/MDFLAT/MDFLAT.ps2.trn", flat_terrain());
+    write(&dir, "Col/mdwall.col", wall_col());
+}
+
+/// A `mods/` folder with the good mod, a music pack, and one of each kind of broken track mod.
+fn mods_folder(name: &str) -> PathBuf {
+    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md2").join(name).join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    let tracks = mods.join("tracks");
+    good(&tracks, "md2_flat");
+    // Broken, one way each.
+    good(&tracks, "md2_badjson");
+    write(&tracks.join("md2_badjson"), "mod.json", "{\"standard\": 1, \"kind\": \"track\",");
+    good(&tracks, "md2_noscene");
+    std::fs::remove_file(tracks.join("md2_noscene/Env/MDFLAT/MDFLAT.scn")).unwrap();
+    good(&tracks, "md2_twoscenes");
+    write(&tracks.join("md2_twoscenes"), "Env/MDFLAT/other.scn", scene());
+    good(&tracks, "md2_noterrain");
+    std::fs::remove_file(tracks.join("md2_noterrain/Env/MDFLAT/MDFLAT.ps2.trn")).unwrap();
+    good(&tracks, "md2_badterrain");
+    write(&tracks.join("md2_badterrain"), "Env/MDFLAT/MDFLAT.ps2.trn", &flat_terrain()[..300]);
+    good(&tracks, "md2_wrongid");
+    write(&tracks.join("md2_wrongid"), "mod.json", mod_json("md2_other"));
+    good(&tracks, "md2_later");
+    write(&tracks.join("md2_later"), "mod.json", mod_json("md2_later").replace("\"standard\": 1", "\"standard\": 2"));
+    good(&tracks, "md2_noversion");
+    write(&tracks.join("md2_noversion"), "mod.json", mod_json("md2_noversion").replace("\"1.0.0\"", "\"one\""));
+    good(&tracks, "md2_badspawn");
+    write(
+        &tracks.join("md2_badspawn"),
+        "mod.json",
+        mod_json("md2_badspawn").replace("\"todo\": []", "\"todo\": [], \"spawn\": {\"position\": [1, 2], \"direction\": [0, 0, 1], \"from\": \"x\"}"),
+    );
+    write(&tracks, "md2_nojson/Env/MDFLAT/MDFLAT.scn", scene());
+    // A music pack is skipped quietly, wherever it is put.
+    write(&tracks, "md2_music/mod.json", mod_json("md2_music").replace("\"track\"", "\"music\""));
+    // And a loose file in tracks/ is not a mod.
+    write(&tracks, "README.txt", "not a mod");
+    mods
+}
+
+const BROKEN: [&str; 11] = [
+    "md2_badjson",
+    "md2_badspawn",
+    "md2_badterrain",
+    "md2_later",
+    "md2_nojson",
+    "md2_noscene",
+    "md2_noterrain",
+    "md2_noversion",
+    "md2_twoscenes",
+    "md2_wrongid",
+    "md2_flat_case",
+];
+
+#[test]
+fn a_mod_folder_lists_and_the_broken_ones_are_one_line_each() {
+    let mods = mods_folder("scan");
+    // Two files that differ only in case break a mod, where the file system can hold both.
+    good(&mods.join("tracks"), "md2_flat_case");
+    write(&mods.join("tracks/md2_flat_case"), "col/MDWALL.col", wall_col());
+    let case_sensitive = std::fs::read_dir(mods.join("tracks/md2_flat_case")).unwrap().count() == 4;
+
+    let scan = track_mods::scan(&mods);
+    let ids: Vec<&str> = scan.tracks.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, ["md2_flat"], "{:#?}", scan.log);
+    let t = &scan.tracks[0];
+    assert_eq!((t.name.as_str(), t.stem.as_str()), ("MD2 Flat", "MDFLAT"));
+    for id in BROKEN {
+        if id == "md2_flat_case" && !case_sensitive {
+            continue;
+        }
+        let lines: Vec<&String> = scan.log.iter().filter(|l| l.starts_with(&format!("mods: tracks/{id} left out: "))).collect();
+        assert_eq!(lines.len(), 1, "{id}: {:#?}", scan.log);
+    }
+    assert_eq!(scan.log.len(), BROKEN.len() - usize::from(!case_sensitive), "{:#?}", scan.log);
+    assert!(!scan.log.iter().any(|l| l.contains("md2_music") || l.contains("README")), "{:#?}", scan.log);
+    for line in &scan.log {
+        println!("{line}");
+    }
+
+    // No folder: nothing, and nothing said.
+    let none = track_mods::scan(&mods.join("nowhere"));
+    assert!(none.tracks.is_empty() && none.log.is_empty());
+    // By id, as a ride finds it; a broken one says why, an unknown one says it is not there.
+    assert_eq!(track_mods::find(&mods, "md2_flat").as_ref(), Ok(t));
+    assert!(track_mods::find(&mods, "md2_noterrain").unwrap_err().contains("MDFLAT"));
+    assert!(track_mods::find(&mods, "md2_absent").is_err());
+    assert!(track_mods::find(&mods, "../md2_flat").is_err());
+}
+
+/// The folder reads as an archive does: members by name or by the end of their path, in any case
+/// and with either slash, and the scene, terrain and collision readers take what it hands out.
+#[test]
+fn a_mod_folder_reads_as_an_archive() {
+    let mods = mods_folder("res");
+    let res = Res::folder(&mods.join("tracks/md2_flat")).expect("the folder opens");
+    let names: Vec<&str> = res.entries().iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["Col\\mdwall.col", "Env\\MDFLAT\\MDFLAT.ps2.trn", "Env\\MDFLAT\\MDFLAT.scn", "mod.json"]);
+    assert_eq!(res.read("env/mdflat/mdflat.scn").unwrap(), scene().as_bytes());
+    assert_eq!(res.read_suffix("MDWALL.COL").unwrap(), wall_col());
+    assert!(res.read("Env\\MDFLAT\\absent.scn").is_err());
+
+    let scene = game_sim::track::Scene::parse(&res.read_suffix(".scn").unwrap()).unwrap();
+    assert_eq!(scene.collision.len(), 1);
+    let terrain = track_mods::terrain_bytes(&res, &scene.terrain_file).unwrap();
+    let terrain = game_sim::track::Terrain::parse(&terrain).expect("the generated terrain parses");
+    assert_eq!((terrain.levels, terrain.blocks), (2, 1));
+    for (sx, sz) in [(0, 0), (128, 77), (254, 254)] {
+        let cell = terrain.cell(sx, sz, 1).expect("a cell");
+        assert!(cell.height.iter().all(|h| h.0 == 0.0), "{sx},{sz}");
+    }
+    let col = res.read_suffix(&scene.collision[0].file).unwrap();
+    game_sim::track::Mesh::parse(&col).expect("the wall parses");
+
+    // The same files handed over in memory, as the browser's storage would.
+    let files = res.entries().iter().map(|e| (e.path(), res.read(&e.name).unwrap())).collect();
+    let mem = Res::files(files).unwrap();
+    assert_eq!(mem.read_suffix("mdflat.scn").unwrap(), scene_text_bytes());
+    assert!(Res::files(vec![("a/B.col".into(), vec![1]), ("A/b.col".into(), vec![2])]).is_err());
+}
+
+fn scene_text_bytes() -> Vec<u8> {
+    scene().into_bytes()
+}
+
+// ---- riding it, through the shell -----------------------------------------------------------------
+
+/// Ride the shell headless with these arguments, or `None` with no disc to ride.
+fn shell(args: &[&str]) -> Option<(bool, String)> {
+    if let Err(e) = game_render::disc::Disc::open_configured() {
+        eprintln!("skipped: {e}");
+        return None;
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = Command::new(env!("CARGO_BIN_EXE_openmx")).current_dir(&root).arg("--headless").args(args).output().expect("the shell runs");
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_ne!(out.status.code(), Some(101), "the shell panicked:\n{said}");
+    Some((out.status.success(), said))
+}
+
+fn line<'a>(said: &'a str, prefix: &str) -> &'a str {
+    said.lines().find(|l| l.starts_with(prefix)).unwrap_or_else(|| panic!("no `{prefix}` line:\n{said}"))
+}
+
+/// Full throttle for `frames` ticks at the engine's capped `dt`.
+fn throttle_tape(frames: usize) -> PathBuf {
+    let mut text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape throttle\n");
+    let report = format!("0079ff{:02x}7f7f7f7f000000000000{:02x}{}", 0xbf, 0xff, "00".repeat(17));
+    for _ in 0..frames {
+        text += &format!("frame 0x3d08850a 0x{report} -\n");
+    }
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md2").join("throttle.tape");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn a_track_mod_loads_and_rides_and_a_broken_one_does_not_crash() {
+    let mods = mods_folder("ride");
+    let tape = throttle_tape(150);
+    let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
+    let Some((ok, said)) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--seconds", "20"]) else { return };
+    assert!(ok, "the mod did not ride:\n{said}");
+    println!("{said}");
+    assert!(line(&said, "mods: md2_flat (MD2 Flat) from ").ends_with("md2_flat"));
+    assert!(line(&said, "MD2 Flat: 0 props, 1 collision shapes").contains("ground 1020 x 1020 feet in 256 x 256 samples"), "\n{said}");
+    assert_eq!(line(&said, "solid: "), "solid: 1 of 1 collision meshes");
+    assert!(line(&said, "start: ").starts_with("start: 512, "), "\n{said}");
+    // Five seconds on the throttle up +z from z = 300 goes somewhere, and stays on the ground.
+    let end: Vec<f32> = line(&said, "end: ")[5..].split(", ").map(|v| v.trim().parse().unwrap()).collect();
+    assert!(end[2] > 400.0 && end[1].abs() < 20.0 && (end[0] - 512.0).abs() < 100.0, "{end:?}\n{said}");
+    // And the same tape on the mod is the same ride.
+    let (_, again) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--seconds", "20"]).unwrap();
+    assert_eq!(line(&said, "ride hash"), line(&again, "ride hash"));
+
+    // A broken mod asked for by name is an error, not a crash; so is a mod with the mods off.
+    let (ok, said) = shell(&["--track", "md2_noterrain", "--mods", mods_arg, "--frames", "2"]).unwrap();
+    assert!(!ok && said.contains("MDFLAT"), "\n{said}");
+    let (ok, said) = shell(&["--track", "md2_flat", "--mods", "off", "--frames", "2"]).unwrap();
+    assert!(!ok && said.contains("md2_flat"), "\n{said}");
+}
+
+/// With no mods, a disc track's ride is the ride it was: the same tape on free06 hashes the same with
+/// a mods folder full of mods, with the mods off, and with no folder at all.
+#[test]
+fn a_disc_ride_is_the_same_with_or_without_mods() {
+    let mods = mods_folder("disc");
+    let tape = throttle_tape(150);
+    let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
+    let empty = mods.parent().unwrap().join("empty");
+    let ride = |m: &str| shell(&["--track", "free06", "--mods", m, "--play", tape, "--seconds", "20"]);
+    let Some((ok, with)) = ride(mods_arg) else { return };
+    assert!(ok, "\n{with}");
+    assert!(!with.contains("mods: "), "a disc ride read the mods:\n{with}");
+    let (_, off) = ride("off").unwrap();
+    let (_, none) = ride(empty.to_str().unwrap()).unwrap();
+    assert_eq!(line(&with, "ride hash"), line(&off, "ride hash"));
+    assert_eq!(line(&with, "ride hash"), line(&none, "ride hash"));
+    println!("{}", line(&with, "ride hash"));
+}
