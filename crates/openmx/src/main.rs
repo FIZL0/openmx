@@ -1608,7 +1608,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         assets.make_texture(dress::NAME_TEXTURE, k.texture(&args.rider, &args.look, &args.bike));
     }
     // The trees and bushes the scene's ecosystem scatters over the ground (V48).
-    match game_render::eco::Grove::load(&archives, &look, game_render::eco::extent(&place.terrain, &sim_terrain), &mut assets) {
+    match game_render::eco::Grove::load(&archives, &look, &place.terrain, &sim_terrain, &mut assets) {
         Ok(grove) => look.ecosystem = grove,
         Err(e) => println!("ecosystem: {e}"),
     }

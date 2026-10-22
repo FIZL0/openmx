@@ -26,8 +26,8 @@
 //! u32 count, count x 9 bytes       the plants: u8 species, u16 x, y, z, i8 height, i8 width
 //! ```
 //!
-//! A plant's species byte is its species' slot; its top bit asks the loader to
-//! stand it on the ground, which the scene loader never lets it do (and no plant of free09 asks).
+//! A plant's species byte is its species' slot; its top bit asks the loader to stand it on the
+//! ground, and the loader does ([`Ecosystem::stand`]): every plant of free06 asks, none of free09's.
 //! Its position is in 65536ths of the map's larger side, `samples x spacing` of the terrain: on
 //! free09 6912 feet, the same number the original keeps beside the plants. The two signed bytes
 //! spread the species' size, height down towards its minimum and width up towards its maximum, the
@@ -81,7 +81,7 @@ pub struct Plant {
     pub pos: V3,
     pub height: f32,
     pub width: f32,
-    /// The bit that asks to be stood on the ground.
+    /// The bit that asks to be stood on the ground ([`Ecosystem::stand`]).
     pub snap: bool,
 }
 
@@ -208,6 +208,19 @@ impl Ecosystem {
         }
         Ok(Ecosystem { version, species, shrubbery, probability, plants })
     }
+
+    /// Stand every plant whose species byte asks for it on the ground, as the original's plant reader
+    /// does while it reads them: `ground` answers the height of the terrain under a point (the point's
+    /// own height where there is no terrain), and the reader keeps it the way the file keeps a height,
+    /// as a whole number of 65536ths of `extent` cut towards zero, so a stood plant sinks into the
+    /// ground by less than one of them. The others keep the file's height, which on free06 is up to
+    /// fifty feet off the ground under it.
+    pub fn stand(&mut self, extent: f32, mut ground: impl FnMut(V3) -> f32) {
+        let (scale, per) = (extent / 65536.0, 65536.0 / extent);
+        for p in self.plants.iter_mut().filter(|p| p.snap) {
+            p.pos.y = ((ground(p.pos) * per) as i32 as u16) as f32 * scale;
+        }
+    }
 }
 
 impl Species {
@@ -273,6 +286,13 @@ impl Species {
 pub fn extent(layout: &game_sim::track::TerrainLayout, terrain: &game_sim::track::Terrain) -> f32 {
     let per = 16u32.pow(terrain.levels) as f32;
     layout.width.max(layout.breadth) as f32 * per * terrain.scale.0
+}
+
+/// The terrain's height under a point, by the original's own point query on it (the one its plant
+/// reader stands a plant with); the point's own height off the terrain.
+pub fn ground_under(layout: &game_sim::track::TerrainLayout, terrain: &game_sim::track::Terrain, p: V3) -> f32 {
+    let ground = game_sim::world::Ground::new(terrain, layout);
+    game_sim::contact_search::ground(&ground.field(), ps2_float::Vf::new(p.x, p.y, p.z, 1.0)).point.y()
 }
 
 /// How a plant is drawn from where the camera is.
@@ -383,14 +403,23 @@ impl Grove {
         Grove { ecosystem, models, billboards, half, near, far, turned }
     }
 
-    /// The scene's grove, if it names an ecosystem the archives have; `extent` as [`extent`].
-    pub fn load(archives: &[Res], scene: &crate::scene::Scene, extent: f32, assets: &mut Assets) -> Result<Option<Grove>, String> {
+    /// The scene's grove, if it names an ecosystem the archives have, its plants placed over the
+    /// track's terrain (`layout` the scene's statement of its size) and stood on it where they ask.
+    pub fn load(
+        archives: &[Res],
+        scene: &crate::scene::Scene,
+        layout: &game_sim::track::TerrainLayout,
+        terrain: &game_sim::track::Terrain,
+        assets: &mut Assets,
+    ) -> Result<Option<Grove>, String> {
         let Some(file) = scene.ecosystem_file.as_deref() else { return Ok(None) };
         let bytes = archives
             .iter()
             .find_map(|a| a.read_suffix(file).ok())
             .ok_or_else(|| format!("no {file} in the track's archives"))?;
-        let eco = Ecosystem::parse(&bytes, extent).map_err(|e| format!("{file}: {e}"))?;
+        let extent = extent(layout, terrain);
+        let mut eco = Ecosystem::parse(&bytes, extent).map_err(|e| format!("{file}: {e}"))?;
+        eco.stand(extent, |p| ground_under(layout, terrain, p));
         Ok(Some(Grove::new(eco, scene.eco_distance_3d, scene.eco_distance_2d, archives, assets)))
     }
 
