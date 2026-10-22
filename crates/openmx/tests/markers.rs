@@ -433,7 +433,7 @@ fn online_an_empty_seat_is_never_a_pick() {
         let first = Sim::new(1);
         let mut sims: Vec<Sim> = (0..3).map(|_| first.clone()).collect();
         let mut world = Flat::default();
-        let mut rides = net::rides::Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None };
+        let mut rides = net::rides::Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None };
         let mut seen = Vec::new();
         for t in 0..2 * (SLOTS + 2) {
             let me = if t % 2 == 0 { Report::from_buttons(Control::Right.mask()) } else { Report::from_buttons(0) };

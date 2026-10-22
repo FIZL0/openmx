@@ -445,14 +445,7 @@ fn marker_line(did: markers::Did) -> String {
 fn switch_machine(seat: &mut Seat, rig: &mut Rig, to: Kind, place: &mut dyn sim_world::World) -> Option<Kind> {
     match seat.garage.switch(to, &mut seat.sim, place) {
         Ok(up) => {
-            let cam = &mut rig.follow_mut(up).cam;
-            cam.snap = true;
-            let name = (!cam.presets.is_empty()).then(|| cam.preset().name.clone());
-            if let Some(name) = name {
-                rig.hud.note_camera(&name);
-            }
-            rig.hud.note_vehicle(up.name());
-            println!("vehicle: {}", up.name());
+            took(rig, up);
             Some(up)
         }
         Err(e) => {
@@ -473,6 +466,19 @@ fn seat_offer(seat: &Seat, bays: &[vehicle::Bay]) -> Option<Machine> {
     let speed = rider.ride.chassis.speed.0;
     vehicle::offer(bays, seat.garage.up, rider.ride.position(), speed, rider.crash.is_some())
         .filter(|m| m.kind().is_some_and(|k| seat.garage.machines().contains(&k)))
+}
+
+/// A player's machine `up` just taken, offline or online (N17): its camera starts where it is, and
+/// the HUD and the console say so.
+fn took(rig: &mut Rig, up: Kind) {
+    let cam = &mut rig.follow_mut(up).cam;
+    cam.snap = true;
+    let name = (!cam.presets.is_empty()).then(|| cam.preset().name.clone());
+    if let Some(name) = name {
+        rig.hud.note_camera(&name);
+    }
+    rig.hud.note_vehicle(up.name());
+    println!("vehicle: {}", up.name());
 }
 
 /// What the original's HUD shows of a player's own ride (V26, V28): their odometer, which machine is
@@ -3043,6 +3049,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             Some(online)
         }
     };
+    // The ride's biplane, which a seat's switch online takes a copy of (N17), on the ride's
+    // modifiers; and the machine this machine's player last picked online, which its pad carries.
+    let plane_like = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.clone());
+    if let Some(on) = online.as_mut() {
+        on.planes(stock_plane, plane_like.as_ref());
+    }
+    let mut online_want: Option<Kind> = None;
     let mut online_frames = 0u32;
     // The session markers kept between rides (P99), in `markers/` beside `settings.txt`. A played
     // tape starts its first player on the markers it was made with and keeps nothing — its ride is
@@ -3302,7 +3315,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // key stays for the keyboard.
         // A tape being written takes the switch at the tick it is on (P102), as it takes modifiers.
         let swap_now = held(&window, key::M);
-        if swap_now && !swap_key && head.is_none() && online.is_none() {
+        if swap_now && !swap_key && online.is_some() {
+            // Online the key is a pick in the pad like the pause's (N17).
+            online_want = Some(world.seats[0].garage.up.other()).filter(|&to| to == Kind::Bike || world.seats[0].garage.plane.is_some());
+        } else if swap_now && !swap_key && head.is_none() {
             let to = world.seats[0].garage.up.other();
             let up = switch_machine(&mut world.seats[0], &mut rigs[0], to, &mut world.place);
             if let (Some(up), Some(tape)) = (up, &mut world.tape) {
@@ -3409,10 +3425,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     break;
                 }
                 Act::Quit => break,
-                // A played tape switches where it says and nowhere else, and online the ride is the
-                // bike's (its sessions carry no machine).
-                Act::Switch(..) if online.is_some() => {
-                    front.menu.note = Some("Online rides the bike: there is no switching machine.".into());
+                // A played tape switches where it says and nowhere else. Online the pick goes into
+                // this machine's pad (N17), and every machine switches the seat at the tick it lands
+                // on; the garage follows below, once the session has stepped it.
+                Act::Switch(i, to) if online.is_some() => {
+                    match (i, Kind::parse(to.word())) {
+                        (0, Ok(to)) if world.seats[0].garage.plane.is_some() || to == Kind::Bike => {
+                            online_want = Some(to);
+                            println!("vehicle: {} at the next tick every machine agrees", to.name());
+                        }
+                        _ => front.menu.note = Some("This ride has no such machine for you.".into()),
+                    }
                 }
                 Act::Switch(i, to) if head.is_none() => {
                     let to = Kind::parse(to.word()).ok();
@@ -3428,9 +3451,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // Open to online players (N10): host a lobby on this ride, which rides on as the
                 // session's from here, alone until a peer drops in.
                 Act::OpenOnline if online.is_none() && front.menu.opening == menu::Opening::Can => {
-                    if world.seats[0].garage.up != Kind::Bike {
-                        front.menu.note = Some("Open to Online rides the bike: switch to it first.".into());
-                    } else {
+                    {
                         let settings = &front.menu.settings;
                         let mut room = openmx_net::Room::new(&settings.name, &args.track, settings.lobby_seats);
                         room.wrecks = args.wrecks && settings.wrecks;
@@ -3442,9 +3463,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         room.take(openmx_net::HOST, &[pick]);
                         (room.riding, room.drop_in) = (true, true);
                         let net = front.network.open(&mut front.menu, room);
-                        match online::Online::open(net, world.seats[0].sim.clone(), &spawn) {
+                        // A player in the plane takes it online with them (N17): the session's seat
+                        // is its `Sim`, and its plane that `Sim`'s own lane.
+                        let mut sim = world.seats[0].sim.clone();
+                        if world.seats[0].garage.up == Kind::Biplane {
+                            sim.plane = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.clone());
+                        }
+                        match online::Online::open(net, sim, &spawn) {
                             Ok(mut on) => {
                                 on.modifiers(mods, stock_phys[..1].to_vec());
+                                on.planes(stock_plane, plane_like.as_ref());
+                                online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some(on.host()));
                                 online = Some(on);
                                 front.menu.opening = menu::Opening::Open;
@@ -3533,10 +3562,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         (dt, simulated) = if let Some(on) = &mut online {
             online_frames += 1;
             // Paused, this machine's rider lets go: the others ride on.
-            let pad = match front.as_deref().is_some_and(|f| !f.menu.riding()) {
+            let mut pad = match front.as_deref().is_some_and(|f| !f.menu.riding()) {
                 true => Report::idle(),
                 false => world.seats[0].reports[0],
             };
+            // The machine this player picked and their biplane scheme, which every machine reads at
+            // the tick it lands on (N17).
+            let scheme = world.seats[0].garage.plane.as_ref().map_or((false, false), |p| (p.every_bank, p.round_stick));
+            pad.0[net::SWITCH] = vehicle::Wanted { to: online_want, every_bank: scheme.0, round_stick: scheme.1 }.byte();
             if let Err(end) = on.frame(pad, &mut world.place, rigs[0].body.as_ref()) {
                 println!("{end}");
                 if front.is_some() {
@@ -3547,6 +3580,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // Every seat back into the shell's, this machine's first: the others are drawn beside it.
             for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
                 seated[d] = on.show(d, &mut seat.sim, rig.body.as_mut());
+                // Its machine is its `Sim`'s (N17): the garage follows, and a switch the session
+                // made snaps the camera onto the machine taken, as offline.
+                if let Some(up) = seat.garage.follow(&seat.sim) {
+                    took(rig, up);
+                    if let (0, Some(front)) = (d, front.as_deref_mut()) {
+                        front.menu.switched(0, menu::Machine::from_word(up.name()).unwrap_or_default());
+                    }
+                }
             }
             // The host's change of the modifiers, taken by every machine at one tick (P100): the
             // seats came back on it above; the biplane, the marks and the menu say it here.
