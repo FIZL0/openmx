@@ -4,7 +4,7 @@
 //! 0     "PLN\0" '7' "ps2\0" "UnCompressedPSXPal8\0"   magic, then zeros
 //! 45    256 x RGBA                 the palette the ground texture is painted through
 //! 1069  f32 spacing                world units between two neighbouring height samples
-//! 1073  u32 1, u32 size            unexplained; `size` is near the file's length but is not it
+//! 1073  u32 levels, u32 tree       the tree's depth, and where its root node starts (MD3)
 //! 1081  u32 columns, u32 rows      height samples across and along, 257 x 257 on a supercross track
 //! 1089  (patches + 1) x u32        where each patch's block starts, relative to the end of this table
 //! …     patches x 2129 bytes       one block per 16 x 16 quads
@@ -18,12 +18,15 @@
 //! remaining 1433 bytes of a block are not decoded here; they look like per-vertex normals and the
 //! per-vertex choice of ground texture, neither of which the first draw needs.
 //!
-//! Flat ground is `0xAAAA`, which is exactly two thirds of the `u16` range — so a height word is a
-//! fraction of a per-track band, with the resting level two thirds of the way up it. **Where the game
-//! keeps that band is not known**: it is in neither the `.trn` header, the `.scn` nor the `.toy`, and
-//! the fitted scale differs from track to track (1/540 on the first supercross track, 1/627 on the
-//! second). [`Terrain::calibrate`] therefore recovers it from the scene itself, by least squares
-//! against the props that rest on the ground — see that function for what it costs.
+//! A height word is a fraction of a per-track band, and the band is the file's own (MD3): the tree's
+//! root node, at the header's tree offset, carries it as its second float — the `height_scale`
+//! `game_sim::track::TerrainNode` reads, a raw word to a local height — and a local height is a world
+//! one times the sample spacing, as the port's own terrain query has it. So a word is
+//! `height_scale × spacing` feet, from zero: 1/485 of a foot on the first supercross track. With it the
+//! disc's bales sit 1.2 to 1.6 feet above the dirt on every supercross track, which is where a bale's
+//! origin is (`the_files_band_seats_the_bales`). Before MD3 the band was fitted to those bales, which
+//! put it a tenth out with an offset of its own; this reader still walks the patches in file order
+//! rather than through the tree, and takes every node at full relief.
 
 use crate::mat::{V3, v3};
 use crate::pst::Texture;
@@ -48,7 +51,7 @@ pub struct Terrain {
     pub spacing: f32,
     /// The height words, row-major: `raw[row * cols + col]`.
     pub raw: Vec<u16>,
-    /// A height word becomes a world height as `raw * scale + base`.
+    /// A height word becomes a world height as `raw * scale + base`: the file's band, so `base` is 0.
     pub scale: f32,
     pub base: f32,
     /// The ground texture, as one tile of the disc's strip.
@@ -58,16 +61,18 @@ pub struct Terrain {
 }
 
 impl Terrain {
-    /// Parse a `.trn`.
-    ///
-    /// The heights come out raw: [`Terrain::calibrate`] turns them into world heights, and until it
-    /// has run the ground sits at whatever the default band says, which is the right shape at the
-    /// wrong height.
+    /// Parse a `.trn`, its heights in the file's own band.
     pub fn parse(d: &[u8]) -> Result<Terrain, String> {
         if d.len() < 1093 || &d[..4] != b"PLN\0" {
             return Err("not a .trn".to_string());
         }
         let spacing = f32::from_bits(le32(d, 1069));
+        // The root node: two floats, the node's relief and then the band.
+        let tree = le32(d, 1077) as usize;
+        if tree.checked_add(8).is_none_or(|end| end > d.len()) {
+            return Err(format!("the tree at {tree} is past the end of a {}-byte file", d.len()));
+        }
+        let band = f32::from_bits(le32(d, tree + 4));
         let cols = le32(d, 1081) as usize;
         let rows = le32(d, 1085) as usize;
         if !(2..=4097).contains(&cols) || !(2..=4097).contains(&rows) {
@@ -114,64 +119,33 @@ impl Terrain {
             rows,
             spacing,
             raw,
-            // A band that puts flat ground at zero: the shape is right, the height is not, until
-            // `calibrate` replaces both numbers.
-            scale: 1.0 / 540.0,
-            base: -(FLAT as f32) / 540.0,
+            scale: band * spacing,
+            base: 0.0,
             ground,
             // The scene's `DetailMapTilingMultiplier`, which is 8 on every track on this disc.
             tiling: spacing * 8.0,
         })
     }
 
-    /// Recover the height band from the scene the terrain belongs to.
-    ///
-    /// The props a track is dressed with mostly stand on the ground, so the height word under a prop
-    /// and the prop's own `y` are a line's worth of evidence each. Fitting that line by least squares
-    /// and then throwing away the props that disagree — the banners and the gantry, which hang in the
-    /// air — converges in three passes, and on the first supercross track leaves 165 bales agreeing
-    /// to a median of 0.16 world units.
-    ///
-    /// A bale's own origin is not at its feet, so the line that fit has a constant bias in it: it
-    /// puts the ground a foot or so above the dirt the bales rest on. The scene's start position
-    /// removes that, being the one point on the track whose world height the game itself states —
-    /// the bike the live game parks there sits at 89.999 where the scene says 90.06. So the slope
-    /// comes from the props and the offset comes from the start line.
-    ///
-    /// This is a renderer's calibration, not the game's own constant: see the module's docs.
-    pub fn calibrate(&mut self, scene: &Scene) -> Option<(usize, f32)> {
-        let mut points: Vec<(f32, f32)> = scene
+    /// How high the scene's bales stand above this ground: how many there are on it, and the median
+    /// of each one's origin less the ground under it. A bale's origin is not at its feet, so a band
+    /// read right puts this a foot or so up, the same on every track; one read wrong would scatter
+    /// it. The check of [`Terrain::parse`]'s band against the scene, not a part of it.
+    pub fn props_rest(&self, scene: &Scene) -> Option<(usize, f32)> {
+        let mut above: Vec<f32> = scene
             .models
             .iter()
             .filter(|p| p.model.to_ascii_lowercase().contains("bale"))
             .filter_map(|p| {
                 let (col, row) = self.sample_of(p.pos.x, p.pos.z)?;
-                Some((self.raw[row * self.cols + col] as f32, p.pos.y))
+                Some(p.pos.y - self.height(col, row))
             })
             .collect();
-        let mut report = None;
-        for _ in 0..4 {
-            if points.len() < 16 {
-                return report;
-            }
-            let Some((scale, base)) = fit(&points) else {
-                return report;
-            };
-            self.scale = scale;
-            self.base = base;
-            let mut errors: Vec<f32> = points.iter().map(|&(v, y)| (v * scale + base - y).abs()).collect();
-            errors.sort_by(f32::total_cmp);
-            // How well the props sit on the ground is the only measure of the fit there is, so it
-            // goes back to the caller: a track whose props are half a foot out has not been read
-            // right, however plausible the band looks.
-            report = Some((points.len(), errors[errors.len() / 2]));
-            let keep = (2.0 * errors[errors.len() / 2]).max(0.5);
-            points.retain(|&(v, y)| (v * scale + base - y).abs() < keep);
+        if above.is_empty() {
+            return None;
         }
-        if report.is_some() && self.sample_of(scene.start.x, scene.start.z).is_some() {
-            self.base += scene.start.y - self.height_at(scene.start.x, scene.start.z);
-        }
-        report
+        above.sort_by(f32::total_cmp);
+        Some((above.len(), above[above.len() / 2]))
     }
 
     /// The world height of one sample.
@@ -233,20 +207,6 @@ impl Terrain {
 fn split(index: usize, patches: usize) -> (usize, usize) {
     let p = (index / PATCH).min(patches - 1);
     (p, index - p * PATCH)
-}
-
-/// Least squares through `(word, height)` pairs, or `None` if every word is the same.
-fn fit(points: &[(f32, f32)]) -> Option<(f32, f32)> {
-    let n = points.len() as f32;
-    let mx = points.iter().map(|p| p.0).sum::<f32>() / n;
-    let my = points.iter().map(|p| p.1).sum::<f32>() / n;
-    let sxx: f32 = points.iter().map(|p| (p.0 - mx) * (p.0 - mx)).sum();
-    let sxy: f32 = points.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
-    if sxx <= 0.0 {
-        return None;
-    }
-    let scale = sxy / sxx;
-    Some((scale, my - scale * mx))
 }
 
 /// The ground texture: one 256 x 256 tile out of the megabyte that follows the patches.
@@ -506,8 +466,12 @@ mod tests {
     use super::*;
 
     /// A one-patch terrain, built the way the disc builds one, to prove the walk through the patch
-    /// table and the 40-byte rows.
+    /// table and the 40-byte rows: three feet a sample, and a root node whose band is `band`.
     fn one_patch(words: impl Fn(usize, usize) -> u16) -> Vec<u8> {
+        one_patch_in(words, 1.0 / 1620.0)
+    }
+
+    fn one_patch_in(words: impl Fn(usize, usize) -> u16, band: f32) -> Vec<u8> {
         let mut d = vec![0u8; 1089];
         d[..4].copy_from_slice(b"PLN\0");
         d[1069..1073].copy_from_slice(&3.0f32.to_bits().to_le_bytes());
@@ -526,6 +490,12 @@ mod tests {
         d.extend_from_slice(&block);
         d.extend_from_slice(&vec![0u8; BLOCK]); // the end-of-table block
         d.extend_from_slice(&vec![7u8; 256 * 256]); // the ground texture
+        // The tree's root: full relief, then the band.
+        let tree = d.len() as u32;
+        d[1077..1081].copy_from_slice(&tree.to_le_bytes());
+        d.extend_from_slice(&1.0f32.to_bits().to_le_bytes());
+        d.extend_from_slice(&band.to_bits().to_le_bytes());
+        d.extend_from_slice(&[0u8; 89]);
         d
     }
 
@@ -542,11 +512,12 @@ mod tests {
 
     #[test]
     fn flat_ground_is_flat_and_sits_where_the_band_says() {
+        // A band of 1/1620 a word at 3 feet a sample is a word to 1/540 of a foot, which puts the
+        // editors' flat word at 80.9 feet.
         let d = one_patch(|_, _| FLAT);
-        let mut t = Terrain::parse(&d).expect("a flat terrain");
-        t.scale = 1.0 / 540.0;
-        t.base = 90.0 - FLAT as f32 / 540.0;
-        assert!((t.height_at(7.5, 11.0) - 90.0).abs() < 1e-3);
+        let t = Terrain::parse(&d).expect("a flat terrain");
+        assert_eq!((t.scale, t.base), ((1.0 / 1620.0) * 3.0, 0.0));
+        assert!((t.height_at(7.5, 11.0) - FLAT as f32 / 540.0).abs() < 1e-3);
         // A flat quad points straight up.
         let n = t.normal(3, 3);
         assert!(n.y > 0.999, "{n:?}");
@@ -559,35 +530,33 @@ mod tests {
         assert!(Terrain::parse(&d).is_err());
     }
 
-    /// The fit is the only thing standing between the height words and the world, so it gets a test
-    /// of its own: a scene whose props sit on a known line, a foot and a half above the ground the
-    /// way a bale's origin does, must give that line's slope back and put the ground through the
-    /// start position rather than through the props.
+    /// The band is the root node's (MD3), not a fit: a terrain whose root says 0.002 a word at three
+    /// feet a sample is 0.006 feet a word from zero, and bales standing a foot and a half above it
+    /// say so, whatever the slope.
     #[test]
-    fn calibration_recovers_the_band_from_the_props() {
-        let d = one_patch(|c, r| (40000 + 100 * (r + c)) as u16);
-        let mut t = Terrain::parse(&d).expect("a sloped terrain");
-        let (scale, base, prop_origin) = (0.002, 7.5, 1.4);
+    fn the_band_is_the_root_nodes_and_the_bales_stand_on_it() {
+        let d = one_patch_in(|c, r| (40000 + 100 * (r + c)) as u16, 0.002);
+        let t = Terrain::parse(&d).expect("a sloped terrain");
+        assert_eq!((t.scale, t.base), (0.002 * 3.0, 0.0));
+        let ground = |col: usize, row: usize| (40000 + 100 * (row + col)) as f32 * 0.006;
+        assert!((t.height_at(6.0, 6.0) - ground(2, 2)).abs() < 1e-2);
         let mut scene = Scene::parse("[SceneInfo]\nSceneName=test\n");
-        let ground = |t: &Terrain, col: usize, row: usize| t.raw[row * 17 + col] as f32 * scale + base;
-        scene.start = v3(6.0, ground(&t, 2, 2), 6.0);
         for i in 0..40 {
             let (col, row) = (i % 17, i / 17);
-            let (x, z) = (col as f32 * 3.0, row as f32 * 3.0);
             scene.models.push(crate::scene::Placement {
                 model: "bale_single_01".to_string(),
-                pos: v3(x, ground(&t, col, row) + prop_origin, z),
+                pos: v3(col as f32 * 3.0, ground(col, row) + 1.5, row as f32 * 3.0),
                 look: v3(0.0, 0.0, 1.0),
                 up: v3(0.0, 1.0, 0.0),
             });
         }
-        let (points, error) = t.calibrate(&scene).expect("a fit");
-        assert_eq!(points, 40);
-        assert!(error < 1e-2, "the props agree to {error}");
-        assert!((t.scale - scale).abs() < 1e-5, "scale {}", t.scale);
-        // The props' own origins are a foot and a half up; the start line is what pins the ground.
-        assert!((t.base - base).abs() < 1e-2, "base {}", t.base);
-        assert!((t.height_at(6.0, 6.0) - scene.start.y).abs() < 1e-2);
+        let (bales, above) = t.props_rest(&scene).expect("bales on it");
+        assert_eq!(bales, 40);
+        assert!((above - 1.5).abs() < 1e-2, "{above}");
+        // A tree offset past the end is a file misread, not a band of zero.
+        let mut d = d;
+        d[1077..1081].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Terrain::parse(&d).is_err());
     }
 
     /// The corners `lod_indices` uses, as (x, z) of the grid.

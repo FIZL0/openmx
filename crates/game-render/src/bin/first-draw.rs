@@ -111,11 +111,11 @@ fn run() -> Result<(), String> {
         scene.terrain
     );
 
-    // The ground, and the band its height words live in, which the scene's own props calibrate.
+    // The ground, in the band the file itself gives its height words (MD3).
     let terrain = match terrain_bytes(&archives[0], &scene.terrain) {
         Ok(bytes) => match Terrain::parse(&bytes) {
-            Ok(mut t) => {
-                let fit = t.calibrate(&scene);
+            Ok(t) => {
+                let rest = t.props_rest(&scene);
                 println!(
                     "terrain: {}x{} samples {} apart, ground at {:.2}, {:.1} feet of relief",
                     t.cols,
@@ -126,13 +126,13 @@ fn run() -> Result<(), String> {
                         - t.raw.iter().copied().min().unwrap_or(0) as f32)
                         * t.scale
                 );
-                match fit {
-                    Some((points, error)) => println!(
-                        "height band: a word is 1/{:.0} of a foot, fitted to {points} props that rest \
-                         on the ground, half of them within {error:.2} feet",
+                match rest {
+                    Some((bales, above)) => println!(
+                        "height band: a word is 1/{:.0} of a foot, the file's; its {bales} bales stand \
+                         {above:.2} feet above the ground (median)",
                         1.0 / t.scale
                     ),
-                    None => println!("height band: not enough props to fit, using the default"),
+                    None => println!("height band: a word is 1/{:.0} of a foot, the file's", 1.0 / t.scale),
                 }
                 Some(t)
             }

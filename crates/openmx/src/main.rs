@@ -249,15 +249,6 @@ const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 /// (`--moment`) is made at.
 const PS2_FRAME: (usize, usize) = (640, 448);
 
-/// How far around the rider the ground is drawn, in terrain samples.
-///
-/// The scene's fog is the real limit and the draw culls against it, but `free06`'s fog is further away
-/// than a software rasteriser can fill at 60 Hz, so the dirt fades out at a radius instead. Nine feet
-/// a sample makes this about a hundred and twenty yards of ground in every direction.
-const GROUND_RADIUS: u32 = 44;
-/// How many cells a side of the ground the GPU draws or culls at once (P44).
-const GROUND_CHUNK: u32 = 32;
-
 /// The near clip plane the frame is drawn with, in feet, and the number the follow camera is handed
 /// as its distance floor, because the original's call site hands its camera the near plane of the
 /// viewport it is drawing into — one field, read by the projection and by the camera alike.
@@ -2326,7 +2317,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // No window to fit, so the PS2's own frame unless `--size` says otherwise.
             width: args.size.unwrap_or(PS2_FRAME).0,
             height: args.size.unwrap_or(PS2_FRAME).1,
-            ground_radius: GROUND_RADIUS,
+            ground_radius: ground.radius(),
             chassis: CHASSIS,
             plane: plane.as_ref(),
             pilot,
@@ -2855,7 +2846,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Everything the GPU draws, uploaded once: the props, the sky, the whole ground and every model.
     if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
         let at = Instant::now();
-        let chunks = ground.chunks(GROUND_CHUNK);
+        let chunks = ground.chunks(ground.chunk_cells());
         r.forget_assets();
         r.set_scene(&look);
         r.set_sky(sky.as_ref());
@@ -2959,7 +2950,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         r.set_images(&images);
     }
-    let radar_span = overlay::radar_span(ground.spacing);
+    // The radar's world is the scene's terrain scales' (MD3): the original reads the larger of the
+    // two the map edge measures with, which on the disc is the terrain file's own spacing.
+    let radar_span = overlay::radar_span(place.terrain.width_scale.0.max(place.terrain.breadth_scale.0));
+    let edge = Area::new(
+        F(place.terrain.width as f32),
+        F(place.terrain.breadth as f32),
+        place.terrain.width_scale,
+        place.terrain.breadth_scale,
+    );
+    println!(
+        "map: {:.0} x {:.0} feet to its edge, shot back from {:.0} feet short of it; radar {:.0} feet across",
+        edge.width.0,
+        edge.depth.0,
+        game_sim::off_map::MARGIN.0,
+        radar_span
+    );
     // The activities' start zones the radar marks (P92): the track's `hit.dat`, in its second
     // archive. A track with none (the MX tracks) marks none.
     let radar_zones = archives
@@ -3998,7 +4004,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // and the long side widens (`view_fov`).
                     fov: aspect::fov(view.fov.0, view_w, view_h),
                     near: NEAR_CLIP,
-                    far: 4000.0,
+                    // The software renderer's far plane: 4,000 feet, or the scene's fog's end where
+                    // that is further (MD3: a mod's map may fog out past it). The GPU's is its own
+                    // (`Graphics::far_clip`).
+                    far: light.fog_far.max(4000.0),
                 },
                 None => Camera::behind(pos, bike_look),
             });
@@ -4333,7 +4342,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let draw_at = Instant::now();
             clear(target, look.fog_color);
             stages.mark(stages::Stage::Sky);
-            let mut tris = ground.draw(target, camera, &light, pos, GROUND_RADIUS);
+            let mut tris = ground.draw(target, camera, &light, pos, ground.radius());
             stages.mark(stages::Stage::Ground);
             // The sky after the ground and before anything that blends (P47): it only paints where
             // nothing is drawn, and the ground is opaque, so it is the same picture as the sky first
