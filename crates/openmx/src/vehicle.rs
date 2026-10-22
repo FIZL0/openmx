@@ -953,6 +953,19 @@ pub fn switch_lane(to: Kind, template: Option<&Flight>, sim: &mut Sim, world: &m
     result
 }
 
+/// **A seat that starts the ride in the plane online** (N18): a copy of `template` (the ride's
+/// biplane as built, never flown) into its [`Sim::plane`], standing in `bay`, the seat's own bay in
+/// the lot. Offline a player whose ride setup picked the plane starts in it in their bay (P41,
+/// [`Lot::plane`]), placed there by its first step; here it is placed before the first tick, which
+/// is the same flight before the same first frame ([`switch_lane`] places its plane at once too).
+pub fn start_lane(template: &Flight, bay: Spawn, sim: &mut Sim) {
+    let mut plane = Plane::flying(bay, template.clone());
+    if let Some(f) = &mut plane.flight {
+        f.reset(bay.at, bay.facing, &sim.tables.ride.acos);
+    }
+    sim.plane = plane.flight.take();
+}
+
 /// One tick of a seat's plane online (N17): [`Plane::step`] on the flight in its [`Sim::plane`], the
 /// seat's pad and its biplane scheme, the bike not stepped. Whether the reset chord or a wreck's
 /// recovery put the plane back this tick. A seat on the bike does nothing.

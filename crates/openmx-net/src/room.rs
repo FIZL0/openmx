@@ -40,11 +40,17 @@ pub struct Pick {
     /// machine to one build, and one build reads the same bytes the same way.
     #[serde(default)]
     pub markers: String,
+    /// The machine the player starts the ride on (N18), the ride setup's pick (`openmx`'s
+    /// `vehicle::Kind` word): `biplane`, or empty for the bike, which is also what an older build
+    /// sends. Every machine starts the seat on it at the ride's first tick. Not in the handshake, as
+    /// the markers are not: one build reads the same word the same way.
+    #[serde(default)]
+    pub machine: String,
 }
 
 impl Pick {
     pub fn new(rider: &str, bike: &str) -> Pick {
-        Pick { rider: rider.into(), bike: bike.into(), preset: 0, look: String::new(), markers: String::new() }
+        Pick { rider: rider.into(), bike: bike.into(), preset: 0, look: String::new(), markers: String::new(), machine: String::new() }
     }
 }
 

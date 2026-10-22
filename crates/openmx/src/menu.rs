@@ -3077,6 +3077,17 @@ impl Lobby {
         }
     }
 
+    /// The machine this machine's player starts a ride on (N18), the ride setup's pick, as its pick's
+    /// word (`biplane`, or empty for the bike): every machine starts the player's seat on it. A
+    /// change goes out with [`Lobby::preset`]'s, on the same terms.
+    pub fn set_machine(&mut self, word: &str) {
+        let word = if word == "bike" { "" } else { word };
+        if self.pick.machine != word {
+            self.pick.machine = word.to_string();
+            self.repick = self.room.is_some();
+        }
+    }
+
     fn join(&mut self, code: &str) {
         self.begin(&format!("Joining {code}..."));
         self.out.push(Cmd::Join(code.to_string(), vec![self.pick.clone()]));
