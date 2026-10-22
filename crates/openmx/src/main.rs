@@ -3026,11 +3026,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut lobby_planes: Option<Vec<bool>> = None;
     let mut online = match &args.online {
         // Into a ride under way (N10): every seat is the host's first's bike, on this machine's
-        // constants for it, and the ride's state comes from the host.
+        // constants for it, and the ride's state comes from the host — this machine's seat in the
+        // plane if its setup picked it (N19), which its pick tells the host.
         None if from_lobby.is_some() && drop_in => {
             let ((room, me), net) = from_lobby.expect("checked");
-            if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike || world.seats.len() != 1 {
-                return Err("dropping in on an online ride rides one player's bike and no tape: drop --play, --record, --vehicle and --players".into());
+            if head.is_some() || world.tape.is_some() || world.seats.len() != 1 {
+                return Err("dropping in on an online ride rides one player and no tape: drop --play, --record and --players".into());
             }
             let disc = &front.as_deref().expect("from the lobby").network.disc;
             let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
@@ -3128,7 +3129,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         on.planes(stock_plane, plane_like.as_ref());
         // Each seat that starts in the plane stands in its own bay at tick 0 (N18): the lobby's
         // now, from the picks; `--peer`s' once every peer's card has said its own.
-        on.bays(online_bays);
+        on.bays(online_bays.clone());
         if let Some(flies) = &lobby_planes {
             on.start_planes(flies)?;
         }
@@ -3551,6 +3552,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             Ok(mut on) => {
                                 on.modifiers(mods, stock_phys[..1].to_vec());
                                 on.planes(stock_plane, plane_like.as_ref());
+                                // a joiner whose setup picked the plane rides in from its own bay (N19)
+                                on.bays(online_bays.clone());
                                 online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some(on.host()));
                                 online = Some(on);
