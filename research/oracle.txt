@@ -3204,6 +3204,20 @@ plane_probe_hit_listener boot 0x0015acf0 the plane's listener on its ray probe (
 plane_probe_sound_listener boot 0x003ea8a0 the ray probe's second listener (a global at 0x0062e324,
 #                              thunk 0x003eb620): two sound calls and 0x002fffe0, presentation only
 bike_struck_listener boot 0x0025a480 a bike's listener on its collidable, vt +0xc (thunk 0x0025a6e0)
+# S48 — the biplane searches the world (crates/game-sim/src/flight_search.rs, flight.rs; proofs in
+# tests/flight_collision.rs over biplane.p2m2_SaveState). The hit listener's this is plane+0x50 (the
+# body), this+0x58 = 1 and this+0x38 the vtable 0x0045b2ac, whose +0x124 is the wake below; the mask
+# word is 0x40, which the meshes' category 0x48 meets.
+plane_body_wake boot 0x0015b790 (body) vt +0x124: only when the word +0x110 points at is 0 (asleep)
+#                              re-seats the +0x138 frames and re-enables it. The port takes a riding
+#                              plane's body as awake, so its hit listener does nothing (that word was
+#                              not read off the state)
+collision_mesh_load boot 0x001eded0 a .col's meshes: each facet normal packs to the low 16 bits of
+#                              (n + 768.0)'s float bits, as i16 (flight_search::pack_normal)
+# The plane's collidable off the state: category 0x42058, actors 8, collides-with 0xffffffff; its
+# probes: rays from Biplane\col\biplanem.col (category 0x8, flags 0x12), the sweep (flags 0x13).
+# The crash test is biplane_wreck_check's: a struck object whose surface category meets +0x580 (0x2000,
+# VEHICLE) does not wreck.
 
 # S47 — the sweep probe's narrow phase (crates/game-sim/src/sweep_probe.rs, proofs in
 # tests/sweep_probe.rs). sphere_probe_clear: count = min(+0x120, 16); per segment the ends +0x128

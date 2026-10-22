@@ -210,7 +210,7 @@ impl Search for NoObjects {
     fn sweep(&mut self, _from: Vf, _to: Vf, _nearby: bool) -> Option<Swept> {
         None
     }
-    fn moved(&mut self) {}
+    fn moved(&mut self, _node: &crate::contact::Node) {}
     fn velocity(&self, _struck: &Struck) -> Vf {
         Vf::ZERO
     }

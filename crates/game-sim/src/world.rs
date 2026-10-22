@@ -91,6 +91,13 @@ pub trait World {
     fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
         Some(Box::new(Sampled(std::cell::RefCell::new(self))))
     }
+
+    /// What a collision object's search reads, together: the terrain ([`World::heightfield`]) and the
+    /// collision meshes standing on it, which the biplane's probes search ([`crate::flight_search`]).
+    /// A world with no props of its own has none.
+    fn collision(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>) {
+        (self.heightfield(), None)
+    }
 }
 
 /// Any world as a heightfield: each cell's corners a unit apart, at the height and with the normal
@@ -509,6 +516,10 @@ impl World for Place<'_> {
 
     fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
         self.ground.heightfield()
+    }
+
+    fn collision(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>) {
+        (self.ground.heightfield(), Some(&self.props))
     }
 }
 
