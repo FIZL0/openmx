@@ -701,6 +701,17 @@ impl Ee {
                 }));
             }
             (0x09, 0x0e) => q(self, (qt & lo64) | (qs & lo64) << 64), // pcpyld
+            (0x09, 0x1e) => {
+                // pexew: words 0 and 2 of rt swapped, 1 and 3 kept — `z` into the low word to store
+                let w = |k: u32| qt >> (32 * k) & 0xffff_ffff;
+                q(self, w(2) | w(1) << 32 | w(0) << 64 | w(3) << 96)
+            }
+            (0x09, 0x1f) => {
+                // prot3w: the low three words of rt rotated down one, word 3 kept — `y` into the low
+                // word to store
+                let w = |k: u32| qt >> (32 * k) & 0xffff_ffff;
+                q(self, w(1) | w(2) << 32 | w(0) << 64 | w(3) << 96)
+            }
             (0x09, 0x12) => q(self, qs & qt),                         // pand
             (0x09, 0x13) => q(self, qs ^ qt),                         // pxor
             (0x29, 0x0e) => q(self, (qs >> 64) | (qt >> 64) << 64),   // pcpyud
