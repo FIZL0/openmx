@@ -763,6 +763,10 @@ pub mod ghost;
 /// players to ride to.
 pub mod markers;
 
+/// The ecosystem's trunks (S97): each tree species' solid cylinder, built by the engine's
+/// collision-tree builder and stood under every plant of the species.
+pub mod eco;
+
 /// Game modifiers (P55): percentages on the loaded files' numbers, set before a ride starts, and
 /// nothing at all at their defaults.
 pub mod modifiers;
