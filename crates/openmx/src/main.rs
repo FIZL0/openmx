@@ -181,6 +181,8 @@ mod perf;
 #[cfg(test)]
 mod same_ride;
 mod saved_markers;
+// MD10: `--shot-pose`, the first view's camera held where the accuracy harness asks.
+mod shot_pose;
 mod split;
 mod stages;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
@@ -697,6 +699,8 @@ struct Args {
     /// its bind pose (V8) — so a shot meant to show the ride, or the overlay with anything in it,
     /// has to be taken a little later.
     shot_frame: u32,
+    /// `--shot-pose` (MD10): the first view drawn from this pose, not the ride camera, all the run.
+    shot_pose: Option<shot_pose::Pose>,
     /// Draw the riding overlay (P6): the pad as the simulation reads it and the numbers beside it.
     /// Off by default and off is free, because it is debugging furniture and not part of the game.
     hud: bool,
@@ -3947,6 +3951,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             .enumerate()
             .map(|(v, c)| before_cameras.get(v).map_or(*c, |b| blend.camera(b, c)))
             .collect();
+        // `--shot-pose` (MD10): the first view looks from the pose instead, whatever the ride does.
+        let mut cameras = cameras;
+        if let (Some(pose), Some(at), Some(camera)) = (args.shot_pose, rects.first(), cameras.first_mut()) {
+            *camera = pose.camera(at.w, at.h, NEAR_CLIP, camera.far);
+        }
 
         // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
         // own shape and put into the window's frame; a full screen's one view is the frame itself.
@@ -4924,6 +4933,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         pad: None,
         shot: None,
         shot_frame: 0,
+        shot_pose: None,
         hud: false,
         overlay: None,
         speedometer: None,
@@ -5046,6 +5056,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .parse()
                     .map_err(|_| "--shot-frame: not a frame number")?;
             }
+            "--shot-pose" => args.shot_pose = Some(shot_pose::Pose::parse(&next("x,y,z,yaw,pitch,fov")?)?),
             "--hud" => {
                 args.hud = true;
                 args.overlay = Some(menu::Overlay::Debug);
@@ -5248,7 +5259,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--speedometer digital|analog] [--hud] [--camera NAME]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
-                            [--shot-frame N] [--vehicle bike|biplane]\n\
+                            [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
