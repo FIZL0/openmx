@@ -3,7 +3,7 @@
 //! 1:1 with — only the d-pad it shares with the ride, which keeps every meaning it has there.
 //!
 //! Each player has [`SLOTS`] markers for the session, and a selection that steps through them and
-//! then through the other players. All four are a d-pad direction's **press** (P93): each fires on
+//! then through the other players in the ride — a seat nobody rides is skipped (P94). All four are a d-pad direction's **press** (P93): each fires on
 //! the tick the direction goes down ([`crate::bindings::Table::pressed`]) and once, however long it
 //! is held after:
 //!
@@ -101,22 +101,38 @@ impl Markers {
         self.at == 0 && self.slots.iter().all(Option::is_none)
     }
 
-    /// How many places the selection has with `players` in the session: the slots, then everybody
-    /// else.
+    /// How many places the selection has with `players` in the session, every one of them riding:
+    /// the slots, then everybody else.
     pub fn places(players: usize) -> usize {
         SLOTS + players.saturating_sub(1)
     }
 
-    /// What the selection is on, for the player in seat `me` of `players`: past the slots, the other
-    /// players in seat order with `me` left out. A selection past the end (somebody left) is the
-    /// first slot.
+    /// What the selection is on, for the player in seat `me` of `players`, every one of them riding:
+    /// [`Markers::pick_among`] with nobody left out.
     pub fn pick(&self, me: usize, players: usize) -> Pick {
+        self.pick_among(me, &vec![true; players])
+    }
+
+    /// The seats the selection reaches past the slots, for the player in seat `me`: every other seat
+    /// in the ride (P94), in seat order. `riding[s]` says whether seat `s` is in it — an online seat
+    /// nobody sits in rides on with an idle pad and is not drawn, so it is no pick — and a seat past
+    /// the end of `riding` is in.
+    pub fn others(me: usize, seats: usize, riding: &[bool]) -> Vec<usize> {
+        (0..seats).filter(|&s| s != me && riding.get(s).copied().unwrap_or(true)).collect()
+    }
+
+    /// What the selection is on, for the player in seat `me` with `riding` saying who is in the ride
+    /// (its length the seat count): past the slots, the other riders in seat order
+    /// ([`Markers::others`]). A selection past the end (somebody left) is the first slot.
+    pub fn pick_among(&self, me: usize, riding: &[bool]) -> Pick {
         let at = self.at as usize;
-        if at < SLOTS || at >= Markers::places(players) {
-            return Pick::Slot(if at < SLOTS { at } else { 0 });
+        if at < SLOTS {
+            return Pick::Slot(at);
         }
-        let k = at - SLOTS;
-        Pick::Player(if k < me { k } else { k + 1 })
+        match Markers::others(me, riding.len(), riding).get(at - SLOTS) {
+            Some(&p) => Pick::Player(p),
+            None => Pick::Slot(0),
+        }
     }
 
     /// Whether a slot holds a marker.
@@ -124,8 +140,10 @@ impl Markers {
         self.slots.get(slot).is_some_and(Option::is_some)
     }
 
-    fn step(&mut self, by: isize, players: usize) {
-        let n = Markers::places(players) as isize;
+    /// Left or Right through `places` places, round; a selection already past them starts from the
+    /// first slot.
+    fn step(&mut self, by: isize, places: usize) {
+        let n = places as isize;
         let at = if (self.at as isize) < n { self.at as isize } else { 0 };
         self.at = (at + by).rem_euclid(n) as u8;
     }
@@ -151,20 +169,29 @@ const DIRECTIONS: [Command; 4] = [Command::LEFT, Command::RIGHT, Command::UP, Co
 
 /// **One tick of a player's markers**, after the tick's step: the player in seat `me` of
 /// `spots.len()`, `hands` the controls the tick was stepped with, `spots` where every player was
-/// ([`Spot::of`], taken before anybody's tick). On the bike only: a plane ride has none.
+/// ([`Spot::of`], taken before anybody's tick), every one of them in the ride. On the bike only: a
+/// plane ride has none.
 pub fn frame(sim: &mut Sim, me: usize, spots: &[Spot], hands: &Controls) -> Option<Did> {
+    frame_among(sim, me, spots, &[], hands)
+}
+
+/// [`frame`] with `riding` saying which seats are in the ride ([`Markers::others`]): a seat not in
+/// it is never a pick, so the selection steps past it (P94). A seat past the end of `riding` is in.
+pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], hands: &Controls) -> Option<Did> {
     if sim.plane.is_some() {
         return None;
     }
     let [left, right, up, down] = fired(sim.input.pad(0), sim.table(), hands);
-    let players = spots.len().max(1);
+    let seats = spots.len().max(1);
+    let riding: Vec<bool> = (0..seats).map(|s| riding.get(s).copied().unwrap_or(true)).collect();
+    let places = SLOTS + Markers::others(me, seats, &riding).len();
     let m = &mut sim.markers;
     let mut did = None;
     if left != right {
-        m.step(if left { -1 } else { 1 }, players);
-        did = Some(Did::Stepped(m.pick(me, players)));
+        m.step(if left { -1 } else { 1 }, places);
+        did = Some(Did::Stepped(m.pick_among(me, &riding)));
     }
-    let pick = m.pick(me, players);
+    let pick = m.pick_among(me, &riding);
     if down {
         did = Some(match pick {
             Pick::Slot(s) if sim.rider.state.wreck.is_none() && sim.rider.crash.is_none() => {
