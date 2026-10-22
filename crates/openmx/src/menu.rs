@@ -232,6 +232,9 @@ pub struct Settings {
     /// Each seat's camera (P82), the Camera page's: the field of view, and how far behind and how
     /// high above the bike and the biplane the follow cameras sit. 1P's first.
     pub cameras: [CameraView; SEATS_MAX],
+    /// Whether the shell reads the `mods/` folder beside this file (MD2): Off, nothing is read from it
+    /// and the pick is the disc's alone. On unless turned off.
+    pub mods: bool,
 }
 
 /// The settings' render scale (V34): auto, picked from the frames' time against the display's
@@ -606,6 +609,7 @@ impl Default for Settings {
             presets: Vec::new(),
             lobby_seats: LOBBY_SEATS,
             cameras: [CameraView::DEFAULT; SEATS_MAX],
+            mods: true,
         }
     }
 }
@@ -655,7 +659,7 @@ impl Settings {
                 "overlay" => s.overlay = Overlay::from_word(v).unwrap_or(s.overlay),
                 "speedometer" => s.speedometer = Speedometer::from_word(v).unwrap_or(s.speedometer),
                 "wrecks" => s.wrecks = v != "off",
-                "track" if TRACKS.iter().any(|t| t.0 == v) => s.track = v.to_string(),
+                "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // One word a seat, 1P's first; a seat the line does not reach rides the bike.
                 "machines" => {
                     for (i, w) in v.split_whitespace().take(SEATS_MAX).enumerate() {
@@ -683,6 +687,7 @@ impl Settings {
                 "vsync" => s.vsync = v != "off",
                 "frame_limit" => s.frame_limit = FrameLimit::from_word(v).unwrap_or(s.frame_limit),
                 "machine_bays" => s.bays = v != "off",
+                "mods" => s.mods = v != "off",
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
@@ -763,6 +768,7 @@ impl Settings {
             self.render_scale.word()
         ) + &self.display_text()
             + &self.bays_text()
+            + &self.mods_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
             + &self.modifiers_text()
@@ -777,6 +783,11 @@ impl Settings {
     /// it was.
     fn bays_text(&self) -> String {
         if self.bays { String::new() } else { "machine_bays = off\n".into() }
+    }
+
+    /// The mods' switch (MD2), only when it is off, so a file from before it is written as it was.
+    fn mods_text(&self) -> String {
+        if self.mods { String::new() } else { "mods = off\n".into() }
     }
 
     /// The lobby's seat count (N12), only when it is not the usual [`LOBBY_SEATS`], so a file from
@@ -815,6 +826,15 @@ impl Settings {
     pub fn track_index(&self) -> usize {
         TRACKS.iter().position(|t| t.0 == self.track).unwrap_or(0)
     }
+}
+
+/// Whether a settings file's `track` may be a track mod's id (MD2): `[a-z0-9_]`, 1 to 40 of them,
+/// `<prefix>_<map>` — `track_mods::valid_id`'s rule, which this file is compiled without. Whether
+/// the mod is there is the pick's to find out; a track it does not list opens on the first.
+fn mod_id(v: &str) -> bool {
+    (1..=40).contains(&v.len())
+        && v.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && v.trim_matches('_').contains('_')
 }
 
 /// What a name may hold: the keyboard's own characters, at most [`NAME_MAX`] of them.
@@ -1334,7 +1354,7 @@ const AUDIO_PRESET: usize = 3;
 const AUDIO_SLIDERS: usize = 4;
 /// Which of [`Mix::levels`]' sliders each slider row is.
 const AUDIO_SLIDER: [usize; 6] = [0, 2, 3, 4, 5, 1];
-const SETTINGS_ROWS: usize = 15;
+const SETTINGS_ROWS: usize = 16;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
 const SETTINGS_MUSIC_VOLUME: usize = 5;
@@ -1351,9 +1371,11 @@ const SETTINGS_FRAME_LIMIT: usize = 11;
 /// The machines at their bays (P103), above the modifiers'.
 const SETTINGS_BAYS: usize = 12;
 /// The game modifiers' screen (P55), the last row.
-const SETTINGS_MODIFIERS: usize = 14;
+const SETTINGS_MODIFIERS: usize = 15;
 /// The cameras' screen (P82), above the modifiers', which stay the last row.
-const SETTINGS_CAMERA: usize = 13;
+const SETTINGS_CAMERA: usize = 14;
+/// Whether the `mods/` folder is read (MD2), under the bays'.
+const SETTINGS_MODS: usize = 13;
 /// The cameras' screen: whose they are, the five sliders, and the two resets.
 const CAMERA_SEAT: usize = 0;
 const CAMERA_FIRST: usize = 1;
@@ -1479,6 +1501,10 @@ pub enum Act {
 pub struct Menu {
     pub settings: Settings,
     pub controls: Controls,
+    /// The track mods that read (MD2), `(id, name)`, which the track pick lists after the disc's
+    /// [`TRACKS`]: empty with no `mods/` folder or with the Mods setting off. Set with
+    /// [`Menu::set_mod_tracks`].
+    pub mod_tracks: Vec<(String, String)>,
     /// Open screens, the one shown last. Empty is a ride with nothing over it.
     stack: Vec<Screen>,
     /// Each screen's row, in [`Screen::ALL`]'s order.
@@ -1624,6 +1650,7 @@ impl Menu {
         Menu {
             settings,
             controls,
+            mod_tracks: Vec::new(),
             stack: vec![Screen::Main],
             cursor,
             typing: String::new(),
@@ -2494,7 +2521,7 @@ impl Menu {
         match screen {
             Screen::Splash => 1,
             Screen::Main => MAIN.len(),
-            Screen::Tracks => TRACKS.len(),
+            Screen::Tracks => self.track_count(),
             Screen::Settings => SETTINGS_ROWS,
             Screen::Controls => CONTROLS_ROWS,
             Screen::Modifiers => MODIFIERS_ROWS,
@@ -2620,7 +2647,7 @@ impl Menu {
                     if self.party.take().is_some() {
                         self.riders = self.free_riders;
                     }
-                    self.cursor[Screen::Tracks.index()] = self.settings.track_index();
+                    self.cursor[Screen::Tracks.index()] = self.track_index();
                     self.tick = 0;
                     self.push(Screen::Tracks);
                 }
@@ -2648,7 +2675,7 @@ impl Menu {
                     if let Some(party) = &mut self.party {
                         party.split = split;
                     }
-                    self.cursor[Screen::Tracks.index()] = self.settings.track_index();
+                    self.cursor[Screen::Tracks.index()] = self.track_index();
                     self.tick = 0;
                     self.push(Screen::Tracks);
                 }
@@ -2667,7 +2694,7 @@ impl Menu {
                     return Act::Stay;
                 }
                 if p.ok || p.start {
-                    let track = TRACKS[at].0.to_string();
+                    let track = self.track_at(at).0.to_string();
                     if self.settings.track != track {
                         self.settings.track = track.clone();
                         self.changed = true;
@@ -2742,6 +2769,10 @@ impl Menu {
                         }
                         SETTINGS_BAYS => {
                             self.settings.bays = !self.settings.bays;
+                            self.changed = true;
+                        }
+                        SETTINGS_MODS => {
+                            self.settings.mods = !self.settings.mods;
                             self.changed = true;
                         }
                         _ => {}
@@ -3265,7 +3296,9 @@ impl Lobby {
 
     /// A lobby for this machine's player to open: the last free-ride track, the settings' wrecks.
     fn room_for(&self, settings: &Settings) -> Room {
-        let mut room = Room::new(&settings.name, &settings.track, settings.lobby_seats);
+        // A track mod is not ridden online until MD6: a lobby opens on the disc's tracks only.
+        let track = if TRACKS.iter().any(|t| t.0 == settings.track) { settings.track.as_str() } else { TRACKS[0].0 };
+        let mut room = Room::new(&settings.name, track, settings.lobby_seats);
         room.wrecks = settings.wrecks;
         room.modifiers = settings.modifiers.text();
         room.take(HOST, std::slice::from_ref(&self.pick));
@@ -3518,6 +3551,37 @@ const TEXTURES: [&str; 16] = [
     "nav_start_off",
 ];
 
+// ---- the track mods' place in the pick (MD2) -------------------------------------------------------
+
+impl Menu {
+    /// The tracks the pick lists: the disc's [`TRACKS`], then the mods'.
+    pub fn track_count(&self) -> usize {
+        TRACKS.len() + self.mod_tracks.len()
+    }
+
+    /// The pick's track `at`, `(id, name)`: a disc track's archive and town, or a mod's id and name.
+    pub fn track_at(&self, at: usize) -> (&str, &str) {
+        match TRACKS.get(at) {
+            Some(&(id, name)) => (id, name),
+            None => self
+                .mod_tracks
+                .get(at - TRACKS.len())
+                .map_or(TRACKS[0], |(id, name)| (id.as_str(), name.as_str())),
+        }
+    }
+
+    /// The pick's index of [`Settings::track`], the first track's where the pick does not list it.
+    pub fn track_index(&self) -> usize {
+        (0..self.track_count()).find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(0)
+    }
+
+    /// The mods the pick lists after the disc's (MD2), the pick's cursor kept on its track.
+    pub fn set_mod_tracks(&mut self, tracks: Vec<(String, String)>) {
+        self.mod_tracks = tracks;
+        self.cursor[Screen::Tracks.index()] = self.track_index();
+    }
+}
+
 /// The stills per track in `UI\trackpreview.res`.
 const STILLS: usize = 5;
 /// Frames each still shows for on the track pick.
@@ -3731,6 +3795,7 @@ impl Art {
                         format!("VSync  {}", if menu.settings.vsync { "On" } else { "Off" }),
                         format!("Frame limit  {}", menu.settings.frame_limit.label()),
                         format!("Machines at bays  {}", if menu.settings.bays { "On" } else { "Off" }),
+                        format!("Mods  {}", if menu.settings.mods { "On" } else { "Off" }),
                         format!("Camera  {}", menu.camera_label()),
                         format!(
                             "Game Modifiers  {}",
@@ -4281,7 +4346,8 @@ impl<'a> Painter<'a> {
         let (vw, vh) = self.view;
         self.fill(self.whole(), BLACK);
         let band = rect(0.0, 49.0, vw, vh - 49.0 - 90.0);
-        let stills = &self.art.stills[at];
+        // A mod's track has no stills (MD2): its band stays black under its name.
+        let stills: &[_] = self.art.stills.get(at).map_or(&[], |s| s.as_slice());
         if !stills.is_empty() {
             let still = &stills[(menu.tick / STILL_FRAMES) as usize % stills.len()];
             // The band's shape cut from the still's middle, never stretched.
@@ -4300,13 +4366,13 @@ impl<'a> Painter<'a> {
         // The masks: a dark top band and the bottom one the legend sits on.
         self.fill(rect(0.0, 0.0, vw, 49.0), [0, 0, 0, 200]);
         self.fill(rect(0.0, vh - 90.0, vw, 90.0), [0, 0, 0, 200]);
-        let (_, name) = TRACKS[at];
+        let (_, name) = menu.track_at(at);
         let mid = vw / 2.0;
         self.text(Face::Title, name, mid, 8.0, Align::Centre, CHOSEN);
         let w = self.art.fonts[&Face::Title].measure(name);
         self.tex("arrow_left_off", rect(mid - w / 2.0 - 44.0, 9.0, 32.0, 32.0), CHOSEN);
         self.tex("arrow_right_off", rect(mid + w / 2.0 + 12.0, 9.0, 32.0, 32.0), CHOSEN);
-        let count = format!("Freeride {} of {}", at + 1, TRACKS.len());
+        let count = format!("Freeride {} of {}", at + 1, menu.track_count());
         self.text(Face::Small, &count, mid, vh - 118.0, Align::Centre, ITEM);
         // The machine each player starts on (P41), in a panel over the stills' right edge: one line
         // a rider, the one Square changes in the chosen colour between up and down arrows when there

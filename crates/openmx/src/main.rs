@@ -178,6 +178,7 @@ mod pace;
 mod pad;
 mod particles;
 mod perf;
+mod portal;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
 mod same_ride;
@@ -186,6 +187,7 @@ mod saved_markers;
 mod shot_pose;
 mod split;
 mod stages;
+mod track_mods;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
 #[allow(dead_code)]
@@ -247,15 +249,6 @@ const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 /// The PS2's own frame, which `--size 640x448` asks for and which a drawing with no window to fit
 /// (`--moment`) is made at.
 const PS2_FRAME: (usize, usize) = (640, 448);
-
-/// How far around the rider the ground is drawn, in terrain samples.
-///
-/// The scene's fog is the real limit and the draw culls against it, but `free06`'s fog is further away
-/// than a software rasteriser can fill at 60 Hz, so the dirt fades out at a radius instead. Nine feet
-/// a sample makes this about a hundred and twenty yards of ground in every direction.
-const GROUND_RADIUS: u32 = 44;
-/// How many cells a side of the ground the GPU draws or culls at once (P44).
-const GROUND_CHUNK: u32 = 32;
 
 /// The near clip plane the frame is drawn with, in feet, and the number the follow camera is handed
 /// as its distance floor, because the original's call site hands its camera the near plane of the
@@ -529,19 +522,21 @@ fn radar_blips(seats: &[Seat], bays: &[vehicle::Bay], v: usize, zones: &[overlay
     out
 }
 
-/// Where view `v`'s player's session markers' posts stand in a `size` view through `camera` (P94):
-/// each filled slot's, with its slot and whether the selection (`pick`) is on it. None for a view
-/// that shows no markers.
-fn marker_posts(seat: &Seat, camera: &Camera, size: (usize, usize), pick: Option<markers::Pick>) -> Vec<(overlay::Post, usize, bool)> {
-    let Some(pick) = pick else { return Vec::new() };
-    let slots = seat.sim.markers.slots.iter().enumerate();
-    slots
-        .filter_map(|(slot, ride)| {
-            let at = ride.as_ref()?.position();
-            let post = overlay::marker_post(camera, size, [at.x(), at.y(), at.z()])?;
-            Some((post, slot, pick == markers::Pick::Slot(slot)))
-        })
-        .collect()
+/// The ground's height under `x`, `z` for a portal's disc (V51), from the ride's own terrain query
+/// looking down from `y`; `None` off the terrain, where the query answers its no-ground depth.
+fn portal_ground(place: &mut dyn sim_world::World, x: f32, y: f32, z: f32) -> Option<f32> {
+    let (on, _) = place.ground(Vf::new(x, y, z, 1.0));
+    (on.y() > -1.0e5).then(|| on.y())
+}
+
+/// What view `v` sees of the portals (V51): the start zones the original shows its player (not the
+/// machine race's while they are in a machine, [`portal::shown`]) and the player's own markers'.
+fn portal_glows(art: &portal::Art, zones: &[portal::Portal], marked: &[Option<portal::Portal>], in_machine: bool, camera: &Camera, seconds: f32) -> Vec<game_render::glow::Glow> {
+    let (eye, at) = (camera.eye, camera.at);
+    let forward = [at.x - eye.x, at.y - eye.y, at.z - eye.z];
+    let race = |p: &&portal::Portal| in_machine && p.kind == portal::Kind::Zone(overlay::Activity::Race);
+    let shown = zones.iter().filter(|p| !race(p)).chain(marked.iter().flatten());
+    shown.flat_map(|p| p.glows(art, [eye.x, eye.y, eye.z], forward, seconds)).collect()
 }
 
 /// One local player's half of the picture (V22): the body and bike posed for them, the cameras that
@@ -867,6 +862,11 @@ struct Args {
     render_scale: Option<f32>,
     /// Whether `--render-scale` was given, `auto` included (V34): if so it wins over the settings'.
     render_scale_asked: bool,
+    /// The `mods/` folder a track not on the disc is looked for in (MD2), or `None` to read none.
+    /// Unless `mods_asked`, the settings' Mods row says, and the folder is beside `settings.txt`.
+    mods: Option<std::path::PathBuf>,
+    /// Whether `--mods DIR|off` was given, or the front end set [`Args::mods`] from its settings.
+    mods_asked: bool,
     /// The pad seat each player reads, the front end's local game's (P43): player i rides seat
     /// `pad_of[i]`'s controller. Empty is seat i for player i, which is every ride outside one.
     pad_of: Vec<usize>,
@@ -1153,6 +1153,10 @@ fn front_end(args: Args) -> Result<(), String> {
         sound,
     };
     front.menu.music_choices = front.sound.choices();
+    // The track mods (MD2), after the disc's tracks in the pick; read again when the Mods row turns.
+    let mut mods_on = front.menu.settings.mods;
+    let listed = mod_tracks(&args, &front.dir, mods_on);
+    front.menu.set_mod_tracks(listed);
     // Online, this machine's player rides the freeride's bike set unless the lobby changes it, as
     // the rider the command line names.
     front.menu.lobby.bikes = lobby::bikes();
@@ -1217,6 +1221,10 @@ fn front_end(args: Args) -> Result<(), String> {
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
+                if !args.mods_asked {
+                    a.mods_asked = true;
+                    a.mods = shell.front.menu.settings.mods.then(|| shell.front.dir.join(track_mods::MODS_DIR));
+                }
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
@@ -1288,6 +1296,8 @@ fn front_end(args: Args) -> Result<(), String> {
             if let Some((room, _)) = shell.front.menu.lobby.start.clone() {
                 let mut a = args.clone();
                 a.track = room.track.clone();
+                // Online rides the disc's tracks only, until MD6 says how peers agree on a mod.
+                (a.mods_asked, a.mods) = (true, None);
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
@@ -1444,6 +1454,11 @@ fn front_end(args: Args) -> Result<(), String> {
                 }
             }
         }
+        if shell.front.menu.settings.mods != mods_on {
+            mods_on = shell.front.menu.settings.mods;
+            let listed = mod_tracks(&args, &shell.front.dir, mods_on);
+            shell.front.menu.set_mod_tracks(listed);
+        }
         if shell.front.menu.changed() {
             seats.set_wiring(shell.front.wiring());
             shell.front.hear();
@@ -1556,18 +1571,39 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
     // ---- the disc -------------------------------------------------------------------------------
     let mut disc = Disc::open_configured()?;
-    let track_member = member_ending(&disc, &format!("{}.res", args.track))?;
+    // A track the disc does not have is a track mod's (MD2), looked for in the mods folder only
+    // then, so a disc track's ride reads nothing from it.
+    let track_member = member_ending(&disc, &format!("{}.res", args.track));
+    let modded = match &track_member {
+        Ok(_) => None,
+        Err(e) => match mods_dir(&args) {
+            Some(dir) => Some(track_mods::find(&dir, &args.track).map_err(|m| format!("{e}, and {m}"))?),
+            None => return Err(e.clone()),
+        },
+    };
+    // The name the track's other files are built from: a disc track's own, a mod's scene's stem.
+    let stem = modded.as_ref().map_or_else(|| args.track.clone(), |t| t.stem.clone());
     let bike_member = member_ending(&disc, &format!("{}.res", args.bike))?;
     // A track is two archives: the props and the terrain in one, the bike's animation set, its
-    // physics and the follow camera in the other, which the game loads alongside it.
-    let second = member_ending(&disc, &format!("{}_2.res", args.track)).ok();
+    // physics and the follow camera in the other, which the game loads alongside it. A mod has no
+    // second archive and rides with a disc freeride's.
+    let second_of = if modded.is_some() { track_mods::FREERIDE } else { args.track.as_str() };
+    let second = member_ending(&disc, &format!("{second_of}_2.res")).ok();
     // The rider is a fourth archive, named after the rider rather than the track or the bike: the
     // body, its gear and its motions are all in there.
     let rider_member = match args.rider.as_str() {
         "none" => None,
         name => Some(member_ending(&disc, &format!("{name}.res"))?),
     };
-    let mut archives: Vec<Res> = vec![disc.res(&track_member)?, disc.res(&bike_member)?];
+    let track_res = match (&modded, &track_member) {
+        (Some(t), _) => {
+            println!("mods: {} ({}) from {}", t.id, t.name, t.dir.display());
+            t.open()?
+        }
+        (None, Ok(member)) => disc.res(member)?,
+        (None, Err(e)) => return Err(e.clone()),
+    };
+    let mut archives: Vec<Res> = vec![track_res, disc.res(&bike_member)?];
     if let Some(name) = &second {
         archives.push(disc.res(name)?);
     }
@@ -1607,7 +1643,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let scn_bytes = archives[0].read(&scn)?;
     // The same file read twice, by two readers that want different things out of it: the simulation's
     // reader for the spawn and the terrain's layout, the renderer's for the props, lights and fog.
-    let place = track::Scene::parse(&scn_bytes)?;
+    let mut place = track::Scene::parse(&scn_bytes)?;
+    if let Some(t) = &modded {
+        t.place_spawn(&mut place)?;
+    }
     let mut look = view::Scene::parse(&ini::text(&scn_bytes));
 
     let terrain_bytes = terrain_bytes(&archives[0], &place.terrain_file)?;
@@ -1616,7 +1655,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let ground = Ground::new(track::Terrain::parse(&terrain_bytes)?, &place.terrain);
     let ground = {
         let extent = ground.extent();
-        ground.painted(game_render::splat::Splat::load(&archives, &args.track, extent))
+        ground.painted(game_render::splat::Splat::load(&archives, &stem, extent))
     };
     let sim_terrain = track::Terrain::parse(&terrain_bytes)?;
     // The sky the scene names, behind everything (V25); the fog colour where it has none.
@@ -1873,6 +1912,20 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         Some(doll) => println!("ragdoll: {} parts off the riding pose", doll.nodes.len()),
         None => println!("ragdoll: none — a wreck is ridden out as one point"),
     }
+    // The bike's two collision files (S78): its body rays, and the frame other riders' rays strike.
+    // Looked for by their whole path, which `wreckbikef.col` does not end in.
+    let bike_col = archives
+        .iter()
+        .find_map(|a| {
+            use game_sim::bike_col::{MODEL, rays_file, shape_file};
+            Some((a.read_suffix(&rays_file(MODEL)).ok()?, a.read_suffix(&shape_file(MODEL)).ok()?))
+        })
+        .and_then(|(rays, shape)| game_sim::bike_col::BikeCol::load(&rays, &shape).ok())
+        .map(Arc::new);
+    match &bike_col {
+        Some(_) => println!("rider contact: the bikes push each other apart"),
+        None => println!("rider contact: no bike collision files — the riders pass through each other"),
+    }
 
     // ---- the bike that moves (V9) ---------------------------------------------------------------
     // The chassis' own animation: the `.sub`'s `[Objects] MCF`, the clips the sixty-state machine
@@ -1932,6 +1985,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The derived class, not the base one: the base camera's frame is dead code on the disc (S24),
     // and this is the frame the picture comes out of.
     let mut camera = Race::new(presets, reverse_speed);
+    // The eye's ceiling, which the race's setup sets off the scene's fog (S103).
+    camera.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
     // The preset the session starts on, by name rather than by its place in the file. A name the
     // file does not have is an error rather than a quiet fall back to the first record, so that a
     // typo cannot pass for the camera it named.
@@ -1964,7 +2019,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         Err(_) => None,
     };
     let machines = machine_res.as_ref().and_then(|res| {
-        let e = res.find_suffix(&format!("{}\\machine.txt", args.track))?;
+        let e = res.find_suffix(&format!("{stem}\\machine.txt"))?;
         Some((e.name.clone(), res.read(&e.name).ok()?))
     });
     // And its flight (P31): the plane's own `biplane.phy`, from the same archive, built the way the
@@ -2072,6 +2127,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 .unwrap_or_default();
             println!("biplane: {} camera presets in {PLANE_PRESETS}", presets.len());
             let mut cam = Race::new(presets, reverse_speed);
+            cam.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
             if let Some(start) = Preset::find(&cam.cam.presets, PLANE_CAMERA) {
                 cam.cam.set_preset(start);
             }
@@ -2095,7 +2151,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     };
     // Its particles (P58): the emitter list and its `.emt`s, and the track's particle sheet.
     let (mut plane_fx, mut fx_sheet) = match plane_drawn.first() {
-        Some(drawn) => match load_plane_fx(&archives, &args.track, drawn, &assets) {
+        Some(drawn) => match load_plane_fx(&archives, &stem, drawn, &assets) {
             Ok((fx, binds, sheet)) => (Some((fx, binds)), Some(sheet)),
             Err(why) => {
                 println!("biplane: no particles: {why}");
@@ -2120,7 +2176,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The cars the track's `.toy` drives along their clips (V41): free06's train, its trucks and
     // scrapers, the other freeride tracks' trailers. Drawn, not ridden into: they reach nothing in the
     // simulation, and their clock is the scene's own, summed from the ticks' `dt` below.
-    let traffic = game_render::toy::Traffic::load(&archives, &args.track, &mut |p| car_ground(&mut sim, p));
+    let traffic = game_render::toy::Traffic::load(&archives, &stem, &mut |p| car_ground(&mut sim, p));
     // A car's model object is a scene prop's, so its pose stands in for the file's root node: the
     // train's turned cars (train_car_03/04/05 carry a half turn there) are drawn without it (V46).
     for (car, _) in &traffic.cars {
@@ -2187,6 +2243,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         if let Some(kit) = &ragdoll_kit {
             rider.carries_ragdoll(Arc::clone(kit));
+        }
+        if let Some(col) = &bike_col {
+            rider.carries_bike_col(Arc::clone(col));
         }
         rider
     };
@@ -2261,7 +2320,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // No window to fit, so the PS2's own frame unless `--size` says otherwise.
             width: args.size.unwrap_or(PS2_FRAME).0,
             height: args.size.unwrap_or(PS2_FRAME).1,
-            ground_radius: GROUND_RADIUS,
+            ground_radius: ground.radius(),
             chassis: CHASSIS,
             plane: plane.as_ref(),
             pilot,
@@ -2529,6 +2588,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 bikes.push(theirs.unwrap_or_else(|| bike_member.clone()));
             }
             let machines = member_ending(&disc, MACHINE_ARCHIVE).unwrap_or_else(|_| MACHINE_ARCHIVE.to_string());
+            // A track mod's own `.aud` names sounds from its own game's bank, which this disc's
+            // does not hold (MD2): it rides with the race events' sounds and no track emitters.
+            let track_res = match &track_member {
+                Ok(member) => member.clone(),
+                Err(_) => second.clone().unwrap_or_default(),
+            };
             let read = Disc::open_configured().and_then(|d| {
                 audio::Sound::read(
                     mixer,
@@ -2536,9 +2601,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     &bikes,
                     rider_member.as_deref(),
                     &machines,
-                    &track_member,
+                    &track_res,
                     second.as_deref(),
-                    &args.track,
+                    &stem,
                 )
             });
             match read {
@@ -2784,7 +2849,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Everything the GPU draws, uploaded once: the props, the sky, the whole ground and every model.
     if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
         let at = Instant::now();
-        let chunks = ground.chunks(GROUND_CHUNK);
+        let chunks = ground.chunks(ground.chunk_cells());
         r.forget_assets();
         r.set_scene(&look);
         r.set_sky(sky.as_ref());
@@ -2888,14 +2953,47 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         r.set_images(&images);
     }
-    let radar_span = overlay::radar_span(ground.spacing);
+    // The radar's world is the scene's terrain scales' (MD3): the original reads the larger of the
+    // two the map edge measures with, which on the disc is the terrain file's own spacing.
+    let radar_span = overlay::radar_span(place.terrain.width_scale.0.max(place.terrain.breadth_scale.0));
+    let edge = Area::new(
+        F(place.terrain.width as f32),
+        F(place.terrain.breadth as f32),
+        place.terrain.width_scale,
+        place.terrain.breadth_scale,
+    );
+    println!(
+        "map: {:.0} x {:.0} feet to its edge, shot back from {:.0} feet short of it; radar {:.0} feet across",
+        edge.width.0,
+        edge.depth.0,
+        game_sim::off_map::MARGIN.0,
+        radar_span
+    );
     // The activities' start zones the radar marks (P92): the track's `hit.dat`, in its second
     // archive. A track with none (the MX tracks) marks none.
     let radar_zones = archives
         .iter()
-        .find_map(|a| a.read_suffix(&format!("{}\\hit.dat", args.track)).ok())
+        .find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok())
         .map(|b| overlay::zones(&String::from_utf8_lossy(&b)))
         .unwrap_or_default();
+    // And drawn in the world (V51) as the original draws them, the session markers as small ones:
+    // the same file's zones, and the portal's art out of the same archive — or, on a track whose
+    // archive lacks the numbers (the MX tracks'), a free-ride track's, which has them all.
+    let zone_spots = archives
+        .iter()
+        .find_map(|a| a.read_suffix(&format!("{}\\hit.dat", args.track)).ok())
+        .map(|b| portal::spots(&String::from_utf8_lossy(&b)))
+        .unwrap_or_default();
+    let portal_art = {
+        let read = |archives: &[Res], name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
+        let own = portal::Art::load(|name| read(&archives, name)).filter(portal::Art::numbered);
+        own.or_else(|| {
+            let free = [disc.res(&member_ending(&disc, portal::ART_ARCHIVE).ok()?).ok()?];
+            portal::Art::load(|name| read(&free, name))
+        })
+    };
+    // The GPU's copy of its pictures, uploaded with the first frame's glows.
+    let mut glow_textures = portal_art.as_ref().map(|a| a.textures.clone());
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut speedometer = args.speedometer.unwrap_or_default();
     let mut graphics = args.graphics.unwrap_or_default();
@@ -2963,6 +3061,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         });
     }
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
+    // The start zones' portals (V51), laid over the ground once: they never move.
+    let zone_portals: Vec<portal::Portal> = portal::shown(&zone_spots, false)
+        .iter()
+        .map(|spot| portal::Portal::zone(spot, |x, z| portal_ground(&mut world.place, x, spot.at[1] + 50.0, z)))
+        .collect();
+    let mut marked_portals: Vec<[Option<portal::Portal>; markers::SLOTS]> = vec![Default::default(); world.seats.len()];
 
     for (seat, rig) in world.seats.iter().zip(&mut rigs) {
         rig.hud.note_vehicle(seat.garage.up.name());
@@ -3009,11 +3113,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut lobby_planes: Option<Vec<bool>> = None;
     let mut online = match &args.online {
         // Into a ride under way (N10): every seat is the host's first's bike, on this machine's
-        // constants for it, and the ride's state comes from the host.
+        // constants for it, and the ride's state comes from the host — this machine's seat in the
+        // plane if its setup picked it (N19), which its pick tells the host.
         None if from_lobby.is_some() && drop_in => {
             let ((room, me), net) = from_lobby.expect("checked");
-            if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike || world.seats.len() != 1 {
-                return Err("dropping in on an online ride rides one player's bike and no tape: drop --play, --record, --vehicle and --players".into());
+            if head.is_some() || world.tape.is_some() || world.seats.len() != 1 {
+                return Err("dropping in on an online ride rides one player and no tape: drop --play, --record and --players".into());
             }
             let disc = &front.as_deref().expect("from the lobby").network.disc;
             let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
@@ -3111,7 +3216,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         on.planes(stock_plane, plane_like.as_ref());
         // Each seat that starts in the plane stands in its own bay at tick 0 (N18): the lobby's
         // now, from the picks; `--peer`s' once every peer's card has said its own.
-        on.bays(online_bays);
+        on.bays(online_bays.clone());
         if let Some(flies) = &lobby_planes {
             on.start_planes(flies)?;
         }
@@ -3161,6 +3266,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             && world.tape.is_none()
             && world.seats.len() == 1
             && args.phy.is_none()
+            && modded.is_none()
             && front.menu.lobby.room.is_none()
             && front.network.disc.phy(&set).is_some_and(|b| *b == phy_bytes);
         front.menu.opening = if can { menu::Opening::Can } else { menu::Opening::No };
@@ -3534,6 +3640,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             Ok(mut on) => {
                                 on.modifiers(mods, stock_phys[..1].to_vec());
                                 on.planes(stock_plane, plane_like.as_ref());
+                                // a joiner whose setup picked the plane rides in from its own bay (N19)
+                                on.bays(online_bays.clone());
                                 online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some(on.host()));
                                 online = Some(on);
@@ -3880,10 +3988,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let view = if presets == 0 {
                 None
             } else {
-                // The camera's one question about the world: the ground under the look-at point, which
-                // the track answers (S23). Without it the view sinks into the dirt on the first dip.
-                // This frame has no obstacle push-out — the base class's did, and the base class's
-                // frame is not the one the disc runs.
+                // The camera's two questions about the world, both the ground under a point, which
+                // the track answers: under the look-at point (S23), without which the view sinks into
+                // the dirt on the first dip, and under the eye, which keeps it 4.8 ft over the ground
+                // (S103). This frame has no obstacle push-out — the base class's did, and the base
+                // class's frame is not the one the disc runs.
                 Some(follow.update(
                     dt,
                     &rider,
@@ -3925,7 +4034,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // and the long side widens (`view_fov`).
                     fov: aspect::fov(view.fov.0, view_w, view_h),
                     near: NEAR_CLIP,
-                    far: 4000.0,
+                    // The software renderer's far plane: 4,000 feet, or the scene's fog's end where
+                    // that is further (MD3: a mod's map may fog out past it). The GPU's is its own
+                    // (`Graphics::far_clip`).
+                    far: light.fog_far.max(4000.0),
                 },
                 None => Camera::behind(pos, bike_look),
             });
@@ -4023,6 +4135,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if let (Some(pose), Some(at), Some(camera)) = (args.shot_pose, rects.first(), cameras.first_mut()) {
             *camera = pose.camera(at.w, at.h, NEAR_CLIP, camera.far);
         }
+        // The start zones' and the markers' portals (V51), each view its own: its player's markers,
+        // and the zones that player is shown.
+        for (v, seat) in world.seats.iter().enumerate() {
+            portal::markers(&mut marked_portals[v], &seat.sim.markers, picks[v], |x, y, z| portal_ground(&mut world.place, x, y, z));
+        }
+        let glows: Vec<Vec<game_render::glow::Glow>> = match &portal_art {
+            Some(art) => (0..world.seats.len())
+                .map(|v| {
+                    let in_machine = world.seats[v].garage.up != Kind::Bike;
+                    let seconds = started.elapsed().as_secs_f32();
+                    cameras.get(v).map_or_else(Vec::new, |c| portal_glows(art, &zone_portals, &marked_portals[v], in_machine, c, seconds))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
 
         // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
         // own shape and put into the window's frame; a full screen's one view is the frame itself.
@@ -4045,11 +4172,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     _ => None,
                 };
                 let banner = shown_markers.get(v).and_then(Option::as_ref);
-                let posts = marker_posts(seat, &cameras[v], (at.w, at.h), picks[v]);
-                if rig.hud.on || banner.is_some() || !posts.is_empty() {
+                if rig.hud.on || banner.is_some() {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| {
-                        hud::draw_marker_posts(f, &posts);
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
                         if let Some((pick, filled, label, others)) = banner {
                             hud::draw_markers(f, *pick, *filled, label, others);
@@ -4200,6 +4325,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let view = t.create_view(&Default::default());
                     r.set_graphics(graphics);
                     set_plane_sprites(r, &mut fx_sheet, &sprites);
+                    set_glows(r, &mut glow_textures, &glows);
                     let d = r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
                     // Nothing else waits on a frame nobody sees: without this the queue runs ahead,
                     // and the times would be the CPU's alone.
@@ -4215,6 +4341,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (None, Some(w)) => {
                     w.renderer.set_graphics(graphics);
                     set_plane_sprites(&mut w.renderer, &mut fx_sheet, &sprites);
+                    set_glows(&mut w.renderer, &mut glow_textures, &glows);
                     let spent = Instant::now();
                     let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
                     waited = w.waited;
@@ -4260,7 +4387,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let draw_at = Instant::now();
             clear(target, look.fog_color);
             stages.mark(stages::Stage::Sky);
-            let mut tris = ground.draw(target, camera, &light, pos, GROUND_RADIUS);
+            let mut tris = ground.draw(target, camera, &light, pos, ground.radius());
             stages.mark(stages::Stage::Ground);
             // The sky after the ground and before anything that blends (P47): it only paints where
             // nothing is drawn, and the ground is opaque, so it is the same picture as the sky first
@@ -4370,6 +4497,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let (Some((fx, _)), Some(sheet)) = (&plane_fx, &soft_sheet) {
                 tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx), &light);
             }
+            // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
+            if let (Some(art), Some(glows)) = (&portal_art, glows.get(v)) {
+                tris += game_render::glow::draw(target, camera, &art.textures, glows);
+            }
             stages.mark(stages::Stage::Scene);
             // And the overlay over the top of it, after everything with a depth test and before anything
             // that reads the frame: what the window shows and what `--shot` writes are the same picture.
@@ -4381,8 +4512,6 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                 _ => None,
             };
-            let posts = marker_posts(seat, camera, (target.width, target.height), picks[v]);
-            hud::draw_marker_posts(target, &posts);
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
             if let Some(Some((pick, filled, label, others))) = shown_markers.get(v) {
                 hud::draw_markers(target, *pick, *filled, label, others);
@@ -4553,6 +4682,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // with a pad is a different ride every time, and its number is worth nothing.
     if head.is_some() || args.record.is_some() || args.headless {
         println!("ride hash {:#018x}", game_sim::hash::of(&world.seats[0].sim.rider.ride));
+        // And where the first rider ended, so a ride on a track can be seen to have gone somewhere (MD2).
+        let end = world.seats[0].sim.rider.ride.position();
+        println!("end: {:.0}, {:.0}, {:.0}", end.x(), end.y(), end.z());
         // And the first player's plane, flown or not, for a tape that switched into it (P102).
         if let Some(flight) = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.as_ref()) {
             println!("plane hash {:#018x} ({})", game_sim::hash::of(flight), world.seats[0].garage.up.name());
@@ -4785,6 +4917,36 @@ fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| format!("the archive has no member ending in {named} or {tagged}"))
 }
 
+/// The `mods/` folder a ride may look for a track in (MD2): `--mods`' or the front end's, else beside
+/// `settings.txt` when its Mods row is on. `None` reads nothing.
+fn mods_dir(args: &Args) -> Option<std::path::PathBuf> {
+    if args.mods_asked {
+        return args.mods.clone();
+    }
+    let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
+    menu::load(&dir).0.mods.then(|| dir.join(track_mods::MODS_DIR))
+}
+
+/// The track mods a front end lists (MD2), saying why each one left out was: `--mods`' folder if it
+/// was given (`off` is none), else the one beside the settings in `dir` while the Mods row is `on`.
+/// With none, nothing is read.
+fn mod_tracks(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, String)> {
+    let folder = match (args.mods_asked, on) {
+        (true, _) => args.mods.clone(),
+        (false, true) => Some(dir.join(track_mods::MODS_DIR)),
+        (false, false) => None,
+    };
+    let Some(folder) = folder else { return Vec::new() };
+    let scan = track_mods::scan(&folder);
+    for line in &scan.log {
+        println!("{line}");
+    }
+    if !scan.tracks.is_empty() {
+        println!("mods: {} tracks", scan.tracks.len());
+    }
+    scan.tracks.into_iter().map(|t| (t.id, t.name)).collect()
+}
+
 /// A tape to ride, from the file it is in.
 ///
 /// Two kinds, because a tape of the port and a tape of the original are the same kind of file and the
@@ -5001,6 +5163,14 @@ fn set_plane_sprites(r: &mut Renderer, sheet: &mut Option<game_render::pst::Text
     r.set_sprites(sprites);
 }
 
+/// This frame's portals into `r` (V51), their pictures first if they have not been uploaded yet.
+fn set_glows(r: &mut Renderer, textures: &mut Option<Vec<game_render::pst::Texture>>, glows: &[Vec<game_render::glow::Glow>]) {
+    if let Some(textures) = textures.take() {
+        r.set_glow_textures(&textures);
+    }
+    r.set_glows(glows);
+}
+
 /// The command line. `Ok(None)` means `--help` was asked for and the shell should not start.
 fn parse_args() -> Result<Option<Args>, String> {
     let mut args = Args {
@@ -5073,6 +5243,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         graphics: None,
         render_scale: None,
         render_scale_asked: false,
+        mods: None,
+        mods_asked: false,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(a) = argv.next() {
@@ -5097,6 +5269,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.menu = true;
             }
             "--track" => args.track = next("a track name, like free06")?,
+            "--mods" => {
+                let v = next("a mods folder, or off")?;
+                args.mods_asked = true;
+                args.mods = (v != "off").then(|| std::path::PathBuf::from(v));
+            }
             "--bike" => args.bike = next("a bike name, like 125sx")?,
             "--rider" => args.rider = next("a rider name, like thq1, or none")?,
             "--pad" => args.pad = Some(next("a device, like /dev/input/js0")?),
@@ -5362,7 +5539,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--preset 0..3|0,2,...]\n\
                             [--bindings FILE] [--renderer gpu|software] [--graphics full|original] [--fps]\n\
                             [--render-scale auto|0.5..1]\n\
-                            [--no-sound]\n\
+                            [--no-sound] [--mods DIR|off]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
                      rides the freeride area from the disc named in kit.toml straight away.\n\
@@ -5459,6 +5636,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      rider's engine, wrecks and landings, the track's own sounds, and music —\n\
                      the disc's songs, then any .wav in the music folder beside the settings,\n\
                      picked in Settings. --no-sound turns it off; a headless ride has none.\n\
+                     \n\
+                     Track mods: a --track not on the disc is looked for in mods/tracks/<id>/\n\
+                     beside the settings (openmx-mods' standard), or in --mods DIR; --mods off,\n\
+                     or Settings' Mods Off, reads nothing there. A mod rides as a freeride.\n\
                      \n\
                      Online: --online NAME@HOST:PORT --peer NAME@HOST:PORT ... --seats NAME,NAME,-\n\
                      rides with the other machines over UDP, one bike a seat (up to eight; the\n\

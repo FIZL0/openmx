@@ -284,7 +284,7 @@ impl Species {
 /// The map's larger side in feet, which an `.esb`'s positions are fractions of: the terrain's samples
 /// times its spacing (not the last sample's place, one spacing short).
 pub fn extent(layout: &game_sim::track::TerrainLayout, terrain: &game_sim::track::Terrain) -> f32 {
-    let per = 16u32.pow(terrain.levels) as f32;
+    let per = game_sim::world::SAMPLES_PER_WIDTH as f32;
     layout.width.max(layout.breadth) as f32 * per * terrain.scale.0
 }
 
