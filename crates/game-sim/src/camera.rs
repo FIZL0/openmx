@@ -442,14 +442,24 @@ pub struct Follow {
     pub speed_reference: F,
     /// How far above the target point the look-at sits. The original's constructor sets it to three.
     pub height_bias: F,
-    /// While this is set the player's stick may not pitch the camera *down*, only up. The front end
-    /// owns it; nothing in this module sets it.
+    /// While this is set the player's stick may not pitch the camera *down*, only up. The base class
+    /// never sets it; the race camera's floor ([`Race::keep_off_the_ground`]) does, once a frame,
+    /// to whether it had to lift the eye — an eye already sitting on the ground may not be pitched
+    /// further into it.
     pub pitch_down_locked: bool,
     /// The lift the ground probe answered last frame, which this frame's decay multiplies — see
     /// [`Follow::probe_ground`]. The original keeps it in the *derived* camera object rather than in
     /// this one, because the probe is that class's override and this class's is a stub; it is here
     /// because this is the object the frame runs on.
     pub ground_lift: F,
+    /// The least height the race camera's eye keeps above the ground, before the near plane's say —
+    /// see [`Race::keep_off_the_ground`]. The derived constructor writes three; the race's setup
+    /// writes two over it, which is what every race camera read live holds. Kept here for the same
+    /// reason as [`Follow::ground_lift`].
+    pub min_height: F,
+    /// The highest the race camera's eye may go, in world `y`: [`F::MAX`], or 200 ft on a scene
+    /// whose fog reaches past 1500 ft ([`Race::ceiling_for_fog`]).
+    pub ceiling: F,
 }
 
 impl Follow {
@@ -488,6 +498,8 @@ impl Follow {
             height_bias: F(3.0),
             pitch_down_locked: false,
             ground_lift: F::ZERO,
+            min_height: F(RACE_CTOR_MIN_HEIGHT),
+            ceiling: F::MAX,
         };
         if !cam.presets.is_empty() {
             cam.set_preset(0);
@@ -1042,6 +1054,10 @@ impl Surface for Nothing {
     fn on_surface(&mut self, point: Vf) -> Vf {
         point
     }
+
+    fn has_ground(&self) -> bool {
+        false
+    }
 }
 
 // --- what the camera asks the ground ---------------------------------------------------------------
@@ -1061,6 +1077,12 @@ pub trait Surface {
     /// `z` and `w` come back untouched either way — the query moves a point *down* onto the ground,
     /// it does not move it sideways.
     fn on_surface(&mut self, point: Vf) -> Vf;
+
+    /// Is there a world to ask at all. The race camera's floor tests its world pointer before it
+    /// asks, and does nothing without one ([`Race::keep_off_the_ground`]); every real scene has one.
+    fn has_ground(&self) -> bool {
+        true
+    }
 }
 
 /// Where the camera goes when the probe hit something: [`PROBE_CLEARANCE`] short of the hit, back
@@ -1243,6 +1265,25 @@ impl Preset {
 /// viewport's 2.4 feet becomes a floor of ten and four fifths.
 pub const NEAR_CLIP_FLOOR: f32 = 4.5;
 
+/// How many near planes the race camera's eye keeps above the ground at the least: the floor is
+/// this many, or [`Follow::min_height`] if that is more. At the race viewport's 2.4 ft near plane the
+/// near planes win, so the eye never sits lower than 4.8 ft over the ground under it.
+pub const NEAR_CLIP_HEIGHT: f32 = 2.0;
+
+/// [`Follow::min_height`] as the derived constructor writes it.
+const RACE_CTOR_MIN_HEIGHT: f32 = 3.0;
+
+/// [`Follow::min_height`] as the race's setup writes it over the constructor's, for every race
+/// camera it builds — the bike's and the plane's.
+pub const RACE_MIN_HEIGHT: f32 = 2.0;
+
+/// The race's setup caps the eye at [`RACE_CEILING`] only on a scene whose fog record's far
+/// distance (`[Fog]`'s `MaximumFogDistance`) is more than this.
+const CEILING_FOG: f32 = 1500.0;
+
+/// The highest the eye may go, in world `y`, on a scene with fog past [`CEILING_FOG`].
+pub const RACE_CEILING: f32 = 200.0;
+
 /// Above this, and only while the rider is in the air, the heading comes off the velocity instead of
 /// the rider's forward axis — so a flip or a whip in the air, which turns the bike's forward row
 /// over, does not turn the camera with it.  (See [`Ridden::airborne`]: on the ground the heading is
@@ -1353,10 +1394,13 @@ pub struct Switches {
 /// * the look-at's target is the target point led a step forward by the velocity;
 /// * standing still, the look-at is the plain target point lifted by the height bias and the
 ///   position leads by ten steps of velocity instead;
-/// * there is no obstacle push-out at all.
+/// * there is no obstacle push-out block at the end of the frame — what keeps the eye out of the
+///   ground is the filter's own slot instead ([`Race::keep_off_the_ground`]).
 ///
 /// The ground probe the base class stubs is overridden too; [`Follow::probe_ground`] is already that
-/// override, so it is used from here as it is.
+/// override, so it is used from here as it is. So is the slot the base class's filter calls on the
+/// position before and after the lags, a `return 1` in the base and the eye's floor in this class
+/// ([`Race::filter`]).
 pub struct Race {
     /// The base object this one is built on. Everything the derived class does not override — the
     /// presets, the filters, the field of view, the nudges, the ground lift — lives here and is
@@ -1368,8 +1412,86 @@ impl Race {
     /// A race camera over the given presets. The derived constructor runs the base one and then
     /// writes its own fields; of those, only the ground lift and the world pointer are ever read by
     /// the frame, and the lift is the base object's own.
+    ///
+    /// The race's setup then writes the eye's least height ([`RACE_MIN_HEIGHT`]) over the
+    /// constructor's, and that is done here too; its ceiling is [`Race::ceiling_for_fog`]'s.
     pub fn new(presets: Vec<Preset>, reverse_speed: F) -> Self {
-        Race { cam: Follow::new(presets, reverse_speed) }
+        let mut cam = Follow::new(presets, reverse_speed);
+        cam.min_height = F(RACE_MIN_HEIGHT);
+        Race { cam }
+    }
+
+    /// The ceiling the race's setup gives the eye on a scene whose fog record reaches `max_fog`:
+    /// [`RACE_CEILING`] past [`CEILING_FOG`], none otherwise. Free09's 1000 ft gets none.
+    pub fn ceiling_for_fog(max_fog: F) -> F {
+        if F(CEILING_FOG) < max_fog { F(RACE_CEILING) } else { F::MAX }
+    }
+
+    /// **The eye's floor**: what keeps the race camera out of the ground. Vtable slot `+0x108`, which
+    /// the base class's filter calls on the position twice a frame — on the raw one before the lags
+    /// and on the lagged one after — and which is a `return 1` in the base class (S7's
+    /// `camera_frame_noop`). This class's override is the only thing in its frame that stops the eye
+    /// going under a hillside behind the rider, into a hollow, or down with a wreck.
+    ///
+    /// * The floor is [`NEAR_CLIP_HEIGHT`] near planes or [`Follow::min_height`], whichever is more:
+    ///   4.8 ft at the race viewport's near plane.
+    /// * The eye is dropped onto the ground under it through the world's own ground query
+    ///   ([`Surface::on_surface`], the probe's question), as it was handed in.
+    /// * Its height is capped at [`Follow::ceiling`].
+    /// * If it is then less than the floor above that ground it is put exactly the floor above it;
+    ///   only `y` moves. The filter always asks for the lift, so the original's "only report it" arm
+    ///   is not here.
+    /// * `lock` (the first of the two calls) records into [`Follow::pitch_down_locked`] whether the
+    ///   eye was under the floor, which is what stops the player's stick pitching it further down.
+    ///
+    /// A camera with no world ([`Surface::has_ground`] false) does none of it, which is the original's
+    /// world pointer left null, and also what a scene of [`Nothing`] is.
+    ///
+    /// The override starts with a second block, a segment probe from the target point out to the eye
+    /// through the camera's collision object that parks the eye a floor's height off whatever it hit,
+    /// along the hit's normal. That object is made by a vtable slot nothing in the race's setup calls,
+    /// and every race camera read live holds a null there, so the block never runs on the disc and is
+    /// not here (`research/oracle.txt`, S103).
+    pub fn keep_off_the_ground(&mut self, eye: &mut Vf, near_clip: F, lock: bool, scene: &mut impl Surface) {
+        let floor = (near_clip * NEAR_CLIP_HEIGHT).max(self.cam.min_height);
+        if !scene.has_ground() {
+            return;
+        }
+        let ground = F(scene.on_surface(*eye).y());
+        let y = F(eye.y()).min(self.cam.ceiling);
+        eye[1] = y.0;
+        if y - ground < floor {
+            if lock {
+                self.cam.pitch_down_locked = true;
+            }
+            eye[1] = (ground + floor).0;
+        } else if lock {
+            self.cam.pitch_down_locked = false;
+        }
+    }
+
+    /// The lags, as this class runs them: [`Follow::filter`] with this class's slot
+    /// ([`Race::keep_off_the_ground`]) called where the base class's filter calls its own — on the raw
+    /// position first, which is what the lags then chase (and what a snap loads them with), and again
+    /// on the lagged position when the lags ran, which is what the frame hands the viewport. The lags
+    /// are not told about the second lift.
+    #[allow(clippy::too_many_arguments)]
+    pub fn filter(
+        &mut self,
+        dt: F,
+        near_clip: F,
+        position: &mut Vf,
+        look_at: &mut Vf,
+        fov: &mut F,
+        spare: &mut F,
+        scene: &mut impl Surface,
+    ) {
+        self.keep_off_the_ground(position, near_clip, true, scene);
+        let lags = self.cam.preset().filter_this_preset && !self.cam.snap;
+        self.cam.filter(dt, position, look_at, fov, spare);
+        if lags {
+            self.keep_off_the_ground(position, near_clip, false, scene);
+        }
     }
 
     /// Yaw and pitch, this class's way. Not a vtable slot at all, unlike the base class's: the
@@ -1521,10 +1643,10 @@ impl Race {
     /// One frame of the race camera, in the original's order. Vtable slot `+0x38` of the derived
     /// class, which is slot `+0x98` of the secondary vtable the base class's frame sits in.
     ///
-    /// `near_clip` is the viewport's near clip distance (see [`Race::limit_distance`]); `switches`
-    /// are the two engine bits the frame reads; `scene` answers the ground probe. There is no
-    /// obstacle argument because this frame has no push-out — the derived class does make a
-    /// collision object, in an override the frame never calls.
+    /// `near_clip` is the viewport's near clip distance (see [`Race::limit_distance`] and
+    /// [`Race::keep_off_the_ground`]); `switches` are the two engine bits the frame reads; `scene`
+    /// answers the ground probe and the eye's floor. There is no obstacle argument because the
+    /// floor's segment probe never runs on the disc (see [`Race::keep_off_the_ground`]).
     ///
     /// A camera with no actor runs none of this in the original and falls through to the base
     /// class's *other* update, the one that only ages the nudges; a caller here simply does not call
@@ -1618,9 +1740,10 @@ impl Race {
 
         let mut position = self.position(dt, speed, direction, lead_point, t.vel);
         let mut spare = F::ZERO;
-        // The filters are the base class's, unoverridden. The original hands them the plain target
-        // point as well, and the base class's filter does not read it.
-        self.cam.filter(dt, &mut position, &mut look_at, &mut fov, &mut spare);
+        // The filters are the base class's, unoverridden, but the slot they call on the position is
+        // this class's floor. The original also hands them the plain target point, which only the
+        // floor's segment probe would read.
+        self.filter(dt, near_clip, &mut position, &mut look_at, &mut fov, &mut spare, scene);
         View { position, look_at, fov }
     }
 }
