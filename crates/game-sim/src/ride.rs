@@ -1169,7 +1169,7 @@ fn bundle(ch: &chassis::Chassis, m: &Mat4, front: &Wheel, rear: &Wheel, dt: F) -
     let cofg = ch.cofg_world;
     b.probes[b.count] = Probe::between(cofg, add_xyz(cofg, scale(ch.vel, dt)));
     b.count += 1;
-    let reach = front.w.probe_length + front.mv.radius;
+    let reach = belly_reach(m, cofg, front, rear);
     let down = scale(direction(m, UP), -reach);
     b.probes[b.count] = Probe::between(cofg, add_xyz(cofg, down));
     b.count += 1;
@@ -1186,6 +1186,26 @@ fn bundle(ch: &chassis::Chassis, m: &Mat4, front: &Wheel, rear: &Wheel, dt: F) -
     debug_assert!(b.count == PROBES);
     b
 }
+
+/// How far [`bundle`]'s straight-down probe reaches below the centre of mass: as far as the
+/// suspension plus a wheel, but never deeper, along the chassis' own down, than a wheel's radius
+/// short of the shallower of the two suspension lines' ends (S89), so that on anything flat it only
+/// catches once the suspension is a radius into its travel. A longer one finds a flat prop first —
+/// free06's railway bed — and holds the bike up on its belly where neither wheel's line reaches it:
+/// no contact, no tire force, and the bike slides. The port's own, like the rest of the bundle, until the original's
+/// body rays replace it (S86/S87).
+fn belly_reach(m: &Mat4, cofg: Vf, front: &Wheel, rear: &Wheel) -> F {
+    let up = direction(m, UP);
+    let mut reach = front.w.probe_length + front.mv.radius;
+    for w in [front, rear] {
+        let end = math::transform_point(m, add_xyz(w.w.mount, w.w.probe));
+        reach = reach.min(dot3(sub_xyz(cofg, end), up) - w.mv.radius);
+    }
+    reach.max(F(BELLY_MIN_REACH))
+}
+
+/// The shortest [`belly_reach`]: a probe of no length sweeps nothing.
+const BELLY_MIN_REACH: f32 = 0.05;
 
 /// One surface out of a tire's table, by the index the ground query answered with. A tire with no
 /// table at all — or an index past its end — gets a surface of all zeroes, which is a tire with no
@@ -1572,8 +1592,11 @@ impl Ride {
                 wh.to_wheel();
                 let mut query = |at: Vf| world.ground(at);
                 wheel::suspension(&mut wh.w, &out.chassis.0, &tables.curve, &mut query);
-                if wh.w.ray_hit != 0 {
-                    wh.surface = world.surface(wh.w.contact_point);
+                // The original's query writes the surface at the ray's last end, hit or miss (S89).
+                if wh.w.has_ground
+                    && let Some(s) = world.wheel_surface(wh.w.probe_end_world)
+                {
+                    wh.surface = s;
                 }
                 wh.from_wheel();
             }
