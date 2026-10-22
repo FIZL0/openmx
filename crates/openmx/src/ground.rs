@@ -37,6 +37,19 @@ const LEAF_SAMPLES: u32 = 16;
 /// honest about being flat.
 pub const DIRT: [f32; 3] = [150.0, 118.0, 86.0];
 
+/// How far around the rider the software renderer draws the ground, in feet ([`Ground::radius`]).
+///
+/// The scene's fog is the real limit and the draw culls against it, but `free06`'s fog is further away
+/// than a software rasteriser can fill at 60 Hz, so the dirt fades out at a radius instead: about a
+/// hundred and thirty yards of ground in every direction, 44 samples at MX Unleashed's nine feet a
+/// sample and 88 at MX vs. ATV's four and a half (MD3), which is the same ground either way.
+pub const REACH: f32 = 396.0;
+
+/// How far a side of ground the GPU draws or culls at once (P44), in feet ([`Ground::chunk_cells`]):
+/// 32 cells at nine feet a sample, 64 at four and a half (MD3), so a finer map is not cut into four
+/// times the chunks.
+pub const CHUNK_FEET: f32 = 288.0;
+
 /// A ground cell's paint in a [`Batch`]: the track's, under its baked light map or outside it, or
 /// none.
 const PAINTED: u32 = 0;
@@ -76,6 +89,16 @@ impl<'a> Ground<'a> {
     pub fn painted(mut self, paint: Option<Splat>) -> Ground<'a> {
         self.paint = paint;
         self
+    }
+
+    /// [`REACH`] in this ground's samples: the radius [`Ground::draw`] is handed.
+    pub fn radius(&self) -> u32 {
+        (REACH / self.spacing.max(1.0e-3)).ceil() as u32
+    }
+
+    /// [`CHUNK_FEET`] in this ground's cells, a power of two as [`Ground::chunks`] makes them.
+    pub fn chunk_cells(&self) -> u32 {
+        ((CHUNK_FEET / self.spacing.max(1.0e-3)).round() as u32).max(1).next_power_of_two()
     }
 
     /// How big the field is in world units.
