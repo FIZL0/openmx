@@ -77,6 +77,15 @@ pub trait World {
     /// looked at — the record says what was hit.
     fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool;
 
+    /// Sweep a bundle against the placed groups only — an ecosystem's trunks ([`crate::eco`], S97):
+    /// the shapes the bike's body rays search and its swept probe and the put-back's probes do not.
+    /// The record is the one [`World::solid`] filled, so the nearer hit of the two stands. A world
+    /// with no placed groups looks at nothing.
+    fn groups(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
+        let _ = (bundle, record);
+        false
+    }
+
     /// Whether the put-back's clearance query refuses a spot with none of its probes meeting anything
     /// (S75): the original's query also refuses when a placed group it has gathered within `radius` of
     /// `centre` has a part whose cell, on the ground plane, is within twenty feet of it — and, in a

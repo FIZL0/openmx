@@ -1789,7 +1789,7 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
             rear: &mut Wheel, near: &mut F, touching: &mut bool, dt: F, world: &mut dyn World) {
     let b = bundle(ch, m, front, rear, dt);
     let mut record = Record::new();
-    let look = world.solid(&b, &mut record);
+    let look = world.solid(&b, &mut record) | world.groups(&b, &mut record);
 
     let mut cs: Vec<chassis::Contact> = Vec::new();
     for i in 0..b.count {
@@ -1867,6 +1867,7 @@ pub fn hits(ride: &Ride, world: &mut dyn World) -> Vec<air::Contact> {
     b.radius = length(sub_xyz(to, from));
     let mut record = Record::new();
     world.solid(&b, &mut record);
+    world.groups(&b, &mut record);
     let reach = F(air::HEAD.1.y());
     if record.hit[0] {
         vec![air::Contact { mirrored: false, reach, other: air::Other::Scenery }]
@@ -1952,6 +1953,7 @@ pub fn hits_among(ride: &Ride, world: &mut dyn World, rivals: &[Rival]) -> Vec<a
     b.radius = length(sub_xyz(to, from));
     let mut record = Record::new();
     world.solid(&b, &mut record);
+    world.groups(&b, &mut record);
     let reach = F(air::HEAD.1.y());
     let mut best = record.hit[0].then(|| (record.fraction[0], air::Other::Scenery));
     for r in rivals {
