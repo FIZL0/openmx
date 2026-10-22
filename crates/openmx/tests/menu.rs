@@ -640,8 +640,10 @@ fn garage(seat: usize, up: Kind) -> Garage {
 fn ride_frame(m: &mut Menu, readers: &mut [Reader], reports: &[Report], garages: &mut [Garage]) -> Act {
     let presses: Vec<Press> = readers.iter_mut().zip(reports).map(|(r, rep)| r.read(rep)).collect();
     let act = m.step_seats(&presses);
-    if let Act::Switch(seat) = act {
-        let up = garages[seat].swap().unwrap();
+    if let Act::Switch(seat, to) = act {
+        // The menu's part is which machine; where it spawns is the garage's, over a floor here.
+        let (mut sim, mut floor) = (game_sim::Sim::new(0), game_sim::world::Flat::default());
+        let up = garages[seat].switch(Kind::parse(to.word()).unwrap(), &mut sim, &mut floor).unwrap();
         m.switched(seat, Machine::from_word(up.name()).unwrap());
     }
     act
@@ -690,7 +692,7 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
-    assert!(acts.contains(&Act::Switch(1)), "{acts:?}");
+    assert!(acts.contains(&Act::Switch(1, Machine::Biplane)), "{acts:?}");
     assert!(m.riding());
     assert_eq!((garages[0].up, garages[1].up), (Kind::Bike, Kind::Biplane));
     assert_eq!(m.up[..2], [Machine::Bike, Machine::Biplane]);
@@ -701,7 +703,7 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
-    assert!(acts.contains(&Act::Switch(0)), "{acts:?}");
+    assert!(acts.contains(&Act::Switch(0, Machine::Biplane)), "{acts:?}");
     assert_eq!((garages[0].up, garages[1].up), (Kind::Biplane, Kind::Biplane));
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
     assert_eq!(m.pause_rows()[2], "Switch To Machine: Bike");
@@ -715,7 +717,7 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
-    assert!(!acts.iter().any(|a| matches!(a, Act::Switch(_))), "{acts:?}");
+    assert!(!acts.iter().any(|a| matches!(a, Act::Switch(..))), "{acts:?}");
     assert_eq!(m.screen(), Some(Screen::Pause));
     assert_eq!(garages[1].up, Kind::Biplane);
 }
@@ -1835,7 +1837,7 @@ fn the_pauses_modifiers_take_when_it_closes_unless_held() {
     tap(&mut m, &mut r, Control::Up);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
-    let gravity = 1 + Knob::ALL.iter().position(|k| *k == Knob::Gravity).unwrap();
+    let gravity = 1 + Knob::MENU.iter().position(|k| *k == Knob::Gravity).unwrap();
     for _ in 0..gravity {
         tap(&mut m, &mut r, Control::Down);
     }
@@ -1850,7 +1852,7 @@ fn the_pauses_modifiers_take_when_it_closes_unless_held() {
     assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90);
     assert_eq!(m.modifier_help(), "Online the ride keeps its modifiers");
     assert!(m.modifier_rows()[gravity].ends_with("Held"), "{:?}", m.modifier_rows());
-    while m.cursor(Screen::Modifiers) != Knob::ALL.len() + 4 {
+    while m.cursor(Screen::Modifiers) != Knob::MENU.len() + 4 {
         tap(&mut m, &mut r, Control::Down);
     }
     tap(&mut m, &mut r, Control::Cross);
