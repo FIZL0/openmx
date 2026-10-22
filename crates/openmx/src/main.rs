@@ -118,9 +118,11 @@
 //!
 //! **M** swaps between the bike and the track's biplane, as does the pause's "Switch To Machine" for
 //! the player who opened it, and `--vehicle biplane` or the ride setup's machine pick starts in the
-//! plane ([`vehicle`], P19, P41): the swap is the original's own — the bike is left where it stands, hidden and
-//! not stepped, and the plane is put back where the track's `machine.txt` parked it, with its own
-//! camera file. With the plane up it flies (P31): its own simulation steps every frame on the seat's
+//! plane ([`vehicle`], P19, P41). The switch is the port's own (P102): the machine taken is spawned
+//! where the player is — a plane landed on its wheels where the bike was, a bike upright on the
+//! ground under the plane — and the machine left goes, not drawn and not stepped; a plane nobody has
+//! taken stands parked in its bay. The plane has its own camera file. A tape writes the switch down
+//! at its tick (`switch <frame> <machine>`) and rides it there again. With the plane up it flies (P31): its own simulation steps every frame on the seat's
 //! pad, the model is drawn at its body's pose with the prop at the engine's angle, the plane's camera
 //! follows it, and the overlay shows its throttle and airspeed. It flies over the terrain's
 //! heightfield alone — the props are not in its world, because the original's contact search is not
@@ -431,11 +433,12 @@ fn marker_line(did: markers::Did) -> String {
     }
 }
 
-/// The swap (P19) for one player, from the M key or the pause's "Switch To Machine" (P41): the
-/// controller moves, and the machine taken gets its own camera, which starts where it is rather than
-/// lagging in from wherever it was last. The machine now up, or `None` (and no swap) with no plane.
-fn switch_machine(seat: &mut Seat, rig: &mut Rig) -> Option<Kind> {
-    match seat.garage.swap() {
+/// The switch (P19, P102) for one player, from the M key, the pause's "Switch To Machine" (P41) or
+/// a tape: `to` is spawned where the player is ([`Garage::switch`]) over `place`, the machine left
+/// goes, and the machine taken gets its own camera, which starts where it is rather than lagging in
+/// from wherever it was last. The machine now up, or `None` (and no switch) where it cannot be had.
+fn switch_machine(seat: &mut Seat, rig: &mut Rig, to: Kind, place: &mut dyn sim_world::World) -> Option<Kind> {
+    match seat.garage.switch(to, &mut seat.sim, place) {
         Ok(up) => {
             let cam = &mut rig.follow_mut(up).cam;
             cam.snap = true;
@@ -486,13 +489,11 @@ fn radar_blips(seats: &[Seat], v: usize, zones: &[overlay::Zone], me: usize, pla
     let view = &seats[v];
     // In the original's order, each over the one before: the machines, the bikes, the zones.
     let mut out = Vec::new();
+    // A plane left, and a bike left, are nowhere (P102): only a plane still in its bay is marked.
     for seat in seats.iter().filter(|s| s.garage.up == Kind::Bike) {
-        if let Some(plane) = &seat.garage.plane {
+        if let Some(plane) = seat.garage.plane_shown() {
             out.push(Blip { icon: Icon::Machine(vehicle::Machine::Biplane, plane.livery), at: ground(plane.at) });
         }
-    }
-    for seat in seats.iter().filter(|s| s.garage.up != Kind::Bike) {
-        out.push(Blip { icon: Icon::Bike, at: ground(seat.sim.rider.ride.position()) });
     }
     let zones = overlay::shown_zones(zones, view.garage.up != Kind::Bike);
     out.extend(zones.into_iter().map(|z| Blip { icon: Icon::Activity(z.activity), at: z.at }));
@@ -3099,6 +3100,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             println!("modifiers: {} (the tape's, from frame {})", mods.text(), head.as_ref().map_or(0, Head::at));
         }
+        // And switched machine there (P102): the first player's, spawned where they are at that
+        // tick, so the ride after it is the one recorded.
+        for word in head.as_ref().map(Head::switches).unwrap_or_default() {
+            match Kind::parse(&word) {
+                Ok(to) => {
+                    let up = switch_machine(&mut world.seats[0], &mut rigs[0], to, &mut world.place);
+                    if let (Some(up), Some(tape)) = (up, &mut world.tape) {
+                        tape.switch(up.name());
+                    }
+                    if let (Some(up), Some(front)) = (up, front.as_deref_mut()) {
+                        front.menu.switched(0, menu::Machine::from_word(up.name()).unwrap_or_default());
+                    }
+                }
+                Err(e) => println!("the tape's switch at frame {}: {e}", head.as_ref().map_or(0, Head::at)),
+            }
+        }
         match &mut head {
             // The seats', otherwise: seat i feeds player i's own pad port (V22's players). A seat
             // whose pad was pulled out pauses its own player rather than riding on with nobody's
@@ -3186,9 +3203,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // It is the first player's key, and the first player's plane.
         // The pause's "Switch To Machine" (P41) is the same swap for whichever player opened it; the
         // key stays for the keyboard.
+        // A tape being written takes the switch at the tick it is on (P102), as it takes modifiers.
         let swap_now = held(&window, key::M);
         if swap_now && !swap_key && head.is_none() && online.is_none() {
-            let up = switch_machine(&mut world.seats[0], &mut rigs[0]);
+            let to = world.seats[0].garage.up.other();
+            let up = switch_machine(&mut world.seats[0], &mut rigs[0], to, &mut world.place);
+            if let (Some(up), Some(tape)) = (up, &mut world.tape) {
+                tape.switch(up.name());
+            }
             if let (Some(up), Some(front)) = (up, front.as_deref_mut()) {
                 front.menu.switched(0, menu::Machine::from_word(up.name()).unwrap_or_default());
             }
@@ -3267,11 +3289,19 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     break;
                 }
                 Act::Quit => break,
-                // A played tape has no swap in it, as the key's does not.
-                Act::Switch(i) if head.is_none() => {
-                    if let (Some(seat), Some(rig)) = (world.seats.get_mut(i), rigs.get_mut(i))
-                        && let Some(up) = switch_machine(seat, rig)
+                // A played tape switches where it says and nowhere else, and online the ride is the
+                // bike's (its sessions carry no machine).
+                Act::Switch(..) if online.is_some() => {
+                    front.menu.note = Some("Online rides the bike: there is no switching machine.".into());
+                }
+                Act::Switch(i, to) if head.is_none() => {
+                    let to = Kind::parse(to.word()).ok();
+                    if let (Some(to), Some(seat), Some(rig)) = (to, world.seats.get_mut(i), rigs.get_mut(i))
+                        && let Some(up) = switch_machine(seat, rig, to, &mut world.place)
                     {
+                        if let (0, Some(tape)) = (i, &mut world.tape) {
+                            tape.switch(up.name());
+                        }
                         front.menu.switched(i, menu::Machine::from_word(up.name()).unwrap_or_default());
                     }
                 }
@@ -3303,7 +3333,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         }
                     }
                 }
-                Act::Stay | Act::Resume | Act::Ride(_) | Act::Switch(_) | Act::Online | Act::OpenOnline => {}
+                Act::Stay | Act::Resume | Act::Ride(_) | Act::Switch(..) | Act::Online | Act::OpenOnline => {}
             }
             // The pause closing on modifiers the player changed in it: the ride takes them now, from
             // where it is (P98), and a tape being written takes the change at the tick it is on.
@@ -3770,9 +3800,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     });
                 }
             }
-            // Every player's plane, in its own livery (P87).
+            // Every player's plane, in its own livery (P87): flown, or in its bay until it is taken.
             for (p, seat) in world.seats.iter().enumerate() {
-                let Some(plane) = &seat.garage.plane else { continue };
+                let Some(plane) = seat.garage.plane_shown() else { continue };
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 let before = before_planes.get(p).copied().flatten();
                 let at = before.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
@@ -3905,8 +3935,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let (scene_at, spent) = (Instant::now(), perf.spent());
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
-                // With the plane up the bike is hidden, as the swap hides its model, and the rider is the
-                // plane's pilot — whom V21 seats.
+                // With the plane up the bike is nowhere (P102), and the rider is the plane's pilot —
+                // whom V21 seats.
                 if seat.garage.up != Kind::Bike || !seated[p] {
                     continue;
                 }
@@ -3982,11 +4012,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                 }
             }
-            // The plane stands in the world either way: parked until it is taken, wherever it was
-            // left after. At its body's pose, nose and up off the plane's own measure, with the prop
-            // at the engine's angle (S35) — or the bent cone, unturned, once it is wrecked.
+            // The plane stands parked in its bay until it is taken, and from then is drawn only while
+            // it is flown (P102). At its body's pose, nose and up off the plane's own measure, with the
+            // prop at the engine's angle (S35) — or the bent cone, unturned, once it is wrecked.
             for (p, seat) in world.seats.iter().enumerate() {
-                let Some(plane) = &seat.garage.plane else { continue };
+                let Some(plane) = seat.garage.plane_shown() else { continue };
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 let before = before_planes.get(p).copied().flatten();
                 let at = before.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
@@ -4182,6 +4212,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // with a pad is a different ride every time, and its number is worth nothing.
     if head.is_some() || args.record.is_some() || args.headless {
         println!("ride hash {:#018x}", game_sim::hash::of(&world.seats[0].sim.rider.ride));
+        // And the first player's plane, flown or not, for a tape that switched into it (P102).
+        if let Some(flight) = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.as_ref()) {
+            println!("plane hash {:#018x} ({})", game_sim::hash::of(flight), world.seats[0].garage.up.name());
+        }
     }
 
     let opened = front.as_deref().is_some_and(|f| f.menu.opening == menu::Opening::Open);
@@ -4999,8 +5033,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      is plugged back in; Start on the keyboard rides on without it. The buttons\n\
                      are rebindable in --bindings (context/controls.txt, written on first run).\n\
                      --vehicle biplane starts in the track's biplane, where its machine.txt\n\
-                     parks one, and M swaps between the bike and the plane the way the\n\
-                     original's \"Switch To Machine\" does. The plane flies over the terrain\n\
+                     parks one, and M switches between the bike and the plane, spawning the\n\
+                     one taken where you are and putting the other away. The plane flies over the terrain\n\
                      alone: Cross opens the throttle and Square closes it.\n\
                      --players N splits the screen between N local players (up to 8), each on\n\
                      a pad of their own with a camera and an overlay of their own: two one above\n\
