@@ -1835,7 +1835,7 @@ fn the_pauses_modifiers_take_when_it_closes_unless_held() {
     tap(&mut m, &mut r, Control::Up);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
-    let gravity = 1 + Knob::ALL.iter().position(|k| *k == Knob::Gravity).unwrap();
+    let gravity = 1 + Knob::MENU.iter().position(|k| *k == Knob::Gravity).unwrap();
     for _ in 0..gravity {
         tap(&mut m, &mut r, Control::Down);
     }
@@ -1850,7 +1850,7 @@ fn the_pauses_modifiers_take_when_it_closes_unless_held() {
     assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90);
     assert_eq!(m.modifier_help(), "Online the ride keeps its modifiers");
     assert!(m.modifier_rows()[gravity].ends_with("Held"), "{:?}", m.modifier_rows());
-    while m.cursor(Screen::Modifiers) != Knob::ALL.len() + 4 {
+    while m.cursor(Screen::Modifiers) != Knob::MENU.len() + 4 {
         tap(&mut m, &mut r, Control::Down);
     }
     tap(&mut m, &mut r, Control::Cross);

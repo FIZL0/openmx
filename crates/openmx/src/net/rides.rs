@@ -54,13 +54,16 @@ impl Game for Rides<'_> {
         // Where every seat's rider is before anybody's tick, which is where a marker's Up rides to
         // (P88): the same on every machine, as every seat's state is.
         let spots: Vec<Spot> = self.sims.iter().map(|s| Spot::of(&s.rider)).collect();
+        // Who is in the ride (P94): a seat nobody sits in has the missing pad ([`Game::step`]), and is
+        // no marker's pick. The pads are the session's, so every machine counts the same.
+        let riding: Vec<bool> = (0..self.sims.len()).map(|s| pads.get(s).is_some_and(|p| p.0[0] != Report::missing().0[0])).collect();
         for (seat, sim) in self.sims.iter_mut().enumerate() {
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());
             // The shell's hands, the d-pad the markers' and not the ride's (P93).
             let hands = sim.poll(dt, &reports).stick_alone();
             sim.step(dt, &hands, self.world);
-            markers::frame(sim, seat, &spots, &hands);
+            markers::frame_among(sim, seat, &spots, &riding, &hands);
             if let Some(after) = &mut self.after {
                 after(seat, dt, sim, &hands);
             }
