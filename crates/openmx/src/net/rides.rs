@@ -68,7 +68,8 @@ impl Game for Rides<'_> {
         let riding: Vec<bool> = (0..self.sims.len()).map(|s| pads.get(s).is_some_and(|p| p.0[0] != Report::missing().0[0])).collect();
         // Rider against rider (S78): every seat's contacts, from where the last tick left every bike.
         let mut lists = rider_contact::among(self.sims, &riding, dt);
-        for seat in 0..self.sims.len() {
+        // The last seat first, as the original walks its riders (S88, `Sim::step_all`).
+        for seat in (0..self.sims.len()).rev() {
             let mut bump = lists
                 .as_mut()
                 .map(|l| std::mem::take(&mut l[seat]))
