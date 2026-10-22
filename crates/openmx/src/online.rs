@@ -11,8 +11,12 @@
 //! state and must be rolled back with the ride; the pose it chose for each rider is written once the
 //! session has run.
 //!
-//! Not here yet: only the first local seat has a pad (P35's seats bring the rest); no Start freeze,
-//! machine swap or tape online.
+//! A seat's machine switch (N17) is its pad's [`crate::net::SWITCH`] byte, and its plane its `Sim`'s
+//! own lane ([`crate::vehicle::Wanted`]): copied into the shell's seat like the rest of it, which the
+//! shell's garage follows for the picture.
+//!
+//! Not here yet: only the first local seat has a pad (P35's seats bring the rest); no Start freeze
+//! or tape online.
 //!
 //! From the lobby (N3, [`Online::lobby`]) the session's datagrams go over the lobby's own iroh
 //! connection instead of `--peer` UDP: to and from the host direct, guest to guest through the host.
@@ -37,6 +41,7 @@ use game_sim::rider::Gate;
 use game_sim::vehicle_anim;
 use game_sim::world::World;
 use game_sim::Sim;
+use game_sim::flight::Flight;
 use ps2_float::F;
 
 use crate::net::rides::{self, Modded, Rides};
@@ -85,6 +90,10 @@ pub struct Online {
     /// them, which a change the host makes mid-ride builds the bikes again from (P100).
     mods: game_sim::modifiers::Mods,
     stock: Vec<game_sim::phy::Phy>,
+    /// The ride's biplane as built (N17, [`rides::plane_on`]), which a seat's switch takes a copy
+    /// of, and the disc's `biplane.phy` before the modifiers, which a change rebuilds it from.
+    plane: Option<Flight>,
+    stock_plane: Option<game_sim::phy::Plane>,
 }
 
 impl Online {
@@ -131,6 +140,8 @@ impl Online {
             presets_owed: true,
             mods: Default::default(),
             stock: Vec::new(),
+            plane: None,
+            stock_plane: None,
         })
     }
 
@@ -182,6 +193,8 @@ impl Online {
             presets_owed: false,
             mods: Default::default(),
             stock: Vec::new(),
+            plane: None,
+            stock_plane: None,
         })
     }
 
@@ -209,6 +222,8 @@ impl Online {
             presets_owed: false,
             mods: Default::default(),
             stock: Vec::new(),
+            plane: None,
+            stock_plane: None,
         })
     }
 
@@ -235,6 +250,8 @@ impl Online {
             presets_owed: false,
             mods: Default::default(),
             stock: Vec::new(),
+            plane: None,
+            stock_plane: None,
         })
     }
 
@@ -246,6 +263,15 @@ impl Online {
         self.time_scale = self.mods.time_scale();
         self.net.mods = self.mods.text();
         self.stock = stock;
+    }
+
+    /// The ride's biplane (N17): `stock`, the disc's `biplane.phy`, built on the modifiers the ride
+    /// is on ([`Online::modifiers`], called first) as `like` (a plane of this ride's) was, for every
+    /// seat's switch to the plane to take a copy of. Without both, a seat asking for the plane stays
+    /// on its bike.
+    pub fn planes(&mut self, stock: Option<game_sim::phy::Plane>, like: Option<&Flight>) {
+        self.plane = stock.as_ref().zip(like).map(|(s, l)| rides::plane_on(s, &self.mods, l));
+        self.stock_plane = stock;
     }
 
     /// The modifiers the ride is on now: the host's last change once every machine took it.
@@ -482,8 +508,8 @@ impl Online {
                     hands = Some(*c);
                 }
             };
-            let mut rides = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale };
-            let mut game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods };
+            let mut rides = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut() };
+            let mut game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: self.stock_plane.as_ref() };
             self.net.frame(&mut game, &local, real);
         }
         self.time_scale = self.mods.time_scale();

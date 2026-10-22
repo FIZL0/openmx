@@ -19,6 +19,9 @@ mod net;
 #[allow(dead_code)]
 #[path = "../src/peer.rs"]
 mod peer;
+#[allow(dead_code)]
+#[path = "../src/vehicle.rs"]
+mod vehicle;
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
