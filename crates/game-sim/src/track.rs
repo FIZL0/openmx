@@ -244,12 +244,14 @@ fn numbered(section: &str, prefix: &str) -> bool {
 }
 
 fn single(value: &str) -> Result<F, String> {
-    // The scene writes its singles as decimal text with six places; this is the host's conversion of
-    // that text, not the game's own, which was not disassembled.
+    // The scene writes its singles as decimal text with six places. The game reads them as it reads
+    // any ini float, `strtod` and then the truncating double-to-float ([`crate::phy::number`]); a host
+    // parse rounds to nearest and is a bit high on most of free06's props (S96, the props' centres
+    // against biplane.p2m2's state). The host parse still says what is not a number.
     value
         .trim()
         .parse::<f32>()
-        .map(|x| F(fpu::operand(x.to_bits())))
+        .map(|_| F(fpu::operand(crate::phy::number(value.trim()).to_bits())))
         .map_err(|e| format!("{value:?} is not a number: {e}"))
 }
 

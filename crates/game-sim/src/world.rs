@@ -371,14 +371,15 @@ impl Prop {
     /// A parsed mesh, stood where the scene puts it.
     ///
     /// The placement is a position and two axes, which go through the engine's own look-at
-    /// ([`math::basis`], orthogonalising and keeping the forward axis, as the scene loader asks for
-    /// one); the mesh carries a transform of its own, which goes first.
+    /// ([`math::basis`], the two axes as given, which is what the scene's collision reader asks for:
+    /// orthogonalising leaves an upright prop's up a bit short of 1, S96); the mesh carries a transform
+    /// of its own, which goes first.
     pub fn place(mesh: Mesh, at: &Placement) -> Prop {
         let place = math::basis(
             Vf::new(at.position[0].0, at.position[1].0, at.position[2].0, 1.0),
             Vf::new(at.look[0].0, at.look[1].0, at.look[2].0, 0.0),
             Vf::new(at.up[0].0, at.up[1].0, at.up[2].0, 0.0),
-            true,
+            false,
             true,
         );
         let own = Mat4([

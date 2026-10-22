@@ -585,6 +585,10 @@ pub mod ray_probe;
 /// world when it keeps no nearby search.
 pub mod broad_phase;
 
+/// How the world fills it: the static tree laid over a track's field and a collidable keyed and put in
+/// (S96), which decides the order a gather hands candidates out in.
+pub mod broad_build;
+
 /// The worked example from `docs/EXAMPLE.md`: three functions of the synthetic program that `./kit demo`
 /// generates, ported, with `tests/demo.rs` proving them bit-exact against the original's instructions.
 /// Delete it once your own port has something real in it.
