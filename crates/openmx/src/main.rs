@@ -178,6 +178,7 @@ mod pace;
 mod pad;
 mod particles;
 mod perf;
+mod portal;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
 mod same_ride;
@@ -530,19 +531,21 @@ fn radar_blips(seats: &[Seat], bays: &[vehicle::Bay], v: usize, zones: &[overlay
     out
 }
 
-/// Where view `v`'s player's session markers' posts stand in a `size` view through `camera` (P94):
-/// each filled slot's, with its slot and whether the selection (`pick`) is on it. None for a view
-/// that shows no markers.
-fn marker_posts(seat: &Seat, camera: &Camera, size: (usize, usize), pick: Option<markers::Pick>) -> Vec<(overlay::Post, usize, bool)> {
-    let Some(pick) = pick else { return Vec::new() };
-    let slots = seat.sim.markers.slots.iter().enumerate();
-    slots
-        .filter_map(|(slot, ride)| {
-            let at = ride.as_ref()?.position();
-            let post = overlay::marker_post(camera, size, [at.x(), at.y(), at.z()])?;
-            Some((post, slot, pick == markers::Pick::Slot(slot)))
-        })
-        .collect()
+/// The ground's height under `x`, `z` for a portal's disc (V51), from the ride's own terrain query
+/// looking down from `y`; `None` off the terrain, where the query answers its no-ground depth.
+fn portal_ground(place: &mut dyn sim_world::World, x: f32, y: f32, z: f32) -> Option<f32> {
+    let (on, _) = place.ground(Vf::new(x, y, z, 1.0));
+    (on.y() > -1.0e5).then(|| on.y())
+}
+
+/// What view `v` sees of the portals (V51): the start zones the original shows its player (not the
+/// machine race's while they are in a machine, [`portal::shown`]) and the player's own markers'.
+fn portal_glows(art: &portal::Art, zones: &[portal::Portal], marked: &[Option<portal::Portal>], in_machine: bool, camera: &Camera, seconds: f32) -> Vec<game_render::glow::Glow> {
+    let (eye, at) = (camera.eye, camera.at);
+    let forward = [at.x - eye.x, at.y - eye.y, at.z - eye.z];
+    let race = |p: &&portal::Portal| in_machine && p.kind == portal::Kind::Zone(overlay::Activity::Race);
+    let shown = zones.iter().filter(|p| !race(p)).chain(marked.iter().flatten());
+    shown.flat_map(|p| p.glows(art, [eye.x, eye.y, eye.z], forward, seconds)).collect()
 }
 
 /// One local player's half of the picture (V22): the body and bike posed for them, the cameras that
@@ -2967,6 +2970,24 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         .find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok())
         .map(|b| overlay::zones(&String::from_utf8_lossy(&b)))
         .unwrap_or_default();
+    // And drawn in the world (V51) as the original draws them, the session markers as small ones:
+    // the same file's zones, and the portal's art out of the same archive — or, on a track whose
+    // archive lacks the numbers (the MX tracks'), a free-ride track's, which has them all.
+    let zone_spots = archives
+        .iter()
+        .find_map(|a| a.read_suffix(&format!("{}\\hit.dat", args.track)).ok())
+        .map(|b| portal::spots(&String::from_utf8_lossy(&b)))
+        .unwrap_or_default();
+    let portal_art = {
+        let read = |archives: &[Res], name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
+        let own = portal::Art::load(|name| read(&archives, name)).filter(portal::Art::numbered);
+        own.or_else(|| {
+            let free = [disc.res(&member_ending(&disc, portal::ART_ARCHIVE).ok()?).ok()?];
+            portal::Art::load(|name| read(&free, name))
+        })
+    };
+    // The GPU's copy of its pictures, uploaded with the first frame's glows.
+    let mut glow_textures = portal_art.as_ref().map(|a| a.textures.clone());
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut speedometer = args.speedometer.unwrap_or_default();
     let mut graphics = args.graphics.unwrap_or_default();
@@ -3034,6 +3055,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         });
     }
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
+    // The start zones' portals (V51), laid over the ground once: they never move.
+    let zone_portals: Vec<portal::Portal> = portal::shown(&zone_spots, false)
+        .iter()
+        .map(|spot| portal::Portal::zone(spot, |x, z| portal_ground(&mut world.place, x, spot.at[1] + 50.0, z)))
+        .collect();
+    let mut marked_portals: Vec<[Option<portal::Portal>; markers::SLOTS]> = vec![Default::default(); world.seats.len()];
 
     for (seat, rig) in world.seats.iter().zip(&mut rigs) {
         rig.hud.note_vehicle(seat.garage.up.name());
@@ -4096,6 +4123,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if let (Some(pose), Some(at), Some(camera)) = (args.shot_pose, rects.first(), cameras.first_mut()) {
             *camera = pose.camera(at.w, at.h, NEAR_CLIP, camera.far);
         }
+        // The start zones' and the markers' portals (V51), each view its own: its player's markers,
+        // and the zones that player is shown.
+        for (v, seat) in world.seats.iter().enumerate() {
+            portal::markers(&mut marked_portals[v], &seat.sim.markers, picks[v], |x, y, z| portal_ground(&mut world.place, x, y, z));
+        }
+        let glows: Vec<Vec<game_render::glow::Glow>> = match &portal_art {
+            Some(art) => (0..world.seats.len())
+                .map(|v| {
+                    let in_machine = world.seats[v].garage.up != Kind::Bike;
+                    let seconds = started.elapsed().as_secs_f32();
+                    cameras.get(v).map_or_else(Vec::new, |c| portal_glows(art, &zone_portals, &marked_portals[v], in_machine, c, seconds))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
 
         // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
         // own shape and put into the window's frame; a full screen's one view is the frame itself.
@@ -4118,11 +4160,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     _ => None,
                 };
                 let banner = shown_markers.get(v).and_then(Option::as_ref);
-                let posts = marker_posts(seat, &cameras[v], (at.w, at.h), picks[v]);
-                if rig.hud.on || banner.is_some() || !posts.is_empty() {
+                if rig.hud.on || banner.is_some() {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| {
-                        hud::draw_marker_posts(f, &posts);
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
                         if let Some((pick, filled, label, others)) = banner {
                             hud::draw_markers(f, *pick, *filled, label, others);
@@ -4273,6 +4313,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let view = t.create_view(&Default::default());
                     r.set_graphics(graphics);
                     set_plane_sprites(r, &mut fx_sheet, &sprites);
+                    set_glows(r, &mut glow_textures, &glows);
                     let d = r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
                     // Nothing else waits on a frame nobody sees: without this the queue runs ahead,
                     // and the times would be the CPU's alone.
@@ -4288,6 +4329,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (None, Some(w)) => {
                     w.renderer.set_graphics(graphics);
                     set_plane_sprites(&mut w.renderer, &mut fx_sheet, &sprites);
+                    set_glows(&mut w.renderer, &mut glow_textures, &glows);
                     let spent = Instant::now();
                     let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
                     waited = w.waited;
@@ -4443,6 +4485,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let (Some((fx, _)), Some(sheet)) = (&plane_fx, &soft_sheet) {
                 tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx), &light);
             }
+            // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
+            if let (Some(art), Some(glows)) = (&portal_art, glows.get(v)) {
+                tris += game_render::glow::draw(target, camera, &art.textures, glows);
+            }
             stages.mark(stages::Stage::Scene);
             // And the overlay over the top of it, after everything with a depth test and before anything
             // that reads the frame: what the window shows and what `--shot` writes are the same picture.
@@ -4454,8 +4500,6 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                 _ => None,
             };
-            let posts = marker_posts(seat, camera, (target.width, target.height), picks[v]);
-            hud::draw_marker_posts(target, &posts);
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
             if let Some(Some((pick, filled, label, others))) = shown_markers.get(v) {
                 hud::draw_markers(target, *pick, *filled, label, others);
@@ -5105,6 +5149,14 @@ fn set_plane_sprites(r: &mut Renderer, sheet: &mut Option<game_render::pst::Text
         r.set_sprite_sheet(&sheet);
     }
     r.set_sprites(sprites);
+}
+
+/// This frame's portals into `r` (V51), their pictures first if they have not been uploaded yet.
+fn set_glows(r: &mut Renderer, textures: &mut Option<Vec<game_render::pst::Texture>>, glows: &[Vec<game_render::glow::Glow>]) {
+    if let Some(textures) = textures.take() {
+        r.set_glow_textures(&textures);
+    }
+    r.set_glows(glows);
 }
 
 /// The command line. `Ok(None)` means `--help` was asked for and the shell should not start.
