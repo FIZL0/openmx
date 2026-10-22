@@ -619,7 +619,7 @@ pub struct Terrain<'a> {
     /// How many leaf blocks the file holds.
     pub blocks: u32,
     /// The images stored between the blocks and the tree. The free tracks carry none; the nationals
-    /// carry 32 or 48.
+    /// carry 32 or 48. MX vs. ATV's and Untamed's terrains are this same layout with 16 to 64 of them.
     pub textures: Vec<TerrainTexture<'a>>,
     palette_at: Option<usize>,
     blocks_at: usize,
@@ -1105,5 +1105,168 @@ mod tests {
         // The freeride pair, the one the physics proofs are compared against.
         assert_eq!(physics_file(FREERIDE_ENGINE, FREERIDE_PRO, Tuning::P), "Bike\\Race125P.phy");
         assert_eq!(physics_file(FREERIDE_ENGINE, FREERIDE_PRO, Tuning::A), "Bike\\Race125A.phy");
+    }
+
+    fn word(out: &mut Vec<u8>, w: u32) {
+        out.extend_from_slice(&w.to_le_bytes());
+    }
+
+    fn terrain_node(out: &mut Vec<u8>, vertical_scale: F, block: u16, children_at: u32) {
+        for f in [vertical_scale, F(0.5), F::ZERO, F::ZERO] {
+            word(out, f.0.to_bits());
+        }
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&block.to_le_bytes());
+        out.extend_from_slice(&[0; 4 + 64 + 4 + 1]);
+        word(out, children_at);
+    }
+
+    /// A one-level terrain the way MX vs. ATV writes them: a palette, two blocks, a texture table of
+    /// two, the two pages between the last block and the tree, then the tree. Returns the bytes and
+    /// where the table, the pages and the tree sit.
+    fn terrain_with_pages() -> (Vec<u8>, [usize; 2], usize) {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"PLN\0");
+        out.push(b'7');
+        out.extend_from_slice(b"ps2\0");
+        let mut name = [0u8; 32];
+        name[..6].copy_from_slice(b"mdtest");
+        out.extend_from_slice(&name);
+        word(&mut out, 1);
+        out.extend((0..1024).map(|i| i as u8));
+        word(&mut out, F(4.5).0.to_bits());
+        word(&mut out, 1);
+        let tree_at_slot = out.len();
+        word(&mut out, 0);
+        word(&mut out, 2); // the words in front of the blocks
+        word(&mut out, 2); // blocks
+        word(&mut out, 0);
+        word(&mut out, 0);
+        word(&mut out, 2); // the texture table
+        word(&mut out, 2); // the textures stored
+        let table_at = out.len();
+        word(&mut out, 0);
+        word(&mut out, 0);
+        for b in 0..2u32 {
+            let start = out.len();
+            word(&mut out, 100 * b);
+            for z in 0..BLOCK_HEIGHT_STRIDE as u32 {
+                for x in 0..BLOCK_HEIGHT_STRIDE as u32 {
+                    if z < BLOCK_SAMPLES {
+                        out.extend_from_slice(&(1000 * b + x + 20 * z).min(0xffff).to_le_bytes()[..2]);
+                    }
+                }
+            }
+            assert_eq!(out.len(), start + BLOCK_NORMALS);
+            for i in 0..289u32 {
+                out.extend_from_slice(&[(i % 7) as u8, 100, (b as u8).wrapping_sub(3)]);
+            }
+            out.extend(std::iter::repeat_n(0xee, 289));
+            out.extend((0..289u32).map(|i| 0x80 | (i % 5) as u8 | (b as u8) << 4));
+            assert_eq!(out.len(), start + BLOCK_BYTES);
+        }
+        // Two pages: the 256×256 byte one every terrain on the discs carries (format, level count, then
+        // width, height, size and the unused word: 24 bytes), and a smaller format-40 one of two levels,
+        // each level's header in front of its own bytes.
+        let mut pages = [0; 2];
+        pages[0] = out.len();
+        for w in [39, 1, 256, 256, 65536, 77] {
+            word(&mut out, w);
+        }
+        out.extend((0..65536u32).map(|i| (i * 7) as u8));
+        pages[1] = out.len();
+        for w in [40, 2, 8, 4, 32, 0] {
+            word(&mut out, w);
+        }
+        out.extend(std::iter::repeat_n(0x11, 32));
+        for w in [4, 2, 8, 0] {
+            word(&mut out, w);
+        }
+        out.extend(std::iter::repeat_n(0x22, 8));
+        for (i, at) in pages.into_iter().enumerate() {
+            out[table_at + 4 * i..table_at + 4 * i + 4].copy_from_slice(&(at as u32).to_le_bytes());
+        }
+
+        // The tree: a root whose table names two leaves, block 0 at full relief and block 1 flattened.
+        let tree_at = out.len();
+        out[tree_at_slot..tree_at_slot + 4].copy_from_slice(&(tree_at as u32).to_le_bytes());
+        let children_at = (tree_at + NODE_BYTES) as u32;
+        let leaves_at = children_at + 256 * 4;
+        terrain_node(&mut out, F(1.0), 0, children_at);
+        let mut children = [0u32; 256];
+        children[0] = leaves_at;
+        children[1] = leaves_at + NODE_BYTES as u32;
+        for c in children {
+            word(&mut out, c);
+        }
+        terrain_node(&mut out, F(1.0), 0, 0);
+        terrain_node(&mut out, F(0.5), 1, 0);
+        (out, pages, tree_at)
+    }
+
+    /// MD1: a terrain with a texture table and pages between its last block and its tree, as every MX
+    /// vs. ATV one has, reads — the pages come out where the table says, and the cells read through the
+    /// tree the same as they would without the pages.
+    #[test]
+    fn a_terrain_with_pages_before_its_tree_reads_and_hands_them_out() {
+        let (bytes, pages, tree_at) = terrain_with_pages();
+        let t = Terrain::parse(&bytes).expect("parses");
+        assert_eq!((t.version, &t.platform, t.name.as_str()), (b'7', b"ps2\0", "mdtest"));
+        assert_eq!((t.scale, t.levels, t.blocks, t.root_at()), (F(4.5), 1, 2, tree_at as u32));
+        assert_eq!(t.palette().map(|p| (p.len(), p[1], p[1023])), Some((1024, 1, 255)));
+
+        assert_eq!(t.textures.len(), 2);
+        let page = &t.textures[0];
+        assert_eq!((page.format, page.levels.len()), (39, 1));
+        let l = page.levels[0];
+        assert_eq!((l.width, l.height, l.unread, l.pixels.len()), (256, 256, 77, 65536));
+        assert_eq!(l.pixels.as_ptr(), bytes[pages[0] + 24..].as_ptr());
+        assert_eq!((l.pixels[0], l.pixels[1], l.pixels[65535]), (0, 7, (65535u32 * 7) as u8));
+        let small = &t.textures[1];
+        assert_eq!(small.format, 40);
+        let sizes: Vec<_> = small.levels.iter().map(|l| (l.width, l.height, l.pixels.len(), l.pixels[0])).collect();
+        assert_eq!(sizes, [(8, 4, 32, 0x11), (4, 2, 8, 0x22)]);
+
+        // Block 0 at full relief: the plain product of the raw sample and the height scale.
+        let q = t.cell(2, 3, 1).expect("a cell of the first leaf");
+        let raw = [2 + 60, 3 + 60, 2 + 80, 3 + 80];
+        for i in 0..4 {
+            assert_eq!(q.height[i], F(0.5) * F::from(raw[i]), "corner {i}");
+        }
+        assert_eq!(q.surface, [(2 + 51) % 5, (3 + 51) % 5, (2 + 68) % 5, (3 + 68) % 5].map(|s| s as u8));
+        assert_eq!(q.normal[0], [F::from(((2 + 51) % 7) as i32), F(100.0), F(-3.0), F(1.0)]);
+        // Block 1 through the flattened leaf: pulled halfway to its base of 100.
+        let q = t.cell(16, 0, 2).expect("a cell of the second leaf");
+        let raw = [1000, 1002, 1040, 1042];
+        for i in 0..4 {
+            let flat = F::from(100) + F(0.5) * F::from(raw[i] - 100);
+            assert_eq!(q.height[i], F(0.5) * flat, "corner {i}");
+        }
+        assert_eq!(q.surface[0], 0x10);
+        assert_eq!(q.normal[0], [F::ZERO, F(100.0), F(-2.0) * F(0.5), F(1.0)]);
+        // A cell the root's table leaves empty, and one past the leaf's edge.
+        assert_eq!(t.cell(40, 0, 1), None);
+        assert_eq!(t.cell(15, 0, 2), None);
+    }
+
+    /// The pages have to account for the gap to the byte: a table that disagrees with where a page
+    /// starts, or a stray byte before the tree, is refused rather than read past.
+    #[test]
+    fn a_terrain_whose_pages_do_not_reach_its_tree_is_refused() {
+        let (bytes, pages, tree_at) = terrain_with_pages();
+        let table_at = pages[0] - 2 * BLOCK_BYTES - 8;
+        let mut moved = bytes.clone();
+        moved[table_at + 4..table_at + 8].copy_from_slice(&(pages[1] as u32 + 4).to_le_bytes());
+        let why = Terrain::parse(&moved).unwrap_err();
+        assert!(why.contains("terrain texture 1 starts at"), "{why}");
+
+        // One byte more in front of the tree, with the header's tree offset moved to match.
+        let mut stray = bytes[..tree_at].to_vec();
+        stray.push(0);
+        stray.extend_from_slice(&bytes[tree_at..]);
+        let tree_at_slot = 4 + 1 + 4 + 32 + 4 + 1024 + 4 + 4;
+        stray[tree_at_slot..tree_at_slot + 4].copy_from_slice(&(tree_at as u32 + 1).to_le_bytes());
+        let why = Terrain::parse(&stray).unwrap_err();
+        assert!(why.contains("but the tree starts at"), "{why}");
     }
 }
