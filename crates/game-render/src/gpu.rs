@@ -55,7 +55,7 @@ use crate::pst::Texture;
 use crate::scene::{Scene, Shading};
 use crate::sky::Sky;
 use crate::splat::Splat;
-use crate::terrain::{lod_balance, lod_coarser, lod_errors, lod_indices, lod_indices_where, lod_level, lod_levels};
+use crate::terrain::{Pages, lod_balance, lod_coarser, lod_errors, lod_indices, lod_indices_where, lod_level, lod_levels};
 use crate::world::{Assets, Camera, Fog, Graphics, Lighting, Surface};
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
@@ -235,6 +235,17 @@ impl GpuModel {
 /// by row along `x`; one at the map's edge repeats the edge's corners past it, which makes empty
 /// triangles rather than a different shape. The GPU picks how many of them to draw
 /// ([`crate::terrain::lod_indices`]).
+/// What the ground is painted with ([`Renderer::set_ground_painted`]).
+#[derive(Clone, Copy)]
+pub enum GroundPaint<'a> {
+    /// One dirt colour.
+    Bare,
+    /// A freeride track's layers and baked light (V25).
+    Splat(&'a Splat),
+    /// A mod track's own terrain pages and detail map, as MX vs. ATV draws its maps (MD4).
+    Pages(&'a Pages),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GroundChunk {
     pub vertices: Vec<GroundVertex>,
@@ -775,6 +786,68 @@ fn sky_bind_group(
     })
 }
 
+/// A ground's pages as one array (mip-mapped), the page each leaf takes as an image a texel a leaf
+/// (its number plus one in red, 0 for none), and the detail map, or a clear texel that leaves the
+/// pages as they are.
+fn upload_pages(device: &wgpu::Device, queue: &wgpu::Queue, p: &Pages) -> [wgpu::TextureView; 3] {
+    let (w, h) = p.pages.first().map_or((1, 1), |t| (t.width as u32, t.height as u32));
+    let first = p.pages.first().map_or_else(|| Texture { width: 1, height: 1, rgba: vec![255; 4] }, Clone::clone);
+    let levels = mips(&first).len() as u32;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ground pages"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: p.pages.len().max(1) as u32 },
+        mip_level_count: levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (layer, page) in p.pages.iter().enumerate().chain(p.pages.is_empty().then_some((0, &first))) {
+        // Every page of a terrain is one size; one that is not is resampled to the first's, nearest.
+        let page = match (page.width as u32, page.height as u32) == (w, h) {
+            true => page.clone(),
+            false => Texture {
+                width: w as usize,
+                height: h as usize,
+                rgba: (0..(w * h) as usize).flat_map(|i| page.sample(((i % w as usize) as f32 + 0.5) / w as f32, ((i / w as usize) as f32 + 0.5) / h as f32)).collect(),
+            },
+        };
+        for (level, (lw, lh, px)) in mips(&page).iter().enumerate() {
+            write_layer(queue, &texture, level as u32, layer as u32, (*lw, *lh), 4, px);
+        }
+    }
+    let pages = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let leaves = Texture {
+        width: p.across.max(1) as usize,
+        height: p.along.max(1) as usize,
+        rgba: match p.page_of.is_empty() {
+            true => vec![0; 4],
+            false => p.page_of.iter().flat_map(|page| [page.map_or(0, |n| n.min(254) as u8 + 1), 0, 0, 255]).collect(),
+        },
+    };
+    let leaves = {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ground page of each leaf"),
+            size: wgpu::Extent3d { width: leaves.width as u32, height: leaves.height as u32, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        write_layer(queue, &texture, 0, 0, (leaves.width as u32, leaves.height as u32), 4, &leaves.rgba);
+        texture.create_view(&Default::default())
+    };
+    let clear = Texture { width: 1, height: 1, rgba: vec![0; 4] };
+    let detail = upload_texture(device, queue, p.detail.as_ref().unwrap_or(&clear));
+    [pages, leaves, detail]
+}
+
 /// The baked light map's tiles as one grey image, for the ground's shader.
 fn upload_shadow(device: &wgpu::Device, queue: &wgpu::Queue, s: &crate::splat::Shadow) -> wgpu::TextureView {
     let across = s.across.max(1);
@@ -1256,6 +1329,20 @@ impl Renderer {
     ///
     /// Every chunk must be the same size, a power of two, with all its corners ([`GroundChunk`]).
     pub fn set_ground(&mut self, chunks: &[GroundChunk], paint: Option<&Splat>, dirt: [f32; 3]) -> Result<(), String> {
+        self.set_ground_painted(chunks, paint.map_or(GroundPaint::Bare, GroundPaint::Splat), dirt)
+    }
+
+    /// [`Renderer::set_ground`], with the ground painted by either of its two kinds of paint (MD4): a
+    /// freeride track's splat, or a mod track's own terrain pages. `dirt` goes where neither reaches.
+    pub fn set_ground_painted(&mut self, chunks: &[GroundChunk], paint: GroundPaint, dirt: [f32; 3]) -> Result<(), String> {
+        let pages = match paint {
+            GroundPaint::Pages(p) => Some(p),
+            _ => None,
+        };
+        let paint = match paint {
+            GroundPaint::Splat(s) => Some(s),
+            _ => None,
+        };
         let cells = chunks.first().map_or(1, |c| c.cells);
         if !cells.is_power_of_two() {
             return Err(format!("ground chunks of {cells} cells: not a power of two"));
@@ -1322,7 +1409,11 @@ impl Renderer {
         }
         let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ground"),
-            source: wgpu::ShaderSource::Wgsl(ground_wgsl(paint, dirt).into()),
+            source: wgpu::ShaderSource::Wgsl(match pages {
+                Some(p) => ground_pages_wgsl(p, dirt),
+                None => ground_wgsl(paint, dirt),
+            }
+            .into()),
         });
         let mut entries = vec![
             sampler_entry(0),
@@ -1332,6 +1423,11 @@ impl Renderer {
         for i in 0..layers.len() {
             entries.push(texture_entry(3 + i as u32, true, wgpu::TextureViewDimension::D2));
         }
+        if pages.is_some() {
+            entries.push(texture_entry(3, true, wgpu::TextureViewDimension::D2Array));
+            entries.push(texture_entry(4, true, wgpu::TextureViewDimension::D2));
+            entries.push(texture_entry(5, true, wgpu::TextureViewDimension::D2));
+        }
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ground"),
             entries: &entries,
@@ -1340,7 +1436,10 @@ impl Renderer {
             Some(s) => upload_shadow(&self.device, &self.queue, s),
             None => self.white.clone(),
         };
-        let views: Vec<wgpu::TextureView> = layers.iter().map(|t| upload_texture(&self.device, &self.queue, t)).collect();
+        let mut views: Vec<wgpu::TextureView> = layers.iter().map(|t| upload_texture(&self.device, &self.queue, t)).collect();
+        if let Some(p) = pages {
+            views.extend(upload_pages(&self.device, &self.queue, p));
+        }
         let mut bind_entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -2496,19 +2595,9 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
     for i in 0..layers {
         s.push_str(&format!("@group(1) @binding({}) var layer{i}: texture_2d<f32>;\n", 3 + i));
     }
+    s.push_str(GROUND_VS_WGSL);
     s.push_str(
-        "struct Out { @builtin(position) clip: vec4f, @location(0) world: vec3f, @location(1) sunlit: vec3f, @location(2) fog: f32 }\n\
-         @vertex fn vs(@location(0) pos: vec3f, @location(1) normal: vec3f) -> Out {\n\
-           var o: Out;\n\
-           o.clip = to_clip(pos);\n\
-           o.world = pos;\n\
-           let l = length(normal);\n\
-           let n = select(normal, normal / l, l > 0.0);\n\
-           o.sunlit = view.ambient.rgb + view.sun_color.rgb * max(-dot(n, view.sun.xyz), 0.0);\n\
-           o.fog = fog_at(pos);\n\
-           return o;\n\
-         }\n\
-         @fragment fn fs(i: Out) -> @location(0) vec4f {\n\
+        "@fragment fn fs(i: Out) -> @location(0) vec4f {\n\
            let x = i.world.x;\n\
            let z = i.world.z;\n\
            var frame = vec4f(0.0);\n\
@@ -2590,6 +2679,69 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
            return vec4f(out / 255.0, 1.0);\n\
          }\n",
     );
+    s
+}
+
+/// The ground's vertex shader, the same for every paint: the world position goes on to the paint,
+/// and the sun on the stored normal and the fog are worked out per corner.
+const GROUND_VS_WGSL: &str = r#"struct Out { @builtin(position) clip: vec4f, @location(0) world: vec3f, @location(1) sunlit: vec3f, @location(2) fog: f32 }
+@vertex fn vs(@location(0) pos: vec3f, @location(1) normal: vec3f) -> Out {
+  var o: Out;
+  o.clip = to_clip(pos);
+  o.world = pos;
+  let l = length(normal);
+  let n = select(normal, normal / l, l > 0.0);
+  o.sunlit = view.ambient.rgb + view.sun_color.rgb * max(-dot(n, view.sun.xyz), 0.0);
+  o.fog = fog_at(pos);
+  return o;
+}
+"#;
+
+/// The ground's shader for a mod track's terrain pages (MD4, [`Pages`]): the page each leaf takes
+/// looked up per pixel, at the place on it the original's mapping gives, the detail map blended over
+/// it, and the dirt colour where no page reaches. The page coordinates jump at every page's edge, so
+/// the mip level comes from the world position, which does not.
+fn ground_pages_wgsl(p: &Pages, dirt: [f32; 3]) -> String {
+    let f = |v: f32| format!("{v:?}");
+    let mut s = String::from(VIEW_WGSL);
+    s.push_str(
+        "@group(1) @binding(0) var tiled: sampler;\n\
+         @group(1) @binding(1) var clamped: sampler;\n\
+         @group(1) @binding(2) var shadow: texture_2d<f32>;\n\
+         @group(1) @binding(3) var pages: texture_2d_array<f32>;\n\
+         @group(1) @binding(4) var page_of: texture_2d<f32>;\n\
+         @group(1) @binding(5) var detail: texture_2d<f32>;\n",
+    );
+    s.push_str(GROUND_VS_WGSL);
+    s.push_str(&format!(
+        "@fragment fn fs(i: Out) -> @location(0) vec4f {{
+  let samples = i.world.xz / {spacing};
+  let leaf = vec2i(floor(samples / 16.0));
+  let leaves = vec2i({across}, {along});
+  let on = all(leaf >= vec2i(0)) && all(leaf < leaves);
+  let entry = i32(round(textureLoad(page_of, clamp(leaf, vec2i(0), leaves - vec2i(1)), 0).r * 255.0));
+  let page = select(0, entry - 1, on && entry > 0);
+  let local = (vec2f(leaf & vec2i(3)) * 16.0 + samples - vec2f(leaf) * 16.0) / 64.0;
+  let along_page = samples * ({inner} / 64.0);
+  let t = textureSampleGrad(pages, tiled, {border} + {inner} * local, page, dpdx(along_page), dpdy(along_page)).rgb * 255.0;
+  let d = textureSample(detail, tiled, i.world.xz / {repeat});
+  let painted = t + (d.rgb * 255.0 - t) * (d.a * 255.0 * 0.5 / 128.0);
+  let texel = select(vec3f(255.0), painted, on && entry > 0);
+  let lit = select(i.sunlit * vec3f({r}, {g}, {b}) / 255.0, i.sunlit, on && entry > 0);
+  let out = clamp(texel * lit * (1.0 - i.fog) + view.fog_color.rgb * i.fog, vec3f(0.0), vec3f(255.0));
+  return vec4f(out / 255.0, 1.0);
+}}
+",
+        spacing = f(p.spacing),
+        across = p.across.max(1),
+        along = p.along.max(1),
+        border = f(1.0 / 32.0),
+        inner = f(15.0 / 16.0),
+        repeat = f(p.detail_repeat),
+        r = f(dirt[0]),
+        g = f(dirt[1]),
+        b = f(dirt[2]),
+    ));
     s
 }
 
@@ -3415,6 +3567,15 @@ mod tests {
             .collect();
         let shadow = crate::splat::Shadow { tiles: vec![layer()], across: 1, x0: -10.0, x1: 10.0, z0: -10.0, z1: 10.0 };
         let paint = Splat { textures: (0..max - 1).map(|_| layer()).collect(), passes, shadow: Some(shadow) };
+        let pages = Pages {
+            pages: vec![layer()],
+            across: 1,
+            along: 1,
+            page_of: vec![Some(0)],
+            spacing: 1.0,
+            detail: Some(layer()),
+            detail_repeat: 8.0,
+        };
         let shaders = [
             ("mesh", MESH_WGSL.to_string()),
             ("sky", SKY_WGSL.to_string()),
@@ -3423,6 +3584,7 @@ mod tests {
             ("upscale", scale::UPSCALE_WGSL.to_string()),
             ("ground, painted", ground_wgsl(Some(&paint), [200.0, 180.0, 150.0])),
             ("ground, bare", ground_wgsl(None, [200.0, 180.0, 150.0])),
+            ("ground, pages", ground_pages_wgsl(&pages, [200.0, 180.0, 150.0])),
         ];
         let mut written = 0;
         let mut translate = |name: &str, source: &str| -> Result<(), String> {

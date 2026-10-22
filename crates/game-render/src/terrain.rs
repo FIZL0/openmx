@@ -496,6 +496,169 @@ pub fn lod_coarser(levels: &[u32], across: usize, along: usize, x: usize, z: usi
     ]
 }
 
+// ---- a mod track's ground, from its terrain's own pages (MD4) --------------------------------------
+//
+// MX vs. ATV paints its maps' ground the way MXU paints its nationals: the `.trn` carries one aerial
+// picture of the whole map cut into 256x256 pages (`game_sim::track::Terrain::textures`), and the
+// ground's material, `TerrainPlain.psm`, lays a detail map over it. Which page a leaf draws is the
+// original's own lookup (MXU's terrain renderer, read in the journal): a leaf's 4x4 block of leaves,
+// within its parent, is one page; the parent node's sixteen-word table names it, the word being twice
+// the page's number; and the leaf takes the quarter of that page its own place in the block says.
+// Each page keeps an 8-pixel border that repeats its neighbours' edges, so the 64 samples a page
+// covers map onto its middle 240 pixels: `1/32 + 15/16 x`. Across all 56 MX vs. ATV maps the pixels
+// either side of a page seam agree exactly that way and by 32 levels a channel without it.
+//
+// The detail map is drawn the way its `.psm` blends it, `(Cs - Cd) * As + Cd`: a grey a little darker
+// than the dirt, pressed in by the map's alpha. It repeats once every `DetailMapTilingMultiplier`
+// samples, which is the reading V1 gave the scene's number and a choice by eye — see [`Pages`].
+
+/// How many leaves a page covers along each side.
+const PAGE_LEAVES: u32 = 4;
+/// Samples a leaf covers along each side, and so samples a page covers: `PAGE_LEAVES` of them.
+const LEAF: u32 = 16;
+/// The original's mapping of a page's 64 samples onto its pixels: everything but an 8-pixel border.
+const PAGE_BORDER: f32 = 1.0 / 32.0;
+const PAGE_INNER: f32 = 15.0 / 16.0;
+
+/// A track's ground as MX vs. ATV draws it: the terrain's pages, which leaf takes which, and the
+/// detail map over them.
+#[derive(Clone, Debug)]
+pub struct Pages {
+    /// The pages, through the terrain's palette, opaque.
+    pub pages: Vec<Texture>,
+    /// Leaves across (x) and along (z).
+    pub across: u32,
+    pub along: u32,
+    /// Each leaf's page, row by row along z; `None` where the terrain has no leaf or its table names
+    /// no page.
+    pub page_of: Vec<Option<u16>>,
+    /// World units between two samples.
+    pub spacing: f32,
+    /// The detail map, as a `.pst` decodes it (its alpha doubled), and the world units one repeat of it
+    /// covers.
+    pub detail: Option<Texture>,
+    pub detail_repeat: f32,
+}
+
+impl Pages {
+    /// The pages of a terrain `across` x `along` leaves, `spacing` feet a sample; `None` when it has no
+    /// pages, or no palette to paint them through, or a page that is not one byte a pixel.
+    pub fn of(terrain: &game_sim::track::Terrain, spacing: f32, (across, along): (u32, u32)) -> Option<Pages> {
+        let palette = terrain.palette()?;
+        if terrain.textures.is_empty() || terrain.levels == 0 {
+            return None;
+        }
+        let mut colours = [[0u8; 4]; 256];
+        for (i, c) in colours.iter_mut().enumerate() {
+            let p = 4 * crate::pst::unswizzle(i);
+            *c = [palette[p], palette[p + 1], palette[p + 2], 255];
+        }
+        let mut pages = Vec::with_capacity(terrain.textures.len());
+        for t in &terrain.textures {
+            let level = t.levels.first()?;
+            let (w, h) = (level.width as usize, level.height as usize);
+            if w == 0 || h == 0 || level.pixels.len() != w * h {
+                return None;
+            }
+            pages.push(Texture { width: w, height: h, rgba: level.pixels.iter().flat_map(|&p| colours[p as usize]).collect() });
+        }
+        let mut page_of = vec![None; (across * along) as usize];
+        for lz in 0..along {
+            for lx in 0..across {
+                page_of[(lz * across + lx) as usize] = leaf_page(terrain, lx, lz).filter(|&p| (p as usize) < pages.len());
+            }
+        }
+        Some(Pages { pages, across, along, page_of, spacing, detail: None, detail_repeat: spacing * 8.0 })
+    }
+
+    /// Lay a detail map over the pages, repeating every `multiplier` samples (the scene's
+    /// `DetailMapTilingMultiplier`).
+    pub fn with_detail(mut self, detail: Option<Texture>, multiplier: f32) -> Pages {
+        self.detail = detail.filter(|d| d.width > 0 && d.height > 0);
+        self.detail_repeat = self.spacing * multiplier.max(1.0);
+        self
+    }
+
+    /// Which page a point of the world is painted from, and where on it: `None` off the leaves, and
+    /// where a leaf has no page.
+    pub fn page_at(&self, x: f32, z: f32) -> Option<(usize, [f32; 2])> {
+        let (sx, sz) = (x / self.spacing, z / self.spacing);
+        let (lx, lz) = ((sx / LEAF as f32).floor(), (sz / LEAF as f32).floor());
+        if lx < 0.0 || lz < 0.0 || lx >= self.across as f32 || lz >= self.along as f32 {
+            return None;
+        }
+        let (lx, lz) = (lx as u32, lz as u32);
+        let page = self.page_of[(lz * self.across + lx) as usize]?;
+        let on_page = |l: u32, s: f32| {
+            let samples = (l % PAGE_LEAVES * LEAF) as f32 + (s - (l * LEAF) as f32);
+            PAGE_BORDER + PAGE_INNER * samples / (PAGE_LEAVES * LEAF) as f32
+        };
+        Some((page as usize, [on_page(lx, sx), on_page(lz, sz)]))
+    }
+
+    /// The ground's colour at a point of the world before any light, or `None` where no page covers it.
+    pub fn paint(&self, x: f32, z: f32) -> Option<[u8; 3]> {
+        let (page, [u, v]) = self.page_at(x, z)?;
+        let t = self.pages[page].sample_smooth(u, v);
+        let mut c = [t[0] as f32, t[1] as f32, t[2] as f32];
+        if let Some(d) = &self.detail {
+            let s = d.sample_smooth(x / self.detail_repeat, z / self.detail_repeat);
+            c = detail_over(c, s);
+        }
+        Some(c.map(|c| c.clamp(0.0, 255.0) as u8))
+    }
+
+    /// The detail map a track's archives hold: the one `TerrainPlain.psm` names as its second texture,
+    /// or else `<stem>_d.pst`, the name every MX vs. ATV map gives it.
+    pub fn load_detail(archives: &[crate::disc::Res], stem: &str) -> Option<Texture> {
+        let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
+        let named = read("terrainplain.psm").and_then(|psm| {
+            let sections = crate::ini::parse(&crate::ini::text(&psm));
+            sections.iter().find_map(|s| s.get("TextureMap_2").map(|n| n.trim().to_string())).filter(|n| !n.is_empty())
+        });
+        let name = named.unwrap_or_else(|| format!("{stem}_d"));
+        Texture::parse(&read(&format!("{name}.pst"))?).ok()
+    }
+}
+
+/// The detail map's texel `d` (alpha as a `.pst` decodes it, doubled) over the colour `c`, as the
+/// ground's material blends it: `(Cs - Cd) * As + Cd`, alpha 128 being one.
+pub fn detail_over(c: [f32; 3], d: [u8; 4]) -> [f32; 3] {
+    let a = d[3] as f32 * 0.5 / 128.0;
+    [0, 1, 2].map(|k| c[k] + (d[k] as f32 - c[k]) * a)
+}
+
+/// The scene's `[Environment]` `DetailMapTilingMultiplier`, which the original reads as a whole
+/// number; 8, its default and every MXU track's, where the scene has none.
+pub fn detail_multiplier(scene: &str) -> f32 {
+    crate::ini::parse(scene)
+        .iter()
+        .filter(|s| s.name.eq_ignore_ascii_case("Environment"))
+        .find_map(|s| s.number("DetailMapTilingMultiplier"))
+        .map_or(8.0, |m| m.trunc().max(1.0))
+}
+
+/// The page leaf (`lx`, `lz`) draws, by the original's lookup: its parent's table, at its 4x4 block
+/// within the parent, holds twice the page's number. `None` where the terrain has no such leaf.
+fn leaf_page(terrain: &game_sim::track::Terrain, lx: u32, lz: u32) -> Option<u16> {
+    let mut node = terrain.root()?;
+    let (mut cx, mut cz) = (lx, lz);
+    let mut shift = (terrain.levels - 1) * 4;
+    for _ in 1..terrain.levels {
+        if cx >> shift >= LEAF || cz >> shift >= LEAF {
+            return None;
+        }
+        node = terrain.node(terrain.child(&node, cx >> shift, cz >> shift)?)?;
+        let mask = (1 << shift) - 1;
+        cx &= mask;
+        cz &= mask;
+        shift -= 4;
+    }
+    terrain.child(&node, cx, cz)?;
+    let word = node.unread.table[((cz / PAGE_LEAVES) * PAGE_LEAVES + cx / PAGE_LEAVES) as usize];
+    u16::try_from(word / 2).ok()
+}
+
 /// A number from the file, little-endian like the machine that wrote it.
 fn le32(d: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
