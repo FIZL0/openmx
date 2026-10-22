@@ -669,6 +669,18 @@ pub fn draw_scene(
             jobs.push((loaded, *transform));
         }
     }
+    // The trees and bushes (V48). The batch has no see-through pass, so a picture only comes in
+    // once it is solid.
+    if let Some(grove) = &scene.ecosystem {
+        let mut drawn = Vec::new();
+        let fov = crate::eco::horizontal_fov(camera, frame.width as f32 / frame.height.max(1) as f32);
+        grove.draws(camera, fov, light.fog_far, &mut drawn);
+        for d in drawn.iter().filter(|d| d.alpha >= 1.0) {
+            if let Some(loaded) = assets.models.get(d.model) {
+                jobs.push((loaded, d.at));
+            }
+        }
+    }
     // Queued on every core, a run of models each, and joined back in order: the same batch as one
     // core queueing them all, and in a four-way split the vertex work is most of the scene (P47).
     let queue = |batch: &mut Batch, jobs: &[(&Loaded, M4)]| {
