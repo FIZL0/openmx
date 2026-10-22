@@ -40,6 +40,7 @@ use crate::phy::{Ini, Throw, Wrecks};
 use crate::ragdoll::{Among, Bike, Carrier, Drive, HOLD_BONES, Launch, MAIN, PARTS, Ragdoll, Records, Tables};
 use crate::ragdoll_body::{self, Fade};
 use crate::ragdoll_contact::{Contact, Open, Sphere};
+use crate::ragdoll_scene::{BikeSearch, Cells, WreckBikeScene};
 use crate::ragdoll_pose::{self, Bone, Start};
 use crate::rider_anim::{Clock, Pool, Thrown};
 use crate::rng::Rng;
@@ -190,6 +191,10 @@ pub struct Kit {
     /// bones are off the bike once the main bone is a foot past (S65). [`Kit::new`] leaves it
     /// `None`, and the bones never leave the bike; a shell sets it from [`bike_sphere`].
     pub bike: Option<(Vf, F)>,
+    /// The wreck bike's collision mesh, the scene the bones' spheres are tested against (S105).
+    /// [`Kit::new`] leaves it `None`, and the scene is open; a shell sets it from
+    /// [`crate::ragdoll_scene::Bike::parse`].
+    pub bike_mesh: Option<std::sync::Arc<crate::ragdoll_scene::Bike>>,
 }
 
 impl std::fmt::Debug for Kit {
@@ -229,6 +234,7 @@ impl Kit {
             pose_damping: forces.vector("DampingForce", UNIT_W),
             wrecks: Wrecks::read(&ini),
             bike: None,
+            bike_mesh: None,
             rig,
             ragdoll,
             tables,
@@ -326,6 +332,8 @@ pub struct Down {
     /// settle test last looked (S61).
     pub fade: Fade,
     pub touching: bool,
+    /// What the bones' search holds of the wreck bike (S105).
+    pub search: BikeSearch,
 }
 
 impl Down {
@@ -428,6 +436,7 @@ impl Down {
             sensed: Thrown { throw, ..Thrown::default() },
             fade: Fade { length: F::ONE, left: F::ZERO },
             touching: false,
+            search: BikeSearch::default(),
         };
         down.sense(world);
         down
@@ -448,6 +457,13 @@ impl Down {
     pub fn step_posed(&mut self, kit: &Kit, posed: Option<&Posed>, dt: F, crash: &crate::ride::Crash, world: &mut dyn World) {
         let frame = math::quat_to_mat4(crash.bike.body.quat, crash.origin);
         let bike = kit.bike.map(|(centre, radius)| (bike_centre(&frame, centre), radius));
+        // The bones' search, once a frame before the off-bike test, round the first sphere.
+        if let (Some(b), Some(s)) = (bike, kit.spheres.first()) {
+            // The bike is put in the track's tree where it stands, every frame.
+            let cells = world.heightfield().and_then(|f| Cells::of(&*f));
+            let key = cells.as_ref().zip(kit.bike_mesh.as_deref()).map_or(0, |(c, mesh)| c.key(mesh, &frame));
+            self.search.gather(cells.as_ref(), s.radius, b, key, !self.ragdoll.ignores_bike);
+        }
         ragdoll_body::wreck_arm(
             &mut self.ragdoll,
             &self.contacts,
@@ -490,12 +506,28 @@ impl Down {
         for c in &mut self.ragdoll.collisions {
             c.touching = false;
         }
+        // The bones' scene is the wreck bike (S105), a sphere paired with it as the search says: the
+        // wreck's entry puts the bike on every bone's ignore list, the arm above takes it off again
+        // when the main bone is off the bike, and the search lists it from its next gather.
+        let mut open = Open;
+        let mut bike_scene = kit.bike_mesh.as_deref().map(|mesh| WreckBikeScene::new(mesh, &frame, &crash.bike, self.search));
+        let scene: &mut dyn crate::ragdoll_contact::Scene = match &mut bike_scene {
+            Some(b) => b,
+            None => &mut open,
+        };
         self.ragdoll.step_among(
             dt,
             &drive,
             &kit.tables,
-            Among { spheres: &kit.spheres, contacts: &mut self.contacts, terrain: Some((&mut *world, TERRAIN_MIN, TERRAIN_MAX)), scene: &mut Open, bike_box: None },
+            Among { spheres: &kit.spheres, contacts: &mut self.contacts, terrain: Some((&mut *world, TERRAIN_MIN, TERRAIN_MAX)), scene, bike_box: None },
         );
+        // Where the first sphere stood, if it stood: its collision on and its bone enabled.
+        if let (Some(b), Some(s), Some(c)) = (&bike_scene, kit.spheres.first(), self.ragdoll.collisions.first())
+            && c.enabled
+            && self.ragdoll.bones.get(s.bone).is_some_and(|b| b.body.enabled)
+        {
+            self.search.stood = b.stood.first().copied();
+        }
         for b in &mut self.ragdoll.bones {
             b.body.quat = normalize(b.body.quat);
         }
@@ -569,6 +601,14 @@ impl crate::hash::State for Down {
         w.f("roll", self.ragdoll.roll);
         w.f("fade_left", self.fade.left);
         w.bool("touching", self.touching);
+        // The bones' search for the wreck bike (S105), which decides whether a bone meets it.
+        w.bool("ignores_bike", self.ragdoll.ignores_bike);
+        w.vf("search_stood", self.search.stood.unwrap_or_default());
+        w.vf("search_centre", self.search.centre);
+        w.f("search_bound", self.search.bound);
+        w.bool("search_built", self.search.built);
+        w.bool("search_listed", self.search.listed);
+        w.f("search_distance", self.search.distance);
         for b in &self.ragdoll.bones {
             w.vf("position", b.body.position);
             w.vf("velocity", b.body.velocity);

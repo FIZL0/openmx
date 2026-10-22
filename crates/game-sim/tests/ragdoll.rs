@@ -1490,10 +1490,9 @@ fn ride_kit() -> Option<(game_sim::ragdoll_ride::Kit, game_sim::phy::Part, Wreck
         .find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbike.phy").ok()))
         .expect("an archive carries wreckbike.phy");
     let mut kit = game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig);
-    kit.bike = names
-        .iter()
-        .find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbikef.col").ok()))
-        .and_then(|col| game_sim::ragdoll_ride::bike_sphere(&col));
+    let col = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbikef.col").ok()));
+    kit.bike = col.as_deref().and_then(game_sim::ragdoll_ride::bike_sphere);
+    kit.bike_mesh = col.as_deref().and_then(game_sim::ragdoll_scene::Bike::parse).map(std::sync::Arc::new);
     assert!(kit.bike.is_some(), "an archive carries wreckbikef.col");
     Some((
         kit,
@@ -1604,6 +1603,43 @@ fn a_reason_5_wreck_that_settles_on_the_originals_tick() {
 fn a_reason_5_wreck_settles_on_the_originals_tick_exactly() {
     let Some((settled, _)) = wreck2_settles() else { return };
     assert_eq!(settled, Some(18), "the gate came on 18 ticks after the entry in the original");
+}
+
+/// **The ride's bones gather the wreck bike once they are off it** (S105): the reason-5 wreck
+/// above, its kit carrying `wreckbikef.col`'s mesh. The search is gathered from the second tick
+/// (the first sphere has stood once); while the bones ignore the bike it never lists it, and once
+/// they are off it the next gather that rebuilds the list does.
+#[test]
+fn the_rides_bones_gather_the_wreck_bike_once_off_it() {
+    let Some((kit, part, wrecks)) = ride_kit() else { return };
+    assert!(kit.bike_mesh.is_some(), "the kit carries the wreck bike's mesh");
+    let mut ride = game_sim::ride::Ride::default();
+    ride.chassis.quat = Vf::new(0.0, 0.0, 0.0, 1.0);
+    ride.origin = Vf::new(4304.0, 150.0, 3412.0, 1.0);
+    ride.chassis.vel = Vf::new(-4.0, -21.0, 49.5, 1.0);
+    let mut world = Slope;
+    let mut crash =
+        game_sim::ride::Crash::begin(&ride, game_sim::trick::Wreck(5), &part, game_sim::ride::WRECK_INERTIA, &wrecks, None);
+    let mut doll =
+        game_sim::ragdoll_ride::Down::enter(&kit, &ride.transform(), &crash, crash.throw, 5, &wrecks, &mut Rng::default(), &mut world);
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let (mut off, mut first) = (None, None);
+    for tick in 1..=60 {
+        let ignored = doll.ragdoll.ignores_bike;
+        crash.step(dt, &part, &wrecks, &mut world);
+        doll.step(&kit, dt, &crash, &mut world);
+        assert_eq!(doll.search.built, tick > 1, "tick {tick}: gathered once the first sphere has stood");
+        assert!(!(ignored && doll.search.listed), "tick {tick}: the bike listed while the bones ignored it");
+        if off.is_none() && !doll.ragdoll.ignores_bike {
+            off = Some(tick);
+        }
+        if first.is_none() && doll.search.listed {
+            first = Some(tick);
+        }
+    }
+    let (off, first) = (off.expect("the bones leave the bike"), first.expect("the bike is gathered"));
+    eprintln!("off the bike at tick {off}, the bike first listed at {first}");
+    assert_eq!((off, first), (35, 43), "off the bike, then listed at the next rebuild");
 }
 
 /// **A wreck thrown from the shell's skeleton** (S65): handed the kit's own riding pose as the live
