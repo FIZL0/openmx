@@ -794,21 +794,9 @@ impl Ride {
     /// way of [`clear`]'s ring of probes around it, and the ground there is no steeper than
     /// [`BACK_LEVEL`]; otherwise the record keeps the last spot that was. `true` when it moved.
     pub fn keep_back(&mut self, at: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> bool {
-        let (under, _) = world.ground(at);
-        let ground = F(under.y());
-
-        // Anything solid between the probe and the ground under it, and the spot is under a roof.
-        let mut over = Bundle { count: 1, centre: at, radius: F(BACK_OVER_REACH), ..Bundle::default() };
-        over.probes[0] = Probe {
-            origin: Vf::new(at.x(), (F(at.y()) + F(BACK_OVER)).0, at.z(), 1.0),
-            dir: DOWN,
-            length: (F(at.y()) - ground) + F(BACK_OVER),
-        };
-        let mut found = Record::new();
-        world.solid(&over, &mut found);
-        if found.hit[0] && ground < F(found.point[0].y()) {
+        let Some(ground) = open_sky(at, world) else {
             return false;
-        }
+        };
 
         let spot = Vf::new(at.x(), ground.0, at.z(), at.w());
         let Some((spot, normal)) = clear(spot, heading, world, curve) else {
@@ -823,6 +811,34 @@ impl Ride {
             up: normal,
         };
         true
+    }
+
+    /// **The put-back record's update in a cannonball** (S77): the original's own branch for a bike
+    /// shot off the map, which keeps the record on the wreck bike — so the put-back lands where it
+    /// came down inside the map, not at the edge it left.
+    ///
+    /// The race manager takes it while the request's reason is the cannonball and the wreck bike's
+    /// collision record says it touched something this tick ([`crate::contact_search::Record::touching`]);
+    /// the caller asks both. `over` is the probe the overhead test stands on, the wreck part's point
+    /// as in any wreck; `at` and `forward` are the wreck bike's transform's translation and forward
+    /// row. The spot handed to [`clear`] is the translation itself, at the node's height — the ground
+    /// query moves it down — with a `w` the original leaves as its stack had it, which every captured
+    /// tick had zero; the heading is the forward row flattened once here, which [`clear`] flattens
+    /// again for its ring. The ground's normal goes straight into the record whether or not the spot
+    /// is clear, and a clear spot is kept with no slope test and no raise. `true` when it moved.
+    pub fn keep_back_thrown(&mut self, over: Vf, at: Vf, forward: Vf, world: &mut dyn World, curve: &CurveTable) -> bool {
+        if open_sky(over, world).is_none() {
+            return false;
+        }
+        let facing = flat_unit(forward);
+        let spot = Vf::new(at.x(), at.y(), at.z(), 0.0);
+        let (spot, normal, clear) = clearance(spot, facing, world, curve);
+        self.back.up = normal;
+        if clear {
+            self.back.at = spot;
+            self.back.facing = facing;
+        }
+        clear
     }
 
     /// Where the bike is: the chassis transform's origin, which is what a camera and a model ride on.
@@ -939,6 +955,31 @@ fn flat_unit(v: Vf) -> Vf {
 /// thing's normal; any of the other thirteen meeting something refuses the spot, and so does the world
 /// saying the ring is [`World::crowded`] (S75), which the original's query answers in the same pass.
 fn clear(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> Option<(Vf, Vf)> {
+    let (spot, normal, clear) = clearance(spot, heading, world, curve);
+    clear.then_some((spot, normal))
+}
+
+/// The ground under a probe, when nothing solid stands between it and the ground: the record
+/// update's overhead test (S66), one probe from ten feet over the point straight down to the ground,
+/// in a query a thousand feet wide. `None` is a roof — something met above the ground.
+fn open_sky(at: Vf, world: &mut dyn World) -> Option<F> {
+    let (under, _) = world.ground(at);
+    let ground = F(under.y());
+    let mut over = Bundle { count: 1, centre: at, radius: F(BACK_OVER_REACH), ..Bundle::default() };
+    over.probes[0] = Probe {
+        origin: Vf::new(at.x(), (F(at.y()) + F(BACK_OVER)).0, at.z(), 1.0),
+        dir: DOWN,
+        length: (F(at.y()) - ground) + F(BACK_OVER),
+    };
+    let mut found = Record::new();
+    world.solid(&over, &mut found);
+    (!(found.hit[0] && ground < F(found.point[0].y()))).then_some(ground)
+}
+
+/// [`clear`]'s whole answer: the spot on the ground (or lifted), its normal, and whether the spot is
+/// clear. The spot and normal are what the original's test leaves in its outputs either way, which
+/// the cannonball's branch reads (S77): its normal is the record's own word.
+fn clearance(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> (Vf, Vf, bool) {
     let flat = flat_unit(heading);
     let (fx, fz) = (F(flat.x()), F(flat.z()));
     let y = F(spot.y());
@@ -970,10 +1011,8 @@ fn clear(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> Op
         spot = Vf::new(spot.x(), found.point[0].y(), spot.z(), spot.w());
         normal = found.normal[0];
     }
-    if found.hit[1..BACK_PROBES].iter().any(|&hit| hit) || world.crowded(ring.centre, ring.radius) {
-        return None;
-    }
-    Some((spot, normal))
+    let refused = found.hit[1..BACK_PROBES].iter().any(|&hit| hit) || world.crowded(ring.centre, ring.radius);
+    (spot, normal, !refused)
 }
 
 /// The transform helper that sets a frame's axes, keeping where the frame is: the original hands its

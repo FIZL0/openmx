@@ -4994,3 +4994,231 @@ fn the_put_back_clearance_refuses_where_the_original_does() {
         assert!(total >= 10_000, "only {total} probes compared");
     }
 }
+
+// --- the put-back after a shootoff (S77) ----------------------------------------------------------
+//
+// S77 rode the original off three of free09's edges (east and west from save state 7, north from 6)
+// with `research/s77_edge_back.py`, which records once a tick, every float with its bits: the request's
+// reason (`c84`, the cannonball branch's test), the wreck bike's collision record's touched words, the
+// put-back record, the wreck bike's transform (its forward row and translation) and the wreck part's
+// point. The captures and the two states' RAM sit in `context/s77/`; without them the tests below say
+// so and pass, and with them they count what they compared so a skip cannot read as a pass.
+
+/// One tick of a shootoff capture.
+struct ThrownTick {
+    frame: u32,
+    reason: u32,
+    /// The request's copy of the reason, from before the tick's verdict.
+    c84: u32,
+    /// The wreck bike's collision record touched something.
+    touch: bool,
+    rec: [Vf; 3],
+    /// The wreck bike's transform: its forward row and its translation.
+    forward: Vf,
+    at: Vf,
+    /// The wreck part's point, which the overhead test stands on while down.
+    part: Vf,
+}
+
+fn thrown_capture(text: &str) -> (u32, Vec<ThrownTick>) {
+    let mut chunks = text.split("\nf ");
+    let head = chunks.next().unwrap();
+    let bike = u32::from_str_radix(head.split_whitespace().nth(2).unwrap(), 16).unwrap();
+    let mut rows = Vec::new();
+    for chunk in chunks {
+        if !chunk.contains(" head ") {
+            continue; // a torn last row
+        }
+        let line = |key: &str| chunk.lines().find(|l| l.trim_start().starts_with(key)).unwrap();
+        let bits_of = |key: &str| {
+            let l = line(key);
+            let words: Vec<&str> = l[l.find(']').unwrap() + 1..].split_whitespace().take(4).collect();
+            bits4(&words)
+        };
+        let first = chunk.lines().next().unwrap();
+        rows.push(ThrownTick {
+            frame: first.split_whitespace().next().unwrap().parse().unwrap(),
+            reason: word_after(first, "reason "),
+            c84: word_after(first, "c84 "),
+            touch: first[first.find("touch [").unwrap() + 7..].starts_with('1'),
+            rec: [bits_of("rec.p"), bits_of("rec.f"), bits_of("rec.u")],
+            forward: bits_of("node.r2"),
+            at: bits_of("node.t"),
+            part: bits_of("part "),
+        });
+    }
+    (bike, rows)
+}
+
+/// The captures and the state each started from.
+const THROWN_CAPTURES: [(&str, u32); 3] = [("free09-east.txt", 7), ("free09-north.txt", 6), ("free09-west.txt", 7)];
+
+/// A shootoff capture's rows and the original's terrain under them; `None`, said why, when this
+/// checkout has not got them.
+fn thrown_run(name: &str, slot: u32) -> Option<(Vec<ThrownTick>, TheOriginalsTerrain)> {
+    let kit = match ps2_oracle::Kit::load() {
+        Ok(kit) => kit,
+        Err(why) => {
+            println!("no kit.toml ({why}): no shootoff verdict");
+            return None;
+        }
+    };
+    let Ok(text) = std::fs::read_to_string(kit.ctx("s77").join(name)) else {
+        println!("no context/s77/{name}: no shootoff verdict for it");
+        return None;
+    };
+    let ram = kit.ctx("s77").join(format!("slot{slot}.eeMemory.bin"));
+    let mut ee = match ps2_oracle::Ee::from_ram(&ram) {
+        Ok(ee) => ee,
+        Err(why) => {
+            println!("{why}: `./kit state ram {slot} --out` writes it; no shootoff verdict for {name}");
+            return None;
+        }
+    };
+    let (Ok(gp), Ok(query)) = (ps2_oracle::addr("boot_gp"), ps2_oracle::addr("ground_query")) else {
+        println!("research/oracle.txt has no boot_gp or ground_query: no shootoff verdict");
+        return None;
+    };
+    ee.set(28, u64::from(gp));
+    let (bike, rows) = thrown_capture(&text);
+    let terrain = ee.u32_at(bike + BIKE_TERRAIN);
+    let mesh = OriginalsMeshes::load().map_err(|why| println!("{why}: the put-back's solid answers nothing")).ok();
+    Some((rows, TheOriginalsTerrain { ee, bike, terrain, query, mesh, unsaid: 0, crowded: 0, asked: 0, met: 0 }))
+}
+
+/// The point, up and the heading's `x`, `y`, `z` of two records: the heading's `w` is a word the
+/// original leaves as its stack had it.
+fn same_record(port: &game_sim::ride::Back, original: &[Vf; 3]) -> bool {
+    let xyz = |a: Vf, b: Vf| (0..3).all(|k| a[k].to_bits() == b[k].to_bits());
+    same_bits(port.at, original[0]) && same_bits(port.up, original[2]) && xyz(port.facing, original[1])
+}
+
+/// The port's cannonball branch from one tick's update, tried on every way a row can hold it: the
+/// wreck bike's transform and the part from this row or the one before (a row is read while the game
+/// runs, and can hold one tick's record with the next tick's bike). What the record came to on each.
+fn thrown_tries(before: &ThrownTick, now: &ThrownTick, world: &mut TheOriginalsTerrain, p: &Phy, tables: &Tables) -> Vec<(bool, game_sim::ride::Back)> {
+    let mut tries = Vec::new();
+    for bike in [now, before] {
+        for part in [now.part, before.part] {
+            let mut ride = rider(p);
+            ride.back = game_sim::ride::Back { at: before.rec[0], facing: before.rec[1], up: before.rec[2] };
+            let kept = ride.keep_back_thrown(part, bike.at, bike.forward, world, &tables.curve);
+            tries.push((kept, ride.back));
+        }
+    }
+    tries
+}
+
+/// **The record in a cannonball, tick for tick** (S77): on every captured tick of a shootoff the
+/// original's record changed on, the port's [`Ride::keep_back_thrown`] — handed the same wreck bike
+/// and part, from the record the tick before, over the original's own ground and meshes — leaves the
+/// same point, up and heading, to the bit: moved onto the wreck bike where the original moved it, and
+/// held with the ground's new up where the original's clearance refused. Before the wreck bike first
+/// touches, and after it last does, the record does not change at all.
+#[test]
+fn the_record_follows_the_wreck_bike_through_a_shootoff() {
+    let tables = Tables::build();
+    let p = bike(&tables);
+    let (mut moved, mut refused) = (0, 0);
+    for (name, slot) in THROWN_CAPTURES {
+        let Some((rows, mut world)) = thrown_run(name, slot) else { continue };
+        let (mut here, mut held_here, mut still, mut untouched) = (0, 0, 0, 0);
+        for i in 1..rows.len() {
+            let (before, now) = (&rows[i - 1], &rows[i]);
+            if now.frame != before.frame + 1 || now.reason != 13 || now.c84 != 13 || before.c84 != 13 {
+                continue; // a lost tick, not thrown, or the throw's own tick, which is the riding branch's
+            }
+            let changed = (0..3).any(|k| !same_bits(now.rec[k], before.rec[k]));
+            if !now.touch && !before.touch {
+                // Neither row's wreck bike touched: the branch is not taken.
+                assert!(!changed, "{name} frame {}: the record changed with the wreck bike in the air", now.frame);
+                untouched += 1;
+                continue;
+            }
+            if !changed {
+                still += 1; // the row was read before its tick's update
+                continue;
+            }
+            let tries = thrown_tries(before, now, &mut world, &p, &tables);
+            let Some(&(kept, _)) = tries.iter().find(|(_, back)| same_record(back, &now.rec)) else {
+                panic!(
+                    "{name} frame {}: the original's record is {} up {}; the port's: {:?}",
+                    now.frame,
+                    show(now.rec[0]),
+                    show(now.rec[2]),
+                    tries.iter().map(|(k, b)| format!("{k} {} up {}", show(b.at), show(b.up))).collect::<Vec<_>>()
+                )
+            };
+            assert_eq!(kept, !same_bits(now.rec[0], before.rec[0]), "{name} frame {}: kept, or held", now.frame);
+            if kept { here += 1 } else { held_here += 1 }
+        }
+        println!(
+            "{name}: {here} ticks moved onto the wreck bike bit for bit, {held_here} held with the new up, \
+             {still} read before their update, {untouched} in the air untouched; {} mesh queries, {} met something",
+            world.asked, world.met
+        );
+        assert!(here >= 5, "{name}: only {here} ticks moved");
+        assert!(still * 4 <= here, "{name}: {still} rows read before their update, against {here}");
+        moved += here;
+        refused += held_here;
+    }
+    if moved > 0 {
+        assert!(moved >= 80, "only {moved} ticks compared");
+        println!("{moved} moved and {refused} held, over the three edges");
+    }
+}
+
+/// **The put-back after a shootoff lands at the landing** (S77): on every captured shootoff the
+/// clock's put-back set the original's bike on its record as it stood the tick before, which the
+/// port's cannonball branch left on the wreck bike's last touch. [`Ride::place_back`] from the
+/// port's own record puts the bike's origin on the original's to the bit — inside the map, hundreds of
+/// feet from the edge it was thrown off, where the port used to put it.
+#[test]
+fn each_captured_post_shootoff_put_back_lands_bit_exact_at_the_landing() {
+    let tables = Tables::build();
+    let p = bike(&tables);
+    let mut landed = 0;
+    for (name, slot) in THROWN_CAPTURES {
+        let Some((rows, mut world)) = thrown_run(name, slot) else { continue };
+        let thrown = rows.iter().position(|r| r.reason == 13).unwrap_or_else(|| panic!("{name}: never thrown"));
+        let back = thrown + rows[thrown..].iter().position(|r| r.reason == 0).unwrap_or_else(|| panic!("{name}: never put back"));
+        let edge = rows[thrown].rec[0];
+        // The last tick the original moved its record before the put-back, and the port's from it.
+        let last = (thrown + 1..back)
+            .rev()
+            .find(|&i| rows[i].frame == rows[i - 1].frame + 1 && !same_bits(rows[i].rec[0], rows[i - 1].rec[0]))
+            .unwrap_or_else(|| panic!("{name}: the record never moved after the throw"));
+        let (before, now) = (&rows[last - 1], &rows[last]);
+        let tries = thrown_tries(before, now, &mut world, &p, &tables);
+        let (_, kept) = *tries
+            .iter()
+            .find(|(kept, b)| *kept && same_record(b, &now.rec))
+            .unwrap_or_else(|| panic!("{name} frame {}: the port did not keep the original's last record", now.frame));
+        assert!(rows[last..back].iter().all(|r| same_bits(r.rec[0], kept.at)), "{name}: the record moved again");
+        let mut ride = rider(&p);
+        ride.back = kept;
+        ride.place_back();
+        let put = &rows[back];
+        assert!(
+            same_bits(ride.position(), put.at),
+            "{name} frame {}: the port put the bike at {}, the original at {}",
+            put.frame,
+            show(ride.position()),
+            show(put.at)
+        );
+        let far = (put.at.x() - edge.x()).hypot(put.at.z() - edge.z());
+        assert!(far > 500.0, "{name}: put back {far} ft from the edge");
+        println!(
+            "{name}: thrown at frame {}, record last moved at {}, put back at {} on {}, {} ft from the edge",
+            rows[thrown].frame,
+            now.frame,
+            put.frame,
+            show(put.at),
+            far
+        );
+        landed += 1;
+    }
+    if landed > 0 {
+        assert_eq!(landed, THROWN_CAPTURES.len(), "a capture had no verdict");
+    }
+}
