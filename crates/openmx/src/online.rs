@@ -39,7 +39,7 @@ use game_sim::world::World;
 use game_sim::Sim;
 use ps2_float::F;
 
-use crate::net::rides::{self, Rides};
+use crate::net::rides::{self, Modded, Rides};
 use crate::net::udp::{self, Udp};
 use crate::net::{Lineup, Netplay, Timing};
 
@@ -81,6 +81,10 @@ pub struct Online {
     room: Option<openmx_net::Room>,
     /// `--peer`s (N15): every seat's controller preset is not known yet, and the first tick waits on it.
     presets_owed: bool,
+    /// The game modifiers every seat rides (P55, 1P's for all), and each seat's bike file before
+    /// them, which a change the host makes mid-ride builds the bikes again from (P100).
+    mods: game_sim::modifiers::Mods,
+    stock: Vec<game_sim::phy::Phy>,
 }
 
 impl Online {
@@ -125,6 +129,8 @@ impl Online {
             arrived: Vec::new(),
             room: None,
             presets_owed: true,
+            mods: Default::default(),
+            stock: Vec::new(),
         })
     }
 
@@ -174,6 +180,8 @@ impl Online {
             arrived: Vec::new(),
             room: None,
             presets_owed: false,
+            mods: Default::default(),
+            stock: Vec::new(),
         })
     }
 
@@ -199,6 +207,8 @@ impl Online {
             arrived: Vec::new(),
             room: None,
             presets_owed: false,
+            mods: Default::default(),
+            stock: Vec::new(),
         })
     }
 
@@ -223,7 +233,44 @@ impl Online {
             arrived: Vec::new(),
             room: None,
             presets_owed: false,
+            mods: Default::default(),
+            stock: Vec::new(),
         })
+    }
+
+    /// The game modifiers the ride starts on, and each seat's bike file before them (`stock[s]`, a
+    /// seat past the last on the first's): its time scale, and what a change mid-ride (P100) is
+    /// built on. Online every seat rides 1P's, so the set is 1P's for every seat.
+    pub fn modifiers(&mut self, mods: game_sim::modifiers::Mods, stock: Vec<game_sim::phy::Phy>) {
+        self.mods = first_players(&mods);
+        self.time_scale = self.mods.time_scale();
+        self.net.mods = self.mods.text();
+        self.stock = stock;
+    }
+
+    /// The modifiers the ride is on now: the host's last change once every machine took it.
+    pub fn mods(&self) -> game_sim::modifiers::Mods {
+        self.mods
+    }
+
+    /// The tick the last change of the modifiers was taken at, every machine alike.
+    pub fn remodified_at(&self) -> Option<u32> {
+        self.net.remods.last().map(|r| r.0)
+    }
+
+    /// Whether this machine hosts the ride: only the host changes its modifiers.
+    pub fn host(&self) -> bool {
+        self.net.host()
+    }
+
+    /// The host changes the ride's modifiers to 1P's of `to` (P100): every machine takes them at the
+    /// tick of the next restart the session can make, the way a join is taken
+    /// ([`crate::net::admit`]); until then the ride is on the old ones.
+    pub fn remodify(&mut self, to: &game_sim::modifiers::Mods) -> Result<(), String> {
+        if self.stock.is_empty() {
+            return Err("this ride has no stock bike file to build the modifiers on".into());
+        }
+        self.net.remodify(first_players(to).text())
     }
 
     /// Whether this machine has a seat in the ride yet (a drop-in waits for the host's state).
@@ -435,9 +482,11 @@ impl Online {
                     hands = Some(*c);
                 }
             };
-            let mut game = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale };
+            let mut rides = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale };
+            let mut game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods };
             self.net.frame(&mut game, &local, real);
         }
+        self.time_scale = self.mods.time_scale();
         if let Err(why) = self.take_presets() {
             self.net.finish(why);
         }
@@ -466,6 +515,18 @@ impl Online {
         }
         Ok(())
     }
+}
+
+/// 1P's modifiers for every player: what an online ride rides, every seat's bike built on 1P's.
+pub fn first_players(m: &game_sim::modifiers::Mods) -> game_sim::modifiers::Mods {
+    use game_sim::modifiers::{Knob, Mods};
+    let mut one = Mods::original();
+    for k in Knob::ALL {
+        for s in 0..game_sim::MAX_PLAYERS {
+            one.set(s, k, m.get(0, k));
+        }
+    }
+    one
 }
 
 /// A datagram on the lobby's reliable stream: who it is for, then it.

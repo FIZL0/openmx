@@ -14,6 +14,12 @@
 //! ride goes on without a tick lost; with others in, the ride steps back to the settled tick — the
 //! few ticks a rollback would re-run anyway — and rides on from there.
 //!
+//! A change of the game's modifiers by the host (P100, [`super::Netplay::remodify`]) is taken the
+//! same way, with or without a join: the settled state goes out as a restart with `Msg::Mods` ahead
+//! of it, and every machine decodes the state and moves it onto the new set
+//! ([`super::Game::remodify`]) before the new session's first tick, so every machine rides the new
+//! numbers from the same tick on.
+//!
 //! The joiner waits with [`super::Netplay::joining`]: no seat and no session, keep-alives to the
 //! host, until the restart comes.
 
@@ -29,6 +35,8 @@ pub struct Admit {
     pub joins: Vec<(String, u32)>,
     /// The peers heard from: a pending join goes ahead once its peer is among them.
     heard: std::collections::BTreeSet<String>,
+    /// The host: the modifiers to change to at the next frame that can (P100), as a join is taken.
+    pub(super) mods: Option<String>,
 }
 
 impl Admit {
@@ -72,7 +80,8 @@ pub(super) fn ask<S: Clone + 'static>(np: &mut Netplay<S>, peer: &str, seats: &[
 
 /// The host, after a frame's ticks: the joins asked for go out and are taken on, if this frame can.
 pub(super) fn run<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay<S>, game: &mut G) {
-    if !np.host() || !np.admit.pending.iter().any(|p| np.admit.heard.contains(&p.0)) || np.end.is_some() || np.recover.ready.is_some() || np.resync.due || np.resync.sent {
+    let joins = np.admit.pending.iter().any(|p| np.admit.heard.contains(&p.0));
+    if !np.host() || !(joins || np.admit.mods.is_some()) || np.end.is_some() || np.recover.ready.is_some() || np.resync.due || np.resync.sent {
         return;
     }
     // no settled state this frame: the next
@@ -88,6 +97,10 @@ pub(super) fn run<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay<S>, g
     game.restore(&now);
     let (lineup, data) = match grown {
         Ok(g) => g,
+        Err(e) if pending.is_empty() => {
+            np.admit.mods = None;
+            return np.say(format!("online: the modifiers cannot change: {e}"));
+        }
         Err(e) => {
             let who: Vec<&str> = pending.iter().map(|p| p.0.as_str()).collect();
             return np.say(format!("online: {} cannot join: {e}", who.join(", ")));
@@ -95,7 +108,11 @@ pub(super) fn run<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay<S>, g
     };
     let round = np.rb.round.wrapping_add(1);
     let n = data.len().div_ceil(PIECE).max(1);
+    // the modifiers go with every restart from here (P100): a change at this tick, or the set the
+    // ride is on for a joiner whose machine may have loaded the room's older one
+    let (was, to) = (np.mods.clone(), np.admit.mods.take().unwrap_or_else(|| np.mods.clone()));
     for p in lineup.peers().into_iter().filter(|p| *p != np.me) {
+        np.link.send(&p, Msg::Mods { round, was: was.clone(), to: to.clone() });
         for i in 0..n {
             let piece = data[i * PIECE..((i + 1) * PIECE).min(data.len())].to_vec();
             np.link.send(&p, Msg::Restart { round, tick, lineup: lineup.clone(), data: piece, last: i + 1 == n });
@@ -107,6 +124,7 @@ pub(super) fn run<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay<S>, g
         np.admit.joins.push((peer.clone(), tick));
     }
     np.recover.ready = Some((round, tick, lineup, data));
+    np.recover.mods = Some((round, was, to));
     recover::restarted(np, game);
 }
 

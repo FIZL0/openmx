@@ -1328,3 +1328,178 @@ fn every_seat_rides_its_own_preset_over_peer_udp() {
     }
     assert!(nets.iter().all(|np| np.desyncs.is_empty() && np.end.is_none()));
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The host changes the modifiers mid-ride (P100)
+// ---------------------------------------------------------------------------------------------------
+
+/// The ride with its modifiers, as the shell's `Online` steps it: [`rides::Modded`] over [`Rides`],
+/// each seat's stock bike file beside it.
+struct ModRide {
+    ride: Ride,
+    stock: Vec<game_sim::phy::Phy>,
+    mods: game_sim::modifiers::Mods,
+}
+
+impl ModRide {
+    fn new(seats: usize) -> ModRide {
+        let ride = Ride::new(seats);
+        let stock = ride.sims.iter().map(|s| (*s.phy).clone()).collect();
+        ModRide { ride, stock, mods: Default::default() }
+    }
+}
+
+impl Machine for ModRide {
+    type S = rides::State;
+    fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
+        let time_scale = self.mods.time_scale();
+        let mut rides = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale };
+        let mut game = rides::Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods };
+        np.frame(&mut game, local, ROUND.as_secs_f32());
+    }
+    fn hash(&self) -> u64 {
+        self.ride.hash()
+    }
+}
+
+/// P100's acceptance: two peers ride, and the host changes gravity mid-ride (the pause's change,
+/// [`Netplay::remodify`]) over a lossy, laggy link. Both machines take it at the same tick, with
+/// the same state before every settled tick and the same pads from the first tick to the last; the
+/// tick it took is the ride the same pads ride offline with the change put on there (the settled
+/// state moved onto the new set, as the pause does it offline, P98), and a ride never changed parts
+/// from it there. A guest cannot change them, and the host's ride never steps back past the settled
+/// tick.
+#[test]
+fn the_host_changes_gravity_mid_ride_and_both_peers_stay_in_sync() {
+    use game_sim::modifiers::Mods;
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    let half = Mods::parse("gravity=50").unwrap();
+    let change = 300;
+    let mut refused = None;
+    let r = run("host,g", Timing::default(), ModRide::new, &link, 0..900, |round, r, _| {
+        if round == change {
+            refused = Some(r.nets[1].remodify(half.text()));
+            r.nets[0].remodify(half.text()).unwrap();
+        }
+    });
+    let plain = run("host,g", Timing::default(), ModRide::new, &link, 0..900, |_, _, _| {});
+    assert!(refused.unwrap().is_err(), "a guest changed the modifiers");
+
+    // one change, on both machines at the same tick, a settled one near the round it was asked at
+    let (h, g) = (&r.nets[0], &r.nets[1]);
+    assert_eq!(h.remods.len(), 1, "{:?}", h.remods);
+    assert_eq!(h.remods, g.remods, "both took the change at one tick");
+    let t = h.remods[0].0 as usize;
+    assert!(t + WINDOW > change as usize && t < change as usize + 40, "the change at tick {t}, asked at round {change}");
+    for (i, np) in r.nets.iter().enumerate() {
+        assert_eq!((np.mods.as_str(), np.rb.round, np.end.as_deref()), ("gravity=50", 1, None), "{}", np.me);
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+        assert_eq!(r.games[i].mods, half, "{}", np.me);
+        for (s, sim) in r.games[i].ride.sims.iter().enumerate() {
+            let mut want = r.games[i].stock[s].clone();
+            half.bike(0, &mut want);
+            assert_eq!(format!("{:?}", *sim.phy), format!("{want:?}"), "{} seat {}: the bike on half gravity", np.me, s + 1);
+        }
+    }
+
+    // in sync from the first tick to the last settled one, across the change
+    let n = r.agree(&[0, 1], 0);
+    assert!(n > 700 && n > t + 400, "host and g agree on {n} ticks, the change at {t}");
+
+    // the same pads offline, the change put on before tick t: the same hash before every tick
+    let mut sims = sims(2);
+    let mut world = Flat::default();
+    let stock: Vec<_> = sims.iter().map(|s| (*s.phy).clone()).collect();
+    for tick in 0..n {
+        if tick == t {
+            for (s, sim) in sims.iter_mut().enumerate() {
+                half.resim(&Mods::original(), 0, &stock[s], sim);
+            }
+        }
+        let mut game = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None };
+        assert_eq!(game.hash(), h.hashes[tick], "offline, the state before tick {tick} (the change at {t})");
+        let pads: Vec<Report> = h.log[tick].iter().map(|&p| unwire(p)).collect();
+        game.step(tick, &pads);
+    }
+
+    // a ride never changed is this one up to the change and another after it
+    let same = plain.nets[0].hashes.len().min(n);
+    let parted = (0..same).find(|&k| plain.nets[0].hashes[k] != h.hashes[k] || plain.nets[0].log[k] != h.log[k]);
+    let parted = parted.expect("the change made no difference to the ride");
+    assert!(parted >= t, "the rides parted at {parted}, before the change at {t}");
+    let hashes_parted = (0..same).find(|&k| plain.nets[0].hashes[k] != h.hashes[k]).unwrap();
+    assert!(hashes_parted > t && hashes_parted <= t + 30, "half gravity first shows in the state at {hashes_parted}, the change at {t}");
+
+    // the host's ride never went back past the settled tick
+    for (round, w) in r.ran[0].windows(2).enumerate() {
+        assert!(w[1] + WINDOW >= w[0], "round {round}: the host went back from {} to {}", w[0], w[1]);
+    }
+}
+
+/// A peer that joins after the host changed the modifiers (P100) loaded the room's older set; the
+/// join's restart carries the set the ride is on, and the joiner's seats ride it from the join tick.
+/// The host opened its ride of one, changed gravity alone at round 100, and `g` drops in at 300.
+#[test]
+fn a_peer_that_joins_after_a_change_rides_the_changed_set() {
+    use game_sim::modifiers::Mods;
+    ggrs::clock::drive(true);
+    let half = Mods::parse("gravity=50").unwrap();
+    let spawn = rides::seat_bytes(&sims(1)[0]);
+    let mut nets = vec![Netplay::new(Lineup::parse("host").unwrap(), "host", Timing::default(), dumps()).unwrap()];
+    let mut games = vec![ModRide::new(1)];
+    let names = ["host", "g"];
+    let mut wire: Vec<(usize, u32, String, Vec<u8>)> = Vec::new();
+    for round in 0..700u32 {
+        if round == 100 {
+            nets[0].remodify(half.text()).unwrap();
+        }
+        if round == 270 {
+            nets[0].admit("g", &[1], rides::spawn_on(&spawn, &[])).unwrap();
+        }
+        if round == 300 {
+            nets.push(Netplay::joining("host", "g", Timing::default(), dumps()).unwrap());
+            games.push(ModRide::new(1));
+        }
+        for (to, at, from, d) in std::mem::take(&mut wire) {
+            if at > round {
+                wire.push((to, at, from, d));
+            } else {
+                nets[to].heard(&from, &d);
+            }
+        }
+        let up = nets.len();
+        for i in 0..up {
+            let np = &mut nets[i];
+            let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| mash(s, np.tick())).collect();
+            games[i].frame(np, &local);
+            for (to, d) in np.outgoing() {
+                if let Some(j) = names.iter().position(|n| *n == to).filter(|&j| j < up) {
+                    wire.push((j, round + 2, names[i].to_string(), d));
+                }
+            }
+            np.said.clear();
+        }
+        ggrs::clock::advance(ROUND);
+    }
+    ggrs::clock::drive(false);
+    let (h, g) = (&nets[0], &nets[1]);
+    let changed = h.remods[0].0;
+    assert!(changed >= 100 && changed < 110, "the host alone took the change at once: tick {changed}");
+    let joined = h.admit.joins[0].1;
+    assert_eq!(g.remods, [(joined, "gravity=50".to_string())], "g took the ride's set at its join");
+    assert_eq!((h.lineup.text().as_str(), g.lineup.text().as_str()), ("host,g", "host,g"));
+    for (i, game) in games.iter().enumerate() {
+        assert_eq!(game.mods, half, "{}", names[i]);
+        for sim in &game.ride.sims {
+            let mut want = game.stock[0].clone();
+            half.bike(0, &mut want);
+            assert_eq!(format!("{:?}", *sim.phy), format!("{want:?}"), "{}: every seat on half gravity", names[i]);
+        }
+    }
+    let settled = (h.confirmed().min(g.confirmed()).max(0)) as usize;
+    assert!(settled > joined as usize + 300, "{settled} settled, joined at {joined}");
+    for t in joined as usize..settled {
+        assert_eq!((h.hashes[t], &h.log[t]), (g.hashes[t], &g.log[t]), "tick {t}, joined at {joined}");
+    }
+    assert!(h.desyncs.is_empty() && g.desyncs.is_empty());
+}
