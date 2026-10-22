@@ -73,7 +73,7 @@ own terrain query, moved.
   would make it 1:1, and nothing in the original covers several terrains to be 1:1 to.
 - **Far from the origin is proved for the ground only** (the sim test, offset 110,592 × 29,952).
   No ride and no camera was run that far out; the shell's camera and its drawing are in world f32,
-  so a picture at 100,000+ ft will jitter by 1/128 ft. Filed as MD13 (camera-relative drawing).
+  so a picture at 100,000+ ft will jitter by 1/128 ft. Filed as MD15 (camera-relative drawing).
 - **The cell a point is in**: ownership divides `x/spacing` as `Ground::at` does; the heightfield
   query multiplies by `1/spacing`. At a cell line the two can differ by one ulp, so a point exactly
   on a `keep` line could be asked of a neighbour's cell. Not seen in 230,000 test points; not ruled out.
@@ -85,7 +85,7 @@ own terrain query, moved.
 - **Eco and paint** are not drawn in a world, and the sky tile's path cars (if it has a `.toy`) are
   drawn at its own coordinates, not moved; props are drawn for the sky tile only, and
   the software renderer draws only the sky tile's ground. Ground chunks are not stitched across a
-  tile seam and every piece's ground is uploaded at the start (not streamed). MD13 / MD9.
+  tile seam and every piece's ground is uploaded at the start (not streamed). MD15 / MD9.
 - **Wasm**: `Reach::WEB` exists but the web build has no world loader; untested there.
 - **The terrain is parsed again per query** (the `Ground` borrows the bytes): +20% a query in debug.
 - **`drop`** takes a tile's scene sections out by name before the scene is read; no generated test
@@ -94,5 +94,5 @@ own terrain query, moved.
 
 ## Next
 
-- MD9 (the look across joins), MD13 (the whole picture, streaming, camera-relative), MD14 (the
+- MD9 (the look across joins), MD15 (the whole picture, streaming, camera-relative), MD14 (the
   plane and put-backs in a world).

@@ -61,9 +61,13 @@ fn tick(sim: &mut Sim, buttons: u16) {
     markers::frame(sim, 0, &spots, &hands[0]);
 }
 
-/// `control` pressed for a tick on top of the gas, then let go for one.
+/// `control` pressed on top of the gas — Left and Right for a tick, Down and Up held the eight ticks
+/// that cross `markers::HOLD_MS` at 30 Hz (P106) — then let go for one.
 fn press(sim: &mut Sim, control: Control) {
-    tick(sim, GAS | control.mask());
+    let ticks = if matches!(control, Control::Up | Control::Down) { 8 } else { 1 };
+    for _ in 0..ticks {
+        tick(sim, GAS | control.mask());
+    }
     tick(sim, GAS);
 }
 

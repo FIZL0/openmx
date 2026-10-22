@@ -7,6 +7,12 @@
 //! slots, so a file of another format or another bike is dropped — said on the console and left
 //! alone until a slot overwrites it — rather than read as something it is not.
 //!
+//! **Each machine its own file** (P107): the plane's markers beside the bike's, in
+//! `markers/<track>/<profile>.biplane.markers`, named by the plane's `.phy` ([`markers::PLANE`])
+//! where a bike's name the bike. A ride loads every machine's, and a slot placed or cleared writes
+//! only its machine's file. A tape and a pick carry them all in one ([`Markers::to_files`]): the
+//! bike's file alone, as before, while the plane has none.
+//!
 //! The markers are simulation state, so the files only ever start a ride: a tape carries the ones its
 //! ride started with ([`game_sim::replay::PadTape::markers`]) and replays without the files, and
 //! online each player's go to every machine with their seat's pick ([`openmx_net::Pick::markers`]).
@@ -14,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use game_sim::hash;
-use game_sim::markers::Markers;
+use game_sim::markers::{self, Markers, Vehicle};
 
 /// The folder beside `settings.txt` the markers are kept in.
 pub const DIR: &str = "markers";
@@ -35,30 +41,53 @@ fn file_word(word: &str) -> String {
     if w.is_empty() { "_".into() } else { w }
 }
 
-/// Where `profile`'s markers on `track` are kept, under the settings' folder `dir`.
+/// Where `profile`'s bike markers on `track` are kept, under the settings' folder `dir`.
 pub fn path(dir: &Path, track: &str, profile: &str) -> PathBuf {
-    dir.join(DIR).join(file_word(&track.to_ascii_lowercase())).join(format!("{}.markers", file_word(profile)))
+    path_of(dir, track, profile, Vehicle::Bike)
 }
 
-/// The markers `profile` kept on `track` for `bike`: none without a file, and none — said why — for a
-/// file that is not this build's format or is another bike's.
+/// Where `profile`'s markers on `track` for the machine `on` are kept (P107): the bike's
+/// [`path`], the plane's beside it, its name before the extension.
+pub fn path_of(dir: &Path, track: &str, profile: &str, on: Vehicle) -> PathBuf {
+    let leaf = match on {
+        Vehicle::Bike => format!("{}.markers", file_word(profile)),
+        Vehicle::Plane => format!("{}.{}.markers", file_word(profile), markers::PLANE),
+    };
+    dir.join(DIR).join(file_word(&track.to_ascii_lowercase())).join(leaf)
+}
+
+/// Every machine's name for its markers: the bike's, `bike`, and the plane's ([`markers::PLANE`]).
+pub fn names(bike: &str) -> [(Vehicle, &str); 2] {
+    [(Vehicle::Bike, bike), (Vehicle::Plane, markers::PLANE)]
+}
+
+/// The markers `profile` kept on `track`, every machine's — the bike's for `bike`: none without a
+/// file, and none — said why — for a file that is not this build's format or is another machine's.
 pub fn load(dir: &Path, track: &str, profile: &str, bike: &str) -> Markers {
-    let file = path(dir, track, profile);
-    let Ok(bytes) = std::fs::read(&file) else { return Markers::default() };
-    match Markers::from_file(&bytes, bike) {
-        Ok(m) => m,
-        Err(e) => {
-            println!("markers: {} not loaded: {e}", file.display());
-            Markers::default()
+    let mut out = Markers::default();
+    for (on, name) in names(bike) {
+        let file = path_of(dir, track, profile, on);
+        let Ok(bytes) = std::fs::read(&file) else { continue };
+        match Markers::from_file(&bytes, name) {
+            Ok(m) if m.any_on(on) || !m.any() => out.join(m),
+            Ok(_) => println!("markers: {} not loaded: another machine's", file.display()),
+            Err(e) => println!("markers: {} not loaded: {e}", file.display()),
         }
     }
+    out
 }
 
-/// Keep `markers`' slots as `profile`'s on `track`: the file written whole (a sibling, then a
-/// rename, so a crash never leaves half of one), or removed when every slot is empty.
+/// Keep `markers`' slots as `profile`'s on `track`, every machine's file ([`save_of`]).
 pub fn save(dir: &Path, track: &str, profile: &str, bike: &str, markers: &Markers) -> Result<(), String> {
-    let file = path(dir, track, profile);
-    if markers.slots.iter().all(Option::is_none) {
+    names(bike).into_iter().try_for_each(|(on, name)| save_of(dir, track, profile, on, name, markers))
+}
+
+/// Keep `markers`' slots of the machine `on` (named `name`) as `profile`'s on `track`: the file
+/// written whole (a sibling, then a rename, so a crash never leaves half of one), or removed when
+/// every slot is empty.
+pub fn save_of(dir: &Path, track: &str, profile: &str, on: Vehicle, name: &str, markers: &Markers) -> Result<(), String> {
+    let file = path_of(dir, track, profile, on);
+    if !markers.any_on(on) {
         return match std::fs::remove_file(&file) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", file.display())),
             _ => Ok(()),
@@ -67,18 +96,32 @@ pub fn save(dir: &Path, track: &str, profile: &str, bike: &str, markers: &Marker
     let parent = file.parent().expect("a file in a folder");
     std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     let part = file.with_extension("markers.part");
-    std::fs::write(&part, markers.to_file(bike)).map_err(|e| format!("{}: {e}", part.display()))?;
+    std::fs::write(&part, markers.set_file(on, name)).map_err(|e| format!("{}: {e}", part.display()))?;
     std::fs::rename(&part, &file).map_err(|e| format!("{}: {e}", file.display()))
 }
 
-/// What a seat's slots hold, as one word: a change of it is a slot placed or cleared. The selection
-/// is not in it — stepping through the slots writes nothing.
+/// What a seat's slots hold, as one word: a change of it is a slot placed or cleared, on any
+/// machine. The selection is not in it — stepping through the slots writes nothing. With markers on
+/// the bike alone it is P99's word, the bike's ([`signatures`]).
 pub fn signature(markers: &Markers) -> u64 {
-    markers.slots.iter().fold(0xcbf2_9ce4_8422_2325, |h, slot| {
-        let one = slot.as_ref().map_or(0, |ride| hash::of(&**ride));
-        (h ^ one).wrapping_mul(0x100_0000_01b3)
+    let words = signatures(markers);
+    Vehicle::ALL.iter().zip(words).skip(1).filter(|(on, _)| markers.any_on(**on)).fold(words[0], |h, (_, w)| (h ^ w).wrapping_mul(PRIME))
+}
+
+/// What each machine's slots hold, a word each in [`Vehicle::ALL`] order (P107): a change of one is
+/// a slot of that machine placed or cleared.
+pub fn signatures(markers: &Markers) -> [u64; Vehicle::ALL.len()] {
+    Vehicle::ALL.map(|on| {
+        let empty = Default::default();
+        markers.slots_of(on).unwrap_or(&empty).iter().fold(0xcbf2_9ce4_8422_2325, |h, slot| {
+            let one = slot.as_ref().map_or(0, |mark| hash::of(&**mark));
+            (h ^ one).wrapping_mul(PRIME)
+        })
     })
 }
+
+/// The signatures' multiplier (FNV-1a's).
+const PRIME: u64 = 0x100_0000_01b3;
 
 /// One local seat's file, and what its slots held when last written: [`Kept::frame`] writes the file
 /// when they change.
@@ -87,38 +130,50 @@ pub struct Kept {
     pub track: String,
     pub profile: String,
     pub bike: String,
+    /// [`signature`] at the last write.
     pub last: u64,
+    /// [`signatures`] at the last write: which machine's file a change is to.
+    each: [u64; Vehicle::ALL.len()],
 }
 
 impl Kept {
     /// A seat that starts its ride on `markers`.
     pub fn new(track: &str, profile: &str, bike: &str, markers: &Markers) -> Kept {
-        Kept { track: track.into(), profile: profile.into(), bike: bike.into(), last: signature(markers) }
+        Kept { track: track.into(), profile: profile.into(), bike: bike.into(), last: signature(markers), each: signatures(markers) }
     }
 
-    /// After a frame: write the seat's file if its slots changed since the last write. What was
-    /// written, or why it could not be, for the console; `None` for no change.
+    /// After a frame: write the seat's file of each machine whose slots changed since the last
+    /// write (P107: only that machine's). What was written, or why it could not be, for the
+    /// console; `None` for no change.
     pub fn frame(&mut self, dir: &Path, markers: &Markers) -> Option<String> {
         let now = signature(markers);
         if now == self.last {
             return None;
         }
-        self.last = now;
-        let file = path(dir, &self.track, &self.profile);
-        Some(match save(dir, &self.track, &self.profile, &self.bike, markers) {
-            Ok(()) => format!("markers: kept in {}", file.display()),
-            Err(e) => format!("markers: not kept: {e}"),
-        })
+        let each = signatures(markers);
+        let mut said = Vec::new();
+        for (i, (on, name)) in names(&self.bike).into_iter().enumerate() {
+            if each[i] == self.each[i] {
+                continue;
+            }
+            let file = path_of(dir, &self.track, &self.profile, on);
+            said.push(match save_of(dir, &self.track, &self.profile, on, name, markers) {
+                Ok(()) => format!("markers: kept in {}", file.display()),
+                Err(e) => format!("markers: not kept: {e}"),
+            });
+        }
+        (self.last, self.each) = (now, each);
+        (!said.is_empty()).then(|| said.join("\n"))
     }
 }
 
 /// `markers` as a lobby pick carries them ([`openmx_net::Pick::markers`]): the track they are for,
 /// a colon, and the file's bytes in hex; empty for no marker at all.
 pub fn to_pick(markers: &Markers, bike: &str, track: &str) -> String {
-    if markers.slots.iter().all(Option::is_none) {
+    if !markers.any() {
         return String::new();
     }
-    let hex: String = markers.to_file(bike).iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = markers.to_files(&names(bike)).iter().map(|b| format!("{b:02x}")).collect();
     format!("{}:{hex}", track.to_ascii_lowercase())
 }
 
@@ -131,7 +186,7 @@ pub fn from_pick(text: &str, bike: &str, track: &str) -> Markers {
         return Markers::default();
     }
     let bytes: Option<Vec<u8>> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()).collect();
-    bytes.and_then(|b| Markers::from_file(&b, bike).ok()).unwrap_or_default()
+    bytes.and_then(|b| Markers::from_files(&b, &names(bike)).ok()).unwrap_or_default()
 }
 
 /// The lobby pick's markers (P99): what [`to_pick`] makes of the player's saved markers on the
@@ -171,12 +226,12 @@ pub fn bike_word(member: &str) -> String {
 /// `markers` as a `--peer` ride sends them to every machine (P105, `net::udp`'s pieces): the track
 /// they are for — its length, then its name — and the file's bytes; empty for no marker at all.
 pub fn to_wire(markers: &Markers, bike: &str, track: &str) -> Vec<u8> {
-    if markers.slots.iter().all(Option::is_none) {
+    if !markers.any() {
         return Vec::new();
     }
     let track = track.to_ascii_lowercase();
     let track = &track.as_bytes()[..track.len().min(255)];
-    [&[track.len() as u8][..], track, &markers.to_file(bike)].concat()
+    [&[track.len() as u8][..], track, &markers.to_files(&names(bike))].concat()
 }
 
 /// [`to_wire`]'s bytes back, for a seat riding `bike` on `track`: none for none, for another
@@ -188,5 +243,5 @@ pub fn from_wire(bytes: &[u8], bike: &str, track: &str) -> Markers {
     if !on.eq_ignore_ascii_case(track.as_bytes()) {
         return Markers::default();
     }
-    Markers::from_file(file, bike).unwrap_or_default()
+    Markers::from_files(file, &names(bike)).unwrap_or_default()
 }

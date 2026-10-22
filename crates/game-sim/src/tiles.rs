@@ -427,11 +427,14 @@ fn moved(at: &Placement, by: [F; 2]) -> Placement {
 }
 
 impl World for Tiled {
+    /// As a track's [`crate::world::Ground`] answers since S64: the original's own query
+    /// ([`crate::contact_search::ground`]) over the owning tile's field, and no ground off the world.
     fn ground(&mut self, at: Vf) -> (Vf, Vf) {
-        match self.at(F(at.x()), F(at.z())) {
-            Some(hit) => (Vf::new(at.x(), hit.y.0, at.z(), 1.0), hit.normal),
-            None => (Vf::new(at.x(), NO_GROUND, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0)),
+        if self.at(F(at.x()).max(F::ZERO), F(at.z()).max(F::ZERO)).is_none() {
+            return (Vf::new(at.x(), NO_GROUND, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0));
         }
+        let g = crate::contact_search::ground(&self.field(), at);
+        (g.point, g.normal)
     }
 
     fn surface(&mut self, at: Vf) -> u8 {

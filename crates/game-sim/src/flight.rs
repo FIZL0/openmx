@@ -297,6 +297,27 @@ impl Flight {
         }
     }
 
+    /// **Back into a flight it kept** (P107, a plane's session marker): the whole of `mark` —
+    /// where the plane was and its attitude, its speed and spin, the throttle and surfaces, the
+    /// engine, the wheels, the wreck counter — out of whatever this flight is in, wreck or not. What
+    /// is this flight's own stays: the numbers the modifiers set ([`Flight::retune`]'s, so a marker
+    /// kept before a change flies on the plane as it is now), and the ray probe and the bike mesh,
+    /// which are the disc's. With the numbers unchanged it is `mark` bit for bit, and the next tick
+    /// is the tick after the placement flown again.
+    pub fn put_back(&mut self, mark: &Flight) {
+        let mut back = mark.clone();
+        back.engine.max_power = self.engine.max_power;
+        back.engine.full_efficiency_speed = self.engine.full_efficiency_speed;
+        back.aero.drag0 = self.aero.drag0;
+        back.gravity_scale = self.gravity_scale;
+        if back.crash.reason == 0 {
+            back.gravity = gravity_force(back.gravity_scale, back.mass);
+        }
+        back.rays = self.rays.clone();
+        back.bike = self.bike.clone();
+        *self = back;
+    }
+
     /// The plane with its collision object's ray probe: the rays of `Biplane\col\biplanem.col`
     /// ([`Rays::of`]), which is what the original's plane loader builds the probe from.
     pub fn with_rays(mut self, rays: Rays) -> Flight {
