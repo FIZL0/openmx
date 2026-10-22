@@ -340,6 +340,55 @@ impl Lot {
 /// which never asks (P50).
 pub const INVERTED_MARGIN: f32 = 0.2;
 
+/// The plane's elevator and aileron off the left stick read round (P89, the plane-relative scheme):
+/// `pad` is what the original's input step made of the same pad ([`flight::pad`]), and the stick's
+/// two fields of it are replaced unless the d-pad holds them.
+///
+/// The original reads each axis on its own: a dead zone of 0.3 on each (a square, so a stick 17
+/// degrees off straight back has no roll at all), then each axis cubed. A round gate's corner is
+/// 0.71 on each axis, which that reading leaves at 0.19 of the pull and 0.20 of the roll — a held
+/// diagonal had a fifth of what either straight push has. Read round, the stick's distance from
+/// centre goes through the same 0.3, the same segment and the same cube, and its direction is
+/// stretched out to the square, so the gate's edge is full travel in every direction: a held corner
+/// is the full pull and the full roll, a half tilt the same part of each in the stick's own
+/// proportion, and straight along an axis it is the original's reading to within rounding.
+///
+/// The centre byte reads `-1/255` through the original's arithmetic, which the dead zone hides; the
+/// stretch would not, so an axis one byte either side of the centre is centred.
+pub fn round_stick(input: &game_sim::input::Pad, mut pad: game_sim::biplane::Pad) -> game_sim::biplane::Pad {
+    use game_sim::bindings::{Command, Table};
+    use game_sim::input::{Axis, AxisRange, PlaneInput};
+    let range = AxisRange::PLAYER;
+    let straight = AxisRange { dead_hi: F::ZERO, dead_lo: F::ZERO, ..range };
+    let read = |axis: Axis| {
+        let v = input.axis_through(axis, &straight);
+        if v.abs() < ROUND_STICK_CENTRE { F::ZERO } else { v }
+    };
+    let (x, y) = (read(Axis::LeftX), read(Axis::LeftY));
+    let r = (x * x + y * y).sqrt().min(range.hi);
+    let (sx, sy) = if r <= range.dead_hi {
+        (F::ZERO, F::ZERO)
+    } else {
+        let m = (r - range.dead_hi) * ((range.hi - range.centre) / (range.hi - range.dead_hi)) + range.centre;
+        let k = m * (m * m) / x.abs().max(y.abs());
+        (x * k, y * k)
+    };
+    // The d-pad's bank and climb still win over the stick, as in the input step: what the step
+    // makes of a centred stick is the d-pad's alone.
+    let dpad = PlaneInput::from_sticks((F::ZERO, F::ZERO), |c| Table::SHIPPED.value(input, Command(c as u8)));
+    if dpad.aileron == F::ZERO {
+        pad.aileron = -sx;
+    }
+    if dpad.elevator == F::ZERO {
+        pad.elevator = -sy;
+    }
+    pad
+}
+
+/// How far from 0 an axis read without a dead zone can be and still be the centre byte or its
+/// neighbour (one byte is `2/255` of the travel): [`round_stick`].
+const ROUND_STICK_CENTRE: f32 = 0.005;
+
 /// The biplane: where it was parked, where it is, and the flight that moves it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plane {
@@ -363,6 +412,13 @@ pub struct Plane {
     /// file's `MinElevator` were 1, which makes the fade exactly 1 at every roll. Off, the flight
     /// reads its file as the original does.
     pub every_bank: bool,
+    /// The plane's stick is read round and its pitch loop never lets go (P89,
+    /// `pad::PlaneScheme::round_stick`): [`round_stick`] in place of the original's square reading,
+    /// and the autopilot's `AileronDeadZone` lifted for each step, so the elevator asks for a pitch
+    /// rate whatever the aileron does — with the loop's coordinated-turn pull faded out as the
+    /// aileron leaves the original's dead zone. Off, the flight reads the pad and its file as the
+    /// original does.
+    pub round_stick: bool,
     /// Which of the disc's liveries it wears, an index into [`Machine::models`] ([`livery`]).
     pub livery: usize,
 }
@@ -380,6 +436,7 @@ impl Plane {
             flight: None,
             placed: false,
             every_bank: false,
+            round_stick: false,
             livery: 0,
         }
     }
@@ -395,8 +452,8 @@ impl Plane {
     /// The swap's unwreck-and-reset: back to the spawn transform, at rest. The flight is put back by
     /// the next step ([`Flight::reset`]), which is the one with the `Sim`'s tables.
     pub fn reset(&mut self) {
-        let (flight, every_bank, livery) = (self.flight.take(), self.every_bank, self.livery);
-        *self = Plane { flight, every_bank, livery, ..Plane::parked(self.spawn) };
+        let (flight, every_bank, round_stick, livery) = (self.flight.take(), self.every_bank, self.round_stick, self.livery);
+        *self = Plane { flight, every_bank, round_stick, livery, ..Plane::parked(self.spawn) };
     }
 
     /// One frame of the plane with the controller on it: the reset chord ([`Flight::reset_chord`],
@@ -419,8 +476,22 @@ impl Plane {
         if self.every_bank {
             f.joystick.min_elevator = F::ONE;
         }
-        f.frame(dt, flight::pad(sim.input.pad(0)), world, &sim.tables.ride);
+        // The autopilot's pitch loop runs while the aileron is inside its dead zone, and no aileron
+        // is outside one wider than the stick's whole travel. Its coordinated-turn pull is for a bank
+        // that is held, not one being rolled through: past the dead zone it fades out over the same
+        // width again, or a held roll would have it pushing as the plane goes over the top (it is a
+        // push banked past 110 degrees). Both put back after the frame.
+        let (dead_zone, feed_forward) = (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward);
+        let mut pad = flight::pad(sim.input.pad(0));
+        if self.round_stick {
+            pad = round_stick(sim.input.pad(0), pad);
+            let held = ((dead_zone + dead_zone - pad.aileron.abs()) / dead_zone).max(F::ZERO).min(F::ONE);
+            f.autopilot.aileron_dead_zone = F(2.0);
+            f.autopilot.feed_forward = feed_forward * held;
+        }
+        f.frame(dt, pad, world, &sim.tables.ride);
         f.joystick.min_elevator = min_elevator;
+        (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward) = (dead_zone, feed_forward);
         let recovered = wrecked && f.crash.reason == 0;
         let (quat, origin) = f.pose();
         let nose = f.measure.forward;
@@ -524,6 +595,14 @@ impl Garage {
     pub fn set_every_bank(&mut self, on: bool) {
         if let Some(plane) = &mut self.plane {
             plane.every_bank = on;
+        }
+    }
+
+    /// Whether the plane's stick is read round and its pitch loop kept (P89): the seat's biplane
+    /// scheme, set beside [`Garage::set_every_bank`] ([`Plane::round_stick`]).
+    pub fn set_round_stick(&mut self, on: bool) {
+        if let Some(plane) = &mut self.plane {
+            plane.round_stick = on;
         }
     }
 
