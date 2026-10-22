@@ -3204,6 +3204,23 @@ plane_probe_hit_listener boot 0x0015acf0 the plane's listener on its ray probe (
 plane_probe_sound_listener boot 0x003ea8a0 the ray probe's second listener (a global at 0x0062e324,
 #                              thunk 0x003eb620): two sound calls and 0x002fffe0, presentation only
 bike_struck_listener boot 0x0025a480 a bike's listener on its collidable, vt +0xc (thunk 0x0025a6e0)
+bike_struck_thunk boot 0x0025a6e0 its vt +0xc entry: a0 -= 0x80 (listener -> bike), then the listener
+# S95 — the biplane strikes the ride's bikes (flight_search::world_among / Scene::among, flight.rs
+#   frame_among, lib.rs Sim::step; proofs in crates/game-sim/tests/flight_bikes.rs over biplane.p2m2).
+#   bike_struck_listener is `sw a2, 0x7d8(a0)`: search_nearby (0x0011a9d0) calls the struck collidable's
+#   listeners' vt +0xc with (listener, struck, striker probe), and the bike keeps the striker at +0x7d8.
+#   bike_wreck_test's last clause: +0x7d8 != 0 and (striker +0x84 & bike +0x398) != 0 -> vt +0xfc(bike, 5)
+#   (Wreck::Flat); +0x7d8 is cleared after, on both exits. +0x398 is 0x100000 on every bike in the state,
+#   and the plane's probes' category is 8, so a plane never wrecks a bike through this.
+#   A bike collidable (three among the plane's 34: found[23..26]): class 2, shape kind 0 (mesh), flags
+#   0x14, +0x31 bit 0, category 0x9a048, collides_with 0xffffffff, categories mode 1 empty, one listener
+#   at bike +0x80 (vtable 0x00454fc0); +0x78 the bike, +0x7c the chassis, +0x80 the bike's collision
+#   record; +0x120 the chassis node's world transform; +0x234 the mesh, bike\col\bikef.col (900 bytes,
+#   12 triangles, identity transform; in every freeNN_ss_2.res and Bike\*.res). +0x60 radius 4.30349 =
+#   |root half extent|; +0x40 the root box's centre through +0x120 (both bit-exact in the test).
+#   The moving list: ray probe, sweep probe, then the bikes (the wrecked one's slot freed, the bike still
+#   a candidate from an earlier gather). The flying player's own bike's collidable is at space 0 (out of
+#   the world), flags 0x94.
 # S48 — the biplane searches the world (crates/game-sim/src/flight_search.rs, flight.rs; proofs in
 # tests/flight_collision.rs over biplane.p2m2_SaveState). The hit listener's this is plane+0x50 (the
 # body), this+0x58 = 1 and this+0x38 the vtable 0x0045b2ac, whose +0x124 is the wake below; the mask

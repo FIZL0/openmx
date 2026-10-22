@@ -1935,6 +1935,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
     });
+    // And the bikes' collision box (S95), which the other riders' bikes are to the plane's search.
+    let bike_box = archives.iter().find_map(|a| a.read(game_sim::flight_search::BIKE_COLLISION).ok()).and_then(|bytes| {
+        game_sim::track::Mesh::parse(&bytes)
+            .map_err(|e| eprintln!("biplane: {}: {e}", game_sim::flight_search::BIKE_COLLISION))
+            .ok()
+    });
     // One of each machine per player (P87): the file's two spots for the first two, beside them for
     // the rest, every second copy in the alternate livery. Only the plane is ported, so the lot's
     // other machines are counted and not stood up.
@@ -1950,6 +1956,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let mut flight = Flight::new(&plane);
             if let Some(rays) = &plane_rays {
                 flight = flight.with_rays(rays.clone());
+            }
+            if let Some(mesh) = &bike_box {
+                flight = flight.with_bike(mesh.clone());
             }
             let t = &place.terrain;
             flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
