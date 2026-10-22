@@ -187,6 +187,37 @@ pub fn surface(g: &Ground) -> i32 {
     i32::from(g.surfaces[at])
 }
 
+/// The surface the heightfield query writes into the wheel's record (S89): the corner of the cell
+/// nearest `at`, by squared distance in the cell's own units, the first on a tie. `None` where the
+/// terrain has no cell — the query returns before it writes, so the wheel keeps the surface it had.
+///
+/// It is the terrain's surface whatever the wheel is riding: the query knows nothing of collision
+/// meshes, and the swept contact that does never writes the byte. The corners come in
+/// [`ground`]'s order — the sample, `+x`, `+z`, both.
+pub fn nearest_surface(t: &dyn Heightfield, at: Vf) -> Option<u8> {
+    let (step, wide) = if t.coarse() { (2, F(2.0)) } else { (1, F::ONE) };
+    let fx = (F(at.x()) * t.per_sample()).max(F::ZERO);
+    let fz = (F(at.z()) * t.per_sample()).max(F::ZERO);
+    let (mut ix, mut iz) = (fx.to_i32(), fz.to_i32());
+    if step == 2 {
+        ix &= !1;
+        iz &= !1;
+    }
+    let cell = t.cell(ix, iz, step)?;
+    let u = (fx - F::from(ix)) / wide;
+    let v = (fz - F::from(iz)) / wide;
+    let (nu, nv) = (F::ONE - u, F::ONE - v);
+    let d = [u * u + v * v, nu * nu + v * v, u * u + nv * nv, nu * nu + nv * nv];
+    let (mut best, mut at) = (F(f32::MAX), 0);
+    for (i, &di) in d.iter().enumerate() {
+        if !(best <= di) {
+            best = di;
+            at = i;
+        }
+    }
+    Some(cell.surfaces[at])
+}
+
 // --- the record ------------------------------------------------------------------------------------
 
 /// A collision object, as the search reads and writes it.
