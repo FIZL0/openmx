@@ -96,6 +96,9 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         MARKERS.put(&mut out);
         markers.at.put(&mut out);
         markers.slots.put(&mut out);
+        // P107's: the machine up and the other machines' sets.
+        markers.on.put(&mut out);
+        markers.away.put(&mut out);
     }
     out
 }
@@ -124,6 +127,19 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.at += 8;
         markers.at = Wire::take(&mut r)?;
         markers.slots = Wire::take(&mut r)?;
+        markers.on = Wire::take(&mut r)?;
+        markers.away = Wire::take(&mut r)?;
+    }
+    // A plane's marker keeps no ray probe or bike mesh, as the plane does not: this machine's.
+    let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone()));
+    if let Some((rays, bike)) = &probe {
+        let sets = std::iter::once(&mut markers.slots).chain(markers.away.iter_mut().map(|s| &mut s.slots));
+        for slot in sets.flatten().flatten() {
+            if let crate::markers::Mark::Plane(f) = &mut **slot {
+                f.rays = rays.clone();
+                f.bike = bike.clone();
+            }
+        }
     }
     if r.at != bytes.len() {
         return Err(format!("{} bytes left over after the state", bytes.len() - r.at));
@@ -781,6 +797,35 @@ impl Wire for crate::motion::Blend {
     }
 }
 
+/// A marker (P107): which machine, then the machine as it was.
+impl Wire for crate::markers::Mark {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.vehicle().put(out);
+        match self {
+            crate::markers::Mark::Bike(ride) => ride.put(out),
+            crate::markers::Mark::Plane(f) => f.put(out),
+        }
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        Ok(match crate::markers::Vehicle::take(r)? {
+            crate::markers::Vehicle::Bike => crate::markers::Mark::Bike(Wire::take(r)?),
+            crate::markers::Vehicle::Plane => crate::markers::Mark::Plane(Wire::take(r)?),
+        })
+    }
+}
+
+impl Wire for crate::markers::Vehicle {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.byte().put(out);
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        let b = u8::take(r)?;
+        crate::markers::Vehicle::of_byte(b).ok_or_else(|| format!("a machine of {b}"))
+    }
+}
+
+wire!(crate::markers::Set { on, slots, at });
+
 // ---------------------------------------------------------------------------------------------------
 // The session markers' slots on their own (P99).
 // ---------------------------------------------------------------------------------------------------
@@ -798,6 +843,29 @@ pub fn encode_slots(slots: &[Option<Box<crate::ride::Ride>>; crate::markers::SLO
 /// [`encode_slots`]'s bytes back, all of them or an error: another build's codec ([`MAGIC`]), a
 /// file cut short, or bytes left over — which is what a field added to the ride makes of an old file.
 pub fn decode_slots(bytes: &[u8]) -> Result<[Option<Box<crate::ride::Ride>>; crate::markers::SLOTS], String> {
+    let mut r = Reader { bytes, at: 0 };
+    if r.bytes(4)? != MAGIC {
+        return Err("not a ride state (or another build's)".into());
+    }
+    let slots = Wire::take(&mut r)?;
+    if r.at != bytes.len() {
+        return Err(format!("{} bytes left over after the slots", bytes.len() - r.at));
+    }
+    Ok(slots)
+}
+
+/// A plane's five marker slots as bytes (P107), as [`encode_slots`] has a bike's: [`MAGIC`] first,
+/// then each slot's flight in [`encode`]'s codec — the ray probe and bike mesh left out, as a
+/// snapshot leaves them, for the reader to put the plane's own back.
+pub fn encode_flights(slots: &[Option<Box<crate::flight::Flight>>; crate::markers::SLOTS]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 * 1024);
+    out.extend_from_slice(&MAGIC);
+    slots.put(&mut out);
+    out
+}
+
+/// [`encode_flights`]'s bytes back, all of them or an error, as [`decode_slots`].
+pub fn decode_flights(bytes: &[u8]) -> Result<[Option<Box<crate::flight::Flight>>; crate::markers::SLOTS], String> {
     let mut r = Reader { bytes, at: 0 };
     if r.bytes(4)? != MAGIC {
         return Err("not a ride state (or another build's)".into());
