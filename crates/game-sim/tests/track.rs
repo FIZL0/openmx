@@ -284,6 +284,47 @@ fn the_terrains_blocks_account_for_the_space_in_front_of_its_tree() {
     }
 }
 
+/// Every track's terrain on the disc reads, the nationals' too (S98): theirs carry 32 or 48 pictures of
+/// 256×256 bytes between the blocks and the tree, each where the table in front of the blocks says, and
+/// with them the space in front of the tree is accounted for to the byte. The free tracks carry none.
+#[test]
+fn every_tracks_terrain_accounts_for_its_blocks_and_textures() {
+    let Some(mut f) = container() else { return };
+    let psr = directory(&mut f);
+    let tracks: Vec<String> = psr
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("tracks\\") && n.ends_with(".res") && !n.ends_with("_2.res")
+        })
+        .collect();
+    let mut nationals = 0;
+    for name in &tracks {
+        let file = member(&mut f, &psr, name);
+        let Ok(res) = Res::parse(&file) else { continue };
+        let Some(e) = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(".ps2.trn")) else { continue };
+        let bytes = res.read(&file, e).unwrap_or_else(|why| panic!("{name}: {why}"));
+        let terrain = Terrain::parse(&bytes).unwrap_or_else(|why| panic!("{name}: {why}"));
+        let stem = name.to_ascii_lowercase();
+        if stem.contains("\\nat") {
+            nationals += 1;
+            assert!(matches!(terrain.textures.len(), 32 | 48), "{name}: {} textures", terrain.textures.len());
+            for t in &terrain.textures {
+                assert_eq!((t.format, t.levels.len()), (39, 1), "{name}");
+                assert_eq!((t.levels[0].width, t.levels[0].height, t.levels[0].pixels.len()), (256, 256, 65536), "{name}");
+            }
+        } else if stem.contains("\\free") {
+            assert!(terrain.textures.is_empty(), "{name}: {} textures", terrain.textures.len());
+        }
+        for leaf in leaves(&terrain) {
+            terrain.block(leaf.block).unwrap_or_else(|| panic!("{name}: block {} of {}", leaf.block, terrain.blocks));
+        }
+    }
+    assert_eq!(nationals, 22, "nat01..nat22");
+}
+
 /// The height formula, against the only oracle the file itself offers: every leaf declares the lowest and
 /// highest point of what it samples, and those have to come out of the heights it points at.
 #[test]
