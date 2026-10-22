@@ -340,7 +340,14 @@ impl Sim {
             return vec![self.step(dt, &controls[0], world)];
         }
         let mut frames = Vec::with_capacity(controls.len());
+        // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
+        let mut lists = self.bike_contacts(dt);
         for (i, c) in controls.iter().enumerate() {
+            let mut bump = lists
+                .as_mut()
+                .map(|l| std::mem::take(&mut l[i]))
+                .filter(|l| !l.is_empty())
+                .map(|l| self.bump(i, l));
             let rivals: Vec<ride::Rival> = (0..self.players())
                 .filter(|&j| j != i)
                 .map(|j| self.rider_of(j))
@@ -352,11 +359,14 @@ impl Sim {
                 .collect();
             let tables = &self.tables;
             let frame = if i == 0 {
-                self.rider.frame_among(&self.phy, tables, c, dt, world, &rivals)
+                self.rider.frame_bumped(&self.phy, tables, c, dt, world, &rivals, bump.as_mut())
             } else {
                 let p = &mut self.others[i - 1];
-                p.rider.frame_among(&p.phy, tables, c, dt, world, &rivals)
+                p.rider.frame_bumped(&p.phy, tables, c, dt, world, &rivals, bump.as_mut())
             };
+            if let Some(b) = &bump {
+                self.bumped(b);
+            }
             frames.push(frame);
         }
         self.ticks += 1;
@@ -803,6 +813,10 @@ pub mod score;
 /// The riding bike's collidables (S86): its body rays and the shape other riders' rays strike, off
 /// the disc, with the masks the ride gives them.
 pub mod bike_col;
+
+/// Rider against rider (S78): the bikes' body rays against each other's frames, and the contacts
+/// resolved in each bike's ground step.
+pub mod rider_contact;
 
 #[cfg(test)]
 mod tests {

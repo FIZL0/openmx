@@ -1,8 +1,9 @@
 //! The ride online: one [`Sim`] a seat, stepped in seat order over one world.
 //!
-//! A seat is a whole [`Sim`] of its own — its own input manager, bike and rider — and the riders do
-//! not touch: S54's one Sim of N riders (with the original's rider-on-rider contact) is not what the
-//! shell rides online yet. Each reads its seat's pad as pad 0, the shape every one-player capture of
+//! A seat is a whole [`Sim`] of its own — its own input manager, bike and rider. The bikes push each
+//! other apart (S78, [`rider_contact::among`]): every seat's contacts are found from the tick's start
+//! and each seat's step resolves its own, pushing the others' chassis. S54's one Sim of N riders (its
+//! head-on joust's wreck) is not what the shell rides online yet. Each reads its seat's pad as pad 0, the shape every one-player capture of
 //! the original has. In bytes (a resync, a restart) each seat is [`game_sim::snapshot`]'s codec.
 //!
 //! The frame length is the tick's own: every machine must hand every tick the same `dt`, and a wall
@@ -19,6 +20,7 @@ use game_sim::ride::Controls;
 use game_sim::tick::{Engine, Timer0, clock_ms};
 use game_sim::flight::Flight;
 use game_sim::world::World;
+use game_sim::rider_contact;
 use game_sim::{Input, Sim};
 use ps2_float::F;
 
@@ -63,7 +65,15 @@ impl Game for Rides<'_> {
         // Who is in the ride (P94): a seat nobody sits in has the missing pad ([`Game::step`]), and is
         // no marker's pick. The pads are the session's, so every machine counts the same.
         let riding: Vec<bool> = (0..self.sims.len()).map(|s| pads.get(s).is_some_and(|p| p.0[0] != Report::missing().0[0])).collect();
-        for (seat, sim) in self.sims.iter_mut().enumerate() {
+        // Rider against rider (S78): every seat's contacts, from where the last tick left every bike.
+        let mut lists = rider_contact::among(self.sims, &riding, dt);
+        for seat in 0..self.sims.len() {
+            let mut bump = lists
+                .as_mut()
+                .map(|l| std::mem::take(&mut l[seat]))
+                .filter(|l| !l.is_empty())
+                .map(|l| rider_contact::bump_among(self.sims, seat, l));
+            let sim = &mut self.sims[seat];
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());
             // The machine the seat's player wants (N17), switched to before the tick's step, as
@@ -81,10 +91,13 @@ impl Game for Rides<'_> {
                 vehicle::fly_lane(sim, dt, wanted, self.world);
                 continue;
             }
-            sim.step(dt, &hands, self.world);
+            sim.step_bumped(dt, &hands, self.world, bump.as_mut());
             markers::frame_among(sim, seat, &spots, &riding, &hands);
             if let Some(after) = &mut self.after {
                 after(seat, dt, sim, &hands);
+            }
+            if let Some(b) = &bump {
+                rider_contact::bumped_among(self.sims, b);
             }
         }
     }

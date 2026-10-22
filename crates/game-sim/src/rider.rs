@@ -225,6 +225,10 @@ pub struct Rider {
     /// The rider's ragdoll as they get on, once a shell has handed it over
     /// ([`Rider::carries_ragdoll`]). A constant, like [`Rider::wreckage`].
     pub ragdoll_kit: Option<Arc<Kit>>,
+    /// The bike's two collision files (S78), once a shell has handed them over
+    /// ([`Rider::carries_bike_col`]): what this bike strikes other riders with and what they strike.
+    /// A constant, like [`Rider::wreckage`]; with none the bike is in nobody's way.
+    pub bike_col: Option<Arc<crate::bike_col::BikeCol>>,
     /// The ragdoll of the wreck being ridden out (S53): the rider's bones, thrown off the bike and
     /// stepped while they are down. `None` when the rider is up, and for a rider with no kit or no
     /// [`Wreckage`], who is down as one point of [`Crash`]'s as before.
@@ -334,6 +338,7 @@ impl Rider {
             wreckage: None,
             crash: None,
             ragdoll_kit: None,
+            bike_col: None,
             ragdoll: None,
             skeleton: None,
             drawn: Vec::new(),
@@ -422,6 +427,12 @@ impl Rider {
         self.ragdoll_kit = Some(kit);
     }
 
+    /// **Hand the bike its collision files** (S78): from then on, in a session with other riders, its
+    /// body rays strike theirs and theirs strike it ([`crate::rider_contact`]).
+    pub fn carries_bike_col(&mut self, col: Arc<crate::bike_col::BikeCol>) {
+        self.bike_col = Some(col);
+    }
+
     /// **The rider's main bone, in the world**: the point the body actor publishes onto the bike every
     /// tick, which the map-edge test asks about beside the chassis. While the rider is down it is the
     /// ragdoll's main bone, or the one point [`Crash`] has for a rider with no ragdoll. Riding, it is
@@ -465,6 +476,14 @@ impl Rider {
     /// one place another rider reaches into this one's frame. With none it is `frame`.
     pub fn frame_among(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World,
                        rivals: &[ride::Rival]) -> Frame {
+        self.frame_bumped(p, t, c, dt, world, rivals, None)
+    }
+
+    /// [`Rider::frame_among`] with this tick's rider-against-rider contacts (S78), which the bike's
+    /// ground step resolves ([`ride::Ride::frame_bumped`]). With none it is `frame_among`.
+    #[allow(clippy::too_many_arguments)] // frame_among's, and the contacts
+    pub fn frame_bumped(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World,
+                        rivals: &[ride::Rival], bump: Option<&mut crate::rider_contact::Bump>) -> Frame {
         let mut out = Frame::default();
         let Rider {
             ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
@@ -528,7 +547,7 @@ impl Rider {
         // wreck bike's translation and forward row (S77).
         let mut thrown_keep = None;
         if state.wreck.is_none() {
-            ride.frame(p, &t.ride, &Controls { respawn: false, ..*c }, dt, world);
+            ride.frame_bumped(p, &t.ride, &Controls { respawn: false, ..*c }, dt, world, bump);
         } else if let (Some(w), Some(down)) = (wreckage.as_ref(), crash.as_mut()) {
             // The physics of a rider who is down: the wreck body tumbling and the rider coming off
             // it. The original's is the same swap — the bike's own step is skipped while the reason
