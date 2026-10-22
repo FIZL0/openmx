@@ -523,8 +523,8 @@ pub enum PlaneScheme {
     /// Relative to the plane (P69): the pad as it is, and the elevator at every bank.
     #[default]
     New,
-    /// Relative to the screen (P50): upside down, the left stick's y, Up and Down, and L1 and R1
-    /// are each other's.
+    /// Relative to the screen (P50): upside down, the left stick's y is turned round, and L1 and R1
+    /// are each other's (Up and Down were too, until the d-pad was the markers', P107).
     Screen,
     /// The original's: the plane reads the pad as it is, at any attitude, and its elevator fades
     /// out on its side.
@@ -591,18 +591,20 @@ impl PlaneScheme {
     /// plane is upside down this frame (`vehicle::Plane::inverted`).
     ///
     /// Upside down under the screen's scheme: the left stick's y byte is mirrored (`255 - b`, which
-    /// the poll's `-1 + 2b/255` reads as exactly the other side), and Up and Down, and L1 and R1, are
-    /// swapped, bit and pressure byte together. Everything else, and every report under the plane's
-    /// or the original's or the right way up, is passed as it is. A pad that is not there is left
-    /// alone.
+    /// the poll's `-1 + 2b/255` reads as exactly the other side), and L1 and R1 are swapped, bit and
+    /// pressure byte together. Everything else, and every report under the plane's or the original's
+    /// or the right way up, is passed as it is. A pad that is not there is left alone.
+    ///
+    /// The d-pad is not swapped (P107): the plane no longer reads it (`vehicle::Plane::step`), the
+    /// session markers do, and their Down puts a marker down whichever way up the plane is.
     pub fn fly(self, report: Report, inverted: bool) -> Report {
         if self != PlaneScheme::Screen || !inverted || report.status() == 0xff {
             return report;
         }
         let mut out = report;
         let was = report.buttons();
-        let pairs = [(Control::Up, Control::Down), (Control::L1, Control::R1)];
-        let mut held = was & !game_sim::input::mask_of(&[Control::Up, Control::Down, Control::L1, Control::R1]);
+        let pairs = [(Control::L1, Control::R1)];
+        let mut held = was & !game_sim::input::mask_of(&[Control::L1, Control::R1]);
         for (a, b) in pairs {
             if was & a.mask() != 0 {
                 held |= b.mask();
@@ -2717,7 +2719,9 @@ pub(crate) mod tests {
             if !(held(Control::L1) && held(Control::R1)) {
                 assert_eq!(down.rudder, -up.rudder, "the rudder is not turned round: {report:?}");
             }
-            if !(held(Control::Up) && held(Control::Down)) {
+            // The d-pad is the markers' and not swapped (P107), so with it held the elevator here
+            // is its own either way up; the plane's step does not read it.
+            if !held(Control::Up) && !held(Control::Down) {
                 // The mirrored byte reads as the other side of centre to within the poll's rounding.
                 let (a, b) = (up.elevator.0, down.elevator.0);
                 assert!((a + b).abs() <= 1e-6 * a.abs().max(1.0), "the elevator {a} upside down is {b}: {report:?}");

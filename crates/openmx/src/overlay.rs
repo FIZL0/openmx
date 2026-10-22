@@ -456,8 +456,8 @@ pub fn marker_post(camera: &game_render::world::Camera, (width, height): (usize,
     Some(Post { foot, top, distance })
 }
 
-/// The radar icons of a player's session markers (P88): one a filled slot, where its bike was put
-/// down (`x`, `z`), the selected one ringed (P94).
+/// The radar icons of a player's session markers (P88): one a filled slot, where its machine was put
+/// down (`x`, `z`), the selected one ringed (P94) — the set of the machine up (P107).
 pub fn marker_blips(markers: &game_sim::markers::Markers, pick: game_sim::markers::Pick) -> Vec<Blip> {
     let ground = |at: ps2_float::Vf| [at.x(), at.z()];
     let selected = |slot| pick == game_sim::markers::Pick::Slot(slot);
