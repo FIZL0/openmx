@@ -169,9 +169,9 @@ impl Knob {
     /// What it does, short enough for the menu's ticker.
     pub fn blurb(self) -> &'static str {
         match self {
-            Knob::BikeSpeed => "engine power and top speed",
+            Knob::BikeSpeed => "the top speed, not the pull off the line",
             Knob::BikeAccel => "how fast the bike gets up to speed, not its top",
-            Knob::BikePower => "engine torque, top speed as geared",
+            Knob::BikePower => "engine torque: quicker off the line, and faster",
             Knob::Grip => "every tire's grip on every surface",
             Knob::Suspension => "spring stiffness",
             Knob::AirControl => "lean and turn in the air",
@@ -191,10 +191,10 @@ impl Knob {
     pub fn fields(self) -> &'static str {
         match self {
             Knob::BikeSpeed => {
-                "[Engine] HP curve (torque), ClutchStatic/KineticFriction, EngineBraking x k; FinalGearRatio / k; [Aerodynamics] Drag / k^2; ReverseSpeed, MaxClutchTorqueScaleSpeed x k; the integrator's speed limit x k"
+                "[Engine] HP curve (torque), ClutchStatic/KineticFriction, EngineBraking x k; FinalGearRatio / k; [Aerodynamics] Drag, every tire surface's WheelDrag / k^2; ReverseSpeed, MaxClutchTorqueScaleSpeed x k; the integrator's speed limit x k"
             }
-            Knob::BikeAccel => "[Engine] HP curve (torque), ClutchStatic/KineticFriction x k; [Aerodynamics] Drag, every tire surface's WheelDrag, WheelFriction x k",
-            Knob::BikePower => "[Engine] HP curve (torque), ClutchStatic/KineticFriction x k",
+            Knob::BikeAccel => "[Engine] HP curve (torque), ClutchStatic/KineticFriction x k; [Aerodynamics] Drag, every tire surface's WheelDrag, WheelFriction x k; above 100%, the rear tire's MaxDriveForce, SkidDriveForce x k",
+            Knob::BikePower => "[Engine] HP curve (torque), ClutchStatic/KineticFriction x k; above 100%, the rear tire's MaxDriveForce, SkidDriveForce and the integrator's speed limit x k",
             Knob::Grip => "every tire surface's SideForce, SlippingSideForce, MaxDriveForce, MaxSideForce, MaxSlippingSideForce, Skid*Force x k",
             Knob::Suspension => "[Front/Rear Tire] Spring, SpringWhenStopped x k",
             Knob::AirControl => "[Airborne Control] AirborneControlMoment, AirborneControlForce x k",
@@ -320,7 +320,16 @@ impl Mods {
     /// Player `seat`'s bike: their own modifiers and the world's, on the loaded file.
     pub fn bike(&self, seat: usize, phy: &mut Phy) {
         if let Some(k) = self.factor(seat, Knob::BikePower) {
+            // k times the torque, on the file's gearing. The disc's bikes spin the rear tire off the
+            // line on the file's own torque (P97: race125p's launch is held by the tire, not the
+            // engine), so more torque alone only spins it harder — 200% was 10% quicker to 40 ft/s
+            // and 500% no quicker than 200%. The driven tire's grip along itself goes up with the
+            // torque, so the extra reaches the ground; below 100% the tire already passes all of
+            // the smaller torque and keeps the file's grip.
             engine_power(phy, k);
+            if k > F::ONE {
+                drive_grip(phy, k);
+            }
         }
         if let Some(k) = self.factor(seat, Knob::BikeAccel) {
             // k times the torque and k times everything that holds the bike back on the flat: the
@@ -328,8 +337,12 @@ impl Mods {
             // speed the bike up is k times the file's at every speed below the top, and the top,
             // where the drive meets the drag, is where it was (to the tires' slip: within 2%). The
             // stock bike tops out on the drag, well under its rev limit in top gear, so the gearing
-            // is left alone.
+            // is left alone. Above 100% the driven tire's grip along itself goes up with the torque,
+            // as for the engine's power: the file's bike is already spinning its tire off the line.
             engine_power(phy, k);
+            if k > F::ONE {
+                drive_grip(phy, k);
+            }
             phy.mv.drag = phy.mv.drag * k;
             for tire in [&mut phy.front, &mut phy.rear] {
                 for s in &mut tire.surfaces {
@@ -341,14 +354,21 @@ impl Mods {
         if let Some(k) = self.factor(seat, Knob::BikeSpeed) {
             // The torque and the gearing move together, so the force at the wheel at any revs is
             // the file's and the wheel turns k times as fast for them; the drag is taken down so that
-            // k times the speed meets the file's drag at the file's speed. The top speed is then k
-            // times the file's, by the gearing and by the drag alike.
+            // k times the speed meets the file's drag at the file's speed — the air's, and the v²
+            // rolling drag some surfaces give the tires (race125p's rear on surface 2). The top
+            // speed is then k times the file's, by the gearing and by the drag alike, and the pull
+            // off the line, where neither drag is anything yet, is the file's.
             engine_power(phy, k);
             phy.engine.engine_braking = phy.engine.engine_braking * k;
             phy.engine.final_drive = phy.engine.final_drive / k;
             let gear = phy.engine.gear.max(1);
             mv::set_gear(&mut phy.engine, gear);
             phy.mv.drag = phy.mv.drag / (k * k);
+            for tire in [&mut phy.front, &mut phy.rear] {
+                for s in &mut tire.surfaces {
+                    s.wheel_drag = s.wheel_drag / (k * k);
+                }
+            }
             phy.mv.reverse_speed = phy.mv.reverse_speed * k;
             phy.mv.max_clutch_torque_scale_speed = phy.mv.max_clutch_torque_scale_speed * k;
         }
@@ -427,17 +447,30 @@ impl Mods {
     }
 
     /// Player `seat`'s ride once it is built: the integrator's speed limit, which is the ride's own
-    /// constant rather than the file's, raised with [`Knob::BikeSpeed`] so the limit is not what
-    /// stops a faster bike.
+    /// constant rather than the file's, raised with [`Knob::BikeSpeed`] and [`Knob::BikePower`] above
+    /// 100% (k² on the square, the product of the two when both are) so the limit is not what stops a
+    /// faster bike. Engine power at 200% was held to it at 135 ft/s on the flat before P97. The
+    /// put-back after a wreck sets the limit back to the ride's [`Ride::riding_speed_sq`], which is
+    /// raised alike; before P97 it went back to the original's, and a faster bike was a 135 ft/s
+    /// bike from its first wreck on.
     pub fn ride(&self, seat: usize, ride: &mut Ride) {
         ride.chassis.max_speed_sq = self.speed_limit(seat, ride.chassis.max_speed_sq);
+        ride.riding_speed_sq = self.speed_limit(seat, ride.riding_speed_sq);
     }
 
     /// The integrator's squared speed limit [`Mods::ride`] leaves a ride built with `limit`.
     fn speed_limit(&self, seat: usize, limit: F) -> F {
-        match self.factor(seat, Knob::BikeSpeed) {
-            Some(k) if k > F::ONE => limit * (k * k),
-            _ => limit,
+        let mut raise = None;
+        for knob in [Knob::BikeSpeed, Knob::BikePower] {
+            if let Some(k) = self.factor(seat, knob)
+                && k > F::ONE
+            {
+                raise = Some(raise.map_or(k, |r: F| r * k));
+            }
+        }
+        match raise {
+            Some(k) => limit * (k * k),
+            None => limit,
         }
     }
 
@@ -456,6 +489,7 @@ impl Mods {
         if ride.chassis.max_speed_sq == was.speed_limit(seat, riding) {
             ride.chassis.max_speed_sq = self.speed_limit(seat, riding);
         }
+        ride.riding_speed_sq = self.speed_limit(seat, riding);
         *phy = Arc::new(file);
     }
 
@@ -521,6 +555,15 @@ fn engine_power(phy: &mut Phy, k: F) {
     phy.peak.torque = phy.peak.torque * k;
     phy.engine.clutch_static = phy.engine.clutch_static * k;
     phy.engine.clutch_kinetic = phy.engine.clutch_kinetic * k;
+}
+
+/// The driven tire's grip along itself, `k` times: the force it passes before it spins, and the
+/// force it drives with once it does.
+fn drive_grip(phy: &mut Phy, k: F) {
+    for s in &mut phy.rear.surfaces {
+        s.max_drive_force = s.max_drive_force * k;
+        s.skid_drive_force = s.skid_drive_force * k;
+    }
 }
 
 /// The step the engine's time-scale object adds to a frame's `dt`, as the fixed update does it
