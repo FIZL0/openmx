@@ -118,7 +118,8 @@
 //!
 //! **M** swaps between the bike and the track's biplane, as does the pause's "Switch To Machine" for
 //! the player who opened it, and `--vehicle biplane` or the ride setup's machine pick starts in the
-//! plane ([`vehicle`], P19, P41). The switch is the port's own (P102): the machine taken is spawned
+//! plane ([`vehicle`], P19, P41) — online too, every seat in its own bay at tick 0 on every machine
+//! (N18). The switch is the port's own (P102): the machine taken is spawned
 //! where the player is — a plane landed on its wheels where the bike was, a bike upright on the
 //! ground under the plane — and the machine left goes, not drawn and not stepped; a plane nobody has
 //! taken stands parked in its bay. The plane has its own camera file. A tape writes the switch down
@@ -1445,6 +1446,10 @@ fn front_end(args: Args) -> Result<(), String> {
             let text = pick_markers.of(&shell.front.dir, &track, &profile, &bike).to_string();
             shell.front.menu.lobby.set_markers(text);
         }
+        // 1P's ride setup machine into it too (N18), which every machine starts the seat on, as the
+        // ride's own start reads it: `--vehicle biplane` over the setup.
+        let machine = if args.vehicle == Kind::Biplane { Kind::Biplane.name() } else { shell.front.menu.settings.machines[0].word() };
+        shell.front.menu.lobby.set_machine(machine);
         // 1P's controller preset into this machine's lobby pick (N13), for every machine's ride.
         shell.front.menu.lobby.preset(seats.preset(args.pad_seat(0)));
         if shell.front.network.pump(&mut shell.front.menu) == Act::Online {
@@ -2001,6 +2006,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         })
     };
     let plane = lot.plane(0, flight_for(0));
+    // Every online seat's own biplane bay (N18), which a seat that starts the ride in the plane
+    // stands in: the lot parked for the most seats a ride has, a copy's place being its own whatever
+    // the count, so every machine has the same off the same disc.
+    let online_bays: Vec<vehicle::Spawn> = match &machines {
+        Some((_, b)) => {
+            let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
+            let mut ground = |at: Vf| sim_world::World::ground(&mut probe, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y();
+            vehicle::park(b, Machine::Biplane, net::SEATS, &mut ground).into_iter().map(|bay| bay.spawn).collect()
+        }
+        None => Vec::new(),
+    };
     // And the biplane's, for the same (P98).
     let stock_plane = plane_phy.as_deref().map(phy::Plane::read_bytes);
     if machines.is_some() {
@@ -2974,6 +2990,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let drop_in = front.as_deref().is_some_and(|f| f.menu.lobby.drop_in);
     // Where the ride starts, for a peer that drops in on it once it is opened online (N10).
     let spawn = world.seats[0].sim.clone();
+    // The lobby's seats that start in the biplane (N18), each its pick's machine.
+    let mut lobby_planes: Option<Vec<bool>> = None;
     let mut online = match &args.online {
         // Into a ride under way (N10): every seat is the host's first's bike, on this machine's
         // constants for it, and the ride's state comes from the host.
@@ -2997,8 +3015,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         None if from_lobby.is_some() => {
             let ((room, me), net) = from_lobby.expect("checked");
-            if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike {
-                return Err("an online ride rides the bike and no tape: drop --play, --record and --vehicle".into());
+            // Each seat's machine is its pick's (N18), started at tick 0 below, and the local
+            // player's the setup's, which this machine's pick says.
+            if head.is_some() || world.tape.is_some() {
+                return Err("an online ride rides no tape: drop --play and --record".into());
             }
             if world.seats.len() != 1 {
                 return Err("an online ride from the lobby has one local player: drop --players".into());
@@ -3037,12 +3057,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             let mut online = online::Online::lobby(net, &room, &me, sims)?;
             online.modifiers(mods, stock);
+            lobby_planes = Some(online::Online::picked_planes(&room));
             Some(online)
         }
         None => None,
         Some(me) => {
-            if head.is_some() || world.tape.is_some() || world.seats[0].garage.up != Kind::Bike {
-                return Err("--online rides the bike and no tape: drop --play, --record and --vehicle".into());
+            // `--vehicle biplane` starts this machine's seat in the plane at tick 0 on every
+            // machine (N18), which its datagrams say.
+            if head.is_some() || world.tape.is_some() {
+                return Err("--online rides no tape: drop --play and --record".into());
             }
             // One local player and no front end: the session's seats are `--seats`, and the pause
             // menu would freeze a ride the other machines go on with.
@@ -3053,7 +3076,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // This machine's controller preset (P79) goes ahead of its every datagram, and every
             // seat rides its own machine's (N15), as from the lobby (N13).
             let here = pad_seats.as_ref().map_or(presets[0], |s| s.preset(args.pad_seat(0)));
-            let mut online = online::Online::start(me, &args.peers, args.seats.as_deref(), &starts, here as u8)?;
+            let mut online = online::Online::start(me, &args.peers, args.seats.as_deref(), &starts, here as u8, world.seats[0].garage.up == Kind::Biplane)?;
             online.modifiers(mods, stock_phys.clone());
             Some(online)
         }
@@ -3063,6 +3086,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let plane_like = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.clone());
     if let Some(on) = online.as_mut() {
         on.planes(stock_plane, plane_like.as_ref());
+        // Each seat that starts in the plane stands in its own bay at tick 0 (N18): the lobby's
+        // now, from the picks; `--peer`s' once every peer's card has said its own.
+        on.bays(online_bays);
+        if let Some(flies) = &lobby_planes {
+            on.start_planes(flies)?;
+        }
     }
     let mut online_want: Option<Kind> = None;
     let mut online_frames = 0u32;
@@ -3590,8 +3619,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
                 seated[d] = on.show(d, &mut seat.sim, rig.body.as_mut());
                 // Its machine is its `Sim`'s (N17): the garage follows, and a switch the session
-                // made snaps the camera onto the machine taken, as offline.
-                if let Some(up) = seat.garage.follow(&seat.sim) {
+                // made snaps the camera onto the machine taken, as offline. Not before every seat's
+                // starting machine is known (N18), or a seat starting in the plane would flick to
+                // the bike and back while `--peer`s say theirs.
+                if on.machines_known()
+                    && let Some(up) = seat.garage.follow(&seat.sim)
+                {
                     took(rig, up);
                     if let (0, Some(front)) = (d, front.as_deref_mut()) {
                         front.menu.switched(0, menu::Machine::from_word(up.name()).unwrap_or_default());

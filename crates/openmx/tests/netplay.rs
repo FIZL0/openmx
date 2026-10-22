@@ -1670,3 +1670,118 @@ fn two_peers_take_the_plane_and_the_bike_back_and_stay_in_sync() {
         assert_eq!(took[s], [(from + 1, p), (to + 1, b)], "seat {}'s garage", s + 1);
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// A seat starts the ride on the plane (N18)
+// ---------------------------------------------------------------------------------------------------
+
+/// Seat `seat`'s bay in [`Starting`]'s lot: on the ground of the flat world, the plane's wheels on
+/// it, a row of them along x.
+fn bay(seat: usize, template: &game_sim::flight::Flight) -> vehicle::Spawn {
+    let spawn = vehicle::Spawn { at: Vf::new(40.0 * seat as f32, 0.0, -30.0, 1.0), facing: Vf::new(0.0, 0.0, 1.0, 0.0) };
+    let rest = vehicle::Plane::flying(spawn, template.clone()).rest_height(0.0);
+    vehicle::Spawn { at: Vf::new(spawn.at.x(), rest, spawn.at.z(), 1.0), ..spawn }
+}
+
+/// g's seat (2) asks for the bike from this tick on; nobody asks for anything before.
+const BACK_ON_THE_BIKE: usize = 300;
+
+/// The ride with seat 2 starting in the plane, as the shell's `--online --vehicle biplane` or a
+/// lobby pick of the plane has it (`Online::start_planes`): every machine puts it in its bay before
+/// the first tick.
+struct Starting {
+    ride: Ride,
+    plane: game_sim::flight::Flight,
+    flown: Vec<usize>,
+}
+
+impl Starting {
+    fn new(seats: usize, template: &game_sim::flight::Flight) -> Starting {
+        let mut ride = Ride::new(seats);
+        vehicle::start_lane(template, bay(1, template), &mut ride.sims[1]);
+        Starting { ride, plane: template.clone(), flown: vec![0; seats] }
+    }
+}
+
+impl Machine for Starting {
+    type S = rides::State;
+    fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
+        let seats = np.lineup.mine(&np.me);
+        let mut pads = local.to_vec();
+        for (pad, &s) in pads.iter_mut().zip(&seats) {
+            let to = (s == 1 && np.tick() >= BACK_ON_THE_BIKE).then_some(vehicle::Kind::Bike);
+            pad.0[net::SWITCH] = vehicle::Wanted { to, ..Default::default() }.byte();
+        }
+        let mut game = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale: None, plane: Some(&mut self.plane) };
+        np.frame(&mut game, &pads, ROUND.as_secs_f32());
+        for (s, sim) in self.ride.sims.iter().enumerate() {
+            self.flown[s] += sim.plane.is_some() as usize;
+        }
+    }
+    fn hash(&self) -> u64 {
+        self.ride.hash()
+    }
+}
+
+/// N18's acceptance: g's seat starts the ride in the plane, standing in its bay, on both machines
+/// before the first tick, and the host's on its bike. Over a lossy, laggy link both machines hold
+/// the same state before every settled tick from tick 0 (the plane in it); the same pads ridden
+/// offline are the same state; the flying seat's flight is tick for tick the one the offline shell
+/// flies for a player whose setup picked the plane (a [`vehicle::Garage`] started on it, the plane
+/// in its bay, stepped as `Seat::pass` steps it); and the seat takes its bike back when it asks.
+#[test]
+fn a_seat_starts_the_ride_in_the_plane_on_every_machine() {
+    let Some(file) = the_discs_plane() else { return };
+    let template = game_sim::flight::Flight::new(&file);
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    let r = run("host,g", Timing::default(), |seats| Starting::new(seats, &template), &link, 0..700, |_, _, _| {});
+    let h = &r.nets[0];
+    for np in &r.nets {
+        assert!(np.desyncs.is_empty() && !np.desynced && np.end.is_none(), "{}: {:?}", np.me, np.desyncs);
+    }
+    for game in &r.games {
+        assert_eq!(game.flown[0], 0, "the host's seat stayed on its bike");
+        assert!(game.flown[1] > BACK_ON_THE_BIKE, "g's seat flew {} ticks", game.flown[1]);
+    }
+    let n = r.agree(&[0, 1], 0);
+    assert!(n > 500, "host and g agree on {n} ticks");
+
+    // offline: the same start, the same pads
+    let mut seats = Starting::new(2, &template).ride.sims;
+    assert!(seats[1].plane.is_some() && seats[0].plane.is_none());
+    let at = seats[1].plane.as_ref().unwrap().spawn;
+    let want = bay(1, &template);
+    assert_eq!((at.0, at.1), (want.at, want.facing), "g's plane stands in its bay");
+    let mut world = Flat::default();
+    let mut plane = template.clone();
+    // the offline shell's seat for a player who picked the plane: its own bike, its plane in its bay
+    let mut shell = Ride::new(2).sims.remove(1);
+    let mut garage = vehicle::Garage::new(vehicle::Kind::Biplane, Some(vehicle::Plane::flying(want, template.clone()))).unwrap();
+    let mut shell_world = Flat::default();
+    let mut flew = 0;
+    let mut back = None;
+    for tick in 0..n {
+        let mut game = Rides { sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut plane) };
+        assert_eq!(game.hash(), h.hashes[tick], "offline, the state before tick {tick}");
+        let pads: Vec<Report> = h.log[tick].iter().map(|&p| unwire(p)).collect();
+        game.step(tick, &pads);
+        match &seats[1].plane {
+            Some(online) if vehicle::Wanted::of(pads[1].0[net::SWITCH]).to.is_none() => {
+                let mut reports = [Report::missing(); game_sim::input::PADS];
+                reports[0] = pads[1];
+                let dt = rides::tick_dt(tick);
+                let controls = shell.poll(dt, &reports).stick_alone();
+                garage.step(&mut shell, dt, &controls, &mut shell_world);
+                let offline = garage.plane.as_ref().and_then(|p| p.flight.as_ref()).unwrap();
+                assert_eq!(online, offline, "g's flight online and the offline shell's, tick {tick}");
+                flew += 1;
+            }
+            Some(_) => {}
+            None => {
+                back.get_or_insert(tick);
+            }
+        }
+    }
+    assert_eq!(flew, BACK_ON_THE_BIKE + 1, "flown alike from tick 0 to the bike's pad");
+    assert_eq!(back, Some(BACK_ON_THE_BIKE + 1), "g's seat back on its bike a tick after it asked (the input delay)");
+}

@@ -573,3 +573,84 @@ fn the_players_controller_preset_rides_in_the_pick() {
     m.lobby.preset(1);
     assert!(m.lobby.out.is_empty());
 }
+
+/// N18: a guest whose ride setup picked the biplane says so in its lobby pick, which reaches the
+/// host's room; once the host starts, both machines put that seat in the plane, in its own bay,
+/// before the first tick (`Online::start_planes` from `Online::picked_planes`, as the shell does), the
+/// host's seat on its bike, and the two rides stay in step with it flying.
+#[test]
+fn a_lobby_pick_of_the_plane_starts_its_seat_in_it_on_every_machine() {
+    use game_sim::world::Flat;
+    use ps2_float::Vf;
+    let file = match game_render::disc::Disc::open_configured() {
+        Ok(mut disc) => {
+            let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+            let bytes = disc.res(&name).expect("machine.res").read_suffix(game_sim::phy::BIPLANE_PHY).expect("biplane.phy");
+            game_sim::phy::Plane::read_bytes(&bytes)
+        }
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let (hn, gn) = (Arc::new(lan("Planey", 1)), Arc::new(lan("Pilot", 1)));
+    let (mut h, mut hr) = fresh("Planey", "thq1");
+    let (mut g, mut gr) = fresh("Pilot", "thq2");
+    g.lobby.set_machine("biplane");
+    h.lobby.set_machine("bike");
+    assert_eq!((h.lobby.pick.machine.as_str(), g.lobby.pick.machine.as_str()), ("", "biplane"));
+    host_and_join(&mut h, &mut hr, &hn, &mut g, &mut gr, &gn);
+    gn.send(Cmd::Prepared(true));
+    until((&mut h, &hn), (&mut g, &gn), "ready", |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| r.all_ready()));
+    hn.send(Cmd::Start);
+    let ((hroom, hme), (groom, gme)) = (started(&hn, "host"), started(&gn, "guest"));
+    let flies = online::Online::picked_planes(&hroom);
+    assert_eq!(flies, online::Online::picked_planes(&groom), "both machines read the same picks");
+    assert_eq!(flies[..2], [false, true], "the guest's seat picked the plane: {:?}", hroom.seats);
+    let sims = |room: &Room| -> Vec<game_sim::Sim> {
+        (0..room.seats.len())
+            .map(|_| {
+                let mut s = game_sim::Sim::new(1);
+                s.rng = room.seed;
+                s
+            })
+            .collect()
+    };
+    let like = game_sim::flight::Flight::new(&file);
+    let bays: Vec<vehicle::Spawn> =
+        (0..hroom.seats.len()).map(|s| vehicle::Spawn { at: Vf::new(40.0 * s as f32, 3.0, -30.0, 1.0), facing: Vf::new(0.0, 0.0, 1.0, 0.0) }).collect();
+    let start = |net: &Arc<Net>, room: &Room, me: &str| {
+        let mut on = online::Online::lobby(net.clone(), room, me, sims(room)).unwrap();
+        on.planes(Some(file), Some(&like));
+        on.bays(bays.clone());
+        on.start_planes(&online::Online::picked_planes(room)).unwrap();
+        on
+    };
+    let (mut ho, mut go) = (start(&hn, &hroom, &hme), start(&gn, &groom, &gme));
+    // shell seat 0 is this machine's own; the host's 1 is the guest's seat
+    let flying = |on: &online::Online, d: usize| {
+        let mut sim = game_sim::Sim::new(1);
+        on.show(d, &mut sim, None);
+        sim.plane.map(|f| f.spawn.0)
+    };
+    assert_eq!((flying(&ho, 0), flying(&ho, 1)), (None, Some(bays[1].at)), "the host's start");
+    assert_eq!((flying(&go, 0), flying(&go, 1)), (Some(bays[1].at), None), "the guest's start");
+    let (mut hw, mut gw) = (Flat::default(), Flat::default());
+    let gas = Report::from_buttons(Control::Cross.mask());
+    let mut climb = Report::from_buttons(Control::Cross.mask());
+    climb.set_axis(3, 0x20);
+    for _ in 0..120 {
+        ho.frame(gas, &mut hw, None).unwrap();
+        go.frame(climb, &mut gw, None).unwrap();
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    let ((ha, hd), (ga, gd)) = (ho.settled(), go.settled());
+    let both = ha.len().min(ga.len());
+    println!("settled: host {} guest {} ticks; {}", ha.len(), ga.len(), ho.summary());
+    assert!(both >= 60, "only {both} ticks settled on both in 4 s");
+    assert_eq!(ha[..both], ga[..both], "the two machines' rides parted");
+    assert_eq!((hd, gd), (0, 0), "desyncs");
+    assert!(flying(&ho, 1).is_some() && flying(&go, 0).is_some(), "the guest's seat flies on");
+    assert!(flying(&ho, 0).is_none(), "the host's seat rides its bike");
+    let _ = go.leave();
+}
