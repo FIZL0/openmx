@@ -256,10 +256,25 @@ impl Sim {
             all[0] = *controls;
             return self.step_all(dt, &all, world).swap_remove(0);
         }
-        if let Some(plane) = &mut self.plane {
+        if self.plane.is_some() {
+            // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
+            // own bike is not: the original takes it out of the world when its rider switches to the
+            // machine (biplane.p2m2's state). A downed rider's bike and a ghost's are out too.
+            let bikes: Vec<flight_search::Bike> = self
+                .others
+                .iter()
+                .map(|p| flight_search::Bike {
+                    transform: p.rider.ride.transform(),
+                    in_world: p.rider.state.wreck.is_none() && !p.rider.ghost.on,
+                })
+                .collect();
+            let plane = self.plane.as_mut().expect("a plane ride");
             // The plane's input step: the player's pad, through I6's mapping, into the five fields the
             // controls read. The bike's `controls` are not the plane's: the plane reads the pad itself.
-            plane.frame(dt, flight::pad(self.input.pad(0)), world, &self.tables.ride);
+            // What the bikes' struck listeners kept is for their wreck tests, which only run when
+            // they are stepped — not while a plane flies — and which never wreck on a plane's probe
+            // ([`flight_search::struck_wreck`]), so it goes no further.
+            let _struck = plane.frame_among(dt, flight::pad(self.input.pad(0)), world, &self.tables.ride, &bikes);
             self.ticks += 1;
             return crate::rider::Frame::default();
         }
