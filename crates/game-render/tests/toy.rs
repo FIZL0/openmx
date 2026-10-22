@@ -207,3 +207,129 @@ fn the_other_path_cars_drive_where_the_originals_do() {
         }
     }
 }
+
+/// One of the train's turned cars as the save state drew it: the matrix the car's model object held
+/// for its own (root) node, the box the object kept in model space, and that box's centre in the world.
+struct Drawn {
+    model: &'static str,
+    lag: f32,
+    rows: [[f32; 4]; 4],
+    centre: [f32; 3],
+    half: [f32; 3],
+    world_centre: [f32; 3],
+}
+
+/// free06's three car models whose file root is a half turn about up, in the biplane recording's state.
+const TURNED_CARS: [Drawn; 3] = [
+    Drawn {
+        model: "train_car_03",
+        lag: 107.0,
+        rows: [
+            [-1.0, 0.0, 0.00158, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [-0.00158, 0.0, -1.0, 0.0],
+            [2313.51733, 134.9986, 2810.90894, 1.0],
+        ],
+        centre: [0.0, 9.04638, 0.07011],
+        half: [5.0, 9.08959, 26.77135],
+        world_centre: [2313.51685, 144.04495, 2810.83838],
+    },
+    Drawn {
+        model: "train_car_04",
+        lag: 160.0,
+        rows: [
+            [-1.0, -0.00014, 0.00152, 0.0],
+            [-0.00014, 1.0, 0.0, 0.0],
+            [-0.00152, 0.0, -1.0, 0.0],
+            [2313.59985, 134.9986, 2863.90918, 1.0],
+        ],
+        centre: [-0.06549, 7.32081, 0.0],
+        half: [5.91, 7.37276, 26.68585],
+        world_centre: [2313.66382, 142.3194, 2863.90869],
+    },
+    Drawn {
+        model: "train_car_05",
+        lag: 213.0,
+        rows: [
+            [-0.99999, -0.00299, 0.00155, 0.0],
+            [-0.00299, 1.0, 0.0, 0.0],
+            [-0.00155, 0.0, -1.0, 0.0],
+            [2313.68213, 134.9986, 2916.90894, 1.0],
+        ],
+        centre: [0.0, 8.0949, 0.07011],
+        half: [5.0, 8.13811, 26.77135],
+        world_centre: [2313.65747, 143.09343, 2916.83838],
+    },
+];
+
+/// The centre and half size of what a loaded model draws, in its own space.
+fn drawn_box(assets: &game_render::world::Assets, model: &str) -> (V3, V3) {
+    let mut lo = v3(f32::MAX, f32::MAX, f32::MAX);
+    let mut hi = v3(f32::MIN, f32::MIN, f32::MIN);
+    for v in assets.models[model].tris.iter().flat_map(|t| t.v.iter()) {
+        lo = v3(lo.x.min(v.pos.x), lo.y.min(v.pos.y), lo.z.min(v.pos.z));
+        hi = v3(hi.x.max(v.pos.x), hi.y.max(v.pos.y), hi.z.max(v.pos.z));
+    }
+    (lo.add(hi).scale(0.5), hi.sub(lo).scale(0.5))
+}
+
+/// A path car is drawn the way a scene prop is (V46): the original's car makes the same model object
+/// a prop does, whose node reader takes the file's root node to be the object itself, so the root's
+/// matrix is read into the very slot the car's placement then overwrites. The file's half turn on
+/// train_car_03, _04 and _05 is never drawn. The state shows it: each turned car's object holds its
+/// pose and nothing else, and the box it kept, put in the world by that pose alone, is where the port
+/// draws the car's vertices once [`Assets::load_placed`] has dropped the root — and 0.13 ft or more
+/// away from where they land with the root's turn kept.
+#[test]
+fn the_trains_turned_cars_are_drawn_without_their_files_root_turn() {
+    use game_render::mat::M4;
+    use game_render::world::Assets;
+    let Some(mut disc) = disc() else { return };
+    let res = track(&mut disc, "free06");
+    let archives = std::slice::from_ref(&res);
+    let cars = cars(&res, "free06");
+    let (scene, terrain) = ground_of(&res);
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let mut on_ground = |p: V3| match ground.at(F(p.x), F(p.z)) {
+        Some(hit) => (v3(p.x, hit.y.0, p.z), v3(hit.normal.x(), hit.normal.y(), hit.normal.z())),
+        None => (p, v3(0.0, 1.0, 0.0)),
+    };
+    for seen in &TURNED_CARS {
+        let (mut placed, mut kept) = (Assets::default(), Assets::default());
+        assert!(placed.load_placed(archives, seen.model), "{:?}", placed.missing());
+        assert!(kept.load(archives, seen.model), "{:?}", kept.missing());
+        let file_root = kept.models[seen.model].model.nodes[0].local;
+        assert!(
+            (file_root.0[0][0] + 1.0).abs() < 1e-6 && (file_root.0[2][2] + 1.0).abs() < 1e-6,
+            "{}'s file root is no longer a half turn: {file_root:?}",
+            seen.model
+        );
+        assert_eq!(placed.models[seen.model].model.nodes[0].local.0, M4::IDENTITY.0, "{}'s root once placed", seen.model);
+
+        // The box the original kept is the file's root box, and it is the box of the vertices as
+        // they are in the file, not turned: the root's node frame is the object's own.
+        let (centre, half) = drawn_box(&placed, seen.model);
+        close(&format!("{}: drawn centre", seen.model), centre, seen.centre, 0.01);
+        close(&format!("{}: drawn half size", seen.model), half, seen.half, 0.01);
+
+        // That box through the object's matrix alone is where the original's world box sits, and the
+        // port's vertices land there; with the root's turn kept they land elsewhere.
+        let pose = M4(seen.rows);
+        close(&format!("{}: the original's world box", seen.model), pose.point(v3(seen.centre[0], seen.centre[1], seen.centre[2])), seen.world_centre, 0.01);
+        close(&format!("{}: drawn in the world", seen.model), pose.point(centre), seen.world_centre, 0.01);
+        let (turned, _) = drawn_box(&kept, seen.model);
+        let off = pose.point(turned).sub(v3(seen.world_centre[0], seen.world_centre[1], seen.world_centre[2])).len();
+        assert!(off > 0.1, "{}: the root's turn would move it only {off} ft", seen.model);
+
+        // And the port's pose for the car is that matrix, row for row.
+        let (car, path) = cars
+            .iter()
+            .find(|(c, _)| c.stem() == seen.model && c.lag == seen.lag)
+            .unwrap_or_else(|| panic!("no {} at lag {}", seen.model, seen.lag));
+        let got = path.pose(car, FREE06_TRAIN_CLOCK, STEP * car.time_scale, &mut on_ground).transform;
+        for r in 0..3 {
+            let (g, w) = (got.0[r], seen.rows[r]);
+            close(&format!("{}: row {r}", seen.model), v3(g[0], g[1], g[2]), [w[0], w[1], w[2]], 0.01);
+        }
+    }
+}
