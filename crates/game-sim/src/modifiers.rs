@@ -428,9 +428,11 @@ impl Mods {
 
     /// Player `seat`'s ride once it is built: the integrator's speed limit, which is the ride's own
     /// constant rather than the file's, raised with [`Knob::BikeSpeed`] so the limit is not what
-    /// stops a faster bike.
+    /// stops a faster bike. The put-back's riding limit is raised with it
+    /// ([`Ride::riding_max_speed_sq`], P101), so a wreck gives the bike this limit back, not the stock.
     pub fn ride(&self, seat: usize, ride: &mut Ride) {
         ride.chassis.max_speed_sq = self.speed_limit(seat, ride.chassis.max_speed_sq);
+        ride.riding_max_speed_sq = self.speed_limit(seat, ride.riding_max_speed_sq);
     }
 
     /// The integrator's squared speed limit [`Mods::ride`] leaves a ride built with `limit`.
@@ -445,9 +447,10 @@ impl Mods {
     /// built again from its stock bytes `stock` with these on it ([`Mods::bike`]), handed to the ride
     /// as its new `.phy`, and what the ride copied out of the old one when it was built taken again
     /// ([`Ride::retune`]). `was` is the set the ride had: the speed limit [`Mods::ride`] raised for it
-    /// is moved to this set's, unless a wreck holds its own limit just now (the put-back sets the
-    /// riding one, as it does on any ride). The bike is not moved, not stopped and not put back: the
-    /// next tick steps it from where it is on the new numbers.
+    /// is moved to this set's, unless a wreck holds its own limit just now; the put-back's riding
+    /// limit ([`Ride::riding_max_speed_sq`]) moves either way, so the put-back after that wreck sets
+    /// this set's (P101). The bike is not moved, not stopped and not put back: the next tick steps it
+    /// from where it is on the new numbers.
     pub fn rebike(&self, was: &Mods, seat: usize, stock: &Phy, phy: &mut Arc<Phy>, ride: &mut Ride) {
         let mut file = stock.clone();
         self.bike(seat, &mut file);
@@ -456,6 +459,7 @@ impl Mods {
         if ride.chassis.max_speed_sq == was.speed_limit(seat, riding) {
             ride.chassis.max_speed_sq = self.speed_limit(seat, riding);
         }
+        ride.riding_max_speed_sq = self.speed_limit(seat, riding);
         *phy = Arc::new(file);
     }
 
