@@ -46,6 +46,9 @@ use openmx_net::{Cmd, Event, HOST, Listing, Room};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[path = "menu_art.rs"]
+pub mod ink;
+
 // ---- the pad -------------------------------------------------------------------------------------
 
 /// One frame of menu input: edges, never holds, with the directions auto-repeating the way a held
@@ -63,6 +66,11 @@ pub struct Press {
     /// Square: the on-screen keyboard's delete.
     pub delete: bool,
     pub start: bool,
+    /// L1 and R1: the tabs of Settings and the Garage, and the Free Ride strip's player (P118).
+    pub l1: bool,
+    pub r1: bool,
+    /// Triangle alone, which is also [`Press::back`]: the Free Ride strip's Wrecks (P118).
+    pub triangle: bool,
 }
 
 impl Press {
@@ -77,6 +85,9 @@ impl Press {
             back: self.back || o.back,
             delete: self.delete || o.delete,
             start: self.start || o.start,
+            l1: self.l1 || o.l1,
+            r1: self.r1 || o.r1,
+            triangle: self.triangle || o.triangle,
         }
     }
 }
@@ -161,6 +172,9 @@ impl Reader {
             back: on(Control::Circle) || on(Control::Triangle),
             delete: on(Control::Square),
             start: on(Control::Start),
+            l1: on(Control::L1),
+            r1: on(Control::R1),
+            triangle: on(Control::Triangle),
         }
     }
 }
