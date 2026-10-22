@@ -99,6 +99,10 @@ fn placed(n: usize, rng: u32) -> Markers {
             tick(&mut sim, gas | Control::Right.mask());
             tick(&mut sim, gas);
         }
+        // Down fires once held for markers::HOLD_MS (P106): the press's tick and seven more at 30 Hz.
+        for _ in 1..8 {
+            assert_eq!(tick(&mut sim, gas | Control::Down.mask()), None);
+        }
         assert_eq!(tick(&mut sim, gas | Control::Down.mask()), Some(Did::Placed(k)));
         tick(&mut sim, gas);
     }
