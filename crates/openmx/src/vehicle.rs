@@ -16,8 +16,17 @@
 //! port collides with a machine, not collided with. A plane nobody has taken yet still stands in its
 //! bay. The original has no such switch.
 //!
-//! The shell has no prompt, so its key and the pause are the menu's path: the switch with no 30 ft
-//! and no 40 mph gate, which belong to the prompt.
+//! The shell's key and the pause are the menu's path: the switch with no 30 ft and no 40 mph gate,
+//! which belong to the prompt.
+//!
+//! # The bays and the prompt (P103)
+//!
+//! The lot's machines stand at their bays as markers: drawn see-through ([`BAY_ALPHA`]), colliding
+//! with nothing, and there whether or not their player has taken their own copy out — the switch
+//! spawns the player's copy on them, so the bay stays where it can be come back to. Riding up to
+//! one, slowly and upright, offers it with the original's own pop-up ([`offer`], [`offer_text`];
+//! drawn by `overlay.rs`), and its button, Circle, is the switch. A setting turns the bays off, and
+//! with them the pop-up; the pause's switch stays.
 //!
 //! # The plane's flight
 //!
@@ -336,6 +345,89 @@ impl Lot {
         };
         plane.livery = bay.livery;
         Some(plane)
+    }
+}
+
+/// How near the rider has to be to a parked machine for the original's switch pop-up, feet: the
+/// trigger's `< 30.0`, a straight-line distance in three dimensions (R8, P103).
+pub const OFFER_RANGE: f32 = 30.0;
+
+/// Above this the pop-up is not shown, feet a second: the prompt's 58.667, 40 mph (R8, P103).
+pub const OFFER_TOP_SPEED: f32 = 58.667;
+
+/// The alpha a machine standing in its bay is drawn at (P103): the put-back ghost's own starting
+/// alpha ([`Ghost::START`]), held. The original draws its parked machines solid and they collide;
+/// these are markers of the port's, see-through and colliding with nothing.
+pub const BAY_ALPHA: f32 = Ghost::START.0;
+
+/// The machine the original's switch pop-up offers a rider at `at` going `speed` (feet a second,
+/// either way), `wrecked` or not, who is on `up` (P103): `freeride_near_machine`'s scan in
+/// `research/oracle.txt`. Kind by kind in the original's order ([`Machine::ALL`]), the nearest bay
+/// of that machine, any player's copy; the first kind whose nearest is closer than [`OFFER_RANGE`]
+/// (and not on top of the rider, which the original's nearest-actor search skips) is offered. A
+/// wrecked rider, or one faster than [`OFFER_TOP_SPEED`], is offered nothing.
+///
+/// Only the ported machines are looked at ([`Machine::kind`]), and never the one the rider is on.
+/// The original also skips a machine its profile has not unlocked and one somebody is driving; the
+/// port has no unlocks, and a bay's machine is a marker nobody drives (the switch spawns the
+/// player's own copy on them, [`Garage::switch`]).
+pub fn offer(bays: &[Bay], up: Kind, at: Vf, speed: f32, wrecked: bool) -> Option<Machine> {
+    if wrecked || speed.abs() > OFFER_TOP_SPEED {
+        return None;
+    }
+    let distance = |b: &Bay| {
+        let (dx, dy, dz) = (b.spawn.at.x() - at.x(), b.spawn.at.y() - at.y(), b.spawn.at.z() - at.z());
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    };
+    Machine::ALL.into_iter().filter(|m| m.kind().is_some_and(|k| k != up)).find(|&m| {
+        let nearest = bays.iter().filter(|b| b.machine == m).map(distance).filter(|&d| d > 1e-6).reduce(f32::min);
+        nearest.is_some_and(|d| d < OFFER_RANGE)
+    })
+}
+
+/// The pop-up's button, one a seat (P103): Circle answers it on the frame it goes down, and only
+/// then, so a Circle held into range does not take the machine, and a press with nothing offered
+/// does nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Answer {
+    was: bool,
+}
+
+impl Answer {
+    /// This frame's Circle — `held` now, or `tapped` (down and up again) since the last frame — and
+    /// what is offered: the machine to switch to, on a press while one is.
+    pub fn take(&mut self, held: bool, tapped: bool, offered: Option<Machine>) -> Option<Kind> {
+        let pressed = (held && !self.was) || tapped;
+        self.was = held;
+        offered.filter(|_| pressed).and_then(Machine::kind)
+    }
+}
+
+/// The bays a ride shows (P103): every bay of a machine the port has ([`Machine::kind`]) while the
+/// setting is `on`, and none when it is off — no ghost there, nothing on the radar, no pop-up.
+pub fn bays_shown(lot: &Lot, on: bool) -> Vec<Bay> {
+    match on {
+        true => lot.bays.iter().filter(|b| b.machine.kind().is_some()).copied().collect(),
+        false => Vec::new(),
+    }
+}
+
+/// The plane a bay shows, standing exactly where it is parked in its copy's livery: what is drawn
+/// see-through there ([`BAY_ALPHA`]). It has no flight and is never stepped, so nothing it could
+/// touch is ever asked.
+pub fn bay_plane(bay: &Bay) -> Plane {
+    Plane { livery: bay.livery, ..Plane::parked(bay.spawn) }
+}
+
+/// The original's pop-up for `machine`, as the disc's English UI text has it: `STR_SWITCH_BIPLANE`
+/// and the rest (`appstart.res`'s `loc\l_ui_eng.bin`).
+pub fn offer_text(machine: Machine) -> &'static str {
+    match machine {
+        Machine::Biplane => "Would you like to switch to the Biplane?",
+        Machine::Helicopter => "Would you like to switch to the Helicopter?",
+        Machine::Buggy => "Would you like to switch to the Dune Buggy?",
+        Machine::Monster => "Would you like to switch to the Monster Truck?",
+        Machine::Baja => "Would you like to switch to the Trophy Truck?",
     }
 }
 
@@ -667,9 +759,17 @@ impl Garage {
     }
 
     /// The plane where it is drawn, if it is drawn at all: while the player flies it, and in its bay
-    /// until they first take it. A plane they have left is drawn nowhere.
+    /// until they first take it. A plane they have left is drawn nowhere. The shell draws the bays'
+    /// own planes instead since P103 ([`Garage::plane_flown`], [`bay_plane`]).
+    #[allow(dead_code)] // the tests'
     pub fn plane_shown(&self) -> Option<&Plane> {
         self.plane.as_ref().filter(|_| self.up == Kind::Biplane || !self.taken)
+    }
+
+    /// The plane while the player flies it, and nowhere else: what is drawn solid once the bays
+    /// show their own see-through machines (P103), the untaken plane's among them.
+    pub fn plane_flown(&self) -> Option<&Plane> {
+        self.plane.as_ref().filter(|_| self.up == Kind::Biplane)
     }
 
     /// Whether the bike is drawn: only while it is up, since a switch away leaves it nowhere.

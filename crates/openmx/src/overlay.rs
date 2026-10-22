@@ -564,6 +564,12 @@ pub struct Art {
     /// What each view's radar marks besides the riders (P92), in view order: start zones, standing
     /// machines and bikes, markers. A view past the end marks none.
     pub radar: Vec<Vec<Blip>>,
+    /// The machine each view's switch pop-up offers (P103), in view order, if any: none past the end.
+    pub offers: Vec<Option<Machine>>,
+    /// `yearlingdashbold_20`, the pop-up's question.
+    question: Font,
+    /// `yearlingdashextrabold_18`, its button's word.
+    answer: Font,
 }
 
 /// A rider's name and number as the HUD shows them (P86).
@@ -592,12 +598,41 @@ impl Tag {
     }
 }
 
+/// The switch pop-up (P103), in layout pixels of a full 640x448 screen, measured off PCSX2's picture
+/// of free09's (936x702 for the layout's 640x448): the panel (left, top, width, height), its
+/// corners' radius and its black at alpha 0x94 (the ground shows through at 0.42);
+const OFFER_PANEL: (f32, f32, f32, f32) = (181.0, 317.0, 280.0, 84.0);
+const OFFER_CORNER: f32 = 10.0;
+const OFFER_PANEL_COLOUR: [u8; 4] = [0, 0, 0, 0x94];
+/// the question's lines' tops and their spacing, and the width it is wrapped to — the original's two
+/// lines break after "switch", whose line inks 215 pixels: 230, which every width from that line's
+/// 217 advance to the 242 of "… switch to" breaks the same way;
+const OFFER_TEXT_TOP: f32 = 333.0;
+const OFFER_LINE: f32 = 19.0;
+const OFFER_WRAP: f32 = 230.0;
+/// The pop-up's text, both fonts, is drawn 0.9 as wide as the fonts' own glyphs and no shorter: the
+/// question's first line inks 215 pixels to the font's 238, "Accept" 57 to 63, at their heights.
+const OFFER_SQUEEZE: f32 = 0.9;
+/// the pill, black and opaque, over the panel's bottom edge;
+const OFFER_PILL: (f32, f32, f32, f32) = (253.0, 385.0, 136.0, 33.0);
+/// the Circle's top-left and size, and the word after it, "Accept" (`STR_DYN_FREESTYLE_NAVIGATION`);
+const OFFER_BUTTON: (f32, f32) = (278.0, 395.0);
+const OFFER_BUTTON_SIZE: f32 = 16.0;
+/// The nav buttons' 64-pixel canvas over the button inked in its middle.
+const NAV_CANVAS: f32 = 4.0;
+const OFFER_ANSWER: &str = "Accept";
+const OFFER_ANSWER_AT: (f32, f32) = (299.0, 395.0);
+/// and the text's grey, both lines' and the word's: 198 at its brightest.
+const OFFER_TEXT: [u8; 4] = [200, 200, 200, 255];
+
 /// The fonts' atlases' places in [`Art::images`], after the textures.
 const DIGITS: usize = TEXTURES.len();
 const SMALL: usize = TEXTURES.len() + 1;
 const LABEL: usize = TEXTURES.len() + 2;
+const QUESTION: usize = TEXTURES.len() + 3;
+const ANSWER: usize = TEXTURES.len() + 4;
 
-const TEXTURES: [&str; 16] = [
+const TEXTURES: [&str; 17] = [
     "speedometer_analog",
     "speedometer_needlepin",
     "odometer_background",
@@ -615,6 +650,8 @@ const TEXTURES: [&str; 16] = [
     "map_icon_monster",
     "map_icon_trophy",
     "map_icon_bike",
+    // The switch pop-up's button (P103).
+    "nav_circle_off",
 ];
 
 impl Art {
@@ -632,7 +669,18 @@ impl Art {
             Font::parse(&cel, atlas).map_err(|e| format!("{name}.cel: {e}"))
         };
         let (digits, small) = (font("yearlingdashboldoblique_55")?, font("eurostileboldbold_14")?);
-        Ok(Art { digits, small, label: font("eurostileboldbold_12")?, textures, tags: Vec::new(), radar: Vec::new() })
+        let (question, answer) = (font("yearlingdashbold_20")?, font("yearlingdashextrabold_18")?);
+        Ok(Art {
+            digits,
+            small,
+            label: font("eurostileboldbold_12")?,
+            textures,
+            tags: Vec::new(),
+            radar: Vec::new(),
+            offers: Vec::new(),
+            question,
+            answer,
+        })
     }
 
     /// Draw view `v`'s HUD into `frame`, which is that view's picture: `riders` is every rider's
@@ -652,14 +700,14 @@ impl Art {
         self.paint(&mut Pen::new(Ink::Frame(frame), (w, h), window), place, riders, v, span, gauges)
     }
 
-    /// Every picture [`Art::sprites`] counts into, in its order: the textures, then the three fonts'
+    /// Every picture [`Art::sprites`] counts into, in its order: the textures, then the five fonts'
     /// atlases. The GPU takes them once ([`game_render::gpu::Renderer::set_images`]).
     pub fn images(&self) -> Vec<&Texture> {
         let mut all: Vec<&Texture> = TEXTURES.iter().filter_map(|n| self.textures.get(n)).collect();
         if all.len() != TEXTURES.len() {
             return Vec::new();
         }
-        all.extend([&self.digits.atlas, &self.small.atlas, &self.label.atlas]);
+        all.extend([&self.digits.atlas, &self.small.atlas, &self.label.atlas, &self.question.atlas, &self.answer.atlas]);
         all
     }
 
@@ -792,8 +840,40 @@ impl Art {
                 drawn.odometer = Some(miles);
             }
         }
+        // Last, over everything: the switch pop-up (P103).
+        if let Some(machine) = self.offers.get(v).copied().flatten() {
+            self.offer(pen, machine, &mut drawn);
+        }
         drawn.scale = pen.s;
         drawn
+    }
+
+    /// The original's switch pop-up for `machine` (P103): `ui\freestyleactivitystartmenu1.lyr`'s
+    /// Flash popup, `free_popup_1.fsh`, as PCSX2 draws it on free09 — measured off its picture, since
+    /// nothing here plays the movie. A dark see-through panel with round corners under the middle
+    /// of the screen, the question in two centred lines over it, and over its bottom edge a black
+    /// pill holding the Circle and "Accept". Counted from the view's bottom edge and centred
+    /// across it.
+    fn offer(&self, pen: &mut Pen, machine: Machine, drawn: &mut Drawn) {
+        pen.corner = Corner::Bottom;
+        pen.rounded(OFFER_PANEL, OFFER_CORNER, OFFER_PANEL_COLOUR);
+        let lines = wrap(&self.question, crate::vehicle::offer_text(machine), OFFER_WRAP / OFFER_SQUEEZE);
+        for (i, line) in lines.iter().enumerate() {
+            let left = LAYOUT.0 / 2.0 - self.question.measure(line) * OFFER_SQUEEZE / 2.0;
+            let top = OFFER_TEXT_TOP + i as f32 * OFFER_LINE;
+            pen.squeezed((&self.question, QUESTION), line, (left, top), OFFER_SQUEEZE, OFFER_TEXT);
+        }
+        let (x, y, w, h) = OFFER_PILL;
+        pen.capsule((x, y, w, h), [0, 0, 0, 255], f32::MAX, [0; 4]);
+        if let Some(t) = self.texture("nav_circle_off") {
+            let half = OFFER_BUTTON_SIZE / 2.0 * NAV_CANVAS;
+            let (cx, cy) = (OFFER_BUTTON.0 + OFFER_BUTTON_SIZE / 2.0, OFFER_BUTTON.1 + OFFER_BUTTON_SIZE / 2.0);
+            pen.blit(t, (cx - half, cy - half, 2.0 * half, 2.0 * half), [255; 4]);
+        }
+        pen.squeezed((&self.answer, ANSWER), OFFER_ANSWER, OFFER_ANSWER_AT, OFFER_SQUEEZE, OFFER_TEXT);
+        let half = OFFER_BUTTON_SIZE / 2.0;
+        drawn.offer = Some(lines);
+        drawn.offer_button = Some(pen.px((OFFER_BUTTON.0 + half, OFFER_BUTTON.1 + half)));
     }
 
     /// A texture by name, and its place in [`Art::images`].
@@ -855,6 +935,26 @@ pub struct Drawn {
     pub mark_tags: Vec<(usize, String)>,
     /// The radar's other icons (P92), in [`Art::radar`]'s order, and the middle of each.
     pub icons: Vec<(Icon, (f32, f32))>,
+    /// The switch pop-up's question, line by line, when it was drawn (P103).
+    pub offer: Option<Vec<String>>,
+    /// The middle of the pop-up's button, when it was drawn.
+    pub offer_button: Option<(f32, f32)>,
+}
+
+/// `text` broken at its spaces into lines no wider than `width` layout pixels in `font`, a word
+/// longer than that on a line of its own: how the pop-up's text field lays out its question.
+pub fn wrap(font: &Font, text: &str, width: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split(' ').filter(|w| !w.is_empty()) {
+        match lines.last_mut() {
+            Some(line) if font.measure(&format!("{line} {word}")) <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
 }
 
 #[derive(Clone, Copy)]
@@ -862,6 +962,8 @@ enum Corner {
     TopLeft,
     BottomLeft,
     BottomRight,
+    /// From the bottom edge, and across from the middle (P103's pop-up).
+    Bottom,
 }
 
 /// Where a [`Pen`] puts what it draws: into a frame's pixels, or as sprites at `at` in the frame.
@@ -899,6 +1001,7 @@ impl<'a> Pen<'a> {
             Corner::TopLeft => (at.0 * self.s, at.1 * self.s),
             Corner::BottomLeft => (at.0 * self.s, y),
             Corner::BottomRight => (w - (LAYOUT.0 - at.0) * self.s, y),
+            Corner::Bottom => (w / 2.0 + (at.0 - LAYOUT.0 / 2.0) * self.s, y),
         }
     }
 
@@ -1093,6 +1196,44 @@ impl<'a> Pen<'a> {
         }
     }
 
+    /// A plain `colour` over a layout box (left, top, width, height).
+    fn fill(&mut self, r: (f32, f32, f32, f32), colour: [u8; 4]) {
+        let (fx0, fy0) = self.px((r.0, r.1));
+        let (fx1, fy1) = (fx0 + r.2 * self.s, fy0 + r.3 * self.s);
+        let frame = match &mut self.ink {
+            Ink::Frame(frame) => frame,
+            Ink::Sprites { .. } => {
+                return self.sprite(Sprite {
+                    corners: [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]],
+                    uv: [[0.0; 2]; 4],
+                    local: [[0.0; 2]; 4],
+                    clamp: [0.0; 4],
+                    image: None,
+                    tint: colour,
+                    shape: Shape::Plain,
+                });
+            }
+        };
+        let (x0, x1) = span(fx0, fx1, frame.width);
+        let (y0, y1) = span(fy0, fy1, frame.height);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                blend(frame, x, y, colour);
+            }
+        }
+    }
+
+    /// A box with corners rounded to `radius` (layout pixels), in a `colour` that may be see-through:
+    /// three pieces that do not overlap, so no part is laid twice — the middle, and either side the
+    /// half of an upright capsule `2 radius` wide that holds the two round corners.
+    fn rounded(&mut self, r: (f32, f32, f32, f32), radius: f32, colour: [u8; 4]) {
+        let (x, y, w, h) = r;
+        let radius = radius.min(w / 2.0).min(h / 2.0);
+        self.fill((x + radius, y, w - 2.0 * radius, h), colour);
+        self.capsule((x, y, 2.0 * radius, h), colour, x + radius, [0; 4]);
+        self.capsule((x + w - 2.0 * radius, y, 2.0 * radius, h), [0; 4], x + w - radius, colour);
+    }
+
     /// The needle's pin: its texture over a disc `size` across centred on `at`, the round cap the
     /// pin's mesh is.
     fn pin(&mut self, (t, image): Image, at: (f32, f32), size: f32) {
@@ -1124,6 +1265,24 @@ impl<'a> Pen<'a> {
                 }
                 let (u, v) = ((dx / r + 1.0) / 2.0 * all[2], (dy / r + 1.0) / 2.0 * all[3]);
                 blend(frame, x, y, bilinear(t, u, v, all));
+            }
+        }
+    }
+
+    /// `text` from its top-left `at`, every glyph and advance `squeeze` as wide (P103's pop-up).
+    fn squeezed(&mut self, (font, image): (&Font, usize), text: &str, at: (f32, f32), squeeze: f32, colour: [u8; 4]) {
+        let mut pen = at.0;
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            let g = font.glyph(c);
+            pen += g.before * squeeze;
+            if c != ' ' {
+                let h = g.uv[3] - g.uv[1];
+                self.blit_src((&font.atlas, image), g.uv, (pen, at.1, g.width * squeeze, h), colour);
+            }
+            pen += (g.width + g.after) * squeeze;
+            if let Some(&n) = chars.peek() {
+                pen += g.kern.iter().find(|k| k.0 == n as u32).map_or(0.0, |k| k.1) * squeeze;
             }
         }
     }
