@@ -639,6 +639,10 @@ pub struct Ride {
     /// the `.phy`'s; the port keeps the `.phy`'s on [`Phy`] and only this, which is the same value
     /// whenever the halving undoes exactly (every normal drag).
     pub drag_halved: bool,
+    /// The speed limit, squared, a put-back gives the chassis back: the original's
+    /// [`crate::off_map::RIDING_MAX_SPEED`] squared, which is the limit a bike is built with, unless a
+    /// modifier that makes the bike faster raised both ([`crate::modifiers::Mods::ride`], P97).
+    pub riding_speed_sq: F,
 }
 
 impl Ride {
@@ -699,9 +703,17 @@ impl Ride {
             touching: false,
             stunt: false,
             drag_halved: false,
+            riding_speed_sq: F(BIKE_MAX_SPEED_SQ),
         };
         ride.place(at, facing);
         ride
+    }
+
+    /// The bike's put-back, its chassis' half ([`crate::off_map::unwreck`]), back to this ride's own
+    /// riding limit: the original's, unless a modifier raised it.
+    pub fn unwreck(&mut self) {
+        crate::off_map::unwreck(&mut self.chassis);
+        self.chassis.max_speed_sq = self.riding_speed_sq;
     }
 
     /// Put the bike down at a point, pointed a way, stopped: the respawn, less the ride state

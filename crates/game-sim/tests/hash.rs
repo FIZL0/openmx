@@ -489,7 +489,10 @@ fn the_size_of_the_state_type_is_pinned() {
     // `markers` only once a session has touched them (tests/markers.rs in openmx).
     // 11160 since S48: the plane's collision object, walked under `plane.collision` only on a plane
     // that has a ray probe; the probe's geometry is the disc's and is left out.
+    // 11168 since P97: the ride's riding speed limit, which a put-back gives the chassis back — a
+    // constant of the ride its builder (and a speed modifier) decides, left out like S73's arm; the
+    // chassis' own limit it is copied into is walked.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11160, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11168, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
