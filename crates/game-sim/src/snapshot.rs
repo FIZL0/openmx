@@ -115,7 +115,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let rng = Wire::take(&mut r)?;
     let input = Wire::take(&mut r)?;
     let mut rider: crate::rider::Rider = Wire::take(&mut r)?;
-    let plane = Wire::take(&mut r)?;
+    let mut plane: Option<crate::flight::Flight> = Wire::take(&mut r)?;
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
     let mut others_riders: Vec<Rider> =
         if r.at < bytes.len() && !tagged(&r) { Wire::take(&mut r)? } else { Vec::new() };
@@ -127,6 +127,9 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     }
     if r.at != bytes.len() {
         return Err(format!("{} bytes left over after the state", bytes.len() - r.at));
+    }
+    if let (Some(p), Some(here)) = (plane.as_mut(), sim.plane.as_ref()) {
+        p.rays = here.rays.clone();
     }
     let here = &sim.rider;
     rider.set = here.set.clone();
@@ -510,7 +513,67 @@ wire!(crate::rider_anim::Thrown { throw, touching, vel, clearance, launch });
 wire!(crate::wreck_sound::Emitter { crash, fall });
 wire!(crate::wreck_sound::List { count, last });
 wire!(crate::rider_anim::Clocked { played, snapshot });
-wire!(crate::flight::Flight { joystick, autopilot, engine, aero, body, measure, tires, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng });
+
+/// The plane by hand: its ray probe's geometry (S48's) is a constant of the disc, kept local like the
+/// rider's set; [`decode`] puts this machine's back.
+impl Wire for crate::flight::Flight {
+    fn put(&self, out: &mut Vec<u8>) {
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _ } = self;
+        joystick.put(out);
+        autopilot.put(out);
+        engine.put(out);
+        aero.put(out);
+        body.put(out);
+        measure.put(out);
+        tires.put(out);
+        pad.put(out);
+        surfaces.put(out);
+        attitude.put(out);
+        air.put(out);
+        crash.put(out);
+        gravity.put(out);
+        gravity_scale.put(out);
+        mass.put(out);
+        inv_inertia.put(out);
+        edge_scale.put(out);
+        wrecks.put(out);
+        spawn.put(out);
+        area.put(out);
+        noise.put(out);
+        rng.put(out);
+        collider.put(out);
+        record.put(out);
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        Ok(Self {
+            joystick: Wire::take(r)?,
+            autopilot: Wire::take(r)?,
+            engine: Wire::take(r)?,
+            aero: Wire::take(r)?,
+            body: Wire::take(r)?,
+            measure: Wire::take(r)?,
+            tires: Wire::take(r)?,
+            pad: Wire::take(r)?,
+            surfaces: Wire::take(r)?,
+            attitude: Wire::take(r)?,
+            air: Wire::take(r)?,
+            crash: Wire::take(r)?,
+            gravity: Wire::take(r)?,
+            gravity_scale: Wire::take(r)?,
+            mass: Wire::take(r)?,
+            inv_inertia: Wire::take(r)?,
+            edge_scale: Wire::take(r)?,
+            wrecks: Wire::take(r)?,
+            spawn: Wire::take(r)?,
+            area: Wire::take(r)?,
+            noise: Wire::take(r)?,
+            rng: Wire::take(r)?,
+            collider: Wire::take(r)?,
+            record: Wire::take(r)?,
+            rays: None,
+        })
+    }
+}
 wire!(crate::input::Manager { pads, events, time_ms });
 wire!(crate::rider_anim::Pool { used, count, rng, seeded });
 wire!(crate::state::Sense { ai_route, owner, wrecks_enabled, settles });

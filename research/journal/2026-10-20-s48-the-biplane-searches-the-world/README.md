@@ -1,9 +1,11 @@
 # S48 — the biplane searches the world
 
-2026-10-20. Task: `./kit plan S48`.
+2026-10-20, 2026-10-21. Task: `./kit plan S48`.
 
-Blocked on arrival: S48 wires S45's broad phase, S46's and S47's narrow phases and the plane's listeners
-into S41's substeps, and none of the four had landed on main (a2054d0). S45, S46 and S47 were in progress
-in slots s2, s3 and s4 with no commits on their branches; S41 is `[~]`, with `Flight::frame` still running
-only the controls' preforce half and no substep loop to call `contact_search::collide` from. No code
-changed. The one lead found, on the plane's hit listener, is in 1-…-PART.md.
+The plane now collides. It has a collision object and a record built like the wreck bike's, and its
+ray probe comes from `biplanem.col`. Each frame it searches the track's meshes and the ground
+(`flight_search::Scene` on `world_search::search_nearby`, with S46's and S47's narrow phases) before
+`WORLD.step`, and `contact::resolve` runs in every substep. A plane flown into the ground or into a mesh
+crashes, and in the shell it no longer flies through the ground. The biplane acceptance run agrees
+through tick 22 (it was 0); tick 23 is the human's first press of the gas. The first session, on
+2026-10-20, was blocked on S41 and S45-S47. Details and the gaps are in 1-…-PART.md.
