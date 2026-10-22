@@ -48,6 +48,11 @@ pub enum Msg {
     Restart { round: u8, tick: u32, lineup: Lineup, data: Vec<u8>, last: bool },
     /// The host: the session is over, with why.
     End(String),
+    /// The host: the restart of session `round` that follows takes the game's modifiers from `was`
+    /// to `to` ([`super::Game::remodify`]), every machine at the restart's tick (P100). Sent ahead
+    /// of every restart that changes them or takes a peer on (whose machine may have loaded an
+    /// older set); `was` equal to `to` changes nothing on a machine already on it.
+    Mods { round: u8, was: String, to: String },
 }
 
 pub enum Kind<'a> {

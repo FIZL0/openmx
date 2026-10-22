@@ -227,3 +227,66 @@ pub fn tick_dt(tick: usize) -> F {
     });
     dts[tick.min(RAMP - 1)]
 }
+
+/// The ride with its game modifiers (P55), which the host changes mid-ride (P100): [`Rides`] as it
+/// is, and the set every seat rides on with each seat's stock bike file, so that a restart that
+/// changes the set ([`Game::remodify`]) moves every seat onto it from where it is. Online every seat
+/// rides 1P's modifiers (each seat's rider is built on them), so the change is 1P's for all of them.
+pub struct Modded<'a, 'b> {
+    pub rides: &'a mut Rides<'b>,
+    /// Each seat's bike file before any modifier; a seat past the last rides the first's, as
+    /// [`Rides::seat`] and [`Rides::decode`] build it on the first seat's constants.
+    pub stock: &'a [game_sim::phy::Phy],
+    pub mods: &'a mut game_sim::modifiers::Mods,
+}
+
+impl Game for Modded<'_, '_> {
+    type State = State;
+
+    fn save(&self) -> State {
+        self.rides.save()
+    }
+
+    fn restore(&mut self, s: &State) {
+        self.rides.restore(s)
+    }
+
+    fn step(&mut self, tick: usize, pads: &[Report]) {
+        self.rides.step(tick, pads)
+    }
+
+    fn hash(&self) -> u64 {
+        self.rides.hash()
+    }
+
+    fn encode(&self) -> Option<Vec<u8>> {
+        self.rides.encode()
+    }
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.rides.decode(bytes)
+    }
+
+    fn seat(&mut self, seat: usize, spawn: &[u8]) -> Result<(), String> {
+        self.rides.seat(seat, spawn)
+    }
+
+    /// Every seat's bike built again from its stock file on `to` and its ride retuned where it is
+    /// ([`game_sim::modifiers::Mods::resim`], as the pause does offline, P98), from the state the
+    /// host had on `was`; the ticks after it scaled by `to`'s time scale. A machine already on `to`
+    /// with no change in it (a joiner the room told the set it is on) is left as it is.
+    fn remodify(&mut self, was: &str, to: &str) -> Result<(), String> {
+        use game_sim::modifiers::Mods;
+        let (was, to) = (Mods::parse(was)?, Mods::parse(to)?);
+        if was == to && *self.mods == to {
+            return Ok(());
+        }
+        let first = self.stock.first().ok_or("no stock bike file to build the modifiers on")?;
+        for (seat, sim) in self.rides.sims.iter_mut().enumerate() {
+            to.resim(&was, 0, self.stock.get(seat).unwrap_or(first), sim);
+        }
+        *self.mods = to;
+        self.rides.time_scale = to.time_scale();
+        Ok(())
+    }
+}
