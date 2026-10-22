@@ -1999,7 +1999,8 @@ fn a_frames_controls_are_what_the_games_own_poll_makes_of_it() {
     assert_eq!(PadFrame::default().stick(0), (0, 0), "a missing pad's sticks are centred");
 
     // The stick as it arrived: the centre byte off, and the one value that cannot be represented
-    // clamped rather than wrapped (0xff - 0x7f is 128, which is not an i8).
+    // wrapped (0xff - 0x7f is 128, which is not an i8): -128, which [`Sim::reports`] puts back as 0xff
+    // (S94; clamped to 127 it came back 0xfe, and a full stick replayed short of full).
     let stick = |x: u8, y: u8| {
         let mut bytes = Report::idle().0;
         bytes[6] = x;
@@ -2008,7 +2009,15 @@ fn a_frames_controls_are_what_the_games_own_poll_makes_of_it() {
     };
     assert_eq!(stick(0x7f, 0x7f), (0, 0));
     assert_eq!(stick(0x89, 0x75), (10, -10));
-    assert_eq!(stick(0x00, 0xff), (-127, 127), "hard left, hard down, with 0xff clamped");
+    assert_eq!(stick(0x00, 0xff), (-127, -128), "hard left, hard down, with 0xff wrapped");
+    for b in 0..=255u8 {
+        let mut bytes = Report::idle().0;
+        bytes[6] = b;
+        bytes[7] = b;
+        let frame = PadFrame::new(dt, [Report::from_bytes(bytes), Report::missing()]);
+        let back = Sim::reports(Input { buttons: 0, stick: frame.stick(0) })[0];
+        assert_eq!((back.axis(2), back.axis(3)), (b, b), "stick byte {b:#04x} does not survive an Input");
+    }
 }
 
 /// A tape round-trips through its file form byte for byte, with every byte of every report and every
@@ -5568,10 +5577,16 @@ fn nearest_opponent(
 // `body.vel`, because the game's frame is more than its world step: the plane's collision object
 // (the record at the plane's `+0x170`) searches and resolves too. S48 ported it, and over the
 // original's ground with free06's terrain and meshes for the search ([`WithTheTrack`]) every lane
-// agrees through tick 22. Tick 23 is the human's first press of the gas, and every lane parts there
-// at once, with no contact or sweep in the port's search before it: the press, not the collision.
-// Over the port's own ground ([`Ground::at`], one ulp low under the plane) it parts at tick 1; the
-// run prints both.
+// agrees through tick 22. Tick 23 is the human's first press of the gas, and every lane parted there
+// at once: the press, not the collision. S94 found the order: the original steps the world before
+// the player's input dispatch stores the pad, so a press reaches the commands on its tick and the
+// controls on the next ([`Flight::frame`](game_sim::flight::Flight::frame)). A full stick (`0xff`)
+// now survives the fixture (it was clamped to `0xfe`), and two kinds of C7 row are not checked: a
+// row read before the game stepped ([`unstepped_rows`]), and the pad lanes of a row read between
+// the world step and the input step ([`read_before_the_input_step`]). The run then agrees through
+// tick 261 and parts at 262 by one ulp of `body.rate[0]`, on the first tick the pitch loop's output
+// is neither clamped nor bypassed. Over the port's own ground ([`Ground::at`], one ulp low under
+// the plane) it parts at tick 1; the run prints both.
 
 /// The capture's file name in [`acceptance_dirs`] — C7's playback of `biplane.p2m2`.
 const BIPLANE_ACCEPTANCE: &str = "biplane";
@@ -5579,8 +5594,8 @@ const BIPLANE_ACCEPTANCE: &str = "biplane";
 /// **The last tick of the biplane recording the port is known to agree with the original on.** The
 /// same contract as [`ACCEPTANCE_AGREES_THROUGH`]: further prints a line asking for it to be raised,
 /// short of it fails. Tick 0 is the start state: the capture's second row, over the save state stepped
-/// to it. 22 is the last tick before the human's first press of the gas (S48).
-const BIPLANE_AGREES_THROUGH: u64 = 22;
+/// to it. 261 is the last tick before an ulp of the body's roll rate parts it (S94).
+const BIPLANE_AGREES_THROUGH: u64 = 261;
 
 /// The container of the area the plane was flown over. Not found by [`recorded_on`]: that fits a
 /// *bike's* rows, and a plane's minute is mostly air. Named instead, and checked against the plane's own
@@ -5810,6 +5825,14 @@ fn biplane_fixture(cap: &Capture, plane: &game_sim::phy::Plane) -> Result<Fixtur
         }
         watches.push(w);
     }
+    let (unstepped, early) = (unstepped_rows(cap)?, read_before_the_input_step(cap)?);
+    for (w, (_, path, _)) in watches.iter_mut().zip(PLANE) {
+        let pad = path.starts_with("plane.pad.");
+        w.samples.retain(|s| {
+            let at = |rows: &[usize]| rows.iter().any(|&r| ticks[r] == s.tick);
+            !at(&unstepped) && !(pad && at(&early))
+        });
+    }
     Ok(Fixture {
         name: format!(
             "{BIPLANE_ACCEPTANCE} ({} ticks of real flight, rng 0x{state:016x}, dt {least}..{most})",
@@ -5821,6 +5844,27 @@ fn biplane_fixture(cap: &Capture, plane: &game_sim::phy::Plane) -> Result<Fixtur
         watches,
         ..Default::default()
     })
+}
+
+/// The rows of C7's capture the recorder read before the game stepped the plane that tick (S94), whose
+/// checks [`biplane_fixture`] drops: rows that are the row before's word for word in the body and the
+/// prop while the plane flies, where a flying plane's prop turns by its `prop_turn` every frame.
+/// The row after one is two frames on (the prop two turns), as [`past_the_first_row`]'s first row
+/// is, so the tick the row stands for is a frame behind and checks nothing; its frame counter has
+/// still risen. One in this capture: tick 149 (frame counter 11121), whose `ail_cmd` is tick 148's
+/// though the pad half the game reads moved. A crash (`crash` not 0) stops the prop, so its rows are
+/// not this.
+fn unstepped_rows(cap: &Capture) -> Result<Vec<usize>, String> {
+    let lanes = [
+        "body_pos.x", "body_pos.y", "body_pos.z", "body_quat.x", "body_quat.y", "body_quat.z", "body_quat.w",
+        "prop_angle",
+    ]
+    .map(|name| column(cap, name));
+    let lanes = lanes.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let crash = column(cap, "crash")?;
+    Ok((1..cap.rows.len())
+        .filter(|&r| cell(cap, r, crash) == "0" && lanes.iter().all(|&at| cell(cap, r, at) == cell(cap, r - 1, at)))
+        .collect())
 }
 
 /// Free06's world, and the plane's first row checked against it: the run is replayed over the area
@@ -5877,6 +5921,47 @@ fn past_the_first_row(mut cap: Capture) -> Capture {
     cap.frames.remove(0);
     cap.rows.remove(0);
     cap
+}
+
+/// The rows of C7's capture the recorder read after the game's world step but before its input step
+/// (S94), whose pad lanes [`biplane_fixture`] does not check: the player record's two stick cubes
+/// (`elev_cmd`, `ail_cmd`) on the row are not what the port's poll and input step
+/// ([`game_sim::flight::pad`]) make of the row's own pad (the older half, [`PadTape::from_capture`]'s)
+/// but are, bit for bit, what they make of the row before's. Their motion is the frame's: the
+/// controls the next frame steps with are the row's own pad, the stale cubes notwithstanding
+/// (tick 157's aileron, 0x50 in both halves and tick 156's 0x4d in the cubes, is 0x50's on tick 158).
+/// [`unstepped_rows`]' rows are not these.
+fn read_before_the_input_step(cap: &Capture) -> Result<Vec<usize>, String> {
+    let at = |name: &str| column(cap, name);
+    let (pad_a, stamp_a, pad_b, stamp_b) = (at("pad_a")?, at("stamp_a")?, at("pad_b")?, at("stamp_b")?);
+    let (elevator, aileron) = (at("elev_cmd")?, at("ail_cmd")?);
+    let unstepped = unstepped_rows(cap)?;
+    let cubes = |r: usize| -> Option<(u32, u32)> {
+        let stamp = |at| cell(cap, r, at).parse::<u64>().ok();
+        let older = if stamp(stamp_a)? <= stamp(stamp_b)? { pad_a } else { pad_b };
+        let hex = cell(cap, r, older);
+        let hex = hex.strip_prefix("0x").unwrap_or(hex);
+        let mut bytes = [0u8; game_sim::input::REPORT_BYTES];
+        for (b, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
+            *b = u8::from_str_radix(core::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+        let mut pad = game_sim::input::Pad::new(0);
+        pad.connected = true;
+        pad.poll(F(1.0 / 30.0), &Report::from_bytes(bytes), &mut game_sim::input::EventQueue::new());
+        let p = game_sim::flight::pad(&pad);
+        Some((p.elevator.to_f32().to_bits(), p.aileron.to_f32().to_bits()))
+    };
+    let recorded = |r: usize| -> Option<(u32, u32)> {
+        let read = |at: usize| cell(cap, r, at).parse::<f32>().map(f32::to_bits).ok();
+        Some((read(elevator)?, read(aileron)?))
+    };
+    Ok((1..cap.rows.len())
+        .filter(|r| !unstepped.contains(r))
+        .filter(|&r| {
+            let (own, before, row) = (cubes(r), cubes(r - 1), recorded(r));
+            row.is_some() && own != row && before == row
+        })
+        .collect())
 }
 
 /// The save state beside C7's recording: the RAM of the moment the capture's first row was read.
