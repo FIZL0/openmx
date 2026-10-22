@@ -1,4 +1,4 @@
-# 1 — wheel start state (PART)
+# 1 — wheel start state (FINAL)
 
 Task S64. 2026-10-22.
 
