@@ -25,10 +25,6 @@ use game_render::gpu::{GroundChunk, GroundVertex};
 use game_render::world::{Camera, Lighting};
 use game_sim::track::{Terrain, TerrainLayout};
 
-/// How many samples a terrain tree's leaf holds along one side, which is also how many cells: the
-/// shared seventeenth sample belongs to the next leaf along.
-const LEAF_SAMPLES: u32 = 16;
-
 /// The colour the ground is painted where the track has no paint of its own ([`Splat`]).
 ///
 /// The `.trn` carries a 1 MiB image and a 256-colour palette for it, but which of its tiles a cell
@@ -36,6 +32,19 @@ const LEAF_SAMPLES: u32 = 16;
 /// one dirt colour with the file's own normals doing all the shaping. It reads as dirt and it is
 /// honest about being flat.
 pub const DIRT: [f32; 3] = [150.0, 118.0, 86.0];
+
+/// How far around the rider the software renderer draws the ground, in feet ([`Ground::radius`]).
+///
+/// The scene's fog is the real limit and the draw culls against it, but `free06`'s fog is further away
+/// than a software rasteriser can fill at 60 Hz, so the dirt fades out at a radius instead: about a
+/// hundred and thirty yards of ground in every direction, 44 samples at MX Unleashed's nine feet a
+/// sample and 88 at MX vs. ATV's four and a half (MD3), which is the same ground either way.
+pub const REACH: f32 = 396.0;
+
+/// How far a side of ground the GPU draws or culls at once (P44), in feet ([`Ground::chunk_cells`]):
+/// 32 cells at nine feet a sample, 64 at four and a half (MD3), so a finer map is not cut into four
+/// times the chunks.
+pub const CHUNK_FEET: f32 = 288.0;
 
 /// A ground cell's paint in a [`Batch`]: the track's, under its baked light map or outside it, or
 /// none.
@@ -59,14 +68,14 @@ impl<'a> Ground<'a> {
     /// The ground of one track: its terrain file, and the scene's own statement of how many root
     /// cells it has.
     ///
-    /// The sample count is the tree's shape rather than a number in the file: each level of the tree
-    /// is sixteen cells across, so a field is `width x 16^levels` samples.
+    /// A field is `width x 256` samples, as the simulation's ground has it, whatever the tree's depth
+    /// ([`game_sim::world::SAMPLES_PER_WIDTH`]).
     pub fn new(terrain: Terrain<'a>, layout: &TerrainLayout) -> Ground<'a> {
-        let per_root = LEAF_SAMPLES.pow(terrain.levels);
+        let per_width = game_sim::world::SAMPLES_PER_WIDTH;
         Ground {
             spacing: terrain.scale.0,
-            samples_x: layout.width.max(1) * per_root,
-            samples_z: layout.breadth.max(1) * per_root,
+            samples_x: layout.width.max(1) * per_width,
+            samples_z: layout.breadth.max(1) * per_width,
             terrain,
             paint: None,
         }
@@ -76,6 +85,16 @@ impl<'a> Ground<'a> {
     pub fn painted(mut self, paint: Option<Splat>) -> Ground<'a> {
         self.paint = paint;
         self
+    }
+
+    /// [`REACH`] in this ground's samples: the radius [`Ground::draw`] is handed.
+    pub fn radius(&self) -> u32 {
+        (REACH / self.spacing.max(1.0e-3)).ceil() as u32
+    }
+
+    /// [`CHUNK_FEET`] in this ground's cells, a power of two as [`Ground::chunks`] makes them.
+    pub fn chunk_cells(&self) -> u32 {
+        ((CHUNK_FEET / self.spacing.max(1.0e-3)).round() as u32).max(1).next_power_of_two()
     }
 
     /// How big the field is in world units.

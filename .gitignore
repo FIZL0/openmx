@@ -27,6 +27,8 @@ context/
 /controls.txt
 /garage.txt
 /riders.txt
+# And its mods folder (MD2): track mods are other games' files, never the repo's.
+/mods/
 
 # Build output
 /target/

@@ -118,43 +118,135 @@ impl Disc {
     pub fn res(&mut self, name: &str) -> Result<Res, String> {
         let bytes = self.member(name)?;
         let dir = game_sim::archive::Res::parse(&bytes)?;
-        Ok(Res { bytes, dir })
+        Ok(Res { members: Box::new(Archive { bytes, dir }) })
     }
 }
 
-/// A `.res` archive held in memory, with its directory parsed.
-pub struct Res {
+/// What a track's files are read out of: a `.res` off the disc, or a mod's folder (MD2), whose loose
+/// files are the members of the `.res` they were copied out of. Every loader takes a [`Res`], and a
+/// `Res` is either, so the scene, terrain, collision and render loaders read a mod as they read the
+/// disc.
+pub trait Members: Send + Sync {
+    /// Every member, in the order the source lists them.
+    fn entries(&self) -> &[Entry];
+    /// One of [`Members::entries`]' bytes.
+    fn bytes(&self, e: &Entry) -> Result<Vec<u8>, String>;
+}
+
+/// A `.res` held in memory, with its directory parsed.
+struct Archive {
     bytes: Vec<u8>,
     dir: game_sim::archive::Res,
 }
 
+impl Members for Archive {
+    fn entries(&self) -> &[Entry] {
+        &self.dir.entries
+    }
+
+    fn bytes(&self, e: &Entry) -> Result<Vec<u8>, String> {
+        crate::tally::inflate();
+        self.dir.read(&self.bytes, e)
+    }
+}
+
+/// A folder of loose files standing in for a `.res` (MD2): each file is a member named by its path
+/// under the folder, `\`-separated as the archives spell theirs, so `Env/MC01/MC01.scn` is the member
+/// `Env\MC01\MC01.scn`. An entry's `at` is its index in [`Folder::files`].
+struct Folder {
+    entries: Vec<Entry>,
+    files: Files,
+}
+
+/// Where a folder's bytes are: on the disk, read when asked for, or handed over whole — the browser's
+/// storage, which has no file system to open a path in.
+enum Files {
+    Disk(PathBuf),
+    Memory(Vec<Vec<u8>>),
+}
+
+impl Members for Folder {
+    fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    fn bytes(&self, e: &Entry) -> Result<Vec<u8>, String> {
+        match &self.files {
+            Files::Disk(root) => {
+                let path = root.join(e.path());
+                std::fs::read(&path).map_err(|err| format!("{}: {err}", path.display()))
+            }
+            Files::Memory(files) => files
+                .get(e.at as usize)
+                .cloned()
+                .ok_or_else(|| format!("the folder has no file {}", e.name)),
+        }
+    }
+}
+
+/// A `.res` archive, or a folder standing in for one, with its directory in memory.
+pub struct Res {
+    members: Box<dyn Members>,
+}
+
 impl Res {
+    /// A folder on the disk, read as an archive (MD2): every file under it, at any depth, is a
+    /// member. Two paths that differ only in case or slash style are an error, since every lookup
+    /// folds both and could not tell them apart.
+    pub fn folder(root: &Path) -> Result<Res, String> {
+        let mut paths = Vec::new();
+        walk(root, root, &mut paths)?;
+        paths.sort();
+        let entries = paths
+            .into_iter()
+            .enumerate()
+            .map(|(i, (name, size))| Entry { name, at: i as u64, size })
+            .collect();
+        Res::of_folder(Folder { entries, files: Files::Disk(root.to_path_buf()) })
+    }
+
+    /// The same, out of files held in memory as `(path, bytes)`: what the browser's storage hands over.
+    pub fn files(files: Vec<(String, Vec<u8>)>) -> Result<Res, String> {
+        let mut entries = Vec::new();
+        let mut bytes = Vec::new();
+        for (i, (path, data)) in files.into_iter().enumerate() {
+            entries.push(Entry { name: path.replace('/', "\\"), at: i as u64, size: data.len() as u32 });
+            bytes.push(data);
+        }
+        Res::of_folder(Folder { entries, files: Files::Memory(bytes) })
+    }
+
+    fn of_folder(folder: Folder) -> Result<Res, String> {
+        let mut seen = std::collections::HashMap::new();
+        for e in &folder.entries {
+            if let Some(was) = seen.insert(normalise(&e.name), &e.name) {
+                return Err(format!("{was} and {} differ only in case", e.name));
+            }
+        }
+        Ok(Res { members: Box::new(folder) })
+    }
+
     /// Every member, in directory order.
     pub fn entries(&self) -> &[Entry] {
-        &self.dir.entries
+        self.members.entries()
     }
 
     /// One member's bytes, by name, matched without regard to case or slash style.
     pub fn read(&self, name: &str) -> Result<Vec<u8>, String> {
         let want = normalise(name);
         let e = self
-            .dir
-            .entries
+            .entries()
             .iter()
             .find(|e| normalise(&e.name) == want)
             .ok_or_else(|| format!("the archive has no member {name}"))?;
-        crate::tally::inflate();
-        self.dir.read(&self.bytes, e)
+        self.members.bytes(e)
     }
 
     /// The first member whose name ends in `suffix` — how the scene's `SLT=bale_single_02` finds
     /// `geom\bale_single_02.psg` without knowing which directory the track keeps its models in.
     pub fn find_suffix(&self, suffix: &str) -> Option<&Entry> {
         let want = normalise(suffix);
-        self.dir
-            .entries
-            .iter()
-            .find(|e| normalise(&e.name).ends_with(&want))
+        self.entries().iter().find(|e| normalise(&e.name).ends_with(&want))
     }
 
     /// `find_suffix` and `read` in one step.
@@ -162,9 +254,32 @@ impl Res {
         let e = self
             .find_suffix(suffix)
             .ok_or_else(|| format!("the archive has no member ending in {suffix}"))?;
-        crate::tally::inflate();
-        self.dir.read(&self.bytes, e)
+        self.members.bytes(e)
     }
+}
+
+/// Every file under `dir`, as `(path from root, \-separated; size)`.
+fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u32)>) -> Result<(), String> {
+    let list = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for item in list {
+        let item = item.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = item.path();
+        let kind = item.file_type().map_err(|e| format!("{}: {e}", path.display()))?;
+        if kind.is_dir() {
+            walk(root, &path, out)?;
+        } else if kind.is_file() {
+            let size = item.metadata().map_err(|e| format!("{}: {e}", path.display()))?.len();
+            let size = u32::try_from(size).map_err(|_| format!("{}: bigger than 4 GB", path.display()))?;
+            let rel = path.strip_prefix(root).map_err(|e| e.to_string())?;
+            let name = rel
+                .components()
+                .map(|c| c.as_os_str().to_str().ok_or_else(|| format!("{}: not UTF-8", path.display())))
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\\");
+            out.push((name, size));
+        }
+    }
+    Ok(())
 }
 
 /// Where [`Disc::open_configured`] looks: `[game] iso` from the nearest `kit.toml`, joined to the

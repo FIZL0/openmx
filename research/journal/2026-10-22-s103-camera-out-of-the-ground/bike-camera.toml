@@ -1,0 +1,114 @@
+# bike-camera.toml — the original's race camera behind the human's free09 ride (first_recording.p2m2),
+# S103: the block it reads off the rider, its own state (the floor's lock and inputs) and the eye it
+# writes. Run with play_camera.sh beside this file.
+#
+# Fixed addresses, measured on first_recording's state only (research/oracle.txt, S103): the bike's
+# race camera is the object at 0x174d7b0, its viewport 0x174d440. The block is the rider's +0xdd0
+# (P34). If `rider_type` is not 2, the chain is aimed elsewhere.
+
+[watch]
+name        = "s103-bike-camera"
+description = "the human riding free09: the rider's camera block, the race camera, the eye"
+every       = 1          # one row per tick
+frames      = 1811
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"           # +0x748: 0 riding; else down, and the wreck camera has the viewport
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+# the camera's target block, rider +0xdd0
+[[field]]
+name = "tgt_point"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xde0"
+type = "f32x4"
+
+[[field]]
+name = "tgt_fwd"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe00"
+type = "f32x4"
+
+[[field]]
+name = "tgt_up"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe10"
+type = "f32x4"
+
+[[field]]
+name = "tgt_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe20"
+type = "f32x4"
+
+[[field]]
+name = "tgt_tail"               # +0x80..+0x8c of the block: lean is .y
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe50"
+type = "f32x4"
+
+[[field]]
+name = "tgt_flag_speed"         # +0xb0 airborne flag (u32), +0xb4 speed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xe80"
+type = "f32x4"
+
+# the bike's race camera
+[[field]]
+name = "cam_dyp"                # +0xd0 distance, +0xd4 yaw, +0xd8 pitch, +0xdc fov
+addr = "0x174d880"
+type = "f32x4"
+
+[[field]]
+name = "cam_preset"             # +0x158
+addr = "0x174d908"
+type = "u32"
+
+[[field]]
+name = "cam_lock"               # +0x16c: set by the floor's first call when the raw eye is under it
+addr = "0x174d91c"
+type = "u32"
+
+[[field]]
+name = "cam_world"              # +0x184 the world the floor queries (0 = no floor)
+addr = "0x174d934"
+type = "u32"
+
+[[field]]
+name = "cam_lift"               # +0x18c
+addr = "0x174d93c"
+type = "f32"
+
+[[field]]
+name = "cam_floor_ceiling"      # +0x1a0 min height, +0x1a4 ceiling (read as .z, .w of +0x198)
+addr = "0x174d948"
+type = "f32x4"
+
+# the viewport: +0x140 eye, +0x150 direction, +0x19c near clip
+[[field]]
+name = "vp_eye"
+addr = "0x174d580"
+type = "f32x4"
+
+[[field]]
+name = "vp_dir"
+addr = "0x174d590"
+type = "f32x4"
+
+[[field]]
+name = "vp_near"
+addr = "0x174d5dc"
+type = "f32"

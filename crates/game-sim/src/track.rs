@@ -133,7 +133,8 @@ pub struct Scene {
 /// How big the terrain is and how its samples map to world units.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TerrainLayout {
-    /// Root cells across and along. Each is one child of the terrain tree's root.
+    /// 256-sample units across and along ([`crate::world::SAMPLES_PER_WIDTH`]). On a two-level tree
+    /// each is one child of the terrain tree's root; a one-level tree is 1, its sixteen root cells.
     pub width: u32,
     pub breadth: u32,
     /// World units per terrain sample, across and along.
@@ -275,12 +276,15 @@ fn vector(value: &str) -> Result<V3, String> {
 // collision
 // ---------------------------------------------------------------------------------------------------
 
-/// Which collision class a `.col` holds. One header, read by one check, in front of two different
+/// Which collision class a `.col` holds. One header, read by one check, in front of three different
 /// bodies — the word says which, so a reader does not have to know what the file is for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Class {
     /// A triangle mesh: everything the wheels can hit.
     Mesh = 0,
+    /// Several triangle meshes, each tied to a bone of the model that loads it: the moving parts of an
+    /// animated toy.
+    Hierarchy = 1,
     /// Line segments: the parts of a vehicle that sweep against the world.
     Rays = 2,
 }
@@ -308,10 +312,9 @@ fn col_header(r: &mut Reader, want: Option<Class>) -> Result<ColHeader, String> 
     }
     let class = match r.u32()? {
         0 => Class::Mesh,
+        1 => Class::Hierarchy,
         2 => Class::Rays,
-        // A third class, which gains three words in front of its transform and then does not account for
-        // its own bytes under either body below. One file on this disc is one, and nothing places it, so
-        // this says so rather than guessing at the bytes.
+        // 8 is a finite plane, which the loader can build but no file on the disc asks for (S49).
         other => return Err(format!("collision class {other} is not understood")),
     };
     if let Some(want) = want
@@ -319,8 +322,9 @@ fn col_header(r: &mut Reader, want: Option<Class>) -> Result<ColHeader, String> 
     {
         return Err(format!("this is a {class:?} collision file, read as {want:?}"));
     }
-    // Version 1 files predate the surface word; the loader reads it only for later ones.
-    let surface = if version > 1 { Some(r.u32()?) } else { None };
+    // Version 1 files predate the surface word; the loader reads it only for later ones. A hierarchy has
+    // none of its own: each of its parts carries one.
+    let surface = if version > 1 && class != Class::Hierarchy { Some(r.u32()?) } else { None };
     Ok(ColHeader { version, class, surface })
 }
 
@@ -328,6 +332,7 @@ fn col_header(r: &mut Reader, want: Option<Class>) -> Result<ColHeader, String> 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Collision {
     Mesh(Mesh),
+    Hierarchy(Hierarchy),
     Rays(Rays),
 }
 
@@ -337,6 +342,7 @@ impl Collision {
         let class = col_header(&mut Reader::new(bytes, "a collision file"), None)?.class;
         match class {
             Class::Mesh => Mesh::parse(bytes).map(Collision::Mesh),
+            Class::Hierarchy => Hierarchy::parse(bytes).map(Collision::Hierarchy),
             Class::Rays => Rays::parse(bytes).map(Collision::Rays),
         }
     }
@@ -445,34 +451,41 @@ impl Mesh {
     pub fn parse(bytes: &[u8]) -> Result<Mesh, String> {
         let mut r = Reader::new(bytes, "a collision mesh");
         let header = col_header(&mut r, Some(Class::Mesh))?;
-        let transform = [r.v3()?, r.v3()?, r.v3()?, r.v3()?];
-        r.skip(4)?; // the transform's fourth column, which the loader fills in with 0,0,0,1 instead
-        let vertex_count = r.u32()?;
-        let node_count = r.u32()?;
-        let triangle_count = r.u32()?;
-        let packed = r.u32()?;
-        let vertices = points(&mut r, vertex_count, packed)?;
-        let normals = if r.u32()? == 0 { None } else { Some(points(&mut r, vertex_count, packed)?) };
-        let nodes = nodes(&mut r, node_count)?;
-        let mut triangles = Vec::with_capacity(triangle_count as usize);
-        for _ in 0..triangle_count {
-            triangles.push(Triangle {
-                distance: r.f()?,
-                normal: r.v3()?,
-                vertices: [r.u16()?, r.u16()?, r.u16()?],
-            });
-        }
+        let mesh = mesh_body(&mut r, header.version, header.surface)?;
         r.finished()?;
-        Ok(Mesh {
-            version: header.version,
-            surface: header.surface,
-            transform,
-            vertices,
-            normals,
-            nodes,
-            triangles,
-        })
+        Ok(mesh)
     }
+}
+
+/// A mesh's body, from its transform to its last triangle: the part both the mesh class and each part of
+/// a hierarchy read the same way.
+fn mesh_body(r: &mut Reader, version: u32, surface: Option<u32>) -> Result<Mesh, String> {
+    let transform = [r.v3()?, r.v3()?, r.v3()?, r.v3()?];
+    r.skip(4)?; // the transform's fourth column, which the loader fills in with 0,0,0,1 instead
+    let vertex_count = r.u32()?;
+    let node_count = r.u32()?;
+    let triangle_count = r.u32()?;
+    let packed = r.u32()?;
+    let vertices = points(r, vertex_count, packed)?;
+    let normals = if r.u32()? == 0 { None } else { Some(points(r, vertex_count, packed)?) };
+    let nodes = nodes(r, node_count)?;
+    let mut triangles = Vec::with_capacity(triangle_count as usize);
+    for _ in 0..triangle_count {
+        triangles.push(Triangle {
+            distance: r.f()?,
+            normal: r.v3()?,
+            vertices: [r.u16()?, r.u16()?, r.u16()?],
+        });
+    }
+    Ok(Mesh {
+        version,
+        surface,
+        transform,
+        vertices,
+        normals,
+        nodes,
+        triangles,
+    })
 }
 
 fn points(r: &mut Reader, count: u32, packed: u32) -> Result<Points, String> {
@@ -488,6 +501,55 @@ fn points(r: &mut Reader, count: u32, packed: u32) -> Result<Points, String> {
             out.push([r.u16()? as i16, r.u16()? as i16, r.u16()? as i16]);
         }
         Ok(Points::Packed(out))
+    }
+}
+
+/// One part of a hierarchy: a mesh, and the bone of the loading model it rides on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BonePart {
+    /// Which bone, counted through the model's skeleton from its root in the order the loader flattens
+    /// it. As stored: the loader clamps it to the last bone when it binds the part, and binds nothing at
+    /// all when the owner has no skeleton.
+    pub bone: u32,
+    /// The part's mesh. Its `surface` is the part's own word, where the file is new enough to have one;
+    /// the loader keeps that word's low byte.
+    pub mesh: Mesh,
+}
+
+/// The third collision class: several meshes, each tied to one bone of the model that loads the file.
+///
+/// It is what an animated toy with `HasCollision` loads — a windmill's blades, a gondola, a shovel — and
+/// the toy then splits it into one ordinary mesh collidable per part, each following its bone, so the
+/// clip that turns the model turns its collision with it. MX Unleashed's disc has 21 of these files.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hierarchy {
+    pub version: u32,
+    /// The word after the part count, which the loader reads and drops. 0 in every file on the disc.
+    pub unread: u32,
+    /// The parts the loader keeps, in file order. A part with no vertices is read and then dropped, and
+    /// the next one takes its place.
+    pub parts: Vec<BonePart>,
+}
+
+impl Hierarchy {
+    /// Read a `.col` as the hierarchy class reads it: a part count and an unused word, then for each
+    /// part its bone, its surface word (version 2 and later) and an ordinary mesh body.
+    pub fn parse(bytes: &[u8]) -> Result<Hierarchy, String> {
+        let mut r = Reader::new(bytes, "a collision hierarchy");
+        let header = col_header(&mut r, Some(Class::Hierarchy))?;
+        let count = r.u32()?;
+        let unread = r.u32()?;
+        let mut parts = Vec::new();
+        for _ in 0..count {
+            let bone = r.u32()?;
+            let surface = if header.version > 1 { Some(r.u32()?) } else { None };
+            let mesh = mesh_body(&mut r, header.version, surface)?;
+            if !mesh.vertices.is_empty() {
+                parts.push(BonePart { bone, mesh });
+            }
+        }
+        r.finished()?;
+        Ok(Hierarchy { version: header.version, unread, parts })
     }
 }
 
