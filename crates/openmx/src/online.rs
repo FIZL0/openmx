@@ -369,7 +369,7 @@ impl Online {
         let Some(all) = udp.markers(&self.net.lineup, &self.net.me) else { return false };
         for (s, (sim, bytes)) in self.sims.iter_mut().zip(&all).enumerate() {
             sim.markers = crate::saved_markers::from_wire(bytes, &marks.bike, &marks.track);
-            let placed = sim.markers.slots.iter().flatten().count();
+            let placed = sim.markers.placed();
             if placed > 0 {
                 println!("online: seat {} starts on {placed} saved markers", s + 1);
             }
@@ -499,7 +499,7 @@ impl Online {
                                 ([_], Some(seat)) if !seat.pick.markers.is_empty() => {
                                     let track = room.as_ref().map_or("", |r| r.track.as_str());
                                     let m = crate::saved_markers::from_pick(&seat.pick.markers, &seat.pick.bike, track);
-                                    let placed = m.slots.iter().flatten().count();
+                                    let placed = m.placed();
                                     match first.map(|f| rides::spawn_marked(f, spawn, m)) {
                                         Some(Ok(b)) if placed > 0 => {
                                             println!("online: {peer} rides in on {placed} saved markers");
