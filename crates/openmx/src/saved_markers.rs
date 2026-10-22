@@ -167,3 +167,26 @@ pub fn bike_word(member: &str) -> String {
     let leaf = file.rsplit(['\\', '/']).next().unwrap_or(&file);
     leaf.trim_end_matches(".phy").to_string()
 }
+
+/// `markers` as a `--peer` ride sends them to every machine (P105, `net::udp`'s pieces): the track
+/// they are for — its length, then its name — and the file's bytes; empty for no marker at all.
+pub fn to_wire(markers: &Markers, bike: &str, track: &str) -> Vec<u8> {
+    if markers.slots.iter().all(Option::is_none) {
+        return Vec::new();
+    }
+    let track = track.to_ascii_lowercase();
+    let track = &track.as_bytes()[..track.len().min(255)];
+    [&[track.len() as u8][..], track, &markers.to_file(bike)].concat()
+}
+
+/// [`to_wire`]'s bytes back, for a seat riding `bike` on `track`: none for none, for another
+/// track's or bike's, and for any that do not read — the same on every machine, which all run one
+/// build and are handed the same bytes.
+pub fn from_wire(bytes: &[u8], bike: &str, track: &str) -> Markers {
+    let Some((&n, rest)) = bytes.split_first() else { return Markers::default() };
+    let Some((on, file)) = rest.split_at_checked(n as usize) else { return Markers::default() };
+    if !on.eq_ignore_ascii_case(track.as_bytes()) {
+        return Markers::default();
+    }
+    Markers::from_file(file, bike).unwrap_or_default()
+}

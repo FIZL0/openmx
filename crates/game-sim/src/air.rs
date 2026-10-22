@@ -378,9 +378,10 @@ pub(crate) fn narrow(x: f64) -> f32 {
 /// copied from fdlibm's source, so that the port stands on what the disc holds. (They turn out to be
 /// fdlibm's published values exactly.)
 ///
-/// `f64` is deliberate and is the only place in this crate that uses it: the four basic operations and
-/// `sqrt` are specified exactly by IEEE-754 and give the same bits on every host, which is what makes
-/// this reproducible, and nothing else here would reproduce the game's table.
+/// `f64` is deliberate and is the only place in this crate that uses it (with [`cos_sin`] below, for
+/// the same reason): the four basic operations and `sqrt` are specified exactly by IEEE-754 and give
+/// the same bits on every host, which is what makes this reproducible, and nothing else here would
+/// reproduce the game's table.
 #[allow(clippy::float_arithmetic)]
 pub(crate) fn acos(x: f64) -> f64 {
     const PS: [u64; 6] = [
@@ -435,6 +436,149 @@ pub(crate) fn acos(x: f64) -> f64 {
     let w = rat(z) * s + c;
     // `df`, not `s`: the correction `c` is the one `df` needs, so the sum has to be built on `df`.
     2.0 * (df + w)
+}
+
+/// `cos` and `sin` in double precision, the game's own (S104): fdlibm 5.3's `cos` and `sin` over its
+/// `__kernel_cos`, `__kernel_sin` and `__ieee754_rem_pio2`, which is what the SDK links and what the
+/// startup code builds the `{cos, sin}` table with ([`crate::camera::CurveTable::build`]). The same
+/// reasons as [`acos`] for `f64`: only the four operations, which every host rounds the same way.
+///
+/// Only for `|x| <= pi` and a little over, the table's range: the reduction here is fdlibm's for
+/// `|x| < 3pi/4` and its medium case at `n = 2`; past that it panics rather than guess at the rest.
+#[allow(clippy::float_arithmetic)]
+pub(crate) fn cos_sin(x: f64) -> (f64, f64) {
+    let ix = high(x) & 0x7fff_ffff;
+    if ix < 0x3fe9_21fc {
+        return (kernel_cos(x, 0.0), kernel_sin(x, 0.0, false));
+    }
+    let (n, y0, y1) = rem_pio2(x);
+    // `0 - v`, as the game negates, rather than `-v`.
+    match n & 3 {
+        0 => (kernel_cos(y0, y1), kernel_sin(y0, y1, true)),
+        1 => (0.0 - kernel_sin(y0, y1, true), kernel_cos(y0, y1)),
+        2 => (0.0 - kernel_cos(y0, y1), 0.0 - kernel_sin(y0, y1, true)),
+        _ => (kernel_sin(y0, y1, true), 0.0 - kernel_cos(y0, y1)),
+    }
+}
+
+/// The high word of a double, which fdlibm's tests are all made on.
+fn high(x: f64) -> u32 {
+    (x.to_bits() >> 32) as u32
+}
+
+/// fdlibm's `__kernel_cos(x, y)`: the cosine of `x + y` for `|x| <= pi/4`, `y` the tail of a reduced
+/// argument.
+#[allow(clippy::float_arithmetic)]
+fn kernel_cos(x: f64, y: f64) -> f64 {
+    const C: [u64; 6] = [
+        0x3FA555555555554C,
+        0xBF56C16C16C15177,
+        0x3EFA01A019CB1590,
+        0xBE927E4F809C52AD,
+        0x3E21EE9EBDB4B1C4,
+        0xBDA8FAE9BE8838D4,
+    ];
+    let c = C.map(f64::from_bits);
+    let ix = high(x) & 0x7fff_ffff;
+    // `(int) x == 0`, which a value this small always is.
+    if ix < 0x3e40_0000 {
+        return 1.0;
+    }
+    let z = x * x;
+    let r = z * (c[0] + z * (c[1] + z * (c[2] + z * (c[3] + z * (c[4] + z * c[5])))));
+    if ix < 0x3fd3_3333 {
+        return 1.0 - (0.5 * z - (z * r - x * y));
+    }
+    let qx = if ix > 0x3fe9_0000 { 0.28125 } else { f64::from_bits(u64::from(ix - 0x0020_0000) << 32) };
+    let hz = 0.5 * z - qx;
+    let a = 1.0 - qx;
+    a - (hz - (z * r - x * y))
+}
+
+/// fdlibm's `__kernel_sin(x, y, iy)`: the sine of `x + y` for `|x| <= pi/4`; `tail` says whether `y`
+/// is one (fdlibm's `iy`).
+#[allow(clippy::float_arithmetic)]
+fn kernel_sin(x: f64, y: f64, tail: bool) -> f64 {
+    const S: [u64; 6] = [
+        0xBFC5555555555549,
+        0x3F8111111110F8A6,
+        0xBF2A01A019C161D5,
+        0x3EC71DE357B1FE7D,
+        0xBE5AE5E68A2B9CEB,
+        0x3DE5D93A5ACFD57C,
+    ];
+    let s = S.map(f64::from_bits);
+    let ix = high(x) & 0x7fff_ffff;
+    if ix < 0x3e40_0000 {
+        return x;
+    }
+    let z = x * x;
+    let v = z * x;
+    let r = s[1] + z * (s[2] + z * (s[3] + z * (s[4] + z * s[5])));
+    if !tail {
+        x + v * (s[0] + z * r)
+    } else {
+        x - ((z * (0.5 * y - v * r) - y) - v * s[0])
+    }
+}
+
+/// fdlibm's `__ieee754_rem_pio2(x)` for `pi/4 < |x| <= pi`: `x - n pi/2` as a head and a tail, and
+/// `n`. Under `3pi/4` the one-step case; above it the medium case, which here is always `n = 2`, with
+/// the second and third pieces of `pi/2` taken in where the first cancels too much.
+#[allow(clippy::float_arithmetic)]
+fn rem_pio2(x: f64) -> (i32, f64, f64) {
+    const INVPIO2: u64 = 0x3FE45F306DC9C883;
+    const PIO2: [(u64, u64); 3] = [
+        (0x3FF921FB54400000, 0x3DD0B4611A626331),
+        (0x3DD0B4611A600000, 0x3BA3198A2E037073),
+        (0x3BA3198A2E000000, 0x397B839A252049C1),
+    ];
+    let pio2 = PIO2.map(|(h, t)| (f64::from_bits(h), f64::from_bits(t)));
+    let hx = high(x) as i32;
+    let ix = hx & 0x7fff_ffff;
+    if ix < 0x4002_d97c {
+        let (mut z, mut tail) = (x, pio2[0].1);
+        if hx > 0 {
+            z = z - pio2[0].0;
+            if ix == 0x3ff9_21fb {
+                z = z - pio2[1].0;
+                tail = pio2[1].1;
+            }
+            let y0 = z - tail;
+            return (1, y0, (z - y0) - tail);
+        }
+        z = z + pio2[0].0;
+        if ix == 0x3ff9_21fb {
+            z = z + pio2[1].0;
+            tail = pio2[1].1;
+        }
+        let y0 = z + tail;
+        return (-1, y0, (z - y0) + tail);
+    }
+    let t = x.abs();
+    let n = (t * f64::from_bits(INVPIO2) + 0.5) as i32;
+    assert_eq!(n, 2, "rem_pio2 is ported for the curve table's angles only, and {x} is not one");
+    let fln = f64::from(n);
+    let mut r = t - fln * pio2[0].0;
+    let mut w = fln * pio2[0].1;
+    let mut y0 = r - w;
+    // fdlibm's `npio2_hw[n - 1]`: the high word of `n pi/2`, near which the first piece cancels.
+    if ix == 0x4009_21fb {
+        let j = ix >> 20;
+        let exponent = |y: f64| ((high(y) >> 20) & 0x7ff) as i32;
+        for (piece, (head, tail)) in pio2.iter().enumerate().skip(1) {
+            if j - exponent(y0) <= [16, 49][piece - 1] {
+                break;
+            }
+            let t = r;
+            w = fln * head;
+            r = t - w;
+            w = fln * tail - ((t - r) - w);
+            y0 = r - w;
+        }
+    }
+    let y1 = (r - y0) - w;
+    if hx < 0 { (-n, 0.0 - y0, 0.0 - y1) } else { (n, y0, y1) }
 }
 
 /// The sine of [`STEEP`], as the game's startup sine table holds it — `0.9393` where the real sine of

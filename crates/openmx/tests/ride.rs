@@ -2269,10 +2269,21 @@ fn a_held_diagonal_pulls_and_rolls_together_every_tick() {
     };
     let arrows = |c: &[Control]| Report::from_buttons(c.iter().fold(Control::Cross.mask(), |m, c| m | c.mask()));
 
-    // The fight, under the original's reading: a round gate's down-left corner, and the nose falls.
+    // The fight, under the original's reading: a round gate's down-left corner turns the pitch loop
+    // off, and the pull is the stick's own fifth, so the nose falls wherever the trim the loop held
+    // at level is the stronger. Which it is depends on where in its phugoid the level plane is at the
+    // thirty seconds' mark (S94's one-tick input lag moved it from a trim of -0.155 to -0.087 against
+    // the corner's -0.099), so the check is the relation, not one side of it.
     let original = fly(stick(-90, 90), PlaneScheme::Original);
+    let trim = level.1.plane.as_ref().and_then(|p| p.flight.as_ref()).unwrap().surfaces.elevator_command;
+    let pull = original[SETTLED].1.elevator_command;
+    assert!(original[SETTLED..].iter().all(|t| t.1.elevator_command == pull), "under the original the pitch loop came back on");
     let falling = original[SETTLED..].iter().filter(|t| t.2 > 0.0).count();
-    assert!(falling > TICKS / 2, "under the original the round corner's nose fell on only {falling} ticks");
+    assert_eq!(
+        falling > TICKS / 2,
+        pull.abs() < trim.abs(),
+        "under the original the round corner's pull {pull:?} against the level trim {trim:?}: the nose fell on {falling} ticks",
+    );
 
     let mut lines = Vec::new();
     // (name, report, x and y signs, whether full on both)

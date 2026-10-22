@@ -371,6 +371,10 @@ mod online;
 #[allow(dead_code)]
 mod vehicle;
 
+#[path = "../src/saved_markers.rs"]
+#[allow(dead_code)]
+mod saved_markers;
+
 /// The `Event::Start` a network says, waiting up to 30 s.
 fn started(net: &Net, who: &str) -> (Room, String) {
     let end = Instant::now() + Duration::from_secs(30);
@@ -649,6 +653,102 @@ fn a_lobby_pick_of_the_plane_starts_its_seat_in_it_on_every_machine() {
     println!("settled: host {} guest {} ticks; {}", ha.len(), ga.len(), ho.summary());
     assert!(both >= 60, "only {both} ticks settled on both in 4 s");
     assert_eq!(ha[..both], ga[..both], "the two machines' rides parted");
+    assert_eq!((hd, gd), (0, 0), "desyncs");
+    assert!(flying(&ho, 1).is_some() && flying(&go, 0).is_some(), "the guest's seat flies on");
+    assert!(flying(&ho, 0).is_none(), "the host's seat rides its bike");
+    let _ = go.leave();
+}
+
+/// N19: a guest whose ride setup picked the biplane drops in on a freeride opened online, and rides
+/// in flying: the host's `Online` reads the machine off the guest's pick as it takes it on, and the
+/// state it sends every machine has the guest's seat in the plane, standing in its own bay
+/// (`rides::spawn_flying`), the host's seat on its bike; the two rides stay in step with it flying.
+#[test]
+fn a_drop_in_whose_setup_picked_the_plane_rides_in_flying() {
+    use game_sim::world::Flat;
+    use ps2_float::Vf;
+    let file = match game_render::disc::Disc::open_configured() {
+        Ok(mut disc) => {
+            let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+            let bytes = disc.res(&name).expect("machine.res").read_suffix(game_sim::phy::BIPLANE_PHY).expect("biplane.phy");
+            game_sim::phy::Plane::read_bytes(&bytes)
+        }
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let (hn, gn) = (Arc::new(lan("Openy", 1)), Arc::new(lan("Flyer", 1)));
+    let like = game_sim::flight::Flight::new(&file);
+    let bays: Vec<vehicle::Spawn> = (0..4).map(|s| vehicle::Spawn { at: Vf::new(40.0 * s as f32, 3.0, -30.0, 1.0), facing: Vf::new(0.0, 0.0, 1.0, 0.0) }).collect();
+    // the host's freeride of one, opened from its pause as the shell opens it
+    let mut room = Room::new("Openy", "free06", 4);
+    room.take(HOST, &[Pick::new("thq1", "race125p")]);
+    (room.riding, room.drop_in) = (true, true);
+    hn.send(Cmd::Host(room));
+    let spawn = game_sim::Sim::new(1);
+    let mut ho = online::Online::open(hn.clone(), spawn.clone(), &spawn).unwrap();
+    ho.planes(Some(file), Some(&like));
+    ho.bays(bays.clone());
+    let (mut hw, mut gw) = (Flat::default(), Flat::default());
+    let gas = Report::from_buttons(Control::Cross.mask());
+    let mut climb = Report::from_buttons(Control::Cross.mask());
+    climb.set_axis(3, 0x20);
+    let end = Instant::now() + Duration::from_secs(30);
+    let code = loop {
+        assert!(Instant::now() < end, "no room code in 30 s");
+        ho.frame(gas, &mut hw, None).unwrap();
+        if let Some(code) = ho.kept().into_iter().find_map(|e| match e {
+            Event::Room(r) if !r.short.is_empty() => Some(r.short),
+            _ => None,
+        }) {
+            break code;
+        }
+        std::thread::sleep(Duration::from_millis(33));
+    };
+    // the guest's pick says the plane, as `Lobby::set_machine` puts the setup's machine in it
+    let pick = Pick { machine: vehicle::Kind::Biplane.name().to_string(), ..Pick::new("thq2", "race125p") };
+    gn.send(Cmd::Name("Flyer".into()));
+    gn.send(Cmd::Join(code, vec![pick]));
+    let mut go = loop {
+        assert!(Instant::now() < end, "the guest never dropped in");
+        ho.frame(gas, &mut hw, None).unwrap();
+        if let Some((room, me)) = gn.poll().into_iter().find_map(|e| match e {
+            Event::DropIn(room, me) => Some((room, me)),
+            _ => None,
+        }) {
+            let mut on = online::Online::drop_in(gn.clone(), &room, &me, game_sim::Sim::new(1)).unwrap();
+            on.planes(Some(file), Some(&like));
+            on.bays(bays.clone());
+            break on;
+        }
+        std::thread::sleep(Duration::from_millis(33));
+    };
+    let flying = |on: &online::Online, d: usize| {
+        let mut sim = game_sim::Sim::new(1);
+        on.show(d, &mut sim, None);
+        sim.plane.map(|f| f.spawn.0)
+    };
+    // shell seat 0 is this machine's own; the host's 1 is the guest's seat
+    let end = Instant::now() + Duration::from_secs(30);
+    while !(go.seated() && ho.riders() == 2) {
+        assert!(Instant::now() < end, "the guest was not taken on in 30 s");
+        ho.frame(gas, &mut hw, None).unwrap();
+        go.frame(climb, &mut gw, None).unwrap();
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    assert_eq!((flying(&ho, 0), flying(&ho, 1)), (None, Some(bays[1].at)), "the host's ride as the guest comes in");
+    assert_eq!((flying(&go, 0), flying(&go, 1)), (Some(bays[1].at), None), "the guest's ride as it comes in");
+    for _ in 0..120 {
+        ho.frame(gas, &mut hw, None).unwrap();
+        go.frame(climb, &mut gw, None).unwrap();
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    let ((ha, hd), (ga, gd)) = (ho.settled(), go.settled());
+    let both = ha.len().min(ga.len());
+    println!("settled: host {} guest {} ticks; {}", ha.len(), ga.len(), ho.summary());
+    assert!(both >= 60, "only {both} ticks settled on both");
+    assert_eq!(ha[both - 30..both], ga[both - 30..both], "the two machines' rides parted");
     assert_eq!((hd, gd), (0, 0), "desyncs");
     assert!(flying(&ho, 1).is_some() && flying(&go, 0).is_some(), "the guest's seat flies on");
     assert!(flying(&ho, 0).is_none(), "the host's seat rides its bike");

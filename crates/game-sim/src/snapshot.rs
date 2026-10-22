@@ -137,6 +137,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     rider.clips = here.clips;
     rider.wreckage = here.wreckage;
     rider.ragdoll_kit = here.ragdoll_kit.clone();
+    rider.bike_col = here.bike_col.clone();
     rider.skeleton = here.skeleton.clone();
     rider.body_numbers = here.body_numbers;
     rider.edge_armed = here.edge_armed;
@@ -149,6 +150,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.clips = p.rider.clips;
         r.wreckage = p.rider.wreckage;
         r.ragdoll_kit = p.rider.ragdoll_kit.clone();
+        r.bike_col = p.rider.bike_col.clone();
         r.skeleton = p.rider.skeleton.clone();
         r.body_numbers = p.rider.body_numbers;
         r.edge_armed = p.rider.edge_armed;
@@ -413,6 +415,7 @@ impl Wire for Rider {
             wreckage: _,
             crash,
             ragdoll_kit: _,
+            bike_col: _,
             ragdoll,
             skeleton: _,
             drawn,
@@ -469,6 +472,7 @@ impl Wire for Rider {
             wreckage: None,
             crash: Wire::take(r)?,
             ragdoll_kit: None,
+            bike_col: None,
             ragdoll: Wire::take(r)?,
             skeleton: None,
             drawn: Wire::take(r)?,

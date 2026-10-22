@@ -602,48 +602,6 @@ fn slot_colour(slot: usize) -> [u8; 3] {
     [r, g, b]
 }
 
-/// **The markers' posts in the world** (P94): over a view's picture, a post standing where each of
-/// the view's player's markers was put down, a flag at its top in the slot's colour with the slot's
-/// number on it, the selected one's flag bigger and ringed white. `posts` are
-/// [`crate::overlay::marker_post`]'s with each one's slot and whether it is selected. They are drawn
-/// over the picture, so a marker shows through a hill and from across the track; the far ones first,
-/// so a near one is over them. The port's own, like the markers.
-pub fn draw_marker_posts(frame: &mut Frame, posts: &[(crate::overlay::Post, usize, bool)]) {
-    let scale = (frame.height as i32 / 224).max(1);
-    let mut order: Vec<&(crate::overlay::Post, usize, bool)> = posts.iter().collect();
-    order.sort_by(|a, b| b.0.distance.total_cmp(&a.0.distance));
-    for &&(post, slot, selected) in &order {
-        let colour = slot_colour(slot);
-        // The pole, a row at a time from the top to the foot, dark edged so it reads on the sky.
-        let ((tx, ty), (fx, fy)) = (post.top, post.foot);
-        let (y0, y1) = (ty.min(fy).round() as i32, ty.max(fy).round() as i32);
-        let pole = scale.max(1);
-        for y in y0.max(0)..=y1.min(frame.height as i32) {
-            let k = if y1 > y0 { (y - y0) as f32 / (y1 - y0) as f32 } else { 0.0 };
-            let (from, to) = if ty <= fy { (tx, fx) } else { (fx, tx) };
-            let x = (from + (to - from) * k).round() as i32;
-            fill(frame, x - pole, y, 2 * pole + 1, 1, POST_EDGE);
-            fill(frame, x - pole / 2, y, pole, 1, colour);
-        }
-        // The flag off the pole's top, its number on it.
-        let s = if selected { scale + (scale + 1) / 2 } else { scale };
-        let number = (slot + 1).to_string();
-        let (w, h) = (number.chars().count() as i32 * 4 * s + 3 * s, 9 * s);
-        let (x, y) = (tx.round() as i32 + pole / 2 + 1, ty.round() as i32);
-        if selected {
-            outline(frame, x - 2 * scale, y - 2 * scale, w + 4 * scale, h + 4 * scale, INK);
-            outline(frame, x - scale, y - scale, w + 2 * scale, h + 2 * scale, INK);
-        } else {
-            outline(frame, x - 1, y - 1, w + 2, h + 2, POST_EDGE);
-        }
-        fill(frame, x, y, w, h, colour);
-        text(frame, x + 2 * s, y + 2 * s, &number, POST_EDGE, s);
-    }
-}
-
-/// A post's edge and its flag's number.
-const POST_EDGE: [u8; 3] = [16, 16, 18];
-
 /// The panel: the scene behind it taken down towards black, so the dirt still shows through and the
 /// text on top of it still reads. One multiply-add a pixel, in bytes.
 fn panel(frame: &mut Frame, x: i32, y: i32, w: i32, h: i32) {

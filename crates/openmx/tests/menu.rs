@@ -252,6 +252,15 @@ fn the_settings_file_reads_back_as_it_was_written() {
         lobby_seats: 16,
         // No machines at their bays (P103).
         bays: false,
+        // 1P on the original's camera and 3P on one of their own, the rest on the default (P82).
+        cameras: {
+            let mut c = [menu::CameraView::DEFAULT; menu::SEATS_MAX];
+            c[0] = menu::CameraView::ORIGINAL;
+            c[2] = menu::CameraView { fov: -5, distance: 140, height: 95, plane_distance: 100, plane_height: 180 };
+            c
+        },
+        // The mods folder not read (MD2).
+        mods: false,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -455,7 +464,9 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     assert!(!m.settings.bays);
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.settings.bays);
-    // And the one after it is still the modifiers', and the last.
+    // Then the mods folder's (MD2), the camera's (P82), and after it the modifiers', still the last.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
@@ -476,6 +487,98 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     assert_eq!(FrameLimit::Refresh.fps(165.0), Some(165.0));
     assert_eq!(FrameLimit::Fps(60).fps(165.0), Some(60.0));
     assert_eq!(FrameLimit::Off.fps(165.0), None);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// P82: the Camera page under Settings. Its sliders move by left and right a notch at a time, Cross
+/// puts one back to the original's, the page's resets put every slider back, a seat can be set apart
+/// from the rest, and all of it is saved and read back. The Original notch hands the shell the
+/// original's distance, height and field of view untouched.
+#[test]
+fn the_camera_rows_change_by_pad_and_are_saved() {
+    use menu::CameraView;
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.cameras, [CameraView::DEFAULT; menu::SEATS_MAX], "the shipped default");
+    assert_eq!(m.camera_label(), "Default");
+    // The Original notch is the original's numbers: no field-of-view offset and each distance and
+    // height at one times the original's.
+    assert_eq!(CameraView::ORIGINAL.bike(), (0.0, 1.0, 1.0));
+    assert_eq!(CameraView::ORIGINAL.plane(), (0.0, 1.0, 1.0));
+    // The default sits further back, higher and a few degrees wider, both machines.
+    let (fov, distance, height) = CameraView::DEFAULT.bike();
+    assert!(fov > 0.0 && distance > 1.0 && height > 1.0);
+    let (fov, distance, height) = CameraView::DEFAULT.plane();
+    assert!(fov > 0.0 && distance > 1.0 && height > 1.0);
+
+    // Main menu, Settings, the row above its last (the modifiers').
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    for _ in 0..2 {
+        tap(&mut m, &mut r, Control::Up);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Camera));
+    assert_eq!(m.camera_rows().len(), 8);
+    assert!(m.camera_rows()[0].contains("Every Player"));
+
+    // The field of view: a notch right is a step wider for every player, Cross the original's.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert!(m.settings.cameras.iter().all(|c| c.fov == CameraView::DEFAULT.fov + 1), "{:?}", m.settings.cameras[0]);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.cameras.iter().all(|c| c.fov == 0));
+    assert!(m.camera_rows()[1].ends_with("Original"), "{:?}", m.camera_rows());
+    tap(&mut m, &mut r, Control::Left);
+    assert!(m.settings.cameras.iter().all(|c| c.fov == -1));
+    // The bike's distance, a notch left: five points nearer.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Left);
+    assert!(m.settings.cameras.iter().all(|c| c.distance == CameraView::DEFAULT.distance - menu::CAMERA_STEP));
+    assert_eq!(m.camera_label(), "Custom");
+
+    // 2P alone: the player row to 2P, then the biplane's height up, which leaves the others'.
+    for _ in 0..2 {
+        tap(&mut m, &mut r, Control::Up);
+    }
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.camera_rows()[0].contains("2P"), "{:?}", m.camera_rows());
+    for _ in 0..5 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.cameras[1].plane_height, CameraView::DEFAULT.plane_height + menu::CAMERA_STEP);
+    assert_eq!(m.settings.cameras[0].plane_height, CameraView::DEFAULT.plane_height);
+    // Reset To Original puts every slider of 2P's back, and nobody else's.
+    for _ in 0..2 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.cameras[1], CameraView::ORIGINAL);
+    assert_eq!(m.settings.cameras[1].bike(), (0.0, 1.0, 1.0));
+    assert_eq!(m.settings.cameras[1].plane(), (0.0, 1.0, 1.0));
+    assert_ne!(m.settings.cameras[0], CameraView::ORIGINAL);
+
+    // Saved and read back, one view a seat.
+    let dir = scratch("camera");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let back = menu::load(&dir).0;
+    assert_eq!(back.cameras, m.settings.cameras);
+    assert!(m.settings.text().contains("camera = "), "{}", m.settings.text());
+    // A file from before P82 is the default, and a short line carries its last view on.
+    assert_eq!(Settings::parse("name = Rider\n").cameras, [CameraView::DEFAULT; menu::SEATS_MAX]);
+    let one = Settings::parse("camera = 0 100 100 100 100\n").cameras;
+    assert_eq!(one, [CameraView::ORIGINAL; menu::SEATS_MAX]);
+    // Out of range is clamped to the slider's ends.
+    let wild = Settings::parse("camera = 90 1000 0 100 100\n").cameras[0];
+    assert_eq!((wild.fov, wild.distance, wild.height), (menu::CAMERA_FOV.1, menu::CAMERA_SHARE.1, menu::CAMERA_SHARE.0));
+    // Back out to the settings, which say whose camera it is.
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Settings));
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -841,6 +944,7 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                         | Screen::Split
                         | Screen::Modifiers
                         | Screen::Audio
+                        | Screen::Camera
                 );
                 if lists {
                     assert_eq!(logos.len(), 1, "{screen:?} at {w}x{h}: no logo");
@@ -855,8 +959,9 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
         }
     }
     // Four list screens, the three online ones (N3), the split layout (P43), the game modifiers (P55),
-    // the keyboard and the pause's audio options (P56), twelve looks each, at four shapes.
-    assert_eq!(pills, 11 * 12 * 4);
+    // the keyboard, the pause's audio options (P56) and the camera page (P82), twelve looks each, at
+    // four shapes.
+    assert_eq!(pills, 12 * 12 * 4);
 }
 
 /// [`tap`] on another seat's pad, which only the garage hears.
@@ -2123,4 +2228,59 @@ fn the_controls_row_offers_the_originals_presets() {
     // Where the Controls screen keeps each one's keyboard list.
     assert_eq!(menu::keyboard_at(n, 2), 0);
     assert_eq!((0..4).map(|p| menu::keyboard_at(o, p)).collect::<Vec<_>>(), [1, 2, 3, 4]);
+}
+
+/// MD2: the track pick lists the mods folder's tracks after the disc's, a mod rides by its id, and
+/// the Mods row turns the folder off and is saved. With no mods the pick is the disc's five.
+#[test]
+fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.track_count(), menu::TRACKS.len());
+    for (i, t) in menu::TRACKS.iter().enumerate() {
+        assert_eq!(m.track_at(i), *t);
+    }
+    assert!(m.settings.mods, "the folder is read unless asked");
+    assert!(!m.settings.text().contains("mods"), "a file without mods says nothing of them");
+
+    m.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into())]);
+    assert_eq!(m.track_count(), menu::TRACKS.len() + 1);
+    assert_eq!(m.track_at(menu::TRACKS.len()), ("md2_flat", "MD2 Flat"));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "left from the first wraps to the mod");
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("md2_flat".into())), "{acts:?}");
+    assert_eq!(m.settings.track, "md2_flat");
+    // The mod is the track the file opens on next time, while the folder still has it.
+    let again = Settings::parse(&m.settings.text());
+    assert_eq!(again.track, "md2_flat");
+    let mut next = Menu::new(again, Controls::default());
+    next.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into())]);
+    assert_eq!(next.cursor(Screen::Tracks), menu::TRACKS.len());
+    // Gone from the folder, it opens on the first track; a name that cannot be a mod's is not kept.
+    next.set_mod_tracks(Vec::new());
+    assert_eq!(next.cursor(Screen::Tracks), 0);
+    assert_eq!(Settings::parse("track = ../free06\n").track, Settings::default().track);
+
+    // The Mods row: three up from the top of Settings, past Modifiers and Camera.
+    let (mut m, mut r) = fresh();
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Up);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_changed());
+    assert!(!m.settings.mods);
+    assert!(m.settings.text().contains("mods = off\n"));
+    let dir = scratch("mods");
+    menu::save(&dir, &m.settings, &Controls::default()).unwrap();
+    assert!(!menu::load(&dir).0.mods);
+    std::fs::remove_dir_all(&dir).unwrap();
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.settings.mods);
 }
