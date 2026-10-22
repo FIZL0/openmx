@@ -184,6 +184,7 @@ mod same_ride;
 mod saved_markers;
 mod split;
 mod stages;
+mod track_mods;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
 #[allow(dead_code)]
@@ -863,6 +864,11 @@ struct Args {
     render_scale: Option<f32>,
     /// Whether `--render-scale` was given, `auto` included (V34): if so it wins over the settings'.
     render_scale_asked: bool,
+    /// The `mods/` folder a track not on the disc is looked for in (MD2), or `None` to read none.
+    /// Unless `mods_asked`, the settings' Mods row says, and the folder is beside `settings.txt`.
+    mods: Option<std::path::PathBuf>,
+    /// Whether `--mods DIR|off` was given, or the front end set [`Args::mods`] from its settings.
+    mods_asked: bool,
     /// The pad seat each player reads, the front end's local game's (P43): player i rides seat
     /// `pad_of[i]`'s controller. Empty is seat i for player i, which is every ride outside one.
     pad_of: Vec<usize>,
@@ -1149,6 +1155,10 @@ fn front_end(args: Args) -> Result<(), String> {
         sound,
     };
     front.menu.music_choices = front.sound.choices();
+    // The track mods (MD2), after the disc's tracks in the pick; read again when the Mods row turns.
+    let mut mods_on = front.menu.settings.mods;
+    let listed = mod_tracks(&args, &front.dir, mods_on);
+    front.menu.set_mod_tracks(listed);
     // Online, this machine's player rides the freeride's bike set unless the lobby changes it, as
     // the rider the command line names.
     front.menu.lobby.bikes = lobby::bikes();
@@ -1213,6 +1223,10 @@ fn front_end(args: Args) -> Result<(), String> {
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
+                if !args.mods_asked {
+                    a.mods_asked = true;
+                    a.mods = shell.front.menu.settings.mods.then(|| shell.front.dir.join(track_mods::MODS_DIR));
+                }
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
@@ -1284,6 +1298,8 @@ fn front_end(args: Args) -> Result<(), String> {
             if let Some((room, _)) = shell.front.menu.lobby.start.clone() {
                 let mut a = args.clone();
                 a.track = room.track.clone();
+                // Online rides the disc's tracks only, until MD6 says how peers agree on a mod.
+                (a.mods_asked, a.mods) = (true, None);
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
@@ -1440,6 +1456,11 @@ fn front_end(args: Args) -> Result<(), String> {
                 }
             }
         }
+        if shell.front.menu.settings.mods != mods_on {
+            mods_on = shell.front.menu.settings.mods;
+            let listed = mod_tracks(&args, &shell.front.dir, mods_on);
+            shell.front.menu.set_mod_tracks(listed);
+        }
         if shell.front.menu.changed() {
             seats.set_wiring(shell.front.wiring());
             shell.front.hear();
@@ -1552,18 +1573,39 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
     // ---- the disc -------------------------------------------------------------------------------
     let mut disc = Disc::open_configured()?;
-    let track_member = member_ending(&disc, &format!("{}.res", args.track))?;
+    // A track the disc does not have is a track mod's (MD2), looked for in the mods folder only
+    // then, so a disc track's ride reads nothing from it.
+    let track_member = member_ending(&disc, &format!("{}.res", args.track));
+    let modded = match &track_member {
+        Ok(_) => None,
+        Err(e) => match mods_dir(&args) {
+            Some(dir) => Some(track_mods::find(&dir, &args.track).map_err(|m| format!("{e}, and {m}"))?),
+            None => return Err(e.clone()),
+        },
+    };
+    // The name the track's other files are built from: a disc track's own, a mod's scene's stem.
+    let stem = modded.as_ref().map_or_else(|| args.track.clone(), |t| t.stem.clone());
     let bike_member = member_ending(&disc, &format!("{}.res", args.bike))?;
     // A track is two archives: the props and the terrain in one, the bike's animation set, its
-    // physics and the follow camera in the other, which the game loads alongside it.
-    let second = member_ending(&disc, &format!("{}_2.res", args.track)).ok();
+    // physics and the follow camera in the other, which the game loads alongside it. A mod has no
+    // second archive and rides with a disc freeride's.
+    let second_of = if modded.is_some() { track_mods::FREERIDE } else { args.track.as_str() };
+    let second = member_ending(&disc, &format!("{second_of}_2.res")).ok();
     // The rider is a fourth archive, named after the rider rather than the track or the bike: the
     // body, its gear and its motions are all in there.
     let rider_member = match args.rider.as_str() {
         "none" => None,
         name => Some(member_ending(&disc, &format!("{name}.res"))?),
     };
-    let mut archives: Vec<Res> = vec![disc.res(&track_member)?, disc.res(&bike_member)?];
+    let track_res = match (&modded, &track_member) {
+        (Some(t), _) => {
+            println!("mods: {} ({}) from {}", t.id, t.name, t.dir.display());
+            t.open()?
+        }
+        (None, Ok(member)) => disc.res(member)?,
+        (None, Err(e)) => return Err(e.clone()),
+    };
+    let mut archives: Vec<Res> = vec![track_res, disc.res(&bike_member)?];
     if let Some(name) = &second {
         archives.push(disc.res(name)?);
     }
@@ -1603,7 +1645,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let scn_bytes = archives[0].read(&scn)?;
     // The same file read twice, by two readers that want different things out of it: the simulation's
     // reader for the spawn and the terrain's layout, the renderer's for the props, lights and fog.
-    let place = track::Scene::parse(&scn_bytes)?;
+    let mut place = track::Scene::parse(&scn_bytes)?;
+    if let Some(t) = &modded {
+        t.place_spawn(&mut place)?;
+    }
     let mut look = view::Scene::parse(&ini::text(&scn_bytes));
 
     let terrain_bytes = terrain_bytes(&archives[0], &place.terrain_file)?;
@@ -1612,7 +1657,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let ground = Ground::new(track::Terrain::parse(&terrain_bytes)?, &place.terrain);
     let ground = {
         let extent = ground.extent();
-        ground.painted(game_render::splat::Splat::load(&archives, &args.track, extent))
+        ground.painted(game_render::splat::Splat::load(&archives, &stem, extent))
     };
     let sim_terrain = track::Terrain::parse(&terrain_bytes)?;
     // The sky the scene names, behind everything (V25); the fog colour where it has none.
@@ -1960,7 +2005,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         Err(_) => None,
     };
     let machines = machine_res.as_ref().and_then(|res| {
-        let e = res.find_suffix(&format!("{}\\machine.txt", args.track))?;
+        let e = res.find_suffix(&format!("{stem}\\machine.txt"))?;
         Some((e.name.clone(), res.read(&e.name).ok()?))
     });
     // And its flight (P31): the plane's own `biplane.phy`, from the same archive, built the way the
@@ -2091,7 +2136,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     };
     // Its particles (P58): the emitter list and its `.emt`s, and the track's particle sheet.
     let (mut plane_fx, mut fx_sheet) = match plane_drawn.first() {
-        Some(drawn) => match load_plane_fx(&archives, &args.track, drawn, &assets) {
+        Some(drawn) => match load_plane_fx(&archives, &stem, drawn, &assets) {
             Ok((fx, binds, sheet)) => (Some((fx, binds)), Some(sheet)),
             Err(why) => {
                 println!("biplane: no particles: {why}");
@@ -2116,7 +2161,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The cars the track's `.toy` drives along their clips (V41): free06's train, its trucks and
     // scrapers, the other freeride tracks' trailers. Drawn, not ridden into: they reach nothing in the
     // simulation, and their clock is the scene's own, summed from the ticks' `dt` below.
-    let traffic = game_render::toy::Traffic::load(&archives, &args.track, &mut |p| car_ground(&mut sim, p));
+    let traffic = game_render::toy::Traffic::load(&archives, &stem, &mut |p| car_ground(&mut sim, p));
     // A car's model object is a scene prop's, so its pose stands in for the file's root node: the
     // train's turned cars (train_car_03/04/05 carry a half turn there) are drawn without it (V46).
     for (car, _) in &traffic.cars {
@@ -2525,6 +2570,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 bikes.push(theirs.unwrap_or_else(|| bike_member.clone()));
             }
             let machines = member_ending(&disc, MACHINE_ARCHIVE).unwrap_or_else(|_| MACHINE_ARCHIVE.to_string());
+            // A track mod's own `.aud` names sounds from its own game's bank, which this disc's
+            // does not hold (MD2): it rides with the race events' sounds and no track emitters.
+            let track_res = match &track_member {
+                Ok(member) => member.clone(),
+                Err(_) => second.clone().unwrap_or_default(),
+            };
             let read = Disc::open_configured().and_then(|d| {
                 audio::Sound::read(
                     mixer,
@@ -2532,9 +2583,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     &bikes,
                     rider_member.as_deref(),
                     &machines,
-                    &track_member,
+                    &track_res,
                     second.as_deref(),
-                    &args.track,
+                    &stem,
                 )
             });
             match read {
@@ -2889,7 +2940,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // archive. A track with none (the MX tracks) marks none.
     let radar_zones = archives
         .iter()
-        .find_map(|a| a.read_suffix(&format!("{}\\hit.dat", args.track)).ok())
+        .find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok())
         .map(|b| overlay::zones(&String::from_utf8_lossy(&b)))
         .unwrap_or_default();
     let mut overlay_mode = args.overlay.unwrap_or_default();
@@ -3157,6 +3208,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             && world.tape.is_none()
             && world.seats.len() == 1
             && args.phy.is_none()
+            && modded.is_none()
             && front.menu.lobby.room.is_none()
             && front.network.disc.phy(&set).is_some_and(|b| *b == phy_bytes);
         front.menu.opening = if can { menu::Opening::Can } else { menu::Opening::No };
@@ -4544,6 +4596,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // with a pad is a different ride every time, and its number is worth nothing.
     if head.is_some() || args.record.is_some() || args.headless {
         println!("ride hash {:#018x}", game_sim::hash::of(&world.seats[0].sim.rider.ride));
+        // And where the first rider ended, so a ride on a track can be seen to have gone somewhere (MD2).
+        let end = world.seats[0].sim.rider.ride.position();
+        println!("end: {:.0}, {:.0}, {:.0}", end.x(), end.y(), end.z());
         // And the first player's plane, flown or not, for a tape that switched into it (P102).
         if let Some(flight) = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.as_ref()) {
             println!("plane hash {:#018x} ({})", game_sim::hash::of(flight), world.seats[0].garage.up.name());
@@ -4774,6 +4829,36 @@ fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
     };
     res.read_suffix(&tagged)
         .map_err(|_| format!("the archive has no member ending in {named} or {tagged}"))
+}
+
+/// The `mods/` folder a ride may look for a track in (MD2): `--mods`' or the front end's, else beside
+/// `settings.txt` when its Mods row is on. `None` reads nothing.
+fn mods_dir(args: &Args) -> Option<std::path::PathBuf> {
+    if args.mods_asked {
+        return args.mods.clone();
+    }
+    let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
+    menu::load(&dir).0.mods.then(|| dir.join(track_mods::MODS_DIR))
+}
+
+/// The track mods a front end lists (MD2), saying why each one left out was: `--mods`' folder if it
+/// was given (`off` is none), else the one beside the settings in `dir` while the Mods row is `on`.
+/// With none, nothing is read.
+fn mod_tracks(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, String)> {
+    let folder = match (args.mods_asked, on) {
+        (true, _) => args.mods.clone(),
+        (false, true) => Some(dir.join(track_mods::MODS_DIR)),
+        (false, false) => None,
+    };
+    let Some(folder) = folder else { return Vec::new() };
+    let scan = track_mods::scan(&folder);
+    for line in &scan.log {
+        println!("{line}");
+    }
+    if !scan.tracks.is_empty() {
+        println!("mods: {} tracks", scan.tracks.len());
+    }
+    scan.tracks.into_iter().map(|t| (t.id, t.name)).collect()
 }
 
 /// A tape to ride, from the file it is in.
@@ -5063,6 +5148,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         graphics: None,
         render_scale: None,
         render_scale_asked: false,
+        mods: None,
+        mods_asked: false,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(a) = argv.next() {
@@ -5087,6 +5174,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.menu = true;
             }
             "--track" => args.track = next("a track name, like free06")?,
+            "--mods" => {
+                let v = next("a mods folder, or off")?;
+                args.mods_asked = true;
+                args.mods = (v != "off").then(|| std::path::PathBuf::from(v));
+            }
             "--bike" => args.bike = next("a bike name, like 125sx")?,
             "--rider" => args.rider = next("a rider name, like thq1, or none")?,
             "--pad" => args.pad = Some(next("a device, like /dev/input/js0")?),
@@ -5351,7 +5443,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--preset 0..3|0,2,...]\n\
                             [--bindings FILE] [--renderer gpu|software] [--graphics full|original] [--fps]\n\
                             [--render-scale auto|0.5..1]\n\
-                            [--no-sound]\n\
+                            [--no-sound] [--mods DIR|off]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
                      rides the freeride area from the disc named in kit.toml straight away.\n\
@@ -5448,6 +5540,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      rider's engine, wrecks and landings, the track's own sounds, and music —\n\
                      the disc's songs, then any .wav in the music folder beside the settings,\n\
                      picked in Settings. --no-sound turns it off; a headless ride has none.\n\
+                     \n\
+                     Track mods: a --track not on the disc is looked for in mods/tracks/<id>/\n\
+                     beside the settings (openmx-mods' standard), or in --mods DIR; --mods off,\n\
+                     or Settings' Mods Off, reads nothing there. A mod rides as a freeride.\n\
                      \n\
                      Online: --online NAME@HOST:PORT --peer NAME@HOST:PORT ... --seats NAME,NAME,-\n\
                      rides with the other machines over UDP, one bike a seat (up to eight; the\n\
