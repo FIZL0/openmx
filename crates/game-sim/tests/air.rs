@@ -410,6 +410,7 @@ impl Gen {
             joust_wreck_height: self.f(0.0, 5.0),
             crossup_wreck: self.f(0.5, 1.0),
             crossup_wreck_time: self.maybe_zero(0.0, 1.5),
+            spin: None,
         };
         let on_ground = lip || self.one_in(4);
         let contact_vel = {
