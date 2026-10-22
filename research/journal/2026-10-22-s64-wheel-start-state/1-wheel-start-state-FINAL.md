@@ -130,6 +130,6 @@ lanes, against the port started from the same RAM image
 
 ## Next
 
-Filed as S106. Find tick 1's roll and pitch gap: run the original's chassis step (Ee) from the save state for one frame,
+Filed as S107. Find tick 1's roll and pitch gap: run the original's chassis step (Ee) from the save state for one frame,
 substep by substep, and compare `out` (the transform `mv::balance`/`mv::roll_pitch` write) and the torque
 sum against the port's.

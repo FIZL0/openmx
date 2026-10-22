@@ -6654,8 +6654,9 @@ const SAVE_STATE_AGREES_THROUGH: u64 = 0;
 
 /// The tick the same run's bike agrees through on its position (`rider.ride.origin`, the chassis
 /// transform's translation): `x` and `z` hold on every tick of the capture, `y` parts by an ulp of
-/// 208 at tick 22. Before S64 it parted at tick 1, by 0.00086.
-const SAVE_STATE_POSITION_AGREES_THROUGH: u64 = 21;
+/// 208 at tick 22 at S64 (agreeing through 41 once main's later commits came in). Before S64 it parted at
+/// tick 1, by 0.00086.
+const SAVE_STATE_POSITION_AGREES_THROUGH: u64 = 41;
 
 /// **The acceptance run's first ticks, started from the save state's whole bike** — the chassis'
 /// integrator, both wheels ([`SaveState::seed_wheel`]), the air state, the drivetrain and the
