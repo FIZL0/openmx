@@ -1755,11 +1755,11 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     let rows = m.modifier_rows();
-    assert_eq!(rows.len(), 1 + Knob::ALL.len() + 4, "{rows:?}");
+    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 4, "{rows:?}");
     assert!(rows.last().unwrap().contains("Reset To Original"), "{rows:?}");
 
     // Gravity, a world modifier, down twice: 80 for everyone.
-    let gravity = 1 + Knob::ALL.iter().position(|k| *k == Knob::Gravity).unwrap();
+    let gravity = 1 + Knob::MENU.iter().position(|k| *k == Knob::Gravity).unwrap();
     for _ in 0..gravity {
         tap(&mut m, &mut r, Control::Down);
     }
@@ -1784,7 +1784,7 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
 
     // Saved as "Low", on the keyboard: L, o, w over the first letter row's keys is long-winded, so
     // the name is typed the way the keyboard test does — through its own text.
-    let save = 1 + Knob::ALL.len() + 1;
+    let save = 1 + Knob::MENU.len() + 1;
     let preset = save - 1;
     while m.cursor(Screen::Modifiers) != save {
         tap(&mut m, &mut r, Control::Down);

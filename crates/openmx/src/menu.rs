@@ -1197,7 +1197,7 @@ const SETTINGS_MODIFIERS: usize = 12;
 /// The modifiers' screen: whose they are, every modifier, then the presets and the reset.
 const MODIFIERS_SEAT: usize = 0;
 const MODIFIERS_KNOBS: usize = 1;
-const MODIFIERS_PRESET: usize = MODIFIERS_KNOBS + game_sim::modifiers::KNOBS;
+const MODIFIERS_PRESET: usize = MODIFIERS_KNOBS + Knob::MENU.len();
 const MODIFIERS_SAVE: usize = MODIFIERS_PRESET + 1;
 const MODIFIERS_DELETE: usize = MODIFIERS_SAVE + 1;
 const MODIFIERS_RESET: usize = MODIFIERS_DELETE + 1;
@@ -1982,7 +1982,7 @@ impl Menu {
                 self.mod_seat = if p.left { (self.mod_seat + n - 1) % n } else { (self.mod_seat + 1) % n };
             }
             _ if at < MODIFIERS_PRESET => {
-                let knob = Knob::ALL[at - MODIFIERS_KNOBS];
+                let knob = Knob::MENU[at - MODIFIERS_KNOBS];
                 let now = self.knob_value(knob);
                 let step = game_sim::modifiers::STEP;
                 let to = match (p.left, p.right) {
@@ -2051,7 +2051,7 @@ impl Menu {
             s => format!("{s}P"),
         };
         let mut rows = vec![format!("Player  {seat}")];
-        for knob in Knob::ALL {
+        for knob in Knob::MENU {
             let mixed = knob.per_seat()
                 && self.mod_seat == 0
                 && (1..SEATS_MAX).any(|s| self.settings.modifiers.get(s, knob) != self.settings.modifiers.get(0, knob));
@@ -2077,7 +2077,7 @@ impl Menu {
         let at = self.cursor(Screen::Modifiers);
         match at {
             _ if (MODIFIERS_KNOBS..MODIFIERS_PRESET).contains(&at) => {
-                let knob = Knob::ALL[at - MODIFIERS_KNOBS];
+                let knob = Knob::MENU[at - MODIFIERS_KNOBS];
                 let whose = if knob.per_seat() { "each player's" } else { "everyone's" };
                 format!("{} for {whose} ride, from the next one", knob.blurb())
             }
