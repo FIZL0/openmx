@@ -17,14 +17,12 @@
 //! (`AGENT.md`: "Cameras, cutaways, effects … match by eye. Just check they do not touch the
 //! simulation's RNG or its timing") this did not have to be bit-exact.
 //!
-//! It is anyway, with one exception. Every number here goes through [`ps2_float`], in the original's
-//! own operation order, because the camera's arithmetic turned out to be plain FPU and VU0 work that
-//! is no harder to port exactly than approximately. The exception is [`CurveTable::build`]: the game
-//! builds its sine table with the SDK's *double*-precision `cos` and `sin` and rounds the results to
-//! `f32`, and this crate has no double-precision transcendentals, so the entries here come from
-//! [`ps2_float::libm`]'s single-precision ones instead and can differ from the disc's in the last bit
-//! or two. [`CurveTable::from_entries`] exists so that a proof can hand the port the game's own table
-//! and compare the rest bit for bit, which is how `tests/camera.rs` does it.
+//! It is anyway. Every number here goes through [`ps2_float`], in the original's own operation order,
+//! because the camera's arithmetic turned out to be plain FPU and VU0 work that is no harder to port
+//! exactly than approximately. [`CurveTable::build`] too: the game builds its sine table with the SDK's
+//! *double*-precision `cos` and `sin` and chops the results to `f32`, and [`crate::air`] ports those
+//! (S104; the biplane's autopilot reads this table, so it has to be the disc's). [`CurveTable::from_entries`]
+//! still lets a proof hand the port the game's own table out of a RAM image.
 //!
 //! # The frame, in the original's order
 //!
@@ -68,7 +66,7 @@
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
-use crate::air::AcosTable;
+use crate::air::{self, AcosTable};
 use crate::phy::Ini;
 use ps2_float::fpu::Acc;
 use ps2_float::{Dest, F, Vf, fpu, libm, vu};
@@ -239,8 +237,8 @@ const CURVE_INV_STEP: f32 = 954.77045;
 /// f cos a`, with `f` the leftover angle. That is what makes a 6000-entry table smooth enough to aim
 /// a camera with.
 ///
-/// [`CurveTable::build`] is the one thing in this module that is not bit-exact — see the module's own
-/// docs — and [`CurveTable::from_entries`] is the way round it for a proof.
+/// [`CurveTable::build`] is the game's builder to the bit (S104); [`CurveTable::from_entries`] hands a
+/// proof the table out of a RAM image instead.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CurveTable(Box<[[f32; 2]]>);
 
@@ -249,14 +247,15 @@ impl CurveTable {
     /// and then the cosine and sine of that.
     ///
     /// The game's own builder widens that angle to double, calls the SDK's double-precision `cos` and
-    /// `sin`, and rounds back; this crate has no double transcendentals, so these entries come from
-    /// [`ps2_float::libm`]'s single-precision ones and can sit a bit or two away from the disc's.
-    /// Nothing in the simulation reads this table, so that difference stays in the picture.
+    /// `sin` (fdlibm's, [`crate::air`]'s `cos_sin`), and narrows back by chopping, as the arc cosine
+    /// table does; so every entry is the disc's to the bit (S104: single-precision ones put two
+    /// entries in three a bit off, and the biplane's turn term reads them).
     pub fn build() -> CurveTable {
         let mut t = vec![[0.0f32; 2]; CURVE_ENTRIES + 1];
         for (i, e) in t.iter_mut().take(CURVE_ENTRIES).enumerate() {
             let a = F(fpu::from_i32(i as i32)) * CURVE_STEP - PI;
-            *e = [libm::cosf(a.0), libm::sinf(a.0)];
+            let (cos, sin) = air::cos_sin(air::widen(a.0));
+            *e = [air::narrow(cos), air::narrow(sin)];
         }
         t[CURVE_ENTRIES] = t[CURVE_ENTRIES - 1];
         CurveTable(t.into_boxed_slice())
