@@ -65,6 +65,14 @@ pub trait World {
         0
     }
 
+    /// The surface the wheel's ray leaves in the wheel (S89): the original's heightfield query writes
+    /// it at the end of every pass of the ray, hit or miss, from the terrain alone. `None` where the
+    /// query writes nothing, so the wheel keeps what it had. A world with no terrain of its own
+    /// answers [`World::surface`].
+    fn wheel_surface(&mut self, at: Vf) -> Option<u8> {
+        Some(self.surface(at))
+    }
+
     /// Sweep a bundle of probes against everything solid, in world space. `true` when anything was
     /// looked at — the record says what was hit.
     fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool;
@@ -318,6 +326,10 @@ impl World for Ground<'_> {
         self.at(F(at.x()), F(at.z())).map_or(0, |hit| hit.surface)
     }
 
+    fn wheel_surface(&mut self, at: Vf) -> Option<u8> {
+        crate::contact_search::nearest_surface(&self.field(), at)
+    }
+
     fn area(&self) -> Option<crate::biplane::Area> {
         Some(self.area)
     }
@@ -497,6 +509,10 @@ impl World for Place<'_> {
 
     fn surface(&mut self, at: Vf) -> u8 {
         self.ground.surface(at)
+    }
+
+    fn wheel_surface(&mut self, at: Vf) -> Option<u8> {
+        self.ground.wheel_surface(at)
     }
 
     fn area(&self) -> Option<crate::biplane::Area> {
