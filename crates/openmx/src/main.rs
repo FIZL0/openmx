@@ -402,6 +402,10 @@ impl Seat {
             {
                 println!("marker: {}", marker_line(did));
             }
+            // The plane's own set (P107), on the d-pad the plane no longer reads.
+            if let Some(did) = self.garage.markers(&mut self.sim, me, spots, &[], place) {
+                println!("marker: {}", marker_line(did));
+            }
         }
         self.hands = controls;
     }
@@ -3254,7 +3258,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut kept_markers: Vec<Option<saved_markers::Kept>> = vec![None; world.seats.len()];
     if let Some(head) = &head {
         if let Some(m) = head.tape.start_markers().map_err(|e| format!("the tape's markers: {e}"))? {
-            println!("markers: the tape's, {} placed", m.slots.iter().flatten().count());
+            println!("markers: the tape's, {} placed", m.placed());
             world.seats[0].sim.markers = m;
         }
     } else if online.is_some() {
@@ -3264,18 +3268,23 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         for (i, seat) in world.seats.iter_mut().enumerate() {
             let bike = bike_words.get(i).unwrap_or(&bike_words[0]);
             seat.sim.markers = saved_markers::load(&markers_dir, &args.track, &profile_of(i), bike);
-            let placed = seat.sim.markers.slots.iter().flatten().count();
+            let placed = seat.sim.markers.placed();
             if placed > 0 {
                 println!("markers: {} on {}: {placed} kept", profile_of(i), args.track);
             }
             kept_markers[i] = Some(saved_markers::Kept::new(&args.track, &profile_of(i), bike, &seat.sim.markers));
         }
     }
-    // A tape carries the markers its first player started with, and replays on them.
+    // Each seat shows the set of the machine it starts on (P107): a ride may start in the plane.
+    for seat in &mut world.seats {
+        let up = if seat.sim.plane.is_some() { Kind::Biplane } else { seat.garage.up };
+        seat.sim.markers.up(vehicle::markers_of(up));
+    }
+    // A tape carries the markers its first player started with, every machine's, and replays on them.
     if let Some(tape) = &mut world.tape
-        && !world.seats[0].sim.markers.slots.iter().all(Option::is_none)
+        && world.seats[0].sim.markers.any()
     {
-        tape.tape.markers = world.seats[0].sim.markers.to_file(&bike_words[0]);
+        tape.tape.markers = world.seats[0].sim.markers.to_files(&saved_markers::names(&bike_words[0]));
     }
     // The pause offers "Open to Online" (N10) on a local freeride of one player on the bike set the
     // disc's own lookup gives (what a joiner's machine loads for it), outside any lobby.
@@ -3406,7 +3415,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
         // The recording's first player cleared their markers from the pause before this frame (P99).
-        if head.as_ref().is_some_and(Head::cleared) && !world.seats[0].sim.markers.slots.iter().all(Option::is_none) {
+        if head.as_ref().is_some_and(Head::cleared) && world.seats[0].sim.markers.any() {
             world.seats[0].sim.markers.clear();
             if let Some(tape) = &mut world.tape {
                 tape.markers_cleared();
@@ -4306,15 +4315,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 .enumerate()
                 .map(|(v, (seat, rig))| {
                     let local = online.is_none() || v == 0;
-                    let ghosts: Vec<Actor> = seat
-                        .sim
-                        .markers
-                        .slots
-                        .iter()
-                        .flatten()
-                        .filter(|_| local && seat.garage.up == Kind::Bike)
+                    // The machine up's set only (P107): a plane's markers are faint planes.
+                    let marks = seat.sim.markers.slots.iter().flatten().filter(|_| local);
+                    let mut ghosts: Vec<Actor> = marks
+                        .clone()
+                        .filter_map(|m| m.ride())
+                        .filter(|_| seat.garage.up == Kind::Bike)
                         .map(|ride| Actor { model: rig.bike_model.as_str(), at: chassis_at(ride), pose: None, lod_from: None, alpha: MARKER_ALPHA })
                         .collect();
+                    let livery = seat.garage.plane.as_ref().map_or(0, |p| p.livery);
+                    for f in marks.filter_map(|m| m.flight()).filter(|_| seat.garage.up == Kind::Biplane) {
+                        let plane = vehicle::marked_plane(f, livery);
+                        let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
+                        for (model, at) in drawn.turned_parts(plane_at(&plane), plane.prop_angle().map(|a| a.0)) {
+                            ghosts.push(Actor { model, at, pose: None, lod_from: None, alpha: MARKER_ALPHA });
+                        }
+                    }
                     if ghosts.is_empty() { Vec::new() } else { actors.iter().cloned().chain(ghosts).collect() }
                 })
                 .collect();
