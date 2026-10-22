@@ -170,3 +170,11 @@ pub fn entry_spin(rng: &mut Rng, w: f32) -> Vf {
 pub fn unwreck(ch: &mut Chassis) {
     ch.max_speed_sq = RIDING_MAX_SPEED * RIDING_MAX_SPEED;
 }
+
+/// [`unwreck`] on a whole bike, the one the rider's put-backs call: the riding limit it sets is the
+/// ride's own ([`crate::ride::Ride::riding_max_speed_sq`]) — [`RIDING_MAX_SPEED`] squared on the
+/// original's bike, and the raised one on a bike [`crate::modifiers::Knob::BikeSpeed`] made faster
+/// (P101), which the stock limit would otherwise cut back to 135 ft/s at its first wreck.
+pub fn unwreck_ride(ride: &mut crate::ride::Ride) {
+    ride.chassis.max_speed_sq = ride.riding_max_speed_sq;
+}

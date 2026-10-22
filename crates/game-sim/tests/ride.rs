@@ -359,9 +359,11 @@ fn the_walk_names_every_field_once() {
     // it): each wheel's steering axis and its tire's three slip flags. S58 moved both again (557 and
     // 2120 before it): each wheel's gyro, turn angle, the three velocities and forces the spin step
     // keeps, its contact frame and its side force per pound of load. S66 moved both (619 and 2368
-    // before it): the put-back record's point, heading and up.
+    // before it): the put-back record's point, heading and up. P101 moved the size alone (2416
+    // before it): the put-back's riding speed limit, which the modifiers set with the ride and the
+    // walk leaves out like the `.phy`; the chassis' limit it is written to is walked.
     assert_eq!(dump.fields.len(), 631, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2416, "the ride's own size");
+    assert_eq!(std::mem::size_of::<Ride>(), 2424, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");

@@ -384,7 +384,7 @@ impl Rider {
     /// down there stopped, on their heading and their up, and the rest as [`Rider::teleport`].
     pub fn teleport_to(&mut self, spot: crate::markers::Spot) {
         self.ride.place_on(spot.at, spot.forward, spot.up);
-        off_map::unwreck(&mut self.ride.chassis);
+        off_map::unwreck_ride(&mut self.ride);
         self.ride.drag_halved = false;
         self.teleported();
     }
@@ -491,7 +491,7 @@ impl Rider {
             if state.request_reset(state::Kind::Wrecked, false, sense.owner) == Some(state::Reset::Now) {
                 state.respawn();
                 ride.place_back();
-                off_map::unwreck(&mut ride.chassis);
+                off_map::unwreck_ride(ride);
                 ride.drag_halved = false;
                 *crash = None;
                 *ragdoll = None;
@@ -772,7 +772,7 @@ impl Rider {
             // was down — **where the wreck ended up**, as [`Crash::rest`] measured — and which still
             // holds the last spot ridden over for a rider put down without a wreck body under them.
             ride.place_back();
-            off_map::unwreck(&mut ride.chassis);
+            off_map::unwreck_ride(ride);
             // The vehicle's unwreck doubles a cannonball's drag back; only a throw halves it.
             ride.drag_halved = false;
             *crash = None;
@@ -801,7 +801,7 @@ impl Rider {
                 // port leaves it where the chord put it (journal 2026-10-21-s72).
                 state.respawn();
             }
-            off_map::unwreck(&mut ride.chassis);
+            off_map::unwreck_ride(ride);
             ride.drag_halved = false;
             *crash = None;
             // the same respawn as the machine's own: the body held two fills, the bones drawn once more
