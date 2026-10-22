@@ -410,6 +410,11 @@ impl Seat {
 /// How see-through a placed marker's bike is drawn for its owner (P88): faint, a fifth of solid.
 const MARKER_ALPHA: f32 = 0.2;
 
+/// The level of detail every rider's body is drawn at: the finest of its five, whatever the
+/// camera's distance. The original picks by distance, but a rider is a player's own, and thrown off
+/// the edge (S59) the camera falls far enough behind to draw the coarsest.
+const RIDER_GROUP: usize = 0;
+
 /// A marker's tick (P88) as the console says it.
 fn marker_line(did: markers::Did) -> String {
     use markers::{Did, Pick};
@@ -3667,7 +3672,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         model: model.as_str(),
                         at: bike_at,
                         pose: Some(gpu_poses.len() - 1),
-                        lod_from: Some(vector(seat.sim.rider.ride.position())),
+                        // The finest, always: a rider is the player's own, and thrown off the edge (S59)
+                        // the camera falls far enough behind to earn the coarsest group.
+                        lod_from: None,
                         alpha,
                     });
                 }
@@ -3864,23 +3871,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     _ => None,
                 };
                 if let (Some(body), Some(model), Some((bones, rigged))) = (&rig.body, &rig.body_model, &down) {
-                    let away = vector(seat.sim.rider.ride.position()).sub(camera.eye).len();
-                    let focal = camera.focal(target.height);
                     if let Some(loaded) = assets.models.get_mut(model.as_str()) {
-                        let group = loaded.model.group_for(away, loaded.radius, focal);
-                        body.skin_ragdoll_into(loaded, group, rigged, bones, bike_at);
+                        body.skin_ragdoll_into(loaded, RIDER_GROUP, rigged, bones, bike_at);
                         skinned[p] = None;
                     }
                     actor.push((model.as_str(), bike_at));
                 } else if let (Some(body), Some(model)) = (&rig.body, &rig.body_model) {
                     if body.posed {
-                        // Which of the body's five levels of detail this camera has earned, and the hands and
-                        // feet put back where the chassis wants them. Both read the camera, so the skinning
-                        // is here rather than beside the pose above.
-                        let away = vector(seat.sim.rider.ride.position()).sub(camera.eye).len();
-                        let focal = camera.focal(target.height);
+                        // The body's finest level of detail ([`RIDER_GROUP`]), and the hands and feet put
+                        // back where the chassis wants them.
                         if let Some(loaded) = assets.models.get_mut(model.as_str()) {
-                            let group = loaded.model.group_for(away, loaded.radius, focal);
+                            let group = RIDER_GROUP;
                             if skinned[p] != Some(group) {
                                 perf.time(Stage::Skinning, || body.skin_into_at(loaded, group, Some(&grips)));
                                 skinned[p] = Some(group);
