@@ -378,6 +378,13 @@ impl Flight {
     ///
     /// Not here: **what is not simulation**, the touchdown sound, the surfaces' and the pilot's animation
     ///   (S35's, the renderer's), the engine sound the prop rpm is written from, the pad's rumble.
+    ///
+    /// The step reads the pad the *last* frame's input step stored, and `pad` is stored after it
+    /// (S94): the game steps the world before the player record's input dispatch reaches the plane,
+    /// so a press is in the plane's commands on the tick it is made and in its controls on the next
+    /// (C7's capture: the first gas press is in `+0x338` a row before the throttle moves). Only while
+    /// the plane is flown: the dispatch reaches only the actor a player controls, and an unflown
+    /// plane's controls keep the pad zeroed.
     pub fn frame(&mut self, dt: F, pad: Pad, ground: &mut dyn world::World, tables: &ride::Tables) {
         self.frame_among(dt, pad, ground, tables, &[]);
     }
@@ -395,11 +402,13 @@ impl Flight {
         tables: &ride::Tables,
         bikes: &[flight_search::Bike],
     ) -> Vec<Option<u32>> {
-        self.pad = pad;
         let mesh = self.bike.clone();
         let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
         let struck = self.search(dt, ground, bikes);
         WORLD.step(dt, &mut Listeners { plane: self, ground: Ground(ground), tables, bikes });
+        if self.attitude.flown {
+            self.pad = pad;
+        }
         struck
     }
 

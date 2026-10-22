@@ -72,6 +72,8 @@ use crate::world::{Flat, World};
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
 pub struct Input {
     pub buttons: u16,
+    /// The left stick's two bytes less the centre, right and down positive, modulo 256: full right
+    /// or down (`0xff`, +128) is the one an `i8` cannot hold, and wraps to -128 (S94).
     pub stick: (i8, i8),
 }
 
@@ -404,7 +406,8 @@ impl Sim {
     /// that needs the strengths is a [`replay::PadTape`] and not a list of [`Input`]s.
     pub fn reports(input: Input) -> [Report; PADS] {
         let mut report = Report::from_buttons(input.buttons);
-        let byte = |v: i8| (i16::from(AXIS_CENTRE) + i16::from(v)).clamp(0, 255) as u8;
+        // Modulo 256, as [`Input::stick`] holds it: -128 is `0xff`, not a second `0x00`.
+        let byte = |v: i8| AXIS_CENTRE.wrapping_add(v as u8);
         report.set_axis(2, byte(input.stick.0));
         report.set_axis(3, byte(input.stick.1));
         let mut reports = [Report::missing(); PADS];
