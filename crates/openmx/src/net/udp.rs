@@ -11,7 +11,9 @@
 //! room or handshake to say, each of the sender's seats' controller preset (P79). A session cannot
 //! tick before it has heard every peer (ggrs' sync is round trips), so every machine has every
 //! seat's preset by the first tick, and builds each seat's table on it ([`Udp::presets`]), as the
-//! lobby's ride does from the room's picks (N13).
+//! lobby's ride does from the room's picks (N13). The byte's top bit ([`PLANE`]) says the seat starts
+//! the ride in the biplane (N18), which every machine puts it in before the first tick
+//! ([`Udp::planes`]), as the lobby's ride does from its picks' machine.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -23,6 +25,10 @@ pub const MAGIC: &[u8; 3] = b"omp";
 
 /// The first bytes of a datagram from a build from N7 to N14, which sent no card.
 pub const NO_CARD: &[u8; 3] = b"omx";
+
+/// A card byte's flag (N18): the seat starts the ride in the biplane. The rest of the byte is its
+/// controller preset.
+pub const PLANE: u8 = 0x80;
 
 pub struct Udp {
     sock: UdpSocket,
@@ -85,6 +91,17 @@ impl Udp {
     /// the seats `lineup` gives it — the two machines were given other `--seats` — or names a preset
     /// the original has not.
     pub fn presets(&self, lineup: &Lineup, me: &str) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.card_bytes(lineup, me)?.map(|b| b.iter().map(|&b| b & !PLANE).collect()))
+    }
+
+    /// Which seats in `lineup` start the ride in the biplane (N18, [`PLANE`]), on
+    /// [`Udp::presets`]'s terms: `None` until every peer has been heard; an empty seat is on the bike.
+    pub fn planes(&self, lineup: &Lineup, me: &str) -> Result<Option<Vec<bool>>, String> {
+        Ok(self.card_bytes(lineup, me)?.map(|b| b.iter().map(|&b| b & PLANE != 0).collect()))
+    }
+
+    /// Every seat's card byte in `lineup`, for [`Udp::presets`] and [`Udp::planes`].
+    fn card_bytes(&self, lineup: &Lineup, me: &str) -> Result<Option<Vec<u8>>, String> {
         let mut presets = vec![0u8; lineup.seats.len()];
         for p in lineup.peers() {
             let Some(card) = (if p == me { Some(&self.card) } else { self.cards.get(&p) }) else { return Ok(None) };
@@ -98,8 +115,8 @@ impl Udp {
                 ));
             }
             for (&s, &preset) in seats.iter().zip(card) {
-                if preset as usize >= game_sim::bindings::PRESETS {
-                    return Err(format!("{p} rides controller preset {preset}, which the original has not"));
+                if (preset & !PLANE) as usize >= game_sim::bindings::PRESETS {
+                    return Err(format!("{p} rides controller preset {}, which the original has not", preset & !PLANE));
                 }
                 presets[s] = preset;
             }
@@ -271,6 +288,25 @@ mod tests {
         bad.send("host", b"w");
         wait(&mut host).unwrap();
         assert!(host.presets(&lineup, "host").unwrap_err().contains("k rides controller preset"));
+    }
+
+    /// N18: a seat that starts in the biplane says so in its card byte's top bit, beside its
+    /// preset; every machine reads the same seats in the plane, and the bit is no preset.
+    #[test]
+    fn every_seat_s_starting_machine_is_known_once_every_peer_is_heard() {
+        let lineup = Lineup::parse("host,g,-,g").unwrap();
+        let mut host = Udp::bind_as(local(), vec![], "b", &[2 | PLANE]).unwrap();
+        let mut g = Udp::bind_as(local(), vec![("host".into(), host.at())], "b", &[1, PLANE]).unwrap();
+        host.meet(vec![("g".into(), g.at())]);
+        assert_eq!(host.planes(&lineup, "host"), Ok(None), "g not heard yet");
+        g.send("host", b"x");
+        wait(&mut host).unwrap();
+        host.send("g", b"y");
+        wait(&mut g).unwrap();
+        for (who, u) in [("host", &host), ("g", &g)] {
+            assert_eq!(u.planes(&lineup, who), Ok(Some(vec![true, false, false, true])), "{who}");
+            assert_eq!(u.presets(&lineup, who), Ok(Some(vec![2, 1, 0, 0])), "{who}");
+        }
     }
 
     #[test]
