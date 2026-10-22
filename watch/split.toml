@@ -1,0 +1,394 @@
+# split.toml — two riders in the original's split screen (S93), for the two-rider fixtures.
+#
+# The user's two split-screen recordings (context/recordings/splitscreen.p2m2, the long ride, and
+# splitscreen2_shortcolision.p2m2, riders colliding) are played back on a copy and captured with this
+# spec, one row per tick, by research/s93/play_capture.sh (C6's recipe with this spec):
+#
+#   export WAYLAND_DISPLAY=wayland-1 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 QT_ACCESSIBILITY=1
+#   ./kit pcsx2 start
+#   ./kit pcsx2 with -- bash research/s93/play_capture.sh PID context/recordings/splitscreen.p2m2 \
+#       3113 2444 context/capture/split/splitscreen.csv
+#   ./kit pcsx2 with -- bash research/s93/play_capture.sh PID \
+#       context/recordings/splitscreen2_shortcolision.p2m2 5765 388 \
+#       context/capture/split/splitscreen2.csv
+#
+# FIRST is the state's frame_counter + 1; N is the tape's fields / 2. crates/game-sim/tests/split.rs
+# reads both captures (game_sim::split_capture).
+#
+# The list, measured in both states' RAM (research/s93/actors.py): entries 0 and 1 are type-1 actors,
+# 2 and 3 the two ridden vehicles (type 2; player 1's first, player +0x30 = 0 / 1), 4 and 5 the two
+# bike actors (type 4), in the same player order. Both are local humans (player +0x34 = 1). The biplanes
+# the long ride spawns come later in the list; every row carries the type and player index guards, so
+# a row whose list moved under it says so.
+#
+# Each vehicle's collision record is *(vehicle+0x7d0) (S78: vtable 0x00454a00): count +0x100 (cap
+# 11), the 0x80-byte contact list at *(+0x108), +0x40..+0x4c the words a mirrored hit raises. Its own
+# side is the chassis *(vehicle+0x7a4). A row is the state after the last substep, so the list holds
+# that substep's contacts only.
+
+[watch]
+name        = "split"
+description = "two riders in split screen: both pads, both vehicles, chassis, records and bikes"
+every       = 1
+frames      = 2444
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+# --- both pads: the controls each player's input manager holds, and libpad's two halves per port ----
+# Port 1's buffers are 0x400 past port 0's (found in both states' RAM: the same idle 00 79 ff ff 7f..).
+[[array]]
+name   = "ctl0"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+[[array]]
+name   = "ctl1"
+addr   = "@pad1_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+[[field]]
+name = "pad0_a"
+addr = "@pad_buffers"
+type = "bytes:8"
+
+[[field]]
+name = "pad0_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:8"
+
+[[field]]
+name = "pad1_a"
+addr = "@pad_buffers + 0x400"
+type = "bytes:8"
+
+[[field]]
+name = "pad1_b"
+addr = "@pad_buffers + 0x480"
+type = "bytes:8"
+
+[[field]]
+name = "stamp0_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "stamp0_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+[[field]]
+name = "stamp1_a"
+addr = "@pad_buffers + 0x458"
+type = "u32"
+
+[[field]]
+name = "stamp1_b"
+addr = "@pad_buffers + 0x4d8"
+type = "u32"
+
+# --- player 1: the ridden vehicle (list entry 2), its chassis, its collision record, its bike actor (4)
+
+[[field]]
+name = "p1_type"              # +0x00: 2 = the ridden vehicle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p1_index"             # player +0x30: 0 for player 1
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p1_ctl_src"           # player +0x34: 1 = a local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "p1_wreck_reason"      # +0x748: 0 riding, else the wreck reason (7 = joust)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "p1_wreck_state"       # +0xb7c: the wrecked flag, 2 = put-back ghost
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xb7c"
+type = "u32"
+
+[[field]]
+name = "p1_on_ground"         # +0x574: either wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x574"
+type = "u32"
+
+[[field]]
+name = "p1_airborne"          # +0x57c: neither wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x57c"
+type = "u32"
+
+[[field]]
+name = "p1_joust_vel"         # +0x560: the velocity a joust copies in before the wreck
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x560"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_centre"         # chassis +0x60: its centre
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_force"          # chassis +0x130: spring + friction forces
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x130"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_moment"         # chassis +0x140: their moment
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x140"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_shock"          # chassis +0x170: impulse shock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x170"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_twist"          # chassis +0x180: impulse twist
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x180"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_vel"            # chassis +0x260: velocity
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_rates"          # chassis +0x290: angular rates
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x290"
+type = "f32x3"
+
+[[field]]
+name = "p1_rec_count"         # record +0x100: contacts in the list (cap 11)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "p1_rec_struck"        # record +0x40..+0x4c: raised when another record mirrors a hit in
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x40"
+type = "bytes:16"
+
+[[array]]
+name   = "p1_c"                   # the record's contact list: *(record+0x108), 0x80-byte entries
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x108 -> 0x0"
+count  = 11
+stride = 0x80
+
+[[array.field]]
+name = "kind"                     # +0x00: 0 own ray, 1 mirrored in by the other record
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "end"                      # +0x20: the ray's end in model space; y > 6 is the head ray
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"                   # +0x30
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"                    # +0x40
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "other"                    # +0x74: the other side's collision record, 0 = scenery
+off  = 0x74
+type = "u32"
+
+
+[[field]]
+name = "p1_bike_type"         # +0x00: 4 = a bike actor
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p1_bike_player"       # its player record's index
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p1_bike_vel"          # +0x130: velocity (0.8 of the body's)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x3"
+
+[[field]]
+name = "p1_bike_xform"        # +0x180: world transform, row 3 the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+
+# --- player 2: the ridden vehicle (list entry 3), its chassis, its collision record, its bike actor (5)
+
+[[field]]
+name = "p2_type"              # +0x00: 2 = the ridden vehicle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p2_index"             # player +0x30: 1 for player 2
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p2_ctl_src"           # player +0x34: 1 = a local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "p2_wreck_reason"      # +0x748: 0 riding, else the wreck reason (7 = joust)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "p2_wreck_state"       # +0xb7c: the wrecked flag, 2 = put-back ghost
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xb7c"
+type = "u32"
+
+[[field]]
+name = "p2_on_ground"         # +0x574: either wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x574"
+type = "u32"
+
+[[field]]
+name = "p2_airborne"          # +0x57c: neither wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x57c"
+type = "u32"
+
+[[field]]
+name = "p2_joust_vel"         # +0x560: the velocity a joust copies in before the wreck
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x560"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_centre"         # chassis +0x60: its centre
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_force"          # chassis +0x130: spring + friction forces
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x130"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_moment"         # chassis +0x140: their moment
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x140"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_shock"          # chassis +0x170: impulse shock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x170"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_twist"          # chassis +0x180: impulse twist
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x180"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_vel"            # chassis +0x260: velocity
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_rates"          # chassis +0x290: angular rates
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x290"
+type = "f32x3"
+
+[[field]]
+name = "p2_rec_count"         # record +0x100: contacts in the list (cap 11)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "p2_rec_struck"        # record +0x40..+0x4c: raised when another record mirrors a hit in
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x40"
+type = "bytes:16"
+
+[[array]]
+name   = "p2_c"                   # the record's contact list: *(record+0x108), 0x80-byte entries
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x108 -> 0x0"
+count  = 11
+stride = 0x80
+
+[[array.field]]
+name = "kind"                     # +0x00: 0 own ray, 1 mirrored in by the other record
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "end"                      # +0x20: the ray's end in model space; y > 6 is the head ray
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"                   # +0x30
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"                    # +0x40
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "other"                    # +0x74: the other side's collision record, 0 = scenery
+off  = 0x74
+type = "u32"
+
+
+[[field]]
+name = "p2_bike_type"         # +0x00: 4 = a bike actor
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p2_bike_player"       # its player record's index
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p2_bike_vel"          # +0x130: velocity (0.8 of the body's)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x3"
+
+[[field]]
+name = "p2_bike_xform"        # +0x180: world transform, row 3 the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+
