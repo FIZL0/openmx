@@ -260,6 +260,18 @@ pub fn spawn_marked(first: &Sim, spawn: &[u8], markers: markers::Markers) -> Res
     Ok(seat_bytes(&sim))
 }
 
+/// A joiner's seat that starts in the biplane (N19): `spawn` ([`seat_bytes`] of where the ride
+/// starts, or [`spawn_marked`]'s) decoded onto `first`'s constants with a copy of the ride's plane
+/// `template` ([`plane_on`]) standing in `bay` in its [`Sim::plane`] ([`vehicle::start_lane`], N18's
+/// start), in [`seat_bytes`] again, for [`spawn_on`]. The state every machine is sent at the join
+/// carries the flight, so every machine seats the joiner flying from the same place.
+pub fn spawn_flying(first: &Sim, spawn: &[u8], template: &Flight, bay: vehicle::Spawn) -> Result<Vec<u8>, String> {
+    let mut sim = first.clone();
+    from_seat_bytes(&mut sim, spawn)?;
+    vehicle::start_lane(template, bay, &mut sim);
+    Ok(seat_bytes(&sim))
+}
+
 /// Which controller preset a seat's bike is read through: the one whose table on pad 0 (and the
 /// shipped one on pad 1, which no online seat reads) is the seat's.
 pub fn preset(sim: &Sim) -> Option<usize> {
