@@ -424,6 +424,7 @@ use game_sim::contact::{Collider, Mover, Node, Other, Side, Vehicle, Weighed};
 use game_sim::ragdoll_contact::{Against, Contact, Scene, Sphere, moving};
 use game_sim::rider_anim::Mode;
 use ps2_float::F;
+use game_sim::ragdoll_scene::{BikeSearch, Cells};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -1540,4 +1541,448 @@ fn the_port_replays_the_wrecks_through_the_bike() {
     // were with the still scenery instead, the port parts at front's 2611.
     assert!(went.ticks >= 2600 && exact >= 2000 && went.entries == 4 && went.settles == 5 && went.settled > 2500, "{went:?}, {exact} exact");
     assert!(hits >= 11, "{hits} ticks with a moving hit");
+}
+
+// --- S105: the bones' spheres against the wreck bike's mesh ----------------------------------------
+
+/// `wreckbikef.col` off the disc, as the shell loads it, or `None` (skipped) without a disc.
+fn wreck_bike_mesh() -> Option<game_sim::ragdoll_scene::Bike> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let names: Vec<String> =
+        disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
+    let col = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbikef.col").ok()));
+    Some(game_sim::ragdoll_scene::Bike::parse(&col.expect("an archive carries wreckbikef.col")).expect("the file reads as a mesh"))
+}
+
+/// A quad as it lies in RAM, nothing flushed.
+fn raw_quad(ee: &Ee, a: u32) -> Vf {
+    Vf([0, 4, 8, 12].map(|k| f32::from_bits(ee.u32_at(a + k))))
+}
+
+/// The wreck bike's collidable (the request's `+0x1ac`) and its frame (`+0x120`, rows then origin).
+fn bike_collidable(ee: &Ee) -> (u32, game_sim::contact::Node) {
+    let b = ee.u32_at(ee.u32_at(ACTOR + 0x488) + 0x1ac);
+    let frame = game_sim::contact::Node { rows: [0, 1, 2].map(|k| raw_quad(ee, b + 0x120 + 0x10 * k)), origin: raw_quad(ee, b + 0x150) };
+    (b, frame)
+}
+
+/// **The port's mesh is the one the original tests against** (S105): `wreckbikef.col` as the port
+/// reads it, every node (children, centre, half extent), every triangle (corners, distance, the
+/// normal in the loader's 16-bit form) and every vertex, equal to the wreck bike collidable's
+/// arrays in RAM word for word.
+#[test]
+fn the_wreck_bike_mesh_is_the_ones_in_ram() {
+    let Some(bike) = wreck_bike_mesh() else { return };
+    let Some(ee) = state_in("s62", &Wreck { name: "front", frame: 2603 }) else { return };
+    let (b, _) = bike_collidable(&ee);
+    assert_eq!(ee.u32_at(b + 0x68), 0, "the wreck bike's collidable is a mesh");
+    let (nodes, triangles, vertices) = (ee.u32_at(b + 0x234), ee.u32_at(b + 0x238), ee.u32_at(b + 0x220));
+    assert_eq!(ee.u32_at(b + 0x228), 0, "wide vertices");
+    let m = &bike.mesh;
+    for (i, n) in m.nodes.iter().enumerate() {
+        let at = nodes + 0x24 * i as u32;
+        assert_eq!([ee.u16_at(at + 8), ee.u16_at(at + 10)], n.children, "node {i}'s children");
+        for k in 0..3 {
+            assert_eq!(ee.u32_at(at + 0xc + 4 * k as u32), n.centre[k].0.to_bits(), "node {i}'s centre");
+            assert_eq!(ee.u32_at(at + 0x18 + 4 * k as u32), n.half_extent[k].0.to_bits(), "node {i}'s half extent");
+        }
+    }
+    for (i, (t, packed)) in m.triangles.iter().zip(&bike.normals).enumerate() {
+        let at = triangles + 0x14 * i as u32;
+        assert_eq!([0, 2, 4].map(|k| ee.u16_at(at + k)), t.vertices, "triangle {i}'s corners");
+        assert_eq!(ee.u32_at(at + 8), t.distance.0.to_bits(), "triangle {i}'s distance");
+        assert_eq!([0xc, 0xe, 0x10].map(|k| ee.u16_at(at + k) as i16), *packed, "triangle {i}'s normal");
+    }
+    let game_sim::track::Points::Wide(v) = &m.vertices else { panic!("the file's vertices are packed") };
+    for (i, p) in v.iter().enumerate() {
+        for k in 0..3 {
+            assert_eq!(ee.u32_at(vertices + 12 * i as u32 + 4 * k as u32), p[k].0.to_bits(), "vertex {i}");
+        }
+    }
+    eprintln!("{} nodes, {} triangles, {} vertices", m.nodes.len(), m.triangles.len(), v.len());
+}
+
+/// The port's answer for a sphere at `centre` of `radius` against the bike in `frame`, as the
+/// record's world contact, and the original's after its pair ran: `(point, normal)` bits.
+type Answer = Option<([u32; 4], [u32; 4])>;
+
+fn ports_answer(bike: &game_sim::ragdoll_scene::Bike, frame: &game_sim::contact::Node, centre: Vf, radius: f32) -> Answer {
+    bike.touch(frame, centre, ps2_float::F(radius)).map(|t| (bits(t.world.0), bits(t.world.1)))
+}
+
+/// **The sphere test answers as the original's, over generated spheres** (S105): in front's 2603
+/// state, 20,000 spheres stood near the wreck bike (round a random vertex, a random way off, radii
+/// from a tenth to a metre and the bones' own three), each through the original's pair on a bone's
+/// sphere collider with an emptied record, and through the port: hit or not, the plane distance,
+/// and the contact's point and normal in the world, bit for bit.
+#[test]
+fn the_sphere_test_answers_as_the_originals() {
+    let Some(bike) = wreck_bike_mesh() else { return };
+    let Some(mut ee) = state_in("s62", &Wreck { name: "front", frame: 2603 }) else { return };
+    let (b, frame) = bike_collidable(&ee);
+    let sphere = ee.u32_at(collision(&ee, 0) + coll_at::SPHERE);
+    let (clear, pair) = (addr("sphere_collider_clear").unwrap(), addr("sphere_collider_pair").unwrap());
+    let game_sim::track::Points::Wide(v) = &bike.mesh.vertices else { panic!("packed") };
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 40) as f32) / (1u64 << 24) as f32
+    };
+    let mut hits = 0;
+    for i in 0..20_000 {
+        let p = frame.place(Vf::new(v[i % v.len()][0].0, v[i % v.len()][1].0, v[i % v.len()][2].0, 1.0));
+        let radius = match i % 5 {
+            0 => 0.4f32,
+            1 => 0.75,
+            2 => 0.5,
+            _ => 0.1 + 0.9 * next(),
+        };
+        let off = Vf::new(next() - 0.5, next() - 0.5, next() - 0.5, 0.0);
+        let reach = 4.0 * radius * next();
+        let centre = Vf::new(p.x() + off.x() * reach, p.y() + off.y() * reach, p.z() + off.z() * reach, 1.0);
+        for at in [0x40, 0x120] {
+            ee.write(sphere + at, 16, u128::from_le_bytes(bytemuck_quad(centre)));
+        }
+        ee.set_f32(sphere + 0x170, radius);
+        ee.set_f32(sphere + 0x174, ps2_float::fpu::mul(radius, radius));
+        ee.call(clear, &[u64::from(sphere)], &[], 1_000_000);
+        ee.call(pair, &[u64::from(sphere), u64::from(b)], &[], 50_000_000);
+        let rec = ee.u32_at(sphere + coll_at::RECORD);
+        let hit = ee.v0() != 0;
+        let original: Answer = hit.then(|| {
+            assert_eq!(ee.u32_at(rec + 4), 1, "{i}: one contact");
+            assert_eq!(ee.u32_at(rec + 0x90), b, "{i}: with the bike");
+            (bits(raw_quad(&ee, rec + 0x60)), bits(raw_quad(&ee, rec + 0x30)))
+        });
+        let port = ports_answer(&bike, &frame, centre, radius);
+        assert_eq!(port, original, "{i}: sphere at {centre:?} r {radius}");
+        if hit {
+            let t = bike.touch(&frame, centre, ps2_float::F(radius)).unwrap();
+            assert_eq!(t.distance.0.to_bits(), ee.u32_at(rec + 8), "{i}: the plane distance");
+            hits += 1;
+        }
+    }
+    eprintln!("{hits} of 20000 hit");
+    assert!(hits > 4000 && hits < 16000, "{hits} hits");
+}
+
+fn bytemuck_quad(v: Vf) -> [u8; 16] {
+    let mut out = [0; 16];
+    for k in 0..4 {
+        out[4 * k..4 * k + 4].copy_from_slice(&v[k].to_bits().to_le_bytes());
+    }
+    out
+}
+
+/// The bones' search as the original holds it (the one the actor's `+0x628` points at): where the
+/// first collision's sphere stands, the list's centre, bound and built flag, and the bike's place in the list.
+fn search_in_ram(ee: &Ee, b: u32, sphere: u32) -> BikeSearch {
+    let s = ee.u32_at(ACTOR + 0x628);
+    let n = ee.u32_at(s + 4);
+    let found = (0..n).map(|i| ee.u32_at(s) + 8 * i).find(|&at| ee.u32_at(at) == b);
+    BikeSearch {
+        stood: Some(raw_quad(ee, sphere + 0x40)),
+        centre: raw_quad(ee, s + 0x10),
+        bound: F(ee.f32_at(s + 0x20)),
+        built: ee.u32_at(s + 0x30) != 0,
+        listed: found.is_some(),
+        distance: found.map_or(F::ZERO, |at| F(ee.f32_at(at + 4))),
+    }
+}
+
+/// The track's tree as the port lays it over the one in RAM's box (the bones' first sphere's
+/// space's table's static structure), its origin, extent, cell and scale held equal to RAM's.
+fn cells_of_ram(ee: &Ee, sphere: u32) -> (Cells, u32) {
+    let tree = ee.u32_at(ee.u32_at(ee.u32_at(sphere + 4) + 4) + 0x34);
+    let origin = [F(ee.f32_at(tree + 0x30)), F(ee.f32_at(tree + 0x38))];
+    let extent = [F(ee.f32_at(tree + 0x48)), F(ee.f32_at(tree + 0x4c))];
+    let cells = Cells::over(origin, [origin[0] + extent[0], origin[1] + extent[1]]);
+    let t = &cells.tree;
+    assert_eq!((t.origin, t.extent, t.cell, t.scale), (origin, extent, ee.i32_at(tree + 0x58), F(ee.f32_at(tree + 0x5c))), "the tree");
+    (cells, tree)
+}
+
+/// Whether the tree under `node` holds `o` in one of its nodes' chunks of four.
+fn tree_holds(ee: &Ee, node: u32, o: u32) -> bool {
+    // Laying the capture in can leave a node pointing at what is no node in the Ee.
+    let ram = |a: u32| (0x10_0000..0x200_0000).contains(&a) && a % 4 == 0;
+    if !ram(node) {
+        return false;
+    }
+    let mut c = ee.u32_at(node + 4);
+    while c != 0 && ram(c) {
+        if (1..5).any(|k| ee.u32_at(c + 4 * k) == o) {
+            return true;
+        }
+        c = ee.u32_at(c);
+    }
+    let children = ee.u32_at(node);
+    ram(children) && (0..4).any(|i| ee.u32_at(children + 4 * i) != 0 && tree_holds(ee, ee.u32_at(children + 4 * i), o))
+}
+
+/// The paths (child indices from the root) of the nodes under `node` that hold `o`.
+fn paths_holding(ee: &Ee, node: u32, o: u32, path: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
+    let ram = |a: u32| (0x10_0000..0x200_0000).contains(&a) && a % 4 == 0;
+    if !ram(node) {
+        return;
+    }
+    let mut c = ee.u32_at(node + 4);
+    while c != 0 && ram(c) {
+        if (1..5).any(|k| ee.u32_at(c + 4 * k) == o) {
+            out.push(path.clone());
+            break;
+        }
+        c = ee.u32_at(c);
+    }
+    let children = ee.u32_at(node);
+    if ram(children) {
+        for i in 0..4 {
+            let n = ee.u32_at(children + 4 * i);
+            if n != 0 {
+                path.push(i);
+                paths_holding(ee, n, o, path, out);
+                path.pop();
+            }
+        }
+    }
+}
+
+/// The key of the nodes the Ee's tree holds the bike in, read back from their paths (child `2x + z`
+/// of the bit each level halves, `0x4000` first), as `broad_build::insert` reads a key: the least
+/// cell, a corner bit for each node, the level. `None` when no node holds it.
+fn bike_key_in_tree(ee: &Ee, b: u32, tree: u32) -> Option<u32> {
+    let mut paths = Vec::new();
+    paths_holding(ee, ee.u32_at(tree + 0x94), b, &mut Vec::new(), &mut paths);
+    let level = paths.first()?.len() as u32 - 1;
+    assert!(paths.iter().all(|p| p.len() as u32 == level + 1), "the bike's nodes are on one level: {paths:?}");
+    let cell = |p: &Vec<u32>| p.iter().enumerate().fold((0, 0), |(x, z), (l, &i)| (x | (i >> 1) * (0x4000 >> l), z | (i & 1) * (0x4000 >> l)));
+    let cells: Vec<(u32, u32)> = paths.iter().map(cell).collect();
+    let (x, z) = (cells.iter().map(|c| c.0).min()?, cells.iter().map(|c| c.1).min()?);
+    let size = 0x4000 >> level;
+    let corners = cells.iter().fold(0, |k, &(cx, cz)| {
+        assert!(cx - x <= size && cz - z <= size, "the bike's nodes are a block of four: {paths:?}");
+        k | 0x10 << (2 * u32::from(cx != x) + u32::from(cz != z))
+    });
+    Some((x << 17) & 0xfff0_0000 | (z << 5) & 0xf_ff00 | corners | level)
+}
+
+/// The bike's key in the tree as RAM holds it (its placement's `+0xc`), or `None` when it is in
+/// none of the tree's nodes.
+fn bike_key_in_ram(ee: &Ee, b: u32, tree: u32) -> Option<u32> {
+    let place = ee.u32_at(b + 4);
+    (place != 0 && tree_holds(ee, ee.u32_at(tree + 0x94), b)).then(|| ee.u32_at(place + 0xc))
+}
+
+/// **The game keeps the wreck bike in the track's tree where its sphere stands** (S105): in every
+/// one of the twenty s62 states where the bike is in the broad phase, its placement is in the
+/// track's tree, at its sphere's centre (its mesh's root box's, through its frame), under the key the
+/// port's [`Cells::key`] gives that box, and the tree holds it there. In the four late states (some 400 frames after the wreck) the bike
+/// is in no structure at all.
+#[test]
+fn the_bike_is_in_the_tree_where_its_sphere_stands() {
+    let Some(bike) = wreck_bike_mesh() else { return };
+    let states = [
+        ("back", [2477, 2478, 2479, 2877]),
+        ("front", [2602, 2603, 2604, 3002]),
+        ("front3", [2630, 2631, 2632, 2668]),
+        ("side", [2607, 2608, 2609, 3007]),
+        ("tip", [2472, 2473, 2474, 2872]),
+    ];
+    let (mut placed, mut out) = (0, 0);
+    for (name, frames) in states {
+        for frame in frames {
+            let Some(ee) = state_in("s62", &Wreck { name, frame }) else { return };
+            let (b, _) = bike_collidable(&ee);
+            let sphere = ee.u32_at(collision(&ee, 0) + coll_at::SPHERE);
+            let (cells, tree) = cells_of_ram(&ee, sphere);
+            let place = ee.u32_at(b + 4);
+            if place == 0 {
+                out += 1;
+                continue;
+            }
+            assert_eq!(ee.u32_at(place + 8), tree, "{name} {frame}: in the track's tree");
+            assert_eq!(bits(raw_quad(&ee, place + 0x10)), bits(raw_quad(&ee, b + 0x40)), "{name} {frame}: at its sphere");
+            let (_, at) = bike_collidable(&ee);
+            let m = Mat4([at.rows[0], at.rows[1], at.rows[2], at.origin]);
+            let (c, _) = game_sim::flight_search::bike_box(&bike.mesh, &m);
+            assert_eq!(c.map(|v| v.0.to_bits()), bits(raw_quad(&ee, b + 0x40)), "{name} {frame}: its box's centre is its sphere's");
+            let key = cells.key(&bike, &m);
+            assert_eq!(ee.u32_at(place + 0xc), key, "{name} {frame}: the key");
+            assert_eq!(bike_key_in_ram(&ee, b, tree), Some(key), "{name} {frame}: the tree holds it");
+            assert_eq!(bike_key_in_tree(&ee, b, tree), Some(key), "{name} {frame}: its nodes read back to its key");
+            placed += 1;
+        }
+    }
+    eprintln!("{placed} states with the bike in the tree, {out} with it in none");
+    assert_eq!((placed, out), (16, 4));
+}
+
+/// **Every sphere test of the five s62 wrecks, answered by the port** (S105): the original's update
+/// runs each wreck as S62's replay does, and the port's search for the bike ([`BikeSearch`]) is
+/// carried beside it from the wreck's first state: gathered each frame where the first sphere stood
+/// (offered the bike once the bones are off it), and after the update equal to the original's search
+/// (centre, bound, built, the bike listed and its distance), bit for bit. At each of the bones' sphere
+/// tests the port pairs the sphere with the bike exactly when the original's search does, and tests
+/// it against the mesh in the bike collidable's frame of that moment: every test the original
+/// answered with a hit is the port's hit with the same world point and normal, and every miss a miss.
+#[test]
+fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
+    let Some(bike) = wreck_bike_mesh() else { return };
+    let bike = Rc::new(bike);
+    #[derive(Default)]
+    struct Count {
+        tests: usize,
+        hits: usize,
+        paired: usize,
+        gathers: usize,
+        rebuilt: usize,
+        listed: usize,
+        /// The pair calls with the bike in the sphere test running now.
+        now: Vec<u32>,
+        wrong: Vec<String>,
+    }
+    let count = Rc::new(RefCell::new(Count::default()));
+    let update = addr("rider_body_update").unwrap();
+    for (name, start, to) in S62 {
+        let w = Wreck { name, frame: start };
+        let Some(cap) = Capture::load_in("s62", name) else { return };
+        let Some(mut ee) = state_in("s62", &w) else { return };
+        let spheres: Vec<u32> = (0..9).map(|i| ee.u32_at(collision(&ee, i) + coll_at::SPHERE)).collect();
+        let (b, _) = bike_collidable(&ee);
+        let (cells, tree) = cells_of_ram(&ee, spheres[0]);
+        let model = Rc::new(RefCell::new(search_in_ram(&ee, b, spheres[0])));
+        let mut frame = start + 1;
+        while cap.has(frame) {
+            if repeated(&cap, frame) {
+                frame += 1;
+                continue;
+            }
+            let n = if frame <= to {
+                let before = Snapshot::of(&ee);
+                let (n, _) = originals_tick(&mut ee, &cap, frame).unwrap_or_else(|d| panic!("{name}: {frame}: {:?}", &d[..d.len().min(4)]));
+                before.back(&mut ee);
+                n
+            } else {
+                0
+            };
+            lay_in(&mut ee, &cap, frame);
+            let mut r = Rng::from_state(cap.int(frame - 1, "rng_state"));
+            (0..n).for_each(|_| {
+                r.rand();
+            });
+            set_rng(&mut ee, r.state());
+            let saved = std::mem::take(&mut ee.hooks);
+            let centre = Rc::new(RefCell::new(Vf::default()));
+            let c = Rc::clone(&centre);
+            ee.hooks.insert(
+                addr("collider_set_position").unwrap(),
+                Box::new(move |ee: &mut Ee| {
+                    *c.borrow_mut() = raw_quad(ee, ee.r(5) as u32);
+                    through(ee);
+                }),
+            );
+            let (k, c) = (Rc::clone(&count), Rc::clone(&centre));
+            let spheres_at = spheres.clone();
+            ee.hooks.insert(
+                addr("sphere_collider_pair").unwrap(),
+                Box::new(move |ee: &mut Ee| {
+                    let (s, o) = (ee.r(4) as u32, ee.r(5) as u32);
+                    if spheres_at.contains(&s) && o == b {
+                        let mut k = k.borrow_mut();
+                        k.paired += 1;
+                        k.now.push(s);
+                        let rec = ee.u32_at(s + coll_at::RECORD);
+                        if bits(raw_quad(ee, s + 0x40)) != bits(*c.borrow()) || ee.u32_at(rec + 4) != 0 {
+                            k.wrong.push(format!("pair: the sphere's centre or a record not empty"));
+                        }
+                    }
+                    through(ee);
+                }),
+            );
+            let collide = |k: Rc<RefCell<Count>>, c: Rc<RefCell<Vf>>, spheres: Vec<u32>, bike: Rc<game_sim::ragdoll_scene::Bike>, model: Rc<RefCell<BikeSearch>>| {
+                Box::new(move |ee: &mut Ee| {
+                    let s = ee.r(4) as u32;
+                    if !spheres.contains(&s) {
+                        return through(ee);
+                    }
+                    let radius = f32::from_bits(ee.u32_at(s + 0x170));
+                    let reaches = model.borrow().reaches(F(ee.f32_at(s + 0x60)));
+                    let (_, at) = bike_collidable(ee);
+                    let port = if reaches { ports_answer(&bike, &at, *c.borrow(), radius) } else { None };
+                    k.borrow_mut().now.clear();
+                    through(ee);
+                    let hit = ee.u8_at(s + coll_at::FLAGS) & 0x20 != 0;
+                    let rec = ee.u32_at(s + coll_at::RECORD);
+                    let mut k = k.borrow_mut();
+                    k.tests += 1;
+                    let original: Answer = hit.then(|| {
+                        if ee.u32_at(rec + 4) != 1 || ee.u32_at(rec + 0x90) != b {
+                            k.wrong.push(format!("{} contacts, with {:#x}", ee.u32_at(rec + 4), ee.u32_at(rec + 0x90)));
+                        }
+                        (bits(raw_quad(ee, rec + 0x60)), bits(raw_quad(ee, rec + 0x30)))
+                    });
+                    k.hits += usize::from(hit);
+                    let paired = k.now.contains(&s);
+                    if paired != reaches || port != original {
+                        k.wrong.push(format!(
+                            "sphere {s:#x} at {:?} r {radius}: paired {paired}, the port's search {:?}; port {port:x?}, original {original:x?}",
+                            *c.borrow(),
+                            *model.borrow(),
+                        ));
+                    }
+                }) as Box<dyn FnMut(&mut Ee)>
+            };
+            for hook in ["collide_against_search", "probe_collide_world"] {
+                let f = collide(Rc::clone(&count), Rc::clone(&centre), spheres.clone(), Rc::clone(&bike), Rc::clone(&model));
+                ee.hooks.insert(addr(hook).unwrap(), f);
+            }
+            // The port's gather where the original's runs: once a frame in the wreck mode only (a
+            // body put back on the bike stops), round the first sphere where it stands, the bike
+            // offered once the bones are off it, and the bike where the Ee's tree holds it. That
+            // is not where the game would: the replay never runs the bike's own update, which puts
+            // it in the tree where it stands every frame, and laying in the capture's bike takes
+            // it out of its node once the game has moved it to another (front, from 2619).
+            let (m, k, cells, s0) = (Rc::clone(&model), Rc::clone(&count), cells.clone(), spheres[0]);
+            ee.hooks.insert(
+                addr("collision_search_gather").unwrap(),
+                Box::new(move |ee: &mut Ee| {
+                    let key = bike_key_in_tree(ee, b, tree);
+                    let mut m = m.borrow_mut();
+                    let before = *m;
+                    m.stood = Some(raw_quad(ee, s0 + 0x40));
+                    let reach = F(ee.f32_at(s0 + 0x60));
+                    let bike_sphere = (raw_quad(ee, b + 0x40), F(ee.f32_at(b + 0x60)));
+                    let offered = ee.u32_at(ACTOR + 0x6b0) != 0 && key.is_some();
+                    m.gather(Some(&cells), reach, bike_sphere, key.unwrap_or(0), offered);
+                    let mut k = k.borrow_mut();
+                    k.gathers += 1;
+                    k.rebuilt += usize::from(bits(m.centre) != bits(before.centre) || m.bound.0.to_bits() != before.bound.0.to_bits());
+                    k.listed += usize::from(m.listed);
+                    through(ee);
+                }),
+            );
+            ee.call(update, &[u64::from(ACTOR)], &[cap.get(frame, "dt")], 2_000_000_000);
+            ee.hooks = saved;
+            let mut theirs = search_in_ram(&ee, b, spheres[0]);
+            let ours = *model.borrow();
+            theirs.stood = ours.stood;
+            if !theirs.listed {
+                // A distance means nothing for a bike not in the list.
+                theirs.distance = ours.distance;
+            }
+            let k = count.borrow();
+            assert_eq!(format!("{ours:?}"), format!("{theirs:?}"), "{name} {frame}: the search");
+            assert!(k.wrong.is_empty(), "{name} {frame}: {:#?}", &k.wrong[..k.wrong.len().min(6)]);
+            drop(k);
+            frame += 1;
+        }
+    }
+    let k = count.borrow();
+    eprintln!(
+        "{} sphere tests, {} paired with the bike, {} hits; {} gathers, {} rebuilt, {} with the bike listed",
+        k.tests, k.paired, k.hits, k.gathers, k.rebuilt, k.listed
+    );
+    let counts = (k.tests, k.paired, k.hits, k.gathers, k.rebuilt, k.listed);
+    assert_eq!(counts, (24822, 600, 64, 367, 12, 176), "tests, paired, hits, gathers, rebuilt, listed");
 }

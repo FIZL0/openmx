@@ -2546,6 +2546,38 @@ bone_collision_impulse boot 0x001f6860 (this, arm*, shift*, kick*) the lever imp
 bone_collision_sweep boot 0x001f7400 (this) the segment pos - vel*(+0x28) .. pos; a hit is point
 #                                    rec+0x30, normal rec+0x20, and sets scene and swept
 collider_set_position boot 0x001f0940 (collider, vec4*, 0) the sphere collider stood at the bone
+# S105 — a bone's sphere against the wreck bike's mesh (crates/game-sim/src/ragdoll_scene.rs; proof in
+# tests/ragdoll_wrecks.rs). The sphere collider (class 5, vtable 0x00451cd0) pairs through its vtable
+# +0x94, a jump to sphere_collider_pair; a mesh other (class 0, vtable 0x00451b50) walks its tree with
+# the sphere at +0x40 (r +0x170, r² +0x174), the other's frame +0x120 (rows, then the origin +0x150),
+# its descriptor +0x220 (vertices, normals, packed) and +0x234 nodes / +0x238 triangles. A hit writes
+# the record's +0x20 centre, then per unclaimed contact (+0x9c+4i zero) the normal +0x30+16i and the
+# point +0x60+16i through the frame, other +0x90+4i, claimed 1.
+sphere_collider_clear boot 0x001f0970 (collider) lowers +0x116 bit 0x20, makes +0x6c the current
+#                     record and empties it
+sphere_collider_pair boot 0x001f1790 (sphere, other) 0 unless the other's +0x31 bit 0; class 1 the
+#                    hierarchy's parts, class 0 the mesh, each through sphere_mesh_test
+sphere_mesh_test boot 0x00109ed0 (centre*, word, tree*, frame*, descriptor, flag) f12 r f13 r²:
+#                stores the descriptor in the global at 0x00468a78 and falls into sphere_mesh_descend
+sphere_mesh_descend boot 0x00109490 the tree walk: a node's box test (0x00106b10), its first child,
+#                   its second only if the first said no; a leaf (flag set) is the centre into the
+#                   frame (0x00109e70), plane distance in 0..r, the foot inside (0x00109aa0) or an
+#                   edge within r (0x00109940, FPU), and the nearest kept in the record (count 1)
+sphere_box_reached boot 0x00106b10 (centre*, half*, point*, frame*) f12 r f13 r²
+sphere_triangle_inside boot 0x00109aa0 (point*, triangle*) the corner tests round the 2nd and 3rd
+sphere_edge_distance boot 0x00109940 (point*, a*, b*) -> f0; past a the square is |w|²+2w.e+|e|²
+#   the bones' search for the bike: one for all the bone colliders, a pointer at the body actor's
+#   +0x628 (list +0, count +4, centre +0x10, bound +0x20, least +0x24, extra +0x28, built +0x30,
+#   capacity +0x34 = 128), gathered by collision_search_gather (a2 = 3) at 0x0024d128 inside
+#   rider_body_mode's wreck arm only (mode 2: a body put back on the bike stops gathering), round
+#   collision 0's sphere where it stands, before the off-bike test. A candidate is listed when the
+#   filter 0x00119d70 (sphere, candidate, 0) passes (the ignore lists +0xd0/+0xd4/+0xd8 both ways,
+#   the masks +0xcc vs +0x84) and either bit 0x8 of its +0x116 is clear (the bike's is 0x14: listed
+#   wherever the query finds it) or its distance is under the bound
+#   the bike's placement: B+4 is its record (+8 the track's static tree, +0xc its key, +0x10 its
+#   centre, = B+0x40), the key that of the mesh root box through B+0x120; some 400 frames after the
+#   wreck B+4 is 0 and B+0x30 0xff, out of the broad phase. 0x0011aed0 is what takes B off every bone
+#   sphere's ignore list (its slot left 0) the frame +0x6b0 is set
 bike_box_solve boot 0x001f5b40 (this) the type-4 constraint's solve (vtable 0x00451dd0 +0x18), the
 #                             rider body actor's +0x5f8 on main bone 0 (+0x9c, the body). +0x4 on;
 #                             +0x14 another actor's transform (0 live; not ported). With +0x60 frame

@@ -1906,10 +1906,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let mut kit = game_sim::ragdoll_ride::Kit::new(rider_file, doll.rig.clone());
             // The wreck bike's collision sphere, which the bones are off the bike past (S65). One
             // file on the disc, looked for by suffix like the wreck bike's own.
-            kit.bike = archives
-                .iter()
-                .find_map(|a| a.read_suffix("wreckbikef.col").ok())
-                .and_then(|col| game_sim::ragdoll_ride::bike_sphere(&col));
+            let col = archives.iter().find_map(|a| a.read_suffix("wreckbikef.col").ok());
+            kit.bike = col.as_deref().and_then(game_sim::ragdoll_ride::bike_sphere);
+            // The same file's mesh, which the bones' spheres hit (S105).
+            kit.bike_mesh = col.as_deref().and_then(game_sim::ragdoll_scene::Bike::parse).map(Arc::new);
             Some(Arc::new(kit))
         }
         _ => None,
