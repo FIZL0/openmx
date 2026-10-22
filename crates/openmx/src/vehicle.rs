@@ -49,6 +49,7 @@ use game_sim::flight::{self, Flight};
 use game_sim::phy::Ini;
 use game_sim::ride::Controls;
 use game_sim::rider;
+use game_sim::markers::Spot;
 use game_sim::world::World;
 use ps2_float::{F, Vf};
 
@@ -599,6 +600,17 @@ fn ground_under(world: &mut dyn World, at: Vf) -> Option<f32> {
     (on.y() > NO_GROUND).then_some(on.y())
 }
 
+/// Where the bike stands when it is put under `plane` (P102's switch, P104's marker): on the ground
+/// under it, upright, along its heading flattened — the bike's own while the plane points straight
+/// up or down — or `None` with no ground there.
+fn under(plane: &Plane, sim: &Sim, world: &mut dyn World) -> Option<Spot> {
+    let ground = ground_under(world, plane.at)?;
+    let (forward, _) = sim.rider.ride.axes();
+    let forward = level(plane.facing).or_else(|| level(forward)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+    let at = Vf::new(plane.at.x(), ground, plane.at.z(), 1.0);
+    Some(Spot { at, forward, up: Vf::new(0.0, 1.0, 0.0, 0.0) })
+}
+
 /// The bike's ghost after a put-back (P57): the rider's own since S63, which moved it into the
 /// simulation when it started to decide who passes through whom. The garage's part is only that a
 /// bike the plane has the controller from is not updated, and so neither is its ghost.
@@ -643,7 +655,7 @@ impl Garage {
         match to {
             Kind::Biplane => {
                 let plane = self.plane.as_mut().ok_or("this track's machine.txt parks no biplane")?;
-                let spot = game_sim::markers::Spot::of(&sim.rider);
+                let spot = Spot::of(&sim.rider);
                 let ground = ground_under(world, spot.at).ok_or("there is no ground under the bike to land the plane on")?;
                 let bay_ground = ground_under(world, plane.bay.at).unwrap_or(plane.bay.at.y());
                 let facing = level(spot.forward).or_else(|| level(plane.bay.facing)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
@@ -655,15 +667,27 @@ impl Garage {
             Kind::Bike => {
                 // A plane switch only ever starts from a garage with a plane.
                 let plane = self.plane.as_ref().ok_or("there is no plane to leave")?;
-                let ground = ground_under(world, plane.at).ok_or("there is no ground under the plane to stand the bike on")?;
-                let (forward, _) = sim.rider.ride.axes();
-                let forward = level(plane.facing).or_else(|| level(forward)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
-                let at = Vf::new(plane.at.x(), ground, plane.at.z(), 1.0);
-                sim.rider.teleport_to(game_sim::markers::Spot { at, forward, up: Vf::new(0.0, 1.0, 0.0, 0.0) });
+                let spot = under(plane, sim, world).ok_or("there is no ground under the plane to stand the bike on")?;
+                sim.rider.teleport_to(spot);
             }
         }
         self.up = to;
         Ok(to)
+    }
+
+    /// **Where the player is**, for a marker's Up onto them (P104): with the bike up, the bike's
+    /// spot ([`Spot::of`], its put-back spot while they are down); with the plane up, where the
+    /// switch back to the bike would stand it — on the ground under the plane, upright, along its
+    /// flattened heading — so a rider ridden to a flying player lands under them rather than at the
+    /// bike they left. With no ground under the plane, the plane's own spot, which the bike falls
+    /// from.
+    pub fn spot(&self, sim: &Sim, world: &mut dyn World) -> Spot {
+        match (self.up, &self.plane) {
+            (Kind::Biplane, Some(plane)) => {
+                under(plane, sim, world).unwrap_or(Spot { at: plane.at, forward: plane.facing, up: plane.up })
+            }
+            _ => Spot::of(&sim.rider),
+        }
     }
 
     /// The plane where it is drawn, if it is drawn at all: while the player flies it, and in its bay
@@ -775,6 +799,33 @@ mod tests {
         assert!(g.switch(Kind::Biplane, &mut sim, &mut floor).is_err());
         assert_eq!(g.up, Kind::Bike);
         assert_eq!(g.machines(), vec![Kind::Bike]);
+    }
+
+    #[test]
+    fn a_flying_players_spot_is_under_their_plane_not_at_the_bike_they_left() {
+        use game_sim::world::Flat;
+        let bay = Spawn::biplane(MACHINES.as_bytes(), 0).unwrap();
+        let mut sim = Sim::new(0);
+        let mut floor = Flat::default();
+        let mut g = Garage::new(Kind::Bike, Some(Plane::parked(bay))).unwrap();
+        assert_eq!(g.spot(&sim, &mut floor), Spot::of(&sim.rider), "on the bike, the bike's spot");
+
+        let bike = sim.rider.ride.position();
+        g.switch(Kind::Biplane, &mut sim, &mut floor).unwrap();
+        let plane = g.plane.as_mut().unwrap();
+        plane.at = Vf::new(-30.0, 400.0, 70.0, 1.0);
+        plane.facing = Vf::new(0.0, 0.6, -0.8, 0.0);
+        let spot = g.spot(&sim, &mut floor);
+        assert_eq!((spot.at.x(), spot.at.y(), spot.at.z()), (-30.0, 0.0, 70.0), "on the floor under the plane");
+        assert!(spot.forward.z() + 1.0 < 1e-5 && spot.forward.y() == 0.0, "{:?}", spot.forward);
+        assert_eq!((spot.up.x(), spot.up.y(), spot.up.z()), (0.0, 1.0, 0.0));
+        assert_ne!(spot.at.x(), bike.x(), "not where the bike was left");
+
+        // A rider ridden there by a marker's Up lands where the switch back would stand the bike.
+        let mut other = Sim::new(0);
+        other.rider.teleport_to(spot);
+        g.switch(Kind::Bike, &mut sim, &mut floor).unwrap();
+        assert_eq!(other.rider.ride.position(), sim.rider.ride.position());
     }
 
     /// Two of each, as the disc's files have them, with the heights of this file's own.
