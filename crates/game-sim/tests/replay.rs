@@ -5559,23 +5559,28 @@ fn nearest_opponent(
 // plane's lanes in place of the bike's: a fixture out of the capture, seeded from its first row, ridden
 // over the ground it was flown over, against a ratchet of its own.
 //
-// The ratchet is 0, and S41 left it there with the frame proved. The capture's first row is one plane
+// S41 left the ratchet at 0 with the frame proved. The capture's first row is one plane
 // frame stale ([`past_the_first_row`]), so the run starts on the second, seeded off C7's save state
 // stepped there ([`off_the_save_state`], [`onto_the_row`]), over the original's own ground query
 // ([`TheOriginalsGround`]). Over that ground the port's [`Flight::frame`](game_sim::flight::Flight::frame)
 // is the game's `dynamics_world_step` word for word for a second
-// ([`the_plane_flies_frame_for_frame_like_the_original`]), yet the run parts at tick 1, a few ulp of
-// `body.vel`, because the game's frame is more than its world step: the plane's collision search
-// (the record at the plane's `+0x170`) is not in the port, and that is S48's. Over the port's own
-// ground ([`Ground::at`], one ulp low under the plane) it parts at tick 1 as well; the run prints both.
+// ([`the_plane_flies_frame_for_frame_like_the_original`]), yet the run parted at tick 1, a few ulp of
+// `body.vel`, because the game's frame is more than its world step: the plane's collision object
+// (the record at the plane's `+0x170`) searches and resolves too. S48 ported it, and over the
+// original's ground with free06's terrain and meshes for the search ([`WithTheTrack`]) every lane
+// agrees through tick 22. Tick 23 is the human's first press of the gas, and every lane parts there
+// at once, with no contact or sweep in the port's search before it: the press, not the collision.
+// Over the port's own ground ([`Ground::at`], one ulp low under the plane) it parts at tick 1; the
+// run prints both.
 
 /// The capture's file name in [`acceptance_dirs`] — C7's playback of `biplane.p2m2`.
 const BIPLANE_ACCEPTANCE: &str = "biplane";
 
 /// **The last tick of the biplane recording the port is known to agree with the original on.** The
 /// same contract as [`ACCEPTANCE_AGREES_THROUGH`]: further prints a line asking for it to be raised,
-/// short of it fails. 0 is the start state: the capture's second row, over the save state stepped to it.
-const BIPLANE_AGREES_THROUGH: u64 = 0;
+/// short of it fails. Tick 0 is the start state: the capture's second row, over the save state stepped
+/// to it. 22 is the last tick before the human's first press of the gas (S48).
+const BIPLANE_AGREES_THROUGH: u64 = 22;
 
 /// The container of the area the plane was flown over. Not found by [`recorded_on`]: that fits a
 /// *bike's* rows, and a plane's minute is mostly air. Named instead, and checked against the plane's own
@@ -5973,6 +5978,39 @@ impl World for TheOriginalsGround {
     }
 }
 
+/// [`TheOriginalsGround`] under the wheels, with a track's terrain and meshes for the collision
+/// object's search (S48): the heightfield rays read the terrain as the terrain object does
+/// ([`Ground::field`], the reading `tests/wreck_bike.rs` holds to the game's), and the world rays the
+/// track's collision meshes ([`game_sim::flight_search`]).
+struct WithTheTrack<'a> {
+    wheels: &'a mut TheOriginalsGround,
+    track: &'a mut dyn World,
+}
+
+impl World for WithTheTrack<'_> {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.wheels.ground(at)
+    }
+    fn solid(&mut self, bundle: &game_sim::collide::Bundle, record: &mut game_sim::collide::Record) -> bool {
+        self.wheels.solid(bundle, record)
+    }
+    fn heightfield(&mut self) -> Option<Box<dyn game_sim::contact_search::Heightfield + '_>> {
+        self.track.heightfield()
+    }
+    fn collision(&mut self) -> (Option<Box<dyn game_sim::contact_search::Heightfield + '_>>, Option<&Props>) {
+        self.track.collision()
+    }
+}
+
+/// The plane's ray probe off the disc's `biplanem.col` (S48).
+fn the_planes_rays(disc: &mut Disc) -> Option<game_sim::flight_search::Rays> {
+    let bytes = disc.member("machine.res")?;
+    let res = Res::parse(&bytes).ok()?;
+    let e = by_suffix(&res, game_sim::flight_search::BIPLANE_RAYS)?;
+    let rays = game_sim::track::Rays::parse(&res.read(&bytes, e).ok()?).ok()?;
+    Some(game_sim::flight_search::Rays::of(&rays))
+}
+
 /// **What the capture's first row does not carry, off the save state of the same moment** (S41):
 /// the whole rigid body (its accumulators, last position and orientation, shock and twist), the three
 /// tires' state (the last compression the strut opens from, the last normal the probe leans toward,
@@ -6105,7 +6143,11 @@ fn the_biplane_acceptance_run() {
         return;
     };
     let Some(state) = biplane_state() else { return };
-    let Some(mut ground) = TheOriginalsGround::load() else { return };
+    let Some(mut wheels) = TheOriginalsGround::load() else { return };
+    let Some(rays) = the_planes_rays(&mut disc) else {
+        println!("no {} in this disc's machine.res: there is no plane to fly", game_sim::flight_search::BIPLANE_RAYS);
+        return;
+    };
     let full = cap;
     let first = inputs_from_capture(&full).unwrap_or_else(|e| panic!("{}: {e}", capture.display()))[0];
     let cap = past_the_first_row(full.clone());
@@ -6113,12 +6155,13 @@ fn the_biplane_acceptance_run() {
     let taken = over_free06(&full, &mut disc, |free06, named| {
         let mut start = biplane_start(&full, f.seed, &plane).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
         let flight = start.plane.as_mut().expect("biplane_start puts a plane in the ride");
+        *flight = std::mem::take(flight).with_rays(rays.clone());
         off_the_save_state(flight, &state).unwrap_or_else(|e| panic!("{BIPLANE_STATE}: {e}"));
         // Two frames to the second row, where the fixture's tick 0 is ([`past_the_first_row`]); both
         // on the first row's pad, which is idle (nothing held, the sticks centred) on the row and on
         // the second row alike.
         for _ in 0..2 {
-            start.tick_in(first, &mut ground);
+            start.tick_in(first, &mut WithTheTrack { wheels: &mut wheels, track: &mut *free06 });
         }
         let row = biplane_start(&cap, f.seed, &plane).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
         onto_the_row(start.plane.as_mut().expect("still flying"), row.plane.as_ref().expect("a plane"));
@@ -6131,6 +6174,7 @@ fn the_biplane_acceptance_run() {
             Err(d) => println!("over the port's own ground ({named}) it parts at {d}"),
         }
         println!("over the original's ground query:");
+        let mut ground = WithTheTrack { wheels: &mut wheels, track: free06 };
         acceptance_verdict_against(&f, &mut ground, BIPLANE_AGREES_THROUGH, "BIPLANE_AGREES_THROUGH");
     });
     if taken.is_none() {

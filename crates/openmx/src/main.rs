@@ -1828,6 +1828,19 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let e = res.find_suffix(phy::BIPLANE_PHY)?;
         res.read(&e.name).ok()
     });
+    // And its collision object's ray probe (S48), which is what it strikes the ground and the
+    // track's meshes with; without it the plane meets the world only with its wheels.
+    let plane_rays = machine_res.as_ref().and_then(|res| {
+        let e = res.find_suffix(game_sim::flight_search::BIPLANE_RAYS)?;
+        let bytes = res.read(&e.name).ok()?;
+        match game_sim::track::Rays::parse(&bytes) {
+            Ok(r) => Some(game_sim::flight_search::Rays::of(&r)),
+            Err(e) => {
+                eprintln!("biplane: {}: {e}", game_sim::flight_search::BIPLANE_RAYS);
+                None
+            }
+        }
+    });
     // One of each machine per player (P87): the file's two spots for the first two, beside them for
     // the rest, every second copy in the alternate livery. Only the plane is ported, so the lot's
     // other machines are counted and not stood up.
@@ -1841,6 +1854,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let mut plane = phy::Plane::read_bytes(bytes);
             mods.plane(seat, &mut plane);
             let mut flight = Flight::new(&plane);
+            if let Some(rays) = &plane_rays {
+                flight = flight.with_rays(rays.clone());
+            }
             let t = &place.terrain;
             flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
             flight
