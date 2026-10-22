@@ -4639,3 +4639,34 @@ collision_tree_build boot 0x00111ee0 (nodes out, facets out, matrix out, quadwor
 #     other +0x40 (r +0x170, r² +0x174): node test 0x00106b10, leaf 0x00105e80 (end within r, else the
 #     closest approach along the unit segment within r and inside its length); writes only +0x80 = 1.0.
 #     Not on any bike's path (no bike collidable is kind 5), so not ported.
+# --- V51: the activities' start zones in the world, read for crates/openmx/src/portal.rs. Checked by
+#     eye against PCSX2 at free09 (recording2's state: the RACE and STUNT columns from afar, the hit
+#     zone's green disc and column from inside it) ---
+asz_load                    boot 0x00326330 reads hit.dat's [Activity Start Zones] ASZCount and each
+#                                           [ASZ n] into a 0xa0-byte zone (vtable 0x4598e0)
+asz_read                    boot 0x003259b0 one [ASZ n]: Position +0x20, LookVector +0x30, Scale +0x40
+#                                           (x) / +0x48 (z), Type -> +0x78 (Hit 1, Run 2, Race 3,
+#                                           Stunt 4), HitSetID's place in [Progression HitSets] (Hit)
+#                                           or [Run HitSets] (Run) -> +0x70 (0 Race/Stunt, -1 none),
+#                                           StringID, AIDifficulty. Colours (float bits): Hit 0x6ea637,
+#                                           Run 0xff9933, Race 0x3373cc, Stunt 0x813bb5 (the radar's)
+asz_build_hit               boot 0x003256f0 the zone's hit object (+0x4c, vtable 0x459af0): +0x38
+#                                           hitzone_start_circle with its material swapped to
+#                                           hitzone_start_activity_circle (0x001a16d0), +0x3c
+#                                           hitzone_landing_cylinder, +0x30 the trigger box. Vtable
+#                                           +0x88 colours the circle at alpha 0.6, +0x94 the cylinder
+#                                           at 0.5
+asz_icon_part               boot 0x00324ff0 one icon part via 0x00325070 (model, scene add, colour
+#                                           0x001a1af0, alpha 0x001a1b20): slot 0 startzone_%d (index+1,
+#                                           Hit/Run), 1 startzone_hit/run/race/stunt, 2
+#                                           startzone_checkmark (white), 3 startzone_disk; tint, 0.6
+asz_place                   boot 0x00323220 circle at (x, 0, z) along the look vector, up (0,1,0),
+#                                           scale (sx, 1, sz), model +0xc4/+0xd4 = 50.0 (draped?);
+#                                           cylinder at y + 112.5 - 25, scale (sx-1, 225, sz-1)
+asz_icons_frame             boot 0x00325280 per frame (from 0x003266c0, the zones walked with the
+#                                           camera's +0x140 position and +0x150 facing): d the flat
+#                                           distance, h = min(d/500, 1)*75 + 15; number at y+h scale
+#                                           20, checkmark/disk y+h+30 scale 20, type word y+h+15 scale
+#                                           40, all turned to the camera's facing
+asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle/cylinder/number/word,
+#                                           bits 4|2 (done) checkmark and disk
