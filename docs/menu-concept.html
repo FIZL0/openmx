@@ -1,0 +1,643 @@
+<title>openmx Front End</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: one 16:9 PS2-style stage (80em x 45em, em = stage/80) driven like the shell; page chrome above, the rethink notes below. */
+@font-face { font-family: "OMX"; font-weight: 800; src: url(../crates/openmx/assets/fonts/MPLUSRounded1c-ExtraBold.ttf) format("truetype"); }
+@font-face { font-family: "OMX"; font-weight: 700; src: url(../crates/openmx/assets/fonts/MPLUSRounded1c-Bold.ttf) format("truetype"); }
+:root {
+  color-scheme: dark;
+  /* colour: the disc's front end */
+  --ember: #f0954a;      /* the backdrop's lit centre */
+  --rust: #8a4420;
+  --umber: #2a1408;      /* the backdrop's edges, the page */
+  --strip: rgba(18, 9, 4, .74);
+  --maroon: #8e0f17;     /* the pill */
+  --maroon-lo: #5a070c;
+  --chalk: #f5f0e8;      /* outlines, lit text */
+  --bone: #d8cfc2;       /* idle text */
+  --dust: #9c8f80;       /* captions */
+  --ink: #050302;        /* the footer band */
+  --x: #4a7be0; --o: #e0473f; --sq: #d872b8; --tri: #3cbf93;
+  /* type: our own face, M PLUS Rounded 1c, slanted where the original slants */
+  --face: "OMX", "M PLUS Rounded 1c", "Arial Rounded MT Bold", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { height: auto; }
+body { background: var(--umber); color: var(--bone); font-family: var(--face); font-weight: 700; }
+.page { max-width: 1320px; margin: 0 auto; padding-block: 20px 48px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 18px; }
+.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+.top h1 { margin: 0; font-weight: 800; font-size: 22px; color: var(--chalk); font-style: oblique 10deg; letter-spacing: .01em; }
+.top h1 b { color: #e2323c; }
+.top p { margin: 0; color: var(--dust); font-size: 13px; }
+.jump { display: flex; flex-wrap: wrap; gap: 6px; }
+.jump button { font: inherit; font-size: 13px; color: var(--bone); background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+.jump button[aria-pressed="true"] { background: var(--maroon); border-color: var(--chalk); color: var(--chalk); }
+.jump button:focus-visible, .stage:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+
+/* ---- the stage ---- */
+.frame { container-type: inline-size; width: 100%; }
+.stage { position: relative; width: 100%; aspect-ratio: 16 / 9; max-width: 100%; overflow: hidden; font-size: calc(100cqw / 80); border-radius: 6px; user-select: none; outline: none;
+  background:
+    radial-gradient(60% 75% at 52% 40%, var(--ember) 0%, #c86a2c 32%, var(--rust) 62%, var(--umber) 100%); }
+.stage::before { /* the original's ghosted MX behind everything */
+  content: "MX"; position: absolute; right: -2em; top: 3em; font-weight: 800; font-size: 26em; line-height: .8; font-style: oblique 14deg; color: rgba(255, 220, 180, .06); letter-spacing: -.05em; pointer-events: none; }
+.stage::after { /* speed streaks */
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(-14deg, transparent 0 3.2em, rgba(255,230,200,.025) 3.2em 3.5em); }
+.layer { position: absolute; inset: 0; z-index: 1; }
+.strip { position: absolute; top: 0; bottom: 4.6em; background: var(--strip); }
+.logo { position: absolute; left: 2.4em; top: 1.6em; display: flex; align-items: flex-end; gap: .1em; transform: skewX(-12deg); transform-origin: left bottom; z-index: 3; filter: drop-shadow(.25em .3em 0 rgba(0,0,0,.35)); }
+.logo .mx { font-weight: 800; font-size: 5.4em; line-height: .78; color: #d0202b; -webkit-text-stroke: .055em var(--chalk); paint-order: stroke fill; letter-spacing: -.04em; background: linear-gradient(#ee3a44, #9c0c14); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.logo .open { font-weight: 800; font-size: 2.1em; line-height: 1; color: var(--chalk); padding-bottom: .12em; text-transform: lowercase; letter-spacing: .01em; }
+.logo.small { font-size: .62em; left: 3.8em; top: 2.2em; }
+
+/* pills: ours, vector, sharp at any size */
+.list { position: absolute; display: flex; flex-direction: column; align-items: center; gap: .55em; }
+.item { position: relative; font-weight: 700; font-size: 1.7em; line-height: 1; padding: .34em .95em .4em; border-radius: 999px; color: var(--bone); text-shadow: 0 .06em 0 rgba(0,0,0,.6), 0 0 .2em rgba(0,0,0,.5); cursor: pointer; white-space: nowrap; border: .1em solid transparent; }
+.item.on { color: var(--chalk); font-style: oblique 12deg; font-weight: 800; border-color: var(--chalk);
+  background: linear-gradient(180deg, #b31a23 0%, var(--maroon) 45%, var(--maroon-lo) 100%);
+  box-shadow: inset 0 .12em 0 rgba(255,255,255,.22), inset 0 -.1em 0 rgba(0,0,0,.35), .28em .3em 0 rgba(0,0,0,.33); }
+.item.dim { opacity: .42; }
+.item small { font-size: .62em; color: var(--dust); margin-left: .5em; font-style: normal; }
+.item.on small { color: #f3c9c2; }
+
+.title { position: absolute; left: 1.45em; bottom: 1.6em; transform: skewX(-11deg); transform-origin: left bottom; font-weight: 800; font-size: 3.1em; font-style: oblique 12deg; color: var(--chalk); text-shadow: .08em .1em 0 rgba(0,0,0,.4); z-index: 3; white-space: nowrap; }
+.band { position: absolute; left: 0; right: 0; bottom: 0; height: 4.6em; background: var(--ink); z-index: 2; display: flex; align-items: center; padding-left: 5em; }
+.band .who { font-size: 1.5em; color: var(--bone); white-space: nowrap; }
+.band .who b { color: var(--chalk); font-weight: 800; }
+.hints { position: absolute; right: 0; bottom: 4.6em; height: 3.4em; padding: 0 2em 0 4em; background: var(--ink); clip-path: polygon(3em 0, 100% 0, 100% 100%, 0 100%); display: flex; align-items: center; gap: 1.6em; z-index: 2; }
+.hint { display: flex; align-items: center; gap: .45em; font-size: 1.55em; color: var(--chalk); cursor: pointer; white-space: nowrap; }
+.btn { width: 1.15em; height: 1.15em; border-radius: 50%; display: inline-grid; place-items: center; flex: none; box-shadow: inset 0 -.08em 0 rgba(0,0,0,.35); }
+.btn svg { width: 64%; height: 64%; }
+.btn.x { background: var(--x); } .btn.o { background: var(--o); } .btn.sq { background: var(--sq); } .btn.tri { background: var(--tri); }
+.shoulder { font-size: .62em; font-weight: 800; padding: .2em .55em; border-radius: .45em; background: #3a3330; color: var(--chalk); box-shadow: inset 0 -.12em 0 rgba(0,0,0,.4); }
+
+/* the context panel on the open side */
+.panel { position: absolute; z-index: 1; color: var(--chalk); }
+.panel h2 { margin: 0; font-weight: 800; font-size: 2.6em; font-style: oblique 12deg; line-height: 1.05; text-shadow: .07em .09em 0 rgba(0,0,0,.35); text-wrap: balance; }
+.panel p { margin: .6em 0 0; font-size: 1.25em; line-height: 1.4; color: #fff3e6; max-width: 26em; text-shadow: 0 .06em .2em rgba(0,0,0,.45); }
+.eyebrow { font-size: 1em; letter-spacing: .14em; text-transform: uppercase; color: #ffe0c4; opacity: .85; }
+.still { position: relative; border: .2em solid var(--chalk); border-radius: .9em; overflow: hidden; aspect-ratio: 16/9; box-shadow: .35em .4em 0 rgba(0,0,0,.33); background: #333; }
+.still svg { display: block; width: 100%; height: 100%; }
+.still .tag { position: absolute; left: .8em; bottom: .7em; font-size: 1.1em; background: rgba(0,0,0,.55); padding: .2em .7em; border-radius: 999px; }
+.chips { display: flex; flex-wrap: wrap; gap: .5em; margin-top: 1em; }
+.chip { font-size: 1.05em; padding: .3em .8em; border-radius: 999px; background: rgba(0,0,0,.42); color: var(--chalk); border: .08em solid rgba(255,255,255,.18); white-space: nowrap; }
+.chip b { color: #ffcf9e; font-weight: 800; }
+
+/* options: tabs, rows, side panel (opentennis's Settings, in this game's clothes) */
+.tabs { position: absolute; display: flex; align-items: center; gap: .3em; z-index: 2; }
+.tab { font-size: 1.3em; padding: .28em .8em .32em; border-radius: 999px; color: var(--bone); cursor: pointer; white-space: nowrap; border: .1em solid transparent; text-shadow: 0 .06em 0 rgba(0,0,0,.6); }
+.tab.on { color: var(--chalk); font-weight: 800; font-style: oblique 12deg; border-color: var(--chalk); background: linear-gradient(180deg, #b31a23, var(--maroon-lo)); box-shadow: .2em .22em 0 rgba(0,0,0,.33); }
+.tabs .shoulder { font-size: .95em; cursor: pointer; }
+.rows { position: absolute; display: flex; flex-direction: column; gap: .2em; }
+.row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 1em; height: 2.55em; padding: 0 1.1em 0 1.3em; border-radius: 999px; border: .1em solid transparent; cursor: pointer; }
+.row .k { font-size: 1.35em; color: var(--bone); white-space: nowrap; text-shadow: 0 .06em 0 rgba(0,0,0,.6); }
+.row .v { font-size: 1.3em; color: var(--chalk); display: flex; align-items: center; gap: .45em; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.row .arr { width: .7em; height: .7em; opacity: 0; cursor: pointer; }
+.row.on { border-color: var(--chalk); background: linear-gradient(180deg, #b31a23 0%, var(--maroon) 45%, var(--maroon-lo) 100%); box-shadow: inset 0 .12em 0 rgba(255,255,255,.2), .25em .27em 0 rgba(0,0,0,.33); }
+.row.on .k { color: var(--chalk); font-weight: 800; font-style: oblique 12deg; }
+.row.on .arr { opacity: 1; }
+.row.off { opacity: .4; }
+.row.head { height: 2em; cursor: default; padding-left: .4em; }
+.row.head .k { font-size: 1em; letter-spacing: .14em; text-transform: uppercase; color: #e9b98d; }
+.meter { display: inline-flex; gap: .12em; }
+.meter i { width: .36em; height: .9em; border-radius: .12em; background: rgba(255,255,255,.18); }
+.meter i.f { background: var(--chalk); }
+.row:not(.on) .meter i.f { background: #e9b98d; }
+.num { min-width: 2.2em; text-align: right; }
+.go { opacity: .7; font-size: .9em; }
+.side { position: absolute; z-index: 1; color: var(--chalk); }
+.side h3 { margin: 0; font-weight: 800; font-size: 2.3em; font-style: oblique 12deg; text-shadow: .07em .09em 0 rgba(0,0,0,.35); }
+.side p { margin: .5em 0 0; font-size: 1.2em; line-height: 1.42; color: #fff3e6; text-shadow: 0 .06em .2em rgba(0,0,0,.45); }
+.choices { margin-top: 1.1em; display: flex; flex-direction: column; gap: .35em; }
+.choice { display: flex; align-items: center; gap: .6em; font-size: 1.25em; color: #fff3e6; }
+.choice::before { content: ""; width: .55em; height: .55em; border-radius: 50%; border: .12em solid rgba(255,255,255,.55); flex: none; }
+.choice.now { color: var(--chalk); font-weight: 800; }
+.choice.now::before { background: var(--chalk); border-color: var(--chalk); box-shadow: 0 0 0 .14em var(--maroon); }
+.choice em { font-style: normal; font-size: .8em; color: #ffd9b8; opacity: .85; margin-left: .3em; }
+.big { font-weight: 800; font-size: 4.2em; font-style: oblique 10deg; line-height: 1; margin-top: .25em; font-variant-numeric: tabular-nums; }
+.note { margin-top: 1em; font-size: 1.05em; padding: .55em .9em; border-radius: .7em; background: rgba(0,0,0,.4); color: #ffe7cf; line-height: 1.35; }
+.seat { font-size: .78em; font-weight: 800; padding: .15em .55em; border-radius: 999px; background: var(--chalk); color: var(--maroon-lo); margin-left: .4em; vertical-align: .15em; font-style: normal; }
+
+/* garage plate */
+.plate { width: 17em; aspect-ratio: 1.15; border-radius: 1.6em 1.6em 2.4em 2.4em; background: linear-gradient(180deg, #fffdf8, #e7e0d4); border: .3em solid #1d1d1d; box-shadow: .4em .45em 0 rgba(0,0,0,.33); display: grid; place-items: center; align-content: center; color: #141414; transform: rotate(-4deg); margin-top: 1em; }
+.plate .n { font-weight: 800; font-size: 8em; line-height: .9; font-style: oblique 10deg; letter-spacing: -.03em; color: #b4141e; -webkit-text-stroke: .03em #141414; }
+.plate .nm { font-weight: 800; font-size: 1.6em; letter-spacing: .08em; text-transform: uppercase; }
+
+/* local game seats */
+.seats { position: absolute; display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.1em; }
+.seatcard { height: 16em; border-radius: 1.1em; border: .18em dashed rgba(255,240,225,.4); background: rgba(10,5,2,.5); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .6em; color: var(--bone); text-align: center; padding: 1em; }
+.seatcard .p { font-weight: 800; font-size: 3em; font-style: oblique 12deg; color: rgba(255,240,225,.5); }
+.seatcard .s { font-size: 1.2em; line-height: 1.35; }
+.seatcard.in { border-style: solid; border-color: var(--chalk); background: linear-gradient(180deg, rgba(142,15,23,.92), rgba(70,6,10,.92)); box-shadow: .3em .35em 0 rgba(0,0,0,.33); color: var(--chalk); }
+.seatcard.in .p { color: var(--chalk); }
+.games { margin-top: 1em; display: flex; flex-direction: column; gap: .4em; }
+.game { display: grid; grid-template-columns: 1fr auto auto; gap: 1em; font-size: 1.15em; padding: .45em .9em; border-radius: .6em; background: rgba(0,0,0,.42); }
+.game span:last-child { color: #ffcf9e; font-variant-numeric: tabular-nums; }
+.code { font-weight: 800; font-size: 3.4em; letter-spacing: .18em; font-style: oblique 8deg; margin-top: .2em; }
+.paused-bg { position: absolute; inset: 0; z-index: 0; filter: saturate(.7) brightness(.55); }
+.paused-bg svg { width: 100%; height: 100%; display: block; }
+.toast { position: absolute; left: 50%; top: 1.4em; transform: translateX(-50%); font-size: 1.25em; padding: .4em 1.1em; border-radius: 999px; background: rgba(0,0,0,.7); color: var(--chalk); border: .08em solid rgba(255,255,255,.3); z-index: 5; transition: opacity .25s; white-space: nowrap; }
+
+.t { display: inline-block; }
+.item.on .t, .tab.on .t, .row.on .t { transform: skewX(-11deg); }
+.panel h2, .side h3, .big, .seatcard .p, .plate .n, .code { transform: skewX(-11deg); transform-origin: left bottom; }
+.top h1, .note-card h3 { display: inline-block; transform: skewX(-9deg); transform-origin: left bottom; }
+/* notes */
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 14px; }
+.note-card { min-width: 0; background: rgba(0,0,0,.28); border: 1px solid rgba(255,255,255,.07); border-radius: 12px; padding: 16px 18px; }
+.note-card h3 { margin: 0 0 8px; font-size: 16px; font-weight: 800; color: var(--chalk); font-style: oblique 10deg; }
+.note-card ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 14px; line-height: 1.45; color: var(--bone); font-weight: 700; }
+.note-card li b { color: #ffcf9e; font-weight: 800; }
+.keys { font-size: 13px; color: var(--dust); }
+.keys kbd { font-family: inherit; font-size: 12px; padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14); color: var(--bone); }
+@media (prefers-reduced-motion: no-preference) {
+  .item, .row, .tab { transition: background-color .08s, border-color .08s; }
+  .stage .in-anim { animation: slide .18s ease-out both; }
+  @keyframes slide { from { transform: translateX(-.8em); opacity: .4; } to { transform: none; opacity: 1; } }
+}
+</style>
+
+<div class="page">
+  <div class="top">
+    <h1>open<b>MX</b> front end · concept</h1>
+    <p class="keys">Drive it: <kbd>↑</kbd><kbd>↓</kbd> move · <kbd>←</kbd><kbd>→</kbd> change · <kbd>Enter</kbd> ✕ · <kbd>Esc</kbd> ◯ back · <kbd>Q</kbd>/<kbd>E</kbd> L1/R1 tabs · <kbd>P</kbd> pause. Click works too.</p>
+  </div>
+  <div class="jump" id="jump" aria-label="Jump to a screen"></div>
+  <div class="frame"><div class="stage" id="stage" tabindex="0" aria-label="Menu concept, keyboard driven"></div></div>
+  <div class="notes">
+    <div class="note-card"><h3>Kept from the original</h3><ul>
+      <li>The lit orange backdrop, the dark column, the logo top left.</li>
+      <li>The maroon pill with the white rim and the hard drop shadow, now drawn as vectors so it stays sharp at 4K.</li>
+      <li>The slanted page title over the black band, and the angled tab that holds the button hints.</li>
+    </ul></div>
+    <div class="note-card"><h3>Settings, regrouped</h3><ul>
+      <li>16 rows on one long page become <b>5 tabs</b>: Ride, Display, Audio, Controls, Camera. Switch with L1 and R1.</li>
+      <li>Every row is a value you can change in place. A side panel names the option, says what it does and lists every choice.</li>
+      <li>The separate Game Audio Options page becomes the <b>Audio</b> tab. The pause's Audio row opens straight to it.</li>
+      <li><b>Rider Name</b> moves to the Garage, beside the number it gets painted with. <b>Overlay</b> is called <b>HUD</b>, and <b>Graphics</b> is called <b>Draw Distance</b>.</li>
+    </ul></div>
+    <div class="note-card"><h3>New places for the new things</h3><ul>
+      <li><b>Mods</b> gets its own spot on the main menu, with packs you can switch on and off, replacing the single On/Off row.</li>
+      <li>Free Ride lists the disc's tracks and the mod tracks under headings, with a <b>ride setup</b> strip: machine, wrecks, modifiers.</li>
+      <li><b>Modifiers</b> sit in the Ride tab and in the ride setup, the place you think about them.</li>
+      <li>Every per-player page (Garage, Controls, Camera, Modifiers) has the same <b>Player</b> row at the top.</li>
+    </ul></div>
+  </div>
+</div>
+
+<script>
+(() => {
+const $ = (s, r = document) => r.querySelector(s);
+const stage = $("#stage");
+
+// ---- pad glyphs ----
+const G = {
+  x: '<span class="btn x"><svg viewBox="0 0 10 10"><path d="M2 2 8 8M8 2 2 8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>',
+  o: '<span class="btn o"><svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="3" stroke="#fff" stroke-width="1.6" fill="none"/></svg></span>',
+  sq: '<span class="btn sq"><svg viewBox="0 0 10 10"><rect x="2.2" y="2.2" width="5.6" height="5.6" stroke="#fff" stroke-width="1.5" fill="none"/></svg></span>',
+  tri: '<span class="btn tri"><svg viewBox="0 0 10 10"><path d="M5 1.8 8.4 7.8H1.6Z" stroke="#fff" stroke-width="1.4" fill="none" stroke-linejoin="round"/></svg></span>',
+  l1: '<span class="shoulder">L1</span>', r1: '<span class="shoulder">R1</span>',
+};
+const ARR_L = '<svg class="arr" data-dir="-1" viewBox="0 0 10 10"><path d="M7 1 2 5l5 4Z" fill="#f5f0e8"/></svg>';
+const ARR_R = '<svg class="arr" data-dir="1" viewBox="0 0 10 10"><path d="M3 1l5 4-5 4Z" fill="#f5f0e8"/></svg>';
+
+// ---- the tracks, drawn: a still per track until the disc's trackpreview stills go in ----
+const LOOK = {
+  Dallas: ["#e9c38b", "#c98a52", "#8a5a33", "#5c3a22"], Norfolk: ["#b7d2e6", "#7d9a6a", "#4d6b3f", "#6b4a2c"],
+  Bridgeport: ["#cfd3c7", "#969a86", "#6b6e5c", "#5a4632"], Rochester: ["#f3b27a", "#a3714d", "#6e4b31", "#3e2a1b"],
+  Cleveland: ["#9eb6cf", "#6f7f8a", "#4f5a52", "#4b3a2b"], "Ocotillo Wells": ["#f6d7a6", "#e0a96b", "#b9794a", "#8a5530"],
+  "Glamis Dunes": ["#f7dcb0", "#e8b47a", "#d09055", "#a96b3c"], "Hatfield": ["#bcd0c0", "#5f7d55", "#3e5b37", "#5b4128"],
+  "Nationals 01": ["#c6dbe6", "#8aa070", "#5b7748", "#7a5636"], "Supercross 01": ["#202634", "#38324a", "#2a2533", "#7a5a3c"],
+};
+function still(name, seed = 1) {
+  const c = LOOK[name] || LOOK.Dallas;
+  const r = n => (Math.sin(seed * 9.7 + n * 3.1) * .5 + .5);
+  const hill = (y, amp, k) => { let d = `M0 ${y}`; for (let i = 0; i <= 16; i++) d += ` L${i * 10} ${(y - Math.sin(i * k + seed) * amp - r(i) * amp * .6).toFixed(1)}`; return d + " L160 90 L0 90Z"; };
+  return `<svg viewBox="0 0 160 90" preserveAspectRatio="none"><defs><linearGradient id="sk${seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${c[0]}"/><stop offset="1" stop-color="#fff6e8"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#sk${seed})"/>
+    <path d="${hill(46, 7, .55)}" fill="${c[1]}" opacity=".75"/>
+    <path d="${hill(58, 6, .9)}" fill="${c[2]}"/>
+    <path d="M-5 90 C 40 62, 70 64, 92 70 S 140 80, 170 66 L170 90Z" fill="${c[3]}"/>
+    <path d="M30 90 C 60 72, 88 70, 120 74" stroke="#f7e3c6" stroke-opacity=".35" stroke-width="1.4" fill="none"/>
+    <path d="M58 72 l10 -8 l6 8Z" fill="${c[3]}" stroke="#2b1a0e" stroke-opacity=".3" stroke-width=".5"/></svg>`;
+}
+
+// ---- state ----
+const S = {
+  name: "FIZL0", number: 27, seat: 0,
+  v: {
+    machine: 0, wrecks: 1, bays: 1, mods: 0,
+    hud: 0, speedo: 0, draw: 1, scale: 0, vsync: 1, fps: 0,
+    mix: 0, music: 7, sfx: 8, engine: 8, crowd: 6, menufx: 7, user: 7, plays: 0, song: 0,
+    layout: 0, preset: 0, plane: 0, gas: 0, confirm: 0, pad: 0, pressure: 0,
+    fov: 5, bdist: 5, bheight: 5, pdist: 5, pheight: 5,
+    class: 0, bike: 0, paint: 2, tier: 1, tuning: 0, rider: 0, colours: 1, kit: 0, helmet: 3, goggles: 1, gloves: 0, boots: 2,
+    split: 0, readmods: 1,
+  },
+  knobs: Array(14).fill(10),
+  packs: [1, 1, 1, 0, 1, 1],
+};
+
+const MIX = ["Game Mix", "Rock-n-Roll Mix", "Night-time Mix", "Engine Mix", "Custom Mix"];
+const KNOBS = ["Bike top speed", "Bike acceleration", "Engine power", "Tyre grip", "Suspension", "Air control", "Flip spin", "Jump strength", "Crash tolerance", "Biplane acceleration", "Biplane top speed", "Gravity", "Air drag", "Time scale"];
+const SEATS = ["1P", "2P", "3P", "4P"];
+
+// row kinds: c = choice (←→), t = toggle, s = slider 0..10, a = action (✕), n = opens a screen, h = heading
+const C = (id, k, choices, desc, more = {}) => ({ kind: "c", id, k, choices, desc, ...more });
+const T = (id, k, desc, more = {}) => ({ kind: "c", id, k, choices: ["Off", "On"], desc, ...more });
+const SL = (id, k, desc, more = {}) => ({ kind: "s", id, k, desc, ...more });
+const PLAYER = (desc) => ({ kind: "seat", id: "seat", k: "Player", desc });
+
+const SETTINGS = [
+  { name: "Ride", rows: [
+    C("machine", "Start On", ["Bike", "Biplane"], "The machine a ride starts on. You can switch at any time from the pause, or by stopping at a bay.", { tips: ["", "The freeride's biplane"] }),
+    T("wrecks", "Wrecks", "Whether a hard landing throws the rider off. Off, you ride out every crash."),
+    T("bays", "Machines at Bays", "The lot's bikes and the biplane stand at their bays, see-through, and the original's pop-up offers them when you stop beside one."),
+    { kind: "n", id: "modifiers", k: "Game Modifiers", to: "modifiers", val: () => knobSummary(), desc: "Speed, grip, gravity and the rest, per player. Saved presets live here too." },
+  ]},
+  { name: "Display", rows: [
+    C("hud", "HUD", ["Original", "Debug", "None"], "What a ride draws over the picture. Original is the game's own; Debug adds the port's numbers; None leaves the picture clean.", { tips: ["The game's own", "Speeds, inputs, timings", "Nothing over the ride"] }),
+    C("speedo", "Speedometer", ["Digital", "Analog"], "How the original's HUD shows your speed: the readout or the dial.", { off: () => S.v.hud === 2, why: "The HUD is off" }),
+    C("draw", "Draw Distance", ["Original Fog", "Whole Map"], "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.", { tips: ["As on the PS2", "No pop-in, no fog wall"] }),
+    C("scale", "Render Scale", ["Auto", "100%", "75%", "50%"], "How much of the window's resolution the 3D is drawn at. Auto drops it when frames run long and climbs back when there's room.", { tips: ["Fits the display's refresh", "Native", "", "Fastest"] }),
+    T("vsync", "VSync", "Waits for the display before showing a frame. No tearing. Off draws as fast as it can."),
+    C("fps", "Frame Limit", ["Off", "30", "60", "120", "Refresh Rate"], "The most frames a second. Only the picture's rate; the ride itself always ticks at the game's 30 Hz."),
+  ]},
+  { name: "Audio", rows: [
+    C("mix", "Audio Preset", MIX, "The original's mixes set all six sliders at once. Moving any slider makes it a Custom Mix, which is kept.", { set: setMix }),
+    SL("music", "Music", "The disc's soundtrack.", { mixed: 0 }),
+    SL("sfx", "Sound FX", "Landings, crashes, the world.", { mixed: 1 }),
+    SL("engine", "Engine", "Your bike and everyone else's.", { mixed: 2 }),
+    SL("crowd", "Crowd", "The stands at the tracks that have them.", { mixed: 3 }),
+    SL("menufx", "Menu FX", "Clicks and swooshes in these menus.", { mixed: 4 }),
+    SL("user", "User Soundtracks", "Songs from the music folder beside the disc, and from mods' music packs.", { mixed: 5 }),
+    { kind: "h", k: "Soundtrack" },
+    C("plays", "Music Plays", ["Shuffle", "In Order", "One Song", "Off"], "How the next song is picked. One Song repeats the song below.", {}),
+    C("song", "Song", ["Headstrong", "From the music folder", "Untamed pack"], "The song One Song repeats.", { off: () => S.v.plays !== 2, why: "Only with Music Plays: One Song" }),
+  ]},
+  { name: "Controls", rows: [
+    PLAYER("Whose controls these rows change. Every player's pad keeps its own."),
+    C("layout", "Bike Layout", ["New", "Original"], "New is the port's: gas and brake on the triggers' pressure, stunts on the face buttons. Original is the disc's, with its four controller presets.", { tips: ["Analog triggers", "As on the PS2"] }),
+    C("preset", "Controller Preset", ["Preset 1", "Preset 2", "Preset 3", "Preset 4"], "The original's Controller Presets screen, one row. Preset 1 is the one the game ships with.", { off: () => S.v.layout === 0, why: "Only with the Original layout" }),
+    C("plane", "Biplane Layout", ["New", "Original"], "New steers the biplane relative to the plane at every bank. Original is the disc's stick, which goes dead on its side.", { tips: ["Stick follows the plane", "As on the PS2"] }),
+    C("gas", "Throttle", ["Cross", "R2", "L2"], "Which button is the gas."),
+    C("confirm", "Nintendo Pads", ["By Label", "By Position"], "By Label: A confirms, as on a Switch. By Position: the bottom button confirms, as on a PlayStation."),
+    C("pad", "Controller", ["First Found", "DualSense", "Keyboard"], "Which device this player rides on."),
+    C("pressure", "Pressure Axes", ["None", "Triggers", "Face Buttons"], "Maps a pad's analog axes onto the PS2's pressure-sensitive buttons."),
+  ]},
+  { name: "Camera", rows: [
+    PLAYER("Whose camera these sliders move. Split-screen players each have their own."),
+    SL("fov", "Field of View", "How wide the view is. 5 is the original's.", { fmt: v => `${60 + (v - 5) * 4}°` }),
+    SL("bdist", "Bike Distance", "How far behind the bike the follow camera sits."),
+    SL("bheight", "Bike Height", "How high above the bike it sits."),
+    SL("pdist", "Biplane Distance", "How far behind the biplane."),
+    SL("pheight", "Biplane Height", "How high above the biplane."),
+    { kind: "a", id: "camdef", k: "Reset to Default", desc: "Back to the port's defaults for this player.", act: () => { ["fov","bdist","bheight","pdist","pheight"].forEach(k => S.v[k] = 5); toast("Camera reset to default"); } },
+    { kind: "a", id: "camorig", k: "Reset to Original", desc: "Back to the disc's camera for this player.", act: () => { ["fov","bdist","bheight","pdist","pheight"].forEach(k => S.v[k] = 5); toast("Camera reset to the original's"); } },
+  ]},
+];
+
+const GARAGE = [
+  { name: "Rider", rows: [
+    PLAYER("Whose rider and bike this is. Each player in a local game has their own."),
+    { kind: "a", id: "name", k: "Name", val: () => S.name + ' <span class="go">✎</span>', desc: "Painted on the back of the jersey and shown to other players online. Opens the on-screen keyboard.", act: () => { S.name = S.name === "FIZL0" ? "FIZLO_MX" : "FIZL0"; toast("Rider name: " + S.name); } },
+    { kind: "s", id: "_num", k: "Number", val: () => String(S.number), desc: "The number on the plate and the jersey.", step: d => { S.number = Math.max(1, Math.min(999, S.number + d)); } },
+    C("rider", "Rider", ["Custom", "Pro 1", "Pro 2", "Pro 3"], "Who rides."),
+    C("colours", "Colours", ["Red / White", "Black / Orange", "Blue / Yellow", "Green / Black"], "The rider's two colours, used on the gear below."),
+    C("kit", "Jersey & Pants", ["Race Kit", "Team Kit", "Retro Kit"], "One pick for the two, as they come as a set."),
+    { kind: "a", id: "gpreset", k: "Save as Preset", desc: "Keeps this rider, bike and gear under a name, for the next session or another seat.", act: () => toast("Saved preset: " + S.name) },
+  ]},
+  { name: "Bike", rows: [
+    PLAYER("Whose bike this is."),
+    C("class", "Class", ["125cc 2-Stroke", "250cc 2-Stroke", "250cc 4-Stroke", "Modded"], "The bike's class. Modded holds bikes from the mods folder."),
+    C("bike", "Bike", ["Stock", "Factory", "Privateer"], "The bike in this class."),
+    C("paint", "Paint", ["Livery 1", "Livery 2", "Livery 3", "Livery 4"], "The bike's livery."),
+    C("tier", "Tier", ["Tier 1", "Tier 2", "Tier 3"], "Higher tiers are faster bikes."),
+    C("tuning", "Tuning", ["Stock", "Soft", "Stiff", "Freestyle"], "Suspension and gearing set-up."),
+  ]},
+  { name: "Gear", rows: [
+    PLAYER("Whose gear this is."),
+    C("helmet", "Helmet", ["Helmet 1", "Helmet 2", "Helmet 3", "Helmet 4", "Helmet 5"], "The helmet, in the rider's colours."),
+    C("goggles", "Goggles", ["Goggles 1", "Goggles 2", "Goggles 3"], "The goggles."),
+    C("gloves", "Gloves", ["Gloves 1", "Gloves 2", "Gloves 3"], "The gloves."),
+    C("boots", "Boots", ["Boots 1", "Boots 2", "Boots 3"], "The boots."),
+  ]},
+];
+
+const MODIFIERS = [{ name: "Modifiers", rows: [
+  PLAYER("Whose modifiers these are. Gravity, air drag and time scale are the world's, so they're everyone's."),
+  ...KNOBS.map((k, i) => ({ kind: "s", id: "_k" + i, k, world: i >= 11, val: () => pct(S.knobs[i]), meter: () => S.knobs[i] / 2, step: d => { S.knobs[i] = Math.max(0, Math.min(20, S.knobs[i] + d)); }, desc: i >= 11 ? "The world's: one value for every player." : "This player's. 100% is the original game." })),
+  { kind: "h", k: "Presets" },
+  { kind: "a", id: "loadp", k: "Load Preset", val: () => "Moon Jumps", desc: "A saved set of modifiers.", act: () => { S.knobs = S.knobs.map((v, i) => i === 7 ? 16 : i === 11 ? 4 : 10); toast("Loaded: Moon Jumps"); } },
+  { kind: "a", id: "savep", k: "Save Preset", desc: "Name and keep this set.", act: () => toast("Preset saved") },
+  { kind: "a", id: "resetp", k: "Reset to Original", desc: "Every modifier back to the original game.", act: () => { S.knobs = S.knobs.map(() => 10); toast("Modifiers reset"); } },
+]}];
+
+const PACKS = [
+  ["MX vs. ATV Unleashed", "56 tracks", "Nationals, supercross and freestyle maps imported from the sequel's disc."],
+  ["MX vs. ATV Untamed", "40 tracks", "Supercross, nationals, freestyle and the open worlds."],
+  ["Elevation maps", "4 tracks", "Glamis, Hatfield, Little Sahara and Ocotillo, built from real terrain."],
+  ["World tracks", "5 tracks", "Big open maps for the biplane."],
+  ["Unleashed music", "music pack", "The sequel's soundtrack, for the User Soundtracks slider."],
+  ["Untamed music", "music pack", "Untamed's soundtrack."],
+];
+const MODS = [{ name: "Mods", rows: [
+  T("readmods", "Read the Mods Folder", "Off, nothing is read from mods/ beside the disc and every pick is the disc's alone."),
+  { kind: "h", k: "Installed" },
+  ...PACKS.map((p, i) => ({ kind: "c", id: "_p" + i, k: p[0], choices: ["Off", "On"], get: () => S.packs[i], put: v => S.packs[i] = v, off: () => !S.v.readmods, why: "The mods folder is off", desc: `${p[1]}. ${p[2]}` })),
+]}];
+
+// The track pick, by section.
+const TRACKS = [
+  { h: "MX Unleashed" }, { t: "Dallas", id: "free06" }, { t: "Norfolk", id: "free07" }, { t: "Bridgeport", id: "free09", last: true }, { t: "Rochester", id: "free10" }, { t: "Cleveland", id: "free11" },
+  { h: "Mods" }, { t: "Ocotillo Wells", id: "elev_ocotillo", pack: "Elevation maps" }, { t: "Glamis Dunes", id: "elev_glamis", pack: "Elevation maps" }, { t: "Hatfield", id: "elev_hatfield", pack: "Elevation maps" }, { t: "Nationals 01", id: "mxvatv_nat01", pack: "MX vs. ATV Unleashed" }, { t: "Supercross 01", id: "mxvatv_sx01", pack: "MX vs. ATV Unleashed", more: "+ 99 more" },
+];
+
+const MENUS = {
+  main: { title: "", items: [
+    { k: "Free Ride", to: "tracks", info: () => panelRide() },
+    { k: "Local Game", to: "local", info: () => panelText("Local Game", "Up to eight players on one machine. Every pad presses its own way into a seat, then you pick how the screen splits.", [`<b>2</b> pads plugged in`, "Side By Side"]) },
+    { k: "Online", to: "online", info: () => panelText("Online", "Ride with friends over the internet or the LAN. Quickplay finds an open ride; Host makes one and gives you a code to share.", ["<b>3</b> open rides on your network"]) },
+    { k: "Garage", to: "garage", info: () => panelGarage() },
+    { k: "Mods", to: "mods", info: () => panelText("Mods", "Tracks, maps and music from the mods folder. Switch whole packs on and off.", [`<b>${S.packs.filter(Boolean).length}</b> of ${PACKS.length} packs on`, "105 tracks"]) },
+    { k: "Settings", to: "settings", info: () => panelText("Settings", "Ride, Display, Audio, Controls and Camera, one tab each.", ["L1 / R1 between tabs"]) },
+    { k: "Quit", act: () => toast("Quit to desktop"), info: () => panelText("Quit", "Back to the desktop. Everything is already saved.", []) },
+  ]},
+  online: { title: "Online", items: [
+    { k: "Quickplay", act: () => toast("Joining the first open ride…"), info: () => panelText("Quickplay", "Joins the first open ride with a free seat, or hosts one if there's none.", []) },
+    { k: "Host", act: () => toast("Lobby open: code KX4-9QD"), info: () => panelText("Host", "Opens a lobby with your track, wrecks and seats. Friends join with the code it shows.", ["Seats <b>4</b>", "Bridgeport"]) },
+    { k: "Find Games", act: () => toast("Joining MotoMike's ride"), info: () => panelGames() },
+    { k: "Join by Code", act: () => toast("Opens the keyboard for a room code"), info: () => panelText("Join by Code", "Type the code a host gave you.", []) },
+  ]},
+  pause: { title: "Paused", items: [
+    { k: "Resume", act: () => toast("Back to the ride"), info: () => panelNow() },
+    { k: "Restart", act: () => toast("Restarting at the start line"), info: () => panelText("Restart", "Back to the start of this track, same machine, same modifiers.", []) },
+    { k: "Switch to Biplane", act: () => toast("Switching to the biplane"), info: () => panelText("Switch to Biplane", "The original pause's machine switch. Your bike waits where you left it.", []) },
+    { k: "Open to Online", act: () => toast("Open to online: code KX4-9QD"), info: () => panelText("Open to Online", "Lets online players drop into this ride. Your seat stays yours; the code appears here.", ["Seats <b>4</b>"]) },
+    { k: "Audio", to: "settings", tab: 2, info: () => panelText("Audio", "The Audio tab of Settings, opened straight from here.", [MIX[S.v.mix]]) },
+    { k: "Settings", to: "settings", info: () => panelText("Settings", "Every setting takes effect when the pause closes.", []) },
+    { k: "Clear Markers", act: () => toast("Your markers on Bridgeport are cleared"), info: () => panelText("Clear Markers", "Removes your session markers on this track, the saved ones with them.", []) },
+    { k: "Main Menu", to: "main", reset: true, info: () => panelText("Main Menu", "Ends the ride.", []) },
+    { k: "Quit", act: () => toast("Quit to desktop"), info: () => panelText("Quit", "Ends the ride and closes the game.", []) },
+  ]},
+};
+
+const OPTION_SCREENS = {
+  settings: { title: "Settings", tabs: SETTINGS },
+  garage: { title: "Garage", tabs: GARAGE },
+  modifiers: { title: "Game Modifiers", tabs: MODIFIERS },
+  mods: { title: "Mods", tabs: MODS },
+};
+
+let nav = { screen: "main", stack: [], cur: {}, tab: {} };
+const cur = s => nav.cur[s] ?? 0;
+
+// ---- value helpers ----
+function pct(v) { return `${v * 10}%`; }
+function knobSummary() { const n = S.knobs.filter(v => v !== 10).length; return n ? `${n} changed` : "Original"; }
+function setMix(i) {
+  const L = [[7, 8, 8, 6, 7, 7], [10, 6, 6, 5, 7, 10], [4, 7, 5, 3, 5, 4], [3, 7, 10, 4, 6, 3], null][i];
+  if (L) ["music", "sfx", "engine", "crowd", "menufx", "user"].forEach((k, j) => S.v[k] = L[j]);
+}
+function get(r) { return r.get ? r.get() : r.id === "seat" ? S.seat : S.v[r.id]; }
+function put(r, v) { if (r.put) r.put(v); else if (r.id === "seat") S.seat = v; else S.v[r.id] = v; }
+const isOff = r => !!(r.off && r.off());
+function valueHTML(r) {
+  if (r.kind === "seat") return `${ARR_L}<span>${SEATS[S.seat]}</span>${ARR_R}`;
+  if (r.kind === "c") return `${ARR_L}<span>${r.choices[get(r)]}</span>${ARR_R}`;
+  if (r.kind === "s") {
+    const v = r.meter ? r.meter() : get(r);
+    const text = r.val ? r.val() : r.fmt ? r.fmt(get(r)) : String(get(r) * 10);
+    const bars = r.val && !r.meter ? "" : `<span class="meter">${Array.from({ length: 10 }, (_, i) => `<i class="${i < Math.round(v) ? "f" : ""}"></i>`).join("")}</span>`;
+    return `${ARR_L}${bars}<span class="num">${text}</span>${ARR_R}`;
+  }
+  if (r.kind === "n") return `<span>${r.val ? r.val() : ""}</span><span class="go">▶</span>`;
+  if (r.kind === "a") return r.val ? `<span>${r.val()}</span>` : `<span class="go">${G.x}</span>`;
+  return "";
+}
+
+// ---- panels on the open side ----
+function panelText(h, p, chips) {
+  return `<div class="eyebrow">${nav.screen === "pause" ? "Bridgeport · Free Ride" : "openMX"}</div><h2>${h}</h2><p>${p}</p>${chips.length ? `<div class="chips">${chips.map(c => `<span class="chip">${c}</span>`).join("")}</div>` : ""}`;
+}
+function panelRide() {
+  return `<div class="still">${still("Bridgeport", 3)}<span class="tag">Last ridden · Bridgeport</span></div>
+    <h2 style="margin-top:.5em">Free Ride</h2><p>Pick a track and ride it on your own. Disc tracks first, then everything in the mods folder.</p>
+    <div class="chips"><span class="chip">${["Bike", "Biplane"][S.v.machine]}</span><span class="chip">Wrecks <b>${S.v.wrecks ? "On" : "Off"}</b></span><span class="chip">Modifiers <b>${knobSummary()}</b></span></div>`;
+}
+function panelGarage() {
+  return `<div class="eyebrow">Riding as</div><h2>${S.name} <span style="color:#ffcf9e">#${S.number}</span></h2>
+    <p>125cc 2-Stroke · Livery 3 · Tier 2. Name, number, bike and gear, per player.</p>`;
+}
+function panelGames() {
+  const g = [["MotoMike's ride", "Dallas", "2 / 4"], ["late night sends", "Glamis Dunes", "3 / 8"], ["practice", "Bridgeport", "1 / 4"]];
+  return `<div class="eyebrow">Example rides</div><h2>Find Games</h2><p>Open rides on the LAN and the internet, newest first.</p>
+    <div class="games">${g.map(r => `<div class="game"><span>${r[0]}</span><span>${r[1]}</span><span>${r[2]}</span></div>`).join("")}</div>`;
+}
+function panelNow() {
+  return `<div class="eyebrow">Bridgeport · Free Ride</div><h2>Resume</h2>
+    <div class="chips"><span class="chip">Now playing <b>Headstrong</b></span><span class="chip">${MIX[S.v.mix]}</span></div>
+    <p>${G.sq} Skip song &nbsp; ${G.tri} Change camera</p>`;
+}
+
+// ---- controller diagram for the Controls tab ----
+function padDiagram() {
+  const N = S.v.layout === 0;
+  const gas = ["Cross", "R2", "L2"][S.v.gas];
+  const L = { l2: "Look Back", l1: "Clutch", r1: "Stunt Modifier", r2: "Thrill Camera", tri: "Stunts", o: "Stunts", sq: "Brake", x: "Gas" };
+  if (N) Object.assign(L, { r2: "Gas (pressure)", l2: "Brake (pressure)", sq: "Look Back", x: "Stunts" });
+  if (gas === "R2") { L.r2 = "Gas"; L.x = N ? "Stunts" : "Stunts"; }
+  if (gas === "L2") { L.l2 = "Gas"; }
+  const t = (x, y, s, a = "start") => `<text x="${x}" y="${y}" text-anchor="${a}" font-family="OMX, sans-serif" font-weight="800" font-size="9" fill="#f5f0e8">${s}</text>`;
+  const ln = (x1, y1, x2, y2) => `<path d="M${x1} ${y1}H${x2}" stroke="#f5f0e8" stroke-opacity=".5" stroke-width=".8"/>`;
+  return `<svg viewBox="0 0 300 150" style="width:100%;margin-top:.6em;display:block">
+    <path d="M70 40 h160 c24 0 38 20 44 52 c5 28 -8 46 -24 46 c-14 0 -22 -14 -34 -30 h-132 c-12 16 -20 30 -34 30 c-16 0 -29 -18 -24 -46 c6 -32 20 -52 44 -52z" fill="#1b1716" stroke="#f5f0e8" stroke-width="2.2"/>
+    <rect x="72" y="30" width="34" height="9" rx="4" fill="#2e2826" stroke="#f5f0e8" stroke-width="1"/><rect x="194" y="30" width="34" height="9" rx="4" fill="#2e2826" stroke="#f5f0e8" stroke-width="1"/>
+    <rect x="74" y="20" width="30" height="9" rx="4" fill="#2e2826" stroke="#f5f0e8" stroke-width="1"/><rect x="196" y="20" width="30" height="9" rx="4" fill="#2e2826" stroke="#f5f0e8" stroke-width="1"/>
+    <path d="M82 66h8v-8h8v8h8v8h-8v8h-8v-8h-8z" fill="#3a3330" stroke="#f5f0e8" stroke-width=".8"/>
+    <circle cx="222" cy="58" r="6" fill="${'#3cbf93'}"/><circle cx="236" cy="72" r="6" fill="#e0473f"/><circle cx="208" cy="72" r="6" fill="#d872b8"/><circle cx="222" cy="86" r="6" fill="#4a7be0"/>
+    <circle cx="122" cy="100" r="13" fill="#2e2826" stroke="#f5f0e8" stroke-width="1"/><circle cx="178" cy="100" r="13" fill="#2e2826" stroke="#f5f0e8" stroke-width="1"/>
+    ${ln(30, 24, 74)}${t(28, 27, L.l2, "end")}${ln(30, 37, 72)}${t(28, 40, L.l1, "end")}
+    ${ln(226, 24, 270)}${t(272, 27, L.r2)}${ln(228, 37, 270)}${t(272, 40, L.r1)}
+    ${ln(242, 58, 270)}${t(272, 61, L.tri)}${ln(242, 72, 270)}${t(272, 75, L.o)}${ln(228, 86, 270)}${t(272, 89, L.x)}
+    ${ln(30, 70, 82)}${t(28, 73, "Steer + Lean", "end")}${ln(30, 100, 109)}${t(28, 103, "Steer + Lean", "end")}
+    ${t(150, 136, "Camera  ·  " + L.sq + " on Square", "middle")}
+  </svg>`;
+}
+
+// ---- drawing ----
+function chrome({ title, hints, who = true }) {
+  const h = hints.map(([g, label, act]) => `<span class="hint" data-act="${act}">${g}${label}</span>`).join("");
+  return `${title ? `<div class="title">${title}</div>` : ""}<div class="hints">${h}</div>
+    <div class="band">${who ? `<span class="who">Riding as <b>${S.name}</b> · #${S.number}</span>` : ""}</div>`;
+}
+
+function drawMenu(id) {
+  const m = MENUS[id]; const at = cur(id); const it = m.items[at];
+  const paused = id === "pause";
+  stage.innerHTML = `${paused ? `<div class="paused-bg">${still("Bridgeport", 3)}</div>` : ""}
+    <div class="strip" style="left:10em;width:18em"></div>
+    <div class="logo ${paused ? "small" : ""}"><span class="open">open</span><span class="mx">MX</span></div>
+    <div class="list" style="left:10em;width:18em;top:${paused ? 7.5 : 10.4}em">${m.items.map((x, i) => `<div class="item ${i === at ? "on" : ""}" data-i="${i}"><span class="t">${x.k}</span></div>`).join("")}</div>
+    <div class="panel in-anim" style="left:34em;width:40em;top:${it.k === "Free Ride" ? 6 : 10}em">${it.info()}</div>
+    ${chrome({ title: m.title, hints: paused ? [[G.o, "Resume", "back"], [G.x, "Select", "ok"]] : id === "main" ? [[G.x, "Select", "ok"]] : [[G.o, "Back", "back"], [G.x, "Select", "ok"]] })}`;
+}
+
+function rowsOf(scr) { const o = OPTION_SCREENS[scr]; return o.tabs[nav.tab[scr] ?? 0].rows; }
+function drawOptions(scr) {
+  const o = OPTION_SCREENS[scr]; const ti = nav.tab[scr] ?? 0; const rows = o.tabs[ti].rows; const at = cur(scr); const r = rows[at];
+  const SHOWN = 11; const first = Math.max(0, Math.min(at - 5, rows.length - SHOWN));
+  const vis = rows.slice(first, first + SHOWN);
+  const tabs = o.tabs.length > 1 ? `<div class="tabs" style="left:4em;top:7.6em">${G.l1.replace('class="shoulder"', 'class="shoulder" data-act="l1"')}${o.tabs.map((t, i) => `<span class="tab ${i === ti ? "on" : ""}" data-tab="${i}"><span class="t">${t.name}</span></span>`).join("")}${G.r1.replace('class="shoulder"', 'class="shoulder" data-act="r1"')}</div>` : "";
+  const top = o.tabs.length > 1 ? 11.4 : 8.2;
+  const rowH = vis.map((x, j) => {
+    const i = first + j;
+    if (x.kind === "h") return `<div class="row head"><span class="k">${x.k}</span></div>`;
+    const seat = (x.kind === "seat" || x.world === undefined) ? "" : "";
+    return `<div class="row ${i === at ? "on" : ""} ${isOff(x) ? "off" : ""}" data-i="${i}"><span class="k"><span class="t">${x.k}</span>${x.world ? ' <span class="seat">World</span>' : ""}</span><span class="v">${valueHTML(x)}</span></div>`;
+  }).join("");
+  stage.innerHTML = `<div class="strip" style="left:3em;width:38em"></div>
+    <div class="logo small" style="left:3.6em;top:1.8em"><span class="open">open</span><span class="mx">MX</span></div>
+    ${tabs}
+    <div class="rows" style="left:3.8em;width:36.4em;top:${top}em">${rowH}</div>
+    <div class="side in-anim" style="left:45em;width:31em;top:${scr === "garage" ? 4.5 : 7.6}em">${sideOf(scr, r)}</div>
+    ${chrome({ title: o.title, hints: [[G.o, "Back", "back"], ...(o.tabs.length > 1 ? [[G.l1 + G.r1, "Tabs", "r1"]] : []), [G.x, r.kind === "a" || r.kind === "n" ? "Select" : "Change", "ok"]] })}`;
+}
+
+function sideOf(scr, r) {
+  const seatTag = (r.kind === "seat" || scr === "garage" || (scr === "settings" && [3, 4].includes(nav.tab.settings ?? 0)) || (scr === "modifiers" && !r.world)) ? `<span class="seat">${SEATS[S.seat]}</span>` : "";
+  let body = `<h3>${r.k}${seatTag}</h3><p>${r.desc || ""}</p>`;
+  if (isOff(r)) body += `<div class="note">${r.why}</div>`;
+  if (r.kind === "c") body += `<div class="choices">${r.choices.map((c, i) => `<div class="choice ${i === get(r) ? "now" : ""}">${c}${r.tips && r.tips[i] ? `<em>${r.tips[i]}</em>` : ""}</div>`).join("")}</div>`;
+  if (r.kind === "seat") body += `<div class="choices">${SEATS.map((c, i) => `<div class="choice ${i === S.seat ? "now" : ""}">${c}${i < 2 ? `<em>${i ? "pad 2" : "pad 1 · " + S.name}</em>` : "<em>not seated</em>"}</div>`).join("")}</div>`;
+  if (r.kind === "s") body += `<div class="big">${r.val ? r.val() : r.fmt ? r.fmt(get(r)) : get(r) * 10}</div>`;
+  if (scr === "settings" && (nav.tab.settings ?? 0) === 3 && r.kind !== "seat") body += padDiagram();
+  if (scr === "garage") body = `<div class="plate"><span class="n">${S.number}</span><span class="nm">${S.name}</span></div><div style="margin-top:1.6em">${body}</div>`;
+  if (scr === "settings" && (nav.tab.settings ?? 0) === 2 && r.mixed !== undefined && S.v.mix !== 4) body += `<div class="note">Moving this makes it a Custom Mix.</div>`;
+  return body;
+}
+
+function trackRows() { return TRACKS; }
+function drawTracks() {
+  const at = cur("tracks") || 3; nav.cur.tracks = at; const tr = TRACKS[at];
+  const disc = TRACKS.filter(t => t.t && !t.pack); const idx = disc.indexOf(tr);
+  stage.innerHTML = `<div class="strip" style="left:3em;width:22em"></div>
+    <div class="logo small" style="left:3.6em;top:1.8em"><span class="open">open</span><span class="mx">MX</span></div>
+    <div class="rows" style="left:3.8em;width:20.4em;top:8.2em">${TRACKS.map((t, i) => t.h ? `<div class="row head"><span class="k">${t.h}</span></div>` : `<div class="row ${i === at ? "on" : ""}" data-i="${i}"><span class="k"><span class="t">${t.t}</span></span><span class="v" style="font-size:1em;opacity:.8">${t.last ? "last" : t.more || ""}</span></div>`).join("")}</div>
+    <div class="panel in-anim" style="left:28.5em;width:47em;top:3.2em">
+      <div class="still">${still(tr.t, at + 1)}<span class="tag">${tr.pack ? tr.pack : `Freeride ${idx + 1} of ${disc.length}`} · ${tr.id}</span></div>
+      <h2 style="margin-top:.45em">${tr.t}</h2>
+      <div class="chips">
+        <span class="chip" data-act="machine">${G.sq} Machine <b>${["Bike", "Biplane"][S.v.machine]}</b></span>
+        <span class="chip" data-act="wrecks">${G.tri} Wrecks <b>${S.v.wrecks ? "On" : "Off"}</b></span>
+        <span class="chip" data-act="mods">Modifiers <b>${knobSummary()}</b></span>
+      </div>
+    </div>
+    ${chrome({ title: "Free Ride", hints: [[G.o, "Back", "back"], [G.sq, "Machine", "machine"], [G.x, "Ride", "ok"]] })}`;
+}
+
+function drawLocal() {
+  const cards = [1, 1, 0, 0].map((j, i) => j
+    ? `<div class="seatcard in"><span class="p">${SEATS[i]}</span><span class="s">${i ? "Pad 2<br>Rider 2 · #14" : `Pad 1<br>${S.name} · #${S.number}`}</span><span class="s">${G.x} Ready</span></div>`
+    : `<div class="seatcard"><span class="p">${SEATS[i]}</span><span class="s">Press ${G.x}<br>to join</span></div>`).join("");
+  const layouts = ["Side By Side", "One Above The Other", "Full Screen"];
+  stage.innerHTML = `<div class="logo small" style="left:3.6em;top:1.8em"><span class="open">open</span><span class="mx">MX</span></div>
+    <div class="seats" style="left:4em;right:4em;top:8.4em">${cards}</div>
+    <div class="rows" style="left:4em;width:36em;top:26.5em"><div class="row on" data-i="0"><span class="k"><span class="t">Split Screen</span></span><span class="v">${ARR_L}<span>${layouts[S.v.split]}</span>${ARR_R}</span></div></div>
+    <div class="panel" style="left:44em;width:32em;top:26.4em"><p style="margin:0">Each pad presses ${G.x} to take a seat and ${G.o} to leave it. Up to 8 seats; the layout follows the count.</p></div>
+    ${chrome({ title: "Local Game", hints: [[G.o, "Back", "back"], [`<span class="shoulder">START</span>`, "Pick Track", "ok"]] })}`;
+}
+
+function draw() {
+  const s = nav.screen;
+  if (MENUS[s]) drawMenu(s); else if (OPTION_SCREENS[s]) drawOptions(s); else if (s === "tracks") drawTracks(); else if (s === "local") drawLocal();
+  document.querySelectorAll("#jump button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.s === s || (b.dataset.s === "settings" && s === "settings"))));
+}
+
+let toastT;
+function toast(msg) {
+  let t = $(".toast", stage);
+  if (!t) { t = document.createElement("div"); t.className = "toast"; stage.appendChild(t); }
+  t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(toastT); toastT = setTimeout(() => { const n = $(".toast", stage); if (n) n.style.opacity = 0; }, 1600);
+}
+
+// ---- input ----
+function go(to, opts = {}) {
+  if (opts.reset) { nav.stack = []; nav.screen = to; draw(); return; }
+  nav.stack.push(nav.screen); nav.screen = to;
+  if (opts.tab !== undefined) { nav.tab[to] = opts.tab; nav.cur[to] = 0; }
+  draw();
+}
+function back() { if (nav.stack.length) { nav.screen = nav.stack.pop(); draw(); } }
+function list() {
+  const s = nav.screen;
+  if (MENUS[s]) return MENUS[s].items;
+  if (OPTION_SCREENS[s]) return rowsOf(s);
+  if (s === "tracks") return TRACKS;
+  return [];
+}
+function move(d) {
+  const L = list(); if (!L.length) return;
+  let i = cur(nav.screen);
+  for (let n = 0; n < L.length; n++) { i = (i + d + L.length) % L.length; const r = L[i]; if (!r.h && r.kind !== "h") break; }
+  nav.cur[nav.screen] = i; draw();
+}
+function change(d) {
+  const s = nav.screen;
+  if (s === "local") { S.v.split = (S.v.split + d + 3) % 3; draw(); return; }
+  if (s === "tracks") { S.v.machine ^= 1; draw(); return; }
+  if (!OPTION_SCREENS[s]) return;
+  const r = rowsOf(s)[cur(s)]; if (!r || isOff(r)) return;
+  if (r.kind === "seat") S.seat = (S.seat + d + 4) % 4;
+  else if (r.kind === "c") { const v = (get(r) + d + r.choices.length) % r.choices.length; put(r, v); if (r.set) r.set(v); }
+  else if (r.kind === "s") { if (r.step) r.step(d); else put(r, Math.max(0, Math.min(10, get(r) + d))); if (r.mixed !== undefined) S.v.mix = 4; }
+  draw();
+}
+function ok() {
+  const s = nav.screen;
+  if (MENUS[s]) { const it = MENUS[s].items[cur(s)]; if (it.to) go(it.to, { tab: it.tab, reset: it.reset }); else if (it.act) it.act(); return; }
+  if (s === "tracks") { toast(`Loading ${TRACKS[cur(s)].t}…`); setTimeout(() => { nav.stack = ["main"]; nav.screen = "pause"; nav.cur.pause = 0; draw(); toast("Riding · press Esc or P for the pause"); }, 700); return; }
+  if (s === "local") { go("tracks"); return; }
+  const r = rowsOf(s)[cur(s)];
+  if (!r || isOff(r)) return;
+  if (r.kind === "n") go(r.to); else if (r.kind === "a") { r.act(); draw(); } else change(1);
+}
+function tab(d) {
+  const s = nav.screen; const o = OPTION_SCREENS[s]; if (!o || o.tabs.length < 2) return;
+  nav.tab[s] = ((nav.tab[s] ?? 0) + d + o.tabs.length) % o.tabs.length; nav.cur[s] = 0; draw();
+}
+stage.addEventListener("keydown", e => {
+  const k = e.key; let used = true;
+  if (k === "ArrowUp") move(-1); else if (k === "ArrowDown") move(1);
+  else if (k === "ArrowLeft") change(-1); else if (k === "ArrowRight") change(1);
+  else if (k === "Enter" || k === " ") ok(); else if (k === "Escape" || k === "Backspace") back();
+  else if (k === "q" || k === "Q") tab(-1); else if (k === "e" || k === "E") tab(1);
+  else if (k === "p" || k === "P") { if (nav.screen !== "pause") { nav.stack = ["main"]; nav.screen = "pause"; draw(); } else back(); }
+  else used = false;
+  if (used) e.preventDefault();
+});
+stage.addEventListener("click", e => {
+  stage.focus({ preventScroll: true });
+  const arr = e.target.closest(".arr"); const row = e.target.closest("[data-i]"); const tb = e.target.closest("[data-tab]"); const act = e.target.closest("[data-act]");
+  if (tb) { nav.tab[nav.screen] = +tb.dataset.tab; nav.cur[nav.screen] = 0; draw(); return; }
+  if (act) { const a = act.dataset.act;
+    if (a === "back") back(); else if (a === "ok") ok(); else if (a === "l1") tab(-1); else if (a === "r1") tab(1);
+    else if (a === "machine") { S.v.machine ^= 1; draw(); } else if (a === "wrecks") { S.v.wrecks ^= 1; draw(); } else if (a === "mods") go("modifiers");
+    return; }
+  if (row) { const i = +row.dataset.i;
+    if (arr) { nav.cur[nav.screen] = i; change(+arr.dataset.dir); return; }
+    if (cur(nav.screen) === i) ok(); else { nav.cur[nav.screen] = i; draw(); } }
+});
+
+// the jump bar
+const JUMP = [["main", "Main Menu"], ["tracks", "Free Ride"], ["local", "Local Game"], ["online", "Online"], ["garage", "Garage"], ["mods", "Mods"], ["settings", "Settings"], ["modifiers", "Modifiers"], ["pause", "Pause"]];
+$("#jump").innerHTML = JUMP.map(([s, l]) => `<button type="button" data-s="${s}">${l}</button>`).join("");
+$("#jump").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return;
+  nav.stack = b.dataset.s === "main" ? [] : b.dataset.s === "modifiers" ? ["main", "settings"] : ["main"]; nav.screen = b.dataset.s; draw(); stage.focus({ preventScroll: true }); });
+
+try { const h = location.hash.slice(1); if (JUMP.some(j => j[0] === h)) { nav.stack = h === "main" ? [] : ["main"]; nav.screen = h; } } catch {}
+draw();
+})();
+</script>

@@ -1798,7 +1798,7 @@ fn a_joiner_that_picked_the_plane_is_seated_flying_from_its_bay() {
     let first = &sims(1)[0];
     let spawn = rides::seat_bytes(first);
     let mut marks = game_sim::markers::Markers::default();
-    marks.slots[0] = Some(Box::new(first.rider.ride.clone()));
+    marks.slots[0] = Some(Box::new(game_sim::markers::Mark::Bike(first.rider.ride.clone())));
     let marked = rides::spawn_marked(first, &spawn, marks).unwrap();
     let flying = rides::spawn_flying(first, &marked, &template, bay(2, &template)).unwrap();
     let mut seats = sims(1);

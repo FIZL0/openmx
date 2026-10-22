@@ -2214,8 +2214,8 @@ fn the_plane_reads_its_stick_round() {
 }
 
 /// A held diagonal pulls (or pushes) and rolls together, every tick, under the plane-relative scheme
-/// (P89): from level flight the plane is held at each of the four corners — a round gate's, a
-/// square one's and the keyboard's two arrows — and at half tilts, and from the moment the
+/// (P89): from level flight the plane is held at each of the four corners — a round gate's and a
+/// square one's (the keyboard's two stick keys) — and at half tilts, and from the moment the
 /// surfaces have come round the body's pitch rate and roll rate each keep the stick's sign on every
 /// tick, the commands never let go, and a half tilt is the same part of each.
 ///
@@ -2298,9 +2298,15 @@ fn a_held_diagonal_pulls_and_rolls_together_every_tick() {
         cases.push((name, r, s, false));
         let (name, r, s) = corner(45, "half tilt");
         cases.push((name, r, s, false));
-        let x = if sx < 0 { Control::Left } else { Control::Right };
-        let y = if sy < 0 { Control::Up } else { Control::Down };
-        cases.push((format!("arrows ({sx:+}, {sy:+})"), arrows(&[x, y]), (sx as f32, sy as f32), true));
+    }
+    // The arrows are the d-pad, and the d-pad is the session markers' since P107: held at a corner
+    // the plane flies on as if they were not, the gas alone.
+    let alone = |ticks: Vec<(game_sim::biplane::Pad, game_sim::biplane::Surfaces, f32, f32)>| -> Vec<(u32, u32, u32, u32)> {
+        ticks.iter().map(|(p, _, pitch, roll)| (p.elevator.to_bits(), p.aileron.to_bits(), pitch.to_bits(), roll.to_bits())).collect()
+    };
+    let gas_alone = alone(fly(gas, PlaneScheme::New));
+    for corner in [[Control::Left, Control::Up], [Control::Right, Control::Down]] {
+        assert_eq!(alone(fly(arrows(&corner), PlaneScheme::New)), gas_alone, "the arrows {corner:?} flew the plane");
     }
     for (name, report, (sx, sy), full) in cases {
         let ticks = fly(report, PlaneScheme::New);

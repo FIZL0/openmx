@@ -60,8 +60,9 @@ impl Game for Rides<'_> {
     fn step(&mut self, tick: usize, pads: &[Report]) {
         let dt = game_sim::modifiers::scaled_dt(tick_dt(tick), self.time_scale);
         // Where every seat's rider is before anybody's tick, which is where a marker's Up rides to
-        // (P88): the same on every machine, as every seat's state is.
-        let spots: Vec<Spot> = self.sims.iter().map(|s| Spot::of(&s.rider)).collect();
+        // (P88): the same on every machine, as every seat's state is. A flying seat's is on the
+        // ground under its plane (P107, as offline P104's), not at the bike it left.
+        let spots: Vec<Spot> = self.sims.iter().map(|s| vehicle::lane_spot(s, self.world)).collect();
         // Who is in the ride (P94): a seat nobody sits in has the missing pad ([`Game::step`]), and is
         // no marker's pick. The pads are the session's, so every machine counts the same.
         let riding: Vec<bool> = (0..self.sims.len()).map(|s| pads.get(s).is_some_and(|p| p.0[0] != Report::missing().0[0])).collect();
@@ -86,9 +87,10 @@ impl Game for Rides<'_> {
             // The shell's hands, the d-pad the markers' and not the ride's (P93).
             let hands = sim.poll(dt, &reports).stick_alone();
             // On the plane the bike is not stepped, its markers do not run and its rider's body
-            // does not move, as offline (`Seat::pass`).
+            // does not move, as offline (`Seat::pass`); the plane's own markers do (P107).
             if sim.plane.is_some() {
                 vehicle::fly_lane(sim, dt, wanted, self.world);
+                vehicle::lane_markers(sim, seat, &spots, &riding, self.world);
                 continue;
             }
             sim.step_bumped(dt, &hands, self.world, bump.as_mut());
