@@ -27,6 +27,14 @@ pub enum Shape {
     /// The whole quad, its light added to what is under it by its alpha rather than laid over it:
     /// the menus' glow.
     Glow,
+    /// A `size` rectangle from `local`'s origin with corners of `radius`, `tint` at its top shading to
+    /// `bottom` at its foot — or, with `ring` above 0, only the band that wide inside its edge: the
+    /// menus' pills, tabs and boxes (P118).
+    Round { size: [f32; 2], radius: f32, ring: f32, bottom: [u8; 4] },
+    /// Type out of a distance atlas (P118): the picture's alpha is 0.5 on the outline and moves by
+    /// 0.5 over the atlas' spread, and `range` is the frame pixels that spread covers here, so the
+    /// edge is a pixel wide at any size. The colour is the tint's alone.
+    Text { range: f32 },
 }
 
 /// One quad of the overlay.
@@ -223,6 +231,8 @@ impl Sprites {
                 Shape::Disc { radius } => (1.0, [radius, 0.0, 0.0, 0.0], 0.0, s.tint),
                 Shape::Capsule { size, split, right } => (2.0, [size[0], size[1], 0.0, 0.0], split, right),
                 Shape::Needle { tail, tip, tail_half, tip_half } => (3.0, [tail, tip, tail_half, tip_half], 0.0, s.tint),
+                Shape::Text { range } => (4.0, [range, 0.0, 0.0, 0.0], 0.0, s.tint),
+                Shape::Round { size, radius, ring, bottom } => (5.0, [size[0], size[1], radius, ring], 0.0, bottom),
             };
             let at = self.vertices.len() as u32;
             for i in [0, 1, 2, 0, 2, 3] {
@@ -360,11 +370,29 @@ struct Out {
 @fragment fn fs(i: Out) -> @location(0) vec4f {
   let size = vec2f(textureDimensions(image));
   let texel = (clamp(i.uv - 0.5, i.clamp.xy, i.clamp.zw) + 0.5) / size;
-  var c = textureSampleLevel(image, samp, texel, 0.0) * i.tint;
+  let raw = textureSampleLevel(image, samp, texel, 0.0);
+  var c = raw * i.tint;
   let p = i.local;
   let kind = i.kind.x;
   var cover = 1.0;
-  if (kind > 2.5) {
+  if (kind > 4.5) {
+    // The rounded box: its signed distance, the band inside the edge for a ring, and the shade.
+    let half = i.params.xy * 0.5;
+    let rad = min(i.params.z, min(half.x, half.y));
+    let q = abs(p - half) - (half - vec2f(rad, rad));
+    let d = length(max(q, vec2f(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - rad;
+    var inside = -d;
+    if (i.params.w > 0.0) {
+      inside = min(-d, d + i.params.w);
+    }
+    cover = clamp(inside + 0.5, 0.0, 1.0);
+    let k = clamp(p.y / max(i.params.y, 1.0), 0.0, 1.0);
+    c = mix(i.tint, i.right, k);
+  } else if (kind > 3.5) {
+    // Type: the atlas' distance, in frame pixels, smoothed over one.
+    cover = clamp((raw.a - 0.5) * 2.0 * i.params.x + 0.5, 0.0, 1.0);
+    c = i.tint;
+  } else if (kind > 2.5) {
     // The needle: inside its taper and between its two ends.
     let k = (p.x + i.params.x) / (i.params.x + i.params.y);
     let half = i.params.z + k * (i.params.w - i.params.z);
