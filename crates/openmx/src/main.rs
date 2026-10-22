@@ -1661,6 +1661,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let extent = ground.extent();
         ground.painted(game_render::splat::Splat::load(&archives, &stem, extent))
     };
+    // A mod track with no splat is painted from its terrain's own pages, as MX vs. ATV draws its maps
+    // (MD4). The disc's tracks keep their own ground.
+    let ground = match &modded {
+        Some(_) if ground.paint.is_none() => {
+            let detail = game_render::terrain::Pages::load_detail(&archives[..1], &stem);
+            let ground = ground.paged(detail, game_render::terrain::detail_multiplier(&ini::text(&scn_bytes)));
+            if let Some(p) = &ground.pages {
+                let paged = p.page_of.iter().filter(|p| p.is_some()).count();
+                let detail = if p.detail.is_some() { "with" } else { "without" };
+                println!("ground: {} terrain pages on {paged} of {} leaves, {detail} a detail map", p.pages.len(), p.page_of.len());
+            }
+            ground
+        }
+        _ => ground,
+    };
     let sim_terrain = track::Terrain::parse(&terrain_bytes)?;
     // The sky the scene names, behind everything (V25); the fog colour where it has none.
     let sky = game_render::sky::Sky::load(&archives, &ini::text(&scn_bytes));
@@ -2857,7 +2872,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         r.forget_assets();
         r.set_scene(&look);
         r.set_sky(sky.as_ref());
-        r.set_ground(&chunks, ground.paint.as_ref(), ground::DIRT)?;
+        let paint = match (&ground.paint, &ground.pages) {
+            (Some(splat), _) => game_render::gpu::GroundPaint::Splat(splat),
+            (None, Some(pages)) => game_render::gpu::GroundPaint::Pages(pages),
+            (None, None) => game_render::gpu::GroundPaint::Bare,
+        };
+        r.set_ground_painted(&chunks, paint, ground::DIRT)?;
         r.upload_all(&assets);
         let (models, materials, textures) = r.uploaded();
         println!(
