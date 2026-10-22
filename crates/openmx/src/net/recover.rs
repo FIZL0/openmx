@@ -44,6 +44,8 @@ pub struct Recover {
     /// its state still to be read).
     pieces: Vec<u8>,
     pub(super) ready: Option<(u8, u32, Lineup, Vec<u8>)>,
+    /// The modifiers a restart takes on (P100): its round, from, to.
+    pub(super) mods: Option<(u8, String, String)>,
     /// Restarts so far.
     pub restarts: u32,
 }
@@ -59,6 +61,7 @@ impl Recover {
             told: None,
             pieces: Vec::new(),
             ready: None,
+            mods: None,
             restarts: 0,
         }
     }
@@ -88,6 +91,7 @@ pub(super) fn heard<S: Clone + 'static>(np: &mut Netplay<S>, from: &str, m: Msg)
     let r = &mut np.recover;
     match m {
         Msg::Away { who, left } => r.told = (!who.is_empty()).then_some((who, left)),
+        Msg::Mods { round, was, to } => r.mods = Some((round, was, to)),
         Msg::Restart { round, tick, lineup, data, last } => {
             r.pieces.extend(data);
             if last {
@@ -197,6 +201,17 @@ pub(super) fn restarted<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay
     }
     if let Err(e) = game.decode(&data) {
         return np.finish(format!("the host's state did not load: {e}"));
+    }
+    // the modifiers the host changed at this tick (P100), on the state as it was before them
+    if let Some((_, was, to)) = np.recover.mods.take().filter(|m| m.0 == round) {
+        if let Err(e) = game.remodify(&was, &to) {
+            return np.finish(format!("the host's modifiers did not take: {e}"));
+        }
+        if to != np.mods {
+            np.say(format!("online: the modifiers are '{to}' from tick {tick}"));
+            np.remods.push((tick, to.clone()));
+        }
+        np.mods = to;
     }
     let rb = match rollback::Rollback::new(&lineup, &np.me, tick as usize, round) {
         Ok(rb) => rb,

@@ -2924,13 +2924,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let disc = &front.as_deref().expect("from the lobby").network.disc;
             let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
             let bytes = disc.phy(&first.pick.bike).ok_or(format!("the disc has no {} bike set", first.pick.bike))?;
-            let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+            let stock = Phy::read_bytes(&bytes, &tables.ride.curve);
+            let mut phy = stock.clone();
             mods.bike(0, &mut phy);
             let mut sim = world.seats[0].sim.clone();
             sim.phy = Arc::new(phy);
             sim.rng = room.seed;
             let mut online = online::Online::drop_in(net, &room, &me, sim)?;
-            online.time_scale = mods.time_scale();
+            online.modifiers(mods, vec![stock]);
             Some(online)
         }
         None if from_lobby.is_some() => {
@@ -2943,13 +2944,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             let disc = &front.as_deref().expect("from the lobby").network.disc;
             let mut sims = Vec::with_capacity(room.seats.len());
+            // each seat's bike file before the modifiers, which a change of them mid-ride is built
+            // on again (P100); an open seat rides this machine's first's
+            let mut stock = Vec::with_capacity(room.seats.len());
             for seat in &room.seats {
                 let mut sim = world.seats[0].sim.clone();
+                stock.push(stock_phys[0].clone());
                 if let Some(seat) = seat {
                     let bytes = disc.phy(&seat.pick.bike).ok_or(format!("the disc has no {} bike set", seat.pick.bike))?;
                     // The host's modifiers, 1P's for every seat: each seat's rider is a copy of
                     // this machine's first, built on 1P's (P55).
                     let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+                    *stock.last_mut().expect("pushed") = phy.clone();
                     mods.bike(0, &mut phy);
                     sim.phy = Arc::new(phy);
                 }
@@ -2965,7 +2971,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 println!("online: this machine's seat rides controller preset {mine}, its lobby pick's, not {here}");
             }
             let mut online = online::Online::lobby(net, &room, &me, sims)?;
-            online.time_scale = mods.time_scale();
+            online.modifiers(mods, stock);
             Some(online)
         }
         None => None,
@@ -2983,7 +2989,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // seat rides its own machine's (N15), as from the lobby (N13).
             let here = pad_seats.as_ref().map_or(presets[0], |s| s.preset(args.pad_seat(0)));
             let mut online = online::Online::start(me, &args.peers, args.seats.as_deref(), &starts, here as u8)?;
-            online.time_scale = mods.time_scale();
+            online.modifiers(mods, stock_phys.clone());
             Some(online)
         }
     };
@@ -3000,7 +3006,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             && front.menu.lobby.room.is_none()
             && front.network.disc.phy(&set).is_some_and(|b| *b == phy_bytes);
         front.menu.opening = if can { menu::Opening::Can } else { menu::Opening::No };
-        front.menu.mods_lock = mods_lock(head.is_some(), online.is_some());
+        front.menu.mods_lock = mods_lock(head.is_some(), online.as_ref().map(online::Online::host));
     }
     // The modifiers the Settings screen last said, so that the pause closing on a set the player
     // changed puts it on the ride (P98) and a `--modifiers` ride the player did not touch keeps its own.
@@ -3294,10 +3300,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         let net = front.network.open(&mut front.menu, room);
                         match online::Online::open(net, world.seats[0].sim.clone(), &spawn) {
                             Ok(mut on) => {
-                                on.time_scale = mods.time_scale();
+                                on.modifiers(mods, stock_phys[..1].to_vec());
+                                front.menu.mods_lock = mods_lock(head.is_some(), Some(on.host()));
                                 online = Some(on);
                                 front.menu.opening = menu::Opening::Open;
-                                front.menu.mods_lock = mods_lock(head.is_some(), true);
                             }
                             Err(e) => front.menu.note = Some(format!("Could not open the ride: {e}")),
                         }
@@ -3310,7 +3316,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if paused && front.menu.riding() && menu_mods != Some(front.menu.settings.modifiers) {
                 let to = front.menu.settings.modifiers;
                 menu_mods = Some(to);
-                if front.menu.mods_lock.is_none() && to != mods {
+                // Online the host's change goes to every machine, which all take it at one tick
+                // (P100): the ride is moved onto it below, once the session has.
+                if let Some(on) = online.as_mut().filter(|_| front.menu.mods_lock.is_none()) {
+                    match on.remodify(&to) {
+                        Ok(()) => println!("modifiers: {} (from the pause, for every machine at the next tick they agree)", to.text()),
+                        Err(e) => front.menu.note = Some(format!("The modifiers did not change: {e}")),
+                    }
+                } else if front.menu.mods_lock.is_none() && to != mods {
                     remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &mods, &to);
                     mods = to;
                     engine.time_scale = mods.time_scale();
@@ -3355,6 +3368,24 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // Every seat back into the shell's, this machine's first: the others are drawn beside it.
             for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
                 seated[d] = on.show(d, &mut seat.sim, rig.body.as_mut());
+            }
+            // The host's change of the modifiers, taken by every machine at one tick (P100): the
+            // seats came back on it above; the biplane, the marks and the menu say it here.
+            if on.mods() != online::first_players(&mods) {
+                let to = on.mods();
+                for (i, seat) in world.seats.iter_mut().enumerate() {
+                    if let (Some(file), Some(flight)) = (stock_plane.as_ref(), seat.garage.plane.as_mut().and_then(|p| p.flight.as_mut())) {
+                        to.replane(i, file, flight);
+                    }
+                }
+                for (i, rig) in rigs.iter_mut().enumerate() {
+                    rig.modified = !to.seat_is_original(i);
+                }
+                mods = to;
+                if let Some(front) = front.as_deref_mut() {
+                    front.menu.modified = !mods.is_original();
+                }
+                println!("modifiers: {} (the host's, from tick {})", if mods.is_original() { "the original game's".into() } else { mods.text() }, on.remodified_at().unwrap_or(0));
             }
             world.seats[0].hands = on.hands;
             world.seats[0].said = rider::Frame::default();
@@ -4411,13 +4442,13 @@ fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
 /// Which means `--play a.p2m2 --phase second --record a.tape` converts one into the other, by riding
 /// it: the tape written is the pad the port was handed, frame for frame.
 /// Why a ride cannot take a change of modifiers from its pause (P98), or `None` when it can. A played
-/// tape rides the modifiers it was made on and changes them where it did; online, every machine's ride
-/// has to change at the same tick, and the session has no way yet to agree one, so the set the room
-/// started on is the ride's to the end.
-fn mods_lock(playing: bool, online: bool) -> Option<String> {
+/// tape rides the modifiers it was made on and changes them where it did. Online (`Some(host)`) every
+/// machine's ride has to change at the same tick: the host's change goes to all of them with a
+/// restart of the session, and they take it there (P100); a guest's pause cannot change them.
+fn mods_lock(playing: bool, online: Option<bool>) -> Option<String> {
     match (playing, online) {
         (true, _) => Some("A played tape rides its own modifiers: they change where it changed them".into()),
-        (_, true) => Some("Online the ride keeps the modifiers it started on: change them in the lobby".into()),
+        (_, Some(false)) => Some("Online only the host changes the modifiers: every rider takes them at the same moment".into()),
         _ => None,
     }
 }
