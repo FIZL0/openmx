@@ -280,6 +280,42 @@ fn double_bike_speed_raises_the_top_speed() {
     s.step(DT, &Controls::default(), &mut Flat);
 }
 
+/// **The put-back keeps the raised limit** (P101): the bike's unwreck sets the riding speed limit
+/// again, and on a bike made faster that is [`Mods::ride`]'s raised one, not the stock 135 ft/s — so a
+/// rider at bike speed x2 who wrecks once still rides past 135 ft/s after it.
+#[test]
+fn double_bike_speed_passes_135_after_a_wreck_and_its_put_back() {
+    let fast = with(Knob::BikeSpeed, 200);
+    let mut s = sim(&fast, 0, 0.0);
+    let raised = s.rider.ride.chassis.max_speed_sq;
+    assert_eq!(raised.0, 135.0 * 135.0 * 4.0, "bike speed x2 did not raise the limit");
+    // Down, the wreck clock on its limit: the next tick asks for the put-back (and a page, if the
+    // seat has a screen, a few ticks later).
+    s.rider.state.enter(game_sim::trick::Wreck::ATTITUDE);
+    s.rider.state.counting = true;
+    s.rider.state.elapsed = s.phy.wreck_times.max_wreck_time;
+    assert!((0..30).any(|_| s.step(DT, &Controls::default(), &mut Flat).respawned), "the wreck was not put back");
+    assert_eq!(s.rider.state.wreck, None);
+    assert_eq!(s.rider.ride.chassis.max_speed_sq.0.to_bits(), raised.0.to_bits(), "the put-back took the limit back to stock");
+    let full = Controls { gas: F(1.0), ..Controls::default() };
+    let mut top = 0.0f32;
+    for _ in 0..1800 {
+        s.step(DT, &full, &mut Flat);
+        top = top.max(s.rider.ride.chassis.speed.0);
+    }
+    println!("top speed after a wreck at bike speed x2: {top:.2} ft/s");
+    assert!(top > 135.0, "after the put-back bike speed x2 tops out at {top} ft/s");
+    // And a change of set in the pause moves the put-back's limit too, wrecked or not.
+    let tables = Tables::build();
+    let stock = Phy::read_bytes(ridden_bike().as_bytes(), &tables.ride.curve);
+    s.rider.ride.chassis.max_speed_sq = game_sim::off_map::THROWN_MAX_SPEED * game_sim::off_map::THROWN_MAX_SPEED;
+    with(Knob::BikeSpeed, 300).resim(&fast, 0, &stock, &mut s);
+    assert_eq!(s.rider.ride.riding_speed_sq.0, 135.0 * 135.0 * 9.0, "the change left the put-back's limit");
+    assert_eq!(s.rider.ride.chassis.max_speed_sq.0, 350.0 * 350.0, "the change moved a thrown bike's limit");
+    Mods::original().resim(&with(Knob::BikeSpeed, 300), 0, &stock, &mut s);
+    assert_eq!(s.rider.ride.riding_speed_sq.0, 135.0 * 135.0, "back on the original, the put-back's limit");
+}
+
 #[test]
 fn a_tape_made_with_modifiers_replays_with_them() {
     let mods = Mods::parse("gravity=70 time_scale=150 bike_speed=130 grip.1=80").unwrap();
