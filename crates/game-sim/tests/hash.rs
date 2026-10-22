@@ -500,7 +500,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // rider-to-rider search reads and the walk leaves out like the ragdoll kit.
     // 11280 since P107: the markers' machine that is up and the other machines' sets, walked under
     // `markers` once either leaves the bike alone (tests/markers.rs in openmx).
+    // 11328 since S105: the ragdoll's search for the wreck bike, walked under the down rider's
+    // ragdoll with the bones' ignore of the bike.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11280, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11328, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
