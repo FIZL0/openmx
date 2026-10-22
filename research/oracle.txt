@@ -4399,6 +4399,8 @@ ecosystem_load_esb          boot 0x0012acb0 (name, EcoDistance2D, EcoDistance3D,
 ecosystem_read_header       boot 0x0012aa30 version, 256 species slots, shrubbery, probability map, then the plants
 ecosystem_read_species      boot 0x0012a3d0 one slot: names, size triples, atlas rect, three words, v2 tail, solids
 ecosystem_read_plants       boot 0x0012b470 9-byte plants: slot (bit 7 snap), u16 x y z times the scale, i8 height, i8 width
+#   V49: bit 7 alone snaps (the test is param_3 || bit, with +0x90 the world non-null): ground_query on
+#   the scaled point, then y = (u16)(int)(y * +0xd8), +0xd8 = 65536/extent. Every free06 plant has it.
 ecosystem_species_models    boot 0x00129180 a species' model and billboard, scales 0.5/half.y and 1/half.x
 ecosystem_frame             boot 0x0012bbd0 per frame: fov-stretched distance, fade byte, turn on entry, depth buckets
 ecosystem_model_item        boot 0x001e04b0 a near plant's matrix: turned by its two shorts, scaled to width and height
