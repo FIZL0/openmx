@@ -203,6 +203,9 @@ impl Assets {
     /// (free09's and free10's telephone wires, free06's pylons, bridges, fences, a runway), so that
     /// root turned on top of the scene's look and up laid a wire's sag sideways and stood a pylon
     /// off the line its wires hang from (V41).
+    ///
+    /// The path cars a track's `.toy` drives are loaded this way too: the original's car makes the
+    /// same model object, and free06's train_car_03/04/05 carry a half turn in the root (V46).
     pub fn load_placed(&mut self, archives: &[Res], name: &str) -> bool {
         let fresh = !self.models.contains_key(name);
         if !self.load(archives, name) {

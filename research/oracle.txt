@@ -4258,6 +4258,17 @@ screen_page_off boot 0x00200ab0 the screen's vt +0xa0, to 0x00200ac0: only the H
 #   drawn by it alone: the file's root node holds the same turn again, which the original does not
 #   apply (world.rs Assets::load_placed). free06 (biplane state): Free06_PowerLine_A at
 #   4235.519,260.544,4304.064 identity, box centre (6.852,3.352,-14.884) half (172.997,10.131,100.064).
+# V46 — why the root turn is never drawn, for props and path cars alike. The model object (class
+#   ctor 0x00176430, 0x1c0 bytes, vtable 0x0044f870; +0xa0 load 0x00176a90 -> model load 0x001a0360)
+#   reads the .psg node tree in 0x001b3890, whose node 0 IS the object: the root's file matrix goes
+#   into object+0x40, the object's own local, and the placement then overwrites +0x40..+0x7f
+#   (position 0x001b2640 writes +0x70, basis 0x001b1d70 rewrites +0x40..+0x70 via 0x0013e330).
+#   The prop reader 0x001a8cd0 and the car init 0x001147c0 both allocate this class; the car's
+#   update 0x00115540 calls 0x001b2640/0x001b1d70 each step. Biplane state (free06): train_car_03's
+#   object 0xd63bf0 holds +0x40 rows (-1,0,0.00158) (0,1,0) (-0.00158,0,-1) pos 2313.517,134.999,
+#   2810.909, box +0xc0 (0,9.046,0.070) half (5,9.090,26.771) = the file root's box in raw-vertex
+#   space; world box 2313.517,144.045,2810.838 = pos + rows*box, no half turn. Also _04 0xd6cf20,
+#   _05 0xd769d0. Every Bike\, Rider\, UI\Bike, UI\Rider and machine.res .psg root is identity.
 # ---------------------------------------------------------------------------------------------------
 # S79 — the points: crates/game-sim/src/score.rs, proved in crates/game-sim/tests/score.rs. How each was
 # found is in research/journal/2026-10-21-s79-trick-points.
