@@ -15,7 +15,7 @@
   --you: #ffd23a;                     /* the original's yellow player / human marks */
   --ai: #ef3b30;                      /* its red AI marks */
   --hit: #4ccf4c; --run: #ff8a1c; --race: #e0473f; --stunt: #b04cff;  /* as the disc's map_icon_h/r/m/s read: green, orange, red, purple */
-  --land: #7fe0a0; --bail: #ff5a4e;
+  --land: #5ee05e; --bail: #ff3b2e;
   --orange: #ff9900;                  /* the original's trick text and preload charge, 255,153,0 */
   --grey: #c8c8c8;                    /* its score text, 200,200,200 */
   --slot1: #00dcff; --slot2: #ff3cc8; --slot3: #b4ff3c; --slot4: #ff7850; --slot5: #9682ff;  /* overlay::MARKER_COLOURS (P94) */
@@ -102,10 +102,11 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
 .trick .pts { display: flex; align-items: center; gap: .45em; }
 .trick .p { font-size: 1.7em; font-variant-numeric: tabular-nums; }
 .mult { font-weight: 800; font-size: 1.3em; color: #ffd8a0; text-shadow: .06em .08em 0 rgba(0,0,0,.6); }
-.trick .verdict { font-weight: 800; font-size: 1.15em; letter-spacing: .14em; opacity: 0; text-shadow: .06em .08em 0 rgba(0,0,0,.6); }
-.trick.landed .verdict { color: #fff2d8; opacity: 1; }
-.trick.bailed .verdict { color: var(--bail); opacity: 1; }
-.trick.bailed .chain, .trick.bailed .pts .p { color: #8a8a8a; text-decoration: line-through; text-decoration-thickness: .08em; }
+.trick .verdict { display: none; }
+/* no words for the outcome: the popup's ink turns, green banked, red lost, then fades */
+.trick .chain, .trick .p, .trick .chain .plus { transition: color .15s; }
+.trick.landed .chain, .trick.landed .p, .trick.landed .chain .plus { color: #5ee05e; }
+.trick.bailed .chain, .trick.bailed .p, .trick.bailed .chain .plus { color: #ff3b2e; }
 .trick.landed .chain, .trick.landed .p { animation: landpulse .5s ease-out; }
 @keyframes landpulse { 0% { transform: scale(1.18); } 100% { transform: none; } }
 .trick.out { opacity: 0; transition: opacity .4s .8s; }
@@ -115,15 +116,16 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
 .radar svg { width: 100%; height: 100%; overflow: visible; }
 .where { position: absolute; left: 50%; bottom: -1.5em; transform: translateX(-50%); font-size: .85em; color: var(--chalk); white-space: nowrap; text-shadow: 0 .08em 0 rgba(0,0,0,.7); }
 
-/* speedometer, bottom right: the dial (the original's default) or the digital readout, the preload
-   meter standing right of either: a dark capsule charging orange from the bottom */
-.speedo { position: absolute; right: 2.2em; bottom: 2.4em; display: flex; align-items: flex-end; gap: .9em; }
-.digital { display: flex; align-items: flex-end; padding-bottom: .6em; }
-.digital .v { font-weight: 800; font-size: 5.4em; line-height: .8; color: #fff; font-variant-numeric: tabular-nums; text-shadow: .05em .06em 0 rgba(0,0,0,.45); min-width: 1.8em; text-align: right; }
-.pre { width: 2.5em; height: 8.5em; border-radius: 999px; background: rgba(0,0,0,.7); padding: .3em; display: flex; align-items: flex-end; margin-bottom: 2.2em; }
-.pre b { display: block; width: 100%; height: 0; border-radius: 999px; background: var(--orange); }
-.analog { width: 13em; height: 13em; display: none; }
+/* speedometer, bottom right, at speedometer.lyt's places on 640x448: the dial's 128 square at 480,301,
+   the preload meter (20x85) hard against its right edge at 599,326, and the digital readout's right
+   edge at 588, just left of the meter. All counted from the view's bottom-right corner */
+.speedo { position: absolute; inset: 0; }
+.analog { position: absolute; right: 4em; bottom: 2.1em; width: 16em; height: 16em; display: none; }
 .analog svg { width: 100%; height: 100%; overflow: visible; }
+.digital { position: absolute; right: 6.5em; bottom: 4.4em; }
+.digital .v { display: block; font-weight: 800; font-size: 5.4em; line-height: .8; color: #fff; font-variant-numeric: tabular-nums; text-shadow: .05em .06em 0 rgba(0,0,0,.45); text-align: right; }
+.pre { position: absolute; right: 2.6em; bottom: 3.8em; width: 2.5em; height: 8.5em; border-radius: 999px; background: rgba(0,0,0,.7); padding: .3em; display: flex; align-items: flex-end; }
+.pre b { display: block; width: 100%; height: 0; border-radius: 999px; background: var(--orange); }
 .speedo.is-analog .analog { display: block; }
 .speedo.is-analog .digital { display: none; }
 
@@ -218,7 +220,7 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
     <div class="card"><h3>Score and the points popup (P68)</h3><ul>
       <li>The score is the original's bar: a dark see-through capsule with a darker label end, and <code>SCORE</code> and the number in 200,200,200 (<code>overlay_score.fsh</code>). Landing a trick flashes it orange (the movie's SuccessDone) while the total counts up.</li>
       <li>The popup is the movies' own: the trick's name over its points, in orange 255,153,0 bold oblique (<code>overlay_stunt1_1.fsh</code>'s text colour, set in yearlingdashboldoblique_18). It pops in from large and faint, as the movie's scale and alpha keys run.</li>
-      <li>A combo (<code>overlay_stunt2_1.fsh</code>) is the names joined with + over the combo's points and its count. A landing pulses it and banks <code>head × count</code>; a bail greys it out and banks nothing (score_combo_end).</li>
+      <li>A combo (<code>overlay_stunt2_1.fsh</code>) is the names joined with + over the combo's points and its count. There are no words for the outcome. A landing turns it green and banks <code>head × count</code>; a bail turns it red and banks nothing (score_combo_end). Both then fade. The two colours are a guess to check against PCSX2, because the movies' files hold no second colour.</li>
       <li>The trick names here are placeholders. The real ones come from the disc's strings once P68 reads them.</li>
     </ul></div>
     <div class="card"><h3>Minimap</h3><ul>
@@ -242,7 +244,8 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
       <li>Overlay None hides it (P117).</li>
     </ul></div>
     <div class="card"><h3>Speed and preload (V42, V53)</h3><ul>
-      <li>The preload meter is the original's: a dark capsule 20×85 standing right of the speed, charging orange (255,153,0) from the bottom as the preload fires (<code>overlay::preload_fill</code>).</li>
+      <li>Places are <code>speedometer.lyt</code>'s: the dial's 128 square at 480,301, the meter hard against its right edge at 599,326, and the digital number's right edge at 588, just left of it.</li>
+      <li>The preload meter is the original's: a dark capsule 20×85, charging orange (255,153,0) from the bottom as the preload fires (<code>overlay::preload_fill</code>).</li>
       <li>The dial is the default, as on the disc. It has white dashes from 0 to 100, an orange needle off a grey hub, and the odometer's <code>%07.1f</code> in a dark capsule. Digital is the big white oblique number alone.</li>
     </ul></div>
     <div class="card" hidden><h3>old</h3><ul>
@@ -341,15 +344,15 @@ function dialSVG(v) {
   const a0 = 130, span = 280, mx = 100, ang = s => (a0 + span * Math.min(s, mx) / mx) * Math.PI / 180;
   let t = "";
   for (let s = 0; s <= mx; s += 10) { const a = ang(s), c = Math.cos(a), n = Math.sin(a);
-    t += `<line x1="${(c * 60).toFixed(1)}" y1="${(n * 60).toFixed(1)}" x2="${(c * 70).toFixed(1)}" y2="${(n * 70).toFixed(1)}" stroke="#fff" stroke-width="5" stroke-linecap="round"/>`;
-    t += `<text x="${(c * 86).toFixed(1)}" y="${(n * 86 + 4.5).toFixed(1)}" text-anchor="middle" font-size="13" font-weight="700" fill="#fff" stroke="#000" stroke-width="2" paint-order="stroke" font-family="OMX, sans-serif">${s}</text>`; }
+    t += `<line x1="${(c * 47).toFixed(1)}" y1="${(n * 47).toFixed(1)}" x2="${(c * 57).toFixed(1)}" y2="${(n * 57).toFixed(1)}" stroke="#fff" stroke-width="5" stroke-linecap="round"/>`;
+    t += `<text x="${(c * 71).toFixed(1)}" y="${(n * 71 + 4.5).toFixed(1)}" text-anchor="middle" font-size="13" font-weight="700" fill="#fff" stroke="#000" stroke-width="2" paint-order="stroke" font-family="OMX, sans-serif">${s}</text>`; }
   const a = ang(v.speed), odo = v.odo.toFixed(1).padStart(7, "0");
-  const tip = [Math.cos(a) * 64, Math.sin(a) * 64], side = [Math.cos(a + Math.PI / 2) * 4.5, Math.sin(a + Math.PI / 2) * 4.5];
+  const tip = [Math.cos(a) * 54, Math.sin(a) * 54], side = [Math.cos(a + Math.PI / 2) * 4.5, Math.sin(a + Math.PI / 2) * 4.5];
   return `<svg viewBox="-100 -100 200 200">${t}
     <path d="M${side[0].toFixed(1)} ${side[1].toFixed(1)} L${tip[0].toFixed(1)} ${tip[1].toFixed(1)} L${(-side[0]).toFixed(1)} ${(-side[1]).toFixed(1)}Z" fill="var(--orange)" stroke="#5a2a00" stroke-width="1"/>
     <circle r="11" fill="#6b6b6b" stroke="#2b2b2b" stroke-width="2"/><circle r="5" cx="-2" cy="-2" fill="#9a9a9a"/>
-    <rect x="-40" y="56" width="80" height="22" rx="11" fill="#000" fill-opacity=".7"/>
-    <text x="0" y="72" text-anchor="middle" font-size="15" font-weight="800" fill="#fff" font-family="OMX, sans-serif" letter-spacing="1.6">${odo}</text></svg>`;
+    <rect x="-40" y="62" width="80" height="22" rx="11" fill="#000" fill-opacity=".7"/>
+    <text x="0" y="78" text-anchor="middle" font-size="15" font-weight="800" fill="#fff" font-family="OMX, sans-serif" letter-spacing="1.6">${odo}</text></svg>`;
 }
 
 /* ---- state ---- */
