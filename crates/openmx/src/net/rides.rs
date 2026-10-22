@@ -57,7 +57,8 @@ impl Game for Rides<'_> {
         for (seat, sim) in self.sims.iter_mut().enumerate() {
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());
-            let hands = sim.poll(dt, &reports);
+            // The shell's hands, the d-pad the markers' and not the ride's (P93).
+            let hands = sim.poll(dt, &reports).stick_alone();
             sim.step(dt, &hands, self.world);
             markers::frame(sim, seat, &spots, &hands);
             if let Some(after) = &mut self.after {
