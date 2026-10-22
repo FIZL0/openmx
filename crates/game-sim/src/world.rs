@@ -8,7 +8,10 @@
 //!   comes out of the terrain object's own query, which D6 ported ([`track::Terrain::cell`]) down to
 //!   the four corners of a cell; what is *not* ported is how the game picks a point inside the cell,
 //!   because that lives in the terrain collision class nobody has read yet. [`Ground::at`] blends the
-//!   cell bilinearly, which is this module's own arithmetic and is marked as such.
+//!   cell bilinearly, which is this module's own arithmetic and is marked as such. The ride's query
+//!   itself, [`World::ground`] on a [`Ground`], is not that since S64: it is the original's own
+//!   triangle split ([`crate::contact_search::ground`]), and `Ground::at` only says whether a point
+//!   is on the field.
 //! * **The sweep.** The scene lists a collision mesh for every solid thing on the track — three
 //!   hundred and fifty-three of them on `free06` — each with a position and a pair of axes. S4 ported
 //!   the sweep itself ([`collide::sweep`]), which works in one mesh's own space, so [`Props`] is the
@@ -331,11 +334,20 @@ impl<'a> Ground<'a> {
 }
 
 impl World for Ground<'_> {
+    /// The world's ground query as the original's is (`ground_query`, S64): the terrain object's own
+    /// heightfield arithmetic over [`Ground::field`] — the cell split into two triangles, the corner
+    /// normals blended by weight and normalised — which is [`crate::contact_search::ground`]. The
+    /// point keeps its `x`, `z` and `w` and takes the ground's `y`.
+    ///
+    /// Off the field the original's query leaves the point where it was (and so a wheel past the edge
+    /// finds ground at its own probe's end); this keeps [`Ground::at`]'s answer there instead, no
+    /// ground at all, which is what keeps a rider on the map. See S64's journal entry.
     fn ground(&mut self, at: Vf) -> (Vf, Vf) {
-        match self.at(F(at.x()), F(at.z())) {
-            Some(hit) => (Vf::new(at.x(), hit.y.0, at.z(), 1.0), hit.normal),
-            None => (Vf::new(at.x(), NO_GROUND, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0)),
+        if self.at(F(at.x()).max(F::ZERO), F(at.z()).max(F::ZERO)).is_none() {
+            return (Vf::new(at.x(), NO_GROUND, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0));
         }
+        let g = crate::contact_search::ground(&self.field(), at);
+        (g.point, g.normal)
     }
 
     fn surface(&mut self, at: Vf) -> u8 {

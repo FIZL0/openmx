@@ -133,9 +133,12 @@ fn write(root: &Path, rel: &str, bytes: impl AsRef<[u8]>) {
     std::fs::write(path, bytes).unwrap();
 }
 
-/// A `mods/` folder holding the one big map, `md3_big`.
+/// A `mods/` folder holding the one big map, `md3_big`: one per shell, since the tests run in
+/// parallel and a shared folder was cleared under another test's shell (14 of 25 runs red).
 fn mods_folder() -> PathBuf {
-    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md3").join("mods");
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("md3-{}-{n}", std::process::id())).join("mods");
     let _ = std::fs::remove_dir_all(&mods);
     let dir = mods.join("tracks").join("md3_big");
     write(&dir, "mod.json", mod_json("md3_big"));
@@ -158,6 +161,7 @@ fn shell(args: &[&str]) -> Option<String> {
         .args(args)
         .output()
         .expect("the shell runs");
+    let _ = std::fs::remove_dir_all(mods.parent().unwrap());
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "the shell failed:\n{said}");
     Some(said)
