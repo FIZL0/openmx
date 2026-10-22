@@ -1452,7 +1452,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Applied to what the ride loads, never as a branch in the simulation: at their defaults nothing
     // is touched at all.
     let lobby_room = shell.as_deref().and_then(|s| s.front.menu.lobby.start.as_ref()).map(|(room, _)| room);
-    let mods = ride_modifiers(&args, lobby_room)?;
+    let mut mods = ride_modifiers(&args, lobby_room)?;
     if !mods.is_original() {
         println!("modifiers: {}", mods.text());
     }
@@ -1629,6 +1629,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The other players' own picks (P37): each rides the `.phy` its set names in its own bike's
     // archive, and wears its own rider's gear. A player the garage has no pick for rides the first's.
     let mut other_phys: Vec<Phy> = Vec::new();
+    // Each player's file as the disc has it, which a change of modifiers in the ride builds the
+    // bike's numbers again from (P98).
+    let mut stock_phys: Vec<Phy> = vec![stock_phy.clone()];
     let mut other_riders: Vec<Option<(String, String)>> = Vec::new();
     // Online every seat of `--seats` is a rider on this track, each machine's in the same places
     // (N5): seat `s` starts where local player `s + 1` would, on the first's bike.
@@ -1646,6 +1649,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
                 println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
                 let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+                stock_phys.push(phy.clone());
                 mods.bike(i, &mut phy);
                 other_phys.push(phy);
                 let rider = member_ending(&disc, &format!("{}.res", pick.rider)).ok();
@@ -1653,6 +1657,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             None => {
                 let mut phy = stock_phy.clone();
+                stock_phys.push(stock_phy.clone());
                 mods.bike(i, &mut phy);
                 other_phys.push(phy);
                 other_riders.push(None);
@@ -1904,6 +1909,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         })
     };
     let plane = lot.plane(0, flight_for(0));
+    // And the biplane's, for the same (P98).
+    let stock_plane = plane_phy.as_deref().map(phy::Plane::read_bytes);
     if machines.is_some() {
         let parked: Vec<String> = Machine::ALL
             .iter()
@@ -2953,7 +2960,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             && front.menu.lobby.room.is_none()
             && front.network.disc.phy(&set).is_some_and(|b| *b == phy_bytes);
         front.menu.opening = if can { menu::Opening::Can } else { menu::Opening::No };
+        front.menu.mods_lock = mods_lock(head.is_some(), online.is_some());
     }
+    // The modifiers the Settings screen last said, so that the pause closing on a set the player
+    // changed puts it on the ride (P98) and a `--modifiers` ride the player did not touch keeps its own.
+    let mut menu_mods = front.as_deref().map(|f| f.menu.settings.modifiers);
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
     let mut seated = vec![true; world.seats.len()];
 
@@ -3033,6 +3044,21 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // since the last frame: what the pause reads (P53). Under the new scheme the ride's report
         // has R2 where Cross was, so a pause read from it took R2 for OK and Cross did nothing.
         let mut menu_reports: Vec<(Report, u16)> = Vec::new();
+        // The recording changed the modifiers before the frame it hands out next (P98): the ride
+        // takes them there, as it did when it was made.
+        if let Some(to) = head.as_ref().and_then(Head::change) {
+            remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &mods, &to);
+            mods = to;
+            engine.time_scale = mods.time_scale();
+            if let Some(front) = front.as_deref_mut() {
+                front.menu.modified = !mods.is_original();
+            }
+            // A tape being written off the one being played (`--play a --record b`) changes there too.
+            if let Some(tape) = &mut world.tape {
+                tape.modifiers(mods);
+            }
+            println!("modifiers: {} (the tape's, from frame {})", mods.text(), head.as_ref().map_or(0, Head::at));
+        }
         match &mut head {
             // The seats', otherwise: seat i feeds player i's own pad port (V22's players). A seat
             // whose pad was pulled out pauses its own player rather than riding on with nobody's
@@ -3159,6 +3185,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             escape = esc;
             front.menu.music_now = front.sound.now();
+            let paused = !front.menu.riding();
             let act = front.menu.step_seats(&presses);
             if front.menu.changed() {
                 overlay_mode = front.menu.settings.overlay;
@@ -3230,12 +3257,29 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                                 on.time_scale = mods.time_scale();
                                 online = Some(on);
                                 front.menu.opening = menu::Opening::Open;
+                                front.menu.mods_lock = mods_lock(head.is_some(), true);
                             }
                             Err(e) => front.menu.note = Some(format!("Could not open the ride: {e}")),
                         }
                     }
                 }
                 Act::Stay | Act::Resume | Act::Ride(_) | Act::Switch(_) | Act::Online | Act::OpenOnline => {}
+            }
+            // The pause closing on modifiers the player changed in it: the ride takes them now, from
+            // where it is (P98), and a tape being written takes the change at the tick it is on.
+            if paused && front.menu.riding() && menu_mods != Some(front.menu.settings.modifiers) {
+                let to = front.menu.settings.modifiers;
+                menu_mods = Some(to);
+                if front.menu.mods_lock.is_none() && to != mods {
+                    remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &mods, &to);
+                    mods = to;
+                    engine.time_scale = mods.time_scale();
+                    front.menu.modified = !mods.is_original();
+                    if let Some(tape) = &mut world.tape {
+                        tape.modifiers(mods);
+                    }
+                    println!("modifiers: {} (from the pause)", if mods.is_original() { "the original game's".into() } else { mods.text() });
+                }
             }
             for seat in &mut world.seats {
                 seat.riding = front.menu.riding();
@@ -4323,6 +4367,43 @@ fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
 ///
 /// Which means `--play a.p2m2 --phase second --record a.tape` converts one into the other, by riding
 /// it: the tape written is the pad the port was handed, frame for frame.
+/// Why a ride cannot take a change of modifiers from its pause (P98), or `None` when it can. A played
+/// tape rides the modifiers it was made on and changes them where it did; online, every machine's ride
+/// has to change at the same tick, and the session has no way yet to agree one, so the set the room
+/// started on is the ride's to the end.
+fn mods_lock(playing: bool, online: bool) -> Option<String> {
+    match (playing, online) {
+        (true, _) => Some("A played tape rides its own modifiers: they change where it changed them".into()),
+        (_, true) => Some("Online the ride keeps the modifiers it started on: change them in the lobby".into()),
+        _ => None,
+    }
+}
+
+/// **The ride takes another set of modifiers, from where it is** (P98): every seat's bike built again
+/// from its stock file `stock[i]` on `to` ([`Mods::rebike`](game_sim::modifiers::Mods::rebike)), its
+/// biplane retuned off the stock `plane` the same way, and the HUD's mark said again. `was` is the set
+/// the ride had. Nothing is moved, stopped or put back.
+fn remodify(
+    seats: &mut [Seat],
+    rigs: &mut [Rig],
+    stock: &[Phy],
+    plane: Option<&phy::Plane>,
+    was: &game_sim::modifiers::Mods,
+    to: &game_sim::modifiers::Mods,
+) {
+    for (i, seat) in seats.iter_mut().enumerate() {
+        if let Some(file) = stock.get(i) {
+            to.resim(was, i, file, &mut seat.sim);
+        }
+        if let (Some(file), Some(flight)) = (plane, seat.garage.plane.as_mut().and_then(|p| p.flight.as_mut())) {
+            to.replane(i, file, flight);
+        }
+    }
+    for (i, rig) in rigs.iter_mut().enumerate() {
+        rig.modified = !to.seat_is_original(i);
+    }
+}
+
 /// The game modifiers a ride loads with (P55): a lobby ride's are its host's, sent in the room
 /// before the start; a `--play` tape's are the ones it was recorded on, so it replays as it rode;
 /// otherwise `--modifiers`' or the Settings screen's.

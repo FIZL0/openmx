@@ -272,6 +272,22 @@ impl Flight {
         f
     }
 
+    /// **The plane's numbers changed under a flight going on** (P98): what [`Flight::new`] took off
+    /// the file and the game modifiers ([`crate::modifiers::Mods::plane`]) reach — the engine's power
+    /// and the speed its prop is fully efficient from, the zero-lift drag, the gravity scale — taken
+    /// again from `plane`, the flight left where and how it is. The gravity force is the file's scale's
+    /// only while flying: a wreck's is `WreckGravity`'s, and its recovery builds the new scale's.
+    pub fn retune(&mut self, plane: &phy::Plane) {
+        let fresh = Flight::new(plane);
+        self.engine.max_power = fresh.engine.max_power;
+        self.engine.full_efficiency_speed = fresh.engine.full_efficiency_speed;
+        self.aero.drag0 = fresh.aero.drag0;
+        self.gravity_scale = fresh.gravity_scale;
+        if self.crash.reason == 0 {
+            self.gravity = gravity_force(self.gravity_scale, self.mass);
+        }
+    }
+
     /// The plane with its collision object's ray probe: the rays of `Biplane\col\biplanem.col`
     /// ([`Rays::of`]), which is what the original's plane loader builds the probe from.
     pub fn with_rays(mut self, rays: Rays) -> Flight {

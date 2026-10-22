@@ -1143,12 +1143,28 @@ pub struct PadTape {
     /// The game modifiers the ride was made with (P55), which a replay has to load the ride with to
     /// ride it again. The original game's — every one at its default — unless the file says.
     pub modifiers: crate::modifiers::Mods,
+    /// The modifiers changed while the ride went on (P98), in tick order: `(k, mods)` is the set
+    /// frames `k` on ride with, put on before frame `k` is stepped — after the pause they were set in,
+    /// which is not on the tape. Empty for a ride that kept the set it loaded with, which is every tape
+    /// before P98.
+    pub changes: Vec<(usize, crate::modifiers::Mods)>,
 }
 
 impl PadTape {
     /// An empty recording, named.
     pub fn new(name: impl Into<String>) -> PadTape {
-        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default() }
+        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new() }
+    }
+
+    /// The modifiers frame `k` rides on: the set the ride loaded with, as the changes before it left
+    /// it.
+    pub fn modifiers_at(&self, k: usize) -> crate::modifiers::Mods {
+        self.changes.iter().take_while(|(at, _)| *at <= k).last().map_or(self.modifiers, |(_, m)| *m)
+    }
+
+    /// The change put on just before frame `k`, if there is one there.
+    pub fn change_at(&self, k: usize) -> Option<crate::modifiers::Mods> {
+        self.changes.iter().rev().find(|(at, _)| *at == k).map(|(_, m)| *m)
     }
 
     /// Write down one frame: the port recording what it just played.
@@ -1253,6 +1269,7 @@ impl PadTape {
     /// format 1
     /// tape freeride-two-minutes
     /// modifiers gravity=50 bike_speed.1=200   # P55's game modifiers, only on a modified ride
+    /// modifiers_from 600 gravity=100            # P98: frames 600 on ride on these (empty: the original's)
     /// frame 0x3d0699a3 0x0079fffb7f7f7f7f0000000000000000ff000000  # dt, pad 0, [pad 1]
     /// frame 0x3d0699a3 *0x0040 -                   # … or a bitmask, and "-" for no pad at all
     /// ```
@@ -1291,6 +1308,19 @@ impl PadTape {
                     tape.modifiers = crate::modifiers::Mods::parse(&line["modifiers".len()..])
                         .map_err(|message| ParseError { line: n, message })?;
                 }
+                // A change of modifiers in the ride (P98): the frame it takes before, then the set.
+                "modifiers_from" => {
+                    let at = word.next().and_then(parse_u64).ok_or_else(|| ParseError {
+                        line: n,
+                        message: "modifiers_from wants the frame it takes before, then the modifiers".into(),
+                    })? as usize;
+                    if tape.changes.last().is_some_and(|(last, _)| *last > at) {
+                        return err(n, format!("modifiers_from {at} comes after a later one"));
+                    }
+                    let mods = crate::modifiers::Mods::parse(&word.collect::<Vec<_>>().join(" "))
+                        .map_err(|message| ParseError { line: n, message })?;
+                    tape.changes.push((at, mods));
+                }
                 "frame" => {
                     let fields: Vec<&str> = word.collect();
                     if fields.is_empty() || fields.len() > 1 + PADS {
@@ -1324,6 +1354,9 @@ impl PadTape {
         // Only a modified ride says so, so the original's tapes are the bytes they always were.
         if !self.modifiers.is_original() {
             let _ = writeln!(s, "modifiers {}", self.modifiers.text());
+        }
+        for (at, mods) in &self.changes {
+            let _ = writeln!(s, "modifiers_from {at} {}", mods.text());
         }
         for frame in &self.frames {
             let _ = write!(s, "frame 0x{:08x}", frame.dt);
@@ -2029,6 +2062,16 @@ impl Recorder {
         self.tape.push(PadFrame::new(dt, *reports));
     }
 
+    /// Write down that the ride's modifiers changed to `mods` (P98): the frames recorded from here on
+    /// ride on them. Two changes between the same two frames are one, the last.
+    pub fn modifiers(&mut self, mods: crate::modifiers::Mods) {
+        let at = self.tape.len();
+        if self.tape.changes.last().is_some_and(|(last, _)| *last == at) {
+            self.tape.changes.pop();
+        }
+        self.tape.changes.push((at, mods));
+    }
+
     /// How many frames have been recorded.
     pub fn len(&self) -> usize {
         self.tape.len()
@@ -2086,6 +2129,12 @@ impl Head {
     /// Whether the tape has run out, which is the loop's cue to stop.
     pub fn done(&self) -> bool {
         self.at >= self.tape.len()
+    }
+
+    /// The modifiers change the ride takes before the frame [`Head::next`] hands out next (P98), if
+    /// the recording changed them there.
+    pub fn change(&self) -> Option<crate::modifiers::Mods> {
+        self.tape.change_at(self.at)
     }
 }
 
