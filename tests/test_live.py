@@ -998,6 +998,32 @@ def _():
     assert 'no PCSX2 config to copy from' in str(e) and 'Run PCSX2 once yourself' in str(e)
 
 
+@check("a copy plugs a DualShock2 into port 2 on SDL-1, and leaves port 1's bindings on SDL-0")
+def _():
+    emu_env(inst='3')
+    own = PLAT.pcsx2_config_dir('') / 'inis' / 'PCSX2.ini'
+    real_ini = own.read_text()
+    # The shape a user's ini has: Pad1 on the keyboard, Pad2 unplugged. Copy 4 rode one rider on this.
+    own.write_text(real_ini + '\n[Pad1]\nType = DualShock2\nUp = Keyboard/Up\nCross = Keyboard/X\n'
+                   '\n[Pad2]\nType = None\n\n[Hotkeys]\nOpenPauseMenu = Keyboard/Escape\n')
+    try:
+        dst, _, _ = out_of(EMU.copy_config, 3)
+        ini = EMU.ini_path('3')
+        for _ in range(2):      # and a refresh of the copy changes nothing
+            assert EMU._ini_get_in(ini, 'Pad2', 'Type') == 'DualShock2', 'Type = None plays P2 idle'
+            assert EMU._ini_get_in(ini, 'Pad1', 'Type') == 'DualShock2'
+            for key, bind in EMU.PAD1_SDL.items():
+                assert EMU._ini_get_in(ini, 'Pad1', key) == bind
+                assert EMU._ini_get_in(ini, 'Pad2', key) == bind.replace('SDL-0/', 'SDL-1/'), key
+            text = ini.read_text()
+            assert text.count('[Pad2]') == 1 and text.count('Type = ') == 2
+            assert 'Keyboard/Up' not in text and '\n\n[Hotkeys]' in text
+            out_of(EMU.copy_config, 3)
+    finally:
+        own.write_text(real_ini)
+        os.environ.pop('KIT_PCSX2', None)
+
+
 @check('the emulator this instance started is tracked by pid file and checked by name')
 def _():
     emu_env()
