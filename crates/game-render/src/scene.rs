@@ -96,6 +96,16 @@ pub struct Scene {
     pub fog_haziness: f32,
     pub lights: Vec<Light>,
     pub models: Vec<Placement>,
+    /// `[Environment]`'s `EcosystemFile`, the trees and bushes (`free09.esb`), and the distances it
+    /// draws them by: `EcoDistance3D` is where a plant's model gives way, `EcoDistance2D` where its
+    /// picture has taken over (V48). `ShrubberyDistLimit` is read for a shrubbery no scene has.
+    pub ecosystem_file: Option<String>,
+    pub eco_distance_2d: f32,
+    pub eco_distance_3d: f32,
+    pub shrubbery_limit: f32,
+    /// The ecosystem itself once a shell has loaded it ([`crate::eco::Grove::load`]): both
+    /// renderers draw it with the props.
+    pub ecosystem: Option<crate::eco::Grove>,
 }
 
 impl Scene {
@@ -114,6 +124,7 @@ impl Scene {
         // The fog's numbers as the original reads them: its `strtod` and then its double-to-float
         // conversion, which truncates, so `Haziness=0.60` is the float just below 0.6.
         let fog_number = |key: &str| fog.and_then(|s| s.get(key)).map(|v| game_sim::phy::number(v).0);
+        let env_number = |key: &str| env.and_then(|s| s.get(key)).map(|v| game_sim::phy::number(v).0);
         let rgb = fog
             .and_then(|s| s.numbers("ColorRGB"))
             .filter(|n| n.len() >= 3)
@@ -169,6 +180,15 @@ impl Scene {
             fog_haziness: fog_number("Haziness").unwrap_or(0.5),
             lights,
             models,
+            ecosystem_file: env
+                .and_then(|s| s.get("EcosystemFile"))
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_string()),
+            eco_distance_2d: env_number("EcoDistance2D").unwrap_or(crate::eco::DISTANCE_2D),
+            eco_distance_3d: env_number("EcoDistance3D").unwrap_or(crate::eco::DISTANCE_3D),
+            shrubbery_limit: env_number("ShrubberyDistLimit").unwrap_or(crate::eco::SHRUBBERY_LIMIT),
+            ecosystem: None,
         }
     }
 
