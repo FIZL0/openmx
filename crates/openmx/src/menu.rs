@@ -1293,9 +1293,9 @@ pub enum Act {
     Restart,
     /// Leave the ride for the main menu.
     MainMenu,
-    /// Put this seat's player on their other machine, and carry on (P41). The shell answers with
-    /// [`Menu::switched`].
-    Switch(usize),
+    /// Put this seat's player on the machine named, spawned where they are, and carry on (P41,
+    /// P102). The shell answers with [`Menu::switched`].
+    Switch(usize, Machine),
     Quit,
     /// The lobby's ride starts: [`Lobby::start`] says on what (with [`Lobby::drop_in`], a ride
     /// under way this machine joins).
@@ -1331,6 +1331,9 @@ pub struct Menu {
     pub switchable: [bool; SEATS_MAX],
     /// The seat whose Start opened the pause, whose machine its switch row is.
     pauser: usize,
+    /// The machine the pause's switch row has picked (P102): left and right step it through the
+    /// pauser's [`Menu::choices`], and OK switches to it. `None` until a step, which is the first.
+    switch_pick: Option<Machine>,
     /// The seat whose machine the ride setup's machine row is picking.
     setup_seat: usize,
     /// What the garage offers, off the disc; empty until [`Menu::with_garage`] gives it one.
@@ -1462,6 +1465,7 @@ impl Menu {
             up: [Machine::Bike; SEATS_MAX],
             switchable: [false; SEATS_MAX],
             pauser: 0,
+            switch_pick: None,
             setup_seat: 0,
             catalogue: Catalogue::default(),
             picks: Picks::default(),
@@ -1959,6 +1963,21 @@ impl Menu {
         self.stack = vec![Screen::Pause];
         self.cursor[Screen::Pause.index()] = 0;
         self.pauser = seat.min(SEATS_MAX - 1);
+        self.switch_pick = None;
+    }
+
+    /// The machines `seat` can be switched to from the one they are on, in [`Machine::ALL`]'s
+    /// order: every one but that, for a player the shell says has another ([`Menu::switchable`]),
+    /// and none for one it says has not.
+    pub fn choices(&self, seat: usize) -> Vec<Machine> {
+        let (up, has) = (self.up.get(seat).copied().unwrap_or_default(), self.switchable.get(seat).copied().unwrap_or(false));
+        Machine::ALL.into_iter().filter(|&m| has && m != up).collect()
+    }
+
+    /// The machine the pause's switch row would put its player on, if any.
+    pub fn switch_to(&self) -> Option<Machine> {
+        let choices = self.choices(self.pauser);
+        self.switch_pick.filter(|m| choices.contains(m)).or(choices.first().copied())
     }
 
     /// The shell's answer to [`Act::Switch`]: `seat` is on `up` now.
@@ -2125,8 +2144,11 @@ impl Menu {
             .iter()
             .enumerate()
             .map(|(i, row)| match i {
-                PAUSE_SWITCH if self.switchable[seat] => format!("{row}: {}", self.up[seat].other().label()),
-                PAUSE_SWITCH => format!("{row}: None"),
+                PAUSE_SWITCH => match self.switch_to() {
+                    Some(m) if self.choices(seat).len() > 1 => format!("{row}: < {} >", m.label()),
+                    Some(m) => format!("{row}: {}", m.label()),
+                    None => format!("{row}: None"),
+                },
                 _ => row.to_string(),
             })
             .collect();
@@ -2505,6 +2527,14 @@ impl Menu {
                     }
                     return Act::Stay;
                 }
+                if at == PAUSE_SWITCH && (p.left || p.right) {
+                    let choices = self.choices(self.pauser);
+                    if let Some(now) = self.switch_to().and_then(|m| choices.iter().position(|c| *c == m)) {
+                        let n = choices.len();
+                        self.switch_pick = Some(choices[if p.left { (now + n - 1) % n } else { (now + 1) % n }]);
+                    }
+                    return Act::Stay;
+                }
                 if p.ok {
                     match at {
                         0 => {
@@ -2516,9 +2546,9 @@ impl Menu {
                             return Act::Restart;
                         }
                         PAUSE_SWITCH => {
-                            if self.switchable[self.pauser] {
+                            if let Some(to) = self.switch_to() {
                                 self.stack.clear();
-                                return Act::Switch(self.pauser);
+                                return Act::Switch(self.pauser, to);
                             }
                         }
                         PAUSE_AUDIO => self.open_audio(),

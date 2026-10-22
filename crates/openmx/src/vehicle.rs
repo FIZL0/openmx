@@ -4,16 +4,20 @@
 //! `machine.txt` parks them — on free06 a biplane, `[Biplane1]`, standing on the dirt well away from
 //! the start line — and the original lets the rider take one over in two ways: a prompt when the
 //! rider stops within 30 ft of a driverless one ("Would you like to switch to the Biplane?",
-//! `STR_SWITCH_BIPLANE`), and the pause menu's "Switch To Machine". Both answer through the one swap routine, and that routine is
-//! what [`Garage::swap`] is (R8's reading, `research/oracle.txt`'s `machine_swap`):
+//! `STR_SWITCH_BIPLANE`), and the pause menu's "Switch To Machine". Both answer through the one swap
+//! routine (R8's reading, `research/oracle.txt`'s `machine_swap`), which hides the bike where it was
+//! left and resets the plane to where `machine.txt` parked it.
 //!
-//! * **The machine left** loses the player's controller. If it is the bike its model is hidden, and
-//!   no transform is written: the bike stays where it was left and nothing steps it.
-//! * **The machine taken** gets the controller and the player's camera off its own list entry, and a
-//!   biplane is unwrecked and reset — put back where `machine.txt` parked it, not beside the rider.
+//! The port's switch is not that swap (P102, the user's, 2026-10-21): [`Garage::switch`] names the
+//! machine wanted and **spawns it on the player** — a plane taken from the bike stands landed where
+//! the bike was, on its wheels on the ground at rest, nose along the bike's heading; a bike taken
+//! from the plane is stood upright on the ground under it, at rest, along the plane's heading. The
+//! machine left goes: it is not stepped, not drawn ([`Garage::plane_shown`]) and, as nothing in the
+//! port collides with a machine, not collided with. A plane nobody has taken yet still stands in its
+//! bay. The original has no such switch.
 //!
-//! The shell has no pause menu and no prompt, so its key is the menu's path: the swap with no 30 ft
-//! and no 40 mph gate, which belong to the prompt and not to the swap.
+//! The shell has no prompt, so its key and the pause are the menu's path: the switch with no 30 ft
+//! and no 40 mph gate, which belong to the prompt.
 //!
 //! # The plane's flight
 //!
@@ -25,8 +29,8 @@
 //! passes through anything standing on it. A plane built without its file (`Plane::parked` alone, as
 //! the unit tests below do) has no flight and stands where it was parked.
 //!
-//! The plane is not [`Sim::plane`]: the shell's `Sim` is the bike's ride, which the swap leaves where it
-//! stands and which a plane session never steps, so its tick count stays where the swap found it.
+//! The plane is not [`Sim::plane`]: the shell's `Sim` is the bike's ride, which a plane session never
+//! steps, so its tick count stays where the switch found it.
 //!
 //! # One of each per player (P87)
 //!
@@ -392,8 +396,11 @@ const ROUND_STICK_CENTRE: f32 = 0.005;
 /// The biplane: where it was parked, where it is, and the flight that moves it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plane {
-    /// Where `machine.txt` parked it, which is where every swap into it puts it back.
+    /// Where it was last put down: its bay until it is taken, and from then where the switch spawned
+    /// it, which is also where its reset chord and a wreck's recovery put it back.
     pub spawn: Spawn,
+    /// Its bay in the lot: where `machine.txt` (or [`park`]) stands it before anybody takes it.
+    pub bay: Spawn,
     /// Where the model's origin is now, which way its nose points, and its orientation.
     pub at: Vf,
     pub facing: Vf,
@@ -428,6 +435,7 @@ impl Plane {
     pub fn parked(spawn: Spawn) -> Plane {
         Plane {
             spawn,
+            bay: spawn,
             at: spawn.at,
             facing: spawn.facing,
             quat: Vf::new(0.0, 0.0, 0.0, 1.0),
@@ -449,11 +457,22 @@ impl Plane {
         Plane { flight: Some(flight), ..Plane::parked(spawn) }
     }
 
-    /// The swap's unwreck-and-reset: back to the spawn transform, at rest. The flight is put back by
-    /// the next step ([`Flight::reset`]), which is the one with the `Sim`'s tables.
+    /// The unwreck-and-reset: back to the spawn transform, at rest. The flight is put back by the
+    /// next step ([`Flight::reset`]), which is the one with the `Sim`'s tables.
     pub fn reset(&mut self) {
-        let (flight, every_bank, round_stick, livery) = (self.flight.take(), self.every_bank, self.round_stick, self.livery);
-        *self = Plane { flight, every_bank, round_stick, livery, ..Plane::parked(self.spawn) };
+        let (flight, every_bank, round_stick, livery, bay) = (self.flight.take(), self.every_bank, self.round_stick, self.livery, self.bay);
+        *self = Plane { flight, every_bank, round_stick, livery, bay, ..Plane::parked(self.spawn) };
+    }
+
+    /// How high its origin stands over the ground under it when it is parked, feet. With its flight,
+    /// the lowest of its tires' bottoms is on the ground (the tires' centres are in the origin's
+    /// frame); without one, the clearance its bay has over the ground there, `bay_ground` being the
+    /// ground's height under the bay.
+    pub fn rest_height(&self, bay_ground: f32) -> f32 {
+        match &self.flight {
+            Some(f) => -f.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min),
+            None => self.bay.at.y() - bay_ground,
+        }
     }
 
     /// One frame of the plane with the controller on it: the reset chord ([`Flight::reset_chord`],
@@ -552,6 +571,32 @@ pub struct Garage {
     pub up: Kind,
     /// This player's own copy of the track's biplane ([`Lot::plane`]), if its `machine.txt` parks one.
     pub plane: Option<Plane>,
+    /// Whether the player has taken their plane out of its bay. Until they do it stands there parked
+    /// and is drawn there; once they have, it goes wherever they take it and is nowhere while they
+    /// are on the bike.
+    pub taken: bool,
+}
+
+/// How far above a machine's origin the ground under it is looked for when the other is spawned
+/// there, feet: enough for a bike's origin sitting below a ridge it leans over, and not so much that
+/// a machine under a bridge comes out on top of it. The port's own number.
+const PROBE: f32 = 20.0;
+
+/// Below this the ground query found nothing ([`game_sim::world::World::ground`]'s no-ground answer is
+/// a million feet down).
+const NO_GROUND: f32 = -1.0e5;
+
+/// A heading flattened onto the ground plane, or `None` straight up or down.
+fn level(v: Vf) -> Option<Vf> {
+    let (x, z) = (v.x(), v.z());
+    let len = x.hypot(z);
+    (len > 1e-4).then(|| Vf::new(x / len, 0.0, z / len, 0.0))
+}
+
+/// The ground's height under `at`, looked for from [`PROBE`] above it, or `None` off the map.
+fn ground_under(world: &mut dyn World, at: Vf) -> Option<f32> {
+    let (on, _) = world.ground(Vf::new(at.x(), at.y() + PROBE, at.z(), 1.0));
+    (on.y() > NO_GROUND).then_some(on.y())
 }
 
 /// The bike's ghost after a put-back (P57): the rider's own since S63, which moved it into the
@@ -566,20 +611,70 @@ impl Garage {
         if up == Kind::Biplane && plane.is_none() {
             return Err("--vehicle biplane: this track's machine.txt parks no biplane".into());
         }
-        Ok(Garage { up, plane })
+        Ok(Garage { up, plane, taken: up == Kind::Biplane })
     }
 
-    /// The swap: the controller moves to the other machine. The bike is left exactly as it is — no
-    /// transform written, nothing stepped — and a plane being taken is reset to where it was parked.
-    /// Returns the machine now up, or an error (and no swap) on a track with no plane.
-    pub fn swap(&mut self) -> Result<Kind, String> {
-        let to = self.up.other();
-        if to == Kind::Biplane {
-            let plane = self.plane.as_mut().ok_or("this track's machine.txt parks no biplane")?;
-            plane.reset();
+    /// The machines this player can be put on: the bike, and the plane where the track parks one.
+    pub fn machines(&self) -> Vec<Kind> {
+        let mut out = vec![Kind::Bike];
+        if self.plane.is_some() {
+            out.push(Kind::Biplane);
+        }
+        out
+    }
+
+    /// **The switch** (P102): the controller moves to `to`, which is spawned where the player is now
+    /// and on their heading, and the machine left goes. `sim` is the bike's ride and `world` the
+    /// ground both stand on.
+    ///
+    /// * Onto the plane: it stands landed where the bike is — where the rider will be put back, if
+    ///   they are down — nose along the bike's heading, level, on its wheels on the ground and at
+    ///   rest ([`Plane::rest_height`]), unwrecked and its throttle shut, as a parked plane stands.
+    /// * Onto the bike: it is stood on the ground under the plane, upright, along the plane's
+    ///   heading and stopped, the rider up out of any wreck ([`rider::Rider::teleport_to`], which
+    ///   ghosts it, so it passes through whoever is standing there).
+    ///
+    /// Switching to the machine already up does nothing. A track with no plane, or no ground under
+    /// the player, refuses with the reason and nothing moves. The machine now up, otherwise.
+    pub fn switch(&mut self, to: Kind, sim: &mut Sim, world: &mut dyn World) -> Result<Kind, String> {
+        if to == self.up {
+            return Ok(to);
+        }
+        match to {
+            Kind::Biplane => {
+                let plane = self.plane.as_mut().ok_or("this track's machine.txt parks no biplane")?;
+                let spot = game_sim::markers::Spot::of(&sim.rider);
+                let ground = ground_under(world, spot.at).ok_or("there is no ground under the bike to land the plane on")?;
+                let bay_ground = ground_under(world, plane.bay.at).unwrap_or(plane.bay.at.y());
+                let facing = level(spot.forward).or_else(|| level(plane.bay.facing)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+                let y = ground + plane.rest_height(bay_ground);
+                plane.spawn = Spawn { at: Vf::new(spot.at.x(), y, spot.at.z(), 1.0), facing };
+                plane.reset();
+                self.taken = true;
+            }
+            Kind::Bike => {
+                // A plane switch only ever starts from a garage with a plane.
+                let plane = self.plane.as_ref().ok_or("there is no plane to leave")?;
+                let ground = ground_under(world, plane.at).ok_or("there is no ground under the plane to stand the bike on")?;
+                let (forward, _) = sim.rider.ride.axes();
+                let forward = level(plane.facing).or_else(|| level(forward)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+                let at = Vf::new(plane.at.x(), ground, plane.at.z(), 1.0);
+                sim.rider.teleport_to(game_sim::markers::Spot { at, forward, up: Vf::new(0.0, 1.0, 0.0, 0.0) });
+            }
         }
         self.up = to;
         Ok(to)
+    }
+
+    /// The plane where it is drawn, if it is drawn at all: while the player flies it, and in its bay
+    /// until they first take it. A plane they have left is drawn nowhere.
+    pub fn plane_shown(&self) -> Option<&Plane> {
+        self.plane.as_ref().filter(|_| self.up == Kind::Biplane || !self.taken)
+    }
+
+    /// Whether the bike is drawn: only while it is up, since a switch away leaves it nowhere.
+    pub fn bike_shown(&self) -> bool {
+        self.up == Kind::Bike
     }
 
     /// [`Plane::inverted`] for the plane with the controller; never, with the bike up.
@@ -641,19 +736,45 @@ mod tests {
     }
 
     #[test]
-    fn a_swap_resets_the_plane_and_a_track_without_one_refuses() {
-        let spawn = Spawn::biplane(MACHINES.as_bytes(), 0).unwrap();
-        let mut plane = Plane::parked(spawn);
-        plane.at = Vf::new(0.0, 500.0, 0.0, 1.0);
-        let mut g = Garage::new(Kind::Bike, Some(plane)).unwrap();
-        assert_eq!(g.swap(), Ok(Kind::Biplane));
-        assert_eq!(g.plane.as_ref().unwrap().at, spawn.at);
-        assert_eq!(g.swap(), Ok(Kind::Bike));
+    fn a_switch_spawns_on_the_player_and_a_track_without_a_plane_refuses() {
+        use game_sim::world::Flat;
+        let bay = Spawn::biplane(MACHINES.as_bytes(), 0).unwrap();
+        let mut sim = Sim::new(0);
+        let mut floor = Flat::default();
+        let mut g = Garage::new(Kind::Bike, Some(Plane::parked(bay))).unwrap();
+        assert_eq!(g.plane_shown().map(|p| p.at), Some(bay.at), "an untaken plane stands in its bay");
+        assert!(g.bike_shown());
+
+        // Onto the plane: where the bike is, along its heading, as high over the floor as the bay
+        // stands over its ground (a plane with no flight has no wheels to stand on).
+        let bike = sim.rider.ride.position();
+        assert_eq!(g.switch(Kind::Biplane, &mut sim, &mut floor), Ok(Kind::Biplane));
+        let p = g.plane.as_ref().unwrap();
+        assert_eq!((p.at.x(), p.at.y(), p.at.z()), (bike.x(), bay.at.y(), bike.z()));
+        assert_eq!((p.facing.x(), p.facing.y(), p.facing.z()), (0.0, 0.0, 1.0));
+        assert_eq!(p.bay, bay, "the bay stays the file's");
+        assert!(!g.bike_shown());
+        assert!(g.plane_shown().is_some());
+
+        // Onto the bike: under the plane, on the floor, along its heading, stopped.
+        g.plane.as_mut().unwrap().at = Vf::new(-30.0, 400.0, 70.0, 1.0);
+        g.plane.as_mut().unwrap().facing = Vf::new(-1.0, 0.3, 0.0, 0.0);
+        assert_eq!(g.switch(Kind::Bike, &mut sim, &mut floor), Ok(Kind::Bike));
+        let at = sim.rider.ride.position();
+        assert_eq!((at.x(), at.y(), at.z()), (-30.0, 0.0, 70.0));
+        let (forward, up) = sim.rider.ride.axes();
+        assert!((forward.x() + 1.0).abs() < 1e-5 && forward.y().abs() < 1e-5, "{forward:?}");
+        assert!((up.y() - 1.0).abs() < 1e-5, "{up:?}");
+        assert_eq!(sim.rider.ride.chassis.speed, F::ZERO);
+        assert!(g.bike_shown());
+        assert_eq!(g.plane_shown(), None, "a plane left is drawn nowhere");
+        assert_eq!(g.switch(Kind::Bike, &mut sim, &mut floor), Ok(Kind::Bike), "already on it");
 
         assert!(Garage::new(Kind::Biplane, None).is_err());
         let mut g = Garage::new(Kind::Bike, None).unwrap();
-        assert!(g.swap().is_err());
+        assert!(g.switch(Kind::Biplane, &mut sim, &mut floor).is_err());
         assert_eq!(g.up, Kind::Bike);
+        assert_eq!(g.machines(), vec![Kind::Bike]);
     }
 
     /// Two of each, as the disc's files have them, with the heights of this file's own.
@@ -714,21 +835,23 @@ mod tests {
         let mut ground = |_: Vf| 0.0;
         let lot = Lot::new(TWO_OF_EACH.as_bytes(), 8, &mut ground);
         let mut garages: Vec<Garage> = (0..8).map(|p| Garage::new(Kind::Bike, lot.plane(p, None)).unwrap()).collect();
-        for g in &mut garages {
-            assert_eq!(g.swap(), Ok(Kind::Biplane));
-        }
-        let planes: Vec<&Plane> = garages.iter().map(|g| g.plane.as_ref().unwrap()).collect();
+        let planes: Vec<&Plane> = garages.iter().map(|g| g.plane_shown().unwrap()).collect();
         for (i, p) in planes.iter().enumerate() {
-            assert_eq!(p.at, lot.bay(Machine::Biplane, i).unwrap().spawn.at, "player {i} is in their own bay");
+            assert_eq!(p.at, lot.bay(Machine::Biplane, i).unwrap().spawn.at, "player {i}'s plane is in their own bay");
             assert_eq!(p.livery, i % 2, "every second plane wears biplane2");
             for q in &planes[..i] {
                 assert_ne!(p.at, q.at, "two players in one plane");
             }
         }
-        // The swap's reset keeps the livery.
-        garages[1].swap().unwrap();
-        garages[1].swap().unwrap();
+        // Taking it leaves every other player's in its bay, and keeps the livery.
+        let (mut sim, mut floor) = (Sim::new(0), game_sim::world::Flat::default());
+        garages[1].switch(Kind::Biplane, &mut sim, &mut floor).unwrap();
+        garages[1].switch(Kind::Bike, &mut sim, &mut floor).unwrap();
+        garages[1].switch(Kind::Biplane, &mut sim, &mut floor).unwrap();
         assert_eq!(garages[1].plane.as_ref().unwrap().livery, 1);
+        for (i, g) in garages.iter().enumerate().filter(|(i, _)| *i != 1) {
+            assert_eq!(g.plane_shown().unwrap().at, lot.bay(Machine::Biplane, i).unwrap().spawn.at);
+        }
         assert_eq!(Machine::Biplane.models()[livery(1)], "biplane2");
     }
 
