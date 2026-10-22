@@ -4572,3 +4572,25 @@ scene_read_environment      boot 0x001a7b30 [Environment]: EcosystemFile, EcoDis
 #   The touched word goes 0 for good some ticks before the clock's put-back on all three captures (the
 #   captured node rose away from the ground after it), so the record freezes on the last touch, and the
 #   put-back at +0x794 = 5.0995 lands on it (2137-2743 ft inside the map).
+# S97 — the ecosystem's trunks (crates/game-sim/src/eco.rs; tests crates/game-sim/tests/eco.rs).
+collision_tree_build boot 0x00111ee0 (nodes out, facets out, matrix out, quadword verts, int[3] tris,
+#                              tri count, vert count): the engine's run-time collision-tree builder
+#   Loader 0x0012acb0 (from the scene loader 0x001a5210, its 2nd argument = build solids): per species
+#   0x00129180(sp, 1), then 0x00129d80(eco, sp) makes species +0x194 solids (+0x198 0x30-byte records:
+#   +0 at, +0x20 kind, +0x24 radius, +0x28 height) into collidables at +0x19c. Kind 0: a mesh file
+#   (0x001ed1e0); 2: 0x001f0740/0x001f08e0; 3: 0x001ea120/0x001ea230; 1: the cylinder, a 0x250-byte mesh
+#   collidable (0x001ecf50) laid out on the stack and handed to 0x001ed430(mesh, verts, tris, 32, 32),
+#   which copies the vertices to +0x220 (12 bytes each), counts +0x23c/+0x23e, and calls the builder
+#   with nodes +0x234, facets +0x238, matrix +0x160. Then +0x1a0.. identity, +0x1d0 = vf0, +0x84 = the
+#   word at 0x00468f48 (4).
+#   Builder: plane 0x0013df30 per triangle (work records 0x40 bytes: +0 corners, +0x10 normal, +0x20
+#   centroid, +0x34 distance), the identity through vertices and normals in place, centroid × vdiv(1,3);
+#   nodes 0x24 each (+0 volume, +4 radius, +8/+0xa children, +0xc centre, +0x18 half) via 0x001e51a0 and
+#   0x003eb880; facets 0x14 (+0 corners u16, +8 distance, +0xc packed normal); recursion 0x00111a00,
+#   bounds 0x0010fbf0, split chooser 0x0010feb0, partition 0x0010f480.
+#   Group parts: 0x00129490 moves the species' mesh to the plant's cell × eco +0xd4 at +0x1d0 (FPU
+#   mul), unless plant +0x12 bit 2 (never set on free09). Free09 (recording2 state): 9 tree species
+#   with one kind-1 solid each (class 2, +0x116 0x04, category 4), two bush species with none
+#   — nine trees; the game keeps the file's species slot n (and a plant's species byte) at n - 1.
+#   Bike: the eleven body rays (+0x7c4, flags 0x12/0x32/0x52) search placed groups; the sweep probe
+#   (+0x7cc, flags 0x13) does not. put_back_solid's group rule is S75's.
