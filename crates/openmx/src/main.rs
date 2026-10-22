@@ -2873,12 +2873,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 return Err("--online rides one local player outside the front end: drop --players and --menu".into());
             }
             let starts: Vec<Sim> = world.seats.iter().map(|s| s.sim.clone()).collect();
-            // The controller preset (P79) is this machine's and is not sent: every seat online rides
-            // the shipped table, preset 0.
-            if presets[0] != 0 {
-                println!("online: controller preset {} is not sent to the other machines — preset 0", presets[0]);
-            }
-            let mut online = online::Online::start(me, &args.peers, args.seats.as_deref(), &starts)?;
+            // This machine's controller preset (P79) goes ahead of its every datagram, and every
+            // seat rides its own machine's (N15), as from the lobby (N13).
+            let here = pad_seats.as_ref().map_or(presets[0], |s| s.preset(args.pad_seat(0)));
+            let mut online = online::Online::start(me, &args.peers, args.seats.as_deref(), &starts, here as u8)?;
             online.time_scale = mods.time_scale();
             Some(online)
         }
