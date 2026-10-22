@@ -102,13 +102,12 @@ fn every_player_has_one_of_each_machine() {
                 }
             }
             // Each player takes their own plane, and no two take one.
-            let mut garages: Vec<Garage> = (0..players).map(|p| Garage::new(Kind::Biplane, lot.plane(p, None)).unwrap()).collect();
-            for (p, g) in garages.iter_mut().enumerate() {
+            let garages: Vec<Garage> = (0..players).map(|p| Garage::new(Kind::Biplane, lot.plane(p, None)).unwrap()).collect();
+            for (p, g) in garages.iter().enumerate() {
                 let plane = g.plane.as_ref().unwrap();
                 assert_eq!(plane.at, lot.bay(Machine::Biplane, p).unwrap().spawn.at);
                 assert_eq!(plane.livery, p % 2);
-                assert_eq!(g.swap(), Ok(Kind::Bike));
-                assert_eq!(g.swap(), Ok(Kind::Biplane));
+                assert_eq!(g.plane_shown().map(|p| p.at), Some(plane.at), "a plane flown from its bay is drawn there");
             }
             for (p, g) in garages.iter().enumerate() {
                 for h in &garages[..p] {
