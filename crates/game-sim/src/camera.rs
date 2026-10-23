@@ -1426,6 +1426,19 @@ impl Race {
         if F(CEILING_FOG) < max_fog { F(RACE_CEILING) } else { F::MAX }
     }
 
+    /// The player's right stick, one frame of it, as this class's override of the base's
+    /// [`Follow::nudge`] slot hands it on: the widen modifier is let go first, so with the zoom
+    /// modifier held the stick zooms and otherwise it looks around — on a race camera holding the
+    /// widen command does nothing. (The original does the letting go by zeroing the command's value
+    /// on the pad itself, for the rest of the frame; the port's camera never writes the pad.)
+    ///
+    /// The override also centres the stick when a sub-object of the loaded scene is in its state 3;
+    /// both riding save states hold no such object, so the veto never fires in a ride and is left
+    /// out.
+    pub fn nudge(&mut self, stick_x: F, stick_y: F, hold_zoom: bool) {
+        self.cam.nudge(stick_x, stick_y, hold_zoom, false);
+    }
+
     /// **The eye's floor**: what keeps the race camera out of the ground. Vtable slot `+0x108`, which
     /// the base class's filter calls on the position twice a frame — on the raw one before the lags
     /// and on the lagged one after — and which is a `return 1` in the base class (S7's
