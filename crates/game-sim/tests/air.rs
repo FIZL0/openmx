@@ -473,6 +473,7 @@ impl Gen {
             touching: self.b(),
             modifier: false,
             spinning: false,
+            spin_active: false,
         };
         let lo = Loads {
             side: self.f(-60.0, 60.0),
