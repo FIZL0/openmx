@@ -383,6 +383,9 @@ fn the_settings_file_reads_back_as_it_was_written() {
         // No radar, and the HUD at 130 % (V52).
         minimap: false,
         hud_scale: 130,
+        // The Original tab's own two at the original's (P126).
+        plants: game_render::eco::Lod::Original,
+        picture: menu::Picture::Television,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -2661,7 +2664,7 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     assert!(m.settings.mods);
 }
 
-/// P118: L1 and R1 walk Settings' five tabs and the Garage's three round from either end, each tab
+/// P118: L1 and R1 walk Settings' six tabs (P126's Original the sixth) and the Garage's three round from either end, each tab
 /// opening on its first row.
 #[test]
 fn l1_and_r1_walk_every_tab_round_from_either_end() {
@@ -2669,10 +2672,10 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
     let (mut m, mut r) = fresh();
     main_to(&mut m, &mut r, "Settings");
     assert_eq!(m.tabs(Screen::Settings), menu::SETTINGS_TABS);
-    assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Audio", "Controls", "Camera"]);
+    assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Audio", "Controls", "Camera", "Original"]);
     tab_to(&mut m, &mut r, "Ride");
     // Controls has no Player row with one seat (P81).
-    let first = [Key::StartOn, Key::Hud, Key::Mix, Key::BikeLayout, Key::Player];
+    let first = [Key::StartOn, Key::Hud, Key::Mix, Key::BikeLayout, Key::Player, Key::Original];
     let here = |m: &Menu, s: Screen| (m.tab(s), m.page()[m.cursor(s)].key);
     for (i, key) in first.iter().enumerate() {
         assert_eq!(here(&m, Screen::Settings), (i, *key));
@@ -2680,10 +2683,10 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
         tap(&mut m, &mut r, Control::Down);
         tap(&mut m, &mut r, Control::R1);
     }
-    assert_eq!(here(&m, Screen::Settings), (0, Key::StartOn), "R1 from Camera is Ride");
+    assert_eq!(here(&m, Screen::Settings), (0, Key::StartOn), "R1 from Original is Ride");
     tap(&mut m, &mut r, Control::L1);
-    assert_eq!(here(&m, Screen::Settings), (4, Key::Player), "L1 from Ride is Camera");
-    for i in (0..4).rev() {
+    assert_eq!(here(&m, Screen::Settings), (5, Key::Original), "L1 from Ride is Original");
+    for i in (0..5).rev() {
         tap(&mut m, &mut r, Control::L1);
         assert_eq!(here(&m, Screen::Settings), (i, first[i]));
     }
@@ -3276,4 +3279,125 @@ fn a_push_both_the_pad_and_the_keyboard_report_is_one_press() {
     m.step_seats(&[r.read_joint(&[(Report::idle(), 0), (start, 0)])]);
     m.step_seats(&[r.read_joint(&[(Report::idle(), 0), (Report::idle(), 0)])]);
     assert_eq!(m.screen(), Some(Screen::Pause), "the keyboard's Start, a tick behind the pad's, closed it");
+}
+
+/// P126: a fresh settings file has every enhancement on and the Original switch off.
+#[test]
+fn a_fresh_settings_file_has_every_enhancement_on_and_original_off() {
+    use menu::{Departure, Original};
+    let (m, _) = fresh();
+    let empty = Menu::new(Settings::parse(""), Controls::parse(""));
+    for m in [&m, &empty] {
+        assert_eq!(m.original(), Original::Off);
+        for d in Departure::ALL {
+            assert!(!m.some_original(d), "{d:?} starts at the original's");
+        }
+        assert!(m.hud_is_original(), "the HUD starts as the original's");
+    }
+    assert_eq!(m.settings.plants, game_render::eco::Lod::Smooth);
+    assert_eq!(m.settings.picture, menu::Picture::Fill);
+    // Neither new setting writes a line at its default, so an older file is written as it was.
+    let text = m.settings.text();
+    assert!(!text.contains("plants") && !text.contains("picture"), "{text}");
+}
+
+/// P126: the Original tab's switch, by pad, puts every sub-switch at the original's — the controls
+/// and cameras of every seat, the fog, the plants, the picture and the HUD — and back; one sub-switch
+/// turned back leaves the others and the switch reads Mixed.
+#[test]
+fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
+    use menu::{Departure, Key, Original};
+    let (mut m, mut r) = fresh();
+    // A HUD of the user's own, which the switch puts back.
+    (m.settings.minimap, m.settings.hud_scale, m.settings.overlay) = (false, 120, Overlay::Debug);
+    settings_at(&mut m, &mut r, "Original");
+    let value = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap().value;
+    assert_eq!(value(&m, Key::Original), "Off");
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::Original, "the tab opens on the switch");
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_changed());
+    assert_eq!(m.original(), Original::On);
+    assert_eq!(value(&m, Key::Original), "On");
+    let (s, c) = (&m.settings, &m.controls);
+    assert_eq!(c.layouts, [Layout::Original; menu::SEATS]);
+    assert_eq!(c.planes, [Layout::Original; menu::SEATS]);
+    assert_eq!(s.cameras, [menu::CameraView::ORIGINAL; menu::SEATS_MAX]);
+    assert_eq!(s.graphics, Graphics::Original);
+    assert_eq!(s.plants, game_render::eco::Lod::Original);
+    assert_eq!(s.picture, menu::Picture::Television);
+    assert_eq!((s.minimap, s.hud_scale, s.overlay), (true, menu::HUD_SCALE_DEFAULT, Overlay::Original));
+    // The sim is none of them (P55).
+    assert!(s.modifiers.is_original());
+    for d in Departure::ALL {
+        assert_eq!(value(&m, Key::Departure(d)), d.choices()[1], "{d:?}");
+    }
+    // Each sub-switch turned back on its own leaves every other at the original's.
+    for d in Departure::ALL {
+        let mut m = m.clone();
+        let mut r = r.clone();
+        down_to(&mut m, &mut r, Key::Departure(d));
+        tap(&mut m, &mut r, Control::Right);
+        assert!(!m.some_original(d), "{d:?} back to ours");
+        assert_eq!(value(&m, Key::Departure(d)), d.choices()[0], "{d:?}");
+        for o in Departure::ALL.into_iter().filter(|o| *o != d) {
+            assert!(m.is_original(o), "{d:?} turned back moved {o:?}");
+        }
+        assert_eq!(m.original(), Original::Mixed, "{d:?}");
+        assert_eq!(value(&m, Key::Original), "Mixed");
+        // The HUD alone off the original's reads Mixed too.
+        let mut h = m.clone();
+        h.set_departure(d, true);
+        assert_eq!(h.original(), Original::On);
+        h.settings.minimap = false;
+        assert_eq!(h.original(), Original::Mixed);
+        // From Mixed the switch's press is On; a second is Off, every enhancement back.
+        down_to(&mut m, &mut r, Key::Original);
+        tap(&mut m, &mut r, Control::Cross);
+        assert_eq!(m.original(), Original::On, "{d:?}");
+        tap(&mut m, &mut r, Control::Cross);
+        assert_eq!(m.original(), Original::Off, "{d:?}");
+        assert_eq!(m.settings.graphics, Graphics::Full);
+        assert_eq!(m.controls.layouts, [Layout::New; menu::SEATS]);
+        assert_eq!(m.settings.cameras, [menu::CameraView::DEFAULT; menu::SEATS_MAX]);
+        // Off leaves the HUD as it is.
+        assert!(m.hud_is_original());
+    }
+    // One player on the original's layout is Mixed on the Controls row and on the switch.
+    let (mut m, mut r) = fresh();
+    m.controls.layouts[1] = Layout::Original;
+    assert_eq!(m.original(), Original::Mixed);
+    settings_at(&mut m, &mut r, "Original");
+    assert_eq!(value(&m, Key::Departure(Departure::Controls)), "Mixed");
+    assert_eq!(value(&m, Key::Departure(Departure::Cameras)), "Further Out");
+    let mut n = m.clone();
+    n.set_departure(Departure::Controls, false);
+    assert_eq!(n.original(), Original::Off);
+}
+
+/// P126: settings.txt (and controls.txt for the layouts) round-trips each sub-switch on its own and
+/// the switch on, and a word it cannot read keeps ours.
+#[test]
+fn the_original_switches_round_trip_through_the_files() {
+    use menu::{Departure, Original};
+    let dir = scratch("original");
+    for d in Departure::ALL {
+        let (mut m, _) = fresh();
+        m.set_departure(d, true);
+        menu::save(&dir, &m.settings, &m.controls).unwrap();
+        let (s, c) = menu::load(&dir);
+        assert_eq!((&s, &c), (&m.settings, &m.controls), "{d:?}");
+        let back = Menu::new(s, c);
+        for o in Departure::ALL {
+            assert_eq!(back.is_original(o), o == d, "{d:?} saved, {o:?} read back");
+        }
+        assert_eq!(back.original(), Original::Mixed);
+    }
+    let (mut m, _) = fresh();
+    m.set_original(true);
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (s, c) = menu::load(&dir);
+    assert_eq!(Menu::new(s, c).original(), Original::On);
+    assert_eq!(Settings::parse("plants = original\n").plants, game_render::eco::Lod::Original);
+    assert_eq!(Settings::parse("plants = fancy\npicture = 16:10\n"), Settings::default());
+    std::fs::remove_dir_all(dir).ok();
 }

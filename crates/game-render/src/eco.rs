@@ -365,6 +365,22 @@ pub enum Lod {
     Smooth,
 }
 
+impl Lod {
+    pub const ALL: [Lod; 2] = [Lod::Smooth, Lod::Original];
+
+    /// The settings file's word for it (P126).
+    pub fn word(self) -> &'static str {
+        match self {
+            Lod::Original => "original",
+            Lod::Smooth => "smooth",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Lod> {
+        Lod::ALL.into_iter().find(|l| l.word() == w)
+    }
+}
+
 /// The smooth band's width, as a share of the middle of the scene's two distances, when the scene's
 /// own band is narrower. It ends where the scene's does, so no model is kept further out than the
 /// original keeps it: free09's 300..350 becomes 252.5..350.

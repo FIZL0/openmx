@@ -1,16 +1,17 @@
-//! The option pages (P118): Settings' five tabs, the Garage's three, the game modifiers and the
+//! The option pages (P118): Settings' six tabs, the Garage's three, the game modifiers and the
 //! mods, each a list of [`Row`]s that change in place. A row knows its name, its value, every choice
 //! it has, what it does and, dimmed, why it does not apply — the side panel draws all of it.
 
 use super::*;
 
 /// Settings' tabs, which L1 and R1 step through, round from either end.
-pub const SETTINGS_TABS: [&str; 5] = ["Ride", "Display", "Audio", "Controls", "Camera"];
+pub const SETTINGS_TABS: [&str; 6] = ["Ride", "Display", "Audio", "Controls", "Camera", "Original"];
 pub const TAB_RIDE: usize = 0;
 pub const TAB_DISPLAY: usize = 1;
 pub const TAB_AUDIO: usize = 2;
 pub const TAB_CONTROLS: usize = 3;
 pub const TAB_CAMERA: usize = 4;
+pub const TAB_ORIGINAL: usize = 5;
 /// The Garage's tabs, each starting with the same Player row.
 pub const GARAGE_TABS: [&str; 3] = ["Rider", "Bike", "Gear"];
 
@@ -98,6 +99,9 @@ pub enum Key {
     ModsFolder,
     /// A mod pack by its place in [`Menu::packs`].
     Pack(usize),
+    /// The Original switch (P126), and each departure's under it.
+    Original,
+    Departure(Departure),
     Heading,
 }
 
@@ -266,6 +270,7 @@ impl Menu {
                 TAB_DISPLAY => self.display_rows(),
                 TAB_AUDIO => self.audio_page(),
                 TAB_CONTROLS => self.control_rows(),
+                TAB_ORIGINAL => self.original_rows(),
                 _ => self.camera_page(),
             },
             Screen::Garage => self.garage_rows(),
@@ -348,6 +353,36 @@ impl Menu {
             Row::on_off(Key::VSync, "VSync", s.vsync, "Waits for the display before showing a frame. No tearing. Off draws as fast as it can."),
             Row::choice(Key::FrameLimit, "Frame Limit", &limits, at(&FrameLimit::ALL, s.frame_limit), "The most frames a second. Only the picture's rate; the ride itself always ticks at the game's 30 Hz."),
         ]
+    }
+
+    /// The Original tab (P126): the master switch, and every departure's own under it.
+    fn original_rows(&self) -> Vec<Row> {
+        let mut master = Row::choice(
+            Key::Original,
+            "Original Game",
+            &["Off", "On"],
+            0,
+            "On puts everything back to the original game: its controls, cameras, fog, plants, picture shape and HUD. Each switch below can be set on its own. The ride itself is the original's either way; Game Modifiers change it.",
+        )
+        .tips(&["Every enhancement on", "The game as it shipped"]);
+        match self.original() {
+            Original::Off => {}
+            Original::On => (master.now, master.value) = (Some(1), "On".into()),
+            Original::Mixed => {
+                (master.now, master.value) = (None, Original::Mixed.label().into());
+                master.note = Some("Some switches below are the original's and some are ours.".into());
+            }
+        }
+        let mut rows = vec![master, Row::heading("Enhancements")];
+        for d in Departure::ALL {
+            let mut r = Row::choice(Key::Departure(d), d.label(), &d.choices(), usize::from(self.is_original(d)), d.about());
+            if !self.is_original(d) && self.some_original(d) {
+                (r.now, r.value) = (None, Original::Mixed.label().into());
+                r.note = Some("Some players are on the original's. A press sets every player.".into());
+            }
+            rows.push(r);
+        }
+        rows
     }
 
     /// Music Plays' choice for the setting: One Song for a song's id.
@@ -775,6 +810,9 @@ impl Menu {
             }
             Key::ResetMods if p.ok => self.settings.modifiers = Mods::original(),
             Key::ModsFolder => s.mods = !s.mods,
+            // From Mixed, a press is On first.
+            Key::Original => self.set_original(next(row) == 1 || row.now.is_none()),
+            Key::Departure(dep) => self.set_departure(dep, next(row) == 1 || row.now.is_none()),
             Key::Pack(i) => {
                 let Some(pack) = self.packs().get(i).map(|p| p.prefix.clone()) else { return };
                 match self.settings.mods_off.iter().position(|p| *p == pack) {

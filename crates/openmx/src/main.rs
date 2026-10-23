@@ -925,6 +925,11 @@ struct Args {
     /// `--aspect fill|4:3`: the frame at the window's own shape, or the largest 4:3 one inside it
     /// with bars round it, which is the shell as it was before V24.
     aspect: Aspect,
+    /// Whether `--aspect` was given: if so it wins over the settings' Picture Shape (P126).
+    aspect_asked: bool,
+    /// `--plants smooth|original` (P126): how the plants change from model to picture, V55's smooth
+    /// way or the original's; the front end's setting when not given.
+    plants: Option<game_render::eco::Lod>,
     /// `--headless`: no window and no host pad — every seat rides an idle pad, or the first rides
     /// `--play`'s tape — and the frame is drawn all the same, for `--shot` and for the tests.
     headless: bool,
@@ -1347,6 +1352,11 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
+                // The Original tab's own two (P126).
+                a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
+                if !args.aspect_asked {
+                    a.aspect = aspect_of(shell.front.menu.settings.picture);
+                }
                 if !args.render_scale_asked {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
                 }
@@ -1421,6 +1431,11 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
+                // The Original tab's own two (P126).
+                a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
+                if !args.aspect_asked {
+                    a.aspect = aspect_of(shell.front.menu.settings.picture);
+                }
                 if !args.render_scale_asked {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
                 }
@@ -1681,6 +1696,14 @@ impl Front {
 /// One ride: the old shell, start to finish. Under the front end `shell` is its window, pad and
 /// menu, and the ride ends when the pause says so; without one it opens its own and runs until
 /// Escape, the window closing, `--seconds` or the tape's end.
+/// The settings' Picture Shape (P126) as the shell draws it.
+fn aspect_of(picture: menu::Picture) -> Aspect {
+    match picture {
+        menu::Picture::Fill => Aspect::Fill,
+        menu::Picture::Television => Aspect::Television,
+    }
+}
+
 fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // ---- the game modifiers (P55) ----------------------------------------------------------------
     // Applied to what the ride loads, never as a branch in the simulation: at their defaults nothing
@@ -1878,6 +1901,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         Ok(_) if world_mod.is_some() => println!("ecosystem: not drawn in a world"),
         Ok(grove) => look.ecosystem = grove,
         Err(e) => println!("ecosystem: {e}"),
+    }
+    if let Some(grove) = &mut look.ecosystem {
+        grove.lod = args.plants.unwrap_or_default();
+        println!("plants: {}", grove.lod.word());
     }
     let has_bike = assets.load(&archives, CHASSIS);
     for part in &vehicle.parts {
@@ -3092,15 +3119,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The frame: `--size`'s, which stays put whatever the window does, or the window's own shape
     // — the largest 4:3 one inside it with `--aspect 4:3` — which is re-made whenever the window
     // changes size (below). With no window, the PS2's own unless `--size` says otherwise.
-    let frame_size = |window: &Option<Screen>| match (args.size, window) {
+    // The shape is the settings' Picture Shape's unless `--aspect` was given, and changes with it
+    // from the pause (P126).
+    let mut aspect = args.aspect;
+    let frame_size = |window: &Option<Screen>, aspect: Aspect| match (args.size, window) {
         (Some(size), _) => size,
-        (None, Some(window)) => args.aspect.frame((window.width, window.height), window.scale),
+        (None, Some(window)) => aspect.frame((window.width, window.height), window.scale),
         (None, None) => PS2_FRAME,
     };
-    let (width, height) = frame_size(&window);
+    let (width, height) = frame_size(&window, aspect);
     // Which of the original's two displays the frame stands for (V24): at 16:9 its cameras read the
     // wide copies of their presets, as the original's loader does in its widescreen modes.
-    let mut display = Display::of(width, height, args.aspect);
+    let mut display = Display::of(width, height, aspect);
     match &window {
         Some(window) => println!(
             "window {}x{} (screen {}x{}), drawing {width}x{height} at scale {}, --aspect {}, a {} display",
@@ -3109,10 +3139,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             window.screen.0,
             window.screen.1,
             window.scale,
-            args.aspect.name(),
+            aspect.name(),
             display.name()
         ),
         None => println!("headless, drawing {width}x{height}, a {} display", display.name()),
+    }
+    if args.size.is_none() {
+        println!("picture shape: {}", aspect.name());
     }
     if display != Display::Television {
         set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
@@ -3183,6 +3216,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut minimap = args.minimap.unwrap_or(true);
     let mut hud_scale = args.hud_scale.unwrap_or(menu::HUD_SCALE_DEFAULT);
     let mut graphics = args.graphics.unwrap_or_default();
+    let mut plants = args.plants.unwrap_or_default();
+    // Set when the pause's settings change the picture's shape: the frame is re-made as for a resize.
+    let mut reshaped = false;
     let mut frame = Frame::new(width, height, look.fog_color);
     // The views (V22): where each player's goes in the frame, and a frame of its own size for each to
     // be drawn into. A full screen has none — its one view is drawn straight into the frame, as it
@@ -3530,15 +3566,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // each view's own (V24). A resize across the middle of 4:3 and 16:9 changes the display the
         // frame stands for, and the cameras reload their presets for it the way the original's do
         // when their split changes: the same preset, re-set, from the other copy.
-        if window.as_mut().is_some_and(|w| w.resized()) {
-            let (width, height) = frame_size(&window);
+        if window.as_mut().is_some_and(|w| w.resized()) || std::mem::take(&mut reshaped) {
+            let (width, height) = frame_size(&window, aspect);
             if (width, height) != (frame.width, frame.height) {
                 frame = Frame::new(width, height, look.fog_color);
                 (rects, view_frames) = views_of(width, height);
                 if let Some(window) = &window {
                     println!("window {}x{}, drawing {width}x{height}", window.width, window.height);
                 }
-                let now = Display::of(width, height, args.aspect);
+                let now = Display::of(width, height, aspect);
                 if now != display {
                     display = now;
                     println!("display: {}", display.name());
@@ -3757,6 +3793,19 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 minimap = front.menu.settings.minimap;
                 hud_scale = front.menu.settings.hud_scale;
                 graphics = front.menu.settings.graphics;
+                if plants != front.menu.settings.plants {
+                    plants = front.menu.settings.plants;
+                    if let Some(grove) = &mut look.ecosystem {
+                        grove.lod = plants;
+                    }
+                    if let Some(r) = renderer_of(&mut offscreen, window) {
+                        r.set_plant_lod(plants);
+                    }
+                }
+                if !args.aspect_asked && aspect != aspect_of(front.menu.settings.picture) {
+                    aspect = aspect_of(front.menu.settings.picture);
+                    reshaped = true;
+                }
                 if !args.render_scale_asked && render_scale != front.menu.settings.render_scale.fraction() {
                     render_scale = front.menu.settings.render_scale.fraction();
                     if let Some(r) = renderer_of(&mut offscreen, window) {
@@ -5520,6 +5569,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         players: 1,
         split: Split::default(),
         aspect: Aspect::default(),
+        aspect_asked: false,
+        plants: None,
         headless: false,
         frames: None,
         draw_fps: None,
@@ -5752,7 +5803,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                 Layout::for_players(args.players, args.split)?;
             }
             "--split" => args.split = Split::parse(&next("h or v")?)?,
-            "--aspect" => args.aspect = Aspect::parse(&next("fill or 4:3")?)?,
+            "--aspect" => (args.aspect, args.aspect_asked) = (Aspect::parse(&next("fill or 4:3")?)?, true),
+            "--plants" => {
+                let word = next("smooth or original")?;
+                args.plants = Some(game_render::eco::Lod::from_word(&word).ok_or_else(|| format!("--plants: {word:?} is not smooth or original"))?);
+            }
             "--headless" => args.headless = true,
             "--no-sound" => args.sound = false,
             "--timings" => args.timings = true,
