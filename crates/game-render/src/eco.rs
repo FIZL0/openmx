@@ -368,11 +368,11 @@ pub enum Lod {
 /// How a plant's leaves are laid over what is behind them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Foliage {
-    /// The original's materials: every texel with any alpha at all mixed in by its alpha and writing
-    /// depth. Filtered and mipped, a crown's edges and its far levels are part-alpha, so a leaf
-    /// card hides whatever is drawn behind it after it, where it is see-through as well as where
-    /// it is not: the trees behind it, and the tree's own cards behind it, which show as pale
-    /// ghosts of the cards inside the crown.
+    /// The original's materials: every texel that passes their alpha test (greater than 80 since
+    /// V54, not any alpha at all) mixed in by its alpha and writing depth. Filtered and mipped, a
+    /// crown's edges and its far levels are part-alpha, so a leaf card can hide whatever is drawn
+    /// behind it after it, where it is see-through as well as where it is not: the trees behind it,
+    /// and the tree's own cards behind it, which show as pale ghosts of the cards inside the crown.
     Original,
     /// Ours (V56, presentation only): the leaves cut out at [`FOLIAGE_CUTOFF`] and drawn solid,
     /// so a texel is either all leaf or not there, and the order plants are drawn in no longer
@@ -390,7 +390,7 @@ pub const FOLIAGE_CUTOFF: u8 = 128;
 /// Any other surface is left as it is.
 pub fn cut_out(s: Surface) -> Surface {
     if s.blend && !s.additive && s.depth_write {
-        Surface { blend: false, cutoff: s.cutoff.max(FOLIAGE_CUTOFF), keep_coverage: true, ..s }
+        Surface { blend: false, cutoff: s.cutoff.max(FOLIAGE_CUTOFF), depth_cutoff: 0, keep_coverage: true, ..s }
     } else {
         s
     }
