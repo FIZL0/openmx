@@ -40,6 +40,9 @@ pub struct Surface {
     pub shading: Shading,
     /// Texels under this alpha (0..=255) are not drawn.
     pub cutoff: u8,
+    /// Texels under this alpha are drawn but leave the depth buffer alone (V54): the GS's alpha test
+    /// failing into the colour buffer only. At or under `cutoff` it changes nothing.
+    pub depth_cutoff: u8,
     /// Mixed over the frame by alpha; `additive` adds instead.
     pub blend: bool,
     pub additive: bool,
@@ -59,6 +62,7 @@ impl Default for Surface {
         Surface {
             shading: Shading::Diffuse,
             cutoff: 32,
+            depth_cutoff: 0,
             blend: false,
             additive: false,
             depth_write: true,
@@ -73,22 +77,38 @@ impl Surface {
         let blend = m.blend.is_some();
         // `(Cs - 0) * As + Cd`: the source is added rather than mixed.
         let additive = matches!(m.blend, Some([0, 2, 1]));
-        let cutoff = match m.alpha_test {
-            // The reference is in the GS's units, where 128 is opaque; the decoder doubles alpha.
-            Some(Some(r)) => (r * 2.0).clamp(0.0, 255.0) as u8,
-            Some(None) => 1,
-            // A blended material with no test draws all but the empty texels, faintly.
-            None if blend => 1,
-            None => 32,
+        // The alpha a texel needs to pass, in the decoder's doubled units (256: none passes). What a
+        // `.psm` leaves out is the original's default material's: the test on, greater than, against
+        // 0 — so only an empty texel is a hole, and the boxcars' and the scraper's texels of alpha
+        // 1 to 15 are as solid as the rest (V54). `alphaTestOnOff = 0` draws every texel.
+        let pass = if m.alpha_test_off {
+            0
+        } else {
+            let r = m.alpha_reference.unwrap_or(0.0).clamp(0.0, 255.0) as u16;
+            match m.alpha_test_method.unwrap_or(6) {
+                0 => 256,
+                1 => 0,
+                // Greater or equal: a GS alpha of 128 decodes to 255, not 256.
+                5 => (2 * r).min(255),
+                // Greater, and the other methods, which no material on the disc names.
+                _ if r >= 128 => 256,
+                _ => (2 * r + 2).min(255),
+            }
+        };
+        // A texel that fails but still lands in colour is drawn whatever its alpha, and only the ones
+        // that pass hide what is behind them.
+        let (cutoff, depth_cutoff) = match m.fail_keeps_color {
+            true => (0, pass),
+            false => (pass, 0),
         };
         Surface {
             shading: m.shading(),
-            cutoff,
+            cutoff: cutoff.min(255) as u8,
+            // When the test can never pass no texel writes depth, and depth_write says so.
+            depth_cutoff: if depth_cutoff > 255 { 0 } else { depth_cutoff as u8 },
             blend,
             additive,
-            // A texel that fails the test but still lands in colour must not hide what is behind it:
-            // the port has no "colour only" write, so the whole material skips depth instead.
-            depth_write: !m.no_depth_write && !(blend && m.fail_keeps_color && cutoff > 1),
+            depth_write: !m.no_depth_write && depth_cutoff <= 255,
             clamp: m.clamp,
             keep_coverage: false,
         }
@@ -637,6 +657,7 @@ fn queue_model(
         }
         let mode = Mode {
             cutoff: surface.cutoff,
+            depth_cutoff: surface.depth_cutoff,
             blend: surface.blend,
             additive: surface.additive,
             depth_write: surface.depth_write,
@@ -782,7 +803,8 @@ mod tests {
         let t = &assets.textures[texture.expect("the .atm's first frame")];
         assert_eq!(&t.rgba[0..4], &[200, 10, 20, 255]);
         assert_eq!(surface.shading, Shading::Prelit);
-        assert_eq!((surface.cutoff, surface.blend), (160, true));
+        // No method named: the original's default, greater than 80 (162 in the doubled alpha).
+        assert_eq!((surface.cutoff, surface.depth_cutoff, surface.blend), (162, 0, true));
         // Asked again, the same texture comes back rather than a second copy.
         assert_eq!(assets.resolve(&read, "seats_red").0, texture);
         assert_eq!(assets.textures.len(), 1);
@@ -846,6 +868,7 @@ mod tests {
         let look = Look {
             paint: &texel,
             cutoff: 1,
+            depth_cutoff: 0,
             blend: true,
             additive: false,
             depth_write: false,
@@ -854,5 +877,59 @@ mod tests {
         frame.triangle_with([at(-3.0, -3.0), at(9.0, -3.0), at(-3.0, 9.0)], &look, [0, 0, 0]);
         assert_eq!(&frame.color[0..3], &[150, 150, 150]);
         assert_eq!(frame.depth[0], 0.0);
+    }
+
+    fn surface(pass: &str) -> Surface {
+        Surface::of(&Material::parse(&format!("[ShaderPass_1]\nTextureMap_1 = t\n{pass}")))
+    }
+
+    /// What a `.psm` leaves out is the original's default material's: the alpha test on, "greater",
+    /// against 0 (V54). Each case is a pass of a material on the disc, cut down; the alphas are the
+    /// decoder's, twice the GS's.
+    #[test]
+    fn a_material_s_alpha_test_is_the_original_s_with_its_defaults() {
+        let cut = |s: Surface| (s.cutoff, s.depth_cutoff, s.depth_write);
+        // mm_boxcars: nothing said. A texel of the GS's alpha 1 (2) is drawn, 0 is a hole.
+        assert_eq!(cut(surface("microProgramName = Vu1StripDiffuseBackFaceCull.vuo\n")), (2, 0, true));
+        // mm_scraper: `alphaTestOnOff = 0`, every texel.
+        assert_eq!(cut(surface("alphaTestOnOff = 0\nalphaBlendingOnOff = 0\n")).0, 0);
+        // bushes: a reference and no switch is tested, greater than 120.
+        assert_eq!(cut(surface("alphaBlendingOnOff = 1\nalphaReferenceValue = 120\n")), (242, 0, true));
+        // bushesbillboard: on, greater than 16.
+        assert_eq!(cut(surface("alphaTestOnOff = 1\nalphaReferenceValue = 16\n")), (34, 0, true));
+        // nat13_billbrd_graf: greater or equal to 70; observation_ladder's 128 is the GS's opaque.
+        assert_eq!(cut(surface("alphaTestMethod = 5\nalphaReferenceValue = 70\n")), (140, 0, true));
+        assert_eq!(surface("alphaTestOnOff = 1\nalphaTestMethod = 5\nalphaReferenceValue = 128\n").cutoff, 255);
+        // mm_caboose: greater or equal to 80, failing into colour only.
+        let caboose = "alphaBlendingOnOff = 1\nalphaTestOnOff = 1\nalphaTestMethod = 5\n\
+                       alphaReferenceValue = 80\nprocessingMethodWhenFailedInAlphaTest = 1\nzWriteDisabled = 0\n";
+        assert_eq!(cut(surface(caboose)), (0, 160, true));
+        // ttrack: "never", failing into colour only: drawn whole and never in depth.
+        let ttrack = "alphaBlendingOnOff = 1\nalphaTestOnOff = 1\nalphaTestMethod = 0\n\
+                      alphaReferenceValue = 0\nprocessingMethodWhenFailedInAlphaTest = 1\n";
+        assert_eq!(cut(surface(ttrack)), (0, 0, false));
+        // sunflare03: off, whatever the rest says.
+        let flare = "alphaTestOnOff = 0\nalphaTestMethod = 6\nalphaReferenceValue = 0\n\
+                     processingMethodWhenFailedInAlphaTest = 0\nalphaBlendingOnOff = 1\nzWriteDisabled = 1\n";
+        assert_eq!(cut(surface(flare)), (0, 0, false));
+    }
+
+    /// A texel that fails a colour-only test is drawn but leaves depth alone, and one that passes
+    /// writes it: a later triangle further off shows through the first and is hidden by the second.
+    #[test]
+    fn a_texel_failing_into_colour_only_leaves_the_depth_buffer_alone() {
+        // Depth is 1 / w: the first triangle at w 1, the second twice as far.
+        let at = |x: f32, y: f32, w: f32| Shade { clip: [x * w, y * w, 0.5, w], uv: [0.0, 0.0], light: [1.0; 3], fog: 0.0 };
+        for (alpha, hidden) in [(100u8, false), (200, true)] {
+            let texel = move |_: f32, _: f32| [200u8, 0, 0, alpha];
+            let far = |_: f32, _: f32| [0u8, 0, 200, 255];
+            let mut frame = Frame::new(2, 2, [0, 0, 0]);
+            let look = Look { paint: &texel, cutoff: 0, depth_cutoff: 160, blend: false, additive: false, depth_write: true, cover: 1.0 };
+            frame.triangle_with([at(-3.0, -3.0, 1.0), at(9.0, -3.0, 1.0), at(-3.0, 9.0, 1.0)], &look, [0, 0, 0]);
+            assert_eq!(&frame.color[0..3], &[200, 0, 0], "drawn either way");
+            frame.triangle_with([at(-3.0, -3.0, 2.0), at(9.0, -3.0, 2.0), at(-3.0, 9.0, 2.0)], &Look::cut_out(&far), [0, 0, 0]);
+            let want = if hidden { [200, 0, 0] } else { [0, 0, 200] };
+            assert_eq!(&frame.color[0..3], &want, "alpha {alpha}");
+        }
     }
 }
