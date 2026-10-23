@@ -184,7 +184,7 @@ impl Knob {
             Knob::Jump => "preload, the jump off the lip",
             Knob::CrashTolerance => "the speeds a landing wrecks at",
             Knob::PlaneSpeed => "biplane thrust and top speed",
-            Knob::PlaneAccel => "how fast the biplane gets up to speed, not its top",
+            Knob::PlaneAccel => "the biplane's pick-up and braking, not its top",
             Knob::PlaneTopSpeed => "the biplane's top speed",
             Knob::PlaneTurn => "how hard the biplane pulls round a turn",
             Knob::Gravity => "gravity, bike and biplane",
@@ -208,7 +208,7 @@ impl Knob {
             Knob::Jump => "[Preload] MaxPreload x k",
             Knob::CrashTolerance => "[Wrecks] Front/Back/Side/RacingDown/FreestyleDown/NoHander WreckSpeedLimit x k",
             Knob::PlaneSpeed => "biplane [Engine] MaxPower, MinPropEfficiencySpeed x k; [Aerodynamics] CD0 / k^2",
-            Knob::PlaneAccel => "biplane [Engine] MaxPower x k; [Aerodynamics] CD0, CD1, CDde x k",
+            Knob::PlaneAccel => "biplane [Engine] MaxPower x k; [Aerodynamics] CD0, CD1, CDde x k; [Joystick] ThrottleIncrement x k; every tire's MaxBrakingForce x k (above 100%, the extra through the centre of gravity)",
             Knob::PlaneTopSpeed => "biplane [Aerodynamics] CD0 / k^3",
             Knob::PlaneTurn => "biplane [Aerodynamics] CLScale, CMq x k; CMalpha, CMde, CMStall x k^2; CD1 / k^2; [Autopilot] MaxPitchRate x k",
             Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane GravityScale x k",
@@ -532,6 +532,22 @@ impl Mods {
             plane.aero.cd0 = plane.aero.cd0 * k;
             plane.aero.cd1 = plane.aero.cd1 * k;
             plane.aero.cd_de = plane.aero.cd_de * k;
+            // And slows k times as hard (P116). Held back, the throttle closes at ThrottleIncrement a
+            // second while the thrust it still gives fights the brakes, so on the runway the file's
+            // brakes against k times the power stopped a 200% plane later than the file's; k times the
+            // rate the throttle moves (both ways) and k times each wheel's braking force (its rolling
+            // friction, BrakeFriction of it, with it) put every force and the throttle's clock on k,
+            // and the run from top speed to a stop takes 1 / k the time as the run up to speed does.
+            // Above 100% the extra braking goes through the centre of gravity: at the contacts, twice
+            // the file's stands the plane on its nose, whose weight is still the file's.
+            plane.joystick.throttle_increment = plane.joystick.throttle_increment * k;
+            for g in &mut plane.gear {
+                if k > F::ONE {
+                    g.cg_braking = k - F::ONE;
+                } else {
+                    g.max_braking_force = g.max_braking_force * k;
+                }
+            }
         }
         if let Some(k) = self.factor(seat, Knob::PlaneTopSpeed) {
             // The power is the drag times the speed, and the drag at a speed goes with its square, so
