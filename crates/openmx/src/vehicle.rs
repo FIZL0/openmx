@@ -773,7 +773,7 @@ fn under(plane: &Plane, sim: &Sim, world: &mut dyn World) -> Option<Spot> {
     let (forward, _) = sim.rider.ride.axes();
     let forward = level(plane.facing).or_else(|| level(forward)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
     let at = Vf::new(plane.at.x(), ground, plane.at.z(), 1.0);
-    Some(Spot { at, forward, up: Vf::new(0.0, 1.0, 0.0, 0.0) })
+    Some(Spot::still(at, forward, Vf::new(0.0, 1.0, 0.0, 0.0)))
 }
 
 /// The bike's ghost after a put-back (P57): the rider's own since S63, which moved it into the
@@ -852,7 +852,7 @@ impl Garage {
                 plane.pose();
                 did?
             }
-            Did::Teleported(Pick::Player(p)) => match land(plane, spots[p], world) {
+            Did::Teleported(Pick::Player(p)) => match land(plane, spots[p].clone(), world) {
                 Some(()) => did?,
                 None => Did::Refused(Pick::Player(p)),
             },
@@ -869,7 +869,7 @@ impl Garage {
     pub fn spot(&self, sim: &Sim, world: &mut dyn World) -> Spot {
         match (self.up, &self.plane) {
             (Kind::Biplane, Some(plane)) => {
-                under(plane, sim, world).unwrap_or(Spot { at: plane.at, forward: plane.facing, up: plane.up })
+                under(plane, sim, world).unwrap_or(Spot::still(plane.at, plane.facing, plane.up))
             }
             _ => Spot::of(&sim.rider),
         }
@@ -1059,7 +1059,7 @@ pub fn lane_markers(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], w
     let mut did = markers::fly(&mut sim.markers, &mut f, sim.input.pad(0), me, spots, riding);
     if let Some(Did::Teleported(Pick::Player(p))) = did {
         let mut plane = Plane::around(f);
-        f = match land(&mut plane, spots[p], world) {
+        f = match land(&mut plane, spots[p].clone(), world) {
             Some(()) => {
                 let mut f = plane.flight.take().expect("the landing keeps the flight");
                 f.reset(plane.spawn.at, plane.spawn.facing, &sim.tables.ride.acos);
@@ -1181,9 +1181,13 @@ mod tests {
         assert_eq!((spot.up.x(), spot.up.y(), spot.up.z()), (0.0, 1.0, 0.0));
         assert_ne!(spot.at.x(), bike.x(), "not where the bike was left");
 
-        // A rider ridden there by a marker's Up lands where the switch back would stand the bike.
+        // A rider ridden there by a marker's Up lands where the switch back would stand the bike, at
+        // rest: a flying player has no bike motion to take (P111).
+        assert_eq!(spot.motion, None, "a flying player's spot carries no bike motion");
         let mut other = Sim::new(0);
+        other.rider.ride.chassis.vel = Vf::new(0.0, 0.0, 9.0, 0.0);
         other.rider.teleport_to(spot);
+        assert_eq!(other.rider.ride.chassis.vel.to_bits(), Vf::ZERO.to_bits(), "landed at rest");
         g.switch(Kind::Bike, &mut sim, &mut floor).unwrap();
         assert_eq!(other.rider.ride.position(), sim.rider.ride.position());
     }
