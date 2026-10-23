@@ -700,6 +700,10 @@ impl<W: World> World for Wooded<W> {
         self.world.off_world(at, margin)
     }
 
+    fn keeps(&mut self, at: Vf) -> bool {
+        self.world.keeps(at)
+    }
+
     fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
         self.world.heightfield()
     }

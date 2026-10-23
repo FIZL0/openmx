@@ -316,6 +316,21 @@ impl Source for Files {
             .collect();
         Ok(Piece { terrain, shapes })
     }
+
+    /// The scene's shapes without its terrain (MD14): the plane asks for every tile's at once.
+    fn shapes(&mut self, index: usize) -> Result<Vec<(track::Mesh, Placement)>, String> {
+        let p = self.pieces.get(index).ok_or("no such piece")?;
+        let Some(scene) = &p.scene else { return Ok(Vec::new()) };
+        let res = Res::folder(&p.dir)?;
+        Ok(scene
+            .collision
+            .iter()
+            .filter_map(|at: &Placement| {
+                let mesh = res.read_suffix(&at.file).and_then(|b| track::Mesh::parse(&b)).ok()?;
+                Some((mesh, at.clone()))
+            })
+            .collect())
+    }
 }
 
 /// Move what the home tile's scene places and lights into the world, by the tile's offset.

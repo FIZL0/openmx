@@ -115,6 +115,14 @@ pub trait World {
         false
     }
 
+    /// Whether the put-back record may keep a spot here (MD14, [`crate::ride::Ride::keep_back`]).
+    /// One terrain keeps every spot, as the original does; a world of several refuses one with no
+    /// ground under it and one its edge test would throw from ([`crate::tiles::Tiled::keeps`]).
+    fn keeps(&mut self, at: Vf) -> bool {
+        let _ = at;
+        true
+    }
+
     /// The terrain as a collision object's search reads it: the wreck bike's heightfield rays
     /// ([`crate::wreck_bike`]). A world that has no terrain of its own is sampled through
     /// [`World::ground`], a cell a unit wide ([`Sampled`]).
