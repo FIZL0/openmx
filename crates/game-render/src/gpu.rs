@@ -1600,6 +1600,14 @@ impl Renderer {
         }
     }
 
+    /// [`Renderer::upload_all`] a slice at a time: `names` of `assets`' models, which uploaded in
+    /// [`Renderer::upload_all`]'s order (sorted) number the same as it does.
+    pub fn upload_models(&mut self, assets: &Assets, names: &[&String]) {
+        for name in names {
+            self.model(assets, name);
+        }
+    }
+
     /// A model's index on the GPU, uploading it the first time it is asked for.
     fn model(&mut self, assets: &Assets, name: &str) -> Option<usize> {
         if let Some(&id) = self.model_ids.get(name) {

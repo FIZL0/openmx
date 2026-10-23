@@ -19,8 +19,9 @@ const SECTOR: u64 = 2048;
 
 /// Anything a disc image can be read out of by offset: a file on the desktop, or the browser's own
 /// storage behind the web shell's host calls (N4), where there is no file system to open a path in.
-pub trait Image: Read + Seek {}
-impl<T: Read + Seek> Image for T {}
+/// `Send`, so a ride can be loaded on a thread of its own (P127).
+pub trait Image: Read + Seek + Send {}
+impl<T: Read + Seek + Send> Image for T {}
 
 /// An opened disc image, with `MX.PSR`'s directory in memory.
 pub struct Disc {

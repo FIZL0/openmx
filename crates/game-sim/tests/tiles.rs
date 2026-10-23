@@ -9,8 +9,8 @@ use game_sim::tiles::{generate, Piece, Reach, Source, Tile, Tiled};
 use game_sim::track::{Terrain, TerrainLayout};
 use game_sim::world::{Ground, Hit, World};
 use ps2_float::{F, Vf};
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The world's height in feet at a world point: rolling ground, one wave across and one along.
 fn relief(x: f64, z: f64) -> f64 {
@@ -62,19 +62,19 @@ fn layout(s: &Spec) -> TerrainLayout {
 /// The test's tiles from memory, counting loads.
 struct Memory {
     files: Vec<Vec<u8>>,
-    loads: Rc<Cell<usize>>,
+    loads: Arc<AtomicUsize>,
 }
 
 impl Source for Memory {
     fn load(&mut self, index: usize) -> Result<Piece, String> {
-        self.loads.set(self.loads.get() + 1);
+        self.loads.fetch_add(1, Ordering::Relaxed);
         Ok(Piece { terrain: self.files[index].clone(), shapes: Vec::new() })
     }
 }
 
 /// The world, every terrain moved by `shift` feet, and its load counter.
-fn world(shift: [u32; 2], reach: Reach) -> (Tiled, Rc<Cell<usize>>) {
-    let loads = Rc::new(Cell::new(0));
+fn world(shift: [u32; 2], reach: Reach) -> (Tiled, Arc<AtomicUsize>) {
+    let loads = Arc::new(AtomicUsize::new(0));
     let tiles = SPECS
         .iter()
         .map(|s| {
@@ -264,7 +264,7 @@ fn streaming_never_changes_an_answer() {
         assert!(same_hit(*a, *b), "{p:?}");
     }
     assert!(tiled.loaded().contains(&0));
-    assert!(loads.get() > 5, "a was loaded again");
+    assert!(loads.load(Ordering::Relaxed) > 5, "a was loaded again");
     println!("terrains held near c: {bytes_far} bytes; all five: {}", tiled.loaded_bytes());
 }
 
@@ -281,7 +281,7 @@ fn a_world_refuses_offsets_that_could_round() {
             keep: [0, 0, 10, 10],
             first_owner: 0,
         };
-        let source = Memory { files: vec![], loads: Rc::new(Cell::new(0)) };
+        let source = Memory { files: vec![], loads: Arc::new(AtomicUsize::new(0)) };
         assert!(Tiled::new(vec![t], Box::new(source), Reach::DESKTOP).is_err(), "{at}");
     }
 }
