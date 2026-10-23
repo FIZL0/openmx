@@ -283,14 +283,23 @@ impl Flight {
 
     /// **The plane's numbers changed under a flight going on** (P98): what [`Flight::new`] took off
     /// the file and the game modifiers ([`crate::modifiers::Mods::plane`]) reach — the engine's power
-    /// and the speed its prop is fully efficient from, the zero-lift drag, the gravity scale — taken
-    /// again from `plane`, the flight left where and how it is. The gravity force is the file's scale's
-    /// only while flying: a wreck's is `WreckGravity`'s, and its recovery builds the new scale's.
+    /// and the speed its prop is fully efficient from, the zero-lift drag, the gravity scale, the turn's
+    /// lift, induced drag, pitch moments and pitch-rate target (P108) — taken again from `plane`, the
+    /// flight left where and how it is. The gravity force is the file's scale's only while flying: a
+    /// wreck's is `WreckGravity`'s, and its recovery builds the new scale's.
     pub fn retune(&mut self, plane: &phy::Plane) {
         let fresh = Flight::new(plane);
         self.engine.max_power = fresh.engine.max_power;
         self.engine.full_efficiency_speed = fresh.engine.full_efficiency_speed;
         self.aero.drag0 = fresh.aero.drag0;
+        // The turn's (P108).
+        self.aero.lift_scale = fresh.aero.lift_scale;
+        self.aero.drag1 = fresh.aero.drag1;
+        self.aero.cm_alpha = fresh.aero.cm_alpha;
+        self.aero.cm_q = fresh.aero.cm_q;
+        self.aero.cm_de = fresh.aero.cm_de;
+        self.aero.cm_stall = fresh.aero.cm_stall;
+        self.autopilot.max_pitch_rate = fresh.autopilot.max_pitch_rate;
         self.gravity_scale = fresh.gravity_scale;
         if self.crash.reason == 0 {
             self.gravity = gravity_force(self.gravity_scale, self.mass);

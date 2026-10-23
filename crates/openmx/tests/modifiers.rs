@@ -373,7 +373,7 @@ fn every_modifier_off_its_default_reaches_the_ride() {
             });
             match knob {
                 Knob::TimeScale => assert!(time && !bike, "{knob:?} at {pct}"),
-                Knob::PlaneSpeed | Knob::PlaneAccel | Knob::PlaneTopSpeed => assert!(!bike && (flown || plane.is_none()), "{knob:?} at {pct}"),
+                Knob::PlaneSpeed | Knob::PlaneAccel | Knob::PlaneTopSpeed | Knob::PlaneTurn => assert!(!bike && (flown || plane.is_none()), "{knob:?} at {pct}"),
                 _ => assert!(bike && !time, "{knob:?} at {pct} left the bike alone"),
             }
         }
