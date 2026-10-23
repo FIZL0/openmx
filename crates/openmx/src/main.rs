@@ -4236,13 +4236,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
             // What the rider did, as a line: a run nobody is watching still says whether a trick
             // started, landed or put the rider down, and by which of the original's reason codes.
+            // A trick pack's extras (MD16) are not in the disc's table: their names are the rider's set's.
+            let name = |t: game_sim::trick::Trick| match t.extra().and_then(|_| seat.sim.rider.set.stunt(t)) {
+                Some(stunt) => stunt.display_name.clone(),
+                None => table.display_name(0, t).to_owned(),
+            };
             if let Some(t) = seat.said.started {
-                println!("{who}trick: {}", table.display_name(0, t));
-                rig.hud.note_trick(table.display_name(0, t));
+                println!("{who}trick: {}", name(t));
+                rig.hud.note_trick(&name(t));
             }
             if let Some(t) = seat.said.landed {
-                println!("{who}landed: {}", table.display_name(0, t));
-                rig.hud.note_trick(&format!("{} landed", table.display_name(0, t)));
+                println!("{who}landed: {}", name(t));
+                rig.hud.note_trick(&format!("{} landed", name(t)));
             }
             if let Some(why) = seat.said.wreck {
                 println!("{who}wreck: reason {} — L1 and R1 together to get back on", why.0);
