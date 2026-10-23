@@ -504,8 +504,9 @@ fn outline(frame: &mut Frame, x: i32, y: i32, w: i32, h: i32, color: [u8; 3]) {
 
 /// **The markers' slot display** (P88): the five slots and the other players, shown for a while
 /// whenever the selection or a slot changes, and for as long as a d-pad direction is held for the
-/// markers. Drawn whether or not the overlay above is on: it is the markers' only feedback. The
-/// port's own, like the markers themselves.
+/// markers. Drawn whether or not the debug overlay above is on, under the original's HUD too: it is
+/// the markers' only feedback. Not under the `none` overlay, which asked for a bare picture (P117).
+/// The port's own, like the markers themselves.
 #[derive(Clone, Debug, Default)]
 pub struct MarkerBanner {
     /// What was shown last: the selection and which slots hold a marker.
