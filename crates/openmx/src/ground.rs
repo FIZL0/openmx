@@ -124,6 +124,39 @@ impl<'a> Ground<'a> {
         )
     }
 
+    /// Which of the field's leaves the terrain's tree has, as [`Terrain::leaf`] finds them, from one
+    /// walk of the tree rather than a descent per sample: the field's width in leaves, and a flag per
+    /// leaf, row by row.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn leaf_map(&self) -> (u32, Vec<bool>) {
+        let t = &self.terrain;
+        let (w, h) = (self.samples_x.div_ceil(LEAF_SAMPLES), self.samples_z.div_ceil(LEAF_SAMPLES));
+        let mut map = vec![false; (w * h) as usize];
+        let Some(root) = t.root() else { return (w, map) };
+        if t.levels == 0 {
+            map.fill(true);
+            return (w, map);
+        }
+        // `node` covers TREE_ARITY^(levels - depth) leaves a side, its first at (x, z).
+        fn walk(t: &Terrain, node: &game_sim::track::TerrainNode, depth: u32, (x, z): (u32, u32), w: u32, map: &mut [bool]) {
+            let arity = game_sim::track::TREE_ARITY;
+            let span = arity.pow(t.levels - 1 - depth);
+            for cz in 0..arity {
+                for cx in 0..arity {
+                    let Some(child) = t.child(node, cx, cz).and_then(|at| t.node(at)) else { continue };
+                    let (lx, lz) = (x + cx * span, z + cz * span);
+                    if depth + 1 < t.levels {
+                        walk(t, &child, depth + 1, (lx, lz), w, map);
+                    } else if lx < w && let Some(m) = map.get_mut((lz * w + lx) as usize) {
+                        *m = true;
+                    }
+                }
+            }
+        }
+        walk(t, &root, 0, (0, 0), w, &mut map);
+        (w, map)
+    }
+
     /// The whole field as the GPU draws it (P44): square chunks of `cells` cells a side, each the
     /// grid of its cells' corners with their stored normals. The GPU picks each chunk's level of
     /// detail and so its triangles (V32), split as [`Ground::draw`] splits them at full detail.
@@ -136,8 +169,19 @@ impl<'a> Ground<'a> {
         let (across, along) = (self.samples_x - 1, self.samples_z - 1);
         let row = cells + 1;
         let mut out = Vec::new();
+        let (leaves_x, leaf_map) = self.leaf_map();
+        let has_leaf = |lx: u32, lz: u32| lx < leaves_x && leaf_map.get((lz * leaves_x + lx) as usize).copied().unwrap_or(false);
         for (cz, z0) in (0..along).step_by(cells as usize).enumerate() {
             for (cx, x0) in (0..across).step_by(cells as usize).enumerate() {
+                // Which of the chunk's leaves the tree has, from the one walk of it above: a cell in
+                // a leaf it lacks has no quad, and a world's join piece is a field mostly without
+                // leaves, whose cells would each walk the tree from its root to find that out.
+                let side = cells.div_ceil(LEAF_SAMPLES);
+                let (lx0, lz0) = (x0 / LEAF_SAMPLES, z0 / LEAF_SAMPLES);
+                let leaves: Vec<bool> = (0..side * side).map(|n| has_leaf(lx0 + n % side, lz0 + n / side)).collect();
+                if !leaves.contains(&true) {
+                    continue;
+                }
                 let mut vertices = vec![GroundVertex::default(); (row * row) as usize];
                 let mut found = vec![false; vertices.len()];
                 let mut missing = vec![false; (cells * cells) as usize];
@@ -149,7 +193,9 @@ impl<'a> Ground<'a> {
                         if sx >= across || sz >= along {
                             continue;
                         }
-                        let Some(quad) = self.terrain.cell(sx, sz, 1) else {
+                        let leaf = (sz / LEAF_SAMPLES - lz0) * side + sx / LEAF_SAMPLES - lx0;
+                        let quad = if leaves[leaf as usize] { self.terrain.cell(sx, sz, 1) } else { None };
+                        let Some(quad) = quad else {
                             missing[(j * cells + i) as usize] = true;
                             continue;
                         };
