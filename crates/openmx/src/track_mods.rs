@@ -101,6 +101,20 @@ pub fn find(mods: &Path, id: &str) -> Result<ModTrack, String> {
     check(&folder)?.ok_or_else(|| format!("{}: not a track mod", folder.display()))
 }
 
+/// Each listed mod's source game (MD11), `(id, game)`: its `mod.json`'s `source.game`, for the
+/// pick's filters. A mod whose file does not say is left out, and the pick files it by its pack.
+pub fn source_games(mods: &Path, ids: &[String]) -> Vec<(String, String)> {
+    ids.iter()
+        .filter(|id| valid_id(id))
+        .filter_map(|id| {
+            let text = std::fs::read_to_string(mods.join("tracks").join(id).join("mod.json")).ok()?;
+            let json = Json::parse(&text).ok()?;
+            let game = json.get("source")?.get("game")?.str()?.trim();
+            (!game.is_empty()).then(|| (id.clone(), game.to_string()))
+        })
+        .collect()
+}
+
 /// Whether `id` is spelled as a mod's id may be: `[a-z0-9_]`, 1 to 40 of them, `<prefix>_<map>`.
 /// No disc track's name has the underscore, so a mod can never take one's place.
 pub fn valid_id(id: &str) -> bool {

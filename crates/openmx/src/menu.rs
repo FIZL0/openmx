@@ -317,6 +317,9 @@ pub struct Settings {
     /// The mod packs switched off on the Mods page (P118), by the prefix their tracks' ids share
     /// (`mxvatv` for `mxvatv_nat13`): their tracks are left off the Free Ride list.
     pub mods_off: Vec<String>,
+    /// The track pick's filter (MD11), the source game whose tracks it lists: a [`Menu::track_groups`]
+    /// name, empty for All Games. A game the pick does not list now shows All and is kept.
+    pub track_filter: String,
     /// Whose tricks a ride has (MD16): the original's, or MX vs. ATV's read from a trick pack in the
     /// mods folder. The original's unless changed.
     pub tricks: Tricks,
@@ -879,6 +882,7 @@ impl Default for Settings {
             cameras: [CameraView::DEFAULT; SEATS_MAX],
             mods: true,
             mods_off: Vec::new(),
+            track_filter: String::new(),
             tricks: Tricks::default(),
             plants: Lod::default(),
             picture: Picture::default(),
@@ -966,6 +970,7 @@ impl Settings {
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
+                "track_filter" => s.track_filter = clean_filter(v),
                 "plants" => s.plants = Lod::from_word(v).unwrap_or(s.plants),
                 "picture" => s.picture = Picture::from_word(v).unwrap_or(s.picture),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
@@ -1094,6 +1099,10 @@ impl Settings {
         if !self.mods_off.is_empty() {
             out += &format!("mods_off = {}\n", self.mods_off.join(" "));
         }
+        // The pick's filter (MD11), only when it is not All Games.
+        if !self.track_filter.is_empty() {
+            out += &format!("track_filter = {}\n", self.track_filter);
+        }
         out
     }
 
@@ -1144,6 +1153,12 @@ impl Settings {
 /// Whether a settings file's `track` may be a track mod's id (MD2): `[a-z0-9_]`, 1 to 40 of them,
 /// `<prefix>_<map>` — `track_mods::valid_id`'s rule, which this file is compiled without. Whether
 /// the mod is there is the pick's to find out; a track it does not list opens on the first.
+/// A filter's name as `settings.txt` keeps it (MD11): one line of printable text with no comment
+/// mark, at most 60 characters; anything else is All Games.
+fn clean_filter(v: &str) -> String {
+    if v.chars().count() <= 60 && v.chars().all(|c| !c.is_control() && c != '#') { v.to_string() } else { String::new() }
+}
+
 fn mod_id(v: &str) -> bool {
     (1..=40).contains(&v.len())
         && v.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
@@ -1882,6 +1897,10 @@ pub struct Menu {
     /// [`TRACKS`]: empty with no `mods/` folder or with the Mods setting off. Set with
     /// [`Menu::set_mod_tracks`].
     pub mod_tracks: Vec<(String, String)>,
+    /// Each mod track's source game (MD11), `(id, game)`, its `mod.json`'s `source.game`, which the
+    /// pick's filters are by. A mod not in it is its pack's ([`pack_name`]). Set with
+    /// [`Menu::set_mod_games`].
+    mod_games: Vec<(String, String)>,
     /// Open screens, the one shown last. Empty is a ride with nothing over it.
     stack: Vec<Screen>,
     /// Each screen's row, in [`Screen::ALL`]'s order.
@@ -2040,6 +2059,7 @@ impl Menu {
             settings,
             controls,
             mod_tracks: Vec::new(),
+            mod_games: Vec::new(),
             stack: vec![Screen::Main],
             cursor,
             typing: String::new(),
@@ -2672,17 +2692,23 @@ impl Menu {
         let (prev, next) = (p.up, p.down);
         if screen == Screen::Tracks && (prev || next || p.left || p.right) {
             let groups = self.track_groups();
-            let g = self.track_group(at);
+            let g = self.track_filter_group();
             let to = if prev || next {
                 let r = &groups[g].1;
                 let n = r.len();
+                let at = if r.contains(&at) { at } else { r.start };
                 r.start + (at - r.start + if prev { n - 1 } else { 1 }) % n
             } else {
-                // Onto the ride's track where the category has it, else its first.
+                // The next filter (MD11), kept in the settings, onto the ride's track where it has
+                // it, else its first.
                 let n = groups.len();
-                let r = &groups[if p.left { (g + n - 1) % n } else { (g + 1) % n }].1;
-                let saved = self.track_index();
-                if r.contains(&saved) { saved } else { r.start }
+                let name = &groups[if p.left { (g + n - 1) % n } else { (g + 1) % n }].0;
+                let filter = if name == ALL_GAMES { String::new() } else { name.clone() };
+                if self.settings.track_filter != filter {
+                    self.settings.track_filter = filter;
+                    self.changed = true;
+                }
+                self.track_index()
             };
             self.cursor[screen.index()] = to;
             self.tick = 0;
@@ -3023,13 +3049,15 @@ impl Menu {
         let side = p.left || p.right;
         let by = if p.left { -1 } else { 1 };
         let Some(&item) = self.lobby.items().get(at) else { return };
+        let list = self.online_tracks();
         let l = &mut self.lobby;
         match item {
             Item::Track if p.ok || side => {
                 if let Some(room) = &l.room {
-                    let i = TRACKS.iter().position(|t| t.0 == room.track).unwrap_or(0) as i32;
-                    let n = TRACKS.len() as i32;
-                    let track = TRACKS[(i + by).rem_euclid(n) as usize].0.to_string();
+                    // The lit filter's tracks (MD11); a room on one it does not list steps onto its ends.
+                    let i = list.iter().position(|t| *t == room.track).map_or(if by > 0 { -1 } else { 0 }, |i| i as i32);
+                    let n = list.len() as i32;
+                    let track = list[(i + by).rem_euclid(n) as usize].to_string();
                     l.out.push(Cmd::Ride { track, wrecks: room.wrecks, biplane: false });
                 }
             }
@@ -3539,43 +3567,108 @@ impl Menu {
         }
     }
 
-    /// The pick's index of [`Settings::track`], the first track's where the pick does not list it.
+    /// The pick's index of [`Settings::track`] in the lit filter, the filter's first track where it
+    /// does not list it.
     pub fn track_index(&self) -> usize {
-        (0..self.track_count()).find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(0)
+        let r = self.track_groups()[self.track_filter_group()].1.clone();
+        r.clone().find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(r.start)
     }
 
-    /// The pick's categories, which Left and Right step between: the disc's towns, then each mod
-    /// pack's tracks, the worlds first (user, 2026-10-23). Each is its name and its tracks' range.
+    /// The pick's filters by source game (MD11), which Left and Right step between, each its name
+    /// and its tracks' range: with mods listed, All Games (every track) first, then MX Unleashed (the
+    /// disc's towns, and a mod made from MX Unleashed after them), the worlds (the combined and ultra
+    /// maps) right after (user, 2026-10-23), then each other source game that has a track, by name.
+    /// With none, the disc's alone.
     pub fn track_groups(&self) -> Vec<(String, Range<usize>)> {
-        let mut out = vec![("MX Unleashed".to_string(), 0..TRACKS.len())];
-        let mut last = "";
+        let mut out = vec![(DISC_GAME.to_string(), 0..TRACKS.len())];
         for (i, (id, _)) in self.shown_mods().enumerate() {
             let at = TRACKS.len() + i;
+            let game = self.track_game(id);
             match out.last_mut() {
-                Some((_, r)) if i > 0 && pack_of(id) == last => r.end = at + 1,
-                _ => out.push((pack_name(pack_of(id)), at..at + 1)),
+                Some((name, r)) if *name == game => r.end = at + 1,
+                _ => out.push((game, at..at + 1)),
             }
-            last = pack_of(id);
+        }
+        if self.track_count() > TRACKS.len() {
+            out.insert(0, (ALL_GAMES.to_string(), 0..self.track_count()));
         }
         out
     }
 
-    /// Which of [`Menu::track_groups`] the pick's track `at` is in.
+    /// Which of [`Menu::track_groups`] the pick's track `at` is in: the lit filter where it has it,
+    /// else the first that does.
     pub fn track_group(&self, at: usize) -> usize {
-        self.track_groups().iter().position(|(_, r)| r.contains(&at)).unwrap_or(0)
+        let groups = self.track_groups();
+        let lit = self.track_filter_group();
+        if groups[lit].1.contains(&at) {
+            return lit;
+        }
+        groups.iter().position(|(_, r)| r.contains(&at)).unwrap_or(0)
+    }
+
+    /// Which of [`Menu::track_groups`] [`Settings::track_filter`] is, All Games (the first) where the
+    /// pick does not list its game.
+    pub fn track_filter_group(&self) -> usize {
+        let want = if self.settings.track_filter.is_empty() { ALL_GAMES } else { self.settings.track_filter.as_str() };
+        self.track_groups().iter().position(|(name, _)| name == want).unwrap_or(0)
+    }
+
+    /// The game a track of the pick is from (MD11): MX Unleashed for the disc's, Worlds for a
+    /// combined map, else its `mod.json`'s source game, or its pack's name where the shell gave none.
+    pub fn track_game(&self, id: &str) -> String {
+        if TRACKS.iter().any(|t| t.0 == id) {
+            return DISC_GAME.into();
+        }
+        if pack_of(id) == WORLDS {
+            return pack_name(WORLDS);
+        }
+        match self.mod_games.iter().find(|(i, _)| i == id) {
+            Some((_, game)) if !game.trim().is_empty() && game != ALL_GAMES => game.trim().to_string(),
+            _ => pack_name(pack_of(id)),
+        }
+    }
+
+    /// The tracks an online room's pick steps through (MD11): the lit filter's disc tracks, since a
+    /// mod is not ridden online until MD6, or every disc track where the filter has none.
+    pub fn online_tracks(&self) -> Vec<&'static str> {
+        let r = self.track_groups()[self.track_filter_group()].1.clone();
+        let disc: Vec<&'static str> = TRACKS.iter().enumerate().filter(|(i, _)| r.contains(i)).map(|(_, t)| t.0).collect();
+        if disc.is_empty() { TRACKS.iter().map(|t| t.0).collect() } else { disc }
     }
 
     /// The mods the pick lists after the disc's (MD2), the pick's cursor kept on its track. They
-    /// are kept by pack, the worlds' first, so each pack is one of the pick's categories.
-    pub fn set_mod_tracks(&mut self, mut tracks: Vec<(String, String)>) {
-        tracks.sort_by(|(a, _), (b, _)| (pack_of(a) != WORLDS, pack_of(a)).cmp(&(pack_of(b) != WORLDS, pack_of(b))));
+    /// are kept by source game ([`Menu::track_groups`]' order), so each game is one of the filters.
+    pub fn set_mod_tracks(&mut self, tracks: Vec<(String, String)>) {
         if !tracks.is_empty() {
             self.mods_seen = tracks.clone();
         }
         self.mod_tracks = tracks;
+        self.arrange_mods();
+    }
+
+    /// Each mod track's source game (MD11), `(id, game)`, as its `mod.json` says.
+    pub fn set_mod_games(&mut self, games: Vec<(String, String)>) {
+        self.mod_games = games;
+        self.arrange_mods();
+    }
+
+    /// The mod tracks in the filters' order, MX Unleashed's first, the worlds next, then each game
+    /// by name, each game's in the order the shell listed them; the cursor back on the ride's track.
+    fn arrange_mods(&mut self) {
+        let mut tracks = std::mem::take(&mut self.mod_tracks);
+        tracks.sort_by_cached_key(|(id, _)| {
+            let game = self.track_game(id);
+            (if game == DISC_GAME { 0 } else if pack_of(id) == WORLDS { 1 } else { 2 }, game)
+        });
+        self.mod_tracks = tracks;
         self.cursor[Screen::Tracks.index()] = self.track_index();
     }
 }
+
+/// The track pick's filter of every track (MD11), which an empty [`Settings::track_filter`] is.
+pub const ALL_GAMES: &str = "All Games";
+/// The track pick's filter of the disc's own tracks (MD11).
+pub const DISC_GAME: &str = "MX Unleashed";
 
 /// The pack prefix of the world mods (MD8), whose category the pick lists right after the disc's.
 pub const WORLDS: &str = "world";
