@@ -6,7 +6,7 @@
 //!
 //! ggrs' own disconnect is off: a silent peer is [`super::recover`]'s to deal with, as in opentennis.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -46,7 +46,7 @@ pub struct Wires {
     inbox: Arc<Mutex<Vec<(String, Message)>>>,
     /// The last inputs message to each peer (every input it has not acked yet), sent again while
     /// stalled (B198).
-    last: Arc<Mutex<HashMap<String, Message>>>,
+    last: Arc<Mutex<BTreeMap<String, Message>>>,
 }
 
 /// Whether `msg` is ggrs' inputs message (its body private: bincode's variant index after the 2-byte

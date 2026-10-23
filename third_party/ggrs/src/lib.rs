@@ -122,6 +122,14 @@ pub use sessions::sync_test_session::SyncTestSession;
 pub use sync_layer::{GameStateAccessor, GameStateCell};
 
 pub mod clock;
+
+/// hst patch: std's maps, but hashed with a fixed key. std seeds each process differently, so
+/// the order ggrs walks its peers in, and with it what a lossy test link drops, changed every run.
+pub(crate) mod det {
+    use std::hash::{BuildHasherDefault, DefaultHasher};
+    pub type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<DefaultHasher>>;
+    pub type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<DefaultHasher>>;
+}
 pub(crate) mod error;
 pub(crate) mod frame_info;
 pub(crate) mod input_queue;
