@@ -1081,7 +1081,7 @@ pub const SEATS: usize = 8;
 
 /// `controls.txt`: how the host's pad is wired, which is the device's and not the rider's, and which
 /// layout each seat rides on.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Controls {
     pub throttle: Gas,
     /// `--pad`'s device, or none for the first one found.
@@ -1098,9 +1098,25 @@ pub struct Controls {
     /// rides on under the `Original` layout, 0 the shipped one. The original's Controller Presets
     /// screen picks it; here it is the seat's row. Under `New` it is 0 and not read.
     pub presets: [usize; SEATS],
-    /// A Nintendo pad's A and B by position (`nintendo = positions`): B, the bottom one, confirms.
-    /// The default (`labels`) has A confirm and B go back, as on a Switch (P53).
+    /// A Nintendo pad's A and B by position (`nintendo = positions`, the default since P64): B, the
+    /// bottom one, confirms, as on every other pad. `by-label` has A confirm and B go back, as on a
+    /// Switch (P53). P53's default wrote `labels` into every file, so that word reads as positions:
+    /// labels are only honoured once picked on the Controls page, which writes `by-label`.
     pub nintendo_positions: bool,
+}
+
+impl Default for Controls {
+    fn default() -> Controls {
+        Controls {
+            throttle: Gas::default(),
+            pad: None,
+            pressure: String::new(),
+            layouts: [Layout::default(); SEATS],
+            planes: [Layout::default(); SEATS],
+            presets: [0; SEATS],
+            nintendo_positions: true,
+        }
+    }
 }
 
 impl Controls {
@@ -1115,7 +1131,8 @@ impl Controls {
                 }
                 "pad" => c.pad = (!v.is_empty() && v != "auto").then(|| v.to_string()),
                 "pressure" => c.pressure = if v == "none" { String::new() } else { v.to_string() },
-                "nintendo" => c.nintendo_positions = v == "positions",
+                // `labels` is P53's default, written whether or not anyone chose it (P64).
+                "nintendo" => c.nintendo_positions = v != "by-label",
                 // One word for every seat, or one per seat with the last carried on.
                 "layout" => {
                     let words: Vec<Option<Layout>> = v
@@ -1154,8 +1171,8 @@ impl Controls {
              # Cross and Square kept free; original is the game's own (P40); biplane is new or\n\
              # original, or one per seat — new is the plane's own stick at every bank, down\n\
              # always pulling the nose toward its belly; original is the disc's (P50, P69); nintendo is\n\
-             # labels (a Switch pad's A confirms and B goes back) or positions (B, the bottom one,\n\
-             # confirms) (P53); preset is the original's controller preset, 0 to 3, or one per seat,\n\
+             # positions (a Switch pad's B, the bottom one, confirms) or by-label (A confirms and B\n\
+             # goes back) (P53, P64); preset is the original's controller preset, 0 to 3, or one per seat,\n\
              # read under the original layout only — 0 is the shipped one (P79)\n\
              throttle = {}\npad = {}\npressure = {}\nlayout = {}\nbiplane = {}\nnintendo = {}\npreset = {}\n",
             self.throttle.word(),
@@ -1163,7 +1180,7 @@ impl Controls {
             if self.pressure.is_empty() { "none" } else { &self.pressure },
             self.layout_text(),
             seat_text(&self.planes),
-            if self.nintendo_positions { "positions" } else { "labels" },
+            if self.nintendo_positions { "positions" } else { "by-label" },
             preset_text(&self.presets),
         )
     }
