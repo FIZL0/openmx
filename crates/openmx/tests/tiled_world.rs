@@ -8,6 +8,10 @@
 //! What is proved: the world rides end to end across both joins on the ground, and is shot back only
 //! at its outer edge; the first tile, at the world's origin, rides tick for tick to the bit as it does
 //! alone; and every tile's ground as the world reads it from the mod's files is that tile's alone.
+//!
+//! MD14: the world is 572 feet deep and narrower than the edge throw's arc, and the bike ridden
+//! through throw after throw is never put back on no ground; and the biplane's search meets a shape
+//! that stands on the second tile.
 
 use game_sim::contact_search;
 use game_sim::tiles::{generate, Piece, Reach, Source, Tile, Tiled};
@@ -188,6 +192,11 @@ struct Tick {
 
 /// `--trace-feel` on the gas from `x,z` facing `degrees`, up to the first wreck.
 fn ride(test: &str, track: &str, x: f32, z: f32, degrees: f32, frames: usize) -> Option<Vec<Tick>> {
+    ticks(test, track, x, z, degrees, frames, true)
+}
+
+/// [`ride`], on through every wreck when `stop` is false.
+fn ticks(test: &str, track: &str, x: f32, z: f32, degrees: f32, frames: usize, stop: bool) -> Option<Vec<Tick>> {
     let at = format!("{x},{z},{degrees}");
     let n = frames.to_string();
     let said = shell(test, track, &["--trace", &n, "--trace-gas", "--trace-feel", "--trace-at", &at])?;
@@ -202,7 +211,7 @@ fn ride(test: &str, track: &str, x: f32, z: f32, degrees: f32, frames: usize) ->
         let tick = Tick { frame, text: w[1..].join(" "), x: f(5), y: f(6), z: f(7), wreck: w[11] == "1" };
         let wrecked = tick.wreck;
         out.push(tick);
-        if wrecked {
+        if wrecked && stop {
             break;
         }
     }
@@ -336,4 +345,199 @@ fn every_tiles_ground_from_the_mods_files_is_its_own() {
         }
     }
     assert!(per.iter().all(|&n| n > 500), "{per:?}");
+}
+
+/// **MD14: throw after throw, never on no ground.** Ridden on the gas from the middle, west, south
+/// and north-east, each for 3000 ticks: the world is narrower than the throw (an arc for half its
+/// 1722-ft width, whichever way), so the bike flies past the far edge or across the whole world and
+/// comes down on nothing. Every tick the bike stands on ground some tile owns, near that ground's
+/// height, and every put-back that moved it lands at least the shootoff's margin inside the world.
+/// Before MD14 the west ride was put back at (1721.8, −999997.9) on its second throw and stayed
+/// there.
+#[test]
+fn a_narrow_world_ridden_through_its_edge_throws_never_puts_the_bike_on_no_ground() {
+    let mut throws = 0;
+    let mut moved = 0;
+    for degrees in [270.0, 0.0, 45.0] {
+        let Some(ticks) = ticks(&format!("throws_{degrees}"), "md8_world", 800.0, 286.0, degrees, 3000, false) else { return };
+        assert_eq!(ticks.len(), 3000, "{degrees}°: the trace stopped at {}", ticks.len());
+        let mut last: Option<&Tick> = None;
+        for t in &ticks {
+            let ground = relief(f64::from(t.x), f64::from(t.z)) as f32;
+            assert!(t.x >= 0.0 && t.x < WIDTH && t.z >= 0.0 && t.z < DEPTH, "{degrees}°, tick {}: off the world at ({}, {})", t.frame, t.x, t.z);
+            assert!((t.y - ground).abs() < 8.0, "{degrees}°, tick {}: at y {} over ground {ground} at ({}, {})", t.frame, t.y, t.x, t.z);
+            throws += usize::from(t.wreck);
+            if let Some(l) = last
+                && (t.x - l.x).hypot(t.z - l.z) > 30.0
+            {
+                // A put-back that moved the bike: where the wreck came down, not by an edge.
+                moved += 1;
+                let inside = t.x >= MARGIN && t.x <= WIDTH - MARGIN && t.z >= MARGIN && t.z <= DEPTH - MARGIN;
+                assert!(inside, "{degrees}°, tick {}: put back at ({}, {}), by the edge", t.frame, t.x, t.z);
+            }
+            last = Some(t);
+        }
+    }
+    println!("{throws} throws, {moved} put-backs that moved the bike");
+    assert!(throws >= 20 && moved >= 1, "{throws} throws, {moved} put-backs that moved it");
+}
+
+/// The disc's machines: `biplane.phy`, the plane's ray probe and its hull, which stands here as a
+/// shape on a tile.
+fn machines() -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let mut disc = match game_render::disc::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return None;
+        }
+    };
+    let name = disc.entries().iter().find(|e| e.name.to_ascii_lowercase().ends_with("machine.res")).expect("machine.res").name.clone();
+    let res = disc.res(&name).expect("machine.res");
+    let read = |n: &str| res.read_suffix(n).unwrap_or_else(|e| panic!("{n}: {e}"));
+    Some((read(game_sim::phy::BIPLANE_PHY), read(game_sim::flight_search::BIPLANE_RAYS), read("biplanef.col")))
+}
+
+/// Some of the world's pieces (`SPECS` indices) from the test's own terrains, and a column of shapes
+/// on piece `shaped`, 252 feet into it along `x` at `z` 286, in its own coordinates.
+struct Column {
+    pieces: Vec<usize>,
+    shaped: usize,
+    hull: game_sim::track::Mesh,
+}
+
+impl Source for Column {
+    fn load(&mut self, i: usize) -> Result<Piece, String> {
+        let piece = self.pieces[i];
+        let shapes = if piece == self.shaped {
+            (0..40)
+                .map(|k| {
+                    let at = game_sim::track::Placement {
+                        position: [F(252.0), F(150.0 + 6.0 * k as f32), F(286.0)],
+                        look: [F(0.0), F(0.0), F(1.0)],
+                        ..game_sim::track::Placement::default()
+                    };
+                    (self.hull.clone(), at)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Piece { terrain: terrain(&SPECS[piece]), shapes })
+    }
+}
+
+fn world_of(source: Column) -> Tiled {
+    let tiles = source
+        .pieces
+        .iter()
+        .map(|&i| &SPECS[i])
+        .map(|s| {
+            let mut t = Tile {
+                name: s.name.into(),
+                at: s.at.map(|a| F(a as f32)),
+                layout: layout(s),
+                spacing: F(s.spacing),
+                levels: 1,
+                keep: [0; 4],
+                first_owner: 0,
+            };
+            t.keep = s.keep.unwrap_or_else(|| t.every_cell());
+            t
+        })
+        .collect();
+    Tiled::new(tiles, Box::new(source), Reach::WEB).unwrap()
+}
+
+/// The plane flown level along `+x` at 200 feet from `x` 600, over the first join onto tile `b`, into
+/// the world: where it ended, whether its rays struck a shape, and its crash reason.
+fn fly(world: &mut Tiled, plane: &[u8], rays: &[u8]) -> (Vf, bool, u32) {
+    use game_sim::world::World;
+    let tables = game_sim::ride::Tables::build();
+    let rays = game_sim::track::Rays::parse(rays).expect("biplanem.col");
+    let mut f = game_sim::flight::Flight::new(&game_sim::phy::Plane::read_bytes(plane)).with_rays(game_sim::flight_search::Rays::of(&rays));
+    f.area = world.area();
+    f.attitude.flown = true;
+    f.place(Vf::new(600.0, 200.0, 286.0, 1.0), Vf::new(1.0, 0.0, 0.0, 0.0), &tables.acos);
+    f.body.velocity = Vf::new(120.0, 0.0, 0.0, 1.0);
+    let gas = game_sim::biplane::Pad { forward: F::ONE, ..Default::default() };
+    let mut struck = false;
+    for _ in 0..120 {
+        f.frame(F(1.0 / 30.0), gas, world, &tables);
+        struck |= f.record.struck.is_some();
+        if f.crash.reason != 0 {
+            break;
+        }
+        world.stream(&[f.body.position]);
+    }
+    (f.body.position, struck, f.crash.reason)
+}
+
+/// **MD14: the plane hits a second tile's shape.** A column of shapes stands on tile `b`, 900 feet
+/// into the world, and the plane is flown level into it from over the first join: its rays strike
+/// it and it crashes there — the plane's search is handed every tile's shapes, in world feet. With
+/// the column on no tile the plane flies on past where it stood. Before MD14 the plane's search was
+/// handed no shapes in a world at all.
+#[test]
+fn the_plane_hits_a_shape_on_the_second_tile() {
+    let Some((plane, rays, hull)) = machines() else { return };
+    let hull = game_sim::track::Mesh::parse(&hull).expect("biplanef.col");
+    let all: Vec<usize> = (0..SPECS.len()).collect();
+    let mut with = world_of(Column { pieces: all.clone(), shaped: 1, hull: hull.clone() });
+    let (at, struck, reason) = fly(&mut with, &plane, &rays);
+    assert!(struck, "the rays never struck the column: the plane ended at {at:?}");
+    assert_eq!(reason, game_sim::biplane::CRASHED, "the plane did not crash into the column: {at:?}");
+    assert!(at.x() < 910.0, "the plane flew through the column to {at:?}");
+    let mut without = world_of(Column { pieces: all, shaped: usize::MAX, hull });
+    let (at, struck, reason) = fly(&mut without, &plane, &rays);
+    assert!(!struck && reason == 0 && at.x() > 1000.0, "with no column: {at:?}, struck {struck}, reason {reason}");
+}
+
+/// The plane flown from `at` with `velocity` (on the gas when `gas`) for up to 30 s over `world`:
+/// when and where it was first thrown, when and where it recovered after that, and its lowest `y`.
+#[allow(clippy::type_complexity)]
+fn thrown_and_back(world: &mut Tiled, plane: &[u8], rays: &[u8], at: Vf, velocity: Vf, gas: bool) -> (Option<(usize, Vf)>, Option<(usize, Vf)>, f32) {
+    use game_sim::world::World;
+    let tables = game_sim::ride::Tables::build();
+    let rays = game_sim::track::Rays::parse(rays).expect("biplanem.col");
+    let mut f = game_sim::flight::Flight::new(&game_sim::phy::Plane::read_bytes(plane)).with_rays(game_sim::flight_search::Rays::of(&rays));
+    f.area = world.area();
+    f.attitude.flown = true;
+    f.place(at, Vf::new(1.0, 0.0, 0.0, 0.0), &tables.acos);
+    f.body.velocity = velocity;
+    let pad = game_sim::biplane::Pad { forward: if gas { F::ONE } else { F::ZERO }, ..Default::default() };
+    let (mut thrown, mut recovered, mut lowest) = (None, None, f32::MAX);
+    for tick in 0..30 * 30 {
+        f.frame(F(1.0 / 30.0), pad, world, &tables);
+        lowest = lowest.min(f.body.position.y());
+        if thrown.is_none() && f.crash.reason == game_sim::biplane::THROWN {
+            thrown = Some((tick, f.body.position));
+        }
+        if thrown.is_some() && f.crash.reason == 0 {
+            recovered = Some((tick, f.body.position));
+            break;
+        }
+    }
+    (thrown, recovered, lowest)
+}
+
+/// **MD14: the plane over a hole.** With tiles `a` and `c` alone, `x` 504 to 1368 is a hole in the
+/// world. Flown level toward it from tile `a`, the plane is thrown back from it as from the world's
+/// edge; the throw aims at the rectangle's middle, `x` 861, which is the hole, and the plane falls
+/// through it onto nothing. Below every ground, that fall counts as its landing, and it recovers to
+/// its spawn rather than falling for ever.
+#[test]
+fn the_plane_is_thrown_back_from_a_hole_and_recovers_from_falling_through_one() {
+    let Some((plane, rays, hull)) = machines() else { return };
+    let hull = game_sim::track::Mesh::parse(&hull).expect("biplanef.col");
+    let mut world = world_of(Column { pieces: vec![0, 2], shaped: usize::MAX, hull });
+    assert!(world.hole(F(861.0), F(286.0)) && !world.hole(F(300.0), F(286.0)));
+    let spawn = Vf::new(250.0, 200.0, 286.0, 1.0);
+    let (thrown, back, lowest) = thrown_and_back(&mut world, &plane, &rays, spawn, Vf::new(120.0, 0.0, 0.0, 1.0), true);
+    let (tick, at) = thrown.expect("never thrown back from the hole");
+    assert!(at.x() < 504.0 - 140.0 && at.x() > 300.0, "thrown on tick {tick} at {at:?}");
+    let (put, spot) = back.unwrap_or_else(|| panic!("thrown on tick {tick} and never recovered; lowest y {lowest}"));
+    assert!(lowest < 0.0, "never fell through the hole: lowest y {lowest}");
+    assert!((spot.x() - spawn.x()).abs() < 5.0 && spot.z() == spawn.z(), "recovered to {spot:?}, not its spawn");
+    println!("thrown on tick {tick} at x {:.1}, recovered on tick {put} at {spot:?}, lowest y {lowest:.1}", at.x());
 }
