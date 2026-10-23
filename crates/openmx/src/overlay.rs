@@ -32,8 +32,9 @@
 //!   movie's own tints (black at 0x80 over the label, 0x66 over the rest).
 //! - **The preload meter** (`speedometer.lyt`'s `PreloadMeter`, `Ingame_Preloadmeter.fsh`): the dark
 //!   capsule right of the speed, black at the movie's 0xb3, likewise drawn by eye (V28), in every
-//!   view (V42). The plane has neither it nor the odometer: the original's biplane shows the speed
-//!   alone.
+//!   view (V42); lit while a preload's lip test passes, and filled as the movie plays a fired
+//!   shove's strength, tick for tick ([`PreloadMeter`], V53). The plane has neither it nor the
+//!   odometer: the original's biplane shows the speed alone.
 //!
 //! What the numbers are, and where they come from, is in `research/oracle.txt` (V26, V28). The pure
 //! parts — [`mph`], [`speed_text`], [`needle_degrees`], [`odometer_text`] and [`radar_mark`] — take
@@ -176,7 +177,9 @@ const SCORE_COLOUR: [u8; 4] = [200, 200, 200, 255];
 /// `speedometer.lyt`'s `Y=-12`.
 const PRELOAD_METER: (f32, f32) = (20.0, 85.0);
 const PRELOAD_MOVIE: (f32, f32) = (599.0, 326.0);
-const PRELOAD_COLOUR: [u8; 4] = [255, 153, 0, 255];
+const PRELOAD_COLOUR: [u8; 4] = [206, 109, 0, 255];
+/// The capsule's inside while the meter is lit (V53, off the original's frames, as the charge's).
+const PRELOAD_LIT: [u8; 4] = [88, 44, 10, 255];
 /// How far the charge sits inside the capsule.
 const PRELOAD_INSET: f32 = 3.0;
 
@@ -210,14 +213,133 @@ pub fn score_text(score: u32) -> String {
     score.to_string()
 }
 
-/// How full the preload meter is, `0..=1`: the shove a preload is giving, as a share of the bike's
-/// `MaxPreload`, running down with its timer — `force` and `timer` the preload's own, `max` and
-/// `time` the `.phy`'s `MaxPreload` and `PreloadTime`. Empty unless it `firing`.
-pub fn preload_fill(firing: bool, force: f32, max: f32, timer: f32, time: f32) -> f32 {
-    if !firing || max <= 0.0 || time <= 0.0 {
-        return 0.0;
+/// What the speedometer reads off its rider for the preload meter, once a tick (V53): the
+/// preload's lip test passed (`ready`), it is shoving (`firing`), its force and the bike's
+/// `MaxPreload`, and the rider is down (`wrecked`, the wreck reason the original copies beside the
+/// reset clock).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PreloadSense {
+    pub ready: bool,
+    pub firing: bool,
+    pub force: f32,
+    pub max: f32,
+    pub wrecked: bool,
+}
+
+/// The preload meter (V53): the speedometer's half and the movie's.
+///
+/// The speedometer writes the meter movie's `preloadMeter` variable each tick: -1 (the capsule
+/// dark) unless the preload's lip test passes, 0 (lit, empty) while it does. On the tick a preload
+/// fires it takes the shove's strength, `max(1, (int)(0.5 + 20 * force / MaxPreload))`, and holds it
+/// — writing nothing more — until the movie says its animation is done; a rider who is down gets -1
+/// instead and no hold. So the meter never fills while the stick is pumped: it shows how hard the
+/// shove that fired was.
+///
+/// The movie, seen frame by frame on the original (V53): it steps once a tick, rising two of its
+/// twenty levels a tick to the value, holding it fifteen ticks, falling back down the odd levels
+/// below it two a tick, and on the tick it is empty again it lets the speedometer go — 14 + n ticks
+/// of hold in all, which is what the original's own latch measures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreloadMeter {
+    /// The movie's `preloadMeter` variable.
+    pub value: i16,
+    /// The speedometer holds a fired value until the movie is done with it.
+    pub latched: bool,
+    /// Ticks the movie has played the held value for.
+    tick: u16,
+    /// The level the movie draws, `0..=20`.
+    level: u8,
+}
+
+impl PreloadSense {
+    /// The bike's: its preload's state off the ride's `air`, the `.phy`'s `MaxPreload`, and whether
+    /// the rider is down.
+    pub fn of(air: &game_sim::air::Air, max_preload: f32, wrecked: bool) -> PreloadSense {
+        PreloadSense {
+            ready: air.preload_ready,
+            firing: air.preload_firing,
+            force: air.preload_force.y(),
+            max: max_preload,
+            wrecked,
+        }
     }
-    ((force / max) * (timer / time)).clamp(0.0, 1.0)
+}
+
+impl Default for PreloadMeter {
+    /// Dark, as the original's is on a standing bike.
+    fn default() -> Self {
+        Self { value: -1, latched: false, tick: 0, level: 0 }
+    }
+}
+
+impl PreloadMeter {
+    /// The levels the movie has.
+    pub const LEVELS: u8 = 20;
+    /// How long the movie holds a value at its top.
+    const HOLD: u16 = 15;
+
+    /// The strength a preload's shove shows as, `1..=20`: the speedometer's own float steps, and
+    /// its truncation.
+    pub fn strength(force: f32, max: f32) -> i16 {
+        use ps2_float::fpu::{add, div, mul, to_i32};
+        let n = to_i32(add(0.5, mul(20.0, div(force, max))));
+        if n < 2 { 1 } else { n.min(i16::MAX as i32) as i16 }
+    }
+
+    /// The level the movie draws `tick` ticks into a value `n`'s animation; `None` once it is over.
+    pub fn level_at(n: i16, tick: u16) -> Option<u8> {
+        let n = n.clamp(1, Self::LEVELS as i16) as u16;
+        let rise = (n - 1) / 2;
+        let fall = n / 2;
+        if tick < rise {
+            Some((2 * (tick + 1)) as u8)
+        } else if tick < rise + Self::HOLD {
+            Some(n as u8)
+        } else if tick < rise + Self::HOLD + fall {
+            let top = if n % 2 == 0 { n - 1 } else { n - 2 };
+            Some((top - 2 * (tick - rise - Self::HOLD)) as u8)
+        } else {
+            None
+        }
+    }
+
+    /// One tick: the speedometer's update, then the movie's frame.
+    pub fn step(&mut self, s: PreloadSense) {
+        if !self.latched {
+            self.value = if s.ready { 0 } else { -1 };
+        }
+        if s.firing && !self.latched {
+            self.latched = true;
+            if s.wrecked {
+                self.value = -1;
+                self.latched = false;
+            } else {
+                self.value = Self::strength(s.force, s.max);
+                self.tick = 0;
+            }
+        }
+        self.level = 0;
+        if self.latched {
+            match Self::level_at(self.value, self.tick) {
+                Some(level) => {
+                    self.level = level;
+                    self.tick += 1;
+                }
+                // Empty again: the movie's `AnimDone`, which lets the speedometer write again.
+                None => self.latched = false,
+            }
+        }
+    }
+
+    /// The level the movie drew this tick, `0..=20`.
+    pub fn level(&self) -> u8 {
+        self.level
+    }
+
+    /// What the overlay draws: `None` dark, or lit with this share of the capsule filled.
+    pub fn shown(&self) -> Option<f32> {
+        (self.value != -1).then(|| f32::from(self.level) / f32::from(Self::LEVELS))
+    }
 }
 
 /// What the view's own rider shows besides where everybody is.
@@ -227,8 +349,8 @@ pub struct Gauges {
     pub feet: f32,
     /// On the bike: the preload meter, and the dial's odometer. The plane has the speed alone.
     pub bike: bool,
-    /// The preload meter, [`preload_fill`].
-    pub preload: f32,
+    /// The preload meter, [`PreloadMeter::shown`]: `None` dark, or lit and this full.
+    pub preload: Option<f32>,
     /// The stunt score.
     pub score: u32,
     /// The ride has a game modifier off the original's (P55): the port's own mark under the score.
@@ -811,13 +933,19 @@ impl Art {
         if gauges.bike {
             let ((x, y), (w, h)) = (meter, PRELOAD_METER);
             pen.capsule((x, y, w, h), [0, 0, 0, PRELOAD_SHADE], f32::MAX, [0; 4]);
-            let fill = gauges.preload.clamp(0.0, 1.0);
+            // Dark until the preload's lip test passes, lit inside while it does; the charge is the
+            // fired shove's strength as the movie plays it (V53, [`PreloadMeter`]).
+            let (i, inner) = (PRELOAD_INSET, h - 2.0 * PRELOAD_INSET);
+            if gauges.preload.is_some() {
+                pen.capsule((x + i, y + i, w - 2.0 * i, inner), PRELOAD_LIT, f32::MAX, [0; 4]);
+            }
+            let fill = gauges.preload.unwrap_or(0.0).clamp(0.0, 1.0);
             if fill > 0.0 {
-                let (i, inner) = (PRELOAD_INSET, h - 2.0 * PRELOAD_INSET);
                 let top = y + i + inner * (1.0 - fill);
                 pen.capsule((x + i, top, w - 2.0 * i, y + h - i - top), PRELOAD_COLOUR, f32::MAX, [0; 4]);
             }
             drawn.preload = Some(fill);
+            drawn.preload_lit = gauges.preload.is_some();
         }
         if !dial {
             // Its right edge at the layout's `X`: the last box's right edge, so the last glyph's
@@ -926,6 +1054,8 @@ pub struct Drawn {
     pub score: String,
     /// How full the preload meter was drawn, when it was (the bike's).
     pub preload: Option<f32>,
+    /// The preload meter was drawn lit (V53): a preload's lip test passed, or one is showing.
+    pub preload_lit: bool,
     /// The middle of the radar, where the rider's own arrow is.
     pub player: (f32, f32),
     /// Every other rider's mark: their seat and the middle of their mark.
