@@ -3756,9 +3756,28 @@ radar_gates                 boot 0x0035f480 Current/Next/Previous Gate Point (ma
 #     for; their shapes, tints (black 0x80/0x66 score, ~0xb3 meter) and text colour 200,200,200 were
 #     read out of the .fsh bytes, the geometry off PCSX2 frames of first_recording ---
 speedo_preload_var          boot 0x00436f78 string "preloadMeter": speedo_update binds the meter movie's
-#                                           variable to the speedometer's +0x4c. What it is fed was not
-#                                           followed: the port fills the meter from the preload's own
-#                                           force and timer, a guess
+#                                           variable to the speedometer's +0x4c, which is a pointer to
+#                                           the variable object; its value is the s16 at +0xe (V53)
+# --- V53: what the preload meter is fed. crates/openmx/src/overlay.rs PreloadMeter ---
+speedo_preload_update       boot 0x002abe10 called first thing in speedo_needle_update, every frame.
+#                                           iface = speedo+0x3c (the rider's MXUIInterface component,
+#                                           rider+0xfd0; its pointers bound by boot 0x0027c220):
+#                                           +0x24 -> rider+0x4a0 preload ready, +0x28 -> +0x4a4 firing,
+#                                           +0x30 -> +0x868 (copy of +0x748, the wreck reason),
+#                                           +0x34 -> +0x494 preload force y, +0x38 -> +0x4c4 MaxPreload.
+#                                           Unlatched (speedo+0x50 == 0): value = ready ? 0 : -1. Firing
+#                                           and unlatched: latch; n = cvt.w.s(0.5 + 20 * (force / max)),
+#                                           n < 2 -> 1; value = n unless the wreck reason is set (then
+#                                           -1, unlatched). Each value change pokes the movie (vtable
+#                                           +0xbc of speedo+0x48's +0x6c)
+speedo_anim_done            boot 0x002abfc0 the movie's event: "AnimDone" (0x00436f88, case-blind
+#                                           compare boot 0x00410c50) with its arg's +0xe == 1 clears
+#                                           the latch
+# Captured (context/capture/v53/, recording2 played back, speedo 0x01b0a2c0 / rider 0x00da5050 in its
+# state): -1 riding or in the air, 0 on a lip, 10/7/5/3 for shoves of 285.7/222.2/148.9/104.1 of 600,
+# each latched 14 + n ticks. The movie (PCSX2 video capture of the same playback) steps once a tick:
+# rises two levels a tick to n, holds n 15 ticks, falls through the odd levels below n, empty on the
+# 14+n'th tick (AnimDone). Lit-empty capsule ~88,44,10; charge ~206,109,0; -1 is the dark capsule
 speedo_show_a               boot 0x002ac190 speedometer part visibility setters (three, by flag); which
 speedo_show_b               boot 0x002ac200 part each shows was not pinned. The biplane rides of the
 speedo_show_c               boot 0x002ac2a0 original show the dial with no odometer and no preload meter
