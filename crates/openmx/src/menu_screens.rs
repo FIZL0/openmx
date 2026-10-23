@@ -920,7 +920,7 @@ impl Pen<'_> {
             Screen::Lobby => self.lobby(menu),
             Screen::Splash => return self.splash(menu),
             // Opened as Settings' tabs; never on top of the stack.
-            Screen::Controls | Screen::Audio | Screen::Camera => {
+            Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => {
                 self.title(screen.title());
                 self.hints(&[(Btn::Circle, "Back")]);
             }
@@ -1130,12 +1130,16 @@ impl Pen<'_> {
         self.hints(&hints);
     }
 
-    /// The tabs between L1 and R1, the one on lit.
+    /// The tabs between L1 and R1, the one on lit, their words made smaller where they would run
+    /// past the page's strip (Settings' six since P128).
     fn tabs(&mut self, tabs: &[&str], on: usize, x: f32, top: f32) {
-        let size = 1.3;
-        let h = size * 1.8;
-        let mid = top + h / 2.0;
         let chip = 0.95;
+        let shoulders: f32 = ["L1", "R1"].iter().map(|w| self.wide(Weight::Heavy, w, chip) + 1.1 * chip).sum();
+        let per: f32 = tabs.iter().map(|t| self.wide(Weight::Heavy, t, 1.0) + 1.6).sum();
+        let room = 40.6 - x - shoulders - 0.3 * (tabs.len() + 1) as f32;
+        let size = if per > 0.0 { (room / per).min(1.3) } else { 1.3 };
+        let h = 1.3 * 1.8;
+        let mid = top + h / 2.0;
         let mut at = x;
         let shoulder = |pen: &mut Pen, word: &str, at: f32| -> f32 {
             let w = pen.wide(Weight::Heavy, word, chip) + 1.1 * chip;

@@ -1,16 +1,18 @@
-//! The option pages (P118): Settings' five tabs, the Garage's three, the game modifiers and the
+//! The option pages (P118): Settings' six tabs, the Garage's three, the game modifiers and the
 //! mods, each a list of [`Row`]s that change in place. A row knows its name, its value, every choice
 //! it has, what it does and, dimmed, why it does not apply — the side panel draws all of it.
 
 use super::*;
 
 /// Settings' tabs, which L1 and R1 step through, round from either end.
-pub const SETTINGS_TABS: [&str; 5] = ["Ride", "Display", "Audio", "Controls", "Camera"];
+/// Display is the HUD's; Graphics (P128) the world's draw and the picture's rate, under headings.
+pub const SETTINGS_TABS: [&str; 6] = ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera"];
 pub const TAB_RIDE: usize = 0;
 pub const TAB_DISPLAY: usize = 1;
-pub const TAB_AUDIO: usize = 2;
-pub const TAB_CONTROLS: usize = 3;
-pub const TAB_CAMERA: usize = 4;
+pub const TAB_GRAPHICS: usize = 2;
+pub const TAB_AUDIO: usize = 3;
+pub const TAB_CONTROLS: usize = 4;
+pub const TAB_CAMERA: usize = 5;
 /// The Garage's tabs, each starting with the same Player row.
 pub const GARAGE_TABS: [&str; 3] = ["Rider", "Bike", "Gear"];
 
@@ -264,6 +266,7 @@ impl Menu {
             Screen::Settings => match self.tab(screen) {
                 TAB_RIDE => self.ride_rows(),
                 TAB_DISPLAY => self.display_rows(),
+                TAB_GRAPHICS => self.graphics_rows(),
                 TAB_AUDIO => self.audio_page(),
                 TAB_CONTROLS => self.control_rows(),
                 _ => self.camera_page(),
@@ -313,9 +316,6 @@ impl Menu {
         let s = &self.settings;
         let hud = Overlay::ALL.map(Overlay::label);
         let speed = Speedometer::ALL.map(Speedometer::label);
-        let scales = RenderScale::ALL.map(RenderScale::label);
-        let limits: Vec<String> = FrameLimit::ALL.iter().map(|f| f.label()).collect();
-        let limits: Vec<&str> = limits.iter().map(String::as_str).collect();
         let speed_off = match s.overlay {
             Overlay::Original => None,
             Overlay::Debug => Some("Only the Original HUD has one"),
@@ -337,6 +337,18 @@ impl Menu {
                 "The size of the whole HUD, each piece in its own corner. 100% is the original's.",
             )
             .off_if(s.overlay == Overlay::None, "The HUD is off"),
+        ]
+    }
+
+    /// The Graphics tab (P128): each graphics setting once, under the group it is in. P126's
+    /// Original mode puts its graphics sub-switches here too.
+    fn graphics_rows(&self) -> Vec<Row> {
+        let s = &self.settings;
+        let scales = RenderScale::ALL.map(RenderScale::label);
+        let limits: Vec<String> = FrameLimit::ALL.iter().map(|f| f.label()).collect();
+        let limits: Vec<&str> = limits.iter().map(String::as_str).collect();
+        vec![
+            Row::heading("World"),
             Row::choice(
                 Key::DrawDistance,
                 "Draw Distance",
@@ -344,6 +356,7 @@ impl Menu {
                 at(&Graphics::ALL, s.graphics),
                 "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.",
             ),
+            Row::heading("Performance"),
             Row::choice(Key::RenderScale, "Render Scale", &scales, at(&RenderScale::ALL, s.render_scale), "How much of the window's resolution the 3D is drawn at. Auto drops it when frames run long and climbs back when there's room."),
             Row::on_off(Key::VSync, "VSync", s.vsync, "Waits for the display before showing a frame. No tearing. Off draws as fast as it can."),
             Row::choice(Key::FrameLimit, "Frame Limit", &limits, at(&FrameLimit::ALL, s.frame_limit), "The most frames a second. Only the picture's rate; the ride itself always ticks at the game's 30 Hz."),
