@@ -245,8 +245,17 @@ pub struct Material {
     pub microprogram: Option<String>,
     /// `alphaTestOnOff`, and `alphaReferenceValue` in the GS's units (128 = opaque) where it has one.
     pub alpha_test: Option<Option<f32>>,
-    /// `processingMethodWhenFailedInAlphaTest` of 1: a texel that fails the test still lands in the
-    /// colour buffer, only the depth buffer skips it.
+    /// `alphaTestOnOff = 0`: no test at all. A material that leaves the key out is tested, which
+    /// [`crate::world::Surface::of`] says how.
+    pub alpha_test_off: bool,
+    /// `alphaReferenceValue`, in the GS's units, whether or not `alphaTestOnOff` is there: free06's
+    /// bushes give a reference and no switch, and are tested against it.
+    pub alpha_reference: Option<f32>,
+    /// `alphaTestMethod`, the GS's ATST: 0 never, 1 always, 5 greater or equal, 6 greater (the only
+    /// ones a material on the disc names).
+    pub alpha_test_method: Option<u8>,
+    /// `processingMethodWhenFailedInAlphaTest` of 1 (the GS's FB_ONLY) or 3 (RGB_ONLY): a texel that
+    /// fails the test still lands in the colour buffer, only the depth buffer skips it.
     pub fail_keeps_color: bool,
     /// `alphaBlendingOnOff`, with `inputColorA`, `inputColorB` and `inputColorD` of the GS's
     /// `(A - B) * C + D` (0 source, 1 frame, 2 zero); a missing one reads as the usual 0, 1, 1.
@@ -295,7 +304,10 @@ impl Material {
             alpha_test: flag("alphaTestOnOff")
                 .filter(|&on| on)
                 .map(|_| number("alphaReferenceValue")),
-            fail_keeps_color: number("processingMethodWhenFailedInAlphaTest") == Some(1.0),
+            alpha_test_off: flag("alphaTestOnOff") == Some(false),
+            alpha_reference: number("alphaReferenceValue"),
+            alpha_test_method: number("alphaTestMethod").map(|v| v as u8),
+            fail_keeps_color: matches!(number("processingMethodWhenFailedInAlphaTest"), Some(v) if v == 1.0 || v == 3.0),
             blend: flag("alphaBlendingOnOff").filter(|&on| on).map(|_| {
                 [input("inputColorA", 0), input("inputColorB", 1), input("inputColorD", 1)]
             }),

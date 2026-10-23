@@ -137,7 +137,8 @@ fn free09s_ecosystem_places_the_originals_trees_and_bushes() {
         let b = &assets.models[board];
         assert_eq!(b.tris.len(), 2);
         assert!(b.textures[0].is_some(), "{board} has no texture");
-        assert!(b.surfaces[0].blend && b.surfaces[0].cutoff == 100, "{board}: {:?}", b.surfaces[0]);
+        // Reference 50 under the original's default, greater than: 51 and up, 102 doubled.
+        assert!(b.surfaces[0].blend && b.surfaces[0].cutoff == 102, "{board}: {:?}", b.surfaces[0]);
     }
 
     // From beside the first plant, looking along (3, 0, 4): it is its model, turned to the camera's
@@ -755,8 +756,8 @@ const THROUGH: [f32; 3] = [60.0, 150.0, 260.0];
 const APART: f32 = 40.0;
 
 /// Under the cut-out foliage the far tree shows through every see-through texel of the near one,
-/// on the software renderer; under the original's materials a few in a hundred of them hide it
-/// (the leaves' texture has a band of part-alpha texels at its edges, and any alpha writes depth).
+/// on the software renderer. So it does under the original's materials since V54: their alpha test
+/// (greater than 80) drops the band of part-alpha texels that, untested, wrote depth and hid it.
 #[test]
 fn a_tree_shows_through_a_nearer_trees_leaves_in_software() {
     let Some(mut disc) = disc() else { return };
@@ -775,14 +776,15 @@ fn a_tree_shows_through_a_nearer_trees_leaves_in_software() {
             if foliage == Foliage::Cutout {
                 assert!(share >= 0.995, "software, {d} ft: the far tree shows through only {:.2}%", share * 100.0);
             } else {
-                assert!(share < 0.99, "software, {d} ft: the original's leaves no longer hide the far tree ({:.2}%)", share * 100.0);
+                // The original's leaf passes test alpha greater than 80 (V54): the part-alpha band that hid
+                // the far tree is never drawn, so it shows through these as well.
+                assert!(share >= 0.995, "software, {d} ft: the original's leaves hide the far tree ({:.2}%)", share * 100.0);
             }
         }
     }
 }
 
-/// The same on the GPU, where the original's materials hide the far tree behind the near one's
-/// filtered and mipped part-alpha edges as well.
+/// The same on the GPU, where the near tree's edges are also filtered and mipped.
 #[test]
 fn a_tree_shows_through_a_nearer_trees_leaves_on_the_gpu() {
     use game_render::gpu::{Renderer, Scene3, Target, View};
@@ -816,7 +818,9 @@ fn a_tree_shows_through_a_nearer_trees_leaves_on_the_gpu() {
             if foliage == Foliage::Cutout {
                 assert!(share >= 0.995, "gpu, {d} ft: the far tree shows through only {:.2}%", share * 100.0);
             } else {
-                assert!(share < 0.99, "gpu, {d} ft: the original's leaves no longer hide the far tree ({:.2}%)", share * 100.0);
+                // The original's leaf passes test alpha greater than 80 (V54): the part-alpha band that hid
+                // the far tree is never drawn, so it shows through these as well.
+                assert!(share >= 0.995, "gpu, {d} ft: the original's leaves hide the far tree ({:.2}%)", share * 100.0);
             }
         }
     }

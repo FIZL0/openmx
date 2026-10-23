@@ -39,6 +39,9 @@ pub struct Look<'a> {
     pub paint: &'a dyn Fn(f32, f32) -> [u8; 4],
     /// Texels with less alpha than this are not drawn at all: the material's alpha test.
     pub cutoff: u8,
+    /// Texels with less alpha than this are drawn but do not write depth: an alpha test that fails
+    /// into the colour buffer only.
+    pub depth_cutoff: u8,
     /// Mix over the frame by the texel's alpha rather than replacing it.
     pub blend: bool,
     /// With `blend`, add to the frame instead of mixing into it: `Cs * As + Cd`, glows and glints.
@@ -55,6 +58,7 @@ pub struct Look<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mode {
     pub cutoff: u8,
+    pub depth_cutoff: u8,
     pub blend: bool,
     pub additive: bool,
     pub depth_write: bool,
@@ -65,6 +69,7 @@ impl Mode {
     /// [`Look::cut_out`]'s.
     pub const CUT_OUT: Mode = Mode {
         cutoff: 32,
+        depth_cutoff: 0,
         blend: false,
         additive: false,
         depth_write: true,
@@ -79,6 +84,7 @@ impl<'a> Look<'a> {
         Look {
             paint,
             cutoff: 32,
+            depth_cutoff: 0,
             blend: false,
             additive: false,
             depth_write: true,
@@ -161,6 +167,7 @@ impl Frame {
                 let look = Look {
                     paint: &look_paint,
                     cutoff: q.mode.cutoff,
+                    depth_cutoff: q.mode.depth_cutoff,
                     blend: q.mode.blend,
                     additive: q.mode.additive,
                     depth_write: q.mode.depth_write,
@@ -342,7 +349,7 @@ impl Rows<'_> {
                     *slot = out as u8;
                 }
                 self.color[at * 3..at * 3 + 3].copy_from_slice(&rgb);
-                if look.depth_write {
+                if look.depth_write && texel[3] >= look.depth_cutoff {
                     self.depth[at] = inv_w;
                 }
             }
