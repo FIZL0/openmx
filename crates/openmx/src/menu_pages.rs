@@ -617,13 +617,20 @@ impl Menu {
             _ => "Changes are the next ride's.".into(),
         });
         let mut rows = vec![player];
-        let most = game_sim::modifiers::MOST;
         for knob in Knob::MENU {
             let v = self.settings.modifiers.get(if knob.per_seat() { seat } else { 0 }, knob);
-            let meter = f32::from(v.saturating_sub(knob.least())) / f32::from(most - knob.least());
-            let mut r = Row::slider(Key::Knob(knob), knob.label(), format!("{v}%"), meter, knob.blurb());
+            let meter = match knob {
+                // Off sits past the highest limit (P137): a full meter.
+                Knob::PlaneMaxG if v == game_sim::modifiers::ORIGINAL => 1.0,
+                _ => f32::from(v.saturating_sub(knob.least())) / f32::from(knob.most() - knob.least()),
+            };
+            let mut r = Row::slider(Key::Knob(knob), knob.label(), knob.shown(v), meter, knob.blurb());
             r.world = !knob.per_seat();
-            r.note = Some(if r.world { "The world's: one value for every player." } else { "This player's. 100% is the original game." }.into());
+            r.note = Some(match (r.world, knob) {
+                (true, _) => "The world's: one value for every player.",
+                (false, Knob::PlaneMaxG) => "This player's. Off is the original game.",
+                (false, _) => "This player's. 100% is the original game.",
+            }.into());
             rows.push(r.off_if(held.is_some(), held.as_deref().unwrap_or("")));
         }
         rows.push(Row::heading("Presets"));
@@ -815,15 +822,14 @@ impl Menu {
                 return;
             }
             Key::Knob(knob) => {
-                let now = row.value.trim_end_matches('%').parse::<u16>().unwrap_or(game_sim::modifiers::ORIGINAL);
-                let step = game_sim::modifiers::STEP;
+                let seat = if knob.per_seat() { self.player.min(SEATS_MAX - 1) } else { 0 };
+                let now = self.settings.modifiers.get(seat, knob);
                 let to = match (p.left, p.right) {
-                    (true, _) => now.saturating_sub(step).max(knob.least()),
-                    (_, true) => (now + step).min(game_sim::modifiers::MOST),
+                    (true, _) => knob.step(now, false),
+                    (_, true) => knob.step(now, true),
                     // Cross puts the one modifier back.
                     _ => game_sim::modifiers::ORIGINAL,
                 };
-                let seat = if knob.per_seat() { self.player.min(SEATS_MAX - 1) } else { 0 };
                 self.settings.modifiers.set(seat, knob, to);
             }
             Key::LoadPreset => {
