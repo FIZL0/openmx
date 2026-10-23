@@ -5561,3 +5561,26 @@ fn md16_three_sixty_comes_round_or_wrecks() {
     assert!(ride[wreck - 1].spin.clip == 2 && ride[wreck].seat.on_ground, "on landing, part way round");
     assert_eq!(ride[wreck].frame.wreck, Some(game_sim::trick::Wreck::from(game_sim::air::Wreck::Tail)));
 }
+
+/// P129: the shell's hands do no trick off the d-pad. In the air off the flip ramp, a trick button
+/// held with d-pad Up starts a trick on the original's hands (the d-pad as [`Controls::through`]
+/// reads it: the gesture's direction and the digital stick), and nothing at all once
+/// [`Controls::stick_alone`] has let the d-pad go — the ride the same, tick for tick, as the trick
+/// button alone. The left stick pushed up in the d-pad's place starts the very trick the d-pad did.
+#[test]
+fn stick_alone_does_no_trick_off_the_dpad() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let started = |ride: &[Md16]| ride.iter().filter_map(|t| t.frame.started).collect::<Vec<_>>();
+    let at = |c: Controls| vec![(200, c), (230, Controls::default())];
+    let button = Controls { trick: [true, false, false], stunt: true, ..Controls::default() };
+    let dpad_up = Controls { dpad_y: true, dpad_dir: 1, dpad: [false, false, true, false], ..button };
+    let (original, _) = ride_md16(&p, wheels, &tables, Set::default(), &at(dpad_up), 360);
+    let (shell, _) = ride_md16(&p, wheels, &tables, Set::default(), &at(dpad_up.stick_alone()), 360);
+    let (alone, _) = ride_md16(&p, wheels, &tables, Set::default(), &at(button), 360);
+    let (stick, _) = ride_md16(&p, wheels, &tables, Set::default(), &at(Controls { stick: (F::ZERO, F(-1.0)), ..button }), 360);
+    assert!(started(&original).iter().any(|t| t.slot().is_some()), "the original's d-pad gesture starts no trick: {:?}", started(&original));
+    assert!(started(&shell).is_empty(), "the shell's d-pad started {:?}", started(&shell));
+    assert!(shell.iter().zip(&alone).all(|(a, b)| a.hash == b.hash), "the let-go d-pad rode");
+    assert_eq!(started(&stick), started(&original), "the stick starts the d-pad's trick");
+}

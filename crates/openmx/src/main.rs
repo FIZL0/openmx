@@ -386,6 +386,10 @@ struct Seat {
     /// Whether this pass's marker Up put the bike somewhere else (P112), which the camera rides out
     /// of at the bike's speed rather than flying in from where it was.
     teleported: bool,
+    /// The player's Markers switch (P129): on, the d-pad is the session markers' and the left stick
+    /// alone rides (`Controls::stick_alone`); off, the d-pad fires no marker and rides as the
+    /// original's (`Controls::through` as it is), on the bike and in the plane.
+    markers: bool,
 }
 
 impl Seat {
@@ -403,8 +407,10 @@ impl Seat {
         // The game's poll, with the frame's dt: this is what turns report bytes into held controls,
         // press and release edges, and stick axes with the game's own dead zone — and then the
         // rider's hands off it, because which button means what lives in the ride and not here.
-        // The d-pad is the markers' and not the ride's (P93): the stick alone steers.
-        let controls = self.sim.poll(dt, &self.reports).stick_alone();
+        // The d-pad is the markers' and not the ride's (P93): the stick alone steers. With the
+        // player's markers off (P129) it is the original's, every meaning it has there.
+        let controls = vehicle::hands(self.sim.poll(dt, &self.reports), self.markers);
+        self.garage.set_dpad(!self.markers);
 
         if self.start_freezes && self.sim.input.pad(0).pressed(Control::Start) {
             self.riding = !self.riding;
@@ -414,7 +420,7 @@ impl Seat {
         self.teleported = false;
         if self.riding {
             let did;
-            (self.said, did) = self.garage.pass(&mut self.sim, dt, &controls, me, spots, place);
+            (self.said, did) = self.garage.pass_marked(&mut self.sim, dt, &controls, me, spots, place, self.markers);
             if let Some(did) = did {
                 self.teleported = matches!(did, markers::Did::Teleported(_));
                 println!("marker: {}", marker_line(did));
@@ -1131,6 +1137,10 @@ struct Args {
     /// `--tricks original|mxvatv` (MD16): whose tricks the ride has. Unset, the front end's Tricks
     /// row says, and a ride outside it has the original's. Online is always the original's.
     tricks: Option<menu::Tricks>,
+    /// `--markers on|off` (P129), one word a seat (`on,off`), the last for every seat past it: each
+    /// player's Markers switch. Unset, the front end's Markers rows say, and a ride outside it has
+    /// them on.
+    markers: Option<[bool; menu::SEATS_MAX]>,
     /// The pad seat each player reads, the front end's local game's (P43): player i rides seat
     /// `pad_of[i]`'s controller. Empty is seat i for player i, which is every ride outside one.
     pad_of: Vec<usize>,
@@ -1145,6 +1155,13 @@ struct Args {
 }
 
 impl Args {
+    /// Player `i`'s Markers switch (P129): `--markers`' where given, else the front end's Markers
+    /// row for the seat, else on.
+    fn markers_of(&self, i: usize, front: Option<&Front>) -> bool {
+        let i = i.min(menu::SEATS_MAX - 1);
+        self.markers.map(|m| m[i]).or_else(|| front.map(|f| f.menu.settings.markers[i])).unwrap_or(true)
+    }
+
     /// The least time a picture takes (P52): `--draw-fps`', a headless ride's 60 a second, or none.
     fn draw_frame(&self) -> Option<Duration> {
         match self.draw_fps {
@@ -3498,6 +3515,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         inverted: false,
         hands: Controls::default(),
         teleported: false,
+        markers: args.markers_of(0, front.as_deref()),
     }];
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87), and starts in
@@ -3523,6 +3541,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             inverted: false,
             hands: Controls::default(),
             teleported: false,
+            markers: args.markers_of(i + 1, front.as_deref()),
         });
     }
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
@@ -3899,6 +3918,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         seat.inverted = seat.garage.inverted(seat.inverted);
                         seat.garage.set_every_bank(seats.plane(from).every_bank());
                         seat.garage.set_round_stick(seats.plane(from).round_stick());
+                        // The player's Markers switch (P129), live: a change under the pause
+                        // rides from the frame it is made.
+                        seat.markers = args.markers_of(i, front.as_deref());
                         // A bike with MX vs. ATV's tricks (MD16) reads the new layout's Cross and Square as
                         // its two extra trick buttons.
                         let tricks = seat.sim.phy.tricks.is_some();
@@ -3926,6 +3948,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // so a plane tape plays back as it was made under the same --biplane-controls.
                     world.seats[0].garage.set_every_bank(args.wiring.planes[0].every_bank());
                     world.seats[0].garage.set_round_stick(args.wiring.planes[0].round_stick());
+                    // Nor is the Markers switch (P129): the command line's, on unless --markers off.
+                    world.seats[0].markers = args.markers.map_or(true, |m| m[0]);
                     world.seats[0].reports = frame.reports;
                     // A tape holds the pad, not the table: the controller preset is --preset's
                     // (P79), whichever layout is said, because the tape is already past the layout.
@@ -4241,7 +4265,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The machine this player picked and their biplane scheme, which every machine reads at
             // the tick it lands on (N17).
             let scheme = world.seats[0].garage.plane.as_ref().map_or((false, false), |p| (p.every_bank, p.round_stick));
-            pad.0[net::SWITCH] = vehicle::Wanted { to: online_want, every_bank: scheme.0, round_stick: scheme.1 }.byte();
+            // And their Markers switch (P129), which every machine's step reads too.
+            pad.0[net::SWITCH] =
+                vehicle::Wanted { to: online_want, every_bank: scheme.0, round_stick: scheme.1, dpad_rides: !world.seats[0].markers }
+                    .byte();
             if let Err(end) = on.frame(pad, &mut world.place, rigs[0].body.as_ref()) {
                 println!("{end}");
                 if front.is_some() {
@@ -4712,13 +4739,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             .enumerate()
             .map(|(v, (seat, banner))| {
                 picks[v]?;
+                // A player with their markers off (P129) has no bar: the d-pad is not the markers'.
+                if !seat.markers {
+                    return None;
+                }
                 let hud::MarkerBar { pick, filled, held, holding } = hud::MarkerBar::read(
                     &seat.sim.markers,
                     mine.unwrap_or(v),
                     &riding,
                     seat.sim.input.pad(0),
                     seat.sim.table(),
-                    &seat.hands,
                     seat.riding,
                 );
                 let others = markers::Markers::others(mine.unwrap_or(v), riding.len(), &riding);
@@ -6025,6 +6055,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         mods: None,
         mods_asked: false,
         tricks: None,
+        markers: None,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(a) = argv.next() {
@@ -6108,6 +6139,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .ok_or_else(|| format!("--overlay: {word:?} is not hud, original, debug or none"))?;
                 args.hud = overlay == menu::Overlay::Debug;
                 args.overlay = Some(overlay);
+            }
+            "--markers" => {
+                let v = next("on, off, or one per seat (on,off)")?;
+                args.markers = Some(menu::markers_seats(&v).ok_or_else(|| format!("--markers: {v:?} is not on or off, one per seat"))?);
             }
             "--tricks" => {
                 let word = next("original or mxvatv")?;
@@ -6349,7 +6384,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--overlay hud|original|debug|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--hud] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--overlay hud|original|debug|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--markers on|off] [--hud] [--camera NAME]\n\
                             [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\

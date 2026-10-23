@@ -398,6 +398,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         picture: menu::Picture::Television,
         // A world's sky taken from the map below (MD9).
         world_sky: menu::WorldSky::PerMap,
+        // 2P with their markers off (P129).
+        markers: [true, false, true, true, true, true, true, true],
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -2474,7 +2476,7 @@ fn the_controls_tab_is_one_choice_a_seat_and_a_plane_stick() {
     settings_at(&mut m, &mut r, "Controls");
     let row = |m: &Menu, k: Key| m.page().into_iter().find(|r| r.key == k).unwrap();
     let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
-    assert_eq!(keys, [Key::BikeLayout, Key::PlaneLayout, Key::Nintendo, Key::Controller, Key::Pressure], "one seat: no Player row");
+    assert_eq!(keys, [Key::BikeLayout, Key::PlaneLayout, Key::Markers, Key::Nintendo, Key::Controller, Key::Pressure], "one seat: no Player row");
     assert!(!m.page().iter().any(|r| r.label.contains("Throttle")), "no throttle row");
     assert_eq!(row(&m, Key::BikeLayout).value, "New");
     let plane = row(&m, Key::PlaneLayout);
@@ -3569,6 +3571,48 @@ fn the_original_switches_round_trip_through_the_files() {
     assert_eq!(Settings::parse("plants = original\n").plants, game_render::eco::Lod::Original);
     assert_eq!(Settings::parse("plants = fancy\npicture = 16:10\n"), Settings::default());
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// P129: each seat has a Markers row on the Controls tab, On by default, saved in settings.txt; the
+/// Original switch turns every seat's off, and the switch's own Markers row reads them all.
+#[test]
+fn each_seat_has_a_markers_row_saved_in_the_settings() {
+    use menu::{Departure, Key, Original};
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.markers, [true; menu::SEATS_MAX], "on by default");
+    assert!(!m.settings.text().contains("markers"), "no line at the default");
+    m.seated = 2;
+    settings_at(&mut m, &mut r, "Controls");
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::Markers).unwrap();
+    assert_eq!(row(&m).choices, ["On", "Off"]);
+    assert_eq!(row(&m).value, "On");
+    // 2P's row: Off for 2P alone.
+    down_to(&mut m, &mut r, Key::Player);
+    tap(&mut m, &mut r, Control::Right);
+    down_to(&mut m, &mut r, Key::Markers);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert_eq!(row(&m).value, "Off");
+    assert_eq!(m.settings.markers, [true, false, true, true, true, true, true, true]);
+    assert_eq!(m.original(), Original::Mixed, "one seat's markers off is a departure turned back");
+    assert!(m.some_original(Departure::Markers) && !m.is_original(Departure::Markers));
+    // The file: one word a seat as far as it differs, the last for every seat past it.
+    let dir = scratch("markers");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (s, _) = menu::load(&dir);
+    assert_eq!(s.markers, m.settings.markers);
+    assert!(m.settings.text().contains("\nmarkers = on off on\n"), "{}", m.settings.text());
+    std::fs::remove_dir_all(dir).ok();
+    assert_eq!(Settings::parse("markers = off").markers, [false; menu::SEATS_MAX]);
+    assert_eq!(Settings::parse("markers = off,on").markers, [false, true, true, true, true, true, true, true]);
+    assert_eq!(Settings::parse("markers = maybe").markers, [true; menu::SEATS_MAX], "a word it cannot read keeps them on");
+    // Under Original every seat's are off; back to ours, every seat's on.
+    m.set_original(true);
+    assert_eq!(m.settings.markers, [false; menu::SEATS_MAX]);
+    assert!(m.is_original(Departure::Markers));
+    assert_eq!(row(&m).value, "Off");
+    m.set_original(false);
+    assert_eq!(m.settings.markers, [true; menu::SEATS_MAX]);
 }
 
 /// P70: the track pick is a card a track, each with the track's own picture — a disc track's first

@@ -206,15 +206,12 @@ impl Controls {
 
 impl Controls {
     /// These controls with the d-pad out of the ride (P93): the shell's, where the d-pad is the
-    /// session markers' ([`crate::markers`]) and the left stick alone leans, steers and moves the
-    /// rider fore and aft. With a trick button down the d-pad is the direction half of a trick's
-    /// gesture, and everything it means then — the gesture's direction, and the digital stick the
-    /// air steps read with it — is kept as it is; with none down the d-pad reads as let go.
+    /// session markers' ([`crate::markers`]) and the left stick alone leans, steers, moves the rider
+    /// fore and aft and is the direction half of a trick's gesture, which the original reads too. The
+    /// d-pad reads as let go whatever else is held (P129): a trick button with it does no trick, and
+    /// its gesture direction, eight-way code and digital stick are all at rest.
     /// [`Controls::through`] stays the original's, d-pad and all, which every replay of it rides on.
     pub fn stick_alone(self) -> Controls {
-        if self.trick.iter().chain(self.extra.iter()).any(|&t| t) {
-            return self;
-        }
         Controls { dpad_y: false, dpad_dir: 0, dpad: [false; trick::DPAD], ..self }
     }
 }
