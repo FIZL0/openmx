@@ -1089,6 +1089,11 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                         }
                         // Unstretched: 512x64 at any shape.
                         menu::Part::Logo(b) => assert!((b[2] / b[3] - 8.0).abs() < 0.01, "{screen:?} at {w}x{h}"),
+                        menu::Part::Card { card, .. } => {
+                            for logo in &logos {
+                                assert!(!overlap(*logo, *card), "{screen:?} at {w}x{h}: a card on the logo");
+                            }
+                        }
                     }
                 }
                 let lit = matches!(
@@ -3276,4 +3281,80 @@ fn a_push_both_the_pad_and_the_keyboard_report_is_one_press() {
     m.step_seats(&[r.read_joint(&[(Report::idle(), 0), (start, 0)])]);
     m.step_seats(&[r.read_joint(&[(Report::idle(), 0), (Report::idle(), 0)])]);
     assert_eq!(m.screen(), Some(Screen::Pause), "the keyboard's Start, a tick behind the pad's, closed it");
+}
+
+/// P70: the track pick is a card a track, each with the track's own picture — a disc track's first
+/// still out of `UI\trackpreview.res`, the lit one turning through its five — and a mod track's card
+/// shows the picture the shell gave it, or none until it has one.
+#[test]
+fn the_pick_is_a_card_a_track_with_its_own_picture() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let mut art = menu::Art::load(&mut disc).expect("the menus' art");
+    let previews = disc.res("UI\\trackpreview.res").expect("the stills");
+    let still = |id: &str, i: usize| {
+        let bytes = previews.read_suffix(&format!("ui\\tex\\{id}_preview_{i:02}.pst")).unwrap();
+        game_render::pst::Texture::parse(&bytes).unwrap()
+    };
+    // A mod's picture, and a second mod with none yet.
+    let picture = game_render::pst::Texture { width: 32, height: 18, rgba: (0..32 * 18 * 4).map(|i| (i * 7 % 256) as u8).collect() };
+    art.set_mod_picture("p70_pictured", picture.clone());
+    let cards = |art: &menu::Art, m: &Menu, w: usize, h: usize| -> Vec<(String, [f32; 4], [f32; 4], Option<usize>, bool)> {
+        let mut frame = game_render::Frame::new(w, h, [90, 90, 90]);
+        art.parts(m, &mut frame)
+            .into_iter()
+            .filter_map(|p| match p {
+                menu::Part::Card { id, card, picture, image, lit } => Some((id, card, picture, image, lit)),
+                _ => None,
+            })
+            .collect()
+    };
+    for (w, h) in [(640, 448), (1920, 1080), (2520, 1080), (360, 640)] {
+        let (mut m, mut r) = fresh();
+        tap(&mut m, &mut r, Control::Cross);
+        assert_eq!(m.screen(), Some(Screen::Tracks));
+        let shown = cards(&art, &m, w, h);
+        let ids: Vec<&str> = shown.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(ids, menu::TRACKS.map(|t| t.0), "a card for every disc track at {w}x{h}");
+        let images = art.images();
+        for (i, (id, card, pic, image, lit)) in shown.iter().enumerate() {
+            assert_eq!(*lit, i == m.cursor(Screen::Tracks), "{id}");
+            let image = image.unwrap_or_else(|| panic!("{id} has no picture"));
+            assert_eq!(images[image].rgba, still(id, 1).rgba, "{id}'s card shows its first still");
+            // The picture on its card, 16:9, and the cards one under the other.
+            assert!(pic[0] >= card[0] && pic[1] >= card[1] && pic[0] + pic[2] <= card[0] + card[2] + 0.5 && pic[1] + pic[3] <= card[1] + card[3] + 0.5, "{id} at {w}x{h}");
+            assert!((pic[2] / pic[3] - 16.0 / 9.0).abs() < 0.01);
+            if i > 0 {
+                assert!(card[1] >= shown[i - 1].1[1] + shown[i - 1].1[3], "{id} on the card above at {w}x{h}");
+            }
+        }
+        // The lit card turns through its stills.
+        let lit = m.cursor(Screen::Tracks);
+        for _ in 0..150 {
+            m.step(r.read(&Report::idle()));
+        }
+        let turned = cards(&art, &m, w, h);
+        assert_eq!(images[turned[lit].3.unwrap()].rgba, still(menu::TRACKS[lit].0, 2).rgba);
+        assert_eq!(images[turned[(lit + 1) % 5].3.unwrap()].rgba, still(menu::TRACKS[(lit + 1) % 5].0, 1).rgba, "an unlit card stays");
+    }
+    // The mods, in a category of their own: the pictured one shows its picture, the other none.
+    let (mut m, mut r) = fresh();
+    m.set_mod_tracks(vec![("p70_pictured".into(), "Pictured".into()), ("p70_bare".into(), "Bare".into())]);
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Right);
+    let shown = cards(&art, &m, 1920, 1080);
+    let ids: Vec<&str> = shown.iter().map(|c| c.0.as_str()).collect();
+    assert_eq!(ids, ["p70_pictured", "p70_bare"]);
+    assert_eq!(art.images()[shown[0].3.unwrap()].rgba, picture.rgba);
+    assert_eq!(shown[1].3, None, "no picture yet");
+    // A picture the shell takes later is the card's from then on.
+    art.set_mod_picture("p70_bare", still("free07", 3));
+    let shown = cards(&art, &m, 1920, 1080);
+    assert_eq!(art.images()[shown[0].3.unwrap()].rgba, picture.rgba);
+    assert_eq!(art.images()[shown[1].3.unwrap()].rgba, still("free07", 3).rgba);
 }

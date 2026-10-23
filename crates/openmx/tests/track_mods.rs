@@ -11,6 +11,10 @@
 #[path = "../src/track_mods.rs"]
 #[allow(dead_code)]
 mod track_mods;
+// P70's pictures on the pick's cards.
+#[path = "../src/track_previews.rs"]
+#[allow(dead_code)]
+mod track_previews;
 
 use game_render::disc::Res;
 use std::path::{Path, PathBuf};
@@ -436,4 +440,64 @@ fn a_one_level_terrain_is_256_samples_a_side() {
     assert!(line(&said, "start: ").starts_with("start: 512, "), "\n{said}");
     let end: Vec<f32> = line(&said, "end: ")[5..].split(", ").map(|v| v.trim().parse().unwrap()).collect();
     assert!(end[2] > 400.0 && end[1].abs() < 20.0 && (end[0] - 512.0).abs() < 100.0, "{end:?}\n{said}");
+}
+
+/// P70: a custom track's card picture. A mod's own `previews/track.png` is its picture; one without
+/// gets a still from its spawn, which the shell's own binary takes headless — the ride's first frame
+/// from the scene's start — and keeps beside `tracks/` for the next time, taken again once the mod
+/// changes; a picture that does not read is one line and no picture.
+#[test]
+fn a_custom_track_shows_its_own_picture_or_a_still_from_its_spawn() {
+    if let Err(e) = game_render::disc::Disc::open_configured() {
+        eprintln!("skipped: {e}");
+        return;
+    }
+    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("p70").join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    let tracks = mods.join("tracks");
+    for id in ["p70_own", "p70_spawn", "p70_badpng"] {
+        good(&tracks, id);
+    }
+    let own: Vec<u8> = (0..64 * 36 * 3).map(|i| (i * 13 % 256) as u8).collect();
+    write(&tracks.join("p70_own"), track_previews::OWN, game_render::png::encode_rgb(64, 36, &own));
+    write(&tracks.join("p70_badpng"), track_previews::OWN, b"\x89PNG\r\n\x1a\n not really");
+    let ids: Vec<String> = ["p70_badpng", "p70_own", "p70_spawn"].map(String::from).to_vec();
+    let mut log = Vec::new();
+    let (have, take) = track_previews::gather(&mods, &ids, &mut log);
+    assert_eq!(have.len(), 1);
+    assert_eq!(have[0].0, "p70_own");
+    assert_eq!((have[0].1.width, have[0].1.height), (64, 36));
+    assert!(have[0].1.rgba.chunks_exact(4).zip(own.chunks_exact(3)).all(|(a, b)| a[..3] == *b && a[3] == 255));
+    assert_eq!(take, ["p70_spawn"], "only the one with no picture of its own is taken");
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(log[0].starts_with("mods: tracks/p70_badpng's picture: "), "{log:?}");
+
+    // The shell takes it.
+    let hear = track_previews::still_job(env!("CARGO_BIN_EXE_openmx").into(), mods.clone(), take);
+    let (id, got) = hear.recv_timeout(std::time::Duration::from_secs(120)).expect("the still job answers");
+    assert_eq!(id, "p70_spawn");
+    let still = got.expect("a still from the spawn");
+    assert_eq!((still.width, still.height), track_previews::STILL_SIZE);
+    // A picture of the track, not a blank: the sky above and the ground below differ.
+    let row = |y: usize| still.rgba[y * still.width * 4..(y + 1) * still.width * 4].to_vec();
+    assert_ne!(row(10), row(still.height - 10));
+    assert!(track_previews::still(&mods, "p70_spawn").is_file());
+    assert!(!mods.join("previews").join("p70_spawn.part.png").exists());
+    // The scan still lists exactly the three tracks: the stills' folder is not a mod.
+    let listed: Vec<String> = track_mods::scan(&mods).tracks.into_iter().map(|t| t.id).collect();
+    assert_eq!(listed, ["p70_badpng", "p70_own", "p70_spawn"]);
+    // Next time it is read, not taken.
+    let (have, take) = track_previews::gather(&mods, &ids, &mut Vec::new());
+    assert!(take.is_empty());
+    assert_eq!(have.iter().find(|(i, _)| i == "p70_spawn").map(|(_, t)| t.rgba == still.rgba), Some(true));
+    // Until the mod changes.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&tracks.join("p70_spawn"), "mod.json", mod_json("p70_spawn"));
+    let (_, take) = track_previews::gather(&mods, &ids, &mut Vec::new());
+    assert_eq!(take, ["p70_spawn"]);
+    // And a mod whose ride does not start is no still, not a crash.
+    std::fs::remove_file(tracks.join("p70_spawn/Env/MDFLAT/MDFLAT.ps2.trn")).unwrap();
+    let hear = track_previews::still_job(env!("CARGO_BIN_EXE_openmx").into(), mods.clone(), take);
+    let (_, got) = hear.recv_timeout(std::time::Duration::from_secs(120)).expect("the still job answers");
+    assert!(got.is_err());
 }
