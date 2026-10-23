@@ -115,6 +115,10 @@ pub struct Params {
     pub joust_wreck_height: F,
     pub crossup_wreck: F,
     pub crossup_wreck_time: F,
+
+    /// Not the original's: the rotation-speed modifier ([`RotationSpeed`], P96), which every [`Rotation`] row's
+    /// tuning is read through. `None` — what the loader writes — is the original, and touches nothing.
+    pub rotation_speed: Option<RotationSpeed>,
 }
 
 /// Everything the air code owns: the only state the five steps write, apart from the chassis' two
@@ -788,6 +792,19 @@ pub struct Rotation {
     pub modifier: bool,
 }
 
+impl Rotation {
+    /// The row's tuning as the step reads it: [`Rotation::tuning`], through [`Params::rotation_speed`] when the
+    /// rotation-speed modifier is on. This is the one place a row's numbers are read, so a row added
+    /// later turns at the modifier's speed with nothing of its own to do.
+    pub fn tuned(&self, p: &Params) -> Tuning {
+        let t = (self.tuning)(p);
+        match p.rotation_speed {
+            None => t,
+            Some(s) => s.tuning(t),
+        }
+    }
+}
+
 /// The disc's backflip, and the only rotation the original has: stick forward on the lip, then back,
 /// and a negative pitch torque.
 pub const BACKFLIP: Rotation = Rotation {
@@ -824,6 +841,103 @@ pub const FLAT_SPIN: Rotation = Rotation {
 /// The rotations the port adds on top of the disc's. None of them is the original's, and none of them
 /// is in a set unless [`Rotations::new`]'s flag asks for it.
 pub const INVENTED: &[Rotation] = &[FLAT_SPIN];
+
+/// **Not the original's.** How fast everything turns in the air: one factor `k` that every rotating
+/// move reads (the rotation-speed modifier, P96).
+///
+/// It speeds the air's rotation up in time rather than pushing it harder: whatever the bike would
+/// have turned through in `t` seconds it turns through in `t / k`, at `k` times the angular velocity.
+/// In the air the turning is `I w' = M - D w` — a moment the stick or a rotation applies against
+/// damping proportional to the spin — and that is the same motion `k` times as fast when every moment
+/// is `k^2` times as big ([`RotationSpeed::moment`]), every term against the angular velocity `k` times
+/// ([`RotationSpeed::damping`]), every moment that ramps ramps `k^3` times as fast ([`RotationSpeed::moment_rate`]),
+/// every window on the angular velocity is `k` times as wide ([`RotationSpeed::rate`]) and every clock that
+/// times a rotation runs `k` times as fast ([`RotationSpeed::time`]). The flight itself — gravity, the jump's
+/// height and the hang time — is not sped up, so a rotation that takes a whole jump at 100% has room
+/// to spare at 150%. The inertia is left alone because the ground's contacts turn the chassis through
+/// it too.
+///
+/// Where it is read:
+/// - every [`Rotation`] row, through [`Rotation::tuned`] — the backflip, the port's front flip and
+///   flat spin, and any row added later, with no change here;
+/// - MX vs. ATV's 360 off a trick pack, through [`SpinTuning::tuned`] at the top of [`three_sixty`];
+/// - the stick's own rotation in the air (front flips and back by pitching, 360s by yawing, rolls),
+///   its damping, its auto-levelling and the brake's gyro, through [`RotationSpeed::params`];
+/// - the chassis' angular windows, through [`RotationSpeed::rate`] where the ride is built
+///   (`modifiers::Mods::ride`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RotationSpeed(pub F);
+
+impl RotationSpeed {
+    /// A moment: `k^2`.
+    pub fn moment(self, m: F) -> F {
+        m * (self.0 * self.0)
+    }
+
+    /// A moment's rate of change, per second: `k^3`.
+    pub fn moment_rate(self, r: F) -> F {
+        r * (self.0 * self.0 * self.0)
+    }
+
+    /// A gain against the angular velocity: `k`.
+    pub fn damping(self, d: F) -> F {
+        d * self.0
+    }
+
+    /// An angular velocity: `k`.
+    pub fn rate(self, w: F) -> F {
+        w * self.0
+    }
+
+    /// A time a rotation runs for: `1 / k`.
+    pub fn time(self, t: F) -> F {
+        t / self.0
+    }
+
+    /// A rotation row's tuning. The stick's times are not touched: they are how fast the stick was
+    /// flicked, which picks the torque, and not how long anything turns.
+    pub fn tuning(self, t: Tuning) -> Tuning {
+        Tuning {
+            min_torque: self.moment(t.min_torque),
+            max_torque: self.moment(t.max_torque),
+            rate_increase: self.moment_rate(t.rate_increase),
+            rate_decrease: self.moment_rate(t.rate_decrease),
+            ..t
+        }
+    }
+
+    /// MX vs. ATV's 360's `[Three Sixty]` keys, as a row's: torques `k^2`, their rates `k^3`, and the
+    /// flick times left alone for the same reason.
+    pub fn three_sixty(self, t: SpinTuning) -> SpinTuning {
+        SpinTuning {
+            min_torque_x: self.moment(t.min_torque_x),
+            max_torque_x: self.moment(t.max_torque_x),
+            min_torque_y: self.moment(t.min_torque_y),
+            max_torque_y: self.moment(t.max_torque_y),
+            rate_increase: self.moment_rate(t.rate_increase),
+            rate_decrease: self.moment_rate(t.rate_decrease),
+            ..t
+        }
+    }
+
+    /// The bike's air numbers, once, when its file is loaded: the stick's moments, the damping, the
+    /// auto-levelling (each gain `k`, so its moment per radian is `k^2` and its moment per radian a
+    /// second `k`), the brake's gyro and the control-authority ramp; and the factor itself, kept for
+    /// the rows. The backflip's own six keys are left as the file has them — [`Rotation::tuned`]
+    /// scales whatever a row reads, so scaling them here as well would count them twice.
+    pub fn params(self, p: &mut Params) {
+        let acm = p.airborne_control_moment;
+        p.airborne_control_moment = acm.merge(Dest::XYZ, acm.mul_q((self.0 * self.0).0));
+        p.brake_gyro_torque = self.moment(p.brake_gyro_torque);
+        p.airborne_damping = self.damping(p.airborne_damping);
+        p.unroll_gain = self.damping(p.unroll_gain);
+        p.unroll_torque = self.damping(p.unroll_torque);
+        p.unyaw_gain = self.damping(p.unyaw_gain);
+        p.unyaw_torque = self.damping(p.unyaw_torque);
+        p.control_authority_time = self.time(p.control_authority_time);
+        p.rotation_speed = Some(self);
+    }
+}
 
 /// The backflip's ending: roll under a quarter turn and pitch inside the airborne wreck angles, with
 /// no torque applied this substep.
@@ -938,7 +1052,7 @@ fn rotate(rows: &[Rotation], active: &mut usize, p: &Params, air: &mut Air, chas
             air.flip_active = false;
             air.flip_armed = false;
         } else if air.flip_armed && (!armed.modifier || step.modifier) && along(armed.gesture, step) > HELD {
-            let t = (armed.tuning)(p);
+            let t = armed.tuned(p);
             let out0 = t.min_torque * armed.floor;
             // An empty range gives the low end — not nothing, as the preload's does.
             let torque =
@@ -971,7 +1085,7 @@ fn rotate(rows: &[Rotation], active: &mut usize, p: &Params, air: &mut Air, chas
         }
     } else {
         let row = &rows[*active];
-        let t = (row.tuning)(p);
+        let t = row.tuned(p);
         if air.on_ground || step.touching || lane(air.flip_torque, row.axis).abs() <= t.min_torque {
             air.flip_active = false;
             air.flip_armed = false;
@@ -1057,6 +1171,17 @@ pub struct SpinTuning {
     pub rate_decrease: F,
 }
 
+impl SpinTuning {
+    /// The 360's tuning as [`three_sixty`] reads it: through [`Params::rotation_speed`] when the
+    /// rotation-speed modifier is on (P96), the pack's keys as they are when it is off.
+    pub fn tuned(&self, p: &Params) -> SpinTuning {
+        match p.rotation_speed {
+            None => *self,
+            Some(s) => s.three_sixty(*self),
+        }
+    }
+}
+
 /// MX vs. ATV's sideways stick past this arms and fires the 360. Its own threshold, not [`HELD`].
 const SPIN_HELD: f32 = 0.7;
 /// Seconds a fired 360 has to get the wheels off the ground.
@@ -1115,6 +1240,7 @@ fn sign(x: F) -> i32 {
 /// [`SPIN_CLIP`] off the take-off heading — is a wreck.
 #[allow(clippy::too_many_arguments)]
 pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, chassis: &mut Chassis, step: &Step, flick: F, table: &AcosTable) {
+    let t = &t.tuned(p);
     spin.applied = false;
     let x = step.stick.0;
     if !spin.active {

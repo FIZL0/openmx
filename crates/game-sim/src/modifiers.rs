@@ -21,12 +21,19 @@
 //! [`Knob::PlaneSpeed`] stays, off the menu ([`Knob::MENU`]), so a preset or a tape that carries
 //! `plane_speed` still loads and rides the numbers it was made with.
 //!
+//! P96 made the flips' knob a speed: [`Knob::Rotation`] turns every rotation in the air — the
+//! backflip, flips and 360s off the stick, and any rotation the port adds — `k` times as fast, through
+//! the one factor the air code reads ([`crate::air::RotationSpeed`]). P55's [`Knob::SpinRate`], which only
+//! scaled the backflip's torques, stays off the menu so a preset or a tape with `spin_rate` still
+//! rides as it did.
+//!
 //! The text form ([`Mods::text`], [`Mods::parse`]) is what a tape, a preset and the online lobby
 //! carry: `word=percent` for a world modifier, `word.N=percent` for player N's, only the ones off
 //! their default. An empty text is the original game.
 #![deny(clippy::float_arithmetic)]
 
 use crate::MAX_PLAYERS;
+use crate::air;
 use crate::phy::{self, Phy};
 use crate::r#move as mv;
 use crate::off_map;
@@ -44,6 +51,7 @@ pub enum Knob {
     Suspension,
     AirControl,
     SpinRate,
+    Rotation,
     Jump,
     CrashTolerance,
     PlaneSpeed,
@@ -56,7 +64,7 @@ pub enum Knob {
 }
 
 /// How many modifiers there are.
-pub const KNOBS: usize = 16;
+pub const KNOBS: usize = 17;
 
 /// A modifier's default, which leaves its fields untouched: 100%.
 pub const ORIGINAL: u16 = 100;
@@ -74,6 +82,7 @@ impl Knob {
         Knob::Suspension,
         Knob::AirControl,
         Knob::SpinRate,
+        Knob::Rotation,
         Knob::Jump,
         Knob::CrashTolerance,
         Knob::PlaneSpeed,
@@ -86,15 +95,16 @@ impl Knob {
     ];
 
     /// The ones the menu has a row for, in its order: all but [`Knob::PlaneSpeed`], which P95 split
-    /// into the biplane's acceleration and top speed and which only an older preset or tape still sets.
-    pub const MENU: [Knob; KNOBS - 1] = [
+    /// into the biplane's acceleration and top speed, and [`Knob::SpinRate`], which P96's
+    /// [`Knob::Rotation`] took over — only an older preset or tape still sets either.
+    pub const MENU: [Knob; KNOBS - 2] = [
         Knob::BikeSpeed,
         Knob::BikeAccel,
         Knob::BikePower,
         Knob::Grip,
         Knob::Suspension,
         Knob::AirControl,
-        Knob::SpinRate,
+        Knob::Rotation,
         Knob::Jump,
         Knob::CrashTolerance,
         Knob::PlaneAccel,
@@ -119,6 +129,7 @@ impl Knob {
             Knob::Suspension => "suspension",
             Knob::AirControl => "air_control",
             Knob::SpinRate => "spin_rate",
+            Knob::Rotation => "rotation_speed",
             Knob::Jump => "jump",
             Knob::CrashTolerance => "crash_tolerance",
             Knob::PlaneSpeed => "plane_speed",
@@ -145,6 +156,7 @@ impl Knob {
             Knob::Suspension => "Suspension",
             Knob::AirControl => "Air control",
             Knob::SpinRate => "Flip spin",
+            Knob::Rotation => "Flip rotation speed",
             Knob::Jump => "Jump strength",
             Knob::CrashTolerance => "Crash tolerance",
             Knob::PlaneSpeed => "Biplane speed",
@@ -181,6 +193,7 @@ impl Knob {
             Knob::Suspension => "spring stiffness",
             Knob::AirControl => "lean and turn in the air",
             Knob::SpinRate => "flip torque",
+            Knob::Rotation => "how fast every flip and spin turns",
             Knob::Jump => "preload, the jump off the lip",
             Knob::CrashTolerance => "the speeds a landing wrecks at",
             Knob::PlaneSpeed => "biplane thrust and top speed",
@@ -205,6 +218,9 @@ impl Knob {
             Knob::Suspension => "[Front/Rear Tire] Spring, SpringWhenStopped x k",
             Knob::AirControl => "[Airborne Control] AirborneControlMoment, AirborneControlForce x k",
             Knob::SpinRate => "[Backflip] Min/MaxBackflipTorque, BackflipTorqueRateIncrease/Decrease x k",
+            Knob::Rotation => {
+                "every rotation's torques ([Backflip] Min/MaxBackflipTorque) x k^2 and their rates (BackflipTorqueRateIncrease/Decrease) x k^3; [Airborne Control] AirborneControlMoment, BrakeGyroTorque x k^2, AirborneDamping, UnrollGain/Torque, UnyawGain/Torque x k; the control-authority time / k; the chassis' angular windows (YawRateLimit) x k"
+            }
             Knob::Jump => "[Preload] MaxPreload x k",
             Knob::CrashTolerance => "[Wrecks] Front/Back/Side/RacingDown/FreestyleDown/NoHander WreckSpeedLimit x k",
             Knob::PlaneSpeed => "biplane [Engine] MaxPower, MinPropEfficiencySpeed x k; [Aerodynamics] CD0 / k^2",
@@ -426,6 +442,12 @@ impl Mods {
                 *f = *f * k;
             }
         }
+        if let Some(k) = self.factor(seat, Knob::Rotation) {
+            // One factor for every rotation, read where the air code reads a rotation's numbers
+            // (`air::RotationSpeed`): the rows' tuning, the stick's moments and the damping. Not a field a
+            // trick at a time, so a rotation added later turns at this speed with nothing to add.
+            air::RotationSpeed(k).params(&mut phy.air);
+        }
         if let Some(k) = self.factor(seat, Knob::Jump) {
             phy.air.max_preload = phy.air.max_preload * k;
         }
@@ -459,10 +481,25 @@ impl Mods {
     /// faster bike. Engine power at 200% was held to it at 135 ft/s on the flat before P97. The
     /// put-back after a wreck sets the limit back to the ride's [`Ride::riding_speed_sq`], which is
     /// raised alike; before P97 it went back to the original's, and a faster bike was a 135 ft/s
-    /// bike from its first wreck on.
+    /// bike from its first wreck on. And its angular windows, the yaw's from the file's
+    /// `YawRateLimit`, moved with [`Knob::Rotation`] so a 360 is not held to the original's rate.
     pub fn ride(&self, seat: usize, ride: &mut Ride) {
         ride.chassis.max_speed_sq = self.speed_limit(seat, ride.chassis.max_speed_sq);
         ride.riding_speed_sq = self.speed_limit(seat, ride.riding_speed_sq);
+        self.windows(seat, &mut ride.chassis);
+    }
+
+    /// Player `seat`'s chassis' angular windows and angular speed limit, as a ride is built with
+    /// them, moved with [`Knob::Rotation`] (P96): each window `k` times as wide, the squared limit
+    /// `k^2`.
+    fn windows(&self, seat: usize, c: &mut crate::chassis::Chassis) {
+        if let Some(k) = self.factor(seat, Knob::Rotation) {
+            let spin = air::RotationSpeed(k);
+            c.max_ang_speed_sq = spin.rate(spin.rate(c.max_ang_speed_sq));
+            for w in c.ang_vel_max.iter_mut().chain(c.ang_vel_min.iter_mut()) {
+                *w = spin.rate(*w);
+            }
+        }
     }
 
     /// The integrator's squared speed limit [`Mods::ride`] leaves a ride built with `limit`.
@@ -498,6 +535,12 @@ impl Mods {
             ride.chassis.max_speed_sq = self.speed_limit(seat, riding);
         }
         ride.riding_speed_sq = self.speed_limit(seat, riding);
+        // The windows, when the rotation speed moved: the bike's as it is built, then moved again.
+        if was.factor(seat, Knob::Rotation) != self.factor(seat, Knob::Rotation) {
+            let c = &mut ride.chassis;
+            (c.max_ang_speed_sq, c.ang_vel_max, c.ang_vel_min) = crate::ride::bike_ang_limits(&file);
+            self.windows(seat, c);
+        }
         *phy = Arc::new(file);
     }
 
