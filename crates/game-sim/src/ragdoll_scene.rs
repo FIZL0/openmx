@@ -14,7 +14,7 @@
 //!
 //! What is not here: the hierarchy class of collision file, which the wreck bike is not; the swept
 //! test, which S62's wrecks never needed against the bike; and the bike leaving the broad phase,
-//! which the s62 states show some 400 frames after the wreck and nothing here models.
+//! which the put-back does (S108) and the caller says ([`crate::ragdoll_ride::Down::step_posed_with`]).
 
 #![deny(clippy::float_arithmetic)]
 

@@ -455,6 +455,16 @@ impl Down {
 
     /// [`Down::step`], the joint torques pulling towards `posed`'s rests when there is one (S65).
     pub fn step_posed(&mut self, kit: &Kit, posed: Option<&Posed>, dt: F, crash: &crate::ride::Crash, world: &mut dyn World) {
+        self.step_posed_with(kit, posed, dt, crash, world, true);
+    }
+
+    /// [`Down::step_posed`] with whether the wreck bike is still in the broad phase (S108). The
+    /// original takes it out at the put-back: the bike's unwreck stops the wreck part, which takes
+    /// its collidable out of the track's tree and lowers the pair's own gate on it, and the body's
+    /// update runs after the bike's in the tick, so on the put-back's tick the bones gather once
+    /// more with the bike gone. A list gathered anew does not hold it, and a list kept from before
+    /// still does, but no sphere is paired with it.
+    pub fn step_posed_with(&mut self, kit: &Kit, posed: Option<&Posed>, dt: F, crash: &crate::ride::Crash, world: &mut dyn World, bike_in: bool) {
         let frame = math::quat_to_mat4(crash.bike.body.quat, crash.origin);
         let bike = kit.bike.map(|(centre, radius)| (bike_centre(&frame, centre), radius));
         // The bones' search, once a frame before the off-bike test, round the first sphere.
@@ -462,7 +472,7 @@ impl Down {
             // The bike is put in the track's tree where it stands, every frame.
             let cells = world.heightfield().and_then(|f| Cells::of(&*f));
             let key = cells.as_ref().zip(kit.bike_mesh.as_deref()).map_or(0, |(c, mesh)| c.key(mesh, &frame));
-            self.search.gather(cells.as_ref(), s.radius, b, key, !self.ragdoll.ignores_bike);
+            self.search.gather(cells.as_ref(), s.radius, b, key, bike_in && !self.ragdoll.ignores_bike);
         }
         ragdoll_body::wreck_arm(
             &mut self.ragdoll,
@@ -510,7 +520,8 @@ impl Down {
         // wreck's entry puts the bike on every bone's ignore list, the arm above takes it off again
         // when the main bone is off the bike, and the search lists it from its next gather.
         let mut open = Open;
-        let mut bike_scene = kit.bike_mesh.as_deref().map(|mesh| WreckBikeScene::new(mesh, &frame, &crash.bike, self.search));
+        let paired = BikeSearch { listed: bike_in && self.search.listed, ..self.search };
+        let mut bike_scene = kit.bike_mesh.as_deref().map(|mesh| WreckBikeScene::new(mesh, &frame, &crash.bike, paired));
         let scene: &mut dyn crate::ragdoll_contact::Scene = match &mut bike_scene {
             Some(b) => b,
             None => &mut open,
