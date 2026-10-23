@@ -654,7 +654,9 @@ impl<'a> Pen<'a> {
         let per_player = page.iter().any(|p| p.kind == Kind::Player) && r.kind != Kind::Player && !r.world;
         if per_player {
             let hx = x + self.wide(Weight::Heavy, &h, size) + 0.9;
-            self.tag(&format!("{}P", menu.player() + 1), hx, y + CAP * size / 2.0);
+            // whose the modifiers page sets: All Players or one seat's (P134)
+            let whose = if screen == Screen::Modifiers { menu.mods_whose() } else { format!("{}P", menu.player() + 1) };
+            self.tag(&whose, hx, y + CAP * size / 2.0);
         }
         y += size * 1.1;
         y = self.para(&r.about, x, y + 0.5, w, 1.2, 1.42, PAPER);
@@ -1603,6 +1605,7 @@ impl Pen<'_> {
             Some(Item::Ready) => "Ready",
             Some(Item::Leave) => "Leave",
             Some(Item::Chat) => "Chat",
+            Some(Item::Modifiers) => "Open",
             _ => "Change",
         };
         self.hints(&[(Btn::Circle, "Leave"), (Btn::Cross, ok)]);

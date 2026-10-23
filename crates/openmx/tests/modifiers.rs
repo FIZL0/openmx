@@ -316,6 +316,43 @@ fn double_bike_speed_passes_135_after_a_wreck_and_its_put_back() {
     assert_eq!(s.rider.ride.riding_speed_sq.0, 135.0 * 135.0, "back on the original, the put-back's limit");
 }
 
+/// P134: two players on one machine ride on their own bike speeds. 2P's own top speed doubled
+/// (the set 2P's page writes, `bike_speed.2=200`) from the start, and then 1P's raised from the pause
+/// mid-ride the way the shell moves every seat onto a change (`Mods::resim` seat by seat): each seat
+/// is on its own, 2P out-running 1P and 1P moved only once its own change came.
+#[test]
+fn two_local_seats_ride_on_their_own_bike_speeds() {
+    let tables = Tables::build();
+    let stock = Phy::read_bytes(ridden_bike().as_bytes(), &tables.ride.curve);
+    let was = Mods::parse("bike_speed.2=200").unwrap();
+    let mut seats = [sim(&was, 0, 0.0), sim(&was, 1, 0.0)];
+    let full = Controls { gas: F(1.0), ..Controls::default() };
+    let top = |seats: &mut [Sim; 2], ticks: usize| {
+        let mut top = [0.0f32; 2];
+        for _ in 0..ticks {
+            for (s, sim) in seats.iter_mut().enumerate() {
+                sim.step(DT, &full, &mut Flat);
+                top[s] = top[s].max(sim.rider.ride.chassis.speed.0);
+            }
+        }
+        top
+    };
+    let before = top(&mut seats, 1800);
+    println!("top speeds, 1P on the original and 2P at x2: {before:?}");
+    assert!(before[1] > before[0] * 1.5, "2P at bike speed x2 reached {} ft/s against 1P's {}", before[1], before[0]);
+    // 1P's own from the pause: 1P at x3, 2P's untouched.
+    let to = Mods::parse("bike_speed.1=300 bike_speed.2=200").unwrap();
+    let limit = seats[1].rider.ride.chassis.max_speed_sq;
+    for (s, sim) in seats.iter_mut().enumerate() {
+        to.resim(&was, s, &stock, sim);
+    }
+    assert_eq!(seats[1].rider.ride.chassis.max_speed_sq.0.to_bits(), limit.0.to_bits(), "2P's bike moved with 1P's change");
+    let after = top(&mut seats, 1800);
+    println!("after 1P's change to x3: {after:?}");
+    assert!(after[0] > before[1] * 1.2, "1P at x3 reached {} ft/s, 2P at x2 {}", after[0], before[1]);
+    assert!((after[1] - before[1]).abs() < 0.05 * before[1], "2P's top speed moved: {} then {}", before[1], after[1]);
+}
+
 #[test]
 fn a_tape_made_with_modifiers_replays_with_them() {
     let mods = Mods::parse("gravity=70 time_scale=150 bike_speed=130 grip.1=80").unwrap();

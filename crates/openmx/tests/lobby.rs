@@ -153,7 +153,7 @@ fn the_online_screens_go_by_pad_and_the_network_s_word_alone() {
     assert_eq!(m.lobby.out.pop(), Some(Cmd::Join("AB2C".into(), vec![Pick::new("thq2", "race125p")])));
     m.heard(Event::Me("guest-id".into()));
     m.heard(Event::Room(guest_room()));
-    assert_eq!(m.lobby.items(), vec![Item::Bike, Item::Chat, Item::Ready, Item::Leave]);
+    assert_eq!(m.lobby.items(), vec![Item::Bike, Item::Chat, Item::Ready, Item::Modifiers, Item::Leave]);
     // Ready, and chat on the keyboard.
     taps(&mut m, &mut r, &[Control::Down, Control::Down, Control::Cross]);
     assert_eq!(m.lobby.out.pop(), Some(Cmd::Prepared(true)));
@@ -754,4 +754,70 @@ fn a_drop_in_whose_setup_picked_the_plane_rides_in_flying() {
     assert!(flying(&ho, 1).is_some() && flying(&go, 0).is_some(), "the guest's seat flies on");
     assert!(flying(&ho, 0).is_none(), "the host's seat rides its bike");
     let _ = go.leave();
+}
+
+/// P134: each player's own modifiers ride in their pick, the host's room gathers every seat's, a
+/// row a seat, and both lobbies show each seat's; the host's All Players reaches the guest's seat
+/// too, and a guest's page cannot touch the world's.
+#[test]
+fn the_lobby_gathers_every_seats_own_modifiers() {
+    use game_sim::modifiers::{Knob, Mods};
+    let (hn, gn) = (lan("Hosty", 1), lan("Guesty", 1));
+    let (mut h, mut hr) = fresh("Hosty", "thq1");
+    let (mut g, mut gr) = fresh("Guesty", "thq2");
+    // the host's gravity is the world's; its bike speed its own
+    h.settings.modifiers.set(0, Knob::Gravity, 80);
+    host_and_join(&mut h, &mut hr, &hn, &mut g, &mut gr, &gn);
+    // the guest's own faster bike, and a gravity of its own the room never takes
+    g.settings.modifiers.set(0, Knob::BikeSpeed, 150);
+    g.settings.modifiers.set(0, Knob::Gravity, 300);
+    let room_mods = |m: &Menu| Mods::parse(&m.lobby.room.as_ref().unwrap().modifiers).unwrap();
+    let both = |h: &mut Menu, g: &mut Menu, what: &str, done: &dyn Fn(&Mods) -> bool| {
+        let end = Instant::now() + Duration::from_secs(30);
+        while !(done(&room_mods(h)) && done(&room_mods(g))) {
+            assert!(Instant::now() < end, "{what}: not in 30 s; host {:?} guest {:?}", room_mods(h), room_mods(g));
+            // as the shell's frame: the pick's modifiers, then its preset's line sends a changed pick
+            for m in [&mut *h, &mut *g] {
+                m.lobby_mods();
+                m.lobby.preset(0);
+            }
+            pump(h, &hn);
+            pump(g, &gn);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    both(&mut h, &mut g, "the guest's own", &|m| m.get(1, Knob::BikeSpeed) == 150);
+    let m = room_mods(&g);
+    assert_eq!((m.get(0, Knob::BikeSpeed), m.get(0, Knob::Gravity)), (100, 80), "the host's own and the world's: {m:?}");
+    let room = g.lobby.room.clone().unwrap();
+    assert_eq!(menu::Lobby::seat_mods(&room, 1), "  Bike top speed 150%");
+    assert_eq!(menu::Lobby::seat_mods(&room, 0), "");
+
+    // The host's page from its lobby, on All Players: grip for every seat, the guest's too.
+    let at = h.lobby.items().iter().position(|i| *i == Item::Modifiers).unwrap();
+    for _ in 0..at {
+        tap(&mut h, &mut hr, Control::Down);
+    }
+    tap(&mut h, &mut hr, Control::Cross);
+    assert_eq!(h.screen(), Some(Screen::Modifiers));
+    tap(&mut h, &mut hr, Control::Left);
+    assert_eq!(h.mods_whose(), "All");
+    while h.page()[h.cursor(Screen::Modifiers)].label != Knob::Grip.label() {
+        tap(&mut h, &mut hr, Control::Down);
+    }
+    tap(&mut h, &mut hr, Control::Right);
+    tap(&mut h, &mut hr, Control::Circle);
+    both(&mut h, &mut g, "the host's All", &|m| m.get(0, Knob::Grip) == 110 && m.get(1, Knob::Grip) == 110);
+    assert_eq!(room_mods(&h).get(1, Knob::BikeSpeed), 150, "the guest's own speed stays");
+
+    // The guest's page from its lobby is its own seat's: the world's are not its to set.
+    let at = g.lobby.items().iter().position(|i| *i == Item::Modifiers).unwrap();
+    for _ in 0..at {
+        tap(&mut g, &mut gr, Control::Down);
+    }
+    tap(&mut g, &mut gr, Control::Cross);
+    assert_eq!(g.screen(), Some(Screen::Modifiers));
+    let gravity = g.page().into_iter().find(|r| r.key == menu::Key::Knob(Knob::Gravity)).unwrap();
+    assert!(gravity.off.is_some(), "{gravity:?}");
+    assert!(g.page()[0].off.is_some(), "the guest has no All Players");
 }
