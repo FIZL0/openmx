@@ -1644,6 +1644,7 @@ impl Ride {
             // R1 alone: what MX vs. ATV's air moves are asked for under (MD16). Read only by them.
             modifier: tricks.is_some() && c.trick == [false, false, true],
             spinning: false,
+            spin_active: false,
         };
 
         // 3 — the ground step, in `mv::step`'s own order.
@@ -1741,6 +1742,7 @@ impl Ride {
             match (p.tricks.as_ref(), tricks.as_deref_mut()) {
                 (Some(moves), Some(t)) => {
                     astep.spinning = t.spin.applied;
+                    astep.spin_active = t.spin.active;
                     air::unleashed_rotate(&p.air, &mut t.flip_row, air, &mut ac, &astep);
                     air::three_sixty(&moves.spin, &p.air, air, &mut t.spin, &mut ac, &astep, t.side_flick, &tables.acos);
                     astep.spinning = t.spin.applied;
