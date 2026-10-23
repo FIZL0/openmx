@@ -742,6 +742,10 @@ pub mod track;
 /// that decide whether it counts, and the trick's own half of what makes a landing a crash.
 pub mod trick;
 
+/// MX vs. ATV's tricks as a pack laid over the original's (MD16): the extra stunts, the 360 and
+/// front flip's numbers, the whip's auto-level. Off unless a pack is laid over a bike.
+pub mod trick_pack;
+
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground

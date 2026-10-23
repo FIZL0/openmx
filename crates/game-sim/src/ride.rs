@@ -140,6 +140,10 @@ pub struct Controls {
     pub balance: bool,
     /// Put the bike back: on [`Ride::back`], the last spot the bike was kept fit to stand on (S66).
     pub respawn: bool,
+    /// **The port's own (MD16):** Cross and Square as trick buttons, for the extra stunts a trick pack
+    /// gives ([`trick::group_with`]). No binding of the original's is either; the shell sets them on
+    /// the new scheme with MX vs. ATV's tricks on, and a rider whose set has no extras ignores them.
+    pub extra: [bool; trick::EXTRA_BUTTONS],
 }
 
 impl Controls {
@@ -195,6 +199,7 @@ impl Controls {
             // no press this frame, is not a chord.
             respawn: (pressed(Command::RESET_LEFT) && held(Command::RESET_RIGHT))
                 || (pressed(Command::RESET_RIGHT) && held(Command::RESET_LEFT)),
+            extra: [false; trick::EXTRA_BUTTONS],
         }
     }
 }
@@ -207,7 +212,7 @@ impl Controls {
     /// air steps read with it — is kept as it is; with none down the d-pad reads as let go.
     /// [`Controls::through`] stays the original's, d-pad and all, which every replay of it rides on.
     pub fn stick_alone(self) -> Controls {
-        if self.trick.iter().any(|&t| t) {
+        if self.trick.iter().chain(self.extra.iter()).any(|&t| t) {
             return self;
         }
         Controls { dpad_y: false, dpad_dir: 0, dpad: [false; trick::DPAD], ..self }
@@ -643,6 +648,10 @@ pub struct Ride {
     /// [`crate::off_map::RIDING_MAX_SPEED`] squared, which is the limit a bike is built with, unless a
     /// modifier that makes the bike faster raised both ([`crate::modifiers::Mods::ride`], P97).
     pub riding_speed_sq: F,
+    /// **The port's own (MD16):** MX vs. ATV's moves' state, made on the first frame of a bike that
+    /// carries a trick pack's numbers ([`Phy::tricks`]). `None` on every ride on the original's tricks,
+    /// and the hash walk leaves it out then, so their hashes do not move.
+    pub tricks: Option<Box<crate::trick_pack::State>>,
 }
 
 impl Ride {
@@ -704,6 +713,7 @@ impl Ride {
             stunt: false,
             drag_halved: false,
             riding_speed_sq: F(BIKE_MAX_SPEED_SQ),
+            tricks: None,
         };
         ride.place(at, facing);
         ride
@@ -1465,12 +1475,20 @@ impl Ride {
         }
         let Ride {
             mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
-            drag_halved, ..
+            drag_halved, tricks, ..
         } = self;
         *touching = false;
+        // MX vs. ATV's moves (MD16), only for a bike a trick pack is laid over.
+        if p.tricks.is_some() && tricks.is_none() {
+            *tricks = Some(Box::default());
+        }
 
         // 1 — the input layer's rate limit.
         held.step(c, &p.joystick, dt);
+        if let Some(t) = tricks.as_deref_mut() {
+            let raw = trick::stick(c.stick.0, c.stick.1, c.dpad);
+            t.side_flick = t.side.sample(raw.x, dt);
+        }
 
         // 2 — the chassis' measure, which is where the pitch and roll `air.rs` reads come from. The
         // euler angles are the one call it makes that this crate ports.
@@ -1570,6 +1588,9 @@ impl Ride {
             // control reads the clocks' own word, which last frame's clocks wrote.
             stunt: *stunt,
             touching: false,
+            // R1 alone: what MX vs. ATV's air moves are asked for under (MD16). Read only by them.
+            modifier: tricks.is_some() && c.trick == [false, false, true],
+            spinning: false,
         };
 
         // 3 — the ground step, in `mv::step`'s own order.
@@ -1664,7 +1685,15 @@ impl Ride {
 
             calls.push(mv::Call::Backflip(h));
             let mut ac = air_chassis!();
-            air::backflip(&p.air, air, &mut ac, &astep);
+            match (p.tricks.as_ref(), tricks.as_deref_mut()) {
+                (Some(moves), Some(t)) => {
+                    astep.spinning = t.spin.applied;
+                    air::unleashed_rotate(&p.air, &mut t.flip_row, air, &mut ac, &astep);
+                    air::three_sixty(&moves.spin, &p.air, air, &mut t.spin, &mut ac, &astep, t.side_flick, &tables.acos);
+                    astep.spinning = t.spin.applied;
+                }
+                _ => air::backflip(&p.air, air, &mut ac, &astep),
+            }
             mvc.force = ac.force;
             mvc.torque = ac.moment;
 
@@ -2052,6 +2081,9 @@ impl State for Ride {
         w.f("near", self.near);
         w.bool("touching", self.touching);
         w.bool("stunt", self.stunt);
+        if let Some(t) = &self.tricks {
+            w.field("tricks", &**t);
+        }
     }
 }
 
