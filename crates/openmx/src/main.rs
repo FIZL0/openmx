@@ -599,6 +599,9 @@ struct Shown {
     /// on the bike otherwise — or none: not posed yet, no body, or the software path, which skins at
     /// the draw.
     body: Option<Vec<M4>>,
+    /// Whether `body` is the ragdoll's, thrown off the bike, which is blended where it is in the world
+    /// rather than where it is on the bike (P120, [`pace::Blend::thrown`]).
+    thrown: bool,
 }
 
 impl Shown {
@@ -608,7 +611,7 @@ impl Shown {
             None => chassis_at(&seat.sim.rider.ride),
         };
         if !poses {
-            return Shown { bike, chassis: Vec::new(), body: None };
+            return Shown { bike, chassis: Vec::new(), body: None, thrown: false };
         }
         let chassis = rig.chassis.as_ref().map_or(Vec::new(), |c| c.world.clone());
         let down = match (seat.sim.rider.drawn_ragdoll(), &seat.sim.rider.ragdoll_kit, ragdolled) {
@@ -629,19 +632,85 @@ impl Shown {
             }
             _ => None,
         };
-        Shown { bike, chassis, body }
+        let thrown = body.is_some() && down.is_some();
+        Shown { bike, chassis, body, thrown }
     }
 
-    /// From this, the tick before the last, to `now`, the last.
+    /// From this, the tick before the last, to `now`, the last, when the seat's [`pace::Cut`] says
+    /// the two are no jump apart. A rider thrown at both is blended in the world, off the bike that
+    /// tumbles beside them; one on the bike, on the bike.
     fn blend(&self, now: &Shown, by: &pace::Blend) -> Shown {
+        let bike = by.slide(self.bike, now.bike);
         Shown {
-            bike: by.at(self.bike, now.bike),
+            bike,
             chassis: by.pose(&self.chassis, &now.chassis),
             body: match (&self.body, &now.body) {
+                (Some(was), Some(is)) if self.thrown && now.thrown => Some(by.thrown(was, self.bike, is, now.bike, bike)),
                 (Some(was), Some(is)) => Some(by.pose(was, is)),
                 (_, is) => is.clone(),
             },
+            thrown: now.thrown,
         }
+    }
+}
+
+/// `--trace-picture`'s line for a drawn frame (P120): the first player's bike, the middle of their
+/// rider's nodes and their camera as drawn, and the bike's and the rider's spots at the two ticks the
+/// frame is blended between, which a test reads to prove the picture never steps back.
+#[allow(clippy::too_many_arguments)]
+fn trace_picture(
+    seats: &[Seat],
+    rigs: &[Rig],
+    assets: &Assets,
+    ragdolled: Option<&game_render::rider::Ragdolled>,
+    before: &[Shown],
+    cameras: &[Camera],
+    cut: &[bool],
+    blend: &pace::Blend,
+    tick: u64,
+) {
+    let (Some(seat), Some(rig), Some(camera)) = (seats.first(), rigs.first(), cameras.first()) else { return };
+    let now = Shown::of(seat, rig, assets, ragdolled, true);
+    let was = before.first().unwrap_or(&now);
+    let cut = cut.first().copied().unwrap_or(true);
+    let shown = if cut { now.clone() } else { was.blend(&now, blend) };
+    let spot = |m: &M4| format!("{:.3} {:.3} {:.3}", m.0[3][0], m.0[3][1], m.0[3][2]);
+    let p3 = |v: V3| format!("{:.3} {:.3} {:.3}", v.x, v.y, v.z);
+    // The middle of the rider's nodes, in the world.
+    let body = |s: &Shown| {
+        let nodes = s.body.as_ref().filter(|b| !b.is_empty())?;
+        let sum = nodes.iter().map(|m| m.mul(s.bike)).fold(V3 { x: 0.0, y: 0.0, z: 0.0 }, |a, m| {
+            a.add(V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] })
+        });
+        Some(sum.scale(1.0 / nodes.len() as f32))
+    };
+    let rider = match (body(was), body(&now), body(&shown)) {
+        (Some(a), Some(b), Some(d)) => format!("rider from {} to {} drawn {}", p3(a), p3(b), p3(d)),
+        _ => "rider none".to_string(),
+    };
+    println!(
+        "picture: tick {tick} blend {:.4} cut {} down {} bike from {} to {} drawn {} eye {} at {} {rider}",
+        blend.0,
+        cut as u8,
+        seat.sim.rider.crash.is_some() as u8,
+        spot(&was.bike),
+        spot(&now.bike),
+        spot(&shown.bike),
+        p3(camera.eye),
+        p3(camera.at),
+    );
+}
+
+/// The spots a seat's [`pace::Cut`] measures a tick's move by: where its machine is — the plane
+/// while it is flown, the bike (or its wreck) otherwise — and where its camera is and looks.
+fn cut_spots(seat: &Seat, bike: M4, camera: Option<&Camera>) -> [V3; 3] {
+    let machine = match seat.garage.plane_flown() {
+        Some(plane) => vector(plane.at),
+        None => V3 { x: bike.0[3][0], y: bike.0[3][1], z: bike.0[3][2] },
+    };
+    match camera {
+        Some(c) => [machine, c.eye, c.at],
+        None => [machine; 3],
     }
 }
 
@@ -879,6 +948,9 @@ struct Args {
     /// `--timings`: a line a second of what each stage of the frame cost (P47, [`stages`]), and
     /// one over the whole session at the end.
     timings: bool,
+    /// `--trace-picture`: a line a drawn frame of where the first player's bike, rider and camera
+    /// were drawn, and the blend between the ticks they were drawn at (P120).
+    trace_picture: bool,
 }
 
 impl Args {
@@ -3336,6 +3408,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Each view's markers' slot display (P88).
     let mut banners: Vec<hud::MarkerBanner> = Vec::new();
     let mut before_planes: Vec<Option<M4>> = Vec::new();
+    // Each seat's cut test (P120): whether the last tick's picture is a jump from the one before.
+    let mut cuts: Vec<pace::Cut> = Vec::new();
+    // The moment the picture is of (P120): read once a pass of the loop, after the last picture was
+    // shown, and both the ticks owed and the blend are taken at it. Read again after the ticks, the
+    // blend came a tick's cost later on the frames that ran one than on those that did not, though
+    // each went up at the display's next refresh, and the faster the ride the more that showed.
+    let mut moment = Instant::now();
     // What the last tick left for the picture: whether it simulated, and each player's ride for the
     // camera and the overlay.
     let mut simulated = false;
@@ -3349,7 +3428,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     };
     perf.begin();
     loop {
-        if pacer.owed(Instant::now()) {
+        if pacer.owed(moment) {
         if let Some(window) = &mut *window {
             window.poll();
             if window.closed() || (front.is_none() && window.held(key::ESCAPE)) {
@@ -3754,6 +3833,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         before = world.seats.iter().zip(&rigs).map(|(seat, rig)| Shown::of(seat, rig, &assets, ragdolled.as_ref(), gpu_on)).collect();
         before_cameras.clone_from(&cameras);
         before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
+        cuts.resize_with(world.seats.len(), pace::Cut::default);
+        for (i, (seat, cut)) in world.seats.iter().zip(&mut cuts).enumerate() {
+            cut.before(cut_spots(seat, before[i].bike, cameras.get(i)));
+        }
         traffic_before = traffic_time;
         let sim_at = Instant::now();
         let dt: F;
@@ -4097,7 +4180,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // The picture, owing no tick (P52): every camera, bike, rider and the plane blended from the
         // tick before the last to the last by how far the wall clock is past it. Render-side only:
         // nothing below writes the simulation.
-        let blend = pace::Blend(pacer.blend(Instant::now()));
+        let blend = pace::Blend(pacer.blend(moment));
         // The path cars at the picture's own moment (V47): their clips read at the clock between the
         // last two ticks, as far along as the bike's blend, so they move every frame drawn.
         if !traffic.cars.is_empty() {
@@ -4155,11 +4238,31 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // And the switch pop-up, each view its own player's (P103), as the input stage's take reads it.
         let offering = head.is_none() && online.is_none() && front.as_deref().is_none_or(|f| f.menu.riding());
         hud_art.offers = world.seats.iter().map(|seat| offering.then(|| seat_offer(seat, &bays)).flatten()).collect();
+        // Which seats' pictures cut this frame (P120): a put-back, or a move far past the seat's own
+        // speed. A seat's machine, rider and camera cut or slide together.
+        let cut: Vec<bool> = world
+            .seats
+            .iter()
+            .enumerate()
+            .map(|(p, seat)| {
+                let bike = match &seat.sim.rider.crash {
+                    Some(crash) => chassis_wrecked(crash),
+                    None => chassis_at(&seat.sim.rider.ride),
+                };
+                cuts.get(p).is_none_or(|c| c.cuts(cut_spots(seat, bike, cameras.get(p)), seat.sim.rider.drawn_jumps()))
+            })
+            .collect();
         let cameras: Vec<Camera> = cameras
             .iter()
             .enumerate()
-            .map(|(v, c)| before_cameras.get(v).map_or(*c, |b| blend.camera(b, c)))
+            .map(|(v, c)| match (before_cameras.get(v), cut.get(v)) {
+                (Some(b), Some(false)) => blend.pan(b, c),
+                _ => *c,
+            })
             .collect();
+        if args.trace_picture {
+            trace_picture(&world.seats, &rigs, &assets, ragdolled.as_ref(), &before, &cameras, &cut, &blend, pacer.ticks());
+        }
         // `--shot-pose` (MD10): the first view looks from the pose instead, whatever the ride does.
         let mut cameras = cameras;
         if let (Some(pose), Some(at), Some(camera)) = (args.shot_pose, rects.first(), cameras.first_mut()) {
@@ -4243,8 +4346,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let now = perf.time(Stage::Skinning, || Shown::of(seat, rig, &assets, ragdolled.as_ref(), true));
                 // A put-back is a cut: the bike and the rider are drawn where it set them, not slid
                 // there from the wreck (S66), and so is the body's first tick back on the bike (S74).
+                // So is any other jump, the seat's camera with them (P120).
                 let shown = match before.get(p) {
-                    Some(b) if !seat.sim.rider.drawn_jumps() => b.blend(&now, &blend),
+                    Some(b) if !cut[p] => b.blend(&now, &blend),
                     _ => now.clone(),
                 };
                 let bike_at = shown.bike;
@@ -4289,8 +4393,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for (p, seat) in world.seats.iter().enumerate() {
                 let Some(plane) = seat.garage.plane_flown() else { continue };
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
-                let before = before_planes.get(p).copied().flatten();
-                let at = before.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
+                let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
+                let at = before.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
                 for (model, at) in drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)) {
                     actors.push(Actor { model, at, pose: None, lod_from: None, alpha: 1.0 });
                 }
@@ -4450,7 +4554,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 };
                 // Between the last two ticks (P52). The software path blends where the machine is
                 // and not its pose, which it skins once a tick.
-                let bike_at = before.get(p).map_or(bike_at, |b| blend.at(b.bike, bike_at));
+                let bike_at = before.get(p).filter(|_| !cut[p]).map_or(bike_at, |b| blend.slide(b.bike, bike_at));
                 // Each part rides on one node of the chassis, so its transform is that node's place in the
                 // chassis followed by the chassis's place in the world.
                 actor.push((rig.bike_model.as_str(), bike_at));
@@ -4521,8 +4625,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for (p, seat) in world.seats.iter().enumerate() {
                 let Some(plane) = seat.garage.plane_flown() else { continue };
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
-                let before = before_planes.get(p).copied().flatten();
-                let at = before.map_or(plane_at(plane), |b| blend.at(b, plane_at(plane)));
+                let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
+                let at = before.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
                 actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
             }
             actor.extend(traffic_at.iter().map(|(model, at)| (model.as_str(), *at)));
@@ -4669,6 +4773,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             stages_since = Instant::now();
         }
         top = Instant::now();
+        moment = top;
         perf.begin();
     }
 
@@ -5270,6 +5375,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         pad_of: Vec::new(),
         sound: true,
         timings: false,
+        trace_picture: false,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         ride_flag: false,
@@ -5477,6 +5583,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--headless" => args.headless = true,
             "--no-sound" => args.sound = false,
             "--timings" => args.timings = true,
+            "--trace-picture" => args.trace_picture = true,
             "--frames" => {
                 args.frames = Some(
                     next("a number of frames")?.parse().map_err(|_| "--frames: not a number of frames")?,
@@ -5629,7 +5736,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      original's two layouts, and three to eight in quarters or eighths. The first\n\
                      player has the keyboard, the plane and the tape. --headless draws with no\n\
                      window and no pad, and --frames N quits after N frames. --timings prints\n\
-                     what each stage of a frame cost, a line a second.\n\
+                     what each stage of a frame cost, a line a second, and --trace-picture\n\
+                     where each drawn frame put the first player's bike, rider and camera.\n\
                      The ride runs 30 ticks a second, as the original does, however fast it is\n\
                      drawn: a window draws as fast as its display takes pictures, a headless\n\
                      ride 60 a second, and --draw-fps N at most N.\n\
