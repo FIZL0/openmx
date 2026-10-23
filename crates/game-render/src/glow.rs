@@ -52,7 +52,7 @@ pub fn draw(frame: &mut Frame, camera: &Camera, textures: &[Texture], glows: &[G
     let mut tagged: Vec<(Option<&Texture>, Option<f32>)> = Vec::new();
     for glow in glows {
         let texture = textures.get(glow.texture);
-        let mode = Mode { cutoff: 1, blend: true, additive: glow.additive, depth_write: false };
+        let mode = Mode { cutoff: 1, blend: true, additive: glow.additive, depth_write: false, cover: 1.0 };
         for tri in &glow.tris {
             let alpha = (tri[0].tint[3] + tri[1].tint[3] + tri[2].tint[3]) / 3.0;
             if !glow.additive && alpha <= 0.0 {
