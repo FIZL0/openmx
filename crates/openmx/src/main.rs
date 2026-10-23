@@ -3448,6 +3448,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             && front.network.disc.phy(&set).is_some_and(|b| *b == phy_bytes);
         front.menu.opening = if can { menu::Opening::Can } else { menu::Opening::No };
         front.menu.mods_lock = mods_lock(head.is_some(), online.as_ref().map(online::Online::host));
+        front.menu.leave_to = online.as_ref().map_or(menu::LeaveTo::Main, online::Online::leaves_to);
     }
     // The modifiers the Settings screen last said, so that the pause closing on a set the player
     // changed puts it on the ride (P98) and a `--modifiers` ride the player did not touch keeps its own.
