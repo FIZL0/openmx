@@ -316,14 +316,14 @@ impl Menu {
         let limits: Vec<String> = FrameLimit::ALL.iter().map(|f| f.label()).collect();
         let limits: Vec<&str> = limits.iter().map(String::as_str).collect();
         let speed_off = match s.overlay {
-            Overlay::Original => None,
-            Overlay::Debug => Some("Only the Original HUD has one"),
+            Overlay::Hud | Overlay::Original => None,
+            Overlay::Debug => Some("Only the HUD and the Original have one"),
             Overlay::None => Some("The HUD is off"),
         };
         vec![
-            Row::choice(Key::Hud, "HUD", &hud, at(&Overlay::ALL, s.overlay), "What a ride draws over the picture. Original is the game's own; Debug adds the port's numbers; None leaves the picture clean.")
-                .tips(&["The game's own", "Speeds, inputs, timings", "Nothing over the ride"]),
-            Row::choice(Key::Speedometer, "Speedometer", &speed, at(&Speedometer::ALL, s.speedometer), "How the original's HUD shows your speed: the readout or the dial.")
+            Row::choice(Key::Hud, "HUD", &hud, at(&Overlay::ALL, s.overlay), "What a ride draws over the picture. HUD is openmx's own, sharp at any size; Original is the game's; Debug adds the port's numbers; None leaves the picture clean.")
+                .tips(&["Sharp at any size", "The game's own", "Speeds, inputs, timings", "Nothing over the ride"]),
+            Row::choice(Key::Speedometer, "Speedometer", &speed, at(&Speedometer::ALL, s.speedometer), "How the HUD shows your speed: the readout or the dial.")
                 .off_if(speed_off.is_some(), speed_off.unwrap_or("")),
             Row::choice(
                 Key::DrawDistance,

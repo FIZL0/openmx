@@ -23,6 +23,9 @@ use std::sync::OnceLock;
 /// The fonts, in the crate (OFL: `assets/fonts/OFL.txt`).
 pub const HEAVY_TTF: &[u8] = include_bytes!("../assets/fonts/MPLUSRounded1c-ExtraBold.ttf");
 pub const BOLD_TTF: &[u8] = include_bytes!("../assets/fonts/MPLUSRounded1c-Bold.ttf");
+/// The ride HUD's digital speedometer face (P121): DSEG7 Classic Bold Italic, a seven-segment
+/// display's lit segments only (OFL: `assets/fonts/DSEG-OFL.txt`).
+pub const DSEG_TTF: &[u8] = include_bytes!("../assets/fonts/DSEG7Classic-BoldItalic.ttf");
 
 /// Atlas texels to the em.
 pub const ATLAS_EM: f32 = 64.0;
@@ -70,7 +73,7 @@ pub struct Type {
 
 /// The characters the atlas holds: printable ASCII, and the few others the menus say, where the
 /// fonts have them.
-fn charset() -> impl Iterator<Item = char> {
+fn charset() -> impl Iterator<Item = char> + Clone {
     (' '..='~').chain(['·', '°', '…', '–', '—', '×', '✓'])
 }
 
@@ -80,16 +83,25 @@ pub fn ink() -> &'static Type {
     TYPE.get_or_init(Type::new)
 }
 
+/// The seven-segment digits (P121), made once a process: [`DSEG_TTF`] as both weights, holding
+/// only what a speedometer says.
+pub fn digits() -> &'static Type {
+    static TYPE: OnceLock<Type> = OnceLock::new();
+    TYPE.get_or_init(|| Type::of([DSEG_TTF, DSEG_TTF], "0123456789.-: ".chars()))
+}
+
 impl Type {
     fn new() -> Type {
-        let fonts = [
-            FontRef::try_from_slice(HEAVY_TTF).expect("the ExtraBold font reads"),
-            FontRef::try_from_slice(BOLD_TTF).expect("the Bold font reads"),
-        ];
+        Type::of([HEAVY_TTF, BOLD_TTF], charset())
+    }
+
+    /// The type of the two faces `ttfs` (ExtraBold's place, then Bold's), holding `chars`.
+    fn of(ttfs: [&'static [u8]; 2], chars: impl Iterator<Item = char> + Clone) -> Type {
+        let fonts = ttfs.map(|t| FontRef::try_from_slice(t).expect("the font reads"));
         let unit = fonts.clone().map(|f| ATLAS_EM / f.units_per_em().unwrap_or(1000.0));
         let mut fields: Vec<(usize, char, GlyphId, Field, f32)> = Vec::new();
         for (w, font) in fonts.iter().enumerate() {
-            for c in charset() {
+            for c in chars.clone() {
                 let id = font.glyph_id(c);
                 if id.0 == 0 && c != ' ' {
                     continue;
@@ -142,6 +154,12 @@ impl Type {
     fn glyph(&self, w: Weight, c: char) -> Option<&Glyph> {
         let g = &self.glyphs[w as usize];
         g.get(&c).or_else(|| g.get(&'?'))
+    }
+
+    /// How far above the baseline `c`'s ink reaches, in ems (to an atlas texel): what lines a
+    /// line's top up with something beside it, as the ascent cannot.
+    pub fn top(&self, w: Weight, c: char) -> f32 {
+        self.glyph(w, c).map_or(self.ascent, |g| -(g.at[1] + SPREAD) / ATLAS_EM)
     }
 
     /// How wide `text` is at `size` frame pixels to the em.
