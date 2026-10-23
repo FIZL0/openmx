@@ -558,6 +558,9 @@ struct Rig {
     /// How this player's two follow cameras' presets are framed now (P82), the bike's and the
     /// plane's: the original's as they were read, until the frame lays the player's own over them.
     framing: (chase::Framing, chase::Framing),
+    /// The two follow cameras' fields of view easing over a framing change (P119), the bike's and the
+    /// plane's.
+    fov_ease: (chase::FovEase, chase::FovEase),
     hud: Hud,
     /// The distance this player's odometer shows, under the original's overlay (V26).
     odometer: overlay::Odometer,
@@ -791,6 +794,10 @@ struct Args {
     /// framing, over the front end's Camera page. Unset, the page's, and without a front end the
     /// shipped default.
     camera_view: Option<menu::CameraView>,
+    /// `--trace-camera` (P119): one line a frame for each view of what its follow camera did — the
+    /// preset, the distance, the pitch, the field of view, the eye and the look-at — for finding a
+    /// camera that swings.
+    trace_camera: bool,
     /// Draw one frame posed from a moment of the original (V2) instead of riding: the moment file
     /// and the path to write that frame to.
     moment: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -2941,6 +2948,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             plane_camera: plane_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
+            fov_ease: Default::default(),
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
             bike_model,
@@ -2958,6 +2966,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             plane_camera,
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
+            fov_ease: Default::default(),
             // The riding overlay (P6). It is the shell's own furniture, so it is created here beside
             // the window rather than inside the simulation's `World`, and it reads the port's own
             // values at draw time instead of being fed them.
@@ -4098,9 +4107,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // picks the preset, the ported camera does everything else.
             // Whichever machine has the controller has the camera: the bike's, on the track's presets, or
             // the plane's, on its own file's.
-            let follow = match (seat.garage.up, &mut rig.plane_camera) {
-                (Kind::Biplane, Some(cam)) => cam,
-                _ => &mut rig.camera,
+            // With the field of view's ease over a framing change (P119), which is the camera's own.
+            let (follow, fov_ease) = match (seat.garage.up, &mut rig.plane_camera) {
+                (Kind::Biplane, Some(cam)) => (cam, &mut rig.fov_ease.1),
+                _ => (&mut rig.camera, &mut rig.fov_ease.0),
             };
             // The original's plane reset (the chord, a wreck's recovery) snaps the plane's camera onto
             // the spawn rather than letting it fly the whole way back (V29).
@@ -4160,7 +4170,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // the dirt on the first dip, and under the eye, which keeps it 4.8 ft over the ground
                 // (S103). This frame has no obstacle push-out — the base class's did, and the base
                 // class's frame is not the one the disc runs.
-                Some(follow.update(
+                let mut view = follow.update(
                     dt,
                     &rider,
                     F(NEAR_CLIP),
@@ -4176,7 +4186,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         short_viewport: aspect::short_viewport(display, view_w, view_h),
                     },
                     &mut world.place,
-                ))
+                );
+                view.fov = fov_ease.ease(view.fov, dt.0);
+                Some(view)
             };
             let view = match (view, &wreck_targets) {
                 (Some(_), Some(targets)) if wreck.on => Some(wreck.update(
@@ -4189,6 +4201,25 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 )),
                 (view, _) => view,
             };
+            if let (true, Some(v)) = (args.trace_camera, &view) {
+                let c = &follow.cam;
+                println!(
+                    "camera {i} {} {} preset {:?} distance {} pitch {} yaw {} fov {} eye {} {} {} at {} {} {}",
+                    pacer.ticks(),
+                    if wreck.on { "wreck" } else { "follow" },
+                    c.preset().name,
+                    c.distance.0,
+                    c.pitch.0,
+                    c.yaw.0,
+                    v.fov.0,
+                    v.position.x(),
+                    v.position.y(),
+                    v.position.z(),
+                    v.look_at.x(),
+                    v.look_at.y(),
+                    v.look_at.z(),
+                );
+            }
             let bike_look = vector(rider.target.forward);
             let pos = vector(rider.target.body_point);
             cameras.push(match &view {
@@ -5064,21 +5095,12 @@ fn set_display(rigs: &mut [Rig], layout: Layout, display: Display, bike: Option<
 
 /// A player's cameras onto the original's presets `bike` and `plane` as `framing` frames them (P82):
 /// the same reload as [`set_display`]'s, which keeps the preset each camera is on and clears the
-/// player's nudges. At [`chase::Framing::ORIGINAL`] the presets are the file's, untouched.
+/// player's nudges, and eases the field of view over ([`chase::reframe`], P119). At
+/// [`chase::Framing::ORIGINAL`] the presets are the file's, untouched.
 fn frame_rig(rig: &mut Rig, bike: &[Preset], plane: &[Preset], framing: (chase::Framing, chase::Framing)) {
-    let reload = |cam: &mut Race, presets: &[Preset]| {
-        if presets.is_empty() || cam.cam.presets.is_empty() {
-            return;
-        }
-        let at = cam.cam.preset.min(presets.len() - 1);
-        cam.cam.presets = presets.to_vec();
-        cam.cam.preset = at;
-        cam.cam.previous = at;
-        cam.cam.set_preset(at);
-    };
-    reload(&mut rig.camera, &chase::framed(bike, framing.0));
+    chase::reframe(&mut rig.camera, &chase::framed(bike, framing.0), &mut rig.fov_ease.0);
     if let Some(cam) = &mut rig.plane_camera {
-        reload(cam, &chase::framed(plane, framing.1));
+        chase::reframe(cam, &chase::framed(plane, framing.1), &mut rig.fov_ease.1);
     }
     rig.framing = framing;
 }
@@ -5388,6 +5410,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         speedometer: None,
         camera: START_CAMERA.to_string(),
         camera_view: None,
+        trace_camera: false,
         moment: None,
         wrecks: true,
         modifiers: game_sim::modifiers::Mods::original(),
@@ -5602,6 +5625,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--trace-brake" => args.trace_brake = true,
             "--trace-gas" => args.trace_gas = true,
             "--trace-feel" => args.trace_feel = true,
+            "--trace-camera" => args.trace_camera = true,
             "--trace-air" => args.trace_air = true,
             "--trace-switch" => {
                 args.trace_switch = Some(
@@ -5822,6 +5846,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --trace-switch N rides the throttle alone for N frames first;\n\
                      --trace-stick-y F:Y,... sets the stick's y from frame F on, each until\n\
                      the next, and adds the backflip's columns to --trace-feel's line;\n\
+                     --trace-camera prints each view's camera a frame (preset, distance, pitch,\n\
+                     field of view, eye and look-at) beside a ride;\n\
                      --trace-at X,Z,DEG starts the bike there instead of the start line, and\n\
                      --phy NAME rides the bike archive's NAME (pro125a.phy) instead of Race125P.phy,\n\
                      --set WORD the bike's own file of that set (race250a, pro500p) on its class,\n\
