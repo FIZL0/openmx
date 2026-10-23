@@ -630,3 +630,73 @@ impl Files {
         }
     }
 }
+
+/// What a world looks like by map (MD9): its ground's paint, and each map's light and sky.
+pub struct WorldLook {
+    pub paint: game_render::terrain::WorldPaint,
+    pub looks: game_render::scene::Looks,
+    /// Each map's sky, in the regions' order; `None` where its scene names none that reads.
+    pub skies: Vec<Option<game_render::sky::Sky>>,
+    /// Each map's name, for the log.
+    pub names: Vec<String>,
+}
+
+impl WorldMod {
+    /// The world rectangles each tile owns, in the world's order: its `keep` cells moved by its offset.
+    pub fn regions(&self) -> game_render::terrain::Regions {
+        let owned = self.pieces[..self.tile_count]
+            .iter()
+            .map(|p| {
+                let [x0, z0, x1, z1] = p.tile.keep.map(|k| k as f32 * p.tile.spacing.0);
+                let [ax, az] = p.tile.at.map(|a| a.0);
+                [ax + x0, az + z0, ax + x1, az + z1]
+            })
+            .collect();
+        game_render::terrain::Regions { owned }
+    }
+
+    /// Every tile's ground paint, light and sky, read from its own folder: its terrain's pages with its
+    /// own detail map (MD4), its scene's lights and fog, and the sky it names — looked for in its
+    /// folder first and then in `fallback`, the ride's other archives, as the ride itself looks.
+    /// A tile whose terrain has no pages is dirt on the ground; one that does not read is dirt and
+    /// the home tile's light.
+    pub fn look(&self, fallback: &[Res], dirt: [f32; 3], home: game_render::world::Lighting) -> WorldLook {
+        let regions = self.regions();
+        let (mut tiles, mut lights, mut skies, mut names) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for p in &self.pieces[..self.tile_count] {
+            let at = p.tile.at.map(|a| a.0);
+            let read = || -> Result<_, String> {
+                let res = Res::folder(&p.dir)?;
+                let (_, stem, scn) = scene_of(&res)?;
+                let text = game_render::ini::text(&scn);
+                let scene = p.scene.as_ref().ok_or("a join has no scene")?;
+                let bytes = track_mods::terrain_bytes(&res, &scene.terrain_file)?;
+                let terrain = Terrain::parse(&bytes)?;
+                let [sx, sz] = p.tile.samples();
+                // Sixteen samples a leaf, as `Ground::paged` counts them.
+                let leaves = (sx / 16, sz / 16);
+                let detail = game_render::terrain::Pages::load_detail(std::slice::from_ref(&res), &stem);
+                let pages = game_render::terrain::Pages::of(&terrain, p.tile.spacing.0, leaves)
+                    .map(|pg| pg.with_detail(detail, game_render::terrain::detail_multiplier(&text)));
+                let mut look = game_render::scene::Scene::parse(&text);
+                move_look(&mut look, p.tile.at);
+                let sky = game_render::sky::Sky::load(std::slice::from_ref(&res), &text).or_else(|| game_render::sky::Sky::load(fallback, &text));
+                Ok((pages, game_render::world::Lighting::of(&look), sky))
+            };
+            let (pages, light, sky) = read().unwrap_or_else(|e| {
+                println!("world: {} looks like dirt: {e}", p.tile.name);
+                (None, home, None)
+            });
+            tiles.push(game_render::terrain::PaintTile { at, pages });
+            lights.push(light);
+            skies.push(sky);
+            names.push(p.tile.name.clone());
+        }
+        WorldLook {
+            paint: game_render::terrain::WorldPaint { regions: regions.clone(), tiles, dirt },
+            looks: game_render::scene::Looks { regions, lights },
+            skies,
+            names,
+        }
+    }
+}

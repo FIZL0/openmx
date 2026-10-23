@@ -441,6 +441,7 @@ pub fn view_fov(horizontal_degrees: f32, aspect: f32) -> f32 {
 }
 
 /// How a scene's lights and fog are applied, pulled out of the `.scn` once.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lighting {
     pub sun: V3,
     pub sun_color: [f32; 3],
@@ -463,6 +464,36 @@ impl Lighting {
             fog_near,
             fog_far,
         }
+    }
+
+    /// Several lightings mixed by their shares (MD9: a world's maps' across a join): every colour and
+    /// distance by share, the sun's direction too and then made unit again. `None` for no share.
+    pub fn blend(parts: &[(Lighting, f32)]) -> Option<Lighting> {
+        let total: f32 = parts.iter().map(|(_, w)| w.max(0.0)).sum();
+        if parts.is_empty() || total <= 0.0 {
+            return None;
+        }
+        let mix3 = |of: &dyn Fn(&Lighting) -> [f32; 3]| {
+            parts.iter().fold([0.0f32; 3], |a, (l, w)| {
+                let c = of(l);
+                [0, 1, 2].map(|k| a[k] + c[k] * w.max(0.0) / total)
+            })
+        };
+        let mix = |of: &dyn Fn(&Lighting) -> f32| parts.iter().map(|(l, w)| of(l) * w.max(0.0) / total).sum::<f32>();
+        let sun = mix3(&|l| [l.sun.x, l.sun.y, l.sun.z]);
+        let first = &parts.iter().max_by(|a, b| a.1.total_cmp(&b.1))?.0;
+        let sun = match v3(sun[0], sun[1], sun[2]) {
+            s if s.len() > 1e-6 => s.norm(),
+            _ => first.sun,
+        };
+        Some(Lighting {
+            sun,
+            sun_color: mix3(&|l| l.sun_color),
+            ambient: mix3(&|l| l.ambient),
+            fog_color: mix3(&|l| l.fog_color.map(f32::from)).map(|c| c.round().clamp(0.0, 255.0) as u8),
+            fog_near: mix(&|l| l.fog_near),
+            fog_far: mix(&|l| l.fog_far),
+        })
     }
 }
 
