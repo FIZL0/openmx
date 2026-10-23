@@ -253,9 +253,11 @@ def cmd_check(argv: list[str]) -> int:
     ap.add_argument('--no-gate', action='store_true', help='skip the concurrency gate (one-off, interactive)')
     ap.add_argument('--all', action='store_true',
                     help="also gate.toml's [[slow]] binaries the work did not touch (a run's merge check)")
-    ap.add_argument('--rerun', action='append', default=[], metavar='ARGS',
-                    help="one failed test binary as the summary's \"to rerun pass\" line gives it, one quoted "
-                         "string (the run's retest of a load flake); repeatable")
+    # extend + nargs='+': the run's retest passes every failed binary after one --rerun, each a quoted string
+    # (`--rerun '-p a --test x' '-p b --test y'`); with append, all but the first landed in `extra` unsplit.
+    ap.add_argument('--rerun', action='extend', nargs='+', default=[], metavar='ARGS',
+                    help="failed test binaries as the summary's \"to rerun pass\" lines give them, each one quoted "
+                         "string (the run's retest of a load flake)")
     a, unknown = ap.parse_known_args(argv)
     extra = a.extra + unknown + [w for r in a.rerun for w in shlex.split(r)]
 

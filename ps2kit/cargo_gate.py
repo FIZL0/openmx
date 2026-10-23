@@ -10,7 +10,7 @@ It only replaces a bare, whole-workspace run (`./kit check` and `./kit done` wit
 `./kit check -- -p X --test Y` still runs the configured command as written, since a filter is one binary
 anyway.
 
-Two more things a whole run does, both read from a tracked `gate.toml` at the root of the checkout. It is
+More that a whole run does, all read from a tracked `gate.toml` at the root of the checkout. It is
 tracked rather than in `kit.toml` because every worktree has to agree on it, and `kit.toml` stays per-machine.
 
     [[slow]]                       # a binary the gate runs only when the work touches what it proves
@@ -19,6 +19,9 @@ tracked rather than in `kit.toml` because every worktree has to agree on it, and
 
     [flaky]                        # failures rerun alone once before they count: load, not the change
     tests = ["-p openmx --test lobby::", "::two_builds_since_the_id"]
+
+    [alone]                        # binaries that time themselves: run one by one after the pool
+    tests = ["-p openmx --test one_fps"]
 
 A slow binary runs anyway under `./kit check --all`, which is what a run's merge check uses, and a filtered
 check names it directly. `paths` are fnmatch globs (`*` crosses `/`) against what this branch changed since
@@ -177,6 +180,11 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
         except (OSError, ValueError):
             last = {}
         bins.sort(key=lambda b: -float(last.get(b.args, 0)))
+        # A binary that holds itself to a frame budget measures the machine as much as the code, and a pool
+        # of other binaries is a busy machine: those run after it, one at a time.
+        solo = set(' '.join(x.split()) for x in (gc.get('alone') or {}).get('tests', []))
+        later = [b for b in bins if b.args in solo]
+        pooled = [b for b in bins if b.args not in solo]
         workers = max(1, jobs)
         benv = {**env, 'RUST_TEST_THREADS': env.get('RUST_TEST_THREADS', str(jobs))}
 
@@ -188,8 +196,10 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             dfut = pool.submit(doc_tests)
-            list(pool.map(lambda b: _run_one(b, benv), bins))
+            list(pool.map(lambda b: _run_one(b, benv), pooled))
             drc, dout = dfut.result()
+        for b in later:
+            _run_one(b, benv)
 
         # A failure that is load and not the change gets one more go, alone, now the pool is quiet.
         flaky = [re.compile(p) for p in (gc.get('flaky') or {}).get('tests', [])]

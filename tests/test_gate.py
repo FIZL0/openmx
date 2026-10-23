@@ -3,7 +3,7 @@
 
     python3 tests/test_gate.py          (needs cargo; no kit.toml, no network, about ten seconds)
 
-What it holds the gate to: the binaries really run at the same time, a `[[slow]]` binary is left out
+What it holds the gate to: the binaries really run at the same time (an `[alone]` one after them), a `[[slow]]` binary is left out
 until the work touches its paths (or `--all`), a `[flaky]` failure gets one lone rerun and counts as a
 pass only when that rerun passes, and a real failure still fails, with cargo's own rerun line in the log.
 """
@@ -98,6 +98,12 @@ def test_gate() -> None:
         rc, notes = gate()
         check(rc == 0 and '-p a --test slow' in (w / 'log').read_text(), 'touching its paths runs the slow one')
         g('checkout', '-q', '--', 'a/src/lib.rs', cwd=w)
+        gt = (w / 'gate.toml').read_text()
+        (w / 'gate.toml').write_text(gt + '\n[alone]\ntests = ["-p a --test two"]\n')
+        rc, _ = gate()
+        s = {k: float(v) for k, v in (l.split() for l in (w / 'stamps').read_text().splitlines())}
+        check(rc == 0 and s['two+'] >= s['one-'], 'an [alone] binary runs after the pool, not beside it')
+        (w / 'gate.toml').write_text(gt)
         rc, notes = gate(all_slow=True)
         check(rc == 0 and '-p a --test slow' in (w / 'log').read_text(), '--all runs it untouched')
 
