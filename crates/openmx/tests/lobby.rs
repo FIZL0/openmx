@@ -37,7 +37,7 @@ use openmx_net::{Board, Cmd, Disc, Event, HOST, Net, Online, Pick, Relay, Room};
 
 fn tap(menu: &mut Menu, reader: &mut Reader, control: Control) -> Vec<Act> {
     let mut acts = Vec::new();
-    for report in [Report::from_buttons(control.mask()), Report::idle()] {
+    for report in [Report::from_buttons(control.mask()), Report::idle(), Report::idle(), Report::idle()] {
         acts.push(menu.step(reader.read(&report)));
     }
     acts
