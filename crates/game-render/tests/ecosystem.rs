@@ -8,7 +8,7 @@
 //! Needs the user's own disc, so every test skips with the reason when it is not there.
 
 use game_render::disc::{Disc, Res};
-use game_render::eco::{self, Draw, Ecosystem, Grove, Lod, Look, Part};
+use game_render::eco::{self, Draw, Ecosystem, Foliage, Grove, Lod, Look, Part};
 use game_render::mat::v3;
 use game_render::scene::Scene;
 use game_render::world::{Assets, Camera};
@@ -85,8 +85,10 @@ fn free09s_ecosystem_places_the_originals_trees_and_bushes() {
 
     let mut assets = Assets::default();
     let mut grove = Grove::load(&archives, &look, &place.terrain, &terrain, &mut assets).expect("the .esb reads").expect("free09 has one");
-    // The original's rule; the smooth one is V55's, tested below.
+    // The original's rule and leaves; the smooth rule is V55's and the cut-out leaves V56's, tested
+    // below.
     grove.lod = Lod::Original;
+    grove.foliage = Foliage::Original;
     let e = &grove.ecosystem;
     assert_eq!((e.version, e.plants.len()), (2, 726));
     assert_eq!(e.probability.as_deref(), Some("Free09_TreeProbability.tga"));
@@ -704,4 +706,118 @@ fn the_densest_view_draws_no_slower() {
     println!("free09's densest view: the original's rule {:.2} ms ({} triangles), the smooth one {:.2} ms ({})", best[0], plants[0], best[1], plants[1]);
     assert!(plants[1] > 1000, "the view has its plants: {} triangles", plants[1]);
     assert!(best[1] <= best[0] * 1.10 + 0.2, "smooth {:.2} ms against the original's {:.2}", best[1], best[0]);
+}
+
+// V56: trees seen through trees. Presentation only: none of it reaches the sim.
+
+/// free09's first plant (a TreeC) twice, the far one `apart` feet further from the camera and moved
+/// aside by its width, so it stands behind the near one's edge; both drawn as models; with the camera `d` feet from the near one, and the scene with neither, the near one
+/// alone, the far one alone and both.
+fn two_trees(disc: &mut Disc, foliage: Foliage, d: f32, apart: f32) -> ([Scene; 4], Assets, Camera) {
+    let (mut scene, mut assets, plant) = lone_plant(disc, 0, Lod::Smooth);
+    let grove = scene.ecosystem.take().unwrap();
+    let camera = riding_at(&plant, d);
+    let along = v3(0.6, 0.0, 0.8);
+    let aside = v3(0.8, 0.0, -0.6).scale(plant.width);
+    let far = eco::Plant { pos: plant.pos.add(along.scale(apart)).add(aside), ..plant };
+    let archives = archives(disc, "free09");
+    let scenes = [vec![], vec![plant], vec![far], vec![plant, far]].map(|plants| {
+        let mut e = grove.ecosystem.clone();
+        e.plants = plants;
+        // Models at every distance: the leaves' cut-out is what is under test, not the handover.
+        let mut g = Grove::new(e, 1.0e5, 1.0e5, &archives, &mut assets);
+        g.foliage = foliage;
+        Scene { ecosystem: Some(g), ..scene.clone() }
+    });
+    (scenes, assets, camera)
+}
+
+/// Of the pixels where the far tree is drawn when alone and the near tree is see-through (drawn as
+/// near as no change to the empty frame), the share that show the far tree when both are drawn;
+/// and how many such pixels there were. Each frame is RGB, the four in [`two_trees`]' order.
+fn far_shows_through(frames: &[Vec<u8>; 4]) -> (f32, usize) {
+    let differ = |a: &[u8], b: &[u8], by: i32| a.iter().zip(b).map(|(&a, &b)| (a as i32 - b as i32).abs()).sum::<i32>() > by;
+    let (mut behind, mut shown) = (0, 0);
+    for i in 0..frames[0].len() / 3 {
+        let px = |k: usize| &frames[k][i * 3..i * 3 + 3];
+        if differ(px(2), px(0), 6) && !differ(px(1), px(0), 6) {
+            behind += 1;
+            if !differ(px(3), px(2), 12) {
+                shown += 1;
+            }
+        }
+    }
+    (shown as f32 / behind.max(1) as f32, behind)
+}
+
+/// The distances the near tree is seen from, and how far behind it the far one stands.
+const THROUGH: [f32; 3] = [60.0, 150.0, 260.0];
+const APART: f32 = 40.0;
+
+/// Under the cut-out foliage the far tree shows through every see-through texel of the near one,
+/// on the software renderer; under the original's materials a few in a hundred of them hide it
+/// (the leaves' texture has a band of part-alpha texels at its edges, and any alpha writes depth).
+#[test]
+fn a_tree_shows_through_a_nearer_trees_leaves_in_software() {
+    let Some(mut disc) = disc() else { return };
+    let (w, h) = (960, 720);
+    for foliage in [Foliage::Cutout, Foliage::Original] {
+        for d in THROUGH {
+            let (scenes, assets, camera) = two_trees(&mut disc, foliage, d, APART);
+            let frames = scenes.each_ref().map(|s| {
+                let mut frame = game_render::Frame::new(w, h, [0, 0, 0]);
+                game_render::draw_scene(&mut frame, s, &assets, &[], &camera);
+                frame.color
+            });
+            let (share, behind) = far_shows_through(&frames);
+            println!("software, {foliage:?}, {d} ft: the far tree shows through {:.2}% of {behind} pixels", share * 100.0);
+            assert!(behind > 0, "{d} ft: the far tree is behind the near one's leaves ({behind} pixels)");
+            if foliage == Foliage::Cutout {
+                assert!(share >= 0.995, "software, {d} ft: the far tree shows through only {:.2}%", share * 100.0);
+            } else {
+                assert!(share < 0.99, "software, {d} ft: the original's leaves no longer hide the far tree ({:.2}%)", share * 100.0);
+            }
+        }
+    }
+}
+
+/// The same on the GPU, where the original's materials hide the far tree behind the near one's
+/// filtered and mipped part-alpha edges as well.
+#[test]
+fn a_tree_shows_through_a_nearer_trees_leaves_on_the_gpu() {
+    use game_render::gpu::{Renderer, Scene3, Target, View};
+    let Some(mut disc) = disc() else { return };
+    let mut gpu = match Renderer::headless() {
+        Ok(r) => r,
+        Err(why) => {
+            println!("SKIPPED: {why}");
+            return;
+        }
+    };
+    let (w, h) = (960u32, 720u32);
+    let texture = gpu.offscreen(w, h);
+    let target_view = texture.create_view(&Default::default());
+    gpu.set_graphics(game_render::world::Graphics::Full);
+    gpu.set_sky(None);
+    for foliage in [Foliage::Cutout, Foliage::Original] {
+        for d in THROUGH {
+            let (scenes, assets, camera) = two_trees(&mut disc, foliage, d, APART);
+            let frames = scenes.each_ref().map(|s| {
+                let light = game_render::world::Lighting::of(s);
+                gpu.set_scene(s);
+                let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &[] }];
+                let target = Target { view: &target_view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+                gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+                gpu.read(&texture)
+            });
+            let (share, behind) = far_shows_through(&frames);
+            println!("gpu, {foliage:?}, {d} ft: the far tree shows through {:.2}% of {behind} pixels", share * 100.0);
+            assert!(behind > 0, "{d} ft: the far tree is behind the near one's leaves ({behind} pixels)");
+            if foliage == Foliage::Cutout {
+                assert!(share >= 0.995, "gpu, {d} ft: the far tree shows through only {:.2}%", share * 100.0);
+            } else {
+                assert!(share < 0.99, "gpu, {d} ft: the original's leaves no longer hide the far tree ({:.2}%)", share * 100.0);
+            }
+        }
+    }
 }
