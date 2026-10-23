@@ -64,6 +64,9 @@ pub struct Hud {
     /// The binding table the bike's commands are read through, the seat's controller preset (P79):
     /// the shell sets it every frame from [`game_sim::Sim::table`].
     pub bindings: Table,
+    /// The settings' HUD scale (V52), 1.0 the panel's own size: the panel grows or shrinks about the
+    /// view's bottom-left corner, and grows no larger than the view holds.
+    pub scale: f32,
 }
 
 impl Hud {
@@ -77,6 +80,7 @@ impl Hud {
             vehicle: "bike".to_string(),
             flight: None,
             bindings: Table::SHIPPED,
+            scale: 1.0,
         }
     }
 
@@ -113,7 +117,38 @@ impl Hud {
         if !self.on {
             return;
         }
-        let (x, y) = panel_at(frame.width, frame.height);
+        let fit = (frame.width as f32 / (PANEL_W + 2 * PAD) as f32).min(frame.height as f32 / (PANEL_H + 2 * PAD) as f32);
+        let k = if self.scale > 1.0 { self.scale.min(fit).max(1.0) } else { self.scale.max(0.1) };
+        if k == 1.0 {
+            let (x, y) = panel_at(frame.width, frame.height);
+            self.body(frame, x, y, pad, rider, riding);
+            return;
+        }
+        // Another size (V52): the panel at its own into a black frame of its size, then over the
+        // view's corner at `k`, nearest pixel — the scene darkened under all of it, and the
+        // panel's ink, never black, wherever it drew.
+        let mut own = Frame::new(PANEL_W as usize, PANEL_H as usize, [0; 3]);
+        self.body(&mut own, 0, 0, pad, rider, riding);
+        let (w, h) = ((PANEL_W as f32 * k).round() as i32, (PANEL_H as f32 * k).round() as i32);
+        let (x, y) = crate::aspect::corner((frame.width, frame.height), (w, h), crate::aspect::Corner::BottomLeft, PAD);
+        panel(frame, x, y, w, h);
+        let (fw, fh) = (frame.width as i32, frame.height as i32);
+        for py in y.max(0)..(y + h).min(fh) {
+            let sy = ((py - y) * PANEL_H / h).min(PANEL_H - 1) as usize;
+            for px in x.max(0)..(x + w).min(fw) {
+                let sx = ((px - x) * PANEL_W / w).min(PANEL_W - 1) as usize;
+                let from = (sy * own.width + sx) * 3;
+                let ink = &own.color[from..from + 3];
+                if ink != [0; 3] {
+                    let to = (py as usize * frame.width + px as usize) * 3;
+                    frame.color[to..to + 3].copy_from_slice(ink);
+                }
+            }
+        }
+    }
+
+    /// The panel with its top-left at `x`, `y`.
+    fn body(&self, frame: &mut Frame, x: i32, y: i32, pad: &Pad, rider: &Rider, riding: bool) {
         panel(frame, x, y, PANEL_W, PANEL_H);
 
         // Three bands down the panel: the numbers, the sixteen controls, and the sticks with the
@@ -550,8 +585,16 @@ pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>])
 /// the label under them, and under that how far a Down or Up hold is towards firing (`holding`,
 /// [`game_sim::markers::holding`]: P88's bar, back with the hold in P106; Left and Right fire on the
 /// press and leave it empty).
+#[allow(dead_code)] // the tests', the shell draws at the settings' scale
 pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, others: &[usize], holding: u32) {
-    let scale = (frame.height as i32 / 224).max(1);
+    draw_markers_scaled(frame, pick, filled, label, others, holding, 1.0);
+}
+
+/// [`draw_markers`] at the settings' HUD scale (V52), `hud_scale` times its own size, still top centre:
+/// its whole pixels a font pixel are the view's 224-line steps times the scale, rounded down, and
+/// never fewer than one.
+pub fn draw_markers_scaled(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, others: &[usize], holding: u32, hud_scale: f32) {
+    let scale = ((frame.height as i32 / 224) as f32 * hud_scale).floor().max(1.0) as i32;
     let (boxw, gap) = (7 * scale, 3 * scale);
     let tags: Vec<String> = others.iter().map(|p| format!("P{}", p + 1)).collect();
     let tag_w = |t: &str| t.chars().count() as i32 * 4 * scale + 2 * scale;
@@ -783,6 +826,68 @@ mod tests {
         assert_eq!(at(320, 100), [20, 60, 120], "the middle of the picture");
         assert_eq!(at(639, 447), [20, 60, 120], "the bottom right corner");
         assert_ne!(at(8, 448 - PANEL_H as usize / 2), [20, 60, 120], "inside the panel");
+    }
+
+    /// The changed pixels' bounds (left, top, right, bottom) of a frame drawn over [`blank`]'s colour.
+    fn changed(frame: &Frame) -> (usize, usize, usize, usize) {
+        let mut b = (usize::MAX, usize::MAX, 0, 0);
+        for (i, p) in frame.color.chunks_exact(3).enumerate() {
+            if p != [20, 60, 120] {
+                let (x, y) = (i % frame.width, i / frame.width);
+                b = (b.0.min(x), b.1.min(y), b.2.max(x + 1), b.3.max(y + 1));
+            }
+        }
+        b
+    }
+
+    /// V52: the settings' HUD scale sizes the panel about the view's bottom-left corner — 150 % half
+    /// again as big, 50 % half the size, the same margin to the corner, the ink still there — and the
+    /// markers' slot display about the top's middle. A view too small for the scale gets the most
+    /// it holds, never past its edges.
+    #[test]
+    fn the_hud_scale_sizes_the_panel_and_the_markers_display() {
+        let pad = polled(Report::idle());
+        let rider = rider();
+        let mut hud = Hud::new(true);
+        let (w, h) = (1920, 1080);
+        let mut at = |scale: f32| {
+            hud.scale = scale;
+            let mut frame = Frame::new(w, h, [20, 60, 120]);
+            hud.draw(&mut frame, pad.pad(0), &rider, true);
+            (changed(&frame), frame)
+        };
+        let ((x0, _, x1, y1), _) = at(1.0);
+        assert_eq!((x0, x1 - x0, y1), (PAD as usize, PANEL_W as usize, h - PAD as usize));
+        for scale in [1.5, 0.5] {
+            let ((x0, y0, x1, y1), frame) = at(scale);
+            let size = ((PANEL_W as f32 * scale).round() as usize, (PANEL_H as f32 * scale).round() as usize);
+            assert_eq!((x0, y1), (PAD as usize, h - PAD as usize), "{scale}: pinned to the corner");
+            assert_eq!((x1 - x0, y1 - y0), size, "{scale}");
+            // The white ink is there, not only the darkened panel.
+            let inked = frame.color.chunks_exact(3).filter(|p| *p == INK).count();
+            assert!(inked > 100, "{scale}: {inked} pixels of ink");
+        }
+        // A 640x360 view holds the panel at no more than it fits.
+        hud.scale = 1.5;
+        let mut small = Frame::new(640, 360, [20, 60, 120]);
+        hud.draw(&mut small, pad.pad(0), &rider, true);
+        let (x0, y0, x1, y1) = changed(&small);
+        assert!(x0 >= PAD as usize && y0 >= PAD as usize && x1 <= 640 - PAD as usize && y1 <= 360 - PAD as usize, "{:?}", (x0, y0, x1, y1));
+        assert!(x1 - x0 > PANEL_W as usize, "grown as far as it fits");
+
+        // The markers' display: whole pixels a font pixel, 3 for 2 at 150 % of a 448-line view.
+        let banner = |scale: f32| {
+            let mut frame = Frame::new(1280, 448, [20, 60, 120]);
+            draw_markers_scaled(&mut frame, Pick::Slot(1), [true, false, true, false, false], "marker 2 empty", &[1], 0, scale);
+            changed(&frame)
+        };
+        let (a, b) = (banner(1.0), banner(1.5));
+        assert_eq!((b.2 - b.0) * 2, (a.2 - a.0) * 3);
+        assert_eq!((b.3 - b.1) * 2, (a.3 - a.1) * 3);
+        assert_eq!(a.0 + a.2, b.0 + b.2, "both centred");
+        let mut plain = Frame::new(1280, 448, [20, 60, 120]);
+        draw_markers(&mut plain, Pick::Slot(1), [true, false, true, false, false], "marker 2 empty", &[1], 0);
+        assert_eq!(changed(&plain), a, "100 % is the display as it was");
     }
 
     /// V24: in every view of a 4:3, 16:9, 21:9 and portrait window, alone and split two and four
