@@ -3190,7 +3190,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, sim, traffic, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
