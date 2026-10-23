@@ -6,7 +6,7 @@
 
 [run]
 command = "./kit"
-test = "./kit check"
+test = "./kit check --all"
 rules = "AGENT.md"
 untested = ["*.md", ".github/*"]
 # A post-merge failure is rerun alone before it parks the branch: the netplay/lobby/udp kind of test times out
