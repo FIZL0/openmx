@@ -1081,6 +1081,9 @@ struct Args {
     /// `--plants smooth|original` (P126): how the plants change from model to picture, V55's smooth
     /// way or the original's; the front end's setting when not given.
     plants: Option<game_render::eco::Lod>,
+    /// `--wheels original` (V59): the bike's wheels drawn turning at the original's own angle and
+    /// never blurred, rather than held under the wagon-wheel alias and blurred when they spin fast.
+    original_wheels: bool,
     /// `--headless`: no window and no host pad — every seat rides an idle pad, or the first rides
     /// `--play`'s tape — and the frame is drawn all the same, for `--shot` and for the tests.
     headless: bool,
@@ -4693,6 +4696,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // The rider's two axes and not zeros: in the air they are the crossup sweep the
                     // chassis' clip is played at, and zero is the sweep's far end (P29).
                     let request = Chassis::riding(&seat.sim.rider);
+                    chassis.original_wheels = args.original_wheels;
                     perf.time(Stage::Animation, || chassis.frame(dt, want, &request, Drive::of(ride)));
                     if let Some(loaded) = assets.models.get_mut(&rig.bike_model).filter(|_| !gpu_on) {
                         perf.time(Stage::Skinning, || chassis.skin_into(loaded));
@@ -5183,6 +5187,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // See-through for a while after a put-back, the bike, its parts and the rider alike (P57).
                 let alpha = seat.sim.rider.ghost.shown();
                 actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha });
+                // A wheel spinning fast is drawn blurred (V59): see-through copies of it trailing
+                // behind, the chassis' own model with every other node shrunk away. Not on a put-back
+                // ghost, which is see-through already.
+                if let (Some(chassis), true) = (&rig.chassis, alpha >= 1.0) {
+                    for copy in chassis.blur_copies(&shown.chassis) {
+                        gpu_poses.push(copy.pose);
+                        let pose = Some(gpu_poses.len() - 1);
+                        actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha: copy.alpha });
+                    }
+                }
                 let node_now = |name: &str| -> Option<M4> {
                     let blended = rig.chassis.as_ref().and_then(|c| c.stance.set.skeleton.find(name));
                     blended.and_then(|j| shown.chassis.get(j).copied()).or_else(|| {
@@ -6271,6 +6285,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         aspect: Aspect::default(),
         aspect_asked: false,
         plants: None,
+        original_wheels: false,
         headless: false,
         frames: None,
         draw_fps: None,
@@ -6519,6 +6534,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--split" => args.split = Split::parse(&next("h or v")?)?,
             "--aspect" => (args.aspect, args.aspect_asked) = (Aspect::parse(&next("fill or 4:3")?)?, true),
+            "--wheels" => match next("blurred or original")?.as_str() {
+                "original" => args.original_wheels = true,
+                "blurred" => args.original_wheels = false,
+                word => return Err(format!("--wheels: {word:?} is not blurred or original")),
+            },
             "--plants" => {
                 let word = next("smooth or original")?;
                 args.plants = Some(game_render::eco::Lod::from_word(&word).ok_or_else(|| format!("--plants: {word:?} is not smooth or original"))?);
