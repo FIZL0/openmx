@@ -181,6 +181,7 @@ impl crate::hash::State for State {
         w.u8("spin.clip", s.clip);
         w.bool("spin.came_round", s.came_round);
         w.bool("spin.wrecked", s.wrecked);
+        w.bool("spin.forward", s.forward);
         w.u8("flip_row", self.flip_row as u8);
         w.f("side.now", self.side.now);
         w.u8("side.head", self.side.head as u8);
