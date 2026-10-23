@@ -111,6 +111,9 @@ pub struct Flight {
     pub measure: Measure,
     /// Front left, front right, and the tail wheel.
     pub tires: [Tire; 3],
+    /// Each wheel's braking pushed again through the centre of gravity, so many times over (the
+    /// gear's [`phy::Gear::cg_braking`]): zero but for the Biplane acceleration modifier (P116).
+    pub cg_braking: [F; 3],
     /// The pad as the plane's input step left it.
     pub pad: Pad,
     pub surfaces: Surfaces,
@@ -271,6 +274,7 @@ impl Flight {
         // The two front legs take the brake and the tail wheel the steer: the pointers the original's
         // gear keeps to the plane's brake and steer words.
         f.tires = [0, 1, 2].map(|k| tire(&plane.gear[k], k < 2, k == 2));
+        f.cg_braking = plane.gear.map(|g| g.cg_braking);
         f.collider = Collider {
             collidable: Some(COLLIDABLE),
             actors: ACTORS,
@@ -283,7 +287,8 @@ impl Flight {
 
     /// **The plane's numbers changed under a flight going on** (P98): what [`Flight::new`] took off
     /// the file and the game modifiers ([`crate::modifiers::Mods::plane`]) reach — the engine's power
-    /// and the speed its prop is fully efficient from, the zero-lift drag, the gravity scale, the turn's
+    /// and the speed its prop is fully efficient from, the zero-lift drag, the throttle's rate and the
+    /// wheels' braking force with the elevator's drag (P116), the gravity scale, the turn's
     /// lift, induced drag, pitch moments and pitch-rate target (P108) — taken again from `plane`, the
     /// flight left where and how it is. The gravity force is the file's scale's only while flying: a
     /// wreck's is `WreckGravity`'s, and its recovery builds the new scale's.
@@ -292,6 +297,14 @@ impl Flight {
         self.engine.max_power = fresh.engine.max_power;
         self.engine.full_efficiency_speed = fresh.engine.full_efficiency_speed;
         self.aero.drag0 = fresh.aero.drag0;
+        // The acceleration's brakes (P116): how fast the throttle moves, and each wheel's braking
+        // force; and the elevator's drag, which the acceleration scales with the others.
+        self.joystick.throttle_increment = fresh.joystick.throttle_increment;
+        self.aero.drag_de = fresh.aero.drag_de;
+        for (t, n) in self.tires.iter_mut().zip(&fresh.tires) {
+            t.brake_friction = n.brake_friction;
+        }
+        self.cg_braking = fresh.cg_braking;
         // The turn's (P108).
         self.aero.lift_scale = fresh.aero.lift_scale;
         self.aero.drag1 = fresh.aero.drag1;
@@ -318,6 +331,13 @@ impl Flight {
         back.engine.max_power = self.engine.max_power;
         back.engine.full_efficiency_speed = self.engine.full_efficiency_speed;
         back.aero.drag0 = self.aero.drag0;
+        // The acceleration's brakes (P116).
+        back.joystick.throttle_increment = self.joystick.throttle_increment;
+        back.aero.drag_de = self.aero.drag_de;
+        for (t, n) in back.tires.iter_mut().zip(&self.tires) {
+            t.brake_friction = n.brake_friction;
+        }
+        back.cg_braking = self.cg_braking;
         back.gravity_scale = self.gravity_scale;
         if back.crash.reason == 0 {
             back.gravity = gravity_force(back.gravity_scale, back.mass);
@@ -509,6 +529,14 @@ impl Flight {
         }
         for t in &mut self.tires {
             t.force(&mut self.body, &mount, h);
+        }
+        // The Biplane acceleration modifier's harder braking (P116), through the centre of gravity:
+        // k times the force at the contacts would pitch the plane onto its nose against a gravity that
+        // is the file's. Nothing at all as the file builds the plane.
+        for (t, c) in self.tires.iter().zip(self.cg_braking) {
+            if c != F::ZERO {
+                self.body.add_force(t.braking(c));
+            }
         }
     }
 
@@ -879,6 +907,15 @@ impl State for Flight {
         w.field("measure", &MeasureWalk(&self.measure));
         for (name, t) in ["tire0", "tire1", "tire2"].into_iter().zip(&self.tires) {
             w.field(name, &TireWalk(t));
+        }
+        // Only a plane the acceleration modifier brakes harder has these (P116), so the file's plane
+        // walks, and hashes, as before.
+        if self.cg_braking.iter().any(|&c| c != F::ZERO) {
+            w.group("cg_braking", |w| {
+                for (name, c) in ["tire0", "tire1", "tire2"].into_iter().zip(self.cg_braking) {
+                    w.f(name, c);
+                }
+            });
         }
         let pad = &self.pad;
         w.group("pad", |w| {

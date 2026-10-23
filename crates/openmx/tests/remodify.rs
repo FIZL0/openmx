@@ -356,7 +356,7 @@ fn the_biplane_takes_a_change_in_flight() {
     let res = disc.res(&name).expect("machine.res");
     let bytes = res.read_suffix(game_sim::phy::BIPLANE_PHY).expect("machine.res carries biplane.phy");
     let stock = game_sim::phy::Plane::read_bytes(&bytes);
-    for to in [with(Knob::PlaneSpeed, 200), with(Knob::Gravity, 50), with(Knob::AirDrag, 30), Mods::original()] {
+    for to in [with(Knob::PlaneSpeed, 200), with(Knob::PlaneAccel, 200), with(Knob::PlaneAccel, 50), with(Knob::Gravity, 50), with(Knob::AirDrag, 30), Mods::original()] {
         let mut moved = game_sim::flight::Flight::new(&stock);
         to.replane(0, &stock, &mut moved);
         let mut file = stock;
