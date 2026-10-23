@@ -540,7 +540,15 @@ impl RideHud<'_> {
             rig.odometer.step([b.x(), b.y(), b.z()]);
         }
         let score = &seat.sim.rider.score;
-        rig.ride_hud.update(now, score, |id| self.table.display_name(0, game_sim::trick::Trick(id)).to_string());
+        // A trick pack's extras (MD16) are named by the rider's set, as the ride log names them.
+        let set = &seat.sim.rider.set;
+        rig.ride_hud.update(now, score, |id| {
+            let t = game_sim::trick::Trick(id);
+            match t.extra().and_then(|_| set.stunt(t)) {
+                Some(stunt) => stunt.display_name.clone(),
+                None => self.table.display_name(0, t).to_string(),
+            }
+        });
         // A split is digital, as the original's code forces it with two riders or more.
         let speedometer = if self.ridden.len() > 1 { menu::Speedometer::Digital } else { self.speedometer };
         let gauges = overlay::Gauges { score: score.total.0.max(0.0) as u32, ..gauges(seat, rig, speedometer) };
