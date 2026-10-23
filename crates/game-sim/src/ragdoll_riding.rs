@@ -110,6 +110,17 @@ impl Riding {
         tail
     }
 
+    /// **A pose off the clip table is in charge** (V61): the two words the actor's mode reads for
+    /// it ([`Actor::posed`], [`Actor::latched`]) are the vehicle animation's `from_table` and
+    /// `holding`, which the body's own machine reads at the same point of the tick
+    /// ([`crate::rider_anim::Body::mode`]). So `posed` is whether that machine chose
+    /// [`crate::rider_anim::Mode::Posed`] this tick, and while it is the ragdoll is not placed: a
+    /// gesture, a no-hander or a backflip is drawn as its clip wrote it, with nothing held.
+    pub fn posed_off_the_table(&mut self, posed: bool) {
+        self.actor.posed = posed;
+        self.actor.latched = false;
+    }
+
     /// The bones have been placed and stepped: [`Riding::nodes`] is the rider.
     pub fn placed(&self) -> bool {
         self.actor.placed
