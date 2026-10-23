@@ -954,6 +954,12 @@ struct Args {
     /// `--trace-at X,Z,DEG`: put the bike on the ground at `x, z` facing `DEG` instead of on the start
     /// line.
     trace_at: Option<(f32, f32, f32)>,
+    /// `--world-ground all`: build a world's whole ground before the first frame instead of the
+    /// pieces in reach of the start (MD17).
+    world_ground_all: bool,
+    /// `--world-reach LOAD,DROP`: how near a world's pieces are loaded and how far they are let go,
+    /// in feet, instead of the desktop's ([`game_sim::tiles::Reach::DESKTOP`]).
+    world_reach: Option<game_sim::tiles::Reach>,
     /// `--trace-switch N`: under `--trace-feel`, ride the first N frames on the throttle alone and only
     /// then take the controls the other flags ask for — a full brake from top speed, or a turn at speed.
     trace_switch: Option<u32>,
@@ -1945,7 +1951,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // A world's ground (MD8): every tile and join, each asked in its own coordinates.
     let mut tiled = match &world_mod {
         Some(w) => {
-            let t = w.tiled(game_sim::tiles::Reach::DESKTOP)?;
+            let t = w.tiled(args.world_reach.unwrap_or(game_sim::tiles::Reach::DESKTOP))?;
             println!("{}", w.line(&t));
             Some(Box::new(t))
         }
@@ -3165,29 +3171,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         },
     );
 
-    // A world's ground is every piece's, unpainted: each tile's paint is its own (MD9). It is built
-    // before the renderer is taken, so the window can be pumped between pieces: a world's takes long
-    // enough that a window left unpumped is called not responding (P127 moves the whole load off it).
-    let world_chunks = match (&world_mod, &sim) {
-        (Some(w), Land::Tiles(t)) if gpu_on => {
-            let at = Instant::now();
-            let chunks = worlds::chunks(w, t, ground.chunk_cells(), [spawn.x, spawn.z], &mut || {
-                if let Some(s) = window.as_mut() {
-                    s.poll();
-                }
-            });
-            println!("world: {} ground chunks built in {:.2} s", chunks.len(), at.elapsed().as_secs_f32());
-            Some(chunks)
-        }
-        _ => None,
-    };
-
-    // Everything the GPU draws, uploaded once: the props, the sky, the whole ground and every model.
+    // A world's ground on the GPU (MD17): the pieces near the start now, the rest as the riders come.
+    let mut ground_stream: Option<worlds::GroundStream> = None;
+    // Everything the GPU draws, uploaded once: the props, the sky, the ground and every model.
     if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
+        // Where the ride's streaming will look from on its first tick: the rider, and the parked plane.
+        let starts: Vec<[f32; 2]> = std::iter::once(at).chain(garage.plane.as_ref().map(|p| p.at)).map(|p| [p.x(), p.z()]).collect();
         let at = Instant::now();
-        let (chunks, paint) = match world_chunks {
-            Some(chunks) => (chunks, game_render::gpu::GroundPaint::Bare),
-            None => {
+        // A world's ground is its pieces', unpainted: each tile's paint is its own (MD9).
+        let (chunks, paint) = match (&world_mod, &sim) {
+            (Some(_), Land::Tiles(_)) => (Vec::new(), game_render::gpu::GroundPaint::Bare),
+            _ => {
                 let paint = match (&ground.paint, &ground.pages) {
                     (Some(splat), _) => game_render::gpu::GroundPaint::Splat(splat),
                     (None, Some(pages)) => game_render::gpu::GroundPaint::Pages(pages),
@@ -3200,11 +3194,33 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         r.set_scene(&look);
         r.set_sky(sky.as_ref());
         r.set_ground_painted(&chunks, paint, ground::DIRT)?;
+        if let (Some(w), Land::Tiles(t)) = (&world_mod, &sim) {
+            let (reach, cells) = (t.reach, ground.chunk_cells());
+            let ground_at = Instant::now();
+            let (mut stream, first) = worlds::GroundStream::start(w, cells, reach, &starts, args.world_ground_all);
+            r.set_ground_streamed(cells, paint, ground::DIRT, t.area.width.0.hypot(t.area.depth.0))?;
+            for (i, c) in &first {
+                r.add_ground_piece(*i as u32, c)?;
+            }
+            for line in stream.take_log() {
+                println!("{line}");
+            }
+            println!(
+                "world ground: {} of {} pieces built before the ride in {:.2} s ({}; load {:.0} ft, drop {:.0} ft)",
+                first.len(),
+                w.pieces.len(),
+                ground_at.elapsed().as_secs_f32(),
+                if args.world_ground_all { "all" } else { "near the start" },
+                reach.load.0,
+                reach.drop.0
+            );
+            ground_stream = Some(stream);
+        }
         r.upload_all(&assets);
         let (models, materials, textures) = r.uploaded();
         println!(
             "gpu: {models} models, {materials} materials, {textures} textures and {} ground chunks uploaded in {:.2} s",
-            chunks.len(),
+            r.ground_chunks().0,
             at.elapsed().as_secs_f32()
         );
         // What the graphics setting makes of the disc's fog (V32): the original's is its fog and far
@@ -4251,6 +4267,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     println!("{line}");
                 }
             }
+            // Its ground on the GPU, the same way (MD17).
+            if let Some(stream) = &mut ground_stream {
+                let near: Vec<[f32; 2]> = near.iter().map(|p| [p.x(), p.z()]).collect();
+                let changes = stream.update(&near);
+                if let Some(r) = renderer_of(&mut offscreen, window) {
+                    for change in changes {
+                        match change {
+                            worlds::Change::Add(i, chunks) => r.add_ground_piece(i as u32, &chunks)?,
+                            worlds::Change::Drop(i) => r.drop_ground_piece(i as u32),
+                        }
+                    }
+                }
+                for line in stream.take_log() {
+                    println!("{line} at tick {}", pacer.ticks());
+                }
+            }
         }
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
@@ -5228,6 +5260,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // And where the first rider ended, so a ride on a track can be seen to have gone somewhere (MD2).
         let end = world.seats[0].sim.rider.ride.position();
         println!("end: {:.0}, {:.0}, {:.0}", end.x(), end.y(), end.z());
+        // And a world's ground there as the GPU holds it, to compare a streamed ground with the
+        // whole one (MD17).
+        if ground_stream.is_some()
+            && let (Some(w), Some(t)) = (&world_mod, world.place.tiled())
+            && let Some((i, _, _)) = t.owner(F(end.x()), F(end.z()))
+            && let Some(r) = renderer_of(&mut offscreen, window)
+        {
+            let hash = r.ground_piece_hash(i as u32).map_or("not held".to_string(), |h| format!("{h:#018x}"));
+            println!("world ground under the rider: {} {hash}", w.pieces[i].tile.name);
+        }
         // And the first player's plane, flown or not, for a tape that switched into it (P102).
         if let Some(flight) = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.as_ref()) {
             println!("plane hash {:#018x} ({})", game_sim::hash::of(flight), world.seats[0].garage.up.name());
@@ -5805,6 +5847,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace_air: false,
         phy: None,
         trace_at: None,
+        world_ground_all: false,
+        world_reach: None,
         trace_switch: None,
         trace_stick_y: Vec::new(),
         record: None,
@@ -6068,6 +6112,22 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--headless" => args.headless = true,
             "--no-sound" => args.sound = false,
             "--timings" => args.timings = true,
+            "--world-ground" => {
+                args.world_ground_all = match next("all or near")?.as_str() {
+                    "all" => true,
+                    "near" => false,
+                    w => return Err(format!("--world-ground: all or near, not {w}")),
+                }
+            }
+            "--world-reach" => {
+                let v: Vec<f32> =
+                    next("load,drop")?.split(',').map(|w| w.trim().parse()).collect::<Result<_, _>>().map_err(|_| "--world-reach: load,drop in feet")?;
+                let [load, drop] = v[..] else { return Err("--world-reach: load,drop in feet".into()) };
+                if !(load > 0.0 && drop >= load) {
+                    return Err("--world-reach: 0 < load <= drop".into());
+                }
+                args.world_reach = Some(game_sim::tiles::Reach { load: F(load), drop: F(drop) });
+            }
             "--trace-picture" => args.trace_picture = true,
             "--frames" => {
                 args.frames = Some(
@@ -6161,6 +6221,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
+                            [--world-ground all|near] [--world-reach LOAD,DROP]\n\
                             [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
