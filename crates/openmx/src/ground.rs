@@ -371,4 +371,70 @@ impl<'a> Ground<'a> {
         frame.draw(&batch, &paint, light.fog_color);
         drawn
     }
+
+    /// One world piece's ground queued into `batch` (MD15), as [`Ground::draw`] draws a track's but in
+    /// world feet: the piece's cells within `radius` samples of `around` (in the world) that `owns`
+    /// keeps (by the cell's own sample), moved by the piece's offset `at`, lit by the sun on the
+    /// stored normals and left for [`draw_world`]'s paint. The triangles queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_piece(
+        &self,
+        batch: &mut Batch,
+        camera: &Camera,
+        size: (usize, usize),
+        light: &Lighting,
+        around: V3,
+        radius: u32,
+        at: [f32; 2],
+        owns: &dyn Fn(u32, u32) -> bool,
+    ) -> usize {
+        let view_projection = camera.view_projection(size.0, size.1);
+        let forward = camera.at.sub(camera.eye).norm();
+        let [ax, az] = at;
+        let (cx, cz) = (((around.x - ax) / self.spacing).floor() as i64, ((around.z - az) / self.spacing).floor() as i64);
+        let radius = radius as i64;
+        let mut drawn = 0;
+        for sz in (cz - radius).max(0)..(cz + radius).min(self.samples_z as i64 - 1) {
+            for sx in (cx - radius).max(0)..(cx + radius).min(self.samples_x as i64 - 1) {
+                let (sx, sz) = (sx as u32, sz as u32);
+                if !owns(sx, sz) {
+                    continue;
+                }
+                let Some(quad) = self.terrain.cell(sx, sz, 1) else { continue };
+                let (x0, z0) = (ax + sx as f32 * self.spacing, az + sz as f32 * self.spacing);
+                let middle = v3(x0 + self.spacing * 0.5, self.spacing * (quad.height[0].0 + quad.height[3].0) * 0.5, z0 + self.spacing * 0.5);
+                let to_middle = middle.sub(camera.eye);
+                if to_middle.len() > light.fog_far || to_middle.dot(forward) < -2.0 * self.spacing {
+                    continue;
+                }
+                let corner = [(0, 0, 0), (1, 1, 0), (3, 1, 1), (2, 0, 1)];
+                let shade = corner.map(|(i, dx, dz): (usize, u32, u32)| {
+                    let point = v3(x0 + dx as f32 * self.spacing, self.spacing * quad.height[i].0, z0 + dz as f32 * self.spacing);
+                    let n = quad.normal[i];
+                    let normal = v3(n[0].0, n[1].0, n[2].0).norm();
+                    let lambert = (-normal.dot(light.sun)).max(0.0);
+                    let lit = [0, 1, 2].map(|k| light.ambient[k] + light.sun_color[k] * lambert);
+                    let fog = ((point.sub(camera.eye).len() - light.fog_near) / (light.fog_far - light.fog_near).max(1.0)).clamp(0.0, 1.0);
+                    Shade { clip: view_projection.clip(point), uv: [point.x, point.z], light: lit, fog }
+                });
+                for tri in [[0, 1, 2], [0, 2, 3]] {
+                    batch.triangle([shade[tri[0]], shade[tri[1]], shade[tri[2]]], PAGED, Mode::CUT_OUT);
+                    drawn += 1;
+                }
+            }
+        }
+        drawn
+    }
+}
+
+/// A world's ground queued by [`Ground::queue_piece`], drawn painted by `paint` (0..255 at a world
+/// point, before any light: the world's paint, MD9).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn draw_world(frame: &mut Frame, batch: &Batch, light: &Lighting, paint: &(dyn Fn(f32, f32) -> [f32; 3] + Sync)) {
+    let paint = |_: u32, x: f32, z: f32| {
+        let c = paint(x, z);
+        [c[0].clamp(0.0, 255.0) as u8, c[1].clamp(0.0, 255.0) as u8, c[2].clamp(0.0, 255.0) as u8, 255]
+    };
+    frame.draw(batch, &paint, light.fog_color);
 }
