@@ -483,7 +483,8 @@ fn a_freerides_pause_opens_it_online() {
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.iter().all(|a| *a == Act::Stay) && m.screen() == Some(Screen::Pause), "{acts:?}");
     // the last row is still Quit, under Seats (N14)
-    let acts = taps_acts(&mut m, &mut r, &[Control::Down, Control::Down, Control::Cross]);
+    // (which asks first since P110: Up off Stay onto Quit)
+    let acts = taps_acts(&mut m, &mut r, &[Control::Down, Control::Down, Control::Cross, Control::Up, Control::Cross]);
     assert!(acts.contains(&Act::Quit), "{acts:?}");
 
     // a guest dropping in
