@@ -426,6 +426,13 @@ const RIDER_GROUP: usize = 0;
 type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u32);
 
 /// A marker's tick (P88) as the console says it.
+/// Whether the session markers' bar, its hold bar and its label are drawn over a view (P117): with
+/// any overlay but `none`, or under `none` once F3 has put the debug HUD up, which they are part of.
+/// The markers work all the same, and their portals are the world's, drawn whatever this says.
+fn marker_bar_shown(overlay: menu::Overlay, debug_hud: bool) -> bool {
+    overlay != menu::Overlay::None || debug_hud
+}
+
 fn marker_line(did: markers::Did) -> String {
     use markers::{Did, Pick};
     let what = |p: Pick| match p {
@@ -4390,7 +4397,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                     _ => None,
                 };
-                let banner = shown_markers.get(v).and_then(Option::as_ref);
+                let banner = shown_markers.get(v).and_then(Option::as_ref).filter(|_| marker_bar_shown(overlay_mode, rig.hud.on));
                 if rig.hud.on || banner.is_some() {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| {
@@ -4740,7 +4747,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 _ => None,
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
-            if let Some(Some((pick, filled, label, others, holding))) = shown_markers.get(v) {
+            if let Some(Some((pick, filled, label, others, holding))) = shown_markers.get(v)
+                && marker_bar_shown(overlay_mode, rig.hud.on)
+            {
                 hud::draw_markers(target, *pick, *filled, label, others, *holding);
             }
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
