@@ -48,7 +48,13 @@
 //! with the radar counted from the view's bottom-left corner and the speedometer from its
 //! bottom-right, so a wide or a narrow window (V24) moves them into its corners rather than
 //! stretching them. A view too small for both at that size (four to a screen) gets them smaller, to
-//! fit: they take 311 by 150 layout pixels between them.
+//! fit: they take 311 by 149 layout pixels between them.
+//!
+//! The settings' HUD scale (V52, [`Art::scale`]) multiplies that scale, each part still counted from
+//! its own corner, so it grows or shrinks about that corner — up to the size where the two would
+//! meet or leave the view, so a four-way split of a window under about 2:1 holds less than 150 %.
+//! The switch pop-up stays at the original's size. The Minimap setting ([`Art::minimap`]) leaves the
+//! radar out and the rest where it was.
 
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
@@ -184,8 +190,9 @@ const PRELOAD_LIT: [u8; 4] = [88, 44, 10, 255];
 const PRELOAD_INSET: f32 = 3.0;
 
 /// The width and height the two parts need between them, in layout pixels: the radar's left edge at
-/// 23 to the dial's right at 608 counted from the other side, and the dial's top to the bottom.
-const NEEDS: (f32, f32) = (151.0 + 160.0, 150.0);
+/// 23 to the dial's right at 608 counted from the other side, and the radar's top (299, above the
+/// dial's 301) to the bottom.
+const NEEDS: (f32, f32) = (151.0 + 160.0, 149.0);
 
 /// What a speed in feet a second reads in miles an hour, never below zero.
 pub fn mph(speed: f32) -> f32 {
@@ -701,6 +708,12 @@ pub struct Art {
     question: Font,
     /// `yearlingdashextrabold_18`, its button's word.
     answer: Font,
+    /// Whether the radar is drawn (V52, the settings' Minimap): off, the rose, the rider's arrow,
+    /// the other riders' marks and every icon on it go, and the rest stays where it was.
+    pub minimap: bool,
+    /// The HUD's size over the original's (V52, the settings' HUD scale, 1.0 the original's): each
+    /// part grows or shrinks about its own corner of the view, and no larger than the view holds.
+    pub scale: f32,
 }
 
 /// A rider's name and number as the HUD shows them (P86).
@@ -811,6 +824,8 @@ impl Art {
             offers: Vec::new(),
             question,
             answer,
+            minimap: true,
+            scale: 1.0,
         })
     }
 
@@ -828,7 +843,7 @@ impl Art {
     ) -> Drawn {
         let (w, h) = (frame.width, frame.height);
         let place = Place::of((w, h), window, v);
-        self.paint(&mut Pen::new(Ink::Frame(frame), (w, h), window), place, riders, v, span, gauges)
+        self.paint(&mut Pen::new(Ink::Frame(frame), (w, h), window, self.scale), place, riders, v, span, gauges)
     }
 
     /// Every picture [`Art::sprites`] counts into, in its order: the textures, then the five fonts'
@@ -858,49 +873,19 @@ impl Art {
     ) -> Drawn {
         let ink = Ink::Sprites { out, at: (view.0 as f32, view.1 as f32) };
         let place = Place::of((view.2, view.3), window, v);
-        self.paint(&mut Pen::new(ink, (view.2, view.3), window), place, riders, v, span, gauges)
+        self.paint(&mut Pen::new(ink, (view.2, view.3), window, self.scale), place, riders, v, span, gauges)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn paint(&self, pen: &mut Pen, place: Place, riders: &[Ridden], v: usize, span: f32, gauges: &Gauges) -> Drawn {
-        let me = &riders[v];
-        let speed = me.speed.0;
+        let speed = riders[v].speed.0;
         let mut drawn = Drawn::default();
 
-        // The radar: the rose turned under the fixed arrow, the other riders between them.
-        let own = [me.target.body_point.x(), me.target.body_point.z()];
-        let forward = [me.target.forward.x(), me.target.forward.z()];
-        let turn = radar_turn(forward);
-        pen.corner = Corner::BottomLeft;
-        if let Some(t) = self.texture("freestyle_radar") {
-            pen.turned(t, RADAR_AT, (RADAR_SIZE, RADAR_SIZE), turn, [255; 4]);
+        // The radar: the rose turned under the fixed arrow, the other riders between them — unless
+        // the minimap is off (V52).
+        if self.minimap {
+            self.radar(pen, riders, v, span, &mut drawn);
         }
-        // Under the riders' marks: the start zones, the standing machines, the markers (P92).
-        for &blip in self.radar.get(v).into_iter().flatten() {
-            let p = radar_icon(own, forward, blip, span);
-            if let Icon::Marker { slot, selected } = blip.icon {
-                self.marker(pen, p.at, slot, selected);
-            } else if let Some(t) = self.texture(p.texture) {
-                pen.turned(t, p.at, p.size, p.turn, p.tint);
-            }
-            drawn.icons.push((blip.icon, pen.px(p.at)));
-        }
-        for (i, r) in riders.iter().enumerate() {
-            if i == v {
-                continue;
-            }
-            let at = radar_mark(own, forward, [r.target.body_point.x(), r.target.body_point.z()], span);
-            self.icon(pen, "map_icon_hit_freestyle", at, MARK_SIZE, HUMAN_MARK);
-            drawn.marks.push((i, pen.px(at)));
-            if let Some(tag) = self.tags.get(i).map(Tag::mark).filter(|t| !t.is_empty()) {
-                let (x, y) = (at.0 + MARK_SIZE / 2.0 + 1.0, at.1 - MARK_SIZE);
-                pen.text((&self.label, LABEL), &tag, x, y, false, HUMAN_MARK);
-                drawn.mark_tags.push((i, tag));
-            }
-        }
-        self.icon(pen, "map_icon_player_freestyle", RADAR_AT, PLAYER_SIZE, PLAYER_COLOUR);
-        drawn.player = pen.px(RADAR_AT);
-        drawn.turn = turn;
 
         // The score, top left.
         pen.corner = Corner::TopLeft;
@@ -985,6 +970,45 @@ impl Art {
         drawn
     }
 
+    /// The radar of view `v`'s rider: the rose turned under the fixed arrow, the start zones, the
+    /// standing machines and the markers (P92) on it, the other riders' marks over them.
+    fn radar(&self, pen: &mut Pen, riders: &[Ridden], v: usize, span: f32, drawn: &mut Drawn) {
+        let me = &riders[v];
+        let own = [me.target.body_point.x(), me.target.body_point.z()];
+        let forward = [me.target.forward.x(), me.target.forward.z()];
+        let turn = radar_turn(forward);
+        pen.corner = Corner::BottomLeft;
+        if let Some(t) = self.texture("freestyle_radar") {
+            pen.turned(t, RADAR_AT, (RADAR_SIZE, RADAR_SIZE), turn, [255; 4]);
+        }
+        // Under the riders' marks: the start zones, the standing machines, the markers (P92).
+        for &blip in self.radar.get(v).into_iter().flatten() {
+            let p = radar_icon(own, forward, blip, span);
+            if let Icon::Marker { slot, selected } = blip.icon {
+                self.marker(pen, p.at, slot, selected);
+            } else if let Some(t) = self.texture(p.texture) {
+                pen.turned(t, p.at, p.size, p.turn, p.tint);
+            }
+            drawn.icons.push((blip.icon, pen.px(p.at)));
+        }
+        for (i, r) in riders.iter().enumerate() {
+            if i == v {
+                continue;
+            }
+            let at = radar_mark(own, forward, [r.target.body_point.x(), r.target.body_point.z()], span);
+            self.icon(pen, "map_icon_hit_freestyle", at, MARK_SIZE, HUMAN_MARK);
+            drawn.marks.push((i, pen.px(at)));
+            if let Some(tag) = self.tags.get(i).map(Tag::mark).filter(|t| !t.is_empty()) {
+                let (x, y) = (at.0 + MARK_SIZE / 2.0 + 1.0, at.1 - MARK_SIZE);
+                pen.text((&self.label, LABEL), &tag, x, y, false, HUMAN_MARK);
+                drawn.mark_tags.push((i, tag));
+            }
+        }
+        self.icon(pen, "map_icon_player_freestyle", RADAR_AT, PLAYER_SIZE, PLAYER_COLOUR);
+        drawn.player = pen.px(RADAR_AT);
+        drawn.turn = turn;
+    }
+
     /// The original's switch pop-up for `machine` (P103): `ui\freestyleactivitystartmenu1.lyr`'s
     /// Flash popup, `free_popup_1.fsh`, as PCSX2 draws it on free09 — measured off its picture, since
     /// nothing here plays the movie. A dark see-through panel with round corners under the middle
@@ -992,6 +1016,10 @@ impl Art {
     /// pill holding the Circle and "Accept". Counted from the view's bottom edge and centred
     /// across it.
     fn offer(&self, pen: &mut Pen, machine: Machine, drawn: &mut Drawn) {
+        // At the original's size whatever the HUD's scale (V52): grown, it would sit over the radar
+        // and the speedometer either side of it.
+        let scaled = pen.s;
+        pen.s = pen.base;
         pen.corner = Corner::Bottom;
         pen.rounded(OFFER_PANEL, OFFER_CORNER, OFFER_PANEL_COLOUR);
         let lines = wrap(&self.question, crate::vehicle::offer_text(machine), OFFER_WRAP / OFFER_SQUEEZE);
@@ -1011,6 +1039,7 @@ impl Art {
         let half = OFFER_BUTTON_SIZE / 2.0;
         drawn.offer = Some(lines);
         drawn.offer_button = Some(pen.px((OFFER_BUTTON.0 + half, OFFER_BUTTON.1 + half)));
+        pen.s = scaled;
     }
 
     /// A texture by name, and its place in [`Art::images`].
@@ -1121,15 +1150,21 @@ struct Pen<'a> {
     w: usize,
     h: usize,
     s: f32,
+    /// The scale at the original's size, before the settings' HUD scale (V52).
+    base: f32,
     corner: Corner,
 }
 
 impl<'a> Pen<'a> {
-    fn new(ink: Ink<'a>, (w, h): (usize, usize), window: (usize, usize)) -> Pen<'a> {
+    /// A pen for a view of `w` by `h` in a window of `window`'s size, the HUD at `scale` times the
+    /// original's size (V52) — and never so large that the two corners' parts meet or leave the view.
+    fn new(ink: Ink<'a>, (w, h): (usize, usize), window: (usize, usize), scale: f32) -> Pen<'a> {
         let (fw, fh) = (w.max(1) as f32, h.max(1) as f32);
         let whole = (window.0.max(1) as f32 / LAYOUT.0).min(window.1.max(1) as f32 / LAYOUT.1);
-        let s = whole.min(fw / NEEDS.0).min(fh / NEEDS.1);
-        Pen { ink, w, h, s, corner: Corner::BottomLeft }
+        let fits = (fw / NEEDS.0).min(fh / NEEDS.1);
+        let base = whole.min(fits);
+        let s = (base * scale.max(0.0)).min(fits);
+        Pen { ink, w, h, s, base, corner: Corner::BottomLeft }
     }
 
     /// A layout point in the view's pixels, counted from the current corner.
