@@ -5584,3 +5584,73 @@ fn stick_alone_does_no_trick_off_the_dpad() {
     assert!(shell.iter().zip(&alone).all(|(a, b)| a.hash == b.hash), "the let-go d-pad rode");
     assert_eq!(started(&stick), started(&original), "the stick starts the d-pad's trick");
 }
+
+/// MD21: the 360 of [`md16_three_sixty_comes_round_or_wrecks`], with the body run each tick on a
+/// library that has the pack's two 360 clips. Past 35° (`spin.clip` set) the body asks for
+/// threesixtyR and plays it; before, and once the bike has come round, it asks for what it did
+/// without. A library with no pack clips — every MX Unleashed body — never leaves the sixty, and one
+/// with only threesixtyL plays nothing for a right-hand 360.
+#[test]
+fn md21_a_three_sixty_plays_threesixty_r() {
+    use game_sim::motion::{Clip, ClipId};
+    use game_sim::vehicle_anim::{self as va, Library, PACK_EXTRA, SPIN_LEFT, SPIN_RIGHT, STATES};
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let script = md16_script(&[
+        (130, 0.0, 0.0, true, [false; 2]),
+        (150, -1.0, 0.0, true, [false; 2]),
+        (158, 1.0, 0.0, true, [false; 2]),
+        (166, 0.0, 0.0, false, [false; 2]),
+    ]);
+    let mut sixty = Library::default();
+    for s in 0..STATES {
+        sixty.clip[s] = Some(ClipId(s as u32));
+    }
+    let with = |states: &[i32]| {
+        let mut lib = sixty.clone();
+        for &s in states {
+            lib.pack[(s - PACK_EXTRA) as usize] = Some(ClipId(s as u32));
+        }
+        lib
+    };
+    // (spin.clip, the state the body asked for, the state it ran) per tick.
+    let ride = |lib: &Library| {
+        let mut r = Rider::new(&q, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), set.clone());
+        r.body_rates = va::Params { rate_stunt: F(3.0), rate_default: F(3.0), rate_pose: F(3.0), rate_hold: F(3.0),
+                                    rate_ready: F(1.0), cross_cap: F(0.25), start_phase: F::ZERO,
+                                    band: [F(7.333_333), F(14.666_666), F(22.0)] };
+        let (start, slope, length) = FLIP_RAMP;
+        let mut world = Jump { origin: Vf::new(0.0, 0.0, 0.0, 1.0), dir: Vf::new(0.0, 0.0, 1.0, 0.0), start, slope, length };
+        let mut now = Controls { gas: F::ONE, ..Controls::default() };
+        let clips = |_: ClipId| Clip::new(F(1.0), false);
+        let mut seen = Vec::new();
+        for tick in 0..400 {
+            if let Some((_, c)) = script.iter().find(|(at, _)| *at == tick) {
+                now = Controls { gas: F::ONE, ..c.clone() };
+            }
+            r.frame(&q, &tables, &now, DT, &mut world);
+            r.body_frame(DT, &now, rider::Gate::default(), lib, &clips);
+            let spin = r.ride.tricks.as_ref().map(|t| t.spin).unwrap_or_default();
+            seen.push((spin.clip, r.body.veh.want, r.body.veh.state));
+        }
+        seen
+    };
+
+    let both = ride(&with(&[SPIN_LEFT, SPIN_RIGHT]));
+    let turned: Vec<usize> = (0..both.len()).filter(|&t| both[t].0 != 0).collect();
+    assert!(turned.len() > 5, "the 360 turns past 35° for a while: {turned:?}");
+    assert!(turned.iter().all(|&t| both[t].1 == SPIN_RIGHT), "the body asks for threesixtyR while it turns");
+    let ran = turned.iter().filter(|&&t| both[t].2 == SPIN_RIGHT).count();
+    assert!(ran + 2 >= turned.len(), "and plays it ({ran} of {} ticks)", turned.len());
+    assert!(both.iter().all(|t| t.1 != SPIN_LEFT && t.2 != SPIN_LEFT), "never threesixtyL");
+
+    let none = ride(&sixty);
+    assert!(none.iter().all(|t| t.1 < STATES as i32 && t.2 < STATES as i32), "no pack, no state past the sixty");
+    let unturned: Vec<usize> = (0..both.len()).filter(|t| !turned.contains(t)).collect();
+    let first_after = turned.last().unwrap() + 1;
+    assert!(unturned.iter().filter(|&&t| t < turned[0]).all(|&t| both[t] == none[t]), "before the turn the body is the same");
+    assert_eq!(both[first_after].1, none[first_after].1, "once round it asks for what it did without");
+    let left_only = ride(&with(&[SPIN_LEFT]));
+    assert_eq!(left_only, none, "a right-hand 360 with only threesixtyL plays nothing new");
+}

@@ -335,6 +335,36 @@ impl Chassis {
         })
     }
 
+    /// **MD21:** a trick pack's bike clips in the stance's states past the sixty — its extras and the
+    /// 360s — bound to this chassis. Answers the names that found no clip.
+    pub fn add_pack(&mut self, pack: &crate::anim::PackClips, stunts: &[Stunt]) -> Vec<String> {
+        let Stance { set, lib, .. } = &mut self.stance;
+        pack.fill(set, lib, stunts, crate::anim::PackClips::bike_members)
+    }
+
+    /// [`Chassis::want`] with a trick pack's states (MD21): an extra in progress plays its own clip
+    /// and a 360 past its clip angle its own, when this chassis has them; otherwise what
+    /// [`Chassis::want`] says, which without a pack is all of it.
+    pub fn want_with_pack(&self, ride: &Ride, tricks: &Tricks) -> i32 {
+        let lib = &self.stance.lib;
+        let has = |state: i32| lib.clip(state).is_some().then_some(state);
+        let extra = tricks
+            .current
+            .extra()
+            .filter(|_| tricks.in_progress)
+            .and_then(|k| has(va::PACK_EXTRA + k as i32));
+        let spin = ride.tricks.as_ref().filter(|t| t.spin.clip != 0).and_then(|t| {
+            has(if t.spin.dir >= 1 { va::SPIN_RIGHT } else { va::SPIN_LEFT })
+        });
+        let want = Chassis::want(ride, tricks);
+        match (extra, spin) {
+            // a gesture slot outranks the pack, as on the rider
+            _ if (0..SLOTS as i32).contains(&want) => want,
+            (Some(state), _) | (None, Some(state)) => state,
+            _ => want,
+        }
+    }
+
     /// One frame: the machine's selection, the clock, the clip's pose, the five drives, the tree.
     ///
     /// `want` is the animation state to run — [`Chassis::want`] is the port's reading of it — and
