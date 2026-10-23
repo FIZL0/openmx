@@ -72,7 +72,8 @@ impl Command {
     pub const RESET_RIGHT: Command = Command(0x4d);
 
     /// The commands a rider on the bike has. Every one is read in a ride by the bike or the shell; the camera commands the shell does not follow
-    /// yet (look back, the other camera, the right stick's two modifiers) are not here.
+    /// yet (look back, the other camera) are not here, and nor are the right stick's two modifiers,
+    /// which the shell's camera reads beside the stick (P114) rather than the ride.
     pub const RIDE: [Command; 14] = [
         Command::GAS,
         Command::BRAKE,
