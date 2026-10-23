@@ -41,6 +41,16 @@ mod aspect;
 #[path = "../src/hud.rs"]
 #[allow(dead_code)]
 mod hud;
+// P125: the shell's pad layouts, and the jump test its picture cuts on.
+#[allow(dead_code)]
+#[path = "../src/window.rs"]
+mod window;
+#[allow(dead_code)]
+#[path = "../src/pad.rs"]
+mod pad;
+#[allow(dead_code)]
+#[path = "../src/pace.rs"]
+mod pace;
 
 use game_sim::input::{Control, PADS, Report};
 use game_sim::markers::{self, Did, HOLD_MS, Pick, SLOTS, Spot};
@@ -658,6 +668,221 @@ fn a_filled_slot_has_a_radar_mark() {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// P125: the plane's markers in the shell.
+// ---------------------------------------------------------------------------------------------------
+
+use game_sim::camera::{Preset, Race, Surface, Switches, View};
+
+/// The shell's plane camera constants (`main.rs`): its reverse threshold, speed reference, near clip
+/// and starting preset.
+const REVERSE_SPEED: f32 = 5.0;
+const SPEED_REFERENCE: f32 = 117.332_8;
+const NEAR_CLIP: f32 = 2.4;
+const PLANE_CAMERA: &str = "Flight Cam 1";
+
+/// The plane camera's presets off the disc (`BiplaneCPresets.ini`, in free06's archive), or `None`.
+fn plane_presets() -> Option<Vec<Preset>> {
+    let mut disc = game_render::disc::Disc::open_configured().ok()?;
+    let names: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().contains("free06")).collect();
+    let bytes = names.iter().find_map(|n| disc.res(n).ok()?.read_suffix("biplanecpresets.ini").ok())?;
+    let presets = Preset::read_bytes(&bytes, "");
+    (!presets.is_empty()).then_some(presets)
+}
+
+/// No ground under the camera: the floor never lifts the eye.
+struct Below;
+
+impl Surface for Below {
+    fn on_surface(&mut self, point: Vf) -> Vf {
+        Vf::new(point.x(), -1.0e6, point.z(), point.w())
+    }
+}
+
+/// A player in the shell: their ride, their garage, and their plane's camera as the shell builds it.
+struct Player {
+    sim: Sim,
+    garage: Garage,
+    cam: Race,
+    /// What the camera showed after the last tick.
+    view: Option<View>,
+}
+
+impl Player {
+    fn new(sim: Sim, garage: Garage, presets: Vec<Preset>) -> Player {
+        let mut cam = Race::new(presets, F(REVERSE_SPEED));
+        if let Some(start) = Preset::find(&cam.cam.presets, PLANE_CAMERA) {
+            cam.cam.set_preset(start);
+        }
+        cam.cam.snap = true;
+        cam.cam.speed_reference = F(SPEED_REFERENCE);
+        Player { sim, garage, cam, view: None }
+    }
+
+    fn plane(&self) -> &Plane {
+        self.garage.plane.as_ref().expect("a plane")
+    }
+
+    /// The camera after a tick, as the shell runs it: a plane that jumped takes it along
+    /// (`chase::follow_jump`, P125), unless `carried` is off — the shell before P125.
+    fn film(&mut self, before: Vf, carried: bool) {
+        let plane = self.plane();
+        let at = |v: Vf| game_render::mat::V3 { x: v.x(), y: v.y(), z: v.z() };
+        let jump = pace::jump(at(before), at(plane.at), plane.speed().0 * DT.0);
+        let speed = plane.speed();
+        if let (Some(by), true) = (jump, carried) {
+            chase::follow_jump(&mut self.cam.cam, [by.x, by.y, by.z], speed);
+        }
+        let rider = chase::ridden(&self.garage, &self.sim.rider.ride);
+        let switches = Switches { no_look_ahead: false, short_viewport: false };
+        self.view = Some(self.cam.update(DT, &rider, F(NEAR_CLIP), &self.sim.tables.ride.curve, switches, &mut Below));
+    }
+
+    /// The plane as the camera shows it: how far it is from the eye, feet, and how far off the
+    /// view's middle, radians.
+    fn in_view(&self) -> (f32, f32) {
+        let view = self.view.as_ref().expect("a filmed tick");
+        let to = self.plane().at.sub(view.position);
+        let dir = view.look_at.sub(view.position);
+        let len = |v: Vf| (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+        let cos = (to.x() * dir.x() + to.y() * dir.y() + to.z() * dir.z()) / (len(to) * len(dir));
+        (len(to), cos.clamp(-1.0, 1.0).acos())
+    }
+}
+
+/// Whether the camera shows the plane: in front of the eye, near the view's middle, and close.
+fn shown((far, off): (f32, f32)) -> bool {
+    far < 150.0 && off < 0.5
+}
+
+/// One shell tick for every player, as `World::simulate` runs them: every player's spot first, then
+/// each one's poll and [`Garage::pass`] in seat order, then the cameras. What each player's d-pad did.
+fn shell_tick(players: &mut [Player], reports: &[Report], carried: bool) -> Vec<Option<Did>> {
+    let mut world = Flat::default();
+    let spots: Vec<Spot> = players.iter().map(|p| p.garage.spot(&p.sim, &mut world)).collect();
+    let mut out = Vec::new();
+    for (me, (p, report)) in players.iter_mut().zip(reports).enumerate() {
+        let before = p.garage.plane.as_ref().map_or(Vf::new(0.0, 0.0, 0.0, 1.0), |plane| plane.at);
+        let controls = p.sim.poll(DT, &[*report, Report::missing()]).stick_alone();
+        out.push(p.garage.pass(&mut p.sim, DT, &controls, me, &spots, &mut world).1);
+        if p.garage.up == Kind::Biplane {
+            p.film(before, carried);
+        }
+    }
+    out
+}
+
+/// The pad's report as the shell hands it to a seat on the plane (main.rs's live pass): through the
+/// seat's layout, then the plane's scheme the right way up. `buttons` are the pad's own.
+fn shell_report(layout: pad::Scheme, buttons: u16, stick_y: u8) -> Report {
+    let mut r = Report::from_buttons(buttons);
+    r.set_axis(3, stick_y);
+    pad::PlaneScheme::default().fly(layout.ride(r), false)
+}
+
+/// Where a layout has the plane's throttle on the pad: R2 under the new one (P40), Cross under the
+/// original's.
+fn pad_gas(layout: pad::Scheme) -> u16 {
+    match layout {
+        pad::Scheme::Original => Control::Cross.mask(),
+        _ => Control::R2.mask(),
+    }
+}
+
+const LAYOUTS: [pad::Scheme; 2] = [pad::Scheme::New, pad::Scheme::Original];
+
+/// P125: on the plane, through the shell's own pass under both layouts, a pad's held Down puts the
+/// flight in slot 1; flown away, a held Up puts the plane back into it — the flight it kept, bit for
+/// bit, drawn where it was — and the plane's camera goes with it, so the plane is on the screen the
+/// tick it is put back and every tick after. Before P125 the camera stayed where the plane had been,
+/// looking away from it: the put-back happened, and nobody could see it.
+#[test]
+fn the_shells_plane_places_and_puts_back_in_view_under_both_layouts() {
+    let Some(presets) = plane_presets() else {
+        eprintln!("skipped: no disc");
+        return;
+    };
+    for layout in LAYOUTS {
+        let Some((sim, garage)) = hangar(Kind::Biplane) else { return };
+        let mut players = [Player::new(sim, garage, presets.clone())];
+        let gas = pad_gas(layout);
+        let tick = |players: &mut [Player], buttons: u16, y: u8| shell_tick(players, &[shell_report(layout, buttons, y)], true)[0];
+        for _ in 0..30 * 30 {
+            tick(&mut players, gas, 0x80);
+        }
+        assert!(!players[0].plane().on_ground(), "{layout:?}: thirty seconds of gas and the plane is not flying");
+        let placed = (0..30).find_map(|_| tick(&mut players, gas | Control::Down.mask(), 0x80));
+        assert_eq!(placed, Some(Did::Placed(0)), "{layout:?}: a held Down on the plane");
+        let kept = flight(&players[0].garage).clone();
+        let mark_at = markers::Mark::Plane(kept.clone()).position();
+
+        // Away: a pull, then level, until the plane is well clear of the marker.
+        for k in 0..300 {
+            tick(&mut players, gas, if k < 40 { 0xff } else { 0x80 });
+        }
+        let away = players[0].plane().at.sub(mark_at);
+        let away = (away.x() * away.x() + away.y() * away.y() + away.z() * away.z()).sqrt();
+        assert!(away > 300.0, "{layout:?}: only {away} ft from the marker");
+        assert!(shown(players[0].in_view()), "{layout:?}: the camera lost the plane in plain flight: {:?}", players[0].in_view());
+
+        // Up, held: the tick it fires, the plane is the flight it kept, where it kept it — and on
+        // the screen. The shell before P125, on the same tick, filmed empty sky.
+        let mut fired = None;
+        for _ in 0..30 {
+            let mut old = [Player { sim: players[0].sim.clone(), garage: players[0].garage.clone(), cam: Race { cam: players[0].cam.cam.clone() }, view: None }];
+            fired = tick(&mut players, gas | Control::Up.mask(), 0x80);
+            if fired.is_some() {
+                shell_tick(&mut old, &[shell_report(layout, gas | Control::Up.mask(), 0x80)], false);
+                assert!(!shown(old[0].in_view()), "{layout:?}: the uncarried camera saw the put-back after all: {:?}", old[0].in_view());
+                break;
+            }
+        }
+        assert_eq!(fired, Some(Did::Teleported(Pick::Slot(0))), "{layout:?}: a held Up on the plane");
+        assert!(*flight(&players[0].garage) == kept, "{layout:?}: the put-back is not the flight it kept");
+        assert_eq!(players[0].plane().at.to_bits()[..3], mark_at.to_bits()[..3], "{layout:?}: not drawn where it was put back");
+        assert!(shown(players[0].in_view()), "{layout:?}: the put-back is off the screen: {:?}", players[0].in_view());
+        for k in 0..60 {
+            tick(&mut players, gas, 0x80);
+            assert!(shown(players[0].in_view()), "{layout:?}: {k} ticks after the put-back the plane is off the screen: {:?}", players[0].in_view());
+        }
+        println!("P125 {layout:?}: placed, flown {away:.0} ft away, put back and filmed, {:?} after it", players[0].in_view());
+    }
+}
+
+/// P125, a split: player 1 flies the plane and player 2 rides the bike. On the plane a Left press
+/// steps the selection off the first slot onto the other player, and a held Up lands the plane by
+/// them, standing on the ground where their bike is, with the camera snapped onto it there.
+#[test]
+fn in_a_split_left_picks_the_other_player_and_up_lands_by_them() {
+    let Some(presets) = plane_presets() else {
+        eprintln!("skipped: no disc");
+        return;
+    };
+    for layout in LAYOUTS {
+        let Some((sim, garage)) = hangar(Kind::Biplane) else { return };
+        let bike = Sim::new(0x125);
+        let mut players = [Player::new(sim, garage, presets.clone()), Player::new(bike, Garage::new(Kind::Bike, None).unwrap(), presets.clone())];
+        let gas = pad_gas(layout);
+        let idle = shell_report(layout, 0, 0x80);
+        let tick = |players: &mut [Player], buttons: u16| shell_tick(players, &[shell_report(layout, buttons, 0x80), idle], true)[0];
+        for _ in 0..30 * 30 {
+            tick(&mut players, gas);
+        }
+        assert!(!players[0].plane().on_ground(), "{layout:?}: not flying");
+        assert_eq!(tick(&mut players, gas | Control::Left.mask()), Some(Did::Stepped(Pick::Player(1))), "{layout:?}: Left from slot 1");
+        tick(&mut players, gas);
+        let fired = (0..30).find_map(|_| tick(&mut players, gas | Control::Up.mask()));
+        assert_eq!(fired, Some(Did::Teleported(Pick::Player(1))), "{layout:?}: a held Up onto the other player");
+        tick(&mut players, 0);
+        let them = Spot::of(&players[1].sim.rider).at;
+        let plane = players[0].plane();
+        assert!(plane.on_ground(), "{layout:?}: the plane is not landed by them");
+        let (dx, dz) = (plane.at.x() - them.x(), plane.at.z() - them.z());
+        assert!(dx.hypot(dz) < 1.0, "{layout:?}: landed {dx}, {dz} ft from the other player");
+        assert!(shown(players[0].in_view()), "{layout:?}: the landed plane is off the screen: {:?}", players[0].in_view());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
 // P107: a set per machine.
 // ---------------------------------------------------------------------------------------------------
 
@@ -687,18 +912,15 @@ fn hangar(up: Kind) -> Option<(Sim, Garage)> {
     Some((Sim::new(0x107), Garage::new(up, Some(Plane::flying(spawn, flight))).unwrap()))
 }
 
-/// One shell pass for player 1 as `Seat::pass` runs it: the poll with the d-pad out of the ride, the
-/// garage's step on whichever machine is up, then the bike's markers or the plane's.
+/// One shell pass for player 1 as `Seat::pass` runs it: the poll with the d-pad out of the ride, then
+/// the shell's own [`Garage::pass`] — the garage's step on whichever machine is up, then the bike's
+/// markers or the plane's (P125).
 fn pass(sim: &mut Sim, garage: &mut Garage, report: Report) -> Option<Did> {
     let mut world = Flat::default();
     let spots = [garage.spot(sim, &mut world)];
     let reports = [report, Report::missing()];
     let controls = sim.poll(DT, &reports).stick_alone();
-    garage.step(sim, DT, &controls, &mut world);
-    if garage.up == Kind::Bike {
-        return markers::frame(sim, 0, &spots, &controls);
-    }
-    garage.markers(sim, 0, &spots, &[], &mut world)
+    garage.pass(sim, DT, &controls, 0, &spots, &mut world).1
 }
 
 /// Down or Up held through [`pass`]es until it fires at [`HOLD_MS`] (P106), the way a player puts a

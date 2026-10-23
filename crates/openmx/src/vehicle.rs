@@ -852,12 +852,37 @@ impl Garage {
                 plane.pose();
                 did?
             }
+            // Placed on the tick it lands (P125), as `lane_markers` places it online: left to the
+            // next step's reset, the plane was drawn and filmed at the flight it left for a tick, and
+            // its camera snapped onto that rather than onto the plane standing by the player.
             Did::Teleported(Pick::Player(p)) => match land(plane, spots[p].clone(), world) {
-                Some(()) => did?,
+                Some(()) => {
+                    if let Some(f) = plane.flight.as_mut() {
+                        f.reset(plane.spawn.at, plane.spawn.facing, &sim.tables.ride.acos);
+                    }
+                    plane.placed = true;
+                    plane.pose();
+                    did?
+                }
                 None => Did::Refused(Pick::Player(p)),
             },
             other => other,
         })
+    }
+
+    /// **One riding pass of the shell's** (`Seat::pass` past its poll, P125): [`Garage::step`] on
+    /// whichever machine has the controller, then that machine's session markers — the bike's
+    /// ([`markers::frame`]) or the plane's ([`Garage::markers`]) — for the player in seat `me`,
+    /// `spots` being where every player was before the pass, every one of them in the ride. What the
+    /// rider did, and what the d-pad did if it did anything.
+    pub fn pass(&mut self, sim: &mut Sim, dt: F, controls: &Controls, me: usize, spots: &[Spot], world: &mut dyn World) -> (rider::Frame, Option<Did>) {
+        let said = self.step(sim, dt, controls, world);
+        let did = match self.up {
+            Kind::Bike => markers::frame(sim, me, spots, controls),
+            // The plane's own set (P107), on the d-pad the plane no longer reads.
+            Kind::Biplane => self.markers(sim, me, spots, &[], world),
+        };
+        (said, did)
     }
 
     /// **Where the player is**, for a marker's Up onto them (P104): with the bike up, the bike's
