@@ -27,6 +27,11 @@
 //! scaled the backflip's torques, stays off the menu so a preset or a tape with `spin_rate` still
 //! rides as it did.
 //!
+//! P137's [`Knob::PlaneMaxG`] is the one exception to both: its value is a limit in g ([`MAX_G`])
+//! or off, and on, the flight runs a step of its own ([`crate::flight::Flight::max_g`]) that holds
+//! the elevator to the pull the limit allows and eases the ailerons above the corner speed. Off, the
+//! default, the flight never enters it.
+//!
 //! The text form ([`Mods::text`], [`Mods::parse`]) is what a tape, a preset and the online lobby
 //! carry: `word=percent` for a world modifier, `word.N=percent` for player N's, only the ones off
 //! their default. An empty text is the original game.
@@ -58,13 +63,14 @@ pub enum Knob {
     PlaneAccel,
     PlaneTopSpeed,
     PlaneTurn,
+    PlaneMaxG,
     Gravity,
     AirDrag,
     TimeScale,
 }
 
 /// How many modifiers there are.
-pub const KNOBS: usize = 17;
+pub const KNOBS: usize = 18;
 
 /// A modifier's default, which leaves its fields untouched: 100%.
 pub const ORIGINAL: u16 = 100;
@@ -72,6 +78,10 @@ pub const ORIGINAL: u16 = 100;
 /// The slider's step and its top, in percent.
 pub const STEP: u16 = 10;
 pub const MOST: u16 = 500;
+
+/// [`Knob::PlaneMaxG`]'s limits, in whole g (P137): its value is the limit itself, and its default,
+/// [`ORIGINAL`], is no limit at all.
+pub const MAX_G: (u16, u16) = (3, 9);
 
 impl Knob {
     pub const ALL: [Knob; KNOBS] = [
@@ -89,6 +99,7 @@ impl Knob {
         Knob::PlaneAccel,
         Knob::PlaneTopSpeed,
         Knob::PlaneTurn,
+        Knob::PlaneMaxG,
         Knob::Gravity,
         Knob::AirDrag,
         Knob::TimeScale,
@@ -110,6 +121,7 @@ impl Knob {
         Knob::PlaneAccel,
         Knob::PlaneTopSpeed,
         Knob::PlaneTurn,
+        Knob::PlaneMaxG,
         Knob::Gravity,
         Knob::AirDrag,
         Knob::TimeScale,
@@ -136,6 +148,7 @@ impl Knob {
             Knob::PlaneAccel => "plane_accel",
             Knob::PlaneTopSpeed => "plane_top_speed",
             Knob::PlaneTurn => "plane_turn",
+            Knob::PlaneMaxG => "plane_max_g",
             Knob::Gravity => "gravity",
             Knob::AirDrag => "air_drag",
             Knob::TimeScale => "time_scale",
@@ -163,6 +176,7 @@ impl Knob {
             Knob::PlaneAccel => "Biplane acceleration",
             Knob::PlaneTopSpeed => "Biplane top speed",
             Knob::PlaneTurn => "Biplane turn speed",
+            Knob::PlaneMaxG => "Biplane max G",
             Knob::Gravity => "Gravity",
             Knob::AirDrag => "Air drag",
             Knob::TimeScale => "Time scale",
@@ -175,11 +189,47 @@ impl Knob {
     }
 
     /// The lowest percentage the slider goes to: nothing at all, where nothing is a sensible world
-    /// (no gravity, no drag), a tenth otherwise.
+    /// (no gravity, no drag), a tenth otherwise. [`Knob::PlaneMaxG`] is in g, not percent: its least
+    /// limit.
     pub fn least(self) -> u16 {
         match self {
             Knob::Gravity | Knob::AirDrag => 0,
+            Knob::PlaneMaxG => MAX_G.0,
             _ => STEP,
+        }
+    }
+
+    /// The highest the slider goes to: [`MOST`] percent, or for [`Knob::PlaneMaxG`] its highest limit
+    /// in g. Above that it is off ([`ORIGINAL`]), the original's plane with no limit at all.
+    pub fn most(self) -> u16 {
+        match self {
+            Knob::PlaneMaxG => MAX_G.1,
+            _ => MOST,
+        }
+    }
+
+    /// One step of the slider from `v`, up or down. [`Knob::PlaneMaxG`] goes a g at a time round a
+    /// ring, off past its highest limit: up from the top is off and up from off the lowest, down from
+    /// off is the top and down from the lowest off (so a press from the default changes it).
+    pub fn step(self, v: u16, up: bool) -> u16 {
+        match (self, up) {
+            (Knob::PlaneMaxG, true) if v == ORIGINAL => self.least(),
+            (Knob::PlaneMaxG, true) if v >= self.most() => ORIGINAL,
+            (Knob::PlaneMaxG, true) => v + 1,
+            (Knob::PlaneMaxG, false) if v == ORIGINAL => self.most(),
+            (Knob::PlaneMaxG, false) if v <= self.least() => ORIGINAL,
+            (Knob::PlaneMaxG, false) => v - 1,
+            (_, true) => (v + STEP).min(MOST),
+            (_, false) => v.saturating_sub(STEP).max(self.least()),
+        }
+    }
+
+    /// The value as the menu shows it: `150%`, or for [`Knob::PlaneMaxG`] `6 g` or `Off`.
+    pub fn shown(self, v: u16) -> String {
+        match self {
+            Knob::PlaneMaxG if v == ORIGINAL => "Off".into(),
+            Knob::PlaneMaxG => format!("{v} g"),
+            _ => format!("{v}%"),
         }
     }
 
@@ -200,6 +250,7 @@ impl Knob {
             Knob::PlaneAccel => "the biplane's pick-up and braking, not its top",
             Knob::PlaneTopSpeed => "the biplane's top speed",
             Knob::PlaneTurn => "how hard the biplane pulls round a turn",
+            Knob::PlaneMaxG => "the most g a pull takes a fast biplane to, and its roll eased with it",
             Knob::Gravity => "gravity, bike and biplane",
             Knob::AirDrag => "air drag, bike and biplane",
             Knob::TimeScale => "how fast the game runs",
@@ -227,6 +278,7 @@ impl Knob {
             Knob::PlaneAccel => "biplane [Engine] MaxPower x k; [Aerodynamics] CD0, CD1, CDde x k; [Joystick] ThrottleIncrement x k; every tire's MaxBrakingForce x k (above 100%, the extra through the centre of gravity)",
             Knob::PlaneTopSpeed => "biplane [Aerodynamics] CD0 / k^3",
             Knob::PlaneTurn => "biplane [Aerodynamics] CLScale, CMq x k; CMalpha, CMde, CMStall x k^2; CD1 / k^2; [Autopilot] MaxPitchRate x k",
+            Knob::PlaneMaxG => "not a key: each step the elevator command held to the angle of attack whose lift is k times the weight, and the ailerons x corner speed / speed above the corner speed",
             Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane GravityScale x k",
             Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0 x k",
             Knob::TimeScale => "the engine's time-scale object: dt + (k - 1) dt",
@@ -263,9 +315,10 @@ impl Mods {
         self.pct[Mods::row(knob, seat)][knob.index()]
     }
 
-    /// Set it, clamped to the slider's range.
+    /// Set it, clamped to the slider's range (a max G's off, [`ORIGINAL`], kept as it is).
     pub fn set(&mut self, seat: usize, knob: Knob, pct: u16) {
-        self.pct[Mods::row(knob, seat)][knob.index()] = pct.clamp(knob.least(), MOST);
+        let pct = if pct == ORIGINAL { pct } else { pct.clamp(knob.least(), knob.most()) };
+        self.pct[Mods::row(knob, seat)][knob.index()] = pct;
     }
 
     /// Nothing off its default: the original game.
@@ -318,8 +371,8 @@ impl Mods {
                 None => (key, None),
             };
             let knob = Knob::from_word(word).ok_or_else(|| format!("no modifier is called '{word}'"))?;
-            if pct < knob.least() || pct > MOST {
-                return Err(format!("modifier '{pair}': {} to {MOST}", knob.least()));
+            if pct != ORIGINAL && (pct < knob.least() || pct > knob.most()) {
+                return Err(format!("modifier '{pair}': {} to {}", knob.least(), knob.most()));
             }
             match (knob.per_seat(), seat) {
                 (true, Some(s)) => m.set(s, knob, pct),
@@ -332,7 +385,16 @@ impl Mods {
         Ok(m)
     }
 
+    /// Player `seat`'s biplane g limit in g, or `None` with it off (P137).
+    pub fn max_g(&self, seat: usize) -> Option<F> {
+        match self.get(seat, Knob::PlaneMaxG) {
+            ORIGINAL => None,
+            g => Some(F::from(g as i32)),
+        }
+    }
+
     /// The factor of a knob for `seat`, or `None` at its default — the case that must touch nothing.
+    /// [`Knob::PlaneMaxG`] is no factor: [`Mods::max_g`] reads it.
     pub fn factor(&self, seat: usize, knob: Knob) -> Option<F> {
         match self.get(seat, knob) {
             ORIGINAL => None,
@@ -616,6 +678,25 @@ impl Mods {
             plane.aero.cm_stall = plane.aero.cm_stall * (k * k);
             plane.aero.cd1 = plane.aero.cd1 / (k * k);
             plane.autopilot.max_pitch_rate = plane.autopilot.max_pitch_rate * k;
+        }
+        if let Some(g) = self.max_g(seat) {
+            // Not a number of the file's: the limit the flight's hold keeps every step's pull under
+            // (P137, [`crate::flight::Flight::max_g`]). The file's lift and moments are left alone,
+            // so below the corner speed the limit implies the plane flies the file's numbers. Above
+            // it the roll is eased, but never past where the sped-up plane rolls as the file's does
+            // at the file's top speed: so many times the top speed (the speed knobs' k, and the air
+            // drag's k^-1/3, as their notes have it) is 1 / that of the aileron at most.
+            plane.autopilot.max_g = g;
+            let mut faster = F::ONE;
+            for knob in [Knob::PlaneSpeed, Knob::PlaneTopSpeed] {
+                if let Some(k) = self.factor(seat, knob) {
+                    faster = faster * k;
+                }
+            }
+            if let Some(k) = self.factor(seat, Knob::AirDrag) {
+                faster = faster / F(ps2_float::libm::powf(k.to_f32(), (F::ONE / F(3.0)).to_f32()));
+            }
+            plane.autopilot.max_g_roll = (F::ONE / faster).min(F::ONE);
         }
         if let Some(k) = self.factor(seat, Knob::Gravity) {
             plane.mass_properties.gravity_scale = plane.mass_properties.gravity_scale * k;
