@@ -137,12 +137,12 @@ impl<'a> Pen<'a> {
         self.base + TEXTURES.len()
     }
 
-    /// A track's still `i`, and its place in [`Art::images`].
-    fn still(&self, track: usize, i: usize) -> Option<(usize, &'a Texture)> {
-        let these = self.art.stills.get(track)?;
-        let t = these.get(i % these.len().max(1))?;
-        let before: usize = self.art.stills[..track].iter().map(Vec::len).sum();
-        Some((self.atlas() + 1 + before + i % these.len(), t))
+    /// The pick's track `at`'s `i`th picture (P70) — a disc track's still or a mod's picture — and
+    /// its place in [`Art::images`].
+    fn track_picture(&self, menu: &Menu, at: usize, i: usize) -> Option<(usize, &'a Texture)> {
+        let image = self.art.track_image(menu.track_at(at).0, i)?;
+        let all = self.art.images();
+        all.get(image).map(|t| (self.base + image, *t))
     }
 
     /// The texture's middle, the box's shape, over the box.
@@ -951,8 +951,8 @@ impl Pen<'_> {
         let (h, p, chips) = main_panel(menu, at);
         let (x, w) = (34.0, 40.0);
         if at == MAIN_FREE {
-            let track = menu.settings.track_index();
-            let (_, town) = menu.track_at(menu.track_index());
+            let track = menu.track_index();
+            let (_, town) = menu.track_at(track);
             let b = [x, 7.4, 30.0, 16.875];
             self.framed_still(menu, track, b, &format!("Last ridden · {town}"));
             let y = self.heading("", h, &p, x, b[1] + b[3] + 1.0, w, 2.6);
@@ -984,17 +984,14 @@ impl Pen<'_> {
         self.hints(&[(Btn::Cross, "Select")]);
     }
 
-    /// A track's still in a chalk frame with its tag, or a dark box for a track without one.
-    fn framed_still(&mut self, menu: &Menu, track: usize, b: Box4, tag: &str) {
+    /// The pick's track `at`'s picture in a chalk frame with its tag, turning through a disc
+    /// track's stills, or a dark box for a track without one.
+    fn framed_still(&mut self, menu: &Menu, at: usize, b: Box4, tag: &str) {
         self.round([b[0] + 0.35, b[1] + 0.4, b[2], b[3]], 0.9, SHADOW, SHADOW);
         self.round(b, 0.9, [0x33, 0x33, 0x33, 255], [0x22, 0x22, 0x22, 255]);
-        let frames = self.art.stills.get(track).map_or(0, Vec::len);
-        if frames > 0 {
-            let i = (menu.tick / STILL_FRAMES) as usize % frames;
-            if let Some((image, t)) = self.still(track, i) {
-                let inner = [b[0] + 0.2, b[1] + 0.2, b[2] - 0.4, b[3] - 0.4];
-                self.cover(image, t, inner, CHALK);
-            }
+        if let Some((image, t)) = self.track_picture(menu, at, (menu.tick / STILL_FRAMES) as usize) {
+            let inner = [b[0] + 0.2, b[1] + 0.2, b[2] - 0.4, b[3] - 0.4];
+            self.cover(image, t, inner, CHALK);
         } else {
             self.text(Weight::Bold, "No picture for this one", b[0] + b[2] / 2.0, Pen::mid(b[1] + b[3] / 2.0, 1.2), 1.2, 0.0, DUST, Align::Centre);
         }
@@ -1177,38 +1174,30 @@ impl Pen<'_> {
         self.text(Weight::Heavy, &nm, x + w / 2.0, y + h - 1.4, 1.3, 0.0, [0x14, 0x14, 0x14, 255], Align::Centre);
     }
 
-    /// Free Ride's pick: the lit category's tracks under its name, Left and Right between the
-    /// categories (the disc's towns, the worlds, each mod pack), the lit track's still, and the
-    /// ride's setup.
+    /// Free Ride's pick: the lit category's tracks as cards under its name (P70), each with its
+    /// picture, Left and Right between the categories (the disc's towns, the worlds, each mod pack),
+    /// the lit track's still large, and the ride's setup.
     fn tracks(&mut self, menu: &Menu) {
         let at = menu.cursor(Screen::Tracks).min(menu.track_count().saturating_sub(1));
         self.strip(3.0, 22.0);
         self.logo(true);
         let groups = menu.track_groups();
         let (group, range) = groups[menu.track_group(at)].clone();
-        let mut rows = Vec::new();
         let top = if groups.len() > 1 {
             self.category(&group, 3.8, 7.6, 20.4);
             11.4
         } else {
-            rows.push(Row { label: group, ..Row::heading_row() });
-            8.2
+            let base = Pen::mid(8.2 + HEAD_H / 2.0 + 0.2, 1.0);
+            self.text(Weight::Bold, &group.to_uppercase(), 4.2, base, 1.0, 0.0, HEADING, Align::Left);
+            8.2 + HEAD_H + ROW_GAP + 0.2
         };
-        let cursor = rows.len() + at - range.start;
-        for i in range.clone() {
-            let mut r = Row::heading_row();
-            r.kind = Kind::Action;
-            r.label = menu.track_at(i).1.to_string();
-            r.value = String::from(" ");
-            rows.push(r);
-        }
-        self.rows(&rows, cursor, 3.8, 20.4, top);
+        let tag_of = |id: &str| if TRACKS.iter().any(|t| t.0 == id) { "MX Unleashed".to_string() } else { menu.packs().into_iter().find(|p| p.prefix == pack_of(id)).map_or("Mods".into(), |p| p.name) };
+        self.cards(menu, range.clone(), at, 3.8, 20.4, top, &tag_of);
         let (id, name) = menu.track_at(at);
         let (x, w) = (28.5, 47.0);
-        let disc = at < TRACKS.len();
-        let tag = if disc { "MX Unleashed".to_string() } else { menu.packs().into_iter().find(|p| p.prefix == pack_of(id)).map_or("Mods".into(), |p| p.name) };
+        let tag = tag_of(id);
         let b = [x, 6.0, 36.0, 20.25];
-        self.framed_still(menu, if disc { at } else { usize::MAX }, b, &tag);
+        self.framed_still(menu, at, b, &tag);
         let count = format!("{} of {}", at - range.start + 1, range.len());
         // A long name stops short of the count beside it.
         let room = w - self.wide(Weight::Bold, &count, 1.2) - 2.0;
@@ -1240,6 +1229,68 @@ impl Pen<'_> {
         }
         hints.push((Btn::Cross, "Ride"));
         self.hints(&hints);
+    }
+
+    /// The pick's tracks in `range` as cards (P70), in P39's pills' look: a lit card in the red
+    /// pill's gradient, rim and shadow, the others glass; each the track's picture (the lit one
+    /// turning through a disc track's stills), its name, and the line under it — Last ridden, or
+    /// where the track is from. As many as fit from `top`, the lit one kept in view.
+    #[allow(clippy::too_many_arguments)]
+    fn cards(&mut self, menu: &Menu, range: Range<usize>, at: usize, x: f32, w: f32, top: f32, tag_of: &dyn Fn(&str) -> String) {
+        const CARD_H: f32 = 4.4;
+        const CARD_GAP: f32 = 0.5;
+        let bottom = STAGE.1 - BAND - 0.4;
+        let shown = (((bottom - top + CARD_GAP) / (CARD_H + CARD_GAP)) as usize).max(1);
+        let n = range.len();
+        let lit_at = at - range.start;
+        let first = lit_at.saturating_sub(shown / 2).min(n.saturating_sub(shown));
+        if first > 0 {
+            self.arrow(x + w / 2.0, top - 0.6, [0.0, -1.0], 0.7, BONE);
+        }
+        let mut y = top;
+        for k in first..(first + shown).min(n) {
+            let i = range.start + k;
+            let lit = i == at;
+            let (id, name) = menu.track_at(i);
+            let b = [x, y, w, CARD_H];
+            let r = 0.7;
+            if lit {
+                self.round([x + 0.25, y + 0.27, w, CARD_H], r, SHADOW, SHADOW);
+                self.round(b, r, LIT_TOP, LIT_BOTTOM);
+                self.ring(b, r, 0.13, CHALK);
+            } else {
+                self.round(b, r, GLASS, GLASS);
+                self.ring(b, r, 0.08, RIM);
+            }
+            let ph = CARD_H - 0.7;
+            let pb = [x + 0.35, y + 0.35, ph * 16.0 / 9.0, ph];
+            self.round(pb, 0.35, [0x22, 0x22, 0x22, 255], [0x22, 0x22, 0x22, 255]);
+            let turn = if lit { (menu.tick / STILL_FRAMES) as usize } else { 0 };
+            let picture = self.track_picture(menu, i, turn);
+            if let Some((image, t)) = picture {
+                self.cover(image, t, pb, CHALK);
+            }
+            self.ring(pb, 0.35, if lit { 0.1 } else { 0.06 }, if lit { CHALK } else { RIM });
+            let tx = pb[0] + pb[2] + 0.8;
+            let room = x + w - 0.8 - tx;
+            let k_size = 1.35;
+            let (kw, kc, ks) = if lit { (Weight::Heavy, CHALK, SLANT) } else { (Weight::Bold, BONE, 0.0) };
+            let label = self.fit(kw, name, k_size, room);
+            let base = y + CARD_H * 0.47;
+            if !lit {
+                self.text(kw, &label, tx, base + 0.06 * k_size, k_size, ks, TEXT_SHADOW, Align::Left);
+            }
+            self.text(kw, &label, tx, base, k_size, ks, kc, Align::Left);
+            let under = if menu.settings.track == id { "Last ridden".to_string() } else { tag_of(id) };
+            let under = self.fit(Weight::Bold, &under, 0.95, room);
+            self.text(Weight::Bold, &under, tx, y + CARD_H * 0.78, 0.95, 0.0, if lit { PEACH } else { DUST }, Align::Left);
+            let image = picture.map(|(image, _)| image - self.base);
+            self.parts.push(Part::Card { id: id.to_string(), card: self.b(b), picture: self.b(pb), image, lit });
+            y += CARD_H + CARD_GAP;
+        }
+        if first + shown < n {
+            self.arrow(x + w / 2.0, y - CARD_GAP + 0.6, [0.0, 1.0], 0.7, BONE);
+        }
     }
 
     /// The pick's category, lit between the arrows Left and Right step it by.
@@ -1532,8 +1583,7 @@ impl Pen<'_> {
     fn splash(&mut self, menu: &Menu) {
         let whole = self.whole();
         self.fill(whole, INK);
-        let track = menu.settings.track_index();
-        if let Some((image, t)) = self.still(track, 0) {
+        if let Some((image, t)) = self.track_picture(menu, menu.track_index(), 0) {
             self.cover(image, t, whole, SPLASH_DIM);
         }
         let (w, h) = (50.0, 6.25);
