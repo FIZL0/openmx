@@ -4824,7 +4824,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let Some(chassis) = &mut rig.chassis {
                 if moving && bike_up {
                     let ride = &seat.sim.rider.ride;
-                    let want = chassis.want_with_pack(ride, &seat.sim.rider.tricks);
+                    // In the trick the body's machine chose, so a trick started whipped does not
+                    // leave the bike crossed up under it (V64); without a body, the pack's own.
+                    let want = match rig.body {
+                        Some(_) => Chassis::want_beside(ride, &seat.sim.rider.tricks, seat.sim.rider.body.veh.want),
+                        None => chassis.want_with_pack(ride, &seat.sim.rider.tricks),
+                    };
                     // The rider's two axes and not zeros: in the air they are the crossup sweep the
                     // chassis' clip is played at, and zero is the sweep's far end (P29).
                     let request = Chassis::riding(&seat.sim.rider);
