@@ -545,6 +545,49 @@ pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>])
     }
 }
 
+/// What one view's slot display reads of its player's markers, on whichever machine is up (P124):
+/// the selection and the filled slots of the set `markers` has up — the switch puts the machine's
+/// own up ([`game_sim::markers::Markers::up`]) — and, while `active` (the player riding or flying),
+/// whether a direction is held for the markers and how far a Down or Up hold is. With the plane's set
+/// up the d-pad is read as the plane's markers read it (`markers::fly`): the shipped bindings, and no
+/// trick buttons to make it a gesture, since the plane has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkerBar {
+    pub pick: Pick,
+    pub filled: [bool; SLOTS],
+    pub held: bool,
+    pub holding: u32,
+}
+
+impl MarkerBar {
+    pub fn read(
+        markers: &game_sim::markers::Markers,
+        me: usize,
+        riding: &[bool],
+        pad: &Pad,
+        table: &Table,
+        hands: &Controls,
+        active: bool,
+    ) -> MarkerBar {
+        let none = Controls::default();
+        let flying = markers.on == game_sim::markers::Vehicle::Plane;
+        let (table, hands) = if flying { (&Table::SHIPPED, &none) } else { (table, hands) };
+        MarkerBar {
+            pick: markers.pick_among(me, riding),
+            filled: std::array::from_fn(|s| markers.holds(s)),
+            held: active && game_sim::markers::held(pad, table, hands),
+            holding: if active { game_sim::markers::holding(pad, table, hands) } else { 0 },
+        }
+    }
+}
+
+/// Whether view `v` shows its player's markers — the slot display, the portals and the radar's icons
+/// — with `online` the session's (P88): offline every view, its own player's; online only this
+/// machine's own view, the first. On every machine alike (P124).
+pub fn markers_shown_in(v: usize, online: bool) -> bool {
+    !online || v == 0
+}
+
 /// The slot display, top centre of `frame`: five boxes — solid in the slot's colour where a marker
 /// is (P94: the colour of its post and its radar mark), the selected one ringed — then a box for each
 /// other player in the ride, `P2`… by seat (`others`, P94: a seat nobody rides is not listed), and

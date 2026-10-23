@@ -976,3 +976,153 @@ fn online_a_planes_markers_ride_the_lane_and_the_snapshot() {
     assert_eq!((0..30).find_map(|_| tick(&mut sim, Report::from_buttons(GAS | Control::Up.mask()))), Some(Did::Teleported(Pick::Slot(0))));
     assert!(sim.plane.as_ref() == Some(&kept), "the lane's put-back is not the flight it kept");
 }
+
+// ---------------------------------------------------------------------------------------------------
+// P124: the slot display on every machine.
+// ---------------------------------------------------------------------------------------------------
+
+use hud::{MarkerBanner, MarkerBar};
+use std::time::{Duration, Instant};
+
+/// [`pass`] for seat `me` of a ride of `garages.len()` local players, everybody riding, every spot
+/// from before the tick: what fired and the hands the poll gave, which the shell keeps as the seat's
+/// (`Seat::hands`) and reads the slot display with.
+fn seat_pass(seats: &mut [(Sim, Garage)], me: usize, report: Report) -> (Option<Did>, Controls) {
+    let mut world = Flat::default();
+    let spots: Vec<Spot> = seats.iter().map(|(sim, garage)| garage.spot(sim, &mut world)).collect();
+    let riding = vec![true; seats.len()];
+    let (sim, garage) = &mut seats[me];
+    let controls = sim.poll(DT, &[report, Report::missing()]).stick_alone();
+    garage.step(sim, DT, &controls, &mut world);
+    let did = match garage.up {
+        Kind::Bike => markers::frame_among(sim, me, &spots, &riding, &controls),
+        _ => garage.markers(sim, me, &spots, &riding, &mut world),
+    };
+    (did, controls)
+}
+
+/// Seat `me`'s slot display as the shell reads it (P124): offline, so every view shows its own.
+fn bar(seats: &[(Sim, Garage)], me: usize, hands: &Controls) -> MarkerBar {
+    assert!(hud::markers_shown_in(me, false));
+    let sim = &seats[me].0;
+    MarkerBar::read(&sim.markers, me, &vec![true; seats.len()], sim.input.pad(0), sim.table(), hands, true)
+}
+
+/// The label the display shows with it, offline (no names).
+fn label(b: &MarkerBar) -> String {
+    hud::marker_label(b.pick, b.filled, &[])
+}
+
+/// P124: flying the plane, the slot display is the plane's. A Left press puts the bar up on the
+/// plane's last slot; a held Down fills the hold bar to `HOLD_MS` — with a trick button down too,
+/// which on the plane is no gesture, as its markers read the pad — and the bar marks the slot
+/// filled, with its radar icon; switching to the bike puts the bar up on the bike's own set, where
+/// the same trick button makes the d-pad a gesture again and fills nothing.
+#[test]
+fn flying_the_plane_shows_the_planes_bar() {
+    let Some(hangar) = hangar(Kind::Biplane) else { return };
+    let mut seats = vec![hangar];
+    let mut hands = Controls::default();
+    let mut banner = MarkerBanner::default();
+    let mut now = Instant::now();
+    let step = Duration::from_millis(33);
+    let mut show = |b: &MarkerBar, now: Instant| banner.update(now, b.pick, b.filled, b.held);
+    for _ in 0..30 {
+        hands = seat_pass(&mut seats, 0, Report::from_buttons(GAS)).1;
+        now += step;
+        assert!(!show(&bar(&seats, 0, &hands), now), "the bar is up untouched");
+    }
+    assert_eq!(seats[0].0.markers.on, markers::Vehicle::Plane);
+
+    // Left: the plane's last slot, the bar up.
+    let (did, h) = seat_pass(&mut seats, 0, Report::from_buttons(GAS | Control::Left.mask()));
+    assert_eq!(did, Some(Did::Stepped(Pick::Slot(SLOTS - 1))));
+    now += step;
+    let b = bar(&seats, 0, &h);
+    assert!(show(&b, now), "a Left press on the plane shows no bar");
+    assert_eq!((b.pick, b.filled, b.held, b.holding), (Pick::Slot(SLOTS - 1), [false; SLOTS], true, 0));
+    assert_eq!(label(&b), "marker 5 empty");
+    seat_pass(&mut seats, 0, Report::from_buttons(GAS));
+
+    // Down held, Circle (trick 1 on the bike) with it: the hold bar fills and the slot is set.
+    let circle = Control::Circle.mask();
+    let mut seen = vec![];
+    let placed = (0..30).find_map(|_| {
+        let (did, h) = seat_pass(&mut seats, 0, Report::from_buttons(GAS | circle | Control::Down.mask()));
+        hands = h;
+        let b = bar(&seats, 0, &hands);
+        seen.push(b.holding);
+        now += step;
+        assert!(show(&b, now), "the bar is down while Down is held");
+        did
+    });
+    assert_eq!(placed, Some(Did::Placed(SLOTS - 1)));
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]) && seen[0] == 0 && seen.iter().any(|&h| h > 0 && h < HOLD_MS), "{seen:?}");
+    assert_eq!(*seen.last().unwrap(), HOLD_MS, "{seen:?}");
+    let b = bar(&seats, 0, &hands);
+    assert!(b.filled[SLOTS - 1] && b.filled.iter().filter(|&&f| f).count() == 1);
+    assert_eq!(label(&b), "marker 5 set");
+    assert_eq!(overlay::marker_blips(&seats[0].0.markers, b.pick).len(), 1, "the plane's marker has no radar icon");
+
+    // Onto the bike: its own set, empty and on its first slot, and the bar up to say so.
+    hands = seat_pass(&mut seats, 0, Report::from_buttons(GAS)).1;
+    let (sim, garage) = &mut seats[0];
+    garage.switch(Kind::Bike, sim, &mut Flat::default()).unwrap();
+    now += step;
+    let b = bar(&seats, 0, &hands);
+    assert_eq!((b.pick, b.filled), (Pick::Slot(0), [false; SLOTS]), "the bike shows the plane's set");
+    assert!(show(&b, now), "the switch's new set put no bar up");
+    assert_eq!(label(&b), "marker 1 empty");
+    assert!(overlay::marker_blips(&seats[0].0.markers, b.pick).is_empty());
+    let mut seen = vec![];
+    for _ in 0..10 {
+        hands = seat_pass(&mut seats, 0, Report::from_buttons(GAS | circle | Control::Down.mask())).1;
+        seen.push(bar(&seats, 0, &hands).holding);
+    }
+    assert!(seen.iter().all(|&h| h == 0), "the bike's trick gesture filled the hold bar: {seen:?}");
+    assert!(!bar(&seats, 0, &hands).filled.iter().any(|&f| f));
+}
+
+/// P124 in a two-player split: player 1 rides the bike while player 2 flies the plane, each view its
+/// own player's bar. Player 2's Left reaches player 1 ("to P1", the one other box), a second Left
+/// the plane's last slot, and a held Down fills player 2's hold bar and sets the plane's slot —
+/// player 1's bike bar staying empty all along. Online only this machine's view shows a bar.
+#[test]
+fn a_split_shows_each_players_own_machines_bar() {
+    let (Some(one), Some(two)) = (hangar(Kind::Bike), hangar(Kind::Biplane)) else { return };
+    let mut seats = vec![one, two];
+    let mut hands = [Controls::default(), Controls::default()];
+    let mut both = |seats: &mut [(Sim, Garage)], b2: u16| {
+        hands[0] = seat_pass(seats, 0, Report::from_buttons(GAS)).1;
+        let (did, h) = seat_pass(seats, 1, Report::from_buttons(b2));
+        hands[1] = h;
+        (did, bar(seats, 0, &hands[0]), bar(seats, 1, &hands[1]))
+    };
+    for _ in 0..30 {
+        both(&mut seats, GAS);
+    }
+    let (did, _, b) = both(&mut seats, GAS | Control::Left.mask());
+    assert_eq!(did, Some(Did::Stepped(Pick::Player(0))));
+    assert_eq!(label(&b), "to P1");
+    assert_eq!(markers::Markers::others(1, 2, &[true, true]), vec![0]);
+    both(&mut seats, GAS);
+    let (did, _, b) = both(&mut seats, GAS | Control::Left.mask());
+    assert_eq!(did, Some(Did::Stepped(Pick::Slot(SLOTS - 1))));
+    assert_eq!(label(&b), "marker 5 empty");
+    both(&mut seats, GAS);
+    let mut most = 0;
+    let placed = (0..30).find_map(|_| {
+        let (did, one, two) = both(&mut seats, GAS | Control::Down.mask());
+        assert_eq!((one.pick, one.filled, one.holding), (Pick::Slot(0), [false; SLOTS], 0), "player 2's hold is on player 1's bar");
+        most = most.max(two.holding);
+        did
+    });
+    assert_eq!(placed, Some(Did::Placed(SLOTS - 1)));
+    assert_eq!(most, HOLD_MS);
+    let (_, one, two) = both(&mut seats, GAS);
+    assert!(two.filled[SLOTS - 1] && !one.filled.iter().any(|&f| f));
+    assert_eq!(seats[1].0.markers.on, markers::Vehicle::Plane);
+    assert_eq!(seats[0].0.markers.on, markers::Vehicle::Bike);
+    // Online: this machine's own view, the first, and no other.
+    assert!(hud::markers_shown_in(0, true) && !hud::markers_shown_in(1, true));
+}
