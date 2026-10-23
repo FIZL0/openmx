@@ -49,13 +49,14 @@ pub enum Knob {
     PlaneSpeed,
     PlaneAccel,
     PlaneTopSpeed,
+    PlaneTurn,
     Gravity,
     AirDrag,
     TimeScale,
 }
 
 /// How many modifiers there are.
-pub const KNOBS: usize = 15;
+pub const KNOBS: usize = 16;
 
 /// A modifier's default, which leaves its fields untouched: 100%.
 pub const ORIGINAL: u16 = 100;
@@ -78,6 +79,7 @@ impl Knob {
         Knob::PlaneSpeed,
         Knob::PlaneAccel,
         Knob::PlaneTopSpeed,
+        Knob::PlaneTurn,
         Knob::Gravity,
         Knob::AirDrag,
         Knob::TimeScale,
@@ -97,6 +99,7 @@ impl Knob {
         Knob::CrashTolerance,
         Knob::PlaneAccel,
         Knob::PlaneTopSpeed,
+        Knob::PlaneTurn,
         Knob::Gravity,
         Knob::AirDrag,
         Knob::TimeScale,
@@ -121,6 +124,7 @@ impl Knob {
             Knob::PlaneSpeed => "plane_speed",
             Knob::PlaneAccel => "plane_accel",
             Knob::PlaneTopSpeed => "plane_top_speed",
+            Knob::PlaneTurn => "plane_turn",
             Knob::Gravity => "gravity",
             Knob::AirDrag => "air_drag",
             Knob::TimeScale => "time_scale",
@@ -146,6 +150,7 @@ impl Knob {
             Knob::PlaneSpeed => "Biplane speed",
             Knob::PlaneAccel => "Biplane acceleration",
             Knob::PlaneTopSpeed => "Biplane top speed",
+            Knob::PlaneTurn => "Biplane turn speed",
             Knob::Gravity => "Gravity",
             Knob::AirDrag => "Air drag",
             Knob::TimeScale => "Time scale",
@@ -181,6 +186,7 @@ impl Knob {
             Knob::PlaneSpeed => "biplane thrust and top speed",
             Knob::PlaneAccel => "how fast the biplane gets up to speed, not its top",
             Knob::PlaneTopSpeed => "the biplane's top speed",
+            Knob::PlaneTurn => "how hard the biplane pulls round a turn",
             Knob::Gravity => "gravity, bike and biplane",
             Knob::AirDrag => "air drag, bike and biplane",
             Knob::TimeScale => "how fast the game runs",
@@ -204,6 +210,7 @@ impl Knob {
             Knob::PlaneSpeed => "biplane [Engine] MaxPower, MinPropEfficiencySpeed x k; [Aerodynamics] CD0 / k^2",
             Knob::PlaneAccel => "biplane [Engine] MaxPower x k; [Aerodynamics] CD0, CD1, CDde x k",
             Knob::PlaneTopSpeed => "biplane [Aerodynamics] CD0 / k^3",
+            Knob::PlaneTurn => "biplane [Aerodynamics] CLScale, CMq x k; CMalpha, CMde, CMStall x k^2; CD1 / k^2; [Autopilot] MaxPitchRate x k",
             Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane GravityScale x k",
             Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0 x k",
             Knob::TimeScale => "the engine's time-scale object: dt + (k - 1) dt",
@@ -532,6 +539,24 @@ impl Mods {
             // at k times the speed. Low down the drag is small beside the thrust, so the getting
             // there is near enough the file's.
             plane.aero.cd0 = plane.aero.cd0 / (k * k * k);
+        }
+        if let Some(k) = self.factor(seat, Knob::PlaneTurn) {
+            // The turn is the lift: with the stick held the elevator sits at its stop, which trims the
+            // wing to the top of its lift curve, so the plane turns as hard as CLScale lets it — k
+            // times the lift is k times the pull at every speed. The pitch has to keep up: the moments
+            // the wing is held at its angle by (CMalpha against CMde, and the stall's break) x k^2
+            // pitch it k times as fast to the same angle, the damping CMq x k keeps it as damped, and
+            // the autopilot's pitch-rate target (MaxPitchRate, which the round stick's 2.5 multiplies)
+            // asks for k times the rate. CD1 / k^2 leaves the drag of the harder pull the file's.
+            // The trim (the angle each elevator holds) is unchanged, so level flight and the banked
+            // hold fly as the file's do.
+            plane.aero.cl_scale = plane.aero.cl_scale * k;
+            plane.aero.cm_q = plane.aero.cm_q * k;
+            plane.aero.cm_alpha = plane.aero.cm_alpha * (k * k);
+            plane.aero.cm_de = plane.aero.cm_de * (k * k);
+            plane.aero.cm_stall = plane.aero.cm_stall * (k * k);
+            plane.aero.cd1 = plane.aero.cd1 / (k * k);
+            plane.autopilot.max_pitch_rate = plane.autopilot.max_pitch_rate * k;
         }
         if let Some(k) = self.factor(seat, Knob::Gravity) {
             plane.mass_properties.gravity_scale = plane.mass_properties.gravity_scale * k;
