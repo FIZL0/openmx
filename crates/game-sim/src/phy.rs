@@ -827,6 +827,7 @@ impl Phy {
             joust_wreck_height: wrecks.float("JoustWreckHeight").unwrap_or(F::ZERO),
             crossup_wreck: wrecks.float("CrossupWreck").unwrap_or(F::ZERO),
             crossup_wreck_time: wrecks.float("CrossupWreckTime").unwrap_or(F::ZERO),
+            rotation_speed: None,
         };
         let wreck_times = WreckTimes {
             max_wreck_time: wrecks.float("MaxWreckTime").unwrap_or(F::ZERO),

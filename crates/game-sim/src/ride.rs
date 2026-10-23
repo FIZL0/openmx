@@ -93,7 +93,7 @@ const ANG_WINDOW: f32 = 25.0;
 /// A file without the key leaves the constructor's 25: the original's loader writes an uninitialised
 /// stack word there instead, which no shipped bike reaches, and [`crate::phy`] reads the missing key
 /// as zero — which the window would read as "no yaw at all".
-fn bike_ang_limits(p: &Phy) -> (F, [F; 3], [F; 3]) {
+pub(crate) fn bike_ang_limits(p: &Phy) -> (F, [F; 3], [F; 3]) {
     let w = [ANG_WINDOW; 3];
     let sq = F(w[2] * w[2] + w[1] * w[1] + w[0] * w[0]);
     let yaw = if p.mass.yaw_rate_limit == F::ZERO { F(ANG_WINDOW) } else { p.mass.yaw_rate_limit };
