@@ -193,6 +193,7 @@ mod shot_pose;
 mod split;
 mod stages;
 mod track_mods;
+mod track_previews;
 mod trick_packs;
 mod worlds;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
@@ -1287,6 +1288,8 @@ fn front_end(args: Args) -> Result<(), String> {
     // The track mods (MD2), after the disc's tracks in the pick; read again when the Mods row turns.
     let mut mods_on = front.menu.settings.mods;
     let listed = mod_tracks(&args, &front.dir, mods_on);
+    // And each one's picture on its card (P70), the stills that are missing taken off this thread.
+    let mut stills = mod_pictures(&mut front.art, mods_folder(&args, &front.dir, mods_on).as_deref(), &listed);
     front.menu.set_mod_tracks(listed);
     // Online, this machine's player rides the freeride's bike set unless the lobby changes it, as
     // the rider the command line names.
@@ -1607,7 +1610,20 @@ fn front_end(args: Args) -> Result<(), String> {
         if shell.front.menu.settings.mods != mods_on {
             mods_on = shell.front.menu.settings.mods;
             let listed = mod_tracks(&args, &shell.front.dir, mods_on);
+            stills = mod_pictures(&mut shell.front.art, mods_folder(&args, &shell.front.dir, mods_on).as_deref(), &listed);
             shell.front.menu.set_mod_tracks(listed);
+            (shown_look, menu_images) = (None, false);
+        }
+        // A still the job took is the card's picture from the next frame on.
+        while let Some((id, got)) = stills.as_ref().and_then(|h| h.try_recv().ok()) {
+            match got {
+                Ok(picture) => {
+                    println!("mods: took a still of {id} from its spawn");
+                    shell.front.art.set_mod_picture(&id, picture);
+                    (shown_look, menu_images) = (None, false);
+                }
+                Err(why) => println!("mods: no still of {id}: {why}"),
+            }
         }
         if shell.front.menu.changed() {
             seats.set_wiring(shell.front.wiring());
@@ -5350,12 +5366,7 @@ fn ride_trick_pack(args: &Args) -> Option<trick_packs::Pack> {
 /// was given (`off` is none), else the one beside the settings in `dir` while the Mods row is `on`.
 /// With none, nothing is read.
 fn mod_tracks(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, String)> {
-    let folder = match (args.mods_asked, on) {
-        (true, _) => args.mods.clone(),
-        (false, true) => Some(dir.join(track_mods::MODS_DIR)),
-        (false, false) => None,
-    };
-    let Some(folder) = folder else { return Vec::new() };
+    let Some(folder) = mods_folder(args, dir, on) else { return Vec::new() };
     let scan = track_mods::scan(&folder);
     for line in &scan.log {
         println!("{line}");
@@ -5365,6 +5376,41 @@ fn mod_tracks(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, Stri
         println!("mods: {} tracks, {} worlds", scan.tracks.len(), worlds.len());
     }
     scan.tracks.into_iter().map(|t| (t.id, t.name)).chain(worlds).collect()
+}
+
+/// The mods folder a front end reads, as [`mod_tracks`] says: `--mods`' if it was given, else the
+/// one beside the settings in `dir` while the Mods row is `on`.
+fn mods_folder(args: &Args, dir: &std::path::Path, on: bool) -> Option<std::path::PathBuf> {
+    match (args.mods_asked, on) {
+        (true, _) => args.mods.clone(),
+        (false, true) => Some(dir.join(track_mods::MODS_DIR)),
+        (false, false) => None,
+    }
+}
+
+/// The listed mod tracks' pictures into the menu's art (P70): each mod's own or the still taken
+/// before, and the job that takes the stills still missing, one headless ride's first frame each.
+fn mod_pictures(
+    art: &mut Art,
+    folder: Option<&std::path::Path>,
+    listed: &[(String, String)],
+) -> Option<std::sync::mpsc::Receiver<(String, Result<game_render::pst::Texture, String>)>> {
+    let folder = folder?;
+    let ids: Vec<String> = listed.iter().map(|(id, _)| id.clone()).collect();
+    let mut log = Vec::new();
+    let (have, take) = track_previews::gather(folder, &ids, &mut log);
+    for line in log {
+        println!("{line}");
+    }
+    for (id, picture) in have {
+        art.set_mod_picture(&id, picture);
+    }
+    if take.is_empty() {
+        return None;
+    }
+    let exe = std::env::current_exe().map_err(|e| println!("mods: no stills of the spawns: {e}")).ok()?;
+    println!("mods: taking a still of {} from the spawn", take.join(", "));
+    Some(track_previews::still_job(exe, folder.to_path_buf(), take))
 }
 
 /// A tape to ride, from the file it is in.

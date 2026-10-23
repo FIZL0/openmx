@@ -317,6 +317,9 @@ added beside them:
   - `moment.rs` — `--moment FILE OUT.png`: one frame posed from a moment file (a bike's transform and
     the frame's camera, read out of a save state by `research/shots/moment.py`) instead of from the
     simulation, so the port's picture can be put beside the original's (V2).
+  - `track_previews.rs` — the track pick's card pictures for mod tracks (P70): a mod's own
+    `previews/track.png`, else a still of its spawn the shell's binary takes headless in the
+    background and keeps in `mods/previews/`; and the small PNG reader both are read with.
 
 As you add modules, list them here with one line each, the way `ps2kit/` is listed above. A code map that
 is a sentence per file is worth more than a directory listing, and it is the cheapest context in the
