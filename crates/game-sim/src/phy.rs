@@ -1512,6 +1512,11 @@ pub struct Gear {
     /// centre one radius lower.
     pub body_tire_center: Vf,
     pub contact: Vf,
+    /// Not a key of the file: how many times over again the wheel's braking force (`MaxBrakingForce`
+    /// times the brake, or `BrakeFriction` of it rolling) is pushed through the centre of gravity
+    /// rather than at the contact. Zero as read; the Biplane acceleration modifier's above 100%
+    /// (P116), which brakes harder without standing the plane on its nose.
+    pub cg_braking: F,
 }
 
 /// `[Autopilot]`: the stick's dead zone and the pitch-rate loop that flies the plane between inputs.
@@ -1709,6 +1714,7 @@ impl Gear {
                 body_tire_center.z(),
                 body_tire_center.w(),
             ),
+            cg_braking: F::ZERO,
         }
     }
 }
