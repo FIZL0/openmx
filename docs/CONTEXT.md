@@ -150,6 +150,3 @@ lessons, so that you can skip them:
 - **Addresses without the overlay name are useless three weeks later.** Hence `[symbols]`,
   `research/oracle.txt`, and `-p/--program` on every static tool.
 - **Verified and unverified work look identical in a diff.** Hence the mandatory journal section.
-
-`RETROSPECTIVE.md` has more of this, including the parts of the original design that turned out to be
-mistakes.
