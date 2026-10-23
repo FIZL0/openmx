@@ -159,7 +159,7 @@ fn circle_takes_the_offered_plane_onto_the_player() {
     let bay = lot.bay(Machine::Biplane, 0).unwrap().spawn;
     // Stand the bike 20 ft from the bay, stopped.
     let near = at(bay.at.x() + 12.0, 0.0, bay.at.z() + 16.0);
-    sim.rider.teleport_to(game_sim::markers::Spot { at: near, forward: Vf::new(0.0, 0.0, 1.0, 0.0), up: Vf::new(0.0, 1.0, 0.0, 0.0) });
+    sim.rider.teleport_to(game_sim::markers::Spot::still(near, Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0)));
     let here = sim.rider.ride.position();
     let offered = vehicle::offer(&bays, garage.up, here, sim.rider.ride.chassis.speed.0, sim.rider.crash.is_some());
     assert_eq!(offered, Some(Machine::Biplane));
