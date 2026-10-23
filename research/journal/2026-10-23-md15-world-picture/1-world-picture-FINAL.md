@@ -1,4 +1,4 @@
-# 1 — world picture (PART)
+# 1 — world picture (FINAL)
 
 Task MD15. 2026-10-23.
 
@@ -69,8 +69,9 @@ the tile ridden alone draws it: same scene, same ecosystem file, same `.toy`, mo
 
 ## Not verified / not 1:1
 
-- **Jitter at 116,000 ft not looked at**: camera-relative drawing is in, but no ride far out on
-  world_ultra was watched. Reason: time; the arithmetic says it is fine, the eye has not.
+- **Jitter at 116,000 ft only seen still**: one GPU frame on world_ultra at (111660, 1644)
+  (`--trace-at 111660,1644,40 --shot`) is clean: the bike, its rider, plants and props crisp, no
+  cracks. A moving ride there was not watched, and jitter is a thing of motion.
 - **Software props are not camera-relative**: the software rasteriser still transforms in absolute
   feet (f32), so far out on world_ultra its props may shimmer. The GPU is the default renderer.
 - **Software plants**: drawn only when fully faded in (alpha ≥ 1), without the GPU's dithered
@@ -95,4 +96,4 @@ the tile ridden alone draws it: same scene, same ecosystem file, same `.toy`, mo
 
 ## Next
 
-(-FINAL once landed.)
+Nothing for MD15. Follow-ups worth filing if the user notices them: software props camera-relative, software plants dithered, a moving ride far out on world_ultra.
