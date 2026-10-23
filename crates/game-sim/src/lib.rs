@@ -768,6 +768,10 @@ pub mod biplane_anim;
 /// scene's collision meshes stood where the scene puts them, with the sweep against the lot.
 pub mod world;
 
+/// Worlds bigger than one terrain (MD8): several tracks' terrains at offsets with join ground
+/// between them, each queried in its own coordinates, loaded and dropped by distance.
+pub mod tiles;
+
 /// The biplane as a ride: the state a plane session carries between ticks, built off `biplane.phy`,
 /// and the frame [`Sim::step`] runs while the plane has the controller.
 pub mod flight;

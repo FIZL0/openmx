@@ -71,6 +71,14 @@ pub trait Heightfield {
     /// The cell reader: the cell at sample `(ix, iz)`, `step` samples wide, or `None` where the
     /// terrain has none.
     fn cell(&self, ix: i32, iz: i32, step: i32) -> Option<Cell>;
+
+    /// A world of several terrains (MD8, [`crate::tiles`]): hand `query` the terrain under a world
+    /// point, with the point moved into that terrain's own coordinates, and say whether there was
+    /// one. `None` for a single terrain, which is queried as it is.
+    fn tile(&self, at: Vf, query: &mut dyn FnMut(&dyn Heightfield, Vf)) -> Option<bool> {
+        let _ = (at, query);
+        None
+    }
 }
 
 /// [`Terrain`] with the terrain object's own fields beside it.
@@ -129,6 +137,14 @@ pub struct Ground {
 /// surfaces. (The original also keeps the last ten cells it read; the cache changes nothing it
 /// returns, so the port has none.)
 pub fn ground(t: &dyn Heightfield, at: Vf) -> Ground {
+    // A tile of a world answers in its own coordinates, and its answer is put back at `at`.
+    let mut found = None;
+    if t.tile(at, &mut |tile, local| found = Some(ground(tile, local))).is_some() {
+        return match found {
+            Some(g) => Ground { point: Vf::new(at.x(), g.point.y(), at.z(), at.w()), ..g },
+            None => Ground { point: at, normal: UP, surfaces: [0; 4], weights: Vf::splat(1.0) },
+        };
+    }
     let (step, wide) = if t.coarse() { (2, F(2.0)) } else { (1, F::ONE) };
     let fx = (F(at.x()) * t.per_sample()).max(F::ZERO);
     let fz = (F(at.z()) * t.per_sample()).max(F::ZERO);
@@ -195,6 +211,10 @@ pub fn surface(g: &Ground) -> i32 {
 /// meshes, and the swept contact that does never writes the byte. The corners come in
 /// [`ground`]'s order — the sample, `+x`, `+z`, both.
 pub fn nearest_surface(t: &dyn Heightfield, at: Vf) -> Option<u8> {
+    let mut found = None;
+    if t.tile(at, &mut |tile, local| found = nearest_surface(tile, local)).is_some() {
+        return found;
+    }
     let (step, wide) = if t.coarse() { (2, F(2.0)) } else { (1, F::ONE) };
     let fx = (F(at.x()) * t.per_sample()).max(F::ZERO);
     let fz = (F(at.z()) * t.per_sample()).max(F::ZERO);
