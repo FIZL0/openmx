@@ -321,13 +321,15 @@ impl Sim {
             .collect()
     }
 
-    /// **One frame of every rider**, in player order, and the tick counter behind them: player 1,
-    /// then player 2, and so on, each one's whole frame before the next one's starts — the order the
-    /// original's update walk visits them in (`research/oracle.txt`, S54). `controls[i]` is player
-    /// `i`'s.
+    /// **One frame of every rider**, the last player first, and the tick counter behind them: the
+    /// last player, then the one before, down to player 1, each one's whole frame before the next
+    /// one's starts — the order the original's update walk visits them in: S54 read player order
+    /// statically, but every split-screen image runs player 2's vehicle, both substeps, before player
+    /// 1's (`research/oracle.txt`, S88; `tests/rider_rider_capture.rs`). `controls[i]` is player `i`'s,
+    /// and the frames come back in player order.
     ///
-    /// Each rider's frame sees every other rider where they stand *now*: the ones before it in the
-    /// order already moved this frame, the ones after it not yet, which is what a sequential walk
+    /// Each rider's frame sees every other rider where they stand *now*: the ones after it in player
+    /// order already moved this frame, the ones before it not yet, which is what a sequential walk
     /// of the scene gives the original. That is the one way riders reach one another — their head
     /// ray striking another's body ([`ride::hits_among`]), which is [`air::Wreck::Joust`] when the
     /// one struck is high enough above.
@@ -342,7 +344,7 @@ impl Sim {
         let mut frames = Vec::with_capacity(controls.len());
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         let mut lists = self.bike_contacts(dt);
-        for (i, c) in controls.iter().enumerate() {
+        for (i, c) in controls.iter().enumerate().rev() {
             let mut bump = lists
                 .as_mut()
                 .map(|l| std::mem::take(&mut l[i]))
@@ -369,6 +371,7 @@ impl Sim {
             }
             frames.push(frame);
         }
+        frames.reverse();
         self.ticks += 1;
         frames
     }

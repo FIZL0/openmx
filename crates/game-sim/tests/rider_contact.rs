@@ -321,7 +321,8 @@ fn online_seats_find_the_same_contacts() {
     let mut both = both;
     ride(&mut both, 1);
     let still = Controls::default();
-    for (i, l) in lists.into_iter().enumerate() {
+    // the last seat first, as `Sim::step_all` and the online seats both step (S88)
+    for (i, l) in lists.into_iter().enumerate().rev() {
         let mut bump = rider_contact::bump_among(&sims, i, l);
         sims[i].step_bumped(DT, &still, &mut Flat::default(), Some(&mut bump));
         rider_contact::bumped_among(&mut sims, &bump);
