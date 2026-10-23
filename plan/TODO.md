@@ -99,9 +99,9 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **P123** Shell --screen words for each Settings/Garage tab (display, ride, rider, bike, gear) so every tab gets a --shot; P118's Display tab has none (filed by P118 as a doubled id, lost when the user's P119/P120 were ticked; re-filed)
 - [ ] **MD19** MD16 follow-up: online rides with MX vs. ATV tricks — every seat must have the same trick pack (MD6's check), then lift main.rs's forced Original
 - [ ] **V57** V56's foliage fix gets its own switch under P126's Original tab: a menu::Departure variant (ours = V56's cutouts, original = the original's blended leaves), set by Menu::set_original, written to settings.txt only off ours (user, 2026-10-23, P126's 'new enhancement tasks add their switch here') → crates/openmx/src/menu.rs · crates/openmx/src/menu_pages.rs | t: crates/openmx/tests/menu.rs: Original on sets it, turned back leaves the others | j: foliage-switch
-- [ ] **MD20** world_ultra: openmx-mods' stitch writes untamed_nat_or at x 215.99995, which the world loader refuses; round the stitch offsets to whole feet so the largest world loads, then ride across it and check MD17's ground stream holds RSS bounded
-- [ ] **MD21** In a world mod the parked biplane sits at free06's machine.txt coordinates, not shifted by the home tile's offset; park it beside the world's spawn
-- [ ] **P129** Profile mid-ride ground adds on world_mxu with openmx --timings: add_ground_piece is ~2 ms per piece but the regrid over 653 pieces is unmeasured
+- [ ] **MD23** world_ultra: openmx-mods' stitch writes untamed_nat_or at x 215.99995, which the world loader refuses; round the stitch offsets to whole feet so the largest world loads, then ride across it and check MD17's ground stream holds RSS bounded
+- [ ] **MD24** In a world mod the parked biplane sits at free06's machine.txt coordinates, not shifted by the home tile's offset; park it beside the world's spawn
+- [ ] **P131** Profile mid-ride ground adds on world_mxu with openmx --timings: add_ground_piece is ~2 ms per piece but the regrid over 653 pieces is unmeasured
 ### Phase 2 — a decompilation you can read
 
 
