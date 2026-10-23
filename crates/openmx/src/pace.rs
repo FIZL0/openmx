@@ -208,10 +208,15 @@ impl Blend {
     /// A placement: its position blended, and its three axes blended and put back to their lengths,
     /// so a turn does not shrink the model halfway through it. A jump is not blended.
     pub fn at(&self, a: M4, b: M4) -> M4 {
-        let row = |m: &M4, i: usize| V3 { x: m.0[i][0], y: m.0[i][1], z: m.0[i][2] };
-        if row(&a, 3).sub(row(&b, 3)).len() > SNAP {
+        if place(&a).sub(place(&b)).len() > SNAP {
             return b;
         }
+        self.slide(a, b)
+    }
+
+    /// [`Blend::at`] with no jump test: for what a seat's [`Cut`] has already said is no jump.
+    pub fn slide(&self, a: M4, b: M4) -> M4 {
+        let row = |m: &M4, i: usize| V3 { x: m.0[i][0], y: m.0[i][1], z: m.0[i][2] };
         let mut out = b;
         for i in 0..4 {
             let v = self.v3(row(&a, i), row(&b, i));
@@ -242,8 +247,104 @@ impl Blend {
         if a.eye.sub(b.eye).len() > SNAP || a.at.sub(b.at).len() > SNAP {
             return *b;
         }
+        self.pan(a, b)
+    }
+
+    /// [`Blend::camera`] with no cut test: for a seat's [`Cut`] to have decided.
+    pub fn pan(&self, a: &Camera, b: &Camera) -> Camera {
         Camera { eye: self.v3(a.eye, b.eye), at: self.v3(a.at, b.at), fov: self.f(a.fov, b.fov), ..*b }
     }
+
+    /// A pose of the same skeleton in the space of a placement that moves under it, `a` in `a_at`'s
+    /// and `b` in `b_at`'s, blended where the nodes are in the world and handed back in the space of
+    /// `at`, the placement drawn (P120). It is how a thrown rider is blended: the ragdoll's bones are
+    /// bodies of their own in the world, and the wrecked bike they are kept relative to tumbles. Blended
+    /// in the bike's space instead, a rider lying still beside a spinning bike is swung round it
+    /// between ticks and springs back on the next — seventy feet a frame, for a rider thrown far off a
+    /// fast crash. The pose decides its jump as one: every node slid, or every node where it lands.
+    pub fn thrown(&self, a: &[M4], a_at: M4, b: &[M4], b_at: M4, at: M4) -> Vec<M4> {
+        if a.len() != b.len() {
+            return b.to_vec();
+        }
+        let back = inverse(at);
+        let world: Vec<(M4, M4)> = a.iter().zip(b).map(|(a, b)| (a.mul(a_at), b.mul(b_at))).collect();
+        if world.iter().any(|(a, b)| place(a).sub(place(b)).len() > SNAP) {
+            return world.iter().map(|(_, b)| b.mul(back)).collect();
+        }
+        world.iter().map(|(a, b)| self.slide(*a, *b).mul(back)).collect()
+    }
+}
+
+/// Where a placement is: its translation row.
+fn place(m: &M4) -> V3 {
+    V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] }
+}
+
+/// The inverse of a placement (an affine matrix, row vectors: `v * M`), scaled or not.
+fn inverse(m: M4) -> M4 {
+    let r = m.0;
+    let det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1]) - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+        + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+    if det.abs() < 1e-12 {
+        return M4::IDENTITY;
+    }
+    let k = 1.0 / det;
+    let mut out = [[0.0f32; 4]; 4];
+    out[0][0] = (r[1][1] * r[2][2] - r[1][2] * r[2][1]) * k;
+    out[0][1] = (r[0][2] * r[2][1] - r[0][1] * r[2][2]) * k;
+    out[0][2] = (r[0][1] * r[1][2] - r[0][2] * r[1][1]) * k;
+    out[1][0] = (r[1][2] * r[2][0] - r[1][0] * r[2][2]) * k;
+    out[1][1] = (r[0][0] * r[2][2] - r[0][2] * r[2][0]) * k;
+    out[1][2] = (r[0][2] * r[1][0] - r[0][0] * r[1][2]) * k;
+    out[2][0] = (r[1][0] * r[2][1] - r[1][1] * r[2][0]) * k;
+    out[2][1] = (r[0][1] * r[2][0] - r[0][0] * r[2][1]) * k;
+    out[2][2] = (r[0][0] * r[1][1] - r[0][1] * r[1][0]) * k;
+    for c in 0..3 {
+        out[3][c] = -(r[3][0] * out[0][c] + r[3][1] * out[1][c] + r[3][2] * out[2][c]);
+    }
+    out[3][3] = 1.0;
+    M4(out)
+}
+
+/// Whether a move of `moved` feet between the last two ticks is a jump, when the tick before moved
+/// `was` (P120): more than [`SNAP`] past what it was already doing, so that riding or flying
+/// however fast is never one, and a put-back or a swap from a standstill is.
+pub fn jumped(was: f32, moved: f32) -> bool {
+    moved > SNAP + 2.0 * was
+}
+
+/// One seat's cut (P120): whether its picture is shown where the last tick left it rather than slid
+/// there. Everything the seat's view shows — its machine, its rider, its camera — cuts or slides
+/// together: tested one by one, a bike that crossed the jump distance a tick before the camera
+/// following it would be drawn where it landed under a camera still sliding, and swing a tick's
+/// travel across the screen and back. A move is measured against the one before it ([`jumped`]).
+#[derive(Clone, Default)]
+pub struct Cut {
+    /// The spots at the tick before the last: the machine, the camera's eye and what it looks at.
+    at: Option<[V3; 3]>,
+    /// How far each moved over the tick before that.
+    was: [f32; 3],
+}
+
+impl Cut {
+    /// The spots the picture blends from, as the tick before the last left them.
+    pub fn before(&mut self, spots: [V3; 3]) {
+        if let Some(at) = self.at {
+            self.was = moved(at, spots);
+        }
+        self.at = Some(spots);
+    }
+
+    /// Whether the last tick's spots, `now`, jumped from the ones before: a cut. `marked` is a jump
+    /// the simulation says it made (a put-back), whatever the distance.
+    pub fn cuts(&self, now: [V3; 3], marked: bool) -> bool {
+        let Some(at) = self.at else { return true };
+        marked || moved(at, now).iter().zip(self.was).any(|(m, was)| jumped(was, *m))
+    }
+}
+
+fn moved(a: [V3; 3], b: [V3; 3]) -> [f32; 3] {
+    std::array::from_fn(|i| a[i].sub(b[i]).len())
 }
 
 #[cfg(test)]
@@ -444,5 +545,100 @@ mod tests {
         let far = M4::placement(v(SNAP + 1.0, 0.0, 0.0), v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0));
         assert_eq!(Blend(0.5).at(a, far), far);
         assert_eq!(Blend(0.0).at(a, b).0[3], a.0[3]);
+    }
+
+    /// P120: a rider lying still forty feet from a bike that turns a quarter round in a tick is drawn
+    /// where they lie at every blend. In the bike's space they were pulled toward it, and a fast enough
+    /// turn snapped some nodes and slid the rest.
+    #[test]
+    fn a_thrown_rider_stays_put_beside_a_tumbling_bike() {
+        let v = |x, y, z| V3 { x, y, z };
+        let bike_a = M4::placement(v(0.0, 10.0, 0.0), v(0.0, 0.0, 1.0), v(0.0, 1.0, 0.0));
+        let bike_b = M4::placement(v(0.0, 10.0, 0.0), v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0));
+        let lies = M4::placement(v(40.0, 0.0, 0.0), v(0.0, 0.0, 1.0), v(0.0, 1.0, 0.0));
+        let in_space = |bike: M4| lies.mul(inverse(bike));
+        let (a, b) = (vec![in_space(bike_a)], vec![in_space(bike_b)]);
+        for k in 0..=10 {
+            let by = Blend(k as f32 / 10.0);
+            let bike = by.slide(bike_a, bike_b);
+            let drawn = by.thrown(&a, bike_a, &b, bike_b, bike)[0].mul(bike);
+            let off = place(&drawn).sub(place(&lies)).len();
+            assert!(off < 1e-3, "at {}: drawn {off} ft from where the rider lies", by.0);
+            let swung = by.pose(&a, &b)[0].mul(bike);
+            if k == 5 {
+                assert!(place(&swung).sub(place(&lies)).len() > 10.0, "the bike's-space blend no longer swings");
+            }
+        }
+        // The affine inverse undoes a scaled placement too.
+        let mut scaled = bike_b;
+        for i in 0..3 {
+            for c in 0..3 {
+                scaled.0[i][c] *= 2.5;
+            }
+        }
+        let round = scaled.mul(inverse(scaled));
+        for i in 0..4 {
+            for c in 0..4 {
+                assert!((round.0[i][c] - M4::IDENTITY.0[i][c]).abs() < 1e-5, "{round:?}");
+            }
+        }
+    }
+
+    /// P120: riding however fast is not a cut, a put-back from a standstill is, and so is anything the
+    /// simulation marks. The seat's three spots cut together.
+    #[test]
+    fn a_cut_is_a_jump_past_the_seats_own_speed() {
+        let v = |z: f32| V3 { x: 0.0, y: 0.0, z };
+        let spots = |z: f32| [v(z), v(z - 30.0), v(z + 5.0)];
+        let mut cut = Cut::default();
+        assert!(cut.cuts(spots(0.0), false), "nothing to blend from");
+        // Fifty feet a tick, steadily: past [`SNAP`], and no jump once the speed is known.
+        cut.before(spots(0.0));
+        for t in 1..10 {
+            cut.before(spots(50.0 * t as f32));
+            assert!(!cut.cuts(spots(50.0 * (t + 1) as f32), false), "tick {t}");
+        }
+        assert!(cut.cuts(spots(550.0), true), "a put-back is a cut whatever the distance");
+        // Standing still, then a put-back forty feet off.
+        let mut cut = Cut::default();
+        cut.before(spots(0.0));
+        cut.before(spots(0.0));
+        assert!(!cut.cuts(spots(0.0), false));
+        assert!(cut.cuts(spots(40.0), false));
+        // The camera alone jumping cuts the seat.
+        let moved = [v(0.0), v(-30.0 + 40.0), v(5.0)];
+        assert!(cut.cuts(moved, false));
+    }
+
+    /// P120: taking the ticks owed and the blend at one moment a frame, a ride at a steady speed is
+    /// drawn exactly a tick behind the wall clock at every frame, at 45, 60 and 144 pictures a second,
+    /// whatever the frames' own lengths: the blend never reaches 1 and the drawn spot never steps back.
+    #[test]
+    fn a_frames_moment_draws_a_steady_ride_a_tick_behind() {
+        let start = Instant::now();
+        for fps in [45.0f64, 60.0, 144.0] {
+            let mut pacer = Pacer::new(TICK, start);
+            // The spot after `n` ticks, at four feet a tick.
+            let spot = |n: u64| 4.0 * n as f64;
+            let (mut last, mut frame) = (f64::MIN, 0u32);
+            while frame < (fps * 5.0) as u32 {
+                // Uneven frames: every third one a third longer, as a frame that ran a tick is.
+                let moment = start + Duration::from_secs_f64((frame as f64 + (frame % 3 == 0) as u8 as f64 / 3.0) / fps);
+                frame += 1;
+                while pacer.owed(moment) {
+                    pacer.ran();
+                }
+                let Some(now) = pacer.ticks().checked_sub(1) else { continue };
+                let f = pacer.blend(moment);
+                assert!((0.0..1.0).contains(&f), "{fps} fps: blend {f}");
+                let drawn = spot(now.saturating_sub(1)) + (spot(now) - spot(now.saturating_sub(1))) * f as f64;
+                assert!(drawn >= last, "{fps} fps: drawn at {drawn}, back from {last}");
+                last = drawn;
+                if now >= 1 {
+                    let wall = moment.duration_since(start).as_secs_f64() / TICK.as_secs_f64();
+                    assert!((drawn - 4.0 * (wall - 1.0)).abs() < 1e-3, "{fps} fps: drawn at {drawn}, the clock says {}", 4.0 * (wall - 1.0));
+                }
+            }
+        }
     }
 }
