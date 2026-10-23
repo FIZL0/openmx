@@ -1038,7 +1038,12 @@ impl Pen<'_> {
         self.chips(&chips, x, y + 1.0, w);
         let title = if menu.riders > 1 { format!("{}P Paused", menu.pauser + 1) } else { "Paused".into() };
         self.title(&title);
-        self.hints(&[(Btn::Circle, "Resume"), (Btn::Cross, "Select")]);
+        if let Some((ask, rows, row)) = menu.confirming() {
+            self.hints(&[(Btn::Circle, "Stay"), (Btn::Cross, "Select")]);
+            self.popup(ask, &rows, row);
+        } else {
+            self.hints(&[(Btn::Circle, "Resume"), (Btn::Cross, "Select")]);
+        }
     }
 
     fn online(&mut self, menu: &Menu) {
@@ -1574,28 +1579,34 @@ impl Pen<'_> {
             self.hints(&[(Btn::Circle, "Quit"), (Btn::Cross, "Start")]);
         }
         if let Some(row) = menu.quitting() {
-            let whole = self.whole();
-            self.fill(whole, [0, 0, 0, 150]);
-            let b = [26.0, 14.0, 28.0, 17.0];
-            self.round([b[0] + 0.4, b[1] + 0.45, b[2], b[3]], 1.2, SHADOW, SHADOW);
-            self.round(b, 1.2, [0x2a, 0x14, 0x08, 255], [0x12, 0x09, 0x04, 255]);
-            self.ring(b, 1.2, 0.12, [255, 255, 255, 60]);
-            self.text(Weight::Heavy, "Quit the game?", 40.0, 18.4, 2.3, SLANT, CHALK, Align::Centre);
-            for (i, label) in QUIT_ROWS.iter().enumerate() {
-                let y = 21.0 + 4.0 * i as f32;
-                let size = ITEM;
-                let mid = y + size * 0.87;
-                if i == row {
-                    let w = self.wide(Weight::Heavy, label, size);
-                    let pb = [40.0 - w / 2.0 - PILL_PAD, y, w + 2.0 * PILL_PAD, size * 1.74];
-                    self.pill(pb, 0.28 * size, 0.1 * size);
-                    let lb = self.text(Weight::Heavy, label, 40.0, Pen::mid(mid, size), size, SLANT, CHALK, Align::Centre);
-                    let pb = self.b(pb);
-                    self.parts.push(Part::Pill { pill: pb, label: lb });
-                } else {
-                    let lb = self.text(Weight::Bold, label, 40.0, Pen::mid(mid, size), size, 0.0, BONE, Align::Centre);
-                    self.parts.push(Part::Item(lb));
-                }
+            self.popup("Quit the game?", &QUIT_ROWS, row);
+        }
+    }
+
+    /// A two-row question over the screen, dimmed under it: the splash's Quit and the pause's
+    /// confirm (P110).
+    fn popup(&mut self, ask: &str, rows: &[&str], row: usize) {
+        let whole = self.whole();
+        self.fill(whole, [0, 0, 0, 150]);
+        let b = [26.0, 14.0, 28.0, 17.0];
+        self.round([b[0] + 0.4, b[1] + 0.45, b[2], b[3]], 1.2, SHADOW, SHADOW);
+        self.round(b, 1.2, [0x2a, 0x14, 0x08, 255], [0x12, 0x09, 0x04, 255]);
+        self.ring(b, 1.2, 0.12, [255, 255, 255, 60]);
+        self.text(Weight::Heavy, ask, 40.0, 18.4, 2.3, SLANT, CHALK, Align::Centre);
+        for (i, label) in rows.iter().enumerate() {
+            let y = 21.0 + 4.0 * i as f32;
+            let size = ITEM;
+            let mid = y + size * 0.87;
+            if i == row {
+                let w = self.wide(Weight::Heavy, label, size);
+                let pb = [40.0 - w / 2.0 - PILL_PAD, y, w + 2.0 * PILL_PAD, size * 1.74];
+                self.pill(pb, 0.28 * size, 0.1 * size);
+                let lb = self.text(Weight::Heavy, label, 40.0, Pen::mid(mid, size), size, SLANT, CHALK, Align::Centre);
+                let pb = self.b(pb);
+                self.parts.push(Part::Pill { pill: pb, label: lb });
+            } else {
+                let lb = self.text(Weight::Bold, label, 40.0, Pen::mid(mid, size), size, 0.0, BONE, Align::Centre);
+                self.parts.push(Part::Item(lb));
             }
         }
     }

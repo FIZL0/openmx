@@ -1575,6 +1575,26 @@ pub const CLAIMED_FRAMES: u32 = 72;
 /// The splash's Quit popup's rows.
 const QUIT_ROWS: [&str; 2] = ["Quit", "Stay"];
 
+/// Where the pause's Main Menu row takes this machine (P110), as the shell says, which its confirm
+/// is worded for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LeaveTo {
+    /// The main menu: a local ride, or a freeride opened to online, whose room closes with it.
+    #[default]
+    Main,
+    /// The lobby: the host of a lobby's ride takes everyone back to it.
+    Lobby,
+    /// Out of the online game: a guest leaves the lobby, and the others ride on.
+    Online,
+}
+
+/// What the pause's confirm (P110) is asking about: its Main Menu row or its Quit row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leaving {
+    Main,
+    Quit,
+}
+
 /// What the pause's song rows ask of the music (P56), beside the settings it changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tune {
@@ -1674,6 +1694,11 @@ pub struct Menu {
     claimed: Option<u32>,
     /// The splash's Quit popup: the device that asked, which alone answers it, and its row.
     quit: Option<(Dev, usize)>,
+    /// The pause's confirm (P110): what its leave row asks, and its row, 1 being Stay. The pauser
+    /// alone answers it, as they alone drive the pause.
+    leaving: Option<(Leaving, usize)>,
+    /// Where the pause's Main Menu row goes, as the shell says.
+    pub leave_to: LeaveTo,
     /// A local game's seats (P43): the controller on each, by the shell's pad seat number, which is
     /// the device id the join screen is over. Kept between rides, so the next local game opens on
     /// the last one's players.
@@ -1800,6 +1825,8 @@ impl Menu {
             p1_name: String::new(),
             claimed: None,
             quit: None,
+            leaving: None,
+            leave_to: LeaveTo::Main,
             join: Join::new(join::ON_SCREEN, Opened::Menu),
             devices: Vec::new(),
             heard: Vec::new(),
@@ -2079,6 +2106,7 @@ impl Menu {
     pub fn main(&mut self) {
         self.stack = vec![Screen::Main];
         self.pauser = 0;
+        self.leaving = None;
     }
 
     /// The pause over a ride, 1P's.
@@ -2092,6 +2120,42 @@ impl Menu {
         self.cursor[Screen::Pause.index()] = 0;
         self.pauser = seat.min(SEATS_MAX - 1);
         self.switch_pick = None;
+        self.leaving = None;
+    }
+
+    /// The pause's confirm, if it is up (P110): its question, its two rows, the leaving one first
+    /// and Stay second, and the row it is on.
+    pub fn confirming(&self) -> Option<(&'static str, [&'static str; 2], usize)> {
+        let (what, row) = self.leaving.filter(|_| self.screen() == Some(Screen::Pause))?;
+        let (ask, go) = match (what, self.leave_to) {
+            (Leaving::Quit, _) => ("Quit the game?", QUIT_ROWS[0]),
+            (Leaving::Main, LeaveTo::Main) => ("Main menu?", "Main Menu"),
+            (Leaving::Main, LeaveTo::Lobby) => ("Return to lobby?", "Return to Lobby"),
+            (Leaving::Main, LeaveTo::Online) => ("Leave the online game?", "Leave Game"),
+        };
+        Some((ask, [go, QUIT_ROWS[1]], row))
+    }
+
+    /// One press on the pause's confirm: any direction moves between its two rows, Cross on the
+    /// first leaves, and Cross on Stay, Circle or Start go back to the pause with the cursor where it
+    /// was.
+    fn confirm(&mut self, p: Press) -> Act {
+        let Some((what, row)) = self.leaving else { return Act::Stay };
+        if p.up || p.down || p.left || p.right {
+            self.leaving = Some((what, 1 - row));
+        } else if p.ok && row == 0 {
+            self.leaving = None;
+            return match what {
+                Leaving::Main => {
+                    self.main();
+                    Act::MainMenu
+                }
+                Leaving::Quit => Act::Quit,
+            };
+        } else if p.ok || p.back || p.start {
+            self.leaving = None;
+        }
+        Act::Stay
     }
 
     /// The machines `seat` can be switched to from the one they are on, in [`Machine::ALL`]'s
@@ -2354,6 +2418,9 @@ impl Menu {
             self.walk_join(0, p);
             return Act::Stay;
         }
+        if screen == Screen::Pause && self.leaving.is_some() {
+            return self.confirm(p);
+        }
         let rows = self.rows(screen);
         // The lobby's and the list's rows come and go with what the network says.
         let at = self.cursor(screen).min(rows - 1);
@@ -2500,16 +2567,14 @@ impl Menu {
                         PAUSE_AUDIO => self.open_settings(pages::TAB_AUDIO),
                         PAUSE_SETTINGS => self.open_settings(self.tab(Screen::Settings)),
                         PAUSE_MARKERS => return Act::ClearMarkers(self.pauser),
-                        PAUSE_MAIN => {
-                            self.main();
-                            return Act::MainMenu;
-                        }
+                        // Leaving asks first, on Stay (P110).
+                        PAUSE_MAIN => self.leaving = Some((Leaving::Main, 1)),
                         PAUSE_OPEN if self.opening == Opening::Can => {
                             self.stack.clear();
                             return Act::OpenOnline;
                         }
                         PAUSE_OPEN if self.opening == Opening::Open => {}
-                        _ => return Act::Quit,
+                        _ => self.leaving = Some((Leaving::Quit, 1)),
                     }
                 }
             }

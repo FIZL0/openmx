@@ -429,6 +429,19 @@ impl Online {
         }
     }
 
+    /// Where [`Online::leave`] takes this machine, for the pause's confirm (P110): back to the lobby
+    /// for the host of a lobby's ride, out of the game for a guest, and to the main menu off an opened
+    /// freeride.
+    pub fn leaves_to(&self) -> crate::menu::LeaveTo {
+        use crate::menu::LeaveTo;
+        match &self.wire {
+            Wire::Lobby { .. } if self.spawn.is_some() => LeaveTo::Main,
+            Wire::Lobby { .. } if self.net.me == openmx_net::HOST => LeaveTo::Lobby,
+            Wire::Lobby { .. } => LeaveTo::Online,
+            _ => LeaveTo::Main,
+        }
+    }
+
     /// Leave a lobby's ride from the pause: the host takes everyone back to the lobby, a guest leaves
     /// the lobby (the others go back to theirs). Whether this machine is still in a lobby after.
     pub fn leave(&self) -> bool {
