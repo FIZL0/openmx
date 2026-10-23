@@ -149,7 +149,9 @@ fn pack(phy: &mut Phy) {
     use game_sim::trick_pack;
     let rows = trick_pack::table(TABLE.as_bytes()).expect("the test's table reads");
     let ini = game_sim::phy::Ini::parse(THREE_SIXTY);
-    let moves = trick_pack::moves(&ini, &rows).expect("the test's file has a [Three Sixty]");
+    let mut moves = trick_pack::moves(&ini, &rows).expect("the test's file has a [Three Sixty]");
+    // The gestures here are MX vs. ATV's step; MD25's easy 360 (the default) would fire on the arm push.
+    moves.spin_style = game_sim::air::SpinStyle::MxVsAtv;
     trick_pack::apply(phy, &ini, moves);
 }
 
