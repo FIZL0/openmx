@@ -1745,9 +1745,7 @@ impl Renderer {
                 self.materials[id].rest = None;
             }
         }
-        for t in textures {
-            self.textures.remove(&t);
-        }
+        self.textures.retain(|&(t, _), _| !textures.contains(&t));
     }
 
     /// A material bind group with no texture of its own, for a dropped material's place.
