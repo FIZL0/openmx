@@ -14,6 +14,10 @@
 //! waits for one it is over and says so, and it never says so) and drops those left behind; and the
 //! piece under the rider at the end, streamed in mid-ride, is handed to the GPU as the same chunks
 //! the whole world built before the first frame hands it (`--world-ground all`).
+//!
+//! MD28 adds a world of three long tiles, each more chunks than the test lets the shell write to the
+//! GPU in a frame (`--world-chunks`), and proves no frame of a ride across them writes more (counted, not timed: the gate's
+//! machine is shared, and a time budget would fail on its load rather than on the shell).
 
 use game_sim::tiles::generate;
 use std::path::{Path, PathBuf};
@@ -108,13 +112,17 @@ fn write(root: &Path, rel: &str, bytes: impl AsRef<[u8]>) {
 
 /// A `mods/` folder holding the world, `md17_world`. Each test writes its own.
 fn mods_folder(test: &str) -> PathBuf {
+    mods_folder_of(test, &specs())
+}
+
+/// [`mods_folder`] with these pieces for the world's.
+fn mods_folder_of(test: &str, specs: &[Spec]) -> PathBuf {
     let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md17").join(test).join("mods");
     let _ = std::fs::remove_dir_all(&mods);
     let world = mods.join("tracks").join("md17_world");
-    let specs = specs();
     let mut tiles = Vec::new();
     let mut joins = Vec::new();
-    for s in &specs {
+    for s in specs {
         if s.tile {
             let dir = world.join("tiles").join(&s.name);
             let stem = s.name.to_uppercase();
@@ -128,7 +136,8 @@ fn mods_folder(test: &str) -> PathBuf {
             );
             write(&dir, &format!("Env/{stem}/{stem}.scn"), scene(s));
             write(&dir, &format!("Env/{stem}/{stem}.ps2.trn"), terrain(s));
-            tiles.push(format!(r#"{{"tile": "{}", "at": [{}.0, {}.0], "keep": [0, 0, 63, 63]}}"#, s.name, s.at[0], s.at[1]));
+            let keep = [s.cells.0 * 16 - 1, s.cells.1 * 16 - 1];
+            tiles.push(format!(r#"{{"tile": "{}", "at": [{}.0, {}.0], "keep": [0, 0, {}, {}]}}"#, s.name, s.at[0], s.at[1], keep[0], keep[1]));
         } else {
             write(&world, &format!("joins/{0}/{0}.ps2.trn", s.name), terrain(s));
             joins.push(format!(r#"{{"join": "{}", "at": [{}.0, {}.0]}}"#, s.name, s.at[0], s.at[1]));
@@ -166,11 +175,16 @@ fn throttle_tape(frames: usize) -> String {
 /// The shell on the world from its start line, headless and small, with these arguments:
 /// what it said, or `None` (and why) without the disc or a GPU.
 fn shell(test: &str, args: &[&str]) -> Option<String> {
+    shell_on(test, &specs(), args)
+}
+
+/// [`shell`] on a world of these pieces.
+fn shell_on(test: &str, specs: &[Spec], args: &[&str]) -> Option<String> {
     if let Err(e) = game_render::disc::Disc::open_configured() {
         eprintln!("skipped: {e}");
         return None;
     }
-    let mods = mods_folder(test);
+    let mods = mods_folder_of(test, specs);
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let reach = format!("{LOAD},{DROP}");
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
@@ -192,12 +206,17 @@ fn shell(test: &str, args: &[&str]) -> Option<String> {
 
 /// The shell ridden on the gas for [`TICKS`] ticks.
 fn ride(test: &str, args: &[&str]) -> Option<String> {
+    ride_on(test, &specs(), args)
+}
+
+/// [`ride`] on a world of these pieces.
+fn ride_on(test: &str, specs: &[Spec], args: &[&str]) -> Option<String> {
     let tape = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md17").join(format!("{test}.tape"));
     write(tape.parent().unwrap(), tape.file_name().unwrap().to_str().unwrap(), throttle_tape(TICKS));
     let n = TICKS.to_string();
     let mut all = vec!["--frames", &n, "--play", tape.to_str().unwrap()];
     all.extend_from_slice(args);
-    shell(test, &all)
+    shell_on(test, specs, &all)
 }
 
 /// The pieces the shell said it built before the ride, and the count its summary gave.
@@ -292,4 +311,44 @@ fn the_streamed_ground_under_the_rider_is_the_whole_builds() {
     let (_, every) = built_before(&all);
     assert_eq!(every, specs().len(), "--world-ground all builds every piece first");
     assert_eq!(end_x(&near), end_x(&all), "the ground the GPU holds does not change the ride");
+}
+
+/// MD28's budget: the most ground chunks the shell writes to the GPU in a frame, but for a piece a
+/// rider is already on — `worlds::CHUNKS_A_FRAME` (96) on the desktop, and this many with
+/// `--world-chunks` here, where a generated tile has 64 chunks at most.
+const CHUNKS_A_FRAME: usize = 10;
+
+/// MD28's world: three tiles of 7 by 16 roots, 32 chunks each — more than [`CHUNKS_A_FRAME`] —
+/// side by side along the ride's line, each owning up to the next, the first with the start line.
+fn long_specs() -> Vec<Spec> {
+    (0..3).map(|c| Spec { name: format!("t{c}0"), at: [999 * c, 0], cells: (7, 16), tile: true }).collect()
+}
+
+/// MD28: a streamed world's pieces go to the GPU at most [`CHUNKS_A_FRAME`] chunks a frame — a piece
+/// built ahead of the rider is written over several frames, its errors and hash worked out on the
+/// builder's thread — so no frame of the ride does a whole piece's ground work at once (written in
+/// one frame, a 576-chunk piece of the freeride world was a frame whose ground took 74 ms).
+#[test]
+fn a_streamed_ride_writes_its_ground_a_few_chunks_a_frame() {
+    let n = CHUNKS_A_FRAME.to_string();
+    let Some(said) = ride_on("budget", &long_specs(), &["--world-chunks", &n]) else { return };
+    let x = end_x(&said);
+    assert!(x > 999.0 - LOAD, "the ride ended at x {x}, short of the second tile's reach:\n{said}");
+    let waited: Vec<_> = during(&said).into_iter().filter(|(_, w, _)| w == "waited").collect();
+    assert!(waited.is_empty(), "the rider got onto a piece before its ground was built: {waited:?}");
+    // The pieces built mid-ride, each bigger than a frame's budget.
+    let mid: Vec<usize> = said
+        .lines()
+        .filter_map(|l| {
+            let (head, tick) = l.strip_prefix("world ground: ")?.rsplit_once(" at tick ")?;
+            let chunks = head.split_once(" built, ")?.1.strip_suffix(" chunks")?;
+            (tick.parse::<usize>().ok()? > 0).then(|| chunks.parse().unwrap())
+        })
+        .collect();
+    assert!(!mid.is_empty() && mid.iter().all(|&n| n > CHUNKS_A_FRAME), "pieces built mid-ride, each over the budget: {mid:?}\n{said}");
+    let most: usize = said
+        .lines()
+        .find_map(|l| l.strip_prefix("world ground: at most ")?.strip_suffix(" chunks written in a frame of the ride")?.parse().ok())
+        .unwrap_or_else(|| panic!("no `at most` line:\n{said}"));
+    assert!(most > 0 && most <= CHUNKS_A_FRAME, "{most} chunks written in one frame, over the budget of {CHUNKS_A_FRAME}:\n{said}");
 }

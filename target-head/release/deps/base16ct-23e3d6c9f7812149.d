@@ -1,0 +1,12 @@
+/home/rycs/repos/openmx-slots/s1/target-head/release/deps/base16ct-23e3d6c9f7812149.d: /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/lib.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/lower.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/mixed.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/upper.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/display.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/error.rs
+
+/home/rycs/repos/openmx-slots/s1/target-head/release/deps/libbase16ct-23e3d6c9f7812149.rlib: /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/lib.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/lower.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/mixed.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/upper.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/display.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/error.rs
+
+/home/rycs/repos/openmx-slots/s1/target-head/release/deps/libbase16ct-23e3d6c9f7812149.rmeta: /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/lib.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/lower.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/mixed.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/upper.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/display.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/error.rs
+
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/lib.rs:
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/lower.rs:
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/mixed.rs:
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/upper.rs:
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/display.rs:
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/base16ct-1.0.0/src/error.rs:

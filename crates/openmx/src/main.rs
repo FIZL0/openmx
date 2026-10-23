@@ -1038,6 +1038,9 @@ struct Args {
     /// `--world-reach LOAD,DROP`: how near a world's pieces are loaded and how far they are let go,
     /// in feet, instead of the desktop's ([`game_sim::tiles::Reach::DESKTOP`]).
     world_reach: Option<game_sim::tiles::Reach>,
+    /// `--world-chunks N`: how many ground chunks of a world's pieces ahead go to the GPU a frame,
+    /// instead of [`worlds::CHUNKS_A_FRAME`] (MD28).
+    world_chunks: Option<usize>,
     /// `--trace-switch N`: under `--trace-feel`, ride the first N frames on the throttle alone and only
     /// then take the controls the other flags ask for — a full brake from top speed, or a turn at speed.
     trace_switch: Option<u32>,
@@ -3513,6 +3516,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
     // A world's ground on the GPU (MD17): the pieces near the start now, the rest as the riders come.
     let mut ground_stream: Option<worlds::GroundStream> = None;
+    // The most ground chunks one frame of the ride wrote to the GPU (MD28).
+    let mut ground_wrote_most = 0usize;
     // A world's look by map (MD9): every tile's ground paint, light and sky, read from its folder.
     let world_look = world_mod.as_ref().map(|w| {
         let l = w.look(&archives[1..], ground::DIRT, Lighting::of(&look));
@@ -3559,7 +3564,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let (mut stream, first) = worlds::GroundStream::start(w, cells, reach, &starts, args.world_ground_all);
             r.set_ground_streamed(cells, paint, ground::DIRT, t.area.width.0.hypot(t.area.depth.0))?;
             for (i, c) in &first {
-                r.add_ground_piece(*i as u32, c)?;
+                r.add_prepared_ground_piece(*i as u32, c)?;
             }
             for line in stream.take_log() {
                 println!("{line}");
@@ -4649,7 +4654,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 rig.preload_meter.step(preload_sense(seat));
             }
         }
-        // A world loads the tiles ahead of the riders and lets the far ones go (MD8).
+        // A world loads the tiles ahead of the riders and lets the far ones go (MD8), charged to the
+        // ground with its pieces' adds (MD28).
+        stages.mark(stages::Stage::Animation);
         if simulated && matches!(world.place, Land::Tiles(_)) {
             let near: Vec<Vf> = world
                 .seats
@@ -4668,18 +4675,27 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let near: Vec<[f32; 2]> = near.iter().map(|p| [p.x(), p.z()]).collect();
                 let changes = stream.update(&near);
                 if let Some(r) = renderer_of(&mut offscreen, window) {
+                    let mut wrote = 0;
                     for change in changes {
                         match change {
-                            worlds::Change::Add(i, chunks) => r.add_ground_piece(i as u32, &chunks)?,
+                            worlds::Change::Add(i, piece, true) => {
+                                wrote += piece.chunks.len();
+                                r.add_prepared_ground_piece(i as u32, &piece)?
+                            }
+                            worlds::Change::Add(i, piece, false) => r.stage_ground_piece(i as u32, piece)?,
                             worlds::Change::Drop(i) => r.drop_ground_piece(i as u32),
                         }
                     }
+                    // A piece ahead goes up a few chunks a frame (MD28).
+                    wrote += r.write_staged_ground(args.world_chunks.unwrap_or(worlds::CHUNKS_A_FRAME), &stream.under());
+                    ground_wrote_most = ground_wrote_most.max(wrote);
                 }
                 for line in stream.take_log() {
                     println!("{line} at tick {}", pacer.ticks());
                 }
             }
         }
+        stages.mark(stages::Stage::Ground);
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
         cameras.clear();
@@ -5207,6 +5223,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 front.art.sprites(&front.menu, (frame.width, frame.height), menu_base, &mut gpu_sprites);
             }
             perf.add(Stage::Draw, draw_at.elapsed());
+            stages.mark(stages::Stage::Hud);
 
             // What stands in the world besides the props, once for every view: each bike, its parts
             // and its rider, posed by node matrices the vertex shader skins with.
@@ -5326,6 +5343,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 })
                 .collect();
             perf.lap(Stage::Scene, scene_at, spent);
+            stages.mark(stages::Stage::Scene);
 
             let draw_at = Instant::now();
             let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, sprites: &gpu_sprites, light: &light };
@@ -5379,7 +5397,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             };
             perf.add(Stage::Draw, draw_at.elapsed().saturating_sub(waited));
             perf.add(Stage::Present, waited);
+            // The GPU's frame is its present; what the renderer spent choosing the ground's chunks
+            // is the ground's (MD28).
+            stages.mark(stages::Stage::Present);
             if let Some(d) = out {
+                stages.shift(stages::Stage::Present, stages::Stage::Ground, d.ground_time);
                 for (v, tris) in d.triangles.iter().enumerate() {
                     view_triangles[v] += tris;
                     drawn += tris;
@@ -5656,7 +5678,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         stages.frame();
         loaded.get_or_insert_with(|| (game_render::tally::Tally::now(), stages::bytes_read_mark()));
         if args.timings && stages_since.elapsed() >= Duration::from_secs(1) {
-            println!("     {}", stages.line());
+            println!("     {}; {}", stages.line(), stages.worst_line());
             stages_since = Instant::now();
         }
         top = Instant::now();
@@ -5724,6 +5746,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let hash = r.ground_piece_hash(i as u32).map_or("not held".to_string(), |h| format!("{h:#018x}"));
             println!("world ground under the rider: {} {hash}", w.pieces[i].tile.name);
         }
+        if ground_stream.is_some() {
+            println!("world ground: at most {ground_wrote_most} chunks written in a frame of the ride");
+        }
         // And the first player's plane, flown or not, for a tape that switched into it (P102).
         if let Some(flight) = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.as_ref()) {
             println!("plane hash {:#018x} ({})", game_sim::hash::of(flight), world.seats[0].garage.up.name());
@@ -5755,7 +5780,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         sound.quiet();
     }
     if args.timings {
-        println!("session {}", stages.session());
+        println!("session {}; {}", stages.session(), stages.session_worst());
         // Bytes read count the window's socket and every pad's events too, so only a ride with
         // neither, a headless one, should say none.
         let (tally, bytes) = loaded.unwrap_or_else(|| (game_render::tally::Tally::now(), None));
@@ -6304,6 +6329,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace_at: None,
         world_ground_all: false,
         world_reach: None,
+        world_chunks: None,
         trace_switch: None,
         trace_stick_y: Vec::new(),
         record: None,
@@ -6592,6 +6618,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
                 args.world_reach = Some(game_sim::tiles::Reach { load: F(load), drop: F(drop) });
             }
+            "--world-chunks" => {
+                let n: usize = next("a number of chunks")?.parse().map_err(|_| "--world-chunks: a number of chunks")?;
+                if n == 0 {
+                    return Err("--world-chunks: at least 1".into());
+                }
+                args.world_chunks = Some(n);
+            }
             "--trace-picture" => args.trace_picture = true,
             "--frames" => {
                 args.frames = Some(
@@ -6685,7 +6718,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
-                            [--world-ground all|near] [--world-reach LOAD,DROP]\n\
+                            [--world-ground all|near] [--world-reach LOAD,DROP] [--world-chunks N]\n\
                             [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\

@@ -1,0 +1,1 @@
+{"rustc":64270464211342465,"features":"[]","declared_features":"[\"default\", \"std\"]","target":11587580729347136699,"profile":854319013279132213,"path":10178399977702174231,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"release/.fingerprint/presser-4b2631b688f45229/dep-lib-presser","checksum":false}}],"rustflags":[],"config":9396254390672932401,"compile_kind":0}

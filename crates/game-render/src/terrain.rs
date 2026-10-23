@@ -364,6 +364,67 @@ pub fn lod_indices_where(cells: u32, level: u32, coarser: [bool; 4], keep: impl 
     out
 }
 
+/// [`lod_indices`] for a chunk with holes in it, at any level (MD28): each of the level's quads whose
+/// cells `has` says are all there, and where only some are, those cells alone at full detail. So a
+/// hole's edge is drawn as finely as the hole is cut and the rest of the chunk as coarsely as its
+/// level; a full cell beside a coarse quad inside the chunk meets it with a T, a crack no wider than
+/// the level's own error ([`lod_errors_where`]). `has(x, z)` is the cell whose first corner is `(x, z)`.
+pub fn lod_indices_holed(cells: u32, level: u32, coarser: [bool; 4], has: impl Fn(u32, u32) -> bool) -> Vec<u32> {
+    let step = 1u32 << level.min(lod_levels(cells));
+    if step == 1 {
+        return lod_indices_where(cells, 0, coarser, has);
+    }
+    let whole = |i: u32, j: u32| (j..j + step).all(|z| (i..i + step).all(|x| has(x, z)));
+    let mut out = lod_indices_where(cells, level, coarser, whole);
+    let row = cells + 1;
+    for j in (0..cells).step_by(step as usize) {
+        for i in (0..cells).step_by(step as usize) {
+            if whole(i, j) {
+                continue;
+            }
+            for z in j..j + step {
+                for x in i..i + step {
+                    if has(x, z) {
+                        let (a, b, c, d) = (z * row + x, z * row + x + 1, (z + 1) * row + x + 1, (z + 1) * row + x);
+                        out.extend([a, b, c, a, c, d]);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// [`lod_errors`] for a chunk with holes in it, drawn as [`lod_indices_holed`] draws it: only a
+/// level's quads that are whole stray from the full grid, so the corners only a hole has — put
+/// anywhere — count for nothing.
+pub fn lod_errors_where(heights: &[f32], cells: u32, has: impl Fn(u32, u32) -> bool) -> Vec<f32> {
+    let row = (cells + 1) as usize;
+    let h = |i: u32, j: u32| heights[j as usize * row + i as usize];
+    let mut out: Vec<f32> = Vec::new();
+    for level in 0..=lod_levels(cells) {
+        let step = 1u32 << level;
+        let mut worst = out.last().copied().unwrap_or(0.0);
+        for j0 in (0..cells).step_by(step as usize) {
+            for i0 in (0..cells).step_by(step as usize) {
+                if !(j0..j0 + step).all(|z| (i0..i0 + step).all(|x| has(x, z))) {
+                    continue;
+                }
+                let (a, b, c, d) = (h(i0, j0), h(i0 + step, j0), h(i0 + step, j0 + step), h(i0, j0 + step));
+                for dj in 0..=step {
+                    for di in 0..=step {
+                        let (u, v) = (di as f32 / step as f32, dj as f32 / step as f32);
+                        let flat = if u >= v { a + (b - a) * u + (c - b) * v } else { a + (c - d) * u + (d - a) * v };
+                        worst = worst.max((h(i0 + di, j0 + dj) - flat).abs());
+                    }
+                }
+            }
+        }
+        out.push(worst);
+    }
+    out
+}
+
 /// How far, in height, each level of a chunk strays from its full grid: for every level, the most any
 /// corner of the full grid lies above or below that level's triangles. `heights` is the chunk's
 /// `(cells + 1)²` corners, row by row along `x`. Never smaller than a finer level's.
@@ -412,33 +473,32 @@ pub fn lod_level(errors: &[f32], distance: f32, focal: f32, pixels: f32) -> u32 
 
 /// Make the levels of a grid of chunks, `across` by `along`, differ by at most one between any two
 /// side neighbours, by making the coarser of a pair finer — never coarser, so no chunk's error grows.
+///
+/// What that settles to is each chunk's level capped by every other chunk's plus their distance
+/// apart in steps across and along, which two sweeps find exactly: one from the first corner taking
+/// the cap from behind and above, one from the last taking it from ahead and below (MD28 — sweeping
+/// until nothing moved was a world's whole ground budget).
 pub fn lod_balance(levels: &mut [u32], across: usize, along: usize) {
-    loop {
-        let mut moved = false;
-        for z in 0..along {
-            for x in 0..across {
-                let here = z * across + x;
-                let mut cap = u32::MAX;
-                if x > 0 {
-                    cap = cap.min(levels[here - 1] + 1);
-                }
-                if x + 1 < across {
-                    cap = cap.min(levels[here + 1] + 1);
-                }
-                if z > 0 {
-                    cap = cap.min(levels[here - across] + 1);
-                }
-                if z + 1 < along {
-                    cap = cap.min(levels[here + across] + 1);
-                }
-                if levels[here] > cap {
-                    levels[here] = cap;
-                    moved = true;
-                }
+    for z in 0..along {
+        for x in 0..across {
+            let here = z * across + x;
+            if x > 0 {
+                levels[here] = levels[here].min(levels[here - 1].saturating_add(1));
+            }
+            if z > 0 {
+                levels[here] = levels[here].min(levels[here - across].saturating_add(1));
             }
         }
-        if !moved {
-            return;
+    }
+    for z in (0..along).rev() {
+        for x in (0..across).rev() {
+            let here = z * across + x;
+            if x + 1 < across {
+                levels[here] = levels[here].min(levels[here + 1].saturating_add(1));
+            }
+            if z + 1 < along {
+                levels[here] = levels[here].min(levels[here + across].saturating_add(1));
+            }
         }
     }
 }
@@ -1012,5 +1072,89 @@ mod tests {
         assert_eq!(levels[2 * across + 2], 0);
         assert_eq!(levels[2 * across + 3], 1);
         assert_eq!(lod_coarser(&levels, across, along, 2, 2), [true; 4]);
+    }
+
+    /// The balance as it was before MD28: sweep until nothing moves.
+    fn balance_until_still(levels: &mut [u32], across: usize, along: usize) {
+        loop {
+            let mut moved = false;
+            for z in 0..along {
+                for x in 0..across {
+                    let here = z * across + x;
+                    let mut cap = u32::MAX;
+                    if x > 0 {
+                        cap = cap.min(levels[here - 1] + 1);
+                    }
+                    if x + 1 < across {
+                        cap = cap.min(levels[here + 1] + 1);
+                    }
+                    if z > 0 {
+                        cap = cap.min(levels[here - across] + 1);
+                    }
+                    if z + 1 < along {
+                        cap = cap.min(levels[here + across] + 1);
+                    }
+                    if levels[here] > cap {
+                        levels[here] = cap;
+                        moved = true;
+                    }
+                }
+            }
+            if !moved {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn two_sweeps_balance_as_sweeping_until_still_did() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..2000 {
+            let (across, along) = (1 + (next() % 23) as usize, 1 + (next() % 17) as usize);
+            let levels: Vec<u32> = (0..across * along).map(|_| (next() % 8) as u32).collect();
+            let (mut two, mut still) = (levels.clone(), levels);
+            lod_balance(&mut two, across, along);
+            balance_until_still(&mut still, across, along);
+            assert_eq!(two, still, "{across} x {along}");
+        }
+    }
+
+    #[test]
+    fn a_holed_chunk_is_coarse_where_whole_and_fine_at_its_holes() {
+        let cells = 16u32;
+        // The left quarter of the chunk is someone else's: a hole four cells wide.
+        let has = |x: u32, _z: u32| x >= 4;
+        let full = lod_indices_holed(cells, 0, [false; 4], has);
+        assert_eq!(full.len(), (12 * 16 * 6) as usize);
+        // At level 3 (8-cell quads), the right half is two whole quads; the left half's quads lack
+        // the hole, so their other four columns of cells are drawn one by one.
+        let coarse = lod_indices_holed(cells, 3, [false; 4], has);
+        assert_eq!(coarse.len(), (2 * 6 + 4 * 16 * 6) as usize);
+        // Every cell the chunk has is covered, and nothing in the hole is: the drawn area is the
+        // owned area whatever the level.
+        for level in 0..=lod_levels(cells) {
+            let tris = lod_indices_holed(cells, level, [false; 4], has);
+            let area: f32 = tris
+                .chunks(3)
+                .map(|t| {
+                    let p = <[u32; 3]>::try_from(t).unwrap().map(|k| ((k % (cells + 1)) as f32, (k / (cells + 1)) as f32));
+                    ((p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[2].0 - p[0].0) * (p[1].1 - p[0].1)).abs() / 2.0
+                })
+                .sum();
+            assert_eq!(area, 12.0 * 16.0, "level {level}");
+            assert!(tris.iter().all(|k| k % (cells + 1) >= 4), "level {level}: a corner in the hole");
+        }
+        // The errors leave out what only the hole has: a spike there does not keep the chunk fine.
+        let mut heights = vec![0.0f32; 17 * 17];
+        heights[8 * 17 + 1] = 1000.0;
+        let errors = lod_errors_where(&heights, cells, has);
+        assert!(errors.iter().all(|&e| e == 0.0), "{errors:?}");
+        assert!(lod_errors(&heights, cells)[1] > 0.0);
     }
 }

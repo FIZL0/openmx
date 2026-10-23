@@ -161,6 +161,38 @@ pub trait Source: Send {
     fn shapes(&mut self, index: usize) -> Result<Vec<(Mesh, Placement)>, String> {
         self.load(index).map(|piece| piece.shapes)
     }
+
+    /// Start reading tile `index` where [`Source::load`] will not have to wait for it, if the source
+    /// can (MD28: a tile read on the ride's thread was 6 to 8 ms, and several came at once).
+    fn want(&mut self, _index: usize) {}
+
+    /// Whether [`Source::load`] of tile `index` answers without reading: always, for a source that
+    /// cannot read ahead.
+    fn ready(&mut self, _index: usize) -> bool {
+        true
+    }
+
+    /// Tile `index` is not wanted any more ([`Source::want`]).
+    fn forget(&mut self, _index: usize) {}
+
+    /// [`every_shape_of`] the world's tiles, if the source made it ahead of time (MD28: read on the
+    /// ride's thread at the first wreck it was 60 ms on a five-tile world, 150 on a big one).
+    fn every_shape(&mut self) -> Option<(Props, Vec<String>)> {
+        None
+    }
+}
+
+/// Every tile's shapes as one set, as [`Tiled::every_shape`] keeps it, read through `shapes`; and a
+/// line for each tile whose shapes do not read.
+pub fn every_shape_of(tiles: &[Tile], mut shapes: impl FnMut(usize) -> Result<Vec<(Mesh, Placement)>, String>) -> (Props, Vec<String>) {
+    let (mut all, mut log) = (Props::default(), Vec::new());
+    for (i, tile) in tiles.iter().enumerate() {
+        match shapes(i) {
+            Ok(shapes) => all.props.extend(shapes.into_iter().map(|(mesh, at)| Prop::place(mesh, &moved(&at, tile.at)))),
+            Err(e) => log.push(format!("world: {} has no shapes for the plane: {e}", tile.name)),
+        }
+    }
+    (all, log)
 }
 
 /// A tile in memory: its terrain's bytes and its shapes, stood in the world.
@@ -350,16 +382,31 @@ impl Tiled {
     }
 
     /// Load the tiles within [`Reach::load`] of any of `near` and drop those past [`Reach::drop`] of
-    /// all of them. Changes nothing the simulation is answered (see the module note).
+    /// all of them. Changes nothing the simulation is answered (see the module note). A tile the
+    /// source reads ahead ([`Source::want`]) is loaded once it is read; one the simulation asks
+    /// for first is loaded then, as a tile past reach is.
     pub fn stream(&mut self, near: &[Vf]) {
         for i in 0..self.tiles.len() {
             let gap = near.iter().map(|p| self.tiles[i].gap(F(p.x()), F(p.z()))).fold(F(f32::MAX), F::min);
-            let held = matches!(self.slots.borrow()[i], Slot::In(_));
-            if !held && gap <= self.reach.load {
-                self.ensure(i);
+            let (held, out) = match self.slots.borrow()[i] {
+                Slot::In(_) => (true, false),
+                Slot::Out => (false, true),
+                Slot::Failed => (false, false),
+            };
+            if out && gap <= self.reach.load {
+                let ready = {
+                    let mut source = self.source.borrow_mut();
+                    source.want(i);
+                    source.ready(i)
+                };
+                if ready {
+                    self.ensure(i);
+                }
             } else if held && gap > self.reach.drop {
                 self.slots.borrow_mut()[i] = Slot::Out;
                 self.log.borrow_mut().push(format!("world: {} dropped", self.tiles[i].name));
+            } else if out && gap > self.reach.drop {
+                self.source.borrow_mut().forget(i);
             }
         }
     }
@@ -434,13 +481,12 @@ impl Tiled {
     /// change as tiles stream in and out. A tile whose shapes do not read adds none, and says so.
     pub fn every_shape(&mut self) -> &Props {
         if self.every.is_none() {
-            let mut all = Props::default();
-            for (i, tile) in self.tiles.iter().enumerate() {
-                match self.source.get_mut().shapes(i) {
-                    Ok(shapes) => all.props.extend(shapes.into_iter().map(|(mesh, at)| Prop::place(mesh, &moved(&at, tile.at)))),
-                    Err(e) => self.log.get_mut().push(format!("world: {} has no shapes for the plane: {e}", tile.name)),
-                }
-            }
+            let source = self.source.get_mut();
+            let (all, log) = match source.every_shape() {
+                Some(made) => made,
+                None => every_shape_of(&self.tiles, |i| source.shapes(i)),
+            };
+            self.log.get_mut().extend(log);
             self.every = Some(all);
         }
         self.every.get_or_insert_with(Props::default)

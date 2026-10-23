@@ -1,0 +1,11 @@
+/home/rycs/repos/openmx-slots/s1/target-head/release/deps/wayland_sys-15e67bce37c89779.d: /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/lib.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/common.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/client.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/server.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/egl.rs
+
+/home/rycs/repos/openmx-slots/s1/target-head/release/deps/libwayland_sys-15e67bce37c89779.rlib: /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/lib.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/common.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/client.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/server.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/egl.rs
+
+/home/rycs/repos/openmx-slots/s1/target-head/release/deps/libwayland_sys-15e67bce37c89779.rmeta: /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/lib.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/common.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/client.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/server.rs /home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/egl.rs
+
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/lib.rs:
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/common.rs:
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/client.rs:
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/server.rs:
+/home/rycs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.11/src/egl.rs:
