@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::det::HashMap;
 
 use crate::error::GgrsError;
 use crate::frame_info::PlayerInput;
@@ -75,8 +75,8 @@ impl<T: Config> SyncTestSession<T> {
             check_distance,
             sync_layer,
             dummy_connect_status,
-            checksum_history: HashMap::new(),
-            local_inputs: HashMap::new(),
+            checksum_history: HashMap::default(),
+            local_inputs: HashMap::default(),
         }
     }
 
