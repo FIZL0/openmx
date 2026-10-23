@@ -1126,3 +1126,249 @@ fn a_split_shows_each_players_own_machines_bar() {
     // Online: this machine's own view, the first, and no other.
     assert!(hud::markers_shown_in(0, true) && !hud::markers_shown_in(1, true));
 }
+
+// ---------------------------------------------------------------------------------------------------
+// P112: a marker keeps the real bike's momentum.
+// ---------------------------------------------------------------------------------------------------
+
+/// The disc's `race125p.phy` (the freeride's bike, P25) and where the `125_faisst` model hangs its
+/// wheels, as `ride.rs`'s `the_disc_125` reads them; `None` (said) without a disc.
+fn the_disc_125(tables: &game_sim::rider::Tables) -> Option<(game_sim::phy::Phy, (Vf, Vf))> {
+    use game_render::disc::Disc;
+    let mut disc = match Disc::open_configured() {
+        Ok(disc) => disc,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return None;
+        }
+    };
+    let archives: Vec<String> = disc
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.contains("bike\\") && n.ends_with(".res")
+        })
+        .collect();
+    let (mut phy, mut wheels) = (None, None);
+    for archive in &archives {
+        let Ok(res) = disc.res(archive) else { continue };
+        if phy.is_none() {
+            phy = res.read_suffix("race125p.phy").ok().map(|b| game_sim::phy::Phy::read_bytes(&b, &tables.ride.curve));
+        }
+        if wheels.is_none() && archive.to_ascii_lowercase().contains("125_faisst") {
+            let Ok(psg) = res.read_suffix("bike.psg") else { continue };
+            let Ok(model) = game_render::psg::Model::parse(&psg) else { continue };
+            let node = |name: &str| -> Option<Vf> {
+                let i = model.nodes.iter().position(|n| n.name == name)?;
+                let mut root = i;
+                while let Some(up) = model.nodes[root].parent {
+                    root = up;
+                }
+                Some(Vf(model.place_in(i, root)))
+            };
+            wheels = node("TireFront").zip(node("TireRear"));
+        }
+    }
+    if phy.is_none() || wheels.is_none() {
+        eprintln!("skipped: no race125p.phy or 125_faisst wheels on the disc");
+    }
+    Some((phy?, wheels?))
+}
+
+/// The real bike on the flat floor, wrecks on as the shell rides by default.
+fn the_real_bike() -> Option<Sim> {
+    let tables = std::sync::Arc::new(game_sim::rider::Tables::build());
+    let (phy, wheels) = the_disc_125(&tables)?;
+    let mut rider = Rider::new(&phy, wheels, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    rider.sense.wrecks_enabled = true;
+    Some(Sim::with_rider(0x112, tables, phy, rider))
+}
+
+/// A report with the left stick's x at `x` on top of `buttons`.
+fn steer(buttons: u16, x: u8) -> Report {
+    let mut r = Report::from_buttons(buttons);
+    r.set_axis(2, x);
+    r
+}
+
+/// One shell pass on the bike for a lone rider: `Seat::pass`'s poll, step and markers.
+fn ride_pass(sim: &mut Sim, report: Report) -> Option<Did> {
+    let spots = [Spot::of(&sim.rider)];
+    let controls = sim.poll(DT, &[report, Report::missing()]).stick_alone();
+    sim.step(DT, &controls, &mut Flat::default());
+    markers::frame(sim, 0, &spots, &controls)
+}
+
+/// The hands both rides are stepped with: gas on, the stick swinging left and right a second at a
+/// time, so the ride turns, leans and the wheels slip rather than running a straight line.
+fn weaving(i: usize) -> Report {
+    steer(GAS, if i % 60 > 30 { 0xc0 } else { 0x60 })
+}
+
+/// The real bike ridden up to speed and a marker placed in slot 1 with Down held: the ride as it was
+/// on the Down's tick, and the ride ridden on two seconds past it — out of a wreck when `wrecked`.
+fn placed_at_speed(wrecked: bool) -> Option<(Sim, Sim)> {
+    let mut sim = the_real_bike()?;
+    for i in 0..90 {
+        ride_pass(&mut sim, weaving(i));
+    }
+    let placed = (0..30).find_map(|_| ride_pass(&mut sim, steer(GAS | Control::Down.mask(), 0xc0)).map(|d| (d, sim.clone())));
+    let Some((Did::Placed(0), placed)) = placed else { panic!("Down held did not place slot 1: {placed:?}", placed = placed.map(|p| p.0)) };
+    // At speed, not rolling: the weave has the bike well past 40 ft/s by now.
+    let v = placed.bike_vel();
+    let speed = (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    assert!(speed > 40.0, "the marker was placed at {speed} ft/s");
+    for i in 0..60 {
+        ride_pass(&mut sim, weaving(i));
+    }
+    if wrecked {
+        sim.rider.state.enter(game_sim::trick::Wreck::ATTITUDE);
+        for i in 0..20 {
+            ride_pass(&mut sim, weaving(i));
+        }
+        assert!(sim.rider.state.wreck.is_some(), "the forced wreck did not take");
+    }
+    Some((placed, sim))
+}
+
+/// Up held onto slot 1, then the motion the teleport came out with against the placement's, and
+/// the two rides stepped on together for four seconds, bit for bit.
+fn rides_out_as_placed(placed: Sim, mut sim: Sim) {
+    let did = (0..30).find_map(|_| ride_pass(&mut sim, steer(GAS | Control::Up.mask(), 0xc0)));
+    assert_eq!(did, Some(Did::Teleported(Pick::Slot(0))));
+    let bits = |v: Vf| [v.x(), v.y(), v.z()].map(f32::to_bits);
+    let (a, b) = (&placed.rider.ride, &sim.rider.ride);
+    assert_eq!(bits(sim.bike_vel()), bits(placed.bike_vel()), "the body's velocity");
+    assert_eq!(bits(b.chassis.vel), bits(a.chassis.vel), "the chassis' velocity");
+    assert_eq!(bits(b.chassis.ang_vel), bits(a.chassis.ang_vel), "the angular velocity");
+    assert_eq!(bits(b.chassis.world_ang_vel), bits(a.chassis.world_ang_vel), "the world angular velocity");
+    assert_eq!(b.front.mv.spin.to_bits(), a.front.mv.spin.to_bits(), "the front wheel's spin");
+    assert_eq!(b.rear.mv.spin.to_bits(), a.rear.mv.spin.to_bits(), "the rear wheel's spin");
+    assert!(a.rear.mv.spin.abs() > 1.0, "the rear wheel was not turning");
+    assert!(sim.rider.crash.is_none() && sim.rider.state.wreck.is_none(), "still down after the teleport");
+    let (mut a, mut b) = (placed, sim);
+    for i in 0..120 {
+        ride_pass(&mut a, weaving(i));
+        ride_pass(&mut b, weaving(i));
+        assert_eq!(hash::of(&b.rider.ride), hash::of(&a.rider.ride), "the ride after the teleport parted from the ride after the placement {i} ticks on");
+    }
+}
+
+/// P112: a marker placed at speed on the real bike (`race125p.phy`) and ridden back to comes out
+/// with the body's velocity, angular velocity and wheel spin it was placed with, and rides on bit
+/// for bit as the ride after the placement did.
+#[test]
+fn a_marker_rides_out_at_its_speed() {
+    let Some((placed, sim)) = placed_at_speed(false) else { return };
+    rides_out_as_placed(placed, sim);
+}
+
+/// P112: the same out of a wreck — the teleport's put-back does not stop the bike.
+#[test]
+fn a_marker_rides_out_of_a_wreck_at_its_speed() {
+    let Some((placed, sim)) = placed_at_speed(true) else { return };
+    rides_out_as_placed(placed, sim);
+}
+
+/// P112: the same after the markers file — the slots saved where the shell keeps them, and loaded
+/// back the way a new ride loads them — ridden back to out of a wreck.
+#[test]
+fn a_saved_marker_rides_out_at_its_speed() {
+    let Some((placed, mut sim)) = placed_at_speed(true) else { return };
+    let dir = std::env::temp_dir().join(format!("openmx-p112-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    saved_markers::save(&dir, "free06", "1P", "race125p", &sim.markers).unwrap();
+    let loaded = saved_markers::load(&dir, "free06", "1P", "race125p");
+    let _ = std::fs::remove_dir_all(&dir);
+    let (kept, back) = (sim.markers.slots[0].as_ref().and_then(|m| m.ride()), loaded.slots[0].as_ref().and_then(|m| m.ride()));
+    assert_eq!(back.map(hash::of), kept.map(hash::of), "the file did not bring slot 1's ride back whole");
+    sim.markers = loaded;
+    rides_out_as_placed(placed, sim);
+}
+
+/// Flat ground at `y = 0`, for the camera.
+struct Ground;
+
+impl game_sim::camera::Surface for Ground {
+    fn on_surface(&mut self, point: Vf) -> Vf {
+        Vf::new(point.x(), 0.0, point.z(), point.w())
+    }
+}
+
+/// P112: the follow camera rides out of a marker's Up with the bike. A camera that has followed a
+/// bike along `z` for seconds, and one that followed it somewhere else and is snapped onto it as a
+/// teleport lands and ridden out (`chase::ride_out`), show the same eye and look-at from there on;
+/// snapped alone, a camera starts feet away from where the riding one is and lags over to it.
+#[test]
+fn the_camera_rides_out_with_the_bike() {
+    use game_sim::camera::{CurveTable, Preset, Race, Ridden, Switches, Target};
+    let lags = Vf::new(0.2, 0.2, 0.2, 0.0);
+    let follow = || {
+        let preset = Preset {
+            name: "Race Cam 1".into(),
+            look_filters: lags,
+            pos_filters: lags,
+            offset_from_body_point: Vf::new(0.0, 3.0, 0.0, 1.0),
+            angle_x: F(0.2),
+            following_distance: F(15.0),
+            fov: F(80.0),
+            filter_this_preset: true,
+            cycle_thru_this_preset: true,
+            min_following_distance: F(5.0),
+            max_following_distance: F(50.0),
+            min_fov: F(40.0),
+            max_fov: F(100.0),
+            ..Preset::default()
+        };
+        let mut race = Race::new(vec![preset], F(1.0));
+        race.cam.set_preset(0);
+        race.cam.snap = true;
+        race
+    };
+    let speed = 60.0;
+    let at = |z: f32| Ridden {
+        target: Target {
+            body_point: Vf::new(10.0, 3.0, z, 1.0),
+            forward: Vf::new(0.0, 0.0, 1.0, 0.0),
+            up: Vf::new(0.0, 1.0, 0.0, 0.0),
+            vel: Vf::new(0.0, 0.0, speed, 0.0),
+            lean: F::ZERO,
+        },
+        airborne: false,
+        speed: F(speed),
+    };
+    let curve = CurveTable::build();
+    let frame = |cam: &mut Race, z: f32| cam.update(DT, &at(z), F(2.4), &curve, Switches::default(), &mut Ground);
+    let step = speed * DT.0;
+    let (mut riding, mut ridden_out, mut snapped) = (follow(), follow(), follow());
+    let mut z = 0.0;
+    for _ in 0..300 {
+        frame(&mut riding, z);
+        frame(&mut ridden_out, z - 2000.0);
+        frame(&mut snapped, z - 2000.0);
+        z += step;
+    }
+    // The teleport's frame: the bike lands where the first camera's bike is.
+    let steady = frame(&mut riding, z);
+    ridden_out.cam.snap = true;
+    snapped.cam.snap = true;
+    let mut out = frame(&mut ridden_out, z);
+    chase::ride_out(&mut ridden_out, &mut out, at(z).target.vel, DT);
+    let jump = frame(&mut snapped, z);
+    let near = |a: Vf, b: Vf| (a.x() - b.x()).abs().max((a.y() - b.y()).abs()).max((a.z() - b.z()).abs());
+    assert!(near(out.position, steady.position) < 0.01 && near(out.look_at, steady.look_at) < 0.01, "ridden out {out:?}, riding {steady:?}");
+    assert!(near(jump.position, steady.position) > 1.0, "a plain snap already sat where the riding camera does: {jump:?}");
+    let mut was = (out.position, jump.position);
+    for _ in 0..60 {
+        z += step;
+        let steady = frame(&mut riding, z);
+        let out = frame(&mut ridden_out, z);
+        let jump = frame(&mut snapped, z);
+        assert!(near(out.position, steady.position) < 0.01 && near(out.look_at, steady.look_at) < 0.01, "ridden out {out:?}, riding {steady:?}");
+        // The ridden-out eye moves with the bike from the first frame; the snapped one creeps.
+        assert!((out.position.z() - was.0.z() - step).abs() < 0.01);
+        was = (out.position, jump.position);
+    }
+}
