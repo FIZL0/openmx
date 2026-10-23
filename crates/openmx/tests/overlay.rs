@@ -1008,3 +1008,124 @@ fn the_radar_draws_its_icons() {
     let none = art.draw(&mut Frame::new(640, 448, [0, 0, 0]), (1280, 896), &riders, 1, span, &bike(0.0));
     assert!(none.icons.is_empty());
 }
+
+/// The lit pixels' bounds (left, top, right, bottom) in a box of `frame` — or `None` if none is.
+fn lit_in(frame: &Frame, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> Option<(usize, usize, usize, usize)> {
+    let mut b: Option<(usize, usize, usize, usize)> = None;
+    for y in y0..y1.min(frame.height) {
+        for x in x0..x1.min(frame.width) {
+            if frame.color[3 * (y * frame.width + x)..][..3].iter().any(|&c| c > 0) {
+                let o = b.unwrap_or((x, y, x + 1, y + 1));
+                b = Some((o.0.min(x), o.1.min(y), o.2.max(x + 1), o.3.max(y + 1)));
+            }
+        }
+    }
+    b
+}
+
+/// V52: the Minimap setting off draws the speedometer and not one pixel of the radar — its rose, the
+/// arrow, the other riders' marks or the icons on it — in one view and in each of four.
+#[test]
+fn minimap_off_draws_the_speedometer_and_no_radar() {
+    let Some(mut art) = art() else { return };
+    let tables = Arc::new(Tables::build());
+    let span = overlay::radar_span(SPACING);
+    let solo = ridden(&[rider(&tables, [0.0, 0.0], [0.0, 1.0])]);
+    let four = ridden(&four_riders(&tables));
+    art.radar = vec![every_icon([0.0, 0.0]); 4];
+    for (riders, (w, h), views) in [(&solo[..], (1280usize, 720usize), 1usize), (&four[..], (1280, 720), 4)] {
+        let (vw, vh) = if views == 1 { (w, h) } else { (w / 2, h / 2) };
+        for v in 0..views {
+            for minimap in [true, false] {
+                art.minimap = minimap;
+                let mut frame = Frame::new(vw, vh, [0, 0, 0]);
+                let drawn = art.draw(&mut frame, (w, h), riders, v, span, &bike(0.0));
+                // The radar's corner, the view's bottom-left under the score and left of the middle;
+                // the speedometer's, its bottom-right.
+                let radar = lit_in(&frame, (0, vh / 3, vw / 2, vh));
+                let speed = lit_in(&frame, (vw / 2, vh / 3, vw, vh));
+                let what = format!("{} view(s), view {v}, minimap {minimap}", views);
+                assert!(speed.is_some() && drawn.speed.is_some(), "{what}: no speedometer");
+                assert_eq!(drawn.preload, Some(0.0), "{what}");
+                assert_eq!(radar.is_some(), minimap, "{what}: radar pixels {radar:?}");
+                assert_eq!(drawn.icons.is_empty(), !minimap, "{what}");
+                assert_eq!(drawn.marks.is_empty(), !minimap || views == 1, "{what}");
+            }
+        }
+    }
+    // The setting: on unless the file says off, which is written only then.
+    assert!(menu::Settings::parse("").minimap);
+    assert!(!menu::Settings::parse("minimap = off\n").minimap);
+    assert!(!menu::Settings::default().text().contains("minimap"));
+}
+
+/// V52: HUD Scale 150 % draws the radar and the speedometer half again as big, each still in its own
+/// corner and inside the view — one view, with the dial and with the readout, and each of a four-way
+/// split. A four-way split of a window under about 2:1 has no room for 150 % of the original's size
+/// between its corners, so that one is held to the most the view holds instead. The radar is what
+/// the minimap's switch takes away; the speedometer is what is lit in the view's right half.
+#[test]
+fn hud_scale_grows_the_radar_and_speedometer_about_their_corners() {
+    let Some(mut art) = art() else { return };
+    let tables = Arc::new(Tables::build());
+    let span = overlay::radar_span(SPACING);
+    let mut one = rider(&tables, [0.0, 0.0], [0.0, 1.0]);
+    ride(&mut one, 200, true, 0.0);
+    let solo = ridden(std::slice::from_ref(&one));
+    let four = ridden(&four_riders(&tables));
+    let analog = overlay::Gauges { speedometer: menu::Speedometer::Analog, ..bike(1000.0) };
+    // The scale, the radar's and the speedometer's bounds of view `v` of a window `w` by `h`.
+    let parts = |art: &mut overlay::Art, riders: &[Ridden], (w, h): (usize, usize), views: usize, v: usize, gauges: &overlay::Gauges, scale: f32| {
+        let (vw, vh) = if views == 1 { (w, h) } else { (w / 2, h / 2) };
+        art.scale = scale;
+        art.minimap = false;
+        let mut bare = Frame::new(vw, vh, [0, 0, 0]);
+        art.draw(&mut bare, (w, h), riders, v, span, gauges);
+        art.minimap = true;
+        let mut frame = Frame::new(vw, vh, [0, 0, 0]);
+        let drawn = art.draw(&mut frame, (w, h), riders, v, span, gauges);
+        for (a, b) in frame.color.iter_mut().zip(&bare.color) {
+            *a = a.abs_diff(*b);
+        }
+        let radar = lit_in(&frame, (0, 0, vw, vh)).expect("a radar");
+        let speed = lit_in(&bare, (vw / 2, 0, vw, vh)).expect("a speedometer");
+        (drawn.scale, radar, speed)
+    };
+    let near = |a: usize, b: f32| (a as f32 - b).abs() <= 3.0;
+    let cases = [(&solo[..], (1280usize, 720usize), 1usize, analog), (&solo[..], (1280, 720), 1, bike(0.0)), (&four[..], (2400, 900), 4, bike(0.0))];
+    for (riders, (w, h), views, gauges) in cases {
+        let (vw, vh) = if views == 1 { (w, h) } else { (w / 2, h / 2) };
+        for v in 0..views {
+            let what = format!("{w}x{h}, {views} view(s), view {v}, {:?}", gauges.speedometer);
+            let (s1, r1, p1) = parts(&mut art, riders, (w, h), views, v, &gauges, 1.0);
+            let (s15, r15, p15) = parts(&mut art, riders, (w, h), views, v, &gauges, 1.5);
+            assert!((s15 - 1.5 * s1).abs() < 1e-4, "{what}: scale {s15} against {s1}");
+            // Half again as big, within a pixel or two of rounding at each edge, and inside the view.
+            for (part, small, big) in [("radar", r1, r15), ("speedometer", p1, p15)] {
+                let (sw, sh) = ((small.2 - small.0) as f32, (small.3 - small.1) as f32);
+                assert!(near(big.2 - big.0, 1.5 * sw) && near(big.3 - big.1, 1.5 * sh), "{what}: the {part} {small:?} -> {big:?}");
+                assert!(big.0 > 0 && big.1 > 0 && big.2 < vw && big.3 < vh, "{what}: the {part} at the view's edge: {big:?}");
+            }
+            // About their corners: the radar's gaps to the left and bottom edges, and the
+            // speedometer's to the right and bottom, half again as wide.
+            assert!(near(r15.0, 1.5 * r1.0 as f32), "{what}: radar left {r1:?} -> {r15:?}");
+            assert!(near(vh - r15.3, 1.5 * (vh - r1.3) as f32), "{what}: radar bottom {r1:?} -> {r15:?}");
+            assert!(near(vw - p15.2, 1.5 * (vw - p1.2) as f32), "{what}: speedometer right {p1:?} -> {p15:?}");
+            assert!(near(vh - p15.3, 1.5 * (vh - p1.3) as f32), "{what}: speedometer bottom {p1:?} -> {p15:?}");
+            // And still apart.
+            assert!(r15.2 < p15.0, "{what}: the radar {r15:?} runs into the speedometer {p15:?}");
+        }
+    }
+    // A four-way split of 1280x720 has less room: the parts grow until they would meet across the
+    // view's 640 pixels, and no further — inside it, the radar clear of the speedometer.
+    for v in 0..4 {
+        let (s, radar, speed) = parts(&mut art, &four, (1280, 720), 4, v, &bike(0.0), 1.5);
+        assert!((s - 640.0 / 311.0).abs() < 1e-4, "view {v}: {s}");
+        assert!(radar.0 > 0 && radar.1 > 0 && radar.3 < 360 && speed.2 < 640 && speed.3 < 360, "view {v}: {radar:?} {speed:?}");
+        assert!(radar.2 < speed.0, "view {v}: {radar:?} runs into {speed:?}");
+    }
+    // 100 % is the original's size, and the smaller steps shrink it.
+    art.scale = 0.5;
+    let drawn = art.draw(&mut Frame::new(640, 448, [0, 0, 0]), (640, 448), &solo, 0, span, &bike(0.0));
+    assert_eq!(drawn.scale, 0.5);
+}
