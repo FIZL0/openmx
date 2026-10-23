@@ -130,7 +130,10 @@ struct MaterialUniform {
     constant: [f32; 4],
     cutoff: f32,
     shading: u32,
-    _pad: [u32; 2],
+    /// Texels at or over this alpha are not drawn: the half of a material whose failing texels are
+    /// drawn apart from its passing ones ([`GpuMaterial::rest`]).
+    below: f32,
+    _pad: u32,
 }
 
 #[repr(C)]
@@ -165,6 +168,7 @@ struct MaterialKey {
     texture: Option<usize>,
     shading: (u8, [u32; 4]),
     cutoff: u8,
+    depth_cutoff: u8,
     pipeline: PipelineKey,
     /// Clamped at the texture's edges along u and v rather than repeated.
     clamp: [bool; 2],
@@ -186,6 +190,7 @@ impl MaterialKey {
             texture,
             shading,
             cutoff: s.cutoff,
+            depth_cutoff: s.depth_cutoff,
             pipeline: PipelineKey {
                 blend,
                 depth_write: s.depth_write,
@@ -199,6 +204,10 @@ impl MaterialKey {
 struct GpuMaterial {
     bind: wgpu::BindGroup,
     pipeline: PipelineKey,
+    /// A material whose texels under [`Surface::depth_cutoff`] are drawn without writing depth
+    /// (V54): those texels, drawn again after the rest with depth writes off. The draw before only
+    /// draws the texels that pass.
+    rest: Option<(wgpu::BindGroup, PipelineKey)>,
 }
 
 /// A run of one model's vertices in one material.
@@ -1618,17 +1627,28 @@ impl Renderer {
             Shading::Constant(c) => c,
             _ => [128.0; 4],
         };
-        let uniform = MaterialUniform {
+        let split = surface.depth_write && surface.depth_cutoff > surface.cutoff;
+        let uniform = |cutoff: u8, below: f32| MaterialUniform {
             constant,
-            cutoff: surface.cutoff as f32,
+            cutoff: cutoff as f32,
             shading: key.shading.0 as u32,
-            _pad: [0; 2],
+            below,
+            _pad: 0,
         };
-        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("material"),
-            contents: bytemuck::bytes_of(&uniform),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let buffer = |uniform: MaterialUniform| {
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("material"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        };
+        let (solid, rest) = match split {
+            true => (
+                buffer(uniform(surface.depth_cutoff, 256.0)),
+                Some(buffer(uniform(surface.cutoff, surface.depth_cutoff as f32))),
+            ),
+            false => (buffer(uniform(surface.cutoff, 256.0)), None),
+        };
         // The few materials that clamp (palm fronds, bark, cut-outs) get a sampler of their own;
         // everything else shares the repeating one.
         let clamped = (key.clamp != [false; 2]).then(|| {
@@ -1643,7 +1663,7 @@ impl Renderer {
                 ..Default::default()
             })
         });
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind = |buffer: &wgpu::Buffer| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material"),
             layout: &self.material_layout,
             entries: &[
@@ -1661,11 +1681,16 @@ impl Renderer {
                 },
             ],
         });
-        self.pipeline(key.pipeline);
-        self.pipeline(PipelineKey { ghost: true, ..key.pipeline });
+        let rest = rest.map(|b| (bind(&b), PipelineKey { depth_write: false, ..key.pipeline }));
+        let bind = bind(&solid);
+        for pipeline in std::iter::once(key.pipeline).chain(rest.as_ref().map(|r| r.1)) {
+            self.pipeline(pipeline);
+            self.pipeline(PipelineKey { ghost: true, ..pipeline });
+        }
         self.materials.push(GpuMaterial {
             bind,
             pipeline: key.pipeline,
+            rest,
         });
         let id = self.materials.len() - 1;
         self.material_ids.insert(key, id);
@@ -2286,6 +2311,14 @@ impl Renderer {
                         pass.draw(r.start..r.start + r.count, 0..batch.count);
                         drawn.draws += 1;
                         drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
+                        if let Some((rest, key)) = &material.rest {
+                            pass.set_pipeline(&self.pipelines[key]);
+                            pass.set_bind_group(0, &self.view_bind, &offset);
+                            pass.set_bind_group(1, rest, &[]);
+                            (current, bound) = (Some(*key), None);
+                            pass.draw(r.start..r.start + r.count, 0..batch.count);
+                            drawn.draws += 1;
+                        }
                     }
                 }
             }
@@ -2314,6 +2347,15 @@ impl Renderer {
                     pass.draw(r.start..r.start + r.count, 0..batch.count);
                     drawn.draws += 1;
                     drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
+                    if let Some((rest, key)) = &material.rest {
+                        let key = PipelineKey { ghost: true, ..*key };
+                        pass.set_pipeline(&self.pipelines[&key]);
+                        pass.set_bind_group(0, &self.view_bind, &offset);
+                        pass.set_bind_group(1, rest, &[]);
+                        (current, bound) = (Some(key), None);
+                        pass.draw(r.start..r.start + r.count, 0..batch.count);
+                        drawn.draws += 1;
+                    }
                 }
             }
             // The particles, over the models (P58).
@@ -2810,6 +2852,7 @@ struct Material {
   constant: vec4f,
   cutoff: f32,
   shading: u32,
+  below: f32,
 }
 @group(1) @binding(0) var<uniform> material: Material;
 @group(1) @binding(1) var tex: texture_2d<f32>;
@@ -2871,7 +2914,7 @@ fn node_matrix(i: u32) -> mat4x4f {
 
 @fragment fn fs(i: Out) -> @location(0) vec4f {
   let t = textureSample(tex, samp, i.uv) * 255.0;
-  if (t.a < material.cutoff) {
+  if (t.a < material.cutoff || t.a >= material.below) {
     discard;
   }
   let out = clamp(t.rgb * i.lit * (1.0 - i.fog) + view.fog_color.rgb * i.fog, vec3f(0.0), vec3f(255.0));
@@ -3140,6 +3183,7 @@ mod tests {
         let glass = Surface {
             shading: Shading::Prelit,
             cutoff: 0,
+            depth_cutoff: 0,
             blend: true,
             additive: false,
             depth_write: false,

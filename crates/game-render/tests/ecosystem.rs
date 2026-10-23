@@ -133,7 +133,8 @@ fn free09s_ecosystem_places_the_originals_trees_and_bushes() {
         let b = &assets.models[board];
         assert_eq!(b.tris.len(), 2);
         assert!(b.textures[0].is_some(), "{board} has no texture");
-        assert!(b.surfaces[0].blend && b.surfaces[0].cutoff == 100, "{board}: {:?}", b.surfaces[0]);
+        // Reference 50 under the original's default, greater than: 51 and up, 102 doubled.
+        assert!(b.surfaces[0].blend && b.surfaces[0].cutoff == 102, "{board}: {:?}", b.surfaces[0]);
     }
 
     // From beside the first plant, looking along (3, 0, 4): it is its model, turned to the camera's
