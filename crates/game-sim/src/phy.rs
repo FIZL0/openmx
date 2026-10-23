@@ -625,6 +625,10 @@ pub struct Phy {
     /// `[Airborne Control]`'s `MaxCrossupAngle`, in radians: the full crossup the animation blend
     /// maps the pose against.
     pub max_crossup: F,
+    /// **The port's own (MD16):** MX vs. ATV's moves, set only when a trick pack is laid over the
+    /// bike ([`crate::trick_pack::apply`]). `None` — every file the disc ships — and the ride runs the
+    /// original's tricks alone.
+    pub tricks: Option<crate::trick_pack::Moves>,
 }
 
 impl Phy {
@@ -946,6 +950,7 @@ impl Phy {
             mv,
             air,
             max_crossup,
+            tricks: None,
         }
     }
 

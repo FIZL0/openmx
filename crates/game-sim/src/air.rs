@@ -228,6 +228,14 @@ pub struct Step {
     /// The bike is touching something that is not the ground: a backflip gives up, and a landing
     /// counts as a landing.
     pub touching: bool,
+    /// **The port's own (MD16):** R1 is held and no other trick button is — the modifier MX vs.
+    /// ATV's air moves are asked for under. Only a [`Rotation`] with [`Rotation::modifier`] reads it,
+    /// and only a ride on MX vs. ATV's tricks ever sets it.
+    pub modifier: bool,
+    /// **The port's own (MD16):** MX vs. ATV's 360 put its torque into the chassis this substep
+    /// ([`Spin::applied`]). The airborne control and the wreck test treat it as they treat a
+    /// backflip's, and a backflip cannot start under it. False on every ride on the original's tricks.
+    pub spinning: bool,
 }
 
 /// What the wreck test is looking at outside this module: the g loads the chassis measured, the
@@ -775,6 +783,9 @@ pub struct Rotation {
     pub over: fn(&Params, &Air, &Chassis) -> bool,
     /// The length of the control-authority ramp the end of the rotation starts.
     pub authority: fn(&Params) -> F,
+    /// **The port's own (MD16):** the row is only armed and fired while [`Step::modifier`] holds —
+    /// R1 alone. False for the disc's backflip, which reads the stick with or without it.
+    pub modifier: bool,
 }
 
 /// The disc's backflip, and the only rotation the original has: stick forward on the lip, then back,
@@ -796,6 +807,7 @@ pub const BACKFLIP: Rotation = Rotation {
     grace: FLIP_GRACE,
     over: upright,
     authority: |p| p.control_authority_time,
+    modifier: false,
 };
 
 /// **Not the original's.** A flat 360 about the vertical: lean left on the lip, then right. It borrows
@@ -922,10 +934,10 @@ fn rotate(rows: &[Rotation], active: &mut usize, p: &Params, air: &mut Air, chas
     air.flip_torque_applied = false;
     if !air.flip_active {
         let armed = &rows[*active];
-        if !on_a_lip(air, chassis, step) {
+        if !on_a_lip(air, chassis, step) || step.spinning {
             air.flip_active = false;
             air.flip_armed = false;
-        } else if air.flip_armed && along(armed.gesture, step) > HELD {
+        } else if air.flip_armed && (!armed.modifier || step.modifier) && along(armed.gesture, step) > HELD {
             let t = (armed.tuning)(p);
             let out0 = t.min_torque * armed.floor;
             // An empty range gives the low end — not nothing, as the preload's does.
@@ -942,7 +954,7 @@ fn rotate(rows: &[Rotation], active: &mut usize, p: &Params, air: &mut Air, chas
             air.flip_armed = false;
             air.flip_active = true;
             air.flip_grace = F(armed.grace);
-        } else if let Some(k) = rows.iter().position(|r| along(r.gesture, step) < -HELD) {
+        } else if let Some(k) = rows.iter().position(|r| (!r.modifier || step.modifier) && along(r.gesture, step) < -HELD) {
             air.flip_armed = true;
             *active = k;
         }
@@ -990,6 +1002,199 @@ fn rotate(rows: &[Rotation], active: &mut usize, p: &Params, air: &mut Air, chas
     }
 }
 
+// --- 3b: MX vs. ATV's air moves (MD16) ---------------------------------------------------------------
+//
+// Nothing here runs on a ride on the original's tricks: the ride only calls [`unleashed_rotate`] and
+// [`three_sixty`] when the bike carries a trick pack's numbers, and with it off [`backflip`] alone is
+// the substep's rotation, as it always was.
+
+/// **The port's own (MD16): the front flip, in neither game.** The backflip mirrored: under R1 alone,
+/// stick back on the lip, then forward, and a positive pitch torque — nose over. The same machinery
+/// ([`rotate`]), the same clocks (the backflip's six `.phy` times and torques, its floor, its 0.6 s
+/// grace, its ending and its authority ramp) and the same landing test.
+///
+/// Its torque is the backflip's times [`FRONT_FLIP_TORQUE_SCALE`], 1.0: the backflip's torque turns
+/// the bike a full pitch turn within a backflip's air, and the front flip turns about the same axis
+/// with the same inertia, so the same numbers give it the same turn (a test proves it fits).
+pub const FRONT_FLIP: Rotation = Rotation {
+    name: "front flip",
+    gesture: Gesture { stick: StickAxis::Pitch, fire_positive: false },
+    axis: Axis::Pitch,
+    negative: false,
+    tuning: |p| {
+        let t = (BACKFLIP.tuning)(p);
+        let k = F(FRONT_FLIP_TORQUE_SCALE);
+        Tuning { min_torque: t.min_torque * k, max_torque: t.max_torque * k, ..t }
+    },
+    modifier: true,
+    ..BACKFLIP
+};
+
+/// **The port's own (MD16):** the front flip's torque as a multiple of the backflip's. No game has a
+/// number for it; 1.0 because the turn it has to make is the backflip's turn mirrored.
+pub const FRONT_FLIP_TORQUE_SCALE: f32 = 1.0;
+
+/// The rotation set a ride on MX vs. ATV's tricks runs: the disc's backflip first, so with R1 up it is
+/// exactly [`backflip`] (the front flip only arms or fires under [`Step::modifier`]), then the front flip.
+pub const UNLEASHED_ROTATIONS: &[Rotation] = &[BACKFLIP, FRONT_FLIP];
+
+/// One substep of [`UNLEASHED_ROTATIONS`]. `active` is which row the flip state belongs to, kept by
+/// the ride between substeps.
+pub fn unleashed_rotate(p: &Params, active: &mut usize, air: &mut Air, chassis: &mut Chassis, step: &Step) {
+    rotate(UNLEASHED_ROTATIONS, active, p, air, chassis, step);
+}
+
+/// MX vs. ATV's `[Three Sixty]` keys, as its `.phy` files name them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpinTuning {
+    pub min_time: F,
+    pub max_time: F,
+    pub min_torque_x: F,
+    pub max_torque_x: F,
+    pub min_torque_y: F,
+    pub max_torque_y: F,
+    pub rate_increase: F,
+    pub rate_decrease: F,
+}
+
+/// MX vs. ATV's sideways stick past this arms and fires the 360. Its own threshold, not [`HELD`].
+const SPIN_HELD: f32 = 0.7;
+/// Seconds a fired 360 has to get the wheels off the ground.
+const SPIN_GRACE: f32 = 0.9;
+/// 35°: past this from the heading it took off on, the 360 is part way round; back inside it, round.
+pub const SPIN_CLIP: f32 = 0.6108652;
+const PI: f32 = 3.1415927;
+const TWO_PI: f32 = 6.2831855;
+
+/// MX vs. ATV's 360 state.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spin {
+    /// The torque went into the chassis this substep.
+    pub applied: bool,
+    /// A 360 turned, and the control-authority ramp starts when the wheels are down.
+    pub ramp: bool,
+    /// Triggered, and (`armed`) either waiting for the second flick on the lip or turning in the air.
+    pub active: bool,
+    pub armed: bool,
+    /// Counts down from [`SPIN_GRACE`] while a fired 360 is still on the ground.
+    pub grace: F,
+    /// Which way: 1 for the stick flicked left then right, −1 the other way.
+    pub dir: i32,
+    /// The flattened heading the bike left the ground on, 0..2π.
+    pub start: F,
+    /// The torque: `x` pitch, `y` yaw.
+    pub torque: Vf,
+    /// The clip state: 0 none, 1 started, 2 playing past [`SPIN_CLIP`].
+    pub clip: u8,
+    /// **The port's own:** latches the rider reads and clears — the bike came back inside
+    /// [`SPIN_CLIP`] with the clip playing (scored), and it landed with the clip still playing (a
+    /// wreck).
+    pub came_round: bool,
+    pub wrecked: bool,
+}
+
+/// The heading flattened into the horizontal plane, as an angle 0..2π from `+z`.
+fn spin_heading(heading: Vf, table: &AcosTable) -> F {
+    let h = normalize(Vf::new(heading.x(), 0.0, heading.z(), 1.0));
+    let a = table.at(F(h.z()).clamp(-1.0, 1.0));
+    if h.x() < 0.0 { (F(PI) - a) + F(PI) } else { a }
+}
+
+/// The sign MX vs. ATV reads a stick axis with: −1 below zero, 1 otherwise.
+fn sign(x: F) -> i32 {
+    if x < F::ZERO { -1 } else { 1 }
+}
+
+/// **MX vs. ATV's 360** (SLUS_211.04, the step after its backflip in the same substep), ported as it
+/// reads. Under R1 alone on a lip, the stick past 0.7 one way arms it and past 0.7 the other way fires
+/// it, with a yaw torque and a pitch torque each mapped from `flick` (the sideways flick speed) through
+/// the `[Three Sixty]` times. The bike has 0.9 s to leave the ground. In the air the torque goes in
+/// every substep, decaying at `ThreeSixtyTorqueRateDecrease` while no trick button is held and the
+/// stick is pushed against the turn; the 360 ends when a wheel touches, the bike hits something or
+/// the yaw torque is under its minimum. Landing while the clip is part way round — more than
+/// [`SPIN_CLIP`] off the take-off heading — is a wreck.
+#[allow(clippy::too_many_arguments)]
+pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, chassis: &mut Chassis, step: &Step, flick: F, table: &AcosTable) {
+    spin.applied = false;
+    let x = step.stick.0;
+    if !spin.active {
+        let lip = on_a_lip(air, chassis, step) && !air.flip_torque_applied && !air.flip_active;
+        if !lip {
+            spin.active = false;
+            spin.armed = false;
+        } else if spin.armed && x.abs() > SPIN_HELD && sign(x) == spin.dir {
+            let map = |lo: F, hi: F| {
+                if t.min_time != t.max_time { map_clamp(flick.abs(), t.min_time, t.max_time, lo, hi) } else { lo }
+            };
+            let d = F(fpu::from_i32(spin.dir));
+            let yaw = d * map(t.min_torque_y, t.max_torque_y);
+            let pitch = -map(t.min_torque_x, t.max_torque_x);
+            spin.torque = Vf::new(pitch.0, yaw.0, spin.torque.z(), spin.torque.w());
+            spin.armed = false;
+            spin.active = true;
+            spin.grace = F(SPIN_GRACE);
+        } else if step.modifier {
+            if x < -SPIN_HELD {
+                spin.armed = true;
+                spin.dir = 1;
+            } else if x > SPIN_HELD {
+                spin.armed = true;
+                spin.dir = -1;
+            }
+        }
+    } else if !spin.armed {
+        if !air.on_ground {
+            spin.armed = true;
+            spin.start = spin_heading(step.heading, table);
+        } else {
+            spin.grace = spin.grace - step.dt;
+            if spin.grace <= 0.0 {
+                spin.active = false;
+                spin.armed = false;
+            }
+        }
+    } else {
+        let h = spin_heading(step.heading, table);
+        let turned = (spin.start - h).abs().min((spin.start + F(TWO_PI) - h).abs());
+        if air.on_ground || step.touching || F(spin.torque.y()).abs() < t.min_torque_y {
+            spin.active = false;
+            spin.armed = false;
+            if spin.clip != 0 {
+                spin.clip = 0;
+                spin.wrecked = true;
+            }
+        } else {
+            if step.dpad_dir == 0 && !step.modifier && sign(x) != spin.dir {
+                let d = F(fpu::from_i32(spin.dir));
+                let yaw = F(spin.torque.y()) - step.dt * t.rate_decrease * d * x.abs();
+                let pitch = F(spin.torque.x()) - step.dt * x * t.rate_decrease;
+                spin.torque = Vf::new(pitch.0, yaw.0, spin.torque.z(), spin.torque.w());
+            }
+            let m = Vf::new(spin.torque.x(), spin.torque.y(), 0.0, 1.0);
+            chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(m));
+            spin.applied = true;
+            spin.ramp = true;
+            let past = turned > SPIN_CLIP;
+            if spin.clip == 0 {
+                if past {
+                    spin.clip = 1;
+                }
+            } else if !past {
+                if spin.clip == 2 {
+                    spin.came_round = true;
+                }
+                spin.clip = 0;
+            } else if spin.clip == 1 {
+                spin.clip = 2;
+            }
+        }
+    }
+    if spin.ramp && air.on_ground {
+        spin.ramp = false;
+        air.authority = p.control_authority_time;
+    }
+}
+
 // --- 4: what the stick can do in the air ------------------------------------------------------------
 
 /// The airborne control step: the moment the stick commands, what damps it, and the lean force.
@@ -1025,7 +1230,10 @@ pub fn airborne_control(p: &Params, air: &mut Air, chassis: &mut Chassis, step: 
     }
     let acm = p.airborne_control_moment;
     let mut m = NOTHING;
-    if !air.flip_torque_applied {
+    // MX vs. ATV's 360 (MD16) silences the stick and damps as a backflip does; false otherwise.
+    let flipping = air.flipping || step.spinning;
+    let torqued = air.flip_torque_applied || step.spinning;
+    if !torqued {
         m = if step.stunt {
             Vf::new(
                 (step.stick.1 * (F(0.5) * F(acm.x()))).0,
@@ -1041,13 +1249,13 @@ pub fn airborne_control(p: &Params, air: &mut Air, chassis: &mut Chassis, step: 
                 m.w(),
             )
         };
-        if air.flipping {
+        if flipping {
             m = Vf::new(m.x(), 0.0, 0.0, m.w());
         }
         m = m.merge(Dest::XYZ, m.mul_q(ramp.0));
     }
     let steep = F(step.heading.y()).abs() >= STEEP_SINE;
-    if steep || step.lean.abs() >= DEAD || air.flipping || air.authority > 0.0 {
+    if steep || step.lean.abs() >= DEAD || flipping || air.authority > 0.0 {
         let damped = chassis.ang_vel.merge(Dest::XYZ, chassis.ang_vel.mul_q(p.airborne_damping.0));
         m = m.merge(Dest::XYZ, m.sub(damped));
     } else {
@@ -1067,7 +1275,7 @@ pub fn airborne_control(p: &Params, air: &mut Air, chassis: &mut Chassis, step: 
     }
     chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(m));
 
-    if !step.stunt && !air.flip_torque_applied && chassis.speed > SLOW {
+    if !step.stunt && !torqued && chassis.speed > SLOW {
         let side = normalize(cross(UP, chassis.vel));
         let push = side.mul_q((p.airborne_control_force * step.lean).0);
         chassis.force = chassis.force.merge(Dest::XYZ, chassis.force.add(push));
@@ -1124,7 +1332,7 @@ pub fn wreck_test(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, loa
         return Some(Wreck::Tail);
     }
     let rolled = chassis.roll.abs() > p.airborne_roll_wreck_angle;
-    if air.airborne && !air.flipping {
+    if air.airborne && !air.flipping && !step.spinning {
         if chassis.pitch < -p.airborne_pitch_down_wreck_angle || rolled {
             return Some(Wreck::NoseDive);
         }

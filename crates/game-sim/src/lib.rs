@@ -231,7 +231,21 @@ impl Sim {
     /// ride in a shell with no pages).
     pub fn poll(&mut self, dt: F, reports: &[Report; PADS]) -> Controls {
         self.input.tick(dt, reports);
-        Controls::through(self.input.pad(0), self.table())
+        self.hands(0)
+    }
+
+    /// Player `i`'s hands off pad `i`: [`Controls::through`], and on a bike with a trick pack laid
+    /// over it (MD16, [`Phy::tricks`]) the two extra trick buttons, which ride the report's R2 and L2
+    /// — the shell's new layout moves the pad's Cross and Square there ([`trick_pack::EXTRA_CONTROLS`]).
+    /// A bike on the original's tricks reads exactly what it always did.
+    fn hands(&self, i: usize) -> Controls {
+        let pad = self.input.pad(i);
+        let mut c = Controls::through(pad, self.table());
+        let phy = if i == 0 { &self.phy } else { &self.others[i - 1].phy };
+        if phy.tricks.is_some() && self.plane.is_none() {
+            c.extra = trick_pack::EXTRA_CONTROLS.map(|k| pad.held(k));
+        }
+        c
     }
 
     /// Build the binding table on each pad's controller preset, pad 0 first, as the original's builder
@@ -317,7 +331,7 @@ impl Sim {
 
     fn pad_controls(&self) -> Vec<Controls> {
         (0..self.players())
-            .map(|i| if i < PADS { Controls::through(self.input.pad(i), self.table()) } else { Controls::default() })
+            .map(|i| if i < PADS { self.hands(i) } else { Controls::default() })
             .collect()
     }
 
@@ -741,6 +755,10 @@ pub mod track;
 /// Tricks: the table of stunts the disc ships, the stick-and-button gesture that names one, the clocks
 /// that decide whether it counts, and the trick's own half of what makes a landing a crash.
 pub mod trick;
+
+/// MX vs. ATV's tricks as a pack laid over the original's (MD16): the extra stunts, the 360 and
+/// front flip's numbers, the whip's auto-level. Off unless a pack is laid over a bike.
+pub mod trick_pack;
 
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come

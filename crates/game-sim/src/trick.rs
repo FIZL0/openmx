@@ -200,6 +200,9 @@ impl Stunts {
             Trick::STOPPIE => "Stoppie",
             Trick::WHEELIE => "Wheelie",
             Trick::BACKFLIP => "BackFlip",
+            Trick::FRONTFLIP => "Frontflip",
+            Trick::THREE_SIXTY_LEFT => "Three Sixty Left",
+            Trick::THREE_SIXTY_RIGHT => "Three Sixty Right",
             _ => match trick.slot() {
                 Some(slot) => match usize::try_from(self.map[player][slot]).ok().and_then(|i| self.get(i)) {
                     Some(stunt) => &stunt.display_name,
@@ -270,7 +273,21 @@ impl Set {
 
     /// The record a trick id runs, or `None` for the ids that are not table slots.
     pub fn stunt(&self, trick: Trick) -> Option<&Stunt> {
-        self.stunts.get(trick.slot()?)
+        self.stunts.get(trick.slot().or_else(|| trick.extra().map(|k| SLOTS + k))?)
+    }
+
+    /// The 24 with the extra slots' records after them (MD16), in [`extra_of`]'s order. A set with
+    /// none is the original's.
+    pub fn with_extras(mut self, extras: Vec<Stunt>) -> Set {
+        self.stunts.truncate(SLOTS);
+        self.stunts.resize_with(SLOTS, Stunt::default);
+        self.stunts.extend(extras.into_iter().take(EXTRA_SLOTS));
+        self
+    }
+
+    /// Whether this rider reads Cross and Square as trick buttons (MD16).
+    pub fn has_extras(&self) -> bool {
+        self.stunts.len() > SLOTS
     }
 
     /// The AI's trick choice for an air time it expects to have.
@@ -317,6 +334,20 @@ impl Trick {
     pub const STOPPIE: Trick = Trick(26);
     /// Nothing: what the rider is set to on the ground, and what it starts on.
     pub const NONE: Trick = Trick(28);
+    /// **The port's own (MD16)**, past every id of the original's: the front flip, and MX vs. ATV's
+    /// two 360s. Only a ride on MX vs. ATV's tricks ever scores one.
+    pub const FRONTFLIP: Trick = Trick(29);
+    pub const THREE_SIXTY_LEFT: Trick = Trick(30);
+    pub const THREE_SIXTY_RIGHT: Trick = Trick(31);
+    /// The first of the [`EXTRA_SLOTS`] ids Cross and Square name (MD16).
+    pub const EXTRA: u8 = 32;
+
+    /// Which extra slot this is, if it is one (MD16). Never a gesture slot: [`Trick::slot`] stays
+    /// the original's 24, so the clip tables keyed on it are not reached past their end.
+    pub fn extra(self) -> Option<usize> {
+        let k = usize::from(self.0.checked_sub(Trick::EXTRA)?);
+        (k < EXTRA_SLOTS).then_some(k)
+    }
 
     /// Which gesture slot this is, if it is one.
     pub fn slot(self) -> Option<usize> {
@@ -547,6 +578,41 @@ pub const TRICK_BUTTONS: usize = 3;
 pub struct Buttons {
     pub trick: [bool; TRICK_BUTTONS],
     pub dpad: [bool; DPAD],
+    /// **The port's own (MD16):** Cross and Square, the two buttons the new control scheme freed,
+    /// which a rider on MX vs. ATV's tricks reads as two more groups ([`group_with`]). Both false for
+    /// every rider on the original's tricks, which is every replay and every acceptance run.
+    pub extra: [bool; EXTRA_BUTTONS],
+}
+
+/// How many buttons past the original's three a rider on MX vs. ATV's tricks reads (MD16): Cross
+/// and Square, in that order.
+pub const EXTRA_BUTTONS: usize = 2;
+/// The gesture slots those two make: one group each, by the four stick directions.
+pub const EXTRA_SLOTS: usize = EXTRA_BUTTONS * 4;
+
+/// [`group`] with the port's two extra buttons (MD16): the original's group when any of its three
+/// buttons is down, so an original gesture always wins; otherwise 7 for Cross and 8 for Square
+/// (Cross first when both are down), and 0 for nothing. With both extras up it is [`group`].
+pub fn group_with(trick: [bool; TRICK_BUTTONS], extra: [bool; EXTRA_BUTTONS]) -> u8 {
+    match group(trick) {
+        0 if extra[0] => 7,
+        0 if extra[1] => 8,
+        g => g,
+    }
+}
+
+/// The extra slot (0..[`EXTRA_SLOTS`]) a group of 7 or 8 and a direction name, in the order
+/// [`slot_of`] numbers the original's: up, down, left, right within a group.
+pub fn extra_of(group: u8, dir: Dir) -> Option<usize> {
+    if !(7..=8).contains(&group) || dir == Dir::None {
+        return None;
+    }
+    Some((group as usize - 7) * 4 + (dir as usize - 1))
+}
+
+/// The trick id a gesture names: one of the 24 slots, or one of the extra ones (MD16).
+pub fn trick_of(group: u8, dir: Dir) -> Option<Trick> {
+    slot_of(group, dir).map(|s| Trick(s as u8)).or_else(|| extra_of(group, dir).map(|k| Trick(Trick::EXTRA + k as u8)))
 }
 
 /// Which of the six button groups is held, or zero for none.
@@ -604,7 +670,7 @@ impl Gesture {
             return;
         }
         self.stick = stick(deflection.0, deflection.1, buttons.dpad);
-        self.group = group(buttons.trick);
+        self.group = group_with(buttons.trick, buttons.extra);
         if self.group == 0 {
             // The release that arms the next trick.
             self.armed = true;
@@ -782,11 +848,13 @@ impl Tricks {
             && self.gesture.group != 0
             && self.gesture.dir != Dir::None
             && !bike.fresh;
-        if let Some(slot) = ready.then(|| slot_of(self.gesture.group, self.gesture.dir)).flatten() {
+        // An extra slot the pack left empty (MD16) asks for nothing; the 24 are always the original's.
+        let filled = |t: &Trick| t.extra().is_none() || set.stunt(*t).is_some();
+        if let Some(id) = ready.then(|| trick_of(self.gesture.group, self.gesture.dir)).flatten().filter(filled) {
             if self.in_progress {
-                self.queue.push_back(Trick(slot as u8));
+                self.queue.push_back(id);
             } else {
-                self.requested = Trick(slot as u8);
+                self.requested = id;
                 self.restart = true;
                 self.seq = 1;
             }

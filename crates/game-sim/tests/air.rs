@@ -470,6 +470,8 @@ impl Gen {
             lean: if self.one_in(2) { self.f(-0.12, 0.12) } else { self.f(-0.6, 0.6) },
             stunt: self.b(),
             touching: self.b(),
+            modifier: false,
+            spinning: false,
         };
         let lo = Loads {
             side: self.f(-60.0, 60.0),

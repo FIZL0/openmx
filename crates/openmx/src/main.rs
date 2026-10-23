@@ -193,6 +193,7 @@ mod shot_pose;
 mod split;
 mod stages;
 mod track_mods;
+mod trick_packs;
 mod worlds;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
@@ -985,6 +986,9 @@ struct Args {
     mods: Option<std::path::PathBuf>,
     /// Whether `--mods DIR|off` was given, or the front end set [`Args::mods`] from its settings.
     mods_asked: bool,
+    /// `--tricks original|mxvatv` (MD16): whose tricks the ride has. Unset, the front end's Tricks
+    /// row says, and a ride outside it has the original's. Online is always the original's.
+    tricks: Option<menu::Tricks>,
     /// The pad seat each player reads, the front end's local game's (P43): player i rides seat
     /// `pad_of[i]`'s controller. Empty is seat i for player i, which is every ride outside one.
     pad_of: Vec<usize>,
@@ -1352,6 +1356,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
                 a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
+                a.tricks = Some(args.tricks.unwrap_or(shell.front.menu.settings.tricks));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 if !args.render_scale_asked {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
@@ -1420,6 +1425,8 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.track = room.track.clone();
                 // Online rides the disc's tracks only, until MD6 says how peers agree on a mod.
                 (a.mods_asked, a.mods) = (true, None);
+                // And the original's tricks, until MD6's check that every seat has the same pack.
+                a.tricks = Some(menu::Tricks::Original);
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
@@ -1769,6 +1776,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         table.stunts.len(),
         stunts.stunts.iter().filter(|s| !s.name.is_empty()).count()
     );
+    // MX vs. ATV's tricks (MD16), from the first trick pack in the mods folder: its extra stunts after
+    // the 24, and below its moves laid over every bike. Without a pack the ride has the original's.
+    let trick_pack = ride_trick_pack(&args);
+    let stunts = match &trick_pack {
+        Some(pack) => {
+            let stunts = pack.stunts(stunts);
+            println!("{}", pack.missing_clips(&stunts));
+            stunts
+        }
+        None => stunts,
+    };
 
     let scn = archives[0]
         .entries()
@@ -1929,7 +1947,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             (bytes, member)
         }
     };
-    let stock_phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
+    let mut stock_phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
+    if let Some(pack) = &trick_pack {
+        println!("{}", pack.lay(&mut stock_phy, &phy_member));
+    }
     let mut phy = stock_phy.clone();
     mods.bike(0, &mut phy);
     // The other players' own picks (P37): each rides the `.phy` its set names in its own bike's
@@ -1957,6 +1978,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
                 println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
                 let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+                if let Some(pack) = &trick_pack {
+                    println!("player {}: {}", i + 1, pack.lay(&mut phy, &member));
+                }
                 stock_phys.push(phy.clone());
                 bike_words.push(saved_markers::bike_word(&member));
                 mods.bike(i, &mut phy);
@@ -3627,7 +3651,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         seat.inverted = seat.garage.inverted(seat.inverted);
                         seat.garage.set_every_bank(seats.plane(from).every_bank());
                         seat.garage.set_round_stick(seats.plane(from).round_stick());
-                        let report = seats.plane(from).fly(seats.scheme(from).ride(report), seat.inverted);
+                        // A bike with MX vs. ATV's tricks (MD16) reads the new layout's Cross and Square as
+                        // its two extra trick buttons.
+                        let tricks = seat.sim.phy.tricks.is_some();
+                        let report = seats.plane(from).fly(seats.scheme(from).ride_tricks(report, tricks), seat.inverted);
                         seat.reports = [report, Report::missing()];
                         // The bike's commands through the seat's controller preset (P79). Online the
                         // ride's own seats hold theirs, the room's pick (N13), and this one is drawn
@@ -5244,6 +5271,32 @@ fn mods_dir(args: &Args) -> Option<std::path::PathBuf> {
     menu::load(&dir).0.mods.then(|| dir.join(track_mods::MODS_DIR))
 }
 
+/// The trick pack a ride lays over the original's tricks (MD16): only with `--tricks mxvatv` or the
+/// Tricks row's MX vs. ATV, never online, and only when the mods folder has one; the line says why not.
+fn ride_trick_pack(args: &Args) -> Option<trick_packs::Pack> {
+    if args.tricks != Some(menu::Tricks::MxVsAtv) {
+        return None;
+    }
+    if args.online.is_some() {
+        println!("tricks: the original's online, until every seat can be checked for the same pack (MD6)");
+        return None;
+    }
+    let Some(dir) = mods_dir(args) else {
+        println!("tricks: the mods folder is off, so the original's");
+        return None;
+    };
+    match trick_packs::find(&dir) {
+        Ok(pack) => {
+            println!("tricks: MX vs. ATV's, from {}", pack.id);
+            Some(pack)
+        }
+        Err(e) => {
+            println!("tricks: {e}; the original's");
+            None
+        }
+    }
+}
+
 /// The track mods a front end lists (MD2), saying why each one left out was: `--mods`' folder if it
 /// was given (`off` is none), else the one beside the settings in `dir` while the Mods row is `on`.
 /// With none, nothing is read.
@@ -5567,6 +5620,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         render_scale_asked: false,
         mods: None,
         mods_asked: false,
+        tricks: None,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(a) = argv.next() {
@@ -5650,6 +5704,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .ok_or_else(|| format!("--overlay: {word:?} is not original, debug or none"))?;
                 args.hud = overlay == menu::Overlay::Debug;
                 args.overlay = Some(overlay);
+            }
+            "--tricks" => {
+                let word = next("original or mxvatv")?;
+                let tricks = menu::Tricks::from_word(&word).ok_or_else(|| format!("--tricks: {word:?} is not original or mxvatv"))?;
+                args.tricks = Some(tricks);
             }
             "--speedometer" => {
                 let word = next("digital or analog")?;
@@ -5862,7 +5921,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--speedometer digital|analog] [--hud] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--hud] [--camera NAME]\n\
                             [--minimap on|off] [--hud-scale 50..150]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\

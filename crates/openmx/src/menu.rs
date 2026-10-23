@@ -316,6 +316,9 @@ pub struct Settings {
     /// The mod packs switched off on the Mods page (P118), by the prefix their tracks' ids share
     /// (`mxvatv` for `mxvatv_nat13`): their tracks are left off the Free Ride list.
     pub mods_off: Vec<String>,
+    /// Whose tricks a ride has (MD16): the original's, or MX vs. ATV's read from a trick pack in the
+    /// mods folder. The original's unless changed.
+    pub tricks: Tricks,
 }
 
 /// The settings' render scale (V34): auto, picked from the frames' time against the display's
@@ -692,6 +695,7 @@ impl Default for Settings {
             cameras: [CameraView::DEFAULT; SEATS_MAX],
             mods: true,
             mods_off: Vec::new(),
+            tricks: Tricks::default(),
         }
     }
 }
@@ -772,6 +776,7 @@ impl Settings {
                 "frame_limit" => s.frame_limit = FrameLimit::from_word(v).unwrap_or(s.frame_limit),
                 "machine_bays" => s.bays = v != "off",
                 "mods" => s.mods = v != "off",
+                "tricks" => s.tricks = Tricks::from_word(v).unwrap_or(s.tricks),
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
@@ -857,6 +862,7 @@ impl Settings {
             + &self.bays_text()
             + &self.hud_text()
             + &self.mods_text()
+            + &self.tricks_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
             + &self.modifiers_text()
@@ -892,6 +898,12 @@ impl Settings {
             out += &format!("mods_off = {}\n", self.mods_off.join(" "));
         }
         out
+    }
+
+    /// The tricks' line (MD16), only when they are not the original's, so a file from before it is
+    /// written as it was.
+    fn tricks_text(&self) -> String {
+        if self.tricks == Tricks::Original { String::new() } else { format!("tricks = {}\n", self.tricks.word()) }
     }
 
     /// The lobby's seat count (N12), only when it is not the usual [`LOBBY_SEATS`], so a file from
@@ -1048,6 +1060,39 @@ impl Speedometer {
         match self {
             Speedometer::Digital => "Digital",
             Speedometer::Analog => "Analog",
+        }
+    }
+}
+
+/// Whose tricks a ride has (MD16), as `settings.txt` and `--tricks` spell it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tricks {
+    /// MX Unleashed's, and nothing else: what every replay and acceptance ride is.
+    #[default]
+    Original,
+    /// MX vs. ATV's laid over them from a trick pack (`mods/tricks/<id>/`): its extra stunts on Cross
+    /// and Square under the new layout, and under R1 its 360s, its whip and the port's own front flip.
+    MxVsAtv,
+}
+
+impl Tricks {
+    pub const ALL: [Tricks; 2] = [Tricks::Original, Tricks::MxVsAtv];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Tricks::Original => "original",
+            Tricks::MxVsAtv => "mxvatv",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Tricks> {
+        Tricks::ALL.into_iter().find(|t| t.word() == w)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tricks::Original => "Original",
+            Tricks::MxVsAtv => "MX vs. ATV",
         }
     }
 }
