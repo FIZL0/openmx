@@ -393,6 +393,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         hud_scale: 130,
         // MX vs. ATV's tricks (MD16).
         tricks: menu::Tricks::MxVsAtv,
+        // MX vs. ATV's own 360 (MD25).
+        three_sixty: menu::ThreeSixty::MxVsAtv,
         // The Original tab's own two at the original's (P126).
         plants: game_render::eco::Lod::Original,
         picture: menu::Picture::Television,
@@ -3446,6 +3448,37 @@ fn the_tricks_row_picks_mx_vs_atv_and_is_saved() {
     m.settings.mods = false;
     let row = m.page().into_iter().find(|row| row.key == menu::Key::Tricks).unwrap();
     assert!(row.off.is_some(), "greyed with the mods folder off");
+}
+
+/// MD25: the 360 Style row, on the Original tab: Easy by default and written as no line, MX vs. ATV's
+/// under the Original switch, saved as `three_sixty = mxvatv`, and each the sim's own style.
+#[test]
+fn the_three_sixty_style_is_easy_unless_original() {
+    use game_sim::air::SpinStyle;
+    use menu::{Departure, Key, ThreeSixty};
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.three_sixty, ThreeSixty::Easy);
+    assert!(!m.settings.text().contains("three_sixty"), "the easy 360 writes no line");
+    settings_at(&mut m, &mut r, "Original");
+    down_to(&mut m, &mut r, Key::Departure(Departure::ThreeSixty));
+    let row = m.page()[m.cursor(Screen::Settings)].clone();
+    assert_eq!((row.label.as_str(), row.value.as_str()), ("360 Style", "Easy"));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.three_sixty, ThreeSixty::MxVsAtv);
+    let text = m.settings.text();
+    assert!(text.contains("three_sixty = mxvatv\n"), "{text}");
+    assert_eq!(Settings::parse(&text).three_sixty, ThreeSixty::MxVsAtv);
+    assert_eq!(Settings::parse("three_sixty = flat\n").three_sixty, ThreeSixty::Easy, "a word it does not know");
+    let (mut o, _) = fresh();
+    o.set_original(true);
+    assert_eq!(o.settings.three_sixty, ThreeSixty::MxVsAtv, "Original sets MX vs. ATV's exact step");
+    o.set_original(false);
+    assert_eq!(o.settings.three_sixty, ThreeSixty::Easy);
+    assert_eq!((ThreeSixty::Easy.style(), ThreeSixty::MxVsAtv.style()), (SpinStyle::Easy, SpinStyle::MxVsAtv));
+    assert_eq!(SpinStyle::default(), SpinStyle::Easy, "a pack's moves start easy");
+    for t in ThreeSixty::ALL {
+        assert_eq!(ThreeSixty::from_word(t.word()), Some(t));
+    }
 }
 
 /// P126: a fresh settings file has every enhancement on and the Original switch off.

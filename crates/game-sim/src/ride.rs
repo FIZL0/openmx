@@ -1645,6 +1645,7 @@ impl Ride {
             modifier: tricks.is_some() && c.trick == [false, false, true],
             spinning: false,
             spin_active: false,
+            easy_spin: false,
         };
 
         // 3 — the ground step, in `mv::step`'s own order.
@@ -1744,8 +1745,9 @@ impl Ride {
                     astep.spinning = t.spin.applied;
                     astep.spin_active = t.spin.active;
                     air::unleashed_rotate(&p.air, &mut t.flip_row, air, &mut ac, &astep);
-                    air::three_sixty(&moves.spin, &p.air, air, &mut t.spin, &mut ac, &astep, t.side_flick, &tables.acos);
+                    air::three_sixty(&moves.spin, moves.spin_style, &p.air, air, &mut t.spin, &mut ac, &astep, t.side_flick, &tables.acos);
                     astep.spinning = t.spin.applied;
+                    astep.easy_spin = t.spin.applied && t.spin.easy;
                 }
                 _ => air::backflip(&p.air, air, &mut ac, &astep),
             }
@@ -1851,7 +1853,13 @@ impl Ride {
             chassis.vel = mvc.vel;
             chassis.ang_vel = mvc.ang_vel;
             chassis::set_flags(chassis, mvc.flags.0, mvc.flags.1, mvc.flags.2);
+            // An easy 360 turns past the bike's yaw limit (MD25, the port's own), for this substep only.
+            let yaw_limits = (chassis.ang_vel_max[1], chassis.ang_vel_min[1]);
+            if let Some(w) = tricks.as_deref().and_then(|t| air::easy_spin_yaw_limit(&t.spin, yaw_limits.0)) {
+                (chassis.ang_vel_max[1], chassis.ang_vel_min[1]) = (w, -w);
+            }
             integrate(chassis, h, &out.chassis, origin);
+            (chassis.ang_vel_max[1], chassis.ang_vel_min[1]) = yaw_limits;
             out.chassis = math::quat_to_mat4(chassis.quat, *origin);
             mvc.force = chassis.force;
             mvc.torque = chassis.torque;
