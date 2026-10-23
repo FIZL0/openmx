@@ -12,7 +12,9 @@
 //!
 //! - **Down** puts a marker in the selected slot: the whole bike as the tick left it ([`Ride`]) —
 //!   where it is, which way it faces, its speed and its spin — so a run-up repeats;
-//! - **Up** rides back to the selected slot's marker, or to the selected player where they stand;
+//! - **Up** rides back to the selected slot's marker, or to the selected player where they are —
+//!   at their speed and spin while they ride (P111, [`Spot::motion`]), stopped where they will be
+//!   put back while they are down;
 //! - **Left** and **Right** step the selection, through the slots and then the other players, round.
 //!
 //! The d-pad is the original's in a ride (P73's table, commands 0–3): a digital stick (lean, steer,
@@ -197,24 +199,46 @@ pub enum Did {
     Refused(Pick),
 }
 
-/// Where a teleport onto a player puts the bike: their bike's origin, its forward and its up.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Where a teleport onto a player puts the bike: their bike's origin, its forward and its up, and
+/// while they ride it the bike's motion (P111), which the teleport rides on with.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Spot {
     pub at: Vf,
     pub forward: Vf,
     pub up: Vf,
+    /// The bike the player rides, as the tick before the teleport left it, for the teleporter to
+    /// ride on as ([`crate::ride::Ride::ride_as`]): its speed, its spin, its wheels'. `None` for a
+    /// player who is down or flies the plane, who has no bike motion to take, so the teleport sets
+    /// the bike down there stopped.
+    pub motion: Option<Motion>,
+}
+
+/// A riding player's bike, for [`Spot::motion`]: shared, as every peer's spot of them is the same.
+#[derive(Clone, Debug)]
+pub struct Motion(pub std::sync::Arc<Ride>);
+
+impl PartialEq for Motion {
+    /// The same bike, field for field, as the state hash walks it.
+    fn eq(&self, other: &Motion) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || crate::hash::Dump::of(&*self.0) == crate::hash::Dump::of(&*other.0)
+    }
 }
 
 impl Spot {
-    /// Where a player is: their bike while they ride it, and the put-back record — where they will be
-    /// put back — while they are down.
+    /// A spot with no motion: the bike is set down there stopped.
+    pub fn still(at: Vf, forward: Vf, up: Vf) -> Spot {
+        Spot { at, forward, up, motion: None }
+    }
+
+    /// Where a player is: their bike while they ride it, with its motion, and the put-back record —
+    /// where they will be put back — while they are down, with none.
     pub fn of(rider: &Rider) -> Spot {
         if rider.state.wreck.is_some() || rider.crash.is_some() {
             let b = rider.ride.back;
-            return Spot { at: b.at, forward: b.facing, up: b.up };
+            return Spot::still(b.at, b.facing, b.up);
         }
         let (forward, up) = rider.ride.axes();
-        Spot { at: rider.ride.position(), forward, up }
+        Spot { at: rider.ride.position(), forward, up, motion: Some(Motion(std::sync::Arc::new(rider.ride.clone()))) }
     }
 }
 
@@ -417,7 +441,7 @@ pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], ha
             },
             Pick::Player(p) => match spots.get(p) {
                 Some(spot) => {
-                    sim.rider.teleport_to(*spot);
+                    sim.rider.teleport_to(spot.clone());
                     Did::Teleported(pick)
                 }
                 None => Did::Refused(pick),
