@@ -16,6 +16,13 @@ use std::collections::HashMap;
 
 /// A model with its triangles already expanded and its textures already resolved.
 ///
+/// What [`Assets::take_in`] took in: the models by their new names, and the textures' places.
+#[derive(Clone, Debug, Default)]
+pub struct Taken {
+    pub models: Vec<String>,
+    pub textures: std::ops::Range<usize>,
+}
+
 /// Cloned for a split screen's second rider and on (V22): a skinned model's triangles are its
 /// pose, so each rider on the screen needs a copy of its own to be posed into.
 #[derive(Clone)]
@@ -327,6 +334,38 @@ impl Assets {
     /// What could not be found, for a report at the end of a draw.
     pub fn missing(&self) -> &[String] {
         &self.missing
+    }
+
+    /// Take in another set's models and textures (MD15: a world tile's, loaded from its own folder on
+    /// a thread of its own), each model under `prefix` and its name, and its textures after these.
+    /// The other set's material and texture answers are not kept: what it loaded is final.
+    pub fn take_in(&mut self, other: Assets, prefix: &str) -> Taken {
+        let first = self.textures.len();
+        self.textures.extend(other.textures);
+        let mut names = Vec::with_capacity(other.models.len());
+        for (name, mut loaded) in other.models {
+            for t in loaded.textures.iter_mut().flatten() {
+                *t += first;
+            }
+            let name = format!("{prefix}{name}");
+            self.models.insert(name.clone(), loaded);
+            names.push(name);
+        }
+        names.sort();
+        Taken { models: names, textures: first..self.textures.len() }
+    }
+
+    /// Let go of what [`Assets::take_in`] took: its models, and its textures' pixels. The textures'
+    /// places stay, empty, so every other index still means what it did.
+    pub fn let_go(&mut self, taken: &Taken) {
+        for name in &taken.models {
+            self.models.remove(name);
+        }
+        for t in taken.textures.clone() {
+            if let Some(t) = self.textures.get_mut(t) {
+                *t = Texture { width: 0, height: 0, rgba: Vec::new() };
+            }
+        }
     }
 }
 
