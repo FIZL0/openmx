@@ -73,8 +73,11 @@
 //! # The controls
 //!
 //! Cross is the throttle and Square the brake (both analogue, as the pad reports them), L2 is the
-//! clutch and R2 the front brake on its own, the left stick steers and leans, L3 asks the rider to
-//! balance and R3 is reverse.
+//! clutch and R2 the front brake on its own, and the left stick steers and leans. The right stick
+//! turns the camera round the rider, the original's look-around, and with L3 held moves it in and out
+//! (P114); clicking it (R3) puts the camera back where its preset has it, which is the port's own —
+//! the original binds R3 to nothing it reads. Reverse is the original's: gas and brake together at a
+//! standstill.
 //!
 //! A **trick** is a gesture: hold one, two or three of Circle, Triangle and R1 — which is what names
 //! one of the six groups — and push the d-pad in one of four directions, which names one of the 24
@@ -3984,7 +3987,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 rig.hud.note_trick(&format!("{} landed", table.display_name(0, t)));
             }
             if let Some(why) = seat.said.wreck {
-                println!("{who}wreck: reason {} — L3 and R3 together to get back on", why.0);
+                println!("{who}wreck: reason {} — L1 and R1 together to get back on", why.0);
                 rig.hud.note_wreck(why);
             }
             if seat.said.respawned {
@@ -4067,6 +4070,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 chase::wreck_targets(crash, down)
             });
             wreck.switch(wreck_targets.as_ref(), crash.map_or(0, |c| c.reason.0), &mut follow.cam);
+            // The seat's right stick turns its own follow camera, L3 held zooms it, and R3 puts it
+            // back (P114) — while the follow camera has the screen, so a wreck's camera is not
+            // nudged from under the player. The preset changes above keep or throw the nudges away
+            // as the original's do.
+            if presets != 0 && !wreck.on {
+                let pad = seat.sim.input.pad(0);
+                let scheme = pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(args.pad_seat(i)));
+                chase::look_around(follow, pad, seat.sim.table(), scheme.resets_camera(pad));
+            }
             // The shape of the view this camera draws into (V22), which on a full screen is the frame.
             let (view_w, view_h) = (rects[i].w, rects[i].h);
             let view = if presets == 0 {
@@ -5641,8 +5653,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Controls screen, per seat) rides the original's instead: Cross throttle,\n\
                      Square brake, R2 front brake, L2 clutch, L1 changes camera. Either way the\n\
                      left stick steers\n\
-                     and leans, the d-pad preloads, L3 balances, R3 reverses, Start freezes,\n\
-                     Escape quits. --camera starts on a camera preset by its\n\
+                     and leans, the d-pad preloads, the right stick turns the camera (L3 held\n\
+                     zooms), R3 puts it back, Start freezes, Escape quits. --camera starts on a camera preset by its\n\
                      name in the track's cpresets.ini (\"Race Cam 1\" unless asked).\n\
                      --camera-view frames every player's cameras (the Camera page's, P82):\n\
                      original is the disc's numbers exactly; five numbers are degrees added to\n\

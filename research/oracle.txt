@@ -1132,6 +1132,11 @@ camera_nudge                boot 0x001fc630 (stick x, stick y in f14/f15, cam, c
 #                                           right stick. Reads analogue controls 0x1e and 0x1f through
 #                                           pad_control_index; with either held the stick zooms or
 #                                           widens, otherwise it swings yaw and pitch
+# P114: the race camera's override of that slot (vtable 0x00452c20 +0x12c, 0x0021f770) zeroes the
+#   pad's value for 0x1f (so R1 never widens a race camera), centres the stick when
+#   *(*(app+0x3cc)+0x74) is set with +0x34 == 3 (null in first_recording and biplane), then calls the
+#   base. The slot's caller is reached only through thunks (0x001fca10, 0x0021f8e0); not found.
+#   The port feeds it each seat's right stick through AxisRange::PLAYER once a tick (chase.rs).
 camera_load_presets         boot 0x001fbf50 (cam, file): fills the 0xa0-byte preset records from the
 #                                           camera ini. Section [NumberOfPresets], then Preset%d (or
 #                                           Preset%dh/v/q by viewport index, or Preset%dw/x/z when the
