@@ -592,6 +592,9 @@ pub struct MarkerBar {
     pub filled: [bool; SLOTS],
     pub held: bool,
     pub holding: u32,
+    /// Slot 1 is the machine's spawn (P132): nothing is put there and the map has a start for it, so
+    /// an Up on it rides back to the start ([`MarkerBar::homed`]).
+    pub home: bool,
 }
 
 impl MarkerBar {
@@ -610,6 +613,22 @@ impl MarkerBar {
             filled: std::array::from_fn(|s| markers.holds(s)),
             held: active && game_sim::markers::held(pad, table),
             holding: if active { game_sim::markers::holding(pad, table) } else { 0 },
+            home: false,
+        }
+    }
+
+    /// The bar with slot 1 shown as the spawn where `home` says the seat has a start for the machine
+    /// up ([`game_sim::markers::Home::has`]) and nothing is put in it (P132).
+    pub fn homed(self, home: bool) -> MarkerBar {
+        MarkerBar { home: home && !self.filled[game_sim::markers::HOME_SLOT], ..self }
+    }
+
+    /// What the slot display says about the selection ([`marker_label`]), slot 1 named the spawn
+    /// while it is one.
+    pub fn label(&self, names: &[Option<String>]) -> String {
+        match self.pick {
+            Pick::Slot(s) if self.home && s == game_sim::markers::HOME_SLOT => format!("marker {} spawn", s + 1),
+            pick => marker_label(pick, self.filled, names),
         }
     }
 }
@@ -636,6 +655,23 @@ pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label:
 /// its whole pixels a font pixel are the view's 224-line steps times the scale, rounded down, and
 /// never fewer than one.
 pub fn draw_markers_scaled(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, others: &[usize], holding: u32, hud_scale: f32) {
+    draw_markers_homed(frame, pick, filled, false, label, others, holding, hud_scale);
+}
+
+/// [`draw_markers_scaled`] with slot 1 drawn as the spawn while `home` (P132, [`MarkerBar::home`]):
+/// an empty box with a small square of its colour in the middle, set apart from a placed marker's
+/// solid fill and from an empty slot's bare outline.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_markers_homed(
+    frame: &mut Frame,
+    pick: Pick,
+    filled: [bool; SLOTS],
+    home: bool,
+    label: &str,
+    others: &[usize],
+    holding: u32,
+    hud_scale: f32,
+) {
     let scale = ((frame.height as i32 / 224) as f32 * hud_scale).floor().max(1.0) as i32;
     let (boxw, gap) = (7 * scale, 3 * scale);
     let tags: Vec<String> = others.iter().map(|p| format!("P{}", p + 1)).collect();
@@ -653,6 +689,8 @@ pub fn draw_markers_scaled(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS],
         let ink = if pick == Pick::Slot(i) { PRESSED } else { DIM };
         if set {
             fill(frame, at + scale, by + scale, boxw - 2 * scale, boxw - 2 * scale, slot_colour(i));
+        } else if home && i == game_sim::markers::HOME_SLOT {
+            fill(frame, at + 3 * scale, by + 3 * scale, boxw - 6 * scale, boxw - 6 * scale, slot_colour(i));
         }
         outline(frame, at, by, boxw, boxw, ink);
         if pick == Pick::Slot(i) {
