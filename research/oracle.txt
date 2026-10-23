@@ -2586,9 +2586,23 @@ sphere_edge_distance boot 0x00109940 (point*, a*, b*) -> f0; past a the square i
 #   the masks +0xcc vs +0x84) and either bit 0x8 of its +0x116 is clear (the bike's is 0x14: listed
 #   wherever the query finds it) or its distance is under the bound
 #   the bike's placement: B+4 is its record (+8 the track's static tree, +0xc its key, +0x10 its
-#   centre, = B+0x40), the key that of the mesh root box through B+0x120; some 400 frames after the
-#   wreck B+4 is 0 and B+0x30 0xff, out of the broad phase. 0x0011aed0 is what takes B off every bone
+#   centre, = B+0x40), the key that of the mesh root box through B+0x120; in the late states
+#   B+4 is 0, out of the broad phase (S108: since the put-back; B+0x30 is 0xff throughout). 0x0011aed0 is what takes B off every bone
 #   sphere's ignore list (its slot left 0) the frame +0x6b0 is set
+# S108 — the wreck bike leaves the broad phase at the put-back, not ~400 frames on (proofs in
+# tests/ragdoll_wrecks.rs and tests/ragdoll.rs; the port's half is ragdoll_ride::Down::step_posed_with).
+#   bike_unwreck's *(bike+0x7a8) vtable(+0x38) +0x120 is wreck_part_stop (a1 0); its +0x11c,
+#   wreck_part_start, is bike_wreck_entry's. B is the wreck part's +0x128. In the s62 captures B+4
+#   and B+0x31 (3, bit 0 the pair's gate) go 0 on the row the reason clears, 79 ticks after each entry
+#   (back 2556, front 2681, side 2686, tip 2551, front3 2681). B+0x30 is 0xff throughout. The body's update
+#   gathers once more on that tick, after the unwreck, with B in no node.
+wreck_part_start boot 0x0015b550 (part) the wreck part's start: a collidable not placed (+4 0) goes
+#                 into the broad phase (its vt +0x20 at +8, then 0x00119c60) for +0x128 and +0x124/+0x12c
+wreck_part_stop boot 0x0015b670 (part, a1) clears +0x28 bit 1; for +0x124/+0x12c and +0x128 (the wreck
+#                bike): broad_phase_leave, then the collidable's vt +0x18 at +8 (gate +0x31 bit 0 down)
+broad_phase_leave boot 0x001ab1d0 (collidable) a placed one (+4) out of every tree node its
+#                 placement lists (0x001ae2f0: the tree's vt +0x2c remove at its key), the record
+#                 freed, +4 = 0
 bike_box_solve boot 0x001f5b40 (this) the type-4 constraint's solve (vtable 0x00451dd0 +0x18), the
 #                             rider body actor's +0x5f8 on main bone 0 (+0x9c, the body). +0x4 on;
 #                             +0x14 another actor's transform (0 live; not ported). With +0x60 frame

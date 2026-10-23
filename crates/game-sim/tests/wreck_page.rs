@@ -196,6 +196,22 @@ fn three_updates_out_and_three_in() {
     assert_eq!(page, Page::default());
 }
 
+/// The fader told ahead of time (S108): before each update of a whole page, out and in,
+/// `puts_back_next` says what that update answers.
+#[test]
+fn the_page_says_its_put_back_before_the_update() {
+    let mut page = Page::default();
+    page.raise();
+    let mut put = 0;
+    while page.up() {
+        let told = page.puts_back_next();
+        assert_eq!(told, page.update(), "told before the update at {page:?}");
+        put += usize::from(told);
+    }
+    assert_eq!(put, 1, "one put-back a page");
+    assert!(!page.puts_back_next(), "an idle fader puts nothing back");
+}
+
 fn rider_down(reason: Wreck, screen: bool) -> (Phy, rider::Tables, Rider) {
     let tables = rider::Tables::build();
     let p = Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.ride.curve);
