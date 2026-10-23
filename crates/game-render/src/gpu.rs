@@ -55,7 +55,7 @@ use crate::pst::Texture;
 use crate::scene::{Scene, Shading};
 use crate::sky::Sky;
 use crate::splat::Splat;
-use crate::terrain::{Pages, lod_balance, lod_coarser, lod_errors, lod_indices, lod_indices_where, lod_level, lod_levels};
+use crate::terrain::{Packed, Pages, WorldPaint, lod_balance, lod_coarser, lod_errors, lod_indices, lod_indices_where, lod_level, lod_levels};
 use crate::world::{Assets, Camera, Fog, Graphics, Lighting, Surface};
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
@@ -252,6 +252,8 @@ pub enum GroundPaint<'a> {
     Splat(&'a Splat),
     /// A mod track's own terrain pages and detail map, as MX vs. ATV draws its maps (MD4).
     Pages(&'a Pages),
+    /// A world's maps' pages, each over its own cells and blended across the joins (MD9).
+    World(&'a WorldPaint),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -882,6 +884,75 @@ fn upload_pages(device: &wgpu::Device, queue: &wgpu::Queue, p: &Pages) -> [wgpu:
     [pages, leaves, detail]
 }
 
+/// Textures as one mip-mapped array the size of the first, each other one resampled to it, nearest;
+/// at least two layers, so no backend takes it for a plain 2D texture.
+fn upload_array(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, layers: &[&Texture]) -> wgpu::TextureView {
+    let blank = Texture { width: 1, height: 1, rgba: vec![0; 4] };
+    let first = layers.first().copied().unwrap_or(&blank);
+    let (w, h) = (first.width.max(1) as u32, first.height.max(1) as u32);
+    let count = layers.len().max(2) as u32;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: count },
+        mip_level_count: mips(&Texture { width: w as usize, height: h as usize, rgba: vec![0; (w * h * 4) as usize] }).len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for layer in 0..count as usize {
+        let t = layers.get(layer).copied().unwrap_or(first);
+        let t = match (t.width as u32, t.height as u32) == (w, h) && t.rgba.len() == (w * h * 4) as usize {
+            true => t.clone(),
+            false => Texture {
+                width: w as usize,
+                height: h as usize,
+                rgba: (0..(w * h) as usize).flat_map(|i| t.sample(((i % w as usize) as f32 + 0.5) / w as f32, ((i / w as usize) as f32 + 0.5) / h as f32)).collect(),
+            },
+        };
+        for (level, (lw, lh, px)) in mips(&t).iter().enumerate() {
+            write_layer(queue, &texture, level as u32, layer as u32, (*lw, *lh), 4, px);
+        }
+    }
+    texture.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() })
+}
+
+/// A world's paint (MD9) for its shader: every packed map's pages in one array, their leaf images
+/// stacked in one picture (a leaf's red and green are its page's layer + 1, low byte first; 0 for
+/// none), and their detail maps in a second array.
+fn upload_world_pages(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint, packed: &[Option<Packed>]) -> [wgpu::TextureView; 3] {
+    let placed: Vec<(&Pages, Packed)> = w.tiles.iter().zip(packed).filter_map(|(t, p)| Some((t.pages.as_ref()?, (*p)?))).collect();
+    let pages: Vec<&Texture> = placed.iter().flat_map(|(p, _)| p.pages.iter()).collect();
+    let pages = upload_array(device, queue, "world ground pages", &pages);
+    let width = placed.iter().map(|(p, _)| p.across).max().unwrap_or(1).max(1) as usize;
+    let height = placed.iter().map(|(p, at)| at.row + p.along).max().unwrap_or(1).max(1) as usize;
+    let mut rgba = vec![0u8; width * height * 4];
+    for (p, at) in &placed {
+        for lz in 0..p.along as usize {
+            for lx in 0..p.across as usize {
+                let entry = p.page_of[lz * p.across as usize + lx].map_or(0, |n| at.first_page + u32::from(n) + 1);
+                let i = ((at.row as usize + lz) * width + lx) * 4;
+                rgba[i..i + 4].copy_from_slice(&[(entry & 0xff) as u8, (entry >> 8) as u8, 0, 255]);
+            }
+        }
+    }
+    let leaves = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("world ground page of each leaf"),
+        size: wgpu::Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    write_layer(queue, &leaves, 0, 0, (width as u32, height as u32), 4, &rgba);
+    let details: Vec<&Texture> = placed.iter().filter_map(|(p, _)| p.detail.as_ref()).collect();
+    let details = upload_array(device, queue, "world ground detail", &details);
+    [pages, leaves.create_view(&Default::default()), details]
+}
+
 /// The baked light map's tiles as one grey image, for the ground's shader.
 fn upload_shadow(device: &wgpu::Device, queue: &wgpu::Queue, s: &crate::splat::Shadow) -> wgpu::TextureView {
     let across = s.across.max(1);
@@ -1374,6 +1445,13 @@ impl Renderer {
             GroundPaint::Pages(p) => Some(p),
             _ => None,
         };
+        let world = match paint {
+            GroundPaint::World(w) => {
+                let limits = self.device.limits();
+                Some((w, w.pack(limits.max_texture_array_layers, limits.max_texture_dimension_2d)))
+            }
+            _ => None,
+        };
         let paint = match paint {
             GroundPaint::Splat(s) => Some(s),
             _ => None,
@@ -1444,9 +1522,10 @@ impl Renderer {
         }
         let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ground"),
-            source: wgpu::ShaderSource::Wgsl(match pages {
-                Some(p) => ground_pages_wgsl(p, dirt),
-                None => ground_wgsl(paint, dirt),
+            source: wgpu::ShaderSource::Wgsl(match (pages, &world) {
+                (Some(p), _) => ground_pages_wgsl(p, dirt),
+                (None, Some((w, packed))) => ground_world_wgsl(w, packed),
+                (None, None) => ground_wgsl(paint, dirt),
             }
             .into()),
         });
@@ -1463,6 +1542,11 @@ impl Renderer {
             entries.push(texture_entry(4, true, wgpu::TextureViewDimension::D2));
             entries.push(texture_entry(5, true, wgpu::TextureViewDimension::D2));
         }
+        if world.is_some() {
+            entries.push(texture_entry(3, true, wgpu::TextureViewDimension::D2Array));
+            entries.push(texture_entry(4, true, wgpu::TextureViewDimension::D2));
+            entries.push(texture_entry(5, true, wgpu::TextureViewDimension::D2Array));
+        }
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ground"),
             entries: &entries,
@@ -1474,6 +1558,9 @@ impl Renderer {
         let mut views: Vec<wgpu::TextureView> = layers.iter().map(|t| upload_texture(&self.device, &self.queue, t)).collect();
         if let Some(p) = pages {
             views.extend(upload_pages(&self.device, &self.queue, p));
+        }
+        if let Some((w, packed)) = &world {
+            views.extend(upload_world_pages(&self.device, &self.queue, w, packed));
         }
         let mut bind_entries = vec![
             wgpu::BindGroupEntry {
@@ -2791,6 +2878,106 @@ fn ground_pages_wgsl(p: &Pages, dirt: [f32; 3]) -> String {
     s
 }
 
+/// The ground's shader for a world (MD9, [`WorldPaint`]): each map's pages over the cells it owns,
+/// as [`ground_pages_wgsl`] draws one map's, and on a join every near map's read mirrored back
+/// inside it and blended by [`crate::terrain::Regions::weights`], with the dirt's trace. Each map's
+/// numbers are written into the shader, one block of code a map.
+fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
+    let f = |v: f32| format!("{v:?}");
+    let mut s = String::from(VIEW_WGSL);
+    s.push_str(
+        "@group(1) @binding(0) var tiled: sampler;\n\
+         @group(1) @binding(1) var clamped: sampler;\n\
+         @group(1) @binding(2) var shadow: texture_2d<f32>;\n\
+         @group(1) @binding(3) var pages: texture_2d_array<f32>;\n\
+         @group(1) @binding(4) var page_of: texture_2d<f32>;\n\
+         @group(1) @binding(5) var detail: texture_2d_array<f32>;\n",
+    );
+    s.push_str(GROUND_VS_WGSL);
+    s.push_str(&format!(
+        "fn inside(p: vec2f, r: vec4f) -> bool {{ return all(p >= r.xy) && all(p < r.zw); }}
+fn reach(p: vec2f, r: vec4f) -> f32 {{
+  let d = max(length(max(max(r.xy - p, p - r.zw), vec2f(0.0))), 0.001);
+  let w = max(1.0 / d - 1.0 / {reach}, 0.0);
+  return w * w;
+}}
+fn mirror1(v: f32, lo: f32, hi: f32) -> f32 {{
+  let top = max(hi - 0.001, lo);
+  return select(select(v, max(top - (v - top), lo), v > top), min(lo + (lo - v), top), v < lo);
+}}
+fn mirror(p: vec2f, r: vec4f) -> vec2f {{ return vec2f(mirror1(p.x, r.x, r.z), mirror1(p.y, r.y, r.w)); }}
+",
+        reach = f(crate::terrain::BLEND_REACH),
+    ));
+    let dirt = format!("vec3f({}, {}, {})", f(w.dirt[0]), f(w.dirt[1]), f(w.dirt[2]));
+    let rect = |i: usize| {
+        let r = w.regions.owned[i];
+        format!("vec4f({}, {}, {}, {})", f(r[0]), f(r[1]), f(r[2]), f(r[3]))
+    };
+    // One map's colour at a world point read in its rectangle.
+    for (i, t) in w.tiles.iter().enumerate() {
+        let body = match (&t.pages, packed.get(i).copied().flatten()) {
+            (Some(p), Some(at)) => {
+                let detail = match (at.detail, &p.detail) {
+                    (Some(layer), Some(_)) => format!(
+                        "let d = textureSampleGrad(detail, tiled, q / {repeat}, {layer}, gx / {repeat}, gy / {repeat});
+  let painted = t + (d.rgb * 255.0 - t) * (d.a * 255.0 * 0.5 / 128.0);",
+                        repeat = f(p.detail_repeat),
+                    ),
+                    _ => "let painted = t;".to_string(),
+                };
+                format!(
+                    "let q = mirror(xz, {rect}) - vec2f({ax}, {az});
+  let samples = q / {spacing};
+  let leaf = vec2i(floor(samples / 16.0));
+  let leaves = vec2i({across}, {along});
+  let on = all(leaf >= vec2i(0)) && all(leaf < leaves);
+  let e = textureLoad(page_of, clamp(leaf, vec2i(0), leaves - vec2i(1)) + vec2i(0, {row}), 0);
+  let entry = i32(round(e.r * 255.0)) + 256 * i32(round(e.g * 255.0));
+  let page = select(0, entry - 1, on && entry > 0);
+  let local = (vec2f(leaf & vec2i(3)) * 16.0 + samples - vec2f(leaf) * 16.0) / 64.0;
+  let k = {inner} / (64.0 * {spacing});
+  let t = textureSampleGrad(pages, tiled, {border} + {inner} * local, page, gx * k, gy * k).rgb * 255.0;
+  {detail}
+  return select({dirt}, painted, on && entry > 0);",
+                    rect = rect(i),
+                    ax = f(t.at[0]),
+                    az = f(t.at[1]),
+                    spacing = f(p.spacing),
+                    across = p.across.max(1),
+                    along = p.along.max(1),
+                    row = at.row,
+                    border = f(1.0 / 32.0),
+                    inner = f(15.0 / 16.0),
+                )
+            }
+            _ => format!("return {dirt};"),
+        };
+        s.push_str(&format!("fn tile{i}(xz: vec2f, gx: vec2f, gy: vec2f) -> vec3f {{\n  {body}\n}}\n"));
+    }
+    let n = w.tiles.len();
+    s.push_str("@fragment fn fs(i: Out) -> @location(0) vec4f {\n  let xz = i.world.xz;\n  let gx = dpdx(xz);\n  let gy = dpdy(xz);\n  var owner = -1;\n");
+    for i in (0..n).rev() {
+        s.push_str(&format!("  if inside(xz, {}) {{ owner = {i}; }}\n", rect(i)));
+    }
+    s.push_str(&format!("  var texel = {dirt};\n  if owner >= 0 {{\n"));
+    for i in 0..n {
+        s.push_str(&format!("    if owner == {i} {{ texel = tile{i}(xz, gx, gy); }}\n"));
+    }
+    s.push_str(&format!("  }} else {{\n    var total = {};\n", f(crate::terrain::DIRT_WEIGHT)));
+    for i in 0..n {
+        s.push_str(&format!("    let w{i} = reach(xz, {});\n    total += w{i};\n", rect(i)));
+    }
+    s.push_str(&format!("    var c = {dirt} * ({} / total);\n", f(crate::terrain::DIRT_WEIGHT)));
+    for i in 0..n {
+        s.push_str(&format!("    if w{i} / total > {} {{ c += tile{i}(xz, gx, gy) * (w{i} / total); }}\n", f(1.0 / 512.0)));
+    }
+    s.push_str(
+        "    texel = c;\n  }\n  let out = clamp(texel * i.sunlit * (1.0 - i.fog) + view.fog_color.rgb * i.fog, vec3f(0.0), vec3f(255.0));\n  return vec4f(out / 255.0, 1.0);\n}\n",
+    );
+    s
+}
+
 /// What every shader of the 3D picture knows about its view.
 const VIEW_WGSL: &str = r#"
 struct View {
@@ -3651,6 +3838,17 @@ mod tests {
             ("ground, painted", ground_wgsl(Some(&paint), [200.0, 180.0, 150.0])),
             ("ground, bare", ground_wgsl(None, [200.0, 180.0, 150.0])),
             ("ground, pages", ground_pages_wgsl(&pages, [200.0, 180.0, 150.0])),
+            ("ground, world", {
+                let world = WorldPaint {
+                    regions: crate::terrain::Regions { owned: vec![[0.0, 0.0, 16.0, 16.0], [40.0, 0.0, 56.0, 16.0]] },
+                    tiles: vec![
+                        crate::terrain::PaintTile { at: [0.0, 0.0], pages: Some(pages.clone()) },
+                        crate::terrain::PaintTile { at: [40.0, 0.0], pages: None },
+                    ],
+                    dirt: [200.0, 180.0, 150.0],
+                };
+                ground_world_wgsl(&world, &world.pack(256, 2048))
+            }),
         ];
         let mut written = 0;
         let mut translate = |name: &str, source: &str| -> Result<(), String> {

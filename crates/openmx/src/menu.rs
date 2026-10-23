@@ -263,6 +263,8 @@ pub struct Settings {
     /// The whole HUD's size, in percent of the original's (V52): [`HUD_SCALE_MIN`] to
     /// [`HUD_SCALE_MAX`] in steps of [`HUD_SCALE_STEP`], each part about its own corner.
     pub hud_scale: u8,
+    /// A combined world's sky and light (MD9): one for the whole world, or each map's own.
+    pub world_sky: WorldSky,
     /// Whether a ride wrecks at all.
     pub wrecks: bool,
     /// The last track ridden, which the track pick opens on.
@@ -668,6 +670,7 @@ impl Default for Settings {
             speedometer: Speedometer::default(),
             minimap: true,
             hud_scale: HUD_SCALE_DEFAULT,
+            world_sky: WorldSky::Global,
             wrecks: true,
             track: TRACKS[0].0.into(),
             machines: [Machine::Bike; SEATS_MAX],
@@ -742,6 +745,7 @@ impl Settings {
                 "speedometer" => s.speedometer = Speedometer::from_word(v).unwrap_or(s.speedometer),
                 "minimap" => s.minimap = v != "off",
                 "hud_scale" => s.hud_scale = hud_scale_word(v).unwrap_or(s.hud_scale),
+                "world_sky" => s.world_sky = WorldSky::from_word(v).unwrap_or(s.world_sky),
                 "wrecks" => s.wrecks = v != "off",
                 "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // One word a seat, 1P's first; a seat the line does not reach rides the bike.
@@ -856,6 +860,7 @@ impl Settings {
         ) + &self.display_text()
             + &self.bays_text()
             + &self.hud_text()
+            + &self.world_sky_text()
             + &self.mods_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
@@ -882,6 +887,15 @@ impl Settings {
             n => format!("hud_scale = {n}\n"),
         };
         minimap + &scale
+    }
+
+    /// A world's sky (MD9), only when it is not the default, so a file from before it is written as
+    /// it was.
+    fn world_sky_text(&self) -> String {
+        match self.world_sky {
+            WorldSky::Global => String::new(),
+            w => format!("world_sky = {}\n", w.word()),
+        }
     }
 
     /// The mods' switch (MD2), only when it is off, so a file from before it is written as it was.
@@ -1048,6 +1062,39 @@ impl Speedometer {
         match self {
             Speedometer::Digital => "Digital",
             Speedometer::Analog => "Analog",
+        }
+    }
+}
+
+/// Where a combined world's (MD8) sky, sun, ambient and fog come from (MD9), as `settings.txt` and
+/// `--world-sky` spell it. A single track has one of each either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorldSky {
+    /// One for the whole world: the map the world mod names for its sky, else its first.
+    #[default]
+    Global,
+    /// The map the camera is over sets them, mixed across a join.
+    PerMap,
+}
+
+impl WorldSky {
+    pub const ALL: [WorldSky; 2] = [WorldSky::Global, WorldSky::PerMap];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            WorldSky::Global => "global",
+            WorldSky::PerMap => "per-map",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<WorldSky> {
+        WorldSky::ALL.into_iter().find(|s| s.word() == w)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            WorldSky::Global => "Global",
+            WorldSky::PerMap => "Per Map",
         }
     }
 }

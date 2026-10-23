@@ -814,6 +814,9 @@ struct Args {
     /// `--minimap on|off` (V52): whether the original's HUD draws its radar. Unset, the front end's
     /// setting decides, and without one it does.
     minimap: Option<bool>,
+    /// `--world-sky global|per-map` (MD9): a combined world's sky and light, one for all of it or the
+    /// map under the camera's. Unset, the front end's setting decides, and without one global.
+    world_sky: Option<menu::WorldSky>,
     /// `--hud-scale 50..150` (V52): the HUD's size in percent of the original's, in the Settings
     /// row's steps of ten. Unset, the front end's setting decides, and without one 100.
     hud_scale: Option<u8>,
@@ -1345,6 +1348,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.hud = overlay == menu::Overlay::Debug;
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
                 a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
+                a.world_sky = Some(args.world_sky.unwrap_or(shell.front.menu.settings.world_sky));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 if !args.render_scale_asked {
@@ -1419,6 +1423,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.hud = overlay == menu::Overlay::Debug;
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
                 a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
+                a.world_sky = Some(args.world_sky.unwrap_or(shell.front.menu.settings.world_sky));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 if !args.render_scale_asked {
@@ -3018,12 +3023,24 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         },
     );
 
+    // A world's look by map (MD9): every tile's ground paint, light and sky, read from its folder.
+    let world_look = world_mod.as_ref().map(|w| {
+        let l = w.look(&archives[1..], ground::DIRT, Lighting::of(&look));
+        let paged = l.paint.tiles.iter().filter(|t| t.pages.is_some()).count();
+        let skies = l.skies.iter().filter(|s| s.is_some()).count();
+        println!("world look: {paged} of {} tiles painted from their pages, {skies} with a sky of their own", l.paint.tiles.len());
+        l
+    });
     // Everything the GPU draws, uploaded once: the props, the sky, the whole ground and every model.
     if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
         let at = Instant::now();
-        // A world's ground is every piece's, unpainted: each tile's paint is its own (MD9).
+        // A world's ground is every piece's, each tile painted from its own pages and the joins
+        // blended from the tiles either side (MD9).
         let (chunks, paint) = match (&world_mod, &sim) {
-            (Some(w), Land::Tiles(t)) => (worlds::chunks(w, t, ground.chunk_cells()), game_render::gpu::GroundPaint::Bare),
+            (Some(w), Land::Tiles(t)) => (
+                worlds::chunks(w, t, ground.chunk_cells()),
+                world_look.as_ref().map_or(game_render::gpu::GroundPaint::Bare, |l| game_render::gpu::GroundPaint::World(&l.paint)),
+            ),
             _ => {
                 let paint = match (&ground.paint, &ground.pages) {
                     (Some(splat), _) => game_render::gpu::GroundPaint::Splat(splat),
@@ -3088,7 +3105,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut gpu_layers: Vec<layer::Layer> = (0..=args.players).map(|_| layer::Layer::new()).collect();
 
     // ---- the loop ------------------------------------------------------------------------------
-    let light = Lighting::of(&look);
+    let mut light = Lighting::of(&look);
+    // Which tile's sky and light a world's ride shows under Per Map (MD9), `Some(None)` while it
+    // shows the whole world's one; `None` before the first frame.
+    let mut shown_look: Option<Option<usize>> = None;
+    if let Some(w) = &world_mod {
+        println!("world sky: {} (the whole world's from {})", args.world_sky.unwrap_or_default().word(), w.pieces[w.home].tile.name);
+    }
     // The frame: `--size`'s, which stays put whatever the window does, or the window's own shape
     // — the largest 4:3 one inside it with `--aspect 4:3` — which is re-made whenever the window
     // changes size (below). With no window, the PS2's own unless `--size` says otherwise.
@@ -3181,6 +3204,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut speedometer = args.speedometer.unwrap_or_default();
     let mut minimap = args.minimap.unwrap_or(true);
+    let mut world_sky = args.world_sky.unwrap_or_default();
     let mut hud_scale = args.hud_scale.unwrap_or(menu::HUD_SCALE_DEFAULT);
     let mut graphics = args.graphics.unwrap_or_default();
     let mut frame = Frame::new(width, height, look.fog_color);
@@ -3755,6 +3779,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 overlay_mode = front.menu.settings.overlay;
                 speedometer = front.menu.settings.speedometer;
                 minimap = front.menu.settings.minimap;
+                world_sky = front.menu.settings.world_sky;
                 hud_scale = front.menu.settings.hud_scale;
                 graphics = front.menu.settings.graphics;
                 if !args.render_scale_asked && render_scale != front.menu.settings.render_scale.fraction() {
@@ -4428,6 +4453,44 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let mut cameras = cameras;
         if let (Some(pose), Some(at), Some(camera)) = (args.shot_pose, rects.first(), cameras.first_mut()) {
             *camera = pose.camera(at.w, at.h, NEAR_CLIP, camera.far);
+        }
+        // A world's sky and light (MD9): under Per Map the tile the first view's camera is over sets
+        // them, mixed across a join and its sky the larger share's; under Global the whole world's.
+        if let (Some(wl), Some(camera)) = (&world_look, cameras.first()) {
+            let (lit, over) = match world_sky {
+                menu::WorldSky::PerMap => match wl.looks.at(camera.eye.x, camera.eye.z) {
+                    Some((lit, over)) => (lit, Some(over)),
+                    None => (Lighting::of(&look), None),
+                },
+                menu::WorldSky::Global => (Lighting::of(&look), None),
+            };
+            light = lit;
+            if shown_look != Some(over) {
+                shown_look = Some(over);
+                if let Some(r) = renderer_of(&mut offscreen, window) {
+                    r.set_sky(match over {
+                        Some(i) => wl.skies[i].as_ref(),
+                        None => sky.as_ref(),
+                    });
+                }
+                let name = over.map_or("the whole world", |i| wl.names[i].as_str());
+                println!(
+                    "world sky: over {name} at {:.0},{:.0}: sun {:.3},{:.3},{:.3} ambient {:.3},{:.3},{:.3} fog {},{},{} {:.0}..{:.0}",
+                    camera.eye.x,
+                    camera.eye.z,
+                    light.sun.x,
+                    light.sun.y,
+                    light.sun.z,
+                    light.ambient[0],
+                    light.ambient[1],
+                    light.ambient[2],
+                    light.fog_color[0],
+                    light.fog_color[1],
+                    light.fog_color[2],
+                    light.fog_near,
+                    light.fog_far
+                );
+            }
         }
         // The start zones' and the markers' portals (V51), each view its own: its player's markers,
         // and the zones that player is shown.
@@ -5489,6 +5552,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         overlay: None,
         speedometer: None,
         minimap: None,
+        world_sky: None,
         hud_scale: None,
         camera: START_CAMERA.to_string(),
         camera_view: None,
@@ -5637,6 +5701,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let style = menu::Speedometer::from_word(&word)
                     .ok_or_else(|| format!("--speedometer: {word:?} is not digital or analog"))?;
                 args.speedometer = Some(style);
+            }
+            "--world-sky" => {
+                let word = next("global or per-map")?;
+                args.world_sky = Some(menu::WorldSky::from_word(&word).ok_or_else(|| format!("--world-sky: {word:?} is not global or per-map"))?);
             }
             "--minimap" => {
                 args.minimap = Some(match next("on or off")?.as_str() {
@@ -5844,7 +5912,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--speedometer digital|analog] [--hud] [--camera NAME]\n\
-                            [--minimap on|off] [--hud-scale 50..150]\n\
+                            [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov] [--vehicle bike|biplane]\n\

@@ -70,6 +70,7 @@ pub enum Key {
     Minimap,
     HudScale,
     DrawDistance,
+    WorldSky,
     RenderScale,
     VSync,
     FrameLimit,
@@ -344,6 +345,15 @@ impl Menu {
                 at(&Graphics::ALL, s.graphics),
                 "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.",
             ),
+            // MD9: a combined world's sky and light, one for all of it or each map its own.
+            Row::choice(
+                Key::WorldSky,
+                "World Sky",
+                &WorldSky::ALL.map(WorldSky::label),
+                at(&WorldSky::ALL, s.world_sky),
+                "For combined worlds of several maps. Global keeps one sky and light everywhere; Per Map gives each map its own, blended where they meet.",
+            )
+            .tips(&["One sky for the whole world", "Each map its own"]),
             Row::choice(Key::RenderScale, "Render Scale", &scales, at(&RenderScale::ALL, s.render_scale), "How much of the window's resolution the 3D is drawn at. Auto drops it when frames run long and climbs back when there's room."),
             Row::on_off(Key::VSync, "VSync", s.vsync, "Waits for the display before showing a frame. No tearing. Off draws as fast as it can."),
             Row::choice(Key::FrameLimit, "Frame Limit", &limits, at(&FrameLimit::ALL, s.frame_limit), "The most frames a second. Only the picture's rate; the ride itself always ticks at the game's 30 Hz."),
@@ -697,6 +707,7 @@ impl Menu {
             // Cross steps it up and round from the top, as a slider does.
             Key::HudScale => s.hud_scale = hud_scale_step(s.hud_scale, p.left, p.right),
             Key::DrawDistance => s.graphics = Graphics::ALL[next(row)],
+            Key::WorldSky => s.world_sky = WorldSky::ALL[next(row)],
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,
             Key::FrameLimit => s.frame_limit = s.frame_limit.step(p.left),

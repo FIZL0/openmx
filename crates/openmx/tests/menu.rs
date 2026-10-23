@@ -383,6 +383,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         // No radar, and the HUD at 130 % (V52).
         minimap: false,
         hud_scale: 130,
+        // A world's sky taken from the map below (MD9).
+        world_sky: menu::WorldSky::PerMap,
     };
     let controls = Controls {
         throttle: Gas::R2,
