@@ -489,3 +489,23 @@ fn the_125() -> Option<(game_sim::phy::Phy, (Vf, Vf))> {
         }
     }
 }
+
+/// Solids of the other kinds (S102): a sphere (kind 2, MX vs. ATV's) is a part no search the port
+/// runs takes a contact from — the plant keeps it, as `None`, and still counts as solid; a kind no
+/// disc has (0, 3) is reported and kept the same way.
+#[test]
+fn a_sphere_is_a_part_with_no_trunk_and_other_kinds_are_reported() {
+    let Some(esb) = free09_esb() else { return };
+    let mut eco = one_tree(&esb, 1, 3000.0, 3000.0);
+    let species = eco.species[1].as_mut().expect("TreeB");
+    let trunk = species.solids[0].clone();
+    species.solids = vec![Solid { kind: eco::SPHERE, ..trunk.clone() }, trunk.clone(), Solid { kind: 3, ..trunk }];
+    let (trees, missed) = Trees::new(&eco, eco::cell_size(F(6912.0)), &CurveTable::build());
+    assert_eq!(missed.len(), 1, "only the kind-3 solid is reported: {missed:?}");
+    assert!(missed[0].contains("kind 3"), "{missed:?}");
+    assert_eq!(trees.props.props.len(), 1, "only the cylinder is built");
+    let g = &trees.groups()[0];
+    assert_eq!(g.parts, vec![None, Some(0), None], "the parts in the species' order");
+    assert!(g.solid);
+    assert!(trees.crowded(Vf::new(3000.0, 0.0, 3019.0, 1.0), F(30.0)), "a plant with solids still turns a put-back away");
+}

@@ -24,14 +24,19 @@
 //! off the body's mass, the high-speed sweep, the moment masks and the frictions.
 //!
 //! What the search meets in the world is handed in: the terrain as a
-//! [`contact_search::Heightfield`], the world's objects as a [`contact_search::Search`]. The ride has
-//! no port of the world search over its scene's objects yet, so it hands in [`NoObjects`].
+//! [`contact_search::Heightfield`], the world's objects as a [`contact_search::Search`]. Of the
+//! world's objects the ride has only the ecosystem's plants (S102): in a world with them the wreck
+//! bike's ray probe searches them as the biplane's does ([`WreckBike::tick_wooded`]); elsewhere the
+//! ride hands in [`NoObjects`].
 
 #![deny(clippy::float_arithmetic)]
 
 use crate::biplane::{self, Body, Dynamics, List};
 use crate::contact::{self, Collider, Node, Response, Weighed};
 use crate::contact_search::{self, Heightfield, Hit, Record, Search, Struck, Swept};
+use crate::eco::Trees;
+use crate::flight_search::{self, Scene};
+use crate::{ray_probe, track};
 use crate::hash::{State, Walk};
 use crate::math::quat_to_mat4;
 use crate::phy::Part;
@@ -71,6 +76,34 @@ pub const RAY_ENDS: [[u32; 3]; 11] = [
     [0x37bb_c000, 0x3ddc_6c70, 0xc02e_43dd],
     [0x380d_1000, 0x3c39_6a00, 0x4023_8b47],
 ];
+
+/// The ray probe's tree over the eleven rays, as the game holds it (`+0x16c`, root `+0x160` = 0) and
+/// the collision file stores it: per node its volume, centre, half extent (bits) and child words.
+pub const RAY_NODES: [(u32, [u32; 3], [u32; 3], [u16; 2]); 10] = [
+    (0x42b5_fa37, [0xb792_0000, 0x4012_ec4c, 0xbcff_7c80], [0x3fa8_3f4e, 0x4012_32e2, 0x4072_6c8c], [0x0001, 0x0002]),
+    (0x402c_eaf4, [0xb792_0000, 0x405c_05bd, 0x3e46_6b58], [0x3fa8_3f4e, 0x3f92_32e2, 0x3e66_5ae8], [0x8000, 0x8001]),
+    (0x4216_b645, [0x0000_0000, 0x3fe9_dec1, 0xbcff_7c80], [0x3f2f_4c26, 0x3fe8_6bed, 0x4072_6c8c], [0x8002, 0x0003]),
+    (0x4216_b645, [0x0000_0000, 0x3fe9_dec1, 0xbcff_7c80], [0x3f2f_4c26, 0x3fe8_6bed, 0x4072_6c8c], [0x0004, 0x0007]),
+    (0x408b_dd01, [0x3eaf_4b02, 0x3fef_ecb5, 0xbcff_7c80], [0x3eaf_4d4a, 0x3ed7_af8c, 0x4072_6c8c], [0x0005, 0x0006]),
+    (0x3d67_c489, [0x37d1_4000, 0x3ff6_0b3f, 0xbcff_7c80], [0x3831_a000, 0x3ebf_3564, 0x4072_6c8c], [0x8003, 0x8004]),
+    (0x3f31_45f4, [0x3eaf_4b02, 0x3fef_ecb5, 0xbea0_c54c], [0x3eaf_4d4a, 0x3ed7_af8c, 0x3f19_a21a], [0x8005, 0x8006]),
+    (0x417a_30db, [0xbeaf_47bd, 0x3fe9_dec1, 0xbf16_9f08], [0x3eaf_508f, 0x3fe8_6bed, 0x4049_3309], [0x0008, 0x800a]),
+    (0x410f_5c68, [0xbeaf_47bd, 0x3ff0_08ba, 0xbff0_d9c4], [0x3eaf_508f, 0x3fe2_41f4, 0x3fec_dbd2], [0x8007, 0x0009]),
+    (0x4081_0eb8, [0xbeaf_4aae, 0x3f99_cfb0, 0xbfb0_42d6], [0x3eaf_4d9e, 0x3f8c_08e8, 0x3fac_44e4], [0x8008, 0x8009]),
+];
+
+/// The ray probe as a world search holds it: the eleven rays and their tree ([`RAY_NODES`]).
+pub fn ray_tree() -> flight_search::Rays {
+    let v3 = |b: [u32; 3]| b.map(|b| F(f32::from_bits(b)));
+    flight_search::Rays {
+        root: 0,
+        nodes: RAY_NODES
+            .iter()
+            .map(|&(volume, centre, half, children)| track::Node { volume: F(f32::from_bits(volume)), centre: v3(centre), half_extent: v3(half), children })
+            .collect(),
+        segments: rays().iter().map(|r| ray_probe::Segment { from: r[0], to: r[1] }).collect(),
+    }
+}
 
 /// The rays as the probe holds them, `[start, end]`.
 pub fn rays() -> Vec<[Vf; 2]> {
@@ -307,6 +340,23 @@ impl WreckBike {
         contact_search::clear(&mut self.record, Some(&mut self.body));
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), ground, objects, dt);
         WORLD.step(dt, &mut Lists(self));
+    }
+
+    /// [`WreckBike::tick`] in a world with the ecosystem's plants in it: the world's objects are the
+    /// trees, searched by the ray probe ([`ray_tree`]) through a nearby list as the plane's is
+    /// ([`flight_search::Scene::wooded`]; the wreck bike's search has the plane's numbers, and its
+    /// sweep probe's flags keep it off placed groups too). The list is gathered fresh each frame
+    /// where the probe stands: the original keeps it between gathers, which hands out the same
+    /// candidates within reach, in its walk's order then rather than now.
+    pub fn tick_wooded(&mut self, dt: F, ground: Option<&dyn Heightfield>, trees: &Trees) {
+        let rays = ray_tree();
+        let bounds = ground.map(|f| {
+            let (lo, hi) = (f.min(), f.max());
+            ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+        });
+        let mut nearby = flight_search::search();
+        let mut scene = Scene::wooded(None, Some(trees), None, bounds, &rays, &self.record.node, &mut nearby);
+        self.tick(dt, ground, &mut scene);
     }
 
     /// The model's origin: the transform's translation.
