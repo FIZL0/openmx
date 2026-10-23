@@ -693,3 +693,37 @@ pub fn reframe(cam: &mut game_sim::camera::Race, presets: &[game_sim::camera::Pr
         }
     }
 }
+
+// --- a marker's ride out (P112) --------------------------------------------------------------------
+
+/// The follow camera as it would be riding along at `vel` (P112), for the frame a marker's Up puts
+/// the bike somewhere else at speed. Call it after the frame the camera snapped on, with that frame's
+/// `view`: each of the eye's and the look-at's lags is moved back along the motion to where it
+/// settles behind a point moving `vel * dt` a frame — `value = target - d (1 - a) / a`, with `a` the
+/// lag's own blend — and the view with them.
+///
+/// Without it the bike rode out at the placed speed and the screen said otherwise: the camera either
+/// flew in from where the bike was (no snap: two hundred feet in fifteen frames, towards the bike, so
+/// it looked to stand) or snapped in at rest when a wreck camera gave the screen back (the eye
+/// lagging out from the preset's distance, a standing start on screen). A camera with no lags on its
+/// preset, or a bike at rest, is left as the snap left it.
+pub fn ride_out(cam: &mut game_sim::camera::Race, view: &mut game_sim::camera::View, vel: Vf, dt: F) {
+    let c = &mut cam.cam;
+    if c.presets.is_empty() || !c.preset().filter_this_preset {
+        return;
+    }
+    let behind = |lag: &mut game_sim::camera::Lag, d: f32| -> f32 {
+        let a = (if dt < lag.tau { dt } else { lag.tau }) / lag.tau;
+        if !(a.0 > 0.0) {
+            return 0.0;
+        }
+        let k = F(d) * (F::ONE - a) / a;
+        lag.value = lag.value - k;
+        k.0
+    };
+    for i in 0..3 {
+        let d = (F(vel[i]) * dt).0;
+        view.look_at[i] -= behind(&mut c.look_filter[i], d);
+        view.position[i] -= behind(&mut c.pos_filter[i], d);
+    }
+}

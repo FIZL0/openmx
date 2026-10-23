@@ -172,6 +172,7 @@ fn offline(pads: &[Report]) -> (Vec<F>, Vec<Vec<u8>>) {
         said: rider::Frame::default(),
         inverted: false,
         hands: Controls::default(),
+        teleported: false,
     };
     let mut world = World { place: Flat::default(), seats: vec![seat], tape: None, played_dt: None };
     let (lib, clip) = clips();
