@@ -40,6 +40,12 @@ pub struct Moves {
     pub three_sixty_points: (F, F),
 }
 
+/// The report's controls the two extra trick buttons ride, Cross's then Square's (MD16): R2 and L2,
+/// which the original binds only to camera commands its ride never reads, and which the shell's new
+/// layout leaves free when it moves the triggers onto the gas and the brake.
+pub const EXTRA_CONTROLS: [crate::input::Control; crate::trick::EXTRA_BUTTONS] =
+    [crate::input::Control::R2, crate::input::Control::L2];
+
 /// The rows the extras never take: the moves the port runs as moves, and the two that are not tricks.
 const NOT_EXTRAS: &[&str] = &["backflip", "wheelie", "stoppie", "threesixtyl", "threesixtyr", "taunt", "nothing"];
 
