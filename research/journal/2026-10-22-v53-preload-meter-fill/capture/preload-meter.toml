@@ -1,0 +1,94 @@
+[watch]
+name        = "v53-preload-meter"
+description = "the preload meter's movie variable beside the rider's preload fields"
+every       = 1
+start       = "frame_counter >= 2374 and frame_counter <= 2400 and rider_type == 2"
+frames      = 1894
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "meter_var"
+addr = "0x01b0a30c -> 0xc"
+type = "u32"
+
+[[field]]
+name = "meter_latch"
+addr = "0x01b0a310"
+type = "u32"
+
+[[field]]
+name = "avail"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4a0"
+type = "u32"
+
+[[field]]
+name = "firing"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4a4"
+type = "u32"
+
+[[field]]
+name = "armed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4a8"
+type = "u32"
+
+[[field]]
+name = "timer"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4b0"
+type = "f32"
+
+[[field]]
+name = "force"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x494"
+type = "f32"
+
+[[field]]
+name = "max"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4c4"
+type = "f32"
+
+[[field]]
+name = "hide"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x868"
+type = "u32"
+
+[[field]]
+name = "stick_y"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x62c"
+type = "f32"
+
+[[field]]
+name = "stick_v"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x630"
+type = "f32"
+
+[[field]]
+name = "on_ground"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x574"
+type = "u32"
+
+[[field]]
+name = "air_flag"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x640"
+type = "f32"
+
+[[field]]
+name = "speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x438"
+type = "f32"
+
+[[field]]
+name = "noflip"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x624"
+type = "u32"

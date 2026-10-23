@@ -433,7 +433,7 @@ fn the_gpu_draws_the_hud_as_the_cpu_does() {
     ride(&mut one, 200, true, 0.0);
     let solo = ridden(std::slice::from_ref(&one));
     let four = ridden(&four_riders(&tables));
-    let analog = overlay::Gauges { feet: 1234.0, bike: true, score: 4321, preload: 0.6, modified: false, speedometer: menu::Speedometer::Analog };
+    let analog = overlay::Gauges { feet: 1234.0, bike: true, score: 4321, preload: Some(0.6), modified: false, speedometer: menu::Speedometer::Analog };
     let digital = overlay::Gauges { speedometer: menu::Speedometer::Digital, ..analog };
     let (w, h) = (1280usize, 720usize);
     let texture = gpu.offscreen(w as u32, h as u32);
@@ -493,7 +493,7 @@ fn the_score_and_the_preload_meter_are_drawn() {
     let Some(art) = art() else { return };
     let tables = Arc::new(Tables::build());
     let riders = ridden(&[rider(&tables, [0.0, 0.0], [0.0, 1.0])]);
-    let gauges = overlay::Gauges { feet: 5280.0, bike: true, preload: 0.5, score: 1234, modified: false, speedometer: menu::Speedometer::Analog };
+    let gauges = overlay::Gauges { feet: 5280.0, bike: true, preload: Some(0.5), score: 1234, modified: false, speedometer: menu::Speedometer::Analog };
     let mut frame = Frame::new(640, 448, [255, 255, 255]);
     let drawn = art.draw(&mut frame, (640, 448), &riders, 0, 384.0, &gauges);
     assert_eq!(drawn.score, "1234");
@@ -584,16 +584,186 @@ fn a_fresh_settings_file_rides_with_the_readout_and_the_meter() {
     assert_eq!((drawn.speed, drawn.needle.is_some(), drawn.odometer, drawn.preload), (None, true, None, None));
 }
 
-/// The meter fills with the preload's shove and empties as its timer runs out; it is empty unless
-/// a preload is firing.
+/// The movie's levels, tick by tick from the tick a preload fired, as the original drew them for
+/// four shoves of recording2 (V53, PCSX2's video capture of the playback, each tick two identical
+/// frames): up two at a time, fifteen ticks at the value, down the odd levels, then empty.
+#[test]
+fn the_preload_meter_plays_the_originals_movie() {
+    let seen: [(i16, &[u8]); 4] = [
+        (10, &[2, 4, 6, 8, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 7, 5, 3, 1]),
+        (7, &[2, 4, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 5, 3, 1]),
+        (5, &[2, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 3, 1]),
+        (3, &[2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 1]),
+    ];
+    for (n, levels) in seen {
+        let played: Vec<u8> = (0..).map_while(|t| overlay::PreloadMeter::level_at(n, t)).collect();
+        assert_eq!(played, levels, "value {n}");
+        assert_eq!(played.len(), 14 + n as usize, "value {n}: the original holds its latch 14 + n ticks");
+    }
+    // The ends of the range: one level is held and gone, twenty climbs to the top.
+    assert_eq!((0..).map_while(|t| overlay::PreloadMeter::level_at(1, t)).collect::<Vec<_>>(), [1; 15]);
+    let full: Vec<u8> = (0..).map_while(|t| overlay::PreloadMeter::level_at(20, t)).collect();
+    assert_eq!((full.len(), &full[..10], full[9 + 15]), (34, &[2, 4, 6, 8, 10, 12, 14, 16, 18, 20][..], 19));
+}
+
+/// The shove's strength as the speedometer writes it: twenty steps of `MaxPreload`, rounded by
+/// adding a half and truncating, never below one. The first four are recording2's (V53).
+#[test]
+fn the_preload_meter_shows_the_shoves_strength() {
+    use overlay::PreloadMeter as M;
+    assert_eq!(M::strength(285.71551, 600.0), 10);
+    assert_eq!(M::strength(222.19357, 600.0), 7);
+    assert_eq!(M::strength(148.93628, 600.0), 5);
+    assert_eq!(M::strength(104.08241, 600.0), 3);
+    assert_eq!((M::strength(0.0, 600.0), M::strength(45.0, 600.0), M::strength(600.0, 600.0)), (1, 2, 20));
+}
+
+/// What the meter does around a shove, off the port's own preload fields: dark, lit while the lip
+/// test passes — and still empty while the stick is pumped — the strength held through the movie
+/// whatever the preload does meanwhile, and nothing for a rider who is down.
 #[test]
 fn the_preload_meter_follows_the_preload() {
-    assert_eq!(overlay::preload_fill(false, 10.0, 10.0, 1.0, 1.0), 0.0);
-    assert_eq!(overlay::preload_fill(true, 10.0, 10.0, 1.0, 1.0), 1.0);
-    assert_eq!(overlay::preload_fill(true, 5.0, 10.0, 1.0, 1.0), 0.5);
-    assert_eq!(overlay::preload_fill(true, 10.0, 10.0, 0.25, 1.0), 0.25);
-    assert_eq!(overlay::preload_fill(true, 30.0, 10.0, 1.0, 1.0), 1.0);
-    assert_eq!(overlay::preload_fill(true, 10.0, 0.0, 1.0, 1.0), 0.0);
+    let mut air = game_sim::air::Air::default();
+    let mut m = overlay::PreloadMeter::default();
+    let sense = |air: &game_sim::air::Air| overlay::PreloadSense::of(air, 600.0, false);
+    m.step(sense(&air));
+    assert_eq!((m.value, m.shown()), (-1, None), "a standing bike's meter is dark");
+    air.preload_ready = true;
+    air.preload_armed = true;
+    for _ in 0..5 {
+        m.step(sense(&air));
+        assert_eq!((m.value, m.shown()), (0, Some(0.0)), "pumped, the meter is lit and empty");
+    }
+    air.preload_firing = true;
+    air.preload_force = Vf::new(0.0, 285.71551, 0.0, 0.0);
+    let mut shown = Vec::new();
+    for t in 0..30 {
+        if t == 7 {
+            air.preload_firing = false;
+            air.preload_ready = false;
+        }
+        m.step(sense(&air));
+        shown.push((m.value, m.latched, m.level()));
+    }
+    assert_eq!(shown[0], (10, true, 2));
+    assert_eq!(shown[4], (10, true, 10));
+    assert_eq!(m.shown(), None, "back to dark in the air");
+    assert_eq!(shown[23], (10, true, 1));
+    assert_eq!(shown[24], (10, false, 0), "the movie lets go 24 ticks on, the value still written");
+    assert_eq!(shown[25], (-1, false, 0));
+    let drawn = |s: &[(i16, bool, u8)]| s.iter().map(|x| x.2).collect::<Vec<_>>();
+    assert_eq!(drawn(&shown[..24]), (0..24).map(|t| overlay::PreloadMeter::level_at(10, t).unwrap()).collect::<Vec<_>>());
+
+    let mut down = overlay::PreloadMeter::default();
+    air.preload_ready = true;
+    air.preload_firing = true;
+    down.step(overlay::PreloadSense::of(&air, 600.0, true));
+    assert_eq!((down.value, down.latched, down.level()), (-1, false, 0), "a rider who is down sees nothing");
+}
+
+/// One row of a V53 capture: what the speedometer read off the rider, and what it wrote.
+struct MeterRow {
+    frame: u32,
+    sense: overlay::PreloadSense,
+    value: i16,
+    latched: bool,
+}
+
+fn meter_rows(path: &std::path::Path) -> Vec<MeterRow> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.next().expect("a header").split(',').collect();
+    let col = |name: &str| head.iter().position(|h| *h == name).unwrap_or_else(|| panic!("no {name} column"));
+    let [frame, var, latch, ready, firing, force, max, wreck] =
+        ["frame_counter", "meter_var", "meter_latch", "avail", "firing", "force", "max", "hide"].map(col);
+    let int = |s: &str| if let Some(h) = s.strip_prefix("0x") { u32::from_str_radix(h, 16).unwrap() } else { s.parse().unwrap() };
+    lines
+        .map(|l| {
+            let c: Vec<&str> = l.split(',').collect();
+            MeterRow {
+                frame: int(c[frame]),
+                sense: overlay::PreloadSense {
+                    ready: int(c[ready]) != 0,
+                    firing: int(c[firing]) != 0,
+                    force: c[force].parse().unwrap(),
+                    max: c[max].parse().unwrap(),
+                    wrecked: int(c[wreck]) != 0,
+                },
+                // The variable's word at +0xc: its value is the high half.
+                value: (int(c[var]) >> 16) as u16 as i16,
+                latched: int(c[latch]) != 0,
+            }
+        })
+        .collect()
+}
+
+/// Over recording2 played back on the original — its pumped preloads and the backflips off them —
+/// the port's meter, fed the rider's preload fields row by row, writes the speedometer's
+/// `preloadMeter` variable and holds its latch as the original did, every tick (V53). A capture row
+/// is read while the frame runs, so a row can catch the rider updated and the HUD not yet: each row
+/// matches the port's tick or the one before, nearly all the tick itself, each shove's value is
+/// exact, and its hold is the original's to the row that tore.
+///
+/// The captures are `context/capture/v53/` (git-ignored), `./kit record` of the spec beside them
+/// during a playback of recording2.p2m2 (C6's play_capture.sh); without them this skips.
+#[test]
+fn the_preload_meter_writes_the_originals_variable() {
+    use ps2_oracle::{Kit, skip};
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let dir = kit.ctx("capture").join("v53");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "csv")).collect())
+        .unwrap_or_default();
+    files.sort();
+    if files.is_empty() {
+        skip(&format!("no V53 capture in {}", dir.display()));
+        return;
+    }
+    for path in files {
+        let rows = meter_rows(&path);
+        let mut m = overlay::PreloadMeter::default();
+        let port: Vec<(i16, bool)> = rows
+            .iter()
+            .map(|r| {
+                m.step(r.sense);
+                (m.value, m.latched)
+            })
+            .collect();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let mut same = 0;
+        for (i, r) in rows.iter().enumerate() {
+            let got = (r.value, r.latched);
+            same += usize::from(got == port[i]);
+            assert!(
+                got == port[i] || (i > 0 && got == port[i - 1]),
+                "{name} frame {}: the original wrote {got:?}, the port {:?} (before it {:?})",
+                r.frame,
+                port[i],
+                port.get(i.wrapping_sub(1))
+            );
+        }
+        assert!(same * 100 >= rows.len() * 99, "{name}: only {same} of {} rows on the port's own tick", rows.len());
+        // Each shove: its strength, held as long as the original held it.
+        let held = |v: &[(i16, bool)]| {
+            let mut runs = Vec::new();
+            for (i, w) in v.iter().enumerate() {
+                if w.1 && (i == 0 || !v[i - 1].1) {
+                    runs.push((w.0, v[i..].iter().take_while(|x| x.1).count()));
+                }
+            }
+            runs
+        };
+        let original: Vec<(i16, bool)> = rows.iter().map(|r| (r.value, r.latched)).collect();
+        let shoves = held(&original);
+        assert!(shoves.len() >= 4, "{name}: {} shoves, recording2 pumps four", shoves.len());
+        // A torn row can start or end a hold a row late in the capture: one row either way.
+        let ported = held(&port);
+        assert_eq!(ported.iter().map(|s| s.0).collect::<Vec<_>>(), shoves.iter().map(|s| s.0).collect::<Vec<_>>(), "{name}: the shoves");
+        for (p, o) in ported.iter().zip(&shoves) {
+            assert_eq!(p.1, 14 + p.0 as usize, "{name}: the port's hold of {}", p.0);
+            assert!(p.1.abs_diff(o.1) <= 1, "{name}: the original held {} for {} rows, the port {}", o.0, o.1, p.1);
+        }
+    }
 }
 
 /// Each rider's name and number from the garage (P86): the view's own under the score, the others'
