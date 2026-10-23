@@ -1018,7 +1018,8 @@ impl Rider {
             countdown: gate.countdown,
             throttle: c.gas,
             reversing: c.reverse,
-            gesture: tricks.requested.slot().map_or(trick::SLOTS as i32, |s| s as i32),
+            gesture: tricks.requested.slot().map_or_else(|| pack_state(lib, tricks.requested), |s| s as i32),
+            spin: spin_state(lib, ride),
         };
         // The mode machine, in front of the animation: in the original the two are different slots
         // of the body actor's vtable, and the wreck mode is what writes `settled` for the selection
@@ -1063,6 +1064,25 @@ impl Rider {
         *body_clocked = clocked;
         frame
     }
+}
+
+/// **MD21:** the state a trick pack's extra plays in, past the original's sixty — or no gesture, the
+/// airborne lean MD16 showed, when the pack has no clip for it (or the trick is not an extra).
+fn pack_state(lib: &vehicle_anim::Library, trick: Trick) -> i32 {
+    trick
+        .extra()
+        .map(|k| vehicle_anim::PACK_EXTRA + k as i32)
+        .filter(|&state| lib.clip(state).is_some())
+        .unwrap_or(trick::SLOTS as i32)
+}
+
+/// **MD21:** MX vs. ATV's 360 clip, from the frame the bike turns past [`air::SPIN_CLIP`] until it
+/// comes round or lands: `threesixtyR` for a 360 flicked left then right, `threesixtyL` the other way.
+/// `None` when no 360 is past its angle, or the pack has no clip for this one.
+fn spin_state(lib: &vehicle_anim::Library, ride: &Ride) -> Option<i32> {
+    let spin = &ride.tricks.as_ref()?.spin;
+    let state = if spin.dir >= 1 { vehicle_anim::SPIN_RIGHT } else { vehicle_anim::SPIN_LEFT };
+    (spin.clip != 0 && lib.clip(state).is_some()).then_some(state)
 }
 
 impl State for Rider {

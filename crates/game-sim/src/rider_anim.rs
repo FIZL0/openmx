@@ -253,7 +253,14 @@ pub struct Ask {
     pub reversing: F,
     /// The gesture slot the request names, or [`SLOTS`] for none — which is the value that lets every
     /// arm past the gesture one run at all.
+    ///
+    /// **MD21:** a trick pack's extra asks for its own state past the sixty
+    /// ([`vehicle_anim::PACK_EXTRA`] + k) here too, when the pack has a clip for it.
     pub gesture: i32,
+    /// **The port's own (MD21):** MX vs. ATV's 360 is past its clip angle, and this is the state its
+    /// clip plays in — [`vehicle_anim::SPIN_LEFT`] or [`vehicle_anim::SPIN_RIGHT`]. Below a gesture,
+    /// above the backflip and the airborne lean; `None` without a pack, or with no clip for it.
+    pub spin: Option<i32>,
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -392,6 +399,8 @@ impl Body {
         } else if a.gesture != SLOTS as i32 {
             // 3 — a gesture. Its own slot, or the one clip that replaces it.
             *want = if a.no_hander { NO_HANDER } else { a.gesture };
+        } else if let Some(spin) = a.spin {
+            *want = spin;
         } else if a.backflip {
             *want = BACKFLIP;
         } else if a.airborne {

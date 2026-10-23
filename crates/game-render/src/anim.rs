@@ -891,3 +891,154 @@ fn suffix(archives: &[Res], name: &str) -> Option<(String, Result<Vec<u8>, Strin
 fn same(a: &str, b: &str) -> bool {
     a.replace('\\', "/").eq_ignore_ascii_case(&b.replace('\\', "/"))
 }
+
+// --- MD21: a trick pack's clips --------------------------------------------------------------------
+
+/// **MD21:** MX vs. ATV's trick clips, out of a trick pack's folder (`mods/tricks/<id>/`), for the
+/// states past the original's sixty ([`vehicle_anim::PACK_EXTRA`]).
+///
+/// The rider's are claimed by the pack's `.mcf`s, as MX vs. ATV's own loader claims them: the name is
+/// `<P>_rider_<stunt>` (`MX_rider_9oclockindianair`), and its `VUE=` names the file under the
+/// `.mcf`'s content directory (`Rider\Anim\MX_9oclockindianair.MOT`) — or `<P>_rider_<stunt>.mot`
+/// there when no `.mcf` lists it. The bike's are loose files in `Veh\Anim\` with no `.mcf`:
+/// `<P>_Bike_<stunt>.mot` (the freestyle and ATV packs' spelling), or `bike_<stunt>.mot`, which is what
+/// the motocross bike's are called.
+///
+/// The clips are bound to the port's own skeleton, MX Unleashed's, by channel name. They are kept
+/// out of the set's own archives, so nothing a disc lookup finds changes.
+pub struct PackClips {
+    res: Res,
+    /// The rider's prefix, `MX` for the motocross rider.
+    prefix: String,
+    claimed: Vec<Motion>,
+}
+
+/// The name a pack clip is bound under in a [`Set`]: the pack's folder is not an archive of the set,
+/// and a name of its own keeps one from shadowing a disc clip of the same name.
+fn pack_bound_name(name: &str) -> String {
+    format!("pack:{name}")
+}
+
+impl PackClips {
+    /// Open a pack's folder for the rider whose prefix is `prefix` (`riders[n].rider` in its
+    /// `mod.json`).
+    pub fn open(folder: &std::path::Path, prefix: &str) -> Result<PackClips, String> {
+        let res = Res::folder(folder)?;
+        let mut claimed: Vec<Motion> = Vec::new();
+        let mcfs: Vec<String> = res
+            .entries()
+            .iter()
+            .filter(|e| e.name.to_ascii_lowercase().ends_with(".mcf"))
+            .map(|e| e.name.clone())
+            .collect();
+        for member in mcfs {
+            let Ok(bytes) = res.read(&member) else { continue };
+            let set = MotionSet::parse(&ini::text(&bytes));
+            for mut m in set.motions {
+                if !claimed.iter().any(|c| c.name.eq_ignore_ascii_case(&m.name)) {
+                    // the claim's file, with its own content directory in front
+                    m.clip = format!("{}{}", set.directory, m.clip);
+                    claimed.push(m);
+                }
+            }
+        }
+        Ok(PackClips { res, prefix: prefix.to_string(), claimed })
+    }
+
+    /// The rider clip's name for a stunt: `MX_rider_9oclockindianair`.
+    pub fn rider_name(&self, stunt: &str) -> String {
+        format!("{}_rider_{stunt}", self.prefix)
+    }
+
+    /// The members a rider clip could be, in the order they are tried.
+    pub fn rider_members(&self, stunt: &str) -> Vec<String> {
+        let name = self.rider_name(stunt);
+        let mut out = Vec::new();
+        if let Some(m) = self.claimed.iter().find(|m| m.name.eq_ignore_ascii_case(&name)) {
+            let stem = m.clip.rsplit_once('.').map_or(m.clip.as_str(), |(stem, _)| stem);
+            out.push(format!("{stem}.mot"));
+        }
+        out.push(format!("Rider\\Anim\\{name}.mot"));
+        out
+    }
+
+    /// The members a bike clip could be, in the order they are tried.
+    pub fn bike_members(&self, stunt: &str) -> Vec<String> {
+        vec![format!("Veh\\Anim\\{}_Bike_{stunt}.mot", self.prefix), format!("Veh\\Anim\\bike_{stunt}.mot")]
+    }
+
+    /// Every `.mot` in the pack, by member name.
+    pub fn members(&self) -> Vec<String> {
+        self.res
+            .entries()
+            .iter()
+            .filter(|e| e.name.to_ascii_lowercase().ends_with(".mot"))
+            .map(|e| e.name.clone())
+            .collect()
+    }
+
+    /// A member's bytes.
+    pub fn read(&self, member: &str) -> Result<Vec<u8>, String> {
+        self.res.read(member)
+    }
+
+    /// Fill `lib`'s pack states out of this pack, binding to `set`'s skeleton: the extras of
+    /// `stunts` (its records past the 24) and the two 360s, through `members` — [`Self::rider_members`]
+    /// or [`Self::bike_members`]. Answers the stunt names that found no clip, the 360s as
+    /// `threesixtyL` and `threesixtyR`.
+    pub fn fill(
+        &self,
+        set: &mut Set,
+        lib: &mut vehicle_anim::Library,
+        stunts: &[Stunt],
+        members: impl Fn(&Self, &str) -> Vec<String>,
+    ) -> Vec<String> {
+        let mut wants: Vec<(usize, String)> = stunts
+            .iter()
+            .skip(SLOTS)
+            .take(game_sim::trick::EXTRA_SLOTS)
+            .enumerate()
+            .filter(|(_, s)| !s.name.is_empty())
+            .map(|(k, s)| (k, s.name.clone()))
+            .collect();
+        let spin = (vehicle_anim::SPIN_LEFT - vehicle_anim::PACK_EXTRA) as usize;
+        wants.push((spin, "ThreeSixtyL".to_string()));
+        wants.push((spin + 1, "ThreeSixtyR".to_string()));
+        let mut missing = Vec::new();
+        for (k, stunt) in wants {
+            lib.pack[k] = set.load_pack(&self.res, &stunt, &members(self, &stunt));
+            if lib.pack[k].is_none() {
+                missing.push(stunt);
+            }
+        }
+        missing
+    }
+}
+
+impl Set {
+    /// **MD21:** read the first of `members` that `res` has, parse it and bind it to this set's
+    /// skeleton under its own name ([`pack_bound_name`]), not looping. A member that is there and does
+    /// not parse is filed in [`Set::missing`] as a disc clip would be.
+    pub fn load_pack(&mut self, res: &Res, name: &str, members: &[String]) -> Option<ClipId> {
+        let bound_as = pack_bound_name(name);
+        if let Some(id) = self.id(&bound_as) {
+            return Some(id);
+        }
+        let archives = std::slice::from_ref(res);
+        let Some((member, read)) = members.iter().find_map(|m| exact(archives, m)) else {
+            self.missing.push(Missing::NoMember(bound_as));
+            return None;
+        };
+        let mut clip = match read.and_then(|b| Clip::parse(&b)) {
+            Ok(clip) => clip,
+            Err(why) => {
+                self.missing.push(Missing::Unreadable(member, why));
+                return None;
+            }
+        };
+        clip.timing.looping = false;
+        let joints = clip.joints(&self.skeleton);
+        self.clips.push(Bound { name: bound_as.clone(), member, clip, joints });
+        self.id(&bound_as)
+    }
+}
