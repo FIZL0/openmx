@@ -401,14 +401,9 @@ impl Seat {
 
         self.said = rider::Frame::default();
         if self.riding {
-            self.said = self.garage.step(&mut self.sim, dt, &controls, place);
-            if self.garage.up == Kind::Bike
-                && let Some(did) = markers::frame(&mut self.sim, me, spots, &controls)
-            {
-                println!("marker: {}", marker_line(did));
-            }
-            // The plane's own set (P107), on the d-pad the plane no longer reads.
-            if let Some(did) = self.garage.markers(&mut self.sim, me, spots, &[], place) {
+            let did;
+            (self.said, did) = self.garage.pass(&mut self.sim, dt, &controls, me, spots, place);
+            if let Some(did) = did {
                 println!("marker: {}", marker_line(did));
             }
         }
@@ -735,6 +730,15 @@ fn cut_spots(seat: &Seat, bike: M4, camera: Option<&Camera>) -> [V3; 3] {
         Some(c) => [machine, c.eye, c.at],
         None => [machine; 3],
     }
+}
+
+/// How far `plane` jumped over the last tick, if it moved further than it flies (P125): its spot
+/// `before` the tick (where it was drawn, [`plane_at`]) against where it is ([`pace::jump`]), its
+/// speed over the tick's `dt` the move it was making. What a marker's put-back or an Up onto another
+/// player does, offline, on a tape and online alike.
+fn plane_jumped(before: Option<M4>, plane: &Plane, dt: F) -> Option<V3> {
+    let b = before?;
+    pace::jump(V3 { x: b.0[3][0], y: b.0[3][1], z: b.0[3][2] }, vector(plane.at), plane.speed().0 * dt.0)
 }
 
 /// Where the plane is drawn: at its body's pose, nose and up off the plane's own measure.
@@ -4142,6 +4146,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // the spawn rather than letting it fly the whole way back (V29).
             if seat.garage.up == Kind::Biplane && seat.said.respawned {
                 follow.cam.snap = true;
+            }
+            // A jump the flight makes between two ticks (P125) — a marker's Up putting the plane
+            // back into the flight it kept, or landing it by another player — takes the camera with
+            // it ([`chase::follow_jump`]). Left alone, the camera lagging far behind a flying plane
+            // stayed where the plane had been, looking away from it, while the plane flew on out of
+            // the picture: an Up looked like it did nothing.
+            else if simulated
+                && let Some((plane, by)) = seat.garage.plane_flown().and_then(|p| Some((p, plane_jumped(before_planes.get(i).copied().flatten(), p, dt)?)))
+            {
+                chase::follow_jump(&mut follow.cam, [by.x, by.y, by.z], plane.speed());
             }
             let presets = follow.cam.presets.len();
             if presets > 1 {

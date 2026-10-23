@@ -238,6 +238,33 @@ pub struct WreckCamera {
     pub fov_shift: f32,
 }
 
+/// Under this speed, feet a second, a plane that jumped is standing for [`follow_jump`].
+const STANDING: f32 = 1.0;
+
+/// The plane's camera after its plane jumped `by` in a tick (P125) at `speed`, feet a second: a
+/// plane standing after it (landed by another player, or put back into a marker kept at rest) snaps
+/// its camera there, as the original's reset does (V29); a flying one carries it ([`carry`]).
+pub fn follow_jump(cam: &mut game_sim::camera::Follow, by: [f32; 3], speed: F) {
+    if speed.0 < STANDING {
+        cam.snap = true;
+    } else {
+        carry(cam, by);
+    }
+}
+
+/// A follow camera moved `by` with the machine it follows (P125, a plane's marker put-back): its
+/// look-at's and its eye's lags shifted alike, so the next frame lags from where it was relative to
+/// the machine rather than from where the machine was. The plane's camera trails a flying plane by
+/// many ticks, so left alone it was left looking at an empty sky while the plane flew on out of
+/// sight; snapped ([`game_sim::camera::Follow::snap`]) it loads the unlagged eye, which in flight sits
+/// on top of the plane.
+pub fn carry(cam: &mut game_sim::camera::Follow, by: [f32; 3]) {
+    for (i, d) in by.into_iter().enumerate() {
+        cam.look_filter[i].value = F(cam.look_filter[i].value.0 + d);
+        cam.pos_filter[i].value = F(cam.pos_filter[i].value.0 + d);
+    }
+}
+
 fn v3(v: Vf) -> [f32; 3] {
     [v.x(), v.y(), v.z()]
 }
