@@ -804,6 +804,14 @@ fn ride_ragdoll(seat: &Seat, rig: &mut Rig, dt: F, place: &mut dyn sim_world::Wo
 /// How far the riding ragdoll's main bone may be from the bike before it is started again, in feet.
 const RIDING_STRAY: f32 = 10.0;
 
+/// Whether the riding rider is drawn from the riding ragdoll (`OPENMX_RIDING_RAGDOLL=1`) rather than the
+/// clip pose. Off by default (user, 2026-10-23: "our guy is super floppy"): the request S109 builds is
+/// a guess, the hands and feet held to the grips and pegs whatever the trick, so a trick's pose never
+/// shows and a backflip folds the body off the bike. S111 proves the request; turn it on after that.
+fn riding_ragdoll_on() -> bool {
+    std::env::var_os("OPENMX_RIDING_RAGDOLL").is_some_and(|v| v == "1")
+}
+
 /// The riding ragdoll's nodes to draw the body from, once it has been placed (S109).
 fn riding_bones<'a>(
     seat: &Seat,
@@ -4728,8 +4736,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                 }
             }
-            // The rider's ragdoll on the bike (S109), off the pose and the grips just drawn.
-            if moving && bike_up && online.is_none() {
+            // The rider's ragdoll on the bike (S109), off the pose and the grips just drawn: only when
+            // asked for, until its request is the original's (S111).
+            if moving && bike_up && online.is_none() && riding_ragdoll_on() {
                 perf.time(Stage::Animation, || ride_ragdoll(seat, rig, dt, &mut world.place));
             }
             stages.mark(stages::Stage::Animation);
