@@ -103,6 +103,30 @@ pub fn wrecked(crash: &Crash) -> Ridden {
     }
 }
 
+// --- the player's right stick (P114) ---------------------------------------------------------------
+
+/// One tick of a seat's right stick on its own follow camera, before the camera's frame: the
+/// original's look-around ([`game_sim::camera::Race::nudge`]), and the port's reset on top.
+///
+/// The stick is read the way the player record's own right-stick consumers are handed it, through
+/// [`game_sim::input::AxisRange::PLAYER`] — the only stick consumers a riding state registers, so the
+/// ones the camera's caller has to be passing — with the poll's inverted right x. The zoom modifier is
+/// the seat's table's command, L3 on every preset; the widen modifier is R1's, and the race camera
+/// lets go of it before it looks. `reset` puts the camera back where its preset says
+/// ([`game_sim::camera::Follow::clear_nudges`]), after this tick's stick, which the original never
+/// does: its clear has no caller.
+///
+/// The camera is presentation: this reads the seat's pad and writes only the camera.
+pub fn look_around(cam: &mut game_sim::camera::Race, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, reset: bool) {
+    use game_sim::input::{Axis, AxisRange};
+    let x = pad.axis_through(Axis::RightX, &AxisRange::PLAYER);
+    let y = pad.axis_through(Axis::RightY, &AxisRange::PLAYER);
+    cam.nudge(x, y, table.held(pad, game_sim::bindings::Command::CAMERA_ZOOM));
+    if reset {
+        cam.cam.clear_nudges();
+    }
+}
+
 // --- the wreck camera (V31) ------------------------------------------------------------------------
 
 /// What the wreck camera follows while the rider is down: the rider's body first, and the wrecked bike.
