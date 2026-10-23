@@ -2627,6 +2627,21 @@ pin_two_body boot 0x001f3d40 (pin) the two-bone position and velocity impulses; 
 #                            inv mass 2, gain, c), c summed into every length
 pin_one_body boot 0x001f4550 (pin) the same against the target and its velocity
 pin_vtable boot 0x00451df0 the pin's table (at pin +0x10); +0x10 = 0x001f7750 writes a1 to +4
+# V61 — the "limb controller" V10 found (0x110 bytes, built in 0x00249cb0, ctor 0x001f3b50, init
+#   0x001f3d20, solve 0x001f4550) is this pin: one of the riding ragdoll's four holds (actor +0x5d0..
+#   +0x5dc: hand, hand, foot, foot; bones 11, 7, 17, 14). Its "bone" is the ragdoll body
+#   (*(actor+0x2f4) + i*0xb0 + 0xa4) and the weight read off it at +0x10 is the body's 1/mass, written
+#   by body_set_mass through the body's vt (data refs 0x00451f24, 0x00451fa4) from the part record's
+#   ride mass (+0x4b8 + i*0x60 +0) on the riding entry, RagdollMass (+4) on the wreck's. recording2,
+#   2374..4023: hands 0.2 (1/m 5.0), feet 0.15 (6.667) on every placed riding tick; 0.35 all four from
+#   the wreck's entry until the riding entry runs again, 2-3 ticks after the reason clears. Gains
+#   +0x100 = (1/m, 0, z, 0): z 1 for the hands, the foot fade for the feet. No render-side IK, no
+#   clavicle or wrist: the drawn rider is the ragdoll's nodes while placed, the clip untouched else.
+# V61 — the hold gate: placed (+0x2ac) is the riding entry's and is cleared entering Posed, Gate or
+#   Held. Posed = from_table (+0x680, as the previous tick's vehicle animation left it) || holding
+#   (+0x684, which the body mode sets for a backflip before it tests). recording2: placed == !Posed on
+#   1499 of 1499 riding ticks (+0x2a4 = 1, +0x2a8 = 0, +0x2b0 = 1), 368 of them Posed: every gesture,
+#   no-hander and backflip is drawn as its clip wrote it, nothing held.
 throw_force boot 0x001f2e00 (listener) the throw's force listener: on (+0): the force *(+0xc) (the
 #                           actor's +0x6e0; +0x10 inline when null) to the body +0x24 if enabled, else
 #                           to every enabled body of the group +0x20 (null here). Table 0x00451ec0,

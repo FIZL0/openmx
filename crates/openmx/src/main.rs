@@ -775,7 +775,8 @@ impl Shown {
 /// ragdoll the body actor steps every tick, the hands held to the chassis' grips and the feet to its
 /// pegs as they are drawn this frame. Started afresh whenever it has nothing to hold to: before the
 /// chassis has a frame, while the rider is down, and when the bike has gone somewhere the bones were
-/// not (a respawn), so a new one is placed from the pose again.
+/// not (a respawn), so a new one is placed from the pose again. While the body's machine has a pose
+/// off the clip table in charge it is not placed either (V61), and the clip is drawn as written.
 fn ride_ragdoll(seat: &Seat, rig: &mut Rig, dt: F, place: &mut dyn sim_world::World) {
     let rider = &seat.sim.rider;
     let anchors = rig.chassis.as_ref().map(chassis_grips);
@@ -801,6 +802,7 @@ fn ride_ragdoll(seat: &Seat, rig: &mut Rig, dt: F, place: &mut dyn sim_world::Wo
     let veh = &rider.body.veh;
     let request = game_sim::ragdoll_riding::request(&rider.ride, veh.mix.value, [world(hand_l), world(hand_r)], [world(foot_l), world(foot_r)], kit.bike);
     let riding = rig.riding.get_or_insert_with(|| game_sim::ragdoll_riding::Riding::new(kit));
+    riding.posed_off_the_table(rider.body.machine.mode == game_sim::rider_anim::Mode::Posed);
     riding.step(kit, rider.skeleton.as_deref(), &request, veh.state, dt, place);
 }
 
