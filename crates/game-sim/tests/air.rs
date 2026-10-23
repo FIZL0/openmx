@@ -474,6 +474,7 @@ impl Gen {
             modifier: false,
             spinning: false,
             spin_active: false,
+            easy_spin: false,
         };
         let lo = Loads {
             side: self.f(-60.0, 60.0),

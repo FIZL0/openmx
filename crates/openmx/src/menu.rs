@@ -325,6 +325,9 @@ pub struct Settings {
     /// Whose tricks a ride has (MD16): the original's, or MX vs. ATV's read from a trick pack in the
     /// mods folder. The original's unless changed.
     pub tricks: Tricks,
+    /// How MX vs. ATV's tricks do a 360 (MD25): the port's easy one unless the Original switch's
+    /// 360 Style is on.
+    pub three_sixty: ThreeSixty,
     /// How the plants change from model to picture (V55): ours, smoothed, unless the Original
     /// switch's Plants (P126) is on.
     pub plants: Lod,
@@ -385,8 +388,9 @@ impl Original {
 }
 
 /// Each place the port departs from the original's look or feel on purpose (P126): a switch of its
-/// own under the Original one, ours by default. The simulation is none of them: the game modifiers
-/// (P55) stay as they are whatever these say. A new enhancement adds itself here.
+/// own under the Original one, ours by default. The simulation is none of them — the game modifiers
+/// (P55) stay as they are whatever these say — but for the 360 style (MD25), the port's easy 360 on
+/// MX vs. ATV's tricks, which the user asked to sit here. A new enhancement adds itself here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Departure {
     /// Every seat's bike layout and plane stick (P40, P50, P81): New, or the disc's (P73, P69).
@@ -401,11 +405,20 @@ pub enum Departure {
     Picture,
     /// Every seat's session markers (P129): on, the d-pad the markers'; or off, the original's d-pad.
     Markers,
+    /// How MX vs. ATV's tricks do a 360 (MD25): the port's easy one, or that game's own step.
+    ThreeSixty,
 }
 
 impl Departure {
-    pub const ALL: [Departure; 6] =
-        [Departure::Controls, Departure::Cameras, Departure::Fog, Departure::Plants, Departure::Picture, Departure::Markers];
+    pub const ALL: [Departure; 7] = [
+        Departure::Controls,
+        Departure::Cameras,
+        Departure::Fog,
+        Departure::Plants,
+        Departure::Picture,
+        Departure::Markers,
+        Departure::ThreeSixty,
+    ];
 
     /// Its row's name.
     pub fn label(self) -> &'static str {
@@ -416,6 +429,7 @@ impl Departure {
             Departure::Plants => "Plant Detail",
             Departure::Picture => "Picture Shape",
             Departure::Markers => "Markers",
+            Departure::ThreeSixty => "360 Style",
         }
     }
 
@@ -428,6 +442,7 @@ impl Departure {
             Departure::Plants => ["Smooth", "Original"],
             Departure::Picture => ["Fill the Window", "4:3"],
             Departure::Markers => ["On", "Off"],
+            Departure::ThreeSixty => ["Easy", "MX vs. ATV"],
         }
     }
 
@@ -440,6 +455,7 @@ impl Departure {
             Departure::Plants => "How bushes and trees turn into flat pictures far off. Smooth dissolves them over a wide band; Original swaps them as the game did.",
             Departure::Picture => "The ride's shape on screen. Original is the television's 4:3, with bars at the sides.",
             Departure::Markers => "Every player's session markers on the d-pad. Off, the d-pad steers, leans and does tricks as in the original.",
+            Departure::ThreeSixty => "The 360 on MX vs. ATV's tricks. Easy: hold R1 and push the stick to one side on a lip, and the bike spins flat once round and stops. MX vs. ATV is that game's: push to one side, then flick to the other, and the nose comes up as it turns.",
         }
     }
 }
@@ -455,6 +471,7 @@ impl Menu {
             Departure::Plants => s.plants == Lod::Original,
             Departure::Picture => s.picture == Picture::Television,
             Departure::Markers => s.markers.iter().all(|m| !*m),
+            Departure::ThreeSixty => s.three_sixty == ThreeSixty::MxVsAtv,
         }
     }
 
@@ -489,6 +506,7 @@ impl Menu {
             Departure::Plants => s.plants = if original { Lod::Original } else { Lod::Smooth },
             Departure::Picture => s.picture = if original { Picture::Television } else { Picture::Fill },
             Departure::Markers => s.markers = [!original; SEATS_MAX],
+            Departure::ThreeSixty => s.three_sixty = if original { ThreeSixty::MxVsAtv } else { ThreeSixty::Easy },
         }
     }
 
@@ -904,6 +922,7 @@ impl Default for Settings {
             mods_off: Vec::new(),
             track_filter: String::new(),
             tricks: Tricks::default(),
+            three_sixty: ThreeSixty::default(),
             plants: Lod::default(),
             picture: Picture::default(),
             markers: [true; SEATS_MAX],
@@ -1007,6 +1026,7 @@ impl Settings {
                 "machine_bays" => s.bays = v != "off",
                 "mods" => s.mods = v != "off",
                 "tricks" => s.tricks = Tricks::from_word(v).unwrap_or(s.tricks),
+                "three_sixty" => s.three_sixty = ThreeSixty::from_word(v).unwrap_or(s.three_sixty),
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
@@ -1144,7 +1164,8 @@ impl Settings {
     fn original_text(&self) -> String {
         let plants = if self.plants == Lod::default() { String::new() } else { format!("plants = {}\n", self.plants.word()) };
         let picture = if self.picture == Picture::default() { String::new() } else { format!("picture = {}\n", self.picture.word()) };
-        plants + &picture
+        let spin = if self.three_sixty == ThreeSixty::default() { String::new() } else { format!("three_sixty = {}\n", self.three_sixty.word()) };
+        plants + &picture + &spin
     }
 
     /// A world's sky (MD9), only when it is not the default, so a file from before it is written as
@@ -1391,6 +1412,40 @@ impl Tricks {
         match self {
             Tricks::Original => "Original",
             Tricks::MxVsAtv => "MX vs. ATV",
+        }
+    }
+}
+
+/// How MX vs. ATV's tricks do a 360 (MD25), as `settings.txt` and `--three-sixty` spell it: the
+/// trick pack's [`game_sim::air::SpinStyle`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThreeSixty {
+    /// The port's own: one sideways push with R1 on a lip, a flat spin that stops itself once round.
+    #[default]
+    Easy,
+    /// MX vs. ATV's step as the disc has it: the two-way flick, with its nose-up pitch.
+    MxVsAtv,
+}
+
+impl ThreeSixty {
+    pub const ALL: [ThreeSixty; 2] = [ThreeSixty::Easy, ThreeSixty::MxVsAtv];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            ThreeSixty::Easy => "easy",
+            ThreeSixty::MxVsAtv => "mxvatv",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<ThreeSixty> {
+        ThreeSixty::ALL.into_iter().find(|t| t.word() == w)
+    }
+
+    /// The sim's style for it.
+    pub fn style(self) -> game_sim::air::SpinStyle {
+        match self {
+            ThreeSixty::Easy => game_sim::air::SpinStyle::Easy,
+            ThreeSixty::MxVsAtv => game_sim::air::SpinStyle::MxVsAtv,
         }
     }
 }

@@ -1154,6 +1154,9 @@ struct Args {
     /// `--tricks original|mxvatv` (MD16): whose tricks the ride has. Unset, the front end's Tricks
     /// row says, and a ride outside it has the original's. Online is always the original's.
     tricks: Option<menu::Tricks>,
+    /// `--three-sixty easy|mxvatv` (MD25): how MX vs. ATV's tricks do a 360. Unset, the front end's 360
+    /// Style row says, and a ride outside it has the easy one.
+    three_sixty: Option<menu::ThreeSixty>,
     /// `--markers on|off` (P129), one word a seat (`on,off`), the last for every seat past it: each
     /// player's Markers switch. Unset, the front end's Markers rows say, and a ride outside it has
     /// them on.
@@ -1540,6 +1543,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.world_sky = Some(args.world_sky.unwrap_or(shell.front.menu.settings.world_sky));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.tricks = Some(args.tricks.unwrap_or(shell.front.menu.settings.tricks));
+                a.three_sixty = Some(args.three_sixty.unwrap_or(shell.front.menu.settings.three_sixty));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 // The Original tab's own two (P126).
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
@@ -6117,8 +6121,10 @@ fn ride_trick_pack(args: &Args) -> Option<trick_packs::Pack> {
         return None;
     };
     match trick_packs::find(&dir) {
-        Ok(pack) => {
-            println!("tricks: MX vs. ATV's, from {}", pack.id);
+        Ok(mut pack) => {
+            let style = args.three_sixty.unwrap_or_default();
+            pack.spin_style = style.style();
+            println!("tricks: MX vs. ATV's, from {}, with the {} 360", pack.id, style.word());
             Some(pack)
         }
         Err(e) => {
@@ -6495,6 +6501,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         mods: None,
         mods_asked: false,
         tricks: None,
+        three_sixty: None,
         markers: None,
     };
     let mut argv = std::env::args().skip(1);
@@ -6583,6 +6590,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--markers" => {
                 let v = next("on, off, or one per seat (on,off)")?;
                 args.markers = Some(menu::markers_seats(&v).ok_or_else(|| format!("--markers: {v:?} is not on or off, one per seat"))?);
+            }
+            "--three-sixty" => {
+                let word = next("easy or mxvatv")?;
+                let style = menu::ThreeSixty::from_word(&word).ok_or_else(|| format!("--three-sixty: {word:?} is not easy or mxvatv"))?;
+                args.three_sixty = Some(style);
             }
             "--tricks" => {
                 let word = next("original or mxvatv")?;
@@ -6829,7 +6841,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--overlay hud|original|debug|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--markers on|off] [--hud] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--overlay hud|original|debug|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--three-sixty easy|mxvatv] [--markers on|off] [--hud] [--camera NAME]\n\
                             [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
