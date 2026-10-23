@@ -1352,6 +1352,13 @@ impl Renderer {
         self.grove = scene.ecosystem.clone();
     }
 
+    /// How the scene's plants change from model to picture from now on (P126's Plants switch).
+    pub fn set_plant_lod(&mut self, lod: crate::eco::Lod) {
+        if let Some(g) = &mut self.grove {
+            g.lod = lod;
+        }
+    }
+
     /// The sky behind every view, or none: the fog's colour instead.
     pub fn set_sky(&mut self, sky: Option<&Sky>) {
         self.has_sky = sky.is_some_and(|s| s.faces.len() >= 6);
