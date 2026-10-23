@@ -19,8 +19,8 @@
 //!
 //! With no flag that picks a ride (`--track`, `--play`, `--record`, `--moment`, `--vehicle`, `--phy`, `--set`, `--garage`,
 //! any `--trace`, `--players`, `--headless`, `--frames`, or `--ride`) the shell opens on its main menu ([`menu`], P36): Free Ride and its
-//! track pick, the Garage (P37: every seat's bike, set and rider), Settings with the rider's name on an on-screen keyboard, the overlay, wrecks and the
-//! throttle's wiring, and Quit. Start or Escape in a ride opens the pause — Resume, Restart, Settings,
+//! track pick, the Garage (P37: every seat's bike, set and rider), Settings with the rider's name on an on-screen keyboard, the overlay, wrecks and each
+//! seat's controls (P81), and Quit. Start or Escape in a ride opens the pause — Resume, Restart, Settings,
 //! Main Menu, Quit — in place of the plain freeze Start is without the front end. `--menu` asks for
 //! the front end whatever else is given, and `--screen NAME` opens it on one screen, which is how a
 //! `--shot` of each is taken. The settings are kept in `settings.txt` and `controls.txt` beside the
@@ -1094,7 +1094,6 @@ impl Front {
             w.throttle = match self.menu.controls.throttle {
                 menu::Gas::Cross => Throttle::Cross,
                 menu::Gas::R2 => Throttle::Trigger(Control::R2),
-                menu::Gas::L2 => Throttle::Trigger(Control::L2),
             };
         }
         if !self.wiring_flags.1 {
@@ -5646,11 +5645,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--throttle" => {
                 args.wiring_flags.0 = true;
-                args.wiring.throttle = match next("cross, r2 or l2")?.as_str() {
+                // L2 is no throttle since P81 (user, 2026-10-22): it is the new layout's brake.
+                args.wiring.throttle = match next("cross or r2")?.as_str() {
                     "cross" => Throttle::Cross,
                     "r2" => Throttle::Trigger(Control::R2),
-                    "l2" => Throttle::Trigger(Control::L2),
-                    other => return Err(format!("--throttle: cross, r2 or l2, not {other}")),
+                    other => return Err(format!("--throttle: cross or r2, not {other}")),
                 }
             }
             "--pad-pressure" => {
@@ -5793,7 +5792,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
-                            [--throttle cross|r2|l2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
+                            [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
                             [--biplane-controls new|screen|original|new,original,...]\n\
                             [--preset 0..3|0,2,...]\n\
