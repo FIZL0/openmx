@@ -135,7 +135,8 @@ struct MaterialUniform {
     constant: [f32; 4],
     cutoff: f32,
     shading: u32,
-    /// 1 for [`Surface::keep_coverage`].
+    /// 1 for [`Surface::keep_coverage`]; the shader no longer reads it, the texture's levels keep
+    /// the coverage (V58).
     coverage: u32,
     /// Texels at or over this alpha are not drawn: the half of a material whose failing texels are
     /// drawn apart from its passing ones ([`GpuMaterial::rest`]).
@@ -561,7 +562,9 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
     clamp_sampler: wgpu::Sampler,
     white: wgpu::TextureView,
-    textures: HashMap<usize, wgpu::TextureView>,
+    /// Each texture as uploaded, by its number and the cutoff its mips keep the coverage of (0 for
+    /// plain box mips, [`Surface::keep_coverage`]'s cut-outs for theirs).
+    textures: HashMap<(usize, u8), wgpu::TextureView>,
     materials: Vec<GpuMaterial>,
     material_ids: HashMap<MaterialKey, usize>,
     models: Vec<GpuModel>,
@@ -778,6 +781,123 @@ fn mips(t: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
 }
 
 fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, t: &Texture) -> wgpu::TextureView {
+    upload_texture_keeping(device, queue, t, 0)
+}
+
+/// [`mips`], with every smaller level's alpha scaled so that each part of it, read bilinearly as
+/// the sampler reads it, covers as much at `cutoff` as the full-size texture does there (V58; after I. Castaño's coverage-preserving
+/// alpha mips, as The Witness has them, but per tile, since one atlas holds solid bark and sparse
+/// twigs side by side). A cut-out's box-filtered levels average its leaves with the holes between
+/// them, and most of a far tree's or bush's averaged texels fell under the cutoff: it thinned to a
+/// quarter of its near self past 500 feet. A `cutoff` of 0 leaves the levels as they are.
+fn mips_keeping(t: &Texture, cutoff: u8) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut levels = mips(t);
+    if cutoff == 0 || levels.len() < 2 {
+        return levels;
+    }
+    let (bw, bh) = (levels[0].0 as usize, levels[0].1 as usize);
+    // How many of each full-size texel's 4x4 points its filtered alpha covers.
+    let base = &levels[0].2;
+    let (mut passes, mut row) = (Vec::with_capacity(bw * bh), Vec::new());
+    for y in 0..bh {
+        filtered(base, bw, bh, (0, y, bw, y + 1), &mut row);
+        passes.extend(row.chunks_exact(16).map(|t| t.iter().filter(|&&a| a >= cutoff as f32).count() as u32));
+    }
+    for (w, h, px) in levels.iter_mut().skip(1) {
+        let (w, h) = (*w as usize, *h as usize);
+        // Tiles of 4x4 texels of this level (or the whole level when it is smaller), each the
+        // same part of the full-size texture.
+        let (tw, th) = (w.min(KEEP_TILE), h.min(KEEP_TILE));
+        // Each tile's scale is found against the level as the box filter left it (its neighbours
+        // read at the same scale), and all are applied after.
+        let (mut scales, mut points) = (Vec::new(), Vec::new());
+        for ty in (0..h).step_by(th) {
+            for tx in (0..w).step_by(tw) {
+                let (x1, y1) = ((tx + tw).min(w), (ty + th).min(h));
+                // The full size's share of the tile it covers.
+                let (sx, sy) = (bw / w, bh / h);
+                let mut hit = 0;
+                for y in ty * sy..(y1 * sy).min(bh) {
+                    hit += passes[y * bw + tx * sx..y * bw + (x1 * sx).min(bw)].iter().sum::<u32>();
+                }
+                let want = hit as f32 / 16.0 / ((x1 * sx).min(bw) - tx * sx).max(1) as f32 / ((y1 * sy).min(bh) - ty * sy).max(1) as f32;
+                // The scale that brings the filtered alpha of as many of the tile's points to the
+                // cutoff as the full size covers: the alpha read between texels is the texels'
+                // scaled, so it is the cutoff over the point that many down. Filtered, as the
+                // sampler reads the level, so a lone texel brought just to the cutoff does not
+                // count as a whole one.
+                filtered(px, w, h, (tx, ty, x1, y1), &mut points);
+                points.sort_unstable_by(|a, b| b.total_cmp(a));
+                // Points that tie (a lone texel's, a flat run's) pass or fail together: of the
+                // two counts either side of the tie, the nearer, taken half way to the next value
+                // so that rounding as it is stored does not tip it.
+                let k = (want * points.len() as f32).round() as usize;
+                let scale = match k {
+                    0 => 1.0,
+                    k if points[k - 1] <= 0.0 => 255.0,
+                    k => {
+                        let v = points[k - 1];
+                        let (above, at) = (points.partition_point(|&p| p > v), points.partition_point(|&p| p >= v));
+                        let below = points.get(at).copied().unwrap_or(0.0);
+                        let level = match (above > 0, k - above < at - k) {
+                            (true, true) => (v + points[above - 1]) / 2.0,
+                            _ => (v + below) / 2.0,
+                        };
+                        (cutoff as f32 / level.max(1e-3)).min(255.0)
+                    }
+                };
+                scales.push((tx, ty, x1, y1, scale));
+            }
+        }
+        for (tx, ty, x1, y1, scale) in scales {
+            for y in ty..y1 {
+                for x in tx..x1 {
+                    let a = &mut px[(y * w + x) * 4 + 3];
+                    *a = (*a as f32 * scale).round().min(255.0) as u8;
+                }
+            }
+        }
+    }
+    levels
+}
+
+/// The alpha of the tile `(x0, y0, x1, y1)` of a `w`x`h` level, read bilinearly between texels
+/// as the sampler reads it, at 4x4 points a texel, into `out`.
+fn filtered(px: &[u8], w: usize, h: usize, (x0, y0, x1, y1): (usize, usize, usize, usize), out: &mut Vec<f32>) {
+    let a = |x: isize, y: isize| {
+        let (x, y) = (x.clamp(0, w as isize - 1) as usize, y.clamp(0, h as isize - 1) as usize);
+        px[(y * w + x) * 4 + 3] as f32
+    };
+    out.clear();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    // The point's place among the texel centres around it.
+                    let (fx, fy) = (x as f32 + (sx as f32 + 0.5) / 4.0 - 0.5, y as f32 + (sy as f32 + 0.5) / 4.0 - 0.5);
+                    let (ix, iy) = (fx.floor() as isize, fy.floor() as isize);
+                    let (u, v) = (fx - ix as f32, fy - iy as f32);
+                    let top = a(ix, iy) * (1.0 - u) + a(ix + 1, iy) * u;
+                    let bottom = a(ix, iy + 1) * (1.0 - u) + a(ix + 1, iy + 1) * u;
+                    out.push(top * (1.0 - v) + bottom * v);
+                }
+            }
+        }
+    }
+}
+
+/// The share of [`filtered`]'s points of a tile whose alpha reaches `cutoff`.
+fn filtered_share(px: &[u8], w: usize, h: usize, tile: (usize, usize, usize, usize), cutoff: u8) -> f32 {
+    let mut points = Vec::new();
+    filtered(px, w, h, tile, &mut points);
+    points.iter().filter(|&&a| a >= cutoff as f32).count() as f32 / points.len().max(1) as f32
+}
+
+/// The side, in texels of its own level, of the tiles [`mips_keeping`] keeps the coverage of.
+const KEEP_TILE: usize = 4;
+
+/// A texture uploaded with [`mips_keeping`]'s levels.
+fn upload_texture_keeping(device: &wgpu::Device, queue: &wgpu::Queue, t: &Texture, cutoff: u8) -> wgpu::TextureView {
     let fallback;
     let t = match t.width == 0 || t.height == 0 || t.rgba.len() < t.width * t.height * 4 {
         true => {
@@ -790,7 +910,7 @@ fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, t: &Texture) -> wg
         }
         false => t,
     };
-    let levels = mips(t);
+    let levels = mips_keeping(t, cutoff);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
         size: wgpu::Extent3d {
@@ -2043,11 +2163,12 @@ impl Renderer {
         if let Some(&id) = self.material_ids.get(&key) {
             return id;
         }
+        let keep = if surface.keep_coverage { surface.cutoff } else { 0 };
         let view = match texture {
             Some(t) => self
                 .textures
-                .entry(t)
-                .or_insert_with(|| upload_texture(&self.device, &self.queue, &assets.textures[t]))
+                .entry((t, keep))
+                .or_insert_with(|| upload_texture_keeping(&self.device, &self.queue, &assets.textures[t], keep))
                 .clone(),
             None => self.white.clone(),
         };
@@ -2079,7 +2200,10 @@ impl Renderer {
         };
         // The few materials that clamp (palm fronds, bark, cut-outs) get a sampler of their own;
         // everything else shares the repeating one.
-        let clamped = (key.clamp != [false; 2]).then(|| {
+        // A cut-out that keeps its coverage (leaves, V58) reads one level, not a mix of two: each
+        // level covers what the full size does, but two mixed (a fine level's thin twigs with a
+        // coarse level's broad, fainter ones) fall under the cutoff between them.
+        let clamped = (key.clamp != [false; 2] || key.keep_coverage).then(|| {
             let mode = |on: bool| if on { wgpu::AddressMode::ClampToEdge } else { wgpu::AddressMode::Repeat };
             self.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("material clamp"),
@@ -2087,7 +2211,7 @@ impl Renderer {
                 address_mode_v: mode(key.clamp[1]),
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                mipmap_filter: if key.keep_coverage { wgpu::MipmapFilterMode::Nearest } else { wgpu::MipmapFilterMode::Linear },
                 ..Default::default()
             })
         });
@@ -3504,11 +3628,8 @@ fn node_matrix(i: u32) -> mat4x4f {
 
 @fragment fn fs(i: Out) -> @location(0) vec4f {
   let t = textureSample(tex, samp, i.uv) * 255.0;
-  // A cut-out that keeps its coverage (leaves, V56): the smaller levels' averaged alpha raised by
-  // half again a level, so a far tree or bush is not thinner than a near one.
-  let size = vec2f(textureDimensions(tex, 0)) * i.uv;
-  let level = max(log2(max(length(dpdx(size)), length(dpdy(size)))), 0.0);
-  let a = select(t.a, t.a * (1.0 + 0.5 * level), material.coverage != 0u);
+  // A cut-out that keeps its coverage (leaves) has it kept by its texture's mips (V58).
+  let a = t.a;
   if (a < material.cutoff || a >= material.below || (i.cover < 1.0 && !covers(i.clip.xy, i.cover))) {
     discard;
   }
@@ -3622,6 +3743,45 @@ fn texel(t: texture_2d<f32>, pos: vec4f) -> vec4f {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sparse cut-out (one solid texel in eight, scattered, as twigs are) and a solid block beside it in one
+    /// 256x256 texture: each of its smaller levels, read bilinearly, covers within a tenth of the
+    /// full size's share of each half at the cutoff (V58), where the plain box mips thin the sparse
+    /// half to nothing by the third level; and a texture whose levels need no help is left as its
+    /// plain mips have it.
+    #[test]
+    fn cut_out_mips_keep_the_full_sizes_coverage() {
+        let n = 256;
+        let rgba = (0..n * n)
+            .flat_map(|i| {
+                let (x, y) = (i % n, i / n);
+                // The sparse half's texels by a hash of their place, about one in eight solid.
+                let hash = ((x * 7919 + y * 104_729) as u32).wrapping_mul(0x9e37_79b9) >> 29;
+                let solid = if x < n / 2 { hash == 0 } else { (n / 2 + 32..n - 32).contains(&x) && (32..n - 32).contains(&y) };
+                [90, 140, 60, if solid { 255 } else { 0 }]
+            })
+            .collect();
+        let t = Texture { width: n, height: n, rgba };
+        let share = |px: &[u8], w: usize, half: usize| filtered_share(px, w, w, (half * w / 2, 0, (half + 1) * w / 2, w), 128);
+        let (plain, kept) = (mips(&t), mips_keeping(&t, 128));
+        let want = [0, 1].map(|half| share(&t.rgba, n, half));
+        for (level, ((w, _, a), (_, _, b))) in plain.iter().zip(&kept).enumerate().skip(1).take(5) {
+            let w = *w as usize;
+            for half in [0, 1] {
+                let (p, k) = (share(a, w, half), share(b, w, half));
+                println!("level {level}, half {half}: plain {p:.3}, kept {k:.3}, full size {:.3}", want[half]);
+                assert!((k - want[half]).abs() <= 0.1 * want[half], "level {level}, half {half}: {k:.3} against {:.3}", want[half]);
+                if half == 0 && level >= 3 {
+                    assert!(p < 0.5 * want[0], "the plain mips keep the sparse half at level {level}: {p:.3}");
+                }
+            }
+        }
+        assert_eq!(mips_keeping(&t, 0), plain);
+        let start = std::time::Instant::now();
+        let big = Texture { width: 512, height: 512, rgba: [t.rgba.clone(), t.rgba.clone(), t.rgba.clone(), t.rgba].concat() };
+        mips_keeping(&big, 128);
+        println!("a 512x512 cut-out's levels in {:.0} ms", start.elapsed().as_secs_f64() * 1000.0);
+    }
 
     #[test]
     fn an_overlay_keeps_only_what_it_touched() {

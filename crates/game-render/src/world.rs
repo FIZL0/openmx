@@ -57,8 +57,9 @@ pub struct Surface {
     /// The material's texture is clamped at its edges along u and along v, not repeated.
     pub clamp: [bool; 2],
     /// A cut-out whose texels are near enough all or nothing, as leaves are: where a renderer
-    /// samples a smaller level of the texture, whose alpha the averaging has thinned, it raises
-    /// the alpha to keep the share of the picture the texture covers (V56, `eco::cut_out`).
+    /// samples a smaller level of the texture, whose alpha the averaging has thinned, the level's
+    /// alpha is raised to keep the share of the picture the texture covers (V56, `eco::cut_out`;
+    /// on the GPU by the mips themselves since V58).
     pub keep_coverage: bool,
 }
 
