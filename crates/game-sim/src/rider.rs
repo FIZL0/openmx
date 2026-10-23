@@ -586,7 +586,8 @@ impl Rider {
         tricks.gesture.read(
             &t.angles,
             c.stick,
-            trick::Buttons { trick: c.trick, dpad: c.dpad },
+            // Cross and Square only for a rider whose set has the extra stunts (MD16).
+            trick::Buttons { trick: c.trick, dpad: c.dpad, extra: if set.has_extras() { c.extra } else { [false; trick::EXTRA_BUTTONS] } },
             down,
         );
 
@@ -637,6 +638,17 @@ impl Rider {
         if clocked.stopped {
             score.finished();
         }
+        // MX vs. ATV's 360 come round this frame (MD16), scored flat under its own id.
+        if let (Some(moves), Some(t)) = (p.tricks.as_ref(), ride.tricks.as_deref_mut()) {
+            if std::mem::take(&mut t.spin.came_round) {
+                let (id, points) = if t.spin.dir >= 1 {
+                    (score::THREE_SIXTY_RIGHT, moves.three_sixty_points.1)
+                } else {
+                    (score::THREE_SIXTY_LEFT, moves.three_sixty_points.0)
+                };
+                score.start_flat(id, points);
+            }
+        }
         let pose = motion::Pose {
             lean: ride.held.lean.0,
             fore_aft: ride.held.lean.1,
@@ -669,7 +681,10 @@ impl Rider {
         // Only three of the step's fields reach the wreck test: the up axis the no-hander's roll is
         // measured on, the trick-in-progress word, and whether anything is touching. The rest are the
         // airborne control's and are already spent.
-        let step = air::Step { up, stunt: tricks.in_progress, touching: ride.touching, ..air::Step::default() };
+        // MX vs. ATV's 360 (MD16) holds the airborne pitch and roll limits off from the moment it
+        // turns until the wheels are down, as a backflip's `flipping` does; false on the original's.
+        let spinning = ride.tricks.as_ref().is_some_and(|t| t.spin.ramp);
+        let step = air::Step { up, stunt: tricks.in_progress, touching: ride.touching, spinning, ..air::Step::default() };
         let g = ride.mv.g_peak;
         let loads = air::Loads {
             side: F(g.x()),
@@ -708,6 +723,8 @@ impl Rider {
         let bone = Self::main_bone(ride, ragdoll_kit.as_deref(), ragdoll.as_ref(), crash.as_ref());
         // A world of several terrains has holes inside its rectangle as well (MD8), asked the same.
         let holed = edge.is_some() && off_map::off_world(&*world, bone, ride.chassis.cofg_world);
+        // MX vs. ATV's 360 landed part way round (MD16): a wreck off the back, the original's 0xb.
+        let spun = ride.tricks.as_deref_mut().and_then(|t| std::mem::take(&mut t.spin.wrecked).then_some(air::Wreck::Tail));
         let thrown = &mut ride.chassis;
         let origin = &mut ride.origin;
         let air = &mut ride.air;
@@ -740,7 +757,7 @@ impl Rider {
                 // "Race50" or "Pro50" (`track::physics_file`'s), and the rider is not told which file
                 // it was built from — nor does `ride::hits` sweep the two shoulder rays it would add.
                 let hit = air::hit_wreck(&p.air, air, touched, false, mass, height, &hits);
-                hit.or(landed).map(Wreck::from)
+                hit.or(landed).or(spun).map(Wreck::from)
             },
             // The screen's page is up from the request until its fade back in is over.
             || page.up(),
@@ -789,6 +806,10 @@ impl Rider {
             *flight = Trick::NONE;
             // The rider's own wreck entry: the trick and the combo both lost (S79).
             score.wrecked();
+            if let Some(t) = ride.tricks.as_deref_mut() {
+                t.spin = air::Spin::default();
+                t.front_watch = 0;
+            }
         } else if was_airborne && !ride.air.airborne {
             out.landed = (*flight != Trick::NONE).then_some(*flight);
             *flight = Trick::NONE;
@@ -855,7 +876,11 @@ impl Rider {
         }
         // 8 — the points (S79): the rider's tick, on the frame's wheels and wreck, and then the
         // manager's, which in the original runs after every rider's and touches only this one's card.
-        score.frame(dt, &Self::score_sense(ride, slow, state.wreck.is_some()));
+        let sensed = Self::score_sense(ride, slow, state.wreck.is_some());
+        match (p.tricks.as_ref(), ride.tricks.as_deref_mut()) {
+            (Some(moves), Some(t)) => score.frame_with(dt, &sensed, Some((&mut t.front_watch, moves.front_flip_points))),
+            _ => score.frame(dt, &sensed),
+        }
         score.grow(dt);
         out
     }

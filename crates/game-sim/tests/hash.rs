@@ -502,7 +502,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // `markers` once either leaves the bike alone (tests/markers.rs in openmx).
     // 11328 since S105: the ragdoll's search for the wreck bike, walked under the down rider's
     // ragdoll with the bones' ignore of the bike.
+    // 11336 since MD16: MX vs. ATV's moves' state (`Ride::tricks`, walked only when a trick pack
+    // is on, so the leaves do not move) and the Cross and Square bits of the controls.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11328, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11336, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
