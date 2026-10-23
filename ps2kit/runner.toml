@@ -13,6 +13,9 @@ untested = ["*.md", ".github/*"]
 # or loses its port under the other slots' load and passes alone. Each name is cargo's "to rerun pass" args.
 failures = 'to rerun pass `([^`]+)`'
 retest = "./kit check --rerun {names}"
+# What a fix or repair session builds before it commits a merge: every test target, so a clash git merged
+# without a conflict (two sides adding one name) shows here and not in the gate after it. The gate reuses it.
+build = "cargo test -q --no-run --message-format=short"
 slot_env = ["KIT_PCSX2={n}", "KIT_RUN=1"]
 pass_env = ["KIT_CONFIG", "KIT_CHECK_SLOTS", "AGENT_RUNNER_IDLE_BG"]
 on_exit = "./kit pcsx2 stop"
