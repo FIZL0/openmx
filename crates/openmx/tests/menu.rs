@@ -39,6 +39,10 @@ mod pad;
 #[allow(dead_code)]
 #[path = "../src/audio.rs"]
 mod audio;
+// MD11's filters read each mod's source game.
+#[path = "../src/track_mods.rs"]
+#[allow(dead_code)]
+mod track_mods;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, FrameLimit, Overlay, Press, Reader, Readers, RenderScale, Screen, Settings, Speedometer};
@@ -339,6 +343,7 @@ fn the_settings_file_reads_back_as_it_was_written() {
         overlay: Overlay::Debug,
         wrecks: false,
         track: "free11".into(),
+        track_filter: "MX vs. ATV Untamed".into(),
         machines: [
             Machine::Biplane,
             Machine::Bike,
@@ -2571,11 +2576,12 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
         ("world_ultra".into(), "Ultra".into()),
     ]);
     let names: Vec<String> = m.track_groups().into_iter().map(|(n, _)| n).collect();
-    assert_eq!(names, ["MX Unleashed", "Worlds", "MX vs. ATV Unleashed", "MX vs. ATV Untamed"]);
+    assert_eq!(names, ["All Games", "MX Unleashed", "Worlds", "MX vs. ATV Unleashed", "MX vs. ATV Untamed"]);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
-    assert_eq!(m.track_group(m.cursor(Screen::Tracks)), 0);
-    // One press to the worlds.
+    assert_eq!(m.track_filter_group(), 0, "All Games unless the settings say");
+    // Two presses to the worlds (MD11's All Games first).
+    tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)), ("world_mxu", "MX Unleashed: every map"));
     tap(&mut m, &mut r, Control::Down);
@@ -2586,12 +2592,14 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_ultra");
     // Left from the first category wraps to the last; the machine stays as it was.
     let machine = m.settings.machines[0];
-    tap(&mut m, &mut r, Control::Left);
-    tap(&mut m, &mut r, Control::Left);
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Left);
+    }
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "untamed_nat_az");
-    tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.track_group(m.cursor(Screen::Tracks)), 1);
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Right);
+    }
+    assert_eq!(m.track_filter_group(), 2);
     assert_eq!(m.settings.machines[0], machine, "left and right no longer change the machine");
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Ride("world_mxu".into())), "{acts:?}");
@@ -2602,7 +2610,7 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
     // A pack switched off takes its category with it.
     m.settings.mods_off = vec!["world".into()];
     let names: Vec<String> = m.track_groups().into_iter().map(|(n, _)| n).collect();
-    assert_eq!(names, ["MX Unleashed", "MX vs. ATV Unleashed", "MX vs. ATV Untamed"]);
+    assert_eq!(names, ["All Games", "MX Unleashed", "MX vs. ATV Unleashed", "MX vs. ATV Untamed"]);
 }
 
 /// MD2: the track pick lists the mods folder's tracks after the disc's, a mod rides by its id, and
@@ -2625,9 +2633,12 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
     tap(&mut m, &mut r, Control::Up);
+    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "up from the first wraps inside All Games");
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Up);
     assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len() - 1, "up from the first wraps inside the disc's towns");
     tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "right is the mods' category");
+    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "right is the mods' game");
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Ride("md2_flat".into())), "{acts:?}");
     assert_eq!(m.settings.track, "md2_flat");
@@ -3614,6 +3625,7 @@ fn the_pick_is_a_card_a_track_with_its_own_picture() {
     m.set_mod_tracks(vec![("p70_pictured".into(), "Pictured".into()), ("p70_bare".into(), "Bare".into())]);
     tap(&mut m, &mut r, Control::Cross);
     tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
     let shown = cards(&art, &m, 1920, 1080);
     let ids: Vec<&str> = shown.iter().map(|c| c.0.as_str()).collect();
     assert_eq!(ids, ["p70_pictured", "p70_bare"]);
@@ -3624,4 +3636,108 @@ fn the_pick_is_a_card_a_track_with_its_own_picture() {
     let shown = cards(&art, &m, 1920, 1080);
     assert_eq!(art.images()[shown[0].3.unwrap()].rgba, picture.rgba);
     assert_eq!(art.images()[shown[1].3.unwrap()].rgba, still("free07", 3).rgba);
+}
+
+/// MD11: with mods from two generated source games, the pick's filters are All Games (every
+/// track), MX Unleashed (exactly the disc's), the worlds, and one a game, each listing only its own
+/// as its `mod.json`'s source says (not its id's prefix); the filter is kept in the settings, and an
+/// online room's pick steps the lit filter's disc tracks.
+#[test]
+fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
+    let mods = scratch("md11").join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    // Listed as the shell lists them, folder order then the worlds; the games interleave, and one
+    // id's prefix names the other game.
+    let listed: Vec<(String, String)> = [
+        ("gen_a1", "Alpha One", Some("Game Alpha")),
+        ("gen_b1", "Beta One", Some("Game Beta")),
+        ("gen_a2", "Alpha Two", Some("Game Alpha")),
+        ("beta_a3", "Alpha Three", Some("Game Alpha")),
+        ("gen_b2", "Beta Two", Some("  Game Beta ")),
+        ("world_gen", "Generated World", None),
+    ]
+    .iter()
+    .map(|&(id, name, game)| {
+        let source = game.map_or(String::new(), |g| format!(r#""source": {{"game": "{g}"}},"#));
+        let dir = mods.join("tracks").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mod.json"), format!(r#"{{"kind": "track", "id": "{id}", {source} "name": "{name}"}}"#)).unwrap();
+        (id.to_string(), name.to_string())
+    })
+    .collect();
+    let ids: Vec<String> = listed.iter().map(|(id, _)| id.clone()).collect();
+    let games = track_mods::source_games(&mods, &ids);
+    assert_eq!(games.len(), 5, "{games:?}");
+
+    let (mut m, mut r) = fresh();
+    m.set_mod_tracks(listed.clone());
+    m.set_mod_games(games.clone());
+    let groups = m.track_groups();
+    let names: Vec<&str> = groups.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["All Games", "MX Unleashed", "Worlds", "Game Alpha", "Game Beta"]);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    // Each filter by the pad: Down walks it round, and what it lists is its own alone.
+    let walk = |m: &mut Menu, r: &mut Reader| -> Vec<String> {
+        let mut seen = vec![m.track_at(m.cursor(Screen::Tracks)).0.to_string()];
+        loop {
+            tap(m, r, Control::Down);
+            let id = m.track_at(m.cursor(Screen::Tracks)).0.to_string();
+            if id == seen[0] {
+                return seen;
+            }
+            seen.push(id);
+        }
+    };
+    let disc: Vec<String> = menu::TRACKS.iter().map(|t| t.0.to_string()).collect();
+    let mut every = disc.clone();
+    every.extend(["world_gen", "gen_a1", "gen_a2", "beta_a3", "gen_b1", "gen_b2"].map(String::from));
+    let mut all = walk(&mut m, &mut r);
+    all.sort();
+    let mut want = every.clone();
+    want.sort();
+    assert_eq!(all, want, "All Games lists every track");
+    let own: [(&str, Vec<String>); 4] = [
+        ("MX Unleashed", disc.clone()),
+        ("Worlds", vec!["world_gen".into()]),
+        ("Game Alpha", ["gen_a1", "gen_a2", "beta_a3"].map(String::from).to_vec()),
+        ("Game Beta", ["gen_b1", "gen_b2"].map(String::from).to_vec()),
+    ];
+    for (name, tracks) in &own {
+        tap(&mut m, &mut r, Control::Right);
+        assert_eq!(m.track_groups()[m.track_filter_group()].0, *name);
+        assert_eq!(m.settings.track_filter, *name);
+        let mut seen = walk(&mut m, &mut r);
+        seen.sort();
+        let mut tracks = tracks.clone();
+        tracks.sort();
+        assert_eq!(seen, tracks, "{name} lists only its own");
+        assert!(m.track_game(&seen[0]) == *name);
+    }
+    assert!(m.take_changed());
+    // Right from the last is All Games again, which the file does not name.
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.track_filter_group(), 0);
+    assert!(!m.settings.text().contains("track_filter"));
+    // Kept: ride a Game Beta track, and the next session's pick opens on Game Beta and on it.
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Down);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("gen_b2".into())), "{acts:?}");
+    assert!(m.settings.text().contains("track_filter = Game Beta\n"), "{}", m.settings.text());
+    let mut next = Menu::new(Settings::parse(&m.settings.text()), Controls::default());
+    next.set_mod_tracks(listed.clone());
+    next.set_mod_games(games.clone());
+    assert_eq!(next.track_groups()[next.track_filter_group()].0, "Game Beta");
+    assert_eq!(next.track_at(next.cursor(Screen::Tracks)).0, "gen_b2");
+    // Online the room's pick is the filter's disc tracks: the disc's for a mod game (MD6 not yet),
+    // and with no mods a kept game's filter is All, which is the disc's.
+    assert_eq!(next.online_tracks(), disc.iter().map(String::as_str).collect::<Vec<_>>());
+    next.set_mod_tracks(Vec::new());
+    assert_eq!(next.track_groups().len(), 1);
+    assert_eq!(next.cursor(Screen::Tracks), 0);
+    assert_eq!(next.settings.track_filter, "Game Beta", "a game gone from the folder is kept for when it is back");
+    // A name the file cannot keep is All Games.
+    assert_eq!(Settings::parse("track_filter = a\u{7}b\n").track_filter, "");
+    std::fs::remove_dir_all(&mods).unwrap();
 }

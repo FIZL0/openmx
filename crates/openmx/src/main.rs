@@ -1290,6 +1290,7 @@ fn front_end(args: Args) -> Result<(), String> {
     let listed = mod_tracks(&args, &front.dir, mods_on);
     // And each one's picture on its card (P70), the stills that are missing taken off this thread.
     let mut stills = mod_pictures(&mut front.art, mods_folder(&args, &front.dir, mods_on).as_deref(), &listed);
+    front.menu.set_mod_games(mod_games(&args, &front.dir, mods_on, &listed));
     front.menu.set_mod_tracks(listed);
     // Online, this machine's player rides the freeride's bike set unless the lobby changes it, as
     // the rider the command line names.
@@ -1611,6 +1612,7 @@ fn front_end(args: Args) -> Result<(), String> {
             mods_on = shell.front.menu.settings.mods;
             let listed = mod_tracks(&args, &shell.front.dir, mods_on);
             stills = mod_pictures(&mut shell.front.art, mods_folder(&args, &shell.front.dir, mods_on).as_deref(), &listed);
+            shell.front.menu.set_mod_games(mod_games(&args, &shell.front.dir, mods_on, &listed));
             shell.front.menu.set_mod_tracks(listed);
             (shown_look, menu_images) = (None, false);
         }
@@ -5392,6 +5394,13 @@ fn mod_tracks(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, Stri
         println!("mods: {} tracks, {} worlds", scan.tracks.len(), worlds.len());
     }
     scan.tracks.into_iter().map(|t| (t.id, t.name)).chain(worlds).collect()
+}
+
+/// The listed mod tracks' source games (MD11), which the pick's filters are by.
+fn mod_games(args: &Args, dir: &std::path::Path, on: bool, listed: &[(String, String)]) -> Vec<(String, String)> {
+    let Some(folder) = mods_folder(args, dir, on) else { return Vec::new() };
+    let ids: Vec<String> = listed.iter().map(|(id, _)| id.clone()).collect();
+    track_mods::source_games(&folder, &ids)
 }
 
 /// The mods folder a front end reads, as [`mod_tracks`] says: `--mods`' if it was given, else the

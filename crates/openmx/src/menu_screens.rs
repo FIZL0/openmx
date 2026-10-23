@@ -1174,15 +1174,18 @@ impl Pen<'_> {
         self.text(Weight::Heavy, &nm, x + w / 2.0, y + h - 1.4, 1.3, 0.0, [0x14, 0x14, 0x14, 255], Align::Centre);
     }
 
-    /// Free Ride's pick: the lit category's tracks as cards under its name (P70), each with its
-    /// picture, Left and Right between the categories (the disc's towns, the worlds, each mod pack),
+    /// Free Ride's pick: the lit filter's tracks as cards under its name (P70), each with its
+    /// picture, Left and Right between the filters by source game (MD11: All Games, the disc's, the
+    /// worlds, each other game),
     /// the lit track's still large, and the ride's setup.
     fn tracks(&mut self, menu: &Menu) {
         let at = menu.cursor(Screen::Tracks).min(menu.track_count().saturating_sub(1));
         self.strip(3.0, 22.0);
         self.logo(true);
         let groups = menu.track_groups();
-        let (group, range) = groups[menu.track_group(at)].clone();
+        // The lit filter (MD11), the cursor on its first track where it is not on one of its own.
+        let (group, range) = groups[menu.track_filter_group()].clone();
+        let at = if range.contains(&at) { at } else { range.start };
         let top = if groups.len() > 1 {
             self.category(&group, 3.8, 7.6, 20.4);
             11.4
@@ -1191,7 +1194,7 @@ impl Pen<'_> {
             self.text(Weight::Bold, &group.to_uppercase(), 4.2, base, 1.0, 0.0, HEADING, Align::Left);
             8.2 + HEAD_H + ROW_GAP + 0.2
         };
-        let tag_of = |id: &str| if TRACKS.iter().any(|t| t.0 == id) { "MX Unleashed".to_string() } else { menu.packs().into_iter().find(|p| p.prefix == pack_of(id)).map_or("Mods".into(), |p| p.name) };
+        let tag_of = |id: &str| menu.track_game(id);
         self.cards(menu, range.clone(), at, 3.8, 20.4, top, &tag_of);
         let (id, name) = menu.track_at(at);
         let (x, w) = (28.5, 47.0);
@@ -1222,7 +1225,7 @@ impl Pen<'_> {
         self.title(Screen::Tracks.title());
         let mut hints = vec![(Btn::Circle, "Back"), (Btn::Square, "Machine"), (Btn::Triangle, "Wrecks")];
         if groups.len() > 1 {
-            hints.push((Btn::LeftRight, "Category"));
+            hints.push((Btn::LeftRight, "Game"));
         }
         if riders > 1 {
             hints.push((Btn::L1R1, "Player"));
