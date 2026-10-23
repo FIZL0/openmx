@@ -111,8 +111,10 @@
 //! trigger's own control for the session; and the keyboard's throttle key ramps open over a third of
 //! a second rather than stepping, so a stab is part throttle on a machine with no pad at all.
 //!
-//! Over each view is the original's own HUD ([`overlay`], V26): its speedometer and its radar with
-//! every other rider on it, off the disc's art. **H** swaps it for the debug overlay ([`hud`]), which
+//! Over each view is the ride HUD ([`ride_hud`], P121): the original's pieces at the original's
+//! places — score, trick pop-up, speedometer, radar with every other rider on it — redrawn as vector
+//! shapes and our own type, sharp at any size; `--overlay original` draws the original's own HUD
+//! ([`overlay`], V26) off the disc's art instead. **H** swaps it for the debug overlay ([`hud`]), which
 //! `--hud` (`--overlay debug`) starts on: the sixteen controls as the port's own input manager holds
 //! them, both sticks where its dead zone put them, and beside them the numbers the ride is running
 //! on. That one is debugging furniture and matches nothing on the disc. `--overlay none`, or the
@@ -182,6 +184,7 @@ mod pad;
 mod particles;
 mod perf;
 mod portal;
+mod ride_hud;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
 mod same_ride;
@@ -488,6 +491,7 @@ fn took(rig: &mut Rig, up: Kind) {
     let name = (!cam.presets.is_empty()).then(|| cam.preset().name.clone());
     if let Some(name) = name {
         rig.hud.note_camera(&name);
+        rig.ride_hud.note_camera(Instant::now(), &name);
     }
     rig.hud.note_vehicle(up.name());
     println!("vehicle: {}", up.name());
@@ -504,6 +508,67 @@ fn gauges(seat: &Seat, rig: &Rig, speedometer: menu::Speedometer) -> overlay::Ga
         score: 0,
         modified: rig.modified,
         speedometer,
+    }
+}
+
+/// What every view's ride HUD (P121) is drawn from besides its own seat: every rider's camera
+/// target, the original's HUD's per-view lists (tags, radar icons, switch offers), the radar's span,
+/// the speedometer style, the lineup's names and the stunt table that names the tricks.
+struct RideHud<'a> {
+    ridden: &'a [Ridden],
+    art: &'a overlay::Art,
+    span: f32,
+    speedometer: menu::Speedometer,
+    names: &'a [Option<String>],
+    table: &'a Stunts,
+    simulated: bool,
+}
+
+impl RideHud<'_> {
+    /// View `v`'s HUD, its seat `seat`: the odometer and the tracker a frame on, then `draw` given
+    /// what it shows. `marker` is the markers' slot display while it is up.
+    fn with(&self, seat: &Seat, rig: &mut Rig, v: usize, marker: Option<&MarkerShown>, draw: impl FnOnce(&ride_hud::Shown, &ride_hud::Tracker, Instant)) {
+        let now = Instant::now();
+        let me = &self.ridden[v];
+        let b = me.target.body_point;
+        if seat.riding && self.simulated {
+            rig.odometer.step([b.x(), b.y(), b.z()]);
+        }
+        let score = &seat.sim.rider.score;
+        rig.ride_hud.update(now, score, |id| self.table.display_name(0, game_sim::trick::Trick(id)).to_string());
+        // A split is digital, as the original's code forces it with two riders or more.
+        let speedometer = if self.ridden.len() > 1 { menu::Speedometer::Digital } else { self.speedometer };
+        let gauges = overlay::Gauges { score: score.total.0.max(0.0) as u32, ..gauges(seat, rig, speedometer) };
+        let riders: Vec<ride_hud::Dot> = self
+            .ridden
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != v)
+            .map(|(_, r)| ride_hud::Dot { at: [r.target.body_point.x(), r.target.body_point.z()], ai: false })
+            .collect();
+        let markers = marker.map(|(pick, filled, _, others, holding)| ride_hud::Panel {
+            pick: *pick,
+            filled: *filled,
+            others: others.iter().map(|&s| (s, self.names.get(s).cloned().flatten())).collect(),
+            holding: *holding,
+            machine: seat.garage.up.name().to_string(),
+        });
+        let shown = ride_hud::Shown {
+            speed: me.speed.0,
+            gauges: &gauges,
+            own: [b.x(), b.z()],
+            forward: [me.target.forward.x(), me.target.forward.z()],
+            riders: &riders,
+            blips: self.art.radar.get(v).map_or(&[], Vec::as_slice),
+            span: self.span,
+            tag: self.art.tags.get(v).map(overlay::Tag::text).filter(|t| !t.is_empty()),
+            offer: self.art.offers.get(v).copied().flatten(),
+            challenge: None,
+            markers,
+            scale: 1.0,
+            minimap: true,
+        };
+        draw(&shown, &rig.ride_hud, now);
     }
 }
 
@@ -582,6 +647,8 @@ struct Rig {
     odometer: overlay::Odometer,
     /// This player's preload meter, a tick at a time (V53).
     preload_meter: overlay::PreloadMeter,
+    /// This player's ride HUD over time (P121): the trick pop-up, the score's flash, the camera toast.
+    ride_hud: ride_hud::Tracker,
     bike_model: String,
     body_model: Option<String>,
     /// What bolts onto this player's chassis, each part under the model name it is drawn from: the
@@ -799,7 +866,7 @@ struct Args {
     /// Draw the riding overlay (P6): the pad as the simulation reads it and the numbers beside it.
     /// Off by default and off is free, because it is debugging furniture and not part of the game.
     hud: bool,
-    /// `--overlay original|debug|none` (V26): which overlay a ride draws, the original's HUD by
+    /// `--overlay hud|original|debug|none` (V26, P121): which overlay a ride draws, the ride HUD by
     /// default. Unset, the front end's setting decides; `--hud` is `--overlay debug`.
     overlay: Option<menu::Overlay>,
     /// `--speedometer digital|analog` (V42): how the original's HUD shows the speed. Unset, the
@@ -2970,6 +3037,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
             preload_meter: overlay::PreloadMeter::default(),
+            ride_hud: ride_hud::Tracker::default(),
             bike_model,
             body_model: own_body,
             parts,
@@ -2992,6 +3060,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
             preload_meter: overlay::PreloadMeter::default(),
+            ride_hud: ride_hud::Tracker::default(),
             bike_model: CHASSIS.to_string(),
             body_model,
             parts: vehicle.parts.clone(),
@@ -3109,9 +3178,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         .collect();
     // The GPU draws it as sprites from its pictures, uploaded once (V30).
     // The front end's after them, for the pause (V30), which is why the HUD's are numbered from 0.
-    let menu_base = hud_art.images().len();
+    // The ride HUD's two atlases next (P121), then the front end's.
+    let hud_base = hud_art.images().len();
+    let menu_base = hud_base + ride_hud::images().len();
     if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
         let mut images = hud_art.images();
+        images.extend(ride_hud::images());
         if let Some(front) = &front {
             images.extend(front.art.images());
         }
@@ -3239,6 +3311,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if !first.cam.presets.is_empty() {
             let name = first.cam.preset().name.clone();
             rig.hud.note_camera(&name);
+            rig.ride_hud.note_camera(Instant::now(), &name);
         }
     }
     println!("vehicle: {}", world.seats[0].garage.up.name());
@@ -4160,6 +4233,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     follow.cam.next_preset();
                     println!("{who}camera: {}", follow.cam.preset().name);
                     rig.hud.note_camera(&follow.cam.preset().name);
+                    rig.ride_hud.note_camera(Instant::now(), &follow.cam.preset().name);
                 }
             }
             // The camera's target block, as the original's vehicle fills it once a frame (`chase.rs`).
@@ -4425,7 +4499,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
                     _ => None,
                 };
-                let banner = shown_markers.get(v).and_then(Option::as_ref).filter(|_| marker_bar_shown(overlay_mode, rig.hud.on));
+                // The ride HUD draws its own marker menu (P121); the debug HUD and the original's keep
+                // the slot display.
+                let ride = !rig.hud.on && overlay_mode == menu::Overlay::Hud;
+                let banner = shown_markers.get(v).and_then(Option::as_ref).filter(|_| marker_bar_shown(overlay_mode, rig.hud.on) && !ride);
                 if rig.hud.on || banner.is_some() {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| {
@@ -4445,6 +4522,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                     let (window, gauges) = ((frame.width, frame.height), gauges(seat, rig, speedometer));
                     art.sprites(&mut gpu_sprites, (at.x, at.y, at.w, at.h), window, &ridden, v, radar_span, &gauges);
+                }
+                if ride {
+                    let marker = shown_markers.get(v).and_then(Option::as_ref);
+                    let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
+                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, speedometer, names: &names, table: &table, simulated };
+                    ctx.with(seat, rig, v, marker, |shown, tracker, now| {
+                        ride_hud::sprites(&mut gpu_sprites, hud_base, view, shown, tracker, now);
+                    });
                 }
             }
             if let Some(front) = &front
@@ -4775,8 +4860,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 _ => None,
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
+            let ride = !rig.hud.on && overlay_mode == menu::Overlay::Hud;
             if let Some(Some((pick, filled, label, others, holding))) = shown_markers.get(v)
                 && marker_bar_shown(overlay_mode, rig.hud.on)
+                && !ride
             {
                 hud::draw_markers(target, *pick, *filled, label, others, *holding);
             }
@@ -4788,6 +4875,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     rig.odometer.step([b.x(), b.y(), b.z()]);
                 }
                 art.draw(target, (width, height), &ridden, v, radar_span, &gauges(seat, rig, speedometer));
+            }
+            // Or the ride HUD (P121), the default.
+            if ride {
+                let marker = shown_markers.get(v).and_then(Option::as_ref);
+                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, speedometer, names: &names, table: &table, simulated };
+                ctx.with(seat, rig, v, marker, |shown, tracker, now| {
+                    ride_hud::draw(target, shown, tracker, now);
+                });
             }
             if let Some(view) = view_frames.get(v) {
                 split::put(&mut frame, view, *at);
@@ -5581,10 +5676,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.overlay = Some(menu::Overlay::Debug);
             }
             "--overlay" => {
-                let word = next("original, debug or none")?;
+                let word = next("hud, original, debug or none")?;
                 let overlay = menu::Overlay::from_word(&word)
                     .filter(|o| o.word() == word)
-                    .ok_or_else(|| format!("--overlay: {word:?} is not original, debug or none"))?;
+                    .ok_or_else(|| format!("--overlay: {word:?} is not hud, original, debug or none"))?;
                 args.hud = overlay == menu::Overlay::Debug;
                 args.overlay = Some(overlay);
             }
@@ -5787,7 +5882,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--speedometer digital|analog] [--hud] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--overlay hud|original|debug|none] [--speedometer digital|analog] [--hud] [--camera NAME]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov] [--vehicle bike|biplane]\n\

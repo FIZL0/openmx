@@ -401,11 +401,12 @@ fn the_settings_file_reads_back_as_it_was_written() {
     assert_eq!(menu::load(&empty), (Settings::default(), Controls::default()));
     std::fs::write(empty.join(menu::SETTINGS_FILE), "track = nowhere\nwrecks\n= on\n").unwrap();
     assert_eq!(menu::load(&empty).0, Settings::default());
-    // A file saved before V26 (P36's `overlay = on`, the debug HUD then the only one) rides the
-    // original's HUD (V28), and so does its `off`.
+    // A file saved before V26 (P36's `overlay = on`, the debug HUD then the only one) read as the
+    // original's HUD (V28), and so did its `off`; being from before P121 too, they now ride the
+    // port's own HUD.
     for word in ["on", "off"] {
         std::fs::write(empty.join(menu::SETTINGS_FILE), format!("name = Rider\noverlay = {word}\nwrecks = on\n")).unwrap();
-        assert_eq!(menu::load(&empty).0.overlay, Overlay::Original, "overlay = {word}");
+        assert_eq!(menu::load(&empty).0.overlay, Overlay::Hud, "overlay = {word}");
     }
     // The defaults themselves round trip too.
     menu::save(&empty, &Settings::default(), &Controls::default()).unwrap();
@@ -461,13 +462,15 @@ fn the_speedometer_row_switches_the_dial_and_is_saved() {
     assert_eq!(m.settings.speedometer, Speedometer::Digital);
     assert!(m.settings.text().contains("speedometer = digital\n"));
     tap(&mut m, &mut r, Control::Left);
-    // Under the debug HUD it dims, says why, and keeps its word.
+    // Under the debug HUD (past the original's since P121) it dims, says why, and keeps its word.
     tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.overlay, Overlay::Original);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.overlay, Overlay::Debug);
     tap(&mut m, &mut r, Control::Down);
     let row = m.page()[m.cursor(Screen::Settings)].clone();
-    assert_eq!((row.key, row.off.as_deref()), (menu::Key::Speedometer, Some("Only the Original HUD has one")));
+    assert_eq!((row.key, row.off.as_deref()), (menu::Key::Speedometer, Some("Only the HUD and the Original have one")));
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.speedometer, Speedometer::Analog);
     // Saved to the file and read back from it.
@@ -704,10 +707,11 @@ fn what_the_pad_sets_is_what_the_file_says() {
     assert_eq!(m.page()[m.cursor(Screen::Garage)].value, "Mx");
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
-    // The HUD on to debug (Display), wrecks off (Ride), and the throttle onto L2 (Controls: left
-    // from Cross wraps to L2).
+    // The HUD on to debug (Display: past the original's since P121), wrecks off (Ride), and the
+    // throttle onto L2 (Controls: left from Cross wraps to L2).
     settings_at(&mut m, &mut r, "Display");
     down_to(&mut m, &mut r, menu::Key::Hud);
+    tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::L1);
     down_to(&mut m, &mut r, menu::Key::Wrecks);
