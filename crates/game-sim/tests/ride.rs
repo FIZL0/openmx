@@ -34,7 +34,7 @@ use game_sim::phy::{self, Phy};
 use game_sim::r#move::{self as mv, Frame};
 use game_sim::ride::{Controls, Ride, Tables};
 use game_sim::rider::{self, Rider};
-use game_sim::trick::Set;
+use game_sim::trick::{Set, Trick};
 use game_sim::track::{Mesh, Node, Placement, Points, Triangle};
 use game_sim::world::{Flat, Prop, Props, World};
 use ps2_float::{F, Vf};
@@ -362,8 +362,10 @@ fn the_walk_names_every_field_once() {
     // before it): the put-back record's point, heading and up. P97 moved the size alone (2416
     // before it): the riding speed limit a put-back gives the chassis back, a constant of the ride
     // its builder decides, which the walk leaves out — the chassis' own limit it lands in is walked.
+    // MD16 moved the size alone (2424 before it): MX vs. ATV's moves' state, boxed and walked only
+    // when a trick pack is on — `None`, as here, is no leaf.
     assert_eq!(dump.fields.len(), 631, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2424, "the ride's own size");
+    assert_eq!(std::mem::size_of::<Ride>(), 2432, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");
@@ -5230,4 +5232,330 @@ fn each_captured_post_shootoff_put_back_lands_bit_exact_at_the_landing() {
     if landed > 0 {
         assert_eq!(landed, THROWN_CAPTURES.len(), "a capture had no verdict");
     }
+}
+
+// --- MD16: MX vs. ATV's tricks, as a pack laid over the original's ------------------------------------
+
+/// A trick pack, generated: MX vs. ATV's table layout (`[StuntNN]` with its four extra keys) with two
+/// stunts the rider's 24 do not have, one of them gesture-mapped, plus the moves' own rows; and a
+/// bike file with MX vs. ATV's `[Three Sixty]` keys and its `[Airborne Control]` auto-level gains.
+const MD16_TABLE: &str = "
+[Stunt01]
+Name=nacnac
+DisplayName=\"NacNac\"
+HoldTime=0.6
+SafeTime=1.0
+Duration=1.2
+DefaultKeyMapping=1CU
+[Stunt02]
+Name=Varial
+DisplayName=\"Varial\"
+HoldTime=0.4
+SafeTime=0.6
+Duration=0.7
+HasAnimation=T
+PointValue=1000
+HoldPointValue=1000
+[Stunt03]
+Name=9oclocknac
+DisplayName=\"9 O'Clock Nac\"
+HoldTime=0.4
+SafeTime=0.6
+Duration=0.7
+DefaultKeyMapping=1CTL
+[Stunt04]
+Name=backflip
+DisplayName=\"Backflip\"
+HoldTime=0.6
+SafeTime=0.8
+Duration=1.0
+UsedForBike=F
+PointValue=2000
+HoldPointValue=10000
+[Stunt05]
+Name=threesixtyL
+DisplayName=\"Three Sixty Left\"
+HoldTime=0.72
+SafeTime=1.26
+Duration=1.5
+PointValue=2000
+HoldPointValue=15000
+[Stunt06]
+Name=threesixtyR
+DisplayName=\"Three Sixty Right\"
+HoldTime=0.72
+SafeTime=1.26
+Duration=1.5
+PointValue=2000
+HoldPointValue=15000
+";
+
+const MD16_PHY: &str = "
+[Airborne Control]
+UnrollGain=1.9
+[Three Sixty]
+MaxThreeSixtyTorqueX=1100
+MinThreeSixtyTorqueX=600
+MaxThreeSixtyTorqueY=1100
+MinThreeSixtyTorqueY=200
+ThreeSixtyTorqueRateIncrease=480
+ThreeSixtyTorqueRateDecrease=1960
+MinThreeSixtyTime=0
+MaxThreeSixtyTime=60
+";
+
+/// The disc's 125 with [`MD16_TABLE`] and [`MD16_PHY`] laid over it, and the rider's set with the
+/// pack's extras: what the shell builds with Tricks on MX vs. ATV.
+fn md16_pack(p: &Phy, whip: bool) -> (Phy, Set) {
+    use game_sim::trick_pack;
+    let rows = trick_pack::table(MD16_TABLE.as_bytes()).expect("the generated table reads");
+    let ini = phy::Ini::parse(MD16_PHY);
+    let moves = trick_pack::moves(&ini, &rows).expect("the generated bike has a [Three Sixty]");
+    let mut q = p.clone();
+    if whip {
+        trick_pack::apply(&mut q, &ini, moves);
+    } else {
+        q.tricks = Some(moves);
+    }
+    let set = Set::default();
+    let extras = trick_pack::extras(&rows, &set);
+    (q, set.with_extras(extras))
+}
+
+/// One tick of an MD16 ride: the seat, and what the moves did.
+struct Md16 {
+    seat: Seat,
+    frame: rider::Frame,
+    flip_row: usize,
+    spin: game_sim::air::Spin,
+    /// The chassis, bit for bit: what "the stick does exactly what it did" is held to.
+    bits: [u32; 8],
+    /// The score banked and open so far, and the ids of the open combo's nodes.
+    total: f32,
+    nodes: Vec<u8>,
+    /// The ride's hash: what "the original's replays do not move" is held to.
+    hash: u64,
+}
+
+/// [`ride_the_flip`] with whole hands per tick and the rider's own set: the flip ramp, pinned
+/// throttle, and `script`'s controls from each tick on.
+fn ride_md16(p: &Phy, wheels: (Vf, Vf), tables: &rider::Tables, set: Set, script: &[(usize, Controls)],
+             ticks: usize) -> (Vec<Md16>, Rider) {
+    let mut r = Rider::new(p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), set);
+    let (start, slope, length) = FLIP_RAMP;
+    let mut world = Jump { origin: Vf::new(0.0, 0.0, 0.0, 1.0), dir: Vf::new(0.0, 0.0, 1.0, 0.0), start, slope, length };
+    let mut now = Controls { gas: F::ONE, ..Controls::default() };
+    let mut seen = Vec::with_capacity(ticks);
+    for tick in 0..ticks {
+        if let Some((_, c)) = script.iter().find(|(at, _)| *at == tick) {
+            now = Controls { gas: F::ONE, ..c.clone() };
+        }
+        let frame = r.frame(p, tables, &now, DT, &mut world);
+        let m = r.ride.transform();
+        let (air, f) = (&r.ride.air, m.0[2]);
+        let pos = r.ride.position();
+        let q = r.ride.chassis.quat;
+        seen.push(Md16 {
+            seat: Seat {
+                speed: r.ride.chassis.speed.0,
+                heading: f32::atan2(m.0[2].x(), m.0[2].z()),
+                up_y: m.0[1].y(),
+                y: pos.y(),
+                on_ground: air.on_ground,
+                wreck: frame.wreck.is_some(),
+                lip: air.on_ground
+                    && r.ride.chassis.vel.y() > 5.0
+                    && air.contact_vel.z() > 30.0
+                    && r.ride.held.brake == F::ZERO,
+                preload: air.preload_firing,
+                flip: air.flip_active,
+                pitch: f32::atan2(f.y(), f.x() * world.dir.x() + f.z() * world.dir.z()),
+            },
+            frame,
+            flip_row: r.ride.tricks.as_ref().map_or(0, |t| t.flip_row),
+            spin: r.ride.tricks.as_ref().map(|t| t.spin).unwrap_or_default(),
+            bits: [pos.x(), pos.y(), pos.z(), q.x(), q.y(), q.z(), q.w(), r.ride.chassis.speed.0].map(f32::to_bits),
+            total: r.score.total.0 + r.score.nodes.iter().map(|n| n.points.0).sum::<f32>(),
+            nodes: r.score.nodes.iter().map(|n| n.id).collect(),
+            hash: hash::of(&r.ride),
+        });
+    }
+    (seen, r)
+}
+
+/// The hands: `y` and `x` on the stick, R1 alone or not, and the two extra buttons.
+fn md16_hands(x: f32, y: f32, r1: bool, extra: [bool; 2]) -> Controls {
+    Controls { stick: (F(x), F(y)), trick: [false, false, r1], extra, ..Controls::default() }
+}
+
+/// A script of whole hands: `(tick, x, y, R1 alone, [Cross, Square])`.
+fn md16_script(hands: &[(usize, f32, f32, bool, [bool; 2])]) -> Vec<(usize, Controls)> {
+    hands.iter().map(|&(at, x, y, r1, extra)| (at, md16_hands(x, y, r1, extra))).collect()
+}
+
+fn md16_seats(ride: &[Md16]) -> Vec<&Seat> {
+    ride.iter().map(|t| &t.seat).collect()
+}
+
+/// [`THE_FLIP`] as whole hands, with R1 up or held through it.
+fn the_flip_hands(r1: bool) -> Vec<(usize, Controls)> {
+    THE_FLIP.iter().map(|&(at, y)| (at, md16_hands(0.0, y, r1, [false; 2]))).collect()
+}
+
+/// MD16: the generated pack's extra stunts start from the new buttons. Cross and Square with a stick
+/// direction in the air name the extra slots in the original's up, down, left, right order: Cross
+/// up is the first row the pack maps to a gesture (`nacnac`), Cross left the first it does not
+/// (`Varial`, after `9oclocknac`), and Square — a slot the three rows do not reach — starts nothing.
+/// On the original's set the same hands start nothing and the ride does not move by a bit.
+#[test]
+fn md16_extras_start_from_cross_and_square() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let names: Vec<&str> = (0..3).map(|k| set.stunt(Trick(Trick::EXTRA + k)).expect("three extras").name.as_str()).collect();
+    assert_eq!(names, ["nacnac", "9oclocknac", "Varial"], "mapped rows first, then the rest in file order");
+    assert!(set.stunt(Trick(Trick::EXTRA + 3)).is_none(), "the pack has three rows the rider lacks");
+
+    let at = |c: [bool; 2], x: f32, y: f32| md16_script(&[(200, x, y, false, c), (230, 0.0, 0.0, false, [false; 2])]);
+    let started = |ride: &[Md16]| ride.iter().filter_map(|t| t.frame.started).collect::<Vec<_>>();
+    let (up, r) = ride_md16(&q, wheels, &tables, set.clone(), &at([true, false], 0.0, -1.0), 360);
+    assert_eq!(started(&up), [Trick(Trick::EXTRA)], "Cross up is the first extra");
+    assert!(r.score.total > F::ZERO, "and it scores when it lands");
+    assert_eq!(wrecks(&md16_seats(&up)), 0);
+    let (left, _) = ride_md16(&q, wheels, &tables, set.clone(), &at([true, false], -1.0, 0.0), 360);
+    assert_eq!(started(&left), [Trick(Trick::EXTRA + 2)], "Cross left is the third");
+    let (square, _) = ride_md16(&q, wheels, &tables, set.clone(), &at([false, true], 1.0, 0.0), 360);
+    assert!(started(&square).is_empty(), "an empty extra slot starts nothing");
+
+    // The original's tricks: the buttons are not trick buttons, and the ride is the one without them.
+    let (pressed, _) = ride_md16(&p, wheels, &tables, Set::default(), &at([true, true], 0.0, -1.0), 360);
+    let (alone, _) = ride_md16(&p, wheels, &tables, Set::default(), &at([false, false], 0.0, -1.0), 360);
+    assert!(started(&pressed).is_empty());
+    assert!(pressed.iter().zip(&alone).all(|(a, b)| a.hash == b.hash), "Cross and Square change nothing on Original");
+}
+
+/// MD16: without R1 the stick does exactly what it did. [`THE_FLIP`]'s pump, R1 up, on a bike with
+/// the pack's moves on: no new move starts, and with the whip's gains left the bike's the ride is the
+/// original's to the bit, tick by tick — the moves' state rides along unread. With the whip it is
+/// still the disc's backflip.
+#[test]
+fn md16_the_pump_without_r1_is_the_original() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (moves_only, set) = md16_pack(&p, false);
+    let (original, _) = ride_md16(&p, wheels, &tables, Set::default(), &the_flip_hands(false), 400);
+    let (pack, _) = ride_md16(&moves_only, wheels, &tables, set.clone(), &the_flip_hands(false), 400);
+    assert!(pack.iter().all(|t| t.flip_row == 0 && !t.spin.active), "no new move starts with R1 up");
+    for (i, (a, b)) in original.iter().zip(&pack).enumerate() {
+        assert_eq!(a.bits, b.bits, "tick {i}: the pump without R1 rides as the original's");
+    }
+    let flips = md16_seats(&original);
+    assert!(came_over(&flips) > 5.5, "and it is a backflip: {}", came_over(&flips));
+
+    let (whip, _) = ride_md16(&md16_pack(&p, true).0, wheels, &tables, set, &the_flip_hands(false), 400);
+    assert!(whip.iter().all(|t| t.flip_row == 0 && !t.spin.active));
+    assert!(came_over(&md16_seats(&whip)) > 5.5, "the whip's gains do not stop the backflip");
+}
+
+/// MD16: where an R1 gesture and a new move read the same input, the original wins. The original's
+/// R1 tricks are R1 *with* Circle or Triangle (groups 3 to 6), and the new moves ask for R1 alone, so
+/// a combination in the air starts the very trick it starts on Original, and nothing new. The
+/// backflip, asked for from a centred stick with R1 held — forward on the lip, then back — arms
+/// first and stays the backflip: the front flip only gets the stick if it was back on the lip first.
+#[test]
+fn md16_r1_tricks_and_the_backflip_stay_the_originals() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let combo = |trick: [bool; 3]| {
+        vec![(200, Controls { stick: (F::ZERO, F(-1.0)), trick, ..Controls::default() }), (230, Controls::default())]
+    };
+    for trick in [[true, false, true], [false, true, true], [true, true, true]] {
+        let (pack, _) = ride_md16(&q, wheels, &tables, set.clone(), &combo(trick), 260);
+        let (original, _) = ride_md16(&p, wheels, &tables, Set::default(), &combo(trick), 260);
+        // The press's own: the landings differ after it (the whip's gains), and so may a wheelie.
+        let started = |ride: &[Md16]| ride.iter().find_map(|t| t.frame.started);
+        assert!(started(&original).is_some_and(|t| t.slot().is_some()), "{trick:?} starts a trick on Original");
+        assert_eq!(started(&pack), started(&original), "{trick:?} starts the same trick");
+        assert!(pack.iter().all(|t| t.flip_row == 0 && !t.spin.active));
+    }
+
+    let hands = md16_script(&[
+        (130, 0.0, 0.0, true, [false; 2]),
+        (158, 0.0, -1.0, true, [false; 2]),
+        (166, 0.0, 1.0, true, [false; 2]),
+        (176, 0.0, 0.0, true, [false; 2]),
+        (260, 0.0, -1.0, true, [false; 2]),
+        (280, 0.0, 0.0, true, [false; 2]),
+    ]);
+    let (ride, _) = ride_md16(&q, wheels, &tables, set, &hands, 400);
+    assert!(ride.iter().any(|t| t.seat.flip), "the backflip fires");
+    assert!(ride.iter().all(|t| t.flip_row == 0 && !t.spin.active), "on the backflip's row, no 360");
+    assert!(came_over(&md16_seats(&ride)) > 5.5, "once round backwards: {}", came_over(&md16_seats(&ride)));
+}
+
+/// MD16: the front flip. R1 held, stick back on the lip and then forward: the backflip's own step
+/// on its mirrored row, pitching the nose down. The bike goes once round forwards inside the
+/// backflip's air, a stab of back stick near the end stops it as a backflip's is stopped, it lands on
+/// its wheels, and it scores as [`score::FRONTFLIP`].
+#[test]
+fn md16_front_flip_goes_round_and_lands() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let hands = md16_script(&[
+        (130, 0.0, 0.0, true, [false; 2]),
+        (140, 0.0, 1.0, true, [false; 2]),
+        (158, 0.0, -1.0, true, [false; 2]),
+        (176, 0.0, 0.0, true, [false; 2]),
+        (285, 0.0, 1.0, true, [false; 2]),
+        (295, 0.0, 0.0, true, [false; 2]),
+    ]);
+    let (ride, r) = ride_md16(&q, wheels, &tables, set, &hands, 400);
+    let seats = md16_seats(&ride);
+    let fired = ride.iter().position(|t| t.seat.flip).expect("the front flip fires");
+    assert!(ride[fired].seat.lip && ride[fired].flip_row == 1, "on the lip, on the front flip's row");
+    let over = came_over(&seats);
+    assert!(over < -5.5 && over > -7.0, "once round forwards: {over}");
+    assert_eq!(wrecks(&seats), 0, "it lands");
+    let last = seats.last().unwrap();
+    assert!(last.on_ground && last.up_y > 0.95, "on its wheels: {}", last.up_y);
+    assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::FRONTFLIP)), "scored as a front flip");
+    assert_eq!(r.score.total, F(10000.0), "worth the pack's backflip");
+}
+
+/// MD16: MX vs. ATV's 360. R1 held, stick left then right on the lip: armed one way and fired the
+/// other, with the yaw torque the pack's `[Three Sixty]` maps the flick to. In the air the bike turns
+/// round, and the rider ends it — R1 released, the stick pushed against the turn — once it is back
+/// inside 35° of its take-off heading: the clip comes round, it scores, and it lands.
+///
+/// Held to the end instead, the torque never decays: the bike turns on past its heading and lands
+/// with the clip part way round, which is MX vs. ATV's wreck.
+#[test]
+fn md16_three_sixty_comes_round_or_wrecks() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let flick = [
+        (130, 0.0, 0.0, true, [false; 2]),
+        (150, -1.0, 0.0, true, [false; 2]),
+        (158, 1.0, 0.0, true, [false; 2]),
+    ];
+    let mut ended = flick.to_vec();
+    ended.extend([(166, 0.0, 0.0, false, [false; 2]), (260, -1.0, 0.0, false, [false; 2]), (300, 0.0, 0.0, false, [false; 2])]);
+    let (ride, r) = ride_md16(&q, wheels, &tables, set.clone(), &md16_script(&ended), 400);
+    let seats = md16_seats(&ride);
+    let fired = ride.iter().position(|t| t.spin.active).expect("the 360 fires");
+    assert!(ride[fired].seat.lip && ride[fired].spin.dir == 1, "on the lip, turning right");
+    assert!(ride.iter().any(|t| t.spin.clip == 2), "it turned past 35°");
+    assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::THREE_SIXTY_RIGHT)), "it came round and scored");
+    assert_eq!(wrecks(&seats), 0, "and landed");
+    assert!(r.score.total >= F(15000.0));
+
+    let mut held = flick.to_vec();
+    held.push((166, 0.0, 0.0, true, [false; 2]));
+    let (ride, _) = ride_md16(&q, wheels, &tables, set, &md16_script(&held), 400);
+    let wreck = ride.iter().position(|t| t.frame.wreck.is_some()).expect("landing mid-clip wrecks");
+    assert!(ride[wreck - 1].spin.clip == 2 && ride[wreck].seat.on_ground, "on landing, part way round");
+    assert_eq!(ride[wreck].frame.wreck, Some(game_sim::trick::Wreck::from(game_sim::air::Wreck::Tail)));
 }

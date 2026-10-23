@@ -1647,7 +1647,7 @@ fn the_humans_tricks() {
         }
         // The input phase, after all of it: the pad this tick, and the rider still down on the tick a
         // respawn puts it back.
-        let buttons = game_sim::trick::Buttons { trick: hands.trick, dpad: hands.dpad };
+        let buttons = game_sim::trick::Buttons { trick: hands.trick, dpad: hands.dpad, extra: [false; 2] };
         tricks.gesture.read(&angles, hands.stick, buttons, wreck(k) != 0 || respawned);
         if tricks.gesture.group != 0 && tricks.gesture.dir != Dir::None {
             *gestures.entry((tricks.gesture.group, tricks.gesture.dir as u8)).or_default() += 1;
@@ -1743,7 +1743,7 @@ fn the_humans_tricks() {
         keys.tick(replay::CAPPED_DT, &[report, Report::missing()]);
         let c = Controls::from_pad(keys.pad(0));
         let mut g = game_sim::trick::Gesture::default();
-        g.read(&angles, c.stick, game_sim::trick::Buttons { trick: c.trick, dpad: c.dpad }, false);
+        g.read(&angles, c.stick, game_sim::trick::Buttons { trick: c.trick, dpad: c.dpad, extra: [false; 2] }, false);
         let same = g.group == group && g.dir as u8 == dir;
         println!(
             "  gesture group {group} x {:?}: {ticks} ticks, slot {:?}; the keyboard {}",

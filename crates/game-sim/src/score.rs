@@ -253,6 +253,21 @@ impl Score {
         }
     }
 
+    /// **The port's own (MD16):** a move scored flat, as [`Score::start`] scores the backflip — on the
+    /// ground or not, worth `points` at once, times the combo's length. MX vs. ATV's front flip and
+    /// 360 are scored this way, each under its own id.
+    pub fn start_flat(&mut self, id: u8, points: F) {
+        if !self.combo {
+            self.open();
+        }
+        self.push(points, F::ZERO, F::ZERO, F::ONE, GRANULARITY, id, flag::FLOOR | flag::TIMED);
+        let count = self.count();
+        if let Some(head) = self.nodes.first() {
+            self.combo_points = self.combo_points + head.points * count;
+        }
+        self.finish(count, true);
+    }
+
     /// **A trick's clock ran out** (the rider's trick-stop hook): landed, times the combo's length.
     pub fn finished(&mut self) {
         if self.combo {
@@ -289,6 +304,17 @@ impl Score {
     /// **The rider's tick**: the one-wheel clocks, the bank, and the backflip watch, after the bike's
     /// update and the trick clocks have run.
     pub fn frame(&mut self, dt: F, s: &Sense) {
+        self.frame_with(dt, s, None);
+    }
+
+    /// [`Score::frame`] with MX vs. ATV's front flip watch beside the backflip's (MD16):
+    /// `front_flip` is the watch and what a front flip is worth. `None` is [`Score::frame`] exactly.
+    ///
+    /// The watch is the backflip's mirrored — **the port's own**, as the front flip is: nose down
+    /// past level with the bike's up axis under it (1), then over with the forward axis pointing up
+    /// again (2), then the right way up with the nose not past 0.79 up (3), which scores as a backflip
+    /// round does: at once in the air when nothing is being scored, or on the landing.
+    pub fn frame_with(&mut self, dt: F, s: &Sense, mut front_flip: Option<(&mut u8, F)>) {
         if !s.wrecked {
             let (front, rear) = (s.front, s.rear);
             if !front && rear && !s.slow {
@@ -310,6 +336,12 @@ impl Score {
                 if self.flip == 3 {
                     self.start(BACKFLIP, s);
                     self.flip = 0;
+                }
+                if let Some((w, points)) = front_flip.as_mut() {
+                    if **w == 3 {
+                        self.start_flat(FRONTFLIP, *points);
+                        **w = 0;
+                    }
                 }
                 if self.combo {
                     self.close(F::ONE, true);
@@ -350,6 +382,30 @@ impl Score {
             }
         } else if self.flip != 3 && self.flip != 0 {
             self.flip = 0;
+        }
+        if let Some((w, points)) = front_flip {
+            if *w == 3 && !self.scoring {
+                self.start_flat(FRONTFLIP, points);
+                *w = 0;
+            }
+            if s.wrecked {
+                *w = 0;
+            } else if s.airborne {
+                let (up, forward) = (s.up_y, s.forward_y);
+                if F::ZERO < up && forward < F(0.79) {
+                    match *w {
+                        2 => *w = 3,
+                        0 | 3 => {}
+                        _ => *w = 0,
+                    }
+                } else if up < F::ZERO && forward < F::ZERO && *w == 0 {
+                    *w = 1;
+                } else if up < F::ZERO && F::ZERO < forward && *w == 1 {
+                    *w = 2;
+                }
+            } else if *w != 3 && *w != 0 {
+                *w = 0;
+            }
         }
     }
 
@@ -395,6 +451,10 @@ impl Score {
 
 /// The backflip's id.
 pub const BACKFLIP: u8 = 24;
+/// **The port's own (MD16):** the front flip's and MX vs. ATV's 360s' ids ([`crate::trick::Trick`]).
+pub const FRONTFLIP: u8 = 29;
+pub const THREE_SIXTY_LEFT: u8 = 30;
+pub const THREE_SIXTY_RIGHT: u8 = 31;
 /// The wheelie's id.
 pub const WHEELIE: u8 = 25;
 /// The stoppie's id.
