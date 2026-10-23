@@ -1,0 +1,531 @@
+<title>openmx Ride HUD</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: a 16:9 ride view (em = view height / 45, so split screen shrinks with it); demo controls under it, notes below. */
+@font-face { font-family: "OMX"; font-weight: 800; src: url(../crates/openmx/assets/fonts/MPLUSRounded1c-ExtraBold.ttf) format("truetype"); }
+@font-face { font-family: "OMX"; font-weight: 700; src: url(../crates/openmx/assets/fonts/MPLUSRounded1c-Bold.ttf) format("truetype"); }
+:root {
+  color-scheme: dark;
+  --ember: #f0954a; --rust: #8a4420; --umber: #2a1408;
+  --glass: rgba(14, 7, 3, .62);      /* HUD panels: the menu strip, thinner */
+  --glass-hi: rgba(14, 7, 3, .78);
+  --maroon: #8e0f17; --maroon-lo: #5a070c; --maroon-hi: #b31a23;
+  --chalk: #f5f0e8; --bone: #d8cfc2; --dust: #9c8f80; --ink: #050302;
+  --x: #4a7be0; --o: #e0473f; --sq: #d872b8; --tri: #3cbf93;
+  --you: #ffd23a;                     /* the original's yellow player / human marks */
+  --ai: #ef3b30;                      /* its red AI marks */
+  --hit: #f0954a; --run: #4aa8e0; --race: #e0473f; --stunt: #d872b8;
+  --land: #7fe0a0; --bail: #ff5a4e;
+  --slot1: #00dcff; --slot2: #ff3cc8; --slot3: #b4ff3c; --slot4: #ff7850; --slot5: #9682ff;  /* overlay::MARKER_COLOURS (P94) */
+  --face: "OMX", "M PLUS Rounded 1c", "Arial Rounded MT Bold", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--umber); color: var(--bone); font-family: var(--face); font-weight: 700; }
+.page { max-width: 1320px; margin: 0 auto; padding-block: 20px 48px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 16px; }
+.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+.top h1 { margin: 0; font-weight: 800; font-size: 22px; color: var(--chalk); font-style: oblique 10deg; }
+.top h1 b { color: #e2323c; }
+.top p { margin: 0; color: var(--dust); font-size: 13px; }
+
+/* ---- the screen ---- */
+.screen { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #000; box-shadow: 0 18px 50px rgba(0,0,0,.5); display: grid; gap: 2px; }
+.screen.split { grid-template-rows: 1fr 1fr; }
+.view { position: relative; container-type: size; overflow: hidden; min-height: 0; }
+.hud { position: absolute; inset: 0; font-size: calc(100cqh / 45 * var(--scale, 1)); pointer-events: none; }
+.scene { position: absolute; inset: 0; width: 100%; height: 100%; }
+.t { display: inline-block; transform: skewX(-11deg); }
+
+/* score, top left */
+.score { position: absolute; left: 3.2em; top: 2.6em; display: grid; gap: .1em; }
+.score .lab { font-size: .95em; letter-spacing: .22em; color: var(--bone); text-shadow: 0 .08em 0 rgba(0,0,0,.6); }
+.score .num { font-weight: 800; font-size: 3.1em; line-height: .95; color: var(--chalk); font-variant-numeric: tabular-nums; text-shadow: .06em .08em 0 rgba(0,0,0,.45); }
+.score .num.bump { animation: bump .45s ease-out; }
+@keyframes bump { 0% { color: var(--land); transform: scale(1.12); transform-origin: left center; } 100% { color: var(--chalk); transform: none; } }
+
+/* the marker menu + camera, top right: up while the d-pad works the markers, gone 2 s after */
+.tr { position: absolute; right: 3.2em; top: 2.6em; display: grid; justify-items: end; gap: .7em; }
+.mk { display: grid; gap: .45em; justify-items: stretch; padding: .55em .7em .5em; border-radius: 1.2em; background: var(--glass-hi); border: .1em solid rgba(245,240,232,.22);
+  opacity: 0; transform: translateY(-.5em); transition: opacity .25s, transform .25s; }
+.mk.show { opacity: 1; transform: none; }
+.mk .head { display: flex; justify-content: space-between; align-items: baseline; gap: 1em; font-size: .72em; letter-spacing: .16em; color: var(--dust); }
+.mk .head b { color: var(--bone); font-weight: 800; }
+.mk .line { display: flex; align-items: center; gap: .4em; }
+.mk .sl { position: relative; width: 1.75em; height: 1.75em; border-radius: 50%; display: grid; place-items: center; font-style: normal; font-weight: 800; font-size: .95em; color: var(--chalk);
+  border: .13em solid var(--c); background: rgba(0,0,0,.3); transition: transform .15s; }
+.mk .sl.set { background: var(--c); color: var(--ink); }
+.mk .sl.on { transform: scale(1.18); box-shadow: 0 0 0 .14em var(--ink), 0 0 0 .3em var(--chalk), .2em .25em 0 .3em rgba(0,0,0,.3); }
+.mk .sep { width: .1em; height: 1.4em; background: rgba(245,240,232,.25); margin: 0 .2em; }
+.mk .pl { font-size: .85em; padding: .22em .6em .26em; border-radius: 999px; color: var(--bone); border: .1em solid rgba(245,240,232,.35); white-space: nowrap; }
+.mk .pl i { font-style: normal; color: var(--dust); margin-right: .3em; }
+.mk .pl.on { color: var(--chalk); border-color: var(--chalk); background: linear-gradient(180deg, var(--maroon-hi) 0%, var(--maroon) 45%, var(--maroon-lo) 100%); box-shadow: inset 0 .1em 0 rgba(255,255,255,.22), .15em .18em 0 rgba(0,0,0,.33); }
+.mk .pl.on i { color: var(--bone); }
+.mk .label { font-weight: 800; font-size: 1.05em; color: var(--chalk); }
+.mk .label small { font-weight: 700; font-size: .78em; color: var(--dust); margin-left: .4em; }
+.mk .hold { height: .3em; border-radius: 999px; background: rgba(255,255,255,.12); overflow: hidden; }
+.mk .hold b { display: block; height: 100%; width: 0; background: var(--bone); }
+.mk .hold b.fired { background: var(--land); }
+.mk .keys { display: flex; gap: .9em; font-size: .72em; color: var(--dust); white-space: nowrap; }
+.mk .keys span { display: inline-flex; align-items: center; gap: .3em; }
+.dp { width: 1.6em; height: 1.6em; }
+.flash { position: absolute; inset: 0; background: radial-gradient(circle at 50% 70%, rgba(245,240,232,.7), rgba(245,240,232,0) 60%); opacity: 0; pointer-events: none; }
+.flash.go { animation: poof .5s ease-out; }
+@keyframes poof { 0% { opacity: 1; } 100% { opacity: 0; } }
+.cam { display: flex; align-items: center; gap: .5em; padding: .35em .9em .35em .45em; border-radius: 999px; background: var(--glass-hi); color: var(--chalk); font-size: 1.1em; opacity: 0; transform: translateY(-.4em); transition: opacity .25s, transform .25s; }
+.cam.show { opacity: 1; transform: none; }
+.shoulder { font-size: .7em; font-weight: 800; color: var(--ink); background: var(--bone); border-radius: .35em; padding: .12em .4em; }
+
+/* the challenge clock, top centre */
+.clock { position: absolute; left: 50%; top: 2.4em; transform: translateX(-50%); display: flex; align-items: center; gap: .9em; padding: .4em 1.1em; border-radius: 999px; background: var(--glass-hi); border: .1em solid rgba(245,240,232,.25); color: var(--chalk); white-space: nowrap; }
+.clock .k { font-size: 1em; color: var(--c); }
+.clock .time { font-weight: 800; font-size: 1.6em; font-variant-numeric: tabular-nums; }
+.clock .goal { font-size: .95em; color: var(--bone); font-variant-numeric: tabular-nums; }
+.clock .bar { width: 6em; height: .45em; border-radius: 999px; background: rgba(255,255,255,.15); overflow: hidden; }
+.clock .bar b { display: block; height: 100%; background: var(--c); width: 0; transition: width .3s; }
+
+/* the trick popup, upper centre (the original's points popup) */
+.trick { position: absolute; left: 50%; top: 7.2em; transform: translateX(-50%); display: grid; justify-items: center; gap: .25em; text-align: center; white-space: nowrap; }
+.trick .chain { font-weight: 800; font-size: 2.1em; color: var(--chalk); text-shadow: .07em .09em 0 rgba(0,0,0,.5), 0 0 .4em rgba(0,0,0,.35); }
+.trick .chain span { display: inline-block; }
+.trick .chain span.new { animation: pop .35s cubic-bezier(.2,1.6,.4,1); }
+.trick .chain .plus { color: var(--ember); margin: 0 .25em; }
+@keyframes pop { 0% { transform: scale(.4); opacity: 0; } 100% { transform: none; opacity: 1; } }
+.trick .pts { display: flex; align-items: center; gap: .5em; }
+.trick .pts .p { font-weight: 800; font-size: 1.5em; color: var(--chalk); font-variant-numeric: tabular-nums; text-shadow: .06em .08em 0 rgba(0,0,0,.5); }
+.mult { font-weight: 800; font-size: 1.15em; color: var(--chalk); padding: .1em .55em .15em; border-radius: 999px; border: .1em solid var(--chalk);
+  background: linear-gradient(180deg, var(--maroon-hi) 0%, var(--maroon) 45%, var(--maroon-lo) 100%);
+  box-shadow: inset 0 .12em 0 rgba(255,255,255,.22), .18em .2em 0 rgba(0,0,0,.33); }
+.trick .verdict { font-weight: 800; font-size: 1.3em; letter-spacing: .16em; opacity: 0; }
+.trick.landed .verdict { color: var(--land); opacity: 1; }
+.trick.bailed .verdict { color: var(--bail); opacity: 1; }
+.trick.bailed .chain, .trick.bailed .pts .p { text-decoration: line-through; text-decoration-thickness: .08em; opacity: .55; }
+.trick.out { opacity: 0; transition: opacity .5s .9s; }
+.trick.landed .p { color: var(--land); }
+
+/* minimap, bottom left (where freestyleradar sits) */
+.radar { position: absolute; left: 2.6em; bottom: 2.4em; width: 11.4em; height: 11.4em; filter: drop-shadow(.22em .26em 0 rgba(0,0,0,.35)); }
+.radar svg { width: 100%; height: 100%; overflow: visible; }
+.where { position: absolute; left: 50%; bottom: -1.5em; transform: translateX(-50%); font-size: .85em; color: var(--chalk); white-space: nowrap; text-shadow: 0 .08em 0 rgba(0,0,0,.7); }
+
+/* speedometer, bottom right */
+.speedo { position: absolute; right: 3.2em; bottom: 2.6em; display: grid; justify-items: end; gap: .35em; }
+.digital { display: flex; align-items: flex-end; gap: .45em; }
+.digital .v { font-weight: 800; font-size: 5.6em; line-height: .8; color: var(--chalk); font-variant-numeric: tabular-nums; text-shadow: .05em .06em 0 rgba(0,0,0,.45); min-width: 1.75em; text-align: right; }
+.digital .u { font-size: 1.05em; letter-spacing: .14em; color: var(--bone); padding-bottom: .25em; }
+.pre { display: flex; align-items: center; gap: .5em; font-size: .8em; color: var(--bone); letter-spacing: .14em; }
+.pre .cap { width: 10.5em; height: .8em; border-radius: 999px; background: var(--glass-hi); border: .12em solid rgba(245,240,232,.5); overflow: hidden; }
+.pre .cap b { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--ember), #ffd8a0); border-radius: 999px; }
+.pre .cap b.full { background: linear-gradient(90deg, var(--land), #e8ffd8); }
+.analog { width: 13em; height: 13em; display: none; }
+.analog svg { width: 100%; height: 100%; overflow: visible; filter: drop-shadow(.2em .25em 0 rgba(0,0,0,.35)); }
+.speedo.is-analog .analog { display: block; }
+.speedo.is-analog .digital { display: none; }
+
+/* prompts: low, small, out of the bike's way */
+.prompts { position: absolute; left: 50%; bottom: 1.6em; transform: translateX(-50%); display: flex; gap: .8em; align-items: center; white-space: nowrap; }
+.prompt { display: flex; align-items: center; gap: .6em; padding: .3em .45em .3em .35em; border-radius: 999px; background: var(--glass-hi); border: .1em solid rgba(245,240,232,.22); color: var(--chalk); font-size: 1em; animation: rise .3s ease-out; }
+@keyframes rise { 0% { transform: translateY(.8em); opacity: 0; } 100% { transform: none; opacity: 1; } }
+.prompt .ico { width: 1.9em; height: 1.9em; border-radius: 50%; display: grid; place-items: center; background: var(--c); color: var(--ink); font-weight: 800; font-size: .95em; flex: none; }
+.prompt .ico svg { width: 1.25em; height: 1.25em; }
+.prompt .what { display: grid; line-height: 1.1; }
+.prompt .what b { font-weight: 800; font-size: 1em; }
+.prompt .what small { font-size: .72em; color: var(--bone); }
+.prompt .act { display: flex; align-items: center; gap: .35em; font-size: .85em; color: var(--bone); padding-left: .55em; border-left: .08em solid rgba(245,240,232,.2); margin-left: .1em; }
+.btn { position: relative; display: inline-grid; place-items: center; width: 1.6em; height: 1.6em; border-radius: 50%; background: #1b1410; border: .1em solid rgba(255,255,255,.6); vertical-align: middle; }
+.btn svg { width: 60%; height: 60%; }
+.btn.x svg path { stroke: var(--x); } .btn.o svg circle { stroke: var(--o); } .btn.sq svg rect { stroke: var(--sq); } .btn.tri svg path { stroke: var(--tri); }
+.btn .ring { position: absolute; inset: -.22em; width: auto; height: auto; transform: rotate(-90deg); }
+.btn .ring circle { fill: none; stroke: var(--chalk); stroke-width: 2.4; stroke-dasharray: 100; stroke-dashoffset: var(--hold, 100); }
+
+.hud.none > :not(.prompts):not(.flash) { display: none; }
+.hud.nomap .radar { display: none; }
+
+/* ---- controls under the screen ---- */
+.ctl { display: grid; gap: 10px; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.row > span { font-size: 12px; color: var(--dust); letter-spacing: .12em; text-transform: uppercase; min-width: 86px; }
+.row button { font: inherit; font-size: 13px; color: var(--bone); background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+.row button:hover { background: rgba(255,255,255,.1); }
+.row button[aria-pressed="true"] { background: var(--maroon); border-color: var(--chalk); color: var(--chalk); }
+.row button:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+.row kbd { font: inherit; font-family: system-ui, sans-serif; font-size: 11px; color: var(--dust); margin-left: 4px; }
+
+/* ---- notes ---- */
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 12px; }
+.card { min-width: 0; background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 14px 16px; }
+.card h3 { margin: 0 0 8px; font-size: 15px; font-weight: 800; color: var(--chalk); }
+.card p, .card li { font-size: 13px; line-height: 1.55; color: var(--bone); margin: 0; }
+.card ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.card code { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ember); }
+</style>
+
+<div class="page">
+  <div class="top">
+    <h1>open<b>MX</b> · ride HUD concept</h1>
+    <p>Our font, vector panels, the original's layout. Press the buttons or use the keys shown.</p>
+  </div>
+  <div class="screen" id="screen"></div>
+
+  <div class="ctl">
+    <div class="row"><span>Tricks</span>
+      <button data-do="trick">Do a trick <kbd>T</kbd></button>
+      <button data-do="land">Land <kbd>L</kbd></button>
+      <button data-do="bail">Bail <kbd>B</kbd></button>
+      <button data-do="pump">Pump the preload <kbd>P</kbd></button>
+    </div>
+    <div class="row"><span>Prompts</span>
+      <button data-do="bay" aria-pressed="false">Stop by a machine</button>
+      <button data-do="zone" aria-pressed="false">Ride into a challenge</button>
+      <button data-do="accept">Answer ◯ <kbd>O</kbd></button>
+      <button data-do="cam">Camera L1 <kbd>C</kbd></button>
+    </div>
+    <div class="row"><span>Markers</span>
+      <button data-do="left">◀ Pick <kbd>←</kbd></button>
+      <button data-do="right">Pick ▶ <kbd>→</kbd></button>
+      <button data-do="place">▼ Hold: place <kbd>↓</kbd></button>
+      <button data-do="go">▲ Hold: ride to <kbd>↑</kbd></button>
+      <button data-do="plane">Machine: Bike</button>
+    </div>
+    <div class="row"><span>Settings</span>
+      <button data-set="speedo" data-v="0" aria-pressed="true">Digital</button>
+      <button data-set="speedo" data-v="1">Analog</button>
+      <button data-set="map" data-v="1" aria-pressed="true">Minimap on</button>
+      <button data-set="map" data-v="0">Minimap off</button>
+      <button data-set="scale" data-v="0.85">HUD 85%</button>
+      <button data-set="scale" data-v="1" aria-pressed="true">100%</button>
+      <button data-set="scale" data-v="1.15">115%</button>
+      <button data-set="overlay" data-v="1" aria-pressed="true">Overlay Original</button>
+      <button data-set="overlay" data-v="0">Overlay None</button>
+      <button data-set="split" data-v="0" aria-pressed="true">1 player</button>
+      <button data-set="split" data-v="1">2 players</button>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="card"><h3>Where things sit</h3><ul>
+      <li>The original's corners are kept. Score is top left, the radar bottom left (freestyleradar's 87,363) and the speed bottom right, all inside a 4% title-safe margin.</li>
+      <li>The trick popup sits in the upper centre, clear of the bike and the horizon line.</li>
+      <li>Prompts are one low strip at the bottom centre, below the rider. They're a third the height of the original's centred dialog box and never cover the bike or the line ahead.</li>
+      <li>Everything is sized in view-height ems, so split screen and the V52 HUD scale are a single multiplier.</li>
+    </ul></div>
+    <div class="card"><h3>Points popup (P68)</h3><ul>
+      <li>Each trick joins the chain with a pop, and the multiplier pill counts the links.</li>
+      <li>A landing turns it green, then the total counts into SCORE. A bail strikes it through in red and nothing is banked.</li>
+      <li>The trick names here are placeholders. The real ones come from the disc's strings once P68 reads them; only Wheelie, Stoppie and BackFlip are named in <code>trick.rs</code> so far.</li>
+    </ul></div>
+    <div class="card"><h3>Minimap</h3><ul>
+      <li>It's heading-up like the original, so the rose turns and the player arrow stays fixed. N rides the rim.</li>
+      <li>Blips use the original's set: yellow humans, red AI, the four activity zones (H hit, R run, M machine race, S stunt), idle machines, and numbered markers in slot colours (P94).</li>
+      <li>Anything past the range pins to the rim as a chevron, so a zone or friend is never lost.</li>
+      <li>Off with Minimap Off (V52).</li>
+    </ul></div>
+    <div class="card"><h3>Prompts</h3><ul>
+      <li>The machine prompt replaces <code>STR_SWITCH_BIPLANE</code>'s dialog ("Would you like to switch to the Biplane?") with one line: the machine's icon, its name and ◯ Switch. It answers the same way through <code>vehicle::Answer</code> (P103).</li>
+      <li>The challenge prompt names the activity and its goal. ◯ is held to start, with a ring filling, so riding through a zone never starts one by accident.</li>
+      <li>Overlay None still shows prompts, because they're how you act. It hides everything else, the marker bar included (P117).</li>
+    </ul></div>
+    <div class="card"><h3>Marker menu (P88, P94, P106, P107)</h3><ul>
+      <li>This rebuilds <code>hud::draw_markers</code> as a vector panel. It moves from top centre to the top right corner, opposite SCORE, so the trick popup and a challenge's clock keep the centre.</li>
+      <li>It shows five slot discs in the markers' own colours, solid where set. The selection is ringed and raised.</li>
+      <li>The other players come next as pills with their names (<code>hud::marker_label</code>: "to Kai", or P2 for a seat with no name), then a one-line label and the 200 ms hold bar for ▼ and ▲.</li>
+      <li>It's up 2 s after a change or while a direction is held (<code>MarkerBanner</code>), the same rule as now. The d-pad legend says what each direction does.</li>
+      <li>The header names the machine whose set is up (P107), and the plane's five are its own.</li>
+      <li>A teleport poofs the screen. Markers appear on the radar in the same colours and numbers.</li>
+      <li>Overlay None hides it (P117).</li>
+    </ul></div>
+    <div class="card"><h3>Speed and preload</h3><ul>
+      <li>Digital is a big slanted readout in our face, with no bitmap yearlingdash.</li>
+      <li>Analog is a vector dial with the odometer (V42).</li>
+      <li>The preload capsule fills while pumping and turns green when full (V53).</li>
+      <li>The biplane keeps the speed only, as the original does.</li>
+    </ul></div>
+    <div class="card"><h3>Build notes</h3><ul>
+      <li>This uses the same M PLUS Rounded 1c subsets and vector pill as the menu concept (P118), so the two ship together.</li>
+      <li>It's drawn on both paths, the GPU one and the software one, as vector quads with no fstyleui.res bitmaps. The disc's icons stay as an "Original art" fallback.</li>
+      <li>The debug overlay (H) stays the port's own and draws on top.</li>
+    </ul></div>
+  </div>
+</div>
+
+<script>
+const BTN = {
+  o: (ring) => `<span class="btn o"><svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="3" stroke-width="1.6" fill="none"/></svg>${ring ? '<svg class="ring" viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" pathLength="100"/></svg>' : ''}</span>`,
+};
+const PLANE = '<svg viewBox="0 0 20 20"><path d="M10 2c.8 0 1.2.8 1.2 2v3.5l6.3 2.2v1.8l-6.3-1.2v4l2 1.5V17l-3.2-.9-3.2.9v-1.2l2-1.5v-4l-6.3 1.2V9.7l6.3-2.2V4c0-1.2.4-2 1.2-2Z" fill="#050302"/></svg>';
+const TRUCK = '<svg viewBox="0 0 20 20"><path d="M2 11l2-4h7l2 3h4l1 1v3h-2a2 2 0 0 1-4 0H8a2 2 0 0 1-4 0H2Z" fill="#050302"/></svg>';
+const TRICKS = [["BackFlip", 1500], ["Superman", 750], ["Nac Nac", 500], ["Heel Clicker", 600], ["Can Can", 400], ["Whip", 350], ["Cliffhanger", 900]];
+const SLOTC = ["var(--slot1)", "var(--slot2)", "var(--slot3)", "var(--slot4)", "var(--slot5)"];
+const DPAD = d => `<svg class="dp" viewBox="0 0 20 20"><path d="M7.5 1.5h5v6h6v5h-6v6h-5v-6h-6v-5h6Z" fill="#3a302a" stroke="#d8cfc2" stroke-width="1"/><path d="${{u: "M10 3.2 12.4 6.4H7.6Z", d: "M10 16.8 12.4 13.6H7.6Z", l: "M3.2 10 6.4 7.6V12.4Z", r: "M16.8 10 13.6 7.6V12.4Z", lr: "M3.2 10 6.4 7.6V12.4ZM16.8 10 13.6 7.6V12.4Z"}[d]}" fill="#f5f0e8"/></svg>`;
+const OTHERS = [[1, "Kai"], [2, null]];
+const CAMS = ["Race Cam 1", "Race Cam 2", "Race Cam 3", "Chase Cam", "Helmet Cam"];
+
+/* the ride behind the HUD: a third-person bike on a dirt line, procedural, no disc art */
+function scene(seed) {
+  const r = n => Math.sin(seed * 9.7 + n * 3.1) * .5 + .5;
+  const hill = (y, a, k) => { let d = `M0 ${y}`; for (let i = 0; i <= 16; i++) d += ` L${i * 10} ${(y - Math.sin(i * k + seed) * a - r(i) * a * .6).toFixed(1)}`; return d + " L160 90 L0 90Z"; };
+  return `<svg class="scene" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs>
+    <linearGradient id="sky${seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8fb4d8"/><stop offset=".55" stop-color="#e9d6b4"/><stop offset="1" stop-color="#f3dfbf"/></linearGradient>
+    <linearGradient id="dirt${seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a87346"/><stop offset="1" stop-color="#5c3a22"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#sky${seed})"/>
+    <path d="${hill(40, 6, .5)}" fill="#a9a48a" opacity=".7"/>
+    <path d="${hill(48, 5, .85)}" fill="#7d7a5a"/>
+    <path d="M0 52 C 40 49, 120 49, 160 53 L160 90 L0 90Z" fill="#8a6a46"/>
+    <path d="M62 52 L98 52 L150 90 L10 90Z" fill="url(#dirt${seed})"/>
+    <path d="M78 52 C 76 64, 70 76, 62 90 M82 52 C 86 64, 94 76, 104 90" stroke="#3e2716" stroke-opacity=".35" stroke-width=".7" fill="none"/>
+    <path d="M90 55 l7 -2.5 l4 2.5Z" fill="#6e4b31"/>
+    <g transform="translate(80 70)">
+      <ellipse cx="0" cy="10.5" rx="9" ry="1.6" fill="#000" opacity=".25"/>
+      <rect x="-1.6" y="2.5" width="3.2" height="8.2" rx="1.4" fill="#1b1410"/>
+      <path d="M-6 1.5 Q0 -1 6 1.5 L4.5 4 L-4.5 4Z" fill="#c2141c"/>
+      <path d="M-3.2 -6 Q0 -8.5 3.2 -6 L3.6 1.5 L-3.6 1.5Z" fill="#2d2f3a"/>
+      <circle cx="0" cy="-9.2" r="2.6" fill="#f5f0e8"/><path d="M-2.6 -9 h5.2 v1.4 h-5.2Z" fill="#c2141c"/>
+      <path d="M-3.6 -4 L-7 1 M3.6 -4 L7 1" stroke="#2d2f3a" stroke-width="1.6" stroke-linecap="round"/>
+      <text x="0" y="-1.8" text-anchor="middle" font-size="3.2" font-weight="800" fill="#f5f0e8" font-family="OMX, sans-serif">27</text>
+    </g></svg>`;
+}
+
+/* ---- the radar: heading-up, the original's blip set ---- */
+const WORLD = [
+  { k: "zone", a: "Hit", c: "var(--hit)", L: "H", x: 120, y: -260 }, { k: "zone", a: "Run", c: "var(--run)", L: "R", x: -300, y: -120 },
+  { k: "zone", a: "Race", c: "var(--race)", L: "M", x: 420, y: 380 }, { k: "zone", a: "Stunt", c: "var(--stunt)", L: "S", x: -90, y: 160 },
+  { k: "plane", c: "#ffd8a0", x: 60, y: 90 }, { k: "truck", c: "#9ad2ff", x: -210, y: 260 },
+  { k: "human", x: -40, y: -140 }, { k: "ai", x: 160, y: 40 }, { k: "ai", x: -260, y: 60 },
+];
+const R = 86, RANGE = 340;
+function radarSVG(v) {
+  const h = v.heading, cos = Math.cos(h), sin = Math.sin(h);
+  const map = (x, y) => { const dx = x - v.x, dy = y - v.y; return [(dx * cos - dy * sin) / RANGE * R, (dx * sin + dy * cos) / RANGE * R]; };
+  let blips = "";
+  for (const b of WORLD.concat(v.marks())) {
+    let [px, py] = map(b.x, b.y); const d = Math.hypot(px, py);
+    if (d > R - 7) { // past the range: a chevron on the rim
+      const a = Math.atan2(py, px), rx = Math.cos(a) * (R - 3), ry = Math.sin(a) * (R - 3);
+      const col = b.k === "zone" ? b.c : b.k === "mark" ? SLOTC[b.n - 1] : b.k === "human" ? "var(--you)" : b.k === "ai" ? "var(--ai)" : b.c;
+      blips += `<path transform="translate(${rx.toFixed(1)} ${ry.toFixed(1)}) rotate(${(a * 180 / Math.PI + 90).toFixed(0)})" d="M-4 2.5 0 -3.5 4 2.5Z" fill="${col}" stroke="#050302" stroke-width="1"/>`;
+      continue;
+    }
+    const at = `transform="translate(${px.toFixed(1)} ${py.toFixed(1)})"`;
+    if (b.k === "zone") blips += `<g ${at}><circle r="7.5" fill="${b.c}" stroke="#f5f0e8" stroke-width="1.4"/><text y="3.4" text-anchor="middle" font-size="9.5" font-weight="800" fill="#050302" font-family="OMX, sans-serif">${b.L}</text></g>`;
+    else if (b.k === "mark") blips += `<g ${at}>${b.on ? '<circle r="8.6" fill="none" stroke="#f5f0e8" stroke-width="1.6"/>' : ""}<circle r="6" fill="${SLOTC[b.n - 1]}" stroke="#050302" stroke-width="1.2"/><text y="3" text-anchor="middle" font-size="8" font-weight="800" fill="#050302" font-family="OMX, sans-serif">${b.n}</text></g>`;
+    else if (b.k === "plane") blips += `<g ${at} transform-origin="0 0"><rect x="-7" y="-7" width="14" height="14" rx="4" fill="${b.c}" stroke="#050302" stroke-width="1"/><g transform="translate(-6 -6) scale(.6)">${PLANE.replace(/<\/?svg[^>]*>/g, "")}</g></g>`;
+    else if (b.k === "truck") blips += `<g ${at}><rect x="-7" y="-7" width="14" height="14" rx="4" fill="${b.c}" stroke="#050302" stroke-width="1"/><g transform="translate(-6 -6) scale(.6)">${TRUCK.replace(/<\/?svg[^>]*>/g, "")}</g></g>`;
+    else blips += `<circle ${at} r="3.6" fill="${b.k === "human" ? "var(--you)" : "var(--ai)"}" stroke="#050302" stroke-width="1.2"/>`;
+  }
+  let ticks = "";
+  for (let i = 0; i < 36; i++) { const a = i * Math.PI / 18 + h, big = i % 9 === 0; ticks += `<line x1="${(Math.sin(a) * (R - (big ? 7 : 4))).toFixed(1)}" y1="${(-Math.cos(a) * (R - (big ? 7 : 4))).toFixed(1)}" x2="${(Math.sin(a) * R).toFixed(1)}" y2="${(-Math.cos(a) * R).toFixed(1)}" stroke="#f5f0e8" stroke-opacity="${big ? .9 : .35}" stroke-width="${big ? 1.6 : 1}"/>`; }
+  const nx = Math.sin(h) * (R + 9), ny = -Math.cos(h) * (R + 9);
+  return `<svg viewBox="-100 -100 200 200"><defs><clipPath id="rc${v.id}"><circle r="${R}"/></clipPath>
+    <radialGradient id="rg${v.id}"><stop offset="0" stop-color="#2a1408" stop-opacity=".55"/><stop offset="1" stop-color="#0e0703" stop-opacity=".82"/></radialGradient></defs>
+    <circle r="${R}" fill="url(#rg${v.id})"/>
+    <g clip-path="url(#rc${v.id})" opacity=".18" stroke="#f5f0e8" fill="none"><circle r="${R / 3}"/><circle r="${R * 2 / 3}"/></g>
+    <path d="M0 0 L-26 -82 A86 86 0 0 1 26 -82Z" fill="#f5f0e8" opacity=".07"/>
+    ${ticks}${blips}
+    <circle r="${R}" fill="none" stroke="#f5f0e8" stroke-width="2.2"/>
+    <g transform="translate(${nx.toFixed(1)} ${ny.toFixed(1)})"><circle r="7" fill="#8e0f17" stroke="#f5f0e8" stroke-width="1.4"/><text y="3.3" text-anchor="middle" font-size="9" font-weight="800" fill="#f5f0e8" font-family="OMX, sans-serif">N</text></g>
+    <path d="M0 -8 L6 6 L0 3 L-6 6Z" fill="var(--you)" stroke="#050302" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
+}
+
+/* ---- analog dial: 0..80 mph over 240°, odometer under the hub ---- */
+function dialSVG(v) {
+  const a0 = -210, span = 240, mx = 80, ang = s => (a0 + span * Math.min(s, mx) / mx) * Math.PI / 180;
+  let t = "";
+  for (let s = 0; s <= mx; s += 5) { const a = ang(s), big = s % 10 === 0, r1 = big ? 70 : 76;
+    t += `<line x1="${(Math.cos(a) * r1).toFixed(1)}" y1="${(Math.sin(a) * r1).toFixed(1)}" x2="${(Math.cos(a) * 84).toFixed(1)}" y2="${(Math.sin(a) * 84).toFixed(1)}" stroke="${s >= 70 ? "#e0473f" : "#f5f0e8"}" stroke-width="${big ? 2.6 : 1.2}"/>`;
+    if (big) t += `<text x="${(Math.cos(a) * 57).toFixed(1)}" y="${(Math.sin(a) * 57 + 4).toFixed(1)}" text-anchor="middle" font-size="12" font-weight="800" fill="#d8cfc2" font-family="OMX, sans-serif">${s}</text>`; }
+  const a = ang(v.speed), odo = String(Math.floor(v.odo * 10)).padStart(5, "0");
+  return `<svg viewBox="-100 -100 200 200"><circle r="92" fill="#0e0703" fill-opacity=".72" stroke="#f5f0e8" stroke-width="2.4"/>${t}
+    <rect x="-24" y="26" width="48" height="16" rx="3" fill="#050302" stroke="#f5f0e8" stroke-opacity=".4"/>
+    <text x="0" y="38.5" text-anchor="middle" font-size="12" font-weight="800" fill="#f5f0e8" font-family="OMX, sans-serif" letter-spacing="1.5">${odo.slice(0, 4)}<tspan fill="#f0954a">${odo.slice(4)}</tspan></text>
+    <text x="0" y="58" text-anchor="middle" font-size="9" fill="#9c8f80" font-family="OMX, sans-serif" letter-spacing="2">MPH</text>
+    <line x1="${(-Math.cos(a) * 12).toFixed(1)}" y1="${(-Math.sin(a) * 12).toFixed(1)}" x2="${(Math.cos(a) * 80).toFixed(1)}" y2="${(Math.sin(a) * 80).toFixed(1)}" stroke="#e0473f" stroke-width="3.6" stroke-linecap="round"/>
+    <circle r="8" fill="#8e0f17" stroke="#f5f0e8" stroke-width="2"/></svg>`;
+}
+
+/* ---- state ---- */
+const O = { speedo: 0, map: 1, scale: 1, overlay: 1, split: 0 };
+function makeView(id) {
+  return { id, seed: id + 1, speed: 34, target: 40, heading: .4, x: 0, y: 0, odo: 142.3, score: id ? 48200 : 128450, chain: [], verdict: "", pre: 0, pumping: false,
+    cam: 0, camT: 0, bay: false, zone: false, hold: 0, holding: false, challenge: null, el: null,
+    machine: 0, sets: [[{ x: 200, y: -60 }, { x: -150, y: -300 }, null, null, null], [{ x: 40, y: 220 }, null, null, null, null]], pick: 1, mkUntil: 0, mkHold: 0, mkDir: "", mkFired: false,
+    get slots() { return this.sets[this.machine]; },
+    marks() { return this.slots.map((s, i) => s && { k: "mark", n: i + 1, x: s.x, y: s.y, on: this.pick === i }).filter(Boolean); } };
+}
+const V = [makeView(0), makeView(1)];
+
+function build() {
+  const scr = document.getElementById("screen");
+  scr.className = "screen" + (O.split ? " split" : "");
+  scr.innerHTML = "";
+  for (const v of V.slice(0, O.split ? 2 : 1)) {
+    const el = document.createElement("div"); el.className = "view";
+    el.innerHTML = scene(v.seed) + `<div class="hud">
+      <div class="score"><span class="lab t">SCORE</span><span class="num t">0</span></div>
+      <div class="flash"></div><div class="tr"><div class="mk"></div><div class="cam"><span class="shoulder">L1</span><span class="t name"></span></div></div>
+      <div class="clock" hidden></div>
+      <div class="trick"><div class="chain t"></div><div class="pts"><span class="p t"></span><span class="mult t" hidden></span></div><div class="verdict t"></div></div>
+      <div class="radar"></div>
+      <div class="speedo"><div class="pre"><span class="t">PRELOAD</span><span class="cap"><b></b></span></div>
+        <div class="digital"><span class="v t">0</span><span class="u t">MPH</span></div><div class="analog"></div></div>
+      <div class="prompts"></div></div>`;
+    scr.appendChild(el); v.el = el;
+    v.q = sel => el.querySelector(sel);
+    renderStatic(v); renderTrick(v); renderPrompts(v);
+  }
+  applySettings();
+}
+function applySettings() {
+  for (const v of V.slice(0, O.split ? 2 : 1)) {
+    const h = v.q(".hud");
+    h.style.setProperty("--scale", O.scale);
+    h.classList.toggle("none", !O.overlay); h.classList.toggle("nomap", !O.map);
+    v.q(".speedo").classList.toggle("is-analog", !!O.speedo);
+  }
+  document.querySelectorAll("[data-set]").forEach(b => b.setAttribute("aria-pressed", String(O[b.dataset.set] == b.dataset.v)));
+}
+function renderStatic(v) {
+  v.q(".score .num").textContent = v.score.toLocaleString("en-US");
+  renderMarkers(v);
+}
+/* the marker menu: hud::draw_markers, redrawn */
+function renderMarkers(v) {
+  const others = OTHERS.filter(([s]) => s !== v.id), n = 5 + others.length, p = v.pick;
+  let label;
+  if (p < 5) label = `Marker ${p + 1}<small>${v.slots[p] ? "set" : "empty"}</small>`;
+  else { const [seat, name] = others[p - 5]; label = `to ${name || "P" + (seat + 1)}<small>${name ? "P" + (seat + 1) : ""}</small>`; }
+  v.q(".mk").innerHTML = `<div class="head"><span class="t">MARKERS</span><b class="t">${v.machine ? "BIPLANE" : "BIKE"}</b></div>
+    <div class="line">${v.slots.map((s, i) => `<i class="sl ${s ? "set" : ""} ${p === i ? "on" : ""}" style="--c:${SLOTC[i]}">${i + 1}</i>`).join("")}
+      ${others.length ? '<span class="sep"></span>' : ""}${others.map(([seat, name], i) => `<span class="pl t ${p === 5 + i ? "on" : ""}"><i>P${seat + 1}</i>${name || ""}</span>`).join("")}</div>
+    <div class="label t">${label}</div>
+    <div class="hold"><b class="${v.mkFired ? "fired" : ""}" style="width:${(v.mkHold * 100).toFixed(0)}%"></b></div>
+    <div class="keys"><span>${DPAD("lr")}pick</span><span>${DPAD("d")}hold: place</span><span>${DPAD("u")}hold: ride to</span></div>`;
+  v.n = n;
+}
+function showMarkers(v) { v.mkUntil = performance.now() + 2000; v.q(".mk").classList.add("show"); }
+function step(v, d) { v.pick = (v.pick + d + 5 + OTHERS.filter(([s]) => s !== v.id).length) % (5 + OTHERS.filter(([s]) => s !== v.id).length); renderMarkers(v); showMarkers(v); }
+function holdMarker(v, dir) { if (v.mkDir) return; v.mkDir = dir; v.mkHold = 0; v.mkFired = false; showMarkers(v); }
+function fireMarker(v) {
+  const dir = v.mkDir, p = v.pick;
+  if (dir === "place" && p < 5) v.slots[p] = { x: v.x, y: v.y };
+  if (dir === "go") {
+    const to = p < 5 ? v.slots[p] : { x: -40, y: -140 };
+    if (to) { v.x = to.x; v.y = to.y; const f = v.q(".flash"); f.classList.remove("go"); void f.offsetWidth; f.classList.add("go"); }
+  }
+  v.mkFired = true; renderMarkers(v); showMarkers(v);
+}
+function chainPts(v) { return v.chain.reduce((a, [, p]) => a + p, 0); }
+function renderTrick(v, fresh) {
+  const t = v.q(".trick"), n = v.chain.length;
+  t.className = "trick" + (v.verdict ? " " + v.verdict : "") + (n || v.verdict ? "" : " out");
+  if (!n) { t.querySelector(".chain").innerHTML = ""; t.querySelector(".p").textContent = ""; t.querySelector(".mult").hidden = true; t.querySelector(".verdict").textContent = ""; return; }
+  t.querySelector(".chain").innerHTML = v.chain.map(([name], i) => (i ? '<span class="plus">+</span>' : "") + `<span class="${fresh && i === n - 1 ? "new" : ""}">${name}</span>`).join("");
+  const m = t.querySelector(".mult"); m.hidden = n < 2; m.textContent = "×" + n;
+  t.querySelector(".p").textContent = (v.verdict === "landed" ? "+" : "") + (chainPts(v) * (v.verdict === "landed" ? n : 1)).toLocaleString("en-US");
+  t.querySelector(".verdict").textContent = v.verdict === "landed" ? "LANDED" : v.verdict === "bailed" ? "BAILED" : "";
+}
+const ACT = { name: "Stunt Competition", c: "var(--stunt)", L: "S", goal: 5000, time: 60 };
+function renderPrompts(v) {
+  let h = "";
+  if (v.bay) h += `<div class="prompt"><span class="ico" style="--c:#ffd8a0">${PLANE}</span><span class="what"><b class="t">Biplane</b><small>parked here</small></span><span class="act">${BTN.o()}<span class="t">Switch</span></span></div>`;
+  if (v.zone && !v.challenge) h += `<div class="prompt"><span class="ico" style="--c:${ACT.c}">${ACT.L}</span><span class="what"><b class="t">${ACT.name}</b><small>${ACT.goal.toLocaleString("en-US")} pts in ${ACT.time} s</small></span><span class="act">${BTN.o(true)}<span class="t">Hold to start</span></span></div>`;
+  v.q(".prompts").innerHTML = h;
+}
+function renderClock(v) {
+  const c = v.q(".clock"), ch = v.challenge;
+  c.hidden = !ch; if (!ch) return;
+  c.style.setProperty("--c", ACT.c);
+  const s = Math.max(0, ch.left);
+  c.innerHTML = `<span class="k t">${ACT.name}</span><span class="time t">${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}</span><span class="bar"><b style="width:${Math.min(100, ch.got / ACT.goal * 100)}%"></b></span><span class="goal t">${ch.got.toLocaleString("en-US")} / ${ACT.goal.toLocaleString("en-US")}</span>`;
+}
+
+/* ---- actions ---- */
+let timers = new Map();
+function later(v, key, ms, fn) { clearTimeout(timers.get(v.id + key)); timers.set(v.id + key, setTimeout(fn, ms)); }
+function trick(v) {
+  if (v.verdict) { v.chain = []; v.verdict = ""; }
+  const used = new Set(v.chain.map(c => c[0])); const pool = TRICKS.filter(t => !used.has(t[0]));
+  v.chain.push(pool[Math.floor(Math.random() * pool.length)] || TRICKS[0]);
+  if (v.chain.length > 4) v.chain.shift();
+  renderTrick(v, true);
+}
+function land(v) {
+  if (!v.chain.length || v.verdict) return;
+  v.verdict = "landed"; renderTrick(v);
+  const add = chainPts(v) * v.chain.length, from = v.score, t0 = performance.now();
+  if (v.challenge) v.challenge.got += add;
+  const step = now => { const k = Math.min(1, (now - t0) / 700); v.score = Math.round(from + add * k); v.q(".score .num").textContent = v.score.toLocaleString("en-US"); if (k < 1) requestAnimationFrame(step); };
+  requestAnimationFrame(step); const n = v.q(".score .num"); n.classList.remove("bump"); void n.offsetWidth; n.classList.add("bump");
+  later(v, "clear", 1800, () => { v.chain = []; v.verdict = ""; renderTrick(v); });
+}
+function bail(v) {
+  if (!v.chain.length || v.verdict) return;
+  v.verdict = "bailed"; renderTrick(v); v.target = 0;
+  later(v, "clear", 1600, () => { v.chain = []; v.verdict = ""; renderTrick(v); v.target = 38; });
+}
+function cam(v) { v.cam = (v.cam + 1) % CAMS.length; const c = v.q(".cam"); c.querySelector(".name").textContent = CAMS[v.cam]; c.classList.add("show"); later(v, "cam", 1500, () => c.classList.remove("show")); }
+function accept(v) {
+  if (v.bay) { v.bay = false; renderPrompts(v); syncToggles(); cam(v); v.q(".cam .name").textContent = "Flight Cam 1"; return; }
+  if (v.zone && !v.challenge) { v.holding = true; later(v, "hold", 900, () => { v.holding = false; }); }
+}
+function syncToggles() { const v = V[0]; document.querySelector('[data-do="bay"]').setAttribute("aria-pressed", String(v.bay)); document.querySelector('[data-do="zone"]').setAttribute("aria-pressed", String(v.zone || !!v.challenge)); }
+const DO = {
+  left: v => step(v, -1), right: v => step(v, 1), place: v => holdMarker(v, "place"), go: v => holdMarker(v, "go"),
+  plane: v => { v.machine ^= 1; v.pick = 0; renderMarkers(v); showMarkers(v); document.querySelector('[data-do="plane"]').textContent = "Machine: " + (v.machine ? "Biplane" : "Bike"); },
+  trick: v => trick(v), land: v => land(v), bail: v => bail(v), cam: v => cam(v), accept: v => accept(v),
+  pump: v => { v.pumping = true; later(v, "pump", 1200, () => v.pumping = false); },
+  bay: v => { v.bay = !v.bay; if (v.bay) v.target = 6; else v.target = 40; renderPrompts(v); },
+  zone: v => { if (v.challenge) { v.challenge = null; v.zone = false; renderClock(v); } else v.zone = !v.zone; renderPrompts(v); },
+};
+document.querySelectorAll("[data-do]").forEach(b => b.addEventListener("click", () => { DO[b.dataset.do](V[0]); syncToggles(); }));
+document.querySelectorAll("[data-set]").forEach(b => b.addEventListener("click", () => {
+  const k = b.dataset.set, val = Number(b.dataset.v); const was = O.split; O[k] = val;
+  if (k === "split" && was !== val) build(); else applySettings();
+}));
+addEventListener("keydown", e => {
+  if (e.target.closest && e.target.closest("input,textarea")) return;
+  const m = { t: "trick", l: "land", b: "bail", p: "pump", c: "cam", o: "accept", arrowleft: "left", arrowright: "right", arrowdown: "place", arrowup: "go" }[e.key.toLowerCase()];
+  if (m) { if (e.key.startsWith("Arrow")) e.preventDefault(); if (e.repeat && m.startsWith("arrow")) return; DO[m](V[0]); syncToggles(); }
+});
+
+/* ---- the frame loop ---- */
+let last = performance.now(), auto = 0;
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  for (const v of V.slice(0, O.split ? 2 : 1)) {
+    if (!v.bay && v.verdict !== "bailed") v.target = 38 + Math.sin(now / 1700 + v.id) * 10;
+    v.speed += (v.target - v.speed) * Math.min(1, dt * 2.2);
+    v.heading += dt * (.09 + Math.sin(now / 4000 + v.id) * .12);
+    const fps = v.speed * 1.4667; v.x += Math.sin(v.heading) * fps * dt; v.y -= Math.cos(v.heading) * fps * dt;
+    if (Math.hypot(v.x, v.y) > 380) { v.x *= .97; v.y *= .97; }
+    v.odo += v.speed * dt / 3600;
+    v.pre = v.pumping ? Math.min(1, v.pre + dt * 1.4) : Math.max(0, v.pre - dt * 1.8);
+    const b = v.q(".pre .cap b"); b.style.width = (v.pre * 100).toFixed(1) + "%"; b.classList.toggle("full", v.pre >= 1);
+    v.q(".digital .v").textContent = Math.round(v.speed);
+    if (O.speedo) v.q(".analog").innerHTML = dialSVG(v);
+    if (O.map) v.q(".radar").innerHTML = radarSVG(v);
+    if (v.zone && !v.challenge) {
+      v.hold = v.holding ? Math.min(1, v.hold + dt / .8) : Math.max(0, v.hold - dt * 3);
+      const ring = v.q(".prompts .btn .ring circle"); if (ring) ring.style.setProperty("--hold", (100 - v.hold * 100).toFixed(1));
+      if (v.hold >= 1) { v.challenge = { left: ACT.time, got: 0 }; v.hold = 0; v.holding = false; renderPrompts(v); syncToggles(); }
+    }
+    if (v.mkDir) { // P106's hold: fires as it crosses 200 ms, once; the bar lingers a beat so it reads
+      v.mkHold = Math.min(1, v.mkHold + dt / .2);
+      if (v.mkHold >= 1 && !v.mkFired) fireMarker(v);
+      else { const b = v.q(".mk .hold b"); if (b) b.style.width = (v.mkHold * 100).toFixed(0) + "%"; }
+      if (v.mkFired) { v.mkT = (v.mkT || 0) + dt; if (v.mkT > .35) { v.mkDir = ""; v.mkT = 0; v.mkHold = 0; v.mkFired = false; renderMarkers(v); } }
+    }
+    if (v.mkUntil && now > v.mkUntil && !v.mkDir) { v.mkUntil = 0; v.q(".mk").classList.remove("show"); }
+    if (v.challenge) { v.challenge.left -= dt; renderClock(v); if (v.challenge.left <= -2) { v.challenge = null; v.zone = false; renderClock(v); renderPrompts(v); syncToggles(); } }
+  }
+  if (O.split) { // player 2 rides by itself
+    auto -= dt; const p2 = V[1];
+    if (auto <= 0) { if (p2.chain.length && !p2.verdict && Math.random() < .5) land(p2); else if (!p2.verdict) trick(p2); auto = .8 + Math.random() * 1.2; }
+  }
+  requestAnimationFrame(frame);
+}
+
+build();
+// open on a moment that shows everything: a two-trick chain in the air, a machine parked by the line
+trick(V[0]); trick(V[0]); V[0].bay = true; V[0].zone = true; V[0].target = 22; renderPrompts(V[0]); syncToggles();
+cam(V[0]); showMarkers(V[0]); V[0].mkUntil = performance.now() + 4000;
+requestAnimationFrame(frame);
+</script>
