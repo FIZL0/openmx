@@ -39,7 +39,7 @@
 use crate::disc::Res;
 use crate::mat::{M4, V3, v3};
 use crate::psg::{Mesh, Model, Node, Strip, Vertex};
-use crate::world::{Assets, Camera, Lighting, Loaded};
+use crate::world::{Assets, Camera, Lighting, Loaded, Surface};
 use std::sync::Mutex;
 
 /// The `[Environment]` distances when a scene leaves them out, as the original's reader has them.
@@ -365,6 +365,50 @@ pub enum Lod {
     Smooth,
 }
 
+/// How a plant's leaves are laid over what is behind them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Foliage {
+    /// The original's materials: every texel with any alpha at all mixed in by its alpha and writing
+    /// depth. Filtered and mipped, a crown's edges and its far levels are part-alpha, so a leaf
+    /// card hides whatever is drawn behind it after it, where it is see-through as well as where
+    /// it is not: the trees behind it, and the tree's own cards behind it, which show as pale
+    /// ghosts of the cards inside the crown.
+    Original,
+    /// Ours (V56, presentation only): the leaves cut out at [`FOLIAGE_CUTOFF`] and drawn solid,
+    /// so a texel is either all leaf or not there, and the order plants are drawn in no longer
+    /// matters ([`cut_out`]).
+    #[default]
+    Cutout,
+}
+
+/// The alpha (0..=255) under which a [`Foliage::Cutout`] texel is not drawn: half. The leaves'
+/// textures are near enough all or nothing at their own size, so this is where their edges are.
+pub const FOLIAGE_CUTOFF: u8 = 128;
+
+/// A plant material's surface under [`Foliage::Cutout`]: one mixed over the frame by alpha that
+/// writes depth is instead solid where its alpha reaches [`FOLIAGE_CUTOFF`] and absent elsewhere.
+/// Any other surface is left as it is.
+pub fn cut_out(s: Surface) -> Surface {
+    if s.blend && !s.additive && s.depth_write {
+        Surface { blend: false, cutoff: s.cutoff.max(FOLIAGE_CUTOFF), keep_coverage: true, ..s }
+    } else {
+        s
+    }
+}
+
+/// The name a part's [`cut_out`] copy is kept under in [`Assets`].
+pub fn cut_name(name: &str) -> String {
+    format!("{name}, cut")
+}
+
+/// Keep a [`cut_out`] copy of the loaded model `name` beside it, replacing any copy made before.
+fn load_cut(assets: &mut Assets, name: &str) {
+    let Some(loaded) = assets.models.get(name) else { return };
+    let mut cut = loaded.clone();
+    cut.surfaces = cut.surfaces.into_iter().map(cut_out).collect();
+    assets.models.insert(cut_name(name), cut);
+}
+
 /// The smooth band's width, as a share of the middle of the scene's two distances, when the scene's
 /// own band is narrower. It ends where the scene's does, so no model is kept further out than the
 /// original keeps it: free09's 300..350 becomes 252.5..350.
@@ -454,6 +498,9 @@ pub struct Draw<'a> {
     /// own copy of the model without looking the name up.
     pub species: usize,
     pub part: Part,
+    /// Its [`cut_out`] copy ([`Foliage::Cutout`]): a model or a matched billboard, never the
+    /// original's picture, which [`Lod::Original`] fades in as the original does.
+    pub cut: bool,
 }
 
 impl Draw<'_> {
@@ -464,6 +511,8 @@ impl Draw<'_> {
             Part::Billboard => 1,
             Part::Matched => 2,
         };
+        // The cut copies follow, of the models and the matched billboards only.
+        let k = if self.cut { 3 + k / 2 } else { k };
         k * species + self.species
     }
 }
@@ -477,6 +526,8 @@ pub struct Grove {
     pub billboards: Vec<String>,
     /// Per species: the billboard painted to look like the model.
     pub matched: Vec<String>,
+    /// The [`cut_out`] copies' names: of the models, then of the matched billboards.
+    pub cut: Vec<String>,
     /// Per species: the model's half height and half width, which its matrix scales to the plant's.
     half: Vec<(f32, f32)>,
     /// `EcoDistance3D` and `EcoDistance2D`.
@@ -484,6 +535,9 @@ pub struct Grove {
     pub far: f32,
     /// How plants change from model to picture; the original's way is this one setting away.
     pub lod: Lod,
+    /// How their leaves are laid over what is behind them; the original's way is this one setting
+    /// away too.
+    pub foliage: Foliage,
     /// Per plant, the way its model turned when it last came near: (cos, sin) about the up axis.
     /// Behind a lock so a frame that only borrows the scene can still turn what it brings near.
     turned: Mutex<Vec<Option<(f32, f32)>>>,
@@ -498,10 +552,12 @@ impl Clone for Grove {
             models: self.models.clone(),
             billboards: self.billboards.clone(),
             matched: self.matched.clone(),
+            cut: self.cut.clone(),
             half: self.half.clone(),
             near: self.near,
             far: self.far,
             lod: self.lod,
+            foliage: self.foliage,
             turned: Mutex::new(self.turned.lock().map(|t| t.clone()).unwrap_or_default()),
             jitter: self.jitter.clone(),
         }
@@ -596,15 +652,17 @@ impl Grove {
                 .and_then(|l| l.model.nodes.first())
                 .map_or((1.0, 1.0), |n| (n.half_extents.y, n.half_extents.x));
             half.push(h);
+            load_cut(assets, &name);
             models.push(name);
             let board = s.billboard_name();
             assets.load_model(archives, &board, s.billboard_model(&s.material()));
             billboards.push(board);
         }
-        let matched = ecosystem.species.iter().map(Species::matched_name).collect();
+        let matched: Vec<String> = ecosystem.species.iter().map(Species::matched_name).collect();
+        let cut = models.iter().chain(&matched).map(|n| cut_name(n)).collect();
         let turned = Mutex::new(vec![None; ecosystem.plants.len()]);
         let jitter = (0..ecosystem.plants.len()).map(jitter).collect();
-        let mut grove = Grove { ecosystem, models, billboards, matched, half, near, far, lod: Lod::default(), turned, jitter };
+        let mut grove = Grove { ecosystem, models, billboards, matched, cut, half, near, far, lod: Lod::default(), foliage: Foliage::default(), turned, jitter };
         grove.match_billboards(None, archives, assets);
         grove
     }
@@ -632,9 +690,10 @@ impl Grove {
     }
 
     /// Every model the grove draws, by name: the species' models, then their billboards, then the
-    /// matched billboards ([`Draw::part_index`]).
+    /// matched billboards, then the [`cut_out`] copies of the models and of the matched billboards
+    /// ([`Draw::part_index`]).
     pub fn parts(&self) -> impl Iterator<Item = &String> {
-        self.models.iter().chain(&self.billboards).chain(&self.matched)
+        self.models.iter().chain(&self.billboards).chain(&self.matched).chain(&self.cut)
     }
 
     /// Paint each species' matched billboard so that, on average, it is drawn in its model's
@@ -652,6 +711,7 @@ impl Grove {
             let paint = std::array::from_fn(|k| (128.0 * want[k] / got[k].max(1.0)).clamp(32.0, 255.0).round() as u8);
             assets.models.remove(&self.matched[s]);
             assets.load_model(archives, &self.matched[s], sp.billboard_painted(&sp.material(), paint, &self.matched[s]));
+            load_cut(assets, &self.matched[s]);
         }
     }
 
@@ -737,12 +797,16 @@ impl Grove {
                 continue;
             }
             let draw = |part: Part, at: M4, alpha: f32, cover: f32| {
-                let k = match part {
-                    Part::Model => &self.models,
-                    Part::Billboard => &self.billboards,
-                    Part::Matched => &self.matched,
+                let cut = self.foliage == Foliage::Cutout && part != Part::Billboard;
+                let species = self.ecosystem.species.len();
+                let model = match part {
+                    Part::Model if cut => &self.cut[plant.species],
+                    Part::Matched if cut => &self.cut[species + plant.species],
+                    Part::Model => &self.models[plant.species],
+                    Part::Billboard => &self.billboards[plant.species],
+                    Part::Matched => &self.matched[plant.species],
                 };
-                Draw { model: &k[plant.species], at, alpha, cover, species: plant.species, part }
+                Draw { model, at, alpha, cover, species: plant.species, part, cut }
             };
             match self.lod {
                 Lod::Original => {
