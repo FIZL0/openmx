@@ -1129,3 +1129,33 @@ fn hud_scale_grows_the_radar_and_speedometer_about_their_corners() {
     let drawn = art.draw(&mut Frame::new(640, 448, [0, 0, 0]), (640, 448), &solo, 0, span, &bike(0.0));
     assert_eq!(drawn.scale, 0.5);
 }
+
+/// Over the user's animandpump ride played back on the original (S109, 1204 ticks of riding,
+/// pumped through five lips with no shove fired), the port's meter, fed the rider's preload fields
+/// row by row, writes the speedometer's `preloadMeter` variable as the original did on every row:
+/// dark while the lip test fails, lit and empty while it passes, never latched. The capture is
+/// `context/capture/s109/run1.csv` (git-ignored, research/journal/2026-10-23-s109-animandpump);
+/// without it this skips.
+#[test]
+fn the_preload_meter_is_the_originals_over_animandpump() {
+    use ps2_oracle::{Kit, skip};
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    // run2 is the whole movie (2361 ticks, a wreck at 3716..3915); run1 its first half.
+    let path = kit.ctx("capture").join("s109").join("run2.csv");
+    if !path.exists() {
+        skip(&format!("no S109 capture at {}", path.display()));
+        return;
+    }
+    let rows = meter_rows(&path);
+    let mut m = overlay::PreloadMeter::default();
+    let (mut lit, mut runs, mut was) = (0, 0, false);
+    for r in &rows {
+        m.step(r.sense);
+        assert_eq!((m.value, m.latched), (r.value, r.latched), "frame {}: the port against the original", r.frame);
+        let on = r.value == 0;
+        lit += usize::from(on);
+        runs += usize::from(on && !was);
+        was = on;
+    }
+    assert!(rows.len() >= 2300 && lit >= 300 && runs >= 8, "{} rows, {lit} lit in {runs} runs", rows.len());
+}
