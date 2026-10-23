@@ -1774,6 +1774,13 @@ impl Tire {
         self.spin = F(self.slip.z()) * self.inv_radius;
         self.angle = wrap(self.angle + self.spin * dt);
     }
+
+    /// `times` the braking along the rolling line [`Tire::roll`] last pushed at the contact, as a
+    /// world force (zero off the ground): what a game modifier adds through the centre of gravity
+    /// (P116). Not the original's.
+    pub fn braking(&self, times: F) -> Vf {
+        rows(&self.frame, Vf::new(0.0, 0.0, (F(self.friction.z()) * times).to_f32(), 0.0))
+    }
 }
 
 /// The plane's collision force, every substep before anything else: gravity onto the body, then the

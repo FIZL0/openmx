@@ -540,7 +540,7 @@ wire!(crate::rider_anim::Clocked { played, snapshot });
 /// rider's set; [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
-        let Self { joystick, autopilot, engine, aero, body, measure, tires, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _, nearby, bike: _ } = self;
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _, nearby, bike: _ } = self;
         joystick.put(out);
         autopilot.put(out);
         engine.put(out);
@@ -548,6 +548,7 @@ impl Wire for crate::flight::Flight {
         body.put(out);
         measure.put(out);
         tires.put(out);
+        cg_braking.put(out);
         pad.put(out);
         surfaces.put(out);
         attitude.put(out);
@@ -576,6 +577,7 @@ impl Wire for crate::flight::Flight {
             body: Wire::take(r)?,
             measure: Wire::take(r)?,
             tires: Wire::take(r)?,
+            cg_braking: Wire::take(r)?,
             pad: Wire::take(r)?,
             surfaces: Wire::take(r)?,
             attitude: Wire::take(r)?,
