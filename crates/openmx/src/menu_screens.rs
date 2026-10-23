@@ -67,6 +67,8 @@ enum Btn {
     Triangle,
     Start,
     L1R1,
+    /// The d-pad's left and right.
+    LeftRight,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -363,6 +365,15 @@ impl<'a> Pen<'a> {
                 }
                 return;
             }
+            Btn::LeftRight => {
+                let w = d * 0.8;
+                for (i, dir) in [-1.0f32, 1.0].into_iter().enumerate() {
+                    let cx = x + (i as f32 - 0.5) * (w + d * 0.15);
+                    self.round([cx - w / 2.0, y - r * 0.8, w, d * 0.8], d * 0.25, SHOULDER, SHOULDER);
+                    self.arrow(cx, y, [dir, 0.0], d * 0.4, CHALK);
+                }
+                return;
+            }
         };
         self.disc(x, y, r, colour);
         let k = d * 0.32;
@@ -387,6 +398,7 @@ impl<'a> Pen<'a> {
         match b {
             Btn::Start => self.wide(Weight::Heavy, "START", d * 0.5) + d * 0.6,
             Btn::L1R1 => 2.0 * (self.wide(Weight::Heavy, "L1", d * 0.5) + d * 0.6) + d * 0.15,
+            Btn::LeftRight => 2.0 * d * 0.8 + d * 0.15,
             _ => d,
         }
     }
@@ -1161,42 +1173,42 @@ impl Pen<'_> {
         self.text(Weight::Heavy, &nm, x + w / 2.0, y + h - 1.4, 1.3, 0.0, [0x14, 0x14, 0x14, 255], Align::Centre);
     }
 
-    /// Free Ride's pick: the disc's towns and the mods under their headings, the lit track's still,
-    /// and the ride's setup.
+    /// Free Ride's pick: the lit category's tracks under its name, Left and Right between the
+    /// categories (the disc's towns, the worlds, each mod pack), the lit track's still, and the
+    /// ride's setup.
     fn tracks(&mut self, menu: &Menu) {
         let at = menu.cursor(Screen::Tracks).min(menu.track_count().saturating_sub(1));
         self.strip(3.0, 22.0);
         self.logo(true);
-        // The list as rows, a heading over each part.
-        let mut rows = vec![Row { label: "MX Unleashed".into(), ..Row::heading_row() }];
-        let mut cursor = 0;
-        for i in 0..menu.track_count() {
-            if i == TRACKS.len() {
-                rows.push(Row { label: "Mods".into(), ..Row::heading_row() });
-            }
-            if i == at {
-                cursor = rows.len();
-            }
-            let (id, name) = menu.track_at(i);
+        let groups = menu.track_groups();
+        let (group, range) = groups[menu.track_group(at)].clone();
+        let mut rows = Vec::new();
+        let top = if groups.len() > 1 {
+            self.category(&group, 3.8, 7.6, 20.4);
+            11.4
+        } else {
+            rows.push(Row { label: group, ..Row::heading_row() });
+            8.2
+        };
+        let cursor = rows.len() + at - range.start;
+        for i in range.clone() {
             let mut r = Row::heading_row();
             r.kind = Kind::Action;
-            r.label = name.to_string();
-            if i >= TRACKS.len() {
-                r.value = String::new();
-                let _ = id;
-            }
+            r.label = menu.track_at(i).1.to_string();
             r.value = String::from(" ");
             rows.push(r);
         }
-        self.rows(&rows, cursor, 3.8, 20.4, 8.2);
+        self.rows(&rows, cursor, 3.8, 20.4, top);
         let (id, name) = menu.track_at(at);
         let (x, w) = (28.5, 47.0);
         let disc = at < TRACKS.len();
         let tag = if disc { "MX Unleashed".to_string() } else { menu.packs().into_iter().find(|p| p.prefix == pack_of(id)).map_or("Mods".into(), |p| p.name) };
         let b = [x, 6.0, 36.0, 20.25];
         self.framed_still(menu, if disc { at } else { usize::MAX }, b, &tag);
-        let count = format!("{} of {}", at + 1, menu.track_count());
-        let y = self.heading("", name, "", x, b[1] + b[3] + 1.0, w, 2.6);
+        let count = format!("{} of {}", at - range.start + 1, range.len());
+        // A long name stops short of the count beside it.
+        let room = w - self.wide(Weight::Bold, &count, 1.2) - 2.0;
+        let y = self.heading("", name, "", x, b[1] + b[3] + 1.0, room, 2.6);
         self.text(Weight::Bold, &count, x + w - 1.0, b[1] + b[3] + 1.0 + CAP * 1.2, 1.2, 0.0, EYEBROW, Align::Right);
         // The setup strip: each rider's machine, the wrecks, the modifiers.
         let riders = menu.riders.clamp(1, SEATS_MAX);
@@ -1216,11 +1228,29 @@ impl Pen<'_> {
         self.chips(&chips, x, y + 1.0, w);
         self.title(Screen::Tracks.title());
         let mut hints = vec![(Btn::Circle, "Back"), (Btn::Square, "Machine"), (Btn::Triangle, "Wrecks")];
+        if groups.len() > 1 {
+            hints.push((Btn::LeftRight, "Category"));
+        }
         if riders > 1 {
             hints.push((Btn::L1R1, "Player"));
         }
         hints.push((Btn::Cross, "Ride"));
         self.hints(&hints);
+    }
+
+    /// The pick's category, lit between the arrows Left and Right step it by.
+    fn category(&mut self, name: &str, x: f32, top: f32, w: f32) {
+        let size = 1.3;
+        let h = size * 1.8;
+        let (mid, r) = (top + h / 2.0, h / 2.0);
+        let (bx, bw) = (x + 1.6, w - 3.2);
+        self.round([bx + 0.26, top + 0.29, bw, h], r, SHADOW, SHADOW);
+        self.round([bx, top, bw, h], r, LIT_TOP, LIT_BOTTOM);
+        self.ring([bx, top, bw, h], r, 0.13, CHALK);
+        let label = self.fit(Weight::Heavy, name, size, bw - 2.0);
+        self.text(Weight::Heavy, &label, bx + bw / 2.0, Pen::mid(mid, size), size, SLANT, CHALK, Align::Centre);
+        self.arrow(x + 0.6, mid, [-1.0, 0.0], 0.9, CHALK);
+        self.arrow(x + w - 0.6, mid, [1.0, 0.0], 0.9, CHALK);
     }
 
     /// The local game's seats: a card each, dashed and open or lit with the pad on it.

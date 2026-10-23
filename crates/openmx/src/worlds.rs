@@ -60,6 +60,25 @@ pub fn is_world(mods: &Path, id: &str) -> bool {
     Json::parse(&text).ok().and_then(|j| j.get("kind").and_then(Json::str).map(|k| k == "world")).unwrap_or(false)
 }
 
+/// The world mods under `mods` for the track pick, `(id, name)` in folder-name order: only each
+/// `mod.json` is read, since [`find`] reads every tile's terrain and the ride checks the rest.
+pub fn listed(mods: &Path) -> Vec<(String, String)> {
+    let Ok(list) = std::fs::read_dir(mods.join("tracks")) else { return Vec::new() };
+    let mut out: Vec<(String, String)> = list
+        .flatten()
+        .filter_map(|e| {
+            let id = e.file_name().into_string().ok()?;
+            let text = std::fs::read_to_string(e.path().join("mod.json")).ok()?;
+            let json = Json::parse(&text).ok()?;
+            let string = |key: &str| json.get(key).and_then(Json::str);
+            let name = string("name")?.trim();
+            (string("kind")? == "world" && string("id")? == id && track_mods::valid_id(&id) && !name.is_empty()).then(|| (id.clone(), name.to_string()))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// Two numbers of a JSON array as whole feet, or as samples.
 fn pair(v: Option<&Json>, what: &str) -> Result<[f64; 2], String> {
     match v {

@@ -5185,10 +5185,11 @@ fn mod_tracks(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, Stri
     for line in &scan.log {
         println!("{line}");
     }
-    if !scan.tracks.is_empty() {
-        println!("mods: {} tracks", scan.tracks.len());
+    let worlds = worlds::listed(&folder);
+    if !scan.tracks.is_empty() || !worlds.is_empty() {
+        println!("mods: {} tracks, {} worlds", scan.tracks.len(), worlds.len());
     }
-    scan.tracks.into_iter().map(|t| (t.id, t.name)).collect()
+    scan.tracks.into_iter().map(|t| (t.id, t.name)).chain(worlds).collect()
 }
 
 /// A tape to ride, from the file it is in.
