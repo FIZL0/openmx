@@ -239,6 +239,20 @@ fn run<M: Machine>(
     make: impl Fn(usize) -> M,
     link: &Link,
     rounds: Range<u32>,
+    each: impl FnMut(u32, &mut Run<M>, &mut Vec<bool>),
+) -> Run<M> {
+    run_asleep(lineup, timing, make, link, rounds, &[], each)
+}
+
+/// [`run`] with the machines `asleep` off the network from the first round, until `each` wakes them:
+/// a machine still loading its ride (P127).
+fn run_asleep<M: Machine>(
+    lineup: &str,
+    timing: Timing,
+    make: impl Fn(usize) -> M,
+    link: &Link,
+    rounds: Range<u32>,
+    asleep: &[usize],
     mut each: impl FnMut(u32, &mut Run<M>, &mut Vec<bool>),
 ) -> Run<M> {
     let lineup = Lineup::parse(lineup).unwrap();
@@ -253,7 +267,7 @@ fn run<M: Machine>(
         names,
         biggest: 0,
     };
-    let mut live = vec![true; r.names.len()];
+    let mut live: Vec<bool> = (0..r.names.len()).map(|i| !asleep.contains(&i)).collect();
     let mut wire: Vec<(usize, u32, String, Vec<u8>)> = Vec::new();
     let mut rng = 0x2545_f491_4f6c_dd1du64;
     let mut lost = move || {
@@ -656,6 +670,27 @@ fn a_desync_is_caught_and_resynced() {
 
 fn short() -> Timing {
     Timing { wait: 5.0, ..Timing::default() }
+}
+
+/// `g`'s load takes 20 s (P127: its machine has said nothing yet, as the shell's online ride makes its
+/// session only once the ride is built): the host stays on tick 0 all that time, nobody counts `g`
+/// as away, and once `g` is in the two start together, in sync from the first tick.
+#[test]
+fn the_ride_starts_only_once_a_slow_loading_peer_is_in() {
+    let link = Link { loss: 0.1, lag: 3, outage: 0..0, oneway: false };
+    let loaded = 600;
+    let mut held = Vec::new();
+    let r = run_asleep("host,g", Timing::default(), Tally::new, &link, 0..loaded + 300, &[1], |round, r, live| {
+        live[1] = round + 1 >= loaded;
+        if round + 1 < loaded {
+            held.push(r.nets[0].tick());
+            assert!(r.nets[0].recover.away.is_empty(), "g away at round {round} while loading");
+        }
+    });
+    assert!(held.iter().all(|&t| t == 0), "the host rode on before g was in: {:?}", held.iter().max());
+    assert!(r.nets[0].tick() > 200 && r.nets[1].tick() > 200, "{} {}", r.nets[0].tick(), r.nets[1].tick());
+    assert!(r.agree(&[0, 1], 0) > 200);
+    assert_eq!((r.nets[0].recover.restarts, r.nets[0].end.as_deref()), (0, None));
 }
 
 /// `h` goes silent at round 150 (5 s) for good: the others hold and say so, and after the wait the host
