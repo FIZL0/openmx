@@ -103,12 +103,18 @@ fn a_default_launch_shows_the_originals_hud() {
 }
 
 /// Paused, the ride's HUD is still under the menu: on the GPU the menu's patch used to replace it.
+/// Since P118 the pause dims the ride and its black band and hint tab cover the bottom of the
+/// frame, as the concept's do, so the HUD is looked for in what shows above them, through the dim:
+/// a twentieth of each box drawn on, where a replaced HUD draws none.
 #[test]
 fn the_pause_menu_keeps_the_hud_under_it() {
     for renderer in ["gpu", "software"] {
         let pause = |overlay| ["--renderer", renderer, "--menu", "--screen", "pause", "--overlay", overlay];
         let Some(with) = first_frame(&format!("{renderer}-pause"), &pause("original")) else { return };
         let without = first_frame(&format!("{renderer}-pause-none"), &pause("none")).unwrap();
-        assert_hud(&format!("{renderer}, paused"), &with, &without, READOUT);
+        for (part, b) in [("speedometer", (READOUT.0, READOUT.1, READOUT.2, 338)), ("radar", (RADAR.0, RADAR.1, RADAR.2, 338))] {
+            let (n, area) = (apart(&with, &without, b), (b.2 - b.0) * (b.3 - b.1));
+            assert!(n * 20 > area, "{renderer}, paused: only {n} of the {part}'s {area} pixels above the band were drawn on");
+        }
     }
 }

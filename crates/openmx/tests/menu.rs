@@ -84,6 +84,122 @@ fn key(menu: &Menu) -> String {
     format!("{m:?}")
 }
 
+/// Taps of `control` until `done` holds, which 64 taps must reach.
+fn tap_until(m: &mut Menu, r: &mut Reader, control: Control, done: impl Fn(&Menu) -> bool) {
+    for _ in 0..64 {
+        if done(m) {
+            return;
+        }
+        tap(m, r, control);
+    }
+    assert!(done(m), "64 taps of {} did not get there", control.name());
+}
+
+/// R1 along the open screen's tabs to the one named `tab` (P118).
+fn tab_to(m: &mut Menu, r: &mut Reader, tab: &str) {
+    let screen = m.screen().unwrap();
+    assert!(m.tabs(screen).contains(&tab), "{screen:?} has no {tab} tab");
+    tap_until(m, r, Control::R1, |m| m.tabs(screen)[m.tab(screen)] == tab);
+}
+
+/// Down the main menu to the row named `row`, and Cross.
+fn main_to(m: &mut Menu, r: &mut Reader, row: &str) {
+    let at = menu::MAIN.iter().position(|n| *n == row).unwrap();
+    tap_until(m, r, Control::Down, |m| m.cursor(Screen::Main) == at);
+    tap(m, r, Control::Cross);
+}
+
+/// Settings from the main menu by pad alone (P118), on the tab named `tab`.
+fn settings_at(m: &mut Menu, r: &mut Reader, tab: &str) {
+    main_to(m, r, "Settings");
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    tab_to(m, r, tab);
+}
+
+/// Down an option page to the row that is `key`, round from the bottom if it is above.
+fn down_to(m: &mut Menu, r: &mut Reader, key: menu::Key) {
+    let screen = m.screen().unwrap();
+    assert!(m.page().iter().any(|row| row.key == key), "{screen:?} has no {key:?} row");
+    tap_until(m, r, Control::Down, |m| m.page()[m.cursor(screen)].key == key);
+}
+
+/// Type `text` on the menu's keyboard: down to each character's row, right to its key, Cross. The
+/// keyboard gives a word's first letter its capital.
+fn type_keys(m: &mut Menu, r: &mut Reader, text: &str) {
+    for c in text.chars() {
+        let (row, col) = menu::KEY_ROWS
+            .iter()
+            .enumerate()
+            .find_map(|(i, k)| k.find(c.to_ascii_lowercase()).map(|j| (i, j)))
+            .unwrap_or_else(|| panic!("no key for {c:?}"));
+        tap_until(m, r, Control::Down, |m| m.key_at().0 == row);
+        tap_until(m, r, Control::Right, |m| m.key_at().1 == col);
+        tap(m, r, Control::Cross);
+    }
+}
+
+/// Cross on the keyboard's command `col` under its letters: Space, Delete, Clear, Done.
+fn key_command(m: &mut Menu, r: &mut Reader, col: usize) {
+    tap_until(m, r, Control::Down, |m| m.key_at().0 == menu::KEY_ROWS.len());
+    tap_until(m, r, Control::Right, |m| m.key_at().1 == col);
+    tap(m, r, Control::Cross);
+}
+
+/// Press every row of the open option page in turn, walking to each by Down, top to bottom or
+/// bottom to top: Right, or Cross where Right is not the row's press. A row that opens a page or the
+/// keyboard is back by Circle. A dimmed row must say why, and neither press may change anything.
+/// The rows whose press changed the menu.
+fn press_every_row(m: &mut Menu, r: &mut Reader, upward: bool) -> Vec<menu::Key> {
+    let screen = m.screen().unwrap();
+    let n = m.page().len();
+    let order: Vec<usize> = if upward { (0..n).rev().collect() } else { (0..n).collect() };
+    let mut changed = Vec::new();
+    for i in order {
+        let row = m.page()[i].clone();
+        if !row.selectable() {
+            continue;
+        }
+        tap_until(m, r, Control::Down, |m| m.cursor(screen) == i);
+        let before = key(m);
+        if let Some(why) = &row.off {
+            assert!(!why.is_empty(), "{screen:?} {:?} is dimmed without saying why", row.key);
+            tap(m, r, Control::Right);
+            tap(m, r, Control::Cross);
+            assert_eq!(key(m), before, "{screen:?} {:?} is dimmed ({why}) but a press changed it", row.key);
+            continue;
+        }
+        tap(m, r, Control::Right);
+        if key(m) == before {
+            tap(m, r, Control::Cross);
+        }
+        if m.screen() != Some(screen) {
+            tap(m, r, Control::Circle);
+            assert_eq!(m.screen(), Some(screen), "{screen:?} {:?}: Circle is not back on the page", row.key);
+            changed.push(row.key);
+        } else if key(m) != before {
+            changed.push(row.key);
+        }
+    }
+    changed
+}
+
+/// Every selectable row of the open page changes by pad in at least one of two walks, top down and
+/// bottom up, each from the menu as `start` leaves it (one row's change can dim another, which the
+/// other walk then reaches first).
+fn every_row_changes(start: &dyn Fn() -> (Menu, Reader), what: &str) {
+    let (m, _) = start();
+    let rows: Vec<menu::Row> = m.page().into_iter().filter(|r| r.selectable()).collect();
+    assert!(!rows.is_empty(), "{what}: no rows");
+    let mut changed = Vec::new();
+    for upward in [false, true] {
+        let (mut m, mut r) = start();
+        changed.extend(press_every_row(&mut m, &mut r, upward));
+    }
+    for row in rows {
+        assert!(changed.contains(&row.key), "{what}: {:?} ({}) never changed", row.key, row.label);
+    }
+}
+
 #[test]
 fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
     let (mut menu, reader) = fresh();
@@ -91,14 +207,16 @@ fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
     // and this walk taps one pad only. One alone is `one_pad_cannot_start_a_local_game_but_can_free_ride`.
     menu.join = join::Join::with(&[Some(0), Some(1)], join::ON_SCREEN, join::Opened::Menu);
     assert_eq!(menu.screen(), Some(Screen::Main));
+    // Controls, Audio and Camera are Settings' tabs since P118, never a screen of their own on the
+    // stack; `l1_and_r1_walk_every_tab_round_from_either_end` walks those.
+    let wanted: Vec<Screen> = Screen::ALL.into_iter().filter(|s| !matches!(s, Screen::Controls | Screen::Audio | Screen::Camera)).collect();
     // Breadth first over single button taps, so each screen is found by its shortest path.
     let mut found: Vec<(Screen, Vec<Control>)> = vec![(Screen::Main, vec![])];
     let mut seen = HashSet::from([key(&menu)]);
     let mut queue = VecDeque::from([(menu, reader, Vec::<Control>::new())]);
     while let Some((menu, reader, path)) = queue.pop_front() {
-        // Seven: Controls is the fourth of the settings' seven rows since P42's sound rows, so the
-        // wrap from the first row no longer reaches it in one.
-        if found.len() == Screen::ALL.len() || path.len() >= 7 {
+        // Seven: the garage's Name row, a row under its Player row, opens the keyboard at six.
+        if found.len() == wanted.len() || path.len() >= 7 {
             break;
         }
         for b in BUTTONS {
@@ -119,7 +237,7 @@ fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
             }
         }
     }
-    for s in Screen::ALL {
+    for s in wanted {
         let path = found.iter().find(|f| f.0 == s);
         assert!(path.is_some(), "{s:?} is not reachable from the main menu");
     }
@@ -132,11 +250,11 @@ fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
 #[test]
 fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     let (mut m, mut r) = fresh();
-    // Free Ride, then right twice: Bridgeport.
+    // Free Ride, then down twice (P118's pick is a list): Bridgeport.
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
-    tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Down);
     assert_eq!(m.cursor(Screen::Tracks), 2);
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Ride("free09".into())), "{acts:?}");
@@ -148,8 +266,7 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     assert!(m.riding());
     tap(&mut m, &mut r, Control::Start);
     assert_eq!(m.screen(), Some(Screen::Pause));
-    // Settings from the pause (past the machine switch, P41, and the audio options, P56), and back
-    // to it.
+    // Settings from the pause (past the machine switch, P41, and the audio, P56), and back to it.
     for _ in 0..4 {
         tap(&mut m, &mut r, Control::Down);
     }
@@ -157,14 +274,14 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     assert_eq!(m.screen(), Some(Screen::Settings));
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Pause));
-    // Restart and Main Menu.
+    // Restart and Main Menu (under Clear Markers since P118).
     for _ in 0..3 {
         tap(&mut m, &mut r, Control::Up);
     }
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Restart), "{acts:?}");
     tap(&mut m, &mut r, Control::Start);
-    for _ in 0..5 {
+    for _ in 0..6 {
         tap(&mut m, &mut r, Control::Down);
     }
     let acts = tap(&mut m, &mut r, Control::Cross);
@@ -182,17 +299,17 @@ fn a_held_direction_repeats_and_the_stick_counts_as_one() {
     let (mut m, mut r) = fresh();
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
-    // The stick leaned right, held for a second: one step, then the repeats.
-    let mut right = Report::idle();
-    right.set_axis(2, 0xff);
+    // The stick leaned down, held for a second: one step, then the repeats.
+    let mut down = Report::idle();
+    down.set_axis(3, 0xff);
     for _ in 0..60 {
-        m.step(r.read(&right));
+        m.step(r.read(&down));
     }
     let moved = m.cursor(Screen::Tracks);
     assert!(moved >= 3, "a second of stick moved the pick {moved} times");
     // And a centred stick moves nothing.
     let mut centre = Report::idle();
-    centre.set_axis(2, AXIS_CENTRE);
+    centre.set_axis(3, AXIS_CENTRE);
     for _ in 0..60 {
         m.step(r.read(&centre));
     }
@@ -261,6 +378,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         },
         // The mods folder not read (MD2).
         mods: false,
+        // One pack of it switched off (P118).
+        mods_off: vec!["md2".into()],
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -295,21 +414,18 @@ fn the_settings_file_reads_back_as_it_was_written() {
     std::fs::remove_dir_all(empty).ok();
 }
 
+/// The draw distance row on the Display tab (P118's name for V-era's graphics row), whose words in
+/// the file are as they were.
 #[test]
 fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     let (mut m, mut r) = fresh();
     assert_eq!(m.settings.graphics, Graphics::Full, "the whole map unless asked");
-    for _ in 0..4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Settings));
-    // Past the name, overlay, wrecks, controls, music and the two volumes.
-    for _ in 0..7 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    settings_at(&mut m, &mut r, "Display");
+    down_to(&mut m, &mut r, menu::Key::DrawDistance);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Whole Map");
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.graphics, Graphics::Original);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Original Fog");
     assert!(m.take_changed());
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.graphics, Graphics::Full);
@@ -320,21 +436,16 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     assert_eq!(Settings::parse("graphics = fancy\n").graphics, Graphics::Full);
 }
 
-/// V42: the readout unless asked, and the row under the render scale's switches it to the dial and
-/// back by pad, and says so to be applied and saved.
+/// V42: the readout unless asked, and the Display tab's row switches it to the dial and back by
+/// pad, and says so to be applied and saved. It is the original HUD's, so it dims with the others
+/// (P118).
 #[test]
 fn the_speedometer_row_switches_the_dial_and_is_saved() {
     let (mut m, mut r) = fresh();
     assert_eq!(m.settings.speedometer, Speedometer::Digital, "the readout unless asked");
     assert_eq!(Settings::parse("").speedometer, Speedometer::Digital);
-    for _ in 0..4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Settings));
-    for _ in 0..9 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    settings_at(&mut m, &mut r, "Display");
+    down_to(&mut m, &mut r, menu::Key::Speedometer);
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
     assert_eq!(m.settings.speedometer, Speedometer::Analog);
@@ -349,8 +460,17 @@ fn the_speedometer_row_switches_the_dial_and_is_saved() {
     assert!(m.take_changed());
     assert_eq!(m.settings.speedometer, Speedometer::Digital);
     assert!(m.settings.text().contains("speedometer = digital\n"));
-    // Saved to the file and read back from it.
     tap(&mut m, &mut r, Control::Left);
+    // Under the debug HUD it dims, says why, and keeps its word.
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.overlay, Overlay::Debug);
+    tap(&mut m, &mut r, Control::Down);
+    let row = m.page()[m.cursor(Screen::Settings)].clone();
+    assert_eq!((row.key, row.off.as_deref()), (menu::Key::Speedometer, Some("Only the Original HUD has one")));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.speedometer, Speedometer::Analog);
+    // Saved to the file and read back from it.
     let dir = scratch("speedometer");
     menu::save(&dir, &m.settings, &Controls::default()).unwrap();
     assert_eq!(menu::load(&dir).0.speedometer, Speedometer::Analog);
@@ -368,15 +488,8 @@ fn the_speedometer_row_switches_the_dial_and_is_saved() {
 fn the_render_scale_row_cycles_and_is_saved() {
     let (mut m, mut r) = fresh();
     assert_eq!(m.settings.render_scale, RenderScale::Auto, "auto unless asked");
-    for _ in 0..4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Settings));
-    // The last row, under the graphics'.
-    for _ in 0..8 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    settings_at(&mut m, &mut r, "Display");
+    down_to(&mut m, &mut r, menu::Key::RenderScale);
     let mut seen = Vec::new();
     for _ in 0..4 {
         tap(&mut m, &mut r, Control::Right);
@@ -391,10 +504,11 @@ fn the_render_scale_row_cycles_and_is_saved() {
     assert_eq!(m.settings.render_scale, RenderScale::Auto);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.settings.render_scale, RenderScale::Full);
-    // Down from the last row wraps to the first.
+    // The row under it is VSync's, which the render scale's press does not reach.
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.render_scale, RenderScale::Full);
+    assert!(!m.settings.vsync);
     // Each one is written and read back, and is what `--render-scale` would say.
     for scale in RenderScale::ALL {
         let s = Settings { render_scale: scale, ..Settings::default() };
@@ -412,7 +526,7 @@ fn the_render_scale_row_cycles_and_is_saved() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// P90: a fresh settings file has VSync on and no frame limit; the two rows under the speedometer's
+/// P90: a fresh settings file has VSync on and no frame limit; the Display tab's last two rows
 /// change by pad input, and what they say is saved and read back.
 #[test]
 fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
@@ -425,14 +539,8 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     assert!(menu::load(&dir).0.vsync, "a file from before P90 is VSync on");
     assert_eq!(menu::load(&dir).0.frame_limit, FrameLimit::Off);
 
-    for _ in 0..4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Settings));
-    for _ in 0..10 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    settings_at(&mut m, &mut r, "Display");
+    down_to(&mut m, &mut r, menu::Key::VSync);
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
     assert!(!m.settings.vsync);
@@ -457,16 +565,15 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.frame_limit, FrameLimit::Fps(144));
     assert!(!m.settings.vsync, "the VSync row is untouched");
-    // The next row is the machines at their bays' (P103), which Cross turns off and on.
-    tap(&mut m, &mut r, Control::Down);
+    // L1 to the Ride tab: the machines at their bays (P103), which Cross turns off and on, and the
+    // game modifiers under them.
+    tap(&mut m, &mut r, Control::L1);
+    down_to(&mut m, &mut r, menu::Key::Bays);
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.take_changed());
     assert!(!m.settings.bays);
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.settings.bays);
-    // Then the mods folder's (MD2), the camera's (P82), and after it the modifiers', still the last.
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
@@ -490,16 +597,15 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// P82: the Camera page under Settings. Its sliders move by left and right a notch at a time, Cross
-/// puts one back to the original's, the page's resets put every slider back, a seat can be set apart
-/// from the rest, and all of it is saved and read back. The Original notch hands the shell the
+/// P82: the Camera tab under Settings. Its sliders move by left and right a notch at a time, Cross
+/// puts one back to the original's, its resets put every slider back, the Player row sets a seat
+/// apart from the rest, and all of it is saved and read back. The Original notch hands the shell the
 /// original's distance, height and field of view untouched.
 #[test]
 fn the_camera_rows_change_by_pad_and_are_saved() {
-    use menu::CameraView;
+    use menu::{CameraView, Key};
     let (mut m, mut r) = fresh();
     assert_eq!(m.settings.cameras, [CameraView::DEFAULT; menu::SEATS_MAX], "the shipped default");
-    assert_eq!(m.camera_label(), "Default");
     // The Original notch is the original's numbers: no field-of-view offset and each distance and
     // height at one times the original's.
     assert_eq!(CameraView::ORIGINAL.bike(), (0.0, 1.0, 1.0));
@@ -510,58 +616,49 @@ fn the_camera_rows_change_by_pad_and_are_saved() {
     let (fov, distance, height) = CameraView::DEFAULT.plane();
     assert!(fov > 0.0 && distance > 1.0 && height > 1.0);
 
-    // Main menu, Settings, the row above its last (the modifiers').
-    for _ in 0..4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Settings));
-    for _ in 0..2 {
-        tap(&mut m, &mut r, Control::Up);
-    }
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Camera));
-    assert_eq!(m.camera_rows().len(), 8);
-    assert!(m.camera_rows()[0].contains("Every Player"));
+    settings_at(&mut m, &mut r, "Camera");
+    let rows = m.page();
+    assert_eq!(rows.iter().map(|r| r.key).collect::<Vec<_>>(), [Key::Player, Key::Camera(0), Key::Camera(1), Key::Camera(2), Key::Camera(3), Key::Camera(4), Key::CameraDefault, Key::CameraOriginal]);
+    assert_eq!(rows[0].value, "1P");
 
-    // The field of view: a notch right is a step wider for every player, Cross the original's.
-    tap(&mut m, &mut r, Control::Down);
+    // The field of view: a notch right is a step wider for 1P alone, Cross the original's.
+    down_to(&mut m, &mut r, Key::Camera(0));
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
-    assert!(m.settings.cameras.iter().all(|c| c.fov == CameraView::DEFAULT.fov + 1), "{:?}", m.settings.cameras[0]);
+    assert_eq!(m.settings.cameras[0].fov, CameraView::DEFAULT.fov + 1);
+    assert_eq!(m.settings.cameras[1], CameraView::DEFAULT, "2P's is their own");
     tap(&mut m, &mut r, Control::Cross);
-    assert!(m.settings.cameras.iter().all(|c| c.fov == 0));
-    assert!(m.camera_rows()[1].ends_with("Original"), "{:?}", m.camera_rows());
+    assert_eq!(m.settings.cameras[0].fov, 0);
+    assert_eq!(m.page()[1].value, "Original");
     tap(&mut m, &mut r, Control::Left);
-    assert!(m.settings.cameras.iter().all(|c| c.fov == -1));
+    assert_eq!(m.settings.cameras[0].fov, -1);
     // The bike's distance, a notch left: five points nearer.
     tap(&mut m, &mut r, Control::Down);
     tap(&mut m, &mut r, Control::Left);
-    assert!(m.settings.cameras.iter().all(|c| c.distance == CameraView::DEFAULT.distance - menu::CAMERA_STEP));
-    assert_eq!(m.camera_label(), "Custom");
+    assert_eq!(m.settings.cameras[0].distance, CameraView::DEFAULT.distance - menu::CAMERA_STEP);
 
-    // 2P alone: the player row to 2P, then the biplane's height up, which leaves the others'.
-    for _ in 0..2 {
-        tap(&mut m, &mut r, Control::Up);
-    }
+    // 2P: the Player row to 2P, then the biplane's height up, which leaves 1P's.
+    down_to(&mut m, &mut r, Key::Player);
     tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Right);
-    assert!(m.camera_rows()[0].contains("2P"), "{:?}", m.camera_rows());
-    for _ in 0..5 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    assert_eq!(m.page()[0].value, "2P");
+    assert_eq!(m.page()[1].value, CameraView::DEFAULT.label(0), "the sliders show 2P's");
+    down_to(&mut m, &mut r, Key::Camera(4));
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.cameras[1].plane_height, CameraView::DEFAULT.plane_height + menu::CAMERA_STEP);
     assert_eq!(m.settings.cameras[0].plane_height, CameraView::DEFAULT.plane_height);
-    // Reset To Original puts every slider of 2P's back, and nobody else's.
-    for _ in 0..2 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    // Reset to Original puts every slider of 2P's back, and nobody else's.
+    down_to(&mut m, &mut r, Key::CameraOriginal);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.settings.cameras[1], CameraView::ORIGINAL);
     assert_eq!(m.settings.cameras[1].bike(), (0.0, 1.0, 1.0));
     assert_eq!(m.settings.cameras[1].plane(), (0.0, 1.0, 1.0));
     assert_ne!(m.settings.cameras[0], CameraView::ORIGINAL);
+    // And Reset to Default 2P's to the port's.
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.cameras[1], CameraView::DEFAULT);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
 
     // Saved and read back, one view a seat.
     let dir = scratch("camera");
@@ -576,71 +673,60 @@ fn the_camera_rows_change_by_pad_and_are_saved() {
     // Out of range is clamped to the slider's ends.
     let wild = Settings::parse("camera = 90 1000 0 100 100\n").cameras[0];
     assert_eq!((wild.fov, wild.distance, wild.height), (menu::CAMERA_FOV.1, menu::CAMERA_SHARE.1, menu::CAMERA_SHARE.0));
-    // Back out to the settings, which say whose camera it is.
+    // Back out to the main menu.
     tap(&mut m, &mut r, Control::Circle);
-    assert_eq!(m.screen(), Some(Screen::Settings));
+    assert_eq!(m.screen(), Some(Screen::Main));
     std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
 fn what_the_pad_sets_is_what_the_file_says() {
     let (mut m, mut r) = fresh();
-    // Settings (under Local Game, Online and Garage), the name: clear it and type "Mx" on the keyboard,
-    // then Done.
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Settings));
+    // The name is the Garage's since P118: its Name row, under the Player row, opens the keyboard.
+    main_to(&mut m, &mut r, "Garage");
+    assert_eq!(m.screen(), Some(Screen::Garage));
+    down_to(&mut m, &mut r, menu::Key::Garage(roster::Row::Name));
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Keyboard));
-    // Up from the letters wraps to the command row: Space Delete Clear Done.
-    tap(&mut m, &mut r, Control::Up);
-    tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.typing(), m.settings.name, "1P's look has no name of its own yet");
+    // Clear, on the command row under the letters, then "mx".
+    key_command(&mut m, &mut r, 2);
     assert_eq!(m.typing(), "");
-    // m is row 1, column 2; x is row 2, column 3.
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Down);
-    // Down from Clear lands over column 5 of the letters; three left is m.
-    for _ in 0..3 {
-        tap(&mut m, &mut r, Control::Left);
-    }
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.typing(), "M");
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Cross);
+    type_keys(&mut m, &mut r, "mx");
     assert_eq!(m.typing(), "Mx");
     // Square deletes, and the letter goes back.
     tap(&mut m, &mut r, Control::Square);
     assert_eq!(m.typing(), "M");
     tap(&mut m, &mut r, Control::Cross);
     tap(&mut m, &mut r, Control::Start);
-    assert_eq!(m.screen(), Some(Screen::Settings));
+    assert_eq!(m.screen(), Some(Screen::Garage));
     assert_eq!(m.settings.name, "Mx");
-    // Overlay on to debug, wrecks off, and the throttle onto L2 (Cross, then left from Cross wraps to L2).
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Cross);
-    tap(&mut m, &mut r, Control::Down);
+    assert_eq!(m.page()[m.cursor(Screen::Garage)].value, "Mx");
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    // The HUD on to debug (Display), wrecks off (Ride), and the throttle onto L2 (Controls: left
+    // from Cross wraps to L2).
+    settings_at(&mut m, &mut r, "Display");
+    down_to(&mut m, &mut r, menu::Key::Hud);
     tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Controls));
+    tap(&mut m, &mut r, Control::L1);
+    down_to(&mut m, &mut r, menu::Key::Wrecks);
+    tap(&mut m, &mut r, Control::Right);
+    tab_to(&mut m, &mut r, "Controls");
+    down_to(&mut m, &mut r, menu::Key::Throttle);
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.controls.throttle, Gas::L2);
     assert!(m.take_changed());
-    // 1P's row steps its layout and its biplane's together (P50), the biplane's the faster, and
-    // wraps either way.
-    tap(&mut m, &mut r, Control::Down);
+    // 1P's bike and biplane layouts are rows of their own, each round either way (P50).
     let one = |m: &Menu| (m.controls.layouts[0], m.controls.planes[0]);
+    down_to(&mut m, &mut r, menu::Key::BikeLayout);
     tap(&mut m, &mut r, Control::Right);
+    assert_eq!(one(&m), (Layout::Original, Layout::New));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(one(&m), (Layout::New, Layout::New));
+    down_to(&mut m, &mut r, menu::Key::PlaneLayout);
+    tap(&mut m, &mut r, Control::Left);
     assert_eq!(one(&m), (Layout::New, Layout::Original));
-    tap(&mut m, &mut r, Control::Left);
-    tap(&mut m, &mut r, Control::Left);
-    assert_eq!(one(&m), (Layout::Original, Layout::Original));
     tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(one(&m), (Layout::New, Layout::Original));
@@ -674,12 +760,18 @@ fn every_screen_draws_from_the_disc() {
     for s in Screen::ALL {
         let mut m = Menu::new(Settings::default(), Controls::default());
         m.open(s);
-        // A grey stand-in for the ride, which the pause draws over rather than covers.
-        const RIDE: [u8; 3] = [90, 90, 90];
-        let mut frame = game_render::Frame::new(320, 224, RIDE);
-        art.draw(&m, &mut frame);
-        let drawn = frame.color.chunks(3).filter(|p| *p != RIDE).count();
-        assert!(drawn > frame.width * frame.height * 9 / 10, "{s:?} drew over {drawn} pixels");
+        // Every tab of a screen that has them (P118).
+        let shown = m.screen().unwrap();
+        for _ in 0..m.tabs(shown).len().max(1) {
+            let tab = m.tab(shown);
+            // A grey stand-in for the ride, which the pause draws over rather than covers.
+            const RIDE: [u8; 3] = [90, 90, 90];
+            let mut frame = game_render::Frame::new(320, 224, RIDE);
+            art.draw(&m, &mut frame);
+            let drawn = frame.color.chunks(3).filter(|p| *p != RIDE).count();
+            assert!(drawn > frame.width * frame.height * 9 / 10, "{s:?} tab {tab} drew over {drawn} pixels");
+            m.step(Press { r1: true, ..Press::default() });
+        }
     }
 }
 
@@ -840,20 +932,23 @@ fn the_setups_pick_starts_the_ride_on_it() {
     m.riders = 2;
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
-    // Square changes 1P's machine; down to 2P and back to bike-then-plane leaves 2P on the plane;
-    // down again wraps to 1P. Left and right still walk the tracks and nothing else.
+    // Square changes 1P's machine; R1 on to 2P and back to bike-then-plane leaves 2P on the plane;
+    // R1 again wraps to 1P (P118: the setup strip's seat is on the shoulders, the d-pad's up and
+    // down walk the tracks, and left and right are the seat's machine too).
     tap(&mut m, &mut r, Control::Square);
     assert_eq!(m.settings.machines[0], Machine::Biplane);
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Square);
-    tap(&mut m, &mut r, Control::Square);
-    tap(&mut m, &mut r, Control::Square);
-    assert_eq!(m.settings.machines[..2], [Machine::Biplane, Machine::Biplane]);
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Square);
-    assert_eq!(m.settings.machines[..3], [Machine::Bike, Machine::Biplane, Machine::Bike]);
+    tap(&mut m, &mut r, Control::R1);
     tap(&mut m, &mut r, Control::Square);
     tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.machines[..2], [Machine::Biplane, Machine::Biplane]);
+    tap(&mut m, &mut r, Control::R1);
+    tap(&mut m, &mut r, Control::Square);
+    assert_eq!(m.settings.machines[..3], [Machine::Bike, Machine::Biplane, Machine::Bike]);
+    tap(&mut m, &mut r, Control::L1);
+    tap(&mut m, &mut r, Control::L1);
+    tap(&mut m, &mut r, Control::Square);
+    tap(&mut m, &mut r, Control::Down);
     assert_eq!(m.cursor(Screen::Tracks), 1);
     assert_eq!(m.settings.machines[..2], [Machine::Biplane, Machine::Biplane]);
     let acts = tap(&mut m, &mut r, Control::Cross);
@@ -888,36 +983,37 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
         }
     };
     let art = menu::Art::load(&mut disc).expect("the menus' art");
-    // The layout's own 4:3-ish shape, 16:9, 21:9 and a portrait phone.
-    let windows = [(640, 448), (960, 540), (1260, 540), (360, 640)];
+    // The PS2's shape, 1080p, 21:9 and a portrait phone.
+    let windows = [(640, 448), (1920, 1080), (2520, 1080), (360, 640)];
     let mut pills = 0;
     for (w, h) in windows {
-        let s = (w as f32 / 640.0).min(h as f32 / 448.0);
         for screen in Screen::ALL {
             let (mut m, mut reader) = fresh();
             m.open(screen);
+            let shown = m.screen().unwrap();
             // Every row of a list, and a walk across the keyboard's keys and down to its commands.
             for step in 0..12 {
-                assert_eq!(m.screen(), Some(screen));
+                assert_eq!(m.screen(), Some(shown));
                 let mut frame = game_render::Frame::new(w, h, [90, 90, 90]);
                 let parts = art.parts(&m, &mut frame);
-                let logos: Vec<_> = parts.iter().filter_map(|p| match p {
-                    menu::Part::Logo(b) => Some(*b),
-                    _ => None,
-                }).collect();
+                let logos: Vec<_> = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        menu::Part::Logo(b) => Some(*b),
+                        _ => None,
+                    })
+                    .collect();
                 for p in &parts {
                     match p {
                         menu::Part::Pill { pill, label } => {
                             pills += 1;
-                            let want = label[2] + 2.0 * menu::PILL_PAD * s;
+                            // The label inside its pill, the slant's lean included, and on its middle.
                             assert!(
-                                (pill[2] - want).abs() <= 1.0,
-                                "{screen:?} at {w}x{h}: a pill {} wide on a label {} wide",
-                                pill[2],
-                                label[2]
+                                label[0] >= pill[0] - 1.0 && label[0] + label[2] <= pill[0] + pill[2] + 1.0,
+                                "{screen:?} at {w}x{h}: a label {label:?} past its pill {pill:?}"
                             );
-                            let (pc, lc) = (pill[0] + pill[2] / 2.0, label[0] + label[2] / 2.0);
-                            assert!((pc - lc).abs() <= 1.0, "{screen:?} at {w}x{h}: a pill off its label");
+                            let (pc, lc) = (pill[1] + pill[3] / 2.0, label[1] + label[3] / 2.0);
+                            assert!((pc - lc).abs() <= pill[3] * 0.2, "{screen:?} at {w}x{h}: a label {label:?} off its pill {pill:?}");
                             for logo in &logos {
                                 assert!(!overlap(*logo, *pill), "{screen:?} at {w}x{h}: a pill on the logo");
                                 assert!(!overlap(*logo, *label), "{screen:?} at {w}x{h}: a label on the logo");
@@ -932,43 +1028,23 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                         menu::Part::Logo(b) => assert!((b[2] / b[3] - 8.0).abs() < 0.01, "{screen:?} at {w}x{h}"),
                     }
                 }
-                let lists = matches!(
-                    screen,
-                    Screen::Main
-                        | Screen::Pause
-                        | Screen::Settings
-                        | Screen::Controls
-                        | Screen::Online
-                        | Screen::Games
-                        | Screen::Lobby
-                        | Screen::Split
-                        | Screen::Modifiers
-                        | Screen::Audio
-                        | Screen::Camera
+                let lit = matches!(
+                    shown,
+                    Screen::Main | Screen::Pause | Screen::Settings | Screen::Online | Screen::Games | Screen::Lobby | Screen::Split | Screen::Modifiers | Screen::Garage | Screen::Mods | Screen::Keyboard
                 );
-                if lists {
-                    assert_eq!(logos.len(), 1, "{screen:?} at {w}x{h}: no logo");
-                }
-                if lists || screen == Screen::Keyboard {
+                if lit {
                     let n = parts.iter().filter(|p| matches!(p, menu::Part::Pill { .. })).count();
                     assert_eq!(n, 1, "{screen:?} at {w}x{h}, step {step}: one pill under the cursor");
                 }
-                let control = if screen == Screen::Keyboard && step % 3 != 2 { Control::Right } else { Control::Down };
+                if matches!(shown, Screen::Main | Screen::Splash) {
+                    assert_eq!(logos.len(), 1, "{screen:?} at {w}x{h}: no logo");
+                }
+                let control = if shown == Screen::Keyboard && step % 3 != 2 { Control::Right } else { Control::Down };
                 tap(&mut m, &mut reader, control);
             }
         }
     }
-    // Four list screens, the three online ones (N3), the split layout (P43), the game modifiers (P55),
-    // the keyboard, the pause's audio options (P56) and the camera page (P82), twelve looks each, at
-    // four shapes.
-    assert_eq!(pills, 12 * 12 * 4);
-}
-
-/// [`tap`] on another seat's pad, which only the garage hears.
-fn tap_garage_seat(menu: &mut Menu, reader: &mut Reader, seat: usize, control: Control) {
-    for report in [Report::from_buttons(control.mask()), Report::idle()] {
-        menu.step_seat(seat, reader.read(&report));
-    }
+    assert!(pills >= 11 * 12 * 4, "{pills} pills");
 }
 
 #[test]
@@ -976,8 +1052,8 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     use game_render::rider::{Rider as Body, Sex};
     use game_sim::phy::Phy;
     use game_sim::track::{Engine, Tuning};
-    use roster::{Catalogue, Picks};
-
+    use menu::Key;
+    use roster::{Catalogue, Picks, Row as G};
     let mut disc = match game_render::Disc::open_configured() {
         Ok(d) => d,
         Err(e) => {
@@ -989,51 +1065,43 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     let mut reader = Reader::new();
     let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::default());
     m.step(reader.read(&Report::idle()));
-    let mut readers: Vec<Reader> = (0..roster::SEATS).map(|_| Reader::new()).collect();
-    for (i, r) in readers.iter_mut().enumerate().skip(1) {
-        m.step_seat(i, r.read(&Report::idle()));
-    }
-    // Two seats sit down; the third has nobody in it.
-    m.seated = 2;
+    let r = &mut reader;
 
-    // Seat 1 opens the garage from the main menu: Down three times (past Local Game and Online), Cross.
-    for _ in 0..3 {
-        tap(&mut m, &mut reader, Control::Down);
-    }
-    tap(&mut m, &mut reader, Control::Cross);
+    // The garage from the main menu, on 1P (P118: one pad dresses every seat by its Player row).
+    main_to(&mut m, r, "Garage");
     assert_eq!(m.screen(), Some(Screen::Garage));
-    // Seat 1: class right (125 to 250), then Tier to Pro, then the next rider.
-    tap(&mut m, &mut reader, Control::Right);
-    for _ in 0..3 {
-        tap(&mut m, &mut reader, Control::Down);
-    }
-    tap(&mut m, &mut reader, Control::Right);
-    tap(&mut m, &mut reader, Control::Down);
-    tap(&mut m, &mut reader, Control::Down);
-    tap(&mut m, &mut reader, Control::Right);
-    // Seat 2, on its own pad and its own column: class left (125 to 50), Tuning to A, and the
-    // rider two along in its second colours.
-    let r2 = &mut readers[1];
-    tap_garage_seat(&mut m, r2, 1, Control::Left);
-    for _ in 0..4 {
-        tap_garage_seat(&mut m, r2, 1, Control::Down);
-    }
-    tap_garage_seat(&mut m, r2, 1, Control::Right);
-    tap_garage_seat(&mut m, r2, 1, Control::Down);
-    tap_garage_seat(&mut m, r2, 1, Control::Right);
-    tap_garage_seat(&mut m, r2, 1, Control::Right);
-    tap_garage_seat(&mut m, r2, 1, Control::Down);
-    tap_garage_seat(&mut m, r2, 1, Control::Right);
-    // Seat 3 is empty, so its pad moves nothing, and a seat's Cross does not close the screen.
-    let before = m.garage(2).cloned();
-    tap_garage_seat(&mut m, &mut readers[2], 2, Control::Right);
-    tap_garage_seat(&mut m, &mut readers[1], 1, Control::Cross);
-    assert_eq!(m.garage(2).cloned(), before);
-    assert_eq!(m.screen(), Some(Screen::Garage));
+    assert_eq!(m.page()[0].value, "1P");
+    // 1P: the Bike tab's class right (125 to 250) and Tier to Pro, then the Rider tab's next rider.
+    tab_to(&mut m, r, "Bike");
+    down_to(&mut m, r, Key::Garage(G::Class));
+    tap(&mut m, r, Control::Right);
+    down_to(&mut m, r, Key::Garage(G::Tier));
+    tap(&mut m, r, Control::Right);
+    tab_to(&mut m, r, "Rider");
+    down_to(&mut m, r, Key::Garage(G::Rider));
+    tap(&mut m, r, Control::Right);
+    // 2P: class left (125 to 50), Tuning to A, and the rider two along in its second colours.
+    tab_to(&mut m, r, "Bike");
+    down_to(&mut m, r, Key::Player);
+    tap(&mut m, r, Control::Right);
+    assert_eq!(m.page()[0].value, "2P");
+    down_to(&mut m, r, Key::Garage(G::Class));
+    tap(&mut m, r, Control::Left);
+    down_to(&mut m, r, Key::Garage(G::Tuning));
+    tap(&mut m, r, Control::Right);
+    tab_to(&mut m, r, "Rider");
+    assert_eq!(m.page()[0].value, "2P", "the Player row is every tab's");
+    down_to(&mut m, r, Key::Garage(G::Rider));
+    tap(&mut m, r, Control::Right);
+    tap(&mut m, r, Control::Right);
+    down_to(&mut m, r, Key::Garage(G::Colours));
+    tap(&mut m, r, Control::Right);
+    // Nobody touched 3P's.
+    assert_eq!(m.garage(2).unwrap().pick, roster::Pick::default());
     let one = m.garage(0).unwrap().pick.clone();
     let two = m.garage(1).unwrap().pick.clone();
-    // Seat 1 leaves, and the picks are kept.
-    tap(&mut m, &mut reader, Control::Cross);
+    // Circle leaves, and the picks are kept.
+    tap(&mut m, r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
     assert!(m.take_picks_changed());
     assert_eq!((&m.picks.0[0], &m.picks.0[1]), (&one, &two));
@@ -1051,11 +1119,8 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     std::fs::remove_dir_all(&dir).ok();
 
     // Free Ride, Cross on the first track: the ride starts, and it is the two seats' picks.
-    for _ in 0..3 {
-        tap(&mut m, &mut reader, Control::Up);
-    }
-    tap(&mut m, &mut reader, Control::Cross);
-    let acts = tap(&mut m, &mut reader, Control::Cross);
+    main_to(&mut m, r, "Free Ride");
+    let acts = tap(&mut m, r, Control::Cross);
     assert!(acts.contains(&Act::Ride("free06".into())), "{acts:?}");
     let picks = m.ride_picks(2).expect("a catalogue");
     assert_eq!(picks, vec![one.clone(), two.clone()]);
@@ -1077,48 +1142,27 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     }
     assert_ne!(seen[0].0, seen[1].0, "the two seats ride the same .phy");
     assert_ne!(seen[0].1, seen[1].1, "the two seats wear the same gear");
+
+    // And every row of the three tabs is reached by pad and changes the seat's pick.
+    for tab in menu::GARAGE_TABS {
+        let start = || {
+            let mut reader = Reader::new();
+            let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::default());
+            m.step(reader.read(&Report::idle()));
+            main_to(&mut m, &mut reader, "Garage");
+            tab_to(&mut m, &mut reader, tab);
+            (m, reader)
+        };
+        every_row_changes(&start, &format!("Garage {tab}"));
+    }
 }
 
 // ---- the rider's look (P86) ----------------------------------------------------------------------
 
-/// `n` taps of `control` on a seat's garage column; seat 0 is the menu's own pad.
-fn taps(m: &mut Menu, reader: &mut Reader, seat: usize, control: Control, n: usize) {
-    for _ in 0..n {
-        match seat {
-            0 => {
-                tap(m, reader, control);
-            }
-            _ => tap_garage_seat(m, reader, seat, control),
-        }
-    }
-}
-
-/// Type `text` on a seat's open keys from the cursor at the first key: walk to each character's key,
-/// Cross on it.
-fn type_on_keys(m: &mut Menu, reader: &mut Reader, seat: usize, text: &str) {
-    for c in text.chars() {
-        let e = m.garage(seat).unwrap().entry.clone().expect("the keys are open");
-        let keys = e.keys();
-        let (row, col) = keys
-            .iter()
-            .enumerate()
-            .find_map(|(r, k)| k.find(c.to_ascii_lowercase()).map(|i| (r, i)))
-            .unwrap_or_else(|| panic!("no key for {c:?}"));
-        let (at_row, at_col) = e.key;
-        let down = (row + keys.len() + 1 - at_row) % (keys.len() + 1);
-        taps(m, reader, seat, Control::Down, down);
-        let now = m.garage(seat).unwrap().entry.as_ref().unwrap().key;
-        assert_eq!(now.0, row, "walked down to {c:?}'s row from ({at_row}, {at_col})");
-        let width = keys[row].len();
-        taps(m, reader, seat, Control::Right, (col + width - now.1) % width);
-        assert_eq!(m.garage(seat).unwrap().entry.as_ref().unwrap().key, (row, col));
-        taps(m, reader, seat, Control::Cross, 1);
-    }
-}
-
 #[test]
 fn a_seat_dresses_its_rider_saves_the_look_and_a_second_seat_rides_it_after_a_restart() {
-    use roster::{Catalogue, Piece, Picks, Presets, Row, ROWS};
+    use menu::Key;
+    use roster::{Catalogue, Piece, Picks, Presets, Row};
 
     let mut disc = match game_render::Disc::open_configured() {
         Ok(d) => d,
@@ -1129,50 +1173,49 @@ fn a_seat_dresses_its_rider_saves_the_look_and_a_second_seat_rides_it_after_a_re
     };
     let catalogue = Catalogue::read(&mut disc).unwrap();
     assert!(!catalogue.wardrobe.outfits.is_empty() && Piece::ALL.iter().all(|&p| catalogue.wardrobe.pieces[p as usize].len() > 1));
-    let row = |r: Row| ROWS.iter().position(|&x| x == r).unwrap();
     let mut reader = Reader::new();
     let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::default()).with_looks(Presets::default());
     m.step(reader.read(&Report::idle()));
-    let mut two = Reader::new();
-    m.step_seat(1, two.read(&Report::idle()));
-    m.seated = 2;
-    taps(&mut m, &mut reader, 0, Control::Down, 3);
-    tap(&mut m, &mut reader, Control::Cross);
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
     assert_eq!(m.screen(), Some(Screen::Garage));
     let stock = m.garage(0).unwrap().pick.clone();
 
-    // Seat 1: the next colours, the next jersey and pants.
-    taps(&mut m, &mut reader, 0, Control::Down, row(Row::Colours));
-    tap(&mut m, &mut reader, Control::Right);
-    tap(&mut m, &mut reader, Control::Down);
-    tap(&mut m, &mut reader, Control::Right);
-    // Its name: Cross opens the keys, the letters, Start keeps them.
-    tap(&mut m, &mut reader, Control::Down);
-    assert_eq!(m.garage(0).unwrap().row, row(Row::Name));
-    tap(&mut m, &mut reader, Control::Cross);
-    type_on_keys(&mut m, &mut reader, 0, "Kaito");
-    assert_eq!(m.screen(), Some(Screen::Garage), "typing does not leave the garage");
-    tap(&mut m, &mut reader, Control::Start);
-    assert_eq!(m.garage(0).unwrap().entry, None);
+    // 1P: the next colours, the next jersey and pants.
+    down_to(&mut m, r, Key::Garage(Row::Colours));
+    tap(&mut m, r, Control::Right);
+    down_to(&mut m, r, Key::Garage(Row::Outfit));
+    tap(&mut m, r, Control::Right);
+    // Its name: Cross opens the menu's keyboard, the letters, Start keeps them.
+    down_to(&mut m, r, Key::Garage(Row::Name));
+    tap(&mut m, r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Keyboard));
+    key_command(&mut m, r, 2);
+    type_keys(&mut m, r, "Kaito");
+    tap(&mut m, r, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Garage), "the keys go back to the garage");
+    assert_eq!(m.garage(0).unwrap().pick.look.name, "Kaito");
     // Its number: one key too many is deleted with Square, then Done on the command row.
-    tap(&mut m, &mut reader, Control::Down);
-    tap(&mut m, &mut reader, Control::Cross);
-    type_on_keys(&mut m, &mut reader, 0, "720");
-    tap(&mut m, &mut reader, Control::Square);
-    let e = m.garage(0).unwrap().entry.clone().unwrap();
-    taps(&mut m, &mut reader, 0, Control::Down, e.keys().len() - e.key.0);
-    let e = m.garage(0).unwrap().entry.clone().unwrap();
-    let done = e.commands().iter().position(|c| *c == "Done").unwrap();
-    taps(&mut m, &mut reader, 0, Control::Right, (done + e.commands().len() - e.key.1) % e.commands().len());
-    tap(&mut m, &mut reader, Control::Cross);
-    assert_eq!(m.garage(0).unwrap().entry, None, "Done closes the keys");
-    // A helmet, the second goggles and the last boots.
-    tap(&mut m, &mut reader, Control::Down);
-    tap(&mut m, &mut reader, Control::Right);
-    tap(&mut m, &mut reader, Control::Down);
-    taps(&mut m, &mut reader, 0, Control::Right, 2);
-    taps(&mut m, &mut reader, 0, Control::Down, 2);
-    tap(&mut m, &mut reader, Control::Left);
+    down_to(&mut m, r, Key::Garage(Row::Number));
+    tap(&mut m, r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Keyboard));
+    key_command(&mut m, r, 2);
+    type_keys(&mut m, r, "720");
+    tap(&mut m, r, Control::Square);
+    key_command(&mut m, r, 3);
+    assert_eq!(m.screen(), Some(Screen::Garage), "Done closes the keys");
+    // Left and right step the number too.
+    tap(&mut m, r, Control::Right);
+    tap(&mut m, r, Control::Left);
+    // The Gear tab: a helmet, the second goggles and the last boots.
+    tab_to(&mut m, r, "Gear");
+    down_to(&mut m, r, Key::Garage(Row::Piece(Piece::Helmet)));
+    tap(&mut m, r, Control::Right);
+    down_to(&mut m, r, Key::Garage(Row::Piece(Piece::Goggles)));
+    tap(&mut m, r, Control::Right);
+    tap(&mut m, r, Control::Right);
+    down_to(&mut m, r, Key::Garage(Row::Piece(Piece::Boots)));
+    tap(&mut m, r, Control::Left);
     let one = m.garage(0).unwrap().pick.clone();
     println!("seat 1: {} | {}", one.rider, one.look.text());
     assert_eq!((one.look.name.as_str(), one.look.number.as_str()), ("Kaito", "72"));
@@ -1182,24 +1225,27 @@ fn a_seat_dresses_its_rider_saves_the_look_and_a_second_seat_rides_it_after_a_re
     assert_eq!(one.look.piece(Piece::Gloves), "", "gloves stay the gear set's");
     assert_eq!(one.look.piece(Piece::Boots), catalogue.wardrobe.pieces[Piece::Boots as usize].last().unwrap());
 
-    // Cross on Preset saves it under its name and number.
-    tap(&mut m, &mut reader, Control::Down);
-    assert_eq!(m.garage(0).unwrap().row, row(Row::Preset));
-    tap(&mut m, &mut reader, Control::Cross);
+    // Cross on Save as Preset, back on the Rider tab, saves it under its name and number.
+    tab_to(&mut m, r, "Rider");
+    down_to(&mut m, r, Key::Garage(Row::Preset));
+    tap(&mut m, r, Control::Cross);
     assert!(m.take_looks_changed());
     assert_eq!(m.looks.keys(), ["Kaito 72"]);
     assert_eq!(m.screen(), Some(Screen::Garage), "saving does not leave the garage");
 
-    // Seat 2, on its own pad: up from the top is the Preset row, right loads the saved look.
-    tap_garage_seat(&mut m, &mut two, 1, Control::Up);
-    assert_eq!(m.garage(1).unwrap().row, row(Row::Preset));
+    // 2P, by the Player row: right on the Preset row loads the saved look.
+    down_to(&mut m, r, Key::Player);
+    tap(&mut m, r, Control::Right);
+    assert_eq!(m.page()[0].value, "2P");
     assert_ne!(m.garage(1).unwrap().pick.look, one.look);
-    tap_garage_seat(&mut m, &mut two, 1, Control::Right);
+    tap(&mut m, r, Control::Up);
+    assert_eq!(m.page()[m.cursor(Screen::Garage)].key, Key::Garage(Row::Preset), "up from the top is the last row");
+    tap(&mut m, r, Control::Right);
     let loaded = m.garage(1).unwrap().pick.clone();
     assert_eq!((&loaded.bike, loaded.set, &loaded.rider, &loaded.look, loaded.preset.as_str()), (&one.bike, one.set, &one.rider, &one.look, "Kaito 72"));
 
     // Circle leaves; the picks carry the looks into the ride.
-    tap(&mut m, &mut reader, Control::Circle);
+    tap(&mut m, r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
     let picks = m.ride_picks(2).unwrap();
     assert_eq!(picks[0].look, picks[1].look);
@@ -1474,7 +1520,7 @@ fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
     assert_eq!(m.screen(), Some(Screen::Tracks));
     // The ride setup lists a machine for each of the two.
     assert_eq!(m.riders, 2);
-    tap_device(&mut m, &mut rd, &all, 0, Control::Right);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     assert!(acts.contains(&Act::Ride("free07".into())), "{acts:?}");
     let party = m.party().expect("a local game").clone();
@@ -1658,41 +1704,50 @@ fn backing_out_of_a_local_game_walks_its_screens_back_to_the_main_menu() {
     assert_eq!(m.screen(), Some(Screen::Online));
 }
 
-/// P42's three sound rows, below Controls: the music steps Off, Shuffle and every song the shell's
-/// sources listed, and the two sliders stop at their ends.
+/// P42's sound rows, on the Audio tab since P118: Music Plays steps Shuffle, In Order, One Song and
+/// Off, the Song row picks the one song among the shell's sources, and the sliders stop at their
+/// ends.
 #[test]
 fn the_sound_rows_pick_the_music_and_the_volumes() {
+    use menu::Key;
     let (mut m, mut r) = fresh();
     m.music_choices = vec![("disc:ooc".into(), "Out of Control - Hoobastank".into()), ("folder:mine.wav".into(), "mine".into())];
-    // Settings, under Local Game, Online and Garage.
-    for _ in 0..4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Settings));
-    for _ in 0..4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    settings_at(&mut m, &mut r, "Audio");
+    let value = |m: &Menu| m.page()[m.cursor(Screen::Settings)].value.clone();
+    down_to(&mut m, &mut r, Key::MusicPlays);
     assert_eq!(m.settings.music, "shuffle");
-    assert_eq!(m.music_label(), "Shuffle");
+    assert_eq!(value(&m), "Shuffle");
     tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.music_label(), "In Order");
+    assert_eq!((m.settings.music.as_str(), value(&m).as_str()), ("order", "In Order"));
     tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.settings.music, "disc:ooc");
-    assert_eq!(m.music_label(), "Out of Control - Hoobastank");
-    tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.settings.music, "off", "past the last song it wraps to Off");
-    tap(&mut m, &mut r, Control::Left);
-    assert_eq!(m.settings.music, "folder:mine.wav");
-    // The music volume, down to nothing and no further, by fives from 70 (P56).
+    assert_eq!(m.settings.music, "disc:ooc", "One Song is on the song row's");
+    assert_eq!(value(&m), "One Song");
+    assert_eq!(m.take_tunes(), [menu::Tune::Play("disc:ooc".into())]);
+    // The Song row: right is the next song, which plays.
     tap(&mut m, &mut r, Control::Down);
+    assert_eq!(value(&m), "Out of Control - Hoobastank");
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.music, "folder:mine.wav");
+    assert_eq!(value(&m), "mine");
+    assert_eq!(m.take_tunes(), [menu::Tune::Play("folder:mine.wav".into())]);
+    // Off dims the Song row and Skip Song and says why.
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.music, "off");
+    let rows = m.page();
+    let off = |k: Key| rows.iter().find(|r| r.key == k).unwrap().off.clone();
+    assert_eq!(off(Key::Song).as_deref(), Some("Only with Music Plays: One Song"));
+    assert_eq!(off(Key::SkipSong).as_deref(), Some("The music is off"));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.music, "folder:mine.wav", "back to the one song");
+    // The music volume, down to nothing and no further, by fives from 70 (P56).
+    down_to(&mut m, &mut r, Key::Level(0));
     for _ in 0..16 {
         tap(&mut m, &mut r, Control::Left);
     }
     assert_eq!(m.settings.music_volume, 0);
     // The effects, up to the top and no further.
-    tap(&mut m, &mut r, Control::Down);
+    down_to(&mut m, &mut r, Key::Level(2));
     for _ in 0..6 {
         tap(&mut m, &mut r, Control::Right);
     }
@@ -1859,26 +1914,26 @@ fn on_the_splash_a_pad_s_cross_makes_it_1p_even_while_an_idle_virtual_pad_is_plu
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// P55: Settings' last row opens the game modifiers; the arrows step a modifier by ten percent, for
-/// every player or for one; a preset saved by name loads back; and Reset To Original puts every
-/// modifier back, which writes the settings file as it was before there were modifiers.
+/// P55: the Ride tab's Game Modifiers row opens the modifiers; the arrows step a modifier by ten
+/// percent, the world's for everyone and the rest for the Player row's player; a preset saved by
+/// name loads back; and Reset to Original puts every modifier back, which writes the settings file
+/// as it was before there were modifiers.
 #[test]
 fn the_game_modifiers_screen_sets_saves_and_resets() {
+    use menu::Key;
     let (mut m, mut r) = fresh();
-    m.open(Screen::Settings);
-    // Up from the first row wraps to the last: Game Modifiers.
-    tap(&mut m, &mut r, Control::Up);
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Original");
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
-    let rows = m.modifier_rows();
-    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 4, "{rows:?}");
-    assert!(rows.last().unwrap().contains("Reset To Original"), "{rows:?}");
+    let rows = m.page();
+    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 1 + 4, "{rows:?}");
+    assert_eq!(rows.last().unwrap().label, "Reset to Original");
+    assert!(rows.iter().filter(|r| r.world).all(|r| !matches!(r.key, Key::Knob(k) if k.per_seat())));
 
     // Gravity, a world modifier, down twice: 80 for everyone.
-    let gravity = 1 + Knob::MENU.iter().position(|k| *k == Knob::Gravity).unwrap();
-    for _ in 0..gravity {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    down_to(&mut m, &mut r, Key::Knob(Knob::Gravity));
     tap(&mut m, &mut r, Control::Left);
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 80);
@@ -1886,25 +1941,17 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     assert!(m.take_changed());
 
     // Bike top speed for 2P alone: the player row to 2P, then the speed row right once.
-    for _ in 0..gravity {
-        tap(&mut m, &mut r, Control::Up);
-    }
+    down_to(&mut m, &mut r, Key::Player);
     tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Right);
-    assert!(m.modifier_rows()[0].contains("2P"), "{:?}", m.modifier_rows());
-    tap(&mut m, &mut r, Control::Down);
+    assert_eq!(m.page()[0].value, "2P");
+    down_to(&mut m, &mut r, Key::Knob(Knob::BikeSpeed));
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.modifiers.get(1, Knob::BikeSpeed), 110);
     assert_eq!(m.settings.modifiers.get(0, Knob::BikeSpeed), 100);
-    assert!(m.settings.modifiers.seat_is_original(0) == false, "gravity reaches 1P too");
+    assert!(!m.settings.modifiers.seat_is_original(0), "gravity reaches 1P too");
 
-    // Saved as "Low", on the keyboard: L, o, w over the first letter row's keys is long-winded, so
-    // the name is typed the way the keyboard test does — through its own text.
-    let save = 1 + Knob::MENU.len() + 1;
-    let preset = save - 1;
-    while m.cursor(Screen::Modifiers) != save {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    // Saved by a name typed on the keyboard: its first key, then Start.
+    down_to(&mut m, &mut r, Key::SavePreset);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Keyboard));
     tap(&mut m, &mut r, Control::Cross);
@@ -1914,16 +1961,16 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     let saved = m.settings.modifiers;
     assert_eq!(m.settings.presets[0].1, saved);
 
-    // Reset To Original, and the preset loads it all back.
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Down);
+    // Reset to Original, and the preset loads it all back.
+    down_to(&mut m, &mut r, Key::ResetMods);
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.settings.modifiers.is_original());
-    while m.cursor(Screen::Modifiers) != preset {
-        tap(&mut m, &mut r, Control::Up);
-    }
+    down_to(&mut m, &mut r, Key::LoadPreset);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.settings.modifiers, saved);
+    // Back on the Ride tab, its row counts them.
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "2 Changed");
 
     // The file keeps both, and an original set with no presets writes no modifier line at all.
     let dir = scratch("modifiers");
@@ -1936,55 +1983,51 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     assert!(Settings::parse("modifiers = gravity=50 warp=9\n").modifiers.is_original());
 }
 
-/// P98: the modifiers screen under the ride's pause sets the ride's modifiers, which take when the
-/// pause closes, and says so; a ride the shell holds them on (online, a played tape) shows them and
-/// does not change them, and says why.
+/// P98: the modifiers page under the ride's pause sets the ride's modifiers, which take when the
+/// pause closes, and says so; a ride the shell holds them on (online, a played tape) shows them dimmed
+/// and does not change them, and says why.
 #[test]
 fn the_pauses_modifiers_take_when_it_closes_unless_held() {
+    use menu::Key;
     let (mut m, mut r) = fresh();
     m.pause();
-    for _ in 0..4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Settings));
-    tap(&mut m, &mut r, Control::Up);
+    tab_to(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
-    let gravity = 1 + Knob::MENU.iter().position(|k| *k == Knob::Gravity).unwrap();
-    for _ in 0..gravity {
-        tap(&mut m, &mut r, Control::Down);
-    }
-    assert!(m.modifier_help().contains("when the pause closes"), "{}", m.modifier_help());
+    let note = |m: &Menu| m.page()[0].note.clone().unwrap_or_default();
+    assert!(note(&m).contains("when the pause closes"), "{}", note(&m));
+    down_to(&mut m, &mut r, Key::Knob(Knob::Gravity));
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90);
     assert!(m.take_changed());
-    // Held: the arrows, Cross and Reset To Original leave them be, and the ticker says why.
-    m.mods_lock = Some("Online the ride keeps its modifiers".into());
+    // Held: the arrows, Cross and Reset to Original leave them be, and the page says why.
+    let held = "Online the ride keeps its modifiers";
+    m.mods_lock = Some(held.into());
     tap(&mut m, &mut r, Control::Left);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90);
-    assert_eq!(m.modifier_help(), "Online the ride keeps its modifiers");
-    assert!(m.modifier_rows()[gravity].ends_with("Held"), "{:?}", m.modifier_rows());
-    while m.cursor(Screen::Modifiers) != Knob::MENU.len() + 4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    assert_eq!(note(&m), held);
+    let gravity = m.page().into_iter().find(|r| r.key == Key::Knob(Knob::Gravity)).unwrap();
+    assert_eq!(gravity.off.as_deref(), Some(held));
+    down_to(&mut m, &mut r, Key::ResetMods);
     tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90, "Reset To Original went through the hold");
+    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90, "Reset to Original went through the hold");
     // Out to the ride: Back twice, then Resume.
     tap(&mut m, &mut r, Control::Circle);
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Pause));
-    while m.cursor(Screen::Pause) != 0 {
-        tap(&mut m, &mut r, Control::Up);
-    }
+    tap_until(&mut m, &mut r, Control::Up, |m| m.cursor(Screen::Pause) == 0);
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.riding());
-    // The main menu's screen is never held: what it sets is the next ride's.
+    // The main menu's page is never held: what it sets is the next ride's.
     m.main();
     m.open(Screen::Modifiers);
-    assert!(m.modifier_help().contains("next"), "{}", m.modifier_help());
-    assert!(!m.modifier_rows()[gravity].contains("Held"), "{:?}", m.modifier_rows());
+    assert!(note(&m).contains("next"), "{}", note(&m));
+    assert!(m.page().iter().all(|r| r.off.is_none() || matches!(r.key, Key::LoadPreset | Key::DeletePreset)), "{:?}", m.page());
 }
 
 // ---- the pause's Game Audio Options (P56) -----------------------------------------------------------
@@ -2079,92 +2122,103 @@ fn tap_heard(m: &mut Menu, r: &mut Reader, speakers: &audio::Speakers, dir: &std
 
 #[test]
 fn the_pause_picks_a_song_skips_it_and_its_music_slider_is_kept() {
+    use menu::Key;
     let dir = scratch("p56");
     let (mut m, mut r) = fresh();
     let speakers = hum_speakers(&m.settings);
     m.music_choices = speakers.choices();
     let tap = |m: &mut Menu, r: &mut Reader, c: Control| tap_heard(m, r, &speakers, &dir, c);
+    // Down or up the Settings page to the row that is `key`, every press heard.
+    let to = |m: &mut Menu, r: &mut Reader, key: Key| {
+        for _ in 0..32 {
+            if m.page()[m.cursor(Screen::Settings)].key == key {
+                return;
+            }
+            tap(m, r, Control::Down);
+        }
+        panic!("no {key:?} row");
+    };
     // A ride, and its pause.
     tap(&mut m, &mut r, Control::Cross);
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.riding());
     tap(&mut m, &mut r, Control::Start);
     assert_eq!(m.screen(), Some(Screen::Pause));
-    assert_eq!(m.pause_rows()[3], "Game Audio Options");
+    assert_eq!(m.pause_rows()[3], "Audio");
     for _ in 0..3 {
         tap(&mut m, &mut r, Control::Down);
     }
     tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Audio));
-    // The shuffle the defaults ask for is playing, and the song row starts on its song.
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    assert_eq!(m.tabs(Screen::Settings)[m.tab(Screen::Settings)], "Audio", "the pause's Audio row is Settings' Audio tab (P118)");
+    // The shuffle the defaults ask for is playing, and the Song row names it, dimmed until One Song.
     let first = speakers.now().expect("a song under Shuffle");
-    let rows = m.audio_rows();
-    assert_eq!(rows[0], format!("Song  {}", m.music_choices.iter().find(|c| c.0 == first).unwrap().1));
-    assert_eq!(rows[3..].to_vec(), ["Audio Presets  Game Mix", "Music  70", "Sound FX  80", "Crowd  45", "Engine  60", "Menu FX  100", "User Soundtracks  70"]);
-    assert_eq!(m.audio_ticker(), format!("Now playing {}", m.music_choices.iter().find(|c| c.0 == first).unwrap().1));
+    let label = |m: &Menu, id: &str| m.music_choices.iter().find(|c| c.0 == id).unwrap().1.clone();
+    let row = |m: &Menu, key: Key| m.page().into_iter().find(|r| r.key == key).unwrap();
+    assert_eq!(row(&m, Key::Song).value, label(&m, &first));
+    assert!(row(&m, Key::Song).off.is_some());
+    assert_eq!(row(&m, Key::SkipSong).value, label(&m, &first), "Skip Song says what it skips");
+    let values: Vec<String> = m.page()[..7].iter().map(|r| r.value.clone()).collect();
+    assert_eq!(values, ["Game Mix", "70", "80", "60", "45", "100", "70"]);
 
-    // Right steps the row to the next song without playing it; Cross plays it.
     let ids: Vec<String> = m.music_choices.iter().map(|c| c.0.clone()).collect();
-    let at = ids.iter().position(|i| *i == first).unwrap();
-    let picked = ids[(at + 1) % ids.len()].clone();
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(speakers.now().as_deref(), Some(first.as_str()));
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(speakers.now(), Some(picked.clone()), "the song picked plays");
+    let after = |id: &str| ids[(ids.iter().position(|i| i == id).unwrap() + 1) % ids.len()].clone();
     let level = |id: &str| match id {
         "hum:one" => 1000.0,
         "hum:two" => 2000.0,
         _ => 3000.0,
     };
+    // In Order keeps the song; Skip Song is the one after it.
+    to(&mut m, &mut r, Key::MusicPlays);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.music, "order");
+    assert_eq!(speakers.now().as_deref(), Some(first.as_str()), "the order changing keeps the song");
+    to(&mut m, &mut r, Key::SkipSong);
+    tap(&mut m, &mut r, Control::Cross);
+    let next = after(&first);
+    assert_eq!(speakers.now(), Some(next.clone()), "skip moves to the next");
+    // One Song repeats the one playing; the Song row's right is the next, which plays.
+    to(&mut m, &mut r, Key::MusicPlays);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.music, next, "One Song is the song playing");
+    assert_eq!(speakers.now(), Some(next.clone()));
+    to(&mut m, &mut r, Key::Song);
+    assert!(row(&m, Key::Song).off.is_none());
+    tap(&mut m, &mut r, Control::Right);
+    let picked = after(&next);
+    assert_eq!(speakers.now(), Some(picked.clone()), "the song picked plays");
     let heard = hum_listen(&speakers);
     assert!((heard[100] as f32 - level(&picked) * 0.7).abs() <= 2.0, "it is heard at the music's 70: {}", heard[100]);
 
-    // In Order, then Skip Song: the song after it.
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Down);
-    tap(&mut m, &mut r, Control::Left);
-    assert_eq!(m.audio_rows()[2], "Play Order  In Order");
-    assert_eq!(speakers.now(), Some(picked.clone()), "the order changing keeps the song");
-    tap(&mut m, &mut r, Control::Up);
-    tap(&mut m, &mut r, Control::Cross);
-    let next = ids[(ids.iter().position(|i| *i == picked).unwrap() + 1) % ids.len()].clone();
-    assert_eq!(speakers.now(), Some(next.clone()), "skip moves to the next");
-
     // The music slider, down a step: the mixer's music gain with it, while paused, and the mix is
     // the user's own.
-    for _ in 0..3 {
-        tap(&mut m, &mut r, Control::Down);
-    }
-    assert!(m.audio_rows()[m.cursor(Screen::Audio)].starts_with("Music  "));
+    to(&mut m, &mut r, Key::Level(0));
     tap(&mut m, &mut r, Control::Left);
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.music_volume, 60);
     assert_eq!(m.settings.mix, menu::Mix::Custom);
     assert_eq!(speakers.mixer().lock().unwrap().music_gain(), 0.6);
     let heard = hum_listen(&speakers);
-    assert!((heard[100] as f32 - level(&next) * 0.6).abs() <= 2.0, "{}", heard[100]);
+    assert!((heard[100] as f32 - level(&picked) * 0.6).abs() <= 2.0, "{}", heard[100]);
     // Back is the pause, the ride still paused under it.
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Pause));
 
     // A restart: the settings read back from where the shell saved them, into a new sound.
     let (settings, controls) = menu::load(&dir);
-    assert_eq!((settings.music.as_str(), settings.music_volume, settings.mix), ("order", 60, menu::Mix::Custom));
+    assert_eq!((settings.music.as_str(), settings.music_volume, settings.mix), (picked.as_str(), 60, menu::Mix::Custom));
     let again = hum_speakers(&settings);
     let mut m = Menu::new(settings, controls);
     m.music_choices = again.choices();
     assert_eq!(again.mixer().lock().unwrap().music_gain(), 0.6);
     m.open(Screen::Audio);
-    assert_eq!(m.audio_rows()[4], "Music  60");
-    assert_eq!(m.audio_rows()[3], "Audio Presets  Custom Mix");
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::Mix);
+    assert_eq!((m.page()[0].value.as_str(), m.page()[1].value.as_str()), ("Custom Mix", "60"));
 
     // The presets set every slider, and Custom brings the user's back.
     let (mut m, mut r) = (m, Reader::new());
     m.step(r.read(&Report::idle()));
     let tap = |m: &mut Menu, r: &mut Reader, c: Control| tap_heard(m, r, &again, &dir, c);
-    for _ in 0..3 {
-        tap(&mut m, &mut r, Control::Down);
-    }
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.mix, menu::Mix::Game);
     tap(&mut m, &mut r, Control::Right);
@@ -2180,33 +2234,40 @@ fn the_pause_picks_a_song_skips_it_and_its_music_slider_is_kept() {
     assert_eq!(m.settings.music_volume, 60);
 }
 
-/// P79: a seat's Controls row offers the original's controller presets under the original layout —
-/// New on its two biplanes, then Original on presets 0 to 3 on each — and the file keeps the pick.
+/// P79: the Controls tab offers the original's controller presets under the original layout, a row
+/// of its own since P118 that is dimmed under New, and the file keeps the pick.
 #[test]
 fn the_controls_row_offers_the_originals_presets() {
+    use menu::Key;
     let (mut m, mut r) = fresh();
-    m.open(Screen::Controls);
-    tap(&mut m, &mut r, Control::Down);
-    let one = |m: &Menu| (m.controls.layouts[0], m.controls.presets[0], m.controls.planes[0]);
-    let mut seen = vec![one(&m)];
-    for _ in 0..9 {
-        tap(&mut m, &mut r, Control::Right);
-        seen.push(one(&m));
-    }
+    settings_at(&mut m, &mut r, "Controls");
     let (n, o) = (Layout::New, Layout::Original);
-    assert_eq!(
-        seen,
-        vec![(n, 0, n), (n, 0, o), (o, 0, n), (o, 0, o), (o, 1, n), (o, 1, o), (o, 2, n), (o, 2, o), (o, 3, n), (o, 3, o)]
-    );
-    // On round to the start, and back the other way.
+    let preset = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::ControllerPreset).unwrap();
+    assert_eq!(preset(&m).off.as_deref(), Some("Only with the Original layout"));
+    down_to(&mut m, &mut r, Key::BikeLayout);
     tap(&mut m, &mut r, Control::Right);
-    assert_eq!(one(&m), (n, 0, n));
+    assert_eq!(m.controls.layouts[0], o);
+    assert!(preset(&m).off.is_none());
+    down_to(&mut m, &mut r, Key::ControllerPreset);
+    let mut seen = vec![m.controls.presets[0]];
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Right);
+        seen.push(m.controls.presets[0]);
+    }
+    assert_eq!(seen, [0, 1, 2, 3, 0], "on round to the start");
     tap(&mut m, &mut r, Control::Left);
-    assert_eq!(one(&m), (o, 3, o));
+    assert_eq!(m.controls.presets[0], 3);
     tap(&mut m, &mut r, Control::Left);
-    tap(&mut m, &mut r, Control::Left);
-    assert_eq!(one(&m), (o, 2, o));
+    assert_eq!(preset(&m).value, "Preset 3");
+    // The biplane's layout is a row of its own.
+    down_to(&mut m, &mut r, Key::PlaneLayout);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!((m.controls.layouts[0], m.controls.presets[0], m.controls.planes[0]), (o, 2, o));
     assert_eq!(m.controls.presets[1..], [0; 7], "2P's preset moved with 1P's");
+    // 2P is still on New, so its preset row is dimmed.
+    down_to(&mut m, &mut r, Key::Player);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(preset(&m).off.is_some());
     assert!(m.take_changed());
     assert_eq!(menu::controls_label(o, 2), "Original preset 2");
     assert_eq!(menu::controls_label(o, 0), "Original");
@@ -2225,15 +2286,17 @@ fn the_controls_row_offers_the_originals_presets() {
     assert_eq!(Controls::parse("preset = 4").presets, [0; 8]);
     assert_eq!(Controls::parse("preset = one").presets, [0; 8]);
     assert!(Controls::default().text().contains("\npreset = 0\n"));
-    // Where the Controls screen keeps each one's keyboard list.
+    // Where the pad diagram keeps each one's keyboard list.
     assert_eq!(menu::keyboard_at(n, 2), 0);
     assert_eq!((0..4).map(|p| menu::keyboard_at(o, p)).collect::<Vec<_>>(), [1, 2, 3, 4]);
 }
 
 /// MD2: the track pick lists the mods folder's tracks after the disc's, a mod rides by its id, and
-/// the Mods row turns the folder off and is saved. With no mods the pick is the disc's five.
+/// the Mods page turns the folder, or one pack of it, off and is saved. With no mods the pick is the
+/// disc's five.
 #[test]
 fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
+    use menu::Key;
     let (mut m, mut r) = fresh();
     assert_eq!(m.track_count(), menu::TRACKS.len());
     for (i, t) in menu::TRACKS.iter().enumerate() {
@@ -2247,8 +2310,8 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     assert_eq!(m.track_at(menu::TRACKS.len()), ("md2_flat", "MD2 Flat"));
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
-    tap(&mut m, &mut r, Control::Left);
-    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "left from the first wraps to the mod");
+    tap(&mut m, &mut r, Control::Up);
+    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "up from the first wraps to the mod");
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Ride("md2_flat".into())), "{acts:?}");
     assert_eq!(m.settings.track, "md2_flat");
@@ -2263,19 +2326,29 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     assert_eq!(next.cursor(Screen::Tracks), 0);
     assert_eq!(Settings::parse("track = ../free06\n").track, Settings::default().track);
 
-    // The Mods row: three up from the top of Settings, past Modifiers and Camera.
+    // The Mods page, the main menu's: its first row is the folder.
     let (mut m, mut r) = fresh();
-    for _ in 0..4 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    m.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into()), ("mxvatv_nat13".into(), "Nat 13".into())]);
+    main_to(&mut m, &mut r, "Mods");
+    assert_eq!(m.screen(), Some(Screen::Mods));
+    assert_eq!(m.page()[m.cursor(Screen::Mods)].key, Key::ModsFolder);
+    // One pack off: its track leaves the pick, and the file says which.
+    down_to(&mut m, &mut r, Key::Pack(0));
+    let pack = m.page()[m.cursor(Screen::Mods)].clone();
+    assert_eq!(pack.value, "On");
     tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Settings));
-    for _ in 0..3 {
-        tap(&mut m, &mut r, Control::Up);
-    }
+    assert!(m.take_changed());
+    assert_eq!(m.settings.mods_off, [menu::pack_of("md2_flat")]);
+    assert_eq!(m.track_count(), menu::TRACKS.len() + 1);
+    assert!(m.settings.text().contains(&format!("mods_off = {}\n", menu::pack_of("md2_flat"))), "{}", m.settings.text());
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.mods_off.is_empty());
+    // The folder off: every pack dims and says why.
+    down_to(&mut m, &mut r, Key::ModsFolder);
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.take_changed());
     assert!(!m.settings.mods);
+    assert!(m.page().iter().filter(|r| matches!(r.key, Key::Pack(_))).all(|r| r.off.as_deref() == Some("The mods folder is off")));
     assert!(m.settings.text().contains("mods = off\n"));
     let dir = scratch("mods");
     menu::save(&dir, &m.settings, &Controls::default()).unwrap();
@@ -2283,4 +2356,289 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     std::fs::remove_dir_all(&dir).unwrap();
     tap(&mut m, &mut r, Control::Right);
     assert!(m.settings.mods);
+}
+
+/// P118: L1 and R1 walk Settings' five tabs and the Garage's three round from either end, each tab
+/// opening on its first row.
+#[test]
+fn l1_and_r1_walk_every_tab_round_from_either_end() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Settings");
+    assert_eq!(m.tabs(Screen::Settings), menu::SETTINGS_TABS);
+    assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Audio", "Controls", "Camera"]);
+    tab_to(&mut m, &mut r, "Ride");
+    let first = [Key::StartOn, Key::Hud, Key::Mix, Key::Player, Key::Player];
+    let here = |m: &Menu, s: Screen| (m.tab(s), m.page()[m.cursor(s)].key);
+    for (i, key) in first.iter().enumerate() {
+        assert_eq!(here(&m, Screen::Settings), (i, *key));
+        // A row down, so the next tab's first row is the tab's doing.
+        tap(&mut m, &mut r, Control::Down);
+        tap(&mut m, &mut r, Control::R1);
+    }
+    assert_eq!(here(&m, Screen::Settings), (0, Key::StartOn), "R1 from Camera is Ride");
+    tap(&mut m, &mut r, Control::L1);
+    assert_eq!(here(&m, Screen::Settings), (4, Key::Player), "L1 from Ride is Camera");
+    for i in (0..4).rev() {
+        tap(&mut m, &mut r, Control::L1);
+        assert_eq!(here(&m, Screen::Settings), (i, first[i]));
+    }
+    // The Garage: Rider, Bike, Gear, each with its Player row first.
+    tap(&mut m, &mut r, Control::Circle);
+    main_to(&mut m, &mut r, "Garage");
+    assert_eq!(m.screen(), Some(Screen::Garage));
+    assert_eq!(m.tabs(Screen::Garage), menu::GARAGE_TABS);
+    assert_eq!(menu::GARAGE_TABS, ["Rider", "Bike", "Gear"]);
+    for i in [0, 1, 2, 0] {
+        assert_eq!(here(&m, Screen::Garage), (i, Key::Player));
+        tap(&mut m, &mut r, Control::R1);
+    }
+    assert_eq!(m.tab(Screen::Garage), 1);
+    tap(&mut m, &mut r, Control::L1);
+    tap(&mut m, &mut r, Control::L1);
+    assert_eq!(here(&m, Screen::Garage), (2, Key::Player), "L1 from Rider is Gear");
+}
+
+/// P118: every row of every Settings tab, of the modifiers page and of the Mods page is reachable by
+/// the d-pad and changes its setting by a press, or opens what it opens; a dimmed row says why and
+/// ignores presses.
+#[test]
+fn every_row_of_every_settings_tab_and_page_changes_by_pad() {
+    // A shell with a device and a pressure map named, two songs, and One Song on, so no row is dim
+    // for want of something to pick.
+    let shell = || {
+        let (mut m, r) = fresh();
+        m.controls.pad = Some("/dev/input/js1".into());
+        m.controls.pressure = "ds2@8".into();
+        m.music_choices = vec![("disc:a".into(), "A".into()), ("disc:b".into(), "B".into())];
+        m.settings.music = "disc:a".into();
+        m.settings.presets = vec![("Moon".into(), Mods::parse("gravity=20").unwrap()), ("Fast".into(), Mods::parse("bike_speed=150").unwrap())];
+        m.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into()), ("mxvatv_nat13".into(), "Nat 13".into())]);
+        (m, r)
+    };
+    for tab in menu::SETTINGS_TABS {
+        every_row_changes(
+            &|| {
+                let (mut m, mut r) = shell();
+                settings_at(&mut m, &mut r, tab);
+                (m, r)
+            },
+            tab,
+        );
+    }
+    every_row_changes(
+        &|| {
+            let (mut m, mut r) = shell();
+            settings_at(&mut m, &mut r, "Ride");
+            down_to(&mut m, &mut r, menu::Key::Modifiers);
+            tap(&mut m, &mut r, Control::Cross);
+            assert_eq!(m.screen(), Some(Screen::Modifiers));
+            (m, r)
+        },
+        "Modifiers",
+    );
+    every_row_changes(
+        &|| {
+            let (mut m, mut r) = shell();
+            main_to(&mut m, &mut r, "Mods");
+            assert_eq!(m.screen(), Some(Screen::Mods));
+            (m, r)
+        },
+        "Mods",
+    );
+}
+
+/// P118: the pause's Audio row is Settings' Audio tab, and Back from it is the pause.
+#[test]
+fn the_pauses_audio_row_opens_settings_on_its_audio_tab() {
+    let (mut m, mut r) = fresh();
+    m.pause();
+    assert_eq!(m.pause_rows()[3], "Audio");
+    tap_until(&mut m, &mut r, Control::Down, |m| m.cursor(Screen::Pause) == 3);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    assert_eq!(m.tabs(Screen::Settings)[m.tab(Screen::Settings)], "Audio");
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, menu::Key::Mix);
+    // Its other tabs are there too, and Back is the pause, on its Audio row.
+    tap(&mut m, &mut r, Control::R1);
+    assert_eq!(m.tabs(Screen::Settings)[m.tab(Screen::Settings)], "Controls");
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.cursor(Screen::Pause), 3);
+}
+
+/// P118 renamed rows and moved them, but every key of the two files is read as it was: a
+/// settings.txt and a controls.txt written before the redo, every key in them, read as the same
+/// settings, and written back word for word.
+#[test]
+fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
+    use menu::CameraView;
+    let custom = CameraView { fov: -5, distance: 140, height: 95, plane_distance: 100, plane_height: 180 };
+    let old = format!(
+        "# openmx's front end (P36)\nname = Ricky C\noverlay = debug\nspeedometer = analog\nwrecks = off\ntrack = free11\n\
+         machines = biplane bike biplane bike bike bike bike biplane\nsplit = v\nmusic = disc:headstrong\nmusic_volume = 35\n\
+         effects_volume = 100\nfolder_volume = 5\ncrowd_volume = 0\nengine_volume = 90\nmenu_volume = 55\nmix = custom\n\
+         custom = 35 5 100 0 90 55\ngraphics = original\nrender_scale = 75\nvsync = off\nframe_limit = 75\nmachine_bays = off\n\
+         mods = off\nlobby_seats = 16\ncamera = {}, {}, {}, {}\nmodifiers = gravity=50 bike_speed.2=200\npreset = Moon | gravity=20\n",
+        CameraView::ORIGINAL.text(),
+        CameraView::DEFAULT.text(),
+        custom.text(),
+        CameraView::DEFAULT.text()
+    );
+    let (b, p) = (Machine::Bike, Machine::Biplane);
+    let want = Settings {
+        name: "Ricky C".into(),
+        overlay: Overlay::Debug,
+        speedometer: Speedometer::Analog,
+        wrecks: false,
+        track: "free11".into(),
+        machines: [p, b, p, b, b, b, b, p],
+        split: split::Split::SideBySide,
+        music: "disc:headstrong".into(),
+        music_volume: 35,
+        effects_volume: 100,
+        folder_volume: 5,
+        crowd_volume: 0,
+        engine_volume: 90,
+        menu_volume: 55,
+        mix: menu::Mix::Custom,
+        custom: [35, 5, 100, 0, 90, 55],
+        graphics: Graphics::Original,
+        render_scale: RenderScale::ThreeQuarters,
+        vsync: false,
+        frame_limit: FrameLimit::Fps(75),
+        bays: false,
+        mods: false,
+        lobby_seats: 16,
+        cameras: {
+            let mut c = [CameraView::DEFAULT; menu::SEATS_MAX];
+            c[0] = CameraView::ORIGINAL;
+            c[2] = custom;
+            c
+        },
+        modifiers: Mods::parse("gravity=50 bike_speed.2=200").unwrap(),
+        presets: vec![("Moon".into(), Mods::parse("gravity=20").unwrap())],
+        ..Settings::default()
+    };
+    assert_eq!(Settings::parse(&old), want);
+    assert_eq!(want.text(), old, "the redo writes an old file's settings as they were");
+    // The original's few keys from P36 alone.
+    let p36 = Settings::parse("name = Rider\noverlay = on\nwrecks = on\n");
+    assert_eq!(p36, Settings { name: "Rider".into(), ..Settings::default() });
+
+    let old = "throttle = r2\npad = /dev/input/js1\npressure = ds2@8\nlayout = new,original,new,new,new,new,new,new\n\
+               biplane = new,new,original,new,new,new,new,new\nnintendo = positions\npreset = 0,2,0,0,0,0,0,0\n";
+    let (n, o) = (Layout::New, Layout::Original);
+    let want = Controls {
+        throttle: Gas::R2,
+        pad: Some("/dev/input/js1".into()),
+        pressure: "ds2@8".into(),
+        layouts: [n, o, n, n, n, n, n, n],
+        planes: [n, n, o, n, n, n, n, n],
+        presets: [0, 2, 0, 0, 0, 0, 0, 0],
+        nintendo_positions: true,
+    };
+    assert_eq!(Controls::parse(old), want);
+    assert!(want.text().ends_with(old), "{}", want.text());
+    // One from before P40, P50, P53 and P79: a throttle, a pad, the rest the defaults.
+    let early = Controls::parse("throttle = l2\npad = auto\npressure = none\n");
+    assert_eq!(early, Controls { throttle: Gas::L2, ..Controls::default() });
+}
+
+/// How soft the edges of white ink on black in `rgb` are: of the pixels part way between, the share
+/// with no near-full and no near-empty pixel both among their eight neighbours and themselves. An
+/// edge a pixel wide has nearly none; an edge two pixels wide has many.
+fn soft_share(rgb: &[u8], w: usize, h: usize) -> (f64, usize) {
+    let at = |x: usize, y: usize| rgb[(y * w + x) * 3];
+    let (mut partial, mut soft) = (0usize, 0usize);
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let v = at(x, y);
+            if !(26..=229).contains(&v) {
+                continue;
+            }
+            partial += 1;
+            let (mut full, mut empty) = (false, false);
+            for dy in 0..3 {
+                for dx in 0..3 {
+                    let n = at(x + dx - 1, y + dy - 1);
+                    full |= n >= 230;
+                    empty |= n <= 25;
+                }
+            }
+            if !(full && empty) {
+                soft += 1;
+            }
+        }
+    }
+    (soft as f64 / partial.max(1) as f64, partial)
+}
+
+/// `rgb` through a 3x3 box blur: a label drawn small and scaled up, as the old menus' were.
+fn blurred(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = rgb.to_vec();
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            for c in 0..3 {
+                let mut sum = 0u32;
+                for dy in 0..3 {
+                    for dx in 0..3 {
+                        sum += u32::from(rgb[((y + dy - 1) * w + x + dx - 1) * 3 + c]);
+                    }
+                }
+                out[(y * w + x) * 3 + c] = (sum / 9) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// A slanted title, a label and a stadium at the stage's em for a `w` by `h` screen, white on black,
+/// as sprites over a frame sized to hold them.
+fn ink_sample(h: usize) -> (Vec<game_render::gpu::Sprite>, usize, usize) {
+    use menu::ink::{self, Weight};
+    let em = h as f32 / 45.0;
+    let title = "SETTINGS · Draw Distance";
+    let t = ink::ink();
+    let fw = (t.measure(Weight::Heavy, title, 1.7 * em) + 6.0 * em).ceil() as usize;
+    let fh = (7.0 * em).ceil() as usize;
+    let mut out = Vec::new();
+    let white = [255, 255, 255, 255];
+    t.text(&mut out, 0, Weight::Heavy, title, 2.0 * em, 2.2 * em, 1.7 * em, ink::SLANT, white);
+    t.text(&mut out, 0, Weight::Bold, "Render Scale  75%", 2.0 * em, 4.0 * em, em, 0.0, white);
+    ink::round(&mut out, [2.0 * em, 4.8 * em, 14.0 * em, 1.6 * em], 0.8 * em, white, white);
+    (out, fw, fh)
+}
+
+/// P118: the menus' ink stays sharp at any size. A label, a slanted title and a stadium drawn at
+/// 1080p and at 4K, on the CPU and (where there is a GPU) the GPU, have edges no wider than a pixel:
+/// nearly every pixel part way between ink and background touches both full ink and none.
+#[test]
+fn a_label_at_1080p_and_4k_has_edges_no_wider_than_a_pixel() {
+    let atlas = &menu::ink::ink().atlas;
+    let mut gpu = game_render::gpu::Renderer::headless().map_err(|e| eprintln!("the GPU half skipped: {e}")).ok();
+    if let Some(g) = gpu.as_mut() {
+        g.set_images(&[atlas]);
+    }
+    for h in [1080usize, 2160] {
+        let (sprites, w, fh) = ink_sample(h);
+        let mut frame = game_render::Frame::new(w, fh, [0, 0, 0]);
+        menu::ink::raster(&mut frame, &sprites, &[atlas]);
+        let (soft, partial) = soft_share(&frame.color, w, fh);
+        let (soft_blur, _) = soft_share(&blurred(&frame.color, w, fh), w, fh);
+        eprintln!("{h}p cpu: {partial} edge pixels, {:.2}% soft; blurred {:.2}%", soft * 100.0, soft_blur * 100.0);
+        assert!(partial > 200, "{h}p: only {partial} edge pixels drawn");
+        assert!(soft < 0.03, "{h}p cpu: {:.2}% of edge pixels are inside a wider edge", soft * 100.0);
+        assert!(soft_blur > 3.0 * soft && soft_blur > 0.2, "the measure tells a soft edge: {:.2}%", soft_blur * 100.0);
+        if let Some(g) = gpu.as_mut() {
+            let texture = g.offscreen(w as u32, fh as u32);
+            let view = texture.create_view(&Default::default());
+            let target = game_render::gpu::Target { view: &view, size: (w as u32, fh as u32), frame: [0, 0, w as u32, fh as u32], scale: 1 };
+            g.draw_sprites(&target, &sprites);
+            let got = g.read(&texture);
+            let (soft, partial) = soft_share(&got, w, fh);
+            eprintln!("{h}p gpu: {partial} edge pixels, {:.2}% soft", soft * 100.0);
+            assert!(partial > 200 && soft < 0.03, "{h}p gpu: {:.2}% of {partial} edge pixels soft", soft * 100.0);
+        }
+    }
 }
