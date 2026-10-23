@@ -4327,15 +4327,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             None => (Vec::new(), vec![true; world.seats.len()], None),
         };
-        // Each view's selection, `None` where it shows no markers: off the bike, and online every
-        // view but this machine's own.
+        // Each view's selection, `None` where it shows no markers: online every view but this
+        // machine's own. On every machine, of the set of the machine up (P124).
         let picks: Vec<Option<markers::Pick>> = world
             .seats
             .iter()
             .enumerate()
             .map(|(v, seat)| {
-                let shows = seat.garage.up == Kind::Bike && (mine.is_none() || v == 0);
-                shows.then(|| seat.sim.markers.pick_among(mine.unwrap_or(v), &riding))
+                hud::markers_shown_in(v, mine.is_some()).then(|| seat.sim.markers.pick_among(mine.unwrap_or(v), &riding))
             })
             .collect();
         let shown_markers: Vec<Option<MarkerShown>> = world
@@ -4344,12 +4343,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             .zip(banners.iter_mut())
             .enumerate()
             .map(|(v, (seat, banner))| {
-                let pick = picks[v]?;
-                let m = &seat.sim.markers;
-                let filled: [bool; markers::SLOTS] = std::array::from_fn(|s| m.holds(s));
-                let pad = seat.sim.input.pad(0);
-                let held = seat.riding && markers::held(pad, seat.sim.table(), &seat.hands);
-                let holding = if seat.riding { markers::holding(pad, seat.sim.table(), &seat.hands) } else { 0 };
+                picks[v]?;
+                let hud::MarkerBar { pick, filled, held, holding } = hud::MarkerBar::read(
+                    &seat.sim.markers,
+                    mine.unwrap_or(v),
+                    &riding,
+                    seat.sim.input.pad(0),
+                    seat.sim.table(),
+                    &seat.hands,
+                    seat.riding,
+                );
                 let others = markers::Markers::others(mine.unwrap_or(v), riding.len(), &riding);
                 banner
                     .update(Instant::now(), pick, filled, held)
