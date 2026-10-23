@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, others, markers } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, others, markers, home: _ } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -183,6 +183,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         plane,
         others,
         markers,
+        home: Arc::clone(&sim.home),
     };
     Ok(())
 }

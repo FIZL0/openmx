@@ -441,8 +441,9 @@ const MARKER_ALPHA: f32 = 0.2;
 const RIDER_GROUP: usize = 0;
 
 /// A view's markers' slot display while it is up (P88): the selection, which slots hold a marker,
-/// the label, the other players in the ride by seat (P94), and how far a Down or Up hold is (P106).
-type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u32);
+/// the label, the other players in the ride by seat (P94), how far a Down or Up hold is (P106), and
+/// whether slot 1 is the spawn (P132).
+type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u32, bool);
 
 /// A marker's tick (P88) as the console says it.
 /// Whether the session markers' bar, its hold bar and its label are drawn over a view (P117): with
@@ -567,9 +568,10 @@ impl RideHud<'_> {
             .filter(|(i, _)| *i != v)
             .map(|(_, r)| ride_hud::Dot { at: [r.target.body_point.x(), r.target.body_point.z()], ai: false })
             .collect();
-        let markers = marker.map(|(pick, filled, _, others, holding)| ride_hud::Panel {
+        let markers = marker.map(|(pick, filled, _, others, holding, home)| ride_hud::Panel {
             pick: *pick,
             filled: *filled,
+            home: *home,
             others: others.iter().map(|&s| (s, self.names.get(s).cloned().flatten())).collect(),
             holding: *holding,
             machine: seat.garage.up.name().to_string(),
@@ -3871,6 +3873,24 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             markers: args.markers_of(i + 1, front.as_deref()),
         });
     }
+    // Where each seat's machines start (P132), marker slot 1 while nothing is put there: every seat
+    // shares the one list and picks its own out of it by seat.
+    // The heading the riders were stood on, as the build worked it out: the scene's start direction,
+    // or `--trace-at`'s degrees.
+    let heading = match args.trace_at {
+        None => {
+            let f = point(place.start_direction).norm();
+            Vf::new(f.x, f.y, f.z, 0.0)
+        }
+        Some((_, _, deg)) => {
+            let h = deg.to_radians();
+            Vf::new(h.sin(), 0.0, h.cos(), 0.0)
+        }
+    };
+    let starts: Vec<Vf> = seats.iter().map(|s| s.sim.rider.ride.position()).collect();
+    let bays: Vec<vehicle::Spawn> = (0..seats.len()).map_while(|p| lot.bay(Machine::Biplane, p).map(|b| b.spawn)).collect();
+    let home = Arc::new(vehicle::home(&starts, heading, &bays));
+    seats.iter_mut().for_each(|s| s.sim.home = Arc::clone(&home));
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
     // The start zones' portals (V51), laid over the ground once: they never move.
     let zone_portals: Vec<portal::Portal> = portal::shown(&zone_spots, false)
@@ -5108,18 +5128,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 if !seat.markers {
                     return None;
                 }
-                let hud::MarkerBar { pick, filled, held, holding } = hud::MarkerBar::read(
-                    &seat.sim.markers,
-                    mine.unwrap_or(v),
-                    &riding,
-                    seat.sim.input.pad(0),
-                    seat.sim.table(),
-                    seat.riding,
-                );
-                let others = markers::Markers::others(mine.unwrap_or(v), riding.len(), &riding);
-                banner
-                    .update(Instant::now(), pick, filled, held)
-                    .then(|| (pick, filled, hud::marker_label(pick, filled, &names), others, holding))
+                let me = mine.unwrap_or(v);
+                // Slot 1 is the spawn while nothing is put there (P132), on the machine up.
+                let home = seat.sim.home.has(seat.sim.markers.on, me);
+                let bar = hud::MarkerBar::read(&seat.sim.markers, me, &riding, seat.sim.input.pad(0), seat.sim.table(), seat.riding).homed(home);
+                let hud::MarkerBar { pick, filled, held, holding, home } = bar;
+                let others = markers::Markers::others(me, riding.len(), &riding);
+                banner.update(Instant::now(), pick, filled, held).then(|| (pick, filled, bar.label(&names), others, holding, home))
             })
             .collect();
         // The bays shown (P103), drawn below and marked on the radar.
@@ -5257,8 +5272,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| {
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
-                        if let Some((pick, filled, label, others, holding)) = banner {
-                            hud::draw_markers_scaled(f, *pick, *filled, label, others, *holding, hud.scale);
+                        if let Some((pick, filled, label, others, holding, home)) = banner {
+                            hud::draw_markers_homed(f, *pick, *filled, *home, label, others, *holding, hud.scale);
                         }
                     };
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
@@ -5645,11 +5660,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
             let ride = !rig.hud.on && overlay_mode == menu::Overlay::Hud;
-            if let Some(Some((pick, filled, label, others, holding))) = shown_markers.get(v)
+            if let Some(Some((pick, filled, label, others, holding, home))) = shown_markers.get(v)
                 && marker_bar_shown(overlay_mode, rig.hud.on)
                 && !ride
             {
-                hud::draw_markers_scaled(target, *pick, *filled, label, others, *holding, rig.hud.scale);
+                hud::draw_markers_homed(target, *pick, *filled, *home, label, others, *holding, rig.hud.scale);
             }
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
             if !rig.hud.on && overlay_mode == menu::Overlay::Original {

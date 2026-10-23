@@ -128,6 +128,10 @@ pub struct Sim {
     /// [`markers::frame`] after the tick. Untouched, it is not walked or sent, so every state that
     /// never used them hashes and encodes as before.
     pub markers: markers::Markers,
+    /// Where this ride's machines start, every seat's (P132): marker slot 1 while the player has put
+    /// nothing there. A constant of the map like [`Sim::phy`], shared by every clone, never hashed
+    /// or sent: every machine derives the same, and a resync keeps this one's ([`snapshot`]).
+    pub home: Arc<markers::Home>,
 }
 
 /// The most riders a session holds: the original's start fills a field of up to eight.
@@ -204,6 +208,7 @@ impl Sim {
             plane: None,
             others: Vec::new(),
             markers: markers::Markers::default(),
+            home: Arc::default(),
         }
     }
 
@@ -478,6 +483,7 @@ impl Clone for Sim {
             plane: self.plane.clone(),
             others: self.others.clone(),
             markers: self.markers.clone(),
+            home: Arc::clone(&self.home),
         }
     }
 }

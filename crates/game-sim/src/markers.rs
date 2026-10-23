@@ -14,7 +14,8 @@
 //!   where it is, which way it faces, its speed and its spin — so a run-up repeats;
 //! - **Up** rides back to the selected slot's marker, or to the selected player where they are —
 //!   at their speed and spin while they ride (P111, [`Spot::motion`]), stopped where they will be
-//!   put back while they are down;
+//!   put back while they are down; slot 1 with nothing put there rides to where the machine started
+//!   this map (P132, [`Home`]), at rest;
 //! - **Left** and **Right** step the selection, through the slots and then the other players, round.
 //!
 //! The d-pad is the original's in a ride (P73's table, commands 0–3): a digital stick (lean, steer,
@@ -213,6 +214,51 @@ pub struct Spot {
     /// the bike down there stopped.
     pub motion: Option<Motion>,
 }
+
+/// **Where each seat's machines start on this map** (P132): marker slot 1's spot while the player
+/// has put nothing there, so an Up on it rides back to the start at rest. The bike's is the map's
+/// start line (a world's spawn, a mod map's: whatever the place's reader gave) or the seat's place
+/// beside it; the plane's the seat's own bay off `machine.txt` ([`Flight::reset`]'s origin and
+/// facing). A constant of the ride like the bike's `.phy` ([`Sim::home`]): every machine derives
+/// the same from the same map, so it is never hashed, encoded or sent, and a resync keeps this
+/// machine's. Empty — a fixture's, a tape's harness — slot 1 is empty as it always was.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Home {
+    /// Each seat's bike start, in seat order, still. A seat past the end starts where the first
+    /// does, as every online seat does (N5).
+    pub bikes: Vec<Spot>,
+    /// Each seat's plane bay, its origin and its facing, in seat order; a seat past the end has none.
+    pub planes: Vec<(Vf, Vf)>,
+}
+
+impl Home {
+    /// Seat `seat`'s bike start, the first seat's where the list has none of its own.
+    pub fn bike(&self, seat: usize) -> Option<&Spot> {
+        self.bikes.get(seat).or(self.bikes.first())
+    }
+
+    /// Seat `seat`'s plane bay.
+    pub fn plane(&self, seat: usize) -> Option<(Vf, Vf)> {
+        self.planes.get(seat).copied()
+    }
+
+    /// Whether seat `seat` has a start for machine `on`: slot 1 is its spawn while nothing is there.
+    pub fn has(&self, on: Vehicle, seat: usize) -> bool {
+        match on {
+            Vehicle::Bike => self.bike(seat).is_some(),
+            Vehicle::Plane => self.plane(seat).is_some(),
+        }
+    }
+
+    /// The first seat's bike start only, and `planes`: an online ride's, where every seat's bike is
+    /// a copy of the first's and every seat has its bay (N18).
+    pub fn online(&self, planes: Vec<(Vf, Vf)>) -> Home {
+        Home { bikes: self.bikes.first().cloned().into_iter().collect(), planes }
+    }
+}
+
+/// The slot an empty selection rides to the start from (P132): the first.
+pub const HOME_SLOT: usize = 0;
 
 /// A riding player's bike, for [`Spot::motion`]: shared, as every peer's spot of them is the same.
 #[derive(Clone, Debug)]
@@ -426,6 +472,14 @@ pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], _h
                     sim.rider.teleport(ride.clone());
                     Did::Teleported(pick)
                 }
+                // Slot 1 with nothing put there is the start (P132): there at rest, as the ride began.
+                None if s == HOME_SLOT => match sim.home.bike(me) {
+                    Some(start) => {
+                        sim.rider.teleport_to(Spot::still(start.at, start.forward, start.up));
+                        Did::Teleported(pick)
+                    }
+                    None => Did::Refused(pick),
+                },
                 _ => Did::Refused(pick),
             },
             Pick::Player(p) => match spots.get(p) {
@@ -468,7 +522,21 @@ fn select(m: &mut Markers, [left, right, ..]: [bool; 4], me: usize, seats: usize
 /// - **Up** on a player answers [`Did::Teleported`] and leaves the plane where it is: landing it on
 ///   the ground where the player is reads the ground and the plane's wheels, which is the garage's
 ///   (`vehicle::land_on`), as the switch onto the plane is.
-pub fn fly(markers: &mut Markers, flight: &mut Flight, pad: &crate::input::Pad, me: usize, spots: &[Spot], riding: &[bool]) -> Option<Did> {
+///
+/// Slot 1 with nothing put there is the plane's bay (P132, [`Home::plane`] of `home`): Up stands the
+/// plane there at rest, unwrecked and its throttle shut ([`Flight::reset`], on `acos`), as an
+/// online seat starts in it.
+#[allow(clippy::too_many_arguments)]
+pub fn fly(
+    markers: &mut Markers,
+    flight: &mut Flight,
+    pad: &crate::input::Pad,
+    me: usize,
+    spots: &[Spot],
+    riding: &[bool],
+    home: &Home,
+    acos: &crate::air::AcosTable,
+) -> Option<Did> {
     markers.up(Vehicle::Plane);
     let fired = fired(pad, &crate::bindings::Table::SHIPPED);
     let (mut did, pick) = select(markers, fired, me, spots.len(), riding);
@@ -489,6 +557,13 @@ pub fn fly(markers: &mut Markers, flight: &mut Flight, pad: &crate::input::Pad, 
                     flight.put_back(kept);
                     Did::Teleported(pick)
                 }
+                None if s == HOME_SLOT => match home.plane(me) {
+                    Some((at, facing)) => {
+                        flight.reset(at, facing, acos);
+                        Did::Teleported(pick)
+                    }
+                    None => Did::Refused(pick),
+                },
                 _ => Did::Refused(pick),
             },
             Pick::Player(p) if p < spots.len() => Did::Teleported(pick),

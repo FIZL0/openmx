@@ -305,7 +305,15 @@ impl Online {
 
     /// Each seat's own bay in the ride's lot (N18): seat `s` stands in `bays[s]` if it starts in the
     /// plane ([`Online::start_planes`]). Every machine parks the same lot off the same disc.
+    ///
+    /// They are each seat's plane start for marker slot 1 too (P132), beside the first seat's bike
+    /// start that every seat's bike is a copy of: [`game_sim::markers::Home::online`], the same on
+    /// every machine, put on every seat (and so on any seat a join adds, a copy of the first).
     pub fn bays(&mut self, bays: Vec<Spawn>) {
+        if let Some(first) = self.sims.first() {
+            let home = std::sync::Arc::new(first.home.online(bays.iter().map(|b| (b.at, b.facing)).collect()));
+            self.sims.iter_mut().for_each(|sim| sim.home = std::sync::Arc::clone(&home));
+        }
         self.bays = bays;
     }
 

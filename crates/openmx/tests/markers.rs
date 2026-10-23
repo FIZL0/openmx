@@ -1627,3 +1627,263 @@ fn the_camera_rides_out_with_the_bike() {
         was = (out.position, jump.position);
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// P132: slot 1 is the spawn until something is put there.
+// ---------------------------------------------------------------------------------------------------
+
+/// The stand-in ride with its map's start as the shell derives it (`vehicle::home`): the stand-in
+/// bike's spawn and, given, the plane's bay.
+fn homed(mut sim: Sim, bays: &[Spawn]) -> Sim {
+    sim.home = std::sync::Arc::new(vehicle::home(&[stock::SPAWN], stock::FACING, bays));
+    sim
+}
+
+/// The bike where it stands and how it is turned, bit for bit, and its speed and spin.
+fn stood(sim: &Sim) -> ([u32; 4], [u32; 4], [u32; 4], [u32; 4]) {
+    let c = &sim.rider.ride.chassis;
+    (sim.rider.ride.position().to_bits(), c.quat.to_bits(), c.vel.to_bits(), c.ang_vel.to_bits())
+}
+
+/// P132: on a fresh ride, Up on slot 1 — nothing put there — rides the bike back to its spawn at
+/// rest: where the ride began and turned as it was, bit for bit, with no speed and no spin, though
+/// it was ridden away at speed. Nothing is placed by it, so the markers stay fresh and walk and
+/// encode as before. Down on slot 1 then puts a real marker over it, and Up goes there; Clear
+/// Markers (and so a cleared slot) brings the spawn back. Only slot 1 is the spawn: Up on an empty
+/// slot 2 does nothing. A ride with no start (no `Home`) refuses as before.
+#[test]
+fn slot_one_is_the_bikes_spawn_until_a_marker_is_put_there() {
+    let start = homed(Sim::new(0x88), &[]);
+    let spawn = stood(&start);
+    let zero = Vf::new(0.0, 0.0, 0.0, 0.0).to_bits();
+    assert_eq!((spawn.2, spawn.3), (zero, zero), "the stand-in does not start at rest");
+
+    let mut sim = start.clone();
+    for _ in 0..45 {
+        tick(&mut sim, GAS);
+    }
+    assert!(F(sim.bike_vel().z()).abs() > F(1.0), "the bike is not moving");
+    assert_ne!(stood(&sim).0, spawn.0);
+    assert_eq!(what(&hold(&mut sim, Control::Up, 0, HOLD_MS)), vec![Did::Teleported(Pick::Slot(0))]);
+    // The tick of the hold that fired put it there; the tick after, let go, rode one tick from rest.
+    let mut back = start.clone();
+    back.rider.teleport_to(Spot::still(stock::SPAWN, stock::FACING, Vf::new(0.0, 1.0, 0.0, 0.0)));
+    assert_eq!(stood(&back), spawn, "a teleport to the spawn is not the spawn");
+    assert!(sim.markers.fresh(), "riding to the spawn placed something");
+    assert!(sim.rider.ghost.on, "the spawn's teleport does not ghost the bike as a teleport does");
+    // Exactly the spawn on the tick it fired: rerun it and stop there.
+    let mut sim = start.clone();
+    for _ in 0..45 {
+        tick(&mut sim, GAS);
+    }
+    let did = (0..30).find_map(|_| tick(&mut sim, Control::Up.mask()));
+    assert_eq!(did, Some(Did::Teleported(Pick::Slot(0))));
+    assert_eq!(stood(&sim), spawn, "Up on slot 1 is not the spawn at rest");
+    let at_rest = sim.clone();
+
+    // Slot 2, empty, is no spawn.
+    assert_eq!(fired(&hold(&mut sim, Control::Right, 0, 0)), vec![(0, Did::Stepped(Pick::Slot(1)))]);
+    assert_eq!(what(&hold(&mut sim, Control::Up, 0, HOLD_MS)), vec![Did::Refused(Pick::Slot(1))]);
+    assert_eq!(fired(&hold(&mut sim, Control::Left, 0, 0)), vec![(0, Did::Stepped(Pick::Slot(0)))]);
+
+    // Down on slot 1 puts a marker over the spawn, and Up goes to it.
+    for _ in 0..30 {
+        tick(&mut sim, GAS);
+    }
+    let did = (0..30).find_map(|_| tick(&mut sim, GAS | Control::Down.mask()));
+    assert_eq!(did, Some(Did::Placed(0)));
+    let placed = sim.markers.slots[0].as_deref().and_then(markers::Mark::ride).cloned().expect("a bike's marker");
+    for _ in 0..30 {
+        tick(&mut sim, GAS);
+    }
+    let did = (0..30).find_map(|_| tick(&mut sim, Control::Up.mask()));
+    assert_eq!(did, Some(Did::Teleported(Pick::Slot(0))));
+    assert_eq!(sim.rider.ride.position().to_bits(), placed.position().to_bits(), "Up went past the placed marker");
+    assert_ne!(sim.rider.ride.position().to_bits(), spawn.0);
+
+    // Clear Markers: the spawn again.
+    sim.markers.clear();
+    for _ in 0..30 {
+        tick(&mut sim, GAS);
+    }
+    let did = (0..30).find_map(|_| tick(&mut sim, Control::Up.mask()));
+    assert_eq!(did, Some(Did::Teleported(Pick::Slot(0))));
+    assert_eq!(stood(&sim), spawn, "Clear Markers did not bring the spawn back");
+
+    // No start, no spawn: the slot is empty as it always was.
+    let mut bare = Sim::new(0x88);
+    for _ in 0..45 {
+        tick(&mut bare, GAS);
+    }
+    assert_eq!(what(&hold(&mut bare, Control::Up, 0, HOLD_MS)), vec![Did::Refused(Pick::Slot(0))]);
+    println!("spawn marker: Up on slot 1 stood the bike at {:?} at rest", at_rest.rider.ride.position());
+}
+
+/// P132: the start is the map's, never a peer's. A ride's state hashes and encodes the same with
+/// and without one, so peers never send or compare it, and a resync keeps this machine's own (the
+/// constant it derived from the map), as it keeps the bike's numbers.
+#[test]
+fn the_spawn_is_derived_never_sent() {
+    let mut sim = homed(Sim::new(0x88), &[]);
+    for _ in 0..20 {
+        tick(&mut sim, GAS);
+    }
+    let mut bare = sim.clone();
+    bare.home = Default::default();
+    assert_eq!(sim.hash(), bare.hash(), "the spawn is in the state hash");
+    let bytes = game_sim::snapshot::encode(&sim);
+    assert_eq!(bytes, game_sim::snapshot::encode(&bare), "the spawn is in the state's bytes");
+    let mut here = homed(Sim::new(0x88), &[]);
+    let home = here.home.clone();
+    game_sim::snapshot::decode(&mut here, &bytes).unwrap();
+    assert_eq!(here.home, home, "a resync dropped this machine's spawn");
+    // And riding to it is the same on every machine: two peers, each its own derived start.
+    let (mut a, mut b) = (sim.clone(), homed(bare, &[]));
+    for s in [&mut a, &mut b] {
+        assert_eq!((0..30).find_map(|_| tick(s, Control::Up.mask())), Some(Did::Teleported(Pick::Slot(0))));
+    }
+    assert_eq!(a.hash(), b.hash());
+}
+
+/// P132: in a split each seat's slot 1 is its own start: seat 2 rides back beside the first, where
+/// it was stood, not onto the first's spawn.
+#[test]
+fn each_seat_has_its_own_spawn() {
+    let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+    let second = Vf::new(stock::SPAWN.x() + 12.0, stock::SPAWN.y(), stock::SPAWN.z(), 1.0);
+    let home = std::sync::Arc::new(vehicle::home(&[stock::SPAWN, second], stock::FACING, &[]));
+    let mut sims: Vec<Sim> = (0..2).map(|_| Sim::new(0x132)).collect();
+    sims[1].rider.teleport_to(Spot::still(second, stock::FACING, up));
+    let at_two = sims[1].rider.ride.position().to_bits();
+    for sim in &mut sims {
+        sim.home = home.clone();
+    }
+    let mut seat = |sims: &mut Vec<Sim>, me: usize, buttons: u16| {
+        let spots: Vec<Spot> = sims.iter().map(|s| Spot::of(&s.rider)).collect();
+        let sim = &mut sims[me];
+        let hands = sim.poll(DT, &pads(buttons)).stick_alone();
+        sim.step(DT, &hands, &mut Flat::default());
+        markers::frame_among(sim, me, &spots, &[true, true], &hands)
+    };
+    for _ in 0..45 {
+        seat(&mut sims, 1, GAS);
+    }
+    assert_ne!(sims[1].rider.ride.position().to_bits(), at_two);
+    assert_eq!((0..30).find_map(|_| seat(&mut sims, 1, Control::Up.mask())), Some(Did::Teleported(Pick::Slot(0))));
+    assert_eq!(sims[1].rider.ride.position().to_bits(), at_two, "seat 2 rode to somebody else's spawn");
+    assert_eq!(sims[1].bike_vel().to_bits(), Vf::new(0.0, 0.0, 0.0, 0.0).to_bits());
+    // An online ride's seats all start on the first's bike start, each in its own bay.
+    let online = home.online(vec![(second, stock::FACING)]);
+    assert_eq!(online.bike(5).map(|s| s.at.to_bits()), Some(stock::SPAWN.to_bits()));
+    assert_eq!(online.plane(0).map(|p| p.0.to_bits()), Some(second.to_bits()));
+    assert_eq!(online.plane(1), None);
+}
+
+/// P132: the plane's slot 1 is its bay. Flown away and up into the air, Up on slot 1 — nothing put
+/// there — stands the plane back in its bay at rest: on its wheels where it was parked, no speed,
+/// no spin, unwrecked, as an online seat starts in it (`vehicle::start_lane`). Down on it puts a
+/// real marker over it; Clear Markers brings the bay back. And the bar shows slot 1 as the spawn,
+/// set apart from a placed marker, until one is placed. Online the lane does the same.
+#[test]
+fn the_planes_slot_one_is_its_bay() {
+    let Some((sim, mut garage)) = hangar(Kind::Biplane) else { return };
+    let bay = garage.plane.as_ref().unwrap().bay;
+    let mut sim = homed(sim, &[bay]);
+    let mut want = flight(&garage).clone();
+    want.reset(bay.at, bay.facing, &sim.tables.ride.acos);
+
+    let seats = [(sim.clone(), garage.clone())];
+    let b = bar(&seats, 0, &Controls::default()).homed(sim.home.has(sim.markers.on, 0));
+    assert!(b.home && !b.filled[0], "a fresh plane's slot 1 is not shown as the spawn");
+    assert_eq!(b.label(&[]), "marker 1 spawn");
+
+    airborne(&mut sim, &mut garage);
+    assert_eq!(hold_pass(&mut sim, &mut garage, Control::Up.mask()), Some(Did::Teleported(Pick::Slot(0))));
+    let f = flight(&garage);
+    let zero = Vf::new(0.0, 0.0, 0.0, 0.0).to_bits();
+    assert_eq!(f.body.position.to_bits(), want.body.position.to_bits(), "the plane is not back in its bay");
+    assert_eq!(f.body.quat.to_bits(), want.body.quat.to_bits());
+    assert_eq!((f.body.velocity.to_bits(), f.body.rates.to_bits()), (want.body.velocity.to_bits(), want.body.rates.to_bits()), "the plane is not at rest");
+    for v in [f.body.velocity, f.body.rates] {
+        assert_eq!([v.x(), v.y(), v.z()], [0.0; 3], "the plane is not at rest");
+    }
+    assert_eq!(f.crash.reason, 0);
+    let plane = garage.plane.as_ref().unwrap();
+    assert_eq!(plane.spawn, bay, "the plane's own spawn is not its bay");
+    assert!(sim.markers.fresh(), "riding to the bay placed something");
+
+    // Down puts a real marker over the bay; the bar shows it placed, not the spawn.
+    airborne(&mut sim, &mut garage);
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Down.mask()), Some(Did::Placed(0)));
+    let kept = flight(&garage).clone();
+    let seats = [(sim.clone(), garage.clone())];
+    let b = bar(&seats, 0, &Controls::default()).homed(sim.home.has(sim.markers.on, 0));
+    assert!(!b.home && b.filled[0]);
+    assert_eq!(b.label(&[]), "marker 1 set");
+    for _ in 0..30 {
+        pass(&mut sim, &mut garage, stick(GAS, 0x00));
+    }
+    assert_eq!(hold_pass(&mut sim, &mut garage, Control::Up.mask()), Some(Did::Teleported(Pick::Slot(0))));
+    assert!(*flight(&garage) == kept, "Up did not go to the placed marker");
+
+    // Clear Markers: the bay again.
+    sim.markers.clear();
+    for _ in 0..30 {
+        pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    }
+    assert_eq!(hold_pass(&mut sim, &mut garage, Control::Up.mask()), Some(Did::Teleported(Pick::Slot(0))));
+    assert_eq!(flight(&garage).body.position.to_bits(), want.body.position.to_bits(), "Clear Markers did not bring the bay back");
+
+    // Online: the lane's plane goes to the seat's bay the same way.
+    let Some((lane, garage)) = hangar(Kind::Biplane) else { return };
+    let mut lane = homed(lane, &[bay]);
+    let template = garage.plane.as_ref().unwrap().flight.clone().unwrap();
+    vehicle::start_lane(&template, bay, &mut lane);
+    let mut world = Flat::default();
+    let mut tick = |sim: &mut Sim, report: Report| {
+        let spots = [vehicle::lane_spot(sim, &mut world)];
+        sim.poll(DT, &[report, Report::missing()]);
+        vehicle::fly_lane(sim, DT, vehicle::Wanted::default(), &mut world);
+        vehicle::lane_markers(sim, 0, &spots, &[true], &mut world)
+    };
+    for _ in 0..30 * 30 {
+        tick(&mut lane, Report::from_buttons(GAS));
+    }
+    assert_eq!((0..30).find_map(|_| tick(&mut lane, Report::from_buttons(Control::Up.mask()))), Some(Did::Teleported(Pick::Slot(0))));
+    let f = lane.plane.as_ref().unwrap();
+    assert_eq!(f.body.position.to_bits(), want.body.position.to_bits(), "the lane's plane is not back in its bay");
+    assert_eq!([f.body.velocity.x(), f.body.velocity.y(), f.body.velocity.z()], [0.0; 3]);
+    println!("spawn marker: the plane stood back in its bay at {:?}", bay.at);
+}
+
+/// P132: the bike's bar shows slot 1 as the spawn on a fresh ride, a placed marker as set, and the
+/// spawn again once the slot is cleared; with no start it is empty, as it was.
+#[test]
+fn the_bar_sets_the_spawn_apart() {
+    let mut sim = homed(Sim::new(0x88), &[]);
+    let read = |sim: &Sim| {
+        MarkerBar::read(&sim.markers, 0, &[true], sim.input.pad(0), sim.table(), true).homed(sim.home.has(sim.markers.on, 0))
+    };
+    let b = read(&sim);
+    assert!(b.home);
+    assert_eq!(b.label(&[]), "marker 1 spawn");
+    let bare = Sim::new(0x88);
+    let b = read(&bare);
+    assert!(!b.home);
+    assert_eq!(b.label(&[]), "marker 1 empty");
+    assert_eq!((0..30).find_map(|_| tick(&mut sim, Control::Down.mask())), Some(Did::Placed(0)));
+    let b = read(&sim);
+    assert!(!b.home && b.filled[0]);
+    assert_eq!(b.label(&[]), "marker 1 set");
+    sim.markers.clear();
+    assert!(read(&sim).home);
+    // Drawn: slot 1 as the spawn is neither a placed marker's solid box nor an empty one's outline.
+    let draw = |filled: [bool; SLOTS], home: bool| {
+        let mut f = game_render::raster::Frame::new(320, 224, [0, 0, 0]);
+        hud::draw_markers_homed(&mut f, Pick::Slot(1), filled, home, "marker", &[], 0, 1.0);
+        f.color
+    };
+    let (empty, spawn, set) = (draw([false; SLOTS], false), draw([false; SLOTS], true), draw([true, false, false, false, false], false));
+    assert_ne!(spawn, empty);
+    assert_ne!(spawn, set);
+}
