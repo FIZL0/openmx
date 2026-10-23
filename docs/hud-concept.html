@@ -2,6 +2,7 @@
 <meta name="claude:viewport-fit-sides" content="cover">
 <style>
 /* Layout: a 16:9 ride view (em = view height / 45, so split screen shrinks with it); demo controls under it, notes below. */
+@font-face { font-family: "DSEG7"; src: url(https://cdn.jsdelivr.net/npm/dseg@0.46.0/fonts/DSEG7-Classic/DSEG7Classic-BoldItalic.woff2) format("woff2"); font-display: block; }
 @font-face { font-family: "OMX"; font-weight: 800; src: url(../crates/openmx/assets/fonts/MPLUSRounded1c-ExtraBold.ttf) format("truetype"); }
 @font-face { font-family: "OMX"; font-weight: 700; src: url(../crates/openmx/assets/fonts/MPLUSRounded1c-Bold.ttf) format("truetype"); }
 :root {
@@ -19,6 +20,7 @@
   --orange: #ff9900;                  /* the original's trick text and preload charge, 255,153,0 */
   --grey: #c8c8c8;                    /* its score text, 200,200,200 */
   --slot1: #00dcff; --slot2: #ff3cc8; --slot3: #b4ff3c; --slot4: #ff7850; --slot5: #9682ff;  /* overlay::MARKER_COLOURS (P94) */
+  --digits: "DSEG7", "OMX", sans-serif;  /* the digital speed: seven-segment LCD digits (DSEG7 Classic Bold Italic, OFL) */
   --face: "OMX", "M PLUS Rounded 1c", "Arial Rounded MT Bold", system-ui, sans-serif;
 }
 * { box-sizing: border-box; }
@@ -118,12 +120,13 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
 
 /* speedometer, bottom right, at speedometer.lyt's places on 640x448: the dial's 128 square at 480,301,
    the preload meter (20x85) hard against its right edge at 599,326, and the digital readout's right
-   edge at 588, just left of the meter. All counted from the view's bottom-right corner */
+   edge at 588, just left of the meter, raised (user, 2026-10-22) so its top sits near the meter's.
+   All counted from the view's bottom-right corner */
 .speedo { position: absolute; inset: 0; }
 .analog { position: absolute; right: 4em; bottom: 2.1em; width: 16em; height: 16em; display: none; }
 .analog svg { width: 100%; height: 100%; overflow: visible; }
-.digital { position: absolute; right: 6.5em; bottom: 4.4em; }
-.digital .v { display: block; font-weight: 800; font-size: 5.4em; line-height: .8; color: #fff; font-variant-numeric: tabular-nums; text-shadow: .05em .06em 0 rgba(0,0,0,.45); text-align: right; }
+.digital { position: absolute; right: 6.5em; bottom: 6.4em; }
+.digital .v { display: block; font-family: var(--digits); font-weight: 400; font-style: normal; font-size: 4.6em; line-height: .8; color: #fff; font-variant-numeric: tabular-nums; text-shadow: .05em .06em 0 rgba(0,0,0,.45); text-align: right; }
 .pre { position: absolute; right: 2.6em; bottom: 3.8em; width: 2.5em; height: 8.5em; border-radius: 999px; background: rgba(0,0,0,.7); padding: .3em; display: flex; align-items: flex-end; }
 .pre b { display: block; width: 100%; height: 0; border-radius: 999px; background: var(--orange); }
 .speedo.is-analog .analog { display: block; }
@@ -195,8 +198,8 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
       <button data-do="plane">Machine: Bike</button>
     </div>
     <div class="row"><span>Settings</span>
-      <button data-set="speedo" data-v="1" aria-pressed="true">Analog</button>
-      <button data-set="speedo" data-v="0">Digital</button>
+      <button data-set="speedo" data-v="0" aria-pressed="true">Digital</button>
+      <button data-set="speedo" data-v="1">Analog</button>
       <button data-set="map" data-v="1" aria-pressed="true">Minimap on</button>
       <button data-set="map" data-v="0">Minimap off</button>
       <button data-set="scale" data-v="0.85">HUD 85%</button>
@@ -244,9 +247,9 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
       <li>Overlay None hides it (P117).</li>
     </ul></div>
     <div class="card"><h3>Speed and preload (V42, V53)</h3><ul>
-      <li>Places are <code>speedometer.lyt</code>'s: the dial's 128 square at 480,301, the meter hard against its right edge at 599,326, and the digital number's right edge at 588, just left of it.</li>
+      <li>Places are <code>speedometer.lyt</code>'s: the dial's 128 square at 480,301, the meter hard against its right edge at 599,326, and the digital number's right edge at 588, just left of it, raised so its top sits near the meter's.</li>
       <li>The preload meter is the original's: a dark capsule 20×85, charging orange (255,153,0) from the bottom as the preload fires (<code>overlay::preload_fill</code>).</li>
-      <li>The dial is the default, as on the disc. It has white dashes from 0 to 100, an orange needle off a grey hub, and the odometer's <code>%07.1f</code> in a dark capsule. Digital is the big white oblique number alone.</li>
+      <li>Digital is the default (user, 2026-10-22): the big white number alone, in seven-segment LCD digits (DSEG7 Classic Bold Italic, OFL; no unlit segments). Analog is the disc's dial, with white dashes from 0 to 100, an orange needle off a grey hub, and the odometer's <code>%07.1f</code> in a dark capsule.</li>
     </ul></div>
     <div class="card" hidden><h3>old</h3><ul>
       <li>Digital is a big slanted readout in our face, with no bitmap yearlingdash.</li>
@@ -356,7 +359,7 @@ function dialSVG(v) {
 }
 
 /* ---- state ---- */
-const O = { speedo: 1, map: 1, scale: 1, overlay: 1, split: 0 };
+const O = { speedo: 0, map: 1, scale: 1, overlay: 1, split: 0 };
 function makeView(id) {
   return { id, seed: id + 1, speed: 34, target: 40, heading: .4, x: 0, y: 0, odo: 142.3, score: id ? 48200 : 128450, chain: [], verdict: "", pre: 0, pumping: false,
     cam: 0, camT: 0, bay: false, zone: false, hold: 0, holding: false, challenge: null, el: null,
