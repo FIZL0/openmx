@@ -60,6 +60,12 @@ impl Page {
         self.fade != Fade::Off
     }
 
+    /// Whether this tick's [`Page::update`] will put the bike back: the fade out's last update (S108,
+    /// for the bones, which the original steps after the fader).
+    pub fn puts_back_next(&self) -> bool {
+        self.fade == Fade::Out && self.updates + 1 >= Self::UPDATES
+    }
+
     /// One tick of the fader, after the bike's update, with its draw. Answers whether this tick's
     /// draw put the bike back.
     pub fn update(&mut self) -> bool {
