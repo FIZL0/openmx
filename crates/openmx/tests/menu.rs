@@ -261,6 +261,9 @@ fn the_settings_file_reads_back_as_it_was_written() {
         },
         // The mods folder not read (MD2).
         mods: false,
+        // No radar, and the HUD at 130 % (V52).
+        minimap: false,
+        hud_scale: 130,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -364,6 +367,70 @@ fn the_speedometer_row_switches_the_dial_and_is_saved() {
     assert_eq!(Settings::parse("speedometer = sundial\n").speedometer, Speedometer::Digital);
 }
 
+/// V52: the Minimap row under the speedometer's turns the radar off and on, and the HUD scale row
+/// under it steps 50 % to 150 % by ten; both are saved to settings.txt and read back, and a file
+/// without them is the radar at the original's size, written as it was.
+#[test]
+fn the_minimap_and_hud_scale_rows_change_and_are_saved() {
+    let (mut m, mut r) = fresh();
+    assert!(m.settings.minimap);
+    assert_eq!(m.settings.hud_scale, 100);
+    let plain = Settings::parse("name = Rider\n");
+    assert!(plain.minimap && plain.hud_scale == 100);
+    assert!(!Settings::default().text().contains("minimap") && !Settings::default().text().contains("hud_scale"));
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    for _ in 0..10 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert!(!m.settings.minimap);
+    assert_eq!(m.settings.speedometer, Speedometer::Digital, "the speedometer's row is untouched");
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.minimap);
+    tap(&mut m, &mut r, Control::Left);
+    assert!(!m.settings.minimap);
+    assert!(m.settings.text().contains("minimap = off\n"));
+
+    // The HUD scale: up to 150 and no further, down to 50 and no further, Cross round from the top.
+    tap(&mut m, &mut r, Control::Down);
+    let mut seen = Vec::new();
+    for _ in 0..7 {
+        tap(&mut m, &mut r, Control::Right);
+        assert!(m.take_changed());
+        seen.push(m.settings.hud_scale);
+    }
+    assert_eq!(seen, [110, 120, 130, 140, 150, 150, 150]);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.hud_scale, 50, "round from the largest to the smallest");
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.hud_scale, 50);
+    for _ in 0..8 {
+        tap(&mut m, &mut r, Control::Right);
+    }
+    assert_eq!(m.settings.hud_scale, 130);
+    assert!(!m.settings.minimap, "the minimap's row is untouched");
+    assert!(m.settings.vsync, "the VSync row is untouched");
+    assert!(m.settings.text().contains("hud_scale = 130\n"));
+
+    // Saved to the file and read back from it.
+    let dir = scratch("hud");
+    menu::save(&dir, &m.settings, &Controls::default()).unwrap();
+    let back = menu::load(&dir).0;
+    assert_eq!((back.minimap, back.hud_scale), (false, 130));
+    std::fs::remove_dir_all(&dir).unwrap();
+    // A step the row does not offer, or nonsense, is the original's size; a percent sign is fine.
+    assert_eq!(Settings::parse("hud_scale = 135\n").hud_scale, 100);
+    assert_eq!(Settings::parse("hud_scale = 900\n").hud_scale, 100);
+    assert_eq!(Settings::parse("hud_scale = big\n").hud_scale, 100);
+    assert_eq!(Settings::parse("hud_scale = 60%\n").hud_scale, 60);
+    assert!(Settings::parse("minimap = on\n").minimap);
+}
+
 #[test]
 fn the_render_scale_row_cycles_and_is_saved() {
     let (mut m, mut r) = fresh();
@@ -430,7 +497,7 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     }
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Settings));
-    for _ in 0..10 {
+    for _ in 0..12 {
         tap(&mut m, &mut r, Control::Down);
     }
     tap(&mut m, &mut r, Control::Right);

@@ -114,7 +114,9 @@
 //! them, both sticks where its dead zone put them, and beside them the numbers the ride is running
 //! on. That one is debugging furniture and matches nothing on the disc. `--overlay none`, or the
 //! front end's setting, draws neither until H. The original's speed is its digital readout unless
-//! `--speedometer analog` or the Settings' Speedometer row asks for its dial (V42).
+//! `--speedometer analog` or the Settings' Speedometer row asks for its dial (V42). `--minimap off` or the
+//! Settings' Minimap row drops its radar, and `--hud-scale` or the HUD scale row sizes every part of
+//! both HUDs about its own corner (V52).
 //!
 //! **M** swaps between the bike and the track's biplane, as does the pause's "Switch To Machine" for
 //! the player who opened it, and `--vehicle biplane` or the ride setup's machine pick starts in the
@@ -715,6 +717,12 @@ struct Args {
     /// `--speedometer digital|analog` (V42): how the original's HUD shows the speed. Unset, the
     /// front end's setting decides, and without one the digital readout.
     speedometer: Option<menu::Speedometer>,
+    /// `--minimap on|off` (V52): whether the original's HUD draws its radar. Unset, the front end's
+    /// setting decides, and without one it does.
+    minimap: Option<bool>,
+    /// `--hud-scale 50..150` (V52): the HUD's size in percent of the original's, in the Settings
+    /// row's steps of ten. Unset, the front end's setting decides, and without one 100.
+    hud_scale: Option<u8>,
     /// `--camera NAME`: which of the track's camera presets to start on, by the name its
     /// `cpresets.ini` gives it. The default is the one the original itself is on in a freeride (P14).
     camera: String,
@@ -1235,6 +1243,8 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
+                a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
+                a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 if !args.render_scale_asked {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
@@ -1308,6 +1318,8 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
+                a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
+                a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 if !args.render_scale_asked {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
@@ -3060,6 +3072,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut glow_textures = portal_art.as_ref().map(|a| a.textures.clone());
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut speedometer = args.speedometer.unwrap_or_default();
+    let mut minimap = args.minimap.unwrap_or(true);
+    let mut hud_scale = args.hud_scale.unwrap_or(menu::HUD_SCALE_DEFAULT);
     let mut graphics = args.graphics.unwrap_or_default();
     let mut frame = Frame::new(width, height, look.fog_color);
     // The views (V22): where each player's goes in the frame, and a frame of its own size for each to
@@ -3624,6 +3638,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if front.menu.changed() {
                 overlay_mode = front.menu.settings.overlay;
                 speedometer = front.menu.settings.speedometer;
+                minimap = front.menu.settings.minimap;
+                hud_scale = front.menu.settings.hud_scale;
                 graphics = front.menu.settings.graphics;
                 if !args.render_scale_asked && render_scale != front.menu.settings.render_scale.fraction() {
                     render_scale = front.menu.settings.render_scale.fraction();
@@ -4210,6 +4226,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // And the switch pop-up, each view its own player's (P103), as the input stage's take reads it.
         let offering = head.is_none() && online.is_none() && front.as_deref().is_none_or(|f| f.menu.riding());
         hud_art.offers = world.seats.iter().map(|seat| offering.then(|| seat_offer(seat, &bays)).flatten()).collect();
+        // The settings' minimap and HUD scale (V52), for the original's HUD and the shell's.
+        hud_art.minimap = minimap;
+        hud_art.scale = f32::from(hud_scale) / 100.0;
         let cameras: Vec<Camera> = cameras
             .iter()
             .enumerate()
@@ -4251,6 +4270,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let (seat, rig) = (&world.seats[v], &mut rigs[v]);
                 let bike_up = seat.garage.up == Kind::Bike;
                 rig.hud.plane = !bike_up;
+                rig.hud.scale = hud_art.scale;
                 rig.hud.bindings = *seat.sim.table();
                 rig.hud.flight = match (bike_up, &seat.garage.plane) {
                     (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
@@ -4262,7 +4282,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let draw = |f: &mut Frame| {
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
                         if let Some((pick, filled, label, others, holding)) = banner {
-                            hud::draw_markers(f, *pick, *filled, label, others, *holding);
+                            hud::draw_markers_scaled(f, *pick, *filled, label, others, *holding, hud.scale);
                         }
                     };
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
@@ -4599,6 +4619,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let (seat, rig) = (&world.seats[v], &mut rigs[v]);
             let bike_up = seat.garage.up == Kind::Bike;
             rig.hud.plane = !bike_up;
+            rig.hud.scale = hud_art.scale;
             rig.hud.bindings = *seat.sim.table();
             rig.hud.flight = match (bike_up, &seat.garage.plane) {
                 (false, Some(plane)) => plane.gauges().map(|(throttle, air)| (throttle.0, air.0)),
@@ -4606,7 +4627,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
             if let Some(Some((pick, filled, label, others, holding))) = shown_markers.get(v) {
-                hud::draw_markers(target, *pick, *filled, label, others, *holding);
+                hud::draw_markers_scaled(target, *pick, *filled, label, others, *holding, rig.hud.scale);
             }
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
             if !rig.hud.on && overlay_mode == menu::Overlay::Original {
@@ -5281,6 +5302,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         hud: false,
         overlay: None,
         speedometer: None,
+        minimap: None,
+        hud_scale: None,
         camera: START_CAMERA.to_string(),
         camera_view: None,
         moment: None,
@@ -5426,6 +5449,18 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let style = menu::Speedometer::from_word(&word)
                     .ok_or_else(|| format!("--speedometer: {word:?} is not digital or analog"))?;
                 args.speedometer = Some(style);
+            }
+            "--minimap" => {
+                args.minimap = Some(match next("on or off")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    word => return Err(format!("--minimap: {word:?} is not on or off")),
+                });
+            }
+            "--hud-scale" => {
+                let word = next("a HUD scale from 50 to 150 in tens")?;
+                let n = menu::hud_scale_word(&word).ok_or_else(|| format!("--hud-scale: {word:?} is not 50 to 150 in steps of 10"))?;
+                args.hud_scale = Some(n);
             }
             "--fps" => args.fps = true,
             "--graphics" => {
@@ -5619,6 +5654,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--overlay original|debug|none] [--speedometer digital|analog] [--hud] [--camera NAME]\n\
+                            [--minimap on|off] [--hud-scale 50..150]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov] [--vehicle bike|biplane]\n\

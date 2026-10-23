@@ -185,6 +185,12 @@ pub struct Settings {
     pub overlay: Overlay,
     /// How the original's HUD shows the speed (V42): the digital readout, or the dial.
     pub speedometer: Speedometer,
+    /// Whether the original's HUD draws its free-ride radar (V52): off, the speedometer stays and
+    /// the radar, its icons and the other riders' marks go from every view. On unless turned off.
+    pub minimap: bool,
+    /// The whole HUD's size, in percent of the original's (V52): [`HUD_SCALE_MIN`] to
+    /// [`HUD_SCALE_MAX`] in steps of [`HUD_SCALE_STEP`], each part about its own corner.
+    pub hud_scale: u8,
     /// Whether a ride wrecks at all.
     pub wrecks: bool,
     /// The last track ridden, which the track pick opens on.
@@ -587,6 +593,8 @@ impl Default for Settings {
             name: "Rider".into(),
             overlay: Overlay::Original,
             speedometer: Speedometer::default(),
+            minimap: true,
+            hud_scale: HUD_SCALE_DEFAULT,
             wrecks: true,
             track: TRACKS[0].0.into(),
             machines: [Machine::Bike; SEATS_MAX],
@@ -658,6 +666,8 @@ impl Settings {
                 }
                 "overlay" => s.overlay = Overlay::from_word(v).unwrap_or(s.overlay),
                 "speedometer" => s.speedometer = Speedometer::from_word(v).unwrap_or(s.speedometer),
+                "minimap" => s.minimap = v != "off",
+                "hud_scale" => s.hud_scale = hud_scale_word(v).unwrap_or(s.hud_scale),
                 "wrecks" => s.wrecks = v != "off",
                 "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // One word a seat, 1P's first; a seat the line does not reach rides the bike.
@@ -768,6 +778,7 @@ impl Settings {
             self.render_scale.word()
         ) + &self.display_text()
             + &self.bays_text()
+            + &self.hud_text()
             + &self.mods_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
@@ -783,6 +794,17 @@ impl Settings {
     /// it was.
     fn bays_text(&self) -> String {
         if self.bays { String::new() } else { "machine_bays = off\n".into() }
+    }
+
+    /// The minimap and the HUD's scale (V52), only where they are not the defaults, so a file from
+    /// before them is written as it was.
+    fn hud_text(&self) -> String {
+        let minimap = if self.minimap { String::new() } else { "minimap = off\n".into() };
+        let scale = match self.hud_scale {
+            HUD_SCALE_DEFAULT => String::new(),
+            n => format!("hud_scale = {n}\n"),
+        };
+        minimap + &scale
     }
 
     /// The mods' switch (MD2), only when it is off, so a file from before it is written as it was.
@@ -845,6 +867,30 @@ fn clean_name(v: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// The HUD's scale (V52), in percent: the Settings row's range and step, and the original's size.
+pub const HUD_SCALE_MIN: u8 = 50;
+pub const HUD_SCALE_MAX: u8 = 150;
+pub const HUD_SCALE_STEP: u8 = 10;
+pub const HUD_SCALE_DEFAULT: u8 = 100;
+
+/// A HUD scale as `settings.txt` and `--hud-scale` spell it, `130` or `130%`: one of the row's
+/// steps, or nothing.
+pub fn hud_scale_word(w: &str) -> Option<u8> {
+    let n = w.trim().trim_end_matches('%').parse::<u8>().ok()?;
+    ((HUD_SCALE_MIN..=HUD_SCALE_MAX).contains(&n) && (n - HUD_SCALE_MIN) % HUD_SCALE_STEP == 0).then_some(n)
+}
+
+/// The HUD scale a step down or up — or, with neither, a step up and round from the largest to the
+/// smallest, as Cross steps a row.
+pub fn hud_scale_step(n: u8, down: bool, up: bool) -> u8 {
+    match (down, up) {
+        (true, _) => n.saturating_sub(HUD_SCALE_STEP).max(HUD_SCALE_MIN),
+        (_, true) => (n + HUD_SCALE_STEP).min(HUD_SCALE_MAX),
+        _ if n >= HUD_SCALE_MAX => HUD_SCALE_MIN,
+        _ => (n + HUD_SCALE_STEP).min(HUD_SCALE_MAX),
+    }
 }
 
 /// Which overlay a ride draws over each view, as `--overlay` spells it (V26).
@@ -1354,7 +1400,7 @@ const AUDIO_PRESET: usize = 3;
 const AUDIO_SLIDERS: usize = 4;
 /// Which of [`Mix::levels`]' sliders each slider row is.
 const AUDIO_SLIDER: [usize; 6] = [0, 2, 3, 4, 5, 1];
-const SETTINGS_ROWS: usize = 16;
+const SETTINGS_ROWS: usize = 18;
 /// The settings' sound rows (P42), after the four P36 shipped.
 const SETTINGS_MUSIC: usize = 4;
 const SETTINGS_MUSIC_VOLUME: usize = 5;
@@ -1365,17 +1411,20 @@ const SETTINGS_GRAPHICS: usize = 7;
 const SETTINGS_RENDER_SCALE: usize = 8;
 /// The speedometer's style (V42), under the render scale's.
 const SETTINGS_SPEEDOMETER: usize = 9;
-/// VSync and the frame limit (P90), under the speedometer's.
-const SETTINGS_VSYNC: usize = 10;
-const SETTINGS_FRAME_LIMIT: usize = 11;
+/// The minimap and the HUD's scale (V52), under the speedometer's.
+const SETTINGS_MINIMAP: usize = 10;
+const SETTINGS_HUD_SCALE: usize = 11;
+/// VSync and the frame limit (P90), under the HUD's.
+const SETTINGS_VSYNC: usize = 12;
+const SETTINGS_FRAME_LIMIT: usize = 13;
 /// The machines at their bays (P103), above the modifiers'.
-const SETTINGS_BAYS: usize = 12;
+const SETTINGS_BAYS: usize = 14;
 /// The game modifiers' screen (P55), the last row.
-const SETTINGS_MODIFIERS: usize = 15;
+const SETTINGS_MODIFIERS: usize = 17;
 /// The cameras' screen (P82), above the modifiers', which stay the last row.
-const SETTINGS_CAMERA: usize = 14;
+const SETTINGS_CAMERA: usize = 16;
 /// Whether the `mods/` folder is read (MD2), under the bays'.
-const SETTINGS_MODS: usize = 13;
+const SETTINGS_MODS: usize = 15;
 /// The cameras' screen: whose they are, the five sliders, and the two resets.
 const CAMERA_SEAT: usize = 0;
 const CAMERA_FIRST: usize = 1;
@@ -2759,6 +2808,14 @@ impl Menu {
                             self.settings.speedometer = all[i];
                             self.changed = true;
                         }
+                        SETTINGS_MINIMAP => {
+                            self.settings.minimap = !self.settings.minimap;
+                            self.changed = true;
+                        }
+                        SETTINGS_HUD_SCALE => {
+                            self.settings.hud_scale = hud_scale_step(self.settings.hud_scale, p.left, p.right);
+                            self.changed = true;
+                        }
                         SETTINGS_VSYNC => {
                             self.settings.vsync = !self.settings.vsync;
                             self.changed = true;
@@ -3792,6 +3849,8 @@ impl Art {
                         format!("Graphics  {}", menu.settings.graphics.label()),
                         format!("Render scale  {}", menu.settings.render_scale.label()),
                         format!("Speedometer  {}", menu.settings.speedometer.label()),
+                        format!("Minimap  {}", if menu.settings.minimap { "On" } else { "Off" }),
+                        format!("HUD scale  {}%", menu.settings.hud_scale),
                         format!("VSync  {}", if menu.settings.vsync { "On" } else { "Off" }),
                         format!("Frame limit  {}", menu.settings.frame_limit.label()),
                         format!("Machines at bays  {}", if menu.settings.bays { "On" } else { "Off" }),
