@@ -13,7 +13,8 @@ use tracing::{trace, warn};
 use crate::clock::{millis_since_epoch, Instant};
 use instant::Duration;
 use std::collections::vec_deque::Drain;
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::det::{HashMap, HashSet};
+use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::ops::Add;
 
@@ -227,7 +228,7 @@ impl<T: Config> UdpProtocol<T> {
         }
 
         // received input history
-        let mut recv_inputs = HashMap::new();
+        let mut recv_inputs = HashMap::default();
         recv_inputs.insert(NULL_FRAME, InputBytes::zeroed::<T>(recv_player_num));
 
         Self {
@@ -239,7 +240,7 @@ impl<T: Config> UdpProtocol<T> {
             // state
             state: ProtocolState::Initializing,
             sync_remaining_roundtrips: NUM_SYNC_PACKETS,
-            sync_random_requests: HashSet::new(),
+            sync_random_requests: HashSet::default(),
             running_last_quality_report: crate::clock::now(),
             running_last_input_recv: crate::clock::now(),
             disconnect_notify_sent: false,
@@ -276,7 +277,7 @@ impl<T: Config> UdpProtocol<T> {
             last_recv_time: crate::clock::now(),
 
             // debug desync
-            pending_checksums: HashMap::new(),
+            pending_checksums: HashMap::default(),
             desync_detection,
         }
     }

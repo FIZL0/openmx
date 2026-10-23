@@ -15,7 +15,8 @@ use tracing::{debug, trace, warn};
 use instant::{Duration, Instant};
 use std::collections::vec_deque::Drain;
 use std::collections::VecDeque;
-use std::collections::{BTreeMap, HashMap};
+use crate::det::HashMap;
+use std::collections::BTreeMap;
 use std::convert::TryInto;
 
 const RECOMMENDATION_INTERVAL: Frame = 60;
@@ -46,9 +47,9 @@ where
 impl<T: Config> PlayerRegistry<T> {
     pub(crate) fn new() -> Self {
         Self {
-            handles: HashMap::new(),
-            remotes: HashMap::new(),
-            spectators: HashMap::new(),
+            handles: HashMap::default(),
+            remotes: HashMap::default(),
+            spectators: HashMap::default(),
         }
     }
 
@@ -224,11 +225,11 @@ impl<T: Config> P2PSession<T> {
             disconnect_frame: NULL_FRAME,
             player_reg: players,
             event_queue: VecDeque::new(),
-            pending_local_inputs: HashMap::new(),
+            pending_local_inputs: HashMap::default(),
             outgoing_local_inputs: BTreeMap::new(),
             last_sent_outgoing_input_frame: NULL_FRAME,
             desync_detection,
-            local_checksum_history: HashMap::new(),
+            local_checksum_history: HashMap::default(),
             last_sent_checksum_frame: NULL_FRAME,
         }
     }
@@ -982,7 +983,7 @@ impl<T: Config> P2PSession<T> {
                 .confirmed_inputs(self.next_spectator_frame, &self.local_connect_status);
             assert_eq!(inputs.len(), self.num_players);
 
-            let mut input_map = HashMap::new();
+            let mut input_map = HashMap::default();
             for (handle, input) in inputs.iter_mut().enumerate() {
                 assert!(input.frame == NULL_FRAME || input.frame == self.next_spectator_frame);
                 input_map.insert(handle, *input);

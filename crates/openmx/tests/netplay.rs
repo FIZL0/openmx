@@ -942,6 +942,8 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
     peers[0].open(room).unwrap();
 
     let frame = Duration::from_nanos(1_001_000_000_000 / 30_000);
+    // ticks ridden after each join before the next step: it rides in real time, so this is the test's length
+    const AFTER: usize = 150;
     let started = Instant::now();
     let mut last = Instant::now();
     // the host's tick after every frame, and when each guest asked to join
@@ -963,17 +965,17 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
         let tick = h.np.tick();
         let joins = h.np.admit.joins.len();
         let short = peers[0].room.as_ref().map(|r| r.short.clone()).unwrap_or_default();
-        // g once the host has ridden two seconds alone and its code is out; k ten seconds after g is in
+        // g once the host has ridden two seconds alone and its code is out; k five seconds after g is in
         if !asked[0] && tick >= 60 && !short.is_empty() {
             assert!(peers[0].room.as_ref().unwrap().riding, "the room is the ride");
             peers[1].net.send(Cmd::Join(short.clone(), vec![on("thq2", "pro250a", 2)]));
             asked[0] = true;
         }
-        if !asked[1] && joins == 1 && tick >= h.np.admit.joins[0].1 as usize + 300 {
+        if !asked[1] && joins == 1 && tick >= h.np.admit.joins[0].1 as usize + AFTER {
             peers[2].net.send(Cmd::Join(short.clone(), vec![on("thq3", "race125p", 1), on("thq4", "race125p", 0)]));
             asked[1] = true;
         }
-        if joins == 2 && h.np.confirmed() > h.np.admit.joins[1].1 as i64 + 300 && peers.iter().all(|p| p.riding.as_ref().is_some_and(|r| r.np.confirmed() > h.np.admit.joins[1].1 as i64 + 300)) {
+        if joins == 2 && h.np.confirmed() > h.np.admit.joins[1].1 as i64 + AFTER as i64 && peers.iter().all(|p| p.riding.as_ref().is_some_and(|r| r.np.confirmed() > h.np.admit.joins[1].1 as i64 + AFTER as i64)) {
             break short;
         }
         if started.elapsed() > Duration::from_secs(150) {
@@ -1012,7 +1014,7 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
     let settled = |nps: &[&net::Netplay<rides::State>]| nps.iter().map(|np| np.confirmed().max(0) as usize).min().unwrap();
     for (who, from) in [(vec![h, g], t1), (vec![h, g, k], t2)] {
         let to = settled(&who);
-        assert!(to > from + 250, "{to} settled from {from}");
+        assert!(to > from + AFTER - 30, "{to} settled from {from}");
         let first = peer::ticks(who[0], from, to);
         for np in &who[1..] {
             let theirs = peer::ticks(np, from, to);
@@ -1023,13 +1025,13 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
         }
     }
     // the bikes move: the agreement is about something
-    let states: std::collections::BTreeSet<u64> = h.hashes[t2..t2 + 200].iter().copied().collect();
-    assert!(states.len() > 100, "{} states", states.len());
+    let states: std::collections::BTreeSet<u64> = h.hashes[t2..t2 + AFTER].iter().copied().collect();
+    assert!(states.len() > AFTER / 2, "{} states", states.len());
 
     // the host's ride: forward all the way, but for the one step back to the settled tick at k's join
     let back: Vec<(usize, usize)> = host.windows(2).filter(|w| w[1] < w[0]).map(|w| (w[0], w[1])).collect();
     assert!(back.len() <= 1 && back.iter().all(|b| b.1 == t2 && b.0 - b.1 <= WINDOW), "the host went back: {back:?} (joins at {t1}, {t2})");
-    assert!(host[0] <= 1 && *host.last().unwrap() > t2 + 300, "{:?}..{:?}", host.first(), host.last());
+    assert!(host[0] <= 1 && *host.last().unwrap() > t2 + AFTER, "{:?}..{:?}", host.first(), host.last());
     assert_eq!((h.recover.restarts, g.recover.restarts, k.recover.restarts), (2, 2, 1));
 }
 
