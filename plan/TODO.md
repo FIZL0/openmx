@@ -100,7 +100,7 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **MD23** world_ultra: openmx-mods' stitch writes untamed_nat_or at x 215.99995, which the world loader refuses; round the stitch offsets to whole feet so the largest world loads, then ride across it and check MD17's ground stream holds RSS bounded
 - [ ] **MD24** In a world mod the parked biplane sits at free06's machine.txt coordinates, not shifted by the home tile's offset; park it beside the world's spawn
 - [ ] **P131** Profile mid-ride ground adds on world_mxu with openmx --timings: add_ground_piece is ~2 ms per piece but the regrid over 653 pieces is unmeasured
-- [ ] **MD25** World Sky Per Map crossfades the skybox across a join instead of switching it at the middle (MD9 blends only sun, ambient and fog): a second sky binding in the sky shader, weighted by Looks::at's shares.
+- [ ] **MD26** World Sky Per Map crossfades the skybox across a join instead of switching it at the middle (MD9 blends only sun, ambient and fog): a second sky binding in the sky shader, weighted by Looks::at's shares.
 ### Phase 2 — a decompilation you can read
 
 
