@@ -9,8 +9,8 @@ use game_render::anim::Set;
 use game_render::disc::{Disc, Res};
 use game_render::psg::Model;
 use game_render::rider::{
-    AIR_POSES, Body, FOOT_ANCHORS, HAND_ANCHORS, HOLD_WITHIN, LET_GO_AT, LIMBS, Sex, Skeleton,
-    anchors_of, hold_on, stunt_name,
+    AIR_POSES, Body, FOOT_ANCHORS, HAND_ANCHORS, LIMBS, Sex, Skeleton, anchors_of, hold_on, holds_in,
+    stunt_name,
 };
 use game_render::chassis::{grips, limb_names, measure};
 use game_render::ini;
@@ -22,6 +22,7 @@ use game_render::world::{Camera, vertical_fov};
 use game_sim::ride::Controls;
 use game_sim::trick::{Dir, SLOTS, Set as Stunts24, Stunts, Trick, slot_of};
 use game_sim::world::Flat;
+use game_sim::rider_anim::Mode;
 use game_sim::{motion, phy::Phy, rider};
 use ps2_float::{F, Vf};
 
@@ -569,23 +570,17 @@ fn the_level_of_detail_falls_back_as_the_camera_pulls_away() {
 /// wheelbase five and a quarter, this body five and a half tall — so an inch is a twelfth.
 const AN_INCH: f32 = 1.0 / 12.0;
 
-/// **V10.** A gesture that takes one limb off the bike leaves the others holding on: solved against
-/// the chassis's own anchors, every hand that is on the bars is on the grip to within an inch and
-/// every foot that is on the pegs is on the peg, while the limb the stunt lets go of is left exactly
-/// where the clip put it.
+/// **V10, V61.** The stand-in solve: against the chassis's own anchors, every limb the anchor is in
+/// reach of lands on it to within an inch, a limb the clip has stretched past its target straightens
+/// at it, no limb changes length, and nothing above the limbs moves — over every gesture this rider
+/// has at nine phases, and nothing excluded. And at a strength of 0 nothing moves at all.
 ///
-/// This is what the four dummy anchors are for, and why the original keeps a controller per limb and
-/// aims it at the vehicle's own anchors every frame. A clip is a recording made against one pose of
-/// one bike: played on a bike whose bars are turned, at a lean the animator did not finish on, or
-/// through a cross-fade out of something else, the hand drifts off the grip and the stunt reads as a
-/// clip playing rather than a rider holding on. Every gesture this rider has, at nine phases of each,
-/// and nothing excluded.
-///
-/// The weight each limb holds on with is [`game_render::rider::holding`], which is the port's own
-/// rule and not the original's — see the module and the journal. What is being tested here is both
-/// halves of it: the limbs it holds land on the bike, and the limbs it does not are untouched.
+/// This is the solve [`hold_on`] draws the clip with while the riding ragdoll is off, and not the
+/// original's (V61: the original holds through its riding ragdoll's pins, and draws a gesture as the
+/// clip wrote it — `a_gesture_is_drawn_as_the_clip_wrote_it`). So every gesture pose is solved here
+/// only as a hard set of starting points, not because the original holds a gesture on.
 #[test]
-fn a_solved_hand_stays_on_the_grip_through_a_gesture() {
+fn the_stand_in_solve_puts_a_limb_in_reach_on_its_anchor() {
     let Some(mut disc) = disc() else { return };
     let bike = member(&disc, &format!("{A_BIKE}.res")).expect("the disc has no bike archive");
     let chassis = disc.res(&bike).and_then(|r| r.read_suffix("bike.psg")).expect("the chassis");
@@ -610,7 +605,6 @@ fn a_solved_hand_stays_on_the_grip_through_a_gesture() {
     };
 
     let mut held = [0usize; 4];
-    let mut let_go = [0usize; 4];
     let mut stretched = 0usize;
     let mut worst_held = (0.0f32, String::new());
     let mut worst_fixed = (0.0f32, String::new());
@@ -625,6 +619,9 @@ fn a_solved_hand_stays_on_the_grip_through_a_gesture() {
             let before = skel.world(&pose);
             let mut after = before.clone();
             let ended = hold_on(&skel, &mut after, &targets, 1.0);
+            let mut untouched = before.clone();
+            hold_on(&skel, &mut untouched, &targets, 0.0);
+            assert!(untouched == before, "{name} at {phase}: a hold at strength 0 moved the pose");
 
             for (i, limb) in LIMBS.iter().enumerate() {
                 let target = targets[i].expect("every anchor has a target here");
@@ -652,42 +649,20 @@ fn a_solved_hand_stays_on_the_grip_through_a_gesture() {
                 let short = span - (upper + lower);
                 let where_ = format!("{} in {name} at {phase}", limb.anchor);
 
-                if was >= LET_GO_AT {
-                    // The stunt let go. Nothing may move at all — not the limb, not its anchor.
-                    let_go[i] += 1;
-                    assert!(
-                        (now - was).abs() < 1e-6,
-                        "{where_}: the stunt let go {was:.2} feet back and the solve moved it to \
-                         {now:.2}"
-                    );
-                    for j in [root, bend, anchor] {
-                        assert!(
-                            at(&after, j).sub(at(&before, j)).len() < 1e-6,
-                            "{where_}: a let-go limb's joints moved"
-                        );
-                    }
-                } else if was <= HOLD_WITHIN && short < -AN_INCH {
+                if short < -AN_INCH {
                     // Holding on, and the anchor is inside the limb's reach: it goes on the bike.
                     held[i] += 1;
                     assert!(now < AN_INCH, "{where_}: ended {now:.4} out, from {was:.4}");
                     if was > worst_fixed.0 {
                         worst_fixed = (was, where_.clone());
                     }
-                } else if was <= HOLD_WITHIN {
+                } else {
                     // Holding on, but the clip has the limb at or past full stretch. The best it can
                     // do is straighten at the anchor, and it may not end further out than that.
                     stretched += 1;
                     assert!(
                         now <= was + 1e-3 && now < short.max(0.0) + AN_INCH,
                         "{where_}: {now:.4} out with {short:.4} of stretch to make up, from {was:.4}"
-                    );
-                } else {
-                    // In between: the limb is faded on, so the anchor moves towards the bike without
-                    // reaching it. The fade is the point — an edge here would pop the frame it
-                    // crossed — so what is checked is the direction and the bound.
-                    assert!(
-                        now <= was + 1e-3,
-                        "{where_}: a faded limb went further out, {was:.3} to {now:.3}"
                     );
                 }
                 if was > worst_held.0 {
@@ -714,125 +689,86 @@ fn a_solved_hand_stays_on_the_grip_through_a_gesture() {
         }
     }
     println!(
-        "{} gestures at nine phases: {} limbs held onto the bike, {} were let go of, {} were at \
-         full stretch; the furthest an anchor started out was {:.2} feet ({}), and the furthest one \
-         that was pulled back on was {:.2} feet ({})",
+        "{} gestures at nine phases: {} limbs put onto the bike, {} were at full stretch; the \
+         furthest an anchor started out was {:.2} feet ({}), and the furthest one that was pulled \
+         back on was {:.2} feet ({})",
         table.stunts.iter().filter(|s| !s.name.is_empty()).count(),
         held.iter().sum::<usize>(),
-        let_go.iter().sum::<usize>(),
         stretched,
         worst_held.0,
         worst_held.1,
         worst_fixed.0,
         worst_fixed.1
     );
-    println!(
-        "held: {held:?} and let go of: {let_go:?}, in the order of LIMBS — foot L, foot R, hand L,          hand R"
-    );
-    // The test proves nothing unless the gestures really do take limbs off the bike and put others
-    // back on it.
+    println!("held: {held:?}, in the order of LIMBS — foot L, foot R, hand L, hand R");
+    // The test proves nothing unless the solve really is asked to move limbs a long way.
     assert!(held.iter().sum::<usize>() > 400, "barely any limb was held: {held:?}");
-    assert!(let_go[0] + let_go[1] > 0, "no gesture let go of a foot");
-    assert!(let_go[2] + let_go[3] > 0, "no gesture let go of a hand");
+    assert!(worst_held.0 > LET_GO, "no gesture took a limb more than {LET_GO} feet off the bike");
     assert!(worst_fixed.0 > 0.5, "nothing more than half a foot out was ever pulled back on");
     assert!(held[2] + held[3] > 100, "hardly any hand was put back on the bars: {held:?}");
 }
 
-/// **V10.** The one-hander, by name: the hand the stunt keeps on the bars ends on the grip and the
-/// hand it throws stays thrown.
+/// How far off the bike a gesture takes a limb it lets go of: `superman` puts both feet six and a
+/// half feet from the pegs and `nohandedlander` both hands nearly three feet off the bars.
+const LET_GO: f32 = 2.0;
+
+/// **V61.** A gesture is drawn as the clip wrote it: from the frame the body's machine hands the
+/// pose to the clip table to the frame it takes it back, [`Body::hold`] is 0 and the drawn pose is
+/// the clip's to the bit, limbs off the bike and all. On every other frame of the ride the hold is
+/// whatever [`holds_in`] says of the machine's mode.
 ///
-/// The general test above sweeps every gesture and holds the rule to both halves of itself. This one
-/// is the sentence the task asks for, on the three stunts that say it plainest — a one-hander, a
-/// can-can and a superman — so that a later change to the rule has to argue with the stunts by name.
+/// The original's rule (journal 2026-10-23-v61-limb-hold): its riding ragdoll is not placed while a
+/// pose off the clip table is in charge, so nothing holds the gesture on. The shortest gesture this
+/// rider has, made in the air the way the shell's rider makes it.
 #[test]
-fn a_one_hander_keeps_the_other_hand_on_the_bars() {
+fn a_gesture_is_drawn_as_the_clip_wrote_it() {
     let Some(mut disc) = disc() else { return };
     let bike = member(&disc, &format!("{A_BIKE}.res")).expect("the disc has no bike archive");
     let chassis = disc.res(&bike).and_then(|r| r.read_suffix("bike.psg")).expect("the chassis");
     let chassis = Skeleton::of(&Model::parse(&chassis).expect("the chassis parses"));
     let targets = anchors_of(&chassis, &[]);
-    let table = stunts(&mut disc);
+    let set = stunts(&mut disc);
     let tables = rider::Tables::build();
     let p = phy(&mut disc, &tables);
-    let body = body(&mut disc, &table, &p);
-    let skel = body.rig.set.skeleton.clone();
+    let mut body = body(&mut disc, &set, &p);
 
-    // Which limbs each of the three is still holding the bike with at the phase the stunt is being
-    // held at — the hold time is the stunt table's own (`Stunt::hold_time`) — in the order of
-    // `LIMBS`: left foot, right foot, left hand, right hand. The rest are thrown, and the rider is
-    // not getting them back until the stunt is over: a one-handed indian air is both feet forward
-    // off the pegs and the left hand off the bars, a can-can swings the right leg over the seat, and
-    // a superman is both feet off with both hands on.
-    for (stunt, holding) in [
-        ("onehandindianair", &[3][..]),
-        ("cancan", &[0, 2, 3][..]),
-        ("superman", &[2, 3][..]),
-    ] {
-        let record = table
-            .stunts
-            .iter()
-            .find(|s| s.name.eq_ignore_ascii_case(stunt))
-            .unwrap_or_else(|| panic!("this rider cannot do {stunt}"));
-        let name = stunt_name("", &record.name);
-        let id = body.rig.set.id(&name).unwrap_or_else(|| panic!("no clip named {name}"));
-        let bound = body.rig.set.get(id).expect("a found id is in the set");
-        let mut pose = game_render::skin::Pose::new(skel.len());
-        let hold = record.hold_time.0.min(bound.clip.timing.duration.0);
-        bound.clip.pose(hold, &bound.joints, &mut pose);
-        let before = skel.world(&pose);
-        let mut after = before.clone();
-        let ended = hold_on(&skel, &mut after, &targets, 1.0);
+    let (slot, stunt) = shortest_stunt(&set);
+    let gesture = gesture_for(slot);
+    let mounts = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+    let mut r = rider::Rider::new(&p, mounts, Vf::new(0.0, DROP, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), set.clone());
+    r.sense.wrecks_enabled = false;
+    r.body_rates = game_render::vehicle::params();
+    let mut world = Flat::default();
 
-        for (i, limb) in LIMBS.iter().enumerate() {
-            let target = targets[i].expect("the chassis has this anchor");
-            let anchor = skel.find(limb.anchor).expect("the body has this anchor");
-            let m = before[anchor].0[3];
-            let was = v3(m[0], m[1], m[2]).sub(target).len();
-            let now = ended[i].expect("every limb of this body is solved");
-            // How much limb there is between the swing joint and the anchor, and how far the anchor
-            // has to go: a holding limb the clip has left stretched past its own length cannot be put
-            // on the bike, and what it can do instead is straighten at it.
-            let g = |w: &[game_render::mat::M4], j: usize| {
-                let m = w[j].0[3];
-                v3(m[0], m[1], m[2])
-            };
-            let (ro, be) = (
-                skel.find(limb.root).expect("the body has this joint"),
-                skel.find(limb.bend).expect("the body has this joint"),
-            );
-            let reach = g(&before, be).sub(g(&before, ro)).len()
-                + g(&before, anchor).sub(g(&before, be)).len();
-            let short = target.sub(g(&before, ro)).len() - reach;
-            println!(
-                "{stunt} held at {hold:.2}s: {} {was:.3} -> {now:.3}                  (a reach of {reach:.3} and {short:+.3} to make up)",
-                limb.anchor
-            );
-            if !holding.contains(&i) {
-                assert!(
-                    was > LET_GO_AT && (now - was).abs() < 1e-6,
-                    "{stunt} throws {}, and the solve put it back: {was:.3} -> {now:.3}",
-                    limb.anchor
-                );
-            } else if short < -AN_INCH {
-                assert!(
-                    now < AN_INCH,
-                    "{stunt} holds on with {}, which ended {now:.3} out (from {was:.3})",
-                    limb.anchor
-                );
-            } else {
-                // `onehandindianair` is the one gesture of the twenty-four where this happens: at the
-                // pose it is held in, the grip is two and a half inches past the end of the arm the
-                // rider is holding on with, so the solve straightens the arm at it and the hand ends
-                // three inches out instead of one. Whether the original reaches it — a third joint
-                // at the collar bone, a wrist that turns — is unproved; see the journal.
-                assert!(
-                    now < short + AN_INCH && now <= was + 1e-3,
-                    "{stunt} holds on with {} at full stretch, {short:+.3} short, and the solve                      left it {now:.3} out (from {was:.3})",
-                    limb.anchor
-                );
-            }
+    let (mut posed, mut riding, mut started) = (0usize, 0usize, false);
+    for k in 0..600 {
+        // The throttle open, which is what takes the body out of the start line's gate, and the
+        // gesture asked for once on the way down.
+        let hands = if k == 10 {
+            Controls { gas: F::ONE, trick: buttons_for(gesture.0), dpad: dpad_for(gesture.1), ..Controls::default() }
+        } else {
+            Controls { gas: F::ONE, ..Controls::default() }
+        };
+        let said = r.frame(&p, &tables, &hands, FRAME, &mut world);
+        body.ride(FRAME, &mut r, &hands, rider::Gate::default());
+        started |= said.started == Some(Trick(slot as u8));
+        let mode = r.body.machine.mode;
+        assert_eq!(body.hold, if holds_in(mode) { 1.0 } else { 0.0 }, "frame {k}: the hold in {mode:?}");
+        if mode == Mode::Posed {
+            posed += 1;
+            let (drawn, _) = body.palette(Some(&targets));
+            assert!(drawn == body.rig.world(), "frame {k}: a posed gesture was held on to the bike");
+        } else if mode == Mode::Riding {
+            riding += 1;
+        }
+        if started && !r.tricks.in_progress && mode != Mode::Posed {
+            break;
         }
     }
+    println!("{:?}: {posed} frames posed off the clip table, {riding} riding", stunt.name);
+    assert!(started, "the gesture never started {:?}", stunt.name);
+    assert!(posed > 5, "the gesture never handed the body to the clip table ({posed} frames)");
+    assert!(riding > 5, "the body was hardly ever riding, so nothing held ({riding} frames)");
 }
 
 /// **V18.** A frame of the shell's own driving puts the body on the bike: three seconds of riding,
@@ -1120,8 +1056,7 @@ fn a_frame_of_the_shells_own_ride_draws_the_bike_where_the_solver_put_it() {
     );
     // The hands are on them all the same, which is the whole point of reading them live. Within an
     // inch rather than the thousandth of a foot the straight-ahead frame gets: half a foot is far
-    // enough for `rider::holding` to start easing the hold off, which is it doing its job — an arm
-    // at full stretch is pulled towards the grip and not snapped onto it.
+    // enough for an arm at full stretch to be straightened towards the grip rather than onto it.
     let steered = measure(&chassis, &model, &r.ride, Some(&body));
     for (name, held) in limb_names().iter().zip(steered.held) {
         let held = held.unwrap_or_else(|| panic!("the limb at {name} was not solved"));

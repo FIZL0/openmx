@@ -237,7 +237,7 @@ fn subtree(model: &Model, node: usize) -> Vec<bool> {
 /// it.
 fn held(body: &Body, targets: &Anchors) -> [Option<f32>; 4] {
     let mut world = body.rig.world();
-    hold_on(&body.rig.set.skeleton, &mut world, targets, 1.0)
+    hold_on(&body.rig.set.skeleton, &mut world, targets, body.hold)
 }
 
 /// The names of the four limbs, for a failure message that says which one let go.

@@ -313,31 +313,23 @@ pub fn anchors_of(chassis: &Skeleton, world: &[M4]) -> Anchors {
     out
 }
 
-/// Put the rider's hands on the grips and its feet on the pegs: the inverse kinematics the four dummy
-/// anchors exist for, solved in place on a joint array from [`Skeleton::world`].
+/// Put the rider's hands on the grips and its feet on the pegs, solved in place on a joint array from
+/// [`Skeleton::world`]: the clip drawn with its limbs' ends on the bike's own anchors.
 ///
-/// A clip is a recording, and a recording of a rider is right only while the bike is where it was
-/// when the animator posed it. The bars turn, the suspension moves, the chassis the body is drawn on
-/// is not the chassis the clip was made against — and at speed that reads as a hand floating off the
-/// grip, which is the difference between a rider holding on and a clip playing. So the original does
-/// not trust the clip with the ends of the limbs: it keeps four controllers, one per limb, each with
-/// the bone it ends at and the offset from that bone to its anchor, and every frame it aims them at
-/// the vehicle's own four anchors.
+/// **This is a stand-in, and not the original's** (V61). The original has no limb solve on the
+/// drawn skeleton at all: what V10 took for four limb controllers are the riding ragdoll's four hold
+/// pins (`game_sim::ragdoll::Ragdoll::holds`), and the weight it found read off each one's bone is
+/// that bone's inverse mass — the pin's own solve, ported and proved as
+/// `game_sim::ragdoll::Pin::one_body`. While riding, the rider is drawn from that ragdoll
+/// (`game_sim::ragdoll_riding`), whose pins pull the hand and foot bodies onto the grips and pegs.
+/// The shell still draws the clip by default (the riding ragdoll is behind `OPENMX_RIDING_RAGDOLL`
+/// until S111), and this is what holds that clip on in the meantime.
 ///
-/// **Which limbs hold on is decided by how far the clip already has them from the bike**, and that is
-/// this port's rule rather than the original's — the original has a weight per limb, which it reads
-/// off the bone it is solving and scales by a term it takes off the vehicle, and what is in that
-/// weight is not known (see the journal). A rule is needed either way: a stunt that lets go of the
-/// bike on purpose must be left alone, or the solve draws a different stunt. Half of this rider's
-/// gestures take a limb off — `superman` puts both feet six and a half feet from the pegs, `cancan`
-/// swings one four and a half feet over the seat, `nohandedlander` takes both hands nearly three feet
-/// off the bars — and on this disc that is a clean gap: inside a gesture, a limb the stunt holds on
-/// with is never more than about a foot from its anchor and a limb it lets go of is never nearer than
-/// two and a third feet. So a limb within [`HOLD_WITHIN`] is pulled all the way on, a limb past
-/// [`LET_GO_AT`] is left exactly where the clip put it, and in between it is faded, because a rule
-/// with an edge in it would pop the frame the pose crossed it.
-///
-/// `strength` scales all four weights: 1 to hold on, 0 to leave the pose alone. Drawing passes 1.
+/// **When it holds is the original's**: `strength` is [`Body::hold`], 1 while the body's mode
+/// machine is riding and 0 otherwise. The original's ragdoll is not placed, so not stepped and not
+/// drawn, whenever a pose off the clip table is in charge — a gesture, a no-hander, a backflip's
+/// hold — or the body is at the gate; the clip is drawn exactly as it was written then, every limb
+/// included. `strength` between 0 and 1 fades each target towards where the clip has its anchor.
 ///
 /// Returns how far each anchor ended from the target it was aimed at, in the disc's unit, which is a
 /// foot; `None` for a limb that was not solved — no target, a joint this skeleton has not got, a limb
@@ -356,28 +348,24 @@ pub fn hold_on(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: f
         ) else {
             continue;
         };
-        let off = world[anchor].point(v3(0.0, 0.0, 0.0)).sub(target).len();
-        let weight = strength * holding(off);
-        if weight <= SMALL {
-            out[i] = Some(off);
+        if strength <= SMALL {
+            out[i] = Some(world[anchor].point(v3(0.0, 0.0, 0.0)).sub(target).len());
             continue;
         }
-        out[i] = aim(skel, world, [root, bend, anchor], target, weight);
+        out[i] = aim(skel, world, [root, bend, anchor], target, strength);
     }
     out
 }
 
-/// How far an anchor may start from its target and still be pulled all the way onto it, in feet.
-pub const HOLD_WITHIN: f32 = 1.0;
-
-/// And how far out the limb is taken to have let go of the bike on purpose, so the pose is left as
-/// the clip wrote it.
-pub const LET_GO_AT: f32 = 2.0;
-
-/// The weight a limb holds on with, for an anchor this far from where the bike wants it: 1 inside
-/// [`HOLD_WITHIN`], 0 past [`LET_GO_AT`], and a straight line between them.
-pub fn holding(off: f32) -> f32 {
-    ((LET_GO_AT - off) / (LET_GO_AT - HOLD_WITHIN)).clamp(0.0, 1.0)
+/// Whether a body in this mode of its machine holds on to the bike (V61): only while riding.
+///
+/// The original's rule, through its riding ragdoll: the actor's mode is chosen by the same chain as
+/// [`game_sim::rider_anim::Body::mode`], and every mode but riding (and the wreck, which is drawn
+/// from the wreck's ragdoll) leaves the ragdoll unplaced, so the clip is drawn as written. Measured
+/// on recording2 (journal 2026-10-23-v61-limb-hold): the ragdoll was placed on exactly the riding
+/// ticks with no pose off the clip table in charge, 1499 of 1499, of which 368 were posed.
+pub fn holds_in(mode: game_sim::rider_anim::Mode) -> bool {
+    mode == game_sim::rider_anim::Mode::Riding
 }
 
 /// One limb's solve: bend the middle joint until the anchor is as far from the root as the target is,
@@ -393,7 +381,6 @@ pub fn holding(off: f32) -> f32 {
 /// `joints` are the limb's three in order: swing, bend, anchor. `strength` fades the target towards
 /// where the anchor already is, and the answer is how far the anchor ended from the target that was
 /// *asked* for — so a limb held at half weight answers about half of what it started out.
-
 fn aim(skel: &Skeleton, world: &mut [M4], joints: [usize; 3], target: V3, strength: f32) -> Option<f32> {
     let [root, bend, anchor] = joints;
     let at = |world: &[M4], j: usize| world[j].point(v3(0.0, 0.0, 0.0));
@@ -685,6 +672,10 @@ pub struct Body {
     /// was in, which is the bind pose. That fade is the driving's and is left alone; see
     /// `tests/body.rs`.
     pub posed: bool,
+    /// How hard the drawn clip holds on to the bike ([`hold_on`]'s `strength`): 1 while the body's
+    /// machine is riding, 0 while anything else poses it ([`holds_in`]). [`Body::ride`] writes it;
+    /// a body nothing rides (the biplane's pilot) holds on.
+    pub hold: f32,
 }
 
 impl Body {
@@ -742,7 +733,7 @@ impl Body {
             }
             pose_lib.clip[SLOTS + i] = set.bound(name);
         }
-        Ok(Body { rider, rig: Rig::bound(set, lib, params), pose_lib, posed: false })
+        Ok(Body { rider, rig: Rig::bound(set, lib, params), pose_lib, posed: false, hold: 1.0 })
     }
 
     /// **MD21:** a trick pack's rider clips in [`Body::pose_lib`]'s states past the sixty — its
@@ -784,6 +775,7 @@ impl Body {
             rider.body_frame(dt, c, gate, lib, &|id| set.timing(Some(id)))
         };
         self.posed_by(frame, &rider.body.player, rider.body_clocked);
+        self.hold = if holds_in(rider.body.machine.mode) { 1.0 } else { 0.0 };
         frame
     }
 
@@ -855,7 +847,7 @@ impl Body {
     ) -> [Option<f32>; 4] {
         let mut world = self.rig.world();
         let held = match hold {
-            Some(targets) => hold_on(&self.rig.set.skeleton, &mut world, targets, 1.0),
+            Some(targets) => hold_on(&self.rig.set.skeleton, &mut world, targets, self.hold),
             None => [None; 4],
         };
         loaded.tris = skin(&loaded.model, &world, group);
@@ -868,7 +860,7 @@ impl Body {
     pub fn palette(&self, hold: Option<&Anchors>) -> (Vec<M4>, [Option<f32>; 4]) {
         let mut world = self.rig.world();
         let held = match hold {
-            Some(targets) => hold_on(&self.rig.set.skeleton, &mut world, targets, 1.0),
+            Some(targets) => hold_on(&self.rig.set.skeleton, &mut world, targets, self.hold),
             None => [None; 4],
         };
         (world, held)
