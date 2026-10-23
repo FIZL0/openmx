@@ -740,6 +740,52 @@ impl Ride {
         }
     }
 
+    /// **Ride on as `other` rides** (P111, a teleport onto another player): `other`'s whole motion
+    /// — where it is and which way it faces, the body's speed and spin and the integrator's history
+    /// of them, the suspension, the wheels' spin, the engine's revs and gear, the air state and the
+    /// controls as the rate limit left them — on this bike's own build. What is the bike's and not
+    /// its motion stays this ride's: the `.phy`'s numbers [`Ride::new`] copied (the chassis' mass,
+    /// inertia, centre of gravity and limits, the engine's tuning, each wheel's tyre, strut and
+    /// steering), and what is the rider's (the spawn, the put-back record, the riding limit). Two
+    /// rides on one build come out of it identical in everything but those last, so given the same
+    /// controls they step on along one path.
+    pub fn ride_as(&mut self, other: &Ride) {
+        let own = std::mem::replace(self, other.clone());
+        (self.spawn, self.spawn_facing, self.back) = (own.spawn, own.spawn_facing, own.back);
+        (self.riding_speed_sq, self.drag_halved) = (own.riding_speed_sq, own.drag_halved);
+
+        let (c, o) = (&mut self.chassis, &own.chassis);
+        (c.inv_mass, c.inv_inertia, c.free, c.ang_free) = (o.inv_mass, o.inv_inertia, o.free, o.ang_free);
+        (c.max_speed_sq, c.max_ang_speed_sq, c.ang_vel_max, c.ang_vel_min) =
+            (o.max_speed_sq, o.max_ang_speed_sq, o.ang_vel_max, o.ang_vel_min);
+        if c.cofg != o.cofg {
+            // Another build's centre of gravity sits elsewhere in the same frame: put it there.
+            c.cofg = o.cofg;
+            let m = held_transform(&self.node, self.chassis.quat, self.origin);
+            self.chassis.cofg_world = math::transform_point(&m, self.chassis.cofg);
+        }
+
+        let (e, o) = (&mut self.engine, &own.engine);
+        (e.gears, e.final_drive, e.gear_ratios, e.rev_limit) = (o.gears, o.final_drive, o.gear_ratios, o.rev_limit);
+        (e.idle_throttle, e.engine_braking, e.inv_inertia) = (o.idle_throttle, o.engine_braking, o.inv_inertia);
+        (e.clutch_static, e.clutch_kinetic, e.min_rpm) = (o.clutch_static, o.clutch_kinetic, o.min_rpm);
+        (e.curve_rpm, e.curve_torque, e.torque_scale) = (o.curve_rpm, o.curve_torque, o.torque_scale);
+        let gear = e.gear.min(e.gears);
+        mv::set_gear(e, gear);
+
+        for (w, o) in [(&mut self.front, &own.front), (&mut self.rear, &own.rear)] {
+            (w.mv.max_steer_angle, w.mv.radius, w.mv.inv_radius, w.mv.steered) =
+                (o.mv.max_steer_angle, o.mv.radius, o.mv.inv_radius, o.mv.steered);
+            let (b, k) = (&mut w.w, &o.w);
+            (b.mount, b.probe, b.probe_length, b.max_compression) = (k.mount, k.probe, k.probe_length, k.max_compression);
+            (b.max_damper_speed, b.extension_rate, b.spring_rate) = (k.max_damper_speed, k.extension_rate, k.spring_rate);
+            (b.damping_out, b.damping_in, b.steered, b.steer_damping) = (k.damping_out, k.damping_in, k.steered, k.steer_damping);
+            (b.steer_inv_inertia, b.max_steer_angle, b.min_steer_angle) =
+                (k.steer_inv_inertia, k.max_steer_angle, k.min_steer_angle);
+            (w.inv_inertia, w.gyro) = (o.inv_inertia, o.gyro);
+        }
+    }
+
     /// The bike's put-back, its chassis' half ([`crate::off_map::unwreck`]), back to this ride's own
     /// riding limit: the original's, unless a modifier raised it.
     pub fn unwreck(&mut self) {
