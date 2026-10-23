@@ -378,6 +378,9 @@ struct Seat {
     /// The hands this pass was stepped with, kept for the body's own animation frame — which runs
     /// after the pass, off the same controls and the same `dt` (V18).
     hands: Controls,
+    /// Whether this pass's marker Up put the bike somewhere else (P112), which the camera rides out
+    /// of at the bike's speed rather than flying in from where it was.
+    teleported: bool,
 }
 
 impl Seat {
@@ -389,6 +392,7 @@ impl Seat {
         // pad comes back.
         if self.waiting {
             self.said = rider::Frame::default();
+            self.teleported = false;
             return;
         }
         // The game's poll, with the frame's dt: this is what turns report bytes into held controls,
@@ -402,10 +406,12 @@ impl Seat {
         }
 
         self.said = rider::Frame::default();
+        self.teleported = false;
         if self.riding {
             let did;
             (self.said, did) = self.garage.pass(&mut self.sim, dt, &controls, me, spots, place);
             if let Some(did) = did {
+                self.teleported = matches!(did, markers::Did::Teleported(_));
                 println!("marker: {}", marker_line(did));
             }
         }
@@ -3220,6 +3226,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         said: rider::Frame::default(),
         inverted: false,
         hands: Controls::default(),
+        teleported: false,
     }];
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87), and starts in
@@ -3244,6 +3251,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             said: rider::Frame::default(),
             inverted: false,
             hands: Controls::default(),
+            teleported: false,
         });
     }
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
@@ -4178,6 +4186,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             {
                 chase::follow_jump(&mut follow.cam, [by.x, by.y, by.z], plane.speed());
             }
+            // A marker's Up at speed (P112) snaps the bike's camera onto where it lands, riding out
+            // at the bike's speed (`chase::ride_out`, after the frame) — taken once, so a frame the
+            // engine skips does not snap again.
+            let ride_out = std::mem::take(&mut seat.teleported) && seat.garage.up == Kind::Bike;
+            if ride_out {
+                follow.cam.snap = true;
+            }
             let presets = follow.cam.presets.len();
             if presets > 1 {
                 let pad = seat.sim.input.pad(0);
@@ -4257,6 +4272,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     },
                     &mut world.place,
                 );
+                if ride_out {
+                    chase::ride_out(follow, &mut view, rider.target.vel, dt);
+                }
                 view.fov = fov_ease.ease(view.fov, dt.0);
                 Some(view)
             };
