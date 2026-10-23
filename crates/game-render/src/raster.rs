@@ -45,6 +45,9 @@ pub struct Look<'a> {
     pub additive: bool,
     /// Whether a drawn pixel hides what is drawn behind it later. Translucent materials say no.
     pub depth_write: bool,
+    /// The share of its pixels drawn at all, by [`crate::eco::covers`]' screen pattern: 1 for every
+    /// one (V55's dissolving plants are less).
+    pub cover: f32,
 }
 
 /// How a queued triangle's pixels are laid over the frame: [`Look`] without the paint, which a
@@ -55,6 +58,7 @@ pub struct Mode {
     pub blend: bool,
     pub additive: bool,
     pub depth_write: bool,
+    pub cover: f32,
 }
 
 impl Mode {
@@ -64,6 +68,7 @@ impl Mode {
         blend: false,
         additive: false,
         depth_write: true,
+        cover: 1.0,
     };
 }
 
@@ -77,6 +82,7 @@ impl<'a> Look<'a> {
             blend: false,
             additive: false,
             depth_write: true,
+            cover: 1.0,
         }
     }
 }
@@ -158,6 +164,7 @@ impl Frame {
                     blend: q.mode.blend,
                     additive: q.mode.additive,
                     depth_write: q.mode.depth_write,
+                    cover: q.mode.cover,
                 };
                 rows.fill(&q.setup, &look, fog);
             }
@@ -302,6 +309,9 @@ impl Rows<'_> {
                 let at = (y - self.y0) * self.width + x;
                 let inv_w = w0 * iw[0] + w1 * iw[1] + w2 * iw[2];
                 if inv_w <= self.depth[at] {
+                    continue;
+                }
+                if look.cover < 1.0 && !crate::eco::covers(x, y, look.cover) {
                     continue;
                 }
                 let scale = 1.0 / inv_w;

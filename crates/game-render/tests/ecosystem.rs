@@ -8,7 +8,7 @@
 //! Needs the user's own disc, so every test skips with the reason when it is not there.
 
 use game_render::disc::{Disc, Res};
-use game_render::eco::{self, Draw, Ecosystem, Grove, Look};
+use game_render::eco::{self, Draw, Ecosystem, Grove, Lod, Look, Part};
 use game_render::mat::v3;
 use game_render::scene::Scene;
 use game_render::world::{Assets, Camera};
@@ -84,7 +84,9 @@ fn free09s_ecosystem_places_the_originals_trees_and_bushes() {
     assert_eq!(extent, 6912.0);
 
     let mut assets = Assets::default();
-    let grove = Grove::load(&archives, &look, &place.terrain, &terrain, &mut assets).expect("the .esb reads").expect("free09 has one");
+    let mut grove = Grove::load(&archives, &look, &place.terrain, &terrain, &mut assets).expect("the .esb reads").expect("free09 has one");
+    // The original's rule; the smooth one is V55's, tested below.
+    grove.lod = Lod::Original;
     let e = &grove.ecosystem;
     assert_eq!((e.version, e.plants.len()), (2, 726));
     assert_eq!(e.probability.as_deref(), Some("Free09_TreeProbability.tga"));
@@ -153,17 +155,24 @@ fn free09s_ecosystem_places_the_originals_trees_and_bushes() {
     for (got, want) in mine.at.0.iter().zip(want) {
         assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-4), "{:?}, the original's {want:?}", mine.at.0);
     }
+    // Every plant in view is drawn by the original's rule; the ones behind the camera are left out.
+    let mut checked = 0;
     for p in &e.plants {
         let seen = eco::look(camera.eye, p.pos, fov, look.eco_distance_3d, look.eco_distance_2d);
         let at = [p.pos.x, p.pos.y, p.pos.z];
         let of: Vec<&Draw> = drawn.iter().filter(|d| d.at.0[3][..3] == at).collect();
         let (model, board) = (&grove.models[p.species], &grove.billboards[p.species]);
+        if of.is_empty() {
+            continue;
+        }
+        checked += 1;
         match seen {
             Look::Model => assert!(of.len() == 1 && of[0].model == model),
             Look::Both(_) => assert!(of.len() == 2 && of[0].model == model && of[1].model == board),
             Look::Billboard => assert!(of.len() == 1 && of[0].model == board && of[0].alpha == 1.0),
         }
     }
+    assert!(checked > 100, "{checked} plants in view");
     let far = e.plants.iter().filter(|p| eco::look(camera.eye, p.pos, fov, 300.0, 350.0) == Look::Billboard).count();
     assert!(far > 600, "{far} of 726 past the distance");
 
@@ -428,4 +437,271 @@ fn nat19s_terrain_reads_and_its_plants_stand_on_it() {
     let (low, high) = worst_off_the_ground(&t);
     println!("nat19: bases from {low} to {high} feet off the ground");
     assert!(low > -0.09 && high <= 0.0, "{low}..{high}");
+}
+
+// V55: the change from model to picture, smoothed. Presentation only: none of it reaches the sim.
+
+/// free09's scene with its fog pushed out of the way (so neither renderer's fog or reach is in the
+/// picture), its props gone, and a grove of the one plant `which` of free09's ecosystem; with its
+/// archives and assets.
+fn lone_plant(disc: &mut Disc, which: usize, lod: Lod) -> (Scene, Assets, eco::Plant) {
+    let archives = archives(disc, "free09");
+    let bytes = scn(&archives[0]).expect("free09's scene");
+    let mut look = Scene::parse(&game_render::ini::text(&bytes));
+    let place = track::Scene::parse(&bytes).expect("the sim's scene");
+    let terrain_file = terrain_bytes(&archives[0], &place.terrain_file);
+    let terrain = track::Terrain::parse(&terrain_file).expect("the terrain");
+    let mut assets = Assets::default();
+    let whole = Grove::load(&archives, &look, &place.terrain, &terrain, &mut assets).expect("the .esb").expect("free09 has one");
+    let mut e = whole.ecosystem.clone();
+    let plant = e.plants[which];
+    e.plants = vec![plant];
+    (look.fog_near, look.fog_far, look.fog_visibility, look.fog_haziness) = (20000.0, 20000.0, 1.0, 0.0);
+    look.models.clear();
+    let mut grove = Grove::new(e, whole.near, whole.far, &archives, &mut assets);
+    grove.match_billboards(Some(&game_render::world::Lighting::of(&look)), &archives, &mut assets);
+    grove.lod = lod;
+    look.ecosystem = Some(grove);
+    (look, assets, plant)
+}
+
+/// The camera `d` feet from a plant along a fixed line, six feet over its foot, looking at its middle.
+fn riding_at(plant: &eco::Plant, d: f32) -> Camera {
+    let along = v3(0.6, 0.0, 0.8);
+    let eye = plant.pos.add(v3(-along.x * d, 6.0, -along.z * d));
+    let at = plant.pos.add(v3(0.0, plant.height / 2.0, 0.0));
+    Camera { eye, at, fov: 0.9, near: 0.5, far: 20000.0 }
+}
+
+/// The ride: 2 feet a frame (82 mph at 60 a second) from 520 feet to 180, through every band.
+const RIDE: std::ops::Range<usize> = 0..171;
+fn ride_distance(frame: usize) -> f32 {
+    520.0 - 2.0 * frame as f32
+}
+
+/// Each frame's change of a ride's coverage (pixels drawn) from the frame before, once the change in
+/// size with distance is taken out (coverage times distance squared), as a share.
+fn steps(coverage: &[usize]) -> Vec<f32> {
+    let size = |f: usize| coverage[f] as f32 * ride_distance(f).powi(2);
+    (0..coverage.len()).map(|f| if f == 0 { 0.0 } else { (size(f) - size(f - 1)).abs() / size(f).max(size(f - 1)).max(1.0) }).collect()
+}
+
+/// How much more than the model alone or the picture alone does on a frame one frame of the ride may
+/// change a plant's drawn size by. Either alone has jumps of its own a handover cannot help — a
+/// small bush's picture loses an eighth of its pixels when its texture's level changes — so a frame is
+/// held to them, not to nothing.
+const MOST_A_FRAME: f32 = 0.06;
+
+/// The ways a plant is drawn on a ride: the smooth rule, the original's, its model alone and its
+/// picture alone (the smooth rule with both distances out of reach, or at nothing).
+const RIDES: [(&str, Lod, Option<f32>); 4] =
+    [("smooth", Lod::Smooth, None), ("original", Lod::Original, None), ("model", Lod::Smooth, Some(1.0e5)), ("picture", Lod::Smooth, Some(0.0))];
+
+/// Of a ride's four coverages (in [`RIDES`]' order), the worst amount by which a frame of a rule
+/// changes more than the model and the picture alone do on that frame, for the smooth rule and the
+/// original's, and where; over the bands, 250 to 400 feet off (both rules' at the camera's 66 degrees
+/// across).
+fn worst_over_alone(coverage: &[Vec<usize>]) -> [(f32, f32); 2] {
+    let s: Vec<Vec<f32>> = coverage.iter().map(|c| steps(c)).collect();
+    std::array::from_fn(|rule| {
+        let mut worst = (0.0f32, 0.0f32);
+        for f in RIDE.filter(|&f| (250.0..=400.0).contains(&ride_distance(f))) {
+            let over = s[rule][f] - s[2][f].max(s[3][f]);
+            if over > worst.0 {
+                worst = (over, ride_distance(f));
+            }
+        }
+        worst
+    })
+}
+
+/// The two plants the rides are of: free09's first, a TreeC, and its first BushA.
+fn ridden(disc: &mut Disc) -> Vec<usize> {
+    let archives = archives(disc, "free09");
+    let look = Scene::parse(&game_render::ini::text(&scn(&archives[0]).unwrap()));
+    let e = Ecosystem::parse(&archives.iter().find_map(|a| a.read_suffix(look.ecosystem_file.as_deref().unwrap()).ok()).unwrap(), 6912.0).unwrap();
+    vec![0, e.plants.iter().position(|p| p.species == 1).unwrap()]
+}
+
+/// A plant alone for one of [`RIDES`].
+fn ride_plant(disc: &mut Disc, which: usize, (_, lod, both): (&str, Lod, Option<f32>)) -> (Scene, Assets, eco::Plant) {
+    let (mut scene, assets, plant) = lone_plant(disc, which, lod);
+    if let Some(d) = both {
+        let grove = scene.ecosystem.as_mut().unwrap();
+        (grove.near, grove.far) = (d, d);
+    }
+    (scene, assets, plant)
+}
+
+/// Judge the rides of one plant: the smooth rule changes no frame by more than [`MOST_A_FRAME`] over
+/// what the model or the picture alone does, and the original's does.
+fn judge(which: usize, coverage: &[Vec<usize>]) {
+    for (c, (name, ..)) in coverage.iter().zip(RIDES) {
+        println!("plant {which}, {name}: pixels {c:?}");
+        assert!(c.iter().all(|&c| c > 50), "plant {which}, {name}: the plant is in the picture all the ride");
+    }
+    let [smooth, original] = worst_over_alone(coverage);
+    println!(
+        "plant {which}: worst frame over the model or picture alone, smooth {:.1}% at {} ft, original {:.1}% at {} ft",
+        smooth.0 * 100.0,
+        smooth.1,
+        original.0 * 100.0,
+        original.1
+    );
+    assert!(smooth.0 <= MOST_A_FRAME, "plant {which}: smooth jumps {:.1}% in a frame at {} ft", smooth.0 * 100.0, smooth.1);
+    assert!(original.0 > MOST_A_FRAME, "plant {which}: the original's rule ({:.1}%) does not jump", original.0 * 100.0);
+}
+
+/// Riding toward a plant, the software renderer's picture of it changes size smoothly through the
+/// model-to-picture band under the smooth rule, where the original's rule jumps.
+#[test]
+fn riding_toward_a_plant_the_software_picture_changes_smoothly() {
+    let Some(mut disc) = disc() else { return };
+    let (w, h) = (960, 720);
+    for which in ridden(&mut disc) {
+        let coverage: Vec<Vec<usize>> = RIDES
+            .map(|ride| {
+                let (scene, assets, plant) = ride_plant(&mut disc, which, ride);
+                RIDE.map(|f| {
+                    let mut frame = game_render::Frame::new(w, h, [0, 0, 0]);
+                    game_render::draw_scene(&mut frame, &scene, &assets, &[], &riding_at(&plant, ride_distance(f)));
+                    frame.depth.iter().filter(|&&z| z > 0.0).count()
+                })
+                .collect()
+            })
+            .into();
+        judge(which, &coverage);
+    }
+}
+
+/// The same rides on the GPU: what the plant covers, against a frame without it.
+#[test]
+fn riding_toward_a_plant_the_gpu_picture_changes_smoothly() {
+    use game_render::gpu::{Renderer, Scene3, Target, View};
+    let Some(mut disc) = disc() else { return };
+    let mut gpu = match Renderer::headless() {
+        Ok(r) => r,
+        Err(why) => {
+            println!("SKIPPED: {why}");
+            return;
+        }
+    };
+    let (w, h) = (960u32, 720u32);
+    let texture = gpu.offscreen(w, h);
+    let target_view = texture.create_view(&Default::default());
+    gpu.set_graphics(game_render::world::Graphics::Full);
+    gpu.set_sky(None);
+    for which in ridden(&mut disc) {
+        let coverage: Vec<Vec<usize>> = RIDES
+            .map(|ride| {
+                let (mut scene, assets, plant) = ride_plant(&mut disc, which, ride);
+                let light = game_render::world::Lighting::of(&scene);
+                let mut frame = |gpu: &mut Renderer, camera: &Camera| {
+                    let views = [View { rect: [0, 0, w, h], camera, actors: &[] }];
+                    let target = Target { view: &target_view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+                    gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+                    gpu.read(&texture)
+                };
+                let grove = scene.ecosystem.take();
+                gpu.set_scene(&scene);
+                let empty = frame(&mut gpu, &riding_at(&plant, 300.0));
+                scene.ecosystem = grove;
+                gpu.set_scene(&scene);
+                RIDE.map(|f| {
+                    let rgb = frame(&mut gpu, &riding_at(&plant, ride_distance(f)));
+                    rgb.chunks_exact(3)
+                        .zip(empty.chunks_exact(3))
+                        .filter(|(a, b)| a.iter().zip(*b).map(|(&a, &b)| (a as i32 - b as i32).abs()).sum::<i32>() > 6)
+                        .count()
+                })
+                .collect()
+            })
+            .into();
+        judge(which, &coverage);
+    }
+}
+
+/// Two plants the same distance from a rider riding at them change on different frames; and of all
+/// free09's plants set at one distance, no one frame of the ride changes more than a tenth of them
+/// (they spread over 32 feet), where the original's rule changes them all at once.
+#[test]
+fn plants_at_one_distance_do_not_change_on_one_frame() {
+    let Some(mut disc) = disc() else { return };
+    let (mut scene, mut assets, plant) = lone_plant(&mut disc, 0, Lod::Smooth);
+    // Two of the first plant, either side of the ride's line and the same distance off it.
+    let mut grove = scene.ecosystem.take().unwrap();
+    let mut e = grove.ecosystem.clone();
+    let side = v3(0.8, 0.0, -0.6).scale(8.0);
+    e.plants = vec![eco::Plant { pos: plant.pos.add(side), ..plant }, eco::Plant { pos: plant.pos.sub(side), ..plant }];
+    let archives = archives(&mut disc, "free09");
+    grove = Grove::new(e, grove.near, grove.far, &archives, &mut assets);
+    let fov = eco::horizontal_fov(&riding_at(&plant, 0.0), 4.0 / 3.0);
+    // The frame each first shows less than half its model.
+    let mut changed = [None; 2];
+    for f in RIDE.rev() {
+        let camera = riding_at(&plant, ride_distance(f));
+        let mut drawn = Vec::new();
+        grove.draws(&camera, fov, f32::INFINITY, &mut drawn);
+        for (k, p) in grove.ecosystem.plants.iter().enumerate() {
+            let model = drawn.iter().find(|d| d.part == Part::Model && d.at.0[3][..3] == [p.pos.x, p.pos.y, p.pos.z]);
+            if model.is_none_or(|d| d.cover < 0.5) && changed[k].is_none() {
+                changed[k] = Some(f);
+            }
+        }
+    }
+    let [Some(a), Some(b)] = changed else { panic!("both change in the ride: {changed:?}") };
+    println!("the two change at frames {a} and {b}, {} and {} feet off", ride_distance(a), ride_distance(b));
+    assert!(a.abs_diff(b) >= 3, "frames {a} and {b}");
+
+    // Every plant of free09 at one distance, closing 2 feet a frame: the frames each changes on.
+    let n = 726;
+    let mut on = vec![0usize; RIDE.len()];
+    for i in 0..n {
+        let f = RIDE.clone().find(|&f| eco::smooth_share(ride_distance(f), grove.near, grove.far, eco::jitter(i)) < 0.5);
+        on[f.expect("changes in the ride")] += 1;
+    }
+    let most = *on.iter().max().unwrap();
+    let frames = on.iter().filter(|&&c| c > 0).count();
+    println!("{n} plants change over {frames} frames, at most {most} on one");
+    assert!(most * 10 <= n && frames >= 12, "{most} of {n} on one frame, over {frames} frames");
+}
+
+/// The eco's draw time on free09's densest view (most plants within 600 feet ahead) is no worse under
+/// the smooth rule than under the original's, on the software renderer: the grove's draws and the
+/// scene they are drawn into, the best of interleaved runs.
+#[test]
+fn the_densest_view_draws_no_slower() {
+    let Some(mut disc) = disc() else { return };
+    let archives = archives(&mut disc, "free09");
+    let bytes = scn(&archives[0]).expect("free09's scene");
+    let mut look = Scene::parse(&game_render::ini::text(&bytes));
+    let place = track::Scene::parse(&bytes).expect("the sim's scene");
+    let terrain_file = terrain_bytes(&archives[0], &place.terrain_file);
+    let terrain = track::Terrain::parse(&terrain_file).expect("the terrain");
+    let mut assets = Assets::default();
+    look.ecosystem = Grove::load(&archives, &look, &place.terrain, &terrain, &mut assets).unwrap();
+    look.models.clear();
+    // The view the shell's `--shot-pose 2750,160,3800,0,-3,85` looks from: north, 3 degrees down.
+    let eye = v3(2750.0, 160.0, 3800.0);
+    let pitch = (-3.0f32).to_radians();
+    let camera = Camera { eye, at: eye.add(v3(0.0, pitch.sin(), pitch.cos())), fov: 85f32.to_radians(), near: 0.5, far: 20000.0 };
+    let (w, h) = (640, 448);
+    let mut best = [f64::MAX; 2];
+    let mut plants = [0; 2];
+    for round in 0..12 {
+        for (k, lod) in [Lod::Original, Lod::Smooth].into_iter().enumerate() {
+            look.ecosystem.as_mut().unwrap().lod = lod;
+            let mut frame = game_render::Frame::new(w, h, [0, 0, 0]);
+            let start = std::time::Instant::now();
+            let tris = game_render::draw_scene(&mut frame, &look, &assets, &[], &camera);
+            let ms = start.elapsed().as_secs_f64() * 1000.0;
+            if round > 1 {
+                best[k] = best[k].min(ms);
+            }
+            plants[k] = tris;
+        }
+    }
+    println!("free09's densest view: the original's rule {:.2} ms ({} triangles), the smooth one {:.2} ms ({})", best[0], plants[0], best[1], plants[1]);
+    assert!(plants[1] > 1000, "the view has its plants: {} triangles", plants[1]);
+    assert!(best[1] <= best[0] * 1.10 + 0.2, "smooth {:.2} ms against the original's {:.2}", best[1], best[0]);
 }
