@@ -313,6 +313,13 @@ pub fn jumped(was: f32, moved: f32) -> bool {
     moved > SNAP + 2.0 * was
 }
 
+/// How far a machine jumped over a tick, from `was` to `now`, when it was moving `flying` feet a tick
+/// (P125): the move, if it is a jump by [`jumped`] — a marker's put-back, say — or `None`.
+pub fn jump(was: V3, now: V3, flying: f32) -> Option<V3> {
+    let by = now.sub(was);
+    jumped(flying, by.len()).then_some(by)
+}
+
 /// One seat's cut (P120): whether its picture is shown where the last tick left it rather than slid
 /// there. Everything the seat's view shows — its machine, its rider, its camera — cuts or slides
 /// together: tested one by one, a bike that crossed the jump distance a tick before the camera
