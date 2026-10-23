@@ -2006,6 +2006,19 @@ pub enum Act {
     ClearMarkers(usize),
 }
 
+/// What the loading screen shows (P127): the track, as the pick names it, and how far its ride's
+/// load has got.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Loading {
+    /// The track's place in [`TRACKS`] for its still, or `usize::MAX` for a mod's, which has none.
+    pub still: usize,
+    pub name: String,
+    pub pack: String,
+    /// The share of the load done, 0 to 1, and what it is doing now ("Ground 12 of 55").
+    pub done: f32,
+    pub stage: String,
+}
+
 /// The front end's state: which screens are open, where each one's cursor is, and the settings it
 /// edits.
 #[derive(Clone, Debug, PartialEq)]
@@ -2034,6 +2047,10 @@ pub struct Menu {
     changed: bool,
     /// A line for the ticker, which is how a ride that could not start says why.
     pub note: Option<String>,
+    /// The ride being loaded (P127), which the loading screen shows over everything while it is.
+    pub loading: Option<Loading>,
+    /// The screens the pick's ride was started from, which a cancelled load goes back to.
+    ride_stack: Vec<Screen>,
     /// The ride under the menu, as the shell tells it (P41): how many players ride, the machine each
     /// one is on now, and which of them have a machine to switch to.
     pub riders: usize,
@@ -2187,6 +2204,8 @@ impl Menu {
             tick: 0,
             changed: false,
             note: None,
+            loading: None,
+            ride_stack: Vec::new(),
             riders: 1,
             up: [Machine::Bike; SEATS_MAX],
             switchable: [false; SEATS_MAX],
@@ -2483,9 +2502,35 @@ impl Menu {
         self.stack.is_empty()
     }
 
+    /// A ride on `track` is loading (P127): the loading screen, with the track's name and its pack
+    /// as the pick shows them, and nothing done yet.
+    pub fn start_loading(&mut self, track: &str) {
+        let disc = TRACKS.iter().position(|(id, _)| *id == track);
+        let name = match disc {
+            Some(i) => TRACKS[i].1.to_string(),
+            None => self.mod_tracks.iter().find(|(id, _)| id == track).map_or_else(|| track.to_string(), |(_, n)| n.clone()),
+        };
+        let pack = match disc {
+            Some(_) => "MX Unleashed".to_string(),
+            None => self.packs().into_iter().find(|p| p.prefix == pack_of(track)).map_or("Mods".into(), |p| p.name),
+        };
+        self.loading = Some(Loading { still: disc.unwrap_or(usize::MAX), name, pack, done: 0.0, stage: String::new() });
+    }
+
+    /// A cancelled load (P127): back to the screens the ride was picked from, the pick on top.
+    pub fn back_to_pick(&mut self) {
+        self.loading = None;
+        self.stack = match std::mem::take(&mut self.ride_stack) {
+            s if s.last() == Some(&Screen::Tracks) => s,
+            _ => vec![Screen::Main, Screen::Tracks],
+        };
+        self.cursor[Screen::Tracks.index()] = self.track_index();
+    }
+
     /// Back to the main menu, with nothing under it.
     pub fn main(&mut self) {
         self.stack = vec![Screen::Main];
+        self.ride_stack.clear();
         self.pauser = 0;
         self.leaving = None;
     }
@@ -2909,7 +2954,7 @@ impl Menu {
                         self.settings.track = track.clone();
                         self.changed = true;
                     }
-                    self.stack.clear();
+                    self.ride_stack = std::mem::take(&mut self.stack);
                     return Act::Ride(track);
                 }
                 if p.back {

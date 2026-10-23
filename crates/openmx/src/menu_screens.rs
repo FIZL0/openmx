@@ -898,6 +898,10 @@ fn modifiers_word(menu: &Menu) -> String {
 
 impl Pen<'_> {
     pub(super) fn screen(&mut self, menu: &Menu) {
+        // A ride loading (P127) is the one thing on the screen until it starts or is cancelled.
+        if let Some(loading) = &menu.loading {
+            return self.loading(menu, loading);
+        }
         let Some(screen) = menu.screen() else { return };
         match screen {
             Screen::Pause => {
@@ -1294,6 +1298,29 @@ impl Pen<'_> {
         if first + shown < n {
             self.arrow(x + w / 2.0, y - CARD_GAP + 0.6, [0.0, 1.0], 0.7, BONE);
         }
+    }
+
+    /// A ride loading (P127): the pick's still and name of its track over a bar the load's stages
+    /// fill, what it is doing under the bar, and Circle to cancel.
+    fn loading(&mut self, menu: &Menu, l: &super::Loading) {
+        self.backdrop();
+        self.logo(true);
+        let (x, w) = (22.0, 36.0);
+        let b = [x, 7.0, w, 20.25];
+        self.framed_still(menu, l.still, b, &l.pack);
+        let y = self.heading("Loading", &l.name, "", x, b[1] + b[3] + 1.0, w, 2.6);
+        let bar = [x, y + 1.0, w, 1.1];
+        self.round(bar, bar[3] / 2.0, GLASS, GLASS);
+        let lit = (w * l.done.clamp(0.0, 1.0)).max(bar[3]);
+        self.round([x, bar[1], lit, bar[3]], bar[3] / 2.0, LIT_TOP, LIT_BOTTOM);
+        self.ring(bar, bar[3] / 2.0, 0.1, RIM);
+        let line = bar[1] + bar[3] + 1.0 + CAP * 1.2;
+        self.text(Weight::Bold, &l.stage, x, line, 1.2, 0.0, BONE, Align::Left);
+        let share = format!("{:.0}%", l.done.clamp(0.0, 1.0) * 100.0);
+        self.text(Weight::Bold, &share, x + w, line, 1.2, 0.0, EYEBROW, Align::Right);
+        self.title("Loading");
+        self.hints(&[(Btn::Circle, "Cancel")]);
+        self.ticker(menu, Screen::Tracks);
     }
 
     /// The pick's category, lit between the arrows Left and Right step it by.

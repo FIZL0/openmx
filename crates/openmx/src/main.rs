@@ -173,6 +173,7 @@ mod ground;
 mod hud;
 // What the CPU still draws over the GPU's picture (P44), as patches.
 mod layer;
+mod loading;
 mod lobby;
 // The join screen (P38's rules), which the front end's local game seats its players through (P43).
 mod join;
@@ -1393,6 +1394,8 @@ enum Leave {
     Quit,
     Menu,
     Restart,
+    /// The load was cancelled (P127): back to the track pick.
+    Pick,
 }
 
 /// The front end (P36): the menus until one of them starts a ride, the ride, and back.
@@ -1505,6 +1508,7 @@ fn front_end(args: Args) -> Result<(), String> {
         }
         if let Act::Ride(track) = &act {
             shell.front.reader.reset();
+            let mut picked = false;
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
@@ -1560,9 +1564,16 @@ fn front_end(args: Args) -> Result<(), String> {
                     apply_picks(&mut a, &picks);
                 }
                 shell.front.note_clear();
-                match ride(a, Some(&mut shell)) {
+                let left = ride(a, Some(&mut shell));
+                shell.front.menu.loading = None;
+                match left {
                     Ok(Leave::Restart) => continue,
                     Ok(Leave::Menu) => break,
+                    // A cancelled load is back on the pick (P127), which it has put on the screen.
+                    Ok(Leave::Pick) => {
+                        picked = true;
+                        break;
+                    }
                     Ok(Leave::Quit) => return Ok(()),
                     Err(e) => {
                         println!("ride: {e}");
@@ -1571,7 +1582,9 @@ fn front_end(args: Args) -> Result<(), String> {
                     }
                 }
             }
-            shell.front.menu.main();
+            if !std::mem::take(&mut picked) {
+                shell.front.menu.main();
+            }
             shell.front.reader.reset();
             shell.front.readers.reset();
             shell.front.seat_readers.iter_mut().for_each(Reader::reset);
@@ -1618,8 +1631,12 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.shot = None;
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
                 shell.front.note_clear();
-                match ride(a, Some(&mut shell)) {
+                let left = ride(a, Some(&mut shell));
+                shell.front.menu.loading = None;
+                match left {
                     Ok(Leave::Quit) => return Ok(()),
+                    // A cancelled load leaves the lobby's ride for this machine (P127).
+                    Ok(Leave::Pick) => shell.front.network.abandon(&mut shell.front.menu),
                     Ok(_) => {}
                     Err(e) => {
                         println!("ride: {e}");
@@ -1890,12 +1907,174 @@ fn aspect_of(picture: menu::Picture) -> Aspect {
     }
 }
 
+/// Models a slice uploads between two loading frames (P127).
+const UPLOAD_SLICE: usize = 16;
+
+/// The loading screen's own state across a ride's load (P127): its frame, its pace, and what it drew.
+#[derive(Default)]
+struct LoadScreen {
+    frame: Option<Frame>,
+    /// Whether the window's renderer has the menu's pictures.
+    images: bool,
+    sprites: Vec<game_render::gpu::Sprite>,
+    /// The software frame's menu, while it is still what the window shows.
+    shown: Option<Menu>,
+    limiter: pace::Limiter,
+    /// Escape held at the last frame, for its edge.
+    escape: bool,
+    frames: u32,
+    since: Option<Instant>,
+}
+
+/// What a loading frame heard.
+#[derive(Debug, PartialEq)]
+enum Wait {
+    On,
+    /// Circle or Escape: back to the pick.
+    Cancel,
+    /// The window was closed.
+    Quit,
+}
+
+/// The ride's build `build` on a thread of its own (P127), the loading screen drawn until it ends:
+/// what it built, or what to leave for if the window was closed or the load cancelled, which stops
+/// the thread before this returns.
+fn load_in_front<'env, T: Send + 'env>(
+    shell: &mut Shell,
+    args: &Args,
+    progress: &loading::Progress,
+    screen: &mut LoadScreen,
+    build: impl FnOnce() -> Result<Result<T, Leave>, String> + Send + 'env,
+) -> Result<Result<T, Leave>, String> {
+    let Shell { window, seats, front } = shell;
+    let wait = || load_tick(window, seats, Some(&mut *front), args, progress, screen);
+    match loading::on_worker(progress, build, wait)? {
+        Ok(built) => Ok(built),
+        Err(leave) => {
+            println!("loading: stopped, the load's thread is gone ({} running)", loading::workers());
+            Ok(Err(leave))
+        }
+    }
+}
+
+/// One loading frame where the front end has one, between two steps of a ride's load (P127): what
+/// to leave the ride for, if anything. A cancel puts the pick back.
+fn load_tick(
+    window: &mut Option<Screen>,
+    seats: &mut Option<Seats>,
+    front: Option<&mut Front>,
+    args: &Args,
+    progress: &loading::Progress,
+    screen: &mut LoadScreen,
+) -> Result<Option<Leave>, String> {
+    let Some(front) = front else { return Ok(None) };
+    if front.menu.loading.is_none() {
+        front.menu.start_loading(&args.track);
+    }
+    match loading_frame(window, seats, front, args, progress, screen)? {
+        Wait::On => Ok(None),
+        Wait::Cancel => {
+            front.menu.back_to_pick();
+            println!("loading: cancelled at {}, back on {:?}", progress.line(), front.menu.screen());
+            Ok(Some(Leave::Pick))
+        }
+        Wait::Quit => Ok(Some(Leave::Quit)),
+    }
+}
+
+/// The loading screen, drawn once, and the window's events and the menus' devices read: the
+/// front end's frame (`front_end`'s loop) with the load's bar for its menu.
+fn loading_frame(
+    window: &mut Option<Screen>,
+    seats: &mut Option<Seats>,
+    front: &mut Front,
+    args: &Args,
+    progress: &loading::Progress,
+    screen: &mut LoadScreen,
+) -> Result<Wait, String> {
+    let Some(window) = window.as_mut() else { return Ok(Wait::On) };
+    screen.since.get_or_insert_with(Instant::now);
+    window.poll();
+    if window.closed() {
+        return Ok(Wait::Quit);
+    }
+    let (width, height) = match args.size {
+        Some(size) => size,
+        None => args.aspect.frame((window.width, window.height), window.scale),
+    };
+    if screen.frame.as_ref().is_none_or(|f| (f.width, f.height) != (width, height)) {
+        screen.frame = Some(Frame::new(width, height, [0, 0, 0]));
+        screen.shown = None;
+    }
+    // Back is Circle on the pads that drive the menus, or Escape on its edge.
+    let esc = window.pressed(key::ESCAPE);
+    let mut back = esc && !screen.escape;
+    screen.escape = esc;
+    if let Some(seats) = seats.as_mut() {
+        let devices = seats.devices(&|code| window.pressed(code));
+        let reports: Vec<(Dev, Report, u16)> = devices
+            .into_iter()
+            .map(|(d, r, taps)| match d {
+                Device::Keys => (Dev::Keys, r, taps),
+                Device::Pad(id) => (Dev::Pad(id), r, taps),
+            })
+            .collect();
+        let menu = &front.menu;
+        let presses = front.readers.read_hosted(&reports, &|d: &Dev| menu.hosts(d));
+        back |= presses.iter().any(|(_, p)| p.back);
+    }
+    back |= std::env::var(loading::CANCEL).ok().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| screen.frames >= n);
+    if let Some(l) = &mut front.menu.loading {
+        l.done = progress.done();
+        l.stage = progress.line();
+    }
+    front.menu.tick = front.menu.tick.wrapping_add(1);
+    let frame = screen.frame.as_mut().expect("made above");
+    if let Some(w) = window.gpu() {
+        if !screen.images {
+            w.renderer.set_images(&front.art.images());
+            screen.images = true;
+        }
+        screen.sprites.clear();
+        front.art.sprites(&front.menu, (frame.width, frame.height), 0, &mut screen.sprites);
+        let sprites = &screen.sprites;
+        w.draw(frame.width, frame.height, |r, t| r.draw_sprites(t, sprites))?;
+    } else {
+        let look = front.menu.look();
+        if screen.shown.as_ref() != Some(&look) {
+            frame.color.fill(0);
+            front.art.draw(&front.menu, frame);
+            window.present(&frame.color, frame.width, frame.height)?;
+            screen.shown = Some(look);
+        } else {
+            window.present_again(&frame.color, frame.width, frame.height)?;
+        }
+    }
+    screen.frames += 1;
+    let floor = picture_floor(window, args.pacing(&front.menu.settings));
+    screen.limiter.wait(args.draw_frame().or(menu_floor(window, floor)).or(Some(Duration::from_millis(16))));
+    Ok(if back { Wait::Cancel } else { Wait::On })
+}
+
 fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // ---- the game modifiers (P55) ----------------------------------------------------------------
     // Applied to what the ride loads, never as a branch in the simulation: at their defaults nothing
     // is touched at all.
-    let lobby_room = shell.as_deref().and_then(|s| s.front.menu.lobby.start.as_ref()).map(|(room, _)| room);
-    let mut mods = ride_modifiers(&args, lobby_room)?;
+    let lobby_room = shell.as_deref().and_then(|s| s.front.menu.lobby.start.as_ref()).map(|(room, _)| room.clone());
+    // Everything up to the window is built in `build` (P127): under the front end on a thread of its
+    // own while the window draws the loading screen and keeps answering, here without one. The
+    // drawn ground's chunks are built in it too when the window's GPU will want them.
+    // The terrain's bytes and the simulation's parse of them are kept out here, where they outlive
+    // the build: the simulation's ground points into them.
+    let progress = &loading::Progress::new();
+    let (keep_bytes, keep_terrain) = (&std::sync::OnceLock::new(), &std::sync::OnceLock::new());
+    let mut shell = shell;
+    let want_chunks = shell.as_deref_mut().and_then(|s| s.window.as_mut()).is_some_and(|w| w.gpu().is_some());
+    let build = {
+        let args = args.clone();
+        move || -> Result<Result<_, Leave>, String> {
+    progress.reach(loading::Stage::Scene)?;
+    let mods = ride_modifiers(&args, lobby_room.as_ref())?;
     if !mods.is_original() {
         println!("modifiers: {}", mods.text());
     }
@@ -2006,7 +2185,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         worlds::move_look(&mut look, w.home_at());
     }
 
-    let terrain_bytes = terrain_bytes(&archives[0], &place.terrain_file)?;
+    progress.reach(loading::Stage::Tiles)?;
+    let read = terrain_bytes(&archives[0], &place.terrain_file)?;
+    let terrain_bytes: &Vec<u8> = keep_bytes.get_or_init(|| read);
     // The same file parsed twice, because the two sides of it are owned by different crates: the
     // shell's `Ground` draws it in host floats, the port's answers the ride's ray in the game's.
     let ground = Ground::new(track::Terrain::parse(&terrain_bytes)?, &place.terrain);
@@ -2029,7 +2210,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         _ => ground,
     };
-    let sim_terrain = track::Terrain::parse(&terrain_bytes)?;
+    let sim_terrain = track::Terrain::parse(terrain_bytes)?;
+    let sim_terrain: &track::Terrain = keep_terrain.get_or_init(|| sim_terrain);
     // A world's ground (MD8): every tile and join, each asked in its own coordinates.
     let mut tiled = match &world_mod {
         Some(w) => {
@@ -2054,6 +2236,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         ground.samples_z
     );
 
+    progress.reach(loading::Stage::Props)?;
     // Everything solid the scene stands on the ground, in its own space with its own place in the
     // world: this is what stops the rider at a fence instead of letting them through it.
     let (props, missed) = sim_world::Props::load(&place, |name| {
@@ -2070,6 +2253,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
 
     // ---- what to draw -------------------------------------------------------------------------
+    progress.reach(loading::Stage::Models)?;
     let mut assets = Assets::default();
     // The bike's own build: which parts bolt onto the shared chassis, and what this one is painted
     // with. Without the repaint half its meshes ask for a material no archive has.
@@ -2451,24 +2635,27 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let mut ground = |at: Vf| sim_world::World::ground(&mut probe, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y();
         machines.as_ref().map_or_else(Lot::default, |(_, b)| Lot::new(b, args.players.max(1), &mut ground))
     };
-    let flight_for = |seat: usize| {
-        plane_phy.as_ref().map(|bytes| {
-            let mut plane = phy::Plane::read_bytes(bytes);
-            mods.plane(seat, &mut plane);
-            let mut flight = Flight::new(&plane);
-            if let Some(rays) = &plane_rays {
-                flight = flight.with_rays(rays.clone());
-            }
-            if let Some(mesh) = &bike_box {
-                flight = flight.with_bike(mesh.clone());
-            }
-            let t = &place.terrain;
-            flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
-            if let Some(area) = world_area {
-                flight.area = Some(area);
-            }
-            flight
-        })
+    // What it reads its own (P127): it outlives the load's thread.
+    let flight_for = {
+        let (plane_phy, plane_rays, bike_box, t) = (plane_phy.clone(), plane_rays.clone(), bike_box.clone(), place.terrain.clone());
+        move |seat: usize| {
+            plane_phy.as_ref().map(|bytes| {
+                let mut plane = phy::Plane::read_bytes(bytes);
+                mods.plane(seat, &mut plane);
+                let mut flight = Flight::new(&plane);
+                if let Some(rays) = &plane_rays {
+                    flight = flight.with_rays(rays.clone());
+                }
+                if let Some(mesh) = &bike_box {
+                    flight = flight.with_bike(mesh.clone());
+                }
+                flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
+                if let Some(area) = world_area {
+                    flight.area = Some(area);
+                }
+                flight
+            })
+        }
     };
     let plane = lot.plane(0, flight_for(0));
     // Every online seat's own biplane bay (N18), which a seat that starts the ride in the plane
@@ -2547,7 +2734,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         _ => Vec::new(),
     };
     // Its particles (P58): the emitter list and its `.emt`s, and the track's particle sheet.
-    let (mut plane_fx, mut fx_sheet) = match plane_drawn.first() {
+    let (plane_fx, fx_sheet) = match plane_drawn.first() {
         Some(drawn) => match load_plane_fx(&archives, &stem, drawn, &assets) {
             Ok((fx, binds, sheet)) => (Some((fx, binds)), Some(sheet)),
             Err(why) => {
@@ -2586,10 +2773,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if !traffic.cars.is_empty() || !traffic.skipped.is_empty() {
         println!("traffic: {} cars on clips, {} left out", traffic.cars.len(), traffic.skipped.len());
     }
-    let mut traffic_time = 0.0f64;
+    let traffic_time = 0.0f64;
     // The scene's clock at the tick before the last, which the picture blends from (V47).
-    let mut traffic_before = 0.0f64;
-    let mut traffic_at: Vec<(String, M4)> = Vec::new();
+    let traffic_before = 0.0f64;
+    let traffic_at: Vec<(String, M4)> = Vec::new();
     // Where the wheels hang off the chassis, which is where each suspension ray starts: the **bike
     // model's own wheel nodes**. `bike_attach_nodes` looks "TireFront" and "TireRear" up in the bike's
     // node by name and writes each one's place, in that node's frame, straight into the wheel's
@@ -2726,7 +2913,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             plane: plane.as_ref(),
             pilot,
         };
-        return moment::draw(&moment, out, &shot, &ground, sky.as_ref(), &assets, &vehicle, &look).map(|()| Leave::Quit);
+        return moment::draw(&moment, out, &shot, &ground, sky.as_ref(), &assets, &vehicle, &look).map(|()| Err(Leave::Quit));
     }
 
     // ---- `--trace`: the solver's own numbers, with nobody on the pad (S22) -----------------------
@@ -2827,7 +3014,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     if f.wreck.is_some() { 1 } else { 0 },
                 );
             }
-            return Ok(Leave::Quit);
+            return Ok(Err(Leave::Quit));
         }
         // The numbers behind the columns, so a trace in a journal entry carries the tuning it was
         // taken on rather than a bike's name.
@@ -2916,13 +3103,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             "peak g over {frames} frames: {:.3} sideways, {:.3} vertical, {:.3} along — phase {:?}",
             peak.0.0, peak.1.0, peak.2.0, rider.phase()
         );
-        return Ok(Leave::Quit);
+        return Ok(Err(Leave::Quit));
     }
 
     // ---- the tape ------------------------------------------------------------------------------
     // `--play` reads one in before anything opens, because a tape that will not parse should say so
     // before a window appears; `--record` starts an empty one and the loop writes it out at the end.
-    let mut head = match &args.play {
+    let head = match &args.play {
         None => None,
         Some(path) => {
             let tape = read_tape(path, args.phase)?;
@@ -2946,6 +3133,34 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         recorder.tape.modifiers = mods;
         recorder
     });
+    // The drawn ground's chunks (P127), the longest part of a world's load, counted for the bar.
+    let pre_chunks = match want_chunks {
+        false => None,
+        true => {
+            progress.reach(loading::Stage::Ground)?;
+            Some(match (&world_mod, &sim) {
+                // A world's ground streams in after the upload (MD17).
+                (Some(_), Land::Tiles(_)) => Vec::new(),
+                _ => ground.chunks(ground.chunk_cells()),
+            })
+        }
+    };
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift)))
+        }
+    };
+    let mut load_screen = LoadScreen::default();
+    let built = match shell.as_deref_mut() {
+        Some(shell) => load_in_front(shell, &args, progress, &mut load_screen, build)?,
+        None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
+        None => build()?,
+    };
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, sim, traffic, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift) = match built {
+        Ok(built) => built,
+        Err(leave) => return Ok(leave),
+    };
+    if let Some(since) = load_screen.since {
+        println!("loading: built, {} frames drawn over {:.2} s", load_screen.frames, since.elapsed().as_secs_f32());
+    }
 
     // ---- the window and the pad ---------------------------------------------------------------
     // `--headless` opens neither: no window to show the frame in and no host pad to read, so every
@@ -3016,6 +3231,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
     };
+    if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {
+        return Ok(leave);
+    }
     if let Some(pads) = args.pads {
         println!("seats: {}", pad::Seat::flag(&pads));
     }
@@ -3097,6 +3315,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut rigs: Vec<Rig> = Vec::with_capacity(args.players);
     let body_model = body.as_ref().map(|b| b.geometry().to_string());
     for i in 1..riders {
+        if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {
+            return Ok(leave);
+        }
         // Its own rider's archive when the garage picked one, the first player's otherwise.
         let motion = other_phys[i - 1].motion();
         let own_rider = other_riders[i - 1].as_ref();
@@ -3266,10 +3487,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         l
     });
     // Everything the GPU draws, uploaded once: the props, the sky, the ground and every model.
-    if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
+    // Under the front end the models go up a slice between loading frames (P127).
+    if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {
+        return Ok(leave);
+    }
+    if gpu_on && renderer_of(&mut offscreen, window).is_some() {
         // Where the ride's streaming will look from on its first tick: the rider, and the parked plane.
         let starts: Vec<[f32; 2]> = std::iter::once(at).chain(garage.plane.as_ref().map(|p| p.at)).map(|p| [p.x(), p.z()]).collect();
         let at = Instant::now();
+        let mut pre_chunks = pre_chunks;
         // A world's ground is its pieces', streamed (MD17), each tile painted from its own pages and
         // the joins blended from the tiles either side (MD9).
         let (chunks, paint) = match (&world_mod, &sim) {
@@ -3283,9 +3509,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     (None, Some(pages)) => game_render::gpu::GroundPaint::Pages(pages),
                     (None, None) => game_render::gpu::GroundPaint::Bare,
                 };
-                (ground.chunks(ground.chunk_cells()), paint)
+                (pre_chunks.take().unwrap_or_else(|| ground.chunks(ground.chunk_cells())), paint)
             }
         };
+        progress.reach(loading::Stage::Upload)?;
+        let r = renderer_of(&mut offscreen, window).expect("checked");
         r.forget_assets();
         r.set_scene(&look);
         r.set_sky(sky.as_ref());
@@ -3312,7 +3540,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             );
             ground_stream = Some(stream);
         }
-        r.upload_all(&assets);
+        // `upload_all`'s order, a slice at a time.
+        let mut names: Vec<&String> = assets.models.keys().collect();
+        names.sort();
+        for (i, slice) in names.chunks(UPLOAD_SLICE).enumerate() {
+            progress.count(i * UPLOAD_SLICE, names.len())?;
+            if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {
+                return Ok(leave);
+            }
+            renderer_of(&mut offscreen, window).expect("checked").upload_models(&assets, slice);
+        }
+        let r = renderer_of(&mut offscreen, window).expect("checked");
         let (models, materials, textures) = r.uploaded();
         println!(
             "gpu: {models} models, {materials} materials, {textures} textures and {} ground chunks uploaded in {:.2} s",
@@ -3339,6 +3577,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         );
     } else if args.graphics == Some(Graphics::Full) {
         println!("graphics: the software renderer draws the original's fog and far clip only");
+    }
+    // The load is over (P127): the ride is on the screen from its first frame.
+    if let Some(f) = front.as_deref_mut()
+        && f.menu.loading.take().is_some()
+    {
+        let seconds = load_screen.since.map_or(0.0, |t| t.elapsed().as_secs_f32());
+        println!("loading: done, {} frames drawn over {seconds:.2} s", load_screen.frames);
     }
     // The GPU's per-frame lists, kept to reuse their room: the poses, the overlay and its layers.
     let mut gpu_poses: Vec<Vec<M4>> = Vec::new();
