@@ -540,15 +540,16 @@ impl Flight {
         }
     }
 
-    /// The post listener: the measure, with the crash test between its halves.
-    fn post(&mut self, dt: F, acos: &AcosTable) {
+    /// The post listener: the measure, with the crash test between its halves. `holed` and `bare` are
+    /// [`CrashContact`]'s, which only a world of several terrains sets.
+    fn post(&mut self, dt: F, acos: &AcosTable, holed: bool, bare: bool) {
         let wheels = self.tires.map(|t| t.touching);
         let (_touchdown, true_speed) = self.measure.contacts(wheels, false);
         self.aero.true_speed = true_speed;
         let m = &self.measure;
         // What the world rays last struck, in the plane's mask of categories the speed rule spares.
         let ignored = self.record.struck.is_some_and(|o| flight_search::category(o) & VEHICLE != 0);
-        let c = CrashContact { touching: self.record.touching, ignored, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()) };
+        let c = CrashContact { touching: self.record.touching, ignored, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()), holed, bare };
         let b = &mut self.body;
         let out = self.crash.step_in(&c, self.area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut self.edge_scale, &mut self.rng, dt);
         if out.wreck.is_some() {
@@ -682,7 +683,11 @@ impl Dynamics for Listeners<'_> {
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
         self.plane.refresh(&mut *self.ground.0, self.bikes);
-        self.plane.post(dt, &self.tables.acos);
+        // A world of several terrains' holes and bare sky (MD14), where the plane stands now.
+        let at = self.plane.body.position;
+        let holed = self.plane.area.is_some() && self.ground.0.off_world(at, F(crate::biplane::EDGE));
+        let bare = !self.ground.0.keeps(at) && at.y() < 0.0;
+        self.plane.post(dt, &self.tables.acos, holed, bare);
     }
 }
 

@@ -2276,6 +2276,8 @@ fn the_crash_test_matches_the_original() {
             grounded: pick.one_in(3),
             speed: F(pick.range(0.0, 150.0)),
             up_y: F(pick.range(-1.0, 1.0)),
+            holed: false,
+            bare: false,
         };
         ee.set_u32(collider + crash::CONTACT, u32::from(touching));
         ee.set_u32(collider + crash::SURFACE, if has_surface { surface } else { 0 });
