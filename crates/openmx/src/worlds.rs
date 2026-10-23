@@ -339,12 +339,23 @@ pub fn move_look(look: &mut game_render::scene::Scene, by: [F; 2]) {
 /// offset, with every cell it does not own cut out (the simulation's [`Tiled::owner`] at the
 /// cell's middle, so the drawn seams are the ridden ones). Each piece's chunks are numbered in a
 /// column band of their own, so the GPU stitches a piece's chunks to each other and to nothing else.
-pub fn chunks(w: &WorldMod, tiled: &Tiled, cells: u32) -> Vec<game_render::gpu::GroundChunk> {
+///
+/// Only the ground near `near` (the start, in world feet), as a stopgap until MD17 streams it: the
+/// pieces within [`GROUND_REACH`] of it, then the chunks nearest it that fit [`GROUND_BYTES`]. A big
+/// world's whole ground does not fit one vertex buffer (world_mxu's is 1.6 GB) and takes minutes to
+/// build. `between` runs after each piece, for the shell to answer its window while it builds.
+pub fn chunks(w: &WorldMod, tiled: &Tiled, cells: u32, near: [f32; 2], between: &mut dyn FnMut()) -> Vec<game_render::gpu::GroundChunk> {
     let cells = cells.max(1).next_power_of_two();
     let mut out = Vec::new();
     let mut column = 0u32;
     let mut files = Files { pieces: w.pieces.clone() };
     for (i, p) in w.pieces.iter().enumerate() {
+        let [ax, az] = p.tile.at.map(|a| a.0);
+        let [sx, sz] = p.tile.samples().map(|n| n as f32 * p.tile.spacing.0);
+        let (dx, dz) = ((ax - near[0]).max(near[0] - ax - sx).max(0.0), (az - near[1]).max(near[1] - az - sz).max(0.0));
+        if dx.hypot(dz) > GROUND_REACH {
+            continue;
+        }
         let bytes = match files.load_terrain(i) {
             Ok(b) => b,
             Err(e) => {
@@ -354,7 +365,6 @@ pub fn chunks(w: &WorldMod, tiled: &Tiled, cells: u32) -> Vec<game_render::gpu::
         };
         let Ok(terrain) = Terrain::parse(&bytes) else { continue };
         let ground = crate::ground::Ground::new(terrain, &p.tile.layout);
-        let [ax, az] = p.tile.at.map(|a| a.0);
         let spacing = ground.spacing;
         let mut widest = 0;
         for mut c in ground.chunks(cells) {
@@ -384,9 +394,25 @@ pub fn chunks(w: &WorldMod, tiled: &Tiled, cells: u32) -> Vec<game_render::gpu::
             out.push(c);
         }
         column += widest + 1;
+        between();
     }
+    let away = |c: &game_render::gpu::GroundChunk| (c.centre.x - near[0]).hypot(c.centre.z - near[1]);
+    out.sort_by(|a, b| away(a).total_cmp(&away(b)));
+    let mut room = GROUND_BYTES / std::mem::size_of::<game_render::gpu::GroundVertex>();
+    out.retain(|c| {
+        let fits = c.vertices.len() <= room;
+        room = room.saturating_sub(c.vertices.len());
+        fits
+    });
     out
 }
+
+/// How far from the start a world's drawn ground reaches, in feet, until MD17 streams it.
+pub const GROUND_REACH: f32 = 16_000.0;
+
+/// The most a world's drawn ground takes of the GPU's one vertex buffer: under the 256 MiB a
+/// device is asked for (`Limits::downlevel_webgl2_defaults`' max_buffer_size).
+pub const GROUND_BYTES: usize = 192 << 20;
 
 impl Files {
     fn load_terrain(&mut self, index: usize) -> Result<Vec<u8>, String> {
