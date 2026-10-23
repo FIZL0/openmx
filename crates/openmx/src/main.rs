@@ -2745,7 +2745,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 .unwrap_or_default();
             println!("biplane: {} camera presets in {PLANE_PRESETS}", presets.len());
             let mut cam = Race::new(presets, reverse_speed);
-            cam.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
+            // The fog's ceiling, unless the first player's plane has none (P136).
+            cam.cam.ceiling = mods.plane_eye_ceiling(0, Race::ceiling_for_fog(F(look.fog_far)));
             if let Some(start) = Preset::find(&cam.cam.presets, PLANE_CAMERA) {
                 cam.cam.set_preset(start);
             }
@@ -3486,7 +3487,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             chassis,
             camera: Race { cam: camera.cam.clone() },
             // Their own plane's camera, on the same presets as the first player's (P87).
-            plane_camera: plane_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
+            // Its ceiling theirs (P136).
+            plane_camera: plane_camera.as_ref().map(|c| {
+                let mut cam = Race { cam: c.cam.clone() };
+                cam.cam.ceiling = mods.plane_eye_ceiling(i, Race::ceiling_for_fog(F(look.fog_far)));
+                cam
+            }),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             fov_ease: Default::default(),
@@ -4202,7 +4208,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // The recording changed the modifiers before the frame it hands out next (P98): the ride
         // takes them there, as it did when it was made.
         if let Some(to) = head.as_ref().and_then(Head::change) {
-            remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &mods, &to);
+            remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &mods, &to, Race::ceiling_for_fog(F(look.fog_far)));
             mods = to;
             engine.time_scale = mods.time_scale();
             if let Some(front) = front.as_deref_mut() {
@@ -4571,7 +4577,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         Err(e) => front.menu.note = Some(format!("The modifiers did not change: {e}")),
                     }
                 } else if front.menu.mods_lock.is_none() && to != mods {
-                    remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &mods, &to);
+                    remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &mods, &to, Race::ceiling_for_fog(F(look.fog_far)));
                     mods = to;
                     engine.time_scale = mods.time_scale();
                     front.menu.modified = !mods.is_original();
@@ -4650,6 +4656,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
                 for (i, rig) in rigs.iter_mut().enumerate() {
                     rig.modified = !to.seat_is_original(i);
+                    if let Some(cam) = &mut rig.plane_camera {
+                        cam.cam.ceiling = to.plane_eye_ceiling(i, Race::ceiling_for_fog(F(look.fog_far)));
+                    }
                 }
                 mods = to;
                 if let Some(front) = front.as_deref_mut() {
@@ -6214,7 +6223,8 @@ fn mods_lock(playing: bool, online: Option<bool>) -> Option<String> {
 /// **The ride takes another set of modifiers, from where it is** (P98): every seat's bike built again
 /// from its stock file `stock[i]` on `to` ([`Mods::rebike`](game_sim::modifiers::Mods::rebike)), its
 /// biplane retuned off the stock `plane` the same way, and the HUD's mark said again. `was` is the set
-/// the ride had. Nothing is moved, stopped or put back.
+/// the ride had. Nothing is moved, stopped or put back. Each plane camera's eye takes `fog`, the
+/// scene's ceiling for it, or none if the seat's plane has no ceiling (P136).
 fn remodify(
     seats: &mut [Seat],
     rigs: &mut [Rig],
@@ -6222,6 +6232,7 @@ fn remodify(
     plane: Option<&phy::Plane>,
     was: &game_sim::modifiers::Mods,
     to: &game_sim::modifiers::Mods,
+    fog: F,
 ) {
     for (i, seat) in seats.iter_mut().enumerate() {
         if let Some(file) = stock.get(i) {
@@ -6233,6 +6244,9 @@ fn remodify(
     }
     for (i, rig) in rigs.iter_mut().enumerate() {
         rig.modified = !to.seat_is_original(i);
+        if let Some(cam) = &mut rig.plane_camera {
+            cam.cam.ceiling = to.plane_eye_ceiling(i, fog);
+        }
     }
 }
 
