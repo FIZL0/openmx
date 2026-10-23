@@ -7,6 +7,8 @@
 //! - every other bike knob moves the measure it is named for (grip the launch, suspension the sag,
 //!   jump the preload, crash tolerance the wreck limits, air control and flip spin their torques);
 //! - none of them is undone by a wreck's put-back, which sets the ride's speed limit back.
+//! - **Biplane turn speed** (P108) at 200% pulls the disc's biplane round a full-stick turn off its
+//!   top speed near twice as fast, and leaves the autopilot's banked hold as the file flies it.
 //!
 //! Skipped without a disc (`./kit extract MX.PSR`): the stand-in bike does not top out the way the
 //! disc's does, and the stock bike's launch on it is not grip-limited the way the real one's is.
@@ -403,4 +405,184 @@ fn every_other_bike_knob_moves_what_it_is_named_for() {
         -t[29].vy
     };
     check("gravity, the speed a second's fall gives", fall(&original), fall(&with(Knob::Gravity, 200)), fall(&with(Knob::Gravity, 50)));
+}
+
+/// The disc's biplane file (`machine.res`'s `biplane.phy`), or `None` and a note.
+fn the_plane() -> Option<game_sim::phy::Plane> {
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/iso/MX.PSR");
+    let path = if here.exists() {
+        here
+    } else {
+        match Kit::load() {
+            Ok(k) => k.ctx("iso").join("MX.PSR"),
+            Err(why) => {
+                skip(&why);
+                return None;
+            }
+        }
+    };
+    let Ok(mut f) = File::open(&path) else {
+        skip(&format!("no {} — `./kit extract MX.PSR` writes it", path.display()));
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find("machine.res").expect("machine.res is in MX.PSR");
+    f.seek(SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    f.read_exact(&mut bytes).expect("read");
+    let res = Res::parse(&bytes).expect("machine.res");
+    let e = res
+        .entries
+        .iter()
+        .find(|e| e.name.eq_ignore_ascii_case(game_sim::phy::BIPLANE_PHY))
+        .expect("machine.res carries the plane's file");
+    Some(game_sim::phy::Plane::read_bytes(&res.read(&bytes, e).expect("its bytes")))
+}
+
+/// The stock biplane's level top speed at full throttle, as `acceleration_modifiers`' level run
+/// finds it: each step the angle of attack that holds the weight, and thrust less that drag.
+fn top_speed(plane: &game_sim::phy::Plane) -> f32 {
+    let mut f = game_sim::flight::Flight::new(plane);
+    let weight = -f.gravity.y();
+    let mass = f.mass.to_f32();
+    let most = f.aero.cm_break_alpha.to_f32();
+    let mut v = 0.0f32;
+    for _ in 0..30 * 120 {
+        let thrust = f.engine.step(F::ONE, Vf::new(0.0, 0.0, v, 0.0), F::ZERO, F::ZERO, DT, &mut |_| F::ZERO).z();
+        let mut air = game_sim::biplane::Air { speed: F(v), ..Default::default() };
+        let (mut lo, mut hi) = (0.0f32, most);
+        for _ in 0..24 {
+            air.alpha = F(0.5 * (lo + hi));
+            if f.aero.forces(&air).0.y() < weight {
+                lo = air.alpha.0;
+            } else {
+                hi = air.alpha.0;
+            }
+        }
+        air.alpha = F(hi);
+        v += (thrust - -f.aero.forces(&air).0.z()) / mass * DT.0;
+    }
+    v
+}
+
+/// What a turn did: the heading turned through in the first second of the pull and over all of it,
+/// in degrees, the most bank, and the height and airspeed it started from and ended at.
+#[derive(Debug)]
+struct Turn {
+    first: f32,
+    all: f32,
+    most_bank: f32,
+    y: (f32, f32),
+    speed: (f32, f32),
+}
+
+/// The biplane on `mods`, flown the way the shell's default controls fly it (the New scheme:
+/// `openmx::vehicle`'s every-bank and round-stick overrides, on the stick a frame at a time) at full
+/// throttle: from `speed` ft/s level, rolled to `bank` degrees over two seconds by a
+/// hand on the aileron that then holds it there, and `secs` seconds of the stick at `pull` (1 is full
+/// back) with the bank still held.
+fn turn(plane: &game_sim::phy::Plane, mods: &Mods, speed: f32, bank: f32, pull: f32, secs: usize) -> Turn {
+    use game_sim::biplane::Pad;
+    let tables = game_sim::ride::Tables::build();
+    let mut plane = *plane;
+    mods.plane(0, &mut plane);
+    let mut f = game_sim::flight::Flight::new(&plane);
+    f.attitude.flown = true;
+    f.place(Vf::new(2048.0, 3000.0, 2048.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), &tables.acos);
+    f.body.velocity = Vf::new(0.0, 0.0, speed, 0.0);
+    f.remeasure(&tables.acos);
+    let mut ground = Flat::default();
+    let mut prev = 0.0f32;
+    let mut frame = |f: &mut game_sim::flight::Flight, bank: f32, elevator: f32| {
+        // A positive aileron rolls the plane to a negative roll; the hand damps the roll rate.
+        let roll = f.attitude.roll.to_f32();
+        let rate = (roll - prev) / DT.0;
+        prev = roll;
+        let aileron = (-(1.5 * (-bank.to_radians() - roll) - 0.4 * rate)).clamp(-1.0, 1.0);
+        let pad = Pad { forward: F::ONE, elevator: F(elevator), aileron: F(aileron), ..Pad::default() };
+        // The New scheme's overrides, as `openmx::vehicle`'s plane step makes them for one frame.
+        let (least, zone, forward, rate_limit) =
+            (f.joystick.min_elevator, f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate);
+        let held = ((F(2.0) + F(2.0) - pad.aileron.abs()) / F(2.0)).max(F::ZERO).min(F::ONE);
+        f.joystick.min_elevator = F::ONE;
+        f.autopilot.aileron_dead_zone = F(2.0);
+        f.autopilot.feed_forward = forward * held;
+        f.autopilot.max_pitch_rate = rate_limit * F(2.5);
+        f.frame(DT, pad, &mut ground, &tables);
+        (f.joystick.min_elevator, f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate) =
+            (least, zone, forward, rate_limit);
+        roll
+    };
+    let hz = (1.0 / DT.0).round() as usize;
+    for _ in 0..2 * hz {
+        frame(&mut f, bank, 0.0);
+    }
+    let heading = |f: &game_sim::flight::Flight| f.body.velocity.x().atan2(f.body.velocity.z());
+    let (y0, s0) = (f.body.position.y(), f.measure.airspeed.to_f32());
+    let (mut last, mut all, mut first, mut most_bank) = (heading(&f), 0.0f32, 0.0f32, 0.0f32);
+    for i in 0..secs * hz {
+        let roll = frame(&mut f, bank, -pull);
+        let h = heading(&f);
+        let d = (h - last + 3.0 * std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI) - std::f32::consts::PI;
+        last = h;
+        all += d;
+        if i + 1 == hz {
+            first = all;
+        }
+        most_bank = most_bank.max(roll.abs().to_degrees());
+    }
+    Turn {
+        first: first.abs().to_degrees(),
+        all: all.abs().to_degrees(),
+        most_bank,
+        y: (y0, f.body.position.y()),
+        speed: (s0, f.measure.airspeed.to_f32()),
+    }
+}
+
+#[test]
+fn biplane_turn_speed_at_200_percent_pulls_round_near_twice_as_fast() {
+    let Some(stock) = the_plane() else { return };
+    // At 100% the file is the original's, to the bit.
+    let mut back = with(Knob::PlaneTurn, 250);
+    for seat in 0..game_sim::MAX_PLAYERS {
+        back.set(seat, Knob::PlaneTurn, game_sim::modifiers::ORIGINAL);
+    }
+    assert!(back.is_original());
+    let mut p = stock;
+    back.plane(0, &mut p);
+    assert_eq!(format!("{p:?}"), format!("{stock:?}"), "Biplane turn speed at 100% touched the biplane");
+    let twice = with(Knob::PlaneTurn, 200);
+    let top = top_speed(&stock);
+    println!("the stock biplane's level top speed: {top:.1} ft/s");
+    // Full stick on the knife edge from the top speed (the bank held at 90 degrees). With the stick
+    // held the elevator sits on its stop, which holds the wing at the top of its lift curve, so the
+    // stock turn is the lift's: 200% lifts and pitches twice as hard. The first second turns 1.71
+    // times as far (81 degrees against 139 when this was written); over three seconds the harder pull
+    // has bled the speed further (to 57 ft/s against 82), and the turn goes with the speed, so the
+    // three seconds are 1.43 times (244 against 349).
+    let a = turn(&stock, &Mods::original(), top, 90.0, 1.0, 3);
+    let b = turn(&stock, &twice, top, 90.0, 1.0, 3);
+    println!("100%: {a:?}\n200%: {b:?}");
+    assert!(a.all > 180.0, "the stock plane only turned {} degrees in 3 s of full stick", a.all);
+    let first = ratio("the first second", b.first, a.first);
+    assert!((1.6..2.3).contains(&first), "200% turned {} degrees in the first second, 100% {}", b.first, a.first);
+    let all = ratio("three seconds", b.all, a.all);
+    assert!((1.35..2.3).contains(&all), "200% turned {} degrees in 3 s, 100% {}", b.all, a.all);
+    assert!(b.most_bank < 95.0, "200% rolled past the knife edge to {} degrees", b.most_bank);
+    // Slower, at 120 ft/s: at least half again as far.
+    let a = turn(&stock, &Mods::original(), 120.0, 90.0, 1.0, 3);
+    let b = turn(&stock, &twice, 120.0, 90.0, 1.0, 3);
+    println!("from 120 ft/s, 100%: {a:?}\n200%: {b:?}");
+    assert!(ratio("the first second from 120 ft/s", b.first, a.first) > 1.5);
+    // The autopilot's banked hold, the stick let go at 45 degrees: the trim is the file's, so it flies
+    // the stock plane's turn, and holds its height at least as well.
+    let a = turn(&stock, &Mods::original(), top, 45.0, 0.0, 3);
+    let b = turn(&stock, &twice, top, 45.0, 0.0, 3);
+    println!("hands off at 45 degrees, 100%: {a:?}\n200%: {b:?}");
+    assert!((ratio("the banked hold's turn", b.all, a.all) - 1.0).abs() < 0.1);
+    assert!(b.y.0 - b.y.1 <= a.y.0 - a.y.1 + 1.0, "200% sank {} ft holding the bank, 100% {}", b.y.0 - b.y.1, a.y.0 - a.y.1);
+    assert!((b.most_bank - 45.0).abs() < 5.0, "200% held the bank at {} degrees", b.most_bank);
 }
