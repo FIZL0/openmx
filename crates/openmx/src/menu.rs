@@ -38,13 +38,22 @@ use crate::join::{self, Join, Opened, Outcome};
 use crate::roster::{self, Catalogue, Garage, Pick, Picks};
 use crate::split::{self, Split};
 use game_render::world::Graphics;
-use game_render::gpu::{Shape, Sprite, clamp_of};
+use game_render::gpu::{Shape, Sprite};
 use game_render::{Disc, Frame, Texture};
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use game_sim::modifiers::{Knob, Mods};
 use openmx_net::{Cmd, Event, HOST, Listing, Room};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+#[path = "menu_art.rs"]
+pub mod ink;
+#[path = "menu_pages.rs"]
+mod pages;
+#[path = "menu_screens.rs"]
+mod screens;
+#[allow(unused_imports)] // the tests' and the shell's, not every includer's
+pub use pages::{GARAGE_TABS, Key, Kind, PLAYERS, Pack, Row, SETTINGS_TABS, graphics_label, pack_of};
 
 // ---- the pad -------------------------------------------------------------------------------------
 
@@ -63,6 +72,11 @@ pub struct Press {
     /// Square: the on-screen keyboard's delete.
     pub delete: bool,
     pub start: bool,
+    /// L1 and R1: the tabs of Settings and the Garage, and the Free Ride strip's player (P118).
+    pub l1: bool,
+    pub r1: bool,
+    /// Triangle alone, which is also [`Press::back`]: the Free Ride strip's Wrecks (P118).
+    pub triangle: bool,
 }
 
 impl Press {
@@ -77,6 +91,9 @@ impl Press {
             back: self.back || o.back,
             delete: self.delete || o.delete,
             start: self.start || o.start,
+            l1: self.l1 || o.l1,
+            r1: self.r1 || o.r1,
+            triangle: self.triangle || o.triangle,
         }
     }
 }
@@ -161,6 +178,9 @@ impl Reader {
             back: on(Control::Circle) || on(Control::Triangle),
             delete: on(Control::Square),
             start: on(Control::Start),
+            l1: on(Control::L1),
+            r1: on(Control::R1),
+            triangle: on(Control::Triangle),
         }
     }
 }
@@ -235,6 +255,9 @@ pub struct Settings {
     /// Whether the shell reads the `mods/` folder beside this file (MD2): Off, nothing is read from it
     /// and the pick is the disc's alone. On unless turned off.
     pub mods: bool,
+    /// The mod packs switched off on the Mods page (P118), by the prefix their tracks' ids share
+    /// (`mxvatv` for `mxvatv_nat13`): their tracks are left off the Free Ride list.
+    pub mods_off: Vec<String>,
 }
 
 /// The settings' render scale (V34): auto, picked from the frames' time against the display's
@@ -480,7 +503,7 @@ impl CameraView {
         Some(std::array::from_fn(|i| views[i.min(views.len() - 1)]))
     }
 
-    /// Slider `slider` ([`CAMERA_SLIDERS`]' order) as a number: degrees, or percent.
+    /// Slider `slider` (the Camera tab's order: field of view, bike distance and height, biplane distance and height) as a number: degrees, or percent.
     pub fn get(&self, slider: usize) -> i32 {
         match slider {
             0 => self.fov as i32,
@@ -535,8 +558,6 @@ impl CameraView {
     }
 }
 
-/// The Camera page's sliders (P82), in [`CameraView::get`]'s order.
-pub const CAMERA_SLIDERS: [&str; 5] = ["Field of view", "Bike distance", "Bike height", "Biplane distance", "Biplane height"];
 
 /// The most players a ride seats, as P35's seats count them.
 pub const SEATS_MAX: usize = 8;
@@ -610,6 +631,7 @@ impl Default for Settings {
             lobby_seats: LOBBY_SEATS,
             cameras: [CameraView::DEFAULT; SEATS_MAX],
             mods: true,
+            mods_off: Vec::new(),
         }
     }
 }
@@ -688,6 +710,9 @@ impl Settings {
                 "frame_limit" => s.frame_limit = FrameLimit::from_word(v).unwrap_or(s.frame_limit),
                 "machine_bays" => s.bays = v != "off",
                 "mods" => s.mods = v != "off",
+                "mods_off" => {
+                    s.mods_off = v.split_whitespace().filter(|w| mod_id(&format!("{w}_x"))).map(str::to_string).collect();
+                }
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
@@ -787,7 +812,12 @@ impl Settings {
 
     /// The mods' switch (MD2), only when it is off, so a file from before it is written as it was.
     fn mods_text(&self) -> String {
-        if self.mods { String::new() } else { "mods = off\n".into() }
+        let mut out = if self.mods { String::new() } else { "mods = off\n".to_string() };
+        // The packs switched off (P118), only when there are some.
+        if !self.mods_off.is_empty() {
+            out += &format!("mods_off = {}\n", self.mods_off.join(" "));
+        }
+        out
     }
 
     /// The lobby's seat count (N12), only when it is not the usual [`LOBBY_SEATS`], so a file from
@@ -984,24 +1014,6 @@ impl Layout {
     }
 }
 
-/// What a seat's Controls row says of its biplane (P50, P69): its stick is the plane's own at every
-/// bank, or the original's, which stops pitching the plane on its side.
-fn plane_label(l: Layout) -> &'static str {
-    match l {
-        Layout::New => "plane relative",
-        Layout::Original => "plane original",
-    }
-}
-
-/// Every choice a seat's Controls row steps through (P79): (layout, controller preset, biplane), the
-/// new layout first on preset 0, then the original's on presets 0 to 3, each with the biplane's two.
-fn seat_choices() -> Vec<(Layout, usize, Layout)> {
-    let planes = [Layout::New, Layout::Original];
-    let new = planes.map(|plane| (Layout::New, 0, plane));
-    let original = (0..PRESETS).flat_map(|p| planes.map(move |plane| (Layout::Original, p, plane)));
-    new.into_iter().chain(original).collect()
-}
-
 /// Where [`Menu::keyboard`] keeps the keyboard of a layout on a controller preset (P79).
 pub fn keyboard_at(layout: Layout, preset: usize) -> usize {
     match layout {
@@ -1012,9 +1024,6 @@ pub fn keyboard_at(layout: Layout, preset: usize) -> usize {
 
 /// How many seats the file holds a layout for: the shell's `pad::SEATS`.
 pub const SEATS: usize = 8;
-
-/// The seats the Controls screen has a row for; the rest are the file's.
-pub const LAYOUT_ROWS: usize = 4;
 
 /// `controls.txt`: how the host's pad is wired, which is the device's and not the rider's, and which
 /// layout each seat rides on.
@@ -1234,10 +1243,12 @@ pub enum Screen {
     /// The cameras (P82), under Settings: the field of view and the follow cameras' distance and
     /// height, per player.
     Camera,
+    /// The mods folder's switch and its packs, each on or off (P118).
+    Mods,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 16] = [
+    pub const ALL: [Screen; 17] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -1254,6 +1265,7 @@ impl Screen {
         Screen::Modifiers,
         Screen::Audio,
         Screen::Camera,
+        Screen::Mods,
     ];
 
     fn index(self) -> usize {
@@ -1279,6 +1291,7 @@ impl Screen {
             Screen::Modifiers => "modifiers",
             Screen::Audio => "audio",
             Screen::Camera => "camera",
+            Screen::Mods => "mods",
         }
     }
 
@@ -1304,27 +1317,30 @@ impl Screen {
             Screen::Modifiers => "Game Modifiers",
             Screen::Audio => "Game Audio Options",
             Screen::Camera => "Camera",
+            Screen::Mods => "Mods",
         }
     }
 }
 
 /// The main menu's rows: opentennis's Local and Online beside Free Ride, as `home.rs` lists them.
-const MAIN: [&str; 6] = ["Free Ride", "Local Game", "Online", "Garage", "Settings", "Quit"];
+/// Mods is P118's: the mods folder's switch and its packs, out of Settings.
+pub const MAIN: [&str; 7] = ["Free Ride", "Local Game", "Online", "Garage", "Mods", "Settings", "Quit"];
 const MAIN_FREE: usize = 0;
 const MAIN_LOCAL: usize = 1;
 const MAIN_ONLINE: usize = 2;
 const MAIN_GARAGE: usize = 3;
-const MAIN_SETTINGS: usize = 4;
+const MAIN_MODS: usize = 4;
+const MAIN_SETTINGS: usize = 5;
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
-/// machine a switch would go to; the fourth its "Game Audio Options" (P56). "Clear Markers" is the
-/// port's (P99): the pausing player's session markers on this track, the saved ones with them.
-const PAUSE: [&str; 8] =
-    ["Resume", "Restart", "Switch To Machine", "Game Audio Options", "Settings", "Main Menu", "Clear Markers", "Quit"];
+/// machine a switch would go to; the fourth its "Game Audio Options" (P56), which is Settings' Audio
+/// tab since P118. "Clear Markers" is the port's (P99): the pausing player's session markers on this
+/// track, the saved ones with them.
+pub const PAUSE: [&str; 8] = ["Resume", "Restart", "Switch To Machine", "Audio", "Settings", "Clear Markers", "Main Menu", "Quit"];
 const PAUSE_SWITCH: usize = 2;
 const PAUSE_AUDIO: usize = 3;
 const PAUSE_SETTINGS: usize = 4;
-const PAUSE_MAIN: usize = 5;
-const PAUSE_MARKERS: usize = 6;
+const PAUSE_MARKERS: usize = 5;
+const PAUSE_MAIN: usize = 6;
 /// The pause's "Open to Online" row (N10), before Quit, on a ride that can be opened
 /// ([`Menu::opening`]); Quit moves down one under it.
 const PAUSE_OPEN: usize = 7;
@@ -1344,58 +1360,9 @@ pub enum Opening {
     /// Hosting: the row shows the room code, for others to join by.
     Open,
 }
-/// The Game Audio Options page's rows (P56): the original's Song, Audio Presets and six sliders in
-/// its order, with Skip Song and Play Order, which are this port's, beside the song.
-const AUDIO: [&str; 10] = ["Song", "Skip Song", "Play Order", "Audio Presets", "Music", "Sound FX", "Crowd", "Engine", "Menu FX", "User Soundtracks"];
-const AUDIO_SONG: usize = 0;
-const AUDIO_SKIP: usize = 1;
-const AUDIO_ORDER: usize = 2;
-const AUDIO_PRESET: usize = 3;
-const AUDIO_SLIDERS: usize = 4;
-/// Which of [`Mix::levels`]' sliders each slider row is.
-const AUDIO_SLIDER: [usize; 6] = [0, 2, 3, 4, 5, 1];
-const SETTINGS_ROWS: usize = 16;
-/// The settings' sound rows (P42), after the four P36 shipped.
-const SETTINGS_MUSIC: usize = 4;
-const SETTINGS_MUSIC_VOLUME: usize = 5;
-const SETTINGS_EFFECTS_VOLUME: usize = 6;
-/// The graphics row (V32): the whole map or the original's fog.
-const SETTINGS_GRAPHICS: usize = 7;
-/// The render scale's row (V34), beside the graphics'.
-const SETTINGS_RENDER_SCALE: usize = 8;
-/// The speedometer's style (V42), under the render scale's.
-const SETTINGS_SPEEDOMETER: usize = 9;
-/// VSync and the frame limit (P90), under the speedometer's.
-const SETTINGS_VSYNC: usize = 10;
-const SETTINGS_FRAME_LIMIT: usize = 11;
-/// The machines at their bays (P103), above the modifiers'.
-const SETTINGS_BAYS: usize = 12;
-/// The game modifiers' screen (P55), the last row.
-const SETTINGS_MODIFIERS: usize = 15;
-/// The cameras' screen (P82), above the modifiers', which stay the last row.
-const SETTINGS_CAMERA: usize = 14;
-/// Whether the `mods/` folder is read (MD2), under the bays'.
-const SETTINGS_MODS: usize = 13;
-/// The cameras' screen: whose they are, the five sliders, and the two resets.
-const CAMERA_SEAT: usize = 0;
-const CAMERA_FIRST: usize = 1;
-const CAMERA_DEFAULT: usize = CAMERA_FIRST + CAMERA_SLIDERS.len();
-const CAMERA_ORIGINAL: usize = CAMERA_DEFAULT + 1;
-const CAMERA_ROWS: usize = CAMERA_ORIGINAL + 1;
-/// The modifiers' screen: whose they are, every modifier, then the presets and the reset.
-const MODIFIERS_SEAT: usize = 0;
-const MODIFIERS_KNOBS: usize = 1;
-const MODIFIERS_PRESET: usize = MODIFIERS_KNOBS + Knob::MENU.len();
-const MODIFIERS_SAVE: usize = MODIFIERS_PRESET + 1;
-const MODIFIERS_DELETE: usize = MODIFIERS_SAVE + 1;
-const MODIFIERS_RESET: usize = MODIFIERS_DELETE + 1;
-const MODIFIERS_ROWS: usize = MODIFIERS_RESET + 1;
-/// How many of a long list's rows a screen shows at once, the rest scrolled to.
-const SHOWN_ROWS: usize = 9;
-const CONTROLS_ROWS: usize = 1 + LAYOUT_ROWS;
 
 /// The on-screen keyboard: opentennis's four rows of ten, then a row of four commands.
-const KEY_ROWS: [&str; 4] = ["abcdefghij", "klmnopqrst", "uvwxyz0123", "456789-'.&"];
+pub const KEY_ROWS: [&str; 4] = ["abcdefghij", "klmnopqrst", "uvwxyz0123", "456789-'.&"];
 const KEY_COMMANDS: [&str; 4] = ["Space", "Delete", "Clear", "Done"];
 
 /// A device that can press a menu (P46): the keyboard, or a pad by the name the seats know it by across an unplug (`pad.rs`'s `DeviceInfo::identity`).
@@ -1581,12 +1548,19 @@ pub struct Menu {
     /// The songs the music row steps through after Off and Shuffle, `(id, label)`, as the shell's
     /// music sources list them (P42). Empty until the shell says.
     pub music_choices: Vec<(String, String)>,
-    /// The modifiers' screen (P55): whose a per-player row sets (0 every player's, then 1P on), and
-    /// the preset its row is on.
-    mod_seat: usize,
+    /// The preset the modifiers' Load Preset row is on (P55).
     mod_preset: usize,
-    /// The Camera page (P82): whose cameras it sets, 0 every player's, then 1P on.
-    cam_seat: usize,
+    /// Each screen's tab, in [`Screen::ALL`]'s order (P118): Settings' and the Garage's.
+    tab: [usize; Screen::ALL.len()],
+    /// Whose rows the pages' Player rows show, 0 for 1P (P118).
+    player: usize,
+    /// The device and the pressure map `controls.txt` named, kept while their rows are on First
+    /// Found and None, to switch back to.
+    pad_kept: Option<String>,
+    pressure_kept: Option<String>,
+    /// Every mod track the folder listed this session, for the Mods page's packs, which stay listed
+    /// while the folder is off.
+    mods_seen: Vec<(String, String)>,
     /// The ride under the menu has a modifier off the original game's, as the shell tells it: the
     /// pause says so.
     pub modified: bool,
@@ -1686,34 +1660,17 @@ impl Menu {
             party: None,
             free_riders: 1,
             music_choices: Vec::new(),
-            mod_seat: 0,
             mod_preset: 0,
-            cam_seat: 0,
+            tab: [0; Screen::ALL.len()],
+            player: 0,
+            pad_kept: None,
+            pressure_kept: None,
+            mods_seen: Vec::new(),
             modified: false,
             mods_lock: None,
             music_now: None,
             music_at: 0,
             tunes: Vec::new(),
-        }
-    }
-
-    /// The music row's choices: Off, Shuffle, In Order, then every song, as `(settings word, label)`.
-    pub fn music_options(&self) -> Vec<(String, String)> {
-        let mut out = vec![
-            ("off".to_string(), "Off".to_string()),
-            ("shuffle".to_string(), "Shuffle".to_string()),
-            ("order".to_string(), "In Order".to_string()),
-        ];
-        out.extend(self.music_choices.iter().cloned());
-        out
-    }
-
-    /// What the music row shows for the setting as it stands.
-    pub fn music_label(&self) -> String {
-        let all = self.music_options();
-        match all.iter().find(|(id, _)| *id == self.settings.music) {
-            Some((_, label)) => label.clone(),
-            None => self.settings.music.clone(),
         }
     }
 
@@ -1733,123 +1690,6 @@ impl Menu {
     /// The song row's song, by id.
     fn song_at(&self) -> Option<&str> {
         self.music_choices.get(self.music_at).map(|(id, _)| id.as_str())
-    }
-
-    /// The Play Order row's word for the pick: Repeat Song for one song's id.
-    fn play_order(&self) -> &'static str {
-        match self.settings.music.as_str() {
-            "off" => "Off",
-            "" | "shuffle" => "Shuffle",
-            "order" => "In Order",
-            _ => "Repeat Song",
-        }
-    }
-
-    /// The Game Audio Options' rows as drawn.
-    pub fn audio_rows(&self) -> Vec<String> {
-        let song = self.song_at().map_or("No Song Playing".to_string(), |id| self.song_label(id));
-        let l = self.settings.levels();
-        AUDIO
-            .iter()
-            .enumerate()
-            .map(|(i, row)| match i {
-                AUDIO_SONG => format!("{row}  {song}"),
-                AUDIO_SKIP => row.to_string(),
-                AUDIO_ORDER => format!("{row}  {}", self.play_order()),
-                AUDIO_PRESET => format!("{row}  {}", self.settings.mix.label()),
-                _ => format!("{row}  {}", l[AUDIO_SLIDER[i - AUDIO_SLIDERS]]),
-            })
-            .collect()
-    }
-
-    /// The ticker under the page: the song playing.
-    pub fn audio_ticker(&self) -> String {
-        match &self.music_now {
-            Some(id) => format!("Now playing {}", self.song_label(id)),
-            None => "No Song Playing".to_string(),
-        }
-    }
-
-    fn open_audio(&mut self) {
-        // The song row starts on the song playing.
-        if let Some(i) = self.music_now.as_ref().and_then(|now| self.music_choices.iter().position(|(id, _)| id == now)) {
-            self.music_at = i;
-        }
-        self.push(Screen::Audio);
-    }
-
-    /// One press on the Game Audio Options page (P56). Every change takes at once, as the original's
-    /// does; Circle goes back to the pause with them kept.
-    fn audio(&mut self, p: Press, at: usize) {
-        let side = p.left || p.right;
-        if p.back {
-            self.pop();
-            return;
-        }
-        if !(p.ok || side) {
-            return;
-        }
-        let songs = self.music_choices.len();
-        let repeat = !matches!(self.settings.music.as_str(), "off" | "" | "shuffle" | "order");
-        match at {
-            AUDIO_SONG if side => {
-                if songs > 0 {
-                    let i = self.music_at.min(songs - 1);
-                    self.music_at = if p.left { (i + songs - 1) % songs } else { (i + 1) % songs };
-                }
-            }
-            AUDIO_SONG => {
-                let Some(id) = self.song_at().map(str::to_string) else { return };
-                // A song picked with the music off starts it, in order from there; one picked under
-                // Repeat Song is the song repeated.
-                if self.settings.music == "off" {
-                    self.settings.music = "order".into();
-                } else if repeat {
-                    self.settings.music = id.clone();
-                }
-                self.tunes.push(Tune::Play(id));
-                self.changed = true;
-            }
-            AUDIO_SKIP if p.ok => {
-                if repeat {
-                    if songs == 0 {
-                        return;
-                    }
-                    let i = self.music_choices.iter().position(|(id, _)| *id == self.settings.music);
-                    let i = i.map_or(0, |i| (i + 1) % songs);
-                    self.music_at = i;
-                    self.settings.music = self.music_choices[i].0.clone();
-                } else if self.settings.music != "off" {
-                    self.tunes.push(Tune::Skip);
-                }
-                self.changed = true;
-            }
-            AUDIO_ORDER => {
-                let mut all = vec!["order".to_string(), "shuffle".to_string()];
-                let held = self.song_at().map(str::to_string).or_else(|| self.music_now.clone());
-                if let Some(id) = &held {
-                    all.push(if repeat { self.settings.music.clone() } else { id.clone() });
-                }
-                all.push("off".into());
-                let n = all.len();
-                let i = if repeat { 2 } else { all.iter().position(|w| *w == self.settings.music).unwrap_or(1) };
-                let i = if p.left { (i + n - 1) % n } else { (i + 1) % n };
-                self.settings.music = all[i].clone();
-                self.changed = true;
-            }
-            AUDIO_PRESET => {
-                let all = Mix::ALL;
-                let i = all.iter().position(|m| *m == self.settings.mix).unwrap_or(0);
-                let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
-                self.settings.set_mix(all[i]);
-                self.changed = true;
-            }
-            AUDIO_SKIP => {}
-            _ => {
-                self.settings.nudge(AUDIO_SLIDER[at - AUDIO_SLIDERS], p.left, p.right);
-                self.changed = true;
-            }
-        }
     }
 
     /// The local game the ride that starts is, or none for a Free Ride (P43).
@@ -1964,71 +1804,12 @@ impl Menu {
         self.pop();
     }
 
-    /// A frame of another seat's pad (seat 0's is [`Menu::step`]'s). Only the garage hears it: each
-    /// seat walks its own column, and only the first seat leaves the screen.
-    /// The join screen hears every one, each pressing for its own seat (P43).
+    /// A frame of another seat's pad (seat 0's is [`Menu::step`]'s). Only the join screen hears it,
+    /// each pressing for its own seat (P43); since P118 the garage is 1P's, its Player row choosing
+    /// whose rider it dresses.
     pub fn step_seat(&mut self, seat: usize, p: Press) {
         if seat > 0 && self.screen() == Some(Screen::Join) {
             self.walk_join(seat, p);
-            return;
-        }
-        if seat == 0 || seat >= self.seated || self.screen() != Some(Screen::Garage) {
-            return;
-        }
-        self.press_garage(seat, p);
-    }
-
-    /// A seat's press on its column (P86): while it types a name or number the keys have it — Cross
-    /// types, Square deletes, Start keeps the text and Circle drops it — and otherwise Cross acts on
-    /// the row and the d-pad walks it. True when the seat asked to leave the screen.
-    fn press_garage(&mut self, seat: usize, p: Press) -> bool {
-        let Some(g) = self.garages.get_mut(seat) else { return false };
-        if let Some(e) = &mut g.entry {
-            if p.up || p.down {
-                e.walk(if p.up { -1 } else { 1 }, 0);
-            } else if p.left || p.right {
-                e.walk(0, if p.left { -1 } else { 1 });
-            } else if p.ok {
-                g.cross(&mut self.looks);
-            } else if p.delete {
-                e.delete();
-            } else if p.start {
-                g.finish_entry();
-            } else if p.back {
-                g.cancel_entry();
-            }
-            return false;
-        }
-        if p.ok {
-            return match g.cross(&mut self.looks) {
-                roster::Cross::Leave => true,
-                roster::Cross::Saved => {
-                    self.looks_changed = true;
-                    false
-                }
-                roster::Cross::Stay => false,
-            };
-        }
-        if p.back || p.start {
-            return true;
-        }
-        if (p.left || p.right) && roster::ROWS[g.row] == roster::Row::Preset {
-            g.turn_preset(&self.catalogue, &self.looks, if p.left { -1 } else { 1 });
-            return false;
-        }
-        self.walk_garage(seat, p);
-        false
-    }
-
-    /// Up and down choose a seat's row, left and right change it.
-    fn walk_garage(&mut self, seat: usize, p: Press) {
-        let Some(g) = self.garages.get_mut(seat) else { return };
-        if p.up {
-            g.up();
-        } else if p.down {
-            g.down();
-        } else if p.left || p.right {
-            g.turn(&self.catalogue, if p.left { -1 } else { 1 });
         }
     }
 
@@ -2186,159 +1967,12 @@ impl Menu {
         }
     }
 
-    /// The Camera page (P82): left and right step the row's slider, held at its ends; Cross puts it
-    /// back to the original's. The seat row picks whose cameras (every player's, or one's), and the
-    /// last two rows put them all to the shipped default or to the original's. Every change takes in
-    /// the ride at once.
-    fn walk_camera(&mut self, p: Press, at: usize) {
-        if p.back {
-            self.pop();
-            return;
-        }
-        let side = p.left || p.right;
-        if !(p.ok || side) {
-            return;
-        }
-        let seats: Vec<usize> = match self.cam_seat {
-            0 => (0..SEATS_MAX).collect(),
-            s => vec![s - 1],
-        };
-        match at {
-            CAMERA_SEAT => {
-                let n = SEATS_MAX + 1;
-                self.cam_seat = if p.left { (self.cam_seat + n - 1) % n } else { (self.cam_seat + 1) % n };
-                return;
-            }
-            CAMERA_DEFAULT | CAMERA_ORIGINAL if !p.ok => return,
-            CAMERA_DEFAULT | CAMERA_ORIGINAL => {
-                let to = if at == CAMERA_DEFAULT { CameraView::DEFAULT } else { CameraView::ORIGINAL };
-                for s in seats {
-                    self.settings.cameras[s] = to;
-                }
-            }
-            _ => {
-                // Every player's: each steps from the shown one's, 1P's, so a mixed set comes together.
-                let slider = at - CAMERA_FIRST;
-                let mut v = self.settings.cameras[seats[0]];
-                v.step(slider, p.left, p.right);
-                for s in seats {
-                    self.settings.cameras[s].set(slider, v.get(slider));
-                }
-            }
-        }
-        self.changed = true;
-    }
-
-    /// The Camera page's rows as drawn.
-    pub fn camera_rows(&self) -> Vec<String> {
-        let seat = match self.cam_seat {
-            0 => "Every Player".to_string(),
-            s => format!("{s}P"),
-        };
-        let shown = self.settings.cameras[self.cam_seat.saturating_sub(1)];
-        let mut rows = vec![format!("Player  {seat}")];
-        for (i, name) in CAMERA_SLIDERS.iter().enumerate() {
-            let mixed = self.cam_seat == 0 && self.settings.cameras.iter().any(|c| c.get(i) != shown.get(i));
-            rows.push(match mixed {
-                true => format!("{name}  Mixed"),
-                false => format!("{name}  {}", shown.label(i)),
-            });
-        }
-        rows.push("Reset To Default".to_string());
-        rows.push("Reset To Original".to_string());
-        rows
-    }
-
-    /// What the Settings page's Camera row says of the cameras: the shipped default, the original's,
-    /// or the player's own.
-    pub fn camera_label(&self) -> &'static str {
-        let c = &self.settings.cameras;
-        if c.iter().all(|v| *v == CameraView::DEFAULT) {
-            "Default"
-        } else if c.iter().all(|v| *v == CameraView::ORIGINAL) {
-            "Original"
-        } else {
-            "Custom"
-        }
-    }
-
-    /// The modifiers' screen (P55): Square or the arrows step a slider by ten percent, Cross on a
-    /// toggle-like row does it, and the last rows load, save and delete presets and put every
-    /// modifier back. What it sets is the next ride's, and under the pause the ride's own from the
-    /// moment the pause closes (P98) — unless the shell holds them ([`Menu::mods_lock`]), when the
-    /// rows that would change them do nothing and the ticker says why.
-    fn walk_modifiers(&mut self, p: Press, at: usize) {
-        if p.back {
-            self.pop();
-            return;
-        }
-        let side = p.left || p.right;
-        if !(p.ok || side) {
-            return;
-        }
-        let sets = (MODIFIERS_KNOBS..MODIFIERS_PRESET).contains(&at) || (at == MODIFIERS_PRESET && !side) || at == MODIFIERS_RESET;
-        if sets && self.mods_held().is_some() {
-            return;
-        }
-        let presets = self.settings.presets.len();
-        match at {
-            MODIFIERS_SEAT => {
-                let n = SEATS_MAX + 1;
-                self.mod_seat = if p.left { (self.mod_seat + n - 1) % n } else { (self.mod_seat + 1) % n };
-            }
-            _ if at < MODIFIERS_PRESET => {
-                let knob = Knob::MENU[at - MODIFIERS_KNOBS];
-                let now = self.knob_value(knob);
-                let step = game_sim::modifiers::STEP;
-                let to = match (p.left, p.right) {
-                    (true, _) => now.saturating_sub(step).max(knob.least()),
-                    (_, true) => (now + step).min(game_sim::modifiers::MOST),
-                    // Cross puts the one modifier back.
-                    _ => game_sim::modifiers::ORIGINAL,
-                };
-                let seats: Vec<usize> = match (knob.per_seat(), self.mod_seat) {
-                    (true, 0) => (0..SEATS_MAX).collect(),
-                    (true, s) => vec![s - 1],
-                    (false, _) => vec![0],
-                };
-                for seat in seats {
-                    self.settings.modifiers.set(seat, knob, to);
-                }
-                self.changed = true;
-            }
-            MODIFIERS_PRESET if presets > 0 => {
-                if side {
-                    self.mod_preset = if p.left { (self.mod_preset + presets - 1) % presets } else { (self.mod_preset + 1) % presets };
-                } else {
-                    self.settings.modifiers = self.settings.presets[self.mod_preset.min(presets - 1)].1;
-                    self.changed = true;
-                }
-            }
-            MODIFIERS_SAVE if p.ok => self.type_for(Typing::Preset),
-            MODIFIERS_DELETE if p.ok && presets > 0 => {
-                self.settings.presets.remove(self.mod_preset.min(presets - 1));
-                self.mod_preset = self.mod_preset.min(self.settings.presets.len().saturating_sub(1));
-                self.changed = true;
-            }
-            MODIFIERS_RESET if p.ok => {
-                self.settings.modifiers = Mods::original();
-                self.changed = true;
-            }
-            _ => {}
-        }
-    }
-
     /// Why the modifiers cannot be changed here: the ride under the pause holds them (P98).
     fn mods_held(&self) -> Option<&str> {
         match self.stack.first() {
             Some(Screen::Pause) => self.mods_lock.as_deref(),
             _ => None,
         }
-    }
-
-    /// A modifier's value on its row: the chosen player's, or with every player chosen 1P's.
-    fn knob_value(&self, knob: Knob) -> u16 {
-        self.settings.modifiers.get(self.mod_seat.saturating_sub(1), knob)
     }
 
     /// Keep the modifiers now set as preset `name`, over one already called that.
@@ -2355,60 +1989,6 @@ impl Menu {
             }
         }
         self.changed = true;
-    }
-
-    /// The modifiers' screen's rows as drawn.
-    pub fn modifier_rows(&self) -> Vec<String> {
-        let seat = match self.mod_seat {
-            0 => "Every Player".to_string(),
-            s => format!("{s}P"),
-        };
-        let mut rows = vec![format!("Player  {seat}")];
-        for knob in Knob::MENU {
-            let mixed = knob.per_seat()
-                && self.mod_seat == 0
-                && (1..SEATS_MAX).any(|s| self.settings.modifiers.get(s, knob) != self.settings.modifiers.get(0, knob));
-            let value = self.knob_value(knob);
-            let mark = match (value == game_sim::modifiers::ORIGINAL, self.mods_held().is_some()) {
-                (true, false) => "",
-                (false, false) => " *",
-                (true, true) => "  Held",
-                (false, true) => " *  Held",
-            };
-            rows.push(match mixed {
-                true => format!("{}  Mixed", knob.label()),
-                false => format!("{}  {value}%{mark}", knob.label()),
-            });
-        }
-        rows.push(match self.settings.presets.get(self.mod_preset) {
-            Some((name, _)) => format!("Load Preset  {name}"),
-            None => "Load Preset  None Saved".to_string(),
-        });
-        rows.push("Save As Preset".to_string());
-        rows.push("Delete Preset".to_string());
-        rows.push("Reset To Original".to_string());
-        rows
-    }
-
-    /// The modifiers' ticker: what the row's modifier scales, and when it takes.
-    pub fn modifier_help(&self) -> String {
-        if let Some(why) = self.mods_held() {
-            return why.to_string();
-        }
-        let at = self.cursor(Screen::Modifiers);
-        let when = match self.stack.first() {
-            Some(Screen::Pause) => "from when the pause closes",
-            _ => "from the next one",
-        };
-        match at {
-            _ if (MODIFIERS_KNOBS..MODIFIERS_PRESET).contains(&at) => {
-                let knob = Knob::MENU[at - MODIFIERS_KNOBS];
-                let whose = if knob.per_seat() { "each player's" } else { "everyone's" };
-                format!("{} for {whose} ride, {when}", knob.blurb())
-            }
-            _ if self.stack.first() == Some(&Screen::Pause) => "Modifiers take when the pause closes".to_string(),
-            _ => "Modifiers take on the next ride".to_string(),
-        }
     }
 
     /// The pause's rows as drawn: the switch row names the machine it would go to, or says there is
@@ -2469,16 +2049,29 @@ impl Menu {
             Screen::Splash => self.splash(),
             Screen::Main => self.main(),
             Screen::Pause => self.pause(),
+            // Settings' tabs (P118), which were screens of their own: Audio over the pause, as the
+            // pause's Audio row opens it.
             Screen::Audio => {
                 self.pause();
-                self.open_audio();
+                self.open_settings(pages::TAB_AUDIO);
             }
-            Screen::Controls => self.stack = vec![Screen::Main, Screen::Settings, Screen::Controls],
-            Screen::Modifiers => self.stack = vec![Screen::Main, Screen::Settings, Screen::Modifiers],
-            Screen::Camera => self.stack = vec![Screen::Main, Screen::Settings, Screen::Camera],
+            Screen::Controls | Screen::Camera => {
+                self.main();
+                self.open_settings(if screen == Screen::Controls { pages::TAB_CONTROLS } else { pages::TAB_CAMERA });
+            }
+            Screen::Settings => {
+                self.main();
+                self.open_settings(self.tab(Screen::Settings));
+            }
+            Screen::Modifiers => {
+                self.main();
+                self.open_settings(pages::TAB_RIDE);
+                self.push(Screen::Modifiers);
+            }
             Screen::Keyboard => {
-                self.stack = vec![Screen::Main, Screen::Settings];
-                self.open_keyboard();
+                self.main();
+                self.open_garage();
+                self.type_for(Typing::Name);
             }
             Screen::Garage => {
                 self.main();
@@ -2522,19 +2115,15 @@ impl Menu {
             Screen::Splash => 1,
             Screen::Main => MAIN.len(),
             Screen::Tracks => self.track_count(),
-            Screen::Settings => SETTINGS_ROWS,
-            Screen::Controls => CONTROLS_ROWS,
-            Screen::Modifiers => MODIFIERS_ROWS,
+            Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods => self.page_of(screen).len().max(1),
+            Screen::Controls | Screen::Audio | Screen::Camera => 1,
             Screen::Keyboard => KEY_ROWS.len() + 1,
             Screen::Pause => PAUSE.len() + 2 * usize::from(self.opening != Opening::No),
-            Screen::Garage => roster::ROWS.len(),
             Screen::Online => ONLINE.len() + 1,
             Screen::Games => self.lobby.found.len() + 1,
             Screen::Lobby => self.lobby.items().len(),
             Screen::Join => join::ON_SCREEN,
             Screen::Split => layouts(self.riders).len(),
-            Screen::Audio => AUDIO.len(),
-            Screen::Camera => CAMERA_ROWS,
         }
     }
 
@@ -2546,13 +2135,16 @@ impl Menu {
         self.stack.pop();
     }
 
-    fn open_keyboard(&mut self) {
-        self.type_for(Typing::Name);
-    }
-
     fn type_for(&mut self, purpose: Typing) {
+        let garage = self.screen() == Some(Screen::Garage);
+        let seat = self.player.min(self.garages.len().saturating_sub(1));
         self.typing = match purpose {
+            Typing::Name if garage => match self.rider_name(seat).as_str() {
+                "None" => String::new(),
+                n => n.to_string(),
+            },
             Typing::Name => self.settings.name.clone(),
+            Typing::Number if garage => self.garages.get(seat).map(|g| g.pick.look.number.clone()).unwrap_or_default(),
             _ => String::new(),
         };
         self.typing_for = purpose;
@@ -2606,13 +2198,8 @@ impl Menu {
         if screen == Screen::Keyboard {
             return self.keyboard(p);
         }
-        if screen == Screen::Garage {
-            // Cross, Circle and Start all leave it: a pick is made by turning it, so there is
-            // nothing to confirm and nothing to cancel — but for the rows Cross acts on (P86), the
-            // name and number it types and the look it saves.
-            if self.press_garage(0, p) {
-                self.close_garage();
-            }
+        if Menu::is_page(screen) {
+            self.walk_page(screen, p);
             return Act::Stay;
         }
         if screen == Screen::Join {
@@ -2623,12 +2210,9 @@ impl Menu {
         // The lobby's and the list's rows come and go with what the network says.
         let at = self.cursor(screen).min(rows - 1);
         self.cursor[screen.index()] = at;
-                // Up and down walk the rows, wrapping, except on the ride setup where left and right walk the
-        // tracks and up and down the players whose machine Square changes.
-        let (prev, next) = match screen {
-            Screen::Tracks => (p.left, p.right),
-            _ => (p.up, p.down),
-        };
+        // Up and down walk the rows, wrapping; on Free Ride they walk the tracks, and left and right
+        // are the setup strip's machine (P118).
+        let (prev, next) = (p.up, p.down);
         if prev || next {
             let to = if prev { (at + rows - 1) % rows } else { (at + 1) % rows };
             self.cursor[screen.index()] = to;
@@ -2637,7 +2221,6 @@ impl Menu {
             }
             return Act::Stay;
         }
-        let side = p.left || p.right;
         match screen {
             // Back on the main menu is the splash again, 1P free for the next press (opentennis's
             // B533); Quit is a row, and Back on the splash asks.
@@ -2654,7 +2237,11 @@ impl Menu {
                 (true, _, MAIN_LOCAL) => self.open_join(),
                 (true, _, MAIN_ONLINE) => self.push(Screen::Online),
                 (true, _, MAIN_GARAGE) => self.open_garage(),
-                (true, _, MAIN_SETTINGS) => self.push(Screen::Settings),
+                (true, _, MAIN_MODS) => {
+                    self.push(Screen::Mods);
+                    self.cursor[Screen::Mods.index()] = 0;
+                }
+                (true, _, MAIN_SETTINGS) => self.open_settings(self.tab(Screen::Settings)),
                 (true, _, _) => return Act::Quit,
                 _ => {}
             },
@@ -2682,12 +2269,18 @@ impl Menu {
             }
             Screen::Tracks => {
                 let riders = self.riders.clamp(1, SEATS_MAX);
-                if p.up || p.down {
+                if p.l1 || p.r1 {
                     let at = self.setup_seat.min(riders - 1);
-                    self.setup_seat = if p.up { (at + riders - 1) % riders } else { (at + 1) % riders };
+                    self.setup_seat = if p.l1 { (at + riders - 1) % riders } else { (at + 1) % riders };
                     return Act::Stay;
                 }
-                if p.delete {
+                // Triangle is the strip's Wrecks; it is also Back, so it goes first.
+                if p.triangle {
+                    self.settings.wrecks = !self.settings.wrecks;
+                    self.changed = true;
+                    return Act::Stay;
+                }
+                if p.delete || p.left || p.right {
                     let seat = self.setup_seat.min(riders - 1);
                     self.settings.machines[seat] = self.settings.machines[seat].other();
                     self.changed = true;
@@ -2704,102 +2297,6 @@ impl Menu {
                 }
                 if p.back {
                     self.pop();
-                }
-            }
-            Screen::Settings => {
-                if p.back {
-                    self.pop();
-                } else if p.ok || side {
-                    match at {
-                        0 if p.ok => self.open_keyboard(),
-                        1 => {
-                            let all = Overlay::ALL;
-                            let i = all.iter().position(|o| *o == self.settings.overlay).unwrap_or(0);
-                            let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
-                            self.settings.overlay = all[i];
-                            self.changed = true;
-                        }
-                        2 => {
-                            self.settings.wrecks = !self.settings.wrecks;
-                            self.changed = true;
-                        }
-                        3 if p.ok => self.push(Screen::Controls),
-                        SETTINGS_MODIFIERS if p.ok => self.push(Screen::Modifiers),
-                        SETTINGS_CAMERA if p.ok => self.push(Screen::Camera),
-                        SETTINGS_MUSIC => {
-                            let all = self.music_options();
-                            let n = all.len();
-                            let i = all.iter().position(|(id, _)| *id == self.settings.music).unwrap_or(1);
-                            let i = if p.left { (i + n - 1) % n } else { (i + 1) % n };
-                            self.settings.music = all[i].0.clone();
-                            self.changed = true;
-                        }
-                        SETTINGS_MUSIC_VOLUME | SETTINGS_EFFECTS_VOLUME => {
-                            self.settings.nudge(if at == SETTINGS_MUSIC_VOLUME { 0 } else { 2 }, p.left, p.right);
-                            self.changed = true;
-                        }
-                        SETTINGS_GRAPHICS => {
-                            let all = Graphics::ALL;
-                            let i = all.iter().position(|g| *g == self.settings.graphics).unwrap_or(0);
-                            let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
-                            self.settings.graphics = all[i];
-                            self.changed = true;
-                        }
-                        SETTINGS_RENDER_SCALE => {
-                            let all = RenderScale::ALL;
-                            let i = all.iter().position(|r| *r == self.settings.render_scale).unwrap_or(0);
-                            let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
-                            self.settings.render_scale = all[i];
-                            self.changed = true;
-                        }
-                        SETTINGS_SPEEDOMETER => {
-                            let all = Speedometer::ALL;
-                            let i = all.iter().position(|s| *s == self.settings.speedometer).unwrap_or(0);
-                            let i = if p.left { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
-                            self.settings.speedometer = all[i];
-                            self.changed = true;
-                        }
-                        SETTINGS_VSYNC => {
-                            self.settings.vsync = !self.settings.vsync;
-                            self.changed = true;
-                        }
-                        SETTINGS_FRAME_LIMIT => {
-                            self.settings.frame_limit = self.settings.frame_limit.step(p.left);
-                            self.changed = true;
-                        }
-                        SETTINGS_BAYS => {
-                            self.settings.bays = !self.settings.bays;
-                            self.changed = true;
-                        }
-                        SETTINGS_MODS => {
-                            self.settings.mods = !self.settings.mods;
-                            self.changed = true;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Screen::Controls => {
-                if p.back {
-                    self.pop();
-                } else if (p.ok || side) && at == 0 {
-                    let i = Gas::ALL.iter().position(|g| *g == self.controls.throttle).unwrap_or(0);
-                    let n = Gas::ALL.len();
-                    let i = if p.left { (i + n - 1) % n } else { (i + 1) % n };
-                    self.controls.throttle = Gas::ALL[i];
-                    self.changed = true;
-                } else if (p.ok || side) && at <= LAYOUT_ROWS {
-                    // A seat's row holds its layout, its controller preset under the original's
-                    // (P79) and its biplane's (P50), stepped through as one, the biplane's the
-                    // fastest: the new layout, then the original's on each of its four presets in
-                    // turn. The screen has no room for a second row a seat.
-                    let i = at - 1;
-                    let all = seat_choices();
-                    let preset = if self.controls.layouts[i] == Layout::Original { self.controls.presets[i] } else { 0 };
-                    let now = all.iter().position(|b| *b == (self.controls.layouts[i], preset, self.controls.planes[i])).unwrap_or(0);
-                    let next = if p.left { (now + all.len() - 1) % all.len() } else { (now + 1) % all.len() };
-                    (self.controls.layouts[i], self.controls.presets[i], self.controls.planes[i]) = all[next];
-                    self.changed = true;
                 }
             }
             Screen::Pause => {
@@ -2837,8 +2334,8 @@ impl Menu {
                                 return Act::Switch(self.pauser, to);
                             }
                         }
-                        PAUSE_AUDIO => self.open_audio(),
-                        PAUSE_SETTINGS => self.push(Screen::Settings),
+                        PAUSE_AUDIO => self.open_settings(pages::TAB_AUDIO),
+                        PAUSE_SETTINGS => self.open_settings(self.tab(Screen::Settings)),
                         PAUSE_MARKERS => return Act::ClearMarkers(self.pauser),
                         PAUSE_MAIN => {
                             self.main();
@@ -2853,13 +2350,12 @@ impl Menu {
                     }
                 }
             }
-            Screen::Modifiers => self.walk_modifiers(p, at),
-            Screen::Audio => self.audio(p, at),
-            Screen::Camera => self.walk_camera(p, at),
+            // Settings' tabs now; never on the stack.
+            Screen::Controls | Screen::Audio | Screen::Camera => self.pop(),
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
-            Screen::Keyboard | Screen::Garage | Screen::Splash | Screen::Join => unreachable!(),
+            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods => unreachable!(),
         }
         Act::Stay
     }
@@ -2897,14 +2393,17 @@ impl Menu {
                     let upper = match self.typing_for {
                         Typing::Name | Typing::Preset => word_start,
                         Typing::Code => true,
-                        Typing::Chat => false,
+                        Typing::Chat | Typing::Number => false,
                     };
-                    self.typing.push(if upper { c.to_ascii_uppercase() } else { c });
+                    // A number takes the digits alone.
+                    if self.typing_for != Typing::Number || c.is_ascii_digit() {
+                        self.typing.push(if upper { c.to_ascii_uppercase() } else { c });
+                    }
                 }
             } else {
                 match col {
                     0 => {
-                        if !self.typing.is_empty() && self.typing.chars().count() < max {
+                        if !self.typing.is_empty() && self.typing.chars().count() < max && self.typing_for != Typing::Number {
                             self.typing.push(' ');
                         }
                     }
@@ -2945,10 +2444,33 @@ impl Menu {
                     self.save_preset(&name);
                 }
             }
+            Typing::Number => {
+                let number = roster::clean_number(&self.typing);
+                self.pop();
+                let seat = self.player.min(self.garages.len().saturating_sub(1));
+                if let Some(g) = self.garages.get_mut(seat) {
+                    g.pick.look.number = number;
+                }
+            }
         }
     }
 
     fn finish_name(&mut self) {
+        // The Garage's Name row (P118): the seat's look, and 1P's is the settings' name too.
+        if self.stack.len() > 1 && self.stack[self.stack.len() - 2] == Screen::Garage {
+            let name = roster::clean_rider_name(&self.typing);
+            self.pop();
+            let seat = self.player.min(self.garages.len().saturating_sub(1));
+            if let Some(g) = self.garages.get_mut(seat) {
+                g.pick.look.name = name.clone();
+            }
+            let name = clean_name(&name);
+            if seat == 0 && !name.is_empty() && name != self.settings.name {
+                self.settings.name = name;
+                self.changed = true;
+            }
+            return;
+        }
         let name = self.typing.trim().to_string();
         if !name.is_empty() && name != self.settings.name {
             self.settings.name = name;
@@ -2960,6 +2482,11 @@ impl Menu {
     /// The keyboard's text as it stands.
     pub fn typing(&self) -> &str {
         &self.typing
+    }
+
+    /// The keyboard's key under the cursor: a row of [`KEY_ROWS`], or the commands' row under them.
+    pub fn key_at(&self) -> (usize, usize) {
+        self.key
     }
 
     // ---- online (N3) ----
@@ -3183,6 +2710,8 @@ enum Typing {
     Chat,
     /// A modifier preset's name (P55).
     Preset,
+    /// A rider's number, digits only (P118).
+    Number,
 }
 
 impl Typing {
@@ -3193,6 +2722,7 @@ impl Typing {
             Typing::Code => 8,
             Typing::Chat => 40,
             Typing::Preset => NAME_MAX,
+            Typing::Number => roster::NUMBER_MAX,
         }
     }
 
@@ -3202,6 +2732,7 @@ impl Typing {
             Typing::Code => "Room Code",
             Typing::Chat => "Chat",
             Typing::Preset => "Preset Name",
+            Typing::Number => "Number",
         }
     }
 }
@@ -3511,52 +3042,20 @@ impl Font {
     }
 }
 
-/// The fonts the menus use, by `ui\mxfrontend.sty`'s styles.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Face {
-    /// MenuItem: `yearlingdashbold_20`.
-    Item,
-    /// MenuItem selected: `yearlingdashboldoblique_22`.
-    Chosen,
-    /// Titles: `yearlingdashboldoblique_32`.
-    Title,
-    /// The ticker and small print: `yearlingdashbold_18`.
-    Small,
-}
-
-const FACES: [(Face, &str); 4] = [
-    (Face::Item, "yearlingdashbold_20"),
-    (Face::Chosen, "yearlingdashboldoblique_22"),
-    (Face::Title, "yearlingdashboldoblique_32"),
-    (Face::Small, "yearlingdashbold_18"),
-];
-
-/// The textures, by their name under `ui\tex\`.
-const TEXTURES: [&str; 16] = [
-    "background",
-    "frontend_background_radial",
-    "mainmenu_background",
-    "mainmenu_highlight",
-    "mainmenu_highlight_off_shadow",
-    "mainmenu_logo",
-    "mainmenu_logo_shadow",
-    "arrow_left_off",
-    "arrow_right_off",
-    "arrow_up_off",
-    "arrow_down_off",
-    "nav_bkgcorner",
-    "nav_x_off",
-    "nav_circle_off",
-    "nav_square_off",
-    "nav_start_off",
-];
+/// The disc's textures the menus draw, by their name under `ui\\tex\\`, sorted.
+const TEXTURES: [&str; 4] = ["background", "frontend_background_radial", "mainmenu_logo", "mainmenu_logo_shadow"];
 
 // ---- the track mods' place in the pick (MD2) -------------------------------------------------------
 
 impl Menu {
     /// The tracks the pick lists: the disc's [`TRACKS`], then the mods'.
     pub fn track_count(&self) -> usize {
-        TRACKS.len() + self.mod_tracks.len()
+        TRACKS.len() + self.shown_mods().count()
+    }
+
+    /// The mod tracks the pick lists: the mods' less the packs switched off (P118).
+    fn shown_mods(&self) -> impl Iterator<Item = &(String, String)> {
+        self.mod_tracks.iter().filter(|(id, _)| !self.settings.mods_off.iter().any(|p| p == pack_of(id)))
     }
 
     /// The pick's track `at`, `(id, name)`: a disc track's archive and town, or a mod's id and name.
@@ -3564,8 +3063,8 @@ impl Menu {
         match TRACKS.get(at) {
             Some(&(id, name)) => (id, name),
             None => self
-                .mod_tracks
-                .get(at - TRACKS.len())
+                .shown_mods()
+                .nth(at - TRACKS.len())
                 .map_or(TRACKS[0], |(id, name)| (id.as_str(), name.as_str())),
         }
     }
@@ -3577,6 +3076,9 @@ impl Menu {
 
     /// The mods the pick lists after the disc's (MD2), the pick's cursor kept on its track.
     pub fn set_mod_tracks(&mut self, tracks: Vec<(String, String)>) {
+        if !tracks.is_empty() {
+            self.mods_seen = tracks.clone();
+        }
         self.mod_tracks = tracks;
         self.cursor[Screen::Tracks.index()] = self.track_index();
     }
@@ -3587,84 +3089,17 @@ const STILLS: usize = 5;
 /// Frames each still shows for on the track pick.
 const STILL_FRAMES: u32 = 150;
 
-/// MenuItem's colour, and its alpha unselected; `mxfrontend.sty`.
-const ITEM: [u8; 4] = [204, 204, 204, 210];
-const CHOSEN: [u8; 4] = [255, 255, 255, 255];
-/// The orange the grey background gradient is drawn in. The original tints it from a colour
-/// animator this does not read; this is the main menu's colour off `plan/HUMAN.md`'s screenshot.
-const ORANGE: [u8; 4] = [210, 112, 52, 255];
-/// The splash's still, dimmed to a backdrop the logo and the prompt read over.
-const SPLASH_DIM: [u8; 4] = [110, 110, 110, 255];
-/// Who 1P is, on the splash once someone has pressed: the main menu's orange, lighter, for text.
-const ORANGE_TEXT: [u8; 4] = [255, 170, 90, 255];
-/// The bar of the controller legend and the ticker under it.
-const BLACK: [u8; 4] = [0, 0, 0, 255];
-
-/// Everything the menus draw with, off the disc.
+/// Everything the menus draw with: the disc's backdrop, logo and stills; the type and the shapes
+/// are our own ([`ink`]).
 pub struct Art {
     textures: HashMap<&'static str, Texture>,
-    fonts: HashMap<Face, Font>,
     /// Each free-ride track's stills, in [`TRACKS`] order.
     stills: Vec<Vec<Texture>>,
-    /// The big stretches drawn last frame, by what they were drawn from and over (P47).
-    blits: std::sync::Mutex<Vec<Blitted>>,
 }
 
-/// One big [`Painter::blit_as`] as it came out: the texture, its part, the box, the tint and the
-/// way of putting texels down, the rows it covered as they were before, and the same rows after.
-/// The background is the same full-frame stretch over the same black every frame, so the next
-/// frame that asks for it over the same pixels gets the pixels it got, without a texel read.
-struct Blitted {
-    key: (usize, [u32; 4], [usize; 4], [u8; 4], usize),
-    before: Vec<u8>,
-    after: Vec<u8>,
-}
-
-/// Where a box goes, in the 640x448 layout.
-#[derive(Clone, Copy, Debug)]
-struct Rect {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-}
-
-fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
-    Rect { x, y, w, h }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Align {
-    Left,
-    Centre,
-    /// Ending at x: the Controls screen's keyboard column (P54).
-    Right,
-}
-
-/// The layout's screen. A window of another shape gets the layout at one scale both ways (the
-/// smaller of its two), and the room left over goes to whichever side each part is anchored away
-/// from, so nothing stretches.
-const LAYOUT: (f32, f32) = (640.0, 448.0);
-
-/// Which corner of the frame a part's layout numbers count from.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Anchor {
-    TopLeft,
-    BottomLeft,
-    BottomRight,
-    Centre,
-}
-
-/// How far a pill reaches past each end of its label, in layout pixels.
-pub const PILL_PAD: f32 = 12.0;
-/// The list's rows are centred on this, `mainmenu.lyt`'s items.
-const LIST_X: f32 = 185.0;
-/// The Controls screen's keyboard column (P54): what a key does to the left of this, the key to its
-/// right, a row every this many layout pixels.
-const KEYS_X: f32 = 548.0;
-const KEYS_ROW: f32 = 20.0;
-/// `mainmenu.lyt`'s logo, 512x64.
-const LOGO: Rect = Rect { x: 20.0, y: 25.0, w: 512.0, h: 64.0 };
+/// How far a pill reaches past each end of its label, in the stage's ems (the concept's
+/// `.95em` of a 1.7em item).
+pub const PILL_PAD: f32 = 1.615;
 
 /// A box the menu drew, in frame pixels: left, top, width, height.
 pub type Bounds = [f32; 4];
@@ -3691,13 +3126,6 @@ impl Art {
         for name in TEXTURES {
             textures.insert(name, tex(name)?);
         }
-        let mut fonts = HashMap::new();
-        for (face, name) in FACES {
-            let cel = ui.read_suffix(&format!("font\\eng\\{name}.cel"))?;
-            let atlas = Texture::parse(&ui.read_suffix(&format!("font\\eng\\{name}.pst"))?)
-                .map_err(|e| format!("{name}.pst: {e}"))?;
-            fonts.insert(face, Font::parse(&cel, atlas).map_err(|e| format!("{name}.cel: {e}"))?);
-        }
         let previews = disc.res("UI\\trackpreview.res")?;
         let mut stills = Vec::new();
         for (track, _) in TRACKS {
@@ -3710,1076 +3138,44 @@ impl Art {
             }
             stills.push(these);
         }
-        Ok(Art { textures, fonts, stills, blits: Default::default() })
+        Ok(Art { textures, stills })
     }
 
     /// Draw the menu's screen into `frame`. In a ride the frame already holds the ride, which the
     /// pause darkens rather than covers; otherwise the menu draws its own background.
     pub fn draw(&self, menu: &Menu, frame: &mut Frame) {
-        self.paint(menu, frame);
+        self.parts(menu, frame);
     }
 
     /// [`Art::draw`], saying where the logo, the pills and the labels went.
     pub fn parts(&self, menu: &Menu, frame: &mut Frame) -> Vec<Part> {
-        self.paint(menu, frame)
+        let mut out = Vec::new();
+        let parts = self.layout(menu, (frame.width, frame.height), 0, &mut out);
+        ink::raster(frame, &out, &self.images());
+        parts
     }
 
-    /// Every picture [`Art::sprites`] counts into, in its order: the textures by name, the fonts'
-    /// atlases, the stills. The GPU takes them once ([`game_render::gpu::Renderer::set_images`]).
+    /// Every picture [`Art::sprites`] counts into, in its order: the textures in [`TEXTURES`]'
+    /// order, the type's atlas, the stills. The GPU takes them once
+    /// ([`game_render::gpu::Renderer::set_images`]).
     pub fn images(&self) -> Vec<&Texture> {
-        let mut names: Vec<&&str> = self.textures.keys().collect();
-        names.sort();
-        let mut all: Vec<&Texture> = names.into_iter().map(|n| &self.textures[*n]).collect();
-        all.extend([Face::Item, Face::Chosen, Face::Title, Face::Small].iter().filter_map(|f| self.fonts.get(f)).map(|f| &f.atlas));
+        let mut all: Vec<&Texture> = TEXTURES.iter().map(|n| &self.textures[n]).collect();
+        all.push(&ink::ink().atlas);
         all.extend(self.stills.iter().flatten());
         all
     }
 
     /// [`Art::draw`] as the GPU draws it (V30): the menu's screen over a `size` frame as sprites into
-    /// `out`, whose pictures are [`Art::images`] counted from `base`. The same layout and the same
-    /// pictures; nothing is drawn on the CPU, so a 4K menu costs what a small one does.
+    /// `out`, whose pictures are [`Art::images`] counted from `base`. The same sprites the CPU
+    /// rasters, so the two agree and a 4K menu is as sharp as its pixels.
     pub fn sprites(&self, menu: &Menu, size: (usize, usize), base: usize, out: &mut Vec<Sprite>) {
-        let mut hollow = Frame { width: size.0, height: size.1, color: Vec::new(), depth: Vec::new() };
-        let images = self.images().into_iter().map(|t| t as *const Texture).collect();
-        self.paint_with(menu, &mut hollow, Some(SpriteInk { out, base, images }));
+        self.layout(menu, size, base, out);
     }
 
-    fn paint(&self, menu: &Menu, frame: &mut Frame) -> Vec<Part> {
-        self.paint_with(menu, frame, None)
-    }
-
-    fn paint_with<'a>(&'a self, menu: &Menu, frame: &'a mut Frame, ink: Option<SpriteInk<'a>>) -> Vec<Part> {
-        let Some(screen) = menu.screen() else {
-            return Vec::new();
-        };
-        let mut p = Painter::new(self, frame);
-        p.sprites = ink;
-        match screen {
-            Screen::Pause | Screen::Audio => p.fill(p.whole(), [0, 0, 0, 140]),
-            Screen::Tracks | Screen::Splash => {}
-            _ => p.background(),
-        }
-        match screen {
-            Screen::Main => {
-                p.column();
-                p.list(&MAIN.map(|s| s.to_string()), menu.cursor(screen));
-                p.logo();
-                p.legend(&[("nav_x_off", "Select")]);
-            }
-            Screen::Pause => {
-                p.column();
-                p.list(&menu.pause_rows(), menu.cursor(screen));
-                p.logo();
-                // With more than one rider the pause is one player's, and says whose.
-                // A ride with a modifier off the original's says so (P55).
-                let modified = if menu.modified { "  Modified" } else { "" };
-                match menu.riders > 1 {
-                    true => p.title(&format!("{}P {}{modified}", menu.pauser + 1, screen.title())),
-                    false => p.title(&format!("{}{modified}", screen.title())),
-                }
-                p.legend(&[("nav_circle_off", "Resume"), ("nav_x_off", "Select")]);
-            }
-            Screen::Settings | Screen::Controls => {
-                let rows: Vec<String> = match screen {
-                    Screen::Settings => vec![
-                        format!("Name  {}", menu.settings.name),
-                        format!("Overlay  {}", menu.settings.overlay.label()),
-                        format!("Wrecks  {}", if menu.settings.wrecks { "On" } else { "Off" }),
-                        "Controls".to_string(),
-                        format!("Music  {}", menu.music_label()),
-                        format!("Music volume  {}", menu.settings.music_volume),
-                        format!("Effects volume  {}", menu.settings.effects_volume),
-                        format!("Graphics  {}", menu.settings.graphics.label()),
-                        format!("Render scale  {}", menu.settings.render_scale.label()),
-                        format!("Speedometer  {}", menu.settings.speedometer.label()),
-                        format!("VSync  {}", if menu.settings.vsync { "On" } else { "Off" }),
-                        format!("Frame limit  {}", menu.settings.frame_limit.label()),
-                        format!("Machines at bays  {}", if menu.settings.bays { "On" } else { "Off" }),
-                        format!("Mods  {}", if menu.settings.mods { "On" } else { "Off" }),
-                        format!("Camera  {}", menu.camera_label()),
-                        format!(
-                            "Game Modifiers  {}",
-                            if menu.settings.modifiers.is_original() { "Original" } else { "Modified" }
-                        ),
-                    ],
-                    _ => std::iter::once(format!("Original throttle  {}", menu.controls.throttle.label()))
-                        .chain(
-                            menu.controls.layouts[..LAYOUT_ROWS]
-                                .iter()
-                                .zip(&menu.controls.planes)
-                                .enumerate()
-                                .map(|(i, (l, plane))| {
-                                    format!("{}P controls  {}  {}", i + 1, controls_label(*l, menu.controls.presets[i]), plane_label(*plane))
-                                }),
-                        )
-                        .collect(),
-                };
-                p.column();
-                let at = menu.cursor(screen);
-                let bar = p.scrolled(&rows, at);
-                // A row with choices wears the arrows either side of its pill.
-                let choice = match screen {
-                    Screen::Settings => at == 1 || at == 2 || (at >= SETTINGS_MUSIC && at != SETTINGS_MODIFIERS && at != SETTINGS_CAMERA),
-                    _ => true,
-                };
-                if choice {
-                    p.tex("arrow_left_off", rect(bar.x - 36.0, bar.y, 32.0, 32.0), CHOSEN);
-                    p.tex("arrow_right_off", rect(bar.x + bar.w + 4.0, bar.y, 32.0, 32.0), CHOSEN);
-                }
-                if screen == Screen::Controls {
-                    let pad = match &menu.controls.pad {
-                        Some(dev) => format!("Pad  {dev}"),
-                        None => "Pad  the first one found".to_string(),
-                    };
-                    p.text(Face::Small, &pad, LIST_X, item_y(CONTROLS_ROWS + 1), Align::Centre, ITEM);
-                    let pressure = match menu.controls.pressure.as_str() {
-                        "" => "Pressures  none".to_string(),
-                        map => format!("Pressures  {map}"),
-                    };
-                    p.text(Face::Small, &pressure, LIST_X, item_y(CONTROLS_ROWS + 2), Align::Centre, ITEM);
-                    p.text(Face::Small, "Pad and pressures: controls.txt", LIST_X, item_y(CONTROLS_ROWS + 3), Align::Centre, ITEM);
-                    p.keyboard_layout(menu, at);
-                }
-                p.logo();
-                p.title(screen.title());
-                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Change")]);
-            }
-            Screen::Modifiers => {
-                p.column();
-                let at = menu.cursor(screen);
-                let bar = p.scrolled(&menu.modifier_rows(), at);
-                if at < MODIFIERS_PRESET || (at == MODIFIERS_PRESET && menu.settings.presets.len() > 1) {
-                    p.tex("arrow_left_off", rect(bar.x - 36.0, bar.y, 32.0, 32.0), CHOSEN);
-                    p.tex("arrow_right_off", rect(bar.x + bar.w + 4.0, bar.y, 32.0, 32.0), CHOSEN);
-                }
-                p.logo();
-                p.title(screen.title());
-                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
-            }
-            Screen::Camera => {
-                p.column();
-                let at = menu.cursor(screen);
-                let bar = p.scrolled(&menu.camera_rows(), at);
-                if at < CAMERA_DEFAULT {
-                    p.tex("arrow_left_off", rect(bar.x - 36.0, bar.y, 32.0, 32.0), CHOSEN);
-                    p.tex("arrow_right_off", rect(bar.x + bar.w + 4.0, bar.y, 32.0, 32.0), CHOSEN);
-                }
-                p.logo();
-                p.title(screen.title());
-                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
-            }
-            Screen::Audio => {
-                p.column();
-                let at = menu.cursor(screen);
-                let bar = p.list(&menu.audio_rows(), at);
-                if at != AUDIO_SKIP {
-                    p.tex("arrow_left_off", rect(bar.x - 36.0, bar.y, 32.0, 32.0), CHOSEN);
-                    p.tex("arrow_right_off", rect(bar.x + bar.w + 4.0, bar.y, 32.0, 32.0), CHOSEN);
-                }
-                p.logo();
-                match menu.riders > 1 {
-                    true => p.title(&format!("{}P {}", menu.pauser + 1, screen.title())),
-                    false => p.title(screen.title()),
-                }
-                let ok = if at == AUDIO_SONG || at == AUDIO_SKIP { "Play" } else { "Change" };
-                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", ok)]);
-            }
-            Screen::Tracks => p.tracks(menu),
-            Screen::Keyboard => p.keyboard(menu),
-            Screen::Garage => p.garage(menu),
-            Screen::Online => {
-                let network = if menu.lobby.lan { "LAN only" } else { "Internet and LAN" };
-                let rows: Vec<String> =
-                    ONLINE.iter().map(|s| s.to_string()).chain([format!("Network  {network}")]).collect();
-                p.column();
-                p.list(&rows, menu.cursor(screen));
-                p.logo();
-                p.title(screen.title());
-                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
-            }
-            Screen::Join => p.join(menu),
-            Screen::Split => {
-                p.column();
-                let rows: Vec<String> = layouts(menu.riders).into_iter().map(|l| layout_label(l).to_string()).collect();
-                let at = menu.cursor(screen).min(rows.len() - 1);
-                p.list(&rows, at);
-                p.views(layouts(menu.riders)[at], menu.riders);
-                p.logo();
-                p.title(screen.title());
-                p.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Select")]);
-            }
-            Screen::Games => p.games(menu),
-            Screen::Lobby => p.lobby(menu),
-            Screen::Splash => p.splash(menu),
-        }
-        // The ticker: a note when there is one, the network's word online, the rider's name otherwise
-        // (not on the splash, where nobody is riding as anyone yet).
-        let online = matches!(screen, Screen::Online | Screen::Games | Screen::Lobby) || screen == Screen::Pause && menu.opening == Opening::Open;
-        let ticker = match &menu.note {
-            Some(n) => n.clone(),
-            None if screen == Screen::Splash => return p.parts,
-            None if screen == Screen::Audio => menu.audio_ticker(),
-            None if online && !menu.lobby.status.is_empty() => menu.lobby.status.clone(),
-            None if screen == Screen::Modifiers => menu.modifier_help(),
-            None if screen == Screen::Camera => "Cross puts a slider back to the original's".to_string(),
-            None => format!("Riding as {}", menu.settings.name),
-        };
-        p.anchor(Anchor::BottomLeft);
-        p.text(Face::Small, &ticker, 50.0, 415.0, Align::Left, ITEM);
-        p.parts
-    }
-}
-
-/// The y of a list's row `i`: `mainmenu.lyt`'s items, thirty apart from 100.
-fn item_y(i: usize) -> f32 {
-    100.0 + 30.0 * i as f32
-}
-
-/// The y of the garage's row `i`: two lines each, so closer together than a list's.
-fn garage_y(i: usize) -> f32 {
-    88.0 + 38.0 * i as f32
-}
-
-/// How many of the garage's rows show at once, and the first of them with the cursor on `row`: the
-/// window follows the cursor, keeping it in the middle where it can.
-const GARAGE_SHOWN: usize = 7;
-
-fn garage_top(row: usize) -> usize {
-    row.saturating_sub(GARAGE_SHOWN / 2 - 1).min(roster::ROWS.len().saturating_sub(GARAGE_SHOWN))
-}
-
-fn garage_label(row: roster::Row) -> &'static str {
-    match row {
-        roster::Row::Class => "Class",
-        roster::Row::Model => "Bike",
-        roster::Row::Livery => "Paint",
-        roster::Row::Tier => "Tier",
-        roster::Row::Tuning => "Tuning",
-        roster::Row::Rider => "Rider",
-        roster::Row::Colours => "Colours",
-        // The original's custom rider screen's own words (P86).
-        roster::Row::Outfit => "Jersey Pants",
-        roster::Row::Name => "Name",
-        roster::Row::Number => "Number",
-        roster::Row::Piece(roster::Piece::Helmet) => "Helmet",
-        roster::Row::Piece(roster::Piece::Goggles) => "Goggle",
-        roster::Row::Piece(roster::Piece::Gloves) => "Glove",
-        roster::Row::Piece(roster::Piece::Boots) => "Boot",
-        roster::Row::Preset => "Preset",
-    }
-}
-
-struct Painter<'a> {
-    art: &'a Art,
-    frame: &'a mut Frame,
-    /// Frame pixels per layout pixel, the same both ways.
-    s: f32,
-    /// The whole frame in layout pixels: 640x448, or more one way.
-    view: (f32, f32),
-    /// Where the layout's origin sits for the part being drawn, by its [`Anchor`].
-    at: (f32, f32),
-    parts: Vec<Part>,
-    /// Sprites to make instead of pixels (V30); the frame is then only its size.
-    sprites: Option<SpriteInk<'a>>,
-}
-
-/// Where a [`Painter`] puts its sprites, and the pictures they count into ([`Art::images`]).
-struct SpriteInk<'a> {
-    out: &'a mut Vec<Sprite>,
-    base: usize,
-    images: Vec<*const Texture>,
-}
-
-impl<'a> Painter<'a> {
-    fn new(art: &'a Art, frame: &'a mut Frame) -> Painter<'a> {
-        let (w, h) = (frame.width.max(1) as f32, frame.height.max(1) as f32);
-        let s = (w / LAYOUT.0).min(h / LAYOUT.1);
-        Painter { art, frame, s, view: (w / s, h / s), at: (0.0, 0.0), parts: Vec::new(), sprites: None }
-    }
-
-    /// Count the layout's numbers from `a` from here on.
-    fn anchor(&mut self, a: Anchor) {
-        let (dx, dy) = (self.view.0 - LAYOUT.0, self.view.1 - LAYOUT.1);
-        self.at = match a {
-            Anchor::TopLeft => (0.0, 0.0),
-            Anchor::BottomLeft => (0.0, dy),
-            Anchor::BottomRight => (dx, dy),
-            Anchor::Centre => (dx / 2.0, dy / 2.0),
-        };
-    }
-
-    /// The whole frame, in the current anchor's numbers.
-    fn whole(&self) -> Rect {
-        rect(-self.at.0, -self.at.1, self.view.0, self.view.1)
-    }
-
-    /// A layout box in frame pixels.
-    fn px(&self, r: Rect) -> Rect {
-        let s = self.s;
-        rect((r.x + self.at.0) * s, (r.y + self.at.1) * s, r.w * s, r.h * s)
-    }
-
-    fn bounds(&self, r: Rect) -> Bounds {
-        let p = self.px(r);
-        [p.x, p.y, p.w, p.h]
-    }
-
-    /// Blend `colour` over a box, by its alpha.
-    fn fill(&mut self, r: Rect, colour: [u8; 4]) {
-        let p = self.px(r);
-        let (x0, x1) = span(p.x, p.x + p.w, self.frame.width);
-        let (y0, y1) = span(p.y, p.y + p.h, self.frame.height);
-        if let Some(ink) = &mut self.sprites {
-            if x0 < x1 && y0 < y1 {
-                let [x0, x1, y0, y1] = [x0, x1, y0, y1].map(|n| n as f32);
-                ink.out.push(Sprite {
-                    corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-                    uv: [[0.0; 2]; 4],
-                    local: [[0.0; 2]; 4],
-                    clamp: [0.0; 4],
-                    image: None,
-                    tint: colour,
-                    shape: Shape::Plain,
-                });
-            }
-            return;
-        }
-        // What `blend` makes of each byte, looked up a row at a time rather than worked out a pixel at
-        // a time (V30): a dimmed or black 4K screen was a fifth of a second of this.
-        let a = colour[3] as u32;
-        let lut: [[u8; 256]; 3] =
-            std::array::from_fn(|i| std::array::from_fn(|d| ((colour[i] as u32 * a + d as u32 * (255 - a)) / 255) as u8));
-        let width = self.frame.width;
-        for y in y0..y1 {
-            let row = &mut self.frame.color[(y * width + x0) * 3..(y * width + x1) * 3];
-            if a == 255 && !row.is_empty() {
-                // Opaque: the colour, doubled along the row.
-                row[..3].copy_from_slice(&colour[..3]);
-                let mut done = 3;
-                while done < row.len() {
-                    let n = done.min(row.len() - done);
-                    row.copy_within(..n, done);
-                    done += n;
-                }
-                continue;
-            }
-            for px in row.chunks_exact_mut(3) {
-                px.copy_from_slice(&[lut[0][px[0] as usize], lut[1][px[1] as usize], lut[2][px[2] as usize]]);
-            }
-        }
-    }
-
-    /// `src` (texels, left top right bottom) of a texture, stretched over `r` and multiplied by
-    /// `tint`, filtered bilinearly.
-    fn blit(&mut self, t: &Texture, src: [f32; 4], r: Rect, tint: [u8; 4]) {
-        self.blit_as(t, src, r, tint, blend_into);
-    }
-
-    /// [`Painter::blit`] with its own way of putting a texel down.
-    fn blit_as(
-        &mut self,
-        t: &Texture,
-        src: [f32; 4],
-        r: Rect,
-        tint: [u8; 4],
-        put: fn(&mut [u8], [u8; 4]),
-    ) {
-        let p = self.px(r);
-        let (fx0, fx1) = (p.x, p.x + p.w);
-        let (fy0, fy1) = (p.y, p.y + p.h);
-        let (x0, x1) = span(fx0, fx1, self.frame.width);
-        let (y0, y1) = span(fy0, fy1, self.frame.height);
-        if let Some(ink) = &mut self.sprites {
-            // The pixels the CPU would fill, read where it would read them: each corner's texel is
-            // the stretch at that pixel edge, so a pixel's centre reads what the CPU's does.
-            let Some(image) = ink.images.iter().position(|&i| std::ptr::eq(i, t)) else { return };
-            if x0 >= x1 || y0 >= y1 {
-                return;
-            }
-            let u = |x: usize| src[0] + (x as f32 - fx0) / (fx1 - fx0) * (src[2] - src[0]);
-            let v = |y: usize| src[1] + (y as f32 - fy0) / (fy1 - fy0) * (src[3] - src[1]);
-            let mut sprite = Sprite::image(
-                ink.base + image,
-                t,
-                [u(x0), v(y0), u(x1), v(y1)],
-                [x0, y0, x1, y1].map(|n| n as f32),
-                tint,
-            );
-            sprite.clamp = clamp_of(t, src);
-            if put as usize == add as fn(&mut [u8], [u8; 4]) as usize {
-                sprite.shape = Shape::Glow;
-            }
-            ink.out.push(sprite);
-            return;
-        }
-        let width = self.frame.width;
-        // Rows `from..` of the frame, starting at `rows`' first byte.
-        let paint = |rows: &mut [u8], from: usize| {
-            for (dy, row) in rows.chunks_mut(width * 3).enumerate() {
-                let y = from + dy;
-                let v = src[1] + (y as f32 + 0.5 - fy0) / (fy1 - fy0) * (src[3] - src[1]);
-                for x in x0..x1 {
-                    let u = src[0] + (x as f32 + 0.5 - fx0) / (fx1 - fx0) * (src[2] - src[0]);
-                    let c = bilinear(t, u, v, src);
-                    let mul = |i: usize| (c[i] as u32 * tint[i] as u32 / 255) as u8;
-                    put(&mut row[x * 3..x * 3 + 3], [mul(0), mul(1), mul(2), mul(3)]);
-                }
-            }
-        };
-        if y0 >= y1 {
-            return;
-        }
-        let rows = &mut self.frame.color[y0 * width * 3..y1 * width * 3];
-        // A big one asked for again over the same pixels is the pixels it made last time.
-        let big = x1.saturating_sub(x0) * (y1 - y0) >= 1 << 15;
-        let key = (
-            t as *const Texture as usize,
-            src.map(f32::to_bits),
-            [x0, x1, y0, y1],
-            tint,
-            put as usize,
-        );
-        let mut blits = self.art.blits.lock().unwrap_or_else(|e| e.into_inner());
-        if big {
-            if let Some(at) = blits.iter().position(|b| b.key == key && b.before[..] == rows[..]) {
-                rows.copy_from_slice(&blits[at].after);
-                // Last out (V30): the splash's breathing prompt makes two new ones a frame, which
-                // otherwise pushed the background out every other frame.
-                let done = blits.remove(at);
-                blits.push(done);
-                return;
-            }
-        }
-        let before = if big { rows.to_vec() } else { Vec::new() };
-        // The background is a full-screen bilinear stretch, every frame: on one core it was most of
-        // a menu frame at the window's own size (P47). Each band of rows is its own, so the bands
-        // can be filled at once and the pixels are the same.
-        // A thread is worth starting for about a 128x256 box of texels, not for a glyph.
-        let threads = game_render::raster::threads().min(x1.saturating_sub(x0) * (y1 - y0) / (1 << 15));
-        if threads <= 1 {
-            paint(rows, y0);
-        } else {
-            let band = (y1 - y0).div_ceil(threads).max(8);
-            std::thread::scope(|scope| {
-                for (b, rows) in rows.chunks_mut(band * width * 3).enumerate() {
-                    let paint = &paint;
-                    scope.spawn(move || paint(rows, y0 + b * band));
-                }
-            });
-        }
-        if big {
-            // A frame's worth of them at most: a screen draws a handful, and a new one, or the same
-            // over other pixels, takes the place of the one that was there the longest.
-            blits.retain(|b| b.key != key);
-            if blits.len() >= 8 {
-                blits.remove(0);
-            }
-            blits.push(Blitted { key, before, after: rows.to_vec() });
-        }
-    }
-
-    fn tex(&mut self, name: &str, r: Rect, tint: [u8; 4]) {
-        let Some(t) = self.art.textures.get(name) else {
-            return;
-        };
-        let all = [0.0, 0.0, t.width as f32, t.height as f32];
-        self.blit(t, all, r, tint);
-    }
-
-    /// A rounded bar over `r`: the texture's two ends (half its height each) kept their shape and
-    /// only its middle stretched, so a short pill still has round ends.
-    fn bar(&mut self, name: &str, r: Rect, tint: [u8; 4]) {
-        let Some(t) = self.art.textures.get(name) else {
-            return;
-        };
-        let (tw, th) = (t.width as f32, t.height as f32);
-        let end_t = (th / 2.0).min(tw / 2.0);
-        let end = (r.h / 2.0).min(r.w / 2.0);
-        self.blit(t, [0.0, 0.0, end_t, th], rect(r.x, r.y, end, r.h), tint);
-        self.blit(t, [end_t, 0.0, tw - end_t, th], rect(r.x + end, r.y, r.w - 2.0 * end, r.h), tint);
-        self.blit(t, [tw - end_t, 0.0, tw, th], rect(r.x + r.w - end, r.y, end, r.h), tint);
-    }
-
-    /// `text` with its left edge, centre or right edge at `x` and its top at `y`; returns the box
-    /// it took, as wide as the font measures it and as tall as a capital.
-    fn text(&mut self, face: Face, text: &str, x: f32, y: f32, align: Align, colour: [u8; 4]) -> Rect {
-        let Some(font) = self.art.fonts.get(&face) else {
-            return rect(x, y, 0.0, 0.0);
-        };
-        let w = font.measure(text);
-        let left = match align {
-            Align::Left => x,
-            Align::Centre => x - w / 2.0,
-            Align::Right => x - w,
-        };
-        let m = font.glyph('M');
-        let h = m.uv[3] - m.uv[1];
-        let mut pen = left;
-        let mut chars = text.chars().peekable();
-        while let Some(c) = chars.next() {
-            let g = font.glyph(c);
-            pen += g.before;
-            if c != ' ' {
-                let h = g.uv[3] - g.uv[1];
-                self.blit(&font.atlas, g.uv, rect(pen, y, g.width, h), colour);
-            }
-            pen += g.width + g.after;
-            if let Some(&n) = chars.peek() {
-                pen += g.kern.iter().find(|k| k.0 == n as u32).map_or(0.0, |k| k.1);
-            }
-        }
-        rect(left, y, w, h)
-    }
-
-    /// The chosen label in the oblique face on a red pill [`PILL_PAD`] wider than it each side,
-    /// centred on `x`, the pill's top at `top` and the text's at `y`; with the pill's shadow ten
-    /// down and right when `shadow`. Returns the pill.
-    fn pill(&mut self, text: &str, x: f32, y: f32, top: f32, shadow: bool) -> Rect {
-        let w = self.art.fonts.get(&Face::Chosen).map_or(0.0, |f| f.measure(text));
-        let bar = rect(x - w / 2.0 - PILL_PAD, top, w + 2.0 * PILL_PAD, 32.0);
-        if shadow {
-            let off = rect(bar.x + 10.0, bar.y + 10.0, bar.w, bar.h);
-            self.bar("mainmenu_highlight_off_shadow", off, [0, 0, 0, 110]);
-        }
-        self.bar("mainmenu_highlight", bar, CHOSEN);
-        let label = self.text(Face::Chosen, text, x, y, Align::Centre, CHOSEN);
-        let part = Part::Pill { pill: self.bounds(bar), label: self.bounds(label) };
-        self.parts.push(part);
-        bar
-    }
-
-    /// A label in the plain face with nothing under it.
-    fn item(&mut self, text: &str, x: f32, y: f32) {
-        let label = self.text(Face::Item, text, x, y, Align::Centre, ITEM);
-        let part = Part::Item(self.bounds(label));
-        self.parts.push(part);
-    }
-
-    /// The grey gradient in orange over the whole frame, and the radial light added over it
-    /// (`mxfrontendnavigation.lyt`'s Background, `frontend_background_radial` at 48 of 128), kept
-    /// round and centred across.
-    fn background(&mut self) {
-        self.anchor(Anchor::TopLeft);
-        self.tex("background", self.whole(), ORANGE);
-        if let Some(t) = self.art.textures.get("frontend_background_radial") {
-            let all = [0.0, 0.0, t.width as f32, t.height as f32];
-            let r = rect((self.view.0 - 512.0) / 2.0, -40.0, 512.0, 448.0);
-            self.blit_as(t, all, r, [255, 150, 80, 96], add);
-        }
-    }
-
-    /// The logo and its shadow, `mainmenu.lyt`'s, drawn last so nothing covers it.
-    fn logo(&mut self) {
-        self.anchor(Anchor::TopLeft);
-        let shadow = rect(LOGO.x + 10.0, LOGO.y + 10.0, LOGO.w, LOGO.h);
-        self.tex("mainmenu_logo_shadow", shadow, [0, 0, 0, 40]);
-        self.tex("mainmenu_logo", LOGO, CHOSEN);
-        let part = Part::Logo(self.bounds(LOGO));
-        self.parts.push(part);
-    }
-
-    /// The dark column the rows sit on, `mainmenu.lyt`'s, top to bottom of the frame, and its
-    /// shadow ten to the right.
-    fn column(&mut self) {
-        self.anchor(Anchor::TopLeft);
-        let h = self.view.1;
-        self.tex("mainmenu_background", rect(117.0, 0.0, 256.0, h), [0, 0, 0, 60]);
-        self.tex("mainmenu_background", rect(107.0, 0.0, 256.0, h), [255, 255, 255, 200]);
-    }
-
-    /// A list longer than the screen holds: [`SHOWN_ROWS`] of it, scrolled so the chosen row shows.
-    fn scrolled(&mut self, rows: &[String], chosen: usize) -> Rect {
-        let first = chosen.saturating_sub(SHOWN_ROWS - 1).min(rows.len().saturating_sub(SHOWN_ROWS));
-        let end = (first + SHOWN_ROWS).min(rows.len());
-        self.list(&rows[first..end], chosen - first)
-    }
-
-    /// Rows centred on the list's line, the chosen one on its pill; returns the pill.
-    fn list(&mut self, rows: &[String], chosen: usize) -> Rect {
-        self.anchor(Anchor::TopLeft);
-        let mut bar = rect(LIST_X, item_y(chosen) - 5.0, 0.0, 32.0);
-        for (i, row) in rows.iter().enumerate() {
-            if i == chosen {
-                bar = self.pill(row, LIST_X, item_y(i) - 1.0, item_y(i) - 5.0, true);
-            } else {
-                self.item(row, LIST_X, item_y(i));
-            }
-        }
-        bar
-    }
-
-    /// The screen's name, bottom left over the ticker, as the navigation layout's Screen Title.
-    fn title(&mut self, title: &str) {
-        self.anchor(Anchor::BottomLeft);
-        self.text(Face::Title, title, 50.0, 362.0, Align::Left, CHOSEN);
-    }
-
-    /// The black bar along the bottom, and the controller legend in the bottom right corner, right
-    /// to left from the frame's edge: `mxfrontendnavigation.lyt`'s Ticker and Navigation
-    /// Background panels.
-    fn legend(&mut self, buttons: &[(&str, &str)]) {
-        self.anchor(Anchor::BottomLeft);
-        self.fill(rect(0.0, 403.0, self.view.0, 45.0), BLACK);
-        self.anchor(Anchor::BottomRight);
-        let font = &self.art.fonts[&Face::Item];
-        let mut widths = Vec::new();
-        for (_, label) in buttons {
-            widths.push(font.measure(label));
-        }
-        let total: f32 = widths.iter().map(|w| w + 34.0).sum::<f32>() + 16.0;
-        let left = 640.0 - total;
-        self.tex("nav_bkgcorner", rect(left - 64.0, 377.0, 64.0, 32.0), BLACK);
-        self.fill(rect(left, 377.0, 640.0 - left, 26.0), BLACK);
-        let mut x = left;
-        for ((icon, label), w) in buttons.iter().zip(widths) {
-            self.tex(icon, rect(x - 16.0, 358.0, 64.0, 64.0), CHOSEN);
-            self.text(Face::Item, label, x + 30.0, 379.0, Align::Left, CHOSEN);
-            x += w + 34.0;
-        }
-    }
-
-    /// The track pick: `trackpreview.lyt`'s band of stills between the two masks, across the
-    /// whole frame, the track's name over it between arrows.
-    fn tracks(&mut self, menu: &Menu) {
-        self.anchor(Anchor::TopLeft);
-        let at = menu.cursor(Screen::Tracks);
-        let (vw, vh) = self.view;
-        self.fill(self.whole(), BLACK);
-        let band = rect(0.0, 49.0, vw, vh - 49.0 - 90.0);
-        // A mod's track has no stills (MD2): its band stays black under its name.
-        let stills: &[_] = self.art.stills.get(at).map_or(&[], |s| s.as_slice());
-        if !stills.is_empty() {
-            let still = &stills[(menu.tick / STILL_FRAMES) as usize % stills.len()];
-            // The band's shape cut from the still's middle, never stretched.
-            let (w, h) = (still.width as f32, still.height as f32);
-            let rows = w * band.h / band.w;
-            let src = if rows <= h {
-                let top = (h - rows) / 2.0;
-                [0.0, top, w, top + rows]
-            } else {
-                let cols = h * band.w / band.h;
-                let left = (w - cols) / 2.0;
-                [left, 0.0, left + cols, h]
-            };
-            self.blit(still, src, band, CHOSEN);
-        }
-        // The masks: a dark top band and the bottom one the legend sits on.
-        self.fill(rect(0.0, 0.0, vw, 49.0), [0, 0, 0, 200]);
-        self.fill(rect(0.0, vh - 90.0, vw, 90.0), [0, 0, 0, 200]);
-        let (_, name) = menu.track_at(at);
-        let mid = vw / 2.0;
-        self.text(Face::Title, name, mid, 8.0, Align::Centre, CHOSEN);
-        let w = self.art.fonts[&Face::Title].measure(name);
-        self.tex("arrow_left_off", rect(mid - w / 2.0 - 44.0, 9.0, 32.0, 32.0), CHOSEN);
-        self.tex("arrow_right_off", rect(mid + w / 2.0 + 12.0, 9.0, 32.0, 32.0), CHOSEN);
-        let count = format!("Freeride {} of {}", at + 1, menu.track_count());
-        self.text(Face::Small, &count, mid, vh - 118.0, Align::Centre, ITEM);
-        // The machine each player starts on (P41), in a panel over the stills' right edge: one line
-        // a rider, the one Square changes in the chosen colour between up and down arrows when there
-        // is more than one.
-        let riders = menu.riders.clamp(1, SEATS_MAX);
-        let seat = menu.setup_seat.min(riders - 1);
-        let left = vw - 200.0;
-        self.fill(rect(left, 60.0, 180.0, 12.0 + 22.0 * riders as f32), [0, 0, 0, 170]);
-        for i in 0..riders {
-            let y = 66.0 + 22.0 * i as f32;
-            let line = match riders {
-                1 => format!("Machine  {}", menu.settings.machines[i].label()),
-                _ => format!("{}P  {}", i + 1, menu.settings.machines[i].label()),
-            };
-            let colour = if i == seat { CHOSEN } else { ITEM };
-            self.text(Face::Small, &line, left + 16.0, y, Align::Left, colour);
-        }
-        if riders > 1 {
-            let y = 66.0 + 22.0 * seat as f32 - 6.0;
-            self.tex("arrow_up_off", rect(left + 150.0, y - 8.0, 24.0, 24.0), CHOSEN);
-            self.tex("arrow_down_off", rect(left + 150.0, y + 8.0, 24.0, 24.0), CHOSEN);
-        }
-        self.title(Screen::Tracks.title());
-        self.legend(&[("nav_square_off", "Machine"), ("nav_circle_off", "Back"), ("nav_x_off", "Ride")]);
-    }
-
-    /// The garage: a column per seated player, opentennis's roster columns in the main menu's dark
-    /// column and red bar, each row a name over its value between arrows on the chosen one.
-    fn garage(&mut self, menu: &Menu) {
-        self.anchor(Anchor::TopLeft);
-        let n = menu.seated.clamp(1, roster::SEATS);
-        // The columns share 560 of the 640 across, centred in the frame, the one-seat column as
-        // wide as the settings'.
-        let (vw, vh) = self.view;
-        let w = (560.0 / n as f32).min(448.0);
-        let left = vw / 2.0 - w * n as f32 / 2.0;
-        for seat in 0..n {
-            let x = left + w * seat as f32;
-            let centre = x + w / 2.0;
-            self.tex("mainmenu_background", rect(x + 14.0, 0.0, w - 8.0, vh), [0, 0, 0, 60]);
-            self.tex("mainmenu_background", rect(x + 4.0, 0.0, w - 8.0, vh), [255, 255, 255, 200]);
-            self.text(Face::Item, &format!("Player {}", seat + 1), centre, 64.0, Align::Centre, CHOSEN);
-            let Some(g) = menu.garage(seat) else { continue };
-            let bar = w - 16.0;
-            // The rows scroll with the cursor (P86 made them fifteen), a window of them at a time.
-            let top = garage_top(g.row);
-            let y = garage_y(g.row - top) - 3.0;
-            self.tex("mainmenu_highlight_off_shadow", rect(x + 18.0, y + 10.0, bar, 40.0), [0, 0, 0, 110]);
-            self.tex("mainmenu_highlight", rect(x + 8.0, y, bar, 40.0), CHOSEN);
-            if top > 0 {
-                self.tex("arrow_up_off", rect(centre - 10.0, garage_y(0) - 22.0, 20.0, 20.0), ITEM);
-            }
-            if top + GARAGE_SHOWN < roster::ROWS.len() && g.entry.is_none() {
-                self.tex("arrow_down_off", rect(centre - 10.0, garage_y(GARAGE_SHOWN) - 4.0, 20.0, 20.0), ITEM);
-            }
-            for (i, row) in roster::ROWS.iter().enumerate().skip(top).take(GARAGE_SHOWN) {
-                // The keys take the place of the rows below the one being typed.
-                if g.entry.is_some() && i > g.row {
-                    break;
-                }
-                let on = i == g.row;
-                let y = garage_y(i - top);
-                let colour = if on { CHOSEN } else { ITEM };
-                self.text(Face::Small, garage_label(*row), centre, y, Align::Centre, colour);
-                let value = g.value(&menu.catalogue, *row);
-                let face = if on { Face::Chosen } else { Face::Item };
-                self.text(face, &value, centre, y + 13.0, Align::Centre, colour);
-                if on {
-                    self.tex("arrow_left_off", rect(x + 6.0, y + 4.0, 24.0, 24.0), CHOSEN);
-                    self.tex("arrow_right_off", rect(x + w - 30.0, y + 4.0, 24.0, 24.0), CHOSEN);
-                }
-            }
-            if let Some(e) = &g.entry {
-                self.garage_keys(e, x + 8.0, garage_y(g.row - top) + 40.0, bar);
-            }
-        }
-        self.title(Screen::Garage.title());
-        let typing = menu.garage(0).is_some_and(|g| g.entry.is_some());
-        let on = menu.garage(0).map(|g| roster::ROWS[g.row]);
-        if typing {
-            self.legend(&[("nav_square_off", "Delete"), ("nav_circle_off", "Cancel"), ("nav_x_off", "Type")]);
-        } else if matches!(on, Some(roster::Row::Name | roster::Row::Number)) {
-            self.legend(&[("nav_circle_off", "Done"), ("nav_x_off", "Type")]);
-        } else if on == Some(roster::Row::Preset) {
-            self.legend(&[("nav_circle_off", "Done"), ("nav_x_off", "Save")]);
-        } else {
-            self.legend(&[("nav_x_off", "Done")]);
-        }
-    }
-
-    /// A seat's keys for its name or number (P86), in its own column under the row being typed: the
-    /// front end's keyboard's rows, or the number pad's, and the commands under them.
-    fn garage_keys(&mut self, e: &roster::Entry, x: f32, y: f32, w: f32) {
-        let rows = e.keys();
-        let h = 22.0 * (rows.len() + 1) as f32 + 8.0;
-        self.fill(rect(x, y, w, h), [0, 0, 0, 210]);
-        for (r, keys) in rows.iter().enumerate() {
-            let cell = w / keys.len() as f32;
-            for (c, k) in keys.chars().enumerate() {
-                let (kx, ky) = (x + cell * c as f32, y + 4.0 + 22.0 * r as f32);
-                let on = e.key == (r, c);
-                if on {
-                    self.fill(rect(kx + 1.0, ky, cell - 2.0, 21.0), [160, 30, 20, 255]);
-                }
-                let colour = if on { CHOSEN } else { ITEM };
-                self.text(Face::Small, &k.to_string(), kx + cell / 2.0, ky + 1.0, Align::Centre, colour);
-            }
-        }
-        let commands = e.commands();
-        let cell = w / commands.len() as f32;
-        let ky = y + 4.0 + 22.0 * rows.len() as f32;
-        for (c, label) in commands.iter().enumerate() {
-            let kx = x + cell * c as f32;
-            let on = e.key == (rows.len(), c);
-            if on {
-                self.fill(rect(kx + 1.0, ky, cell - 2.0, 21.0), [160, 30, 20, 255]);
-            }
-            let colour = if on { CHOSEN } else { ITEM };
-            self.text(Face::Small, label, kx + cell / 2.0, ky + 1.0, Align::Centre, colour);
-        }
-    }
-
-    /// The splash (P46): a track's still from the disc, dimmed, the logo over it, and what to
-    /// press — or, once someone has, who 1P is — and the Quit popup when Back asked for it.
-    fn splash(&mut self, menu: &Menu) {
-        // The picture covers the whole frame at any shape (V24); the rest is the layout's, centred.
-        self.anchor(Anchor::Centre);
-        let whole = self.whole();
-        self.fill(whole, BLACK);
-        // The last track ridden's first still. (The disc's own `titlescreen` has its logo and a
-        // block of small print baked in, which the prompt would sit on.)
-        let track = menu.settings.track_index();
-        let still = self.art.stills.get(track).and_then(|s| s.first());
-        if let Some(t) = still {
-            // Cover the screen with the picture's middle, keeping its shape.
-            let (w, h) = (t.width as f32, t.height as f32);
-            let fit = whole.w / whole.h;
-            let src = if w / h > fit {
-                let cw = h * fit;
-                [(w - cw) / 2.0, 0.0, (w + cw) / 2.0, h]
-            } else {
-                let ch = w / fit;
-                [0.0, (h - ch) / 2.0, w, (h + ch) / 2.0]
-            };
-            self.blit(t, src, whole, SPLASH_DIM);
-        }
-        // The logo a quarter up on the main menu's, its lettering (the left 0.68 of the texture)
-        // centred.
-        let (w, h) = (512.0 * 1.25, 64.0 * 1.25);
-        let x = 320.0 - w * 0.68 / 2.0;
-        self.tex("mainmenu_logo_shadow", rect(x + 10.0, 100.0, w, h), [0, 0, 0, 90]);
-        self.tex("mainmenu_logo", rect(x, 90.0, w, h), CHOSEN);
-        if menu.claimed.is_some() || menu.p1.is_some() {
-            let who = format!("Player 1  {}", menu.p1_name);
-            self.text(Face::Title, &who, 320.0, 270.0, Align::Centre, ORANGE_TEXT);
-        } else {
-            // The prompt breathes until it is answered.
-            let breath = (menu.tick as f32 * 2.6 / 60.0).cos().abs();
-            let a = (255.0 * (0.6 + 0.4 * breath)) as u8;
-            let colour = [255, 255, 255, a];
-            let font = &self.art.fonts[&Face::Title];
-            let (press, or) = (font.measure("Press"), font.measure("or"));
-            let w = press + 12.0 + 40.0 + 12.0 + or + 12.0 + 40.0;
-            let mut x = 320.0 - w / 2.0;
-            let y = 270.0;
-            self.text(Face::Title, "Press", x, y, Align::Left, colour);
-            x += press + 12.0;
-            self.tex("nav_start_off", rect(x - 12.0, y - 12.0, 64.0, 64.0), colour);
-            x += 40.0 + 12.0;
-            self.text(Face::Title, "or", x, y, Align::Left, colour);
-            x += or + 12.0;
-            self.tex("nav_x_off", rect(x - 12.0, y - 12.0, 64.0, 64.0), colour);
-            self.text(Face::Small, "Enter or Space on the keyboard", 320.0, 316.0, Align::Centre, ITEM);
-            self.text(Face::Small, "Whoever presses it rides as Player 1", 320.0, 338.0, Align::Centre, ITEM);
-            if !menu.heard.is_empty() {
-                let line = format!("Controllers: {}", names_line(&menu.heard));
-                self.text(Face::Small, &line, 320.0, 372.0, Align::Centre, ITEM);
-            }
-            if !menu.skipped.is_empty() {
-                let line = format!("Not read: {}", names_line(&menu.skipped));
-                self.text(Face::Small, &line, 320.0, 394.0, Align::Centre, [255, 255, 255, 120]);
-            }
-        }
-        if menu.p1.is_none() {
-            self.legend(&[("nav_circle_off", "Quit"), ("nav_x_off", "Start")]);
-        }
-        if let Some(row) = menu.quitting() {
-            self.anchor(Anchor::Centre);
-            self.fill(self.whole(), [0, 0, 0, 150]);
-            self.fill(rect(170.0, 150.0, 300.0, 140.0), [0, 0, 0, 220]);
-            self.text(Face::Chosen, "Quit the game?", 320.0, 164.0, Align::Centre, CHOSEN);
-            for (i, label) in QUIT_ROWS.iter().enumerate() {
-                let y = 210.0 + 36.0 * i as f32;
-                if i == row {
-                    self.tex("mainmenu_highlight", rect(320.0 - 96.0, y - 5.0, 192.0, 32.0), CHOSEN);
-                    self.text(Face::Chosen, label, 320.0, y - 1.0, Align::Centre, CHOSEN);
-                } else {
-                    self.text(Face::Item, label, 320.0, y, Align::Centre, ITEM);
-                }
-            }
-        }
-    }
-
-    /// The join screen (P43): a card a seat across the frame, the garage's columns, each saying who
-    /// is on it — a controller's name on the red bar, the same dimmed when it is gone, or the button
-    /// that joins an open one — with arrows either side of a seated card that has room to move.
-    fn join(&mut self, menu: &Menu) {
-        self.anchor(Anchor::TopLeft);
-        let seats = &menu.join.seats;
-        let n = seats.len();
-        let (vw, vh) = self.view;
-        let w = (560.0 / n as f32).min(448.0);
-        let left = vw / 2.0 - w * n as f32 / 2.0;
-        let name = |d: &usize| menu.devices.get(*d).cloned().unwrap_or_else(|| format!("Pad {}", d + 1));
-        let open = |i: usize| seats[i] == join::Seat::Open;
-        for (i, seat) in seats.iter().enumerate() {
-            let x = left + w * i as f32;
-            let centre = x + w / 2.0;
-            self.tex("mainmenu_background", rect(x + 14.0, 0.0, w - 8.0, vh), [0, 0, 0, 60]);
-            self.tex("mainmenu_background", rect(x + 4.0, 0.0, w - 8.0, vh), [255, 255, 255, 200]);
-            self.text(Face::Item, &format!("Player {}", i + 1), centre, 120.0, Align::Centre, CHOSEN);
-            let y = 160.0;
-            match seat {
-                join::Seat::Open => {
-                    self.tex("nav_x_off", rect(centre - 32.0, y - 18.0, 64.0, 64.0), CHOSEN);
-                    self.text(Face::Small, "to join", centre, y + 36.0, Align::Centre, ITEM);
-                }
-                join::Seat::Taken(d) | join::Seat::Gone(d) => {
-                    let gone = matches!(seat, join::Seat::Gone(_));
-                    let bar = w - 16.0;
-                    let tint = if gone { [120, 120, 120, 160] } else { CHOSEN };
-                    self.tex("mainmenu_highlight_off_shadow", rect(x + 18.0, y + 7.0, bar, 32.0), [0, 0, 0, 110]);
-                    self.tex("mainmenu_highlight", rect(x + 8.0, y - 3.0, bar, 32.0), tint);
-                    let face = if gone { Face::Item } else { Face::Chosen };
-                    let colour = if gone { ITEM } else { CHOSEN };
-                    // A pad's name can be long; the card shows what fits of it.
-                    let mut label = name(d);
-                    let room = bar - 16.0;
-                    while label.chars().count() > 1 && self.art.fonts[&face].measure(&label) > room {
-                        label.pop();
-                    }
-                    self.text(face, &label, centre, y, Align::Centre, colour);
-                    if gone {
-                        self.text(Face::Small, "Gone - plug it back in", centre, y + 36.0, Align::Centre, ITEM);
-                    } else {
-                        if (0..i).any(open) {
-                            self.tex("arrow_left_off", rect(x + 6.0, y + 36.0, 24.0, 24.0), CHOSEN);
-                        }
-                        if (i + 1..n).any(open) {
-                            self.tex("arrow_right_off", rect(x + w - 30.0, y + 36.0, 24.0, 24.0), CHOSEN);
-                        }
-                    }
-                }
-            }
-        }
-        self.title(Screen::Join.title());
-        let mut buttons = vec![("nav_circle_off", "Leave"), ("nav_x_off", "Join")];
-        if seats.iter().any(|s| matches!(s, join::Seat::Gone(_))) {
-            buttons.insert(0, ("nav_square_off", "Let Go"));
-        }
-        // A local game is two or more (P51): Ride shows once the host has somebody to ride with.
-        if menu.join.can_start() {
-            buttons.push(("nav_start_off", "Ride"));
-        }
-        self.legend(&buttons);
-    }
-
-    /// The split layout's picture, right of the list: the frame's shape cut into the layout's
-    /// views, each numbered for its player, and the views nobody has dark.
-    fn views(&mut self, layout: split::Layout, players: usize) {
-        self.anchor(Anchor::TopLeft);
-        let (fw, fh) = (224usize, 156usize);
-        let (x0, y0) = (390.0, 120.0);
-        self.fill(rect(x0 - 4.0, y0 - 4.0, fw as f32 + 8.0, fh as f32 + 8.0), BLACK);
-        for (i, r) in layout.rects(fw, fh).into_iter().enumerate() {
-            let at = rect(x0 + r.x as f32 + 2.0, y0 + r.y as f32 + 2.0, r.w as f32 - 4.0, r.h as f32 - 4.0);
-            match i < players {
-                true => {
-                    self.fill(at, [150, 72, 30, 255]);
-                    let label = format!("{}P", i + 1);
-                    self.text(Face::Item, &label, at.x + at.w / 2.0, at.y + at.h / 2.0 - 8.0, Align::Centre, CHOSEN);
-                }
-                false => self.fill(at, [40, 40, 40, 255]),
-            }
-        }
-    }
-
-    /// The Controls screen's keyboard (P54), down the right of the frame: the keys under the layout
-    /// of the seat whose row the cursor is on (1P's on the throttle's row), as the bindings file has
-    /// them.
-    fn keyboard_layout(&mut self, menu: &Menu, at: usize) {
-        let seat = at.saturating_sub(1).min(LAYOUT_ROWS - 1);
-        let layout = menu.controls.layouts[seat];
-        let rows = &menu.keyboard[keyboard_at(layout, menu.controls.presets[seat])];
-        if rows.is_empty() {
-            return;
-        }
-        self.anchor(Anchor::BottomRight);
-        let title = format!("{}P keyboard  {}", seat + 1, controls_label(layout, menu.controls.presets[seat]));
-        self.text(Face::Small, &title, KEYS_X, item_y(0), Align::Centre, CHOSEN);
-        for (n, (what, keys)) in rows.iter().enumerate() {
-            let y = item_y(0) + KEYS_ROW * (n + 1) as f32;
-            self.text(Face::Small, what, KEYS_X - 6.0, y, Align::Right, ITEM);
-            self.text(Face::Small, keys, KEYS_X + 6.0, y, Align::Left, CHOSEN);
-        }
-    }
-
-    /// The on-screen keyboard, in the middle of the frame: the name being typed, the four rows of
-    /// ten and the commands.
-    fn keyboard(&mut self, menu: &Menu) {
-        self.anchor(Anchor::Centre);
-        self.fill(rect(90.0, 60.0, 460.0, 290.0), [0, 0, 0, 200]);
-        let typed = format!("{}_", menu.typing());
-        self.fill(rect(120.0, 76.0, 400.0, 32.0), [60, 0, 0, 255]);
-        self.text(Face::Chosen, &typed, 132.0, 80.0, Align::Left, CHOSEN);
-        let (row, col) = menu.key;
-        for (r, keys) in KEY_ROWS.iter().enumerate() {
-            for (c, k) in keys.chars().enumerate() {
-                let (x, y) = (120.0 + 40.0 * c as f32, 124.0 + 40.0 * r as f32);
-                if (r, c) == (row, col) {
-                    self.pill(&k.to_string(), x + 20.0, y + 4.0, y - 2.0, false);
-                } else {
-                    self.item(&k.to_string(), x + 20.0, y + 4.0);
-                }
-            }
-        }
-        for (c, label) in KEY_COMMANDS.iter().enumerate() {
-            let (x, y) = (120.0 + 100.0 * c as f32, 290.0);
-            if (KEY_ROWS.len(), c) == (row, col) {
-                self.pill(label, x + 50.0, y, y - 4.0, false);
-            } else {
-                self.item(label, x + 50.0, y);
-            }
-        }
-        self.title(menu.typing_for.title());
-        self.legend(&[
-            ("nav_square_off", "Delete"),
-            ("nav_circle_off", "Cancel"),
-            ("nav_x_off", "Type"),
-        ]);
-    }
-}
-
-impl Painter<'_> {
-    /// The lobbies Find turned up, a row each, and Refresh under them.
-    fn games(&mut self, menu: &Menu) {
-        let found = &menu.lobby.found;
-        let rows: Vec<String> = found
-            .iter()
-            .map(|l| {
-                let track = TRACKS.iter().find(|t| t.0 == l.track).map_or(l.track.as_str(), |t| t.1);
-                let build = if !l.same_build() { "  (another version)" } else if l.riding { "  (riding: drop in)" } else { "" };
-                format!("{}  {track}  {}/{}{build}", l.name, l.taken, l.seats)
-            })
-            .chain(["Refresh".to_string()])
-            .collect();
-        self.column();
-        self.list(&rows, menu.cursor(Screen::Games));
-        if found.is_empty() {
-            self.text(Face::Small, "No games listed yet: Refresh to look again.", LIST_X, item_y(2), Align::Centre, ITEM);
-        }
-        self.logo();
-        self.title(Screen::Games.title());
-        self.legend(&[("nav_circle_off", "Back"), ("nav_x_off", "Join")]);
-    }
-
-    /// The lobby: its rows on the left, the code, the seats and the chat on the right.
-    fn lobby(&mut self, menu: &Menu) {
-        let l = &menu.lobby;
-        let rows: Vec<String> = l.items().iter().map(|i| i.label(l)).collect();
-        self.column();
-        self.list(&rows, menu.cursor(Screen::Lobby));
-        // The panel sits right of the column and takes what the window has to spare.
-        let x = 383.0;
-        self.fill(rect(x, 92.0, (self.view.0 - x - 10.0).max(237.0), 262.0), [0, 0, 0, 170]);
-        let code = match (&l.room, l.code.as_str()) {
-            (None, _) => "Not in a lobby yet".to_string(),
-            (Some(_), "") => "Room code: waiting".to_string(),
-            (Some(_), code) => format!("Room code  {code}"),
-        };
-        self.text(Face::Item, &code, x + 12.0, 98.0, Align::Left, CHOSEN);
-        if let Some(room) = &l.room {
-            // Six seats a line each above the chat; more (N12) in columns of eight short lines.
-            let n = room.seats.len();
-            let (cols, step) = if n <= SEAT_LINES { (1, 20.0) } else { (n.div_ceil(SEAT_COLUMN), 15.0) };
-            let width = ((self.view.0 - x - 10.0).max(237.0) - 24.0) / cols as f32;
-            for i in 0..n {
-                let line = if cols == 1 { l.seat_line(room, i) } else { l.seat_short(room, i) };
-                let colour = if room.seats[i].as_ref().is_some_and(|s| s.peer == l.me) { CHOSEN } else { ITEM };
-                let (col, row) = if cols == 1 { (0, i) } else { (i / SEAT_COLUMN, i % SEAT_COLUMN) };
-                let at = (x + 12.0 + width * col as f32, 128.0 + step * row as f32);
-                self.text(Face::Small, &line, at.0, at.1, Align::Left, colour);
-            }
-        }
-        for (i, line) in l.chat.iter().enumerate() {
-            self.text(Face::Small, line, x + 12.0, 254.0 + 18.0 * i as f32, Align::Left, ITEM);
-        }
-        self.logo();
-        self.title(Screen::Lobby.title());
-        let ok = match l.items().get(menu.cursor(Screen::Lobby)) {
-            Some(Item::Start) => "Start",
-            Some(Item::Ready) => "Ready",
-            Some(Item::Leave) => "Leave",
-            Some(Item::Chat) => "Chat",
-            _ => "Change",
-        };
-        self.legend(&[("nav_circle_off", "Leave"), ("nav_x_off", ok)]);
+    fn layout(&self, menu: &Menu, size: (usize, usize), base: usize, out: &mut Vec<Sprite>) -> Vec<Part> {
+        let mut pen = screens::Pen::new(self, out, base, size);
+        pen.screen(menu);
+        pen.parts
     }
 }
 
@@ -4799,15 +3195,6 @@ fn blend_into(px: &mut [u8], c: [u8; 4]) {
     for i in 0..3 {
         let d = px[i] as u32;
         px[i] = ((c[i] as u32 * a + d * (255 - a)) / 255) as u8;
-    }
-}
-
-/// Light added by its alpha, which is how the radial glow brightens and never darkens: into one
-/// pixel's three bytes.
-fn add(px: &mut [u8], c: [u8; 4]) {
-    for i in 0..3 {
-        let d = px[i] as u32 + c[i] as u32 * c[3] as u32 / 255;
-        px[i] = d.min(255) as u8;
     }
 }
 
