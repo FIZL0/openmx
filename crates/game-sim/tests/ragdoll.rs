@@ -1642,6 +1642,94 @@ fn the_rides_bones_gather_the_wreck_bike_once_off_it() {
     assert_eq!((off, first), (35, 43), "off the bike, then listed at the next rebuild");
 }
 
+/// **The bones gather without the wreck bike once it has left the broad phase** (S108): the S105
+/// wreck above, each tick stepped beside a copy told the bike is out, as it is on the put-back's
+/// tick. The copy's gathers that rebuild never list it, a kept list keeps what it held, and none of
+/// the copy's spheres is ever paired with the bike (this wreck's bones never reach it either: what
+/// the pairing refuses is `WreckBikeScene`'s, S105).
+#[test]
+fn the_rides_bones_gather_without_a_wreck_bike_gone_from_the_broad_phase() {
+    let Some((kit, part, wrecks)) = ride_kit() else { return };
+    let mut ride = game_sim::ride::Ride::default();
+    ride.chassis.quat = Vf::new(0.0, 0.0, 0.0, 1.0);
+    ride.origin = Vf::new(4304.0, 150.0, 3412.0, 1.0);
+    ride.chassis.vel = Vf::new(-4.0, -21.0, 49.5, 1.0);
+    let mut world = Slope;
+    let mut crash =
+        game_sim::ride::Crash::begin(&ride, game_sim::trick::Wreck(5), &part, game_sim::ride::WRECK_INERTIA, &wrecks, None);
+    let mut doll =
+        game_sim::ragdoll_ride::Down::enter(&kit, &ride.transform(), &crash, crash.throw, 5, &wrecks, &mut Rng::default(), &mut world);
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let (mut rebuilt, mut kept_listed) = (0, 0);
+    for tick in 1..=60 {
+        crash.step(dt, &part, &wrecks, &mut world);
+        let mut gone = doll.clone();
+        let before = gone.search;
+        gone.step_posed_with(&kit, None, dt, &crash, &mut world, false);
+        doll.step(&kit, dt, &crash, &mut world);
+        let s = gone.search;
+        if s.built && (!before.built || s.centre.to_bits() != before.centre.to_bits()) {
+            rebuilt += 1;
+            assert!(!s.listed, "tick {tick}: a list gathered anew holds a bike gone from the tree");
+        } else {
+            assert_eq!(s.listed, before.listed, "tick {tick}: a kept list keeps what it held");
+            kept_listed += usize::from(s.listed);
+        }
+        assert!(gone.contacts.iter().all(|c| !c.scene), "tick {tick}: a sphere met a bike gone from the broad phase");
+    }
+    eprintln!("{rebuilt} rebuilt, {kept_listed} kept lists holding the bike");
+    assert!(rebuilt > 0 && kept_listed > 0, "both paths of the gather are seen");
+}
+
+/// **The rider's bones lose the wreck bike on the put-back's tick** (S108): a rider down in a
+/// reason-5 wreck with its bones and its wreck body, the wreck clock run out a few ticks in, put back
+/// by the page (a screen) or at once (none). Each tick a copy of the rider is stepped with its bones'
+/// list forced to be gathered anew and the bike no longer ignored: it holds the bike on every tick
+/// before the put-back, and on the put-back's own tick, whose bones the rider draws once more, it
+/// does not, as the original's body gathers after the bike's unwreck took the bike out.
+#[test]
+fn the_riders_bones_lose_the_wreck_bike_on_the_put_back_tick() {
+    use game_sim::rider::{Rider, Wreckage};
+    let Some((kit, part, wrecks)) = ride_kit() else { return };
+    let kit = std::sync::Arc::new(kit);
+    let tables = game_sim::rider::Tables::build();
+    let p = game_sim::phy::Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.ride.curve);
+    let mut world = game_sim::world::Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let idle = game_sim::ride::Controls::default();
+    for screen in [true, false] {
+        let mut r = Rider::new(&p, game_sim::stock::MOUNTS, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), game_sim::trick::Set::default());
+        r.sense.owner = Some(game_sim::state::Owner { human: true, screen });
+        r.wreckage = Some(Wreckage { part: part.clone(), wrecks: wrecks.clone(), inertia: game_sim::ride::WRECK_INERTIA });
+        r.ragdoll_kit = Some(kit.clone());
+        let reason = game_sim::trick::Wreck(5);
+        let crash = game_sim::ride::Crash::begin(&r.ride, reason, &part, game_sim::ride::WRECK_INERTIA, &wrecks, None);
+        r.ragdoll = Some(game_sim::ragdoll_ride::Down::enter(&kit, &r.ride.transform(), &crash, crash.throw, 5, &wrecks, &mut Rng::default(), &mut world));
+        r.crash = Some(crash);
+        r.state.enter(reason);
+        r.state.counting = true;
+        r.state.elapsed = p.wreck_times.max_wreck_time - F(0.2);
+        r.frame(&p, &tables, &idle, dt, &mut world);
+        let mut listed = Vec::new();
+        for tick in 2..40 {
+            let mut q = r.clone();
+            let doll = q.ragdoll.as_mut().expect("still down");
+            doll.search.built = false;
+            doll.ragdoll.ignores_bike = false;
+            q.frame(&p, &tables, &idle, dt, &mut world);
+            listed.push(q.drawn_ragdoll().expect("the bones are drawn on the put-back's tick").search.listed);
+            if r.frame(&p, &tables, &idle, dt, &mut world).respawned {
+                assert!(q.ragdoll.is_none(), "screen {screen}: the copy is put back on the same tick ({tick})");
+                break;
+            }
+        }
+        eprintln!("screen {screen}: listed {listed:?}");
+        let (last, before) = listed.split_last().expect("ticks");
+        assert!(r.ragdoll.is_none() && before.len() >= 3, "screen {screen}: put back after a few ticks");
+        assert!(before.iter().all(|&l| l), "screen {screen}: the bike is in the broad phase while the rider is down");
+        assert!(!last, "screen {screen}: the put-back's tick gathers without it");
+    }}
+
 /// **A wreck thrown from the shell's skeleton** (S65): handed the kit's own riding pose as the live
 /// one, the posed entry and step are the fixed pose's to the bit; handed another pose, the bones
 /// start where it has them and pull towards its rests.

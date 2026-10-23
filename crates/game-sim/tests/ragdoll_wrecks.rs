@@ -1777,7 +1777,7 @@ fn bike_key_in_ram(ee: &Ee, b: u32, tree: u32) -> Option<u32> {
 /// **The game keeps the wreck bike in the track's tree where its sphere stands** (S105): in every
 /// one of the twenty s62 states where the bike is in the broad phase, its placement is in the
 /// track's tree, at its sphere's centre (its mesh's root box's, through its frame), under the key the
-/// port's [`Cells::key`] gives that box, and the tree holds it there. In the four late states (some 400 frames after the wreck) the bike
+/// port's [`Cells::key`] gives that box, and the tree holds it there. In the four late states (after the put-back, S108) the bike
 /// is in no structure at all.
 #[test]
 fn the_bike_is_in_the_tree_where_its_sphere_stands() {
@@ -1818,6 +1818,38 @@ fn the_bike_is_in_the_tree_where_its_sphere_stands() {
     assert_eq!((placed, out), (16, 4));
 }
 
+/// The game manager singleton, whose human player's vehicle is `+0x30 -> +0x34 -> +0 -> +0x48 -> +0`.
+const GAME_MANAGER: u32 = 0x004e_1e98;
+
+/// **The bike's unwreck takes the wreck bike out of the broad phase** (S108): in each s62 wreck's
+/// last entry state the bike is in the track's tree, placed (`B+4`) and gated in for the pair
+/// (`B+0x31` bit 0, which the sphere pair asks first). The vehicle's wreck part (`+0x7a8`) holds it
+/// at `+0x128`. The original's unwreck, run on that state as every put-back runs it, stops the wreck
+/// part, and after it the bike is in no node of the tree, its placement is 0 and its gate is down:
+/// what the s62 captures show from each put-back's row on (the put-back's own tick's gather is
+/// `every_sphere_test_of_the_wrecks_is_the_bike_meshs`'s).
+#[test]
+fn the_unwreck_takes_the_wreck_bike_out_of_the_broad_phase() {
+    let Some(unwreck) = addr("bike_unwreck").ok() else { return };
+    let Some(stop) = addr("wreck_part_stop").ok() else { return };
+    for (name, frame) in [("back", 2479), ("front", 2604), ("front3", 2632), ("side", 2609), ("tip", 2474)] {
+        let Some(mut ee) = state_in("s62", &Wreck { name, frame }) else { return };
+        let (b, _) = bike_collidable(&ee);
+        let sphere = ee.u32_at(collision(&ee, 0) + coll_at::SPHERE);
+        let (_, tree) = cells_of_ram(&ee, sphere);
+        let player = ee.u32_at(ee.u32_at(ee.u32_at(ee.u32_at(GAME_MANAGER) + 0x30) + 0x34));
+        let vehicle = ee.u32_at(ee.u32_at(player + 0x48));
+        let part = ee.u32_at(vehicle + 0x7a8);
+        assert_eq!(ee.u32_at(part + 0x128), b, "{name} {frame}: the wreck part's collidable is the bike");
+        assert_eq!(ee.u32_at(ee.u32_at(part + 0x38) + 0x120), stop, "{name} {frame}: the unwreck's call is the stop");
+        assert!(ee.u32_at(b + 4) != 0 && ee.u8_at(b + 0x31) & 1 != 0, "{name} {frame}: placed and gated in");
+        assert!(tree_holds(&ee, ee.u32_at(tree + 0x94), b), "{name} {frame}: in the tree");
+        ee.call(unwreck, &[u64::from(vehicle), 1], &[], 200_000_000);
+        assert_eq!((ee.u32_at(b + 4), ee.u8_at(b + 0x31) & 1), (0, 0), "{name} {frame}: unplaced and gated out");
+        assert!(!tree_holds(&ee, ee.u32_at(tree + 0x94), b), "{name} {frame}: in no node of the tree");
+    }
+}
+
 /// **Every sphere test of the five s62 wrecks, answered by the port** (S105): the original's update
 /// runs each wreck as S62's replay does, and the port's search for the bike ([`BikeSearch`]) is
 /// carried beside it from the wreck's first state: gathered each frame where the first sphere stood
@@ -1840,6 +1872,8 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
         listed: usize,
         /// The pair calls with the bike in the sphere test running now.
         now: Vec<u32>,
+        /// The gathers with the bike out of the broad phase (S108).
+        gone: Vec<String>,
         wrong: Vec<String>,
     }
     let count = Rc::new(RefCell::new(Count::default()));
@@ -1954,6 +1988,15 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
                     let reach = F(ee.f32_at(s0 + 0x60));
                     let bike_sphere = (raw_quad(ee, b + 0x40), F(ee.f32_at(b + 0x60)));
                     let offered = ee.u32_at(ACTOR + 0x6b0) != 0 && key.is_some();
+                    // The put-back's tick (S108): the bike's unwreck has taken it out of the tree and
+                    // lowered the pair's gate on it before the body's update gathers.
+                    let gone = ee.u32_at(b + 4) == 0;
+                    if gone {
+                        k.borrow_mut().gone.push(format!("{name} {frame}"));
+                        if key.is_some() || ee.u8_at(b + 0x31) & 1 != 0 {
+                            k.borrow_mut().wrong.push(format!("a bike out of the broad phase still in the tree or gated in"));
+                        }
+                    }
                     m.gather(Some(&cells), reach, bike_sphere, key.unwrap_or(0), offered);
                     let mut k = k.borrow_mut();
                     k.gathers += 1;
@@ -1985,4 +2028,6 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
     );
     let counts = (k.tests, k.paired, k.hits, k.gathers, k.rebuilt, k.listed);
     assert_eq!(counts, (24822, 600, 64, 367, 12, 176), "tests, paired, hits, gathers, rebuilt, listed");
+    // One gather each wreck after the bike has left the broad phase: the put-back's tick (S108).
+    assert_eq!(k.gone, ["front 2681", "side 2686", "back 2556", "tip 2551", "front3 2681"], "the gathers with the bike gone");
 }

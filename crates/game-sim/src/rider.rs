@@ -574,7 +574,20 @@ impl Rider {
             // The rider's bones, when there are any: they let go of the bars on their own clock.
             if let (Some(kit), Some(doll)) = (ragdoll_kit.as_ref(), ragdoll.as_mut()) {
                 let held = doll.ragdoll.holds[0] || doll.ragdoll.holds[1];
-                doll.step_posed(kit, skeleton.as_deref(), dt, down, world);
+                // The wreck bike leaves the broad phase at the put-back, which the original makes in
+                // the bike's update, before the body's (S108): the page's last fade-out update, or
+                // the machine's own reset, asked here of a copy of it on the settle gate it reads.
+                let unwrecks = page.puts_back_next() || {
+                    let mut s = sense;
+                    s.settles = doll.settles();
+                    let params = state::Params {
+                        max_wreck_time: p.wreck_times.max_wreck_time,
+                        cannonball_wreck_time: p.wreck_times.cannonball_wreck_time,
+                    };
+                    let mut machine = *state;
+                    machine.step(dt, s, params, |_| None, || page.up()).reset == Some(state::Reset::Now)
+                };
+                doll.step_posed_with(kit, skeleton.as_deref(), dt, down, world, !unwrecks);
                 out.separated = held && !(doll.ragdoll.holds[0] || doll.ragdoll.holds[1]);
             }
         }
