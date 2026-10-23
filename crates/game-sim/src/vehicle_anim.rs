@@ -47,7 +47,13 @@
 //!   39      nohandedlander_*                                mode 1
 //!   40..=45 wreck/hold group      played once               a cross into the clip, then mode 0
 //!   46..=59 get_ready group       played once               the same
+//!   60..=67 a trick pack's extras (MD21, the port's own)    the stunt cross-fade, as 0..=23
+//!   68, 69  threesixtyL/R (MD21, the port's own)           played once, as 40..=59
 //! ```
+//!
+//! The last two rows are not the original's: MX Unleashed's table stops at 59. They are where MX vs.
+//! ATV's trick clips go (MD21), in [`Library::pack`], and nothing in the original's own driving asks
+//! for them — so a ride without a pack never reaches a state past 59, and runs as it always has.
 //!
 //! ## Which state
 //!
@@ -64,7 +70,7 @@ use crate::chassis::turn;
 use crate::hash;
 use crate::motion::{Animations, Clip, ClipId, Played, Player, Put, clamp01, remap};
 use crate::rng::Rng;
-use crate::trick::{SLOTS, Stunt};
+use crate::trick::{EXTRA_SLOTS, SLOTS, Stunt};
 use ps2_float::{Dest, F, Vf, libm};
 
 /// How many animation states the machine has: the length of both of its jump tables, and of the clip
@@ -149,6 +155,30 @@ pub const IDLES: i32 = 10;
 /// How many start poses there are, which is the other list the chooser draws from.
 pub const START_POSES: i32 = 3;
 
+/// **The port's own (MD21):** the first of the states past the original's sixty, one per trick-pack
+/// extra slot ([`crate::trick::Trick::EXTRA`] + k plays `PACK_EXTRA + k`).
+pub const PACK_EXTRA: i32 = STATES as i32;
+/// MX vs. ATV's two 360 clips, played once the 360 is past its clip angle ([`crate::air::SPIN_CLIP`]):
+/// `threesixtyL` and `threesixtyR`.
+pub const SPIN_LEFT: i32 = PACK_EXTRA + EXTRA_SLOTS as i32;
+pub const SPIN_RIGHT: i32 = SPIN_LEFT + 1;
+/// How many states [`Library::pack`] holds.
+pub const PACK_STATES: usize = EXTRA_SLOTS + 2;
+/// The last extra state.
+const PACK_LAST: i32 = SPIN_LEFT - 1;
+
+/// A state the stunt cross-fade plays: one of the 24 gesture slots, or a pack's extra that `lib` has
+/// a clip for.
+fn gesture_state(lib: &Library, state: i32) -> bool {
+    (0..SLOTS as i32).contains(&state) || pack_state(lib, state, PACK_EXTRA..=PACK_LAST)
+}
+
+/// One of the states past the sixty in `range`, which `lib` has a clip for. Without it a state past
+/// the sixty is what it is in the original, a state out of the table, and nothing changes for it.
+fn pack_state(lib: &Library, state: i32, range: std::ops::RangeInclusive<i32>) -> bool {
+    range.contains(&state) && lib.clip(state).is_some()
+}
+
 // ---------------------------------------------------------------------------------------------------
 // which clip
 // ---------------------------------------------------------------------------------------------------
@@ -180,11 +210,14 @@ pub struct Library {
     /// The records added from outside, in the order they were added — which is the order
     /// [`Driver::extra`] indexes.
     pub extra: Vec<Extra>,
+    /// **The port's own (MD21):** a trick pack's clips for the states past the sixty — the extras,
+    /// then the two 360s ([`PACK_EXTRA`]). Empty without a pack.
+    pub pack: [Option<ClipId>; PACK_STATES],
 }
 
 impl Default for Library {
     fn default() -> Library {
-        Library { clip: [None; STATES], extra: Vec::new() }
+        Library { clip: [None; STATES], extra: Vec::new(), pack: [None; PACK_STATES] }
     }
 }
 
@@ -221,6 +254,10 @@ impl Library {
 
     /// The handle in a state's slot, or `None` for a state outside the table.
     pub fn clip(&self, state: i32) -> Option<ClipId> {
+        if state >= PACK_EXTRA {
+            let k = usize::try_from(state - PACK_EXTRA).ok()?;
+            return self.pack.get(k).copied().flatten();
+        }
         usize::try_from(state).ok().and_then(|s| self.clip.get(s).copied()).flatten()
     }
 
@@ -725,6 +762,8 @@ impl Driver {
         if restart {
             self.rate = match self.want {
                 0..=23 | NO_HANDER => p.rate_stunt,
+                // MD21's pack states take the gesture slots' rate, the 360s too.
+                s if pack_state(lib, s, PACK_EXTRA..=SPIN_RIGHT) => p.rate_stunt,
                 REVERSE_L | REVERSE_R => {
                     // The only arm of the rate switch that does anything besides pick a rate.
                     self.reverse = F::ZERO;
@@ -796,10 +835,10 @@ impl Driver {
             match self.state {
                 // The gesture slots: cross out of the gesture that was running, each clip at its own
                 // phase, or play the new one alone when there was no gesture to come out of.
-                0..=23 => {
+                s if gesture_state(lib, s) => {
                     self.from_table = true;
                     a = lib.clip(self.state);
-                    if (0..SLOTS as i32).contains(&self.prev) {
+                    if gesture_state(lib, self.prev) {
                         b = lib.clip(self.prev);
                         if restart {
                             self.cross = F::ZERO;
@@ -883,7 +922,7 @@ impl Driver {
                 }
                 // The two played-once groups: a cross into the clip on the frame the state starts, and
                 // from then on the clip runs on its own.
-                HOLD..=59 => {
+                s if (HOLD..=59).contains(&s) || pack_state(lib, s, SPIN_LEFT..=SPIN_RIGHT) => {
                     if restart {
                         let clip = lib.clip(self.state);
                         play = Some(Play {

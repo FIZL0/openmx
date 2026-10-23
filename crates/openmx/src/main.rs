@@ -1888,13 +1888,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // the 24, and below its moves laid over every bike. Without a pack the ride has the original's.
     let trick_pack = ride_trick_pack(&args);
     let stunts = match &trick_pack {
-        Some(pack) => {
-            let stunts = pack.stunts(stunts);
-            println!("{}", pack.missing_clips(&stunts));
-            stunts
-        }
+        Some(pack) => pack.stunts(stunts),
         None => stunts,
     };
+    // Its clips (MD21), bound below onto every body and chassis the ride loads.
+    let pack_clips = trick_pack.as_ref().and_then(|pack| match pack.clips() {
+        Ok(clips) => Some(clips),
+        Err(e) => {
+            println!("tricks: no clips: {e}");
+            None
+        }
+    });
 
     let scn = archives[0]
         .entries()
@@ -2136,12 +2140,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // out of its own copy as the simulation asks for them, where `archives` is what the models and
     // textures are loaded from. The blend time the cross-fade falls at is the bike's, off its
     // `.phy` — the same `Params` the simulation's own driver runs on.
+    // What the pack's clips left unbound on the first body and chassis (MD21), for the line below.
+    let mut pack_missing: (Option<Vec<String>>, Option<Vec<String>>) = (None, None);
     let mut body = match &rider_member {
         None => None,
         Some(member) => {
             let own = vec![disc.res(member)?];
             match Body::load(own, &args.rider, Sex::Male, "", &table.stunts, phy.motion()) {
-                Ok(body) => Some(body),
+                Ok(mut body) => {
+                    pack_missing.0 = pack_clips.as_ref().map(|p| body.add_pack(p, &stunts.stunts));
+                    Some(body)
+                }
                 Err(e) => {
                     println!("rider: {e}");
                     None
@@ -2247,7 +2256,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         false => {
             let own = vec![disc.res(&bike_member)?];
             match Chassis::load(own, &vehicle.mcf, BIKE_PREFIX, &table.stunts, vehicle_params()) {
-                Ok(chassis) => Some(chassis),
+                Ok(mut chassis) => {
+                    pack_missing.1 = pack_clips.as_ref().map(|p| chassis.add_pack(p, &stunts.stunts));
+                    Some(chassis)
+                }
                 Err(e) => {
                     println!("chassis: {e}");
                     None
@@ -2255,6 +2267,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
     };
+    if let (Some(pack), Some(_)) = (&trick_pack, &pack_clips) {
+        println!("{}", pack.missing_clips(&stunts, pack_missing.0.as_deref(), pack_missing.1.as_deref()));
+    }
     if let Some(chassis) = &chassis {
         let slots = chassis.stance.lib.clip[..game_sim::trick::SLOTS].iter().filter(|c| c.is_some()).count();
         let poses = chassis.stance.lib.clip[game_sim::trick::SLOTS..].iter().filter(|c| c.is_some()).count();
@@ -3021,6 +3036,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, motion).ok()
             }
         };
+        let body = body.map(|mut b| {
+            if let Some(p) = &pack_clips {
+                b.add_pack(p, &stunts.stunts);
+            }
+            b
+        });
         // Its own name and number (P86), on whatever of its bike and body is loaded below.
         let own_look = args.others.get(i - 1).map(|p| p.look.clone()).unwrap_or_default();
         if let Some(k) = &mut kit {
@@ -3052,6 +3073,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             true => None,
             false => Chassis::load(vec![disc.res(own_member)?], &own_vehicle.mcf, BIKE_PREFIX, &table.stunts, vehicle_params()).ok(),
         };
+        let chassis = chassis.map(|mut c| {
+            if let Some(p) = &pack_clips {
+                c.add_pack(p, &stunts.stunts);
+            }
+            c
+        });
         let copy = |assets: &mut Assets, name: &str| -> Option<String> {
             let own = format!("{name}@{}", i + 1);
             let loaded = assets.models.get(name)?.clone();
@@ -4298,7 +4325,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let Some(chassis) = &mut rig.chassis {
                 if moving && bike_up {
                     let ride = &seat.sim.rider.ride;
-                    let want = Chassis::want(ride, &seat.sim.rider.tricks);
+                    let want = chassis.want_with_pack(ride, &seat.sim.rider.tricks);
                     // The rider's two axes and not zeros: in the air they are the crossup sweep the
                     // chassis' clip is played at, and zero is the sweep's far end (P29).
                     let request = Chassis::riding(&seat.sim.rider);
