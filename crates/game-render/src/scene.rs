@@ -575,4 +575,19 @@ impl Looks {
         let sky = (0..shares.len()).max_by(|&a, &b| shares[a].total_cmp(&shares[b]))?;
         Some((crate::world::Lighting::blend(&parts)?, sky))
     }
+
+    /// The two skies to crossfade between at a world point (MD26), and the second's share of the
+    /// two: the maps with the largest shares, the lower-numbered first, so the pair holds still across
+    /// a whole join and only the share moves. Inside a map it is that map twice, with no share.
+    /// Where three maps meet the third's sky is left out.
+    pub fn skies(&self, x: f32, z: f32) -> Option<([usize; 2], f32)> {
+        let shares = self.regions.shares(x, z);
+        let mut order: Vec<usize> = (0..shares.len()).collect();
+        order.sort_by(|&a, &b| shares[b].total_cmp(&shares[a]));
+        let first = *order.first()?;
+        let second = order.get(1).copied().filter(|&i| shares[i] > 0.0).unwrap_or(first);
+        let pair = [first.min(second), first.max(second)];
+        let share = if pair[0] == pair[1] { 0.0 } else { shares[pair[1]] / (shares[pair[0]] + shares[pair[1]]) };
+        Some((pair, share))
+    }
 }

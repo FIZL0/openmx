@@ -3296,6 +3296,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Which tile's sky and light a world's ride shows under Per Map (MD9), `Some(None)` while it
     // shows the whole world's one; `None` before the first frame.
     let mut shown_look: Option<Option<usize>> = None;
+    // The pair of skies bound for the crossfade (MD26), `Some(None)` while the whole world's one is.
+    let mut shown_skies: Option<Option<[usize; 2]>> = None;
     if let Some(w) = &world_mod {
         println!("world sky: {} (the whole world's from {})", args.world_sky.unwrap_or_default().word(), w.pieces[w.home].tile.name);
     }
@@ -4720,14 +4722,26 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 menu::WorldSky::Global => (Lighting::of(&look), None),
             };
             light = lit;
+            // The skybox crossfades across a join (MD26): the two maps' skies bound while the eye is
+            // between them, the nearer's share of the picture growing as it is ridden into.
+            let skies = match world_sky {
+                menu::WorldSky::PerMap => wl.looks.skies(camera.eye.x, camera.eye.z),
+                menu::WorldSky::Global => None,
+            };
+            if let Some(r) = renderer_of(&mut offscreen, window) {
+                let pair = skies.map(|(pair, _)| pair);
+                if shown_skies != Some(pair) {
+                    shown_skies = Some(pair);
+                    match pair {
+                        Some([a, b]) if a != b => r.set_skies(wl.skies[a].as_ref(), wl.skies[b].as_ref()),
+                        Some([a, _]) => r.set_sky(wl.skies[a].as_ref()),
+                        None => r.set_sky(sky.as_ref()),
+                    }
+                }
+                r.set_sky_mix(skies.map_or(0.0, |(_, share)| share));
+            }
             if shown_look != Some(over) {
                 shown_look = Some(over);
-                if let Some(r) = renderer_of(&mut offscreen, window) {
-                    r.set_sky(match over {
-                        Some(i) => wl.skies[i].as_ref(),
-                        None => sky.as_ref(),
-                    });
-                }
                 let name = over.map_or("the whole world", |i| wl.names[i].as_str());
                 println!(
                     "world sky: over {name} at {:.0},{:.0}: sun {:.3},{:.3},{:.3} ambient {:.3},{:.3},{:.3} fog {},{},{} {:.0}..{:.0}",
