@@ -954,32 +954,25 @@ impl Speedometer {
     }
 }
 
-/// Where the throttle comes from, as `--throttle` spells it.
+/// Where the throttle comes from, as `--throttle` spells it. Not a Controls row since P81: the new
+/// layout's gas is R2 already and the original's is its own binding, so this is `controls.txt`'s
+/// `throttle` line and `--throttle` only. L2 is gone from it (user, 2026-10-22): an old file's
+/// `throttle = l2` reads as the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Gas {
     #[default]
     Cross,
     R2,
-    L2,
 }
 
 impl Gas {
-    pub const ALL: [Gas; 3] = [Gas::Cross, Gas::R2, Gas::L2];
+    pub const ALL: [Gas; 2] = [Gas::Cross, Gas::R2];
 
     /// The file's word, which is also `--throttle`'s.
     pub fn word(self) -> &'static str {
         match self {
             Gas::Cross => "cross",
             Gas::R2 => "r2",
-            Gas::L2 => "l2",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Gas::Cross => "Cross",
-            Gas::R2 => "R2",
-            Gas::L2 => "L2",
         }
     }
 }
@@ -1010,6 +1003,15 @@ impl Layout {
         match self {
             Layout::New => "New",
             Layout::Original => "Original",
+        }
+    }
+
+    /// What the Controls tab's plane row calls a biplane scheme (P81): the plane-relative one is the
+    /// normal one, and the disc's is named for what it is.
+    pub fn plane_label(self) -> &'static str {
+        match self {
+            Layout::New => "Normal",
+            Layout::Original => "Like the Original",
         }
     }
 }
@@ -1094,7 +1096,7 @@ impl Controls {
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's pad wiring (P36): throttle is cross, r2 or l2; pad is a device or auto;\n\
+            "# openmx's pad wiring (P36): throttle is cross or r2; pad is a device or auto;\n\
              # pressure is --pad-pressure's axis:control list, or none; layout is new or original,\n\
              # or one per seat (new,original,...) — new is R2 gas, L2 brake, Select camera, with\n\
              # Cross and Square kept free; original is the game's own (P40); biplane is new or\n\
@@ -1168,13 +1170,20 @@ fn preset_text(presets: &[usize; SEATS]) -> String {
 /// cannot name because `tests/menu.rs` compiles it on its own.
 pub const PRESETS: usize = 4;
 
-/// A seat's layout and its controller preset as its Controls row says them (P79): the original's
-/// shipped preset is plain `Original`, the other three name their number.
+/// A seat's layout and its controller preset as its Controls row says them (P79, P81): the presets
+/// are inside Original, numbered from 1 as the original's Controller Presets screen does, and its
+/// shipped one, Preset 1, is plain `Original`.
 pub fn controls_label(l: Layout, preset: usize) -> String {
     match (l, preset) {
-        (Layout::Original, p) if p > 0 => format!("Original preset {p}"),
+        (Layout::Original, p) if p > 0 => format!("Original, Preset {}", p.min(PRESETS - 1) + 1),
         _ => l.label().to_string(),
     }
+}
+
+/// The Controls tab's one choice per seat (P81) in the order it steps: New, then Original on each of
+/// the original's controller presets.
+pub fn control_choices() -> Vec<(Layout, usize)> {
+    std::iter::once((Layout::New, 0)).chain((0..PRESETS).map(|p| (Layout::Original, p))).collect()
 }
 
 /// [`per_seat`]'s text back: one word when every seat agrees.

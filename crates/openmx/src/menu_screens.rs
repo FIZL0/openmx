@@ -691,7 +691,8 @@ impl<'a> Pen<'a> {
             y = self.note(note, x, y + 0.9, w);
         }
         if screen == Screen::Settings && menu.tab(screen) == pages::TAB_CONTROLS {
-            if r.kind == Kind::Player {
+            // The keyboard under the Player row, or under the layout row on a tab of one seat (P81).
+            if r.kind == Kind::Player || (r.key == Key::BikeLayout && !menu.many_seats()) {
                 self.keys(menu, x, y + 1.0, w);
             } else if room - y > 10.0 {
                 self.pad(menu, x, y + 0.6, w.min((room - y - 0.6) * 2.0));
@@ -701,7 +702,7 @@ impl<'a> Pen<'a> {
 
     /// The keyboard's keys under the player's layout, as the bindings file has them.
     fn keys(&mut self, menu: &Menu, x: f32, top: f32, w: f32) {
-        let p = menu.player().min(SEATS - 1);
+        let p = menu.control_seat();
         let layout = menu.controls.layouts[p];
         let rows = &menu.keyboard[keyboard_at(layout, menu.controls.presets[p])];
         if rows.is_empty() {
@@ -730,7 +731,7 @@ impl<'a> Pen<'a> {
     fn pad(&mut self, menu: &Menu, x: f32, top: f32, w: f32) {
         let k = w / 300.0;
         let p = |px: f32, py: f32| [x + px * k, top + py * k];
-        let seat = menu.player().min(SEATS - 1);
+        let seat = menu.control_seat();
         let new = menu.controls.layouts[seat] == Layout::New;
         let mut l = [("l2", "Look Back"), ("l1", "Clutch"), ("r1", "Stunt Modifier"), ("r2", "Thrill Camera"), ("tri", "Stunts"), ("o", "Stunts"), ("sq", "Brake"), ("x", "Gas")];
         let set = |l: &mut [(&str, &'static str); 8], key: &str, v: &'static str| {
@@ -744,10 +745,8 @@ impl<'a> Pen<'a> {
             set(&mut l, "sq", "Look Back");
             set(&mut l, "x", "Stunts");
         }
-        match menu.controls.throttle {
-            Gas::R2 => set(&mut l, "r2", "Gas"),
-            Gas::L2 => set(&mut l, "l2", "Gas"),
-            Gas::Cross => {}
+        if menu.controls.throttle == Gas::R2 {
+            set(&mut l, "r2", "Gas");
         }
         let say = |key: &str| l.iter().find(|e| e.0 == key).map_or("", |e| e.1);
         // The body: two grips and the bridge, rounded boxes in the drawing's places.

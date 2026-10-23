@@ -77,10 +77,9 @@ pub enum Key {
     MusicPlays,
     Song,
     SkipSong,
+    /// A seat's one Controls choice (P81): New, or Original on one of its controller presets.
     BikeLayout,
-    ControllerPreset,
     PlaneLayout,
-    Throttle,
     Nintendo,
     Controller,
     Pressure,
@@ -381,11 +380,20 @@ impl Menu {
         rows
     }
 
+    /// Whether more than one seat is set up (P81): the Controls tab has its Player row only then, and
+    /// is 1P's alone otherwise.
+    pub fn many_seats(&self) -> bool {
+        self.seated.max(self.riders) > 1
+    }
+
+    /// The seat the Controls tab's rows change: the Player row's, or 1P's when it has none.
+    pub fn control_seat(&self) -> usize {
+        if self.many_seats() { self.player.min(SEATS - 1) } else { 0 }
+    }
+
     fn control_rows(&self) -> Vec<Row> {
         let c = &self.controls;
-        let p = self.player.min(SEATS - 1);
-        let presets: Vec<String> = (1..=PRESETS).map(|i| format!("Preset {i}")).collect();
-        let presets: Vec<&str> = presets.iter().map(String::as_str).collect();
+        let p = self.control_seat();
         let first = p != 0;
         let pad = c.pad.clone().or_else(|| self.pad_kept.clone());
         let mut device = match &pad {
@@ -399,25 +407,38 @@ impl Menu {
             None => Row::choice(Key::Pressure, "Pressure Axes", &["None"], 0, "Maps a pad's analog axes onto the PS2's pressure-sensitive buttons."),
         };
         pressure = pressure.off_if(first, "Other players ride the pad they joined on").off_if(!first && map.is_none(), "Name a map in controls.txt");
-        vec![
-            self.player_row("Whose controls these rows change. Every player's pad keeps its own."),
-            Row::choice(
-                Key::BikeLayout,
-                "Bike Layout",
-                &Layout::ALL.map(Layout::label),
-                usize::from(c.layouts[p] == Layout::Original),
-                "New is the port's: gas and brake on the triggers' pressure, stunts on the face buttons. Original is the disc's, with its four controller presets.",
-            ),
-            Row::choice(Key::ControllerPreset, "Controller Preset", &presets, c.presets[p], "The original's Controller Presets screen, one row. Preset 1 is the one the game ships with.")
-                .off_if(c.layouts[p] != Layout::Original, "Only with the Original layout"),
-            Row::choice(
-                Key::PlaneLayout,
-                "Biplane Layout",
-                &Layout::ALL.map(Layout::label),
-                usize::from(c.planes[p] == Layout::Original),
-                "New steers the biplane relative to the plane at every bank. Original is the disc's stick, which goes dead on its side.",
-            ),
-            Row::choice(Key::Throttle, "Throttle", &Gas::ALL.map(Gas::label), Gas::ALL.iter().position(|g| *g == c.throttle).unwrap_or(0), "Which button is the gas."),
+        // One choice for the bike (P81): New, or Original with the original's controller presets
+        // inside it. The throttle is no row: each layout's gas is its own.
+        let choices = control_choices();
+        let names: Vec<String> = choices.iter().map(|(l, n)| controls_label(*l, *n)).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let preset = if c.layouts[p] == Layout::Original { c.presets[p] } else { 0 };
+        let now = choices.iter().position(|ch| *ch == (c.layouts[p], preset)).unwrap_or(0);
+        let tips = ["R2 gas, L2 brake", "Cross gas, Square brake", "The disc's second preset", "Its third", "Its fourth"];
+        let bike = Row::choice(
+            Key::BikeLayout,
+            "Button Layout",
+            &names,
+            now,
+            "New: R2 the gas and L2 the brake, by how far they are pulled. Original: the disc's own buttons, on any of its four controller presets.",
+        )
+        .tips(&tips);
+        // The plane's stick (P50, P69): the hint under the cursor says what the choice it is on does.
+        let planes = Layout::ALL.map(Layout::plane_label);
+        let plane_now = usize::from(c.planes[p] == Layout::Original);
+        let hints = [
+            "Normal: down pulls the nose up, always relative to the plane, at every bank and upside down.",
+            "Like the original: the disc's own stick, which stops pitching the plane while it is on its side.",
+        ];
+        let plane = Row::choice(Key::PlaneLayout, "Plane Stick", &planes, plane_now, hints[plane_now])
+            .tips(&["Relative to the plane", "Dead on its side"]);
+        let mut rows = Vec::new();
+        if self.many_seats() {
+            rows.push(self.player_row("Whose controls these rows change. Every player's pad keeps its own."));
+        }
+        rows.extend([
+            bike,
+            plane,
             Row::choice(
                 Key::Nintendo,
                 "Nintendo Pads",
@@ -427,7 +448,8 @@ impl Menu {
             ),
             device,
             pressure,
-        ]
+        ]);
+        rows
     }
 
     fn camera_page(&self) -> Vec<Row> {
@@ -669,18 +691,15 @@ impl Menu {
             Key::Song if side => self.step_song(d),
             Key::SkipSong if p.ok => self.skip_song(),
             Key::BikeLayout => {
-                let i = self.player.min(SEATS - 1);
-                self.controls.layouts[i] = Layout::ALL[next(row)];
-            }
-            Key::ControllerPreset => {
-                let i = self.player.min(SEATS - 1);
-                self.controls.presets[i] = next(row);
+                let i = self.control_seat();
+                let (layout, preset) = control_choices()[next(row)];
+                self.controls.layouts[i] = layout;
+                self.controls.presets[i] = preset;
             }
             Key::PlaneLayout => {
-                let i = self.player.min(SEATS - 1);
+                let i = self.control_seat();
                 self.controls.planes[i] = Layout::ALL[next(row)];
             }
-            Key::Throttle => self.controls.throttle = Gas::ALL[next(row)],
             Key::Nintendo => self.controls.nintendo_positions = !self.controls.nintendo_positions,
             Key::Controller => {
                 // First Found keeps the named device to come back to.
