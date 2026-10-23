@@ -20,10 +20,11 @@
 //! The d-pad is the original's in a ride (P73's table, commands 0–3): a digital stick (lean, steer,
 //! the rider fore and aft) and the direction half of a trick's gesture. In the shell the markers have
 //! it instead of the stick: the shell rides on [`Controls::stick_alone`], so the left stick alone
-//! leans and steers and a d-pad press moves no bike. Its gesture meaning stays — a press with a trick
-//! button down is a trick's gesture and not a marker's, so it fires nothing, and the bike reads it
-//! as the original does. P93 had Up and Down fire on the press too; P106 put their hold back, against
-//! a brushed d-pad placing over a marker or teleporting (see both journals).
+//! leans and steers and a d-pad press moves no bike. Since P129 that includes the gesture: a press
+//! with a trick button down is the markers' too and does no trick (the stick names the gesture's
+//! direction). P93 had Up and Down fire on the press too; P106 put their hold back, against a brushed
+//! d-pad placing over a marker or teleporting (see both journals). A seat with its Markers switch off
+//! (P129, the shell's) runs none of this, and its d-pad rides as the original's.
 //!
 //! A teleport sets the bike down the way a put-back does ([`crate::rider::Rider::teleport`]): out of
 //! any wreck, the trick machine cleared, and ghosted (P57's poof, S63's pass-through), so a rider
@@ -356,18 +357,9 @@ impl Markers {
 
 /// The four d-pad directions that fired this tick — left, right, up, down — off the pad the player's
 /// controls were read from: Left and Right the tick they went down, Up and Down the tick their held
-/// timer crosses [`HOLD_MS`]. None with a trick button down, which makes the d-pad a trick's gesture.
-pub fn fired(pad: &crate::input::Pad, table: &crate::bindings::Table, hands: &Controls) -> [bool; 4] {
-    if hands.trick.iter().any(|&t| t) {
-        return [false; 4];
-    }
-    pressed(pad, table)
-}
-
-/// The four directions that fired this tick on any machine, gesture or not: [`fired`]'s test once
-/// the trick buttons have had their say (Left and Right on the press, Up and Down at [`HOLD_MS`]).
-/// The plane has no tricks, so in it this is the whole test.
-fn pressed(pad: &crate::input::Pad, table: &crate::bindings::Table) -> [bool; 4] {
+/// timer crosses [`HOLD_MS`]. A trick button held with it changes nothing (P129): the d-pad is no
+/// part of a trick's gesture in the shell ([`Controls::stick_alone`]).
+pub fn fired(pad: &crate::input::Pad, table: &crate::bindings::Table) -> [bool; 4] {
     let crossed = |c| {
         table.control(pad.index as usize, c).is_some_and(|control| {
             let s = pad.control(control);
@@ -377,19 +369,15 @@ fn pressed(pad: &crate::input::Pad, table: &crate::bindings::Table) -> [bool; 4]
     [table.pressed(pad, Command::LEFT), table.pressed(pad, Command::RIGHT), crossed(Command::UP), crossed(Command::DOWN)]
 }
 
-/// Whether a d-pad direction is down for the markers, for a display that stays up while it is: none
-/// with a trick button down.
-pub fn held(pad: &crate::input::Pad, table: &crate::bindings::Table, hands: &Controls) -> bool {
-    !hands.trick.iter().any(|&t| t) && DIRECTIONS.iter().any(|&c| table.held(pad, c))
+/// Whether a d-pad direction is down for the markers, for a display that stays up while it is.
+pub fn held(pad: &crate::input::Pad, table: &crate::bindings::Table) -> bool {
+    DIRECTIONS.iter().any(|&c| table.held(pad, c))
 }
 
 /// How far Down or Up is through its hold, `0..=HOLD_MS`, for a bar that fills while the player
-/// holds: the longer-held of the two, 0 with neither held or a trick button down. Left and Right fire
-/// on the press and have no hold to show.
-pub fn holding(pad: &crate::input::Pad, table: &crate::bindings::Table, hands: &Controls) -> u32 {
-    if hands.trick.iter().any(|&t| t) {
-        return 0;
-    }
+/// holds: the longer-held of the two, 0 with neither held. Left and Right fire on the press and
+/// have no hold to show.
+pub fn holding(pad: &crate::input::Pad, table: &crate::bindings::Table) -> u32 {
     [Command::UP, Command::DOWN]
         .iter()
         .filter_map(|&c| table.control(pad.index as usize, c))
@@ -403,7 +391,8 @@ pub fn holding(pad: &crate::input::Pad, table: &crate::bindings::Table, hands: &
 const DIRECTIONS: [Command; 4] = [Command::LEFT, Command::RIGHT, Command::UP, Command::DOWN];
 
 /// **One tick of a player's markers**, after the tick's step: the player in seat `me` of
-/// `spots.len()`, `hands` the controls the tick was stepped with, `spots` where every player was
+/// `spots.len()`, `hands` the controls the tick was stepped with (which since P129 change nothing
+/// here: a trick button no longer holds the markers' d-pad), `spots` where every player was
 /// ([`Spot::of`], taken before anybody's tick), every one of them in the ride. On the bike only: a
 /// plane ride has none.
 pub fn frame(sim: &mut Sim, me: usize, spots: &[Spot], hands: &Controls) -> Option<Did> {
@@ -412,12 +401,12 @@ pub fn frame(sim: &mut Sim, me: usize, spots: &[Spot], hands: &Controls) -> Opti
 
 /// [`frame`] with `riding` saying which seats are in the ride ([`Markers::others`]): a seat not in
 /// it is never a pick, so the selection steps past it (P94). A seat past the end of `riding` is in.
-pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], hands: &Controls) -> Option<Did> {
+pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], _hands: &Controls) -> Option<Did> {
     if sim.plane.is_some() {
         return None;
     }
     sim.markers.up(Vehicle::Bike);
-    let fired = fired(sim.input.pad(0), sim.table(), hands);
+    let fired = fired(sim.input.pad(0), sim.table());
     let m = &mut sim.markers;
     let (mut did, pick) = select(m, fired, me, spots.len(), riding);
     let [_, _, up, down] = fired;
@@ -481,7 +470,7 @@ fn select(m: &mut Markers, [left, right, ..]: [bool; 4], me: usize, seats: usize
 ///   (`vehicle::land_on`), as the switch onto the plane is.
 pub fn fly(markers: &mut Markers, flight: &mut Flight, pad: &crate::input::Pad, me: usize, spots: &[Spot], riding: &[bool]) -> Option<Did> {
     markers.up(Vehicle::Plane);
-    let fired = pressed(pad, &crate::bindings::Table::SHIPPED);
+    let fired = fired(pad, &crate::bindings::Table::SHIPPED);
     let (mut did, pick) = select(markers, fired, me, spots.len(), riding);
     let [_, _, up, down] = fired;
     if down {

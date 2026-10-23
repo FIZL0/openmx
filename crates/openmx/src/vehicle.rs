@@ -482,6 +482,13 @@ pub fn round_stick(input: &game_sim::input::Pad, mut pad: game_sim::biplane::Pad
     pad
 }
 
+/// A seat's hands off its poll (P129): with its Markers switch on, the d-pad out of the ride
+/// ([`Controls::stick_alone`]) — it is the markers' — and the left stick alone steers, leans and names
+/// a trick's direction; off, the poll as it is ([`Controls::through`]), the d-pad the original's.
+pub fn hands(polled: Controls, markers: bool) -> Controls {
+    if markers { polled.stick_alone() } else { polled }
+}
+
 /// `pad` with its four d-pad directions let go (P107): what the shell's plane flies on, the d-pad
 /// being the session markers' (`game_sim::markers::fly`). Everything else is the pad as it was.
 pub fn without_dpad(pad: &game_sim::input::Pad) -> game_sim::input::Pad {
@@ -539,6 +546,9 @@ pub struct Plane {
     /// aileron leaves the original's dead zone. Off, the flight reads the pad and its file as the
     /// original does.
     pub round_stick: bool,
+    /// The plane reads the d-pad as the original's does (P129): its seat's Markers switch is off,
+    /// so the d-pad is no marker's. Off — markers on, the default — it flies on [`without_dpad`].
+    pub dpad: bool,
     /// Which of the disc's liveries it wears, an index into [`Machine::models`] ([`livery`]).
     pub livery: usize,
 }
@@ -558,6 +568,7 @@ impl Plane {
             placed: false,
             every_bank: false,
             round_stick: false,
+            dpad: false,
             livery: 0,
         }
     }
@@ -573,8 +584,9 @@ impl Plane {
     /// The unwreck-and-reset: back to the spawn transform, at rest. The flight is put back by the
     /// next step ([`Flight::reset`]), which is the one with the `Sim`'s tables.
     pub fn reset(&mut self) {
-        let (flight, every_bank, round_stick, livery, bay) = (self.flight.take(), self.every_bank, self.round_stick, self.livery, self.bay);
-        *self = Plane { flight, every_bank, round_stick, livery, bay, ..Plane::parked(self.spawn) };
+        let (flight, every_bank, round_stick, dpad, livery, bay) =
+            (self.flight.take(), self.every_bank, self.round_stick, self.dpad, self.livery, self.bay);
+        *self = Plane { flight, every_bank, round_stick, dpad, livery, bay, ..Plane::parked(self.spawn) };
     }
 
     /// How high its origin stands over the ground under it when it is parked, feet. With its flight,
@@ -620,7 +632,8 @@ impl Plane {
             (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate);
         // The d-pad is the session markers' (P107), as the bike's has been since P93: the plane
         // reads the pad without it, under every scheme, and the left stick alone banks and climbs.
-        let input = without_dpad(sim.input.pad(0));
+        // With the seat's markers off (P129) it is the original's again.
+        let input = if self.dpad { sim.input.pad(0).clone() } else { without_dpad(sim.input.pad(0)) };
         let mut pad = flight::pad(&input);
         if self.round_stick {
             pad = round_stick(&input, pad);
@@ -876,7 +889,26 @@ impl Garage {
     /// `spots` being where every player was before the pass, every one of them in the ride. What the
     /// rider did, and what the d-pad did if it did anything.
     pub fn pass(&mut self, sim: &mut Sim, dt: F, controls: &Controls, me: usize, spots: &[Spot], world: &mut dyn World) -> (rider::Frame, Option<Did>) {
+        self.pass_marked(sim, dt, controls, me, spots, world, true)
+    }
+
+    /// [`Garage::pass`] with the seat's Markers switch (P129): off, the pass is the machine's step
+    /// alone and the d-pad does nothing of the markers'.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pass_marked(
+        &mut self,
+        sim: &mut Sim,
+        dt: F,
+        controls: &Controls,
+        me: usize,
+        spots: &[Spot],
+        world: &mut dyn World,
+        markers: bool,
+    ) -> (rider::Frame, Option<Did>) {
         let said = self.step(sim, dt, controls, world);
+        if !markers {
+            return (said, None);
+        }
         let did = match self.up {
             Kind::Bike => markers::frame(sim, me, spots, controls),
             // The plane's own set (P107), on the d-pad the plane no longer reads.
@@ -943,6 +975,13 @@ impl Garage {
         }
     }
 
+    /// Whether the plane reads the d-pad (P129, [`Plane::dpad`]): the seat's Markers switch off.
+    pub fn set_dpad(&mut self, on: bool) {
+        if let Some(plane) = &mut self.plane {
+            plane.dpad = on;
+        }
+    }
+
     /// One simulation pass for whichever machine has the controller. With the bike up this is
     /// exactly [`Sim::step`] and nothing else, which is what keeps a `--vehicle bike` session the
     /// shell it was before P19. With the plane up the bike is not stepped at all, the plane flies on
@@ -981,18 +1020,22 @@ pub struct Wanted {
     /// the same, so it rides in the same byte, a tick at a time.
     pub every_bank: bool,
     pub round_stick: bool,
+    /// The seat's Markers switch is off (P129): its d-pad fires no marker and rides as the original's,
+    /// on the bike and in the plane. A seat's own choice that every step must read the same, so it
+    /// rides in the byte too; 0, an idle pad's, is markers on, as offline's default.
+    pub dpad_rides: bool,
 }
 
 impl Wanted {
     /// The byte: the machine in the low two bits (0 none, 1 the bike, 2 the biplane), then the
-    /// two scheme bits.
+    /// two scheme bits, then the markers-off bit.
     pub fn byte(self) -> u8 {
         let to = match self.to {
             None => 0,
             Some(Kind::Bike) => 1,
             Some(Kind::Biplane) => 2,
         };
-        to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3
+        to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4
     }
 
     /// [`Wanted::byte`] read back; a machine number this build does not know is no pick.
@@ -1002,7 +1045,7 @@ impl Wanted {
             2 => Some(Kind::Biplane),
             _ => None,
         };
-        Wanted { to, every_bank: byte & 4 != 0, round_stick: byte & 8 != 0 }
+        Wanted { to, every_bank: byte & 4 != 0, round_stick: byte & 8 != 0, dpad_rides: byte & 16 != 0 }
     }
 }
 
@@ -1060,7 +1103,8 @@ pub fn start_lane(template: &Flight, bay: Spawn, sim: &mut Sim) {
 /// recovery put the plane back this tick. A seat on the bike does nothing.
 pub fn fly_lane(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World) -> bool {
     let Some(f) = sim.plane.take() else { return false };
-    let mut plane = Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, ..Plane::around(f) };
+    let mut plane =
+        Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
     let respawned = plane.step(sim, dt, world);
     sim.plane = plane.flight.take();
     respawned

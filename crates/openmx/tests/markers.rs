@@ -243,8 +243,7 @@ fn left_fires_on_its_first_tick() {
 /// part-way through the hold, full from 200 ms on — and Left and Right, on the press, leave it empty.
 #[test]
 fn the_bar_fills_with_an_up_or_down_hold() {
-    let hands = Controls::default();
-    let holding = |sim: &Sim| markers::holding(sim.input.pad(0), sim.table(), &hands);
+    let holding = |sim: &Sim| markers::holding(sim.input.pad(0), sim.table());
     for c in [Control::Up, Control::Down] {
         let mut sim = Sim::new(0x88);
         let mut seen = vec![];
@@ -258,12 +257,11 @@ fn the_bar_fills_with_an_up_or_down_hold() {
         assert_eq!(*seen.last().unwrap(), HOLD_MS, "{c:?}: {seen:?}");
         tick(&mut sim, 0);
         assert_eq!(holding(&sim), 0, "{c:?}: let go");
-        // With a trick button down it is the gesture's, and nothing fills.
-        let mut trick = Controls::default();
-        trick.trick[0] = true;
-        tick(&mut sim, c.mask());
-        tick(&mut sim, c.mask());
-        assert_eq!(markers::holding(sim.input.pad(0), sim.table(), &trick), 0);
+        // With a trick button down it fills all the same (P129): the d-pad is no gesture's.
+        let circle = Control::Circle.mask();
+        tick(&mut sim, circle | c.mask());
+        tick(&mut sim, circle | c.mask());
+        assert!(holding(&sim) > 0, "{c:?}: a trick button held the bar");
     }
     for c in [Control::Left, Control::Right] {
         let mut sim = Sim::new(0x88);
@@ -315,35 +313,65 @@ fn a_held_dpad_moves_no_bike() {
     }
 }
 
-/// A hold with a trick button down is the trick's gesture (the d-pad names its direction, P73) and
-/// fires nothing — and the bike reads the d-pad exactly as the original's hands do ([`Sim::poll`]):
-/// with a trick button down it is not taken out of the ride (P93).
+/// P129: a trick button held with the d-pad makes it no trick's gesture: the hold is the markers'
+/// all the same — Down places at [`HOLD_MS`], Left steps — and the bike rides exactly as on the
+/// trick button and the gas alone, tick for tick, the d-pad read as let go.
 #[test]
-fn a_trick_gesture_is_not_a_marker() {
-    let mut sim = moving();
-    let start = sim.clone();
-    let mut plain = sim.clone();
+fn a_trick_button_does_not_take_the_dpad_from_the_markers() {
     let circle = Control::Circle.mask(); // trick 1, the shipped preset's
-    let did = hold(&mut sim, Control::Down, GAS | circle, 1000);
-    assert_eq!(fired(&did), vec![]);
-    assert!(sim.markers.fresh());
-    // A ride that never had a marker step: the same pads into the same state, ridden on the plain
-    // step alone, hash the same.
-    let mut hands = Vec::new();
+    let mut sim = moving();
+    let mut plain = sim.clone();
+    let did = hold(&mut sim, Control::Down, GAS | circle, HOLD_MS);
+    assert_eq!(fired(&did), vec![(hold_tick(), Did::Placed(0))], "a trick button stopped the marker");
     for k in 0..did.len() {
-        let b = if k + 1 < did.len() { GAS | circle | Control::Down.mask() } else { GAS | circle };
-        let c = plain.poll(DT, &pads(b));
-        plain.step(DT, &c, &mut Flat::default());
-        hands.push(c);
+        tick(&mut plain, GAS | circle);
+        if k + 1 == did.len() {
+            assert_eq!(hash::of(&plain.rider.ride), hash::of(&sim.rider.ride), "the d-pad rode with the trick button");
+        }
     }
-    assert_eq!(plain.hash(), sim.hash(), "a gesture's hold changed the ride");
-    // The control: the same with no d-pad is another ride, so the gesture's d-pad was read.
-    let mut circle_alone = start.clone();
-    for _ in 0..did.len() {
-        let c = circle_alone.poll(DT, &pads(GAS | circle));
-        circle_alone.step(DT, &c, &mut Flat::default());
+    let did = hold(&mut sim, Control::Left, GAS | circle, 0);
+    assert_eq!(fired(&did), vec![(0, Did::Stepped(Pick::Slot(SLOTS - 1)))]);
+    // The hands the bike was stepped with have no d-pad in them, a trick button down or not.
+    let c = sim.poll(DT, &pads(GAS | circle | Control::Up.mask())).stick_alone();
+    assert!(c.trick[0], "the trick button is still read");
+    assert_eq!((c.dpad_y, c.dpad_dir, c.dpad), (false, 0, [false; 4]));
+}
+
+/// P129: with the player's Markers switch off (the original's controls, Original's sub-switch) the
+/// d-pad fires no marker and rides as the original's: the shell's pass is the original's hands
+/// ([`Controls::through`], [`vehicle::hands`] with markers off) stepped, tick for tick the same ride as
+/// `Sim::poll` and `Sim::step` alone — d-pad Left steering the bike off the gas-alone line, and
+/// Down with a trick button held a second the gesture the bike reads. With markers on the same pads
+/// move no bike and the hold places a marker.
+#[test]
+fn markers_off_the_dpad_rides_as_the_originals() {
+    let circle = Control::Circle.mask();
+    let start = moving();
+    let pass_with = |sim: &mut Sim, garage: &mut Garage, buttons: u16, on: bool| {
+        let mut world = Flat::default();
+        let spots = [garage.spot(sim, &mut world)];
+        let controls = vehicle::hands(sim.poll(DT, &pads(buttons)), on);
+        garage.pass_marked(sim, DT, &controls, 0, &spots, &mut world, on).1
+    };
+    for buttons in [GAS | Control::Left.mask(), GAS | circle | Control::Down.mask()] {
+        let (mut off, mut on, mut original, mut plain) = (start.clone(), start.clone(), start.clone(), start.clone());
+        let (mut g_off, mut g_on) = (Garage::new(Kind::Bike, None).unwrap(), Garage::new(Kind::Bike, None).unwrap());
+        let mut did_on = vec![];
+        for k in 0..30 {
+            assert_eq!(pass_with(&mut off, &mut g_off, buttons, false), None, "{buttons:#x}: markers off fired on tick {k}");
+            did_on.push(pass_with(&mut on, &mut g_on, buttons, true));
+            let c = original.poll(DT, &pads(buttons));
+            original.step(DT, &c, &mut Flat::default());
+            let c = plain.poll(DT, &pads(buttons & !(Control::Left.mask() | Control::Down.mask()))).stick_alone();
+            plain.step(DT, &c, &mut Flat::default());
+            assert_eq!(hash::of(&off.rider.ride), hash::of(&original.rider.ride), "{buttons:#x}: tick {k} is not the original's");
+            assert_eq!(hash::of(&on.rider.ride), hash::of(&plain.rider.ride), "{buttons:#x}: markers on, the d-pad rode on tick {k}");
+        }
+        assert!(off.markers.fresh(), "{buttons:#x}: markers off touched the markers");
+        assert_ne!(hash::of(&off.rider.ride), hash::of(&on.rider.ride), "{buttons:#x}: the d-pad did nothing with markers off");
+        let want = if buttons & Control::Down.mask() != 0 { vec![Did::Placed(0)] } else { vec![Did::Stepped(Pick::Slot(SLOTS - 1))] };
+        assert_eq!(what(&did_on), want, "{buttons:#x}: markers on");
     }
-    assert_ne!(circle_alone.hash(), sim.hash(), "the gesture's d-pad did nothing to the ride");
 }
 
 /// Up pressed lands the rider on the marker: the bike exactly as it was kept, its speed too, the
@@ -1227,7 +1255,8 @@ fn seat_pass(seats: &mut [(Sim, Garage)], me: usize, report: Report) -> (Option<
 fn bar(seats: &[(Sim, Garage)], me: usize, hands: &Controls) -> MarkerBar {
     assert!(hud::markers_shown_in(me, false));
     let sim = &seats[me].0;
-    MarkerBar::read(&sim.markers, me, &vec![true; seats.len()], sim.input.pad(0), sim.table(), hands, true)
+    let _ = hands; // since P129 the trick buttons say nothing to the bar
+    MarkerBar::read(&sim.markers, me, &vec![true; seats.len()], sim.input.pad(0), sim.table(), true)
 }
 
 /// The label the display shows with it, offline (no names).
@@ -1239,7 +1268,7 @@ fn label(b: &MarkerBar) -> String {
 /// plane's last slot; a held Down fills the hold bar to `HOLD_MS` — with a trick button down too,
 /// which on the plane is no gesture, as its markers read the pad — and the bar marks the slot
 /// filled, with its radar icon; switching to the bike puts the bar up on the bike's own set, where
-/// the same trick button makes the d-pad a gesture again and fills nothing.
+/// since P129 the same trick button fills it too and sets the bike's slot.
 #[test]
 fn flying_the_plane_shows_the_planes_bar() {
     let Some(hangar) = hangar(Kind::Biplane) else { return };
@@ -1297,12 +1326,16 @@ fn flying_the_plane_shows_the_planes_bar() {
     assert_eq!(label(&b), "marker 1 empty");
     assert!(overlay::marker_blips(&seats[0].0.markers, b.pick).is_empty());
     let mut seen = vec![];
+    let mut placed = None;
     for _ in 0..10 {
-        hands = seat_pass(&mut seats, 0, Report::from_buttons(GAS | circle | Control::Down.mask())).1;
+        let did;
+        (did, hands) = seat_pass(&mut seats, 0, Report::from_buttons(GAS | circle | Control::Down.mask()));
+        placed = placed.or(did);
         seen.push(bar(&seats, 0, &hands).holding);
     }
-    assert!(seen.iter().all(|&h| h == 0), "the bike's trick gesture filled the hold bar: {seen:?}");
-    assert!(!bar(&seats, 0, &hands).filled.iter().any(|&f| f));
+    assert_eq!(*seen.last().unwrap(), HOLD_MS, "a trick button held the bike's hold bar: {seen:?}");
+    assert_eq!(placed, Some(Did::Placed(0)));
+    assert!(bar(&seats, 0, &hands).filled[0]);
 }
 
 /// P124 in a two-player split: player 1 rides the bike while player 2 flies the plane, each view its
