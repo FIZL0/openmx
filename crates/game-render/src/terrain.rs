@@ -619,6 +619,175 @@ fn leaf_page(terrain: &game_sim::track::Terrain, lx: u32, lz: u32) -> Option<u16
     u16::try_from(word / 2).ok()
 }
 
+// ---- a world's ground across its joins (MD9) -------------------------------------------------------
+//
+// A world (MD8) is several maps' terrains side by side with join ground between them. Each map keeps
+// its own look inside the cells it owns; on a join, which has no pages of its own, the ground is
+// every near map's paint blended by how near the map is, so the join starts as the map behind it and
+// ends as the map ahead, with no step anywhere. A map's paint is read past its edge by mirroring the
+// point back inside it: the mirror is continuous at the edge, so the join begins on exactly the
+// map's last pixel and carries its texture on, not one leaf's quarter-page repeated. Nothing in the
+// original covers several maps; this is by eye.
+
+/// Feet from a map's ground within which it still tints a join: past it a map plays no part.
+pub const BLEND_REACH: f32 = 1500.0;
+
+/// How strongly dirt holds where no map is near: a map `BLEND_REACH / 2` away outweighs it about
+/// two thousand times, so the dirt shows only in a hole well clear of every map.
+pub const DIRT_WEIGHT: f32 = 1.0 / (BLEND_REACH * BLEND_REACH * 2048.0);
+
+/// The world rectangles the maps of a world own, `[x0, z0, x1, z1]` in feet, half-open, in the
+/// world's order (a point two claim is the first's), and how each tints the ground and the light
+/// where none owns it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Regions {
+    pub owned: Vec<[f32; 4]>,
+}
+
+impl Regions {
+    /// The map that owns a point, if one does.
+    pub fn owner(&self, x: f32, z: f32) -> Option<usize> {
+        self.owned.iter().position(|r| x >= r[0] && x < r[2] && z >= r[1] && z < r[3])
+    }
+
+    /// Each map's weight at a point, not normalised: 1 for the owner and 0 for every other where a
+    /// map owns it, and otherwise `(1/d - 1/BLEND_REACH)²` of the distance `d` to each map's ground,
+    /// which grows without bound at a map's edge and is 0 from `BLEND_REACH` out.
+    pub fn weights(&self, x: f32, z: f32) -> Vec<f32> {
+        if let Some(o) = self.owner(x, z) {
+            return (0..self.owned.len()).map(|i| if i == o { 1.0 } else { 0.0 }).collect();
+        }
+        self.owned
+            .iter()
+            .map(|r| {
+                let d = distance_to(r, x, z).max(1e-3);
+                (1.0 / d - 1.0 / BLEND_REACH).max(0.0).powi(2)
+            })
+            .collect()
+    }
+
+    /// Each map's share of the light and the sky at a point: [`Regions::weights`] summing to one, or
+    /// the nearest map's alone where none is within reach.
+    pub fn shares(&self, x: f32, z: f32) -> Vec<f32> {
+        let mut w = self.weights(x, z);
+        let total: f32 = w.iter().sum();
+        if total > 0.0 {
+            w.iter_mut().for_each(|w| *w /= total);
+        } else if let Some(near) = (0..self.owned.len()).min_by(|&a, &b| {
+            distance_to(&self.owned[a], x, z).total_cmp(&distance_to(&self.owned[b], x, z))
+        }) {
+            w[near] = 1.0;
+        }
+        w
+    }
+
+    /// A point read in map `i`'s rectangle: itself inside it, mirrored back in across the edge past it.
+    pub fn mirrored(&self, i: usize, x: f32, z: f32) -> (f32, f32) {
+        let r = self.owned[i];
+        (mirror(x, r[0], r[2]), mirror(z, r[1], r[3]))
+    }
+}
+
+/// How far a point is from a rectangle, 0 inside it.
+fn distance_to(r: &[f32; 4], x: f32, z: f32) -> f32 {
+    let dx = (r[0] - x).max(x - r[2]).max(0.0);
+    let dz = (r[1] - z).max(z - r[3]).max(0.0);
+    (dx * dx + dz * dz).sqrt()
+}
+
+/// `v` reflected into `lo..hi` across the edge it is past, kept a hair inside the far edge.
+fn mirror(v: f32, lo: f32, hi: f32) -> f32 {
+    let top = (hi - 1e-3).max(lo);
+    if v < lo {
+        (lo + (lo - v)).min(top)
+    } else if v > top {
+        (top - (v - top)).max(lo)
+    } else {
+        v
+    }
+}
+
+/// One map of a world as its ground is painted: where its terrain's sample (0, 0) is, and its pages.
+#[derive(Clone, Debug)]
+pub struct PaintTile {
+    pub at: [f32; 2],
+    /// Its own pages, or `None` for a map painted otherwise (a splat) or not at all: dirt.
+    pub pages: Option<Pages>,
+}
+
+/// A world's ground paint: each map's pages over the cells it owns, blended across the joins.
+#[derive(Clone, Debug)]
+pub struct WorldPaint {
+    pub regions: Regions,
+    pub tiles: Vec<PaintTile>,
+    /// The colour (0..255) where no map's paint reaches.
+    pub dirt: [f32; 3],
+}
+
+impl WorldPaint {
+    /// Map `i`'s colour before any light at a world point read in its rectangle, dirt where it has
+    /// no page.
+    fn tile_paint(&self, i: usize, x: f32, z: f32) -> [f32; 3] {
+        let (x, z) = self.regions.mirrored(i, x, z);
+        let t = &self.tiles[i];
+        t.pages
+            .as_ref()
+            .and_then(|p| p.paint(x - t.at[0], z - t.at[1]))
+            .map_or(self.dirt, |c| c.map(f32::from))
+    }
+
+    /// The ground's colour before any light at a point of the world (0..255): the owner's own paint,
+    /// or on a join every near map's blended with a trace of dirt.
+    pub fn paint(&self, x: f32, z: f32) -> [f32; 3] {
+        if let Some(o) = self.regions.owner(x, z) {
+            return self.tile_paint(o, x, z);
+        }
+        let w = self.regions.weights(x, z);
+        let total: f32 = w.iter().sum::<f32>() + DIRT_WEIGHT;
+        let mut c = self.dirt.map(|d| d * DIRT_WEIGHT / total);
+        for (i, &w) in w.iter().enumerate() {
+            if w / total > 1.0 / 512.0 {
+                let t = self.tile_paint(i, x, z);
+                (0..3).for_each(|k| c[k] += t[k] * w / total);
+            }
+        }
+        c
+    }
+
+    /// Where each map's pages go on the GPU, inside a device's limits: all the maps' pages in one
+    /// array of `max_layers`, their leaf images stacked in one picture no taller than `max_rows`, and
+    /// one detail layer each. A map that does not fit is drawn in dirt.
+    pub fn pack(&self, max_layers: u32, max_rows: u32) -> Vec<Option<Packed>> {
+        let (mut layers, mut rows, mut details) = (0u32, 0u32, 0u32);
+        self.tiles
+            .iter()
+            .map(|t| {
+                let p = t.pages.as_ref()?;
+                let n = p.pages.len() as u32;
+                if n == 0 || layers + n > max_layers || rows + p.along > max_rows || p.across > max_rows {
+                    return None;
+                }
+                let slot = Packed { first_page: layers, row: rows, detail: p.detail.as_ref().map(|_| details) };
+                layers += n;
+                rows += p.along.max(1);
+                details += u32::from(p.detail.is_some());
+                Some(slot)
+            })
+            .collect()
+    }
+}
+
+/// Where one map's pages sit in a world's GPU paint ([`WorldPaint::pack`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Packed {
+    /// Its first page's layer in the world's page array.
+    pub first_page: u32,
+    /// The row its leaf image starts on.
+    pub row: u32,
+    /// Its detail map's layer, if it has one.
+    pub detail: Option<u32>,
+}
+
 /// A number from the file, little-endian like the machine that wrote it.
 fn le32(d: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
