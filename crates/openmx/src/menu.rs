@@ -3284,6 +3284,9 @@ pub struct Art {
     textures: HashMap<&'static str, Texture>,
     /// Each free-ride track's stills, in [`TRACKS`] order.
     stills: Vec<Vec<Texture>>,
+    /// The mod tracks' pictures (P70), by id: a mod's own, or the still the shell took of its
+    /// spawn. Counted after the stills in [`Art::images`].
+    mod_pictures: Vec<(String, Texture)>,
 }
 
 /// How far a pill reaches past each end of its label, in the stage's ems (the concept's
@@ -3302,6 +3305,9 @@ pub enum Part {
     Pill { pill: Bounds, label: Bounds },
     /// A row's label with no pill under it.
     Item(Bounds),
+    /// A track pick's card (P70): its box, its picture's box, and which of [`Art::images`] the
+    /// picture is, `None` for a track with no picture yet.
+    Card { id: String, card: Bounds, picture: Bounds, image: Option<usize>, lit: bool },
 }
 
 impl Art {
@@ -3327,7 +3333,29 @@ impl Art {
             }
             stills.push(these);
         }
-        Ok(Art { textures, stills })
+        Ok(Art { textures, stills, mod_pictures: Vec::new() })
+    }
+
+    /// A mod track's picture (P70), in place of the one it had. The GPU has to be given
+    /// [`Art::images`] again after it.
+    pub fn set_mod_picture(&mut self, id: &str, picture: Texture) {
+        match self.mod_pictures.iter_mut().find(|(i, _)| i == id) {
+            Some(p) => p.1 = picture,
+            None => self.mod_pictures.push((id.to_string(), picture)),
+        }
+    }
+
+    /// Which of [`Art::images`] a track's card shows as its `i`th picture: a disc track's still
+    /// (turning through its five), or a mod's picture; `None` where there is none.
+    pub fn track_image(&self, id: &str, i: usize) -> Option<usize> {
+        let first = TEXTURES.len() + 1;
+        if let Some(track) = TRACKS.iter().position(|t| t.0 == id) {
+            let n = self.stills[track].len();
+            let before: usize = self.stills[..track].iter().map(Vec::len).sum();
+            return (n > 0).then(|| first + before + i % n);
+        }
+        let stills: usize = self.stills.iter().map(Vec::len).sum();
+        self.mod_pictures.iter().position(|(m, _)| m == id).map(|at| first + stills + at)
     }
 
     /// Draw the menu's screen into `frame`. In a ride the frame already holds the ride, which the
@@ -3345,12 +3373,13 @@ impl Art {
     }
 
     /// Every picture [`Art::sprites`] counts into, in its order: the textures in [`TEXTURES`]'
-    /// order, the type's atlas, the stills. The GPU takes them once
+    /// order, the type's atlas, the stills, the mods' pictures. The GPU takes them once
     /// ([`game_render::gpu::Renderer::set_images`]).
     pub fn images(&self) -> Vec<&Texture> {
         let mut all: Vec<&Texture> = TEXTURES.iter().map(|n| &self.textures[n]).collect();
         all.push(&ink::ink().atlas);
         all.extend(self.stills.iter().flatten());
+        all.extend(self.mod_pictures.iter().map(|(_, t)| t));
         all
     }
 
