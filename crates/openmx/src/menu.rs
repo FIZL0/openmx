@@ -477,7 +477,7 @@ impl Menu {
     }
 
     /// Whether the HUD is the original's: its own overlay, the radar on, at its own size. Not a
-    /// departure — the port's HUD starts as the original's — but On reads it.
+    /// departure of its own — since P121 the port's ride HUD is the default — but On reads it.
     pub fn hud_is_original(&self) -> bool {
         let s = &self.settings;
         s.overlay == Overlay::Original && s.minimap && s.hud_scale == HUD_SCALE_DEFAULT
@@ -496,14 +496,17 @@ impl Menu {
     }
 
     /// The Original switch thrown: on puts every departure and the HUD back to the original's; off
-    /// turns every enhancement back on and leaves the HUD as it is.
+    /// turns every enhancement back on, the original's HUD back to the port's ride HUD (P121), and
+    /// leaves the debug HUD, no HUD, the radar and the scale as they are.
     pub fn set_original(&mut self, on: bool) {
         for d in Departure::ALL {
             self.set_departure(d, on);
         }
+        let s = &mut self.settings;
         if on {
-            let s = &mut self.settings;
             (s.overlay, s.minimap, s.hud_scale) = (Overlay::Original, true, HUD_SCALE_DEFAULT);
+        } else if s.overlay == Overlay::Original {
+            s.overlay = Overlay::Hud;
         }
     }
 }
@@ -854,7 +857,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             name: "Rider".into(),
-            overlay: Overlay::Original,
+            overlay: Overlay::default(),
             speedometer: Speedometer::default(),
             minimap: true,
             hud_scale: HUD_SCALE_DEFAULT,
@@ -991,6 +994,11 @@ impl Settings {
                 _ => {}
             }
         }
+        // A file from before P121 has no `hud` line, and its `original` was the only HUD there was
+        // to have: it takes the ride HUD once, and the line written from then on keeps a choice.
+        if s.overlay == Overlay::Original && !pairs(text).any(|(k, _)| k == HUD_KEY) {
+            s.overlay = Overlay::Hud;
+        }
         // An older file's two sliders are a mix of the user's own.
         if tens && text.contains("_volume") {
             s.mix = Mix::Custom;
@@ -1060,6 +1068,13 @@ impl Settings {
             + &self.lobby_seats_text()
             + &self.cameras_text()
             + &self.modifiers_text()
+            + &self.ride_hud_text()
+    }
+
+    /// P121's line saying the file knows the ride HUD, only beside the original's overlay (the one
+    /// pick read differently without it), so a file from before it is written as it was.
+    fn ride_hud_text(&self) -> String {
+        if self.overlay == Overlay::Original { format!("{HUD_KEY} = 1\n") } else { String::new() }
     }
 
     /// The picture's pacing (P90): VSync and the frame limit.
@@ -1199,11 +1214,17 @@ pub fn hud_scale_step(n: u8, down: bool, up: bool) -> u8 {
     }
 }
 
+/// The line that marks a settings file written since the ride HUD (P121): one without it said
+/// `original` when that was the only HUD, and reads as [`Overlay::Hud`].
+const HUD_KEY: &str = "hud";
+
 /// Which overlay a ride draws over each view, as `--overlay` spells it (V26).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Overlay {
-    /// The original's own HUD: its speedometer and its radar, off the disc (`overlay.rs`).
+    /// The port's own ride HUD (P121): the concept's, in vector shapes and our type (`ride_hud.rs`).
     #[default]
+    Hud,
+    /// The original's own HUD: its speedometer and its radar, off the disc (`overlay.rs`).
     Original,
     /// The shell's debug HUD (`hud.rs`).
     Debug,
@@ -1212,11 +1233,12 @@ pub enum Overlay {
 }
 
 impl Overlay {
-    pub const ALL: [Overlay; 3] = [Overlay::Original, Overlay::Debug, Overlay::None];
+    pub const ALL: [Overlay; 4] = [Overlay::Hud, Overlay::Original, Overlay::Debug, Overlay::None];
 
     /// The file's word, which is also `--overlay`'s.
     pub fn word(self) -> &'static str {
         match self {
+            Overlay::Hud => "hud",
             Overlay::Original => "original",
             Overlay::Debug => "debug",
             Overlay::None => "none",
@@ -1236,6 +1258,7 @@ impl Overlay {
 
     fn label(self) -> &'static str {
         match self {
+            Overlay::Hud => "HUD",
             Overlay::Original => "Original",
             Overlay::Debug => "Debug",
             Overlay::None => "None",

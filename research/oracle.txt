@@ -4817,3 +4817,14 @@ asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle
 #   mirror goes into that record. Not ported (follow-up).
 #   Capture rows tear: 5998's P1 is P1 as P2's update left it (before P1's own); 3403's P1 wreck reason
 #   (1, set inside the tick) shows at 3404.
+
+# P121 — how the original's stunt pop-up ends a combo (read for the ride HUD's land/bail colours).
+#   The stunt overlay's HUD listener is booted at boot 0x002a6940 and ticked by boot 0x002a5ba0; the
+#   trick line's update is boot 0x002a54f0 and its text setter boot 0x002a5660 (formats at 0x436b20,
+#   0x436b88, 0x436ba8). A combo's end reaches it as event 2 (landed) or 3 (bailed), and both do the
+#   same thing: set the Stunt movie's "Mode" variable (string at 0x435cc0) to 1 and play it, which
+#   pops the orange text out and away. Neither path changes the text's colour, and no word (LANDED /
+#   BAILED) is drawn. A landed combo of two or more first shows "Stunt Combo Total" (0x436bb8 /
+#   0x436bc0) with the banked total. ELF vaddr = file offset - 0x80 + 0x100000 for these.
+#   Filmed since (P121 journal entry 2, recording2 under Video Capture): a land, a two-trick land and a
+#   bail all stay orange; the end shrinks and fades in ~0.25 s, and the combo total stands ~1 s.
