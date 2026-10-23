@@ -2461,10 +2461,15 @@ impl Crash {
             self.rider_vel = self.bike.body.velocity;
         }
 
-        // The body: the world node's tick, against the terrain. The world's objects are not searched
-        // (see `wreck_bike`), and a part with its collision off searches nothing.
-        {
-            let field = if part.collision_enabled { world.heightfield() } else { None };
+        // The body: the world node's tick, against the terrain and the ecosystem's trees; the world's
+        // other objects are not searched (see `wreck_bike`), and a part with its collision off
+        // searches nothing.
+        if !part.collision_enabled {
+            self.bike.tick(dt, None, &mut NoObjects);
+        } else if let (field, _, Some(trees)) = world.wooded() {
+            self.bike.tick_wooded(dt, field.as_deref(), trees);
+        } else {
+            let field = world.heightfield();
             self.bike.tick(dt, field.as_deref(), &mut NoObjects);
         }
         self.origin = self.bike.origin();

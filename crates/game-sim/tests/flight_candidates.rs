@@ -656,3 +656,115 @@ fn the_plane_gathers_in_its_post_before_the_others_move() {
     assert_eq!(apart, moved, "the candidates apart at the state's centres are the ones that moved");
     assert_eq!(apart.len(), 5, "S96's five: they moved after the plane's gather");
 }
+
+// --- the trees (S102) --------------------------------------------------------------------------------
+
+/// A placed group's fields: its cell's three shorts, its species slot, its two size bytes.
+mod group_at {
+    pub const CELL: u32 = 0x08;
+    pub const MODEL: u32 = 0x0e;
+    pub const HEIGHT: u32 = 0x10;
+    pub const WIDTH: u32 = 0x11;
+}
+
+/// free06's ecosystem from its archive, stood on its ground as the loader stands it, and its trunks
+/// built on the state's own curve table.
+fn free06_trees(ee: &Ee) -> Option<game_sim::eco::Trees> {
+    let kit = Kit::load().ok()?;
+    let mut file = std::fs::File::open(kit.ctx("iso").join("MX.PSR")).ok()?;
+    let mut front = vec![0u8; 64 << 10];
+    std::io::Read::read_exact(&mut file, &mut front).expect("the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find(TRACK)?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    std::io::Read::read_exact(&mut file, &mut bytes).expect("read");
+    let res = Res::parse(&bytes).ok()?;
+    let read = |suffix: &str| {
+        let e = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(suffix)).unwrap_or_else(|| panic!("free06 has no {suffix}"));
+        res.read(&bytes, e).expect("a free06 member")
+    };
+    let scene = Scene::parse(&read(".scn")).expect("free06's scene");
+    let terrain_bytes = read(&scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn"));
+    let terrain = Terrain::parse(&terrain_bytes).expect("free06's terrain");
+    let mut eco = game_sim::eco::Ecosystem::parse(&read(".esb")).expect("free06.esb parses");
+    let layout = &scene.terrain;
+    let extent = F::from(layout.width.max(layout.breadth) as i32 * game_sim::world::SAMPLES_PER_WIDTH as i32) * terrain.scale;
+    let ground = Ground::new(&terrain, layout);
+    let field = ground.field();
+    eco.stand(extent, |p| F(game_sim::contact_search::ground(&field, p).point.y()));
+    let table = ee.u32_at(addr("curve_table_ptr").unwrap());
+    let entries: Vec<[f32; 2]> = (0..game_sim::camera::CURVE_ENTRIES as u32)
+        .map(|i| [f32::from_bits(ee.u32_at(table + 8 * i)), f32::from_bits(ee.u32_at(table + 8 * i + 4))])
+        .collect();
+    let curve = game_sim::camera::CurveTable::from_entries(&entries);
+    let (trees, missed) = game_sim::eco::Trees::new(&eco, game_sim::eco::cell_size(extent), &curve);
+    assert!(missed.is_empty(), "free06's solids the port does not build: {missed:?}");
+    Some(trees)
+}
+
+/// **The trees in the tree** (S102): free06's plants, put in the port's tree as placed groups over
+/// its props ([`flight_search::world_wooded`]), sit in the save state's tree node for node and, within
+/// each node, in the same order among the props; each is at the state's cell (its height the one the
+/// loader stood it at) with the state's size bytes.
+#[test]
+fn the_plants_are_in_the_props_tree_where_the_original_put_them() {
+    let Some(ee) = plane() else { return };
+    let Some((props, field)) = free06() else { return };
+    let Some(trees) = free06_trees(&ee) else { return };
+    let p = the_plane(&ee);
+    let (broad, objects) = flight_search::world_wooded(&props.props, Some(&trees), None, Some(field), Vf::new(0.0, 0.0, 0.0, 1.0), F::ZERO);
+    let tree = tree_of(&broad);
+    let first_group = objects.iter().position(|c| c.class == Class::Group).expect("free06 has plants");
+    assert_eq!(first_group, FIRST + props.props.len(), "the groups follow the props");
+
+    // The props as before (their own collidables sit in front of the groups).
+    let mut index = scenery_index(&ee, &broad, &objects[..first_group], p.tree);
+    assert_eq!(index.len(), props.props.len(), "the state's scene meshes and free06's props");
+
+    // The state's groups by their cell on the ground plane and their size bytes.
+    let mut by_place: HashMap<(u16, u16, i8, i8), Vec<usize>> = HashMap::new();
+    for (i, g) in trees.groups().iter().enumerate() {
+        by_place.entry((g.cell[0], g.cell[2], g.height, g.blend)).or_default().push(i);
+    }
+    let (mut groups, mut stood, mut off) = (0, 0, Vec::new());
+    for (_, slots) in tree_slots(&ee, ee.u32_at(p.tree + tree_at::ROOT)) {
+        for o in slots {
+            if o == 0 || u32::from(ee.u8_at(o + at::CLASS)) != 3 || index.contains_key(&o) {
+                continue;
+            }
+            let cell = [0, 2, 4].map(|k| ee.u16_at(o + group_at::CELL + k));
+            let key = (cell[0], cell[2], ee.u8_at(o + group_at::HEIGHT) as i8, ee.u8_at(o + group_at::WIDTH) as i8);
+            let found = by_place.get(&key).unwrap_or_else(|| panic!("the state's group {o:#x} at {key:?} is none of the port's plants"));
+            // Two plants on one spot of one size: take the first not yet named.
+            let taken: std::collections::HashSet<usize> = index.values().copied().collect();
+            let g = *found.iter().find(|&&g| !taken.contains(&(first_group + g))).unwrap_or_else(|| panic!("{o:#x}: every plant at {key:?} is taken"));
+            let ours = &trees.groups()[g];
+            if ours.cell[1] != cell[1] {
+                off.push((o, cell[1], ours.cell[1]));
+            }
+            assert_eq!(u32::from(ee.u8_at(o + group_at::MODEL)) + 1, u32::from(ours.model), "{o:#x}'s species (game slot n - 1)");
+            stood += usize::from(ours.cell[1] == cell[1]);
+            index.insert(o, first_group + g);
+            groups += 1;
+        }
+    }
+    assert!(off.is_empty(), "{} of {groups} plants at another height than the state's, e.g. {:?}", off.len(), &off[..off.len().min(8)]);
+    assert_eq!(groups, trees.groups().len(), "the state's groups and free06's plants");
+
+    let theirs: HashMap<Vec<u8>, Vec<usize>> = tree_slots(&ee, ee.u32_at(p.tree + tree_at::ROOT))
+        .into_iter()
+        .map(|(path, slots)| (path, slots.into_iter().filter_map(|o| index.get(&o).copied()).collect::<Vec<_>>()))
+        .filter(|(_, s)| !s.is_empty())
+        .collect();
+    let ours: HashMap<Vec<u8>, Vec<usize>> = port_slots(tree).into_iter().filter(|(_, s)| !s.is_empty()).collect();
+    let mut paths: Vec<_> = theirs.keys().chain(ours.keys()).cloned().collect();
+    paths.sort();
+    paths.dedup();
+    let mut entries = 0;
+    for path in &paths {
+        assert_eq!(ours.get(path), theirs.get(path), "the props and plants in node {path:?}");
+        entries += ours[path].len();
+    }
+    eprintln!("{groups} plants ({stood} at the state's height) and {} props in {entries} node entries over {} nodes", props.props.len(), paths.len());
+}

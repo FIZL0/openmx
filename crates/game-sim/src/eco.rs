@@ -7,9 +7,11 @@
 //! * **The shapes.** A species lists solid records — `u32 kind, vec3 at, 12 bytes, f32 radius,
 //!   f32 height` — and the ecosystem's loader turns each into a collidable when the scene asks it to
 //!   (a free ride does). Every tree of the disc's free tracks has one, kind 1, at the origin, radius
-//!   1.5 and 30 to 50 high: an upright sixteen-sided prism, the trunk. Bushes have none. The other
-//!   kinds (0, a mesh file by the species' name; 2 and 3, shapes of their own classes) are not used by
-//!   any species this module has seen and are not ported ([`Trees::new`] skips them, and says so).
+//!   1.5 and 30 to 50 high: an upright sixteen-sided prism, the trunk. Bushes have none. Kind 2 is a
+//!   sphere (MX vs. ATV's tracks have them, S102): a part the ray probe's narrow phase only answers
+//!   yes or no to, writing no contact, so it is kept as a part that is never tested. Kinds 0 (a mesh
+//!   file by the species' name) and 3 (a shape class of its own) stand on no track of either game's
+//!   discs and are not built ([`Trees::new`] skips them, and says so).
 //! * **The mesh.** [`cylinder`] lays out the prism exactly — its sixteen corners come off the engine's
 //!   `{cos, sin}` table without the table's correction — and [`build`] is the engine's collision-tree
 //!   builder, the one every mesh made at run time goes through: each triangle's plane, the identity
@@ -23,10 +25,14 @@
 //! bike's eleven body rays search placed groups, its swept-sphere probe does not, and the put-back
 //! never sweeps a group but refuses any spot within twenty feet of one ([`Trees::crowded`], S75's
 //! rule). The port has no body rays (S86/S87), so [`World::groups`] answers its own frame probes and
-//! the head ray, and nothing else: see the S97 journal.
+//! the head ray: see the S97 journal. The biplane's and the wreck bike's ray probes search them
+//! through their nearby lists as the original's do, the plants placed groups in the world's tree
+//! ([`World::wooded`], [`crate::flight_search::Scene::wooded`], S102); the camera never asks the
+//! world for anything but the terrain.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
+use crate::broad_phase::Model;
 use crate::camera::CurveTable;
 use crate::collide::{Bundle, Record};
 use crate::contact_search::Heightfield;
@@ -38,6 +44,10 @@ use ps2_float::{Acc, F, Vf, fpu, vu};
 
 /// The solid record's kind for an upright cylinder.
 pub const CYLINDER: u32 = 1;
+
+/// The solid record's kind for a sphere (S102): a collidable of the sphere class, `radius` round at
+/// `at`. MX vs. ATV's tracks stand some; no MXU species has one.
+pub const SPHERE: u32 = 2;
 
 /// How many sides the original gives a cylinder: sixteen corners a sixteenth of a turn apart.
 pub const SIDES: usize = 16;
@@ -65,6 +75,8 @@ pub struct Solid {
 pub struct Species {
     /// The model's name, which a kind-0 solid would load its mesh by.
     pub model: String,
+    /// Feet: the usual, the least and the most — the original's `+0x100`, `+0x104`, `+0x108`.
+    pub height: [F; 3],
     /// Feet: the usual, the least and the most — the original's `+0x10c`, `+0x110`, `+0x114`.
     pub width: [F; 3],
     pub solids: Vec<Solid>,
@@ -145,7 +157,7 @@ impl Ecosystem {
             }
             let model = r.string()?;
             r.string()?; // the billboard
-            let _height = [r.f()?, r.f()?, r.f()?];
+            let height = [r.f()?, r.f()?, r.f()?];
             let width = [r.f()?, r.f()?, r.f()?];
             r.take(5 * 4 + 12)?; // the billboard's rectangle and trunk, and three words
             if version == 2 {
@@ -160,7 +172,7 @@ impl Ecosystem {
                 r.take(12)?;
                 solids.push(Solid { kind, at, radius: r.f()?, height: r.f()? });
             }
-            species.push(Some(Species { model, width, solids }));
+            species.push(Some(Species { model, height, width, solids }));
         }
         r.maybe_string()?; // the shrubbery
         if version == 2 {
@@ -510,13 +522,33 @@ impl Built {
 
 // --- the plants --------------------------------------------------------------------------------------
 
-/// A placed group, as the put-back's rule reads it: the plant's cell on the ground plane, its reach,
-/// and whether its species has any parts.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Group {
-    cell: [u16; 3],
-    reach: F,
-    parts: bool,
+/// A placed group: one plant as the broad phase holds it (S102) and the put-back's rule reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Group {
+    /// The plant's cell, its species' slot, and its two size bytes.
+    pub cell: [u16; 3],
+    pub model: u8,
+    pub blend: i8,
+    pub height: i8,
+    /// Its reach on the ground plane: the species' usual width, `blend` 128ths of the way to its widest.
+    pub reach: F,
+    /// Half its height: the species' usual, `height` 128ths of the usual less the least further, halved.
+    pub half_height: F,
+    /// Its species has solids (the count the original's part loop and the put-back read).
+    pub solid: bool,
+    /// Its parts, one per solid in the species' order: a trunk by its index in [`Trees::props`], or
+    /// `None` for one no search the port runs takes a contact from (a sphere, or a kind not built).
+    pub parts: Vec<Option<usize>>,
+}
+
+impl Group {
+    /// The box the loader puts the plant in its world tree with: on the plant's cell (`cell` feet a
+    /// step), from its foot up its height, `reach` either way across.
+    pub fn bounds(&self, cell: F) -> ([F; 4], [F; 4]) {
+        let at = |c: u16| F::from(i32::from(c)) * cell;
+        let centre = [at(self.cell[0]), self.half_height + at(self.cell[1]), at(self.cell[2]), F::ZERO];
+        (centre, [self.reach, self.half_height, self.reach, F::ZERO])
+    }
 }
 
 /// Every trunk of an ecosystem, stood under its plants.
@@ -526,14 +558,15 @@ pub struct Trees {
     pub props: Props,
     groups: Vec<Group>,
     cell: F,
+    models: Vec<Model>,
 }
 
 impl Trees {
     /// The trunks of `eco` with plants on a grid of `cell` feet, their cylinders laid out off `curve`.
-    /// The second half is a line per solid this module does not build (kinds other than 1).
+    /// The second half is a line per solid this module does not build (kinds other than 1 and 2).
     pub fn new(eco: &Ecosystem, cell: F, curve: &CurveTable) -> (Trees, Vec<String>) {
         let mut missed = Vec::new();
-        let meshes: Vec<Vec<(Mesh, BuiltNode)>> = eco
+        let meshes: Vec<Vec<Option<(Mesh, BuiltNode)>>> = eco
             .species
             .iter()
             .enumerate()
@@ -541,7 +574,11 @@ impl Trees {
                 let Some(sp) = sp else { return Vec::new() };
                 sp.solids
                     .iter()
-                    .filter_map(|s| {
+                    .map(|s| {
+                        if s.kind == SPHERE {
+                            // A part only the hit bit sees: see [`Trees`].
+                            return None;
+                        }
                         if s.kind != CYLINDER {
                             missed.push(format!("{} (slot {slot}): a solid of kind {}, not built", sp.model, s.kind));
                             return None;
@@ -553,21 +590,51 @@ impl Trees {
                     .collect()
             })
             .collect();
-        let mut trees = Trees { props: Props::default(), groups: Vec::with_capacity(eco.plants.len()), cell };
+        let models = eco
+            .species
+            .iter()
+            .map(|s| s.as_ref().map_or(Model::default(), |s| Model { near: s.width[0], far: s.width[2] }))
+            .collect();
+        let mut trees = Trees { props: Props::default(), groups: Vec::with_capacity(eco.plants.len()), cell, models };
         for p in &eco.plants {
             let slot = usize::from(p.species);
-            let width = eco.species[slot].as_ref().map_or([F::ZERO; 3], |s| s.width);
+            let sp = eco.species[slot].as_ref();
+            let width = sp.map_or([F::ZERO; 3], |s| s.width);
             let reach = width[0] + F::from(i32::from(p.width)) * (width[2] - width[0]) / 128.0;
-            trees.groups.push(Group { cell: p.cell, reach, parts: !meshes[slot].is_empty() });
+            let height = sp.map_or([F::ZERO; 3], |s| s.height);
+            let half_height = (height[0] + F::from(i32::from(p.height)) * (height[0] - height[1]) / 128.0) * 0.5;
+            let mut parts = Vec::with_capacity(meshes[slot].len());
             let [x, y, z] = place(p.cell, cell);
-            for (mesh, root) in &meshes[slot] {
+            for m in &meshes[slot] {
+                let Some((mesh, root)) = m else {
+                    parts.push(None);
+                    continue;
+                };
+                parts.push(Some(trees.props.props.len()));
                 let to_world = Mat4([ROWS[0], ROWS[1], ROWS[2], Vf::new(x.0, y.0, z.0, 1.0)]);
                 let from_world = Mat4([ROWS[0], ROWS[1], ROWS[2], Vf::new(fpu::neg(x.0), fpu::neg(y.0), fpu::neg(z.0), 1.0)]);
                 let centre = Vf::new((root.centre[0] + x).0, (root.centre[1] + y).0, (root.centre[2] + z).0, 1.0);
                 trees.props.props.push(Prop { mesh: mesh.clone(), to_world, from_world, centre, radius: root.radius });
             }
+            let solid = !parts.is_empty();
+            trees.groups.push(Group { cell: p.cell, model: p.species, blend: p.width, height: p.height, reach, half_height, solid, parts });
         }
         (trees, missed)
+    }
+
+    /// The plants as placed groups, in the file's order.
+    pub fn groups(&self) -> &[Group] {
+        &self.groups
+    }
+
+    /// Feet a plant's cell steps.
+    pub fn cell(&self) -> F {
+        self.cell
+    }
+
+    /// Each species slot's reach at blend 0 and 128, as the broad phase measures a group by.
+    pub fn models(&self) -> &[Model] {
+        &self.models
     }
 
     /// Sweep a world-space bundle against every trunk it could reach ([`Props::sweep`]).
@@ -587,7 +654,7 @@ impl Trees {
             let (dx, dz) = (x - F(centre.x()), z - F(centre.z()));
             let gap = Acc::mula(dx, dx).madd(dz, dz).sqrt() - (F::ZERO + g.reach);
             let gap = if gap <= 0.0 { F::ZERO } else { gap };
-            gap < radius && g.parts && Acc::mula(dx, dx).madd(dz, dz) <= CROWDED
+            gap < radius && g.solid && Acc::mula(dx, dx).madd(dz, dz) <= CROWDED
         })
     }
 }
@@ -635,6 +702,11 @@ impl<W: World> World for Wooded<W> {
 
     fn collision(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&world::Props>) {
         self.world.collision()
+    }
+
+    fn wooded(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&world::Props>, Option<&Trees>) {
+        let (field, props) = self.world.collision();
+        (field, props, Some(&self.trees))
     }
 }
 
