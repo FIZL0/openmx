@@ -123,7 +123,10 @@ struct ViewUniform {
     forward: [f32; 4],
     right: [f32; 4],
     up: [f32; 4],
-    _pad: [f32; 12],
+    /// Where the view's coordinates start (MD15): the camera's eye. Everything is drawn relative to
+    /// it, so a world 116,000 feet across does not jitter where it is drawn far from the origin.
+    origin: [f32; 4],
+    _pad: [f32; 8],
 }
 
 #[repr(C)]
@@ -576,6 +579,8 @@ pub struct Renderer {
     props: Vec<Prop>,
     /// The scene's trees and bushes (V48), drawn with the props.
     grove: Option<crate::eco::Grove>,
+    /// More groves, each with its owner (MD15): a world's tiles', moved to where each tile is.
+    groves: Vec<(u32, crate::eco::Grove)>,
     /// How far the world is drawn (V32), and how far apart the ground's two farthest points are.
     graphics: Graphics,
     span: f32,
@@ -600,7 +605,12 @@ struct Prop {
     name: String,
     model: Option<Option<usize>>,
     at: M4,
+    /// Whose it is: [`SCENE`] for the scene's, or what [`Renderer::add_props`] was told (MD15).
+    owner: u32,
 }
+
+/// The owner of the scene's own props and grove ([`Renderer::set_scene`]).
+const SCENE: u32 = u32::MAX;
 
 /// A run of copies of one model at one level of detail, in one view.
 #[derive(Clone, Copy)]
@@ -1252,7 +1262,11 @@ impl Renderer {
         let info = adapter.get_info();
         // WebGL2's limits, raised to the size of texture this adapter can take: what is drawn here can
         // be drawn in a browser.
-        let limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        let mut limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        // And to as many array layers as it has: a world's ground pages (MD15: a disc map's baked
+        // paint is 144 of them) need more than WebGL2's 256; a device with fewer draws the maps past
+        // them in dirt ([`WorldPaint::pack`]).
+        limits.max_texture_array_layers = limits.max_texture_array_layers.max(adapter.limits().max_texture_array_layers);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("openmx"),
@@ -1497,6 +1511,7 @@ impl Renderer {
             ground: None,
             props: Vec::new(),
             grove: None,
+            groves: Vec::new(),
             graphics: Graphics::default(),
             span: 0.0,
             scratch: Vec::new(),
@@ -1520,14 +1535,99 @@ impl Renderer {
                 name: p.model.clone(),
                 model: None,
                 at: p.transform(),
+                owner: SCENE,
             })
             .collect();
         self.grove = scene.ecosystem.clone();
+        self.groves.clear();
+    }
+
+    /// More props drawn in every frame from now on, and a grove, as `owner`'s (MD15: a world tile's,
+    /// already moved to where the tile is), until [`Renderer::drop_owner`] lets them go.
+    pub fn add_props(&mut self, owner: u32, props: &[crate::scene::Placement], grove: Option<crate::eco::Grove>) {
+        let lod = self.grove.as_ref().or(self.groves.first().map(|(_, g)| g)).map(|g| g.lod);
+        self.props.extend(props.iter().map(|p| Prop { name: p.model.clone(), model: None, at: p.transform(), owner }));
+        if let Some(mut g) = grove {
+            if let Some(lod) = lod {
+                g.lod = lod;
+            }
+            self.groves.push((owner, g));
+        }
+    }
+
+    /// Stop drawing what `owner` added, and let go of its models and textures on the GPU: the
+    /// models named, and every material painted with one of the textures. Their places stay, empty,
+    /// so every other index still means what it did; a model asked for again is uploaded again.
+    pub fn drop_owner(&mut self, owner: u32, models: &[String], textures: std::ops::Range<usize>) {
+        self.props.retain(|p| p.owner != owner);
+        self.groves.retain(|(o, _)| *o != owner);
+        for name in models {
+            if let Some(Some(id)) = self.model_ids.remove(name) {
+                // Its place stays, so every later model keeps its index; its vertices go.
+                let m = &mut self.models[id];
+                m.vertices = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("dropped model"),
+                    size: 4,
+                    usage: wgpu::BufferUsages::VERTEX,
+                    mapped_at_creation: false,
+                });
+                m.groups.clear();
+            }
+        }
+        if textures.is_empty() {
+            return;
+        }
+        let gone: Vec<(MaterialKey, usize)> = self
+            .material_ids
+            .iter()
+            .filter(|(k, _)| k.texture.is_some_and(|t| textures.contains(&t)))
+            .map(|(k, &id)| (*k, id))
+            .collect();
+        if !gone.is_empty() {
+            // A bind group holds its texture; one painted plain white in its place lets it go.
+            let blank = self.blank_material();
+            for (key, id) in gone {
+                self.material_ids.remove(&key);
+                self.materials[id].bind = blank.clone();
+                self.materials[id].rest = None;
+            }
+        }
+        for t in textures {
+            self.textures.remove(&t);
+        }
+    }
+
+    /// A material bind group with no texture of its own, for a dropped material's place.
+    fn blank_material(&self) -> wgpu::BindGroup {
+        let uniform = MaterialUniform { constant: [128.0; 4], cutoff: 0.0, shading: 0, coverage: 0, below: 256.0 };
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("dropped material"),
+            contents: bytemuck::bytes_of(&uniform),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("dropped material"),
+            layout: &self.material_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.white) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        })
+    }
+
+    /// Where `owner`'s props are drawn now, in world feet: what a test reads to see a world tile's
+    /// props stood at its offset (MD15).
+    pub fn props_of(&self, owner: u32) -> Vec<crate::mat::V3> {
+        self.props.iter().filter(|p| p.owner == owner).map(|p| p.at.point(crate::mat::V3 { x: 0.0, y: 0.0, z: 0.0 })).collect()
     }
 
     /// How the scene's plants change from model to picture from now on (P126's Plants switch).
     pub fn set_plant_lod(&mut self, lod: crate::eco::Lod) {
         if let Some(g) = &mut self.grove {
+            g.lod = lod;
+        }
+        for (_, g) in &mut self.groves {
             g.lod = lod;
         }
     }
@@ -1812,6 +1912,7 @@ impl Renderer {
         self.statics_written = 0;
         self.props.clear();
         self.grove = None;
+        self.groves.clear();
     }
 
     /// Wait for everything submitted so far to be drawn.
@@ -2210,11 +2311,16 @@ impl Renderer {
                 self.model(assets, a.model);
             }
         }
-        if let Some(g) = &self.grove {
-            let names: Vec<String> = g.parts().filter(|n| !self.model_ids.contains_key(*n)).cloned().collect();
-            for name in names {
-                self.model(assets, &name);
-            }
+        let names: Vec<String> = self
+            .grove
+            .iter()
+            .chain(self.groves.iter().map(|(_, g)| g))
+            .flat_map(|g| g.parts())
+            .filter(|n| !self.model_ids.contains_key(*n))
+            .cloned()
+            .collect();
+        for name in names {
+            self.model(assets, &name);
         }
         let pose_starts = self.write_palette(frame.poses);
 
@@ -2228,6 +2334,7 @@ impl Renderer {
         };
         let (fog, far) = self.fog(light);
         self.scratch.clear();
+        let mut origins = Vec::with_capacity(views.len());
         for (v, view) in views.iter().enumerate() {
             let [_, _, w, h] = view.rect;
             let (w, h) = (w * target.scale, h * target.scale);
@@ -2249,8 +2356,12 @@ impl Renderer {
             }
             let half_h = (camera.fov / 2.0).tan();
             let half_w = half_h * w as f32 / h.max(1) as f32;
+            // Drawn relative to the eye (MD15): the matrix looks from the origin, and every point
+            // and copy is moved by the eye before it, so far from the map's origin nothing jitters.
+            let from_origin = Camera { eye: v3(0.0, 0.0, 0.0), at: camera.at.sub(camera.eye), ..*camera };
+            origins.push(camera.eye);
             let u = ViewUniform {
-                vp: reversed(vp).0,
+                vp: reversed(view_projection(&from_origin, w, h, far)).0,
                 eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
                 sun: [light.sun.x, light.sun.y, light.sun.z, 0.0],
                 sun_color: [light.sun_color[0], light.sun_color[1], light.sun_color[2], 0.0],
@@ -2260,7 +2371,8 @@ impl Renderer {
                 forward: [forward.x, forward.y, forward.z, 0.0],
                 right: [right.x * half_w, right.y * half_w, right.z * half_w, 0.0],
                 up: [up.x * half_h, up.y * half_h, up.z * half_h, 0.0],
-                _pad: [0.0; 12],
+                origin: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
+                _pad: [0.0; 8],
             };
             let at = v * VIEW_STRIDE as usize;
             uniforms[at..at + std::mem::size_of::<ViewUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
@@ -2314,7 +2426,7 @@ impl Renderer {
             // the original's rule the pictures come in see-through as the actors' ghosts are drawn;
             // under the smooth one (V55) model and picture each draw their share of a screen
             // pattern, so they batch with every other copy of their model and need no sorting.
-            if let Some(grove) = &self.grove {
+            for grove in self.grove.iter().chain(self.groves.iter().map(|(_, g)| g)) {
                 let species = grove.ecosystem.species.len();
                 let ids: Vec<Option<usize>> = grove.parts().map(|n| self.model_ids.get(n).copied().flatten()).collect();
                 let mut plants = Vec::new();
@@ -2357,7 +2469,12 @@ impl Renderer {
                     count: 1,
                 }),
             }
-            self.flat.push(*inst);
+            let mut inst = *inst;
+            let o = origins[view];
+            inst.m[3][0] -= o.x;
+            inst.m[3][1] -= o.y;
+            inst.m[3][2] -= o.z;
+            self.flat.push(inst);
         }
         if self.flat.len() as u64 > self.instance_capacity {
             self.instance_capacity = (self.flat.len() as u64).next_power_of_two();
@@ -3199,6 +3316,7 @@ struct View {
   forward: vec4f,
   right: vec4f,
   up: vec4f,
+  origin: vec4f,
 }
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var palette: texture_2d<f32>;
@@ -3207,8 +3325,9 @@ struct View {
 fn rows(m: mat4x4f, p: vec3f) -> vec4f {
   return p.x * m[0] + p.y * m[1] + p.z * m[2] + m[3];
 }
+// `vp` looks from the origin (MD15): a point is moved by the view's origin, the camera's eye, first.
 fn to_clip(p: vec3f) -> vec4f {
-  return rows(view.vp, p);
+  return rows(view.vp, p - view.origin.xyz);
 }
 fn fog_at(p: vec3f) -> f32 {
   return clamp((distance(p, view.eye.xyz) - view.fog.x) / max(view.fog.y - view.fog.x, 1.0), 0.0, view.fog.w);
@@ -3227,6 +3346,7 @@ struct View {
   forward: vec4f,
   right: vec4f,
   up: vec4f,
+  origin: vec4f,
 }
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var palette: texture_2d<f32>;
@@ -3307,10 +3427,11 @@ fn node_matrix(i: u32) -> mat4x4f {
     lit = material.constant.rgb / 128.0;
   }
   var o: Out;
+  // The copy's place came already moved by the view's origin (MD15), as `vp` looks from it.
   o.clip = rows(view.vp, world);
   o.uv = v.uv;
   o.lit = lit;
-  o.fog = clamp((distance(world, view.eye.xyz) - view.fog.x) / max(view.fog.y - view.fog.x, 1.0), 0.0, view.fog.w);
+  o.fog = clamp((distance(world, view.eye.xyz - view.origin.xyz) - view.fog.x) / max(view.fog.y - view.fog.x, 1.0), 0.0, view.fog.w);
   o.cover = v.cover;
   return o;
 }
@@ -3343,6 +3464,7 @@ struct View {
   forward: vec4f,
   right: vec4f,
   up: vec4f,
+  origin: vec4f,
 }
 @group(0) @binding(0) var<uniform> view: View;
 @group(1) @binding(0) var faces: texture_2d_array<f32>;
