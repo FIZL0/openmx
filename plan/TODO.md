@@ -13,6 +13,8 @@ One line is one task, finishable in one session:
 `→ files` is what the task touches — the runner uses it to keep two agents off the same code, so keep it
 honest and specific. `t:` names the test that will prove it; a task with nothing under `t:` either is not a
 port task or is not thought through yet. `j:` is the journal directory under `research/journal/`.
+Keep the line to what it has to do and how it is proved, about 400 characters: the why, the history and
+the design go in `plan/<ID>.md`, which `brief` pastes in whole.
 `- [x]` done (it moves to `plan/DONE.md`), `- [~]` blocked with the reason on the line, `(after X)` waits
 for X, `(in X)` is a subtask of X.
 
