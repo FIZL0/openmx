@@ -380,6 +380,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         mods: false,
         // One pack of it switched off (P118).
         mods_off: vec!["md2".into()],
+        // MX vs. ATV's tricks (MD16).
+        tricks: menu::Tricks::MxVsAtv,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -2641,4 +2643,35 @@ fn a_label_at_1080p_and_4k_has_edges_no_wider_than_a_pixel() {
             assert!(partial > 200 && soft < 0.03, "{h}p gpu: {:.2}% of {partial} edge pixels soft", soft * 100.0);
         }
     }
+}
+
+/// MD16: the Ride tab's Tricks row, Original unless changed, saved only when it is MX vs. ATV — so a
+/// file from before it is written as it was — and greyed with the mods folder off.
+#[test]
+fn the_tricks_row_picks_mx_vs_atv_and_is_saved() {
+    use menu::Tricks;
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.tricks, Tricks::Original);
+    assert!(!m.settings.text().contains("tricks"), "the original's tricks write no line");
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, menu::Key::Tricks);
+    let row = m.page()[m.cursor(Screen::Settings)].clone();
+    assert_eq!(row.value, "Original");
+    assert!(row.about.contains("front flip is the port's own"), "{}", row.about);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.tricks, Tricks::MxVsAtv);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "MX vs. ATV");
+    let text = m.settings.text();
+    assert!(text.contains("tricks = mxvatv\n"), "{text}");
+    assert_eq!(Settings::parse(&text).tricks, Tricks::MxVsAtv);
+    assert_eq!(Settings::parse("tricks = unleashed2\n").tricks, Tricks::Original, "a word it does not know");
+    for t in Tricks::ALL {
+        assert_eq!(Tricks::from_word(t.word()), Some(t));
+    }
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.tricks, Tricks::Original, "round to the original's");
+    m.settings.mods = false;
+    let row = m.page().into_iter().find(|row| row.key == menu::Key::Tricks).unwrap();
+    assert!(row.off.is_some(), "greyed with the mods folder off");
 }

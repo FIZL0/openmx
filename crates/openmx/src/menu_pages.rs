@@ -7,6 +7,11 @@ use super::*;
 /// Settings' tabs, which L1 and R1 step through, round from either end.
 pub const SETTINGS_TABS: [&str; 5] = ["Ride", "Display", "Audio", "Controls", "Camera"];
 pub const TAB_RIDE: usize = 0;
+/// The Tricks row's help (MD16): what MX vs. ATV's tricks add, and what is the port's own.
+const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. MX vs. ATV adds that game's from a trick pack in the mods folder: \
+     extra stunts on Cross and Square (the bike layout's free buttons), and with R1 held a sideways flick off a lip \
+     for a 360 and a forward one for a front flip. The front flip is the port's own, in neither game, and shows the \
+     backflip's pose. Online rides are always Original.";
 pub const TAB_DISPLAY: usize = 1;
 pub const TAB_AUDIO: usize = 2;
 pub const TAB_CONTROLS: usize = 3;
@@ -97,6 +102,7 @@ pub enum Key {
     ModsFolder,
     /// A mod pack by its place in [`Menu::packs`].
     Pack(usize),
+    Tricks,
     Heading,
 }
 
@@ -305,6 +311,8 @@ impl Menu {
             Row::on_off(Key::Wrecks, "Wrecks", self.settings.wrecks, "Whether a hard landing throws the rider off. Off, you ride out every crash."),
             Row::on_off(Key::Bays, "Machines at Bays", self.settings.bays, "The lot's bikes and the biplane stand at their bays, see-through, and the original's pop-up offers them when you stop beside one."),
             mods,
+            Row::choice(Key::Tricks, "Tricks", &Tricks::ALL.map(Tricks::label), Tricks::ALL.iter().position(|t| *t == self.settings.tricks).unwrap_or(0), TRICKS_HELP)
+                .off_if(!self.settings.mods, "Needs a trick pack in the mods folder"),
         ]
     }
 
@@ -651,6 +659,7 @@ impl Menu {
             Key::StartOn => s.machines[0] = Machine::ALL[next(row)],
             Key::Wrecks => s.wrecks = !s.wrecks,
             Key::Bays => s.bays = !s.bays,
+            Key::Tricks => s.tricks = Tricks::ALL[next(row)],
             Key::Modifiers if p.ok => {
                 self.push(Screen::Modifiers);
                 self.cursor[Screen::Modifiers.index()] = 0;

@@ -501,6 +501,35 @@ impl Scheme {
         out.0[pressure(Control::L2)] = 0;
         out
     }
+
+    /// [`Scheme::ride`] on a ride with MX vs. ATV's tricks (MD16), which reads its two extra trick
+    /// buttons off the report's R2 and L2 (`game_sim::trick_pack::EXTRA_CONTROLS`). Under the new
+    /// scheme the pad's Cross and Square, which [`Scheme::ride`] lets go, become them, bit and pressure
+    /// byte together. The extras are the new layout's only: under the original's the pad's R2 and L2
+    /// are let go instead, so they never start one. With `tricks` off this is [`Scheme::ride`] exactly.
+    pub fn ride_tricks(self, report: Report, tricks: bool) -> Report {
+        let mut out = self.ride(report);
+        if !tricks || report.status() == 0xff {
+            return out;
+        }
+        let pressure = |c: Control| c.binding().pressure as usize;
+        let mut held = out.buttons() & !game_sim::input::mask_of(&[Control::L2, Control::R2]);
+        out.0[pressure(Control::R2)] = 0;
+        out.0[pressure(Control::L2)] = 0;
+        if self == Scheme::New {
+            let was = report.buttons();
+            for (to, from) in game_sim::trick_pack::EXTRA_CONTROLS.into_iter().zip([Control::Cross, Control::Square]) {
+                if was & from.mask() != 0 {
+                    held |= to.mask();
+                }
+                out.0[pressure(to)] = report.0[pressure(from)];
+            }
+        }
+        let low = !held;
+        out.0[2] = (low >> 8) as u8;
+        out.0[3] = low as u8;
+        out
+    }
 }
 
 /// How the biplane's stick reads at every attitude (P50, P69).
@@ -3273,6 +3302,36 @@ pub(crate) mod tests {
     /// line as it was then, this machine's own file among them (pre-P40's select and start) — is
     /// read as no file at all, so the new layout gets its keys; a line the player changed is theirs
     /// under both layouts.
+    /// MD16: with MX vs. ATV's tricks the new layout's Cross and Square reach the ride as its two
+    /// extra trick buttons, the original's layout gets none, and with the original's tricks the
+    /// report is [`Scheme::ride`]'s to the byte.
+    #[test]
+    fn the_new_layout_s_face_buttons_are_the_extra_tricks() {
+        let mut report = Report::idle();
+        for c in [Control::Cross, Control::Square, Control::R2, Control::L2, Control::R1] {
+            press(&mut report, c, 0xc0);
+        }
+        for scheme in [Scheme::New, Scheme::Original] {
+            assert_eq!(scheme.ride_tricks(report, false), scheme.ride(report));
+        }
+        let new = Scheme::New.ride_tricks(report, true);
+        let ridden = Scheme::New.ride(report);
+        let extras = game_sim::input::mask_of(&game_sim::trick_pack::EXTRA_CONTROLS);
+        assert_eq!(new.buttons() & !extras, ridden.buttons(), "the gas, the brake and R1 as they were");
+        assert_eq!(new.buttons() & extras, extras);
+        for c in game_sim::trick_pack::EXTRA_CONTROLS {
+            assert_eq!(new.pressure(c.binding().pressure), 0xc0);
+        }
+        let mut faces = Report::idle();
+        press(&mut faces, Control::R1, 0xff);
+        let alone = Scheme::New.ride_tricks(faces, true);
+        assert_eq!(alone.buttons() & extras, 0, "no face button, no extra");
+        let old = Scheme::Original.ride_tricks(report, true);
+        assert_eq!(old.buttons() & extras, 0, "the original's layout has no extras");
+        assert_eq!(old.buttons(), report.buttons() & !extras);
+        assert_eq!(Scheme::New.ride_tricks(Report::missing(), true), Report::missing());
+    }
+
     #[test]
     fn an_old_controls_file_keeps_each_layout_s_keys() {
         let old = "triangle = V PadNorth\ncircle = C PadEast\ncross = X Space PadSouth\nsquare = Z PadWest\n\

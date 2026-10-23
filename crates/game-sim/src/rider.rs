@@ -981,7 +981,8 @@ impl Rider {
             // and the body's airborne pose is what a stoppie in the air should show too. For a
             // gesture the choice makes no difference: the gesture arm runs in front of this one.
             airborne: ride.air.airborne,
-            backflip: tricks.requested == Trick::BACKFLIP,
+            // MD16's front flip has no clip in either game: it shows the backflip's until one exists.
+            backflip: tricks.requested == Trick::BACKFLIP || tricks.requested == Trick::FRONTFLIP,
             no_hander: tricks.no_hander,
             // Down, or down as the request last saw it: on the tick the wreck clock puts the rider
             // back the body is still in the wreck (S74). The wreck's own entry is not held back the
