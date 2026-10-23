@@ -340,11 +340,23 @@ pub fn move_look(look: &mut game_render::scene::Scene, by: [F; 2]) {
 /// cell's middle, so the drawn seams are the ridden ones). Each piece's chunks are numbered in a
 /// column band of their own, so the GPU stitches a piece's chunks to each other and to nothing else.
 pub fn chunks(w: &WorldMod, tiled: &Tiled, cells: u32) -> Vec<game_render::gpu::GroundChunk> {
+    chunks_counted(w, tiled, cells, &mut |_, _| Ok(())).unwrap_or_default()
+}
+
+/// [`chunks`], telling `tick` how many pieces of how many are done before each chunk (P127's loading
+/// bar), and stopping at the first error it gives back (a cancelled load).
+pub fn chunks_counted(
+    w: &WorldMod,
+    tiled: &Tiled,
+    cells: u32,
+    tick: &mut dyn FnMut(usize, usize) -> Result<(), String>,
+) -> Result<Vec<game_render::gpu::GroundChunk>, String> {
     let cells = cells.max(1).next_power_of_two();
     let mut out = Vec::new();
     let mut column = 0u32;
     let mut files = Files { pieces: w.pieces.clone() };
     for (i, p) in w.pieces.iter().enumerate() {
+        tick(i, w.pieces.len())?;
         let bytes = match files.load_terrain(i) {
             Ok(b) => b,
             Err(e) => {
@@ -358,6 +370,7 @@ pub fn chunks(w: &WorldMod, tiled: &Tiled, cells: u32) -> Vec<game_render::gpu::
         let spacing = ground.spacing;
         let mut widest = 0;
         for mut c in ground.chunks(cells) {
+            tick(i, w.pieces.len())?;
             let (x0, z0) = (c.at.0 * cells, c.at.1 * cells);
             let mut missing = if c.missing.is_empty() { vec![false; (cells * cells) as usize] } else { c.missing.clone() };
             for j in 0..cells {
@@ -385,7 +398,8 @@ pub fn chunks(w: &WorldMod, tiled: &Tiled, cells: u32) -> Vec<game_render::gpu::
         }
         column += widest + 1;
     }
-    out
+    tick(w.pieces.len(), w.pieces.len())?;
+    Ok(out)
 }
 
 impl Files {

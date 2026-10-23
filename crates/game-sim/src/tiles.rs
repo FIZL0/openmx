@@ -141,8 +141,9 @@ pub struct Piece {
     pub shapes: Vec<(Mesh, Placement)>,
 }
 
-/// Where a world's tiles come from: the shell reads a mod's folders, a test writes them.
-pub trait Source {
+/// Where a world's tiles come from: the shell reads a mod's folders, a test writes them. `Send`, so
+/// a ride can be loaded on a thread of its own (P127).
+pub trait Source: Send {
     /// Tile `index`'s terrain and shapes.
     fn load(&mut self, index: usize) -> Result<Piece, String>;
 }
