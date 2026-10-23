@@ -200,6 +200,7 @@ mod track_mods;
 mod track_previews;
 mod trick_packs;
 mod worlds;
+mod world_dress;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
 #[allow(dead_code)]
@@ -2281,6 +2282,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     };
     assets.rename_materials(&vehicle.materials);
 
+    // A world's tiles dress themselves (MD15), the home tile's props among them, each under its own
+    // name: the home scene's are not loaded twice.
+    if world_mod.is_some() {
+        look.models.clear();
+    }
     let mut names: Vec<String> = look.models.iter().map(|p| p.model.clone()).collect();
     names.sort();
     names.dedup();
@@ -2293,8 +2299,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     // The trees and bushes the scene's ecosystem scatters over the ground (V48).
     match game_render::eco::Grove::load(&archives, &look, &place.terrain, &sim_terrain, &mut assets) {
-        // A world's (MD8) would stand in the home tile's coordinates, and only its: none yet.
-        Ok(_) if world_mod.is_some() => println!("ecosystem: not drawn in a world"),
+        // A world's are its tiles', each stood on its own tile (MD15, `world_dress`).
+        Ok(_) if world_mod.is_some() => {}
         Ok(grove) => look.ecosystem = grove,
         Err(e) => println!("ecosystem: {e}"),
     }
@@ -2790,7 +2796,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // In a world the home tile's `.toy` is still in the tile's own feet: its cars find their ground at
     // the tile's offset and are drawn there (MD8).
     let car_shift = world_mod.as_ref().map_or([0.0; 2], |w| w.home_at().map(|a| a.0));
-    let traffic = game_render::toy::Traffic::load(&archives, &stem, &mut |p| car_ground(&mut sim, p, car_shift));
+    // Every tile's cars are its own in a world (MD15, `world_dress`), the home tile's too.
+    let traffic = match &world_mod {
+        Some(_) => game_render::toy::Traffic::default(),
+        None => game_render::toy::Traffic::load(&archives, &stem, &mut |p| car_ground(&mut sim, p, car_shift)),
+    };
     // A car's model object is a scene prop's, so its pose stands in for the file's root node: the
     // train's turned cars (train_car_03/04/05 carry a half turn there) are drawn without it (V46).
     for (car, _) in &traffic.cars {
@@ -3514,6 +3524,35 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         },
     );
 
+    // A world's tiles dressed (MD15): every tile's props, plants and cars near the start now, the
+    // rest as the riders come, each read from its own folder and moved by its offset.
+    let mut dress_stream: Option<world_dress::DressStream> = None;
+    // The near pieces' terrains, for the software renderer's world ground (MD15).
+    let mut soft_terrains: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+    let mut dressed: Vec<world_dress::Dressed> = Vec::new();
+    let world_reach = match &sim {
+        Land::Tiles(t) => Some(t.reach),
+        _ => None,
+    };
+    if let (Some(w), Some(reach)) = (&world_mod, world_reach) {
+        let starts: Vec<[f32; 2]> = std::iter::once(at).chain(garage.plane.as_ref().map(|p| p.at)).map(|p| [p.x(), p.z()]).collect();
+        let dress_at = Instant::now();
+        let (mut stream, first) = world_dress::DressStream::start(w, reach, &starts, args.plants.unwrap_or_default());
+        for b in first {
+            dressed.push(world_dress::take(b, w, &mut assets, &mut |p, by| car_ground(&mut sim, p, by)));
+        }
+        for line in stream.take_log() {
+            println!("{line}");
+        }
+        println!(
+            "world props: {} of {} tiles dressed before the ride in {:.2} s, {} cars on clips",
+            dressed.len(),
+            w.tile_count,
+            dress_at.elapsed().as_secs_f32(),
+            dressed.iter().map(|d| d.traffic.cars.len()).sum::<usize>()
+        );
+        dress_stream = Some(stream);
+    }
     // A world's ground on the GPU (MD17): the pieces near the start now, the rest as the riders come.
     let mut ground_stream: Option<worlds::GroundStream> = None;
     // A world's look by map (MD9): every tile's ground paint, light and sky, read from its folder.
@@ -3554,6 +3593,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let r = renderer_of(&mut offscreen, window).expect("checked");
         r.forget_assets();
         r.set_scene(&look);
+        for d in &dressed {
+            r.add_props(d.index as u32, &d.props, d.grove.clone());
+        }
         r.set_sky(sky.as_ref());
         r.set_ground_painted(&chunks, paint, ground::DIRT)?;
         if let (Some(w), Land::Tiles(t)) = (&world_mod, &sim) {
@@ -4682,6 +4724,33 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     println!("{line} at tick {}", pacer.ticks());
                 }
             }
+            // And what stands on it (MD15).
+            if let (Some(stream), Some(w)) = (&mut dress_stream, &world_mod) {
+                let near: Vec<[f32; 2]> = near.iter().map(|p| [p.x(), p.z()]).collect();
+                for change in stream.update(&near) {
+                    match change {
+                        world_dress::Change::Add(b) => {
+                            let place = &mut world.place;
+                            let d = world_dress::take(b, w, &mut assets, &mut |p, by| car_ground(place, p, by));
+                            if let Some(r) = renderer_of(&mut offscreen, window) {
+                                r.add_props(d.index as u32, &d.props, d.grove.clone());
+                            }
+                            dressed.push(d);
+                        }
+                        world_dress::Change::Drop(i) => {
+                            let Some(at) = dressed.iter().position(|d| d.index == i) else { continue };
+                            let d = dressed.remove(at);
+                            if let Some(r) = renderer_of(&mut offscreen, window) {
+                                r.drop_owner(i as u32, &d.taken.models, d.taken.textures.clone());
+                            }
+                            assets.let_go(&d.taken);
+                        }
+                    }
+                }
+                for line in stream.take_log() {
+                    println!("{line} at tick {}", pacer.ticks());
+                }
+            }
         }
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
@@ -4993,6 +5062,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for (_, at) in &mut traffic_at {
                 at.0[3][0] += car_shift[0];
                 at.0[3][2] += car_shift[1];
+            }
+        }
+        // A world's are each tile's own (MD15), on the same clock, each moved by its tile's offset.
+        if !dressed.is_empty() {
+            let place = &mut world.place;
+            let shown = game_render::toy::between(traffic_before, traffic_time, blend.0);
+            traffic_at.clear();
+            for d in dressed.iter().filter(|d| !d.traffic.cars.is_empty()) {
+                traffic_at.extend(d.cars(shown, &mut |p, by| car_ground(place, p, by)));
             }
         }
         // The markers' slot display (P88), each view its own player's: the selection, the slots, the
@@ -5416,7 +5494,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let draw_at = Instant::now();
             clear(target, look.fog_color);
             stages.mark(stages::Stage::Sky);
-            let mut tris = ground.draw(target, camera, &light, pos, ground.radius());
+            // A world's is every near piece's (MD15), each cell its owner's.
+            let mut tris = match (&world_mod, &world.place) {
+                (Some(w), Land::Tiles(t)) => {
+                    let paint = world_look.as_ref().map(|l| &l.paint);
+                    world_dress::draw_ground(target, camera, &light, pos, w, t, &mut soft_terrains, paint)
+                }
+                _ => ground.draw(target, camera, &light, pos, ground.radius()),
+            };
             stages.mark(stages::Stage::Ground);
             // The sky after the ground and before anything that blends (P47): it only paints where
             // nothing is drawn, and the ground is opaque, so it is the same picture as the sky first
@@ -5518,6 +5603,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
             }
             actor.extend(traffic_at.iter().map(|(model, at)| (model.as_str(), *at)));
+            // A world's tiles' props and plants (MD15), culled at the fog as `draw_scene` culls the
+            // scene's; a plant only once it is solid, as there.
+            let mut plants = Vec::new();
+            for d in &dressed {
+                for p in &d.props {
+                    let radius = assets.models.get(&p.model).map_or(0.0, |l| l.radius);
+                    if p.pos.sub(camera.eye).len() - radius <= light.fog_far {
+                        actor.push((p.model.as_str(), p.transform()));
+                    }
+                }
+                if let Some(grove) = &d.grove {
+                    let fov = game_render::eco::horizontal_fov(camera, target.width as f32 / target.height.max(1) as f32);
+                    grove.draws(camera, fov, light.fog_far, &mut plants);
+                }
+            }
+            actor.extend(plants.iter().filter(|d| d.alpha >= 1.0).map(|d| (d.model, d.at)));
             perf.lap(Stage::Scene, scene_at, spent);
             let draw_at = Instant::now();
             tris += draw_scene(target, &look, &assets, &actor, camera);
@@ -5737,6 +5838,18 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         {
             let hash = r.ground_piece_hash(i as u32).map_or("not held".to_string(), |h| format!("{h:#018x}"));
             println!("world ground under the rider: {} {hash}", w.pieces[i].tile.name);
+        }
+        // And where each dressed tile's props stand as the GPU draws them, so a tile's props can be
+        // seen moved by its offset (MD15).
+        if let Some(w) = &world_mod
+            && !dressed.is_empty()
+            && let Some(r) = renderer_of(&mut offscreen, window)
+        {
+            for d in &dressed {
+                let at = r.props_of(d.index as u32);
+                let (x, z) = at.iter().fold((f32::MAX, f32::MAX), |(x, z), p| (x.min(p.x), z.min(p.z)));
+                println!("world props drawn: {} {} props, lowest x {x:.0}, lowest z {z:.0}", w.pieces[d.index].tile.name, at.len());
+            }
         }
         // And the first player's plane, flown or not, for a tape that switched into it (P102).
         if let Some(flight) = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.as_ref()) {
