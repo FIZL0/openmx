@@ -487,20 +487,26 @@ fn took(rig: &mut Rig, up: Kind) {
 /// up, how hard a preload is shoving the bike, and the score. The port keeps no stunt score yet, so
 /// the score reads 0 — what the original's shows until a trick lands.
 fn gauges(seat: &Seat, rig: &Rig, speedometer: menu::Speedometer) -> overlay::Gauges {
-    let (air, p) = (&seat.sim.rider.ride.air, &seat.sim.phy.air);
     overlay::Gauges {
         feet: rig.odometer.feet,
         bike: seat.garage.up == Kind::Bike,
-        preload: overlay::preload_fill(
-            air.preload_firing,
-            air.preload_force.y(),
-            p.max_preload.0,
-            air.preload_timer.0,
-            p.preload_time.0,
-        ),
+        preload: rig.preload_meter.shown(),
         score: 0,
         modified: rig.modified,
         speedometer,
+    }
+}
+
+/// What the speedometer reads off a seat's rider for the preload meter (V53): nothing on the
+/// plane, where the original shows no meter.
+fn preload_sense(seat: &Seat) -> overlay::PreloadSense {
+    match seat.garage.up {
+        Kind::Bike => overlay::PreloadSense::of(
+            &seat.sim.rider.ride.air,
+            seat.sim.phy.air.max_preload.0,
+            seat.sim.rider.state.wreck.is_some(),
+        ),
+        _ => overlay::PreloadSense::default(),
     }
 }
 
@@ -561,6 +567,8 @@ struct Rig {
     hud: Hud,
     /// The distance this player's odometer shows, under the original's overlay (V26).
     odometer: overlay::Odometer,
+    /// This player's preload meter, a tick at a time (V53).
+    preload_meter: overlay::PreloadMeter,
     bike_model: String,
     body_model: Option<String>,
     /// What bolts onto this player's chassis, each part under the model name it is drawn from: the
@@ -2871,6 +2879,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
+            preload_meter: overlay::PreloadMeter::default(),
             bike_model,
             body_model: own_body,
             parts,
@@ -2891,6 +2900,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // values at draw time instead of being fed them.
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
+            preload_meter: overlay::PreloadMeter::default(),
             bike_model: CHASSIS.to_string(),
             body_model,
             parts: vehicle.parts.clone(),
@@ -3899,6 +3909,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         if simulated {
             traffic_time += f64::from(dt.0);
+        }
+        // The preload meter's movie runs a frame a tick, as the original's HUD does (V53).
+        if simulated {
+            for (seat, rig) in world.seats.iter().zip(&mut rigs) {
+                rig.preload_meter.step(preload_sense(seat));
+            }
         }
         // A world loads the tiles ahead of the riders and lets the far ones go (MD8).
         if simulated && matches!(world.place, Land::Tiles(_)) {
