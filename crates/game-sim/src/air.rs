@@ -240,6 +240,10 @@ pub struct Step {
     /// ([`Spin::applied`]). The airborne control and the wreck test treat it as they treat a
     /// backflip's, and a backflip cannot start under it. False on every ride on the original's tricks.
     pub spinning: bool,
+    /// **The port's own (MD20):** MX vs. ATV's 360 is triggered or turning ([`Spin::active`]). A flip
+    /// cannot start under it unless [`both_at_once`] lets it. False on every ride on the original's
+    /// tricks.
+    pub spin_active: bool,
 }
 
 /// What the wreck test is looking at outside this module: the g loads the chassis measured, the
@@ -1048,7 +1052,7 @@ fn rotate(rows: &[Rotation], active: &mut usize, p: &Params, air: &mut Air, chas
     air.flip_torque_applied = false;
     if !air.flip_active {
         let armed = &rows[*active];
-        if !on_a_lip(air, chassis, step) || step.spinning {
+        if !on_a_lip(air, chassis, step) || ((step.spinning || step.spin_active) && !both_at_once(step)) {
             air.flip_active = false;
             air.flip_armed = false;
         } else if air.flip_armed && (!armed.modifier || step.modifier) && along(armed.gesture, step) > HELD {
@@ -1216,6 +1220,10 @@ pub struct Spin {
     /// wreck).
     pub came_round: bool,
     pub wrecked: bool,
+    /// **The port's own (MD20):** a front flip left the ground with this 360, so its pitch share
+    /// turns the bike nose-down ([`SPIN_PITCH_FOLLOWS_THE_FLIP`]). Latched on the substep the wheels
+    /// leave; false on every 360 alone.
+    pub forward: bool,
 }
 
 /// The heading flattened into the horizontal plane, as an angle 0..2π from `+z`.
@@ -1229,6 +1237,40 @@ fn spin_heading(heading: Vf, table: &AcosTable) -> F {
 fn sign(x: F) -> i32 {
     if x < F::ZERO { -1 } else { 1 }
 }
+
+/// **The port's own (MD20): a flip and a 360 at once, in neither game.** MX vs. ATV's two lip tests
+/// lock each other out (openmx-mods M21, `notes/tricks.md` "Both at once"): the 360 refuses while a
+/// backflip is triggered or turning, the backflip while a 360 is, so the first to fire has the jump
+/// and a same-frame tie goes to the backflip. Here, while this holds, neither refuses for the other:
+/// with R1 held on a lip, the stick on a diagonal arms and fires both (a backflip or the front flip
+/// with a 360), and either can start while the other is triggered and waiting to leave the ground —
+/// until its grace ([`FLIP_GRACE`], [`SPIN_GRACE`]) ends or the wheels leave, after which no lip is
+/// left to start anything on.
+///
+/// The rest of the combination is the two moves as they are alone, which is the rule chosen and not
+/// a gap: each keeps its own torque ([`Air::flip_torque`] on its pitch lane, [`Spin::torque`] on yaw
+/// and its pitch share) and its own decay, both go into the chassis every substep, each ends on its
+/// own test, and each landing test stands — the 360's clip still past [`SPIN_CLIP`] wrecks, and a
+/// flip that is not upright wrecks as it would alone. It scores as both, each move's own points; no
+/// game has a row for the combination (M21 found none in either trick table), so there is no bonus.
+///
+/// [`BOTH_AT_ONCE_UNDER_R1`] is the switch. Without R1 — and on every ride on the original's tricks,
+/// where [`Step::modifier`] is never set — the lock-out is the disc's.
+pub fn both_at_once(step: &Step) -> bool {
+    BOTH_AT_ONCE_UNDER_R1 && step.modifier
+}
+
+/// **The port's own (MD20):** R1 alone lifts the flip/360 lock-out ([`both_at_once`]). `false` would
+/// give MX vs. ATV's exclusive rule (M21) on every ride.
+pub const BOTH_AT_ONCE_UNDER_R1: bool = true;
+
+/// **The port's own (MD20):** a 360 that leaves the ground with the front flip turns its pitch share
+/// nose-down ([`Spin::forward`]), so the cork leans the way the flip goes. MX vs. ATV's 360 pitches
+/// the nose up (−600 to −1100 on the generated bike, against the front flip's 1000 to 1400), and
+/// left as it is the two nearly cancel: measured on the generated lip, the bike yawed round with
+/// its up axis never under 0.75 and the front flip never went over. With a backflip the share
+/// already turns the flip's way, and nothing changes. `false` keeps the share as the 360 alone has it.
+pub const SPIN_PITCH_FOLLOWS_THE_FLIP: bool = true;
 
 /// **MX vs. ATV's 360** (SLUS_211.04, the step after its backflip in the same substep), ported as it
 /// reads. Under R1 alone on a lip, the stick past 0.7 one way arms it and past 0.7 the other way fires
@@ -1244,7 +1286,7 @@ pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, c
     spin.applied = false;
     let x = step.stick.0;
     if !spin.active {
-        let lip = on_a_lip(air, chassis, step) && !air.flip_torque_applied && !air.flip_active;
+        let lip = on_a_lip(air, chassis, step) && (both_at_once(step) || (!air.flip_torque_applied && !air.flip_active));
         if !lip {
             spin.active = false;
             spin.armed = false;
@@ -1272,6 +1314,8 @@ pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, c
         if !air.on_ground {
             spin.armed = true;
             spin.start = spin_heading(step.heading, table);
+            // Both moves are triggered by now: nothing starts once the wheels are off.
+            spin.forward = SPIN_PITCH_FOLLOWS_THE_FLIP && air.flip_active && air.flip_torque.x() > 0.0;
         } else {
             spin.grace = spin.grace - step.dt;
             if spin.grace <= 0.0 {
@@ -1296,7 +1340,10 @@ pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, c
                 let pitch = F(spin.torque.x()) - step.dt * x * t.rate_decrease;
                 spin.torque = Vf::new(pitch.0, yaw.0, spin.torque.z(), spin.torque.w());
             }
-            let m = Vf::new(spin.torque.x(), spin.torque.y(), 0.0, 1.0);
+            // The torque keeps the original's pitch and its decay; only the moment's sign turns with
+            // a front flip.
+            let pitch = if spin.forward { -F(spin.torque.x()) } else { F(spin.torque.x()) };
+            let m = Vf::new(pitch.0, spin.torque.y(), 0.0, 1.0);
             chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(m));
             spin.applied = true;
             spin.ramp = true;

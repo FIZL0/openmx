@@ -5455,6 +5455,18 @@ fn md16_the_pump_without_r1_is_the_original() {
     let (whip, _) = ride_md16(&md16_pack(&p, true).0, wheels, &tables, set, &the_flip_hands(false), 400);
     assert!(whip.iter().all(|t| t.flip_row == 0 && !t.spin.active));
     assert!(came_over(&md16_seats(&whip)) > 5.5, "the whip's gains do not stop the backflip");
+
+    // MD20: the same pump on the diagonal — the 360 backflip's hands, R1 up — is still the original's,
+    // and on the original's tricks MD20's hands with R1 held start no 360.
+    let diagonal: Vec<_> = THE_FLIP.iter().map(|&(at, y)| (at, md16_hands(y, y, false, [false; 2]))).collect();
+    let (original, _) = ride_md16(&p, wheels, &tables, Set::default(), &diagonal, 400);
+    let (pack, _) = ride_md16(&moves_only, wheels, &tables, md16_pack(&p, false).1, &diagonal, 400);
+    assert!(pack.iter().all(|t| t.flip_row == 0 && !t.spin.active), "no 360 on the diagonal with R1 up");
+    for (i, (a, b)) in original.iter().zip(&pack).enumerate() {
+        assert_eq!(a.bits, b.bits, "tick {i}: the diagonal pump without R1 rides as the original's");
+    }
+    let (held, _) = ride_md16(&p, wheels, &tables, Set::default(), &md20_hands(true, true, (220, 40), (220, 40)), 400);
+    assert!(held.iter().all(|t| t.flip_row == 0 && t.spin == game_sim::air::Spin::default()), "Original: no 360 under R1");
 }
 
 /// MD16: where an R1 gesture and a new move read the same input, the original wins. The original's
@@ -5560,4 +5572,134 @@ fn md16_three_sixty_comes_round_or_wrecks() {
     let wreck = ride.iter().position(|t| t.frame.wreck.is_some()).expect("landing mid-clip wrecks");
     assert!(ride[wreck - 1].spin.clip == 2 && ride[wreck].seat.on_ground, "on landing, part way round");
     assert_eq!(ride[wreck].frame.wreck, Some(game_sim::trick::Wreck::from(game_sim::air::Wreck::Tail)));
+}
+
+/// The bike's turn in its own frame, summed tick by tick off the chassis quaternion: (pitch, yaw),
+/// in radians, as M21 measured the original's (the body-frame steps of the quaternion, summed).
+fn md20_turned(ride: &[Md16]) -> (f32, f32) {
+    let q = |t: &Md16| [3, 4, 5, 6].map(|k| f32::from_bits(t.bits[k]));
+    let (mut pitch, mut yaw) = (0.0, 0.0);
+    for w in ride.windows(2) {
+        let ([ax, ay, az, aw], [bx, by, bz, bw]) = (q(&w[0]), q(&w[1]));
+        // conj(a) * b: the step in a's own frame.
+        let x = aw * bx - ax * bw - ay * bz + az * by;
+        let y = aw * by + ax * bz - ay * bw - az * bx;
+        let dw = aw * bw + ax * bx + ay * by + az * bz;
+        let s = if dw < 0.0 { -2.0 } else { 2.0 };
+        pitch += s * x;
+        yaw += s * y;
+    }
+    (pitch, yaw)
+}
+
+/// MD20's hands for a flip and a 360 at once, `back` for a backflip (else a front flip), `right` for a
+/// 360 turning right: R1 held, the stick diagonally against both on the lip, then diagonally into
+/// both; R1 let go and the stick centred in the air, then pushed against both from `x_at` for `x_for`
+/// ticks (the 360's end) and from `y_at` for `y_for` (the flip's stab), and centred again.
+fn md20_hands(back: bool, right: bool, (x_at, x_for): (usize, usize), (y_at, y_for): (usize, usize)) -> Vec<(usize, Controls)> {
+    let (fx, fy) = (if right { 1.0 } else { -1.0 }, if back { 1.0 } else { -1.0 });
+    let mut h = vec![(130, 0.0, 0.0, true, [false; 2]), (158, -fx, -fy, true, [false; 2]), (166, fx, fy, true, [false; 2])];
+    for t in 176..400 {
+        let x = if (x_at..x_at + x_for).contains(&t) { -fx } else { 0.0 };
+        let y = if (y_at..y_at + y_for).contains(&t) { -fy } else { 0.0 };
+        h.push((t, x, y, false, [false; 2]));
+    }
+    md16_script(&h)
+}
+
+/// MD20: the 360 backflip and the 360 front flip, both ways round. One diagonal flick with R1 held
+/// fires the flip and the 360 on the same lip tick; the bike goes once round on its pitch and once
+/// round on its yaw, the rider ends both, it lands on its wheels and scores each move — the flip's
+/// row and the 360's, and nothing for the pair ([`game_sim::air::both_at_once`]).
+#[test]
+fn md20_three_sixty_flips_turn_both_ways_and_land_clean() {
+    use game_sim::score;
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    for back in [true, false] {
+        for right in [true, false] {
+            let name = format!("{} {}", if back { "360 backflip" } else { "360 front flip" }, if right { "right" } else { "left" });
+            let (ride, r) = ride_md16(&q, wheels, &tables, set.clone(), &md20_hands(back, right, (220, 40), (220, 40)), 400);
+            let seats = md16_seats(&ride);
+            let flip = ride.iter().position(|t| t.seat.flip).expect("the flip fires");
+            let spin = ride.iter().position(|t| t.spin.active).expect("the 360 fires");
+            assert_eq!(flip, spin, "{name}: one flick fires both");
+            assert!(ride[flip].seat.lip, "{name}: on the lip");
+            assert_eq!(ride[flip].flip_row, if back { 0 } else { 1 }, "{name}: on the flip's row");
+            assert_eq!(ride[spin].spin.dir, if right { 1 } else { -1 }, "{name}: turning its way");
+            assert_eq!(ride.iter().any(|t| t.spin.forward), !back, "{name}: the 360's pitch follows a front flip only");
+            let (pitch, yaw) = md20_turned(&ride);
+            let over = if back { -pitch } else { pitch };
+            assert!(over > 5.3 && over < 6.5, "{name}: once round on the pitch: {pitch}");
+            let round = if right { yaw } else { -yaw };
+            assert!(round > 1.5 && round < 3.0, "{name}: and the 360 (a cork, as MX vs. ATV's is) on the yaw: {yaw}");
+            assert_eq!(wrecks(&seats), 0, "{name}: it lands");
+            let last = seats.last().unwrap();
+            assert!(last.on_ground && last.up_y > 0.95, "{name}: on its wheels: {}", last.up_y);
+            let scored = |id: u8| ride.iter().any(|t| t.nodes.contains(&id));
+            assert!(scored(if back { score::BACKFLIP } else { score::FRONTFLIP }), "{name}: the flip scores");
+            assert!(scored(if right { score::THREE_SIXTY_RIGHT } else { score::THREE_SIXTY_LEFT }), "{name}: the 360 scores");
+            assert!(r.score.total >= F(25000.0), "{name}: both moves' points: {}", r.score.total.0);
+        }
+    }
+}
+
+/// MD20: either can start while the other is triggered, until the grace ends — the 360 fired on the
+/// lip and the backflip six ticks later, or the other way round, still go round together and land.
+/// Without R1 the second is MX vs. ATV's: a backflip asked for while the 360 turns does not start.
+#[test]
+fn md20_either_starts_while_the_other_is_triggered() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let hands = |second: (f32, f32), r1: bool| {
+        let mut h = vec![(130, 0.0, 0.0, true, [false; 2]), (156, -1.0, -1.0, true, [false; 2]),
+                         (162, second.0, second.1, true, [false; 2]), (168, 1.0, 1.0, r1, [false; 2])];
+        h.extend((176..400).map(|t| (t, if (220..260).contains(&t) { -1.0 } else { 0.0 }, if (220..260).contains(&t) { -1.0 } else { 0.0 }, false, [false; 2])));
+        md16_script(&h)
+    };
+    for (name, second, flip_at, spin_at) in [("360 first", (1.0, -1.0), 168, 162), ("backflip first", (-1.0, 1.0), 162, 168)] {
+        let (ride, _) = ride_md16(&q, wheels, &tables, set.clone(), &hands(second, true), 400);
+        assert_eq!(ride.iter().position(|t| t.seat.flip), Some(flip_at), "{name}: the backflip fires");
+        assert_eq!(ride.iter().position(|t| t.spin.active), Some(spin_at), "{name}: the 360 fires");
+        assert!(ride[flip_at.max(spin_at)].seat.lip, "{name}: both on the lip");
+        let (pitch, _) = md20_turned(&ride);
+        assert!(-pitch > 5.3 && -pitch < 6.5, "{name}: once round backwards: {pitch}");
+        assert_eq!(wrecks(&md16_seats(&ride)), 0, "{name}: it lands");
+        assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::THREE_SIXTY_RIGHT)), "{name}: the 360 scores");
+        assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::BACKFLIP)), "{name}: the backflip scores");
+    }
+    let (ride, _) = ride_md16(&q, wheels, &tables, set, &hands((1.0, -1.0), false), 400);
+    assert_eq!(ride.iter().position(|t| t.spin.active), Some(162), "the 360 fires");
+    assert!(!ride.iter().any(|t| t.seat.flip), "and without R1 the backflip is locked out, as MX vs. ATV's is");
+}
+
+/// MD20: one short of either wrecks as it would alone. The 360 brought round but the backflip
+/// stopped early: the 360 scores, and the bike lands on its nose (the backflip's own wreck test,
+/// clip home). The flip done but the 360 not ended in time: the clip is still part way round when it
+/// is due and the 360 wrecks the rider as it does alone — with the flip still going.
+#[test]
+fn md20_one_short_of_either_wrecks() {
+    use game_sim::{air, trick};
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+
+    let (ride, _) = ride_md16(&q, wheels, &tables, set.clone(), &md20_hands(true, true, (220, 40), (200, 60)), 400);
+    let w = ride.iter().position(|t| t.frame.wreck.is_some()).expect("a backflip stopped short wrecks");
+    let (pitch, _) = md20_turned(&ride[..w]);
+    assert!(-pitch < 5.0, "short of round: {pitch}");
+    assert!(ride[w].seat.on_ground && ride[w - 1].spin.clip == 0, "on landing, the 360 home");
+    assert_eq!(ride[w].frame.wreck, Some(trick::Wreck::from(air::Wreck::Front)), "on its nose");
+    assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::THREE_SIXTY_RIGHT)), "the 360 still scored");
+    assert!(!ride.iter().any(|t| t.nodes.contains(&game_sim::score::BACKFLIP)), "the backflip did not");
+
+    for back in [true, false] {
+        let (ride, _) = ride_md16(&q, wheels, &tables, set.clone(), &md20_hands(back, back, (200, 60), (220, 40)), 400);
+        let w = ride.iter().position(|t| t.frame.wreck.is_some()).expect("a 360 left turning wrecks");
+        assert_eq!(ride[w - 1].spin.clip, 2, "back {back}: the clip part way round");
+        assert!(ride[w].seat.flip, "back {back}: while the flip still goes");
+        assert_eq!(ride[w].frame.wreck, Some(trick::Wreck::from(air::Wreck::Tail)), "back {back}: the 360's wreck");
+    }
 }
