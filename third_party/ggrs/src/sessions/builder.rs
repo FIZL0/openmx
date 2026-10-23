@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::det::HashMap;
 
 use instant::Duration;
 
@@ -337,7 +337,7 @@ impl<T: Config> SessionBuilder<T> {
         }
 
         // count the number of players per address
-        let mut addr_count = HashMap::<PlayerType<T::Address>, Vec<PlayerHandle>>::new();
+        let mut addr_count = HashMap::<PlayerType<T::Address>, Vec<PlayerHandle>>::default();
         for (handle, player_type) in &self.player_reg.handles {
             match player_type {
                 PlayerType::Remote(_) | PlayerType::Spectator(_) => addr_count
