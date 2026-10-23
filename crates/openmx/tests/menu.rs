@@ -934,7 +934,8 @@ fn the_setups_pick_starts_the_ride_on_it() {
     assert_eq!(m.screen(), Some(Screen::Tracks));
     // Square changes 1P's machine; R1 on to 2P and back to bike-then-plane leaves 2P on the plane;
     // R1 again wraps to 1P (P118: the setup strip's seat is on the shoulders, the d-pad's up and
-    // down walk the tracks, and left and right are the seat's machine too).
+    // down walk the tracks; left and right step the pick's categories, of which the disc alone has
+    // one, so they change nothing here).
     tap(&mut m, &mut r, Control::Square);
     assert_eq!(m.settings.machines[0], Machine::Biplane);
     tap(&mut m, &mut r, Control::R1);
@@ -2291,6 +2292,54 @@ fn the_controls_row_offers_the_originals_presets() {
     assert_eq!((0..4).map(|p| menu::keyboard_at(o, p)).collect::<Vec<_>>(), [1, 2, 3, 4]);
 }
 
+/// Left and Right step the pick's categories: the disc's towns, the worlds right after them, then
+/// each pack in its own; up and down wrap inside the lit one, and a pack turned off leaves with its
+/// category (user, 2026-10-23).
+#[test]
+fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
+    let (mut m, mut r) = fresh();
+    m.set_mod_tracks(vec![
+        ("mxvatv_nat01".into(), "Nat 01".into()),
+        ("mxvatv_nat02".into(), "Nat 02".into()),
+        ("untamed_nat_az".into(), "Arizona".into()),
+        ("world_mxu".into(), "MX Unleashed: every map".into()),
+        ("world_ultra".into(), "Ultra".into()),
+    ]);
+    let names: Vec<String> = m.track_groups().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["MX Unleashed", "Worlds", "MX vs. ATV Unleashed", "MX vs. ATV Untamed"]);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    assert_eq!(m.track_group(m.cursor(Screen::Tracks)), 0);
+    // One press to the worlds.
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)), ("world_mxu", "MX Unleashed: every map"));
+    tap(&mut m, &mut r, Control::Down);
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_ultra");
+    tap(&mut m, &mut r, Control::Down);
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_mxu", "down wraps inside the worlds");
+    tap(&mut m, &mut r, Control::Up);
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_ultra");
+    // Left from the first category wraps to the last; the machine stays as it was.
+    let machine = m.settings.machines[0];
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "untamed_nat_az");
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.track_group(m.cursor(Screen::Tracks)), 1);
+    assert_eq!(m.settings.machines[0], machine, "left and right no longer change the machine");
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("world_mxu".into())), "{acts:?}");
+    // Back on the pick it opens on the world, and a category comes back to the ride's track.
+    let mut next = Menu::new(Settings::parse(&m.settings.text()), Controls::default());
+    next.set_mod_tracks(m.mod_tracks.clone());
+    assert_eq!(next.track_at(next.cursor(Screen::Tracks)).0, "world_mxu");
+    // A pack switched off takes its category with it.
+    m.settings.mods_off = vec!["world".into()];
+    let names: Vec<String> = m.track_groups().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["MX Unleashed", "MX vs. ATV Unleashed", "MX vs. ATV Untamed"]);
+}
+
 /// MD2: the track pick lists the mods folder's tracks after the disc's, a mod rides by its id, and
 /// the Mods page turns the folder, or one pack of it, off and is saved. With no mods the pick is the
 /// disc's five.
@@ -2311,7 +2360,9 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
     tap(&mut m, &mut r, Control::Up);
-    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "up from the first wraps to the mod");
+    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len() - 1, "up from the first wraps inside the disc's towns");
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "right is the mods' category");
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Ride("md2_flat".into())), "{acts:?}");
     assert_eq!(m.settings.track, "md2_flat");
