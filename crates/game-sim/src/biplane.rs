@@ -1845,6 +1845,16 @@ pub struct CrashContact {
     /// `|velocity|`, and the `y` of the plane's up row.
     pub speed: F,
     pub up_y: F,
+    /// In a world of several terrains (MD14): the plane is within [`EDGE`] of a hole inside the
+    /// world's rectangle, which throws it back as the rectangle's edge does
+    /// ([`crate::world::World::off_world`]). Never on one terrain, which has no holes.
+    pub holed: bool,
+    /// In a world of several terrains (MD14): the plane is where the world would keep no put-back
+    /// ([`crate::world::World::keeps`]: over no ground, or by an edge or a hole) and below `y` 0,
+    /// under every ground a terrain can hold (its heights are never negative). A thrown plane that
+    /// fell through a hole never comes down on anything, so this counts as its landing. Never on one
+    /// terrain.
+    pub bare: bool,
 }
 
 /// The plane's crash state.
@@ -1915,7 +1925,7 @@ impl Crash {
         dt: F,
     ) -> Crashed {
         let mut out = Crashed::default();
-        if let Some(area) = area.filter(|a| self.reason != THROWN && a.outside(position, F(EDGE))) {
+        if let Some(area) = area.filter(|a| self.reason != THROWN && (a.outside(position, F(EDGE)) || c.holed)) {
             let half_width = F(0.5) * area.width;
             let target = Vf::new(half_width.to_f32(), position.y(), (F(0.5) * area.depth).to_f32(), 1.0);
             let mut toward = minus(target, position);
@@ -1952,7 +1962,7 @@ impl Crash {
         }
         self.clock = self.clock + dt;
         if self.reason == THROWN {
-            if !self.landed && !(self.clock <= THROWN_FOR) && (c.grounded || c.touching) {
+            if !self.landed && !(self.clock <= THROWN_FOR) && (c.grounded || c.touching || c.bare) {
                 self.landed = true;
                 self.clock = F::ZERO;
             }

@@ -37,6 +37,15 @@
 //! the original's own edge test ([`crate::off_map`]) shoots a rider off its outer edge with its own
 //! margin, and nowhere between tiles. Inside that rectangle, a hole (no tile and no join) is asked
 //! the same way through [`World::off_world`].
+//!
+//! **The put-back** (MD14). The original's put-back record keeps any spot it finds fit, and on one
+//! big terrain a thrown bike comes down inside it. A world is narrower than its throw (an arc for
+//! half its width, whichever way it is thrown) and has holes, so a wreck can come down over no
+//! ground at all: there the record keeps nothing ([`Tiled::keeps`]) — no spot no tile owns, and none
+//! the edge test would throw from — and the bike goes back to the last spot it held on ground.
+//!
+//! **The plane** searches one set of shapes in one space, so it is handed every tile's together
+//! ([`Tiled::every_shape`]), read once and kept; the bike's own sweeps go tile by tile as above.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::biplane::Area;
@@ -145,6 +154,12 @@ pub struct Piece {
 pub trait Source {
     /// Tile `index`'s terrain and shapes.
     fn load(&mut self, index: usize) -> Result<Piece, String>;
+
+    /// Tile `index`'s shapes alone, for the plane's search ([`Tiled::every_shape`]): [`Source::load`]'s,
+    /// which a source that can read them without the terrain does.
+    fn shapes(&mut self, index: usize) -> Result<Vec<(Mesh, Placement)>, String> {
+        self.load(index).map(|piece| piece.shapes)
+    }
 }
 
 /// A tile in memory: its terrain's bytes and its shapes, stood in the world.
@@ -193,6 +208,9 @@ pub struct Tiled {
     index: HashMap<(i32, i32), Vec<usize>>,
     /// What loading and dropping did since the shell last took the lines ([`Tiled::take_log`]).
     log: RefCell<Vec<String>>,
+    /// Every tile's shapes in one set, in owner order, once the plane's search has asked
+    /// ([`Tiled::every_shape`]).
+    every: Option<Props>,
 }
 
 /// The index square a world point is in.
@@ -253,6 +271,7 @@ impl Tiled {
             slots: RefCell::new(slots),
             index,
             log: RefCell::new(Vec::new()),
+            every: None,
         })
     }
 
@@ -405,6 +424,35 @@ impl Tiled {
     pub fn field(&self) -> TiledField<'_> {
         TiledField(self)
     }
+
+    /// **Every tile's shapes as one set** (MD14), for the searches that take one set of shapes in one
+    /// space — the plane's ([`crate::flight_search`]) and the wreck bike's: tile by tile in owner
+    /// order, each in world feet, so a shape's place in the set is its [`Tile::first_owner`] plus its
+    /// place in its tile whatever is loaded. Read once from the source, the first time it is asked,
+    /// and kept: the plane's search numbers what it gathered by place in the set, so the set must not
+    /// change as tiles stream in and out. A tile whose shapes do not read adds none, and says so.
+    pub fn every_shape(&mut self) -> &Props {
+        if self.every.is_none() {
+            let mut all = Props::default();
+            for (i, tile) in self.tiles.iter().enumerate() {
+                match self.source.get_mut().shapes(i) {
+                    Ok(shapes) => all.props.extend(shapes.into_iter().map(|(mesh, at)| Prop::place(mesh, &moved(&at, tile.at)))),
+                    Err(e) => self.log.get_mut().push(format!("world: {} has no shapes for the plane: {e}", tile.name)),
+                }
+            }
+            self.every = Some(all);
+        }
+        self.every.get_or_insert_with(Props::default)
+    }
+
+    /// Whether the put-back record may keep a spot ([`World::keeps`], MD14): a tile owns the ground
+    /// under it, and the edge test would not throw from it — [`crate::off_map::MARGIN`] inside the
+    /// world's rectangle and from every hole in it. Anywhere else a bike put back is on no ground
+    /// (`y` −10⁶, and the camera's angles go with it), or thrown again on its first tick.
+    pub fn keeps(&self, at: Vf) -> bool {
+        let margin = crate::off_map::MARGIN;
+        self.at(F(at.x()), F(at.z())).is_some() && !self.area.outside(at, margin) && !self.off_world(at, margin)
+    }
 }
 
 impl Tile {
@@ -466,9 +514,15 @@ impl World for Tiled {
         Some(Box::new(self.field()))
     }
 
+    fn keeps(&mut self, at: Vf) -> bool {
+        Tiled::keeps(self, at)
+    }
+
     fn collision(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>) {
-        // The plane's search takes one set of shapes in one space; a world's are a set a tile.
-        (Some(Box::new(self.field())), None)
+        // The plane's search takes one set of shapes in one space: every tile's, together.
+        self.every_shape();
+        let (this, every) = (&*self, self.every.as_ref());
+        (Some(Box::new(this.field())), every)
     }
 }
 
@@ -580,6 +634,9 @@ impl World for Land<'_> {
             Land::Track(p) => p.off_world(at, margin),
             Land::Tiles(t) => t.off_world(at, margin),
         }
+    }
+    fn keeps(&mut self, at: Vf) -> bool {
+        self.world().keeps(at)
     }
     fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
         match self {

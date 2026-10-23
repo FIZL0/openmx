@@ -860,13 +860,18 @@ impl Ride {
     /// forward row as the frame left it. The spot is the ground straight under the probe. It is kept
     /// only when nothing solid stands over it between the probe and the ground, nothing stands in the
     /// way of [`clear`]'s ring of probes around it, and the ground there is no steeper than
-    /// [`BACK_LEVEL`]; otherwise the record keeps the last spot that was. `true` when it moved.
+    /// [`BACK_LEVEL`]; otherwise the record keeps the last spot that was. In a world of several
+    /// terrains the world must also keep the spot ([`World::keeps`], MD14). `true` when it moved.
     pub fn keep_back(&mut self, at: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> bool {
         let Some(ground) = open_sky(at, world) else {
             return false;
         };
 
         let spot = Vf::new(at.x(), ground.0, at.z(), at.w());
+        // A world of several terrains keeps no spot over a hole or by its edge (MD14).
+        if !world.keeps(spot) {
+            return false;
+        }
         let Some((spot, normal)) = clear(spot, heading, world, curve) else {
             return false;
         };
@@ -896,6 +901,11 @@ impl Ride {
     /// is clear, and a clear spot is kept with no slope test and no raise. `true` when it moved.
     pub fn keep_back_thrown(&mut self, over: Vf, at: Vf, forward: Vf, world: &mut dyn World, curve: &CurveTable) -> bool {
         if open_sky(over, world).is_none() {
+            return false;
+        }
+        // Nor while the wreck is over a world's hole or by its edge (MD14): the record, its up too,
+        // is left as it was, so the put-back lands where the bike last was on ground.
+        if !world.keeps(at) {
             return false;
         }
         let facing = flat_unit(forward);
