@@ -396,6 +396,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         // The Original tab's own two at the original's (P126).
         plants: game_render::eco::Lod::Original,
         picture: menu::Picture::Television,
+        // A world's sky taken from the map below (MD9).
+        world_sky: menu::WorldSky::PerMap,
     };
     let controls = Controls {
         throttle: Gas::R2,

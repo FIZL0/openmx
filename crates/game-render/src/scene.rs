@@ -556,3 +556,23 @@ mod tests {
         assert_eq!(p[1].angle_x, 65.0);
     }
 }
+
+/// A world's sky and light by where the eye is (MD9): each map's own [`Lighting`], mixed across a
+/// join by [`crate::terrain::Regions::shares`], and the sky of the map with the largest share. Inside
+/// a map it is exactly that map's.
+#[derive(Clone, Debug)]
+pub struct Looks {
+    pub regions: crate::terrain::Regions,
+    /// Each map's light, in the regions' order.
+    pub lights: Vec<crate::world::Lighting>,
+}
+
+impl Looks {
+    /// The light at a world point, and which map's sky is behind it.
+    pub fn at(&self, x: f32, z: f32) -> Option<(crate::world::Lighting, usize)> {
+        let shares = self.regions.shares(x, z);
+        let parts: Vec<_> = self.lights.iter().copied().zip(shares.iter().copied()).filter(|(_, w)| *w > 0.0).collect();
+        let sky = (0..shares.len()).max_by(|&a, &b| shares[a].total_cmp(&shares[b]))?;
+        Some((crate::world::Lighting::blend(&parts)?, sky))
+    }
+}
