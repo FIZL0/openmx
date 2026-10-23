@@ -98,12 +98,14 @@ pub struct GroundVertex {
     pub normal: [f32; 3],
 }
 
-/// One drawn copy of a model: where it stands, where its palette starts and how long it is.
+/// One drawn copy of a model: where it stands, where its palette starts and how long it is, and the
+/// share of its pixels it draws ([`crate::eco::covers`]; 1 for all of them).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct InstanceRaw {
     m: [[f32; 4]; 4],
     palette: [u32; 2],
+    cover: f32,
 }
 
 #[repr(C)]
@@ -595,7 +597,11 @@ fn flat(m: M4) -> [f32; 16] {
     ]
 }
 
-/// A texture's mip chain, each level half the last, by a box filter.
+/// A texture's mip chain, each level half the last, by a box filter. The colour is averaged by
+/// alpha, and every wholly clear texel of every level takes the colour of the level above it there
+/// (V55): a cut-out's holes keep whatever colour the artist left in them (free06's bush atlas a
+/// dark green), and the filtering mixed it into every edge, so a twiggy bush or a far billboard
+/// came out the holes' colour rather than its own.
 fn mips(t: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
     let mut out = vec![(t.width as u32, t.height as u32, t.rgba.clone())];
     while let Some((w, h, px)) = out.last()
@@ -606,14 +612,34 @@ fn mips(t: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
         let mut next = vec![0u8; nw * nh * 4];
         for y in 0..nh {
             for x in 0..nw {
-                for k in 0..4 {
-                    let at = |xx: usize, yy: usize| px[(yy.min(h - 1) * w + xx.min(w - 1)) * 4 + k] as u32;
-                    let s = at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1);
-                    next[(y * nw + x) * 4 + k] = ((s + 2) / 4) as u8;
+                let at = |xx: usize, yy: usize, k: usize| px[(yy.min(h - 1) * w + xx.min(w - 1)) * 4 + k] as u32;
+                let four = [(2 * x, 2 * y), (2 * x + 1, 2 * y), (2 * x, 2 * y + 1), (2 * x + 1, 2 * y + 1)];
+                let alpha: u32 = four.iter().map(|&(xx, yy)| at(xx, yy, 3)).sum();
+                for k in 0..3 {
+                    next[(y * nw + x) * 4 + k] = if alpha == 0 {
+                        let s: u32 = four.iter().map(|&(xx, yy)| at(xx, yy, k)).sum();
+                        ((s + 2) / 4) as u8
+                    } else {
+                        let s: u32 = four.iter().map(|&(xx, yy)| at(xx, yy, k) * at(xx, yy, 3)).sum();
+                        ((s + alpha / 2) / alpha) as u8
+                    };
                 }
+                next[(y * nw + x) * 4 + 3] = ((alpha + 2) / 4) as u8;
             }
         }
         out.push((nw as u32, nh as u32, next));
+    }
+    for level in (0..out.len().saturating_sub(1)).rev() {
+        let (above, below) = out.split_at_mut(level + 1);
+        let (w, _, px) = &mut above[level];
+        let (cw, ch, coarse) = &below[0];
+        let (w, cw, ch) = (*w as usize, *cw as usize, *ch as usize);
+        for (i, texel) in px.chunks_exact_mut(4).enumerate() {
+            if texel[3] == 0 {
+                let (x, y) = ((i % w / 2).min(cw - 1), (i / w / 2).min(ch - 1));
+                texel[..3].copy_from_slice(&coarse[(y * cw + x) * 4..(y * cw + x) * 4 + 3]);
+            }
+        }
     }
     out
 }
@@ -1620,7 +1646,7 @@ impl Renderer {
                         array_stride: std::mem::size_of::<InstanceRaw>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![
-                            5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Uint32x2
+                            5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Uint32x2, 10 => Float32
                         ],
                     }),
                 ],
@@ -1826,7 +1852,7 @@ impl Renderer {
             }
         }
         if let Some(g) = &self.grove {
-            let names: Vec<String> = g.models.iter().chain(&g.billboards).filter(|n| !self.model_ids.contains_key(*n)).cloned().collect();
+            let names: Vec<String> = g.parts().filter(|n| !self.model_ids.contains_key(*n)).cloned().collect();
             for name in names {
                 self.model(assets, &name);
             }
@@ -1898,6 +1924,7 @@ impl Renderer {
                     InstanceRaw {
                         m: prop.at.0,
                         palette: [model.bind_palette, model.nodes],
+                        cover: 1.0,
                     },
                 ));
             }
@@ -1922,15 +1949,19 @@ impl Renderer {
                     None => [model.bind_palette, model.nodes],
                 };
                 let key = ((v as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
-                self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette }));
+                self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette, cover: 1.0 }));
             }
-            // The trees and bushes: each a model near, a picture far and both between (V48), the
-            // pictures coming in see-through as the actors' ghosts are drawn.
+            // The trees and bushes: each a model near, a picture far and both between (V48). Under
+            // the original's rule the pictures come in see-through as the actors' ghosts are drawn;
+            // under the smooth one (V55) model and picture each draw their share of a screen
+            // pattern, so they batch with every other copy of their model and need no sorting.
             if let Some(grove) = &self.grove {
+                let species = grove.ecosystem.species.len();
+                let ids: Vec<Option<usize>> = grove.parts().map(|n| self.model_ids.get(n).copied().flatten()).collect();
                 let mut plants = Vec::new();
                 grove.draws(camera, crate::eco::horizontal_fov(camera, w as f32 / h.max(1) as f32), cull.reach, &mut plants);
                 for d in &plants {
-                    let Some(Some(m)) = self.model_ids.get(d.model).copied() else { continue };
+                    let Some(m) = ids[d.part_index(species)] else { continue };
                     let model = &self.models[m];
                     // The model's reach from its origin, at the plant's largest scale.
                     let row = |r: usize| v3(d.at.0[r][0], d.at.0[r][1], d.at.0[r][2]);
@@ -1941,7 +1972,8 @@ impl Renderer {
                     }
                     let ghost = if d.alpha < 1.0 { d.alpha.to_bits() } else { 0 };
                     let key = ((v as u64) << 48) | ((m as u64) << 16);
-                    self.scratch.push((key, ghost, InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes] }));
+                    let inst = InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes], cover: d.cover };
+                    self.scratch.push((key, ghost, inst));
                 }
             }
             ground_counts[v] = self.ground_for(v, &cull, focal, &mut drawn);
@@ -2674,12 +2706,23 @@ struct In {
   @location(7) m2: vec4f,
   @location(8) m3: vec4f,
   @location(9) pal: vec2u,
+  @location(10) cover: f32,
 }
 struct Out {
   @builtin(position) clip: vec4f,
   @location(0) uv: vec2f,
   @location(1) lit: vec3f,
   @location(2) fog: f32,
+  @location(3) @interpolate(flat) cover: f32,
+}
+
+// `eco::covers`: whether a copy drawn at `cover` keeps this pixel of a 4x4 ordered dither; below 0
+// the pattern's complement keeps `-cover` of them.
+fn covers(at: vec2f, cover: f32) -> bool {
+  var bayer = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+  let p = vec2u(at) & vec2u(3u);
+  let t = (f32(bayer[p.y * 4u + p.x]) + 0.5) / 16.0;
+  return select((t >= 1.0 + cover), (t < cover), (cover >= 0.0));
 }
 
 // A node's matrix, four texels of the palette.
@@ -2714,12 +2757,13 @@ fn node_matrix(i: u32) -> mat4x4f {
   o.uv = v.uv;
   o.lit = lit;
   o.fog = clamp((distance(world, view.eye.xyz) - view.fog.x) / max(view.fog.y - view.fog.x, 1.0), 0.0, view.fog.w);
+  o.cover = v.cover;
   return o;
 }
 
 @fragment fn fs(i: Out) -> @location(0) vec4f {
   let t = textureSample(tex, samp, i.uv) * 255.0;
-  if (t.a < material.cutoff) {
+  if (t.a < material.cutoff || (i.cover < 1.0 && !covers(i.clip.xy, i.cover))) {
     discard;
   }
   let out = clamp(t.rgb * i.lit * (1.0 - i.fog) + view.fog_color.rgb * i.fog, vec3f(0.0), vec3f(255.0));

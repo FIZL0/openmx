@@ -39,7 +39,7 @@
 use crate::disc::Res;
 use crate::mat::{M4, V3, v3};
 use crate::psg::{Mesh, Model, Node, Strip, Vertex};
-use crate::world::{Assets, Camera, Loaded};
+use crate::world::{Assets, Camera, Lighting, Loaded};
 use std::sync::Mutex;
 
 /// The `[Environment]` distances when a scene leaves them out, as the original's reader has them.
@@ -245,6 +245,21 @@ impl Species {
     /// The billboard as a model: one quad of the usual size, standing on its origin in the xy plane,
     /// seen along +z, painted from the atlas with `material`.
     pub fn billboard_model(&self, material: &str) -> Model {
+        self.billboard_painted(material, [0x80; 3], &self.billboard_name())
+    }
+
+    /// The billboard's texture's name less its `.tga`, as a material: `springtime2billboard.psm`.
+    fn material(&self) -> String {
+        self.billboard.split('.').next().unwrap_or("").to_ascii_lowercase()
+    }
+
+    /// The name of the billboard [`Grove::match_billboards`] paints to look like its model.
+    pub fn matched_name(&self) -> String {
+        format!("{} billboard, matched", self.model_name())
+    }
+
+    /// The billboard with its vertices painted `paint` (0x80 is the texture's own colour), as `name`.
+    pub fn billboard_painted(&self, material: &str, paint: [u8; 3], name: &str) -> Model {
         let (left, right) = self.billboard_span();
         let [u0, u1, v_bottom, v_top] = self.uv;
         let h = self.height[0];
@@ -253,7 +268,7 @@ impl Species {
             pos: v3(x, y, 0.0),
             normal: v3(0.0, 1.0, 0.0),
             uv: [u, v],
-            color: [0x80, 0x80, 0x80, 0x80],
+            color: [paint[0], paint[1], paint[2], 0x80],
             node: 0,
             adc: false,
         };
@@ -266,7 +281,7 @@ impl Species {
         let half = v3((left + right) / 2.0, h / 2.0, 0.0);
         Model {
             nodes: vec![Node {
-                name: self.billboard_name(),
+                name: name.to_string(),
                 local: M4::IDENTITY,
                 parent: None,
                 center: v3((right - left) / 2.0, h / 2.0, 0.0),
@@ -306,12 +321,17 @@ pub enum Look {
     Billboard,
 }
 
-/// The original's rule for one plant: the distance across the ground, stretched by how wide the
-/// camera sees (`fov`, horizontal degrees, against the 77 it was tuned at), against the scene's
-/// `EcoDistance3D` (`near`) and `EcoDistance2D` (`far`).
-pub fn look(eye: V3, pos: V3, fov: f32, near: f32, far: f32) -> Look {
+/// The distance the original's rule measures: across the ground, stretched by how wide the camera
+/// sees (`fov`, horizontal degrees, against the 77 it was tuned at).
+pub fn seen_distance(eye: V3, pos: V3, fov: f32) -> f32 {
     let (dx, dz) = (pos.x - eye.x, pos.z - eye.z);
-    let d = ((dx * dx + dz * dz) * fov / 77.0).sqrt();
+    ((dx * dx + dz * dz) * fov / 77.0).sqrt()
+}
+
+/// The original's rule for one plant: [`seen_distance`] against the scene's `EcoDistance3D`
+/// (`near`) and `EcoDistance2D` (`far`).
+pub fn look(eye: V3, pos: V3, fov: f32, near: f32, far: f32) -> Look {
+    let d = seen_distance(eye, pos, fov);
     if d > far {
         Look::Billboard
     } else if d < near {
@@ -330,6 +350,95 @@ fn fade_alpha(f: u8) -> f32 {
     (f as f32 / 97.0).min(1.0)
 }
 
+/// How a grove hands a plant over from its model to its picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lod {
+    /// The original's ([`look`]): every plant at the same two distances, the picture as the atlas
+    /// paints it faded in over the model, and the model dropped at the far one.
+    Original,
+    /// Ours (V55, presentation only): the model dissolves into the picture over a wider band, by
+    /// a fixed screen pattern so neither has to be sorted, the band's middle moved per plant
+    /// ([`jitter`]) so no ring of plants changes on one frame, the picture painted and lit to
+    /// look like its model ([`Grove::match_billboards`]), and the farthest pictures dissolving
+    /// in at the reach rather than appearing there.
+    #[default]
+    Smooth,
+}
+
+/// The smooth band's width, as a share of the middle of the scene's two distances, when the scene's
+/// own band is narrower. It ends where the scene's does, so no model is kept further out than the
+/// original keeps it: free09's 300..350 becomes 252.5..350.
+pub const BAND_SHARE: f32 = 0.3;
+/// How much nearer than the scene's a plant's own band may be, as a share of the middle of the two
+/// distances: up to 32 feet on free09. Only nearer, so the jitter costs no models.
+pub const JITTER_SHARE: f32 = 0.1;
+/// How far past its band a plant has to go before its model forgets the way it was turned, as a
+/// share of the middle: the turn does not flip back and forth at the band's far edge.
+pub const HOLD_SHARE: f32 = 0.1;
+/// Over how much of the reach the farthest pictures dissolve in, at the least.
+pub const EDGE_SHARE: f32 = 0.06;
+
+/// A plant's own number in -1..1, the same on every frame and every machine: where in the band it
+/// changes, so two plants at one distance do not change together.
+pub fn jitter(plant: usize) -> f32 {
+    // A 32-bit integer hash (the "lowbias32" mix): neighbours in the file come out unrelated.
+    let mut x = plant as u32 ^ 0x9e37_79b9;
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    (x >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+}
+
+/// How much of a plant is its picture rather than its model under [`Lod::Smooth`], 0..=1, at
+/// [`seen_distance`] `d`: a smoothstep over the plant's own band.
+pub fn smooth_share(d: f32, near: f32, far: f32, jitter: f32) -> f32 {
+    let (start, width) = smooth_band(near, far, jitter);
+    let t = ((d - start) / width).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Where a plant's smooth band starts and how wide it is.
+fn smooth_band(near: f32, far: f32, jitter: f32) -> (f32, f32) {
+    let mid = (near + far) / 2.0;
+    let width = (far - near).max(BAND_SHARE * mid).max(1.0);
+    (far - width - JITTER_SHARE * mid * (1.0 - jitter) / 2.0, width)
+}
+
+/// How much of a plant `away` feet from the eye is drawn at all when nothing is drawn past `reach`:
+/// 1 well inside it, dissolving to 0 at it over a stretch that differs a little per plant.
+pub fn edge_share(away: f32, reach: f32, jitter: f32) -> f32 {
+    if !reach.is_finite() {
+        return 1.0;
+    }
+    let stretch = EDGE_SHARE * reach * (1.25 + 0.25 * jitter);
+    ((reach - away) / stretch.max(1e-3)).clamp(0.0, 1.0)
+}
+
+/// Whether a screen pattern of `cover` keeps the pixel at `(x, y)`: an ordered 4x4 dither, so a
+/// thing drawn at a cover keeps that share of its pixels, spread evenly. 1 or more keeps every one;
+/// below 0 the pattern's complement keeps `-cover` of them, so a model at `c` and its picture at
+/// `c - 1` share out each pixel to one of the two. The GPU's shader has the same table.
+pub fn covers(x: usize, y: usize, cover: f32) -> bool {
+    const BAYER: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+    if cover >= 1.0 {
+        return true;
+    }
+    let t = (BAYER[(y & 3) * 4 + (x & 3)] as f32 + 0.5) / 16.0;
+    if cover >= 0.0 { t < cover } else { t >= 1.0 + cover }
+}
+
+/// Which of a species' three models a draw is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Model,
+    /// The picture as the atlas paints it, the original's.
+    Billboard,
+    /// The picture painted to look like the model ([`Grove::match_billboards`]).
+    Matched,
+}
+
 /// One thing a frame draws of the ecosystem.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Draw<'a> {
@@ -338,6 +447,25 @@ pub struct Draw<'a> {
     pub at: M4,
     /// 1 is solid; below it, see-through.
     pub alpha: f32,
+    /// The share of its pixels it draws, by [`covers`]' pattern: 1 all of them, below 0 the
+    /// complement's.
+    pub cover: f32,
+    /// Its species, and which of the species' models: with [`Grove::parts`], a renderer's way to its
+    /// own copy of the model without looking the name up.
+    pub species: usize,
+    pub part: Part,
+}
+
+impl Draw<'_> {
+    /// Its place in [`Grove::parts`] of a grove of `species` species.
+    pub fn part_index(&self, species: usize) -> usize {
+        let k = match self.part {
+            Part::Model => 0,
+            Part::Billboard => 1,
+            Part::Matched => 2,
+        };
+        k * species + self.species
+    }
 }
 
 /// A scene's ecosystem, loaded and ready to draw.
@@ -347,14 +475,20 @@ pub struct Grove {
     /// Per species: the model and the billboard, by their names in [`Assets`].
     pub models: Vec<String>,
     pub billboards: Vec<String>,
+    /// Per species: the billboard painted to look like the model.
+    pub matched: Vec<String>,
     /// Per species: the model's half height and half width, which its matrix scales to the plant's.
     half: Vec<(f32, f32)>,
     /// `EcoDistance3D` and `EcoDistance2D`.
     pub near: f32,
     pub far: f32,
+    /// How plants change from model to picture; the original's way is this one setting away.
+    pub lod: Lod,
     /// Per plant, the way its model turned when it last came near: (cos, sin) about the up axis.
     /// Behind a lock so a frame that only borrows the scene can still turn what it brings near.
     turned: Mutex<Vec<Option<(f32, f32)>>>,
+    /// Per plant, [`jitter`].
+    jitter: Vec<f32>,
 }
 
 impl Clone for Grove {
@@ -363,10 +497,13 @@ impl Clone for Grove {
             ecosystem: self.ecosystem.clone(),
             models: self.models.clone(),
             billboards: self.billboards.clone(),
+            matched: self.matched.clone(),
             half: self.half.clone(),
             near: self.near,
             far: self.far,
+            lod: self.lod,
             turned: Mutex::new(self.turned.lock().map(|t| t.clone()).unwrap_or_default()),
+            jitter: self.jitter.clone(),
         }
     }
 }
@@ -375,6 +512,73 @@ impl Clone for Grove {
 /// vertical one and the shape of the frame.
 pub fn horizontal_fov(camera: &Camera, aspect: f32) -> f32 {
     (2.0 * ((camera.fov / 2.0).tan() * aspect).atan()).to_degrees()
+}
+
+/// What a loaded model looks like on average: the mean colour its texels are drawn in, each by its
+/// share of the picture (its area and its alpha), lit by `light` if there is one — turned every way
+/// about the up axis, as a plant's model may be — or by its vertex colours alone.
+fn appearance(loaded: &Loaded, assets: &Assets, light: Option<&Lighting>) -> [f32; 3] {
+    const TURNS: usize = 8;
+    // A fixed spread of points over a triangle, in barycentric weights.
+    const POINTS: [(f32, f32); 10] = [
+        (1.0 / 3.0, 1.0 / 3.0),
+        (0.1, 0.1),
+        (0.8, 0.1),
+        (0.1, 0.8),
+        (0.45, 0.1),
+        (0.1, 0.45),
+        (0.45, 0.45),
+        (0.6, 0.25),
+        (0.25, 0.6),
+        (0.2, 0.2),
+    ];
+    let (mut sum, mut weight) = ([0.0f64; 3], 0.0f64);
+    for t in &loaded.tris {
+        let area = t.v[1].pos.sub(t.v[0].pos).cross(t.v[2].pos.sub(t.v[0].pos)).len() as f64;
+        if area <= 0.0 {
+            continue;
+        }
+        let surface = loaded.surfaces.get(t.material).copied().unwrap_or_default();
+        let texture = loaded.textures.get(t.material).copied().flatten().and_then(|i| assets.textures.get(i));
+        // The triangle's light: its vertices', each over every turn.
+        let mut lit = [0.0f32; 3];
+        for v in &t.v {
+            match light {
+                Some(light) => {
+                    for k in 0..TURNS {
+                        let (s, c) = (k as f32 * std::f32::consts::TAU / TURNS as f32).sin_cos();
+                        let n = v3(c * v.normal.x + s * v.normal.z, v.normal.y, -s * v.normal.x + c * v.normal.z);
+                        let l = crate::world::vertex_light(surface.shading, light, n, v.color);
+                        for (o, l) in lit.iter_mut().zip(l) {
+                            *o += l / (3 * TURNS) as f32;
+                        }
+                    }
+                }
+                None => {
+                    for (o, c) in lit.iter_mut().zip(v.color) {
+                        *o += c as f32 / 128.0 / 3.0;
+                    }
+                }
+            }
+        }
+        for &(b1, b2) in &POINTS {
+            let b0 = 1.0 - b1 - b2;
+            let uv = |k: usize| t.v[0].uv[k] * b0 + t.v[1].uv[k] * b1 + t.v[2].uv[k] * b2;
+            let texel = texture.map_or([255; 4], |tx| tx.sample(uv(0), uv(1)));
+            if texel[3] < surface.cutoff {
+                continue;
+            }
+            let w = area * texel[3] as f64;
+            for k in 0..3 {
+                sum[k] += w * (texel[k] as f32 * lit[k]) as f64;
+            }
+            weight += w;
+        }
+    }
+    if weight <= 0.0 {
+        return [128.0; 3];
+    }
+    sum.map(|s| (s / weight) as f32)
 }
 
 impl Grove {
@@ -394,13 +598,15 @@ impl Grove {
             half.push(h);
             models.push(name);
             let board = s.billboard_name();
-            // The texture's name less its `.tga`, as a material: `springtime2billboard.psm`.
-            let material = s.billboard.split('.').next().unwrap_or("").to_ascii_lowercase();
-            assets.load_model(archives, &board, s.billboard_model(&material));
+            assets.load_model(archives, &board, s.billboard_model(&s.material()));
             billboards.push(board);
         }
+        let matched = ecosystem.species.iter().map(Species::matched_name).collect();
         let turned = Mutex::new(vec![None; ecosystem.plants.len()]);
-        Grove { ecosystem, models, billboards, half, near, far, turned }
+        let jitter = (0..ecosystem.plants.len()).map(jitter).collect();
+        let mut grove = Grove { ecosystem, models, billboards, matched, half, near, far, lod: Lod::default(), turned, jitter };
+        grove.match_billboards(None, archives, assets);
+        grove
     }
 
     /// The scene's grove, if it names an ecosystem the archives have, its plants placed over the
@@ -420,7 +626,33 @@ impl Grove {
         let extent = extent(layout, terrain);
         let mut eco = Ecosystem::parse(&bytes, extent).map_err(|e| format!("{file}: {e}"))?;
         eco.stand(extent, |p| ground_under(layout, terrain, p));
-        Ok(Some(Grove::new(eco, scene.eco_distance_3d, scene.eco_distance_2d, archives, assets)))
+        let mut grove = Grove::new(eco, scene.eco_distance_3d, scene.eco_distance_2d, archives, assets);
+        grove.match_billboards(Some(&Lighting::of(scene)), archives, assets);
+        Ok(Some(grove))
+    }
+
+    /// Every model the grove draws, by name: the species' models, then their billboards, then the
+    /// matched billboards ([`Draw::part_index`]).
+    pub fn parts(&self) -> impl Iterator<Item = &String> {
+        self.models.iter().chain(&self.billboards).chain(&self.matched)
+    }
+
+    /// Paint each species' matched billboard so that, on average, it is drawn in its model's
+    /// colours: the atlas's picture of a tree is lighter and yellower than the tree's own
+    /// textures, and lit as a crown from above it takes far more of the sun than the model's
+    /// upright leaves do (V55). The paint is the model's mean drawn colour over the picture's under
+    /// `light` (the scene's, every way the model may be turned), or under their vertex colours
+    /// alone with none. Presentation only, and by eye: a picture cannot have its model's shading.
+    pub fn match_billboards(&mut self, light: Option<&Lighting>, archives: &[Res], assets: &mut Assets) {
+        for (s, sp) in self.ecosystem.species.iter().enumerate() {
+            let (Some(model), Some(board)) = (assets.models.get(&self.models[s]), assets.models.get(&self.billboards[s])) else {
+                continue;
+            };
+            let (want, got) = (appearance(model, assets, light), appearance(board, assets, light));
+            let paint = std::array::from_fn(|k| (128.0 * want[k] / got[k].max(1.0)).clamp(32.0, 255.0).round() as u8);
+            assets.models.remove(&self.matched[s]);
+            assets.load_model(archives, &self.matched[s], sp.billboard_painted(&sp.material(), paint, &self.matched[s]));
+        }
     }
 
     /// The matrix of a plant's model, turned `(cos, sin)` about the up axis and scaled from the
@@ -461,31 +693,115 @@ impl Grove {
     }
 
     /// What one view draws of the grove from `camera` (`fov` its horizontal degrees), nearest
-    /// first, out to `reach`. A plant whose model comes into view turns it to the camera's heading
-    /// and keeps it turned that way while it stays near, as the original does; one seen near for the
-    /// first time turns now.
+    /// first, out to `reach`, by [`Grove::lod`]'s rule. A plant whose model comes into view turns it
+    /// to the camera's heading and keeps it turned that way while it stays near, as the original
+    /// does; one seen near for the first time turns now. Plants outside the camera's view cone
+    /// are left out (their turns are kept as if they were drawn).
     pub fn draws<'a>(&'a self, camera: &Camera, fov: f32, reach: f32, out: &mut Vec<Draw<'a>>) {
         let heading = Grove::heading(camera);
+        let cone = ViewCone::of(camera, fov);
         let mut turned = self.turned.lock().unwrap_or_else(|e| e.into_inner());
+        let mid = (self.near + self.far) / 2.0;
         for (i, plant) in self.ecosystem.plants.iter().enumerate() {
             let size = plant.height.max(plant.width * 2.0);
-            if plant.pos.sub(camera.eye).len() > reach + size {
+            let away = plant.pos.sub(camera.eye);
+            let away_len = away.len();
+            if away_len > reach + size {
                 continue;
             }
-            let seen = look(camera.eye, plant.pos, fov, self.near, self.far);
-            if seen == Look::Billboard {
+            let d = seen_distance(camera.eye, plant.pos, fov);
+            // How much of it is its picture, and whether its model is drawn at all.
+            let (share, model) = match self.lod {
+                Lod::Original => match look(camera.eye, plant.pos, fov, self.near, self.far) {
+                    Look::Model => (0.0, true),
+                    Look::Both(f) => (fade_alpha(f), true),
+                    Look::Billboard => (1.0, false),
+                },
+                Lod::Smooth => {
+                    let share = smooth_share(d, self.near, self.far, self.jitter[i]);
+                    (share, share < 1.0)
+                }
+            };
+            if model {
+                turned[i].get_or_insert(heading);
+            } else if self.lod == Lod::Original {
                 turned[i] = None;
             } else {
-                let turn = *turned[i].get_or_insert(heading);
-                out.push(Draw { model: &self.models[plant.species], at: self.model_at(plant, turn), alpha: 1.0 });
+                // Held a little past the band, so the turn does not flip at its edge.
+                let (start, width) = smooth_band(self.near, self.far, self.jitter[i]);
+                if d > start + width + HOLD_SHARE * mid {
+                    turned[i] = None;
+                }
             }
-            let alpha = match seen {
-                Look::Model => continue,
-                Look::Both(f) => fade_alpha(f),
-                Look::Billboard => 1.0,
+            if !cone.sees(away, away_len, size) {
+                continue;
+            }
+            let draw = |part: Part, at: M4, alpha: f32, cover: f32| {
+                let k = match part {
+                    Part::Model => &self.models,
+                    Part::Billboard => &self.billboards,
+                    Part::Matched => &self.matched,
+                };
+                Draw { model: &k[plant.species], at, alpha, cover, species: plant.species, part }
             };
-            out.push(Draw { model: &self.billboards[plant.species], at: self.billboard_at(plant, camera), alpha });
+            match self.lod {
+                Lod::Original => {
+                    if model {
+                        let turn = turned[i].unwrap_or(heading);
+                        out.push(draw(Part::Model, self.model_at(plant, turn), 1.0, 1.0));
+                    }
+                    if share > 0.0 {
+                        out.push(draw(Part::Billboard, self.billboard_at(plant, camera), share, 1.0));
+                    }
+                }
+                Lod::Smooth => {
+                    let edge = edge_share(away_len, reach, self.jitter[i]);
+                    if edge <= 0.0 {
+                        continue;
+                    }
+                    // The model keeps the pattern's first `1 - share`, the picture the rest.
+                    let keep = (1.0 - share) * edge;
+                    if model && keep > 0.0 {
+                        let turn = turned[i].unwrap_or(heading);
+                        let cover = if keep >= 1.0 { 1.0 } else { keep };
+                        out.push(draw(Part::Model, self.model_at(plant, turn), 1.0, cover));
+                    }
+                    let shown = share * edge;
+                    if shown > 0.0 {
+                        let cover = if shown >= 1.0 { 1.0 } else { -shown };
+                        out.push(draw(Part::Matched, self.billboard_at(plant, camera), 1.0, cover));
+                    }
+                }
+            }
         }
+    }
+}
+
+/// A camera's view as a cone about its forward, wide enough for the frame's corners: what
+/// [`Grove::draws`] leaves out without building a matrix.
+struct ViewCone {
+    forward: V3,
+    cos: f32,
+    sin: f32,
+}
+
+impl ViewCone {
+    fn of(camera: &Camera, fov: f32) -> ViewCone {
+        let f = camera.at.sub(camera.eye);
+        let forward = if f.len() > 1e-6 { f.norm() } else { v3(0.0, 0.0, 1.0) };
+        let (h, v) = ((fov.to_radians() / 2.0).tan(), (camera.fov / 2.0).tan());
+        let half = (h * h + v * v).sqrt().atan().min(std::f32::consts::FRAC_PI_2);
+        ViewCone { forward, cos: half.cos(), sin: half.sin() }
+    }
+
+    /// Whether a sphere `radius` round, `away` from the eye (`len` long), reaches into the cone.
+    fn sees(&self, away: V3, len: f32, radius: f32) -> bool {
+        if len <= radius {
+            return true;
+        }
+        let along = away.dot(self.forward);
+        let across = (len * len - along * along).max(0.0).sqrt();
+        across * self.cos - along * self.sin <= radius
     }
 }
 

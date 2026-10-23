@@ -539,7 +539,7 @@ pub fn draw_model(
     light: &Lighting,
 ) -> usize {
     let mut batch = Batch::new(frame.width, frame.height);
-    let drawn = queue_model(&mut batch, loaded, assets, transform, view_projection, eye, light);
+    let drawn = queue_model(&mut batch, loaded, assets, transform, view_projection, eye, light, 1.0);
     frame.draw(&batch, &texel_of(assets), light.fog_color);
     drawn
 }
@@ -585,6 +585,7 @@ fn queue_model(
     view_projection: M4,
     eye: V3,
     light: &Lighting,
+    cover: f32,
 ) -> usize {
     let mvp = transform.mul(view_projection);
     let mut drawn = 0;
@@ -633,6 +634,7 @@ fn queue_model(
             blend: surface.blend,
             additive: surface.additive,
             depth_write: surface.depth_write,
+            cover,
         };
         batch.triangle(shade, tag_of(texture, &surface), mode);
         drawn += 1;
@@ -652,7 +654,7 @@ pub fn draw_scene(
     let view_projection = camera.view_projection(frame.width, frame.height);
     let light = Lighting::of(scene);
     // Every prop and every extra, in order: what is to be queued into the one batch.
-    let mut jobs: Vec<(&Loaded, M4)> = Vec::new();
+    let mut jobs: Vec<(&Loaded, M4, f32)> = Vec::new();
     for placement in &scene.models {
         let Some(loaded) = assets.models.get(&placement.model) else {
             continue;
@@ -662,30 +664,30 @@ pub fn draw_scene(
         if distance > light.fog_far {
             continue;
         }
-        jobs.push((loaded, placement.transform()));
+        jobs.push((loaded, placement.transform(), 1.0));
     }
     for (name, transform) in extra {
         if let Some(loaded) = assets.models.get(*name) {
-            jobs.push((loaded, *transform));
+            jobs.push((loaded, *transform, 1.0));
         }
     }
-    // The trees and bushes (V48). The batch has no see-through pass, so a picture only comes in
-    // once it is solid.
+    // The trees and bushes (V48). The batch has no see-through pass, so under the original's rule a
+    // picture only comes in once it is solid; the smooth one dissolves them by a pattern (V55).
     if let Some(grove) = &scene.ecosystem {
         let mut drawn = Vec::new();
         let fov = crate::eco::horizontal_fov(camera, frame.width as f32 / frame.height.max(1) as f32);
         grove.draws(camera, fov, light.fog_far, &mut drawn);
         for d in drawn.iter().filter(|d| d.alpha >= 1.0) {
             if let Some(loaded) = assets.models.get(d.model) {
-                jobs.push((loaded, d.at));
+                jobs.push((loaded, d.at, d.cover));
             }
         }
     }
     // Queued on every core, a run of models each, and joined back in order: the same batch as one
     // core queueing them all, and in a four-way split the vertex work is most of the scene (P47).
-    let queue = |batch: &mut Batch, jobs: &[(&Loaded, M4)]| {
+    let queue = |batch: &mut Batch, jobs: &[(&Loaded, M4, f32)]| {
         jobs.iter()
-            .map(|&(loaded, at)| queue_model(batch, loaded, assets, at, view_projection, camera.eye, &light))
+            .map(|&(loaded, at, cover)| queue_model(batch, loaded, assets, at, view_projection, camera.eye, &light, cover))
             .sum::<usize>()
     };
     let mut batch = Batch::new(frame.width, frame.height);
@@ -694,11 +696,11 @@ pub fn draw_scene(
         queue(&mut batch, &jobs)
     } else {
         // Runs of about equal triangle counts, so one core does not get every rider.
-        let total: usize = jobs.iter().map(|(l, _)| l.tris.len()).sum();
+        let total: usize = jobs.iter().map(|(l, _, _)| l.tris.len()).sum();
         let share = total.div_ceil(threads).max(1);
-        let mut runs: Vec<&[(&Loaded, M4)]> = Vec::new();
+        let mut runs: Vec<&[(&Loaded, M4, f32)]> = Vec::new();
         let (mut from, mut held) = (0, 0);
-        for (i, (l, _)) in jobs.iter().enumerate() {
+        for (i, (l, _, _)) in jobs.iter().enumerate() {
             held += l.tris.len();
             if held >= share {
                 runs.push(&jobs[from..=i]);
@@ -841,6 +843,7 @@ mod tests {
             blend: true,
             additive: false,
             depth_write: false,
+            cover: 1.0,
         };
         frame.triangle_with([at(-3.0, -3.0), at(9.0, -3.0), at(-3.0, 9.0)], &look, [0, 0, 0]);
         assert_eq!(&frame.color[0..3], &[150, 150, 150]);
