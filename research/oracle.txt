@@ -4677,6 +4677,25 @@ collision_tree_build boot 0x00111ee0 (nodes out, facets out, matrix out, quadwor
 #   — nine trees; the game keeps the file's species slot n (and a plant's species byte) at n - 1.
 #   Bike: the eleven body rays (+0x7c4, flags 0x12/0x32/0x52) search placed groups; the sweep probe
 #   (+0x7cc, flags 0x13) does not. put_back_solid's group rule is S75's.
+# S102 — trees for the plane and the wreck bike (crates/game-sim/src/{eco,flight_search,wreck_bike}.rs;
+#   tests flight_candidates.rs, flight_collision.rs, wreck_bike.rs, eco.rs).
+#   Plants into the world tree at 0x0012b470, in the file's order, via the tree's vt+0x20 (key) and
+#   vt+0x24 (insert); the box: centre (x, hh + y, z) × eco +0xd4, half (reach, hh, reach), reach =
+#   sp +0x10c + width × (sp +0x114 - sp +0x10c) / 128, hh = (sp +0x100 + height × (sp +0x100 - sp +0x104)
+#   / 128) × 0.5. Group record 0x1c bytes: +2 class 3, +8/+0xa/+0xc cell, +0xe species (file slot - 1),
+#   +0x10 height, +0x11 width, +0x12 flags. free06 (biplane state): 5600 groups, every one in the
+#   port's node and slot order among the 353 meshes, at the port's stood height.
+#   group_part_count 0x00129460 = species +0x194; group_part 0x00129490 (skips when plant +0x12 bit 2)
+#   = species +0x19c[i], scaled by the plant's width/height ratios: sphere (kind 2) +0x178/+0x17c scale
+#   and +0x160 position, kind 3 +0x188/+0x18c and +0x150, mesh (kind 0/1) +0x1d0 and vt+0xac.
+#   Ray against a sphere: ray_collide_pair 0x001ebe70 case 5 -> 0x00109ee0 (nodes 0x00106b10, leaf
+#   0x00105e80) returns a bool and writes no contact. Kinds on the discs: MXU 1 only; MX vs. ATV 1, 2.
+#   Camera: its collision object's +0xe8 search is never made; 0x001dc960 queries the terrain only.
+#   Wreck bike ray probe: count +0x168 (11), segments +0x170, root +0x160 (0), nodes +0x16c (10 × 0x24,
+#   as the builder's, = bike\col\wreckbikem.col's). Its nearby gather's caller not found among
+#   0x00218b80's callers (0x0015b210 plane, 0x0024d128 rider body, 0x00257a00 bike ground, 0x0027df50
+#   put back, 0x0021e4d0 camera; 0x002f8820, 0x0034ad70, 0x003a10b0, 0x003a45c0, 0x003e2480, 0x003e3990
+#   not read).
 # S86 — the riding bike's collidables (crates/game-sim/src/bike_col.rs; tests crates/game-sim/tests/bike_col.rs).
 #   Loader 0x00252ff0: dir "%sCol" of "Bike\" -> "Bike\Col\"; "%sm.col"/"%sf.col" of bike +0x28c, an
 #   inline string, "bike" for both split-screen players (S93's P2 rides another rider and .phy, not

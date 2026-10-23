@@ -532,3 +532,107 @@ fn the_wreck_bikes_replay_bit_exact() {
     assert!(failures.is_empty(), "{failures:#?}");
     assert_eq!(ticks, 78 + 78 + 78 + 78 + 50, "ticks compared");
 }
+
+/// The ray probe's tree the trees are searched with (S102): [`wreck_bike::ray_tree`]'s nodes are
+/// the game's, node for node and bit for bit, and the model's collision file's; its root is node 0.
+#[test]
+fn the_ray_probes_tree_is_the_games_and_the_files() {
+    const ROOT: u32 = 0x160;
+    const NODES: u32 = 0x16c;
+    const NODE_SIZE: u32 = 0x24;
+    let (name, frame, _) = WRECKS[0];
+    let Some(ee) = state(name, frame) else { return };
+    let Some(mut disc) = Disc::open() else { return };
+    let (_, col) = wreck_files(&mut disc);
+    let (_, c) = bike_in(&ee);
+    let probe = ee.u32_at(c + rec::RAY_PROBE);
+    let tree = wreck_bike::ray_tree();
+    assert_eq!(u32::from(tree.root), ee.u32_at(probe + ROOT), "the root");
+    assert_eq!(tree.nodes.len(), col.nodes.len(), "the collision file's nodes");
+    let nodes = ee.u32_at(probe + NODES);
+    let bits3 = |v: [F; 3]| v.map(F::to_bits);
+    for (i, n) in tree.nodes.iter().enumerate() {
+        let at = nodes + NODE_SIZE * i as u32;
+        let words = |a: u32| [0, 4, 8].map(|k| ee.u32_at(a + k));
+        let game = (ee.u32_at(at), words(at + 0xc), words(at + 0x18), [ee.u16_at(at + 8), ee.u16_at(at + 10)]);
+        let ours = (n.volume.to_bits(), bits3(n.centre), bits3(n.half_extent), n.children);
+        assert_eq!(ours, game, "node {i} against the game's");
+        let f = &col.nodes[i];
+        assert_eq!(ours, (f.volume.to_bits(), bits3(f.centre), bits3(f.half_extent), f.children), "node {i} against the file");
+    }
+    assert_eq!(tree.segments.len(), wreck_bike::rays().len(), "the probe's rays");
+}
+
+/// A wreck bike thrown at a free09 tree (S102): with one of the track's trunks put where its first
+/// wreck's bike goes, [`WreckBike::tick_wooded`] takes the trunk's contacts and the bike goes
+/// elsewhere; with the tree far away it is the bare tick to the bit.
+#[test]
+fn a_wreck_bike_strikes_a_free09_trunk() {
+    use game_sim::camera::CurveTable;
+    use game_sim::eco::{self, Ecosystem, Trees};
+    let (name, frame, last) = WRECKS[0];
+    let Some(ee) = state(name, frame) else { return };
+    let Some(mut disc) = Disc::open() else { return };
+    let (part, _) = wreck_files(&mut disc);
+    let res_bytes = disc.member("Tracks\\free09.res");
+    let res = Res::parse(&res_bytes).expect("free09.res");
+    let esb = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with("free09.esb")).expect("free09.esb");
+    let esb = Ecosystem::parse(&res.read(&res_bytes, esb).expect("the esb")).expect("free09.esb parses");
+    let (bytes, scene) = free09(&mut disc);
+    let terrain = Terrain::parse(&bytes).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let field = ground.field();
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let ticks = (last - frame) as usize;
+
+    // The bare ride, where its body goes each tick.
+    let bare: Vec<Vf> = {
+        let mut bike = bike_from(&ee, &part);
+        (0..ticks)
+            .map(|_| {
+                bike.tick(dt, Some(&field), &mut NoObjects);
+                bike.body.position
+            })
+            .collect()
+    };
+    let cell = eco::cell_size(F(6912.0));
+    let tree_at = |at: Vf| {
+        let mut eco = esb.clone();
+        let mut plant = *esb.plants.iter().find(|p| p.species == 1).expect("a TreeB");
+        let ground_y = game_sim::contact_search::ground(&field, at).point.y();
+        plant.cell = [at.x(), ground_y, at.z()].map(|v| (v / cell.0) as u16);
+        eco.plants = vec![plant];
+        Trees::new(&eco, cell, &CurveTable::build()).0
+    };
+    let wooded = |trees: &Trees| -> Vec<Vf> {
+        let mut bike = bike_from(&ee, &part);
+        (0..ticks)
+            .map(|_| {
+                bike.tick_wooded(dt, Some(&field), trees);
+                bike.body.position
+            })
+            .collect()
+    };
+
+    let far = tree_at(Vf::new(bare[0].x() + 500.0, 0.0, bare[0].z() + 500.0, 1.0));
+    let far_ride = wooded(&far);
+    for (t, (a, b)) in bare.iter().zip(&far_ride).enumerate() {
+        assert_eq!(a.0.map(f32::to_bits), b.0.map(f32::to_bits), "tick {t}: a tree 700 feet off moved the bike");
+    }
+
+    let mid = bare[ticks / 3];
+    let near = tree_at(mid);
+    let trunk = near.props.props[0].centre;
+    let ride = wooded(&near);
+    let off = |p: &Vf| ((p.x() - trunk.x()).powi(2) + (p.z() - trunk.z()).powi(2)).sqrt();
+    let radius = esb.species[1].as_ref().expect("TreeB").solids[0].radius.0;
+    let parted = bare.iter().zip(&ride).position(|(a, b)| a.0.map(f32::to_bits) != b.0.map(f32::to_bits));
+    let reaches = bare.iter().position(|p| off(p) < radius).expect("the bare ride goes through the trunk");
+    eprintln!("trunk {radius} round at {trunk:?}: the bare ride reaches it at tick {reaches}, the wooded one parts at {parted:?}");
+    // Only the rays search groups (the sweep probe's flags keep it off them, as the original's do), so
+    // the bike's body is inside the trunk's reach a tick before a ray crosses its wall.
+    let parted = parted.expect("the trunk moved the bike");
+    assert!(reaches <= parted && parted <= reaches + 2, "the trunk struck at tick {parted}, the bike reached it at {reaches}");
+    let (end_bare, end) = (off(&bare[ticks - 1]), off(&ride[ticks - 1]));
+    assert!(end < end_bare - 3.0, "the struck bike is thrown back: it ends {end} ft off the trunk, the bare one {end_bare}");
+}

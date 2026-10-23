@@ -120,6 +120,14 @@ pub trait World {
     fn collision(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>) {
         (self.heightfield(), None)
     }
+
+    /// [`World::collision`] and the ecosystem's plants standing in the world, which the biplane's and
+    /// the wreck bike's ray probes search as placed groups (S102, [`crate::eco::Wooded`]). A world
+    /// without an ecosystem has none.
+    fn wooded(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>, Option<&crate::eco::Trees>) {
+        let (field, props) = self.collision();
+        (field, props, None)
+    }
 }
 
 /// Any world as a heightfield: each cell's corners a unit apart, at the height and with the normal
