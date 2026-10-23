@@ -501,3 +501,47 @@ fn a_custom_track_shows_its_own_picture_or_a_still_from_its_spawn() {
     let (_, got) = hear.recv_timeout(std::time::Duration::from_secs(120)).expect("the still job answers");
     assert!(got.is_err());
 }
+
+/// A tape of `gas` frames on the throttle, then `up` with the d-pad's Up held and nothing else, then
+/// a second at rest: P132's ride away and back to slot 1. Up is byte 2's bit 4, active low, with
+/// its pressure in byte 10.
+fn spawn_tape(name: &str, gas: usize, up: usize) -> PathBuf {
+    let mut text = format!("# game-sim pad tape: {} frames\nformat 1\ntape {name}\n", gas + up + 60);
+    let report = |b2: u8, b3: u8, up: u8, cross: u8| format!("0079{b2:02x}{b3:02x}7f7f7f7f0000{up:02x}000000{cross:02x}{}", "00".repeat(17));
+    let (throttle, home, idle) = (report(0xff, 0xbf, 0, 0xff), report(0xef, 0xff, 0xff, 0), report(0xff, 0xff, 0, 0));
+    for report in std::iter::repeat_n(&throttle, gas).chain(std::iter::repeat_n(&home, up)).chain(std::iter::repeat_n(&idle, 60)) {
+        text += &format!("frame 0x3d08850a 0x{report} -\n");
+    }
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md2").join(format!("{name}.tape"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// The numbers off a `start: x, y, z facing ...` or `end: x, y, z` line.
+fn spot(line: &str) -> Vec<f32> {
+    let at = line.split_once(": ").unwrap().1.split(" facing").next().unwrap();
+    at.split(", ").map(|v| v.trim().parse().unwrap()).collect()
+}
+
+/// P132: a mod map's slot 1 is its start too. Five seconds on the throttle carry the bike off up the
+/// map; holding Up then, nothing put in slot 1, stands it back on the mod's start and it stays there.
+#[test]
+fn a_mod_maps_slot_one_is_its_start() {
+    let mods = mods_folder("spawn");
+    let tape = spawn_tape("spawn", 150, 60);
+    let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
+    let Some((ok, said)) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--seconds", "20"]) else { return };
+    assert!(ok, "the mod did not ride:\n{said}");
+    let (start, end) = (spot(line(&said, "start: ")), spot(line(&said, "end: ")));
+    // Across the ground: the start line gives the placement's height, and the bike settles onto the
+    // ground under it as it does at the start of the ride.
+    let off = ((start[0] - end[0]).powi(2) + (start[2] - end[2]).powi(2)).sqrt();
+    assert!(end[1] <= start[1] + 1.0, "the bike is above its start: {end:?}");
+    println!("md2_flat: start {start:?}, back at {end:?}, {off:.1} ft off");
+    assert!(off < 3.0, "Up on slot 1 did not go back to the mod's start:\n{said}");
+    // And without the Up the same throttle is far off up the map.
+    let gone = spawn_tape("spawn-gone", 150, 0);
+    let (_, said) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", gone.to_str().unwrap(), "--seconds", "20"]).unwrap();
+    assert!(spot(line(&said, "end: "))[2] - start[2] > 100.0, "\n{said}");
+}

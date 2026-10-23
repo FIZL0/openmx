@@ -770,6 +770,20 @@ pub fn marked_plane(flight: &Flight, livery: usize) -> Plane {
     Plane { livery, ..Plane::around(flight.clone()) }
 }
 
+/// **Where every seat's machines start on this map** (P132), for [`Sim::home`]: each bike stood at
+/// its start — `starts`, in seat order, the origins the shell placed them at — along `heading` and
+/// upright, which is the placement a ride begins with ([`game_sim::ride::Ride::place`]); and each
+/// seat's plane in its bay, `bays` in seat order. Marker slot 1 rides there while nothing is put in
+/// it. A disc's track, a mod map and a world all give their start through the place's reader, and
+/// their bays through `machine.txt`'s.
+pub fn home(starts: &[Vf], heading: Vf, bays: &[Spawn]) -> markers::Home {
+    let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+    markers::Home {
+        bikes: starts.iter().map(|&at| Spot::still(at, heading, up)).collect(),
+        planes: bays.iter().map(|b| (b.at, b.facing)).collect(),
+    }
+}
+
 /// The markers' word for a machine (P107): each has its own set.
 pub fn markers_of(kind: Kind) -> markers::Vehicle {
     match kind {
@@ -857,7 +871,7 @@ impl Garage {
     pub fn markers(&mut self, sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], world: &mut dyn World) -> Option<Did> {
         let (Kind::Biplane, Some(plane)) = (self.up, &mut self.plane) else { return None };
         let f = plane.flight.as_mut()?;
-        let did = markers::fly(&mut sim.markers, f, sim.input.pad(0), me, spots, riding);
+        let did = markers::fly(&mut sim.markers, f, sim.input.pad(0), me, spots, riding, &sim.home, &sim.tables.ride.acos);
         Some(match did? {
             Did::Teleported(Pick::Slot(_)) => {
                 plane.placed = true;
@@ -1125,7 +1139,7 @@ pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
 /// there at once, as [`switch_lane`] does. Nothing on the bike.
 pub fn lane_markers(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], world: &mut dyn World) -> Option<Did> {
     let mut f = sim.plane.take()?;
-    let mut did = markers::fly(&mut sim.markers, &mut f, sim.input.pad(0), me, spots, riding);
+    let mut did = markers::fly(&mut sim.markers, &mut f, sim.input.pad(0), me, spots, riding, &sim.home, &sim.tables.ride.acos);
     if let Some(Did::Teleported(Pick::Player(p))) = did {
         let mut plane = Plane::around(f);
         f = match land(&mut plane, spots[p].clone(), world) {

@@ -50,7 +50,7 @@ fn gauges(speedometer: Speedometer) -> Gauges {
 }
 
 fn panel(pick: Pick, others: Vec<(usize, Option<String>)>, holding: u32) -> Panel {
-    Panel { pick, filled: [true, false, true, false, false], others, holding, machine: "Bike".into() }
+    Panel { pick, filled: [true, false, true, false, false], home: false, others, holding, machine: "Bike".into() }
 }
 
 fn shown<'a>(g: &'a Gauges, riders: &'a [Dot], blips: &'a [Blip], markers: Option<Panel>) -> Shown<'a> {
