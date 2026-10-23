@@ -35,6 +35,12 @@
 //! plane strikes is a vehicle to its crash test, and its one listener, **the bike's struck listener**
 //! ([`bike_struck`]), keeps what struck it for the bike's wreck test, which wrecks it only when that
 //! category is in the bike's mask ([`struck_wreck`]) — never a plane's probe's.
+//!
+//! **The ecosystem's plants** (S102) are placed groups in the static tree after the props, each in
+//! the box the ecosystem's loader files it with ([`crate::eco::Group::bounds`]), gathered within the
+//! bound by its reach and searched part by part, unfiltered, by the ray probe (the sweep probe's flags
+//! keep it off groups): a trunk is a mesh like a prop's, category [`TREE`] ([`Scene::wooded`]). The
+//! wreck bike's ray probe searches them the same way ([`crate::ride::Crash::step`]).
 
 #![deny(clippy::float_arithmetic)]
 
@@ -46,6 +52,7 @@ use crate::sweep_probe::{self, SweepProbe};
 use crate::track::{self, Node};
 use crate::world::{Prop, Props};
 use crate::broad_build;
+use crate::eco::Trees;
 use crate::broad_phase::{self, Blocks, Broad, Pair, Placement, Space, Structure, Tables, more_flags};
 use crate::world_search::{self, Categories, Class, Collidable, Narrow, Nearby, flags};
 use crate::math::{self, Mat4};
@@ -174,6 +181,14 @@ pub const BIKE_STRUCK_MASK: u32 = 0x10_0000;
 /// What the plane's collision record keeps as struck ([`crate::contact_search::Record::struck`])
 /// when it is the ride's bike `k`: `BIKES + k`. A prop is its slot in [`world`]'s collidables.
 pub const BIKES: usize = 1 << 16;
+
+/// A trunk's category (`+0x84`): the word the ecosystem's loader gives every cylinder (S97).
+pub const TREE: u32 = 4;
+const TREE_FLAGS: u8 = flags::ENABLED;
+
+/// What the collision record keeps as struck when it is trunk `j` of the world's trees
+/// ([`crate::eco::Trees::props`]): `TREES + j`.
+pub const TREES: usize = 1 << 17;
 
 /// The bike's struck listener (its collidable's one listener, `vt +0xc`): it keeps what struck the
 /// bike — the category of the collidable that did — for the bike's next wreck test, over whatever
@@ -367,10 +382,67 @@ pub fn world_among(
     (broad, objects)
 }
 
+/// [`world_among`] with the ecosystem's plants standing in it (S102): after the bikes, plant `g` as a
+/// placed group at `FIRST + props + bikes + g`, filed in the static tree after the props in the
+/// file's order, and after the groups every trunk, `j` at the groups' end plus `j`, in no structure —
+/// a group's parts are found through it.
+pub fn world_wooded(
+    props: &[Prop],
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+) -> (Broad, Vec<Collidable>) {
+    let Some(trees) = trees else { return world_among(props, bikes, field, centre, radius) };
+    // With no terrain to lay the tree over (none, or one with no edge), it spans the trunks as well
+    // as the props.
+    let bare = tree_box(props, None);
+    let field = match tree_box(props, field) {
+        laid if field.is_some() && laid != bare => Some(laid),
+        _ => {
+            let ((a, b), (c, d)) = (bare, tree_box(&trees.props.props, None));
+            Some(([a[0].min(c[0]), a[1].min(c[1])], [b[0].max(d[0]), b[1].max(d[1])]))
+        }
+    };
+    let (mut broad, mut objects) = world_among(props, bikes, field, centre, radius);
+    let (_, hi) = tree_box(props, field);
+    let Structure::Tree(tree) = &mut broad.structures[0] else { unreachable!("the table's first structure is its tree") };
+    for g in trees.groups() {
+        let (c, h) = g.bounds(trees.cell());
+        let o = objects.len();
+        objects.push(Collidable { class: Class::Group, nearby: true, ..Collidable::default() });
+        broad.places.push(Placement { centre: c, cell: [g.cell[0], g.cell[2]], model: g.model, blend: g.blend, ..Placement::default() });
+        let key = broad_build::key(tree, hi, c, h);
+        broad_build::insert(tree, o, key);
+    }
+    for p in &trees.props.props {
+        objects.push(Collidable {
+            class: Class::Object,
+            flags: TREE_FLAGS,
+            nearby: true,
+            radius: p.radius,
+            category: TREE,
+            collides_with: PROBE_COLLIDES_WITH,
+            categories: any_category(),
+            ..Collidable::default()
+        });
+        broad.places.push(Placement { centre: prop_box(p).0, ..Placement::default() });
+    }
+    broad.group_cell = trees.cell();
+    broad.models = trees.models().to_vec();
+    (broad, objects)
+}
+
 /// The world the plane searches, for one frame: the track's props as collidables, the candidates
 /// gathered around the ray probe, and the two probes' state.
 pub struct Scene<'a> {
     props: &'a [Prop],
+    trees: Option<&'a Trees>,
+    /// The first plant's collidable and the first trunk's ([`world_wooded`]).
+    groups: usize,
+    trunks: usize,
+    trunk_facets: std::collections::HashMap<usize, Vec<Facet>>,
     bikes: Option<Bikes<'a>>,
     bike_facets: Option<Vec<Facet>>,
     /// What the bike's struck listener ([`bike_struck`]) kept on each of the ride's bikes this frame.
@@ -401,9 +473,22 @@ pub fn refresh_among(
     node: &Frame,
     search: &mut broad_phase::Search,
 ) {
+    refresh_wooded(props, None, bikes, field, rays, node, search);
+}
+
+/// [`refresh_among`] in a world with the ecosystem's plants in it ([`world_wooded`]).
+pub fn refresh_wooded(
+    props: Option<&Props>,
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    rays: &Rays,
+    node: &Frame,
+    search: &mut broad_phase::Search,
+) {
     let props = props.map_or(&[][..], |p| &p.props[..]);
     let (centre, radius) = reach(rays, &matrix(node));
-    let (mut broad, mut objects) = world_among(props, bikes, field, centre, radius);
+    let (mut broad, mut objects) = world_wooded(props, trees, bikes, field, centre, radius);
     refill(&mut objects, &mut broad, search);
 }
 
@@ -441,10 +526,24 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
     ) -> Scene<'a> {
+        Scene::wooded(props, None, bikes, field, rays, node, search)
+    }
+
+    /// [`Scene::among`] in a world with the ecosystem's plants in it ([`world_wooded`]): the ray probe
+    /// meets a plant's trunks as it meets a prop.
+    pub fn wooded(
+        props: Option<&'a Props>,
+        trees: Option<&'a Trees>,
+        bikes: Option<Bikes<'a>>,
+        field: Option<([F; 2], [F; 2])>,
+        rays: &'a Rays,
+        node: &Frame,
+        search: &mut broad_phase::Search,
+    ) -> Scene<'a> {
         let props = props.map_or(&[][..], |p| &p.props[..]);
         let transform = matrix(node);
         let (centre, radius) = reach(rays, &transform);
-        let (mut broad, mut objects) = world_among(props, bikes.as_ref(), field, centre, radius);
+        let (mut broad, mut objects) = world_wooded(props, trees, bikes.as_ref(), field, centre, radius);
         if !search.built || search.nearby.found.iter().any(|c| objects.len() <= c.object) {
             refill(&mut objects, &mut broad, search);
         }
@@ -457,7 +556,31 @@ impl<'a> Scene<'a> {
         let sweep = SweepProbe::default();
         let nearby = search.nearby.clone();
         let struck = vec![None; bikes.map_or(0, |b| b.bikes.len())];
-        Scene { props, bikes, bike_facets: None, struck, rays, transform, objects, nearby, facets: vec![None; props.len()], ray, sweep }
+        let groups = FIRST + props.len() + bikes.map_or(0, |b| b.bikes.len());
+        let trunks = groups + trees.map_or(0, |t| t.groups().len());
+        Scene {
+            props,
+            trees,
+            groups,
+            trunks,
+            trunk_facets: std::collections::HashMap::new(),
+            bikes,
+            bike_facets: None,
+            struck,
+            rays,
+            transform,
+            objects,
+            nearby,
+            facets: vec![None; props.len()],
+            ray,
+            sweep,
+        }
+    }
+
+    /// The world's trunk `j`, when `other` is one of [`world_wooded`]'s trunks.
+    fn trunk(&self, other: usize) -> Option<usize> {
+        let j = other.checked_sub(self.trunks)?;
+        self.trees.is_some_and(|t| j < t.props.props.len()).then_some(j)
     }
 
     /// The ride's bike `k`, when `other` is one of [`world_among`]'s bikes.
@@ -468,6 +591,9 @@ impl<'a> Scene<'a> {
 
     /// What the plane's record keeps as struck for collidable `other` ([`BIKES`]).
     fn id(&self, other: usize) -> usize {
+        if let Some(j) = self.trunk(other) {
+            return TREES + j;
+        }
         self.bike(other).map_or(other, |k| BIKES + k)
     }
 
@@ -511,6 +637,36 @@ impl Scene<'_> {
     }
 }
 
+impl Scene<'_> {
+    /// A probe's narrow phase against trunk `j` of the world's trees, collidable `other`: a prop's.
+    fn pair_trunk(&mut self, probe: usize, other: usize, j: usize) -> bool {
+        let Some(trees) = self.trees else { return false };
+        let p = &trees.props.props[j];
+        if probe == RAY {
+            let facets = self.trunk_facets.entry(j).or_insert_with(|| facets(&p.mesh));
+            let mesh = ray_probe::Mesh {
+                id: other as u32,
+                transform: placed(p),
+                root: 0,
+                nodes: &p.mesh.nodes,
+                facets,
+                vertices: &p.mesh.vertices,
+            };
+            let rays = self.rays;
+            let probe = RayProbe { transform: self.transform, root: rays.root, nodes: &rays.nodes, segments: &rays.segments };
+            ray_probe::pair(&probe, &ray_probe::Shape::Mesh(mesh), &mut self.ray)
+        } else {
+            let target = sweep_probe::Target {
+                nearby: true,
+                centre: p.centre,
+                radius: p.radius,
+                shape: sweep_probe::Shape::Mesh(sweep_probe::Placed { transform: placed(p), mesh: MeshRef::of(&p.mesh), object: other }),
+            };
+            sweep_probe::pair(&mut self.sweep, Some(&target))
+        }
+    }
+}
+
 /// A prop's mesh where the scene stands it.
 fn placed(p: &Prop) -> Matrix {
     p.to_world.0
@@ -530,6 +686,9 @@ impl Narrow for Scene<'_> {
     fn prepare(&mut self, _objects: &mut [Collidable], _probe: usize) {}
 
     fn pair(&mut self, _objects: &mut [Collidable], probe: usize, other: usize) -> bool {
+        if let Some(j) = self.trunk(other) {
+            return self.pair_trunk(probe, other, j);
+        }
         if let Some(k) = self.bike(other) {
             return self.pair_bike(probe, other, k);
         }
@@ -561,12 +720,18 @@ impl Narrow for Scene<'_> {
         }
     }
 
-    fn parts(&mut self, _objects: &mut [Collidable], _group: usize) -> usize {
-        0
+    /// A plant's parts: one per solid of its species, as the original's part count reads them.
+    fn parts(&mut self, _objects: &mut [Collidable], group: usize) -> usize {
+        let trees = self.trees.expect("a placed group in a world without trees");
+        trees.groups()[group - self.groups].parts.len()
     }
 
-    fn part(&mut self, _objects: &mut [Collidable], _group: usize, _i: usize) -> Option<usize> {
-        None
+    /// Part `i` of a plant: its trunk, already where the plant stands. A sphere's ray test writes no
+    /// contact in the original (its narrow phase returns only whether a ray passed through it), and
+    /// nothing the port reads off a search is the hit bit alone, so a sphere is no part here.
+    fn part(&mut self, _objects: &mut [Collidable], group: usize, i: usize) -> Option<usize> {
+        let trees = self.trees.expect("a placed group in a world without trees");
+        trees.groups()[group - self.groups].parts[i].map(|j| self.trunks + j)
     }
 
     /// The ray probe's two listeners: the hit listener's wake is a no-op on the plane's awake body,
@@ -624,8 +789,14 @@ impl Search for Scene<'_> {
     }
 }
 
-/// The category of what [`Scene`] reports as struck: a bike's ([`BIKES`]) is [`BIKE`], every prop's
-/// is scenery.
+/// The category of what [`Scene`] reports as struck: a trunk's ([`TREES`]) is [`TREE`], a bike's
+/// ([`BIKES`]) is [`BIKE`], every prop's is scenery.
 pub fn category(object: usize) -> u32 {
-    if object >= BIKES { BIKE } else { SCENERY }
+    if object >= TREES {
+        TREE
+    } else if object >= BIKES {
+        BIKE
+    } else {
+        SCENERY
+    }
 }

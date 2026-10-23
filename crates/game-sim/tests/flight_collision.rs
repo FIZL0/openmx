@@ -413,3 +413,55 @@ fn a_plane_flown_into_a_mesh_crashes() {
     assert!(f.record.struck.is_some(), "the rays never struck a mesh");
     assert_eq!(f.crash.reason, CRASHED, "the plane did not crash into the meshes");
 }
+
+/// **The plane meets a tree** (S102): flown level at twenty feet into one of free09's trunks standing
+/// on a floor ([`game_sim::eco::Wooded`]), its rays strike the trunk through the placed group's part
+/// and it crashes; with no tree it flies on past where the trunk would be.
+#[test]
+fn a_plane_flown_into_a_tree_crashes() {
+    use game_sim::eco::{self, Ecosystem, Trees, Wooded};
+    let Some((_, f, _, _)) = the_plane() else { return };
+    let Some(kit) = Kit::load().ok() else { return };
+    let Ok(mut file) = File::open(kit.ctx("iso").join("MX.PSR")) else { return };
+    let mut front = vec![0u8; 64 << 10];
+    file.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find("Tracks\\free09.res").expect("free09.res is in MX.PSR");
+    file.seek(SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    file.read_exact(&mut bytes).expect("read");
+    let res = Res::parse(&bytes).expect("free09.res");
+    let esb = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with("free09.esb")).expect("free09.esb");
+    let mut eco = Ecosystem::parse(&res.read(&bytes, esb).expect("its bytes")).expect("free09.esb parses");
+    let cell = eco::cell_size(F(6912.0));
+    // A TreeB (the file's slot 1) sixty feet ahead on the floor.
+    let mut plant = *eco.plants.iter().find(|p| p.species == 1).expect("a TreeB");
+    plant.cell = [0, 0, (60.0 / cell.0) as u16];
+    eco.plants = vec![plant];
+    let (trees, missed) = Trees::new(&eco, cell, &game_sim::camera::CurveTable::build());
+    assert!(missed.is_empty(), "{missed:?}");
+
+    let tables = game_sim::ride::Tables::build();
+    let fly = |world: &mut dyn game_sim::world::World| {
+        let mut f = f.clone();
+        f.attitude.flown = true;
+        f.place(Vf::new(0.0, 20.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), &tables.acos);
+        f.body.velocity = Vf::new(0.0, 0.0, 120.0, 1.0);
+        let gas = game_sim::biplane::Pad { forward: F::ONE, ..Default::default() };
+        for _ in 0..30 {
+            f.frame(F(1.0 / 30.0), gas, world, &tables);
+            if f.crash.reason != 0 {
+                break;
+            }
+        }
+        f
+    };
+    let open = fly(&mut Flat::default());
+    assert_eq!(open.crash.reason, 0, "the plane crashed over the bare floor");
+    assert!(open.body.position.z() > 70.0, "the plane did not fly past the tree's spot: {:?}", open.body.position);
+
+    let struck = fly(&mut Wooded { world: Flat::default(), trees });
+    assert!(struck.record.struck.is_some(), "the rays never struck the trunk");
+    assert_eq!(struck.crash.reason, CRASHED, "the plane did not crash into the tree");
+    assert!(struck.body.position.z() < 62.0, "the plane flew through the trunk: {:?}", struck.body.position);
+}
