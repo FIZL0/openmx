@@ -150,6 +150,11 @@ impl Scene {
                     target: vec_of(Some(s), "TargetPosition", v3(0.0, 0.0, 0.0)),
                 });
             } else if lower.starts_with("model") {
+                // MX vs. ATV's race props: a free ride, the only ride on its maps here, draws no
+                // hidden activity model (MD13, `game_sim::track::ActivityModel`).
+                if game_sim::track::ActivityModel::free_ride_hides(s.get("Type"), s.get("Hide")) {
+                    continue;
+                }
                 if let Some(name) = s.get("SLT") {
                     models.push(Placement {
                         model: slt_name(name),
@@ -436,6 +441,22 @@ mod tests {
         assert!(s.sun().y < 0.0, "{:?}", s.sun());
         // A prop with no vectors of its own still gets a usable transform.
         assert_eq!(s.models[1].transform().point(v3(0.0, 0.0, 0.0)), s.models[1].pos);
+    }
+
+    /// MX vs. ATV's race props (MD13): a hidden gate and hill-climb flag are not drawn in a free ride,
+    /// a start zone, a `Hide=False` gate and a plain prop are.
+    #[test]
+    fn a_free_ride_draws_no_hidden_race_prop() {
+        let s = Scene::parse(
+            "[Model1]\nSLT=Barn\n\
+             [Model2]\nSLT=AirRace_Start\n;-- Extra params\nType=Waypoint\nActivity=\"Glamis Waypoint Race\"\n\
+             AlphaFade=True\nHide=True\nHasCol=True\n\
+             [Model3]\nSLT=HC_Flag\nType=ActivitySpecific\nActivity=\"Hill Climb\"\n\
+             [Model4]\nSLT=StartZone_Race\nType=StartZone\nActivity=\"Free Ride\"\nHide=True\n\
+             [Model5]\nSLT=Open Gate\nType=waypoint\nHide=FALSE\n",
+        );
+        let names: Vec<&str> = s.models.iter().map(|m| m.model.as_str()).collect();
+        assert_eq!(names, ["Barn", "StartZone_Race", "OpenGate"]);
     }
 
     /// free09's `[Fog]` (10..1000, `Visibility` 1, `Haziness` 0.6) against what the save state of
