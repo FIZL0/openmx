@@ -652,6 +652,8 @@ impl Rider {
                     (score::THREE_SIXTY_LEFT, moves.three_sixty_points.0)
                 };
                 score.start_flat(id, points);
+                // Told as a start, so the shell names it: it has no clip of its own to show it.
+                out.started = out.started.or(Some(if t.spin.dir >= 1 { Trick::THREE_SIXTY_RIGHT } else { Trick::THREE_SIXTY_LEFT }));
             }
         }
         let pose = motion::Pose {
@@ -883,7 +885,14 @@ impl Rider {
         // manager's, which in the original runs after every rider's and touches only this one's card.
         let sensed = Self::score_sense(ride, slow, state.wreck.is_some());
         match (p.tricks.as_ref(), ride.tricks.as_deref_mut()) {
-            (Some(moves), Some(t)) => score.frame_with(dt, &sensed, Some((&mut t.front_watch, moves.front_flip_points))),
+            (Some(moves), Some(t)) => {
+                let was = t.front_watch;
+                score.frame_with(dt, &sensed, Some((&mut t.front_watch, moves.front_flip_points)));
+                // A front flip come round, told as a start as the 360 is.
+                if was != 3 && t.front_watch == 3 {
+                    out.started = out.started.or(Some(Trick::FRONTFLIP));
+                }
+            }
             _ => score.frame(dt, &sensed),
         }
         score.grow(dt);

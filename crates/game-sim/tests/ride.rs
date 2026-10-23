@@ -5521,6 +5521,7 @@ fn md16_front_flip_goes_round_and_lands() {
     let last = seats.last().unwrap();
     assert!(last.on_ground && last.up_y > 0.95, "on its wheels: {}", last.up_y);
     assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::FRONTFLIP)), "scored as a front flip");
+    assert!(ride.iter().any(|t| t.frame.started == Some(Trick::FRONTFLIP)), "and told as a start, for the shell's name");
     assert_eq!(r.score.total, F(10000.0), "worth the pack's backflip");
 }
 
@@ -5549,6 +5550,7 @@ fn md16_three_sixty_comes_round_or_wrecks() {
     assert!(ride[fired].seat.lip && ride[fired].spin.dir == 1, "on the lip, turning right");
     assert!(ride.iter().any(|t| t.spin.clip == 2), "it turned past 35°");
     assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::THREE_SIXTY_RIGHT)), "it came round and scored");
+    assert!(ride.iter().any(|t| t.frame.started == Some(Trick::THREE_SIXTY_RIGHT)), "and told as a start");
     assert_eq!(wrecks(&seats), 0, "and landed");
     assert!(r.score.total >= F(15000.0));
 
