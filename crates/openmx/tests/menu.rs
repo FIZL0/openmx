@@ -284,6 +284,9 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     for _ in 0..6 {
         tap(&mut m, &mut r, Control::Down);
     }
+    // Main Menu asks first, on Stay (P110): Up onto the leaving row, then Cross.
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Up);
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::MainMenu), "{acts:?}");
     assert_eq!(m.screen(), Some(Screen::Main));
@@ -3066,4 +3069,111 @@ fn a_push_both_the_pad_and_the_keyboard_report_is_one_press() {
     m.step_seats(&[r.read_joint(&[(Report::idle(), 0), (start, 0)])]);
     m.step_seats(&[r.read_joint(&[(Report::idle(), 0), (Report::idle(), 0)])]);
     assert_eq!(m.screen(), Some(Screen::Pause), "the keyboard's Start, a tick behind the pad's, closed it");
+}
+
+// ---- leaving from the pause asks first (P110) -------------------------------------------------------
+
+/// A plain press of one kind, for [`Menu::step_seats`].
+fn press(f: impl Fn(&mut Press)) -> Press {
+    let mut p = Press::default();
+    f(&mut p);
+    p
+}
+
+/// The pause's Main Menu and Quit rows open a two-row confirm on Stay instead of acting: the ride
+/// stays under it, Stay, Circle and Start go back to the pause on the same row, and only the leaving
+/// row yields [`Act::MainMenu`] (or [`Act::Quit`]) — worded for where the shell says it goes.
+#[test]
+fn leaving_from_the_pause_asks_first_on_stay() {
+    use menu::LeaveTo;
+    for (to, ask, go) in [
+        (LeaveTo::Main, "Main menu?", "Main Menu"),
+        (LeaveTo::Lobby, "Return to lobby?", "Return to Lobby"),
+        (LeaveTo::Online, "Leave the online game?", "Leave Game"),
+    ] {
+        let (mut m, mut r) = fresh();
+        m.leave_to = to;
+        m.pause();
+        tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Main Menu");
+        let at = m.cursor(Screen::Pause);
+        let acts = tap(&mut m, &mut r, Control::Cross);
+        assert!(acts.iter().all(|a| *a == Act::Stay), "{to:?}: {acts:?}");
+        assert_eq!(m.screen(), Some(Screen::Pause), "{to:?}");
+        assert_eq!(m.confirming(), Some((ask, [go, "Stay"], 1)), "{to:?}");
+        // Cross on Stay, Circle and Start: back to the pause, on the row it was, the ride not left.
+        for back in [Control::Cross, Control::Circle, Control::Start] {
+            if m.confirming().is_none() {
+                tap(&mut m, &mut r, Control::Cross);
+            }
+            assert_eq!(m.confirming().map(|c| c.2), Some(1), "{to:?} {back:?}");
+            let acts = tap(&mut m, &mut r, back);
+            assert!(acts.iter().all(|a| *a == Act::Stay), "{to:?} {back:?}: {acts:?}");
+            assert_eq!(m.confirming(), None, "{to:?} {back:?}");
+            assert_eq!(m.screen(), Some(Screen::Pause), "{to:?} {back:?}");
+            assert_eq!(m.cursor(Screen::Pause), at, "{to:?} {back:?}");
+        }
+        // Up or Down moves between the two rows, round; Cross on the first leaves.
+        tap(&mut m, &mut r, Control::Cross);
+        tap(&mut m, &mut r, Control::Down);
+        assert_eq!(m.confirming().map(|c| c.2), Some(0), "{to:?}");
+        tap(&mut m, &mut r, Control::Up);
+        assert_eq!(m.confirming().map(|c| c.2), Some(1), "{to:?}");
+        tap(&mut m, &mut r, Control::Up);
+        let acts = tap(&mut m, &mut r, Control::Cross);
+        assert!(acts.contains(&Act::MainMenu), "{to:?}: {acts:?}");
+        assert_eq!(m.screen(), Some(Screen::Main), "{to:?}");
+        assert_eq!(m.confirming(), None, "{to:?}");
+    }
+
+    // The pause's Quit asks the same, worded as the splash's.
+    let (mut m, mut r) = fresh();
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Quit");
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.iter().all(|a| *a == Act::Stay), "{acts:?}");
+    assert_eq!(m.confirming(), Some(("Quit the game?", ["Quit", "Stay"], 1)));
+    let acts = tap(&mut m, &mut r, Control::Circle);
+    assert!(acts.iter().all(|a| *a == Act::Stay) && m.screen() == Some(Screen::Pause), "{acts:?}");
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Left);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Quit), "{acts:?}");
+
+    // A fresh pause has no confirm up from the last one.
+    let (mut m, mut r) = fresh();
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Main Menu");
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.confirming().is_some());
+    m.pause();
+    assert_eq!(m.confirming(), None);
+}
+
+/// Over a split, the confirm is the pauser's: 2P's pause hears 2P's pad alone, so 1P's Cross on its
+/// leaving row does nothing, and 2P's does.
+#[test]
+fn over_a_split_only_the_pausers_pad_answers_the_confirm() {
+    let (mut m, _) = fresh();
+    m.riders = 2;
+    let idle = Press::default();
+    let (cross, down, up) = (press(|p| p.ok = true), press(|p| p.down = true), press(|p| p.up = true));
+    // 2P's Start, as a ride hears it.
+    m.pause_for(1);
+    assert_eq!(m.driver(), 1);
+    while m.pause_rows()[m.cursor(Screen::Pause)] != "Main Menu" {
+        m.step_seats(&[idle, down]);
+    }
+    assert_eq!(m.step_seats(&[idle, cross]), Act::Stay);
+    assert_eq!(m.confirming().map(|c| c.2), Some(1));
+    // 1P moves and presses: nothing.
+    m.step_seats(&[up, idle]);
+    assert_eq!(m.confirming().map(|c| c.2), Some(1));
+    m.step_seats(&[press(|p| p.back = true), idle]);
+    assert_eq!(m.confirming().map(|c| c.2), Some(1));
+    // 2P onto the leaving row; 1P's Cross still nothing, 2P's leaves.
+    m.step_seats(&[idle, up]);
+    assert_eq!(m.step_seats(&[cross, idle]), Act::Stay);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.step_seats(&[idle, cross]), Act::MainMenu);
+    assert_eq!(m.screen(), Some(Screen::Main));
 }
