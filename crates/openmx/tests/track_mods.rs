@@ -437,3 +437,37 @@ fn a_one_level_terrain_is_256_samples_a_side() {
     let end: Vec<f32> = line(&said, "end: ")[5..].split(", ").map(|v| v.trim().parse().unwrap()).collect();
     assert!(end[2] > 400.0 && end[1].abs() < 20.0 && (end[0] - 512.0).abs() < 100.0, "{end:?}\n{said}");
 }
+
+/// P113: a mod map has no `machine.txt`, and the biplane is there all the same. `--vehicle biplane`
+/// starts a four-player split on it with every seat in its plane, and a tape's switch takes the
+/// plane where the rider is and gives the bike back (tests/machines_everywhere.rs has the pause's
+/// switch for every seat, and the spots).
+#[test]
+fn a_mod_map_has_the_biplane_with_no_machine_txt() {
+    let mods = mods_folder("p113");
+    let mods_arg = mods.to_str().unwrap();
+    let Some((ok, said)) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--vehicle", "biplane", "--players", "4", "--seconds", "2"]) else {
+        return;
+    };
+    assert!(ok, "the plane did not start on the mod map:\n{said}");
+    assert!(said.contains("biplane: no parked copy here"), "\n{said}");
+    assert_eq!(line(&said, "vehicle: "), "vehicle: biplane");
+    assert!(line(&said, "plane hash").ends_with("(biplane)"), "\n{said}");
+    // The flat's ground is at 0: the plane started on it, on its wheels, not under it or over it.
+    let under: f32 = line(&said, "the dirt under the biplane is at ")[33..].trim_end_matches(" feet").parse().unwrap();
+    assert!(under.abs() < 1.0, "\n{said}");
+
+    let frames = 240;
+    let mut text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape throttle and two switches\n");
+    let report = format!("0079ff{:02x}7f7f7f7f000000000000{:02x}{}", 0xbf, 0xff, "00".repeat(17));
+    for _ in 0..frames {
+        text += &format!("frame 0x3d08850a 0x{report} -\n");
+    }
+    text += "switch 60 biplane\nswitch 180 bike\n";
+    let tape = mods.parent().unwrap().join("switching.tape");
+    std::fs::write(&tape, text).unwrap();
+    let (ok, said) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape.to_str().unwrap(), "--seconds", "9"]).unwrap();
+    assert!(ok, "\n{said}");
+    let switched: Vec<&str> = said.lines().filter(|l| l.starts_with("vehicle: ")).collect();
+    assert_eq!(switched, ["vehicle: bike", "vehicle: biplane", "vehicle: bike"], "\n{said}");
+}
