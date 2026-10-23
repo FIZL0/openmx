@@ -53,6 +53,10 @@ pub enum Msg {
     /// of every restart that changes them or takes a peer on (whose machine may have loaded an
     /// older set); `was` equal to `to` changes nothing on a machine already on it.
     Mods { round: u8, was: String, to: String },
+    /// A guest to the host: its player's own modifiers are `to` (P134, `rides::own_set`'s text),
+    /// which the host puts on the guest's seats and takes as a change of its own
+    /// ([`super::Netplay::remodify`]), every machine at one tick.
+    Mine { to: String },
 }
 
 pub enum Kind<'a> {

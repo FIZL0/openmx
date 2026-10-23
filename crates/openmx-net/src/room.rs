@@ -46,11 +46,25 @@ pub struct Pick {
     /// the markers are not: one build reads the same word the same way.
     #[serde(default)]
     pub machine: String,
+    /// The player's own game modifiers (P134), in `game_sim::modifiers::Mods`' text form, a set
+    /// whose every player is this one: the host puts its own-seat ones on the player's seat in the
+    /// room's [`Room::modifiers`]. Empty is the original game's, and what an older build sends. Not
+    /// in the handshake, as the markers are not.
+    #[serde(default)]
+    pub modifiers: String,
 }
 
 impl Pick {
     pub fn new(rider: &str, bike: &str) -> Pick {
-        Pick { rider: rider.into(), bike: bike.into(), preset: 0, look: String::new(), markers: String::new(), machine: String::new() }
+        Pick {
+            rider: rider.into(),
+            bike: bike.into(),
+            preset: 0,
+            look: String::new(),
+            markers: String::new(),
+            machine: String::new(),
+            modifiers: String::new(),
+        }
     }
 }
 

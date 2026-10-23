@@ -378,10 +378,11 @@ impl Game for Modded<'_, '_> {
         }
         let first = self.stock.first().ok_or("no stock bike file to build the modifiers on")?;
         for (seat, sim) in self.rides.sims.iter_mut().enumerate() {
-            to.resim(&was, 0, self.stock.get(seat).unwrap_or(first), sim);
+            // Each seat on its own row (P134); a ride whose rows are all 1P's is as before.
+            to.resim(&was, seat, self.stock.get(seat).unwrap_or(first), sim);
             // A plane in flight retuned where it is, as the pause does offline (P98, `replane`).
             if let (Some(file), Some(f)) = (self.stock_plane, sim.plane.as_mut()) {
-                to.replane(0, file, f);
+                to.replane(seat, file, f);
             }
         }
         // And the plane a switch takes from here built on the new set.
@@ -393,3 +394,9 @@ impl Game for Modded<'_, '_> {
         Ok(())
     }
 }
+
+// ---- every seat's own modifiers online (P134) ------------------------------------------------------
+
+/// The per-seat sets an online ride rides, kept beside [`Mods`](game_sim::modifiers::Mods) so the
+/// menu can read them too.
+pub use game_sim::modifiers::online::{host_set, own_row, own_set, ride_set, with_own};
