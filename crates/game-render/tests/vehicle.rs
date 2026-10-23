@@ -13,6 +13,7 @@ use game_render::rider as gear;
 use game_render::scene::Vehicle;
 use game_render::skin::skin;
 use game_render::vehicle::{BARS, Chassis, Drive, FRONT, REAR, ROOT, SHOCKS, SWINGARM, params};
+use game_render::vehicle::{BLUR_ALPHA, BLUR_ARC, BLUR_FROM, BLUR_FULL, SPIN_STEP_CAP, Spin, about};
 use game_sim::ride::Controls;
 use game_sim::trick::{Dir, SLOTS, Set as Stunts24, Stunts, Trick, slot_of};
 use game_sim::world::Flat;
@@ -276,8 +277,10 @@ fn the_fork_node_travels_with_the_ported_compression() {
 /// Neither half of this is in a clip. The rate is the wheel's own (`+0x1d4`, which S16's
 /// integration writes) and the angle is the renderer's integral of it, because nothing in the
 /// simulation reads one. Two things are checked: the integral against an independent one run here,
-/// and the *node* against the integral — a point at the top of the tire, taken through the composed
-/// tree and back into the tire's parent frame, has to have gone round by exactly that angle.
+/// and the *node* against the angle it is drawn at — a point at the top of the tire, taken through
+/// the composed tree and back into the tire's parent frame, has to have gone round by exactly that
+/// angle. Since V59 the drawn angle is [`Spin`]'s, the same steps held under [`SPIN_STEP_CAP`], so
+/// that is integrated here too.
 #[test]
 fn the_wheel_node_angle_integrates_its_own_spin() {
     let Some(mut disc) = disc() else { return };
@@ -301,6 +304,7 @@ fn the_wheel_node_angle_integrates_its_own_spin() {
     let hands = Controls { gas: F::ONE, ..Controls::default() };
     // The reference integration: the original's own wrap, run here off the same rate.
     let mut reference = [0.0f32; 2];
+    let mut drawn = [0.0f32; 2];
     let mut turned = [0.0f32; 2];
     for n in 0..A_MINUTE {
         r.frame(&p, &tables, &hands, FRAME, &mut world);
@@ -316,14 +320,23 @@ fn the_wheel_node_angle_integrates_its_own_spin() {
                 a += 6.2831855;
             }
             reference[w] = a;
+            let step = (rate * FRAME.0).clamp(-SPIN_STEP_CAP, SPIN_STEP_CAP);
+            drawn[w] = wrap(drawn[w] + step);
         }
         let got = [c.front_roll.angle, c.rear_roll.angle];
+        let shown = [c.front_spin.angle, c.rear_spin.angle];
         for w in 0..2 {
             assert!(
                 (got[w] - reference[w]).abs() < 1e-4,
                 "wheel {w} is at {} on frame {n} and its own spin wants {}",
                 got[w],
                 reference[w]
+            );
+            assert!(
+                wrap(shown[w] - drawn[w]).abs() < 1e-3,
+                "wheel {w} is drawn at {} on frame {n} and its capped steps want {}",
+                shown[w],
+                drawn[w]
             );
         }
         // And the node itself: the top of the tire, in the frame of the node it hangs off.
@@ -336,12 +349,12 @@ fn the_wheel_node_angle_integrates_its_own_spin() {
                 up.x * parent.0[1][0] + up.y * parent.0[1][1] + up.z * parent.0[1][2],
                 up.x * parent.0[2][0] + up.y * parent.0[2][1] + up.z * parent.0[2][2],
             );
-            let (s, cos) = got[w].sin_cos();
+            let (s, cos) = shown[w].sin_cos();
             let want = v3(0.0, cos, s);
             assert!(
                 dir.sub(want).len() < 1e-3,
                 "frame {n}: the top of {tire} points {dir:?} and an angle of {} wants {want:?}",
-                got[w]
+                shown[w]
             );
         }
     }
@@ -895,4 +908,293 @@ fn a_crossed_up_landing_eases_the_bike_square() {
     assert!(at > 30.0, "the flight was not crossed up, so this proves nothing: {at} deg");
     assert!(step < 5.0, "the chassis turned {step} deg in one frame after landing");
     assert!(*after.last().unwrap() < 1.0, "the chassis never came square: {after:?}");
+}
+
+/// An angle put back into `-pi..pi`.
+fn wrap(a: f32) -> f32 {
+    (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
+
+/// The turn from `a` to `b` about `axis`, signed the way [`about`] turns (`y` towards `z` about `x`).
+fn turn_about(axis: V3, a: V3, b: V3) -> f32 {
+    axis.dot(a.cross(b)).atan2(a.dot(b))
+}
+
+/// The chassis' finest triangles as the pose has them, kept with the wheel each was skinned from.
+fn wheel_tris(geometry: &Model, c: &Chassis, pose: &[M4], wheel: u8) -> Vec<game_render::psg::Tri> {
+    skin(geometry, pose, 0)
+        .into_iter()
+        .filter(|t| t.v.iter().all(|v| c.wheels.get(v.node) == Some(&wheel)))
+        .collect()
+}
+
+fn area(t: &game_render::psg::Tri) -> f32 {
+    t.v[1].pos.sub(t.v[0].pos).cross(t.v[2].pos.sub(t.v[0].pos)).len() * 0.5
+}
+
+/// **V59.** Past the alias rate a wheel is drawn turning forward by under half a turn a tick, and
+/// blurred.
+///
+/// The ride is 30 ticks a second and the picture is blended between two of them the short way
+/// round, so a wheel that turns more than half a turn in a tick is drawn turning backwards, and one
+/// of thin spokes strobes long before that. Every rate either way, at the ride's tick and at the
+/// window's: the drawn step keeps the rate's sign, is the rate's own under the cap and never more
+/// than [`SPIN_STEP_CAP`] (a fifth of a turn) past it, and wherever the cap holds a step back the
+/// wheel is wholly blurred.
+#[test]
+fn past_the_alias_rate_the_wheel_turns_forward_and_blurs() {
+    assert!(SPIN_STEP_CAP < std::f32::consts::PI * 0.5, "the cap is under a quarter turn");
+    for dt in [1.0 / 30.0, 1.0 / 60.0] {
+        assert!(BLUR_FULL * dt < SPIN_STEP_CAP, "the blur is whole before the cap bites at dt {dt}");
+        for k in -1200..=1200 {
+            let rate = k as f32 * 0.25;
+            let mut s = Spin { angle: 2.9, ..Spin::default() };
+            let before = s.angle;
+            let after = s.step(dt, rate);
+            assert!((-std::f32::consts::PI..=std::f32::consts::PI).contains(&after), "{after} wrapped");
+            let step = wrap(after - before);
+            assert!(step.abs() <= SPIN_STEP_CAP + 1e-5, "rate {rate} at dt {dt} drew a step of {step}");
+            assert!(step.abs() < std::f32::consts::PI, "half a turn or more at rate {rate}");
+            if rate != 0.0 {
+                assert_eq!(step.signum(), rate.signum(), "rate {rate} at dt {dt} turned the wheel backwards");
+            }
+            if (rate * dt).abs() <= SPIN_STEP_CAP {
+                assert!((step - rate * dt).abs() < 1e-4, "rate {rate} at dt {dt}: {step}, not its own step");
+            } else {
+                assert_eq!(s.blur, 1.0, "rate {rate} is capped at dt {dt} and not wholly blurred");
+            }
+            if rate.abs() <= BLUR_FROM {
+                assert_eq!(s.blur, 0.0, "a slow wheel at {rate} is blurred");
+            }
+            if rate.abs() >= BLUR_FULL {
+                assert_eq!(s.blur, 1.0, "a fast wheel at {rate} is not wholly blurred");
+            }
+            assert_eq!(s.dir, if rate < 0.0 { -1.0 } else { 1.0 });
+        }
+    }
+    let mut s = Spin::default();
+    s.step(1.0 / 30.0, f32::NAN);
+    assert_eq!(s, Spin::default(), "a rate that is not a number leaves the wheel where it was");
+}
+
+/// **V59.** The blur is the wheel alone, turned back along its trail.
+///
+/// On the disc's own chassis, spun past the blur: [`BLUR_ALPHA`]'s copies a wheel, at those alphas;
+/// skinned, every triangle with any area in a copy is that wheel's; and that wheel's every vertex
+/// is the drawn one's, turned about the axle (the tire node's own `x`) the way it came from by its
+/// share of [`BLUR_ARC`]. A slow wheel and the original's wheels draw no copies, and the original's
+/// are drawn at [`Roll`](game_render::vehicle::Roll)'s uncapped angle.
+#[test]
+fn a_spinning_wheel_blurs_alone_about_its_axle() {
+    let Some(mut disc) = disc() else { return };
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let build = sub(&mut disc);
+    let mut c = chassis(&mut disc, &set, &build.mcf);
+    let res = bike_res(&mut disc);
+    let geometry = Model::parse(&res.read_suffix(&format!("{}.psg", c.geometry)).expect("psg"))
+        .expect("the chassis geometry parses");
+    let front = c.stance.set.skeleton.find(FRONT).expect("a TireFront");
+    let rear = c.stance.set.skeleton.find(REAR).expect("a TireRear");
+
+    let mut r = ride(&p, &c, &set);
+    let mut world = Flat::default();
+    let hands = Controls { gas: F::ONE, ..Controls::default() };
+    let spun = |c: &mut Chassis, r: &rider::Rider, front: f32, rear: f32| {
+        let mut d = Drive::of(&r.ride);
+        d.front_spin = front;
+        d.rear_spin = rear;
+        c.frame(FRAME, Chassis::want(&r.ride, &r.tricks), &Chassis::request(&r.ride, &r.tricks), d);
+    };
+    for _ in 0..20 {
+        r.frame(&p, &tables, &hands, FRAME, &mut world);
+        let _ = frame(&mut c, &r);
+    }
+
+    // Forward on the front and backward on the rear, so both trails are checked.
+    spun(&mut c, &r, 100.0, -100.0);
+    let base = c.world.clone();
+    let copies = c.blur_copies(&base);
+    let n = BLUR_ALPHA.len();
+    assert_eq!(copies.len(), 2 * n, "{n} copies a wheel");
+    for (i, copy) in copies.iter().enumerate() {
+        let (wheel, node, dir) = if i < n { (1u8, front, 1.0) } else { (2u8, rear, -1.0) };
+        let k = i % n;
+        assert_eq!(copy.alpha, BLUR_ALPHA[k], "copy {i}'s alpha");
+        let tris = skin(&geometry, &copy.pose, 0);
+        let drawn: Vec<_> = tris.iter().filter(|t| area(t) > 1e-6).collect();
+        assert!(!drawn.is_empty(), "copy {i} draws nothing");
+        for t in &drawn {
+            assert!(t.v.iter().all(|v| c.wheels[v.node] == wheel), "copy {i} draws a triangle off wheel {wheel}");
+        }
+
+        let tire = base[node];
+        let centre = v3(tire.0[3][0], tire.0[3][1], tire.0[3][2]);
+        let axis = tire.dir(v3(1.0, 0.0, 0.0));
+        let axis = axis.scale(1.0 / axis.len());
+        let want = -dir * BLUR_ARC * (k as f32 + 1.0) / n as f32;
+        let (was, now) = (wheel_tris(&geometry, &c, &base, wheel), wheel_tris(&geometry, &c, &copy.pose, wheel));
+        assert_eq!(was.len(), now.len());
+        assert!(!was.is_empty(), "wheel {wheel} has triangles");
+        for (a, b) in was.iter().zip(&now) {
+            for (va, vb) in a.v.iter().zip(&b.v) {
+                let (ra, rb) = (va.pos.sub(centre), vb.pos.sub(centre));
+                let (ha, hb) = (ra.dot(axis), rb.dot(axis));
+                assert!((ha - hb).abs() < 1e-3, "copy {i} moved a vertex along the axle: {ha} to {hb}");
+                let (pa, pb) = (ra.sub(axis.scale(ha)), rb.sub(axis.scale(hb)));
+                assert!((pa.len() - pb.len()).abs() < 1e-3, "copy {i} moved a vertex off its circle");
+                if pa.len() > 0.05 {
+                    let got = turn_about(axis, pa, pb);
+                    assert!(
+                        wrap(got - want).abs() < 2e-3,
+                        "copy {i} of wheel {wheel} is turned {got} about its axle and wants {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Half way into the blur, the alphas scale with it.
+    spun(&mut c, &r, (BLUR_FROM + BLUR_FULL) * 0.5, BLUR_FULL);
+    let copies = c.blur_copies(&c.world);
+    assert_eq!(copies.len(), 2 * n);
+    assert!((copies[0].alpha - BLUR_ALPHA[0] * 0.5).abs() < 1e-6, "half a blur, half the alpha");
+    assert_eq!(copies[n].alpha, BLUR_ALPHA[0]);
+
+    // Slow: nothing more is drawn.
+    spun(&mut c, &r, BLUR_FROM, -BLUR_FROM);
+    assert!(c.blur_copies(&c.world).is_empty(), "a slow wheel draws copies");
+    assert!(c.blur_copies(&c.world[1..]).is_empty(), "a pose of another model draws copies");
+
+    // The original's: no copies, and the node at the roll's own angle, however far it went.
+    c.original_wheels = true;
+    let shocks = c.stance.set.skeleton.find(SHOCKS).expect("Shocks");
+    for _ in 0..7 {
+        spun(&mut c, &r, 150.0, 150.0);
+        assert!(c.blur_copies(&c.world).is_empty(), "the original's wheels are blurred");
+        let up = c.world[front].dir(v3(0.0, 1.0, 0.0));
+        let parent = c.world[shocks];
+        let dir = v3(
+            up.x * parent.0[0][0] + up.y * parent.0[0][1] + up.z * parent.0[0][2],
+            up.x * parent.0[1][0] + up.y * parent.0[1][1] + up.z * parent.0[1][2],
+            up.x * parent.0[2][0] + up.y * parent.0[2][1] + up.z * parent.0[2][2],
+        );
+        let got = dir.z.atan2(dir.y);
+        assert!(
+            wrap(got - c.front_roll.angle).abs() < 1e-3,
+            "the original's front is drawn at {got} and rolled to {}",
+            c.front_roll.angle
+        );
+    }
+    let off = wrap(c.front_spin.angle - c.front_roll.angle).abs();
+    println!("V59 blur: {} copies at 100 rad/s; at 150 rad/s the capped turn is {off:.3} rad off the roll", 2 * n);
+}
+
+/// **V59.** At full droop the tyres stay on their axles and clear of the fender.
+///
+/// Off the drop, with both wheels hanging, the front axle is where the fork puts it under the
+/// `Shocks` node and the rear is its bind distance from the swingarm pivot; each tyre's triangles
+/// are round its axle (the middle of them on it); and the front fender, placed at `Handlebars` the
+/// way the shell places it, has no vertex inside the tyre — within the tyre's width, every one is
+/// farther from the axle than the tyre's outer edge. Over the whole minute the least clearance is
+/// printed, with the compression it came at.
+#[test]
+fn at_full_droop_the_tyres_stay_on_their_axles_and_clear_of_the_fender() {
+    let Some(mut disc) = disc() else { return };
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let build = sub(&mut disc);
+    let mut c = chassis(&mut disc, &set, &build.mcf);
+    let res = bike_res(&mut disc);
+    let geometry = Model::parse(&res.read_suffix(&format!("{}.psg", c.geometry)).expect("psg"))
+        .expect("the chassis geometry parses");
+    let part = build
+        .parts
+        .iter()
+        .find(|part| part.model.to_ascii_lowercase().contains("front_fender"))
+        .expect("the bike has a front fender part");
+    assert!(part.placement.eq_ignore_ascii_case(BARS), "the fender hangs off {}", part.placement);
+    let name = part.model.trim_end_matches(".psg");
+    let fender = Model::parse(&res.read_suffix(&format!("{name}.psg")).expect("fender psg")).expect("the fender parses");
+    let fender_pose: Vec<M4> = (0..fender.nodes.len()).map(|i| fender.world(i)).collect();
+    let fender_tris = skin(&fender, &fender_pose, 0);
+    assert!(!fender_tris.is_empty(), "the fender skinned to nothing");
+
+    let sk = &c.stance.set.skeleton;
+    let (front, rear) = (sk.find(FRONT).expect("TireFront"), sk.find(REAR).expect("TireRear"));
+    let (shocks, swingarm) = (sk.find(SHOCKS).expect("Shocks"), sk.find(SWINGARM).expect("SwingArm"));
+    let bars = sk.find(BARS).expect("Handlebars");
+    let rest = |name: &str| c.node_rest(name).expect("a bind place");
+    let fork_drop = rest(FRONT).sub(rest(SHOCKS)).len();
+    let arm = rest(REAR).sub(rest(SWINGARM)).len();
+
+    let mut r = ride(&p, &c, &set);
+    let mut world = Flat::default();
+    let hands = Controls { gas: F::ONE, ..Controls::default() };
+    let mut droop = 0;
+    let mut least = (f32::MAX, 0.0f32);
+    let mut least_droop = f32::MAX;
+    for k in 0..A_MINUTE {
+        r.frame(&p, &tables, &hands, FRAME, &mut world);
+        let compression = [r.ride.front.w.compression.0, r.ride.rear.w.compression.0];
+        let on_ground = Drive::of(&r.ride).on_ground;
+        let _ = frame(&mut c, &r);
+        let at = |j: usize| v3(c.world[j].0[3][0], c.world[j].0[3][1], c.world[j].0[3][2]);
+
+        // The front tyre against the fender, every frame.
+        let axis = c.world[front].dir(v3(1.0, 0.0, 0.0));
+        let axis = axis.scale(1.0 / axis.len());
+        let centre = at(front);
+        let tyre = wheel_tris(&geometry, &c, &c.world, 1);
+        let (mut outer, mut width) = (0.0f32, 0.0f32);
+        for v in tyre.iter().flat_map(|t| t.v.iter()) {
+            let r = v.pos.sub(centre);
+            let h = r.dot(axis);
+            outer = outer.max(r.sub(axis.scale(h)).len());
+            width = width.max(h.abs());
+        }
+        let bars = c.world[bars];
+        let mut clearance = f32::MAX;
+        for v in fender_tris.iter().flat_map(|t| t.v.iter()) {
+            let r = bars.point(v.pos).sub(centre);
+            let h = r.dot(axis);
+            if h.abs() < width {
+                clearance = clearance.min(r.sub(axis.scale(h)).len() - outer);
+            }
+        }
+        if clearance < least.0 {
+            least = (clearance, compression[0]);
+        }
+
+        if on_ground || compression[0] > 1e-4 || compression[1] > 1e-4 {
+            continue;
+        }
+        droop += 1;
+        least_droop = least_droop.min(clearance);
+        let drop = at(front).sub(at(shocks)).len();
+        assert!((drop - fork_drop).abs() < 1e-3, "frame {k}: the front axle is {drop} from Shocks, bound at {fork_drop}");
+        let reach = at(rear).sub(at(swingarm)).len();
+        assert!((reach - arm).abs() < 1e-3, "frame {k}: the rear axle is {reach} from the pivot, bound at {arm}");
+        for (wheel, node) in [(1u8, front), (2, rear)] {
+            let tris = wheel_tris(&geometry, &c, &c.world, wheel);
+            let axis = c.world[node].dir(v3(1.0, 0.0, 0.0));
+            let axis = axis.scale(1.0 / axis.len());
+            let mut mid = v3(0.0, 0.0, 0.0);
+            for v in tris.iter().flat_map(|t| t.v.iter()) {
+                mid = mid.add(v.pos.scale(1.0 / (3 * tris.len()) as f32));
+            }
+            let off = mid.sub(at(node));
+            let off = off.sub(axis.scale(off.dot(axis))).len();
+            assert!(off < 0.05, "frame {k}: wheel {wheel}'s middle is {off} off its axle");
+        }
+        assert!(clearance > 0.0, "frame {k}: the fender is {clearance} into the front tyre at full droop");
+    }
+    assert!(droop > 0, "the drop never hung both wheels at full droop");
+    println!(
+        "V59 droop: {droop} frames hanging, the fender at least {least_droop:.3} clear of the front tyre \
+         there; over the minute at least {:.3}, at a front compression of {:.3}",
+        least.0, least.1
+    );
 }
