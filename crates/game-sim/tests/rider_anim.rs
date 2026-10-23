@@ -530,6 +530,7 @@ fn the_selection_matches_over_thirty_thousand_frames() {
             throttle: F(throttle),
             reversing: F(reversing),
             gesture,
+            spin: None,
         };
         let mut pool =
             Pool { used: pool0, count: count0, rng: Rng::from_seed(seed), seeded: true };

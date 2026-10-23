@@ -19,6 +19,8 @@ pub struct Pack {
     folder: PathBuf,
     /// The first rider's stunt table (`riders[0]`, MX vs. ATV's male motocross rider).
     rows: Vec<Row>,
+    /// That rider's clip prefix (`riders[0].rider`, `MX`), which names its clips (MD21).
+    rider: String,
     /// The pack's `.phy` files, by their name in lower case.
     phys: Vec<(String, PathBuf)>,
 }
@@ -52,11 +54,13 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
         return Ok(None);
     }
     let id = json.get("id").and_then(Json::str).ok_or("mod.json has no id")?.to_owned();
-    let table = match json.get("riders") {
-        Some(Json::Arr(riders)) => riders.first().and_then(|r| r.get("table")).and_then(Json::str),
+    let first = match json.get("riders") {
+        Some(Json::Arr(riders)) => riders.first(),
         _ => None,
-    }
-    .ok_or("mod.json has no riders[0].table")?;
+    };
+    let table = first.and_then(|r| r.get("table")).and_then(Json::str).ok_or("mod.json has no riders[0].table")?;
+    // The motocross rider's when the pack does not say: every pack import-tricks writes says `MX`.
+    let rider = first.and_then(|r| r.get("rider")).and_then(Json::str).unwrap_or("MX").to_owned();
     let bytes = std::fs::read(file(folder, table)).map_err(|e| format!("{table}: {e}"))?;
     let rows = trick_pack::table(&bytes).map_err(|e| format!("{table}: {e}"))?;
     let mut phys = Vec::new();
@@ -68,7 +72,7 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
             }
         }
     }
-    Ok(Some(Pack { id, folder: folder.to_owned(), rows, phys }))
+    Ok(Some(Pack { id, folder: folder.to_owned(), rows, rider, phys }))
 }
 
 /// A pack's file by its `/`-separated name, kept inside the pack's folder.
@@ -104,15 +108,27 @@ impl Pack {
         }
     }
 
-    /// What the ride shows of the pack's tricks: none of their clips. MX vs. ATV's `.mot` files are
-    /// a version the port's clip reader refuses, so every extra stunt, the 360s and the front flip
-    /// (which has no clip in either game) ride without a pose of their own; the line names them.
-    pub fn missing_clips(&self, stunts: &Set) -> String {
-        let names: Vec<&str> = stunts.stunts.iter().skip(game_sim::trick::SLOTS).map(|s| s.name.as_str()).filter(|n| !n.is_empty()).collect();
+    /// The pack's clips, for the rider and the bike to bind (MD21).
+    pub fn clips(&self) -> Result<game_render::anim::PackClips, String> {
+        game_render::anim::PackClips::open(&self.folder, &self.rider)
+    }
+
+    /// What the ride shows of the pack's tricks (MD21): which of its extras and 360s found no clip
+    /// on the rider (`rider`) and the bike (`bike`) — the names [`game_render::anim::PackClips::fill`]
+    /// answered, `None` for a body or chassis that was not loaded — and the front flip, which has no
+    /// clip in either game and shows the backflip's.
+    pub fn missing_clips(&self, stunts: &Set, rider: Option<&[String]>, bike: Option<&[String]>) -> String {
+        let extras = stunts.stunts.iter().skip(game_sim::trick::SLOTS).filter(|s| !s.name.is_empty()).count();
+        let side = |who: &str, missing: Option<&[String]>| match missing {
+            None => format!("no {who} to bind them to"),
+            Some([]) => format!("the {who} has all {} of them", extras + 2),
+            Some(names) => format!("the {who} has {} of {}, none for {}", extras + 2 - names.len(), extras + 2, names.join(", ")),
+        };
         format!(
-            "tricks: no clips from {} (its .mot files are not read): {}, threesixtyL, threesixtyR and the front flip have none",
+            "tricks: clips from {} for {extras} extras and the two 360s: {}; {}; the front flip has none in either game and shows the backflip's",
             self.folder.display(),
-            names.join(", ")
+            side("rider", rider),
+            side("bike", bike)
         )
     }
 }

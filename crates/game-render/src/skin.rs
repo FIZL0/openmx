@@ -13,6 +13,8 @@
 //!
 //! ```text
 //! i32            negated version if negative (3 on this disc), else version 1 and this is the next field
+//! version >= 5:
+//!   i32          a word MX vs. ATV's reader reads and drops
 //! i32            frame count — the longest channel's key count; nothing here uses it
 //! version >= 3:
 //!   i32          name count, then that many: i32 length (the NUL included), then the bytes
@@ -21,11 +23,18 @@
 //! i32            position key kind: 0 sixteen bytes, 1 forty
 //! i32            position channel count
 //! i32            rotation channel count
+//! version >= 6:
+//!   i32          a third channel count
+//! version >= 4:
+//!   i32          event count
 //! then the position channels, then the rotation channels, each:
 //!   i32 key count, i32 name — an index into the name table above
 //!   key[count]   kind 1 rotation: f32 time, u16 turn, i16 axis[3]   (twelve bytes, [`RotKey`])
 //!                kind 0 rotation: f32 time, u8  turn, i8  axis[3]   (eight bytes, [`NarrowKey`])
 //!                kind 0 position: f32 time, f32 xyz[3]
+//! version >= 6: the third channels, each an i32 key count and eight bytes a key
+//! version >= 4: the events, each i32, i32 sections, and per section a string, an i32 pair count
+//!               and that many string pairs (a string here is an i32 length, no NUL, and the bytes)
 //! ```
 //!
 //! All 17,337 `.mot` members on this disc are version 3 with position kind 0. 17,295 of them are
@@ -33,6 +42,12 @@
 //! rotation kind 0: the trucks and scrapers that drive around a few of the free-ride tracks. Version 1
 //! and 2 headers and the forty-byte position key are read by the original's own reader but appear
 //! nowhere on the disc, so they are rejected here rather than guessed at.
+//!
+//! Versions 4 to 7 are MX vs. ATV's, read as its own reader reads them: the layout above with the
+//! extra fields marked. Its trick pack's 171 clips are 48 version 3, 12 version 6 and 111 version 7,
+//! all position kind 0, none with a third channel or an event; no file of version 4 or 5 has been
+//! seen. The third channels and events are walked and dropped, so a version 3 clip comes out exactly
+//! as it always has.
 //!
 //! **The compressed quaternion.** A rotation key spends its first bytes on an angle and the rest on an
 //! axis. In the twelve-byte kind, `turn` indexes a 4096-entry table of
@@ -182,6 +197,10 @@ impl Clip {
         let mut frames = i32_at(d, &mut p)?;
         if frames < 0 {
             version = -frames;
+            if version >= 5 {
+                // MX vs. ATV's v5 word: read and dropped by its own reader (1 in every pack file)
+                i32_at(d, &mut p)?;
+            }
             frames = i32_at(d, &mut p)?;
         }
         let mut names = Vec::new();
@@ -206,8 +225,14 @@ impl Clip {
         let pos_kind = i32_at(d, &mut p)?;
         let n_pos = i32_at(d, &mut p)?;
         let n_rot = i32_at(d, &mut p)?;
+        // MX vs. ATV's later versions add two counts here: v6 a third kind of channel, v4 an event table
+        let n_third = if version >= 6 { i32_at(d, &mut p)? } else { 0 };
+        let n_events = if version >= 4 { i32_at(d, &mut p)? } else { 0 };
         if version < 3 {
             return Err(format!("a version {version} .mot: no clip on this disc is one"));
+        }
+        if version > 7 {
+            return Err(format!("a version {version} .mot: MX vs. ATV's reader stops at 7"));
         }
         if !(0..=1).contains(&rot_kind) || pos_kind != 0 {
             return Err(format!(
@@ -252,6 +277,7 @@ impl Clip {
             };
             rotation.push(RotChannel::new(name, keys));
         }
+        skip_later_channels(d, &mut p, n_third, n_events)?;
         if p != d.len() {
             return Err(format!("not a .mot: its channels end at {p}, not at {}", d.len()));
         }
@@ -1165,6 +1191,41 @@ pub fn tables() -> &'static Tables {
         arc[ARC_LEN - 1] = 0.0;
         Tables { turn, narrow, arc }
     })
+}
+
+/// MX vs. ATV's v6 third channels and v4 events, walked as its reader walks them and dropped: no
+/// pack clip has either, and nothing the port draws would read them.
+///
+/// A third channel is an i32 key count (no name) and eight bytes a key. An event is an i32, a section
+/// count, and per section a name, a pair count and that many key/value pairs — every string an i32
+/// length (no NUL counted) and its bytes.
+fn skip_later_channels(d: &[u8], p: &mut usize, n_third: i32, n_events: i32) -> Result<(), String> {
+    fn bytes(d: &[u8], p: &mut usize, n: i32) -> Result<(), String> {
+        let n = usize::try_from(n).map_err(|_| format!("not a .mot: a length of {n} at {p}"))?;
+        if *p + n > d.len() {
+            return Err(format!("not a .mot: {n} bytes at {p} run past the end", p = *p));
+        }
+        *p += n;
+        Ok(())
+    }
+    for _ in 0..n_third.max(0) {
+        let count = i32_at(d, p)?;
+        bytes(d, p, count.max(0).saturating_mul(8))?;
+    }
+    for _ in 0..n_events.max(0) {
+        i32_at(d, p)?;
+        let sections = i32_at(d, p)?;
+        for _ in 0..sections.max(0) {
+            let len = i32_at(d, p)?;
+            bytes(d, p, len)?;
+            let pairs = i32_at(d, p)?;
+            for _ in 0..pairs.max(0) * 2 {
+                let len = i32_at(d, p)?;
+                bytes(d, p, len)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn i32_at(d: &[u8], p: &mut usize) -> Result<i32, String> {

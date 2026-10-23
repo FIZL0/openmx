@@ -745,6 +745,12 @@ impl Body {
         Ok(Body { rider, rig: Rig::bound(set, lib, params), pose_lib, posed: false })
     }
 
+    /// **MD21:** a trick pack's rider clips in [`Body::pose_lib`]'s states past the sixty — its
+    /// extras and the 360s — bound to this body's skeleton. Answers the names that found no clip.
+    pub fn add_pack(&mut self, pack: &crate::anim::PackClips, stunts: &[Stunt]) -> Vec<String> {
+        pack.fill(&mut self.rig.set, &mut self.pose_lib, stunts, crate::anim::PackClips::rider_members)
+    }
+
     /// Pose the body from a frame of the **bike's** animation driving
     /// ([`game_sim::rider::Rider::animation`]), at the same `dt` the simulation stepped with.
     ///
