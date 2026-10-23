@@ -541,3 +541,43 @@ fn the_plane_is_thrown_back_from_a_hole_and_recovers_from_falling_through_one() 
     assert!((spot.x() - spawn.x()).abs() < 5.0 && spot.z() == spawn.z(), "recovered to {spot:?}, not its spawn");
     println!("thrown on tick {tick} at x {:.1}, recovered on tick {put} at {spot:?}, lowest y {lowest:.1}", at.x());
 }
+
+/// A tape of `gas` frames on the throttle, then `up` with the d-pad's Up held and nothing else, then
+/// a second at rest: P132's ride away and back to slot 1. Up is byte 2's bit 4, active low, with
+/// its pressure in byte 10.
+fn spawn_tape(test: &str, gas: usize, up: usize) -> PathBuf {
+    let mut text = format!("# game-sim pad tape: {} frames\nformat 1\ntape {test}\n", gas + up + 60);
+    let report = |b2: u8, b3: u8, up: u8, cross: u8| format!("0079{b2:02x}{b3:02x}7f7f7f7f0000{up:02x}000000{cross:02x}{}", "00".repeat(17));
+    let (throttle, home, idle) = (report(0xff, 0xbf, 0, 0xff), report(0xef, 0xff, 0xff, 0), report(0xff, 0xff, 0, 0));
+    for report in std::iter::repeat_n(&throttle, gas).chain(std::iter::repeat_n(&home, up)).chain(std::iter::repeat_n(&idle, 60)) {
+        text += &format!("frame 0x3d08850a 0x{report} -\n");
+    }
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md8").join(format!("{test}.tape"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// P132: a world's slot 1 is its start too. Five seconds on the throttle carry the bike off; holding
+/// Up then, nothing put in slot 1, stands it back on the world's start.
+#[test]
+fn a_worlds_slot_one_is_its_start() {
+    let tape = spawn_tape("spawn", 150, 60);
+    let Some(said) = shell("spawn", "md8_world", &["--play", tape.to_str().unwrap(), "--seconds", "20"]) else { return };
+    let spot = |l: &str| -> Vec<f32> {
+        let at = l.split_once(": ").unwrap().1.split(" facing").next().unwrap();
+        at.split(", ").map(|v| v.trim().parse().unwrap()).collect()
+    };
+    let (start, end) = (spot(line(&said, "start: ")), spot(line(&said, "end: ")));
+    // Across the ground: the start line gives the placement's height, and the bike settles onto the
+    // ground under it as it does at the start of the ride.
+    let off = ((start[0] - end[0]).powi(2) + (start[2] - end[2]).powi(2)).sqrt();
+    assert!(end[1] <= start[1] + 1.0, "the bike is above its start: {end:?}");
+    println!("md8_world: start {start:?}, back at {end:?}, {off:.1} ft off");
+    assert!(off < 3.0, "Up on slot 1 did not go back to the world's start:\n{said}");
+    let gone = spawn_tape("spawn-gone", 150, 0);
+    let said = shell("spawn-gone", "md8_world", &["--play", gone.to_str().unwrap(), "--seconds", "20"]).unwrap();
+    let away = spot(line(&said, "end: "));
+    let far: f32 = start.iter().zip(&away).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+    assert!(far > 50.0, "the throttle alone did not leave the start: {away:?}\n{said}");
+}

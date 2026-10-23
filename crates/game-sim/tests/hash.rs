@@ -506,7 +506,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // is on, so the leaves do not move) and the Cross and Square bits of the controls.
     // 11344 since P116: the plane's braking through its centre of gravity, walked under `plane` only
     // when the Biplane acceleration modifier sets it.
+    // 11352 since P132: the map's starts slot 1 rides to (`Sim::home`), a constant of the ride
+    // derived from the map on every machine, left out of the walk like the bike's numbers.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11344, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11352, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

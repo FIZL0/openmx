@@ -113,6 +113,9 @@ pub struct Dot {
 pub struct Panel {
     pub pick: Pick,
     pub filled: [bool; SLOTS],
+    /// Slot 1 is the machine's spawn (P132, `hud::MarkerBar::home`): drawn with a ring of its colour
+    /// round a dark middle and an `S` for its number, and labelled the spawn.
+    pub home: bool,
     /// The other players in the ride, by seat, and their names where the lineup has them.
     pub others: Vec<(usize, Option<String>)>,
     /// How long a Down or Up hold has been down, in ms ([`game_sim::markers::holding`]).
@@ -320,6 +323,7 @@ pub fn grouped(points: f32) -> String {
 /// What the marker menu's label says: the slot and whether it holds a marker, or the player.
 pub fn panel_label(p: &Panel) -> (String, String) {
     match p.pick {
+        Pick::Slot(s) if p.home && s == game_sim::markers::HOME_SLOT && !p.filled[s] => (format!("Marker {}", s + 1), "spawn".into()),
         Pick::Slot(s) => (format!("Marker {}", s + 1), if p.filled[s] { "set" } else { "empty" }.into()),
         Pick::Player(seat) => {
             let name = p.others.iter().find(|(o, _)| *o == seat).and_then(|(_, n)| n.clone()).filter(|n| !n.trim().is_empty());
@@ -1061,7 +1065,8 @@ fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32) -> PanelOut {
             pen.disc(c, r, shade(77));
             pen.circle(c, r, 0.13 * EM, colour);
         }
-        let n = (s + 1).to_string();
+        let home = p.home && !set && s == game_sim::markers::HOME_SLOT;
+        let n = if home { "S".to_string() } else { (s + 1).to_string() };
         let size = 0.95 * EM * if on { 1.18 } else { 1.0 };
         let nw = Pen::measure(Face::Words, Weight::Heavy, &n, size);
         pen.text(Face::Words, Weight::Heavy, &n, (c.0 - nw / 2.0, mid + Pen::cap(Face::Words, size) / 2.0), size, 0.0, if set { INK } else { CHALK });
