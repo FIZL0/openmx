@@ -503,3 +503,55 @@ fn every_physics_name_the_loader_can_build_is_on_the_disc() {
         assert!(on_disc.contains(&want), "the freeride pair is not on the disc: {want}");
     }
 }
+
+/// MD13: MX Unleashed's own scenes have none of MX vs. ATV's activity models, so the free-ride filter
+/// leaves every one of them as it was: each `[Model<n>]` with a model and each `[Object<n>]` with a
+/// shape that the file has, counted off the text, is in the parse.
+#[test]
+fn every_disc_scene_parses_with_no_activity_prop() {
+    let Some(mut f) = container() else { return };
+    let psr = directory(&mut f);
+    let tracks: Vec<String> = psr
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("tracks\\") && n.ends_with(".res") && !n.ends_with("_2.res")
+        })
+        .collect();
+    let mut scenes = 0;
+    for track in &tracks {
+        let part = Part::open(&mut f, &psr, track);
+        for e in part.res.entries.iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".scn")) {
+            let bytes = part.read(e);
+            let Ok(scene) = Scene::parse(&bytes) else { continue };
+            let text = String::from_utf8_lossy(&bytes);
+            let (mut models, mut objects, mut section) = (0, 0, String::new());
+            for line in text.lines().map(str::trim) {
+                if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                    section = name.to_ascii_lowercase();
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else { continue };
+                let (key, value) = (key.trim().to_ascii_lowercase(), value.trim());
+                let numbered = |p: &str| {
+                    section.strip_prefix(p).is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+                };
+                match key.as_str() {
+                    "slt" if numbered("model") && !value.is_empty() => models += 1,
+                    "col" if numbered("object") && !value.is_empty() => objects += 1,
+                    "type" if numbered("model") => assert!(
+                        game_sim::track::ActivityModel::of(Some(value)).is_none(),
+                        "{track}: {}: [{section}] Type={value}",
+                        e.name
+                    ),
+                    _ => {}
+                }
+            }
+            assert_eq!((scene.models.len(), scene.collision.len()), (models, objects), "{track}: {}", e.name);
+            scenes += 1;
+        }
+    }
+    assert!(scenes >= 57, "{scenes} scenes in {} track archives", tracks.len());
+}

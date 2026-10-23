@@ -179,10 +179,13 @@ impl Scene {
         let mut section = String::new();
         let mut current = Placement::default();
         let mut collecting: Option<bool> = None; // Some(true) = a collision shape, Some(false) = a model
+        let mut keys = ActivityKeys::default();
+        let mut activity = FreeRide::default();
 
         for raw in text.lines() {
             let line = raw.trim();
             if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                activity.note(&current, collecting, core::mem::take(&mut keys));
                 Scene::flush(&mut scene, &mut current, &mut collecting);
                 section = name.to_ascii_lowercase();
                 collecting = match () {
@@ -211,15 +214,19 @@ impl Scene {
                     "lookvector" => current.look = vector(value)?,
                     "upvector" => current.up = vector(value)?,
                     "type" => current.kind = Some(value.to_owned()),
+                    "hide" => keys.hide = Some(value.to_owned()),
+                    "hascol" => keys.has_col = Some(value.to_owned()),
                     _ => {}
                 },
                 _ => {}
             }
         }
+        activity.note(&current, collecting, keys);
         Scene::flush(&mut scene, &mut current, &mut collecting);
         if scene.terrain_file.is_empty() {
             return Err("the scene names no terrain file".to_owned());
         }
+        activity.apply(&mut scene);
         Ok(scene)
     }
 
@@ -236,6 +243,144 @@ impl Scene {
         }
         *current = Placement::default();
     }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// MX vs. ATV's activity props (MD13)
+// ---------------------------------------------------------------------------------------------------
+
+/// The three `[Model<n>]` `Type`s MX vs. ATV Unleashed's scene builds as activity models rather than
+/// plain static ones. `PlayerFacing`, its fourth special type, is a model class of its own that is
+/// never hidden; none of MX Unleashed's scenes gives a model any of the three.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActivityModel {
+    /// `ActivitySpecific`: a hill climb's markers, a dash for cash's flags.
+    Specific,
+    /// `Waypoint`: a waypoint race's gates, an air race's rings.
+    Waypoint,
+    /// `StartZone`: where a free ride starts an activity.
+    StartZone,
+}
+
+impl ActivityModel {
+    /// The class a model's `Type=` builds, compared without case as the game compares it.
+    pub fn of(kind: Option<&str>) -> Option<ActivityModel> {
+        let kind = kind?.trim();
+        [
+            ("ActivitySpecific", ActivityModel::Specific),
+            ("Waypoint", ActivityModel::Waypoint),
+            ("StartZone", ActivityModel::StartZone),
+        ]
+        .into_iter()
+        .find(|(name, _)| kind.eq_ignore_ascii_case(name))
+        .map(|(_, class)| class)
+    }
+
+    /// Whether a free ride leaves this model out of the picture.
+    ///
+    /// An activity model reads `Hide` with a default of on. When the scene has loaded, every activity
+    /// model that hides is hidden, and the Free Ride activity, starting, shows every start zone again
+    /// (and nothing else). So in a free ride an `ActivitySpecific` or `Waypoint` model is drawn only
+    /// when its scene says `Hide=False`; a start zone always is.
+    pub fn free_ride_hides(kind: Option<&str>, hide: Option<&str>) -> bool {
+        match ActivityModel::of(kind) {
+            Some(ActivityModel::Specific | ActivityModel::Waypoint) => hide.is_none_or(switch),
+            _ => false,
+        }
+    }
+}
+
+/// A switch as MX vs. ATV's ini reader takes one, ignoring case: a value starting `T`, `ON` or `Y` is
+/// on, then one starting `F`, `OFF` or `N` is off, and anything else is a C `strtol` with base 0 — on
+/// when it is not 0.
+pub fn switch(value: &str) -> bool {
+    let v = value.trim().to_ascii_uppercase();
+    if v.starts_with('T') || v.starts_with("ON") || v.starts_with('Y') {
+        return true;
+    }
+    if v.starts_with('F') || v.starts_with("OFF") || v.starts_with('N') {
+        return false;
+    }
+    let (negative, digits) = match v.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, v.strip_prefix('+').unwrap_or(&v)),
+    };
+    let (radix, digits) = match digits.strip_prefix("0X") {
+        Some(hex) => (16, hex),
+        None if digits.starts_with('0') => (8, digits),
+        None => (10, digits),
+    };
+    let end = digits.find(|c: char| !c.is_digit(radix)).unwrap_or(digits.len());
+    let n = i64::from_str_radix(&digits[..end], radix).unwrap_or(0);
+    (if negative { -n } else { n }) != 0
+}
+
+/// The two activity keys of the `[Model<n>]` being read.
+#[derive(Default)]
+struct ActivityKeys {
+    hide: Option<String>,
+    has_col: Option<String>,
+}
+
+/// What a scene's activity models do to it in a free ride, gathered while it is read.
+///
+/// The original hides an activity model's collision by name, not by the `[Object<n>]`'s own keys
+/// (its collision-object reader takes none of them): an activity model with `HasCOL` on (the default)
+/// takes out of the world every collision object whose shape name contains the model's name, ignoring
+/// case, and the Free Ride activity puts back those of the start zones. Nat03's air-race gate
+/// `[Model230]` `SLT=AirRace_Start` is how `[Object189]` `COL=AirRace_Start.col` leaves the ride.
+#[derive(Default)]
+struct FreeRide {
+    /// Models a free ride does not draw, by their index among the scene's models.
+    hidden: Vec<usize>,
+    models: usize,
+    /// The names whose collision is taken out, and the start zones' names that put it back.
+    off: Vec<String>,
+    on: Vec<String>,
+}
+
+impl FreeRide {
+    fn note(&mut self, current: &Placement, collecting: Option<bool>, keys: ActivityKeys) {
+        if collecting != Some(false) || current.file.is_empty() {
+            return;
+        }
+        let kind = current.kind.as_deref();
+        if ActivityModel::free_ride_hides(kind, keys.hide.as_deref()) {
+            self.hidden.push(self.models);
+        }
+        self.models += 1;
+        let Some(class) = ActivityModel::of(kind) else { return };
+        if !keys.has_col.as_deref().is_none_or(switch) {
+            return;
+        }
+        // The game's text reader has dropped every space by the time a name reaches the model.
+        let name = squeezed(&current.file);
+        if name.is_empty() {
+            return;
+        }
+        match class {
+            ActivityModel::StartZone => self.on.push(name),
+            _ => self.off.push(name),
+        }
+    }
+
+    fn apply(self, scene: &mut Scene) {
+        let mut at = 0;
+        scene.models.retain(|_| {
+            at += 1;
+            !self.hidden.contains(&(at - 1))
+        });
+        let named = |names: &[String], file: &str| {
+            let file = squeezed(file);
+            names.iter().any(|n| file.contains(n.as_str()))
+        };
+        scene.collision.retain(|o| !named(&self.off, &o.file) || named(&self.on, &o.file));
+    }
+}
+
+/// A name as the game compares it here: no white space, any case.
+fn squeezed(name: &str) -> String {
+    name.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase()
 }
 
 /// `model17` is `Model<n>`; `models` is not.
@@ -1128,6 +1273,86 @@ mod tests {
         assert_eq!(scene.collision.len(), 1);
         assert_eq!(scene.collision[0].file, "MM_HTTower.col");
         assert_eq!(scene.collision[0].look, [F(1.0), F::ZERO, F::ZERO]);
+    }
+
+    /// A scene the way MX vs. ATV writes one, with the four kinds of activity model: hidden race
+    /// props and their shapes leave a free ride, a start zone and a `Hide=False` gate stay.
+    const ACTIVITY_SCENE: &[u8] = b"[Environment]\r\n\
+                    TerrainFile=Nat03.trn\r\n\
+                    [Model1]\r\n\
+                    SLT=Barn\r\n\
+                    [Model2]\r\n\
+                    SLT=AirRace_Start\r\n\
+                    ;-- Extra params\r\n\
+                    Type=Waypoint\r\n\
+                    Activity=\"Glamis Waypoint Race\"\r\n\
+                    AlphaFade=True\r\n\
+                    Hide=True\r\n\
+                    HasCol=True\r\n\
+                    [Model3]\r\n\
+                    SLT=HC_Flag\r\n\
+                    Type=ActivitySpecific\r\n\
+                    Activity=\"Hill Climb\"\r\n\
+                    [Model4]\r\n\
+                    SLT=StartZone_Race\r\n\
+                    Type=StartZone\r\n\
+                    Activity=\"Free Ride\"\r\n\
+                    Hide=True\r\n\
+                    HasCol=True\r\n\
+                    [Model5]\r\n\
+                    SLT=Open Gate\r\n\
+                    Type=waypoint\r\n\
+                    Hide=FALSE\r\n\
+                    HasCol=False\r\n\
+                    [Model6]\r\n\
+                    SLT=Ring_Trigger\r\n\
+                    Type=Waypoint\r\n\
+                    Hide=True\r\n\
+                    HasCol=False\r\n\
+                    [Object1]\r\n\
+                    COL=Barn.col\r\n\
+                    [Object2]\r\n\
+                    COL=AirRace_Start.col\r\n\
+                    Type=Waypoint\r\n\
+                    Hide=True\r\n\
+                    [Object3]\r\n\
+                    COL=Big_HC_Flag_Pole.col\r\n\
+                    [Object4]\r\n\
+                    COL=StartZone_Race.col\r\n\
+                    Type=StartZone\r\n\
+                    Hide=True\r\n\
+                    [Object5]\r\n\
+                    COL=OpenGate.col\r\n\
+                    [Object6]\r\n\
+                    COL=Ring_Trigger.col\r\n\
+                    Type=Waypoint\r\n\
+                    Hide=True\r\n";
+
+    #[test]
+    fn a_free_ride_leaves_out_the_hidden_race_props_and_their_shapes() {
+        let scene = Scene::parse(ACTIVITY_SCENE).expect("the scene");
+        let files = |list: &[Placement]| list.iter().map(|p| p.file.clone()).collect::<Vec<_>>();
+        // The gate and the hill-climb flag hide (the flag by the key's default); the start zone is
+        // what the Free Ride activity shows; a gate saying Hide=False and a plain model draw as ever.
+        assert_eq!(files(&scene.models), ["Barn", "StartZone_Race", "Open Gate"]);
+        // A shape goes with the model whose name it contains, whatever its own keys say: the gate's
+        // and the flag's go, the start zone's comes back, and the ring the model keeps no collision
+        // for (HasCol=False) stays in the world as the original's does.
+        assert_eq!(files(&scene.collision), ["Barn.col", "StartZone_Race.col", "OpenGate.col", "Ring_Trigger.col"]);
+    }
+
+    #[test]
+    fn the_switch_reads_as_the_ini_reader_does() {
+        for on in ["True", "TRUE", "t", "On", "ONx", "Yes", "1", "-2", "0x10", " true "] {
+            assert!(switch(on), "{on}");
+        }
+        for off in ["False", "FALSE", "Off", "No", "0", "", "x", "00", "0x"] {
+            assert!(!switch(off), "{off}");
+        }
+        assert!(ActivityModel::free_ride_hides(Some("Waypoint"), None), "Hide's default is on");
+        assert!(!ActivityModel::free_ride_hides(Some("StartZone"), Some("True")));
+        assert!(!ActivityModel::free_ride_hides(Some("PlayerFacing"), Some("True")));
+        assert!(!ActivityModel::free_ride_hides(None, Some("True")), "MXU's models have no Type");
     }
 
     #[test]
