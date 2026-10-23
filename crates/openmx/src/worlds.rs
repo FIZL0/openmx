@@ -33,6 +33,8 @@ pub struct WorldPiece {
     pub scene: Option<track::Scene>,
     /// The scene's file stem (`MC01`), or the join's name.
     pub stem: String,
+    /// The scene's sections the world's `drop` takes out, for what draws it too (MD15).
+    pub dropped: Vec<String>,
 }
 
 /// A world mod that reads.
@@ -96,7 +98,7 @@ fn pair(v: Option<&Json>, what: &str) -> Result<[f64; 2], String> {
 
 /// Take the `[Section]`s named in `drop` out of a scene's text: their header and every line up to
 /// the next header.
-fn without_sections(text: &str, drop: &[String]) -> String {
+pub(crate) fn without_sections(text: &str, drop: &[String]) -> String {
     let mut out = String::with_capacity(text.len());
     let mut skipping = false;
     for line in text.split_inclusive('\n') {
@@ -111,7 +113,7 @@ fn without_sections(text: &str, drop: &[String]) -> String {
 }
 
 /// The one `.scn` in a tile's folder: its path in the folder, its file stem, and its bytes.
-fn scene_of(res: &Res) -> Result<(String, String, Vec<u8>), String> {
+pub(crate) fn scene_of(res: &Res) -> Result<(String, String, Vec<u8>), String> {
     let scenes: Vec<&str> = res.entries().iter().map(|e| e.name.as_str()).filter(|n| n.to_ascii_lowercase().ends_with(".scn")).collect();
     let [scn] = scenes.as_slice() else { return Err(format!("{} .scn files, and a tile has one", scenes.len())) };
     let stem = scn.rsplit(['\\', '/']).next().unwrap_or(scn);
@@ -192,7 +194,7 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
             first_owner,
         };
         first_owner = first_owner.saturating_add(scene.collision.len() as i32);
-        pieces.push(WorldPiece { tile: t, dir: folder, scene: Some(scene), stem });
+        pieces.push(WorldPiece { tile: t, dir: folder, scene: Some(scene), stem, dropped: sections });
     }
     let tile_count = pieces.len();
     if tile_count == 0 {
@@ -207,7 +209,7 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
         let layout = TerrainLayout { width, breadth, width_scale: spacing, breadth_scale: spacing, ..TerrainLayout::default() };
         let mut t = Tile { name: join.clone(), at: at.map(|a| F(a as f32)), layout, spacing, levels, keep: [0; 4], first_owner };
         t.keep = t.every_cell();
-        pieces.push(WorldPiece { tile: t, dir: folder, scene: None, stem: join });
+        pieces.push(WorldPiece { tile: t, dir: folder, scene: None, stem: join, dropped: Vec::new() });
     }
     let named = |tile: &str| pieces[..tile_count].iter().position(|p| p.tile.name == tile);
     let home = match json.get("sky").and_then(Json::str) {
@@ -278,6 +280,11 @@ impl WorldMod {
     pub fn tiled(&self, reach: Reach) -> Result<Tiled, String> {
         let files = Files { pieces: self.pieces.clone() };
         Tiled::new(self.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(files), reach)
+    }
+
+    /// Piece `index`'s terrain file, read from its folder (MD15: the software renderer's ground).
+    pub fn piece_terrain(&self, index: usize) -> Result<Vec<u8>, String> {
+        Files { pieces: vec![self.pieces.get(index).ok_or("no such piece")?.clone()] }.load_terrain(0)
     }
 
     /// The log line the ride prints.
@@ -389,8 +396,7 @@ pub fn piece_chunks(tile: &Tile, index: usize, bytes: &[u8], tiled: &Tiled, cell
                     // [`Tile`]'s own test of a cell: inside `keep`, and a cell of the terrain.
                     sx >= k0 && sx < k2 && sz >= k1 && sz < k3 && sx + 1 < sx_n && sz + 1 < sz_n
                 } else {
-                    let (x, z) = (ax + (sx as f32 + 0.5) * spacing, az + (sz as f32 + 0.5) * spacing);
-                    tiled.owner(F(x), F(z)).map(|(o, _, _)| o) == Some(index)
+                    owns_cell(tiled, index, [ax, az], spacing, sx, sz)
                 };
                 if !owned {
                     missing[(j * cells + i2) as usize] = true;
@@ -410,6 +416,20 @@ pub fn piece_chunks(tile: &Tile, index: usize, bytes: &[u8], tiled: &Tiled, cell
         out.push(c);
     }
     Ok(out)
+}
+
+/// Whether piece `index` draws its cell `(sx, sz)` (its own samples, its offset `at`): the piece
+/// that owns the cell's middle does, as the ride's ground asks it ([`Tiled::owner`]), and across a
+/// seam between two grids that do not line up (a 4.5-foot map beside a 9-foot join, MD15) so does
+/// one that owns any corner of it, a twentieth of a cell in, so the two pieces' cells overlap there
+/// rather than leave a gap. Where the grids line up every point of a cell has the middle's owner, and
+/// the cut is the middle's alone.
+pub fn owns_cell(tiled: &Tiled, index: usize, at: [f32; 2], spacing: f32, sx: u32, sz: u32) -> bool {
+    let owner = |fx: f32, fz: f32| tiled.owner(F(at[0] + (sx as f32 + fx) * spacing), F(at[1] + (sz as f32 + fz) * spacing)).map(|(o, _, _)| o);
+    if owner(0.5, 0.5) == Some(index) {
+        return true;
+    }
+    [(0.05, 0.05), (0.95, 0.05), (0.05, 0.95), (0.95, 0.95)].iter().any(|&(fx, fz)| owner(fx, fz) == Some(index))
 }
 
 /// A piece's terrain rectangle in world feet, `[x0, z0, x1, z1]`, `margin` wider all round.
@@ -596,7 +616,7 @@ impl Drop for GroundStream {
 }
 
 /// The smallest gap from a piece to any of `near`.
-fn nearest(t: &Tile, near: &[[f32; 2]]) -> f32 {
+pub(crate) fn nearest(t: &Tile, near: &[[f32; 2]]) -> f32 {
     near.iter().map(|p| gap(t, p[0], p[1])).fold(f32::MAX, f32::min)
 }
 
@@ -658,13 +678,14 @@ impl WorldMod {
     /// Every tile's ground paint, light and sky, read from its own folder: its terrain's pages with its
     /// own detail map (MD4), its scene's lights and fog, and the sky it names — looked for in its
     /// folder first and then in `fallback`, the ride's other archives, as the ride itself looks.
-    /// A tile whose terrain has no pages is dirt on the ground; one that does not read is dirt and
-    /// the home tile's light.
+    /// A tile whose terrain has no pages (a disc map's) has pages baked from its splat and light map
+    /// ([`crate::world_dress::bake_splat`], MD15), or is dirt without them; one that does not read is
+    /// dirt and the home tile's light. The tiles are read on every core.
     pub fn look(&self, fallback: &[Res], dirt: [f32; 3], home: game_render::world::Lighting) -> WorldLook {
         let regions = self.regions();
         let (mut tiles, mut lights, mut skies, mut names) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for p in &self.pieces[..self.tile_count] {
-            let at = p.tile.at.map(|a| a.0);
+        // Each map read on a core of its own (MD15: a disc map's paint is baked, which takes a while).
+        let read_one = |p: &WorldPiece| {
             let read = || -> Result<_, String> {
                 let res = Res::folder(&p.dir)?;
                 let (_, stem, scn) = scene_of(&res)?;
@@ -679,14 +700,37 @@ impl WorldMod {
                 let pages = game_render::terrain::Pages::of(&terrain, p.tile.spacing.0, leaves)
                     .map(|pg| pg.with_detail(detail, game_render::terrain::detail_multiplier(&text)));
                 let mut look = game_render::scene::Scene::parse(&text);
+                // A disc map has no pages: its splat and baked light, baked into some (MD15).
+                let pages = pages.or_else(|| {
+                    let [sx, sz] = p.tile.samples();
+                    let extent = ((sx - 1) as f32 * p.tile.spacing.0, (sz - 1) as f32 * p.tile.spacing.0);
+                    let splat = game_render::splat::Splat::load(std::slice::from_ref(&res), &stem, extent)?;
+                    let light = game_render::world::Lighting::of(&look);
+                    crate::world_dress::bake_splat(&splat, &terrain, p.tile.spacing.0, leaves, &light)
+                });
                 move_look(&mut look, p.tile.at);
                 let sky = game_render::sky::Sky::load(std::slice::from_ref(&res), &text).or_else(|| game_render::sky::Sky::load(fallback, &text));
                 Ok((pages, game_render::world::Lighting::of(&look), sky))
             };
-            let (pages, light, sky) = read().unwrap_or_else(|e| {
+            read().unwrap_or_else(|e| {
                 println!("world: {} looks like dirt: {e}", p.tile.name);
                 (None, home, None)
-            });
+            })
+        };
+        let maps = &self.pieces[..self.tile_count];
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(maps.len()).max(1);
+        let mut read: Vec<(usize, _)> = std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..threads)
+                .map(|t| {
+                    let read_one = &read_one;
+                    scope.spawn(move || maps.iter().enumerate().skip(t).step_by(threads).map(|(i, p)| (i, read_one(p))).collect::<Vec<_>>())
+                })
+                .collect();
+            jobs.into_iter().flat_map(|j| j.join().expect("a map's look")).collect()
+        });
+        read.sort_by_key(|(i, _)| *i);
+        for (p, (_, (pages, light, sky))) in maps.iter().zip(read) {
+            let at = p.tile.at.map(|a| a.0);
             tiles.push(game_render::terrain::PaintTile { at, pages });
             lights.push(light);
             skies.push(sky);
