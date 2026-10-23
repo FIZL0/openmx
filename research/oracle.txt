@@ -4817,3 +4817,12 @@ asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle
 #   mirror goes into that record. Not ported (follow-up).
 #   Capture rows tear: 5998's P1 is P1 as P2's update left it (before P1's own); 3403's P1 wreck reason
 #   (1, set inside the tick) shows at 3404.
+
+# S109 — the riding ragdoll is what a riding rider is drawn from; ported beside the ride as
+# crates/game-sim/src/ragdoll_riding.rs (draw-only), tick proved 1203/1203 against animandpump's run1.
+# In animandpump's state the human's body actor is 0x015b96f0 and its riding request 0x151c990
+# (actor +0x488). Constructor numbers off the actor: +0xa14 stand speed 0x40eaaa65 (7.3333),
+# +0xa20 slow speed 0x4292aa7f (73.333), +0x510/+0x520 the feet's offsets, +0x650 pose spring
+# (80,30,30), +0x670 damper base (3.2,2,2). Request: +0xf0/+0xf4 point at the bike box (centre
+# (0,4.3,-1.5), half (0.45,0.6,1.75)); +0x170 pitch (~ the body machine's mix lag), +0x178 speed
+# (not the velocity's length; writer not found, S111).

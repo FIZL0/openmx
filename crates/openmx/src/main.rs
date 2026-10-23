@@ -594,6 +594,9 @@ struct Rig {
     parts: Vec<game_render::scene::Part>,
     /// A game modifier reaches this player's ride (P55): the overlay says it is modified.
     modified: bool,
+    /// The rider's ragdoll while riding (S109), which the body on the bike is drawn from once it is
+    /// placed. The shell's alone: nothing of the ride reads it back, and online it is not run.
+    riding: Option<game_sim::ragdoll_riding::Riding>,
 }
 
 impl Rig {
@@ -646,7 +649,8 @@ impl Shown {
             (Some(doll), Some(kit), Some(rigged)) => Some((doll.nodes(kit), rigged)),
             _ => None,
         };
-        let body = match (&rig.body, &down) {
+        let riding = riding_bones(seat, rig, ragdolled).filter(|_| down.is_none());
+        let body = match (&rig.body, down.as_ref().or(riding.as_ref())) {
             (Some(body), Some((bones, rigged))) => Some(body.ragdoll_palette(rigged, bones, bike)),
             (Some(body), None) if body.posed => {
                 let grips = match &rig.chassis {
@@ -679,6 +683,54 @@ impl Shown {
             },
             thrown: now.thrown,
         }
+    }
+}
+
+/// **The rider's riding ragdoll, one tick** (S109): the original draws a riding rider from the
+/// ragdoll the body actor steps every tick, the hands held to the chassis' grips and the feet to its
+/// pegs as they are drawn this frame. Started afresh whenever it has nothing to hold to: before the
+/// chassis has a frame, while the rider is down, and when the bike has gone somewhere the bones were
+/// not (a respawn), so a new one is placed from the pose again.
+fn ride_ragdoll(seat: &Seat, rig: &mut Rig, dt: F, place: &mut dyn sim_world::World) {
+    let rider = &seat.sim.rider;
+    let anchors = rig.chassis.as_ref().map(chassis_grips);
+    let (Some(kit), Some([Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)]), None) =
+        (&rider.ragdoll_kit, anchors, rider.drawn_ragdoll())
+    else {
+        rig.riding = None;
+        return;
+    };
+    let m = rider.ride.transform();
+    let world = |a: V3| game_sim::math::transform_point(&m, Vf::new(a.x, a.y, a.z, 1.0));
+    let at = rider.ride.position();
+    let strayed = rig.riding.as_ref().is_some_and(|r| {
+        let d = r.main().sub(at);
+        r.placed() && d.x() * d.x() + d.y() * d.y() + d.z() * d.z() > RIDING_STRAY * RIDING_STRAY
+    });
+    if strayed || rider.crash.is_some() {
+        rig.riding = None;
+    }
+    if rider.crash.is_some() {
+        return;
+    }
+    let veh = &rider.body.veh;
+    let request = game_sim::ragdoll_riding::request(&rider.ride, veh.mix.value, [world(hand_l), world(hand_r)], [world(foot_l), world(foot_r)], kit.bike);
+    let riding = rig.riding.get_or_insert_with(|| game_sim::ragdoll_riding::Riding::new(kit));
+    riding.step(kit, rider.skeleton.as_deref(), &request, veh.state, dt, place);
+}
+
+/// How far the riding ragdoll's main bone may be from the bike before it is started again, in feet.
+const RIDING_STRAY: f32 = 10.0;
+
+/// The riding ragdoll's nodes to draw the body from, once it has been placed (S109).
+fn riding_bones<'a>(
+    seat: &Seat,
+    rig: &Rig,
+    ragdolled: Option<&'a game_render::rider::Ragdolled>,
+) -> Option<(Vec<game_sim::math::Mat4>, &'a game_render::rider::Ragdolled)> {
+    match (&rig.riding, &seat.sim.rider.ragdoll_kit, ragdolled) {
+        (Some(r), Some(kit), Some(rigged)) if r.placed() && seat.sim.rider.drawn_ragdoll().is_none() => Some((r.nodes(kit), rigged)),
+        _ => None,
     }
 }
 
@@ -3071,6 +3123,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             body_model: own_body,
             parts,
             modified: !mods.seat_is_original(i),
+            riding: None,
         });
     }
     rigs.insert(
@@ -3093,6 +3146,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             body_model,
             parts: vehicle.parts.clone(),
             modified: !mods.seat_is_original(0),
+            riding: None,
         },
     );
 
@@ -4235,6 +4289,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                 }
             }
+            // The rider's ragdoll on the bike (S109), off the pose and the grips just drawn.
+            if moving && bike_up && online.is_none() {
+                perf.time(Stage::Animation, || ride_ragdoll(seat, rig, dt, &mut world.place));
+            }
             stages.mark(stages::Stage::Animation);
 
             // What the rider did, as a line: a run nobody is watching still says whether a trick
@@ -4898,7 +4956,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // the bones: thrown off the bike, not sat on it.
                 let down = match (seat.sim.rider.drawn_ragdoll(), &seat.sim.rider.ragdoll_kit, &ragdolled) {
                     (Some(doll), Some(kit), Some(rigged)) => Some((doll.nodes(kit), rigged)),
-                    _ => None,
+                    _ => riding_bones(seat, rig, ragdolled.as_ref()),
                 };
                 if let (Some(body), Some(model), Some((bones, rigged))) = (&rig.body, &rig.body_model, &down) {
                     if let Some(loaded) = assets.models.get_mut(model.as_str()) {
