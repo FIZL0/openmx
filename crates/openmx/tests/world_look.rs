@@ -344,3 +344,32 @@ fn per_map_light_is_mixed_across_the_join() {
     let (_, sky) = looks.at(680.0, 288.0).unwrap();
     assert_eq!(sky, 1, "b's sky while nearer b");
 }
+
+/// Per Map's skybox across the join (MD26): `a`'s alone at `a`'s edge, `b`'s alone at `b`'s, and
+/// between them the same two skies bound the whole way, `b`'s share growing a little at a time.
+#[test]
+fn per_map_sky_crossfades_across_the_join() {
+    use game_render::scene::Looks;
+    use game_render::world::Lighting;
+    let lights = vec![Lighting::of(&game_render::scene::Scene::parse("")); 2];
+    let looks = Looks { regions: paint().regions, lights };
+    assert_eq!(looks.skies(503.0, 288.0), Some(([0, 0], 0.0)), "a's sky alone inside a");
+    assert_eq!(looks.skies(711.0, 288.0), Some(([1, 1], 0.0)), "b's sky alone inside b");
+    let mut last = 0.0;
+    let mut x = 504.0;
+    while x < 711.0 {
+        x += 0.5;
+        let (pair, share) = looks.skies(x, 288.0).unwrap();
+        if pair == [1, 1] {
+            assert!(last > 0.99, "b's sky took over at x {x} from a share of {last}");
+            last = 1.0;
+            continue;
+        }
+        assert_eq!(pair, [0, 1], "the pair moved at x {x}");
+        assert!(share >= last && share - last < 0.01, "b's share jumps {last} -> {share} at x {x}");
+        last = share;
+    }
+    assert_eq!(last, 1.0, "b's sky never took over");
+    let (_, half) = looks.skies(607.0, 288.0).unwrap();
+    assert!((half - 0.5).abs() < 0.1, "b's share {half} at the join's middle");
+}

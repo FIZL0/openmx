@@ -546,6 +546,10 @@ pub struct Renderer {
     sky_pipeline: wgpu::RenderPipeline,
     sky_layout: wgpu::BindGroupLayout,
     sky_bind: wgpu::BindGroup,
+    /// The crossfade: the second sky's share, and whether each sky is there ([`Renderer::set_sky_mix`]).
+    sky_mix: wgpu::Buffer,
+    sky_has: [bool; 2],
+    sky_share: f32,
     has_sky: bool,
     place_layout: wgpu::BindGroupLayout,
     overlay_mul: wgpu::RenderPipeline,
@@ -864,13 +868,7 @@ fn view_bind_group(
 }
 
 /// The sky's six faces as one array texture; a black one-texel cube where there is no sky.
-fn sky_bind_group(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    layout: &wgpu::BindGroupLayout,
-    sampler: &wgpu::Sampler,
-    sky: Option<&Sky>,
-) -> wgpu::BindGroup {
+fn sky_faces(device: &wgpu::Device, queue: &wgpu::Queue, sky: Option<&Sky>) -> wgpu::TextureView {
     let (w, h) = sky
         .and_then(|s| s.faces.first())
         .map_or((1, 1), |f| (f.width.max(1) as u32, f.height.max(1) as u32));
@@ -904,21 +902,39 @@ fn sky_bind_group(
         };
         write_layer(queue, &texture, 0, face, (w, h), 4, &px);
     }
-    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+    texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
-    });
+    })
+}
+
+/// The two skies the backdrop crossfades between (MD26), and the uniform saying how far.
+fn sky_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    faces: &[wgpu::TextureView; 2],
+    mix: &wgpu::Buffer,
+) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("sky"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
+                resource: wgpu::BindingResource::TextureView(&faces[0]),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&faces[1]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: mix.as_entire_binding(),
             },
         ],
     })
@@ -1335,7 +1351,12 @@ impl Renderer {
         // The sky: six faces as one array texture, and a triangle over the view that looks them up.
         let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky"),
-            entries: &[texture_entry(0, true, wgpu::TextureViewDimension::D2Array), sampler_entry(1)],
+            entries: &[
+                texture_entry(0, true, wgpu::TextureViewDimension::D2Array),
+                sampler_entry(1),
+                texture_entry(2, true, wgpu::TextureViewDimension::D2Array),
+                uniform_entry(3, wgpu::ShaderStages::FRAGMENT),
+            ],
         });
         let sky_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sky"),
@@ -1367,7 +1388,16 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
-        let sky_bind = sky_bind_group(&device, &queue, &sky_layout, &clamp_sampler, None);
+        let sky_mix = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sky mix"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&sky_mix, 0, bytemuck::cast_slice(&[0.0f32; 4]));
+        let none = sky_faces(&device, &queue, None);
+        let sky_views = [none.clone(), none];
+        let sky_bind = sky_bind_group(&device, &sky_layout, &clamp_sampler, &sky_views, &sky_mix);
 
         // The overlay and the blit: images read texel for texel and laid over the target.
         let place_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1467,6 +1497,9 @@ impl Renderer {
             sky_pipeline,
             sky_layout,
             sky_bind,
+            sky_mix,
+            sky_has: [false; 2],
+            sky_share: 0.0,
             has_sky: false,
             place_layout,
             overlay_mul,
@@ -1534,9 +1567,34 @@ impl Renderer {
 
     /// The sky behind every view, or none: the fog's colour instead.
     pub fn set_sky(&mut self, sky: Option<&Sky>) {
-        self.has_sky = sky.is_some_and(|s| s.faces.len() >= 6);
-        let sky = sky.filter(|_| self.has_sky);
-        self.sky_bind = sky_bind_group(&self.device, &self.queue, &self.sky_layout, &self.clamp_sampler, sky);
+        let has = sky.is_some_and(|s| s.faces.len() >= 6);
+        let view = sky_faces(&self.device, &self.queue, sky.filter(|_| has));
+        self.put_skies([view.clone(), view], [has; 2]);
+        self.set_sky_mix(0.0);
+    }
+
+    /// Two skies to crossfade between (MD26), a combined world's across a join: `a` shown alone until
+    /// [`Renderer::set_sky_mix`] gives `b` a share. A missing one is the fog's colour, as with
+    /// [`Renderer::set_sky`].
+    pub fn set_skies(&mut self, a: Option<&Sky>, b: Option<&Sky>) {
+        let has = [a, b].map(|s| s.is_some_and(|s| s.faces.len() >= 6));
+        let views = [sky_faces(&self.device, &self.queue, a.filter(|_| has[0])), sky_faces(&self.device, &self.queue, b.filter(|_| has[1]))];
+        self.put_skies(views, has);
+    }
+
+    /// How much of the second sky [`Renderer::set_skies`] gave shows, 0 (none) to 1 (all of it): a
+    /// uniform's worth, cheap to set every frame.
+    pub fn set_sky_mix(&mut self, share: f32) {
+        self.sky_share = share.clamp(0.0, 1.0);
+        let has = self.sky_has.map(|h| if h { 1.0f32 } else { 0.0 });
+        self.queue.write_buffer(&self.sky_mix, 0, bytemuck::cast_slice(&[self.sky_share, has[0], has[1], 0.0]));
+    }
+
+    fn put_skies(&mut self, views: [wgpu::TextureView; 2], has: [bool; 2]) {
+        self.has_sky = has[0] || has[1];
+        self.sky_has = has;
+        self.sky_bind = sky_bind_group(&self.device, &self.sky_layout, &self.clamp_sampler, &views, &self.sky_mix);
+        self.set_sky_mix(self.sky_share);
     }
 
     /// The ground: its chunks, and the track's paint for it — or, without paint, the one colour `dirt`
@@ -3355,6 +3413,10 @@ struct View {
 @group(0) @binding(0) var<uniform> view: View;
 @group(1) @binding(0) var faces: texture_2d_array<f32>;
 @group(1) @binding(1) var samp: sampler;
+// The second sky, crossfaded in across a combined world's join (MD26), and how: its share, and
+// whether the first and the second are there at all (the fog's colour where one is not).
+@group(1) @binding(2) var others: texture_2d_array<f32>;
+@group(1) @binding(3) var<uniform> blend: vec4f;
 
 struct Out {
   @builtin(position) pos: vec4f,
@@ -3397,8 +3459,10 @@ struct Out {
     face = 3;
     uv = vec2f(-d.z, -d.y) / a.x;
   }
-  let c = textureSampleLevel(faces, samp, (uv + 1.0) * 0.5, face, 0.0).rgb;
-  return vec4f(select(view.fog_color.rgb / 255.0, c, view.fog.z > 0.5), 1.0);
+  let fog = view.fog_color.rgb / 255.0;
+  let first = select(fog, textureSampleLevel(faces, samp, (uv + 1.0) * 0.5, face, 0.0).rgb, blend.y > 0.5);
+  let second = select(fog, textureSampleLevel(others, samp, (uv + 1.0) * 0.5, face, 0.0).rgb, blend.z > 0.5);
+  return vec4f(mix(first, second, blend.x), 1.0);
 }
 "#;
 
@@ -3782,6 +3846,57 @@ mod tests {
         }
         assert!(changed > 500, "the board covered {changed} pixels");
         assert!(halfway as f32 > 0.95 * changed as f32, "only {halfway} of {changed} pixels are halfway");
+    }
+
+    /// The backdrop crossfades between two skies by the second's share (MD26), a missing one is the
+    /// fog's colour, and one sky alone is shown whatever the share.
+    #[test]
+    fn the_sky_crossfades_between_two_skies() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (mut scene, assets, camera) = known_scene();
+        scene.models.clear();
+        let solid = |rgb: [u8; 3]| Sky {
+            faces: (0..6).map(|_| Texture { width: 4, height: 4, rgba: (0..16).flat_map(|_| [rgb[0], rgb[1], rgb[2], 255]).collect() }).collect(),
+        };
+        let (red, blue) = (solid([200, 40, 0]), solid([0, 80, 240]));
+        let (w, h) = (64u32, 48u32);
+        let light = Lighting::of(&scene);
+        gpu.set_graphics(Graphics::Original);
+        gpu.set_scene(&scene);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let draw = |gpu: &mut Renderer| {
+            let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &[] }];
+            let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+            gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+            gpu.read(&texture)
+        };
+        // Every pixel within a step of `want`.
+        let all = |px: &[u8], want: [f32; 3], what: &str| {
+            for p in px.chunks_exact(3) {
+                assert!((0..3).all(|k| (p[k] as f32 - want[k]).abs() <= 1.5), "{what}: {p:?}, not {want:?}");
+            }
+        };
+        let between = |a: [u8; 3], b: [u8; 3], t: f32| std::array::from_fn(|k| a[k] as f32 + (b[k] as f32 - a[k] as f32) * t);
+        gpu.set_skies(Some(&red), Some(&blue));
+        for t in [0.0, 0.25, 0.5, 0.8, 1.0] {
+            gpu.set_sky_mix(t);
+            all(&draw(&mut gpu), between([200, 40, 0], [0, 80, 240], t), &format!("red to blue at {t}"));
+        }
+        let fog = light.fog_color;
+        gpu.set_skies(Some(&red), None);
+        gpu.set_sky_mix(0.5);
+        all(&draw(&mut gpu), between([200, 40, 0], fog, 0.5), "red halfway to the fog");
+        gpu.set_sky(Some(&blue));
+        all(&draw(&mut gpu), between([0, 80, 240], [0; 3], 0.0), "one sky is the whole of it");
+        gpu.set_sky_mix(0.7);
+        all(&draw(&mut gpu), between([0, 80, 240], [0; 3], 0.0), "one sky whatever the share");
     }
 
     /// A scene with the disc's kind of fog: free07's, 25 to 1,000 feet at haziness 0.7, which the
