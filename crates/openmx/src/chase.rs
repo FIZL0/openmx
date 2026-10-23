@@ -603,3 +603,69 @@ pub fn framed(presets: &[game_sim::camera::Preset], framing: Framing) -> Vec<gam
         })
         .collect()
 }
+
+/// How long a framing change takes to ease the field of view over (P119), in seconds: the lag's time
+/// constant, about the eye's own (the presets' position lags are a quarter to a third of a second).
+pub const FOV_EASE: f32 = 0.25;
+
+/// A follow camera's field of view easing from one framing's to the next (P119).
+///
+/// The camera's own lag on the field of view has a time constant of zero: the original's presets
+/// never move the field of view under a running camera, and that lag's blend is zero over zero,
+/// which the PS2's divide answers with the largest float. A target that moves by a degree throws
+/// the lag to the largest float the next frame and to zero the frame after, and on, until a snap —
+/// a picture zooming in and out every frame and, past half a turn, upside down. So a reload puts
+/// the camera's lag on the new framing's field of view, and the view shown eases from where it was
+/// with this offset, which decays to nothing. At rest the offset is zero and the camera's own field
+/// of view is the one drawn, to the bit.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FovEase {
+    /// Degrees the view shown is off the camera's, decaying to zero.
+    pub offset: f32,
+}
+
+impl FovEase {
+    /// The field of view to draw for the camera's `fov` this frame, `dt` seconds on.
+    pub fn ease(&mut self, fov: F, dt: f32) -> F {
+        if self.offset == 0.0 {
+            return fov;
+        }
+        self.offset *= 1.0 - (dt / FOV_EASE).clamp(0.0, 1.0);
+        if self.offset.abs() < 0.01 {
+            self.offset = 0.0;
+        }
+        F(fov.0 + self.offset)
+    }
+}
+
+/// A follow camera onto `presets`, a framing's (P82, P119): the original's own reload when a
+/// camera's presets change, which keeps the preset it is on and clears the player's nudges, and then
+/// the field of view's lag put on the new preset's, with `ease` carrying the view from the field of
+/// view it showed. The eye and the look-at chase the new framing through their own lags, as they do
+/// a preset change. A camera that has not filtered a frame yet, or snaps on its next, has nothing to
+/// ease from.
+pub fn reframe(cam: &mut game_sim::camera::Race, presets: &[game_sim::camera::Preset], ease: &mut FovEase) {
+    if presets.is_empty() || cam.cam.presets.is_empty() {
+        return;
+    }
+    let was = cam.cam.fov_filter.value.0 + ease.offset;
+    let at = cam.cam.preset.min(presets.len() - 1);
+    cam.cam.presets = presets.to_vec();
+    cam.cam.preset = at;
+    cam.cam.previous = at;
+    cam.cam.set_preset(at);
+    let fov = cam.cam.field_of_view();
+    // Eased from inside the new preset's limits: a jump from one end of the slider to the other
+    // starts at the near limit.
+    let p = cam.cam.preset();
+    let running = was > 0.0 && was < 180.0 && !cam.cam.snap;
+    let shown = was.clamp(p.min_fov.0, p.max_fov.0);
+    // A lag with a time constant of its own would ease the change itself.
+    ease.offset = 0.0;
+    if cam.cam.fov_filter.tau == 0.0 {
+        cam.cam.fov_filter.set_value(fov);
+        if running {
+            ease.offset = shown - fov.0;
+        }
+    }
+}
