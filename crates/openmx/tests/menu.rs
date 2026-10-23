@@ -1817,7 +1817,7 @@ fn seat_frame(seats: &mut pad::Seats) -> (Report, u16) {
 }
 
 /// The user's pad, seated as 1P, in a ride: its + opens the pause, the hat's down moves the cursor,
-/// and A takes the row — tapped between frames, and held across them. The report the new scheme
+/// and B, the bottom button, takes the row (P64) — tapped between frames, and held across them. The report the new scheme
 /// rides on has no Cross in it (R2 is the gas there), which is why the pause reads the pad's own.
 #[test]
 fn a_seated_pad_s_start_opens_the_pause_and_its_d_pad_and_cross_work_it() {
@@ -1853,20 +1853,21 @@ fn a_seated_pad_s_start_opens_the_pause_and_its_d_pad_and_cross_work_it() {
     pro.axis(5, 0);
     step(&mut m, &mut seats);
     assert_eq!(m.cursor(Screen::Pause), 1);
-    // A (js 1), held across a frame: the scheme's report has lost it, the pad's own has not.
-    pro.button(1, true);
+    // B (js 0), the bottom one, held across a frame: the scheme's report has lost it, the pad's own
+    // has not.
+    pro.button(0, true);
     let (report, taps) = seat_frame(&mut seats);
     assert!(report.buttons() & Control::Cross.mask() != 0);
     assert!(pad::Scheme::New.ride(report).buttons() & Control::Cross.mask() == 0, "the new scheme moves R2 onto Cross and Cross off");
     let act = m.step_seats(&[r.read_taps(&report, taps)]);
     assert_eq!(act, Act::Restart);
-    pro.button(1, false);
+    pro.button(0, false);
     seat_frame(&mut seats);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
 /// The splash at any frame rate: an idle pad plugged in first (a virtual one some program left,
-/// its stick wandering), and the user's pad's A pressed for three 60 Hz ticks somewhere — the
+/// its stick wandering), and the user's pad's B, the bottom button (P64), pressed for three 60 Hz ticks somewhere — the
 /// menu's frames every tick, or every twelfth (5 fps), at every phase. The user's pad is 1P.
 #[test]
 fn on_the_splash_a_pad_s_cross_makes_it_1p_even_while_an_idle_virtual_pad_is_plugged_in_at_any_frame_rate() {
@@ -1893,10 +1894,10 @@ fn on_the_splash_a_pad_s_cross_makes_it_1p_even_while_an_idle_virtual_pad_is_plu
                 idle.axis(0, wander(7) as i16);
                 idle.axis(1, wander(13) as i16);
                 if tick == 60 + phase {
-                    pro.button(1, true);
+                    pro.button(0, true);
                 }
                 if tick == 63 + phase {
-                    pro.button(1, false);
+                    pro.button(0, false);
                 }
                 if tick % every != 0 {
                     continue;
@@ -1912,6 +1913,147 @@ fn on_the_splash_a_pad_s_cross_makes_it_1p_even_while_an_idle_virtual_pad_is_plu
             assert_eq!(m.p1(), users.as_ref(), "every {every} phase {phase}");
             assert!(users.is_some());
         }
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// P64: a Switch Pro Controller is laid out like every other pad unless its player asks — its
+/// bottom button (B, js 0) takes the splash and confirms, its right one (A, js 1) goes back — even
+/// with a `controls.txt` that P53's default wrote `nintendo = labels` into. The Controls tab's
+/// Nintendo A/B row, worked by the pad alone, puts it on its labels at once (the shell's
+/// `seats.set_wiring` on a changed menu, as main.rs does): A confirms and B goes back. The pick is
+/// saved, and the next start comes up on labels: A takes the splash, and + does either way.
+#[test]
+fn a_nintendo_pad_s_bottom_button_confirms_until_its_row_says_labels() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let root = pad::tests::scratch("menu-nintendo");
+    let (dev, sys, dir) = (root.join("dev"), root.join("sys"), root.join("files"));
+    std::fs::create_dir_all(&dev).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(menu::CONTROLS_FILE), "throttle = cross\npad = auto\npressure = none\nlayout = new\nnintendo = labels\n").unwrap();
+    let mut pro = pro_controller(&dev, &sys, "js0");
+    let wiring = |c: &Controls| pad::Wiring { nintendo_positions: c.nintendo_positions, ..pad::Wiring::default() };
+    let dev_of = |d: pad::Device<String>| match d {
+        pad::Device::Keys => Dev::Keys,
+        pad::Device::Pad(id) => Dev::Pad(id),
+    };
+    // One menu frame of every device, and the shell's answer to a changed menu.
+    let frame = |m: &mut Menu, seats: &mut pad::Seats, readers: &mut Readers| {
+        let got = pad::tests::devices_now(seats, &|_| false);
+        let reports: Vec<(Dev, Report, u16)> = got.into_iter().map(|(d, r, t)| (dev_of(d), r, t)).collect();
+        m.step_devices(&readers.read_taps(&reports));
+        if m.take_changed() {
+            seats.set_wiring(wiring(&m.controls));
+            menu::save(&dir, &m.settings, &m.controls).unwrap();
+        }
+    };
+    // A press and release of one js button between two frames, or of the hat along one axis.
+    let press = |m: &mut Menu, seats: &mut pad::Seats, readers: &mut Readers, pro: &mut pad::tests::FakePad, js: u8| {
+        pro.button(js, true);
+        pro.button(js, false);
+        // Rested, as a hand is between two taps.
+        for _ in 0..3 {
+            frame(m, seats, readers);
+        }
+    };
+    let hat = |m: &mut Menu, seats: &mut pad::Seats, readers: &mut Readers, pro: &mut pad::tests::FakePad, axis: u8, v: i16| {
+        pro.axis(axis, v);
+        pro.axis(axis, 0);
+        // Rested, as a hand is between two taps.
+        for _ in 0..3 {
+            frame(m, seats, readers);
+        }
+    };
+    let (b, a, plus, r) = (0u8, 1u8, 10u8, 6u8);
+    let start = |seats: &mut pad::Seats| {
+        let (settings, controls) = menu::load(&dir);
+        seats.set_wiring(wiring(&controls));
+        let mut m = Menu::new(settings, controls);
+        m.splash();
+        (m, Readers::new())
+    };
+
+    // The old file's `labels` is not honoured: by position.
+    let mut seats = pad::tests::seats_in(&dev, &sys, pad::Wiring::default());
+    let (mut m, mut readers) = start(&mut seats);
+    assert!(m.controls.nintendo_positions, "P53's default labels migrate to positions");
+    frame(&mut m, &mut seats, &mut readers);
+    // A on the splash goes back, which asks to quit; A again leaves the question.
+    press(&mut m, &mut seats, &mut readers, &mut pro, a);
+    assert_eq!(m.p1(), None);
+    assert_eq!(m.screen(), Some(Screen::Splash));
+    press(&mut m, &mut seats, &mut readers, &mut pro, a);
+    // B is 1P's press start.
+    press(&mut m, &mut seats, &mut readers, &mut pro, b);
+    assert!(m.p1().is_some(), "the bottom button takes the splash");
+    for _ in 0..CLAIMED_FRAMES {
+        frame(&mut m, &mut seats, &mut readers);
+    }
+    assert_eq!(m.screen(), Some(Screen::Main));
+    // B confirms Settings, A goes back out, B goes in again.
+    let at = menu::MAIN.iter().position(|n| *n == "Settings").unwrap();
+    for _ in 0..64 {
+        if m.cursor(Screen::Main) == at {
+            break;
+        }
+        hat(&mut m, &mut seats, &mut readers, &mut pro, 5, i16::MAX);
+    }
+    assert_eq!(m.cursor(Screen::Main), at);
+    press(&mut m, &mut seats, &mut readers, &mut pro, b);
+    assert_eq!(m.screen(), Some(Screen::Settings), "B confirms");
+    press(&mut m, &mut seats, &mut readers, &mut pro, a);
+    assert_eq!(m.screen(), Some(Screen::Main), "A goes back");
+    press(&mut m, &mut seats, &mut readers, &mut pro, b);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+
+    // R along the tabs to Controls, the hat down to the row, which reads By Position.
+    for _ in 0..8 {
+        if m.tabs(Screen::Settings)[m.tab(Screen::Settings)] == "Controls" {
+            break;
+        }
+        press(&mut m, &mut seats, &mut readers, &mut pro, r);
+    }
+    assert_eq!(m.tabs(Screen::Settings)[m.tab(Screen::Settings)], "Controls");
+    for _ in 0..16 {
+        if m.page()[m.cursor(Screen::Settings)].key == menu::Key::Nintendo {
+            break;
+        }
+        hat(&mut m, &mut seats, &mut readers, &mut pro, 5, i16::MAX);
+    }
+    let row = &m.page()[m.cursor(Screen::Settings)];
+    assert_eq!((row.key, row.label.as_str(), row.value.as_str()), (menu::Key::Nintendo, "Nintendo A/B", "By Position"));
+    // The hat's right flips it, and from the next frame the pad is on its labels.
+    hat(&mut m, &mut seats, &mut readers, &mut pro, 4, i16::MAX);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "By Label");
+    assert!(!m.controls.nintendo_positions);
+    assert!(std::fs::read_to_string(dir.join(menu::CONTROLS_FILE)).unwrap().contains("nintendo = by-label\n"));
+    // B goes back now, and A confirms.
+    press(&mut m, &mut seats, &mut readers, &mut pro, b);
+    assert_eq!(m.screen(), Some(Screen::Main), "B goes back under labels");
+    press(&mut m, &mut seats, &mut readers, &mut pro, a);
+    assert_eq!(m.screen(), Some(Screen::Settings), "A confirms under labels");
+
+    // A restart: labels, picked in the menu, are kept. B on the splash asks to quit; A takes it.
+    drop(seats);
+    let mut seats = pad::tests::seats_in(&dev, &sys, pad::Wiring::default());
+    let (mut m, mut readers) = start(&mut seats);
+    assert!(!m.controls.nintendo_positions, "the pick survives a restart");
+    frame(&mut m, &mut seats, &mut readers);
+    press(&mut m, &mut seats, &mut readers, &mut pro, b);
+    assert_eq!(m.p1(), None, "B is not press start under labels");
+    press(&mut m, &mut seats, &mut readers, &mut pro, b);
+    press(&mut m, &mut seats, &mut readers, &mut pro, a);
+    assert!(m.p1().is_some(), "A takes the splash under labels");
+
+    // And + takes the splash whichever way the pad reads.
+    for positions in [true, false] {
+        let mut seats = pad::tests::seats_in(&dev, &sys, pad::Wiring { nintendo_positions: positions, ..pad::Wiring::default() });
+        let mut m = Menu::new(Settings::default(), Controls { nintendo_positions: positions, ..Controls::default() });
+        m.splash();
+        let mut readers = Readers::new();
+        frame(&mut m, &mut seats, &mut readers);
+        press(&mut m, &mut seats, &mut readers, &mut pro, plus);
+        assert!(m.p1().is_some(), "+ with positions {positions}");
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -2646,6 +2788,13 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
     let early = Controls::parse("throttle = l2\npad = auto\npressure = none\n");
     assert_eq!(early, Controls::default());
     assert_eq!(Controls::parse("throttle = r2").throttle, Gas::R2);
+    // P64: positions are the default, P53's default `labels` reads as positions, and only the
+    // menu's `by-label` puts a Nintendo pad on its labels, which round trips.
+    assert!(early.nintendo_positions);
+    assert!(Controls::parse("nintendo = labels\n").nintendo_positions);
+    let labels = Controls::parse("nintendo = by-label\n");
+    assert!(!labels.nintendo_positions);
+    assert_eq!(Controls::parse(&labels.text()), labels);
 }
 
 /// How soft the edges of white ink on black in `rgb` are: of the pixels part way between, the share
