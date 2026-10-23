@@ -2417,7 +2417,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The cars the track's `.toy` drives along their clips (V41): free06's train, its trucks and
     // scrapers, the other freeride tracks' trailers. Drawn, not ridden into: they reach nothing in the
     // simulation, and their clock is the scene's own, summed from the ticks' `dt` below.
-    let traffic = game_render::toy::Traffic::load(&archives, &stem, &mut |p| car_ground(&mut sim, p));
+    // In a world the home tile's `.toy` is still in the tile's own feet: its cars find their ground at
+    // the tile's offset and are drawn there (MD8).
+    let car_shift = world_mod.as_ref().map_or([0.0; 2], |w| w.home_at().map(|a| a.0));
+    let traffic = game_render::toy::Traffic::load(&archives, &stem, &mut |p| car_ground(&mut sim, p, car_shift));
     // A car's model object is a scene prop's, so its pose stands in for the file's root node: the
     // train's turned cars (train_car_03/04/05 carry a half turn there) are drawn without it (V46).
     for (car, _) in &traffic.cars {
@@ -4468,7 +4471,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if !traffic.cars.is_empty() {
             let place = &mut world.place;
             let shown = game_render::toy::between(traffic_before, traffic_time, blend.0);
-            traffic_at = traffic.placed(shown, &mut |p| car_ground(place, p));
+            traffic_at = traffic.placed(shown, &mut |p| car_ground(place, p, car_shift));
+            for (_, at) in &mut traffic_at {
+                at.0[3][0] += car_shift[0];
+                at.0[3][2] += car_shift[1];
+            }
         }
         // The markers' slot display (P88), each view its own player's: the selection, the slots, the
         // label and the hold, or `None` while it is down. Online the selection's players are the
@@ -5321,9 +5328,10 @@ fn framings(v: menu::CameraView) -> (chase::Framing, chase::Framing) {
 /// `sx02.ps2.trn`: the loader tags the file with the platform it was built for, and a few scenes
 /// already spell the tag out.
 /// The ground under a path car (V41), as the ride's own query answers it: the point on the surface
-/// and the surface's normal. Off the terrain the point stays where it is, standing straight up.
-fn car_ground(world: &mut dyn sim_world::World, p: V3) -> (V3, V3) {
-    let (on, normal) = world.ground(Vf::new(p.x, p.y, p.z, 1.0));
+/// and the surface's normal. Off the terrain the point stays where it is, standing straight up. `p`
+/// is in the track's own feet, which sit `by` from the world's (a world's home tile, MD8).
+fn car_ground(world: &mut dyn sim_world::World, p: V3, by: [f32; 2]) -> (V3, V3) {
+    let (on, normal) = world.ground(Vf::new(p.x + by[0], p.y, p.z + by[1], 1.0));
     if on.y() < -1.0e5 {
         return (p, v3(0.0, 1.0, 0.0));
     }
