@@ -132,7 +132,9 @@ struct MaterialUniform {
     constant: [f32; 4],
     cutoff: f32,
     shading: u32,
-    _pad: [u32; 2],
+    /// 1 for [`Surface::keep_coverage`].
+    coverage: u32,
+    _pad: u32,
 }
 
 #[repr(C)]
@@ -170,6 +172,7 @@ struct MaterialKey {
     pipeline: PipelineKey,
     /// Clamped at the texture's edges along u and v rather than repeated.
     clamp: [bool; 2],
+    keep_coverage: bool,
 }
 
 impl MaterialKey {
@@ -194,6 +197,7 @@ impl MaterialKey {
                 ghost: false,
             },
             clamp: s.clamp,
+            keep_coverage: s.keep_coverage,
         }
     }
 }
@@ -1648,7 +1652,8 @@ impl Renderer {
             constant,
             cutoff: surface.cutoff as f32,
             shading: key.shading.0 as u32,
-            _pad: [0; 2],
+            coverage: key.keep_coverage as u32,
+            _pad: 0,
         };
         let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material"),
@@ -2842,6 +2847,7 @@ struct Material {
   constant: vec4f,
   cutoff: f32,
   shading: u32,
+  coverage: u32,
 }
 @group(1) @binding(0) var<uniform> material: Material;
 @group(1) @binding(1) var tex: texture_2d<f32>;
@@ -2915,7 +2921,12 @@ fn node_matrix(i: u32) -> mat4x4f {
 
 @fragment fn fs(i: Out) -> @location(0) vec4f {
   let t = textureSample(tex, samp, i.uv) * 255.0;
-  if (t.a < material.cutoff || (i.cover < 1.0 && !covers(i.clip.xy, i.cover))) {
+  // A cut-out that keeps its coverage (leaves, V56): the smaller levels' averaged alpha raised by
+  // half again a level, so a far tree or bush is not thinner than a near one.
+  let size = vec2f(textureDimensions(tex, 0)) * i.uv;
+  let level = max(log2(max(length(dpdx(size)), length(dpdy(size)))), 0.0);
+  let a = select(t.a, t.a * (1.0 + 0.5 * level), material.coverage != 0u);
+  if (a < material.cutoff || (i.cover < 1.0 && !covers(i.clip.xy, i.cover))) {
     discard;
   }
   let out = clamp(t.rgb * i.lit * (1.0 - i.fog) + view.fog_color.rgb * i.fog, vec3f(0.0), vec3f(255.0));
@@ -3188,6 +3199,7 @@ mod tests {
             additive: false,
             depth_write: false,
             clamp: [false; 2],
+            keep_coverage: false,
         };
         assets.models.insert(
             "board".into(),

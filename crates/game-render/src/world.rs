@@ -46,6 +46,10 @@ pub struct Surface {
     pub depth_write: bool,
     /// The material's texture is clamped at its edges along u and along v, not repeated.
     pub clamp: [bool; 2],
+    /// A cut-out whose texels are near enough all or nothing, as leaves are: where a renderer
+    /// samples a smaller level of the texture, whose alpha the averaging has thinned, it raises
+    /// the alpha to keep the share of the picture the texture covers (V56, `eco::cut_out`).
+    pub keep_coverage: bool,
 }
 
 impl Default for Surface {
@@ -59,6 +63,7 @@ impl Default for Surface {
             additive: false,
             depth_write: true,
             clamp: [false; 2],
+            keep_coverage: false,
         }
     }
 }
@@ -85,6 +90,7 @@ impl Surface {
             // the port has no "colour only" write, so the whole material skips depth instead.
             depth_write: !m.no_depth_write && !(blend && m.fail_keeps_color && cutoff > 1),
             clamp: m.clamp,
+            keep_coverage: false,
         }
     }
 }
