@@ -160,6 +160,11 @@ fn online(ticks: usize, pads: impl Fn(usize) -> Report) -> (Vec<Report>, Vec<Vec
 /// The offline ride: the shell's world of one seat (no front end, so Start would freeze it) under
 /// the engine, on `pads[t]` at tick `t`. Each tick's `dt` and the seat's state after it.
 fn offline(pads: &[Report]) -> (Vec<F>, Vec<Vec<u8>>) {
+    offline_marked(pads, true)
+}
+
+/// [`offline`] with the seat's Markers switch (P129).
+fn offline_marked(pads: &[Report], markers: bool) -> (Vec<F>, Vec<Vec<u8>>) {
     let mut engine = Engine::new();
     pace::after_load(&mut engine);
     let seat = Seat {
@@ -173,6 +178,7 @@ fn offline(pads: &[Report]) -> (Vec<F>, Vec<Vec<u8>>) {
         inverted: false,
         hands: Controls::default(),
         teleported: false,
+        markers,
     };
     let mut world = World { place: Flat::default(), seats: vec![seat], tape: None, played_dt: None };
     let (lib, clip) = clips();
@@ -246,4 +252,25 @@ fn a_pad_off_by_a_tick_parts_them() {
     let (_, offline) = offline(&pads);
     let parted = (0..300).position(|t| online[t] != offline[t]);
     assert_eq!(parted, Some(200));
+}
+
+/// P129: a seat with its Markers switch off rides online as offline too. Its pad carries the
+/// switch's bit ([`crate::vehicle::Wanted::dpad_rides`]), and every tick's state is the offline
+/// seat's with the switch off — the d-pad presses of the pad's wilder legs riding as the original's
+/// — and not the ride with markers on, which parts from it.
+#[test]
+fn markers_off_online_is_the_offline_ride() {
+    let off = |f: usize| {
+        let mut r = pad(f);
+        r.0[net::SWITCH] = crate::vehicle::Wanted { dpad_rides: true, ..Default::default() }.byte();
+        r
+    };
+    let (_, online_off) = online(TICKS, off);
+    let (_, online_on) = online(TICKS, pad);
+    let pads: Vec<Report> = (0..TICKS).map(|t| t.checked_sub(net::DELAY).map_or(Report::idle(), off)).collect();
+    let (_, offline_off) = offline_marked(&pads, false);
+    for t in 0..TICKS {
+        assert!(online_off[t] == offline_off[t], "tick {t}: markers off, online and offline part");
+    }
+    assert!((0..TICKS).any(|t| online_off[t] != online_on[t]), "the switch changed nothing online");
 }

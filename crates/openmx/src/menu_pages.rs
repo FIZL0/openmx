@@ -88,6 +88,8 @@ pub enum Key {
     /// A seat's one Controls choice (P81): New, or Original on one of its controller presets.
     BikeLayout,
     PlaneLayout,
+    /// A seat's session markers (P129), on or off.
+    Markers,
     Nintendo,
     Controller,
     Pressure,
@@ -488,6 +490,14 @@ impl Menu {
         ];
         let plane = Row::choice(Key::PlaneLayout, "Plane Stick", &planes, plane_now, hints[plane_now])
             .tips(&["Relative to the plane", "Dead on its side"]);
+        // The d-pad's job (P129): the session markers', or the original's ride and trick gestures.
+        let markers = Row::choice(
+            Key::Markers,
+            "Markers",
+            &["On", "Off"],
+            usize::from(!self.settings.markers[p.min(SEATS_MAX - 1)]),
+            "On: the d-pad saves and rides back to markers, and the left stick alone steers and does tricks. Off: the d-pad steers, leans and does tricks as in the original.",
+        );
         let mut rows = Vec::new();
         if self.many_seats() {
             rows.push(self.player_row("Whose controls these rows change. Every player's pad keeps its own."));
@@ -495,6 +505,7 @@ impl Menu {
         rows.extend([
             bike,
             plane,
+            markers,
             Row::choice(
                 Key::Nintendo,
                 "Nintendo A/B",
@@ -759,6 +770,10 @@ impl Menu {
             Key::PlaneLayout => {
                 let i = self.control_seat();
                 self.controls.planes[i] = Layout::ALL[next(row)];
+            }
+            Key::Markers => {
+                let i = self.control_seat().min(SEATS_MAX - 1);
+                self.settings.markers[i] = next(row) == 0;
             }
             Key::Nintendo => self.controls.nintendo_positions = !self.controls.nintendo_positions,
             Key::Controller => {

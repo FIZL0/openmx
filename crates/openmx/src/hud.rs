@@ -584,8 +584,8 @@ pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>])
 /// the selection and the filled slots of the set `markers` has up — the switch puts the machine's
 /// own up ([`game_sim::markers::Markers::up`]) — and, while `active` (the player riding or flying),
 /// whether a direction is held for the markers and how far a Down or Up hold is. With the plane's set
-/// up the d-pad is read as the plane's markers read it (`markers::fly`): the shipped bindings, and no
-/// trick buttons to make it a gesture, since the plane has none.
+/// up the d-pad is read as the plane's markers read it (`markers::fly`): the shipped bindings. A trick
+/// button held with it changes nothing (P129).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkerBar {
     pub pick: Pick,
@@ -601,17 +601,15 @@ impl MarkerBar {
         riding: &[bool],
         pad: &Pad,
         table: &Table,
-        hands: &Controls,
         active: bool,
     ) -> MarkerBar {
-        let none = Controls::default();
         let flying = markers.on == game_sim::markers::Vehicle::Plane;
-        let (table, hands) = if flying { (&Table::SHIPPED, &none) } else { (table, hands) };
+        let table = if flying { &Table::SHIPPED } else { table };
         MarkerBar {
             pick: markers.pick_among(me, riding),
             filled: std::array::from_fn(|s| markers.holds(s)),
-            held: active && game_sim::markers::held(pad, table, hands),
-            holding: if active { game_sim::markers::holding(pad, table, hands) } else { 0 },
+            held: active && game_sim::markers::held(pad, table),
+            holding: if active { game_sim::markers::holding(pad, table) } else { 0 },
         }
     }
 }

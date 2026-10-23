@@ -579,7 +579,8 @@ fn every_seat_rides_its_own_preset_and_says_it_in_bytes() {
 
 /// [`mash`]'s pads are a ride as the game reads them (N9): every seat's bike is on the gas nearly
 /// every tick at more than one pressure, brakes now and then, holds a stunt on the chord, and the
-/// d-pad is touched only by the chord (up), not held throughout. And the bikes get going.
+/// d-pad the chord touches (up) never reaches the hands: since P129 it is the markers' with a trick
+/// button down too. And the bikes get going.
 #[test]
 fn the_mashed_pads_are_a_ride() {
     let mut world = Flat::default();
@@ -616,8 +617,8 @@ fn the_mashed_pads_are_a_ride() {
     }
     for (seat, s) in seen.iter().enumerate() {
         assert!(s.gas > ticks * 8 / 11 && s.gases.len() > 5, "seat {seat}: {s:?}");
-        assert!(s.brake > 0 && s.stunt > 0 && s.up > 0, "seat {seat}: {s:?}");
-        assert_eq!(s.down, 0, "seat {seat}: d-pad down held");
+        assert!(s.brake > 0 && s.stunt > 0, "seat {seat}: {s:?}");
+        assert_eq!((s.up, s.down), (0, 0), "seat {seat}: the d-pad reached the hands");
         assert!(s.speed > 10.0, "seat {seat} never got going: {s:?}");
     }
 }
@@ -1536,7 +1537,7 @@ fn the_discs_plane() -> Option<game_sim::phy::Plane> {
 fn wanted(seat: usize, tick: usize) -> vehicle::Wanted {
     let (from, to) = [(120, 450), (300, 600)][seat % 2];
     let up = if (from..to).contains(&tick) { vehicle::Kind::Biplane } else { vehicle::Kind::Bike };
-    vehicle::Wanted { to: Some(up), every_bank: seat == 1, round_stick: false }
+    vehicle::Wanted { to: Some(up), every_bank: seat == 1, round_stick: false, dpad_rides: false }
 }
 
 /// The ride with the plane every seat may take, each seat's pad saying the machine it wants.
@@ -1577,8 +1578,10 @@ fn a_wanted_machine_goes_in_one_byte() {
     use vehicle::{Kind, Wanted};
     for to in [None, Some(Kind::Bike), Some(Kind::Biplane)] {
         for (every_bank, round_stick) in [(false, false), (true, false), (false, true), (true, true)] {
-            let w = Wanted { to, every_bank, round_stick };
-            assert_eq!(Wanted::of(w.byte()), w);
+            for dpad_rides in [false, true] {
+                let w = Wanted { to, every_bank, round_stick, dpad_rides };
+                assert_eq!(Wanted::of(w.byte()), w);
+            }
         }
     }
     assert_eq!(Wanted::of(0), Wanted::default(), "a pad that says nothing switches nothing");
