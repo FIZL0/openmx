@@ -268,18 +268,42 @@ pub struct GroundChunk {
 }
 
 struct GpuChunk {
-    /// Where its corners start in the vertex buffer.
+    /// Which page of the vertex buffers holds its corners, and where in it they start.
+    page: u32,
     base: u32,
     centre: V3,
     radius: f32,
     /// Its height error at each level ([`lod_errors`]).
     errors: Vec<f32>,
-    /// A chunk with holes: its whole grid, stitched each of the sixteen ways.
-    own: Option<Vec<Vec<u32>>>,
+    /// A chunk with holes: which cells it lacks, and its whole grid stitched each of the sixteen
+    /// ways, each made the first time it is drawn that way (a world has thousands of such chunks,
+    /// and all sixteen of each were most of its memory, MD17).
+    own: Option<(Vec<bool>, Vec<Option<Vec<u32>>>)>,
+    /// The piece of ground it came with ([`Renderer::add_ground_piece`]), and where in that piece.
+    piece: u32,
+    at: (u32, u32),
+}
+
+impl GpuChunk {
+    /// A chunk of `cells` cells whose corners start at `base` in the vertex buffer.
+    fn of(c: &GroundChunk, cells: u32, page: u32, base: u32, piece: u32) -> GpuChunk {
+        let heights: Vec<f32> = c.vertices.iter().map(|v| v.pos[1]).collect();
+        let own = c.missing.iter().any(|&m| m).then(|| (c.missing.clone(), vec![None; 16]));
+        GpuChunk { page, base, centre: c.centre, radius: c.radius, errors: lod_errors(&heights, cells), own, piece, at: c.at }
+    }
 }
 
 struct GpuGround {
-    vertices: wgpu::Buffer,
+    /// The chunks' corners, in pages of `per_page` chunks each but the last, which grows: no buffer
+    /// can be bigger than the device allows, and a world's ground is (MD17).
+    pages: Vec<wgpu::Buffer>,
+    per_page: u32,
+    /// How many chunks the pages have room for, and which of those places are free: place `p` is
+    /// page `p / per_page`.
+    capacity: u32,
+    free: Vec<u32>,
+    /// Each piece's chunks as they were handed over, as one number ([`Renderer::ground_piece_hash`]).
+    hashes: HashMap<u32, u64>,
     chunks: Vec<GpuChunk>,
     cells: u32,
     across: usize,
@@ -295,6 +319,74 @@ struct GpuGround {
     bind: wgpu::BindGroup,
 }
 
+impl GpuGround {
+    /// Free piece `piece`'s chunks' places; [`GpuGround::regrid`] after.
+    fn forget(&mut self, piece: u32) {
+        let corners = (self.cells + 1) * (self.cells + 1);
+        let free = &mut self.free;
+        self.chunks.retain(|c| {
+            if c.piece == piece {
+                free.push(c.page * self.per_page + c.base / corners);
+            }
+            c.piece != piece
+        });
+    }
+
+    /// Lay the chunks out in one grid again: each piece in a column band of its own, in piece
+    /// order, one empty column after it so no piece is stitched to the next. Every view's indices
+    /// are built again on its next frame.
+    fn regrid(&mut self) {
+        let mut pieces: Vec<u32> = self.chunks.iter().map(|c| c.piece).collect();
+        pieces.sort_unstable();
+        pieces.dedup();
+        let mut band = Vec::with_capacity(pieces.len());
+        let mut column = 0usize;
+        for &p in &pieces {
+            band.push(column);
+            column += self.chunks.iter().filter(|c| c.piece == p).map(|c| c.at.0 as usize + 1).max().unwrap_or(0) + 1;
+        }
+        self.across = column.saturating_sub(1);
+        self.along = self.chunks.iter().map(|c| c.at.1 as usize + 1).max().unwrap_or(0);
+        self.slots = vec![None; self.across * self.along];
+        for (i, c) in self.chunks.iter().enumerate() {
+            let x = band[pieces.binary_search(&c.piece).expect("listed")] + c.at.0 as usize;
+            self.slots[c.at.1 as usize * self.across + x] = Some(i);
+        }
+        self.levels = vec![0; self.slots.len()];
+        for v in &mut self.views {
+            v.key.clear();
+            v.count = 0;
+            v.runs.clear();
+        }
+    }
+}
+
+/// Ground chunks as one number ([`Renderer::ground_piece_hash`]).
+fn chunks_hash(chunks: &[GroundChunk]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in chunks {
+        (c.cells, c.at, &c.missing).hash(&mut h);
+        for v in &c.vertices {
+            v.pos.map(f32::to_bits).hash(&mut h);
+            v.normal.map(f32::to_bits).hash(&mut h);
+        }
+        [c.centre.x, c.centre.y, c.centre.z, c.radius].map(f32::to_bits).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// A ground vertex buffer with room for `chunks` chunks of `cells` cells.
+fn ground_vertex_buffer(device: &wgpu::Device, cells: u32, chunks: u32) -> wgpu::Buffer {
+    let corners = u64::from((cells + 1) * (cells + 1));
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ground vertices"),
+        size: u64::from(chunks.max(1)) * corners * std::mem::size_of::<GroundVertex>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    })
+}
+
 /// One view's ground: what it drew last frame, kept until the chunks it sees or their levels change.
 struct GroundView {
     buffer: wgpu::Buffer,
@@ -303,6 +395,8 @@ struct GroundView {
     key: Vec<u32>,
     count: u32,
     indices: Vec<u32>,
+    /// The indices' runs a page at a time: the page, its first index and how many.
+    runs: Vec<(u32, u32, u32)>,
 }
 
 /// Something to draw in a view besides the scene's own props: a bike, its parts, a rider, the plane.
@@ -1377,6 +1471,26 @@ impl Renderer {
     /// [`Renderer::set_ground`], with the ground painted by either of its two kinds of paint (MD4): a
     /// freeride track's splat, or a mod track's own terrain pages. `dirt` goes where neither reaches.
     pub fn set_ground_painted(&mut self, chunks: &[GroundChunk], paint: GroundPaint, dirt: [f32; 3]) -> Result<(), String> {
+        let cells = chunks.first().map_or(1, |c| c.cells);
+        if chunks.is_empty() {
+            self.ground = None;
+            return Ok(());
+        }
+        let (mut lo, mut hi) = (v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN));
+        for v in chunks.iter().flat_map(|c| &c.vertices) {
+            lo = v3(lo.x.min(v.pos[0]), lo.y.min(v.pos[1]), lo.z.min(v.pos[2]));
+            hi = v3(hi.x.max(v.pos[0]), hi.y.max(v.pos[1]), hi.z.max(v.pos[2]));
+        }
+        self.set_ground_streamed(cells, paint, dirt, if lo.x <= hi.x { hi.sub(lo).len() } else { 0.0 })?;
+        self.add_ground_piece(0, chunks)
+    }
+
+    /// A ground that comes and goes a piece at a time (MD17): the paint and its pipeline as
+    /// [`Renderer::set_ground_painted`] makes them, no chunks yet, and `span` as the distance between
+    /// the ground's two farthest points (the fog of [`Graphics::Full`] reaches across it). Chunks of
+    /// `cells` cells come with [`Renderer::add_ground_piece`] and go with
+    /// [`Renderer::drop_ground_piece`].
+    pub fn set_ground_streamed(&mut self, cells: u32, paint: GroundPaint, dirt: [f32; 3], span: f32) -> Result<(), String> {
         let pages = match paint {
             GroundPaint::Pages(p) => Some(p),
             _ => None,
@@ -1385,60 +1499,15 @@ impl Renderer {
             GroundPaint::Splat(s) => Some(s),
             _ => None,
         };
-        let cells = chunks.first().map_or(1, |c| c.cells);
         if !cells.is_power_of_two() {
             return Err(format!("ground chunks of {cells} cells: not a power of two"));
         }
-        let corners = ((cells + 1) * (cells + 1)) as usize;
-        let mut vertices: Vec<GroundVertex> = Vec::with_capacity(chunks.len() * corners);
-        let mut gpu_chunks = Vec::with_capacity(chunks.len());
-        let (mut lo, mut hi) = (v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN));
-        for c in chunks {
-            if c.cells != cells || c.vertices.len() != corners {
-                return Err(format!("a ground chunk of {} cells and {} corners among chunks of {cells}", c.cells, c.vertices.len()));
-            }
-            let base = vertices.len() as u32;
-            vertices.extend_from_slice(&c.vertices);
-            for v in &c.vertices {
-                lo = v3(lo.x.min(v.pos[0]), lo.y.min(v.pos[1]), lo.z.min(v.pos[2]));
-                hi = v3(hi.x.max(v.pos[0]), hi.y.max(v.pos[1]), hi.z.max(v.pos[2]));
-            }
-            let heights: Vec<f32> = c.vertices.iter().map(|v| v.pos[1]).collect();
-            let own = c.missing.iter().any(|&m| m).then(|| {
-                (0..16)
-                    .map(|mask| {
-                        let row = cells as usize;
-                        lod_indices_where(cells, 0, sides(mask), |i, j| !c.missing[j as usize * row + i as usize])
-                    })
-                    .collect()
-            });
-            gpu_chunks.push(GpuChunk {
-                base,
-                centre: c.centre,
-                radius: c.radius,
-                errors: lod_errors(&heights, cells),
-                own,
-            });
-        }
-        if gpu_chunks.is_empty() {
-            self.ground = None;
-            return Ok(());
-        }
-        self.span = if lo.x <= hi.x { hi.sub(lo).len() } else { 0.0 };
-        let across = chunks.iter().map(|c| c.at.0 as usize + 1).max().unwrap_or(0);
-        let along = chunks.iter().map(|c| c.at.1 as usize + 1).max().unwrap_or(0);
-        let mut slots = vec![None; across * along];
-        for (i, c) in chunks.iter().enumerate() {
-            slots[c.at.1 as usize * across + c.at.0 as usize] = Some(i);
-        }
+        self.ground = None;
+        self.span = span;
         let patterns: Vec<Vec<u32>> = (0..=lod_levels(cells))
             .flat_map(|level| (0..16).map(move |mask| lod_indices(cells, level, sides(mask))))
             .collect();
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ground vertices"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let vertex_buffer = ground_vertex_buffer(&self.device, cells, 1);
 
         // The paint is a little program (`splat.rs`); here it is written out as the shader's own code.
         let layers: &[Texture] = paint.map_or(&[], |p| &p.textures);
@@ -1538,19 +1607,88 @@ impl Renderer {
             cache: None,
         });
         self.ground = Some(GpuGround {
-            vertices: vertex_buffer,
-            levels: vec![0; slots.len()],
-            chunks: gpu_chunks,
+            pages: vec![vertex_buffer],
+            per_page: ((self.device.limits().max_buffer_size / (u64::from((cells + 1) * (cells + 1)) * std::mem::size_of::<GroundVertex>() as u64))
+                .min(u64::from(u32::MAX / ((cells + 1) * (cells + 1))))) as u32,
+            capacity: 1,
+            free: vec![0],
+            hashes: HashMap::new(),
+            levels: Vec::new(),
+            chunks: Vec::new(),
             cells,
-            across,
-            along,
-            slots,
+            across: 0,
+            along: 0,
+            slots: Vec::new(),
             patterns,
             views: Vec::new(),
             pipeline,
             bind,
         });
         Ok(())
+    }
+
+    /// Piece `piece` of the ground (MD17): its chunks, numbered across and along within the piece,
+    /// in place of whatever the piece had. A piece's chunks are stitched to each other and to no
+    /// other piece's. Needs a ground set first ([`Renderer::set_ground_streamed`]).
+    pub fn add_ground_piece(&mut self, piece: u32, chunks: &[GroundChunk]) -> Result<(), String> {
+        let Some(g) = &mut self.ground else { return Err("no ground to add a piece to".into()) };
+        let cells = g.cells;
+        let corners = ((cells + 1) * (cells + 1)) as usize;
+        if let Some(c) = chunks.iter().find(|c| c.cells != cells || c.vertices.len() != corners) {
+            return Err(format!("a ground chunk of {} cells and {} corners among chunks of {cells}", c.cells, c.vertices.len()));
+        }
+        g.forget(piece);
+        g.hashes.insert(piece, chunks_hash(chunks));
+        while g.free.len() < chunks.len() {
+            let need = (chunks.len() - g.free.len()) as u32;
+            let last = g.capacity - (g.pages.len() as u32 - 1) * g.per_page;
+            let grown = if last < g.per_page {
+                // The last page with room for twice as many, its old corners copied over.
+                let size = (last * 2).max(last + need).min(g.per_page);
+                let bigger = ground_vertex_buffer(&self.device, cells, size);
+                let old = g.pages.pop().expect("a page");
+                let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ground grows") });
+                encoder.copy_buffer_to_buffer(&old, 0, &bigger, 0, old.size());
+                self.queue.submit([encoder.finish()]);
+                g.pages.push(bigger);
+                size - last
+            } else {
+                let size = need.next_power_of_two().min(g.per_page);
+                g.pages.push(ground_vertex_buffer(&self.device, cells, size));
+                size
+            };
+            g.free.extend((g.capacity..g.capacity + grown).rev());
+            g.capacity += grown;
+        }
+        let stride = (corners * std::mem::size_of::<GroundVertex>()) as u64;
+        for c in chunks {
+            let place = g.free.pop().expect("room was made");
+            let (page, at) = (place / g.per_page, place % g.per_page);
+            self.queue.write_buffer(&g.pages[page as usize], u64::from(at) * stride, bytemuck::cast_slice(&c.vertices));
+            g.chunks.push(GpuChunk::of(c, cells, page, at * corners as u32, piece));
+        }
+        g.regrid();
+        Ok(())
+    }
+
+    /// Take piece `piece`'s chunks out of the ground ([`Renderer::add_ground_piece`]).
+    pub fn drop_ground_piece(&mut self, piece: u32) {
+        if let Some(g) = &mut self.ground {
+            g.forget(piece);
+            g.hashes.remove(&piece);
+            g.regrid();
+        }
+    }
+
+    /// Piece `piece`'s chunks as the ground holds them, as one number: every corner, hole, place and
+    /// bound, so two grounds that hash the same draw the piece the same. `None` if it is not held.
+    pub fn ground_piece_hash(&self, piece: u32) -> Option<u64> {
+        self.ground.as_ref()?.hashes.get(&piece).copied()
+    }
+
+    /// How many chunks the ground holds now, and how many it has room for.
+    pub fn ground_chunks(&self) -> (usize, usize) {
+        self.ground.as_ref().map_or((0, 0), |g| (g.chunks.len(), g.capacity as usize))
     }
 
     /// How far the world is drawn from now on (V32): the original's fog and far clip, or all of it.
@@ -2205,6 +2343,7 @@ impl Renderer {
                 key: Vec::new(),
                 count: 0,
                 indices: Vec::new(),
+                runs: Vec::new(),
             });
         }
         if drawn.ground_levels.len() <= top as usize {
@@ -2224,20 +2363,40 @@ impl Renderer {
             drawn.ground_levels[level as usize] += 1;
             key.push(level * 16 + mask);
         }
-        let gv = &mut g.views[v];
-        if key != gv.key {
-            gv.indices.clear();
-            let chunks = g.slots.iter().flatten();
-            for (&c, &k) in chunks.zip(&key) {
+        if key != g.views[v].key {
+            // The stitchings of chunks with holes this key asks for that are not made yet.
+            let (cells, chunks) = (g.cells, &mut g.chunks);
+            for (&c, &k) in g.slots.iter().flatten().zip(&key) {
                 if k == u32::MAX {
                     continue;
                 }
-                let chunk = &g.chunks[c];
-                let pattern = match &chunk.own {
-                    Some(own) => &own[(k % 16) as usize],
-                    None => &g.patterns[k as usize],
-                };
-                gv.indices.extend(pattern.iter().map(|i| i + chunk.base));
+                if let Some((missing, made)) = &mut chunks[c].own {
+                    made[(k % 16) as usize].get_or_insert_with(|| {
+                        let row = cells as usize;
+                        lod_indices_where(cells, 0, sides((k % 16) as usize), |i, j| !missing[j as usize * row + i as usize])
+                    });
+                }
+            }
+            let gv = &mut g.views[v];
+            gv.indices.clear();
+            gv.runs.clear();
+            for page in 0..g.pages.len() as u32 {
+                let first = gv.indices.len() as u32;
+                let chunks = g.slots.iter().flatten();
+                for (&c, &k) in chunks.zip(&key) {
+                    let chunk = &g.chunks[c];
+                    if k == u32::MAX || chunk.page != page {
+                        continue;
+                    }
+                    let pattern = match &chunk.own {
+                        Some((_, made)) => made[(k % 16) as usize].as_ref().expect("made above"),
+                        None => &g.patterns[k as usize],
+                    };
+                    gv.indices.extend(pattern.iter().map(|i| i + chunk.base));
+                }
+                if gv.indices.len() as u32 > first {
+                    gv.runs.push((page, first, gv.indices.len() as u32 - first));
+                }
             }
             let bytes = (gv.indices.len() * 4) as u64;
             if bytes > gv.capacity {
@@ -2255,7 +2414,7 @@ impl Renderer {
             gv.count = gv.indices.len() as u32;
             gv.key = key;
         }
-        gv.count
+        g.views[v].count
     }
 
     /// Every view into `pass`, each at `rect` of its frame rectangle, inside a target of `bounds`.
@@ -2293,10 +2452,12 @@ impl Renderer {
                 pass.set_pipeline(&ground.pipeline);
                 pass.set_bind_group(0, &self.view_bind, &offset);
                 pass.set_bind_group(1, &ground.bind, &[]);
-                pass.set_vertex_buffer(0, ground.vertices.slice(..));
                 pass.set_index_buffer(gv.buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..ground_counts[v], 0, 0..1);
-                drawn.draws += 1;
+                for &(page, first, count) in &gv.runs {
+                    pass.set_vertex_buffer(0, ground.pages[page as usize].slice(..));
+                    pass.draw_indexed(first..first + count, 0, 0..1);
+                    drawn.draws += 1;
+                }
                 drawn.triangles[v] += (ground_counts[v] / 3) as usize;
             }
             // The models: the opaque runs of every batch, then the translucent ones over them.
