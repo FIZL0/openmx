@@ -24,3 +24,9 @@ tests = [
     "::(.*::)?two_builds_since_the_id_both_say_why$",
     "::(.*::)?a_60_fps_limit_sleeps_the_frame_and_leaves_the_ticks_alone$",
 ]
+
+[alone]
+# Binaries that hold themselves to a time budget: run one by one after the pool, on a machine the gate's own
+# other binaries are not loading. one_fps and ecosystem's densest view both red in the first parallel merge
+# gate (P128, 10-23 16:16) and are the original's frame-budget and the smooth rule's no-slower checks.
+tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem"]
