@@ -492,8 +492,11 @@ fn steps(coverage: &[usize]) -> Vec<f32> {
 /// How much more than the model alone or the picture alone does on a frame one frame of the ride may
 /// change a plant's drawn size by. Either alone has jumps of its own a handover cannot help — a
 /// small bush's picture loses an eighth of its pixels when its texture's level changes — so a frame is
-/// held to them, not to nothing.
-const MOST_A_FRAME: f32 = 0.06;
+/// held to them, not to nothing. 7% since V58: the GPU's bush model no longer swells past its
+/// size at a distance (its mips keep the full size's coverage, as the software renderer's
+/// unfiltered texels always did), so the bush's model, half its picture's size on both renderers,
+/// hands over to the picture through a steeper change on the GPU too (6.1% at 298 feet).
+const MOST_A_FRAME: f32 = 0.07;
 
 /// The ways a plant is drawn on a ride: the smooth rule, the original's, its model alone and its
 /// picture alone (the smooth rule with both distances out of reach, or at nothing).
@@ -541,7 +544,9 @@ fn ride_plant(disc: &mut Disc, which: usize, (_, lod, both): (&str, Lod, Option<
 fn judge(which: usize, coverage: &[Vec<usize>]) {
     for (c, (name, ..)) in coverage.iter().zip(RIDES) {
         println!("plant {which}, {name}: pixels {c:?}");
-        assert!(c.iter().all(|&c| c > 50), "plant {which}, {name}: the plant is in the picture all the ride");
+        // 40: the GPU's bush model alone at 520 feet, far past where either rule draws it, covers
+        // under 50 pixels since its mips keep their coverage rather than V56's boost (V58).
+        assert!(c.iter().all(|&c| c > 40), "plant {which}, {name}: the plant is in the picture all the ride");
     }
     let [smooth, original] = worst_over_alone(coverage);
     println!(
@@ -674,6 +679,7 @@ fn plants_at_one_distance_do_not_change_on_one_frame() {
 /// scene they are drawn into, the best of interleaved runs.
 #[test]
 fn the_densest_view_draws_no_slower() {
+    let _quiet = alone();
     let Some(mut disc) = disc() else { return };
     let archives = archives(&mut disc, "free09");
     let bytes = scn(&archives[0]).expect("free09's scene");
@@ -823,5 +829,153 @@ fn a_tree_shows_through_a_nearer_trees_leaves_on_the_gpu() {
                 assert!(share >= 0.995, "gpu, {d} ft: the original's leaves hide the far tree ({:.2}%)", share * 100.0);
             }
         }
+    }
+}
+
+// V58: far plants keep their leaves, and a trunk is drawn all the way in. Presentation only.
+
+/// A frame of one of [`RIDES`] of a plant at `d` feet, on the software renderer or the GPU: which
+/// pixels the plant covers (software: its depth; GPU: where it differs from a frame without it).
+struct Shots {
+    gpu: game_render::gpu::Renderer,
+    target: game_render::gpu::wgpu::Texture,
+    size: (u32, u32),
+}
+
+impl Shots {
+    fn new(size: (u32, u32)) -> Option<Shots> {
+        let mut gpu = match game_render::gpu::Renderer::headless() {
+            Ok(r) => r,
+            Err(why) => {
+                println!("SKIPPED: {why}");
+                return None;
+            }
+        };
+        let target = gpu.offscreen(size.0, size.1);
+        gpu.set_graphics(game_render::world::Graphics::Full);
+        gpu.set_sky(None);
+        Some(Shots { gpu, target, size })
+    }
+
+    /// The plant's pixels at each of `distances`: software's, then the GPU's.
+    fn covered(&mut self, (scene, assets, plant): &mut (Scene, Assets, eco::Plant), distances: &[f32]) -> [Vec<Vec<bool>>; 2] {
+        use game_render::gpu::{Scene3, Target, View};
+        let (w, h) = self.size;
+        let view = self.target.create_view(&Default::default());
+        let light = game_render::world::Lighting::of(scene);
+        let mut frame = |gpu: &mut game_render::gpu::Renderer, camera: &Camera| {
+            let views = [View { rect: [0, 0, w, h], camera, actors: &[] }];
+            let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+            gpu.render(&target, assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+            gpu.read(&self.target)
+        };
+        let grove = scene.ecosystem.take();
+        self.gpu.set_scene(scene);
+        let empty = frame(&mut self.gpu, &riding_at(plant, 300.0));
+        scene.ecosystem = grove;
+        self.gpu.set_scene(scene);
+        let mut out = [vec![], vec![]];
+        for &d in distances {
+            let camera = riding_at(plant, d);
+            let mut f = game_render::Frame::new(w as usize, h as usize, [0, 0, 0]);
+            game_render::draw_scene(&mut f, scene, assets, &[], &camera);
+            out[0].push(f.depth.iter().map(|&z| z > 0.0).collect());
+            let rgb = frame(&mut self.gpu, &camera);
+            out[1].push(rgb.chunks_exact(3).zip(empty.chunks_exact(3)).map(|(a, b)| a.iter().zip(b).map(|(&a, &b)| (a as i32 - b as i32).abs()).sum::<i32>() > 6).collect());
+        }
+        out
+    }
+}
+
+/// Where a plant's size is judged from, and the distances it is judged at, of its model (which is
+/// drawn out to the band) and of its picture (drawn from the band out to the fog).
+const MODEL_NEAR: f32 = 40.0;
+const MODEL_AT: [f32; 4] = [80.0, 150.0, 220.0, 300.0];
+const PICTURE_NEAR: f32 = 200.0;
+const PICTURE_AT: [f32; 4] = [400.0, 600.0, 900.0, 1400.0];
+/// How far a plant's drawn size (pixels times distance squared) may move from its near one, as a
+/// share: a little either way for the levels' and the rasteriser's rounding.
+const KEEPS: std::ops::RangeInclusive<f32> = 0.8..=1.25;
+
+/// A tree and a bush drawn at their far distances cover as much, for their size, as near, on both
+/// renderers: their model out to the band, their picture past it. At HEAD the GPU's picture of the
+/// tree kept 29% of its leaves at 500 feet: the cut-out's box-filtered mips averaged the leaves
+/// with the holes between them under the cutoff (and V56's boost on the levels pushed the solid
+/// texels past V54's upper test, which dropped them).
+/// The timing test held apart from V58's big two-renderer shots, which would share its cores.
+fn alone() -> std::sync::MutexGuard<'static, ()> {
+    static QUIET: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    QUIET.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[test]
+fn a_far_plant_keeps_its_near_coverage_on_both_renderers() {
+    let _quiet = alone();
+    let Some(mut disc) = disc() else { return };
+    let Some(mut shots) = Shots::new((1280, 960)) else { return };
+    for which in ridden(&mut disc) {
+        for (ride, near, at) in [(RIDES[2], MODEL_NEAR, MODEL_AT), (RIDES[3], PICTURE_NEAR, PICTURE_AT)] {
+            let mut plant = ride_plant(&mut disc, which, ride);
+            let distances: Vec<f32> = std::iter::once(near).chain(at).collect();
+            let covered = shots.covered(&mut plant, &distances);
+            for (renderer, frames) in ["software", "gpu"].iter().zip(&covered) {
+                let size: Vec<f32> = frames.iter().zip(&distances).map(|(f, d)| f.iter().filter(|&&c| c).count() as f32 * d * d).collect();
+                let kept: Vec<f32> = size[1..].iter().map(|s| s / size[0].max(1.0)).collect();
+                println!("plant {which}, {} on {renderer}: {:?} kept of {near} ft's at {at:?}", ride.0, kept.iter().map(|k| format!("{:.0}%", k * 100.0)).collect::<Vec<_>>());
+                assert!(size[0] > 0.0, "plant {which}, {}: drawn at {near} ft on {renderer}", ride.0);
+                for (k, d) in kept.iter().zip(at) {
+                    assert!(KEEPS.contains(k), "plant {which}, {} on {renderer}: {:.0}% of its near coverage at {d} ft", ride.0, k * 100.0);
+                }
+            }
+        }
+    }
+}
+
+/// The ride in, for the trunk: from past the band to under the crown.
+fn walk_in() -> Vec<f32> {
+    (0..=95).map(|k| 420.0 - 4.0 * k as f32).collect()
+}
+
+/// Walked from far to near, a tree's trunk is drawn at every step on both renderers. The trunk is
+/// judged where the software renderer (which has no mips to lose it in) draws it: of the pixels in
+/// the lowest fifth of the tree where its model alone and its picture alone both draw, the smooth
+/// rule draws every one (the two halves of the dither share each out to one of them; the GPU, whose
+/// edges round a little differently, 90%), and it draws at least half as many of the fifth's pixels
+/// as the thinner of the two does alone. At HEAD the GPU's model lost its trunk from some 100 to
+/// 300 feet off and got it back nearer (the boosted levels' solid bark fell past V54's upper test;
+/// only level 0 kept it).
+#[test]
+fn a_tree_walked_from_far_to_near_keeps_its_trunk() {
+    let _quiet = alone();
+    let Some(mut disc) = disc() else { return };
+    let (w, h) = (960usize, 720usize);
+    let Some(mut shots) = Shots::new((w as u32, h as u32)) else { return };
+    let walk = walk_in();
+    let which = 0;
+    // Smooth, model alone, picture alone.
+    let covered: Vec<[Vec<Vec<bool>>; 2]> = [RIDES[0], RIDES[2], RIDES[3]].iter().map(|&r| shots.covered(&mut ride_plant(&mut disc, which, r), &walk)).collect();
+    for (r, renderer) in ["software", "gpu"].iter().enumerate() {
+        let mut least = (f32::INFINITY, 0.0f32);
+        for (step, &d) in walk.iter().enumerate() {
+            let [model, picture] = [1, 2].map(|k| &covered[k][0][step]);
+            let smooth = &covered[0][r][step];
+            let rows: Vec<usize> = (0..h).filter(|&y| (0..w).any(|x| model[y * w + x] || picture[y * w + x])).collect();
+            assert!(!rows.is_empty(), "{d} ft: the tree is in the picture");
+            let (top, bottom) = (rows[0], rows[rows.len() - 1]);
+            let fifth = (bottom - (bottom - top) / 5) * w..(bottom + 1) * w;
+            let count = |m: &[bool]| fifth.clone().filter(|&i| m[i]).count();
+            let both: Vec<usize> = fifth.clone().filter(|&i| model[i] && picture[i]).collect();
+            let drawn = both.iter().filter(|&&i| smooth[i]).count();
+            let must = if r == 0 { both.len() } else { (both.len() as f32 * 0.9).floor() as usize };
+            assert!(drawn >= must, "{renderer}, {d} ft: {} of the {} trunk pixels both halves draw are missing", both.len() - drawn, both.len());
+            let thinner = count(model).min(count(picture));
+            assert!(thinner > 0, "{d} ft: the trunk is drawn by the model and the picture alone");
+            let share = count(smooth) as f32 / thinner as f32;
+            if share < least.0 {
+                least = (share, d);
+            }
+        }
+        println!("{renderer}: the trunk's fifth drawn at least {:.0}% of the thinner half's, at {} ft", least.0 * 100.0, least.1);
+        assert!(least.0 >= 0.5, "{renderer}: the trunk thins to {:.0}% at {} ft", least.0 * 100.0, least.1);
     }
 }
