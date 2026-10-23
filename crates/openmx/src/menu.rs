@@ -330,6 +330,11 @@ pub struct Settings {
     pub plants: Lod,
     /// The ride's picture's shape (P126): the window's own, or the original's 4:3 with bars.
     pub picture: Picture,
+    /// Each seat's session markers (P129), the Controls tab's Markers row, 1P's first: on, the d-pad
+    /// is the markers' and the left stick alone rides; off, the d-pad fires no marker, the marker
+    /// bar hides, and the d-pad rides as the original's — steering, leaning and the trick gestures.
+    /// On unless turned off.
+    pub markers: [bool; SEATS_MAX],
 }
 
 /// The shape a ride's picture is drawn in (P126), as `settings.txt` spells it: the shell's
@@ -394,10 +399,13 @@ pub enum Departure {
     Plants,
     /// The ride's picture (V24): the window's shape, or the original's 4:3.
     Picture,
+    /// Every seat's session markers (P129): on, the d-pad the markers'; or off, the original's d-pad.
+    Markers,
 }
 
 impl Departure {
-    pub const ALL: [Departure; 5] = [Departure::Controls, Departure::Cameras, Departure::Fog, Departure::Plants, Departure::Picture];
+    pub const ALL: [Departure; 6] =
+        [Departure::Controls, Departure::Cameras, Departure::Fog, Departure::Plants, Departure::Picture, Departure::Markers];
 
     /// Its row's name.
     pub fn label(self) -> &'static str {
@@ -407,6 +415,7 @@ impl Departure {
             Departure::Fog => "Fog and Draw Distance",
             Departure::Plants => "Plant Detail",
             Departure::Picture => "Picture Shape",
+            Departure::Markers => "Markers",
         }
     }
 
@@ -418,6 +427,7 @@ impl Departure {
             Departure::Fog => ["Whole Map", "Original Fog"],
             Departure::Plants => ["Smooth", "Original"],
             Departure::Picture => ["Fill the Window", "4:3"],
+            Departure::Markers => ["On", "Off"],
         }
     }
 
@@ -429,6 +439,7 @@ impl Departure {
             Departure::Fog => "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.",
             Departure::Plants => "How bushes and trees turn into flat pictures far off. Smooth dissolves them over a wide band; Original swaps them as the game did.",
             Departure::Picture => "The ride's shape on screen. Original is the television's 4:3, with bars at the sides.",
+            Departure::Markers => "Every player's session markers on the d-pad. Off, the d-pad steers, leans and does tricks as in the original.",
         }
     }
 }
@@ -443,6 +454,7 @@ impl Menu {
             Departure::Fog => s.graphics == Graphics::Original,
             Departure::Plants => s.plants == Lod::Original,
             Departure::Picture => s.picture == Picture::Television,
+            Departure::Markers => s.markers.iter().all(|m| !*m),
         }
     }
 
@@ -453,6 +465,7 @@ impl Menu {
         match d {
             Departure::Controls => c.layouts.iter().chain(&c.planes).any(|l| *l == Layout::Original),
             Departure::Cameras => s.cameras.contains(&CameraView::ORIGINAL),
+            Departure::Markers => s.markers.contains(&false),
             _ => self.is_original(d),
         }
     }
@@ -475,6 +488,7 @@ impl Menu {
             Departure::Fog => s.graphics = if original { Graphics::Original } else { Graphics::Full },
             Departure::Plants => s.plants = if original { Lod::Original } else { Lod::Smooth },
             Departure::Picture => s.picture = if original { Picture::Television } else { Picture::Fill },
+            Departure::Markers => s.markers = [!original; SEATS_MAX],
         }
     }
 
@@ -892,8 +906,27 @@ impl Default for Settings {
             tricks: Tricks::default(),
             plants: Lod::default(),
             picture: Picture::default(),
+            markers: [true; SEATS_MAX],
         }
     }
+}
+
+/// `markers`' line (P129): `on` or `off` a seat, 1P's first, the last for every seat past it; `None`
+/// for a line with a word it cannot read, or more words than seats.
+pub fn markers_seats(v: &str) -> Option<[bool; SEATS_MAX]> {
+    let words: Vec<bool> = v
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .map(|w| match w {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    if words.is_empty() || words.len() > SEATS_MAX {
+        return None;
+    }
+    Some(std::array::from_fn(|i| words[i.min(words.len() - 1)]))
 }
 
 /// `--split`'s word for a layout of two, as `settings.txt` keeps it.
@@ -981,6 +1014,7 @@ impl Settings {
                 "plants" => s.plants = Lod::from_word(v).unwrap_or(s.plants),
                 "picture" => s.picture = Picture::from_word(v).unwrap_or(s.picture),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
+                "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
                 "modifiers" => s.modifiers = Mods::parse(v).unwrap_or_default(),
@@ -1072,6 +1106,7 @@ impl Settings {
             + &self.tricks_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
+            + &self.markers_text()
             + &self.modifiers_text()
             + &self.ride_hud_text()
     }
@@ -1149,6 +1184,20 @@ impl Settings {
 
     /// The cameras' line (P82), only when a seat's is not the shipped default, so a file from before
     /// them is written as it was: one seat's five numbers for every seat, or one set a seat.
+    /// Each seat's Markers switch (P129), only when one is off, so a file from before it is written
+    /// as it was: one word a seat as far as the last that differs from the seat after it, the last
+    /// word standing for every seat past it (as `camera`'s line).
+    fn markers_text(&self) -> String {
+        if self.markers.iter().all(|m| *m) {
+            return String::new();
+        }
+        let n = match self.markers.iter().rposition(|m| *m != self.markers[SEATS_MAX - 1]) {
+            Some(i) => i + 2,
+            None => 1,
+        };
+        format!("markers = {}\n", self.markers[..n].iter().map(|m| on_off(*m)).collect::<Vec<_>>().join(" "))
+    }
+
     fn cameras_text(&self) -> String {
         if self.cameras.iter().all(|c| *c == CameraView::DEFAULT) {
             return String::new();
