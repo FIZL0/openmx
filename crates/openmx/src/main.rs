@@ -1061,14 +1061,17 @@ struct Shell {
     front: Front,
 }
 
+/// The rate the pause's readers are read at: the ride's ticks, which step it ([`pace::TICK`]).
+const RIDE_HZ: u32 = 30;
+
 /// The front end's own half of [`Shell`].
 struct Front {
     menu: Menu,
-    /// The pause's reader, of 1P's seat, and the keyboard's beside it when a pad is 1P (P46).
+    /// The pause's reader, of 1P's seat and the keyboard with it when a pad is 1P (P46, P109), read
+    /// at the ride's ticks.
     reader: Reader,
     /// The other seats' readers, for the garage's columns (P37).
     seat_readers: Vec<Reader>,
-    keys_reader: Reader,
     /// The menus' readers, a device each, so the splash can tell who pressed (P46).
     readers: Readers,
     art: Art,
@@ -1240,9 +1243,8 @@ fn front_end(args: Args) -> Result<(), String> {
     let network = lobby::Network::new(&dir);
     let mut front = Front {
         menu: Menu::new(settings, controls).with_garage(catalogue, picks).with_looks(roster::Presets::load(&dir)),
-        reader: Reader::new(),
+        reader: Reader::at(RIDE_HZ),
         seat_readers: (0..roster::SEATS).map(|_| Reader::new()).collect(),
-        keys_reader: Reader::new(),
         readers: Readers::new(),
         art,
         dir,
@@ -1319,7 +1321,6 @@ fn front_end(args: Args) -> Result<(), String> {
         }
         if let Act::Ride(track) = &act {
             shell.front.reader.reset();
-            shell.front.keys_reader.reset();
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
@@ -1394,7 +1395,6 @@ fn front_end(args: Args) -> Result<(), String> {
         // the lobby after.
         if act == Act::Online {
             shell.front.reader.reset();
-            shell.front.keys_reader.reset();
             if let Some((room, _)) = shell.front.menu.lobby.start.clone() {
                 let mut a = args.clone();
                 a.track = room.track.clone();
@@ -1480,7 +1480,11 @@ fn front_end(args: Args) -> Result<(), String> {
                 Device::Pad(id) => (Dev::Pad(id), r, taps),
             })
             .collect();
-        let mut presses = shell.front.readers.read_taps(&reports);
+        // Past the splash 1P's pad and the keyboard drive the menu as one (P109): a push both see
+        // is one press.
+        let menu = &shell.front.menu;
+        let hosted = |d: &Dev| menu.screen() != Some(menu::Screen::Splash) && menu.hosts(d);
+        let mut presses = shell.front.readers.read_hosted(&reports, &hosted);
         // Escape is the keyboard's Back, on its edge: on the main menu the splash, on the splash
         // the Quit popup.
         let esc = window.pressed(key::ESCAPE);
@@ -3254,7 +3258,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             front.menu.switchable[i] = seat.garage.plane.is_some();
         }
     }
-    let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::new()).collect();
+    let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::at(RIDE_HZ)).collect();
     // H toggles it, on its own edge: the window keeps key state and not key events, so the shell
     // remembers last frame's to tell a press from a hold.
     let mut hud_key = false;
@@ -3705,12 +3709,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // theirs their pad drives it (P41). Escape is the keyboard's, and Back for whoever drives.
             // Each player's pad as it is, not as the ride's scheme moved it (P53).
             let menu_report = |i: usize| menu_reports.get(i).copied().unwrap_or((world.seats[i].reports[0], 0));
-            let (report, taps) = menu_report(0);
-            let mut first = front.reader.read_taps(&report, taps);
-            // The keyboard pauses and works 1P's pause whoever has 1P (P46), from no seat of its own.
+            let mut seat0 = vec![menu_report(0)];
+            // The keyboard pauses and works 1P's pause whoever has 1P (P46), from no seat of its own:
+            // read as one with 1P's pad (P109), so a push both see is one press.
             if let Some(keys) = pad_seats.as_ref().and_then(|s| s.keyboard_alone()) {
-                first = first.or(front.keys_reader.read(&keys));
+                seat0.push((keys, 0));
             }
+            let first = front.reader.read_joint(&seat0);
             let mut presses = vec![first];
             for (i, r) in (1..world.seats.len()).zip(&mut start_readers) {
                 let (report, taps) = menu_report(i);

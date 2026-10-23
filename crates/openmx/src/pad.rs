@@ -219,6 +219,12 @@ fn js_order(bitmap: &str, codes: impl Iterator<Item = u16>) -> Vec<u16> {
 /// double tap inside one frame is two presses, handed over one a frame.
 const QUEUE_MAX: u8 = 4;
 
+/// A control let go for less than this many milliseconds, by the events' own times, and down again
+/// is the press it was, not another (P109): a d-pad contact bouncing would otherwise be two
+/// presses in the queue, two rows of a menu for one push. A hand's quickest double tap leaves it up
+/// for longer than this.
+const BOUNCE_MS: u32 = 35;
+
 /// Where each stick axis goes in the report: the report's own order is right X, right Y, left X,
 /// left Y, which is not the pad's.
 const REPORT_RIGHT_X: usize = 0;
@@ -794,6 +800,9 @@ pub struct Pads {
     queue: [u8; 16],
     /// The controls the last report pressed out of [`Pads::queue`].
     taps: u16,
+    /// When each control ([`Control::ALL`]'s order) was last let go, by the events' clock, for
+    /// [`BOUNCE_MS`].
+    up_at: [Option<u32>; 16],
     /// Which pad buttons are down, in [`PAD_BUTTONS`]' slots.
     button: [bool; BUTTONS],
     /// The d-pad directions a device sends as buttons ([`JsButton::Dpad`]) held.
@@ -856,6 +865,7 @@ impl Pads {
             raw,
             queue: [0; 16],
             taps: 0,
+            up_at: [None; 16],
             button: [false; BUTTONS],
             dpad: 0,
             key_stick: [KeyAxis::CENTRED; KEY_STICK_SLOTS.len()],
@@ -984,47 +994,57 @@ impl Pads {
     /// One joystick event: the state it changes, and a press for [`Pads::queue`] when it is a
     /// button or a hat direction going down — not an initial one, which is how the device was when
     /// it was opened and nobody's press.
-    fn event(&mut self, kind: u8, number: usize, value: i16, init: bool) {
+    ///
+    /// A control is pressed when it goes down from every source it has — a d-pad sent both as a hat
+    /// and as buttons is one push, not two (P109) — and only once it has been up [`BOUNCE_MS`] by
+    /// `time`, the event's own milliseconds.
+    fn event(&mut self, kind: u8, number: usize, value: i16, init: bool, time: u32) {
+        let before = self.pressable();
         match kind {
             EVENT_AXIS => {
                 if let Some(slot) = self.raw.get_mut(number) {
                     *slot = value;
                 }
                 let Some(slot) = self.map.axis(number) else { return };
-                let before = self.hat_mask();
                 self.axis[slot] = value;
-                if !init && (slot == AXIS_HAT_X || slot == AXIS_HAT_Y) {
-                    self.queue_mask(self.hat_mask() & !before);
-                }
             }
             EVENT_BUTTON => match self.map.button(number) {
                 JsButton::Pad(slot) => {
                     let slot = self.slot(slot);
-                    let down = value != 0;
-                    if down && !init && !self.button[slot] {
-                        let mut one = [false; BUTTONS];
-                        one[slot] = true;
-                        self.queue_mask(self.bindings.buttons(self.scheme, &one, &no_keys));
-                    }
-                    self.button[slot] = down;
+                    self.button[slot] = value != 0;
                 }
                 JsButton::Trigger(slot) => self.axis[slot] = if value != 0 { i16::MAX } else { TRIGGER_REST },
                 JsButton::Dpad(control) => {
-                    let mask = control.mask();
-                    let held = self.dpad & mask != 0;
                     if value != 0 {
-                        if !held && !init {
-                            self.queue_mask(mask);
-                        }
-                        self.dpad |= mask;
+                        self.dpad |= control.mask();
                     } else {
-                        self.dpad &= !mask;
+                        self.dpad &= !control.mask();
                     }
                 }
                 JsButton::Nothing => {}
             },
             _ => {}
         }
+        let after = self.pressable();
+        let mut pressed = 0;
+        for (up_at, control) in self.up_at.iter_mut().zip(Control::ALL) {
+            let m = control.mask();
+            if before & m != 0 && after & m == 0 {
+                *up_at = Some(time);
+            } else if before & m == 0 && after & m != 0 {
+                let bounced = up_at.is_some_and(|at| time.wrapping_sub(at) < BOUNCE_MS);
+                if !init && !bounced {
+                    pressed |= m;
+                }
+            }
+        }
+        self.queue_mask(pressed);
+    }
+
+    /// The controls held that a press can come from: the pad's buttons as its bindings make them,
+    /// and the d-pad, hat or buttons. Not the triggers' axes, which are a pressure.
+    fn pressable(&self) -> u16 {
+        self.bindings.buttons(self.scheme, &self.button, &no_keys) | self.hat_mask() | self.dpad
     }
 
     /// The slot a button is read in: a Nintendo pad's A and B change places unless the wiring reads
@@ -1093,7 +1113,8 @@ impl Pads {
                 Ok(EVENT_BYTES) => {
                     let value = i16::from_le_bytes([event[4], event[5]]);
                     let init = event[6] & EVENT_INIT != 0;
-                    self.event(event[6] & !EVENT_INIT, event[7] as usize, value, init);
+                    let time = u32::from_le_bytes([event[0], event[1], event[2], event[3]]);
+                    self.event(event[6] & !EVENT_INIT, event[7] as usize, value, init, time);
                 }
                 // A short read cannot happen on this device. End of file, or any error but "nothing
                 // waiting", is a device that went away — the kernel answers ENODEV once a pad is
@@ -3436,6 +3457,10 @@ pub(crate) mod tests {
         /// A reader of the test's own, so that the writer can open before [`Seats`] does.
         _hold: std::fs::File,
         writer: std::fs::File,
+        /// The events' clock, in milliseconds, and how far it moves each event: a hand's pace
+        /// unless a test says otherwise ([`FakePad::gap`]).
+        time: u32,
+        step: u32,
     }
 
     /// Held by every test that plugs a [`FakePad`]. A fifo only reads end-of-file once every writer
@@ -3455,7 +3480,7 @@ pub(crate) mod tests {
                 .open(&path)
                 .unwrap();
             let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-            FakePad { path, _hold: hold, writer }
+            FakePad { path, _hold: hold, writer, time: 0, step: 50 }
         }
 
         pub(crate) fn button(&mut self, number: u8, down: bool) {
@@ -3476,10 +3501,17 @@ pub(crate) mod tests {
             }
         }
 
+        /// The milliseconds between the events sent from now on (P109): a bounce is a few.
+        pub(crate) fn gap(&mut self, ms: u32) {
+            self.step = ms;
+        }
+
         fn send(&mut self, kind: u8, number: u8, value: i16) {
             use std::io::Write;
+            self.time = self.time.wrapping_add(self.step);
             let [lo, hi] = value.to_le_bytes();
-            self.writer.write_all(&[0, 0, 0, 0, lo, hi, kind, number]).unwrap();
+            let [t0, t1, t2, t3] = self.time.to_le_bytes();
+            self.writer.write_all(&[t0, t1, t2, t3, lo, hi, kind, number]).unwrap();
         }
 
         /// Pull it out: the node goes, and the device reads end-of-file.
@@ -4236,6 +4268,57 @@ pub(crate) mod tests {
         frame(&mut seats_none, &nothing);
         let got = devices_now(&mut seats_none, &nothing);
         assert!(got.iter().all(|(_, _, taps)| *taps == 0), "{got:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// P109: one push of the d-pad is one press in the taps, however the pad sends it — as a hat and
+    /// as d-pad buttons both, or with its contact bouncing up and down again inside a few
+    /// milliseconds. A hand's second press, further apart than [`BOUNCE_MS`], is still its own.
+    #[test]
+    fn one_d_pad_push_is_one_press_from_both_sources_and_through_a_bounce() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("bounce");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        // A Pro Controller's codes with the d-pad's buttons as well (js 14 to 17: up, down, left,
+        // right), the hat at js 4 and 5.
+        let mut keys = PRO_KEYS.to_vec();
+        keys.extend([0x220, 0x221, 0x222, 0x223]);
+        sys_device(&sys, "js0", "Nintendo Switch Pro Controller", (0x057e, 0x2009), &keys, &PRO_ABS, &[]);
+        let mut a = FakePad::plug(&dev, "js0");
+        a.init(18, &[0; 6]);
+        let mut seats = seats_in(&dev, &sys, Wiring::default());
+        assert_eq!(pad_report(&mut seats, "js0").1, 0);
+        let taps = |seats: &mut Seats, n: usize| -> Vec<u16> { (0..n).map(|_| pad_report(seats, "js0").1).collect() };
+        let down = Control::Down.mask();
+
+        // The hat and the button for the one push, a millisecond apart, and both let go.
+        a.gap(1);
+        a.axis(5, i16::MAX);
+        a.button(15, true);
+        assert_eq!(taps(&mut seats, 3), [down, 0, 0]);
+        a.axis(5, 0);
+        a.button(15, false);
+        assert_eq!(taps(&mut seats, 1), [0]);
+
+        // A bounce: down, up three milliseconds later and down again, inside one frame.
+        a.gap(50);
+        a.axis(5, i16::MAX);
+        a.gap(3);
+        a.axis(5, 0);
+        a.axis(5, i16::MAX);
+        assert_eq!(taps(&mut seats, 3), [down, 0, 0]);
+        // And across a frame: up in one, down again in the next, still within the bounce.
+        a.axis(5, 0);
+        assert_eq!(taps(&mut seats, 1), [0]);
+        a.axis(5, i16::MAX);
+        assert_eq!(taps(&mut seats, 2), [0, 0]);
+
+        // A hand lets go and presses again further apart: two presses.
+        a.gap(50);
+        a.axis(5, 0);
+        a.axis(5, i16::MAX);
+        assert_eq!(taps(&mut seats, 2), [down, 0]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

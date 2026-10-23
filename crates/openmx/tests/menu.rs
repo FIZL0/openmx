@@ -59,11 +59,11 @@ const BUTTONS: [Control; 8] = [
     Control::Start,
 ];
 
-/// One press and release of `control`: two frames of reports through the reader, the menu stepping
-/// on each.
+/// One press and release of `control`: a frame down and three up through the reader, the menu
+/// stepping on each — a hand's pace, the up longer than a bounce (P109).
 fn tap(menu: &mut Menu, reader: &mut Reader, control: Control) -> Vec<Act> {
     let mut acts = Vec::new();
-    for report in [Report::from_buttons(control.mask()), Report::idle()] {
+    for report in [Report::from_buttons(control.mask()), Report::idle(), Report::idle(), Report::idle()] {
         acts.push(menu.step(reader.read(&report)));
     }
     acts
@@ -857,7 +857,7 @@ fn ride_frame(m: &mut Menu, readers: &mut [Reader], reports: &[Report], garages:
 /// One press and release of `control` on `seat`'s pad, the others at rest.
 fn tap_seat(m: &mut Menu, readers: &mut [Reader], garages: &mut [Garage], seat: usize, control: Control) -> Vec<Act> {
     let mut acts = Vec::new();
-    for pressed in [true, false] {
+    for pressed in [true, false, false, false] {
         let reports: Vec<Report> = (0..readers.len())
             .map(|i| match pressed && i == seat {
                 true => Report::from_buttons(control.mask()),
@@ -1472,7 +1472,7 @@ fn front_frame(m: &mut Menu, readers: &mut [Reader], present: &[usize], reports:
 /// One press and release of `control` on pad seat `device`'s controller, every other at rest.
 fn tap_device(m: &mut Menu, readers: &mut [Reader], present: &[usize], device: usize, control: Control) -> Vec<Act> {
     let mut acts = Vec::new();
-    for pressed in [true, false] {
+    for pressed in [true, false, false, false] {
         let reports: Vec<Report> = (0..readers.len())
             .map(|i| match pressed && i == device {
                 true => Report::from_buttons(control.mask()),
@@ -2103,7 +2103,7 @@ fn hum_listen(speakers: &audio::Speakers) -> Vec<i16> {
 /// [`tap`] with the shell's sound around it, as its menu loop has it: the song playing told to the
 /// menu before each frame, and after one that changed the settings, `Front::hear` and the save.
 fn tap_heard(m: &mut Menu, r: &mut Reader, speakers: &audio::Speakers, dir: &std::path::Path, control: Control) {
-    for report in [Report::from_buttons(control.mask()), Report::idle()] {
+    for report in [Report::from_buttons(control.mask()), Report::idle(), Report::idle(), Report::idle()] {
         m.music_now = speakers.now();
         m.step(r.read(&report));
         if m.changed() {
@@ -2744,4 +2744,326 @@ fn a_label_at_1080p_and_4k_has_edges_no_wider_than_a_pixel() {
             assert!(partial > 200 && soft < 0.03, "{h}p gpu: {:.2}% of {partial} edge pixels soft", soft * 100.0);
         }
     }
+}
+
+// ---- P109: one push, one row -----------------------------------------------------------------------
+
+/// Every screen and tab a pad's d-pad walks (P109), each as the pad reaches it from the main menu:
+/// the main menu itself, the Free Ride pick, every tab of Settings and the Garage (P118's L1/R1
+/// tabs), Mods, Online, the modifiers, the on-screen keyboard and the pause.
+fn every_walked_screen() -> Vec<(String, Menu, Reader)> {
+    let mut out = Vec::new();
+    let (m, r) = fresh();
+    out.push(("Main".to_string(), m, r));
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Free Ride");
+    out.push(("Free Ride".to_string(), m, r));
+    for (row, tabs) in [("Settings", &menu::SETTINGS_TABS[..]), ("Garage", &menu::GARAGE_TABS[..])] {
+        for tab in tabs {
+            let (mut m, mut r) = fresh();
+            main_to(&mut m, &mut r, row);
+            tab_to(&mut m, &mut r, tab);
+            out.push((format!("{row}: {tab}"), m, r));
+        }
+    }
+    for row in ["Mods", "Online"] {
+        let (mut m, mut r) = fresh();
+        main_to(&mut m, &mut r, row);
+        out.push((row.to_string(), m, r));
+    }
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, menu::Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    out.push(("Modifiers".to_string(), m, r));
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Garage");
+    down_to(&mut m, &mut r, menu::Key::Garage(roster::Row::Name));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Keyboard));
+    out.push(("Keyboard".to_string(), m, r));
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Free Ride");
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    tap(&mut m, &mut r, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    out.push(("Pause".to_string(), m, r));
+    out
+}
+
+/// `m` after exactly one step of `press` and then `rest` frames of nothing: what one push must do.
+fn after_one(m: &Menu, press: Press, rest: usize) -> String {
+    let mut m = m.clone();
+    m.step(press);
+    for _ in 0..rest {
+        m.step(Press::default());
+    }
+    key(&m)
+}
+
+/// The user's case (P109): one push of the d-pad's down — or up — moves exactly one row, on every
+/// screen and tab, however long a hand holds it short of the repeat: a single frame, or most of a
+/// third of a second. And through a contact's bounce, up for a frame and down again: still one.
+#[test]
+fn one_d_pad_push_moves_exactly_one_row_on_every_screen_and_tab() {
+    for (name, m, r) in every_walked_screen() {
+        for (control, press) in [(Control::Down, Press { down: true, ..Press::default() }), (Control::Up, Press { up: true, ..Press::default() })] {
+            let push = Report::from_buttons(control.mask());
+            let idle = Report::idle();
+            let shapes: Vec<Vec<bool>> = (1..20)
+                .map(|n| vec![true; n])
+                .chain([vec![true, false, true, true], vec![true, true, false, true, true, true]])
+                .collect();
+            // The Mods screen is one row without a mods folder, as here: there a push is no move.
+            if after_one(&m, press, 0) == key(&m) {
+                assert_eq!(name, "Mods", "{name}: {} moves nothing", control.name());
+                continue;
+            }
+            for shape in shapes {
+                let (mut mm, mut rr) = (m.clone(), r.clone());
+                for &down in &shape {
+                    mm.step(rr.read(if down { &push } else { &idle }));
+                }
+                for _ in 0..4 {
+                    mm.step(rr.read(&Report::idle()));
+                }
+                let frames = shape.len() + 4 - 1;
+                assert_eq!(key(&mm), after_one(&m, press, frames), "{name}: {} held {shape:?} is not one row", control.name());
+            }
+        }
+    }
+}
+
+/// The same push through the shell's pad layer, the user's Pro Controller's hat (P109): pressed and
+/// let go between two frames, held over several, and bouncing — up for three milliseconds inside a
+/// frame, and up for a frame — every one of them a single row of the pause and of the main menu.
+#[test]
+fn one_push_of_a_pro_controller_s_hat_moves_one_row_through_the_pad_layer() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let root = pad::tests::scratch("menu-one-row");
+    let (dev, sys) = (root.join("dev"), root.join("sys"));
+    std::fs::create_dir_all(&dev).unwrap();
+    let mut pro = pro_controller(&dev, &sys, "js0");
+    let mut seats = pad::tests::seats_in(&dev, &sys, pad::Wiring::default());
+    let (mut m, mut r) = fresh();
+    let mut frame = |m: &mut Menu, seats: &mut pad::Seats| {
+        let got = pad::tests::devices_now(seats, &|_| false);
+        let (_, report, taps) = got[1];
+        m.step(r.read_taps(&report, taps));
+    };
+    frame(&mut m, &mut seats);
+    let pushes: [&dyn Fn(&mut pad::tests::FakePad, &mut dyn FnMut()); 4] = [
+        // Down and up between two frames.
+        &|p, _| {
+            p.gap(50);
+            p.axis(5, i16::MAX);
+            p.axis(5, 0);
+        },
+        // Held across six frames.
+        &|p, f| {
+            p.gap(50);
+            p.axis(5, i16::MAX);
+            for _ in 0..6 {
+                f();
+            }
+            p.axis(5, 0);
+        },
+        // Bouncing inside a frame.
+        &|p, f| {
+            p.gap(50);
+            p.axis(5, i16::MAX);
+            p.gap(3);
+            p.axis(5, 0);
+            p.axis(5, i16::MAX);
+            for _ in 0..3 {
+                f();
+            }
+            p.gap(50);
+            p.axis(5, 0);
+        },
+        // Bouncing across a frame: up in one, down again in the next.
+        &|p, f| {
+            p.gap(50);
+            p.axis(5, i16::MAX);
+            f();
+            p.gap(3);
+            p.axis(5, 0);
+            f();
+            p.axis(5, i16::MAX);
+            for _ in 0..3 {
+                f();
+            }
+            p.gap(50);
+            p.axis(5, 0);
+        },
+    ];
+    for (i, push) in pushes.iter().enumerate() {
+        let at = m.cursor(Screen::Main);
+        let mut f = || frame(&mut m, &mut seats);
+        push(&mut pro, &mut f);
+        // The frames the push asked for, then some at rest.
+        for _ in 0..5 {
+            f();
+        }
+        assert_eq!(m.cursor(Screen::Main), (at + 1) % menu::MAIN.len(), "push {i}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A ride's menu as main.rs steps it (P109): at the ride's 30 Hz ticks, with a reader of that rate.
+fn riding_at_30() -> (Menu, Reader) {
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Free Ride");
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    let mut r = Reader::at(30);
+    m.step_seats(&[r.read(&Report::idle())]);
+    (m, r)
+}
+
+/// Start held for many ticks opens the pause once and leaves it open (P109): the press that opened
+/// it is not the Resume too, nor is the hold. Only a fresh press of it closes the pause.
+#[test]
+fn start_held_for_many_frames_opens_the_pause_once_and_leaves_it_open() {
+    let (mut m, mut r) = riding_at_30();
+    let start = Report::from_buttons(Control::Start.mask());
+    for tick in 0..90 {
+        let act = m.step_seats(&[r.read(&start)]);
+        assert_eq!(act, Act::Stay, "tick {tick}");
+        assert_eq!(m.screen(), Some(Screen::Pause), "tick {tick}");
+        assert_eq!(m.cursor(Screen::Pause), 0, "tick {tick}");
+    }
+    for _ in 0..3 {
+        m.step_seats(&[r.read(&Report::idle())]);
+    }
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.step_seats(&[r.read(&start)]), Act::Resume);
+    assert!(m.riding());
+    // A second rider's Start held over a split opens it once for them, and theirs closes it.
+    let mut r2 = Reader::at(30);
+    m.step_seats(&[r.read(&Report::idle()), r2.read(&Report::idle())]);
+    for tick in 0..60 {
+        m.step_seats(&[r.read(&Report::idle()), r2.read(&start)]);
+        assert_eq!(m.screen(), Some(Screen::Pause), "tick {tick}");
+    }
+    m.step_seats(&[r.read(&Report::idle()), r2.read(&Report::idle())]);
+    // 1P's Start is not theirs to close it with.
+    m.step_seats(&[r.read(&start), r2.read(&Report::idle())]);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+}
+
+/// The left stick leaned to `y` out of 127 from the centre, down positive.
+fn stick_y(y: i32) -> Report {
+    let mut r = Report::idle();
+    r.set_axis(3, (AXIS_CENTRE as i32 + y).clamp(0, 255) as u8);
+    r
+}
+
+/// A stick resting just off centre moves nothing, however long (P109), and one resting on the
+/// line of the lean — a worn stick's noise either side of it — is one press, not one each time it
+/// crosses: the direction lets go only once the stick is well back towards the centre.
+#[test]
+fn a_stick_resting_just_off_centre_does_not_move_the_cursor() {
+    for (name, m, r) in every_walked_screen() {
+        let (mut mm, mut rr) = (m.clone(), r.clone());
+        for f in 0..300 {
+            let wobble = [20, 30, 45, 55, 60, 50, 35, 25][f % 8];
+            mm.step(rr.read(&stick_y(wobble)));
+            mm.step(rr.read(&stick_y(-wobble)));
+        }
+        assert_eq!(key(&mm), key(&m), "{name}: a stick off centre moved it");
+        // On the line, wobbling over and under it, for under the repeat: one row.
+        let (mut mm, mut rr) = (m.clone(), r.clone());
+        let line = [62, 66, 60, 70, 58, 64, 61, 67, 59, 65];
+        for &y in &line {
+            mm.step(rr.read(&stick_y(y)));
+        }
+        for _ in 0..4 {
+            mm.step(rr.read(&Report::idle()));
+        }
+        let once = after_one(&m, Press { down: true, ..Press::default() }, line.len() + 3);
+        assert_eq!(key(&mm), once, "{name}: a stick on the line is not one row");
+    }
+}
+
+/// How many rows `frames` of a held Down move the pause's cursor, read `hz` times a second.
+fn held_rows(hz: u32, frames: usize) -> usize {
+    let (mut m, _) = riding_at_30();
+    m.pause();
+    let mut r = Reader::at(hz);
+    m.step(r.read(&Report::idle()));
+    let down = Report::from_buttons(Control::Down.mask());
+    let mut moved = 0;
+    for _ in 0..frames {
+        let at = m.cursor(Screen::Pause);
+        m.step(r.read(&down));
+        moved += usize::from(m.cursor(Screen::Pause) != at);
+    }
+    moved
+}
+
+/// A held push repeats at the front end's rate (P109): the front end's frames are 60 a second and
+/// the pause's the ride's 30 ticks, and either way a held Down waits a third of a second and then
+/// moves twelve rows a second. Before, the pause counted frames and repeated at half the rate.
+#[test]
+fn a_held_push_repeats_at_the_front_ends_rate() {
+    // One second, and two: the push, then the repeats.
+    assert_eq!(held_rows(60, 60), 1 + 8);
+    assert_eq!(held_rows(30, 30), held_rows(60, 60));
+    assert_eq!(held_rows(30, 60), held_rows(60, 120));
+    // Not before a third of a second.
+    assert_eq!(held_rows(60, 19), 1);
+    assert_eq!(held_rows(30, 9), 1);
+}
+
+/// Two devices seeing the one push (P109) — 1P's pad and the keyboard a desktop maps its d-pad and
+/// buttons to, one a frame behind the other — are one press: one row, and a Start that opens the
+/// pause rather than opening and closing it.
+#[test]
+fn a_push_both_the_pad_and_the_keyboard_report_is_one_press() {
+    let (mut m, mut readers) = on_the_splash();
+    let rest = [(Dev::Keys, Report::idle()), (pad("pro"), Report::idle())];
+    let hosted = |m: &Menu| {
+        let m = m.clone();
+        move |d: &Dev| m.screen() != Some(Screen::Splash) && m.hosts(d)
+    };
+    let frame = |m: &mut Menu, readers: &mut Readers, reports: &[(Dev, Report)]| {
+        let with: Vec<(Dev, Report, u16)> = reports.iter().map(|(d, r)| (d.clone(), *r, 0)).collect();
+        let presses = readers.read_hosted(&with, &hosted(m));
+        m.step_devices(&presses)
+    };
+    frame(&mut m, &mut readers, &rest);
+    frame(&mut m, &mut readers, &[(Dev::Keys, Report::idle()), (pad("pro"), cross())]);
+    assert_eq!(m.p1(), Some(&pad("pro")));
+    for _ in 0..CLAIMED_FRAMES + 2 {
+        frame(&mut m, &mut readers, &rest);
+    }
+    assert_eq!(m.screen(), Some(Screen::Main));
+    let down = Report::from_buttons(Control::Down.mask());
+    // The pad first, the keyboard a frame later, and the keyboard let go a frame after the pad.
+    frame(&mut m, &mut readers, &[(Dev::Keys, Report::idle()), (pad("pro"), down)]);
+    frame(&mut m, &mut readers, &[(Dev::Keys, down), (pad("pro"), down)]);
+    frame(&mut m, &mut readers, &[(Dev::Keys, down), (pad("pro"), Report::idle())]);
+    for _ in 0..4 {
+        frame(&mut m, &mut readers, &rest);
+    }
+    assert_eq!(m.cursor(Screen::Main), 1);
+    // A second pad nobody hosts holding Down does not hold 1P's back.
+    frame(&mut m, &mut readers, &[(Dev::Keys, Report::idle()), (pad("pro"), Report::idle()), (pad("other"), down)]);
+    frame(&mut m, &mut readers, &[(Dev::Keys, Report::idle()), (pad("pro"), down), (pad("other"), down)]);
+    assert_eq!(m.cursor(Screen::Main), 2);
+
+    // The pause's Start, in the ride: 1P's pad and the keyboard read as one, as main.rs does.
+    let (mut m, _) = riding_at_30();
+    let mut r = Reader::at(30);
+    let start = Report::from_buttons(Control::Start.mask());
+    m.step_seats(&[r.read_joint(&[(Report::idle(), 0), (Report::idle(), 0)])]);
+    m.step_seats(&[r.read_joint(&[(start, 0), (Report::idle(), 0)])]);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    m.step_seats(&[r.read_joint(&[(start, 0), (start, 0)])]);
+    m.step_seats(&[r.read_joint(&[(Report::idle(), 0), (start, 0)])]);
+    m.step_seats(&[r.read_joint(&[(Report::idle(), 0), (Report::idle(), 0)])]);
+    assert_eq!(m.screen(), Some(Screen::Pause), "the keyboard's Start, a tick behind the pad's, closed it");
 }
