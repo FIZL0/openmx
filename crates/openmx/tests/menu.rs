@@ -704,26 +704,27 @@ fn what_the_pad_sets_is_what_the_file_says() {
     assert_eq!(m.page()[m.cursor(Screen::Garage)].value, "Mx");
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
-    // The HUD on to debug (Display), wrecks off (Ride), and the throttle onto L2 (Controls: left
-    // from Cross wraps to L2).
+    // The HUD on to debug (Display), wrecks off (Ride).
     settings_at(&mut m, &mut r, "Display");
     down_to(&mut m, &mut r, menu::Key::Hud);
     tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::L1);
     down_to(&mut m, &mut r, menu::Key::Wrecks);
     tap(&mut m, &mut r, Control::Right);
-    tab_to(&mut m, &mut r, "Controls");
-    down_to(&mut m, &mut r, menu::Key::Throttle);
-    tap(&mut m, &mut r, Control::Left);
-    assert_eq!(m.controls.throttle, Gas::L2);
     assert!(m.take_changed());
-    // 1P's bike and biplane layouts are rows of their own, each round either way (P50).
+    tab_to(&mut m, &mut r, "Controls");
+    // 1P's bike and biplane controls are rows of their own, each round either way (P50, P81): the
+    // bike's left from New wraps to the original's last preset.
     let one = |m: &Menu| (m.controls.layouts[0], m.controls.planes[0]);
     down_to(&mut m, &mut r, menu::Key::BikeLayout);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(one(&m), (Layout::Original, Layout::New));
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(one(&m), (Layout::New, Layout::New));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!((one(&m), m.controls.presets[0]), ((Layout::Original, Layout::New), 3));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!((one(&m), m.controls.presets[0]), ((Layout::New, Layout::New), 0), "New is on preset 0");
     down_to(&mut m, &mut r, menu::Key::PlaneLayout);
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(one(&m), (Layout::New, Layout::Original));
@@ -739,7 +740,7 @@ fn what_the_pad_sets_is_what_the_file_says() {
         settings,
         Settings { name: "Mx".into(), overlay: Overlay::Debug, wrecks: false, ..Settings::default() }
     );
-    assert_eq!(controls.throttle, Gas::L2);
+    assert_eq!(controls.throttle, Gas::Cross);
     assert_eq!(controls.planes[0], Layout::Original);
     // And a menu opened on what was read is the menu that wrote it.
     let again = Menu::new(settings, controls);
@@ -2235,42 +2236,90 @@ fn the_pause_picks_a_song_skips_it_and_its_music_slider_is_kept() {
     assert_eq!(m.settings.music_volume, 60);
 }
 
-/// P79: the Controls tab offers the original's controller presets under the original layout, a row
-/// of its own since P118 that is dimmed under New, and the file keeps the pick.
+/// P81: the Controls tab is one choice a seat for the bike and one for the plane's stick. A fresh
+/// file is on New and the stick that never turns round; there is no throttle row; the Player row is
+/// there only with more than one seat; both rows step by the pad and are saved; and the plane row's
+/// hint says what the choice it is on does.
+#[test]
+fn the_controls_tab_is_one_choice_a_seat_and_a_plane_stick() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Controls");
+    let row = |m: &Menu, k: Key| m.page().into_iter().find(|r| r.key == k).unwrap();
+    let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
+    assert_eq!(keys, [Key::BikeLayout, Key::PlaneLayout, Key::Nintendo, Key::Controller, Key::Pressure], "one seat: no Player row");
+    assert!(!m.page().iter().any(|r| r.label.contains("Throttle")), "no throttle row");
+    assert_eq!(row(&m, Key::BikeLayout).value, "New");
+    let plane = row(&m, Key::PlaneLayout);
+    assert_eq!((plane.label.as_str(), plane.value.as_str()), ("Plane Stick", "Normal"));
+    assert_eq!(m.controls.planes, [Layout::New; menu::SEATS], "the plane-relative stick is the default");
+    let normal = plane.about.clone();
+    assert!(normal.contains("relative to the plane"), "{normal}");
+
+    // Both rows by the pad.
+    down_to(&mut m, &mut r, Key::BikeLayout);
+    tap(&mut m, &mut r, Control::Right);
+    down_to(&mut m, &mut r, Key::PlaneLayout);
+    tap(&mut m, &mut r, Control::Right);
+    let plane = row(&m, Key::PlaneLayout);
+    assert_eq!((row(&m, Key::BikeLayout).value.as_str(), plane.value.as_str()), ("Original", "Like the Original"));
+    assert_ne!(plane.about, normal, "the hint follows the value");
+    assert!(plane.about.starts_with("Like the original"), "{}", plane.about);
+    assert!(m.take_changed());
+    let dir = scratch("p81");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (_, controls) = menu::load(&dir);
+    assert_eq!((controls.layouts[0], controls.planes[0]), (Layout::Original, Layout::Original));
+    assert_eq!(controls.throttle, Gas::Cross, "the throttle line is still written, untouched");
+    std::fs::remove_dir_all(dir).ok();
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(row(&m, Key::PlaneLayout).about, normal);
+
+    // Two seats: the Player row comes first, and the rows are the seat it is on.
+    m.seated = 2;
+    assert_eq!(m.page()[0].key, Key::Player);
+    down_to(&mut m, &mut r, Key::Player);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(row(&m, Key::BikeLayout).value, "New", "2P's own");
+    down_to(&mut m, &mut r, Key::PlaneLayout);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!((m.controls.planes[0], m.controls.planes[1]), (Layout::New, Layout::Original));
+}
+
+/// P79, P81: the Controls tab offers the original's controller presets inside Original, on the one
+/// choice a seat has, and the file keeps the pick.
 #[test]
 fn the_controls_row_offers_the_originals_presets() {
     use menu::Key;
     let (mut m, mut r) = fresh();
+    m.seated = 2;
     settings_at(&mut m, &mut r, "Controls");
     let (n, o) = (Layout::New, Layout::Original);
-    let preset = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::ControllerPreset).unwrap();
-    assert_eq!(preset(&m).off.as_deref(), Some("Only with the Original layout"));
+    let bike = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::BikeLayout).unwrap();
+    assert_eq!(bike(&m).choices, ["New", "Original", "Original, Preset 2", "Original, Preset 3", "Original, Preset 4"]);
+    assert_eq!(bike(&m).tips.len(), 5, "a line under every choice");
     down_to(&mut m, &mut r, Key::BikeLayout);
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.controls.layouts[0], o);
-    assert!(preset(&m).off.is_none());
-    down_to(&mut m, &mut r, Key::ControllerPreset);
-    let mut seen = vec![m.controls.presets[0]];
-    for _ in 0..4 {
+    let mut seen = vec![(m.controls.layouts[0], m.controls.presets[0])];
+    for _ in 0..5 {
         tap(&mut m, &mut r, Control::Right);
-        seen.push(m.controls.presets[0]);
+        seen.push((m.controls.layouts[0], m.controls.presets[0]));
     }
-    assert_eq!(seen, [0, 1, 2, 3, 0], "on round to the start");
+    assert_eq!(seen, [(n, 0), (o, 0), (o, 1), (o, 2), (o, 3), (n, 0)], "on round to the start");
     tap(&mut m, &mut r, Control::Left);
-    assert_eq!(m.controls.presets[0], 3);
+    assert_eq!((m.controls.layouts[0], m.controls.presets[0]), (o, 3));
     tap(&mut m, &mut r, Control::Left);
-    assert_eq!(preset(&m).value, "Preset 3");
-    // The biplane's layout is a row of its own.
+    assert_eq!(bike(&m).value, "Original, Preset 3");
+    // The biplane's stick is a row of its own.
     down_to(&mut m, &mut r, Key::PlaneLayout);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!((m.controls.layouts[0], m.controls.presets[0], m.controls.planes[0]), (o, 2, o));
     assert_eq!(m.controls.presets[1..], [0; 7], "2P's preset moved with 1P's");
-    // 2P is still on New, so its preset row is dimmed.
+    // 2P is still on New.
     down_to(&mut m, &mut r, Key::Player);
     tap(&mut m, &mut r, Control::Right);
-    assert!(preset(&m).off.is_some());
+    assert_eq!(bike(&m).value, "New");
     assert!(m.take_changed());
-    assert_eq!(menu::controls_label(o, 2), "Original preset 2");
+    assert_eq!(menu::controls_label(o, 2), "Original, Preset 3");
     assert_eq!(menu::controls_label(o, 0), "Original");
     assert_eq!(menu::controls_label(n, 0), "New");
 
@@ -2419,7 +2468,8 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
     assert_eq!(m.tabs(Screen::Settings), menu::SETTINGS_TABS);
     assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Audio", "Controls", "Camera"]);
     tab_to(&mut m, &mut r, "Ride");
-    let first = [Key::StartOn, Key::Hud, Key::Mix, Key::Player, Key::Player];
+    // Controls has no Player row with one seat (P81).
+    let first = [Key::StartOn, Key::Hud, Key::Mix, Key::BikeLayout, Key::Player];
     let here = |m: &Menu, s: Screen| (m.tab(s), m.page()[m.cursor(s)].key);
     for (i, key) in first.iter().enumerate() {
         assert_eq!(here(&m, Screen::Settings), (i, *key));
@@ -2591,9 +2641,11 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
     };
     assert_eq!(Controls::parse(old), want);
     assert!(want.text().ends_with(old), "{}", want.text());
-    // One from before P40, P50, P53 and P79: a throttle, a pad, the rest the defaults.
+    // One from before P40, P50, P53 and P79: a throttle, a pad, the rest the defaults. L2 is no
+    // throttle since P81, so its word reads as the default.
     let early = Controls::parse("throttle = l2\npad = auto\npressure = none\n");
-    assert_eq!(early, Controls { throttle: Gas::L2, ..Controls::default() });
+    assert_eq!(early, Controls::default());
+    assert_eq!(Controls::parse("throttle = r2").throttle, Gas::R2);
 }
 
 /// How soft the edges of white ink on black in `rgb` are: of the pixels part way between, the share
