@@ -37,6 +37,7 @@
 use crate::join::{self, Join, Opened, Outcome};
 use crate::roster::{self, Catalogue, Garage, Pick, Picks};
 use crate::split::{self, Split};
+use game_render::eco::Lod;
 use game_render::world::Graphics;
 use game_render::gpu::{Shape, Sprite};
 use game_render::{Disc, Frame, Texture};
@@ -319,6 +320,189 @@ pub struct Settings {
     /// Whose tricks a ride has (MD16): the original's, or MX vs. ATV's read from a trick pack in the
     /// mods folder. The original's unless changed.
     pub tricks: Tricks,
+    /// How the plants change from model to picture (V55): ours, smoothed, unless the Original
+    /// switch's Plants (P126) is on.
+    pub plants: Lod,
+    /// The ride's picture's shape (P126): the window's own, or the original's 4:3 with bars.
+    pub picture: Picture,
+}
+
+/// The shape a ride's picture is drawn in (P126), as `settings.txt` spells it: the shell's
+/// `aspect::Aspect`, which this file cannot name because `tests/menu.rs` compiles it on its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Picture {
+    /// The window's own shape, whatever it is.
+    #[default]
+    Fill,
+    /// The original's television, the largest 4:3 frame that fits, with bars round it.
+    Television,
+}
+
+impl Picture {
+    pub const ALL: [Picture; 2] = [Picture::Fill, Picture::Television];
+
+    /// The file's word, which is also `--aspect`'s.
+    pub fn word(self) -> &'static str {
+        match self {
+            Picture::Fill => "fill",
+            Picture::Television => "4:3",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Picture> {
+        Picture::ALL.into_iter().find(|p| p.word() == w)
+    }
+}
+
+/// What the Original switch reads (P126): every departure below it at the original's and the HUD the
+/// original's, every one of them ours, or some of each. Mixed is its own reading, not Off: Off means
+/// every enhancement is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Original {
+    Off,
+    On,
+    Mixed,
+}
+
+impl Original {
+    pub fn label(self) -> &'static str {
+        match self {
+            Original::Off => "Off",
+            Original::On => "On",
+            Original::Mixed => "Mixed",
+        }
+    }
+}
+
+/// Each place the port departs from the original's look or feel on purpose (P126): a switch of its
+/// own under the Original one, ours by default. The simulation is none of them: the game modifiers
+/// (P55) stay as they are whatever these say. A new enhancement adds itself here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Departure {
+    /// Every seat's bike layout and plane stick (P40, P50, P81): New, or the disc's (P73, P69).
+    Controls,
+    /// Every seat's camera (P82): the port's further-out view, or the disc's numbers.
+    Cameras,
+    /// The fog and far clip (V32): the whole map, or the original's.
+    Fog,
+    /// The plants' model-to-picture change (V55): the smooth one, or the original's.
+    Plants,
+    /// The ride's picture (V24): the window's shape, or the original's 4:3.
+    Picture,
+}
+
+impl Departure {
+    pub const ALL: [Departure; 5] = [Departure::Controls, Departure::Cameras, Departure::Fog, Departure::Plants, Departure::Picture];
+
+    /// Its row's name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Departure::Controls => "Controls",
+            Departure::Cameras => "Cameras",
+            Departure::Fog => "Fog and Draw Distance",
+            Departure::Plants => "Plant Detail",
+            Departure::Picture => "Picture Shape",
+        }
+    }
+
+    /// Its row's two choices, ours first.
+    pub fn choices(self) -> [&'static str; 2] {
+        match self {
+            Departure::Controls => ["New", "Original"],
+            Departure::Cameras => ["Further Out", "Original"],
+            Departure::Fog => ["Whole Map", "Original Fog"],
+            Departure::Plants => ["Smooth", "Original"],
+            Departure::Picture => ["Fill the Window", "4:3"],
+        }
+    }
+
+    /// What its row says it does.
+    pub fn about(self) -> &'static str {
+        match self {
+            Departure::Controls => "Every player's bike buttons and plane stick. Original is the disc's own layout, on each player's controller preset.",
+            Departure::Cameras => "Every player's follow cameras. Further Out sits a little back and higher; Original is the disc's.",
+            Departure::Fog => "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.",
+            Departure::Plants => "How bushes and trees turn into flat pictures far off. Smooth dissolves them over a wide band; Original swaps them as the game did.",
+            Departure::Picture => "The ride's shape on screen. Original is the television's 4:3, with bars at the sides.",
+        }
+    }
+}
+
+impl Menu {
+    /// Whether a departure is at the original's: for every seat, where it is per seat.
+    pub fn is_original(&self, d: Departure) -> bool {
+        let (s, c) = (&self.settings, &self.controls);
+        match d {
+            Departure::Controls => c.layouts.iter().chain(&c.planes).all(|l| *l == Layout::Original),
+            Departure::Cameras => s.cameras.iter().all(|v| *v == CameraView::ORIGINAL),
+            Departure::Fog => s.graphics == Graphics::Original,
+            Departure::Plants => s.plants == Lod::Original,
+            Departure::Picture => s.picture == Picture::Television,
+        }
+    }
+
+    /// Whether any seat has a departure at the original's: [`Menu::is_original`] but for one seat
+    /// enough.
+    pub fn some_original(&self, d: Departure) -> bool {
+        let (s, c) = (&self.settings, &self.controls);
+        match d {
+            Departure::Controls => c.layouts.iter().chain(&c.planes).any(|l| *l == Layout::Original),
+            Departure::Cameras => s.cameras.contains(&CameraView::ORIGINAL),
+            _ => self.is_original(d),
+        }
+    }
+
+    /// One departure to the original's or back to ours, leaving the others. Back to ours is the
+    /// port's default, not whatever it was before: a seat's controller preset and a camera's own
+    /// slider moves are not kept.
+    pub fn set_departure(&mut self, d: Departure, original: bool) {
+        let (s, c) = (&mut self.settings, &mut self.controls);
+        match d {
+            Departure::Controls => {
+                let to = if original { Layout::Original } else { Layout::New };
+                c.layouts = [to; SEATS];
+                c.planes = [to; SEATS];
+                if !original {
+                    c.presets = [0; SEATS];
+                }
+            }
+            Departure::Cameras => s.cameras = [if original { CameraView::ORIGINAL } else { CameraView::DEFAULT }; SEATS_MAX],
+            Departure::Fog => s.graphics = if original { Graphics::Original } else { Graphics::Full },
+            Departure::Plants => s.plants = if original { Lod::Original } else { Lod::Smooth },
+            Departure::Picture => s.picture = if original { Picture::Television } else { Picture::Fill },
+        }
+    }
+
+    /// Whether the HUD is the original's: its own overlay, the radar on, at its own size. Not a
+    /// departure — the port's HUD starts as the original's — but On reads it.
+    pub fn hud_is_original(&self) -> bool {
+        let s = &self.settings;
+        s.overlay == Overlay::Original && s.minimap && s.hud_scale == HUD_SCALE_DEFAULT
+    }
+
+    /// The Original switch's reading: On with every departure and the HUD the original's, Off with
+    /// every departure ours for every seat (whatever the HUD), Mixed otherwise.
+    pub fn original(&self) -> Original {
+        if Departure::ALL.iter().all(|d| self.is_original(*d)) && self.hud_is_original() {
+            Original::On
+        } else if !Departure::ALL.iter().any(|d| self.some_original(*d)) {
+            Original::Off
+        } else {
+            Original::Mixed
+        }
+    }
+
+    /// The Original switch thrown: on puts every departure and the HUD back to the original's; off
+    /// turns every enhancement back on and leaves the HUD as it is.
+    pub fn set_original(&mut self, on: bool) {
+        for d in Departure::ALL {
+            self.set_departure(d, on);
+        }
+        if on {
+            let s = &mut self.settings;
+            (s.overlay, s.minimap, s.hud_scale) = (Overlay::Original, true, HUD_SCALE_DEFAULT);
+        }
+    }
 }
 
 /// The settings' render scale (V34): auto, picked from the frames' time against the display's
@@ -696,6 +880,8 @@ impl Default for Settings {
             mods: true,
             mods_off: Vec::new(),
             tricks: Tricks::default(),
+            plants: Lod::default(),
+            picture: Picture::default(),
         }
     }
 }
@@ -780,6 +966,8 @@ impl Settings {
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
+                "plants" => s.plants = Lod::from_word(v).unwrap_or(s.plants),
+                "picture" => s.picture = Picture::from_word(v).unwrap_or(s.picture),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
@@ -861,6 +1049,7 @@ impl Settings {
         ) + &self.display_text()
             + &self.bays_text()
             + &self.hud_text()
+            + &self.original_text()
             + &self.mods_text()
             + &self.tricks_text()
             + &self.lobby_seats_text()
@@ -888,6 +1077,14 @@ impl Settings {
             n => format!("hud_scale = {n}\n"),
         };
         minimap + &scale
+    }
+
+    /// The Original switch's own settings (P126), only where they are not ours, so a file from
+    /// before them is written as it was.
+    fn original_text(&self) -> String {
+        let plants = if self.plants == Lod::default() { String::new() } else { format!("plants = {}\n", self.plants.word()) };
+        let picture = if self.picture == Picture::default() { String::new() } else { format!("picture = {}\n", self.picture.word()) };
+        plants + &picture
     }
 
     /// The mods' switch (MD2), only when it is off, so a file from before it is written as it was.
