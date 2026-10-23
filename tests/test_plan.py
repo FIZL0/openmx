@@ -282,7 +282,7 @@ def test_runner_config():
         s = json.loads(kit_py('import json; from ps2kit import runner; print(json.dumps(runner.settings()))', toml))
         r = s['run']
         eq(r['command'], './kit', 'sessions are told ./kit, not agent-runner')
-        eq(r['test'], './kit check', 'the gate is ./kit check')
+        eq(r['test'], './kit check --all', 'the gate is ./kit check --all (slow binaries too)')
         eq(r['slot_env'], ['KIT_PCSX2={n}', 'KIT_RUN=1'], 'each slot gets its own emulator copy')
         check({'KIT_CONFIG', 'KIT_CHECK_SLOTS', 'AGENT_RUNNER_IDLE_BG'} <= set(r['pass_env']),
               'and the kit settings the runner was started with', str(r['pass_env']))
