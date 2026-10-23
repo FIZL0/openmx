@@ -24,6 +24,9 @@ as a single job under `./kit pcsx2 with -- <cmd>` so it holds the emulator for t
 short. Close your copy when you are done with it: `./kit pcsx2 stop` (never kill the process by name — the \
 other slots' copies are running too). On a usage limit, leave the emulator running.
 
-Also read docs/. Tests only through `./kit check` (one line when they pass; it says plainly whether the build \
+Read a doc in docs/ only when the task touches it, never the folder whole: PCSX2.md (driving the emulator), \
+PROVING.md (proving a match), PS2.md (hardware), GHIDRA.md (the decompiler), TROUBLESHOOTING.md (a tool \
+fails), INTERNALS.md (changing ps2kit/). A task that names a concept .html opens that file and no other. \
+Tests only through `./kit check` (one line when they pass; it says plainly whether the build \
 broke or a test failed). Read decompilation with `./kit fn` / `./kit xref`, never whole files.
 """
