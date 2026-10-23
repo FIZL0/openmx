@@ -206,6 +206,12 @@ pub struct Settings {
     pub overlay: Overlay,
     /// How the original's HUD shows the speed (V42): the digital readout, or the dial.
     pub speedometer: Speedometer,
+    /// Whether the original's HUD draws its free-ride radar (V52): off, the speedometer stays and
+    /// the radar, its icons and the other riders' marks go from every view. On unless turned off.
+    pub minimap: bool,
+    /// The whole HUD's size, in percent of the original's (V52): [`HUD_SCALE_MIN`] to
+    /// [`HUD_SCALE_MAX`] in steps of [`HUD_SCALE_STEP`], each part about its own corner.
+    pub hud_scale: u8,
     /// Whether a ride wrecks at all.
     pub wrecks: bool,
     /// The last track ridden, which the track pick opens on.
@@ -609,6 +615,8 @@ impl Default for Settings {
             name: "Rider".into(),
             overlay: Overlay::Original,
             speedometer: Speedometer::default(),
+            minimap: true,
+            hud_scale: HUD_SCALE_DEFAULT,
             wrecks: true,
             track: TRACKS[0].0.into(),
             machines: [Machine::Bike; SEATS_MAX],
@@ -681,6 +689,8 @@ impl Settings {
                 }
                 "overlay" => s.overlay = Overlay::from_word(v).unwrap_or(s.overlay),
                 "speedometer" => s.speedometer = Speedometer::from_word(v).unwrap_or(s.speedometer),
+                "minimap" => s.minimap = v != "off",
+                "hud_scale" => s.hud_scale = hud_scale_word(v).unwrap_or(s.hud_scale),
                 "wrecks" => s.wrecks = v != "off",
                 "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // One word a seat, 1P's first; a seat the line does not reach rides the bike.
@@ -794,6 +804,7 @@ impl Settings {
             self.render_scale.word()
         ) + &self.display_text()
             + &self.bays_text()
+            + &self.hud_text()
             + &self.mods_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
@@ -809,6 +820,17 @@ impl Settings {
     /// it was.
     fn bays_text(&self) -> String {
         if self.bays { String::new() } else { "machine_bays = off\n".into() }
+    }
+
+    /// The minimap and the HUD's scale (V52), only where they are not the defaults, so a file from
+    /// before them is written as it was.
+    fn hud_text(&self) -> String {
+        let minimap = if self.minimap { String::new() } else { "minimap = off\n".into() };
+        let scale = match self.hud_scale {
+            HUD_SCALE_DEFAULT => String::new(),
+            n => format!("hud_scale = {n}\n"),
+        };
+        minimap + &scale
     }
 
     /// The mods' switch (MD2), only when it is off, so a file from before it is written as it was.
@@ -876,6 +898,30 @@ fn clean_name(v: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// The HUD's scale (V52), in percent: the Settings row's range and step, and the original's size.
+pub const HUD_SCALE_MIN: u8 = 50;
+pub const HUD_SCALE_MAX: u8 = 150;
+pub const HUD_SCALE_STEP: u8 = 10;
+pub const HUD_SCALE_DEFAULT: u8 = 100;
+
+/// A HUD scale as `settings.txt` and `--hud-scale` spell it, `130` or `130%`: one of the row's
+/// steps, or nothing.
+pub fn hud_scale_word(w: &str) -> Option<u8> {
+    let n = w.trim().trim_end_matches('%').parse::<u8>().ok()?;
+    ((HUD_SCALE_MIN..=HUD_SCALE_MAX).contains(&n) && (n - HUD_SCALE_MIN) % HUD_SCALE_STEP == 0).then_some(n)
+}
+
+/// The HUD scale a step down or up — or, with neither, a step up and round from the largest to the
+/// smallest, as Cross steps a row.
+pub fn hud_scale_step(n: u8, down: bool, up: bool) -> u8 {
+    match (down, up) {
+        (true, _) => n.saturating_sub(HUD_SCALE_STEP).max(HUD_SCALE_MIN),
+        (_, true) => (n + HUD_SCALE_STEP).min(HUD_SCALE_MAX),
+        _ if n >= HUD_SCALE_MAX => HUD_SCALE_MIN,
+        _ => (n + HUD_SCALE_STEP).min(HUD_SCALE_MAX),
+    }
 }
 
 /// Which overlay a ride draws over each view, as `--overlay` spells it (V26).

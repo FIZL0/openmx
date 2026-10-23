@@ -67,6 +67,8 @@ pub enum Key {
     Modifiers,
     Hud,
     Speedometer,
+    Minimap,
+    HudScale,
     DrawDistance,
     RenderScale,
     VSync,
@@ -325,6 +327,17 @@ impl Menu {
                 .tips(&["The game's own", "Speeds, inputs, timings", "Nothing over the ride"]),
             Row::choice(Key::Speedometer, "Speedometer", &speed, at(&Speedometer::ALL, s.speedometer), "How the original's HUD shows your speed: the readout or the dial.")
                 .off_if(speed_off.is_some(), speed_off.unwrap_or("")),
+            // V52: the radar alone, and the whole HUD's size about its corners.
+            Row::on_off(Key::Minimap, "Minimap", s.minimap, "The original HUD's radar in the corner. Off, it goes from every view and the speedometer stays.")
+                .off_if(speed_off.is_some(), speed_off.unwrap_or("")),
+            Row::slider(
+                Key::HudScale,
+                "HUD Scale",
+                format!("{}%", s.hud_scale),
+                f32::from(s.hud_scale - HUD_SCALE_MIN) / f32::from(HUD_SCALE_MAX - HUD_SCALE_MIN),
+                "The size of the whole HUD, each piece in its own corner. 100% is the original's.",
+            )
+            .off_if(s.overlay == Overlay::None, "The HUD is off"),
             Row::choice(
                 Key::DrawDistance,
                 "Draw Distance",
@@ -658,6 +671,9 @@ impl Menu {
             }
             Key::Hud => s.overlay = Overlay::ALL[next(row)],
             Key::Speedometer => s.speedometer = Speedometer::ALL[next(row)],
+            Key::Minimap => s.minimap = !s.minimap,
+            // Cross steps it up and round from the top, as a slider does.
+            Key::HudScale => s.hud_scale = hud_scale_step(s.hud_scale, p.left, p.right),
             Key::DrawDistance => s.graphics = Graphics::ALL[next(row)],
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,
