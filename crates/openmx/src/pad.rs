@@ -300,8 +300,8 @@ pub struct Wiring {
     /// shipped one. The new layout rides preset 0 whatever this says ([`Scheme::preset`]).
     pub presets: [usize; SEATS],
     /// A Nintendo pad's A and B by where they are (P53): B, the bottom one, is Cross and confirms,
-    /// as on every other pad. Off, the default, they go by what they say — A, the right one, confirms
-    /// and B goes back, the way a Switch player's thumb expects ([`Pads::nintendo`]).
+    /// as on every other pad — the default (P64). Off, they go by what they say — A, the right one,
+    /// confirms and B goes back, the way a Switch's own menus have it ([`Pads::nintendo`]).
     pub nintendo_positions: bool,
 }
 
@@ -313,7 +313,7 @@ impl Default for Wiring {
             schemes: [Scheme::default(); SEATS],
             planes: [PlaneScheme::default(); SEATS],
             presets: [0; SEATS],
-            nintendo_positions: false,
+            nintendo_positions: true,
         }
     }
 }
@@ -777,7 +777,7 @@ pub struct Pads {
     device: Option<std::fs::File>,
     /// Which of the shell's slots each of the device's js numbers is ([`JsMap`]).
     map: JsMap,
-    /// A Nintendo pad, whose A (the right button) confirms unless the wiring says positions.
+    /// A Nintendo pad, whose A (the right button) confirms only if the wiring says labels.
     nintendo: bool,
     /// Its name, for the line the shell prints when it joins.
     pub name: Option<String>,
@@ -4075,10 +4075,11 @@ pub(crate) mod tests {
         got.into_iter().find(|(d, _, _)| *d == Device::Pad(id.clone())).map(|(_, r, t)| (r, t)).unwrap()
     }
 
-    /// P53, the user's pad: a Switch Pro Controller's A confirms and B goes back, + is Start and -
-    /// Select, ZR is a full R2 (the new scheme's gas), its d-pad is the d-pad and its right stick the
-    /// right stick — where before it was Circle, Cross, R3, L3, nothing, the right stick, and L2. Its
-    /// IMU device is not read, and the splash's list says so. `nintendo = positions` puts B on Cross.
+    /// P53, the user's pad: a Switch Pro Controller's B (the bottom one) confirms and A goes back
+    /// (P64: by position unless the wiring says labels), + is Start and - Select, ZR is a full R2
+    /// (the new scheme's gas), its d-pad is the d-pad and its right stick the right stick — where
+    /// before P53 they were Circle, Cross, R3, L3, nothing, the right stick, and L2. Its IMU device
+    /// is not read, and the splash's list says so. By label, A is Cross.
     #[test]
     fn a_switch_pro_controller_reads_as_its_labels_say() {
         let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
@@ -4106,8 +4107,8 @@ pub(crate) mod tests {
             pad_report(seats, "js0");
             r
         };
-        assert_eq!(held(&mut seats, &mut pro, 1).buttons(), Control::Cross.mask(), "A");
-        assert_eq!(held(&mut seats, &mut pro, 0).buttons(), Control::Circle.mask(), "B");
+        assert_eq!(held(&mut seats, &mut pro, 0).buttons(), Control::Cross.mask(), "B, the bottom one");
+        assert_eq!(held(&mut seats, &mut pro, 1).buttons(), Control::Circle.mask(), "A, the right one");
         assert_eq!(held(&mut seats, &mut pro, 2).buttons(), Control::Triangle.mask(), "X, the top one");
         assert_eq!(held(&mut seats, &mut pro, 3).buttons(), Control::Square.mask(), "Y, the left one");
         assert_eq!(held(&mut seats, &mut pro, 10).buttons(), Control::Start.mask(), "+");
@@ -4131,10 +4132,10 @@ pub(crate) mod tests {
         pro.axis(2, 0);
         pro.axis(5, 0);
 
-        // By position, B (the bottom one) is Cross, as on every other pad.
-        seats.set_wiring(Wiring { nintendo_positions: true, ..Wiring::default() });
-        assert_eq!(held(&mut seats, &mut pro, 0).buttons(), Control::Cross.mask());
-        assert_eq!(held(&mut seats, &mut pro, 1).buttons(), Control::Circle.mask());
+        // By label, A (the right one) is Cross, as on a Switch.
+        seats.set_wiring(Wiring { nintendo_positions: false, ..Wiring::default() });
+        assert_eq!(held(&mut seats, &mut pro, 1).buttons(), Control::Cross.mask());
+        assert_eq!(held(&mut seats, &mut pro, 0).buttons(), Control::Circle.mask());
         drop(imu);
         std::fs::remove_dir_all(&root).unwrap();
     }
