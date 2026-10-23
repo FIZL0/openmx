@@ -105,7 +105,7 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **MD22** A single generated map smaller than a throw's arc can still put the bike back at NO_GROUND: world::Ground::ground answers -1e6 off its field and World::keeps is true on one terrain (MD14 kept the original's record). Decide whether a lone terrain refuses off-field spots too, and prove disc replay hashes unchanged.
 - [ ] **MD23** world_ultra: openmx-mods' stitch writes untamed_nat_or at x 215.99995, which the world loader refuses; round the stitch offsets to whole feet so the largest world loads, then ride across it and check MD17's ground stream holds RSS bounded
 - [ ] **MD24** In a world mod the parked biplane sits at free06's machine.txt coordinates, not shifted by the home tile's offset; park it beside the world's spawn
-- [ ] **P131** Profile mid-ride ground adds on world_mxu with openmx --timings: add_ground_piece is ~2 ms per piece but the regrid over 653 pieces is unmeasured
+- [ ] **P131** Profile mid-ride ground adds on world_mxu with openmx --timings: add_ground_piece is ~2 ms per piece but the regrid over 653 pieces is unmeasured — folded into MD26 (the world ride lag, user, 2026-10-23); do it there
 ### Phase 2 — a decompilation you can read
 
 
