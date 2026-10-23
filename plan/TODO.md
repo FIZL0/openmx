@@ -99,7 +99,7 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **P123** Shell --screen words for each Settings/Garage tab (display, ride, rider, bike, gear) so every tab gets a --shot; P118's Display tab has none (filed by P118 as a doubled id, lost when the user's P119/P120 were ticked; re-filed)
 - [ ] **MD19** MD16 follow-up: online rides with MX vs. ATV tricks — every seat must have the same trick pack (MD6's check), then lift main.rs's forced Original
 - [ ] **V57** V56's foliage fix gets its own switch under P126's Original tab: a menu::Departure variant (ours = V56's cutouts, original = the original's blended leaves), set by Menu::set_original, written to settings.txt only off ours (user, 2026-10-23, P126's 'new enhancement tasks add their switch here') → crates/openmx/src/menu.rs · crates/openmx/src/menu_pages.rs | t: crates/openmx/tests/menu.rs: Original on sets it, turned back leaves the others | j: foliage-switch
-- [ ] **P129** Flight::put_back keeps the modifier numbers retune sets, but not P108's turn ones (lift_scale, drag1, cm_alpha, cm_q, cm_de, cm_stall, autopilot max_pitch_rate): a plane's session marker kept before a Biplane turn speed change flies on the old turn after it. Found in P116; add them beside P98's/P116's in put_back and a marker test
+- [ ] **P130** Flight::put_back keeps the modifier numbers retune sets, but not P108's turn ones (lift_scale, drag1, cm_alpha, cm_q, cm_de, cm_stall, autopilot max_pitch_rate): a plane's session marker kept before a Biplane turn speed change flies on the old turn after it. Found in P116; add them beside P98's/P116's in put_back and a marker test
 ### Phase 2 — a decompilation you can read
 
 
