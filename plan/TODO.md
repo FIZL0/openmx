@@ -103,6 +103,7 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **P77** the bike's gas, brake and clutch are switches in the original (P73: 1.0 for any non-zero command value, oracle.txt P73), and gas+brake held below speed 5 is its reverse; port the switches and bike_input_limiter's walk. User question first: the New layout's analogue R2 gas (P40) would become a switch under this — keep New analogue, or match the original?
 - [ ] **P63** the biplane's wreck dust and chunks, fed (P58's follow-up): P58 ports the CollisionModel entries (Vehicle Dust, Vehicle Chunks) but the shell's plane_fx_frame passes no contacts, because the port's plane touches nothing until S48. Once S48 lands, hand the body's ground/object contacts and the wreck tick to particles::PlaneFrame and check the dark puff on a ground crash against S57's capture video (s5 context/s57/run1.mp4, ~crash rows 1083 and 1941) → crates/openmx/src/main.rs | t: crates/openmx/tests/biplane_particles.rs | j: biplane-particles (after S48)
 - [ ] **P122** Mods page: list music packs beside the track packs, each on/off like a track pack (P118 lists track packs only, by id prefix) (filed by P118 as a doubled id, lost when the user's P119/P120 were ticked; re-filed)
+- [ ] **P123** Shell --screen words for each Settings/Garage tab (display, ride, rider, bike, gear) so every tab gets a --shot; P118's Display tab has none (filed by P118 as a doubled id, lost when the user's P119/P120 were ticked; re-filed)
 ### Phase 2 — a decompilation you can read
 
 
