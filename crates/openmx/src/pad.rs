@@ -461,6 +461,17 @@ impl Scheme {
         t.pressed(pad, Command::NEXT_CAMERA) && !t.held(pad, Command::LOOK_BACK) && !t.held(pad, Command::OTHER_CAMERA)
     }
 
+    /// The control that puts a camera the right stick has turned back where its preset says (P114),
+    /// the port's own: R3, the right stick's click, under either scheme. The original binds R3 to two
+    /// commands (0x07, 0x23) that nothing in it reads, and the shell had nothing on it, so no layout
+    /// loses a control to it.
+    pub const RESET_CAMERA: Control = Control::R3;
+
+    /// Whether this frame asks for the camera's reset: [`Scheme::RESET_CAMERA`]'s press.
+    pub fn resets_camera(self, pad: &game_sim::input::Pad) -> bool {
+        pad.pressed(Scheme::RESET_CAMERA)
+    }
+
     /// The report the simulation is handed for a pad that reported `report`.
     ///
     /// Under the new scheme R2 is moved onto Cross and L2 onto Square, bit and pressure byte
@@ -3726,6 +3737,26 @@ pub(crate) mod tests {
         let mut pads = Pads::unplugged(Wiring::default());
         pads.button[6] = true;
         assert!(down(Scheme::New.ride(pads.build(FRAME, &nothing)), Control::Select));
+    }
+
+    /// P114: R3's click resets the camera under either layout, once a press — the layouts leave it
+    /// on the report as it is — and the keyboard's R3 key (N under the new layout, E under the
+    /// original's) reaches it too.
+    #[test]
+    fn r3_resets_the_camera_under_either_layout() {
+        for scheme in Scheme::ALL {
+            let mut manager = Manager::connected();
+            let mut out = Vec::new();
+            for held in [&[][..], &[Control::R3][..], &[Control::R3][..], &[][..], &[Control::R3, Control::L3][..]] {
+                let report = scheme.ride(Report::from_buttons(game_sim::input::mask_of(held)));
+                manager.tick(F(FRAME), &[report; PADS]);
+                out.push(scheme.resets_camera(manager.pad(0)));
+            }
+            assert_eq!(out, [false, true, false, false, true], "{scheme:?}");
+        }
+        for (scheme, k) in [(Scheme::New, key::N), (Scheme::Original, key::E)] {
+            assert!(down(scheme.ride(held_for(scheme, k)), Control::R3), "{scheme:?}");
+        }
     }
 
     /// P73: what each button does in a ride under each layout, read off the ride itself
