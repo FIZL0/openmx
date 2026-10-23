@@ -100,38 +100,53 @@ impl Press {
 
 /// How far the left stick has to lean before it counts as a direction, out of 127.
 const STICK_DIRECTION: i32 = 64;
-/// Frames a direction is held before it repeats, and then frames between repeats.
-const REPEAT_AFTER: u32 = 20;
-const REPEAT_EVERY: u32 = 5;
+/// How far back towards the centre a leaning stick has to come before it lets the direction go
+/// (P109): a stick resting on the line would otherwise press and let go every few frames.
+const STICK_LET_GO: i32 = 40;
+/// How long a direction is held before it repeats, and then the time between repeats, in
+/// microseconds: the front end's twenty frames and five at 60 Hz, which the pause, read at the
+/// ride's 30 Hz ticks, keeps too (P109).
+const REPEAT_AFTER_US: u64 = 20 * 16_666;
+const REPEAT_EVERY_US: u64 = 5 * 16_666;
+/// A control let go for less than this and down again is still the press it was (P109): a d-pad's
+/// contact bouncing, or one push reported up and down again across a frame. A pad's presses that
+/// came further apart than this inside a frame reach the menu as its taps ([`Reader::read_taps`]),
+/// which `pad.rs` debounces the same by the events' own times.
+const BOUNCE_US: u64 = 35_000;
+/// The rate a [`Reader`] is read at unless it says otherwise: the front end's frames.
+const MENU_HZ: u64 = 60;
 
 /// Turns a report a frame into [`Press`]es.
 ///
 /// The first report it sees is taken as already held, so the Cross that chose a track, or the Start
 /// that paused, does not press again on the screen it opened.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Reader {
     last: Option<u16>,
-    held_for: u32,
+    /// How long the directions held now have been held, in microseconds.
+    held_us: u64,
+    /// How long each control ([`Control`]'s bit order) has been up, in microseconds.
+    up_us: [u64; 16],
+    /// The time one read stands for: the rate it is read at.
+    frame_us: u64,
 }
 
-/// A direction from the stick, as the d-pad bit it stands in for.
-fn stick(r: &Report) -> u16 {
+impl Default for Reader {
+    fn default() -> Reader {
+        Reader::at(MENU_HZ as u32)
+    }
+}
+
+/// A direction from the stick, as the d-pad bit it stands in for. A direction `held` lets go only
+/// once the stick is back inside [`STICK_LET_GO`].
+fn stick(r: &Report, held: u16) -> u16 {
     let lean = |i: usize| r.axis(i) as i32 - AXIS_CENTRE as i32;
     let (x, y) = (lean(2), lean(3));
-    let mut m = 0;
-    if x <= -STICK_DIRECTION {
-        m |= Control::Left.mask();
-    }
-    if x >= STICK_DIRECTION {
-        m |= Control::Right.mask();
-    }
-    if y <= -STICK_DIRECTION {
-        m |= Control::Up.mask();
-    }
-    if y >= STICK_DIRECTION {
-        m |= Control::Down.mask();
-    }
-    m
+    let past = |c: Control, by: i32| {
+        let edge = if held & c.mask() != 0 { STICK_LET_GO } else { STICK_DIRECTION };
+        if by >= edge { c.mask() } else { 0 }
+    };
+    past(Control::Left, -x) | past(Control::Right, x) | past(Control::Up, -y) | past(Control::Down, y)
 }
 
 impl Reader {
@@ -139,9 +154,15 @@ impl Reader {
         Reader::default()
     }
 
+    /// A reader read `hz` times a second: the pause's, at the ride's ticks, holds a direction as
+    /// long in time before it repeats as the front end's does.
+    pub fn at(hz: u32) -> Reader {
+        Reader { last: None, held_us: 0, up_us: [u64::MAX; 16], frame_us: 1_000_000 / u64::from(hz.max(1)) }
+    }
+
     /// Forget what was held, so the next report is the first again.
     pub fn reset(&mut self) {
-        *self = Reader::default();
+        *self = Reader { frame_us: self.frame_us, ..Reader::default() };
     }
 
     pub fn read(&mut self, r: &Report) -> Press {
@@ -153,20 +174,50 @@ impl Reader {
     /// let go and pressed again between two frames is down in both, and a slow frame — 5 fps at 4K
     /// — is longer than a tap. Not on the first report: that one is what was already held.
     pub fn read_taps(&mut self, r: &Report, taps: u16) -> Press {
-        // A pad that is not there holds nothing.
-        let now = if r.status() == 0xff { 0 } else { r.buttons() | stick(r) };
+        self.read_joint(&[(*r, taps)])
+    }
+
+    /// Several devices' reports as one driver's (P109): what any of them holds is held, so the
+    /// same push seen by two — a pad and the keyboard a desktop maps its d-pad to — one frame
+    /// apart is one press, not one each.
+    pub fn read_joint(&mut self, reports: &[(Report, u16)]) -> Press {
+        let held = self.last.unwrap_or(0);
+        let mut now = 0;
+        let mut taps = 0;
+        for (r, t) in reports {
+            // A pad that is not there holds nothing.
+            if r.status() != 0xff {
+                now |= r.buttons() | stick(r, held);
+            }
+            taps |= t;
+        }
         let Some(last) = self.last.replace(now) else {
             return Press::default();
         };
+        // Down again after too short a time up is the press it was.
+        let mut fresh = 0;
+        for (bit, up) in self.up_us.iter_mut().enumerate() {
+            let m = 1u16 << bit;
+            if now & m != 0 {
+                if last & m == 0 && *up >= BOUNCE_US {
+                    fresh |= m;
+                }
+                *up = 0;
+            } else {
+                *up = up.saturating_add(self.frame_us);
+            }
+        }
         let dirs = Control::Up.mask() | Control::Down.mask() | Control::Left.mask() | Control::Right.mask();
-        let mut edge = now & !last | taps;
+        let mut edge = fresh | taps;
         if now & dirs != 0 && now & dirs == last & dirs {
-            self.held_for += 1;
-            if self.held_for >= REPEAT_AFTER && (self.held_for - REPEAT_AFTER) % REPEAT_EVERY == 0 {
+            let repeats = |t: u64| if t < REPEAT_AFTER_US { 0 } else { 1 + (t - REPEAT_AFTER_US) / REPEAT_EVERY_US };
+            let before = self.held_us;
+            self.held_us += self.frame_us;
+            if repeats(self.held_us) != repeats(before) {
                 edge |= now & dirs;
             }
         } else {
-            self.held_for = 0;
+            self.held_us = 0;
         }
         let on = |c: Control| edge & c.mask() != 0;
         Press {
@@ -1375,7 +1426,7 @@ pub enum Dev {
 /// A [`Reader`] per device, so each one's presses are its own edges: a second pad's held stick is
 /// not the first one's press, and a pad plugged in holding a button does not press it.
 #[derive(Clone, Debug, Default)]
-pub struct Readers(Vec<(Dev, Reader)>);
+pub struct Readers(Vec<(Dev, Reader)>, Reader);
 
 impl Readers {
     pub fn new() -> Readers {
@@ -1385,6 +1436,7 @@ impl Readers {
     /// Forget every device's last report, so the next frame's are all first ones again.
     pub fn reset(&mut self) {
         self.0.clear();
+        self.1.reset();
     }
 
     /// This frame's reports, a device each, as presses. A device missing from them is forgotten.
@@ -1409,6 +1461,29 @@ impl Readers {
                 (dev.clone(), self.0[at].1.read_taps(report, *taps))
             })
             .collect()
+    }
+
+    /// [`Readers::read_taps`], with the devices that drive the menu together — `hosted`, 1P's and
+    /// the keyboard past the splash ([`Menu::hosts`]) — read as one ([`Reader::read_joint`], P109):
+    /// the first of them carries their press and the rest none, so one push both report, a frame
+    /// apart or in the same one, is one press under [`Menu::step_devices`]. Every device is still
+    /// read on its own as well, for the splash, which asks who pressed.
+    pub fn read_hosted(&mut self, reports: &[(Dev, Report, u16)], hosted: &dyn Fn(&Dev) -> bool) -> Vec<(Dev, Press)> {
+        let mut presses = self.read_taps(reports);
+        let together: Vec<(Report, u16)> = reports.iter().filter(|(d, _, _)| hosted(d)).map(|(_, r, t)| (*r, *t)).collect();
+        if together.is_empty() {
+            self.1.reset();
+            return presses;
+        }
+        let joint = self.1.read_joint(&together);
+        let mut first = true;
+        for (d, p) in &mut presses {
+            if hosted(d) {
+                *p = if first { joint } else { Press::default() };
+                first = false;
+            }
+        }
+        presses
     }
 }
 
