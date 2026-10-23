@@ -44,6 +44,7 @@ use game_sim::input::{AXIS_CENTRE, Control, Report};
 use game_sim::modifiers::{Knob, Mods};
 use openmx_net::{Cmd, Event, HOST, Listing, Room};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 #[path = "menu_art.rs"]
@@ -53,7 +54,7 @@ mod pages;
 #[path = "menu_screens.rs"]
 mod screens;
 #[allow(unused_imports)] // the tests' and the shell's, not every includer's
-pub use pages::{GARAGE_TABS, Key, Kind, PLAYERS, Pack, Row, SETTINGS_TABS, graphics_label, pack_of};
+pub use pages::{GARAGE_TABS, Key, Kind, PLAYERS, Pack, Row, SETTINGS_TABS, graphics_label, pack_name, pack_of};
 
 // ---- the pad -------------------------------------------------------------------------------------
 
@@ -2210,15 +2211,30 @@ impl Menu {
         // The lobby's and the list's rows come and go with what the network says.
         let at = self.cursor(screen).min(rows - 1);
         self.cursor[screen.index()] = at;
-        // Up and down walk the rows, wrapping; on Free Ride they walk the tracks, and left and right
-        // are the setup strip's machine (P118).
+        // Up and down walk the rows, wrapping; on Free Ride they walk the lit category's tracks, and
+        // left and right step the categories (user, 2026-10-23).
         let (prev, next) = (p.up, p.down);
+        if screen == Screen::Tracks && (prev || next || p.left || p.right) {
+            let groups = self.track_groups();
+            let g = self.track_group(at);
+            let to = if prev || next {
+                let r = &groups[g].1;
+                let n = r.len();
+                r.start + (at - r.start + if prev { n - 1 } else { 1 }) % n
+            } else {
+                // Onto the ride's track where the category has it, else its first.
+                let n = groups.len();
+                let r = &groups[if p.left { (g + n - 1) % n } else { (g + 1) % n }].1;
+                let saved = self.track_index();
+                if r.contains(&saved) { saved } else { r.start }
+            };
+            self.cursor[screen.index()] = to;
+            self.tick = 0;
+            return Act::Stay;
+        }
         if prev || next {
             let to = if prev { (at + rows - 1) % rows } else { (at + 1) % rows };
             self.cursor[screen.index()] = to;
-            if screen == Screen::Tracks {
-                self.tick = 0;
-            }
             return Act::Stay;
         }
         match screen {
@@ -2280,7 +2296,7 @@ impl Menu {
                     self.changed = true;
                     return Act::Stay;
                 }
-                if p.delete || p.left || p.right {
+                if p.delete {
                     let seat = self.setup_seat.min(riders - 1);
                     self.settings.machines[seat] = self.settings.machines[seat].other();
                     self.changed = true;
@@ -3074,8 +3090,31 @@ impl Menu {
         (0..self.track_count()).find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(0)
     }
 
-    /// The mods the pick lists after the disc's (MD2), the pick's cursor kept on its track.
-    pub fn set_mod_tracks(&mut self, tracks: Vec<(String, String)>) {
+    /// The pick's categories, which Left and Right step between: the disc's towns, then each mod
+    /// pack's tracks, the worlds first (user, 2026-10-23). Each is its name and its tracks' range.
+    pub fn track_groups(&self) -> Vec<(String, Range<usize>)> {
+        let mut out = vec![("MX Unleashed".to_string(), 0..TRACKS.len())];
+        let mut last = "";
+        for (i, (id, _)) in self.shown_mods().enumerate() {
+            let at = TRACKS.len() + i;
+            match out.last_mut() {
+                Some((_, r)) if i > 0 && pack_of(id) == last => r.end = at + 1,
+                _ => out.push((pack_name(pack_of(id)), at..at + 1)),
+            }
+            last = pack_of(id);
+        }
+        out
+    }
+
+    /// Which of [`Menu::track_groups`] the pick's track `at` is in.
+    pub fn track_group(&self, at: usize) -> usize {
+        self.track_groups().iter().position(|(_, r)| r.contains(&at)).unwrap_or(0)
+    }
+
+    /// The mods the pick lists after the disc's (MD2), the pick's cursor kept on its track. They
+    /// are kept by pack, the worlds' first, so each pack is one of the pick's categories.
+    pub fn set_mod_tracks(&mut self, mut tracks: Vec<(String, String)>) {
+        tracks.sort_by(|(a, _), (b, _)| (pack_of(a) != WORLDS, pack_of(a)).cmp(&(pack_of(b) != WORLDS, pack_of(b))));
         if !tracks.is_empty() {
             self.mods_seen = tracks.clone();
         }
@@ -3083,6 +3122,9 @@ impl Menu {
         self.cursor[Screen::Tracks.index()] = self.track_index();
     }
 }
+
+/// The pack prefix of the world mods (MD8), whose category the pick lists right after the disc's.
+pub const WORLDS: &str = "world";
 
 /// The stills per track in `UI\trackpreview.res`.
 const STILLS: usize = 5;
