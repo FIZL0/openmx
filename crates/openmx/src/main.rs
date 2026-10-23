@@ -3091,13 +3091,29 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         },
     );
 
+    // A world's ground is every piece's, unpainted: each tile's paint is its own (MD9). It is built
+    // before the renderer is taken, so the window can be pumped between pieces: a world's takes long
+    // enough that a window left unpumped is called not responding (P127 moves the whole load off it).
+    let world_chunks = match (&world_mod, &sim) {
+        (Some(w), Land::Tiles(t)) if gpu_on => {
+            let at = Instant::now();
+            let chunks = worlds::chunks(w, t, ground.chunk_cells(), [spawn.x, spawn.z], &mut || {
+                if let Some(s) = window.as_mut() {
+                    s.poll();
+                }
+            });
+            println!("world: {} ground chunks built in {:.2} s", chunks.len(), at.elapsed().as_secs_f32());
+            Some(chunks)
+        }
+        _ => None,
+    };
+
     // Everything the GPU draws, uploaded once: the props, the sky, the whole ground and every model.
     if gpu_on && let Some(r) = renderer_of(&mut offscreen, window) {
         let at = Instant::now();
-        // A world's ground is every piece's, unpainted: each tile's paint is its own (MD9).
-        let (chunks, paint) = match (&world_mod, &sim) {
-            (Some(w), Land::Tiles(t)) => (worlds::chunks(w, t, ground.chunk_cells()), game_render::gpu::GroundPaint::Bare),
-            _ => {
+        let (chunks, paint) = match world_chunks {
+            Some(chunks) => (chunks, game_render::gpu::GroundPaint::Bare),
+            None => {
                 let paint = match (&ground.paint, &ground.pages) {
                     (Some(splat), _) => game_render::gpu::GroundPaint::Splat(splat),
                     (None, Some(pages)) => game_render::gpu::GroundPaint::Pages(pages),
