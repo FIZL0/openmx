@@ -15,8 +15,12 @@ use crate::track_mods::{self, Json, ModTrack};
 use game_render::disc::Res;
 use game_sim::tiles::{Piece, Reach, Source, Tile, Tiled};
 use game_sim::track::{self, Placement, Terrain, TerrainLayout};
+use game_render::gpu::GroundChunk;
 use ps2_float::F;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 /// One tile or join of a world, as the world's file and its own files say.
 #[derive(Clone, Debug)]
@@ -350,84 +354,272 @@ pub fn move_look(look: &mut game_render::scene::Scene, by: [F; 2]) {
     }
 }
 
-/// Every piece's ground as the GPU draws it: each piece's own chunks of `cells` cells, moved by its
-/// offset, with every cell it does not own cut out (the simulation's [`Tiled::owner`] at the
-/// cell's middle, so the drawn seams are the ridden ones). Each piece's chunks are numbered in a
-/// column band of their own, so the GPU stitches a piece's chunks to each other and to nothing else.
+/// One piece's ground as the GPU draws it: its own chunks of `cells` cells, moved by its offset,
+/// with every cell it does not own cut out (the simulation's [`Tiled::owner`] at the cell's middle,
+/// so the drawn seams are the ridden ones). Chunks are numbered across and along within the piece:
+/// the renderer stitches a piece's chunks to each other and to nothing else
+/// ([`game_render::gpu::Renderer::add_ground_piece`]).
 ///
-/// Only the ground near `near` (the start, in world feet), as a stopgap until MD17 streams it: the
-/// pieces within [`GROUND_REACH`] of it, then the chunks nearest it that fit [`GROUND_BYTES`]. A big
-/// world's whole ground does not fit one vertex buffer (world_mxu's is 1.6 GB) and takes minutes to
-/// build. `between` runs after each piece, for the shell to answer its window while it builds.
-pub fn chunks(w: &WorldMod, tiled: &Tiled, cells: u32, near: [f32; 2], between: &mut dyn FnMut()) -> Vec<game_render::gpu::GroundChunk> {
+/// The field is the piece's own samples ([`Tile::samples`]), a tree level's sixteen to a root cell:
+/// a one-level join meshed at a disc map's 256 a width unit was 256 times its own area of empty
+/// cells to walk, which was most of a world's load (MD17).
+pub fn piece_chunks(tile: &Tile, index: usize, bytes: &[u8], tiled: &Tiled, cells: u32) -> Result<Vec<GroundChunk>, String> {
+    let terrain = Terrain::parse(bytes)?;
+    let mut ground = crate::ground::Ground::new(terrain, &tile.layout);
+    [ground.samples_x, ground.samples_z] = tile.samples();
     let cells = cells.max(1).next_power_of_two();
+    let [ax, az] = tile.at.map(|a| a.0);
+    let spacing = ground.spacing;
+    // The earlier pieces' terrains, a cell wider all round: only they can own a cell before this
+    // one does, so a chunk none of them reaches is cut by its own `keep` alone.
+    let earlier: Vec<[f32; 4]> = tiled.tiles[..index].iter().map(|t| rect(t, t.spacing.0)).collect();
     let mut out = Vec::new();
-    let mut column = 0u32;
-    let mut files = Files { pieces: w.pieces.clone() };
-    for (i, p) in w.pieces.iter().enumerate() {
-        let [ax, az] = p.tile.at.map(|a| a.0);
-        let [sx, sz] = p.tile.samples().map(|n| n as f32 * p.tile.spacing.0);
-        let (dx, dz) = ((ax - near[0]).max(near[0] - ax - sx).max(0.0), (az - near[1]).max(near[1] - az - sz).max(0.0));
-        if dx.hypot(dz) > GROUND_REACH {
-            continue;
-        }
-        let bytes = match files.load_terrain(i) {
-            Ok(b) => b,
-            Err(e) => {
-                println!("world: {} not drawn: {e}", p.tile.name);
-                continue;
-            }
-        };
-        let Ok(terrain) = Terrain::parse(&bytes) else { continue };
-        let ground = crate::ground::Ground::new(terrain, &p.tile.layout);
-        let spacing = ground.spacing;
-        let mut widest = 0;
-        for mut c in ground.chunks(cells) {
-            let (x0, z0) = (c.at.0 * cells, c.at.1 * cells);
-            let mut missing = if c.missing.is_empty() { vec![false; (cells * cells) as usize] } else { c.missing.clone() };
-            for j in 0..cells {
-                for i2 in 0..cells {
-                    let (sx, sz) = (x0 + i2, z0 + j);
+    for mut c in ground.chunks(cells) {
+        let (x0, z0) = (c.at.0 * cells, c.at.1 * cells);
+        let mut missing = if c.missing.is_empty() { vec![false; (cells * cells) as usize] } else { c.missing.clone() };
+        let side = cells as f32 * spacing;
+        let (wx, wz) = (ax + x0 as f32 * spacing, az + z0 as f32 * spacing);
+        let alone = !earlier.iter().any(|r| r[0] < wx + side && wx < r[2] && r[1] < wz + side && wz < r[3]);
+        let [sx_n, sz_n] = tile.samples();
+        let [k0, k1, k2, k3] = tile.keep;
+        for j in 0..cells {
+            for i2 in 0..cells {
+                let (sx, sz) = (x0 + i2, z0 + j);
+                let owned = if alone {
+                    // [`Tile`]'s own test of a cell: inside `keep`, and a cell of the terrain.
+                    sx >= k0 && sx < k2 && sz >= k1 && sz < k3 && sx + 1 < sx_n && sz + 1 < sz_n
+                } else {
                     let (x, z) = (ax + (sx as f32 + 0.5) * spacing, az + (sz as f32 + 0.5) * spacing);
-                    if tiled.owner(F(x), F(z)).map(|(o, _, _)| o) != Some(i) {
-                        missing[(j * cells + i2) as usize] = true;
-                    }
+                    tiled.owner(F(x), F(z)).map(|(o, _, _)| o) == Some(index)
+                };
+                if !owned {
+                    missing[(j * cells + i2) as usize] = true;
                 }
             }
-            if missing.iter().all(|&m| m) {
-                continue;
-            }
-            for v in &mut c.vertices {
-                v.pos[0] += ax;
-                v.pos[2] += az;
-            }
-            c.centre.x += ax;
-            c.centre.z += az;
-            c.missing = if missing.iter().any(|&m| m) { missing } else { Vec::new() };
-            widest = widest.max(c.at.0 + 1);
-            c.at.0 += column;
-            out.push(c);
         }
-        column += widest + 1;
-        between();
+        if missing.iter().all(|&m| m) {
+            continue;
+        }
+        for v in &mut c.vertices {
+            v.pos[0] += ax;
+            v.pos[2] += az;
+        }
+        c.centre.x += ax;
+        c.centre.z += az;
+        c.missing = if missing.iter().any(|&m| m) { missing } else { Vec::new() };
+        out.push(c);
     }
-    let away = |c: &game_render::gpu::GroundChunk| (c.centre.x - near[0]).hypot(c.centre.z - near[1]);
-    out.sort_by(|a, b| away(a).total_cmp(&away(b)));
-    let mut room = GROUND_BYTES / std::mem::size_of::<game_render::gpu::GroundVertex>();
-    out.retain(|c| {
-        let fits = c.vertices.len() <= room;
-        room = room.saturating_sub(c.vertices.len());
-        fits
-    });
-    out
+    Ok(out)
 }
 
-/// How far from the start a world's drawn ground reaches, in feet, until MD17 streams it.
-pub const GROUND_REACH: f32 = 16_000.0;
+/// A piece's terrain rectangle in world feet, `[x0, z0, x1, z1]`, `margin` wider all round.
+fn rect(t: &Tile, margin: f32) -> [f32; 4] {
+    let [sx, sz] = t.samples();
+    let [ax, az] = t.at.map(|a| a.0);
+    [ax - margin, az - margin, ax + sx as f32 * t.spacing.0 + margin, az + sz as f32 * t.spacing.0 + margin]
+}
 
-/// The most a world's drawn ground takes of the GPU's one vertex buffer: under the 256 MiB a
-/// device is asked for (`Limits::downlevel_webgl2_defaults`' max_buffer_size).
-pub const GROUND_BYTES: usize = 192 << 20;
+/// How far a world point is from a piece's terrain, the larger of the two axes' gaps: 0 over it.
+fn gap(t: &Tile, x: f32, z: f32) -> f32 {
+    let [x0, z0, x1, z1] = rect(t, 0.0);
+    (x0 - x).max(x - x1).max(0.0).max((z0 - z).max(z - z1).max(0.0))
+}
+
+/// A world's ground on the GPU a piece at a time (MD17), as [`Tiled::stream`] keeps the
+/// simulation's: the pieces within [`Reach::load`] of a rider are built before the ride, the rest on
+/// a thread of their own nearest first as the riders come within reach, and a piece past
+/// [`Reach::drop`] of every rider is let go. The gap between the two is the margin that keeps a
+/// piece at the edge from being built again every frame.
+///
+/// A piece is built from its folder by [`piece_chunks`], the same chunks whenever it is built.
+pub struct GroundStream {
+    tiles: Vec<Tile>,
+    reach: Reach,
+    held: Vec<Held>,
+    /// What the builder has to do, nearest last, and whether it should stop.
+    work: Arc<(Mutex<(Vec<usize>, bool)>, Condvar)>,
+    built: Receiver<(usize, Result<Vec<GroundChunk>, String>)>,
+    /// What building and dropping did since the shell last took the lines.
+    log: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    Out,
+    /// Asked of the builder, or being built.
+    Asked,
+    In,
+}
+
+/// What a [`GroundStream`] asks of the renderer: a piece's chunks to add, or a piece to drop.
+pub enum Change {
+    Add(usize, Vec<GroundChunk>),
+    Drop(usize),
+}
+
+impl GroundStream {
+    /// The stream, and the pieces it built before the ride: those within `reach.load` of `near`,
+    /// or with `all` every one (the whole world before the first frame, as before MD17). The
+    /// pieces are built on every core.
+    pub fn start(w: &WorldMod, cells: u32, reach: Reach, near: &[[f32; 2]], all: bool) -> (GroundStream, Vec<(usize, Vec<GroundChunk>)>) {
+        let tiles: Vec<Tile> = w.pieces.iter().map(|p| p.tile.clone()).collect();
+        let first: Vec<usize> = (0..tiles.len()).filter(|&i| all || nearest(&tiles[i], near) <= reach.load.0).collect();
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(first.len()).max(1);
+        let mut ready: Vec<(usize, Result<Vec<GroundChunk>, String>)> = std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..threads)
+                .map(|t| {
+                    let (first, pieces) = (&first, &w.pieces);
+                    scope.spawn(move || {
+                        let mut b = Builder::new(pieces.clone(), reach, cells);
+                        first.iter().skip(t).step_by(threads).map(|&i| (i, b.build(i))).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            jobs.into_iter().flat_map(|j| j.join().expect("a ground builder")).collect()
+        });
+        ready.sort_by_key(|(i, _)| *i);
+        let work = Arc::new((Mutex::new((Vec::new(), false)), Condvar::new()));
+        let (send, built) = channel();
+        let (pieces, theirs) = (w.pieces.clone(), work.clone());
+        std::thread::spawn(move || {
+            let mut b = Builder::new(pieces, reach, cells);
+            loop {
+                let next = {
+                    let (lock, wake) = &*theirs;
+                    let mut todo = lock.lock().expect("the ground's work");
+                    while todo.0.is_empty() && !todo.1 {
+                        todo = wake.wait(todo).expect("the ground's work");
+                    }
+                    if todo.1 {
+                        return;
+                    }
+                    todo.0.pop().expect("work")
+                };
+                if send.send((next, b.build(next))).is_err() {
+                    return;
+                }
+            }
+        });
+        let mut stream = GroundStream { held: vec![Held::Out; tiles.len()], tiles, reach, work, built, log: Vec::new() };
+        let mut out = Vec::new();
+        for (i, r) in ready {
+            if let Some(chunks) = stream.arrived(i, r) {
+                out.push((i, chunks));
+            }
+        }
+        (stream, out)
+    }
+
+    /// A piece the builder finished: held, with its line, or `None` with the line why not.
+    fn arrived(&mut self, i: usize, built: Result<Vec<GroundChunk>, String>) -> Option<Vec<GroundChunk>> {
+        let name = &self.tiles[i].name;
+        match built {
+            Ok(chunks) => {
+                self.log.push(format!("world ground: {name} built, {} chunks", chunks.len()));
+                self.held[i] = Held::In;
+                Some(chunks)
+            }
+            Err(e) => {
+                // Not asked again: its files do not change under a ride.
+                self.log.push(format!("world ground: {name} not drawn: {e}"));
+                self.held[i] = Held::In;
+                None
+            }
+        }
+    }
+
+    /// Ask for the pieces within reach of `near` nearest first, take what the builder finished, and
+    /// let go of the pieces past reach. A piece a rider is over that is not built yet is waited for,
+    /// and the wait said.
+    pub fn update(&mut self, near: &[[f32; 2]]) -> Vec<Change> {
+        let gaps: Vec<f32> = self.tiles.iter().map(|t| nearest(t, near)).collect();
+        let mut out = Vec::new();
+        {
+            let (lock, wake) = &*self.work;
+            let mut todo = lock.lock().expect("the ground's work");
+            for &i in &todo.0 {
+                self.held[i] = Held::Out;
+            }
+            let mut want: Vec<usize> = (0..self.tiles.len()).filter(|&i| self.held[i] == Held::Out && gaps[i] <= self.reach.load.0).collect();
+            want.sort_by(|a, b| gaps[*b].total_cmp(&gaps[*a]));
+            for &i in &want {
+                self.held[i] = Held::Asked;
+            }
+            todo.0 = want;
+            wake.notify_one();
+        }
+        let mut take = |s: &mut GroundStream, (i, r): (usize, Result<Vec<GroundChunk>, String>)| {
+            if gaps[i] > s.reach.drop.0 {
+                s.held[i] = Held::Out;
+            } else if let Some(chunks) = s.arrived(i, r) {
+                out.push(Change::Add(i, chunks));
+            }
+        };
+        while let Ok(done) = self.built.try_recv() {
+            take(self, done);
+        }
+        while let Some(i) = (0..self.tiles.len()).find(|&i| gaps[i] == 0.0 && self.held[i] == Held::Asked) {
+            let at = Instant::now();
+            let Ok(done) = self.built.recv() else { break };
+            self.log.push(format!("world ground: waited {:.0} ms for {}", at.elapsed().as_secs_f32() * 1000.0, self.tiles[i].name));
+            take(self, done);
+        }
+        for i in 0..self.tiles.len() {
+            if self.held[i] == Held::In && gaps[i] > self.reach.drop.0 {
+                self.held[i] = Held::Out;
+                self.log.push(format!("world ground: {} dropped", self.tiles[i].name));
+                out.push(Change::Drop(i));
+            }
+        }
+        out
+    }
+
+    /// How many pieces are held now.
+    pub fn held(&self) -> usize {
+        self.held.iter().filter(|&&h| h == Held::In).count()
+    }
+
+    /// The lines building and dropping wrote since the last call.
+    pub fn take_log(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.log)
+    }
+}
+
+impl Drop for GroundStream {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.work;
+        if let Ok(mut todo) = lock.lock() {
+            todo.1 = true;
+            wake.notify_one();
+        }
+    }
+}
+
+/// The smallest gap from a piece to any of `near`.
+fn nearest(t: &Tile, near: &[[f32; 2]]) -> f32 {
+    near.iter().map(|p| gap(t, p[0], p[1])).fold(f32::MAX, f32::min)
+}
+
+/// What builds pieces on one thread: the world's files, and its owners to cut by.
+struct Builder {
+    files: Files,
+    tiled: Option<Tiled>,
+    cells: u32,
+}
+
+impl Builder {
+    fn new(pieces: Vec<WorldPiece>, reach: Reach, cells: u32) -> Builder {
+        // Only its owners are asked, which read nothing.
+        let tiled = Tiled::new(pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(Files { pieces: pieces.clone() }), reach).ok();
+        Builder { files: Files { pieces }, tiled, cells }
+    }
+
+    fn build(&mut self, i: usize) -> Result<Vec<GroundChunk>, String> {
+        let bytes = self.files.load_terrain(i)?;
+        let tiled = self.tiled.as_ref().ok_or("the world does not read")?;
+        piece_chunks(&self.files.pieces[i].tile, i, &bytes, tiled, self.cells)
+    }
+}
 
 impl Files {
     fn load_terrain(&mut self, index: usize) -> Result<Vec<u8>, String> {
