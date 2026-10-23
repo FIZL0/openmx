@@ -124,6 +124,100 @@ impl Roll {
     }
 }
 
+/// The most a wheel is drawn turning in one tick, in radians (V59).
+///
+/// Off the ground on the gas the rear wheel spins up to 80 or 90 radians a second, which at the
+/// ride's 30 ticks is close to half a turn a tick, and on a straight the front is not far behind.
+/// The picture is blended between two ticks the short way round, so past half a turn a wheel is
+/// drawn turning backwards, and well before it a wheel of thin spokes stands still or crawls
+/// (the wagon-wheel effect). Drawn, the turn is held to this, a fifth of a turn; past the rate
+/// where that matters the [`Spin::blur`] has taken over and the eye reads speed from the blur,
+/// not from the spokes. [`Roll`] keeps the original's own angle, uncapped.
+pub const SPIN_STEP_CAP: f32 = 1.2;
+/// The spin rate, in radians per second, where the blur starts to show (a walking pace on a
+/// 250's wheel), and where it is whole (about 15 mph). Between them it eases in.
+pub const BLUR_FROM: f32 = 6.0;
+pub const BLUR_FULL: f32 = 20.0;
+/// How far behind the drawn wheel its blurred copies trail, in radians: two spoke pitches of a
+/// 36-spoke wheel, and about one of the tyre's knobs.
+pub const BLUR_ARC: f32 = 0.8;
+/// The blurred copies' alphas, nearest the wheel first, at a whole blur. The renderer lays its
+/// see-through copies faintest first, so the nearest copy is laid last and weighs most, and with
+/// these the wheel itself keeps about a quarter of the picture and each copy behind it less: a
+/// smear that fades the way the wheel came from.
+pub const BLUR_ALPHA: [f32; 8] = [0.2, 0.18, 0.17, 0.16, 0.15, 0.14, 0.13, 0.12];
+
+/// A wheel as it is drawn turning, which is not the original's (V59): [`Roll`] turned by at most
+/// [`SPIN_STEP_CAP`] a tick, and how blurred the spin is.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spin {
+    /// Radians, in `-pi..pi`: the turn the wheel is drawn at.
+    pub angle: f32,
+    /// 0 sharp to 1 a whole blur, from the rate between [`BLUR_FROM`] and [`BLUR_FULL`].
+    pub blur: f32,
+    /// Which way it turns, 1 or -1: the blur trails the other way.
+    pub dir: f32,
+}
+
+impl Spin {
+    /// One tick at a rate in radians per second.
+    pub fn step(&mut self, dt: f32, rate: f32) -> f32 {
+        if !(rate * dt).is_finite() {
+            self.blur = 0.0;
+            return self.angle;
+        }
+        let a = self.angle + (rate * dt).clamp(-SPIN_STEP_CAP, SPIN_STEP_CAP);
+        let a = (a + std::f32::consts::PI).rem_euclid(TAU) - std::f32::consts::PI;
+        self.angle = if a.is_finite() { a } else { 0.0 };
+        let t = ((rate.abs() - BLUR_FROM) / (BLUR_FULL - BLUR_FROM)).clamp(0.0, 1.0);
+        self.blur = t * t * (3.0 - 2.0 * t);
+        self.dir = if rate < 0.0 { -1.0 } else { 1.0 };
+        self.angle
+    }
+}
+
+/// One see-through copy of the chassis for the spin blur: a pose of it in which every node but
+/// one wheel's is shrunk to a point, so only that wheel draws, turned back along its trail.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlurCopy {
+    pub pose: Vec<M4>,
+    pub alpha: f32,
+}
+
+/// Which wheel each node of a chassis turns with: 1 under `TireFront`, 2 under `TireRear`, else 0.
+fn wheels_of(skeleton: &Skeleton, nodes: Nodes) -> Vec<u8> {
+    let mut out = vec![0u8; skeleton.len()];
+    for j in 0..skeleton.len() {
+        let mut at = Some(j);
+        while let Some(k) = at {
+            if Some(k) == nodes.front {
+                out[j] = 1;
+                break;
+            }
+            if Some(k) == nodes.rear {
+                out[j] = 2;
+                break;
+            }
+            at = skeleton.bones[k].parent;
+        }
+    }
+    out
+}
+
+/// A rigid transform's inverse: the rotation transposed, the translation taken back through it.
+fn rigid_inverse(m: M4) -> M4 {
+    let t = v3(m.0[3][0], m.0[3][1], m.0[3][2]);
+    let mut out = M4::IDENTITY;
+    for r in 0..3 {
+        for c in 0..3 {
+            out.0[r][c] = m.0[c][r];
+        }
+    }
+    let back = out.dir(t);
+    out.0[3] = [-back.x, -back.y, -back.z, 1.0];
+    out
+}
+
 /// What the chassis' bind pose says about how this bike is put together, worked out once.
 ///
 /// Every number here comes out of the `.psg`'s own node tree. None of them is a constant: a bike
@@ -244,6 +338,14 @@ pub struct Chassis {
     /// The two wheels' rolled angles.
     pub front_roll: Roll,
     pub rear_roll: Roll,
+    /// The two wheels as they are drawn turning (V59): what the wheel nodes are written from.
+    pub front_spin: Spin,
+    pub rear_spin: Spin,
+    /// Which wheel each node turns with ([`wheels_of`]), for the blur's copies.
+    pub wheels: Vec<u8>,
+    /// Draw the wheels the original's way (V59): at [`Roll`]'s own angle, however fast, and never
+    /// blurred.
+    pub original_wheels: bool,
     /// Every node's transform as the last [`Chassis::frame`] left it — the pose, the drives and the
     /// tree, composed. Empty until the first frame.
     pub world: Vec<M4>,
@@ -321,6 +423,7 @@ impl Chassis {
         let stance = Stance::new(set, prefix, stunts, params);
         let nodes = Nodes::of(&stance.set.skeleton);
         let shape = Geometry::of(&stance.set.skeleton, nodes);
+        let wheels = wheels_of(&stance.set.skeleton, nodes);
         Ok(Chassis {
             stance,
             geometry,
@@ -328,6 +431,10 @@ impl Chassis {
             shape,
             front_roll: Roll::default(),
             rear_roll: Roll::default(),
+            front_spin: Spin::default(),
+            rear_spin: Spin::default(),
+            wheels,
+            original_wheels: false,
             world: Vec::new(),
             posing: false,
             fading: 0.0,
@@ -392,8 +499,15 @@ impl Chassis {
         };
         self.shown = live.clone();
         let mut local = self.stance.set.skeleton.locals(live);
-        let front = self.front_roll.step(dt, d.front_spin);
-        let rear = self.rear_roll.step(dt, d.rear_spin);
+        self.front_roll.step(dt, d.front_spin);
+        self.rear_roll.step(dt, d.rear_spin);
+        // The wheels are drawn at their own turn and not the roll's (V59, [`Spin`]).
+        let front = self.front_spin.step(dt, d.front_spin);
+        let rear = self.rear_spin.step(dt, d.rear_spin);
+        let (front, rear) = match self.original_wheels {
+            true => (self.front_roll.angle, self.rear_roll.angle),
+            false => (front, rear),
+        };
         let shape = self.shape;
 
         // 1 — the steering head, and only with a wheel on the ground: the local rotation is
@@ -446,6 +560,48 @@ impl Chassis {
             }
         }
         self.world = self.stance.set.skeleton.compose(&local);
+    }
+
+    /// The spin blur's see-through copies of a drawn pose of this chassis (V59): for each wheel
+    /// spinning past [`BLUR_FROM`], one copy per [`BLUR_ALPHA`], that wheel alone turned back along
+    /// its trail by a share of [`BLUR_ARC`], at that alpha times how blurred it is. None for a
+    /// wheel turning slowly, so a bike at rest draws no more than it did.
+    ///
+    /// `pose` is a pose as drawn — [`Chassis::world`], or the shell's blend of two of them — so
+    /// the turn is put on in model space, about each wheel's own axle as that pose has it: a node
+    /// under the wheel is carried by `inverse(tire) * turn * tire`. Every other node is a point,
+    /// and its triangles have no area to draw.
+    pub fn blur_copies(&self, pose: &[M4]) -> Vec<BlurCopy> {
+        let mut out = Vec::new();
+        if pose.len() != self.wheels.len() || self.original_wheels {
+            return out;
+        }
+        for (wheel, node, spin) in [(1u8, self.nodes.front, self.front_spin), (2, self.nodes.rear, self.rear_spin)] {
+            let Some(tire) = node.and_then(|j| pose.get(j).copied()) else { continue };
+            if !(spin.blur > 0.0) {
+                continue;
+            }
+            let back = rigid_inverse(tire);
+            let n = BLUR_ALPHA.len() as f32;
+            for (i, alpha) in BLUR_ALPHA.iter().enumerate() {
+                let turn = -spin.dir * BLUR_ARC * (i as f32 + 1.0) / n;
+                let carry = back.mul(about(v3(1.0, 0.0, 0.0), turn)).mul(tire);
+                let pose = pose
+                    .iter()
+                    .zip(&self.wheels)
+                    .map(|(m, w)| match *w == wheel {
+                        true => m.mul(carry),
+                        false => {
+                            let mut point = M4::IDENTITY;
+                            point.0 = [[0.0; 4], [0.0; 4], [0.0; 4], m.0[3]];
+                            point
+                        }
+                    })
+                    .collect();
+                out.push(BlurCopy { pose, alpha: alpha * spin.blur });
+            }
+        }
+        out
     }
 
     /// A node's live transform by name, for a `.sub` part to be placed at — the whole point of the
