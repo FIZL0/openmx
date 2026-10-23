@@ -214,7 +214,7 @@ pub struct Pack {
 }
 
 /// A pack's name for its prefix: the importers' own, or the prefix.
-fn pack_name(prefix: &str) -> String {
+pub fn pack_name(prefix: &str) -> String {
     match prefix {
         "mxvatv" => "MX vs. ATV Unleashed".into(),
         "untamed" => "MX vs. ATV Untamed".into(),

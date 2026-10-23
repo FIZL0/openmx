@@ -243,10 +243,17 @@ impl Res {
     }
 
     /// The first member whose name ends in `suffix` — how the scene's `SLT=bale_single_02` finds
-    /// `geom\bale_single_02.psg` without knowing which directory the track keeps its models in.
+    /// `geom\bale_single_02.psg` without knowing which directory the track keeps its models in. A
+    /// member the suffix names whole (`appstart\cpresets.ini`) comes before one it only ends
+    /// (`appstart\biplanecpresets.ini`), which a mod folder's sorted listing can put first.
     pub fn find_suffix(&self, suffix: &str) -> Option<&Entry> {
         let want = normalise(suffix);
-        self.entries().iter().find(|e| normalise(&e.name).ends_with(&want))
+        let whole = |n: &str| n == want || n.strip_suffix(want.as_str()).is_some_and(|d| d.ends_with('/'));
+        let entries = self.entries();
+        entries
+            .iter()
+            .find(|e| whole(&normalise(&e.name)))
+            .or_else(|| entries.iter().find(|e| normalise(&e.name).ends_with(&want)))
     }
 
     /// `find_suffix` and `read` in one step.
@@ -388,5 +395,16 @@ mod tests {
     #[test]
     fn names_compare_across_slashes_and_case() {
         assert_eq!(normalise("Tracks\\SX01.res"), normalise("tracks/sx01.res"));
+    }
+
+    #[test]
+    fn a_suffix_finds_the_file_it_names_whole_before_one_it_only_ends() {
+        let files = ["appstart/biplanecpresets.ini", "appstart/cpresets.ini", "geom/BaleTHQ.psm"];
+        let res = Res::files(files.iter().map(|f| (f.to_string(), f.as_bytes().to_vec())).collect()).unwrap();
+        assert_eq!(res.read_suffix("cpresets.ini").unwrap(), b"appstart/cpresets.ini");
+        assert_eq!(res.read_suffix("CPRESETS.INI").unwrap(), b"appstart/cpresets.ini");
+        // With no whole name, the first that ends in it, as before.
+        assert_eq!(res.read_suffix("thq.psm").unwrap(), b"geom/BaleTHQ.psm");
+        assert_eq!(res.read_suffix("bale_single.psg").ok(), None);
     }
 }
