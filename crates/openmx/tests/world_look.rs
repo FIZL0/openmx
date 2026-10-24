@@ -373,3 +373,158 @@ fn per_map_sky_crossfades_across_the_join() {
     let (_, half) = looks.skies(607.0, 288.0).unwrap();
     assert!((half - 0.5).abs() < 0.1, "b's share {half} at the join's middle");
 }
+
+/// Each tile's own sky in the split-screen tests (P142): `a`'s orange, `b`'s blue.
+const SKIES: [[u8; 3]; 2] = [[210, 120, 60], [70, 110, 230]];
+
+/// A `.cub` one colour all over: 96 packets, each one strip of two triangles over its whole patch.
+fn cub(rgb: [u8; 3]) -> Vec<u8> {
+    let mut d = vec![0; 92];
+    for _ in 0..96 {
+        d.extend_from_slice(&[0, 0, 0, 0, 9, 2, 0, 0]);
+        d.extend_from_slice(&[0, 0xc0, 4, 0x66, 0, 0, 128, 0, 0, 128, 128, 128]);
+        d.extend_from_slice(&[0, 0xc0, 4, 0x6a]);
+        for _ in 0..4 {
+            d.extend_from_slice(&rgb);
+        }
+    }
+    d
+}
+
+/// [`mods_folder`] with each tile's scene naming a sky of its own, `SKIES`.
+fn mods_folder_with_skies(test: &str) -> PathBuf {
+    let mods = mods_folder(test);
+    let world = mods.join("tracks").join("md9_world");
+    for (s, rgb) in SPECS[..2].iter().zip(SKIES) {
+        let dir = world.join("tiles").join(s.name);
+        let text = scene(s).replace("[Environment]\r\n", &format!("[Environment]\r\nCubeFile=sky{}.cub\r\n", s.name));
+        assert!(text.contains("CubeFile"), "the scene has no [Environment] line to name a sky under");
+        write(&dir, &format!("Env/{0}/{0}.scn", s.stem), text);
+        write(&dir, &format!("Env/{}/skies/sky{}.ps2.cub", s.stem, s.name), cub(rgb));
+    }
+    mods
+}
+
+/// The shell on the world in two views, one above the other at 640x448, with `mods`: what it said,
+/// and the shot's two views' pixels, top then bottom.
+fn two_views(test: &str, mods: &Path, args: &[&str]) -> Option<(String, [Vec<[u8; 3]>; 2])> {
+    if let Err(e) = game_render::disc::Disc::open_configured() {
+        eprintln!("skipped: {e}");
+        return None;
+    }
+    let path = scratch(test, "two.png");
+    let _ = std::fs::remove_file(&path);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
+        .current_dir(&root)
+        .args(["--headless", "--track", "md9_world", "--mods", mods.to_str().unwrap(), "--size", "640x448", "--overlay", "none"])
+        .args(["--players", "2", "--frames", "3", "--shot", path.to_str().unwrap()])
+        .args(args)
+        .output()
+        .expect("the shell runs");
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "the shell failed:\n{said}");
+    let (w, h, rgb) = read_png(&path);
+    let view = |rows: std::ops::Range<usize>| -> Vec<[u8; 3]> {
+        rows.flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| std::array::from_fn(|k| rgb[3 * (y * w + x) + k])).collect()
+    };
+    Some((said.clone(), [view(0..h / 2), view(h / 2..h)]))
+}
+
+/// The `world sky: over` line about view `v` (from 1).
+fn view_sky_line(said: &str, v: usize) -> &str {
+    let tag = format!(" in view {v}:");
+    said.lines()
+        .find(|l| l.starts_with("world sky: over") && l.contains(&tag))
+        .unwrap_or_else(|| panic!("no `world sky: over` line for view {v}:\n{said}"))
+}
+
+/// The middle half of a view, every pixel within `tolerance` of `want`.
+fn view_is(px: &[[u8; 3]], want: [u8; 3], tolerance: i32, what: &str) {
+    let (w, h) = (640, px.len() / 640);
+    for y in h / 4..3 * h / 4 {
+        for x in w / 4..3 * w / 4 {
+            let p = px[y * w + x];
+            let off = (0..3).map(|k| (i32::from(p[k]) - i32::from(want[k])).abs()).max().unwrap();
+            assert!(off <= tolerance, "{what}: {p:?} at {x},{y}, not {want:?}");
+        }
+    }
+}
+
+/// Both views looking up into the sky: the first's from over `a`, the second's from over `b`.
+const UP_OVER_A: &str = "200,200,288,90,45,60";
+const UP_OVER_B: &str = "1000,200,288,90,45,60";
+/// Over the join's middle, where `a`'s and `b`'s skies are crossfading.
+const UP_OVER_JOIN: &str = "607,200,288,90,45,60";
+
+/// Per Map in split screen (P142): P1 over `a` sees `a`'s sky and light, P2 over `b` `b`'s, each
+/// view's lines naming it; under Global both see the whole world's (`a`'s).
+#[test]
+fn split_screen_views_each_take_their_own_maps_sky() {
+    let mods = mods_folder_with_skies("split-sky");
+    let poses = ["--shot-pose", UP_OVER_A, "--shot-pose", UP_OVER_B];
+    let Some((said, [top, bottom])) = two_views("split-sky", &mods, &[&poses[..], &["--world-sky", "per-map"]].concat()) else { return };
+    if !said.contains("renderer: gpu") {
+        eprintln!("skipped: no GPU\n{said}");
+        return;
+    }
+    let (one, two) = (view_sky_line(&said, 1), view_sky_line(&said, 2));
+    assert!(one.contains("over a at 200,288"), "{one}");
+    assert!(two.contains("over b at 1000,288"), "{two}");
+    assert_eq!(fog_of(one), SPECS[0].fog, "{one}");
+    assert_eq!(fog_of(two), SPECS[1].fog, "{two}");
+    assert!(two.contains("ambient 0.157,0.157,0.275"), "b's ambient in view 2: {two}");
+    view_is(&top, SKIES[0], 3, "view 1 under a's sky");
+    view_is(&bottom, SKIES[1], 3, "view 2 under b's sky");
+
+    let Some((said, [top, bottom])) = two_views("split-sky-global", &mods, &[&poses[..], &["--world-sky", "global"]].concat()) else { return };
+    for v in [1, 2] {
+        let line = view_sky_line(&said, v);
+        assert!(line.contains("over the whole world"), "{line}");
+        assert_eq!(fog_of(line), SPECS[0].fog, "{line}");
+    }
+    view_is(&top, SKIES[0], 3, "view 1 under the whole world's sky");
+    view_is(&bottom, SKIES[0], 3, "view 2 under the whole world's sky too");
+}
+
+/// One view crossing a join while the other sits still (P142): the still one's picture is the
+/// same to the pixel whether the other is over `a` or between `a` and `b`, and the crossing one
+/// shows the two skies mixed.
+#[test]
+fn a_view_crossing_a_join_leaves_the_other_views_sky() {
+    let mods = mods_folder_with_skies("split-join");
+    let per_map = ["--world-sky", "per-map"];
+    let Some((said, [_, still])) = two_views("split-join-a", &mods, &[&["--shot-pose", UP_OVER_A, "--shot-pose", UP_OVER_B][..], &per_map].concat()) else { return };
+    if !said.contains("renderer: gpu") {
+        eprintln!("skipped: no GPU\n{said}");
+        return;
+    }
+    let Some((said, [crossing, still_too])) = two_views("split-join-mid", &mods, &[&["--shot-pose", UP_OVER_JOIN, "--shot-pose", UP_OVER_B][..], &per_map].concat()) else { return };
+    assert!(still == still_too, "view 2's picture changed when view 1 moved onto the join");
+    view_is(&still_too, SKIES[1], 3, "view 2 under b's sky");
+    let p = crossing[crossing.len() / 2 + 320];
+    // Red and blue tell the two apart; green is all but the same in both.
+    let mixed = [0, 2].into_iter().all(|k| {
+        let (a, b) = (SKIES[0][k].min(SKIES[1][k]), SKIES[0][k].max(SKIES[1][k]));
+        p[k] > a + 20 && p[k] + 20 < b
+    });
+    assert!(mixed, "view 1 over the join shows {p:?}, not a mix of {:?} and {:?}\n{}", SKIES[0], SKIES[1], view_sky_line(&said, 1));
+}
+
+/// Each view's fog on both renderers (P142): with no skies, the backdrop is the view's own map's
+/// fog colour, P1's `a`'s and P2's `b`'s.
+#[test]
+fn split_screen_views_each_take_their_own_maps_fog() {
+    let mods = mods_folder("split-fog");
+    for renderer in ["software", "gpu"] {
+        let test = format!("split-fog-{renderer}");
+        let args = ["--shot-pose", UP_OVER_A, "--shot-pose", UP_OVER_B, "--world-sky", "per-map", "--renderer", renderer];
+        let Some((said, [top, bottom])) = two_views(&test, &mods, &args) else { return };
+        if !said.contains(&format!("renderer: {renderer}")) {
+            eprintln!("skipped {renderer}: not drawn by it\n{said}");
+            continue;
+        }
+        view_is(&top, SPECS[0].fog, 2, &format!("view 1's fog, {renderer}"));
+        view_is(&bottom, SPECS[1].fog, 2, &format!("view 2's fog, {renderer}"));
+    }
+}

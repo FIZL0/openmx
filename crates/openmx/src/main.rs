@@ -957,6 +957,8 @@ struct Args {
     shot_frame: u32,
     /// `--shot-pose` (MD10): the first view drawn from this pose, not the ride camera, all the run.
     shot_pose: Option<shot_pose::Pose>,
+    /// `--shot-pose` given again (P142): the second view's pose, then the third's, and so on.
+    more_poses: Vec<shot_pose::Pose>,
     /// Draw the riding overlay (P6): the pad as the simulation reads it and the numbers beside it.
     /// Off by default and off is free, because it is debugging furniture and not part of the game.
     hud: bool,
@@ -3697,11 +3699,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
     // ---- the loop ------------------------------------------------------------------------------
     let mut light = Lighting::of(&look);
-    // Which tile's sky and light a world's ride shows under Per Map (MD9), `Some(None)` while it
-    // shows the whole world's one; `None` before the first frame.
-    let mut shown_look: Option<Option<usize>> = None;
-    // The pair of skies bound for the crossfade (MD26), `Some(None)` while the whole world's one is.
-    let mut shown_skies: Option<Option<[usize; 2]>> = None;
+    // A world's views' own lights (P142), each off its own camera; empty on a disc map, whose views
+    // all take `light`. `light` is the first view's.
+    let mut lights: Vec<Lighting> = Vec::new();
+    // Which tile's sky and light each view of a world's ride shows under Per Map (MD9, P142),
+    // `Some(None)` while it shows the whole world's one; `None` before its first frame.
+    let mut shown_look: Vec<Option<Option<usize>>> = Vec::new();
+    // Each view's pair of skies bound for the crossfade (MD26), `Some(None)` while the whole world's
+    // one is.
+    let mut shown_skies: Vec<Option<Option<[usize; 2]>>> = Vec::new();
     if let Some(w) = &world_mod {
         println!("world sky: {} (the whole world's from {})", args.world_sky.unwrap_or_default().word(), w.pieces[w.home].tile.name);
     }
@@ -5047,7 +5053,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // The software renderer's far plane: 4,000 feet, or the scene's fog's end where
                     // that is further (MD3: a mod's map may fog out past it). The GPU's is its own
                     // (`Graphics::far_clip`).
-                    far: light.fog_far.max(4000.0),
+                    far: lights.get(i).unwrap_or(&light).fog_far.max(4000.0),
                 },
                 None => Camera::behind(pos, bike_look),
             });
@@ -5183,54 +5189,67 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if let (Some(pose), Some(at), Some(camera)) = (args.shot_pose, rects.first(), cameras.first_mut()) {
             *camera = pose.camera(at.w, at.h, NEAR_CLIP, camera.far);
         }
-        // A world's sky and light (MD9): under Per Map the tile the first view's camera is over sets
-        // them, mixed across a join and its sky the larger share's; under Global the whole world's.
-        if let (Some(wl), Some(camera)) = (&world_look, cameras.first()) {
-            let (lit, over) = match world_sky {
-                menu::WorldSky::PerMap => match wl.looks.at(camera.eye.x, camera.eye.z) {
-                    Some((lit, over)) => (lit, Some(over)),
-                    None => (Lighting::of(&look), None),
-                },
-                menu::WorldSky::Global => (Lighting::of(&look), None),
-            };
-            light = lit;
-            // The skybox crossfades across a join (MD26): the two maps' skies bound while the eye is
-            // between them, the nearer's share of the picture growing as it is ridden into.
-            let skies = match world_sky {
-                menu::WorldSky::PerMap => wl.looks.skies(camera.eye.x, camera.eye.z),
-                menu::WorldSky::Global => None,
-            };
-            if let Some(r) = renderer_of(&mut offscreen, window) {
-                let pair = skies.map(|(pair, _)| pair);
-                if shown_skies != Some(pair) {
-                    shown_skies = Some(pair);
-                    match pair {
-                        Some([a, b]) if a != b => r.set_skies(wl.skies[a].as_ref(), wl.skies[b].as_ref()),
-                        Some([a, _]) => r.set_sky(wl.skies[a].as_ref()),
-                        None => r.set_sky(sky.as_ref()),
+        // And `--shot-pose` again, the views after it (P142).
+        for ((pose, at), camera) in args.more_poses.iter().zip(rects.iter().skip(1)).zip(cameras.iter_mut().skip(1)) {
+            *camera = pose.camera(at.w, at.h, NEAR_CLIP, camera.far);
+        }
+        // A world's sky and light (MD9): under Per Map the tile each view's camera is over sets its
+        // own (P142), mixed across a join and its sky the larger share's; under Global the whole
+        // world's for every view.
+        if let Some(wl) = &world_look {
+            let views = cameras.len().min(world.seats.len());
+            shown_look.resize(views, None);
+            shown_skies.resize(views, None);
+            lights.clear();
+            for (v, camera) in cameras.iter().enumerate().take(views) {
+                let (lit, over) = match world_sky {
+                    menu::WorldSky::PerMap => match wl.looks.at(camera.eye.x, camera.eye.z) {
+                        Some((lit, over)) => (lit, Some(over)),
+                        None => (Lighting::of(&look), None),
+                    },
+                    menu::WorldSky::Global => (Lighting::of(&look), None),
+                };
+                lights.push(lit);
+                // The skybox crossfades across a join (MD26): the two maps' skies bound while the eye
+                // is between them, the nearer's share of the picture growing as it is ridden into.
+                let skies = match world_sky {
+                    menu::WorldSky::PerMap => wl.looks.skies(camera.eye.x, camera.eye.z),
+                    menu::WorldSky::Global => None,
+                };
+                if let Some(r) = renderer_of(&mut offscreen, window) {
+                    let pair = skies.map(|(pair, _)| pair);
+                    if shown_skies[v] != Some(pair) {
+                        shown_skies[v] = Some(pair);
+                        // Each map's cube is uploaded the first time a view is over it, and kept.
+                        r.set_view_skies(v, pair.map(|p| p.map(|m| (m, wl.skies[m].as_ref()))));
                     }
+                    r.set_view_sky_mix(v, skies.map_or(0.0, |(_, share)| share));
                 }
-                r.set_sky_mix(skies.map_or(0.0, |(_, share)| share));
+                if shown_look[v] != Some(over) {
+                    shown_look[v] = Some(over);
+                    let name = over.map_or("the whole world", |i| wl.names[i].as_str());
+                    println!(
+                        "world sky: over {name} at {:.0},{:.0} in view {}: sun {:.3},{:.3},{:.3} ambient {:.3},{:.3},{:.3} fog {},{},{} {:.0}..{:.0}",
+                        camera.eye.x,
+                        camera.eye.z,
+                        v + 1,
+                        lit.sun.x,
+                        lit.sun.y,
+                        lit.sun.z,
+                        lit.ambient[0],
+                        lit.ambient[1],
+                        lit.ambient[2],
+                        lit.fog_color[0],
+                        lit.fog_color[1],
+                        lit.fog_color[2],
+                        lit.fog_near,
+                        lit.fog_far
+                    );
+                }
             }
-            if shown_look != Some(over) {
-                shown_look = Some(over);
-                let name = over.map_or("the whole world", |i| wl.names[i].as_str());
-                println!(
-                    "world sky: over {name} at {:.0},{:.0}: sun {:.3},{:.3},{:.3} ambient {:.3},{:.3},{:.3} fog {},{},{} {:.0}..{:.0}",
-                    camera.eye.x,
-                    camera.eye.z,
-                    light.sun.x,
-                    light.sun.y,
-                    light.sun.z,
-                    light.ambient[0],
-                    light.ambient[1],
-                    light.ambient[2],
-                    light.fog_color[0],
-                    light.fog_color[1],
-                    light.fog_color[2],
-                    light.fog_near,
-                    light.fog_far
-                );
+            light = lights.first().copied().unwrap_or(light);
+            if let Some(r) = renderer_of(&mut offscreen, window) {
+                r.set_view_lights(&lights);
             }
         }
         // The start zones' and the markers' portals (V51), each view its own: its player's markers,
@@ -5511,9 +5530,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             };
             let camera = &cameras[v];
             let pos = vector(ridden[v].target.body_point);
+            // Its own light and fog (P142): a world's view over its own map's, a disc map's the scene's.
+            let light = lights.get(v).copied().unwrap_or(light);
             // The picture: the dirt, then the scene's props and the bikes standing on them.
             let draw_at = Instant::now();
-            clear(target, look.fog_color);
+            clear(target, light.fog_color);
             stages.mark(stages::Stage::Sky);
             // A world's is every near piece's (MD15), each cell its owner's.
             let mut tris = match (&world_mod, &world.place) {
@@ -6431,6 +6452,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         shot: None,
         shot_frame: 0,
         shot_pose: None,
+        more_poses: Vec::new(),
         hud: false,
         overlay: None,
         speedometer: None,
@@ -6574,7 +6596,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .parse()
                     .map_err(|_| "--shot-frame: not a frame number")?;
             }
-            "--shot-pose" => args.shot_pose = Some(shot_pose::Pose::parse(&next("x,y,z,yaw,pitch,fov")?)?),
+            "--shot-pose" => {
+                let pose = shot_pose::Pose::parse(&next("x,y,z,yaw,pitch,fov")?)?;
+                match args.shot_pose {
+                    None => args.shot_pose = Some(pose),
+                    Some(_) => args.more_poses.push(pose),
+                }
+            }
             "--hud" => {
                 args.hud = true;
                 args.overlay = Some(menu::Overlay::Debug);
@@ -6845,7 +6873,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
-                            [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov] [--vehicle bike|biplane]\n\
+                            [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--world-ground all|near] [--world-reach LOAD,DROP]\n\
                             [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
