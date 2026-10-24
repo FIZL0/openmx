@@ -635,7 +635,7 @@ impl Menu {
             false => Row::choice(Key::LoadPreset, "Load Preset", &names, self.mod_preset, "A saved set of modifiers."),
         };
         rows.push(load.off_if(none, "No presets saved yet").off_if(held.is_some(), held.as_deref().unwrap_or("")));
-        rows.push(Row::action(Key::SavePreset, "Save Preset", "Name and keep this set."));
+        rows.push(Row::action(Key::SavePreset, "Save Preset", "Name and keep this player's set, with the world's. Any player can load it."));
         rows.push(Row::action(Key::DeletePreset, "Delete Preset", "Forgets the preset Load Preset is on.").off_if(none, "No presets saved yet"));
         rows.push(Row::action(Key::ResetMods, "Reset to Original", "Every modifier back to the original game.").off_if(held.is_some(), held.as_deref().unwrap_or("")));
         rows
@@ -833,7 +833,8 @@ impl Menu {
                     self.mod_preset = cycle(self.mod_preset, d, n);
                     return;
                 }
-                self.settings.modifiers = self.settings.presets[self.mod_preset.min(n - 1)].1;
+                let preset = self.settings.presets[self.mod_preset.min(n - 1)].1;
+                load_preset_onto(&mut self.settings.modifiers, &preset, self.player.min(SEATS_MAX - 1));
             }
             Key::SavePreset if p.ok => {
                 self.type_for(Typing::Preset);
