@@ -527,7 +527,14 @@ stunt_landing               boot 0x002522c0 (obj in a0, the thing it hit in a1, 
 stunt_idle                  boot 0x00258cc0 (obj) what is requested when nothing was asked for:
 #                                           airborne -> 25 (the stick-driven lean), grounded -> 28
 stunt_state_pack            boot 0x00258d50 (obj) latches the requested id into +0x864 and the request
-#                                           count into +0x8a0 — what a networked rider sends
+#                                           count into +0x8a0 — what a networked rider sends. Also
+#                                           snapshots the body (S67): +0x830 = mat4_to_quat of the
+#                                           node's world rows (+0x80), +0x840 the chassis velocity,
+#                                           +0x850 the chassis' +0x280; stunt_clocks (a1 = 0 from
+#                                           bike_vehicle_update) copies +0x830 back into the chassis
+#                                           quaternion (+0x1a0), +0x840 into +0x260 and +0x8b4 into
+#                                           +0x294, so every frame ends with the quat the node's
+#                                           matrix holds (proved by the S67 replay test)
 #
 # The table on the disc.
 stunts_ini_load             boot 0x0037d820 (obj, dir) reads <dir>Anim\stunts.ini: 57 [Stunt<n>]
@@ -1331,8 +1338,12 @@ transform_unpoint boot 0x001b3180 (out, transform, p) -> a world point back into
 #                                 frame: the transpose of the rotation applied to p less the origin.
 #                                 transform_rotate's and transform_unrotate's sibling, and like them
 #                                 it may rebuild a lazy chain of parent frames first (0x001b1750)
-transform_sync boot 0x001b2770 (transform, flags) -> brings the transform up to date; called with
-#                              flags 0 and its answer thrown away
+transform_sync boot 0x001b2770 (transform, relative_to, v in a2) -> really a translate (S67): with
+#                              relative_to 0 and no parent it is 0x001b2730, three scalar adds of v
+#                              onto the local origin (+0x70..+0x78) and the rebuild. The decompiler
+#                              drops a2; wheel_tire_forces' bottom-out passes its stack slot, the
+#                              contact normal x (comp - max) x 0.9, so the shove moves the body. The
+#                              parent-frame branch is not ported (no state had a parent)
 # The five one-line VU0 helpers wheel_tire_forces calls, all inlined in the port (moving words about
 # and a masked lane op, nothing that can round differently):
 #   0x00107fa0 (out, a) out = a, one quadword     0x00107fb0 vec3_sub_vu, above

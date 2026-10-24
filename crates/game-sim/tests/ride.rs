@@ -3795,7 +3795,8 @@ fn it_flies_straight_hands_off() {
     // −0.0123 rad/s (it was 0.0744) with the bike pointed 5.5 deg off the run-up and rolled 9.6 deg,
     // and it lands rolled 0.03 deg with the heading turned −1.36 deg.
     assert!(flying > 30, "not a jump: {flying} frames in the air");
-    assert!(lip_rate.abs() > F(0.01), "the lip handed the air step no yaw rate to take out: {}", lip_rate.0);
+    // Since S67 (the bottom-out's shove) the lip hands over 0.0085 rad/s, the other way.
+    assert!(lip_rate.abs() > F(0.005), "the lip handed the air step no yaw rate to take out: {}", lip_rate.0);
     assert!(
         roll.abs() <= ORIGINAL_SQUAREST_ROLL,
         "landed rolled {roll} deg hands off; the original's squarest landing is {ORIGINAL_SQUAREST_ROLL}"
@@ -5718,7 +5719,11 @@ fn md16_three_sixty_comes_round_or_wrecks() {
     let (ride, _) = ride_md16(&q, wheels, &tables, set, &md16_script(&held), 400);
     let wreck = ride.iter().position(|t| t.frame.wreck.is_some()).expect("landing mid-clip wrecks");
     assert!(ride[wreck - 1].spin.clip == 2 && ride[wreck].seat.on_ground, "on landing, part way round");
-    assert_eq!(ride[wreck].frame.wreck, Some(game_sim::trick::Wreck::from(game_sim::air::Wreck::Tail)));
+    // The 360's own wreck is Tail, but the landing's attitude limits are tested first; since S67 the
+    // no-hander's roll reaches the body (the stunt clocks' copy-back), and the bike comes down rolled
+    // past them, off to the right.
+    let side = [game_sim::air::Wreck::Tail, game_sim::air::Wreck::Right].map(game_sim::trick::Wreck::from);
+    assert!(ride[wreck].frame.wreck.is_some_and(|w| side.contains(&w)), "{:?}", ride[wreck].frame.wreck);
 }
 
 /// P129: the shell's hands do no trick off the d-pad. In the air off the flip ramp, a trick button
@@ -5950,7 +5955,8 @@ fn md20_one_short_of_either_wrecks() {
 /// `0x13fe6e4514be885d` there and through MD30's removal of the easy 360; MD30's air-control fix moved
 /// it twice over, as MX vs. ATV's air control does both: once the backflip is over and the 360 turns
 /// on alone, the stick has its say again, and once the 360 has ended in the air the bike is damped
-/// until the wheels are down ([`game_sim::air::Step::spin_ramp`]) where the port had levelled.
+/// until the wheels are down ([`game_sim::air::Step::spin_ramp`]) where the port had levelled. Re-pinned
+/// by S67, whose bottom-out shove and stunt-clock copy-back are the original's and move every landing.
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
@@ -5962,8 +5968,8 @@ fn md25_mx_vs_atv_rides_as_before() {
     let (flip, _) = ride_md16(&q, wheels, &tables, set, &md20_hands(true, true, (220, 40), (220, 40)), 400);
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
-const MD25_GESTURE_FOLD: u64 = 0x1d8d55415bc24f70;
-const MD25_DIAGONAL_FOLD: u64 = 0xc39acc450c4488a5;
+const MD25_GESTURE_FOLD: u64 = 0x3ccc375c1617c3b6;
+const MD25_DIAGONAL_FOLD: u64 = 0xf7b5115bac219822;
 
 /// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
 /// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope.
