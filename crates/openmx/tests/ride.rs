@@ -2335,3 +2335,148 @@ fn a_held_diagonal_pulls_and_rolls_together_every_tick() {
     }
     println!("biplane, held diagonals from level ({TICKS} ticks, settled at {SETTLED}):\n{}", lines.join("\n"));
 }
+
+// ---------------------------------------------------------------------------------------------------
+// the rider's body through a backflip (V35)
+// ---------------------------------------------------------------------------------------------------
+
+/// Every state of the body's sixty-entry table bound to a clip of its own, and the one-second,
+/// non-looping clip each of them is: which state the body is in does not hang on the clips' lengths.
+fn v35_library() -> game_sim::vehicle_anim::Library {
+    let mut lib = game_sim::vehicle_anim::Library::default();
+    for (s, clip) in lib.clip.iter_mut().enumerate() {
+        *clip = Some(game_sim::motion::ClipId(s as u32));
+    }
+    lib
+}
+
+fn v35_clip(_: game_sim::motion::ClipId) -> game_sim::motion::Clip {
+    game_sim::motion::Clip::new(F(1.0), false)
+}
+
+/// V35's capture of recording2 played back on the original (the journal's `capture/flips.toml`), one
+/// map per row; `None` when this checkout does not have it.
+fn v35_rows() -> Option<Vec<std::collections::HashMap<String, String>>> {
+    let ctx = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context");
+    let text = std::fs::read_to_string(ctx.join("capture/v35/flips.csv")).ok()?;
+    let mut lines = text.lines();
+    let head: Vec<String> = lines.next()?.split(',').map(str::to_owned).collect();
+    Some(lines.map(|l| head.iter().cloned().zip(l.split(',').map(str::to_owned)).collect()).collect())
+}
+
+/// V35: the body plays the original's clips through recording2's two backflips, on the original's
+/// ticks.
+///
+/// The capture has, per tick, the bike's own words (airborne, the backflip's turning flag, the trick
+/// id), the request block the original's body read off them, and the state the body asked for and
+/// ran. Two things are checked on every tick the rider is on the bike:
+///
+/// 1. **the request is the bike's words** — the backflip word is the turning flag (`air.flipping`),
+///    airborne is airborne and the gesture slot is the trick id's, or 24 for none. That is the row of
+///    `Rider::body_frame`'s mapping V35 changed: before it the backflip came off the trick id, which
+///    is the airborne idle's (25) all through a flip in the original and in the port, so the body
+///    never played the backflip at all;
+/// 2. **the port's body, handed those words, plays the original's state** — the port's rider, with
+///    its ride's two flags and its trick id set from the row, runs `body_frame` and asks for and runs
+///    the state the original did. Flip 1 plays `backflip` (38) from the tick the torque first goes in
+///    for 31 ticks, until a trick asked mid-flip outranks it; flip 2's trick was asked a tick before
+///    it turned, so it never shows. Then the airborne pose and riding, as the original.
+///
+/// The wreck's ticks (3016–3139, reason 8, and the request's tick behind it) are left out: the port's body here
+/// is not thrown, so it has no wreck to follow.
+#[test]
+fn the_body_plays_the_originals_backflip_through_recording2() {
+    use game_sim::trick::Trick;
+    use game_sim::vehicle_anim::BACKFLIP;
+    let Some(rows) = v35_rows() else {
+        eprintln!("skipped: no context/capture/v35/flips.csv (V35's capture of recording2)");
+        return;
+    };
+    let tables = Tables::build();
+    let Some((phy, wheels)) = the_disc_125(&tables) else { return };
+    let mut r = game_sim::rider::Rider::new(&phy, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let lib = v35_library();
+    let dt = F(1.0 / 30.0);
+    let c = Controls { gas: F::ONE, ..Controls::default() };
+    // The body starts at the gate; the throttle lets it ride, as recording2's rider is at its start.
+    for _ in 0..10 {
+        r.body_frame(dt, &c, game_sim::rider::Gate::default(), &lib, &v35_clip);
+    }
+    assert_eq!(r.body.veh.state, 30, "the body does not ride after the gate");
+
+    let n = |row: &std::collections::HashMap<String, String>, col: &str| -> u32 {
+        row[col].parse().unwrap_or_else(|_| panic!("column {col} is {:?}", row[col]))
+    };
+    let (mut checked, mut backflips, mut missed) = (0, Vec::new(), Vec::new());
+    for row in &rows {
+        let tick = n(row, "frame_counter");
+        if n(row, "wreck_reason") != 0 || n(row, "req_wreck") != 0 {
+            continue;
+        }
+        let (airborne, flipping, trick) = (n(row, "airborne") != 0, n(row, "flipping") != 0, n(row, "trick_id"));
+        let slot = if trick < 24 { trick } else { 24 };
+        assert_eq!(n(row, "req_backflip") != 0, flipping, "tick {tick}: the request's backflip is not the bike's turning flag");
+        assert_eq!(n(row, "req_airborne") != 0, airborne, "tick {tick}: the request's airborne is not the bike's");
+        assert_eq!(n(row, "req_gesture"), slot, "tick {tick}: the request's gesture is not the trick id's slot");
+
+        r.ride.air.airborne = airborne;
+        r.ride.air.flipping = flipping;
+        r.tricks.requested = Trick(trick as u8);
+        r.body_frame(dt, &c, game_sim::rider::Gate::default(), &lib, &v35_clip);
+        let (want, state) = (n(row, "state_want") as i32, n(row, "state") as i32);
+        if (r.body.veh.want, r.body.veh.state) != (want, state) {
+            missed.push((tick, (want, state), (r.body.veh.want, r.body.veh.state)));
+        }
+        if state == BACKFLIP {
+            backflips.push(tick);
+        }
+        checked += 1;
+    }
+    assert!(checked > 900, "only {checked} riding ticks in the capture");
+    assert_eq!(backflips, (2513..2544).collect::<Vec<_>>(), "the original's backflip ticks moved: the capture is not V35's");
+    assert!(missed.is_empty(), "{} of {checked} ticks: (tick, the original's (want, state), the port's): {:?}", missed.len(), &missed[..missed.len().min(12)]);
+}
+
+/// V35: P16's flip off the lip, ridden through the shell's sim on the disc's 125 with the body run
+/// after every frame as the shell runs it. The body plays `backflip` on exactly the frames the bike
+/// is turning over — from the first frame the torque goes in, which is the original's tick in
+/// [`the_body_plays_the_originals_backflip_through_recording2`] — the airborne pose either side of
+/// it in the air, and is back to riding once it is down.
+#[test]
+fn a_ridden_backflip_plays_the_backflip_clip() {
+    use game_sim::vehicle_anim::{AIR, BACKFLIP};
+    let tables = Arc::new(Tables::build());
+    let Some((phy, wheels)) = the_disc_125(&tables) else { return };
+    let rider = game_sim::rider::Rider::new(&phy, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let mut sim = Sim::with_rider(0, tables, phy, rider);
+    let (start, slope, length) = FLIP_RAMP;
+    let dir = Vf::new(0.0, 0.0, 1.0, 0.0);
+    let mut world = Jump { origin: Vf::new(0.0, 0.0, 0.0, 1.0), dir, start, slope, length };
+    let lib = v35_library();
+    // (flipping, airborne, on the ground, the body's state) per frame.
+    let mut seen = Vec::new();
+    for &report in &script(FLIP)[0].1 {
+        let reports: [Report; PADS] = [report, Report::missing()];
+        let controls = sim.poll(DT, &reports);
+        let frame = sim.step(DT, &controls, &mut world);
+        assert!(frame.wreck.is_none(), "the flip wrecked");
+        sim.rider.body_frame(DT, &controls, game_sim::rider::Gate::default(), &lib, &v35_clip);
+        let air = &sim.rider.ride.air;
+        seen.push((air.flipping, air.airborne, air.on_ground, sim.rider.body.veh.state));
+    }
+    let turning: Vec<usize> = (0..seen.len()).filter(|&f| seen[f].0).collect();
+    assert!(turning.len() > 20, "the bike hardly turned over: {} frames", turning.len());
+    let played: Vec<usize> = (0..seen.len()).filter(|&f| seen[f].3 == BACKFLIP).collect();
+    assert_eq!(played, turning, "the body plays the backflip on other frames than the bike turns on");
+    // From the first frame on the ground: the bike is dropped onto the ground from two feet, at the gate.
+    let landed = seen.iter().position(|s| s.2).expect("the bike never touched down");
+    let aloft = |f: &usize| *f > landed && seen[*f].1 && !seen[*f].0;
+    let off: Vec<(usize, (bool, bool, bool, i32))> = (0..seen.len()).filter(aloft).filter(|&f| seen[f].3 != AIR).map(|f| (f, seen[f])).collect();
+    assert!(off.is_empty(), "in the air and not turning, the body is not in the airborne pose: {off:?} (turning {:?}..{:?})", turning.first(), turning.last());
+    let after = turning.last().unwrap() + 1;
+    assert!(seen[after].1 && seen[after].3 == AIR, "the frame the rotation is over the body is not in the airborne pose: {:?}", seen[after]);
+    let down = (after..seen.len()).find(|&f| seen[f].2).expect("the bike never came down");
+    // A wheel's bounce after it (a frame or two airborne) is the airborne pose again, checked above.
+    let tail: Vec<(usize, i32)> = (down..seen.len()).filter(|&f| !seen[f].1 && seen[f].3 != 30).map(|f| (f, seen[f].3)).collect();
+    assert!(tail.is_empty(), "on the ground after the landing at {down}, the body is not riding: {tail:?}");
+}
