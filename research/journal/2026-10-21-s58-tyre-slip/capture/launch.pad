@@ -1,0 +1,5 @@
+# S58 launch: full gas from standing. Wall-clock times, at a quarter speed (4 ms here is 1 ms ridden).
+sleep 4000
+down cross
+sleep 40000
+up cross

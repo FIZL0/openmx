@@ -4865,3 +4865,20 @@ asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle
 # (80,30,30), +0x670 damper base (3.2,2,2). Request: +0xf0/+0xf4 point at the bike box (centre
 # (0,4.3,-1.5), half (0.45,0.6,1.75)); +0x170 pitch (~ the body machine's mix lag), +0x178 speed
 # (not the velocity's length; writer not found, S111).
+# S58 — the bike's slip. Four things the port had wrong, each found by replaying a save-state capture
+# (journal 2026-10-21-s58-tyre-slip, cases launch/turn/brake):
+#   bike_input_limiter 0x00251a50: the gas and the brake rise at their rates and drop to the lever at
+#   once (a released lever is 0 the same tick); the clutch is rate-limited both ways; bike +0x654 is
+#   written from +0x650. The port walked every lever both ways, so a released brake kept braking.
+#   bike_ground_step 0x00257a00: the steer write front+0x8ac = front+0x7c * bike+0x670 * scale(+0x438)
+#   happens once, before the substep loop. Inside it, after both tire_forces calls, the ground step
+#   sets rear+0xc4 = (front+0xdc && !rear+0xdc) before both wheel_spin_integrate calls.
+#   wheel_spin_integrate 0x0025c530, the +0xc4 branch (flag set and the wheel's own +0xdc == 0): the
+#   load point +0x140 = the probe end +0x160, the normal load +0xf8 = +0xc8 * (+0xcc)->+0xf8, +0x1f0
+#   and +0x1f4 copied from the other wheel, the contact velocity redone (0x0025b710), then the contact
+#   frame and the tire's drive force: an airborne rear still drives and brakes on the front's load.
+#   In the save state both wheels' +0xc4 = 0, +0xc8 = 1.0, and +0xcc points at the other wheel.
+#   bike_air_state 0x00251d20: bike +0x430 = front+0x190 when the front touches, else rear+0x190 when
+#   the rear does, else chassis+0x270; +0x438 (its z) is the "speed" the steering fade, the lean and
+#   the other mv readers take. The save state's +0x430 equals front+0x190 bit for bit; +0x190 is the
+#   chassis' velocity less the ground's, in the chassis' frame (not +0x170, the contact's).

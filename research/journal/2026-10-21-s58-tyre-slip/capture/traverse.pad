@@ -1,0 +1,9 @@
+# S58 traverse: gas, and a moment later a part stick to the right with the gas held, so the bike meets
+# the jump face ahead of the start at an angle and rides across it rather than up it. Wall-clock, at a
+# quarter speed (4 ms here is 1 ms ridden).
+sleep 4000
+down cross
+sleep 2000
+stick l 0.4 0
+sleep 22000
+release
