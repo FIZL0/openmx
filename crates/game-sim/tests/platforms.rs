@@ -434,8 +434,8 @@ const RIDERS_HASHES: &[(u64, u64)] = &[
 /// FNV-1a over every tick's hash of the run.
 const RIDERS_DIGEST: u64 = 0x0914495ddb02b2de;
 /// FNV-1a over the session's `snapshot::encode` bytes at the end, and how many bytes they were.
-const RIDERS_WIRE_DIGEST: u64 = 0xb6fcfe5d530fc989;
-const RIDERS_WIRE_LEN: usize = 13323;
+const RIDERS_WIRE_DIGEST: u64 = 0x35ce96a6b401d35b;
+const RIDERS_WIRE_LEN: usize = 13327;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed

@@ -161,6 +161,12 @@ pub struct Sense {
     /// Wrecks are switched on at all. One global in the original, cleared by the modes that must not
     /// wreck anybody.
     pub wrecks_enabled: bool,
+    /// The bike's attitude in the air may throw the rider off (P138): the airborne clause of
+    /// [`crate::air::wreck_test`] — nosed over, looped back or rolled past the bike's airborne limits
+    /// while neither flipping nor spinning. The original always asks it, so true is the original; a
+    /// player's Air Wrecks switch turned off makes it false, and the rider rides the jump out. The
+    /// landing is judged as ever either way.
+    pub air_wrecks: bool,
     /// The vehicle has settled: the window in front of the reset clock may start. **Not a property of
     /// the class** — S5 read it as one and said so here, and that was wrong. It is a runtime signal,
     /// written during a wreck by the rider's own side of it, and a player bike's copy of it
@@ -184,6 +190,8 @@ pub struct Allowed {
     /// The attitude, g-load and landing clauses. False once the rider is already down: only the
     /// collision clause runs then, and that one only while the reason is not already the cannonball.
     pub landing: bool,
+    /// The airborne attitude clause among the landing ones: [`Sense::air_wrecks`].
+    pub air: bool,
 }
 
 /// What the machine asks for when the clock runs out.
@@ -276,7 +284,7 @@ impl Ride {
         let mut out = Step::default();
         let driven = sense.ai_route || sense.owner.is_some_and(|o| o.human);
         if driven {
-            let allowed = Allowed { wrecks: sense.wrecks_enabled, landing: self.wreck.is_none() };
+            let allowed = Allowed { wrecks: sense.wrecks_enabled, landing: self.wreck.is_none(), air: sense.air_wrecks };
             if let Some(reason) = test(allowed) {
                 self.enter(reason);
                 out.wreck = Some(reason);

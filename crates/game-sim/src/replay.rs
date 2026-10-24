@@ -1160,12 +1160,17 @@ pub struct PadTape {
     /// The frames the first player's markers were cleared before (P99, from the pause, which is not
     /// on the tape), in order: a replay empties the slots there as the ride did.
     pub cleared: Vec<usize>,
+    /// The first player's Air Wrecks switch (P138, [`crate::state::Sense::air_wrecks`]) where the
+    /// ride set it, in tick order: `(k, on)` is the switch frames `k` on ride with, put on before
+    /// frame `k` is stepped. Empty for a ride with it on throughout, the original's, which is every
+    /// tape before P138; a ride started with it off says so at frame 0.
+    pub air_wrecks: Vec<(usize, bool)>,
 }
 
 impl PadTape {
     /// An empty recording, named.
     pub fn new(name: impl Into<String>) -> PadTape {
-        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new() }
+        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new(), air_wrecks: Vec::new() }
     }
 
     /// The modifiers frame `k` rides on: the set the ride loaded with, as the changes before it left
@@ -1177,6 +1182,11 @@ impl PadTape {
     /// The change put on just before frame `k`, if there is one there.
     pub fn change_at(&self, k: usize) -> Option<crate::modifiers::Mods> {
         self.changes.iter().rev().find(|(at, _)| *at == k).map(|(_, m)| *m)
+    }
+
+    /// The Air Wrecks switch put on just before frame `k` (P138), if the ride set it there.
+    pub fn air_wrecks_at(&self, k: usize) -> Option<bool> {
+        self.air_wrecks.iter().rev().find(|(at, _)| *at == k).map(|(_, on)| *on)
     }
 
     /// The machines the first player is switched to just before frame `k`, in the order they were.
@@ -1370,6 +1380,22 @@ impl PadTape {
                         (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()).collect();
                     tape.markers = bytes.ok_or_else(|| ParseError { line: n, message: "markers wants hex bytes".into() })?;
                 }
+                // The Air Wrecks switch from this frame on (P138): the frame, then on or off.
+                "air_wrecks" => {
+                    let (Some(at), Some(on), None) = (word.next().and_then(parse_u64), word.next(), word.next()) else {
+                        return err(n, "air_wrecks wants the frame it takes before, then on or off");
+                    };
+                    let on = match on {
+                        "on" => true,
+                        "off" => false,
+                        _ => return err(n, format!("air_wrecks wants on or off, not '{on}'")),
+                    };
+                    let at = at as usize;
+                    if tape.air_wrecks.last().is_some_and(|(last, _)| *last > at) {
+                        return err(n, format!("air_wrecks {at} comes after a later one"));
+                    }
+                    tape.air_wrecks.push((at, on));
+                }
                 // The first player's markers cleared before this frame (P99).
                 "markers_cleared" => {
                     let Some(at) = word.next().and_then(parse_u64) else {
@@ -1430,6 +1456,9 @@ impl PadTape {
         }
         for at in &self.cleared {
             let _ = writeln!(s, "markers_cleared {at}");
+        }
+        for (at, on) in &self.air_wrecks {
+            let _ = writeln!(s, "air_wrecks {at} {}", if *on { "on" } else { "off" });
         }
         for frame in &self.frames {
             let _ = write!(s, "frame 0x{:08x}", frame.dt);
@@ -1619,7 +1648,7 @@ pub fn play(tape: &PadTape, seed: u32) -> Playback {
 }
 
 /// Play a whole recording into a run that starts from `sim`, with the markers the tape started with
-/// when it says (P99). Panics on markers this build cannot read ([`PadTape::start_markers`]).
+/// when it says (P99) and the first player's Air Wrecks switch where it set it (P138). Panics on markers this build cannot read ([`PadTape::start_markers`]).
 pub fn play_from(tape: &PadTape, sim: Sim) -> Playback {
     let mut run = Playback::from_state(sim);
     if let Some(markers) = tape.start_markers().expect("the tape's markers") {
@@ -1628,6 +1657,9 @@ pub fn play_from(tape: &PadTape, sim: Sim) -> Playback {
     for (k, frame) in tape.frames.iter().enumerate() {
         if tape.cleared.contains(&k) {
             run.sim.markers.clear();
+        }
+        if let Some(on) = tape.air_wrecks_at(k) {
+            run.sim.rider.sense.air_wrecks = on;
         }
         run.advance(frame);
     }
@@ -2168,6 +2200,16 @@ impl Recorder {
         }
     }
 
+    /// Write down that the first player's Air Wrecks switch is now `on` (P138): the frames recorded
+    /// from here on ride with it. Two settings between the same two frames are one, the last.
+    pub fn air_wrecks(&mut self, on: bool) {
+        let at = self.tape.len();
+        if self.tape.air_wrecks.last().is_some_and(|(last, _)| *last == at) {
+            self.tape.air_wrecks.pop();
+        }
+        self.tape.air_wrecks.push((at, on));
+    }
+
     /// How many frames have been recorded.
     pub fn len(&self) -> usize {
         self.tape.len()
@@ -2237,6 +2279,12 @@ impl Head {
     /// (P102), in order, where the recording switched there.
     pub fn switches(&self) -> Vec<String> {
         self.tape.switches_at(self.at).map(str::to_string).collect()
+    }
+
+    /// The Air Wrecks switch the first player's ride takes before the frame [`Head::next`] hands
+    /// out next (P138), where the recording set it there.
+    pub fn air_wrecks(&self) -> Option<bool> {
+        self.tape.air_wrecks_at(self.at)
     }
 
     /// Whether the recording cleared the first player's markers before the frame [`Head::next`]

@@ -1583,6 +1583,15 @@ pub fn airborne_control(p: &Params, air: &mut Air, chassis: &mut Chassis, step: 
 /// the out-of-bounds test the original runs first, and the bike-against-bike loop it runs last, belong
 /// to the track and to collision rather than here.
 pub fn wreck_test(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, loads: &Loads) -> Option<Wreck> {
+    wreck_test_in(p, air, chassis, step, loads, true)
+}
+
+/// [`wreck_test`] with its airborne attitude clause switched (P138): `in_air` false skips the
+/// `NoseDive` and `Tail` answers for the bike pitched or rolled past its airborne limits, and asks
+/// everything else — the g loads, the ground pitch, a flip still torquing on a touch, the landing's
+/// crossup and the trick endings — as ever, so a landing on the roof still wrecks. True is the
+/// original, and [`wreck_test`] itself.
+pub fn wreck_test_in(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, loads: &Loads, in_air: bool) -> Option<Wreck> {
     if loads.fore_aft > p.back_wreck_speed_limit {
         return Some(Wreck::Back);
     }
@@ -1609,7 +1618,7 @@ pub fn wreck_test(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, loa
         return Some(Wreck::Tail);
     }
     let rolled = chassis.roll.abs() > p.airborne_roll_wreck_angle;
-    if air.airborne && !air.flipping && !step.spinning {
+    if in_air && air.airborne && !air.flipping && !step.spinning {
         if chassis.pitch < -p.airborne_pitch_down_wreck_angle || rolled {
             return Some(Wreck::NoseDive);
         }

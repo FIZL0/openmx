@@ -3,7 +3,7 @@
 //! else that peer is refused with a message saying what differs.
 //!
 //! Here that is the track, every player's bike set (the `.phy` the simulation loads for them, D7's loader), wrecks
-//! on or off (`game_sim::state::Sense::wrecks_enabled` in the shell), the biplane switch and every player's controller
+//! on or off (`game_sim::state::Sense::wrecks_enabled` in the shell), Air Wrecks on or off (`Sense::air_wrecks`, P138), the biplane switch and every player's controller
 //! preset (N13: the binding table their seat's bike is read through on every machine). A name is not enough
 //! for a bike set or a track: two discs (or a modded one) can hold different files under one name, so each peer
 //! also says what its own disc has under it, as a hash ([`Disc`]). The riders' looks (model, gear, colours) are not
@@ -49,6 +49,9 @@ pub struct Handshake {
     /// Every seated player's bike set in seat order, with this peer's disc's hash of it.
     pub bikes: Vec<(String, Option<u64>)>,
     pub wrecks: bool,
+    /// The room's Air Wrecks switch (P138); on from a peer that does not say.
+    #[serde(default = "crate::room::on")]
+    pub air_wrecks: bool,
     pub biplane: bool,
     /// Every seated player's controller preset (P79) in seat order: each machine reads that seat's pad through it.
     #[serde(default)]
@@ -86,6 +89,7 @@ impl Handshake {
             track_hash: disc.track(&room.track),
             bikes: room.seats.iter().flatten().map(|s| (s.pick.bike.clone(), disc.bike(&s.pick.bike))).collect(),
             wrecks: room.wrecks,
+            air_wrecks: room.air_wrecks,
             biplane: room.biplane,
             presets: room.seats.iter().flatten().map(|s| s.pick.preset).collect(),
             seed: room.seed,
@@ -121,6 +125,9 @@ impl Handshake {
         if self.wrecks != host.wrecks {
             return differ("wrecks", on(self.wrecks), on(host.wrecks));
         }
+        if self.air_wrecks != host.air_wrecks {
+            return differ("air wrecks", on(self.air_wrecks), on(host.air_wrecks));
+        }
         if self.biplane != host.biplane {
             return differ("the biplane", on(self.biplane), on(host.biplane));
         }
@@ -145,6 +152,7 @@ mod tests {
             track_hash: Some(1),
             bikes: vec![("race125p".into(), Some(7)), ("pro250a".into(), Some(8))],
             wrecks: true,
+            air_wrecks: true,
             biplane: false,
             presets: vec![0, 2],
             seed: 99,
@@ -168,6 +176,7 @@ mod tests {
         refused(Handshake { bikes: vec![("race125p".into(), None), ("pro250a".into(), Some(8))], ..h.clone() }, "isn't on your disc");
         refused(Handshake { bikes: vec![("race125p".into(), Some(7))], ..h.clone() }, "number of riders");
         refused(Handshake { wrecks: false, ..h.clone() }, "wrecks differs (host: on, you: off)");
+        refused(Handshake { air_wrecks: false, ..h.clone() }, "air wrecks differs (host: on, you: off)");
         refused(Handshake { biplane: true, ..h.clone() }, "the biplane differs");
         refused(Handshake { presets: vec![0, 3], ..h.clone() }, "rider 2's controller preset differs (host: 2, you: 3)");
         refused(Handshake { presets: vec![0], ..h.clone() }, "rider 2's controller preset differs (host: 2, you: none)");
