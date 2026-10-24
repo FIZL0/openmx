@@ -1,0 +1,11 @@
+# S106 roll2: roll's gentle twin. Half a second of gas (ridden time) from first_recording's start, off
+# the gas to coast the 35 ft to the lip of the face ahead, then the brake held from just before the
+# edge all the way down. Wall-clock, at a quarter speed.
+sleep 2000
+down cross
+sleep 2000
+up cross
+sleep 8000
+down square
+sleep 30000
+release

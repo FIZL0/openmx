@@ -9,4 +9,7 @@ and spin inertia whole, and proves them bit-exact with the function oracle over 
 `BodyTireForcePosition` did both jobs, and in the original it is only the arm. On the human's minute,
 S32's tick-1 vertical shove went from 0.077 to 0.00086. The brief's four captures were not made: no
 capture can replay bit-exact until a run starts from the original's wheel state. That is S64, and
-S58 is blocked after it. Details in `1-tyre-slip-PART.md`.
+S58 is blocked after it. Details in `1-tyre-slip-FINAL.md`.
+
+Reopened 2026-10-23 once S64 had landed: the four captures and their replays are in
+`../2026-10-23-s58-slip-cases/`.

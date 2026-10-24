@@ -1,0 +1,11 @@
+# S106 roll: from first_recording's start on the lip of the 50-degree drop ahead, a short burst of gas
+# to roll over the edge, off the gas, then the brake held all the way down the face, nose first.
+# Wall-clock, at a quarter speed (4 ms here is 1 ms ridden).
+sleep 2000
+down cross
+sleep 5000
+up cross
+sleep 3000
+down square
+sleep 30000
+release

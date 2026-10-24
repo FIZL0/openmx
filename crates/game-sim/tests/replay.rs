@@ -3552,6 +3552,12 @@ impl SaveState {
         Self::open_image(&at, &[0x34, 0x34, 0x8, 0x8, 0x0])
     }
 
+    /// Any save state's RAM image whose rider chain lands where the recording's does (S106's
+    /// teleported states keep the same actors).
+    fn open_at(at: PathBuf) -> Option<SaveState> {
+        Self::open_image(&at, &[0x34, 0x34, 0x8, 0x8, 0x0])
+    }
+
     /// [`SaveState::open`] on another image, whose human rider is `hops` down from the game manager.
     fn open_image(at: &std::path::Path, hops: &[u32]) -> Option<SaveState> {
         let Ok(ram) = std::fs::read(at) else {
@@ -4077,9 +4083,10 @@ const GAS_RATE_LIMIT: F = F(10.0);
 /// * **The throttle moved 18 times in sixty seconds** — nine stabs, the longest held for 346 ticks
 ///   (11.5 s) and the shortest for 8 — so what the rider did with it was pin it and shut it.
 /// * **What part throttle there is, the bike makes itself.** Run the recording through the port's own
-///   poll and the 125's `GasRateLimit`, and `Held::gas` is strictly between shut and pinned on 54 of
-///   the 1,810 ticks: three ticks after each of the 18 edges, 3% of the minute and not one tick of it
-///   asked for by the rider.
+///   poll and the 125's `GasRateLimit`, and `Held::gas` is strictly between shut and pinned on 27 of
+///   the 1,810 ticks: three ticks after each of the nine stabs, 1.5% of the minute and not one tick of
+///   it asked for by the rider. A release shuts it the same tick: the original's limiter only holds
+///   the gas back on the way up (S58; it was 54, three either side of all 18 edges, before).
 ///
 /// That is a measurement and not a verdict on the shell: a recording made through PCSX2 can only
 /// carry what the host pad reported, so this says nothing about what a DualShock 2 on a PlayStation 2
@@ -4197,9 +4204,9 @@ fn the_human_recording_is_a_switch_and_the_part_throttle_in_it_is_the_rate_limit
         stick_bytes.len(),
     );
     assert_eq!(
-        held_part, 54,
-        "the 125's rate limit leaves part throttle on {held_part} of {ticks} ticks, not 54 — three \
-         ticks either side of each of the {edges} edges: either the limit, the step or the recording \
+        held_part, 27,
+        "the 125's rate limit leaves part throttle on {held_part} of {ticks} ticks, not 27 — three \
+         ticks after each of the {stabs} stabs: either the limit, the step or the recording \
          is not the one this was measured on"
     );
     assert_eq!(held_pinned, 1_276, "and full throttle on the rest of the time the button was down");
@@ -6519,6 +6526,25 @@ impl SaveState {
         Some(())
     }
 
+    /// The engine's own state off the rider's `+0x7b8`, at the offsets `tests/move.rs` proves
+    /// `engine_update` on: the gear `+0x68` and its ratios `+0x80`/`+0x84`, the clutch's launch
+    /// scale `+0x88` and lock `+0x64`, the revs `+0xa8`, and the curve's cursor `+0x90`/`+0x94`. The
+    /// acceptance start leaves the recording's; S106's teleported states were saved in another gear
+    /// and with the clutch slipping, and the port's engine drove a braked rear into a spin at tick 1.
+    fn seed_engine_state(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        let e = self.rider_at(0x7b8)?;
+        let eng = &mut ride.engine;
+        eng.gear = self.word(e + 0x68)? as i32;
+        eng.ratio = self.float(e + 0x80)?;
+        eng.inv_ratio = self.float(e + 0x84)?;
+        eng.clutch_torque_scale = self.float(e + 0x88)?;
+        eng.clutch_locked = self.flag(e + 0x64)?;
+        eng.rpm = self.float(e + 0xa8)?;
+        eng.curve.index = self.word(e + 0x90)?;
+        eng.curve = game_sim::r#move::Curve::at(eng.curve.points, eng.curve.index, self.float(e + 0x94)?);
+        Some(())
+    }
+
     /// The balance and the pitch controller's memory off the rider (`r#move::Ride`'s offsets).
     fn seed_balance(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
         let r = self.rider;
@@ -6548,6 +6574,24 @@ impl SaveState {
         air.hang_time = self.float(r + 0x4f0)?;
         air.contact_vel = self.vf(r + 0x430)?;
         air.crossup = self.float(r + 0x600)?;
+        Some(())
+    }
+
+    /// The levers after the rate limiter (`ride::Held`), off the rider: the brake `+0x650` and its
+    /// rear copy `+0x654`, the gas `+0x658`, the clutch `+0x65c`, the squared stick `+0x628`/`+0x62c`
+    /// and the lean `+0x670`/`+0x674` (the input limiter's, oracle S58). A state saved with a lever
+    /// held (S106's braked bikes on a slope) has it at the top already; left at its default the
+    /// port's brake would walk up from zero over the first ticks.
+    fn seed_levers(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        let r = self.rider;
+        let h = &mut ride.held;
+        h.brake = self.float(r + 0x650)?;
+        h.front_brake = h.brake;
+        h.rear_brake = self.float(r + 0x654)?;
+        h.gas = self.float(r + 0x658)?;
+        h.clutch = self.float(r + 0x65c)?;
+        h.stick = (self.float(r + 0x628)?, self.float(r + 0x62c)?);
+        h.lean = (self.float(r + 0x670)?, self.float(r + 0x674)?);
         Some(())
     }
 }
@@ -6813,6 +6857,28 @@ fn retick(mut w: Watch, ticks: &[u64], shift: u64) -> Watch {
     w
 }
 
+/// Every lane of a save-state capture ([`chassis_lanes`], [`slip_lanes`] and the chassis' speed) that
+/// the capture has a column for, on `ticks`.
+fn save_state_watches(cap: &Capture, ticks: &[u64]) -> Vec<Watch> {
+    let mut watches = Vec::new();
+    for (col, path) in chassis_lanes() {
+        let Ok(w) = cap.float(&col, &path) else { continue };
+        watches.push(retick(w, ticks, 0));
+    }
+    // The chassis' speed is measured at the top of a frame, from the velocity the frame before
+    // left (`chassis::measure`). The original's rows carry it already measured — every row's
+    // `ch_speed` is the length of its own `ch_vel`, the save state's too — and the port's is
+    // measured a tick later: a row's speed is the port's on the tick after it.
+    if let Ok(w) = cap.float("ch_speed", "rider.ride.chassis.speed") {
+        watches.push(retick(w, ticks, 1));
+    }
+    for (col, path) in slip_lanes() {
+        let Ok(w) = cap.bool(&col, &path) else { continue };
+        watches.push(retick(w, ticks, 0));
+    }
+    watches
+}
+
 /// The tick [`the_save_state_run_starts_from_the_originals_wheels`] agrees through on every lane: tick
 /// 0 is the save state word for word, and tick 1 parts by ulps on the lateral terms (`vel[0]`, the tire
 /// forces' `x`) and by more on two — the roll quaternion's `z` (1.3e-3 of it) and the pitch's angular
@@ -6855,22 +6921,7 @@ fn the_save_state_run_starts_from_the_originals_wheels() {
         st.seed_balance(ride).expect("the balance");
         st.seed_engine_outputs(ride).expect("the engine");
         st.seed_air(ride).expect("the air state");
-        let mut watches = Vec::new();
-        for (col, path) in chassis_lanes() {
-            let Ok(w) = cap.float(&col, &path) else { continue };
-            watches.push(retick(w, &ticks, 0));
-        }
-        // The chassis' speed is measured at the top of a frame, from the velocity the frame before
-        // left (`chassis::measure`). The original's rows carry it already measured — every row's
-        // `ch_speed` is the length of its own `ch_vel`, the save state's too — and the port's is
-        // measured a tick later: a row's speed is the port's on the tick after it.
-        if let Ok(w) = cap.float("ch_speed", "rider.ride.chassis.speed") {
-            watches.push(retick(w, &ticks, 1));
-        }
-        for (col, path) in slip_lanes() {
-            let Ok(w) = cap.bool(&col, &path) else { continue };
-            watches.push(retick(w, &ticks, 0));
-        }
+        let watches = save_state_watches(&cap, &ticks);
         let last = *ticks.last().unwrap() as usize + 1;
         let f = Fixture {
             name: format!("{name} from the save state"),
@@ -7602,4 +7653,317 @@ fn the_vehicle_update_leaves_the_chassis_its_nodes_quaternion() {
         ran += 1;
     }
     println!("{ran} states updated");
+}
+
+// --- S58: the tyres' slip, case by case ------------------------------------------------------------
+
+/// S58's captures of `watch/s58-slip.toml`, each the recording's own save state ridden on with the
+/// kit's pad at a quarter speed (`research/journal/2026-10-21-s58-tyre-slip/capture/` has the pad
+/// scripts and the job), in `context/capture/s58-slip/`.
+///
+/// With each, the last tick the bike's path (`origin`) is bit-exact and the last tick all four slip
+/// flags agree, as S58 left them: a ratchet, to raise. The path parts by an ulp first (S107's drift
+/// from tick 1, grown); the slip flags part after the launch's, the brake's and the traverse's landing
+/// off the jump face at tick 124 and after the turn's quaternion sign flip at 130 (journal
+/// 2026-10-23-s58-slip-cases).
+const S58_CASES: [(&str, &str, u64, u64); 4] = [
+    ("turn", "a hard turn at speed on flat dirt", 82, 146),
+    ("launch", "a full-gas launch from standing", 96, 126),
+    ("brake", "a locked brake at speed", 105, 130),
+    ("traverse", "a part-steered ride up the jump face and across a side slope", 82, 123),
+];
+
+/// How many ticks ahead of a quarter-speed row's ride state its pad is. A row at tick `t` (the ride
+/// as it is after tick `t`, [`quarter_ticks`]) carries the control state tick `t + 2` rides on, which
+/// is the port's `inputs[t + 1]` (`inputs[k]` drives tick `k + 1`). Measured on S58's launch: with
+/// the pad a tick later (`inputs[t]`) the port's rear wheel took the gas's first torque (379.33) and
+/// its spin (1.19) at tick 31, the original at 32, every lane one tick ahead; with it here they come
+/// on the same tick.
+const PAD_LEADS: usize = 1;
+
+/// Each tick's input in a save-state capture ridden with a pad: from a row at tick `t`, the report
+/// its pad buffers say was read ([`PadTape::from_capture`]'s half), `PAD_LEADS` on; on an index no
+/// row gives (the ones up to the second row's, and the one a late row skips), the nearest one before
+/// it, or after it before the first. Checked against the control state the same row carries, which
+/// is what the game itself believed was held.
+fn save_state_inputs(cap: &Capture, ticks: &[u64]) -> Result<Vec<Input>, String> {
+    let tape = PadTape::from_capture(cap).map_err(|e| e.to_string())?;
+    let last = *ticks.last().ok_or("no rows")? as usize;
+    let mut on = vec![None; last + 1 + PAD_LEADS];
+    // The tape drops row 0 (a full-speed row is the tick before it), so row r is its frame r - 1.
+    for (r, &t) in ticks.iter().enumerate().skip(1) {
+        let input = tape.frames[r - 1].input();
+        let mut held = 0u16;
+        for (i, c) in Control::ALL.iter().enumerate() {
+            if cell(cap, r, column(cap, &format!("ctl{i}.held"))?) == "1" {
+                held |= c.mask();
+            }
+        }
+        if held != input.buttons {
+            return Err(format!(
+                "row {r}: the pad read {:#06x} but the game held {held:#06x}",
+                input.buttons
+            ));
+        }
+        on[t as usize + PAD_LEADS] = Some(input);
+    }
+    let mut now = on.iter().flatten().next().copied().ok_or("no input")?;
+    Ok(on
+        .into_iter()
+        .map(|i| {
+            if let Some(i) = i {
+                now = i;
+            }
+            now
+        })
+        .collect())
+}
+
+/// **Each of S58's slip cases, replayed in the port from the save state's whole bike** on the pad the
+/// original read, and every lane's first divergence printed, earliest first: the slip flags, each
+/// wheel's spin, local velocity and force, the surface under it, and the chassis' path.
+#[test]
+fn the_slip_cases_replay_from_the_save_state() {
+    let Some((_, acc)) = acceptance_capture() else { return };
+    let Some(st) = SaveState::open().filter(|s| s.leads(&acc)) else { return };
+    let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+    let seed = acceptance_fixture(&acc).map(|f| f.seed).unwrap_or(0);
+    let dir = private_dir("capture").join("s58-slip");
+    for (case, what, path_through, slip_through) in S58_CASES {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{case}.csv"))) else {
+            println!("{case} ({what}): no capture — `watch/s58-slip.toml` says how it is recorded");
+            continue;
+        };
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+        let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+        let inputs = save_state_inputs(&cap, &ticks).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+        in_the_world_of(&acc, |world, named, bike| {
+            let mut sim = acceptance_start(&acc, seed, bike).unwrap();
+            let ride = &mut sim.rider.ride;
+            st.seed_chassis(ride).expect("the chassis");
+            st.seed_wheels(ride).expect("both wheels");
+            st.seed_balance(ride).expect("the balance");
+            st.seed_engine_outputs(ride).expect("the engine");
+            st.seed_air(ride).expect("the air state");
+            let mut watches = save_state_watches(&cap, &ticks);
+            for (col, wheel) in [("f_surface", "front"), ("r_surface", "rear")] {
+                if let Ok(w) = cap.uint(col, &format!("rider.ride.{wheel}.surface")) {
+                    watches.push(retick(w, &ticks, 0));
+                }
+            }
+            let f = Fixture {
+                name: format!("{case} from the save state"),
+                seed,
+                start: Some(sim),
+                inputs: inputs.clone(),
+                watches,
+                world: Some(named.clone()),
+                ..Default::default()
+            };
+            // S58_TRACE="case:from:to:lane,lane": the original's and the port's values side by side.
+            if let Ok(t) = std::env::var("S58_TRACE") {
+                let parts: Vec<&str> = t.split(':').collect();
+                if parts[0] == case {
+                    let (from, to): (u64, u64) = (parts[1].parse().unwrap(), parts[2].parse().unwrap());
+                    let mut sim = f.initial();
+                    for (k, &input) in f.inputs.iter().enumerate().take(to as usize) {
+                        sim.tick_in(input, world);
+                        let tick = k as u64 + 1;
+                        if tick < from {
+                            continue;
+                        }
+                        let dump = game_sim::hash::Dump::of(&sim);
+                        let mut line = format!("{tick:4} in {:#06x} {:?}", input.buttons, input.stick);
+                        for lane in parts[3].split(',') {
+                            let w = f.watches.iter().find(|w| w.path.ends_with(lane));
+                            let want = w.and_then(|w| w.samples.iter().find(|s| s.tick == tick)).map(|s| format!("{}", s.value));
+                            let path = w.map(|w| w.path.clone()).unwrap_or(lane.to_string());
+                            let got = dump.get(&path).map(|l| format!("{l}"));
+                            line += &format!(" | {lane} {} / {}", want.unwrap_or("-".into()), got.unwrap_or("?".into()));
+                        }
+                        println!("{line}");
+                    }
+                }
+            }
+            let mut parted = Vec::new();
+            for w in &f.watches {
+                let one = Fixture { name: w.path.clone(), watches: vec![w.clone()], hashes: Vec::new(), ..f.clone() };
+                if let Err(d) = replay::verify_in(&one, world) {
+                    parted.push((d.tick, d.to_string()));
+                }
+            }
+            parted.sort();
+            println!(
+                "{case} ({what}): {} ticks, {} of {} lanes part",
+                inputs.len(),
+                parted.len(),
+                f.watches.len()
+            );
+            for (_, d) in parted.iter().take(6) {
+                println!("  {d}");
+            }
+            // And the slip's own lanes, wherever they come in the order.
+            let slip = ["slip.", ".surface", "mv.spin", ".origin[", "local_force", "drive_torque"];
+            for (_, d) in parted.iter().skip(6).filter(|(_, d)| slip.iter().any(|s| d.contains(s))) {
+                println!("  {d}");
+            }
+            let agree: Vec<&str> = f
+                .watches
+                .iter()
+                .map(|w| w.path.as_str())
+                .filter(|p| !parted.iter().any(|(_, d)| d.contains(&format!("{p} "))))
+                .collect();
+            println!("  agree on every tick: {}", agree.join(" "));
+            let first = |lane: &str| parted.iter().find(|(_, d)| d.contains(lane)).map_or(u64::MAX, |(t, _)| *t);
+            assert!(first(".origin[") > path_through, "{case}: the path parts at {}, not after {path_through}", first(".origin["));
+            assert!(first(".slip.") > slip_through, "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
+        });
+    }
+}
+
+// --- S106: the brake held on a steep face ------------------------------------------------------------
+
+/// **One save-state capture ridden with a pad, replayed in the port from the state's whole bike** on
+/// the pad the original read, and every lane's first divergence printed, earliest first: the slip
+/// flags, each wheel's spin, local velocity and force, the surface under it, and the chassis' path.
+/// S58's test's body, for S106's braked slopes, with the levers and the engine seeded too. Returns
+/// every lane that parts, at its first tick. `late` names ticks whose row the recorder read out of step with the ride (S106's nose: the row
+/// after the load is the next tick's), whose samples are not compared.
+fn replay_a_save_state_case(acc: &Capture, st: &SaveState, seed: u32, text: &str, case: &str, what: &str,
+                            late: &[u64]) -> Vec<(u64, String)> {
+    let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+    let cap = Capture::parse(text).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+    let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+    let inputs = save_state_inputs(&cap, &ticks).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+    in_the_world_of(acc, |world, named, bike| {
+        let mut sim = acceptance_start(acc, seed, bike).unwrap();
+        let ride = &mut sim.rider.ride;
+        st.seed_chassis(ride).expect("the chassis");
+        st.seed_wheels(ride).expect("both wheels");
+        st.seed_balance(ride).expect("the balance");
+        st.seed_engine_outputs(ride).expect("the engine");
+        st.seed_air(ride).expect("the air state");
+        st.seed_levers(ride).expect("the levers");
+        st.seed_engine_state(ride).expect("the engine's state");
+        let mut watches = save_state_watches(&cap, &ticks);
+        for (col, wheel) in [("f_surface", "front"), ("r_surface", "rear")] {
+            if let Ok(w) = cap.uint(col, &format!("rider.ride.{wheel}.surface")) {
+                watches.push(retick(w, &ticks, 0));
+            }
+        }
+        for w in &mut watches {
+            w.samples.retain(|s| !late.contains(&s.tick));
+        }
+        let f = Fixture {
+            name: format!("{case} from the save state"),
+            seed,
+            start: Some(sim),
+            inputs: inputs.clone(),
+            watches,
+            world: Some(named.clone()),
+            ..Default::default()
+        };
+        // S58_TRACE="case:from:to:lane,lane": the original's and the port's values side by side.
+        if let Ok(t) = std::env::var("S58_TRACE") {
+            let parts: Vec<&str> = t.split(':').collect();
+            if parts[0] == case {
+                let (from, to): (u64, u64) = (parts[1].parse().unwrap(), parts[2].parse().unwrap());
+                let mut sim = f.initial();
+                for (k, &input) in f.inputs.iter().enumerate().take(to as usize) {
+                    sim.tick_in(input, world);
+                    let tick = k as u64 + 1;
+                    if tick < from {
+                        continue;
+                    }
+                    let dump = game_sim::hash::Dump::of(&sim);
+                    let mut line = format!("{tick:4} in {:#06x} {:?}", input.buttons, input.stick);
+                    for lane in parts[3].split(',') {
+                        let w = f.watches.iter().find(|w| w.path.ends_with(lane));
+                        let want = w.and_then(|w| w.samples.iter().find(|s| s.tick == tick)).map(|s| format!("{}", s.value));
+                        let path = w.map(|w| w.path.clone()).unwrap_or(lane.to_string());
+                        let got = dump.get(&path).map(|l| format!("{l}"));
+                        line += &format!(" | {lane} {} / {}", want.unwrap_or("-".into()), got.unwrap_or("?".into()));
+                    }
+                    println!("{line}");
+                }
+            }
+        }
+        let mut parted = Vec::new();
+        for w in &f.watches {
+            let one = Fixture { name: w.path.clone(), watches: vec![w.clone()], hashes: Vec::new(), ..f.clone() };
+            if let Err(d) = replay::verify_in(&one, world) {
+                parted.push((d.tick, d.to_string()));
+            }
+        }
+        parted.sort();
+        println!(
+            "{case} ({what}): {} ticks, {} of {} lanes part",
+            inputs.len(),
+            parted.len(),
+            f.watches.len()
+        );
+        for (_, d) in parted.iter().take(6) {
+            println!("  {d}");
+        }
+        // And the slip's own lanes, wherever they come in the order.
+        let slip = ["slip.", ".surface", "mv.spin", ".origin[", "local_force", "drive_torque"];
+        for (_, d) in parted.iter().skip(6).filter(|(_, d)| slip.iter().any(|s| d.contains(s))) {
+            println!("  {d}");
+        }
+        let agree: Vec<&str> = f
+            .watches
+            .iter()
+            .map(|w| w.path.as_str())
+            .filter(|p| !parted.iter().any(|(_, d)| d.contains(&format!("{p} "))))
+            .collect();
+        println!("  agree on every tick: {}", agree.join(" "));
+        parted
+    })
+    .unwrap_or_default()
+}
+
+/// S106's captures of `watch/s58-slip.toml` (`research/journal/2026-10-24-s106-brake-slope-slide/
+/// capture/` has the scripts), in `context/capture/s106-slope/`, each with the save state it was
+/// ridden from: the brake held from the first frame, the bike stood by `tele.py` on the 53° face
+/// ahead of first_recording's start (nose down) and on the 46° face to its right (side on), and from
+/// the start itself, rolled over the lip and braked down the face (`roll`: 37 ft/s off the lip, a
+/// 45-tick flight and a landing at 64 ft/s; `roll2`: coasted on at 15 ft/s, braked to a stop on the
+/// face, held there 150 ticks and let go). The states' RAM images are `./kit state ram`'s of the
+/// slots `tele.py` saved, in `context/states/`. Then the ticks not compared (`late`), and the last
+/// tick the path and the slip flags agree through. The slip flags agree on every tick of nose, side
+/// and roll2; the path parts by ulps (S107's drift), and roll's slip at the 64 ft/s landing (S67).
+const S106_CASES: [(&str, &str, &str, &[u64], u64, u64); 4] = [
+    ("nose", "s106-nose", "the brake held from standing on a 53° face, nose down", &[1], 27, 200),
+    ("side", "s106-side", "the brake held from standing on a 46° face, side on", &[], 76, 200),
+    ("roll", "", "rolled over the lip and braked down the face", &[], 61, 112),
+    ("roll2", "", "coasted over the lip at 15 ft/s, braked to a stop on the face, then let go", &[], 73, 421),
+];
+
+/// **Each of S106's braked slopes, replayed in the port from its own save state**
+/// ([`replay_a_save_state_case`]): the path (the chassis' origin) and the wheels' slip flags agree
+/// with the original's past the ticks in [`S106_CASES`], which ratchet up.
+#[test]
+fn the_braked_slopes_replay_from_their_save_states() {
+    let Some((_, acc)) = acceptance_capture() else { return };
+    let seed = acceptance_fixture(&acc).map(|f| f.seed).unwrap_or(0);
+    let dir = private_dir("capture").join("s106-slope");
+    for (case, image, what, late, path_through, slip_through) in S106_CASES {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{case}.csv"))) else {
+            println!("{case} ({what}): no capture — S106's journal says how it is recorded");
+            continue;
+        };
+        let st = if image.is_empty() {
+            SaveState::open().filter(|s| s.leads(&acc))
+        } else {
+            SaveState::open_at(private_dir("states").join(format!("{image}.eeMemory.bin")))
+        };
+        let Some(st) = st else {
+            println!("{case} ({what}): no RAM image of its save state");
+            continue;
+        };
+        let parted = replay_a_save_state_case(&acc, &st, seed, &text, case, what, late);
+        let first = |lane: &str| parted.iter().find(|(_, d)| d.contains(lane)).map_or(u64::MAX, |(t, _)| *t);
+        assert!(first(".origin[") > path_through, "{case}: the path parts at {}, not after {path_through}", first(".origin["));
+        assert!(first(".slip.") > slip_through, "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
+    }
 }

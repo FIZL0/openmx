@@ -133,8 +133,8 @@ pub struct Air {
     pub was_airborne: bool,
     /// Seconds since the wheels left the ground; zeroed on the substep they leave.
     pub hang_time: F,
-    /// The velocity the bike is travelling at the contact patch: the touching wheel's, or the
-    /// chassis' own in its local frame when neither touches.
+    /// The bike's velocity in its own frame (`+0x430`, the speed `+0x438` its `z`): the touching
+    /// wheel's view of the chassis (`+0x190`), or the chassis' own when neither touches.
     pub contact_vel: Vf,
     /// The crossup angle: how far the bike points away from where it is going, signed, in radians,
     /// zero whenever it cannot be measured (mid-backflip, or below [`SLOW`]).
@@ -205,7 +205,7 @@ pub struct Step {
     pub up: Vf,
     pub front_contact: bool,
     pub rear_contact: bool,
-    /// Each wheel's own velocity at its contact patch.
+    /// Each wheel's view of the chassis' velocity, in the chassis' frame (`+0x190`).
     pub front_vel: Vf,
     pub rear_vel: Vf,
     /// The left stick, `+0x628`/`+0x62c`: the player-range deflection with the d-pad override, then
