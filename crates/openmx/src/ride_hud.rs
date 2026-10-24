@@ -201,6 +201,7 @@ pub struct Tracker {
 /// The pop-up as it stands.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Popup {
+    /// The chain's entries, oldest first, repeats folded ([`folded`]).
     pub names: Vec<String>,
     pub points: String,
     /// The combo's length, shown beside the points from two on.
@@ -213,6 +214,22 @@ pub struct Popup {
     pub scale: f32,
     pub alpha: f32,
     pub newest: (f32, f32),
+}
+
+/// The chain as the pop-up spells it: a trick done again straight after itself is one entry with its
+/// count, `Backflip x2`, and the count grows in as a new name would. Only back-to-back repeats fold, so
+/// a broken run keeps its order (`Backflip + Can Can + Backflip`). The original draws no chain at all —
+/// only the newest name, over its points and the combo's `X n` — so this is ours; the score's nodes
+/// and the multiplier still count every trick.
+pub fn folded(names: &[String]) -> Vec<String> {
+    let mut runs: Vec<(&String, usize)> = Vec::new();
+    for n in names {
+        match runs.last_mut() {
+            Some((last, count)) if *last == n => *count += 1,
+            _ => runs.push((n, 1)),
+        }
+    }
+    runs.into_iter().map(|(n, count)| if count > 1 { format!("{n} x{count}") } else { n.clone() }).collect()
 }
 
 fn since(now: Instant, then: Instant) -> f32 {
@@ -279,7 +296,7 @@ impl Tracker {
         let n = self.names.len();
         let colour = |landed| if landed { LAND_COLOUR } else { BAIL_COLOUR };
         let (names, points, mult, outcome, colour, out, newest) = match self.out {
-            None => (self.names.clone(), grouped(self.points), (n >= 2).then_some(n), None, ORANGE, 0.0, popped(self.popped)),
+            None => (folded(&self.names), grouped(self.points), (n >= 2).then_some(n), None, ORANGE, 0.0, popped(self.popped)),
             // A landed chain's total pops in where the chain was, stands, then plays out.
             Some(o) if o.totals() => {
                 let t = ((since(now, o.at) - HOLD) / OUT).clamp(0.0, 1.0);
@@ -288,7 +305,7 @@ impl Tracker {
             }
             Some(o) => {
                 let t = (since(now, o.at) / OUT).clamp(0.0, 1.0);
-                (self.names.clone(), grouped(self.points), (n >= 2).then_some(n), Some(o.landed), colour(o.landed), t, (1.0, 1.0))
+                (folded(&self.names), grouped(self.points), (n >= 2).then_some(n), Some(o.landed), colour(o.landed), t, (1.0, 1.0))
             }
         };
         Some(Popup { names, points, mult, outcome, colour, scale: 1.0 - (1.0 - OUT_TO) * out, alpha: 1.0 - out, newest })
@@ -619,14 +636,15 @@ fn mix(a: [u8; 4], b: [u8; 4], k: f32) -> [u8; 4] {
     std::array::from_fn(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * k).round() as u8)
 }
 
-/// The trick pop-up, low centre: the combo's names joined by `+` over its points and its length, in
-/// the original's orange ringed dark; the newest name and the points grow in from half their size,
-/// and an ended combo shrinks away, fading.
+/// The trick pop-up, low centre: the combo's names, a back-to-back repeat folded to `Name xN`
+/// ([`folded`]), joined by `+` over its points and its length, in the original's orange ringed dark;
+/// the newest name and the points grow in from half their size, and an ended combo shrinks away,
+/// fading.
 fn trick(pen: &mut Pen, p: &Popup) -> Vec<Line> {
     pen.corner = Corner::Bottom;
     pen.alpha = p.alpha;
     let (cx, cy) = TRICK_AT;
-    // The names, the latest three, shrunk to fit across.
+    // The names, the latest three folded entries, shrunk to fit across.
     let mut names: Vec<String> = p.names.iter().rev().take(3).rev().cloned().collect();
     if p.names.len() > 3 {
         names.insert(0, "…".into());
