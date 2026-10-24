@@ -478,6 +478,7 @@ fn the_original_rides_off_each_edge() {
                 ai_route: false,
                 owner: Some(Owner { human: true, screen: true }),
                 wrecks_enabled: true,
+                air_wrecks: true,
                 settles,
             };
             m.step(dt, sense, p, |_| (j == 1).then_some(Wreck::CANNONBALL), || paged).reset

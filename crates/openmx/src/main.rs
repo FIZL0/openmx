@@ -1000,6 +1000,10 @@ struct Args {
     /// it says it is: a way to ride without being judged, not a way to ride at all. The g loads are
     /// still a task of their own.
     wrecks: bool,
+    /// Whether the bike's attitude in the air can throw the rider off
+    /// ([`game_sim::state::Sense::air_wrecks`], P138): the Settings screen's Air Wrecks row, which
+    /// `--no-air-wrecks` turns off. On by default, the original's.
+    air_wrecks: bool,
     /// `--modifiers TEXT` (P55): the game modifiers the ride loads with, as `settings.txt` spells
     /// them (`gravity=50 bike_speed.1=200`). The original game's by default; under the front end the
     /// Settings screen's unless this asked for others. A `--play` tape rides with its own, and a
@@ -1554,6 +1558,7 @@ fn front_end(args: Args) -> Result<(), String> {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
                 }
                 a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
+                a.air_wrecks = args.air_wrecks && shell.front.menu.settings.air_wrecks;
                 if args.modifiers.is_original() {
                     a.modifiers = shell.front.menu.settings.modifiers;
                 }
@@ -1645,6 +1650,7 @@ fn front_end(args: Args) -> Result<(), String> {
                     a.render_scale = shell.front.menu.settings.render_scale.fraction();
                 }
                 a.wrecks = room.wrecks;
+                a.air_wrecks = room.air_wrecks;
                 // This machine's rider in the first seat's look (P86), as the room was told.
                 a.look = shell.front.menu.picks.0[0].look.clone();
                 a.wiring = shell.front.wiring();
@@ -2857,6 +2863,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             rider.ride.front.steer_axis = game_sim::tire::steering_axis(h, s);
         }
         rider.sense.wrecks_enabled = args.wrecks;
+        rider.sense.air_wrecks = args.air_wrecks;
         // The eight numbers the body's *step* reads, which `Rider::new` leaves at zero and says a shell
         // is expected to fill: the five fade rates, the stunt cross-fade's cap and the pose grid's three
         // speed thresholds, as V12 measured them off the body's own object in the running original. With
@@ -3175,6 +3182,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let mut recorder = Recorder::new(format!("{} on {} / {}", args.rider, args.track, args.bike));
         // A modified ride's tape carries its modifiers, so it replays on them (P55).
         recorder.tape.modifiers = mods;
+        // and a ride with Air Wrecks off says so before its first frame (P138)
+        if !args.air_wrecks {
+            recorder.air_wrecks(false);
+        }
         recorder
     });
     // The drawn ground's chunks (P127), the longest part of a world's load, counted for the bar.
@@ -3898,6 +3909,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let home = Arc::new(vehicle::home(&starts, heading, &bays));
     seats.iter_mut().for_each(|s| s.sim.home = Arc::clone(&home));
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
+    // A played tape rides Air Wrecks as it was made (P138): on, the original's, until the tape says
+    // otherwise, whatever the Settings screen or the command line say.
+    if head.is_some() {
+        world.seats[0].sim.rider.sense.air_wrecks = true;
+    }
     // The start zones' portals (V51), laid over the ground once: they never move.
     let zone_portals: Vec<portal::Portal> = portal::shown(&zone_spots, false)
         .iter()
@@ -4114,11 +4130,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             && front.network.disc.phy(&set).is_some_and(|b| *b == phy_bytes);
         front.menu.opening = if can { menu::Opening::Can } else { menu::Opening::No };
         front.menu.mods_lock = mods_lock(head.is_some(), online.as_ref().map(online::Online::host));
+        front.menu.air_lock = air_lock(head.is_some(), online.is_some());
         front.menu.leave_to = online.as_ref().map_or(menu::LeaveTo::Main, online::Online::leaves_to);
     }
     // The modifiers the Settings screen last said, so that the pause closing on a set the player
     // changed puts it on the ride (P98) and a `--modifiers` ride the player did not touch keeps its own.
     let mut menu_mods = front.as_deref().map(|f| f.menu.settings.modifiers);
+    // And the Air Wrecks switch it last said (P138), taken the same way at the pause's close.
+    let mut menu_air = front.as_deref().map(|f| f.menu.settings.air_wrecks);
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
     let mut seated = vec![true; world.seats.len()];
 
@@ -4243,6 +4262,14 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 tape.markers_cleared();
             }
             println!("markers: cleared (the tape's, before frame {})", head.as_ref().map_or(0, Head::at));
+        }
+        // And set Air Wrecks there (P138).
+        if let Some(on) = head.as_ref().and_then(Head::air_wrecks) {
+            world.seats[0].sim.rider.sense.air_wrecks = on;
+            if let Some(tape) = &mut world.tape {
+                tape.air_wrecks(on);
+            }
+            println!("air wrecks: {} (the tape's, before frame {})", if on { "on" } else { "off" }, head.as_ref().map_or(0, Head::at));
         }
         match &mut head {
             // The seats', otherwise: seat i feeds player i's own pad port (V22's players). A seat
@@ -4498,6 +4525,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         let settings = &front.menu.settings;
                         let mut room = openmx_net::Room::new(&settings.name, &args.track, settings.lobby_seats);
                         room.wrecks = args.wrecks && settings.wrecks;
+                        room.air_wrecks = args.air_wrecks && settings.air_wrecks;
                         room.modifiers = mods.text();
                         let mut pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
                         // the preset this seat rides on now (N13), which the room tells a joiner's machine
@@ -4520,6 +4548,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                                 on.bays(online_bays.clone());
                                 online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some(on.host()));
+                                front.menu.air_lock = air_lock(head.is_some(), true);
                                 online = Some(on);
                                 front.menu.opening = menu::Opening::Open;
                             }
@@ -4585,6 +4614,22 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         tape.modifiers(mods);
                     }
                     println!("modifiers: {} (from the pause)", if mods.is_original() { "the original game's".into() } else { mods.text() });
+                }
+            }
+            // And on an Air Wrecks switch the player changed (P138): every seat takes it at this
+            // tick, as Wrecks is every seat's, and a tape being written says so before its next frame.
+            if paused && front.menu.riding() && menu_air != Some(front.menu.settings.air_wrecks) {
+                let on = front.menu.settings.air_wrecks;
+                menu_air = Some(on);
+                if front.menu.air_lock.is_none() {
+                    let on = args.air_wrecks && on;
+                    for seat in &mut world.seats {
+                        seat.sim.rider.sense.air_wrecks = on;
+                    }
+                    if let Some(tape) = &mut world.tape {
+                        tape.air_wrecks(on);
+                    }
+                    println!("air wrecks: {} (from the pause)", if on { "on" } else { "off" });
                 }
             }
             for seat in &mut world.seats {
@@ -6219,6 +6264,17 @@ fn mods_lock(playing: bool, online: Option<bool>) -> Option<String> {
     }
 }
 
+/// Why a ride cannot take a change of Air Wrecks from its pause (P138), or `None` when it can. A
+/// played tape switches it where it was switched; online the room's switch, agreed by every machine at
+/// the handshake, holds for the ride.
+fn air_lock(playing: bool, online: bool) -> Option<String> {
+    match (playing, online) {
+        (true, _) => Some("A played tape switches Air Wrecks where it was switched".into()),
+        (_, true) => Some("Online the room's Air Wrecks holds for the ride".into()),
+        _ => None,
+    }
+}
+
 /// **The ride takes another set of modifiers, from where it is** (P98): every seat's bike built again
 /// from its stock file `stock[i]` on `to` ([`Mods::rebike`](game_sim::modifiers::Mods::rebike)), its
 /// biplane retuned off the stock `plane` the same way, and the HUD's mark said again. `was` is the set
@@ -6442,6 +6498,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace_camera: false,
         moment: None,
         wrecks: true,
+        air_wrecks: true,
         modifiers: game_sim::modifiers::Mods::original(),
         trace: None,
         trace_dt: None,
@@ -6661,6 +6718,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--display" => args.display = next("a display, like :0")?,
             "--no-wrecks" => args.wrecks = false,
+            "--no-air-wrecks" => args.air_wrecks = false,
             "--modifiers" => {
                 args.modifiers =
                     game_sim::modifiers::Mods::parse(&next("modifiers, like gravity=50")?).map_err(|e| format!("--modifiers: {e}"))?
@@ -6841,7 +6899,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--overlay hud|original|debug|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--three-sixty easy|mxvatv] [--markers on|off] [--hud] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--overlay hud|original|debug|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--three-sixty easy|mxvatv] [--markers on|off] [--hud] [--camera NAME]\n\
                             [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
@@ -6929,7 +6987,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Settings rows say (VSync On, Frame limit Off). The ride's 30 Hz ticks are\n\
                      the same at any of them; --draw-fps, a test's fixed rate, wins over both.\n\
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
-                     rider, tumbles the bike and puts you back on it); --modifiers sets the\n\
+                     rider, tumbles the bike and puts you back on it); --no-air-wrecks keeps\n\
+                     the rider on whatever the bike's attitude in the air (a landing is still\n\
+                     judged); --modifiers sets the\n\
                      game modifiers, percentages of what the ride loads (a tape keeps its own);\n\
                      --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\

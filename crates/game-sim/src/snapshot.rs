@@ -604,7 +604,7 @@ impl Wire for crate::flight::Flight {
 }
 wire!(crate::input::Manager { pads, events, time_ms });
 wire!(crate::rider_anim::Pool { used, count, rng, seeded });
-wire!(crate::state::Sense { ai_route, owner, wrecks_enabled, settles });
+wire!(crate::state::Sense { ai_route, owner, wrecks_enabled, air_wrecks, settles });
 wire!(crate::trick::Trick; f0);
 wire!(crate::trick::Tricks { gesture, queue, requested, current, restart, seq, prev_seq, elapsed, progress, hold_elapsed, wiggle_time, held, hold_done, in_progress, safe, no_hander, hand_hold });
 wire!(crate::motion::Driver { action, ramp, faded, fore_aft, pose, shown_crossup });
