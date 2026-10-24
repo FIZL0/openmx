@@ -60,8 +60,9 @@ impl Game for Rides<'_> {
     fn step(&mut self, tick: usize, pads: &[Report]) {
         let dt = game_sim::modifiers::scaled_dt(tick_dt(tick), self.time_scale);
         // Where every seat's rider is before anybody's tick, which is where a marker's Up rides to
-        // (P88): the same on every machine, as every seat's state is. A flying seat's is on the
-        // ground under its plane (P107, as offline P104's), not at the bike it left.
+        // (P88): the same on every machine, as every seat's state is. A flying seat's is its plane
+        // as it flies (P141; the ground under it while it is on or near the ground, P107, as
+        // offline P104's), not at the bike it left.
         let spots: Vec<Spot> = self.sims.iter().map(|s| vehicle::lane_spot(s, self.world)).collect();
         // Who is in the ride (P94): a seat nobody sits in has the missing pad ([`Game::step`]), and is
         // no marker's pick. The pads are the session's, so every machine counts the same.

@@ -793,6 +793,18 @@ impl Ride {
         }
     }
 
+    /// **Thrown from a spot** (P141, a teleport onto a player flying the plane): set down at `at`
+    /// along `facing` and `up` as [`Ride::place_on`] sets it, and the body then moving at `vel`
+    /// (`xyz`, feet a second) and not turning, in the air until the ground step finds the ground
+    /// under it, as a bike leaving a jump is.
+    pub fn launch(&mut self, at: Vf, facing: Vf, up: Vf, vel: Vf) {
+        self.place_on(at, facing, up);
+        let vel = Vf::ZERO.merge(Dest::XYZ, vel);
+        self.chassis.vel = vel;
+        self.chassis.local_vel = chassis::unrotate(&Mat3::new(self.node[0], self.node[1], self.node[2]), vel);
+        self.chassis.speed = Acc::mula(vel.x(), vel.x()).madda(vel.y(), vel.y()).madd(vel.z(), vel.z()).sqrt();
+    }
+
     /// The bike's put-back, its chassis' half ([`crate::off_map::unwreck`]), back to this ride's own
     /// riding limit: the original's, unless a modifier raised it.
     pub fn unwreck(&mut self) {

@@ -387,12 +387,15 @@ impl Rider {
 
     /// A teleport onto a spot rather than a marker — another player, where they are: with the spot's
     /// motion (P111, a player riding) the bike rides on as theirs does, at their speed and spin
-    /// ([`Ride::ride_as`]); with none (a player down, or in the plane) it is set down there stopped,
-    /// on their heading and their up. The rest as [`Rider::teleport`].
+    /// ([`Ride::ride_as`]); with a flight (P141, a player flying the plane) it is thrown from the
+    /// spot under the plane at the plane's velocity ([`Ride::launch`]) and falls as off a jump; with
+    /// neither (a player down, or in a plane on the ground) it is set down there stopped, on their
+    /// heading and their up. The rest as [`Rider::teleport`]: no wreck for the teleport itself.
     pub fn teleport_to(&mut self, spot: crate::markers::Spot) {
-        match &spot.motion {
-            Some(m) => self.ride.ride_as(&m.0),
-            None => self.ride.place_on(spot.at, spot.forward, spot.up),
+        match (&spot.motion, &spot.flight) {
+            (Some(m), _) => self.ride.ride_as(&m.0),
+            (None, Some(f)) => self.ride.launch(spot.at, spot.forward, spot.up, f.body.velocity),
+            (None, None) => self.ride.place_on(spot.at, spot.forward, spot.up),
         }
         self.ride.unwreck();
         self.ride.drag_halved = false;
