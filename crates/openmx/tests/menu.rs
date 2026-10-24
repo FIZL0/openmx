@@ -2222,6 +2222,34 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     assert!(Settings::parse("modifiers = gravity=50 warp=9\n").modifiers.is_original());
 }
 
+/// P136: Biplane max height steps past 500% to Uncapped, which the row says in words, and back.
+#[test]
+fn the_biplane_max_height_tops_out_uncapped() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    m.settings.modifiers.set(0, Knob::PlaneCeiling, 490);
+    down_to(&mut m, &mut r, Key::Knob(Knob::PlaneCeiling));
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::Knob(Knob::PlaneCeiling)).unwrap();
+    assert_eq!(row(&m).value, "490%");
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(row(&m).value, "500%");
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(row(&m).value, "Uncapped");
+    assert!(m.settings.modifiers.uncapped(0) && !m.settings.modifiers.uncapped(1));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(row(&m).value, "Uncapped", "there is no step past Uncapped");
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.modifiers.get(0, Knob::PlaneCeiling), 500);
+    // Cross puts it back to the original's.
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.modifiers.get(0, Knob::PlaneCeiling), 100);
+}
+
 /// P98: the modifiers page under the ride's pause sets the ride's modifiers, which take when the
 /// pause closes, and says so; a ride the shell holds them on (online, a played tape) shows them dimmed
 /// and does not change them, and says why.

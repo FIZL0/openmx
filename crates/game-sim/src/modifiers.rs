@@ -27,6 +27,10 @@
 //! scaled the backflip's torques, stays off the menu so a preset or a tape with `spin_rate` still
 //! rides as it did.
 //!
+//! P136's [`Knob::PlaneCeiling`] moves the biplane's ceiling, which is its engine's altitude fade, and
+//! has one step past [`MOST`], [`UNCAPPED`] ([`Knob::most`]): no fade at all, and the plane camera's
+//! eye no longer held under the race setup's 200 ft cap ([`Mods::plane_eye_ceiling`]).
+//!
 //! The text form ([`Mods::text`], [`Mods::parse`]) is what a tape, a preset and the online lobby
 //! carry: `word=percent` for a world modifier, `word.N=percent` for player N's, only the ones off
 //! their default. An empty text is the original game.
@@ -58,13 +62,14 @@ pub enum Knob {
     PlaneAccel,
     PlaneTopSpeed,
     PlaneTurn,
+    PlaneCeiling,
     Gravity,
     AirDrag,
     TimeScale,
 }
 
 /// How many modifiers there are.
-pub const KNOBS: usize = 17;
+pub const KNOBS: usize = 18;
 
 /// A modifier's default, which leaves its fields untouched: 100%.
 pub const ORIGINAL: u16 = 100;
@@ -72,6 +77,9 @@ pub const ORIGINAL: u16 = 100;
 /// The slider's step and its top, in percent.
 pub const STEP: u16 = 10;
 pub const MOST: u16 = 500;
+
+/// [`Knob::PlaneCeiling`]'s top step, one past [`MOST`]: no ceiling at all (P136).
+pub const UNCAPPED: u16 = MOST + STEP;
 
 impl Knob {
     pub const ALL: [Knob; KNOBS] = [
@@ -89,6 +97,7 @@ impl Knob {
         Knob::PlaneAccel,
         Knob::PlaneTopSpeed,
         Knob::PlaneTurn,
+        Knob::PlaneCeiling,
         Knob::Gravity,
         Knob::AirDrag,
         Knob::TimeScale,
@@ -110,6 +119,7 @@ impl Knob {
         Knob::PlaneAccel,
         Knob::PlaneTopSpeed,
         Knob::PlaneTurn,
+        Knob::PlaneCeiling,
         Knob::Gravity,
         Knob::AirDrag,
         Knob::TimeScale,
@@ -136,6 +146,7 @@ impl Knob {
             Knob::PlaneAccel => "plane_accel",
             Knob::PlaneTopSpeed => "plane_top_speed",
             Knob::PlaneTurn => "plane_turn",
+            Knob::PlaneCeiling => "plane_ceiling",
             Knob::Gravity => "gravity",
             Knob::AirDrag => "air_drag",
             Knob::TimeScale => "time_scale",
@@ -163,6 +174,7 @@ impl Knob {
             Knob::PlaneAccel => "Biplane acceleration",
             Knob::PlaneTopSpeed => "Biplane top speed",
             Knob::PlaneTurn => "Biplane turn speed",
+            Knob::PlaneCeiling => "Biplane max height",
             Knob::Gravity => "Gravity",
             Knob::AirDrag => "Air drag",
             Knob::TimeScale => "Time scale",
@@ -183,6 +195,15 @@ impl Knob {
         }
     }
 
+    /// The highest percentage the slider goes to: [`MOST`], or for the biplane's max height one step
+    /// more, [`UNCAPPED`].
+    pub fn most(self) -> u16 {
+        match self {
+            Knob::PlaneCeiling => UNCAPPED,
+            _ => MOST,
+        }
+    }
+
     /// What it does, short enough for the menu's ticker.
     pub fn blurb(self) -> &'static str {
         match self {
@@ -200,6 +221,7 @@ impl Knob {
             Knob::PlaneAccel => "the biplane's pick-up and braking, not its top",
             Knob::PlaneTopSpeed => "the biplane's top speed",
             Knob::PlaneTurn => "how hard the biplane pulls round a turn",
+            Knob::PlaneCeiling => "how high the biplane's engine still pulls; at the top, no ceiling",
             Knob::Gravity => "gravity, bike and biplane",
             Knob::AirDrag => "air drag, bike and biplane",
             Knob::TimeScale => "how fast the game runs",
@@ -227,6 +249,7 @@ impl Knob {
             Knob::PlaneAccel => "biplane [Engine] MaxPower x k; [Aerodynamics] CD0, CD1, CDde x k; [Joystick] ThrottleIncrement x k; every tire's MaxBrakingForce x k (above 100%, the extra through the centre of gravity)",
             Knob::PlaneTopSpeed => "biplane [Aerodynamics] CD0 / k^3",
             Knob::PlaneTurn => "biplane [Aerodynamics] CLScale, CMq x k; CMalpha, CMde, CMStall x k^2; CD1 / k^2; [Autopilot] MaxPitchRate x k",
+            Knob::PlaneCeiling => "biplane [Engine] MaxAltitude (and the fade's start, which is 0) x k; Uncapped: no fade, and no 200 ft cap on the plane camera's eye",
             Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane GravityScale x k",
             Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0 x k",
             Knob::TimeScale => "the engine's time-scale object: dt + (k - 1) dt",
@@ -265,7 +288,7 @@ impl Mods {
 
     /// Set it, clamped to the slider's range.
     pub fn set(&mut self, seat: usize, knob: Knob, pct: u16) {
-        self.pct[Mods::row(knob, seat)][knob.index()] = pct.clamp(knob.least(), MOST);
+        self.pct[Mods::row(knob, seat)][knob.index()] = pct.clamp(knob.least(), knob.most());
     }
 
     /// Nothing off its default: the original game.
@@ -318,8 +341,8 @@ impl Mods {
                 None => (key, None),
             };
             let knob = Knob::from_word(word).ok_or_else(|| format!("no modifier is called '{word}'"))?;
-            if pct < knob.least() || pct > MOST {
-                return Err(format!("modifier '{pair}': {} to {MOST}", knob.least()));
+            if pct < knob.least() || pct > knob.most() {
+                return Err(format!("modifier '{pair}': {} to {}", knob.least(), knob.most()));
             }
             match (knob.per_seat(), seat) {
                 (true, Some(s)) => m.set(s, knob, pct),
@@ -617,12 +640,38 @@ impl Mods {
             plane.aero.cd1 = plane.aero.cd1 / (k * k);
             plane.autopilot.max_pitch_rate = plane.autopilot.max_pitch_rate * k;
         }
+        if self.uncapped(seat) {
+            // No ceiling: the fade's top at the float's top, so the thrust's share is `1 - y / MAX`,
+            // which is 1 exactly at any height a flight reaches (and below 0, where the fade clamps
+            // it to 1 as the file's does).
+            plane.engine.max_altitude = F::MAX;
+        } else if let Some(k) = self.factor(seat, Knob::PlaneCeiling) {
+            // The fade runs from the constructor's 0 to MaxAltitude, a straight line, so k times the
+            // top is the same share of the thrust at k times the height, and the height the plane's
+            // thrust still holds it at is k times the file's. The start, 0, is 0 at any k.
+            plane.engine.max_altitude = plane.engine.max_altitude * k;
+        }
         if let Some(k) = self.factor(seat, Knob::Gravity) {
             plane.mass_properties.gravity_scale = plane.mass_properties.gravity_scale * k;
         }
         if let Some(k) = self.factor(seat, Knob::AirDrag) {
             plane.aero.cd0 = plane.aero.cd0 * k;
         }
+    }
+
+    /// Player `seat`'s biplane has no ceiling: [`Knob::PlaneCeiling`] at its top step, [`UNCAPPED`].
+    pub fn uncapped(&self, seat: usize) -> bool {
+        self.get(seat, Knob::PlaneCeiling) == UNCAPPED
+    }
+
+    /// The highest player `seat`'s plane camera's eye may go, on a scene whose race setup gives it
+    /// `fog` ([`crate::camera::Race::ceiling_for_fog`]): that, unless their plane has no ceiling.
+    /// The setup's 200 ft cap on a long-fog scene would leave the eye under a plane climbing on
+    /// past it, looking up; uncapped, the eye follows the plane up. The far clip and the sky are
+    /// not a bound: the eye keeps its distance from the plane at any height, and the sky is drawn
+    /// by direction alone.
+    pub fn plane_eye_ceiling(&self, seat: usize, fog: F) -> F {
+        if self.uncapped(seat) { F::MAX } else { fog }
     }
 
     /// The engine's time-scale factor (`dt += factor × dt`): `None`, the original's normal case,

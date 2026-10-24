@@ -289,7 +289,8 @@ impl Flight {
     /// the file and the game modifiers ([`crate::modifiers::Mods::plane`]) reach — the engine's power
     /// and the speed its prop is fully efficient from, the zero-lift drag, the throttle's rate and the
     /// wheels' braking force with the elevator's drag (P116), the gravity scale, the turn's
-    /// lift, induced drag, pitch moments and pitch-rate target (P108) — taken again from `plane`, the
+    /// lift, induced drag, pitch moments and pitch-rate target (P108), the engine's altitude fade
+    /// (P136) — taken again from `plane`, the
     /// flight left where and how it is. The gravity force is the file's scale's only while flying: a
     /// wreck's is `WreckGravity`'s, and its recovery builds the new scale's.
     pub fn retune(&mut self, plane: &phy::Plane) {
@@ -313,6 +314,9 @@ impl Flight {
         self.aero.cm_de = fresh.aero.cm_de;
         self.aero.cm_stall = fresh.aero.cm_stall;
         self.autopilot.max_pitch_rate = fresh.autopilot.max_pitch_rate;
+        // The ceiling's (P136): where the engine's altitude fade starts and ends.
+        self.engine.fade_altitude = fresh.engine.fade_altitude;
+        self.engine.max_altitude = fresh.engine.max_altitude;
         self.gravity_scale = fresh.gravity_scale;
         if self.crash.reason == 0 {
             self.gravity = gravity_force(self.gravity_scale, self.mass);
@@ -338,6 +342,9 @@ impl Flight {
             t.brake_friction = n.brake_friction;
         }
         back.cg_braking = self.cg_braking;
+        // The ceiling's (P136).
+        back.engine.fade_altitude = self.engine.fade_altitude;
+        back.engine.max_altitude = self.engine.max_altitude;
         back.gravity_scale = self.gravity_scale;
         if back.crash.reason == 0 {
             back.gravity = gravity_force(back.gravity_scale, back.mass);
