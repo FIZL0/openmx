@@ -115,11 +115,11 @@
 //! Over each view is the ride HUD ([`ride_hud`], P121): the original's pieces at the original's
 //! places — score, trick pop-up, speedometer, radar with every other rider on it — redrawn as vector
 //! shapes and our own type, sharp at any size; `--overlay original` draws the original's own HUD
-//! ([`overlay`], V26) off the disc's art instead. **H** swaps it for the debug overlay ([`hud`]), which
-//! `--hud` (`--overlay debug`) starts on: the sixteen controls as the port's own input manager holds
+//! ([`overlay`], V26) off the disc's art instead. A ride launched with `--hud` (`--overlay debug`)
+//! starts on the debug overlay ([`hud`]), and only such a ride swaps it in and out on **H** (P83): the sixteen controls as the port's own input manager holds
 //! them, both sticks where its dead zone put them, and beside them the numbers the ride is running
 //! on. That one is debugging furniture and matches nothing on the disc. `--overlay none`, or the
-//! front end's setting, draws neither until H. The original's speed is its digital readout unless
+//! front end's setting, draws none. The original's speed is its digital readout unless
 //! `--speedometer analog` or the Settings' Speedometer row asks for its dial (V42). `--minimap off` or the
 //! Settings' Minimap row drops its radar, and `--hud-scale` or the HUD scale row sizes every part of
 //! both HUDs about its own corner (V52).
@@ -463,7 +463,7 @@ type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u
 
 /// A marker's tick (P88) as the console says it.
 /// Whether the session markers' bar, its hold bar and its label are drawn over a view (P117): with
-/// any overlay but `none`, or under `none` once F3 has put the debug HUD up, which they are part of.
+/// any overlay but `none`, or under `none` once F3 has put the debug HUD up (a `--hud` launch), which they are part of.
 /// The markers work all the same, and their portals are the world's, drawn whatever this says.
 fn marker_bar_shown(overlay: menu::Overlay, debug_hud: bool) -> bool {
     overlay != menu::Overlay::None || debug_hud
@@ -981,6 +981,9 @@ struct Args {
     /// Draw the riding overlay (P6): the pad as the simulation reads it and the numbers beside it.
     /// Off by default and off is free, because it is debugging furniture and not part of the game.
     hud: bool,
+    /// The debug HUD may be shown at all (P83): only a launch with `--hud` or `--overlay debug`,
+    /// never the settings, puts it up or lets F3/H toggle it.
+    debug_hud: bool,
     /// `--overlay hud|original|debug|none` (V26, P121): which overlay a ride draws, the ride HUD by
     /// default. Unset, the front end's setting decides; `--hud` is `--overlay debug`.
     overlay: Option<menu::Overlay>,
@@ -4432,7 +4435,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // stick's left (P54), which would flash the overlay on and off with every trick.
         let h_free = pad_seats.as_ref().is_none_or(|s| !s.binds_key(key::H));
         let hud_now = held(&window, key::F3) || (h_free && held(&window, key::H));
-        if hud_now && !hud_key {
+        if hud_now && !hud_key && args.debug_hud {
             for rig in &mut rigs {
                 rig.hud.on = !rig.hud.on;
             }
@@ -4546,8 +4549,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                     println!("render scale: {} (settings)", render_scale.map_or("auto".into(), |f| f.to_string()));
                 }
+                // The settings never hold the debug HUD (P83), so a change leaves it as F3 put it:
+                // up only in a ride launched with `--hud`.
                 for rig in &mut rigs {
-                    rig.hud.on = overlay_mode == menu::Overlay::Debug;
+                    rig.hud.on &= args.debug_hud;
                 }
                 for seat in &mut world.seats {
                     seat.sim.rider.sense.wrecks_enabled = args.wrecks && front.menu.settings.wrecks;
@@ -6593,6 +6598,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         shot_pose: None,
         more_poses: Vec::new(),
         hud: false,
+        debug_hud: false,
         overlay: None,
         speedometer: None,
         minimap: None,
@@ -6742,7 +6748,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
             }
             "--hud" => {
-                args.hud = true;
+                (args.hud, args.debug_hud) = (true, true);
                 args.overlay = Some(menu::Overlay::Debug);
             }
             "--overlay" => {
@@ -6751,6 +6757,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .filter(|o| o.word() == word)
                     .ok_or_else(|| format!("--overlay: {word:?} is not hud, original, debug or none"))?;
                 args.hud = overlay == menu::Overlay::Debug;
+                args.debug_hud = args.hud;
                 args.overlay = Some(overlay);
             }
             "--markers" => {
@@ -7053,8 +7060,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      pressure byte): a key ramps it, --throttle r2 rides it on a trigger instead,\n\
                      giving up that trigger's own control, and --pad-pressure says which joystick\n\
                      axes a pad reports its buttons' own pressures on.\n\
-                     F3 toggles the debug overlay (and H, where H is not a ride's key), which\n\
-                     --hud (--overlay debug) starts on.\n\
+                     --hud (--overlay debug) starts on the debug overlay, and only then do F3\n\
+                     (and H, where H is not a ride's key) toggle it; Settings never offers it.\n\
                      Up to eight seats: every pad plugged in takes the next one, the keyboard\n\
                      beside 1P's, or --pads says each seat's (k the keyboard, a number the pad\n\
                      in the order found, - nobody). A pad pulled out pauses its player until it\n\
