@@ -3995,6 +3995,37 @@ rider_wreck_sound_load boot 0x0033e5b0 reads the rider archive's rider.aud [Fall
 crowd_sound_load boot 0x001fe220 reads event.aud's Crowd* lists when the track's CrowdPresent is set
 music_list_load boot 0x001fd9f0 reads appstart.res aud\music\music.pb: [Artists], [Song N] Filename,
 #                               Title, Artist
+# P66 -- no landing sound on the bike. VehicleSoundEmitters.cpp's machine emitter (vtable 0x0045ea90)
+# is made and loaded only by the car (0x0038f5b0, at +0x54c), MXBuggy (0x003990f0) and MXBiplane
+# (0x00353a60); the motocross bike's sound setup (engine_sound_hands) makes the engine note +0x1494,
+# the wreck clank +0x1498, the event emitter +0x149c and the drive-on loop +0x14a0, and no landing one.
+machine_suspension_load boot 0x003dcd10 (emitter, ini, prefix, at, vel) [<p>TireParams] gates the rest;
+#                                       [<p>TireTouchdown] Min/MaxLevelVelocity x1.46666 to +0x21c/+0x220,
+#                                       attenuations +0x224 and +0x228 = max - min, list +0x200;
+#                                       [<p>Suspension] Min/MaxLevelVelocity as read (no x1.46666) to
+#                                       +0x248/+0x24c, +0x250 min attenuation, +0x254 max - min, list
+#                                       +0x22c, SoundNVelocityTierStart floats at +0x244
+machine_touchdown_play boot 0x003dd0a0 (emitter, 0, v*) touchdown: a no-repeat rand pick of the list,
+#                                      level min + clamp((|vel+0xd4| - lo)/(hi - lo)) * range (int, vt
+#                                      +0x30); suspension when v given: s = |v.y|, nothing below tier
+#                                      1's start, else the last tier whose start <= s, level min +
+#                                      clamp01((s - MinLevelVelocity)/(Max - Min)) * range, then sound_3d
+#                                      and start. The car calls it on the frame its record's +0x40 goes
+#                                      0 -> touched (0x0038e894), v the body's +0xb0 rotated by +0x18c
+machine_wreck_load boot 0x003dc570 [<p>Wreck]: Min/MaxDistance, MinImpulse +0x228, MaxImpulse +0x22c,
+#                                  list +0x208; +0x200/+0x204 the two gate words, +0x224 the impulse*
+bike_wreck_clank boot 0x003dc8c0 the wreck emitter's frame (vt +0x38): when *+0x200 (bike +0x948 =
+#                                wrecked, from the +0x868 reason copy) and *+0x204 (record +0x40
+#                                touched) and the emitter idle and |bike +0x550| >= MinImpulse: a
+#                                no-repeat rand pick at min(100, |imp|/MaxImpulse*100)%. Not ported:
+#                                the port plays one [Wreck] at the wreck entry instead
+drive_on_frame boot 0x001b9690 the drive-on emitter's frame (vtable 0x004505e0): per wheel, the touched
+#                              material's id (contact +0x89) plays its DriveOnSoundFile (vt +0xa8)
+#                              or stops it (vt +0xbc)
+drive_on_play boot 0x001b8da0 (emitter, wheel, material, level) starts/keeps the material's loop
+material_table_load boot 0x003ea350 Col\template.cmt: per [material] ID, DriveOn*, Collision* (sound
+#                                   file, distances, Min/MaxImpulse). Only props' materials (IDs 1..22
+#                                   on free09); no dirt entry
 
 # ---------------------------------------------------------------------------------------------------
 # V31 — the wreck camera (MXCameraWreck over SimpleWreckCam). How each was read, and the live logs, are

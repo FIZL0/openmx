@@ -1,4 +1,4 @@
-//! Sound (P42): the original's own engine notes, wrecks, landings, crowd, world emitters and music,
+//! Sound (P42): the original's own engine notes, wrecks, crowd, world emitters and music,
 //! read off the user's disc and mixed by the shell.
 //!
 //! # Where the sound is on the disc
@@ -564,6 +564,11 @@ impl Mixer {
 
     pub fn voices(&self) -> usize {
         self.voices.len()
+    }
+
+    /// Every voice's clip and gain, in the order they were started.
+    pub fn clips(&self) -> Vec<(Arc<Clip>, f32)> {
+        self.voices.iter().map(|v| (v.clip.clone(), v.play.gain)).collect()
     }
 
     /// A voice's left and right gains for the listeners as they stand: the nearest listener's distance
@@ -1981,7 +1986,7 @@ impl PlaneNote {
     }
 }
 
-// --- the rider, the landing, the world --------------------------------------------------------------
+// --- the rider, the world, and no landing ------------------------------------------------------
 
 /// `rider.aud`: the voice's two wreck lists.
 #[derive(Clone, Debug, Default)]
@@ -2005,42 +2010,13 @@ impl RiderSounds {
     }
 }
 
-/// `machine.aud`'s suspension: a sound per tier of landing speed, louder the harder.
-#[derive(Clone, Debug, Default)]
-pub struct Landing {
-    pub tiers: Vec<(f32, Arc<Clip>)>,
-    pub quiet: (f32, f32),
-    pub loud: (f32, f32),
-}
-
-impl Landing {
-    pub fn read(text: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> Landing {
-        let s = ini::parse(text);
-        let Some(p) = s.iter().find(|s| s.name.to_ascii_lowercase().ends_with("suspension")) else {
-            return Landing::default();
-        };
-        let n = p.number("NumSounds").unwrap_or(0.0) as usize;
-        let tiers = (1..=n)
-            .filter_map(|i| {
-                let from = p.number(&format!("Sound{i}VelocityTierStart"))?;
-                Some((from, lib(p.get(&format!("Sound{i}"))?)?))
-            })
-            .collect();
-        Landing {
-            tiers,
-            quiet: (p.number("MinLevelVelocity").unwrap_or(10.0), p.number("MinLevelAttenuation").unwrap_or(50.0)),
-            loud: (p.number("MaxLevelVelocity").unwrap_or(55.0), p.number("MaxLevelAttenuation").unwrap_or(100.0)),
-        }
-    }
-
-    /// The sound and its gain for a landing at `speed` feet a second down, or `None` below the first
-    /// tier.
-    pub fn pick(&self, speed: f32) -> Option<(Arc<Clip>, f32)> {
-        let (_, clip) = self.tiers.iter().rev().find(|(from, _)| speed >= *from)?;
-        let t = ((speed - self.quiet.0) / (self.loud.0 - self.quiet.0).max(1e-3)).clamp(0.0, 1.0);
-        Some((clip.clone(), (self.quiet.1 + (self.loud.1 - self.quiet.1) * t) / 100.0))
-    }
-}
+// No landing sound (P66). The original's motocross bike makes four sound emitters — the engine note,
+// the bike's `[Wreck]` clank (which plays only while the bike is wrecked), the race events and the
+// surface the wheels roll on — and none of them is played by a landing: a landing is heard only as
+// the engine note coming back from its airborne decel. `machine.aud`'s `[<machine>Suspension]` tiers
+// (`suspen00..03`, `trkbtm_*`) are the buggy's, the baja's and the monster truck's, loaded and played
+// only by those machines' classes; P42 played the buggy's on the bike. research/oracle.txt
+// `machine_suspension_*` has the machines' rule for when they are ported.
 
 /// A track's `.aud` and the race's `event.aud`: the world's fixed emitters, its random ones, and the
 /// crowd where the track has one.
@@ -2100,8 +2076,6 @@ impl WorldSounds {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SeatFrame {
     pub hands: Hands,
-    /// Vertical speed, feet a second (down is negative).
-    pub vy: f32,
     /// The rider came off, for this reason.
     pub wreck: Option<i32>,
     /// A trick was landed.
@@ -2117,7 +2091,6 @@ pub struct SeatSound {
     plane: PlaneNote,
     last: [i32; 4],
     was_grounded: bool,
-    last_vy: f32,
     dice: Dice,
 }
 
@@ -2129,7 +2102,6 @@ impl SeatSound {
             plane: PlaneNote::default(),
             last: [-1; 4],
             was_grounded: true,
-            last_vy: 0.0,
             dice: Dice::new(seed.wrapping_mul(31).wrapping_add(7)),
         }
     }
@@ -2141,7 +2113,6 @@ pub struct Sound {
     pub mixer: Arc<Mutex<Mixer>>,
     pub seats: Vec<SeatSound>,
     pub rider: RiderSounds,
-    pub landing: Landing,
     pub world: WorldSounds,
     pub plane: LoopEngine,
     started: bool,
@@ -2156,7 +2127,6 @@ impl Sound {
             mixer,
             seats: Vec::new(),
             rider: RiderSounds::default(),
-            landing: Landing::default(),
             world: WorldSounds::default(),
             plane: LoopEngine::default(),
             started: false,
@@ -2225,9 +2195,6 @@ impl Sound {
                 }
             }
             if h.grounded && !s.was_grounded && f.wreck.is_none() {
-                if let Some((clip, gain)) = self.landing.pick(-s.last_vy) {
-                    m.play(clip, Play { gain, ..near });
-                }
                 if f.landed_trick {
                     if let Some((clip, _)) = self.world.cheer.pick(&mut self.dice, &mut self.last[2]) {
                         m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
@@ -2235,7 +2202,6 @@ impl Sound {
                 }
             }
             s.was_grounded = h.grounded;
-            s.last_vy = f.vy;
         }
     }
 
@@ -2293,12 +2259,10 @@ impl Reading<'_> {
     }
 
     /// `res` is the machines' archive (`machine.res`).
-    pub fn machines(&mut self, res: &str) -> (Landing, LoopEngine) {
-        let machine = self.text(res, "aud\\machine.aud");
+    pub fn machines(&mut self, res: &str) -> LoopEngine {
         let cars = self.text(res, "aud\\carengine.aud");
         let lib = &mut *self.lib;
-        let landing = Landing::read(&machine, &mut |n| lib.clip(n));
-        (landing, LoopEngine::read(&cars, "biplane", &mut |n| lib.clip(n)))
+        LoopEngine::read(&cars, "biplane", &mut |n| lib.clip(n))
     }
 
     /// `track` is the track's name (`free10`): its `.aud` is in `tracks\free10.res`, the race's events
@@ -2571,7 +2535,7 @@ impl Sound {
         if let Some(rider) = rider {
             sound.rider = read.rider(rider);
         }
-        (sound.landing, sound.plane) = read.machines(machines);
+        sound.plane = read.machines(machines);
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
         Ok(sound)
     }

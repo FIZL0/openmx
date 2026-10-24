@@ -6166,7 +6166,6 @@ fn seat_sound(seat: &Seat) -> audio::SeatFrame {
             at: [p.x(), p.y(), p.z()],
             vel: [v.x(), v.y(), v.z()],
         },
-        vy: v.y(),
         wreck: seat.said.wreck.map(|w| w.0 as i32),
         landed_trick: seat.said.landed.is_some(),
         plane,
