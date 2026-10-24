@@ -1086,3 +1086,254 @@ fn a_landing_plays_only_the_engine_as_the_originals_does() {
         assert!(heard > 0, "the engine note sounded through the {name} landing");
     }
 }
+
+// --- the shootoff (P85) -----------------------------------------------------------------------------
+
+/// The original riding off free09's west edge at 70 music, Video Capture's sound on (context/capture/
+/// p85/west.csv, research/journal/2026-10-23-p85-shootoff-sound): per tick, the wreck reason and the
+/// chassis' centre after the tick, and what the bike's sound child had done in it: the rumble
+/// playing and its volume, the boom playing, and the song's volume. 4242 is the throw, 4601 the
+/// put-back; the rows between them are the same.
+const WEST: [(u32, i32, f32, f32, bool, i32, bool, f32); 64] = [
+    (4187, 0, 353.6556396484375, 3370.264404296875, false, 100, false, 0.699999988079071),
+    (4188, 0, 353.6556396484375, 3370.264404296875, false, 100, false, 0.699999988079071),
+    (4189, 0, 346.3855895996094, 3370.349365234375, true, 26, false, 0.6800000071525574),
+    (4190, 0, 342.7442626953125, 3370.391845703125, true, 27, false, 0.6700000166893005),
+    (4191, 0, 339.0985107421875, 3370.434814453125, true, 29, false, 0.6600000262260437),
+    (4192, 0, 335.4482116699219, 3370.477783203125, true, 30, false, 0.6399999856948853),
+    (4193, 0, 331.79376220703125, 3370.520751953125, true, 31, false, 0.6299999952316284),
+    (4194, 0, 331.79376220703125, 3370.520751953125, true, 31, false, 0.6299999952316284),
+    (4195, 0, 324.47247314453125, 3370.606689453125, true, 34, false, 0.6100000143051147),
+    (4196, 0, 320.80572509765625, 3370.649658203125, true, 35, false, 0.5899999737739563),
+    (4197, 0, 317.1352233886719, 3370.692626953125, true, 37, false, 0.5799999833106995),
+    (4198, 0, 313.4607849121094, 3370.735595703125, true, 38, false, 0.5699999928474426),
+    (4199, 0, 309.7821350097656, 3370.778564453125, true, 40, false, 0.550000011920929),
+    (4200, 0, 306.09942626953125, 3370.821533203125, true, 41, false, 0.5400000214576721),
+    (4201, 0, 302.412841796875, 3370.864501953125, true, 42, false, 0.5299999713897705),
+    (4202, 0, 298.72265625, 3370.907470703125, true, 44, false, 0.5199999809265137),
+    (4203, 0, 295.0286560058594, 3370.950927734375, true, 45, false, 0.5),
+    (4204, 0, 291.3305969238281, 3370.994384765625, true, 47, false, 0.49000000953674316),
+    (4205, 0, 287.62860107421875, 3371.037841796875, true, 48, false, 0.47999998927116394),
+    (4206, 0, 283.9229431152344, 3371.081298828125, true, 49, false, 0.46000000834465027),
+    (4207, 0, 280.2137145996094, 3371.124755859375, true, 51, false, 0.44999998807907104),
+    (4208, 0, 280.2137145996094, 3371.124755859375, true, 51, false, 0.44999998807907104),
+    (4209, 0, 272.783935546875, 3371.211669921875, true, 53, false, 0.41999998688697815),
+    (4210, 0, 272.783935546875, 3371.211669921875, true, 53, false, 0.41999998688697815),
+    (4211, 0, 265.3395080566406, 3371.298583984375, true, 56, false, 0.4000000059604645),
+    (4212, 0, 261.61163330078125, 3371.342041015625, true, 58, false, 0.38999998569488525),
+    (4213, 0, 257.8801574707031, 3371.385498046875, true, 59, false, 0.3700000047683716),
+    (4214, 0, 254.14535522460938, 3371.428955078125, true, 60, false, 0.36000001430511475),
+    (4215, 0, 254.14535522460938, 3371.428955078125, true, 60, false, 0.36000001430511475),
+    (4216, 0, 246.66505432128906, 3371.515869140625, true, 63, false, 0.33000001311302185),
+    (4217, 0, 242.91970825195312, 3371.559814453125, true, 65, false, 0.3199999928474426),
+    (4218, 0, 239.1708221435547, 3371.603759765625, true, 66, false, 0.3100000023841858),
+    (4219, 0, 239.1708221435547, 3371.603759765625, true, 66, false, 0.3100000023841858),
+    (4220, 0, 231.66246032714844, 3371.691650390625, true, 69, false, 0.2800000011920929),
+    (4221, 0, 227.90321350097656, 3371.735595703125, true, 70, false, 0.27000001072883606),
+    (4222, 0, 224.14059448242188, 3371.779541015625, true, 72, false, 0.25),
+    (4223, 0, 220.3746337890625, 3371.823486328125, true, 73, false, 0.23999999463558197),
+    (4224, 0, 216.60531616210938, 3371.867431640625, true, 75, false, 0.23000000417232513),
+    (4225, 0, 212.83270263671875, 3371.911376953125, true, 76, false, 0.20999999344348907),
+    (4226, 0, 209.05677795410156, 3371.955322265625, true, 77, false, 0.20000000298023224),
+    (4227, 0, 205.27760314941406, 3371.999267578125, true, 79, false, 0.1899999976158142),
+    (4228, 0, 205.27760314941406, 3371.999267578125, true, 79, false, 0.1899999976158142),
+    (4229, 0, 197.70948791503906, 3372.087158203125, true, 82, false, 0.1599999964237213),
+    (4230, 0, 193.9206085205078, 3372.131103515625, true, 83, false, 0.15000000596046448),
+    (4231, 0, 190.12855529785156, 3372.175048828125, true, 84, false, 0.14000000059604645),
+    (4232, 0, 190.12855529785156, 3372.175048828125, true, 84, false, 0.14000000059604645),
+    (4233, 0, 186.33323669433594, 3372.218994140625, true, 86, false, 0.11999999731779099),
+    (4234, 0, 182.5349884033203, 3372.263427734375, true, 87, false, 0.10999999940395355),
+    (4235, 0, 174.9291534423828, 3372.352294921875, true, 90, false, 0.07999999821186066),
+    (4236, 0, 171.12149047851562, 3372.396728515625, true, 92, false, 0.07000000029802322),
+    (4237, 0, 167.31082153320312, 3372.441162109375, true, 93, false, 0.05999999865889549),
+    (4238, 0, 163.49713134765625, 3372.485595703125, true, 94, false, 0.03999999910593033),
+    (4239, 0, 159.68045043945312, 3372.530029296875, true, 96, false, 0.029999999329447746),
+    (4240, 0, 155.8607940673828, 3372.574462890625, true, 97, false, 0.019999999552965164),
+    (4241, 0, 152.03819274902344, 3372.618896484375, true, 99, false, 0.0),
+    (4242, 13, 148.21263122558594, 3372.663330078125, true, 100, false, 0.0),
+    (4243, 13, 148.21263122558594, 3372.663330078125, false, 100, true, 0.0),
+    (4244, 13, 148.21263122558594, 3372.663330078125, false, 100, true, 0.0),
+    (4245, 13, 148.21263122558594, 3372.663330078125, false, 100, true, 0.0),
+    (4599, 13, 148.21263122558594, 3372.663330078125, false, 100, true, 0.0),
+    (4600, 13, 148.21263122558594, 3372.663330078125, false, 100, true, 0.0),
+    (4601, 0, 148.21263122558594, 3372.663330078125, false, 100, true, 0.0),
+    (4602, 0, 2867.028076171875, 3459.937744140625, false, 100, true, 0.699999988079071),
+    (4603, 0, 2867.024169921875, 3459.94580078125, false, 100, true, 0.699999988079071),
+];
+
+/// free09's extent, feet, both ways.
+const FREE09: f32 = 6912.0;
+
+fn shootoff() -> audio::Shootoff {
+    audio::Shootoff { cannon: Some((tone(9000.0, 8.0), false)), rumble: Some((tone(3000.0, 1.5), true)) }
+}
+
+/// One replayed tick against one captured row: the rumble, its volume, the boom (newly started on
+/// `boom`), and the song's volume to the bit.
+fn replay_row(
+    m: &mut Mixer,
+    edge: &mut audio::EdgeSound,
+    sounds: &audio::Shootoff,
+    row: (u32, i32, f32, f32, bool, i32, f32),
+    boom: bool,
+) {
+    let (frame, reason, x, z, rumbling, volume, song) = row;
+    let before = edge.cannon();
+    let f = audio::EdgeFrame { armed: true, reason, edge: audio::edge_distance(FREE09, FREE09, [x, 0.0, z]) };
+    edge.tick(m, sounds, &f);
+    assert_eq!(edge.rumble().is_some_and(|id| m.playing(id)), rumbling, "the rumble at {frame}");
+    if rumbling {
+        let gain = m.gain_of(edge.rumble().unwrap()).unwrap();
+        assert_eq!(gain.to_bits(), (volume as f32 / 100.0).to_bits(), "the rumble's volume at {frame}");
+    }
+    assert_eq!(edge.cannon() != before, boom, "the boom at {frame}");
+    // The original's is a signed whole percent and goes a hair under 0 past the margin; a gain is 0.
+    assert_eq!(m.music_gain().to_bits(), song.max(0.0).to_bits(), "the music at {frame}: {}", m.music_gain());
+}
+
+/// **A replayed shootoff sounds as the original's**: the rumble from 350 ft out, rising from 25 to 100
+/// as the music fades from the settings' 70 to nothing at the margin; the throw stops the rumble and
+/// plays the boom once, a tick after the reason turns, unplaced; the music stays down while the
+/// rider is off, and is back whole, with no fade in, the tick after the put-back.
+#[test]
+fn a_replayed_shootoff_booms_and_fades_the_music_as_the_original() {
+    let sounds = shootoff();
+    let mut m = Mixer::new(Music::new(Vec::new(), 1));
+    m.music_volume = 0.7;
+    let mut edge = audio::EdgeSound::default();
+    let mut booms = 0;
+    for (i, &(frame, reason, x, z, rumbling, volume, cannon, song)) in WEST.iter().enumerate() {
+        let boom = cannon && !WEST[i.saturating_sub(1)].6;
+        booms += boom as u32;
+        replay_row(&mut m, &mut edge, &sounds, (frame, reason, x, z, rumbling, volume, song), boom);
+    }
+    assert_eq!(booms, 1);
+    let id = edge.cannon().expect("the boom");
+    assert!(m.playing(id), "the boom is 8 s long and still going");
+    assert!(Arc::ptr_eq(&m.clip_of(id).unwrap(), sounds.cannon.as_ref().map(|c| &c.0).unwrap()));
+    assert_eq!(m.music_edge, None, "the put-back left the music scaled");
+
+    // Off the edge the rumble stops and the music is left as it was: riding back in from 300 ft.
+    let mut edge = audio::EdgeSound::default();
+    let mut m = Mixer::new(Music::new(Vec::new(), 1));
+    m.music_volume = 0.7;
+    for (x, rumbling) in [(300.0, true), (360.0, false)] {
+        let f = audio::EdgeFrame { armed: true, reason: 0, edge: audio::edge_distance(FREE09, FREE09, [x, 0.0, 3000.0]) };
+        edge.tick(&mut m, &sounds, &f);
+        assert_eq!(edge.rumble().is_some(), rumbling, "at {x}");
+        assert_eq!(m.music_gain().to_bits(), 0.52f32.to_bits(), "at {x}");
+    }
+    // A bike the edge is not armed on hears nothing of it (S73).
+    let mut edge = audio::EdgeSound::default();
+    let mut m = Mixer::new(Music::new(Vec::new(), 1));
+    for reason in [0, 13, 13, 0] {
+        edge.tick(&mut m, &sounds, &audio::EdgeFrame { armed: false, reason, edge: Some(150.0) });
+    }
+    assert_eq!((edge.rumble(), edge.cannon(), m.music_edge), (None, None, None));
+}
+
+/// The query: nothing inside 350 ft of every edge, else the nearest edge of four.
+#[test]
+fn the_edge_is_asked_as_the_original_asks() {
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [3456.0, 0.0, 3456.0]), None);
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [350.0, 0.0, 6562.0]), None);
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [349.0, 0.0, 3456.0]), Some(349.0));
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [3000.0, 0.0, 6800.0]), Some(112.0));
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [-10.0, 0.0, 200.0]), Some(-10.0));
+    assert_eq!((audio::rumble_volume(350.0), audio::rumble_volume(150.0), audio::rumble_volume(-500.0)), (25, 100, 100));
+}
+
+/// The whole of each capture of the original riding off an edge, when this checkout has them: every
+/// tick the rumble, its volume, the boom and the music as the fixture's.
+#[test]
+fn every_captured_shootoff_replays() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../context/capture/p85");
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        println!("skipped: no {}", dir.display());
+        return;
+    };
+    let mut paths: Vec<_> = read.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "csv")).collect();
+    paths.sort();
+    let sounds = shootoff();
+    for path in paths {
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines = text.lines();
+        let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let col = |n: &str| head.iter().position(|h| *h == n).unwrap_or_else(|| panic!("no {n} in {}", path.display()));
+        let (frame, armed, reason, x, z) = (col("frame_counter"), col("edge_armed"), col("reason"), col("cofg.x"), col("cofg.z"));
+        let (rumble, volume, cannon, song) = (col("rumble_voice"), col("rumble_vol"), col("cannon_voice"), col("song0_vol"));
+        let rows: Vec<Vec<&str>> = lines.map(|l| l.split(',').collect()).collect();
+        let mut m = Mixer::new(Music::new(Vec::new(), 1));
+        m.music_volume = rows[0][song].parse().unwrap();
+        let mut edge = audio::EdgeSound::default();
+        let (mut ticks, mut booms, mut last) = (0, 0, None::<&[&str]>);
+        for r in &rows {
+            assert_eq!(r[armed], "1", "{}", path.display());
+            // A row read twice over one tick (frame_counter-trigger-tears): the tick was replayed.
+            let same = |a: &[&str]| head.iter().enumerate().all(|(i, h)| h.starts_with("frame") || a[i] == r[i]);
+            let boom = last.is_some_and(|l| l[cannon] != r[cannon]);
+            if last.is_some_and(same) {
+                continue;
+            }
+            booms += boom as u32;
+            let n = |c: usize| r[c].parse::<f32>().unwrap();
+            let row = (r[frame].parse().unwrap(), n(reason) as i32, n(x), n(z), r[rumble] != "-1", n(volume) as i32, n(song));
+            replay_row(&mut m, &mut edge, &sounds, row, boom);
+            last = Some(r);
+            ticks += 1;
+        }
+        println!("{}: {ticks} ticks, {booms} booms", path.display());
+        assert!(booms >= 1, "{}: no shootoff", path.display());
+    }
+}
+
+/// **In a split, each rider has their own**: the rider at the edge fades the one music for both, and
+/// the rider thrown hears the boom while the other rides on, out of their sound.
+#[test]
+fn a_split_booms_for_the_rider_thrown() {
+    let mut s = audio::Sound::new(Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1)))));
+    s.mixer.lock().unwrap().music_volume = 0.7;
+    s.shootoff = shootoff();
+    for i in 0..2 {
+        s.seats.push(audio::SeatSound::new(Arc::new(tone_bike()), i));
+    }
+    let at = |reason: i32, d: Option<f32>| audio::SeatFrame {
+        edge: audio::EdgeFrame { armed: true, reason, edge: d },
+        ..audio::SeatFrame::default()
+    };
+    s.frame(&[at(0, Some(250.0)), at(0, None)], 1.0 / 30.0);
+    assert_eq!(s.mixer.lock().unwrap().music_gain().to_bits(), 0.35f32.to_bits());
+    assert!(s.seats[0].edge.rumble().is_some() && s.seats[1].edge.rumble().is_none());
+    s.frame(&[at(13, Some(148.0)), at(0, None)], 1.0 / 30.0);
+    s.frame(&[at(13, Some(148.0)), at(0, None)], 1.0 / 30.0);
+    assert!(s.seats[0].edge.cannon().is_some() && s.seats[0].edge.rumble().is_none());
+    assert_eq!(s.seats[1].edge.cannon(), None);
+    // The other rider's wreck reason is no shootoff of theirs.
+    s.frame(&[at(13, Some(148.0)), at(4, None)], 1.0 / 30.0);
+    s.frame(&[at(13, Some(148.0)), at(4, None)], 1.0 / 30.0);
+    assert_eq!(s.seats[1].edge.cannon(), None);
+    // A pause in the cannonball: no second boom on the way out, and the music stays down.
+    s.quiet();
+    assert_eq!(s.seats[0].edge.cannon(), None);
+    s.frame(&[at(13, Some(148.0)), at(4, None)], 1.0 / 30.0);
+    assert_eq!(s.seats[0].edge.cannon(), None, "the pause boomed again");
+    assert_eq!(s.mixer.lock().unwrap().music_gain(), 0.0);
+    // The ride over, the music is the settings' again.
+    let mixer = s.mixer.clone();
+    drop(s);
+    assert_eq!(mixer.lock().unwrap().music_gain().to_bits(), 0.7f32.to_bits());
+}
+
+/// The disc's `[Cannonball]`: the 8 s stereo boom, played once, and the 1.5 s mono rumble looped.
+#[test]
+fn the_shootoff_sounds_are_the_discs() {
+    let Some(d) = disc() else { return };
+    let mut lib = audio::Library::open(d).unwrap();
+    let s = audio::Reading { lib: &mut lib }.shootoff("tracks\\free09_2.res");
+    let (cannon, once) = s.cannon.expect("Cannon");
+    let (rumble, looped) = s.rumble.expect("Rumble");
+    assert!(!once && looped);
+    assert_eq!((cannon.rate, cannon.channels, rumble.rate, rumble.channels), (22050, 2, 22050, 1));
+    assert!((cannon.seconds() - 8.0).abs() < 0.05, "{}", cannon.seconds());
+    assert!((rumble.seconds() - 1.5).abs() < 0.05, "{}", rumble.seconds());
+}

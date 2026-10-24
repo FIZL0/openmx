@@ -4974,3 +4974,31 @@ ui_sounds_free      boot 0x002424c0
 #   +0x1ac = *(rider+0x7a8)+0x128 (the bike collider); +0x1b0 = +0x7c0; +0x144 = *(rider+4000)+0xc4;
 #   +0x160/+0x164/+0x168 = +0x888 (throttle)/+0x894/+0x88c; +0x238 = +0xb7c (cleared after);
 #   +0x23c/+0x240 = +0x7dc/+0x7e0
+# P85 — the shootoff's sound and the music fade. The player bike's builder (0x00280fb0) makes a sound
+# child at +0x149c (ctor 0x001fe7e0, vtable 0x004521b0, update 0x001fea70), read from Aud\event.aud's
+# [Cannonball] (0x001fe8b0): Cannon = SFX\cannonball_stereo (streamed, stereo, one-shot, 8.0 s at 22050)
+# and Rumble = SFX\RumbleMono (looping mono, 1.5 s); +0x34/+0x38 the two sound objects (vtable
+# 0x0044ed00: vt +0x1c play, +0x20 state, +0x28 stop, +0x70 volume 0..100 clamped, default 100), +0x40
+# the reason it saw last, +0x44 -> the bike's +0x748, +0x48 -> the chassis' cofg (+0x7a4 -> +0x60),
+# +0x4c the bike's +0x570 edge gate. Neither sound is placed: no 3D call is made on either.
+shootoff_sound_update boot 0x001fea70 (child) runs among the bike's children, after its physics and
+#                                     before the ride state machine, so it reads last tick's reason.
+#                                     Reason 13 newly seen: Rumble stopped, Cannon played, the music
+#                                     stream's pause set (0x001686b0, music manager +0x400 -> +0x30).
+#                                     Reason 0: newly back from 13, the music's volumes set to the
+#                                     options' own (0x001fdf90); then the edge query (0x001a6e50) at
+#                                     350 ft on the cofg: d = the nearest edge's distance. Within it,
+#                                     Rumble started if idle, its volume (int)((350-d)/200*75)+25, and
+#                                     the songs' volumes (int)(v*(1-(350-d)/200)) of the options' v
+#                                     (music for songs 0..12, ripped music past), negative let through.
+#                                     Outside it, Rumble stopped and the music's pause cleared; the
+#                                     volume is left where the last tick inside put it. Both music
+#                                     calls gated on the game's +0x570.
+music_set_volumes boot 0x001fdf90 (music manager, music 0..100, ripped 0..100) jukebox +0x44: song k's
+#                                 volume float at (+0x64)+k*0x3c+0x30 = v/100
+stream_pause boot 0x001686b0 (stream, on, a2) +0x40 = on, IOP command 0x17 when it changes; vt +0x18
+#                            sets it, vt +0x20 clears it; the pause page (0x00207770) sets every stream's
+# Live (context/capture/p85, watch/p85-edge-sound.toml): the pause flag the throw sets is clear again the
+# next tick (writer not found); the song stays at volume 0 through the cannonball and is back at the
+# options' volume the tick after the put-back. Video Capture: the boom is heard ~6 ticks after the
+# rumble stops (the stream's start).

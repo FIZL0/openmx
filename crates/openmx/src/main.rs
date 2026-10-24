@@ -5541,7 +5541,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if world.seats.iter().any(|seat| seat.riding) {
                 let ears: Vec<audio::Listener> = cameras.iter().map(listener).collect();
                 sound.listen(&ears);
-                let frames: Vec<audio::SeatFrame> = world.seats.iter().map(seat_sound).collect();
+                let area = sim_world::World::area(&world.place);
+                let frames: Vec<audio::SeatFrame> = world.seats.iter().map(|s| seat_sound(s, area)).collect();
                 sound.frame(&frames, dt.0);
                 hushed = false;
             } else if !hushed {
@@ -6455,8 +6456,15 @@ fn listener(c: &Camera) -> audio::Listener {
 
 /// What one seat's frame sounds like (P42): the hands and the engine on the bike, the rider's fall
 /// and landing, or the plane's engine note when the plane is up.
-fn seat_sound(seat: &Seat) -> audio::SeatFrame {
+fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::SeatFrame {
     let r = &seat.sim.rider.ride;
+    // The shootoff's (P85): the edge asked of the chassis' centre, as the throw asks it.
+    let c = r.chassis.cofg_world;
+    let edge = audio::EdgeFrame {
+        armed: area.is_some() && seat.sim.rider.edge_armed,
+        reason: seat.sim.rider.state.wreck.map_or(0, |w| w.0 as i32),
+        edge: area.and_then(|a| audio::edge_distance(a.width.0, a.depth.0, [c.x(), c.y(), c.z()])),
+    };
     let p = r.position();
     let v = r.chassis.vel;
     let plane = match (seat.garage.up, &seat.garage.plane) {
@@ -6480,6 +6488,7 @@ fn seat_sound(seat: &Seat) -> audio::SeatFrame {
         wreck: seat.said.wreck.map(|w| w.0 as i32),
         landed_trick: seat.said.landed.is_some(),
         plane,
+        edge,
     }
 }
 

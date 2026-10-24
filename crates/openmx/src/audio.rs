@@ -436,6 +436,9 @@ pub struct Mixer {
     pub engine_volume: f32,
     pub crowd_volume: f32,
     pub menu_volume: f32,
+    /// The shootoff's fade (P85): while a rider is near the map's edge, what the music's volume is
+    /// scaled by, after it is cut to whole percent as the original's settings keep it.
+    pub music_edge: Option<f32>,
     /// Samples rendered since the start.
     pub rendered: u64,
     /// The front end's own music (P65), the original's `UI\UI_001` pair: one stereo loop, under the
@@ -471,6 +474,7 @@ impl Mixer {
             engine_volume: 0.8,
             crowd_volume: 0.8,
             menu_volume: 0.8,
+            music_edge: None,
             rendered: 0,
             menu_music: None,
             front_end: false,
@@ -514,6 +518,11 @@ impl Mixer {
     /// The clip a voice is playing now.
     pub fn clip_of(&self, id: VoiceId) -> Option<Arc<Clip>> {
         self.voices.iter().find(|v| v.id == id && !v.stopping).map(|v| v.clip.clone())
+    }
+
+    /// The gain a playing voice was last set to.
+    pub fn gain_of(&self, id: VoiceId) -> Option<f32> {
+        self.voices.iter().find(|v| v.id == id && !v.stopping).map(|v| v.play.gain)
     }
 
     pub fn playing(&self, id: VoiceId) -> bool {
@@ -605,9 +614,13 @@ impl Mixer {
     /// music's for the rest — the original's split, where the songs past the disc's thirteen take the
     /// ripped music's volume and the rest the music's.
     pub fn music_gain(&self) -> f32 {
-        match self.music.now() {
+        let base = match self.music.now() {
             Some(id) if id.starts_with(FOLDER) => self.folder_volume,
             _ => self.music_volume,
+        };
+        match self.music_edge {
+            Some(f) => ((((base * 100.0).round() as i32) as f32 * f) as i32).max(0) as f32 / 100.0,
+            None => base,
         }
     }
 
@@ -2070,6 +2083,148 @@ impl WorldSounds {
     }
 }
 
+// --- the shootoff (P85) -----------------------------------------------------------------------------
+
+/// The wreck reason of the cannonball, the throw back off the map's edge (S59).
+pub const CANNONBALL: i32 = 13;
+/// How near an edge the shootoff's warning starts, feet: the music begins to fade and the rumble to
+/// rise here, and both are at their ends at the throw's own 150-ft margin, [`EDGE_RAMP`] further in.
+pub const EDGE_WARNING: f32 = 350.0;
+pub const EDGE_RAMP: f32 = 200.0;
+
+/// The map-edge query the shootoff's sound asks: `None` while `at` is [`EDGE_WARNING`] or more inside
+/// every edge of a `width` × `depth` map, else the distance to the nearest edge (negative past it).
+pub fn edge_distance(width: f32, depth: f32, at: [f32; 3]) -> Option<f32> {
+    let m = EDGE_WARNING;
+    if m <= at[0] && at[0] <= width - m && m <= at[2] && at[2] <= depth - m {
+        return None;
+    }
+    Some(at[0].min(width - at[0]).min(at[2]).min(depth - at[2]))
+}
+
+/// The rumble's volume, `0..=100`, at `d` feet from the edge: 25 at the warning's start, 100 at the
+/// margin.
+pub fn rumble_volume(d: f32) -> i32 {
+    (((EDGE_WARNING - d) / EDGE_RAMP * 75.0) as i32 + 25).clamp(0, 100)
+}
+
+/// What the music is scaled by at `d` feet from the edge: 1 at the warning's start, 0 at the margin.
+pub fn music_scale(d: f32) -> f32 {
+    1.0 - (EDGE_WARNING - d) / EDGE_RAMP
+}
+
+/// `event.aud`'s `[Cannonball]`: the boom of the throw (`Cannon`) and the rumble that rises as the
+/// edge comes near (`Rumble`). Neither is placed in the world: everyone hears them alike.
+#[derive(Clone, Debug, Default)]
+pub struct Shootoff {
+    pub cannon: Option<(Arc<Clip>, bool)>,
+    pub rumble: Option<(Arc<Clip>, bool)>,
+}
+
+impl Shootoff {
+    pub fn read(event: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> Shootoff {
+        let e = ini::parse(event);
+        let Some(s) = section(&e, "Cannonball") else { return Shootoff::default() };
+        let mut one = |key: &str| {
+            let clip = s.get(key).map(str::trim).and_then(&mut *lib)?;
+            Some((clip, s.get(&format!("{key}Looping")).is_some_and(truthy)))
+        };
+        Shootoff { cannon: one("Cannon"), rumble: one("Rumble") }
+    }
+}
+
+/// What one rider's shootoff sound reads in a tick.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EdgeFrame {
+    /// The map edge is armed on this bike (the throw's own gate, S73).
+    pub armed: bool,
+    /// The ride's wreck reason after the tick, 0 riding.
+    pub reason: i32,
+    /// [`edge_distance`] of the chassis' centre of gravity after the tick.
+    pub edge: Option<f32>,
+}
+
+/// **One rider's shootoff sound**, the original's sound child of the player's bike. It runs among
+/// the bike's children, after the physics and before the ride's state machine, so it reads the
+/// position of this tick and the reason the last one left: the boom comes the tick after the throw,
+/// and the music the tick after the put-back.
+///
+/// - The cannonball newly seen: the rumble stops and the boom plays.
+/// - Riding, just back from a cannonball: the music is the settings' own again.
+/// - Riding near an edge: the rumble plays at [`rumble_volume`] and the music is scaled by
+///   [`music_scale`], cut to the settings' whole percent first. Riding away from it: the rumble
+///   stops, and the music is left as the last tick near the edge put it.
+///
+/// The music is the whole mix's, so in a split every rider's sound writes it in seat order.
+#[derive(Debug, Default)]
+pub struct EdgeSound {
+    /// The reason the last tick left, which this one reads.
+    pending: i32,
+    /// The reason the last tick read.
+    seen: i32,
+    rumble: Option<VoiceId>,
+    cannon: Option<VoiceId>,
+}
+
+impl EdgeSound {
+    pub fn tick(&mut self, m: &mut Mixer, sounds: &Shootoff, f: &EdgeFrame) {
+        let reason = std::mem::replace(&mut self.pending, f.reason);
+        if f.armed {
+            if reason == CANNONBALL && self.seen != CANNONBALL {
+                self.stop_rumble(m);
+                if let Some((clip, looping)) = &sounds.cannon {
+                    self.cannon = Some(m.play(clip.clone(), Play { looping: *looping, ..Play::default() }));
+                }
+                // The original pauses the music's stream here too, and it is going again the next
+                // tick: the song plays on, at the volume the last tick near the edge left (0).
+            } else if reason == 0 {
+                if self.seen == CANNONBALL {
+                    m.music_edge = None;
+                }
+                match f.edge {
+                    None => self.stop_rumble(m),
+                    Some(d) => {
+                        let gain = rumble_volume(d) as f32 / 100.0;
+                        match self.rumble.filter(|&id| m.playing(id)) {
+                            Some(id) => m.set(id, gain, 1.0, None),
+                            None => {
+                                if let Some((clip, looping)) = &sounds.rumble {
+                                    let play = Play { gain, looping: *looping, ..Play::default() };
+                                    self.rumble = Some(m.play(clip.clone(), play));
+                                }
+                            }
+                        }
+                        m.music_edge = Some(music_scale(d));
+                    }
+                }
+            }
+        }
+        self.seen = reason;
+    }
+
+    fn stop_rumble(&mut self, m: &mut Mixer) {
+        if let Some(id) = self.rumble.take() {
+            m.stop(id);
+        }
+    }
+
+    /// The rumble's voice while it plays.
+    pub fn rumble(&self) -> Option<VoiceId> {
+        self.rumble
+    }
+
+    /// The last boom's voice.
+    pub fn cannon(&self) -> Option<VoiceId> {
+        self.cannon
+    }
+
+    /// Every voice was stopped: nothing of this rider's plays, and the reasons seen are kept.
+    pub fn hushed(&mut self) {
+        self.rumble = None;
+        self.cannon = None;
+    }
+}
+
 // --- the shell's sound ------------------------------------------------------------------------------
 
 /// What one seat hands the sound each frame.
@@ -2082,6 +2237,8 @@ pub struct SeatFrame {
     pub landed_trick: bool,
     /// In the plane, and its engine note `0..1`, where it is.
     pub plane: Option<(f32, [f32; 3])>,
+    /// What the shootoff's sound reads (P85).
+    pub edge: EdgeFrame,
 }
 
 /// One rider's sounds: the bike they ride, and what plays for them.
@@ -2092,6 +2249,7 @@ pub struct SeatSound {
     last: [i32; 4],
     was_grounded: bool,
     dice: Dice,
+    pub edge: EdgeSound,
 }
 
 impl SeatSound {
@@ -2103,6 +2261,7 @@ impl SeatSound {
             last: [-1; 4],
             was_grounded: true,
             dice: Dice::new(seed.wrapping_mul(31).wrapping_add(7)),
+            edge: EdgeSound::default(),
         }
     }
 }
@@ -2115,6 +2274,7 @@ pub struct Sound {
     pub rider: RiderSounds,
     pub world: WorldSounds,
     pub plane: LoopEngine,
+    pub shootoff: Shootoff,
     started: bool,
     world_voices: Vec<VoiceId>,
     dice: Dice,
@@ -2129,6 +2289,7 @@ impl Sound {
             rider: RiderSounds::default(),
             world: WorldSounds::default(),
             plane: LoopEngine::default(),
+            shootoff: Shootoff::default(),
             started: false,
             world_voices: Vec::new(),
             dice: Dice::new(0x5eed),
@@ -2167,9 +2328,11 @@ impl Sound {
             let h = &f.hands;
             if let Some((note, at)) = f.plane {
                 s.engine.silence(m);
+                s.edge.stop_rumble(m);
                 s.plane.update(m, &self.plane, note, at);
                 continue;
             }
+            s.edge.tick(m, &self.shootoff, &f.edge);
             s.plane.silence(m);
             s.engine.update(h, dt, m, &s.bike);
             let near = Play { at: Some(h.at), near: self.rider.near, far: self.rider.far, ..Play::default() };
@@ -2234,6 +2397,18 @@ impl Sound {
         for s in &mut self.seats {
             s.engine = Engine::new(s.dice.below(u32::MAX) as u64);
             s.plane = PlaneNote::default();
+            // A pause in a cannonball must not boom again on the way out: the rider's reasons stay.
+            s.edge.hushed();
+        }
+    }
+}
+
+impl Drop for Sound {
+    /// The mixer outlives the ride (the menus' music plays on): leave it at the settings' own volume.
+    /// A pause keeps the fade, as the original's does.
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.music_edge = None;
         }
     }
 }
@@ -2291,6 +2466,13 @@ impl Reading<'_> {
         let e = self.text(events_res, "aud\\event.aud");
         let lib = &mut *self.lib;
         WorldSounds::read(&t, &e, &mut |n| lib.clip(n))
+    }
+
+    /// The shootoff's boom and rumble, out of the race events' `aud\event.aud`.
+    pub fn shootoff(&mut self, events_res: &str) -> Shootoff {
+        let e = self.text(events_res, "aud\\event.aud");
+        let lib = &mut *self.lib;
+        Shootoff::read(&e, &mut |n| lib.clip(n))
     }
 }
 
@@ -2556,6 +2738,7 @@ impl Sound {
         }
         sound.plane = read.machines(machines);
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
+        sound.shootoff = read.shootoff(events_res.unwrap_or(track_res));
         Ok(sound)
     }
 }
