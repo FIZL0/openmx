@@ -570,3 +570,66 @@ fn the_hud_scale_and_the_minimap_setting_reach_the_ride_hud() {
     assert!(off.radar.is_none() && one.radar.is_some());
     assert!(off.meter.is_some() && off.trick.is_some());
 }
+
+/// A chain of `ids` built up one trick at a time from `t0`, 400 ms apart, named as the stunt table
+/// would: 24 the backflip, 2 the can-can.
+fn chain(t0: Instant, ids: &[u8]) -> (Tracker, Instant) {
+    let named = |id: u8| match id {
+        24 => "Backflip".to_string(),
+        2 => "Can Can".to_string(),
+        id => name(id),
+    };
+    let mut t = Tracker::default();
+    t.update(t0, &card(&[], false, 0.0), named);
+    let mut at = t0;
+    for k in 1..=ids.len() {
+        at = t0 + Duration::from_millis(400 * k as u64);
+        t.update(at, &card(&ids[..k], true, 0.0), named);
+    }
+    (t, at)
+}
+
+/// The names drawn on the pop-up's chain line, the points and the multiplier left out.
+fn drawn_names(t: &Tracker, at: Instant) -> Vec<String> {
+    let g = gauges(Speedometer::Digital);
+    let mut frame = Frame::new(1920, 1080, [0, 0, 0]);
+    let mut shown = shown(&g, &[], &[], None);
+    shown.offer = None;
+    let d = ride_hud::draw(&mut frame, &shown, t, at);
+    let (p, lines) = d.trick.expect("drawn");
+    lines.iter().map(|l| l.text.clone()).filter(|l| *l != p.points && !l.starts_with('x')).collect()
+}
+
+/// P140: a trick done again straight after itself reads `Backflip x2`, not `Backflip + Backflip`;
+/// the latest-three window counts the folded entries, the multiplier still counts every trick, and
+/// a run broken by another trick keeps its order.
+#[test]
+fn a_repeated_trick_reads_with_its_count() {
+    let t0 = Instant::now();
+    let cases: [(&[u8], &[&str], usize); 6] = [
+        (&[24, 24], &["Backflip x2"], 2),
+        (&[24, 24, 24, 2], &["Backflip x3", "Can Can"], 4),
+        (&[24, 2, 24], &["Backflip", "Can Can", "Backflip"], 3),
+        (&[3, 7, 24], &["Trick 3", "Trick 7", "Backflip"], 3),
+        (&[2, 24, 24, 3, 3, 3, 7], &["…", "Backflip x2", "Trick 3 x3", "Trick 7"], 7),
+        (&[24], &["Backflip"], 1),
+    ];
+    for (ids, want, mult) in cases {
+        let (t, at) = chain(t0, ids);
+        let p = t.popup(at).unwrap();
+        let entries: Vec<&str> = want.iter().copied().filter(|w| *w != "…").collect();
+        assert_eq!(p.names.iter().rev().take(entries.len()).rev().collect::<Vec<_>>(), entries, "{ids:?}");
+        assert_eq!(p.mult, (mult >= 2).then_some(mult), "{ids:?}");
+        assert_eq!(drawn_names(&t, at + Duration::from_millis(500)), *want, "{ids:?}");
+    }
+    assert_eq!(ride_hud::folded(&["A".into(), "A".into(), "B".into(), "A".into()]), ["A x2", "B", "A"]);
+    // The count grows in as a new name does: the second backflip pops the folded entry.
+    let (t, at) = chain(t0, &[24, 24]);
+    let p = t.popup(at).unwrap();
+    assert!(near(p.newest.0, 0.5, 0.01), "{p:?}");
+    // A bailed run plays out still folded.
+    let mut t = t;
+    let end = at + Duration::from_millis(300);
+    t.update(end, &card(&[], false, 0.0), name);
+    assert_eq!(t.popup(end).unwrap().names, ["Backflip x2"]);
+}
