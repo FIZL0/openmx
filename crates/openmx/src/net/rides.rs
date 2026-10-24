@@ -67,8 +67,12 @@ impl Game for Rides<'_> {
         // Who is in the ride (P94): a seat nobody sits in has the missing pad ([`Game::step`]), and is
         // no marker's pick. The pads are the session's, so every machine counts the same.
         let riding: Vec<bool> = (0..self.sims.len()).map(|s| pads.get(s).is_some_and(|p| p.0[0] != Report::missing().0[0])).collect();
+        // A seat whose player has their pause open (P84, in its byte) is frozen where it is: not
+        // polled, not stepped, and out of every bike's contacts, so the others pass through it.
+        let paused: Vec<bool> = (0..self.sims.len()).map(|s| pads.get(s).is_some_and(|p| Wanted::of(p.0[super::SWITCH]).paused)).collect();
+        let touching: Vec<bool> = riding.iter().zip(&paused).map(|(&r, &p)| r && !p).collect();
         // Rider against rider (S78): every seat's contacts, from where the last tick left every bike.
-        let mut lists = rider_contact::among(self.sims, &riding, dt);
+        let mut lists = rider_contact::among(self.sims, &touching, dt);
         // The last seat first, as the original walks its riders (S88, `Sim::step_all`).
         for seat in (0..self.sims.len()).rev() {
             let mut bump = lists
@@ -76,6 +80,9 @@ impl Game for Rides<'_> {
                 .map(|l| std::mem::take(&mut l[seat]))
                 .filter(|l| !l.is_empty())
                 .map(|l| rider_contact::bump_among(self.sims, seat, l));
+            if paused[seat] {
+                continue;
+            }
             let sim = &mut self.sims[seat];
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());

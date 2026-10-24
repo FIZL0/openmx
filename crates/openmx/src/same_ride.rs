@@ -182,6 +182,7 @@ fn offline_marked(pads: &[Report], markers: bool) -> (Vec<F>, Vec<Vec<u8>>) {
         markers,
         // The online side's byte leaves the together chord off (P67), so this does too.
         together: false,
+        paused: false,
     };
     let mut world = World { place: Flat::default(), seats: vec![seat], tape: None, played_dt: None };
     let (lib, clip) = clips();

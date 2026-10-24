@@ -382,6 +382,10 @@ struct Seat {
     /// is paused — not polled, not stepped — while every other player rides on; nothing else in the
     /// world waits on them.
     waiting: bool,
+    /// Whether this player has their own pause open (P84), offline off the front end's menu and online
+    /// off the tick's pads: frozen where they are, drawn see-through ([`vehicle::PAUSED_ALPHA`]) and
+    /// passed through, while every other player rides on.
+    paused: bool,
     /// What the rider did this frame, kept so the loop can print it after the pass.
     said: rider::Frame,
     /// Whether the plane was upside down when this frame's report was made, which turns the
@@ -4000,9 +4004,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         reports: [Report::missing(); PADS],
         sim: Sim::with_rider(0, tables.clone(), phy.clone(), rider),
         garage,
-        riding: front.as_ref().is_none_or(|f| f.menu.riding()),
+        riding: front.as_ref().is_none_or(|f| !f.menu.paused(0)),
         start_freezes: front.is_none(),
         waiting: false,
+        paused: false,
         said: rider::Frame::default(),
         inverted: false,
         hands: Controls::default(),
@@ -4032,9 +4037,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             reports: [Report::missing(); PADS],
             sim: Sim::with_rider(0, tables.clone(), phy, rider),
             garage: Garage::new(up, plane)?,
-            riding: front.as_ref().is_none_or(|f| f.menu.riding()),
+            riding: front.as_ref().is_none_or(|f| !f.menu.paused(i + 1)),
             start_freezes: front.is_none(),
             waiting: false,
+            paused: false,
             said: rider::Frame::default(),
             inverted: false,
             hands: Controls::default(),
@@ -4572,7 +4578,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // same switch as the key and the pause. Not on a played tape, whose switches are its own
         // lines, nor online, where the ride is the bike's.
         let bays = vehicle::bays_shown(&lot, front.as_deref().is_none_or(|f| f.menu.settings.bays));
-        let offering = head.is_none() && online.is_none() && front.as_deref().is_none_or(|f| f.menu.riding());
+        // A paused player is offered nothing (`seat_offer`), and the others ride on and are (P84).
+        let offering = head.is_none() && online.is_none();
         answers.resize(world.seats.len(), vehicle::Answer::default());
         for (i, answer) in answers.iter_mut().enumerate() {
             let (report, taps) = menu_reports.get(i).copied().unwrap_or((world.seats[i].reports[0], 0));
@@ -4591,12 +4598,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         stages.mark(stages::Stage::Input);
 
-        // The pause, under the front end: Start or Escape opens it, and while it is open the ride is
-        // frozen exactly as Start's own freeze leaves it, the pass polling the pad and stepping
+        // The pause, under the front end: Start or Escape opens it, and while it is open its player's
+        // ride is frozen exactly as Start's own freeze leaves it, the pass polling the pad and stepping
         // nothing. What it changes is applied at once, and saved.
         if let Some(front) = front.as_deref_mut() {
-            // Every player's press: another player's Start pauses for them, and while the pause is
-            // theirs their pad drives it (P41). Escape is the keyboard's, and Back for whoever drives.
+            // Every player's press: each player's Start opens their own pause, which their pad drives
+            // (P41) in their own view while the others ride on (P84). Escape is the keyboard's, 1P's.
             // Each player's pad as it is, not as the ride's scheme moved it (P53).
             let menu_report = |i: usize| menu_reports.get(i).copied().unwrap_or((world.seats[i].reports[0], 0));
             let mut seat0 = vec![menu_report(0)];
@@ -4613,7 +4620,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             let esc = held(window, key::ESCAPE);
             if esc && !escape {
-                if front.menu.riding() {
+                if !front.menu.paused(0) {
                     front.menu.pause();
                 } else if let Some(p) = presses.get_mut(front.menu.driver()) {
                     p.back = true;
@@ -4621,7 +4628,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             escape = esc;
             front.menu.music_now = front.sound.now();
-            let paused = !front.menu.riding();
+            let paused: Vec<bool> = (0..world.seats.len()).map(|i| front.menu.paused(i)).collect();
             let mut act = front.menu.step_seats(&presses);
             for &(d, p) in &idle_presses {
                 if act == Act::Stay {
@@ -4892,6 +4899,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             riding: false,
                             start_freezes: false,
                             waiting: false,
+                            paused: false,
                             said: rider::Frame::default(),
                             inverted: false,
                             hands: Controls::default(),
@@ -4983,7 +4991,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             // The pause closing on modifiers the player changed in it: the ride takes them now, from
             // where it is (P98), and a tape being written takes the change at the tick it is on.
-            if paused && front.menu.riding() && menu_mods != Some(front.menu.settings.modifiers) {
+            let closed = paused.iter().enumerate().any(|(i, &was)| was && !front.menu.paused(i));
+            if closed && menu_mods != Some(front.menu.settings.modifiers) {
                 let to = front.menu.settings.modifiers;
                 menu_mods = Some(to);
                 // the knobs the host set through All Players, every seat's online too (P134)
@@ -5010,7 +5019,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             // And on an Air Wrecks switch the player changed (P138): every seat takes it at this
             // tick, as Wrecks is every seat's, and a tape being written says so before its next frame.
-            if paused && front.menu.riding() && menu_air != Some(front.menu.settings.air_wrecks) {
+            if closed && menu_air != Some(front.menu.settings.air_wrecks) {
                 let on = front.menu.settings.air_wrecks;
                 menu_air = Some(on);
                 if front.menu.air_lock.is_none() {
@@ -5024,8 +5033,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     println!("air wrecks: {} (from the pause)", if on { "on" } else { "off" });
                 }
             }
-            for seat in &mut world.seats {
-                seat.riding = front.menu.riding();
+            // Each player frozen while their own pause is open (P84), the others riding on. Online the
+            // seats are the session's, frozen at the tick their pads say so (below).
+            for (i, seat) in world.seats.iter_mut().enumerate() {
+                seat.paused = front.menu.paused(i);
+                seat.riding = !seat.paused;
             }
         }
         stages.mark(stages::Stage::Menu);
@@ -5047,8 +5059,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let dt: F;
         (dt, simulated) = if let Some(on) = &mut online {
             online_frames += 1;
-            // Paused, this machine's rider lets go: the others ride on.
-            let mut pad = match front.as_deref().is_some_and(|f| !f.menu.riding()) {
+            // Paused, this machine's rider lets go of the pad and says so in it (P84): from the tick
+            // that lands on, every machine freezes this seat where it is, and the others ride on.
+            let paused = front.as_deref().is_some_and(|f| f.menu.paused(0));
+            let mut pad = match paused {
                 true => Report::idle(),
                 false => world.seats[0].reports[0],
             };
@@ -5064,6 +5078,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     round_stick: scheme.1,
                     dpad_rides: !world.seats[0].markers,
                     together: world.seats[0].together,
+                    paused,
                 }
                 .byte();
             if let Err(end) = on.frame(pad, &mut world.place, rigs[0].body.as_ref()) {
@@ -5082,6 +5097,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // Every seat back into the shell's, this machine's first: the others are drawn beside it.
             for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
                 seated[d] = on.show(d, &mut seat.sim, rig.body.as_mut());
+                // Frozen and see-through on the ticks its pads say it is paused (P84), as on every
+                // machine.
+                seat.paused = on.paused(d);
+                seat.riding = !seat.paused;
                 // Its machine is its `Sim`'s (N17): the garage follows, and a switch the session
                 // made snaps the camera onto the machine taken, as offline. Not before every seat's
                 // starting machine is known (N18), or a seat starting in the plane would flick to
@@ -5613,7 +5632,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // The radar's other icons, each view its own (P92).
         hud_art.radar = (0..world.seats.len()).map(|v| radar_blips(&world.seats, &bays, v, &radar_zones, picks[v])).collect();
         // And the switch pop-up, each view its own player's (P103), as the input stage's take reads it.
-        let offering = head.is_none() && online.is_none() && front.as_deref().is_none_or(|f| f.menu.riding());
+        let offering = head.is_none() && online.is_none();
         hud_art.offers = world.seats.iter().map(|seat| offering.then(|| seat_offer(seat, &bays)).flatten()).collect();
         // Which seats' pictures cut this frame (P120): a put-back, or a move far past the seat's own
         // speed. A seat's machine, rider and camera cut or slide together.
@@ -5781,11 +5800,18 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     });
                 }
             }
-            if let Some(front) = &front
-                && front.menu.screen().is_some()
-            {
-                // As sprites (V30), after the HUDs' and so over them; the patches go under both.
-                front.art.sprites(&front.menu, (frame.width, frame.height), menu_base, &mut gpu_sprites);
+            if let Some(front) = front.as_deref_mut() {
+                // As sprites (V30), after the HUDs' and so over them; the patches go under both. Over a
+                // split each player's own pause in their own view (P84), the whole frame's otherwise.
+                let (art, menu) = (&front.art, &mut front.menu);
+                for (v, at) in menu.pause_views(&rects, world.seats.len()) {
+                    let from = gpu_sprites.len();
+                    menu.with_seat(v, |m| art.sprites(m, (at.w, at.h), menu_base, &mut gpu_sprites));
+                    for corner in gpu_sprites[from..].iter_mut().flat_map(|s| &mut s.corners) {
+                        corner[0] += at.x as f32;
+                        corner[1] += at.y as f32;
+                    }
+                }
             }
             perf.add(Stage::Draw, draw_at.elapsed());
 
@@ -5812,7 +5838,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     gpu_poses.len() - 1
                 });
                 // See-through for a while after a put-back, the bike, its parts and the rider alike (P57).
-                let alpha = seat.sim.rider.ghost.shown();
+                // And while the player's own pause is open (P84).
+                let alpha = vehicle::shown_alpha(seat.sim.rider.ghost.shown(), seat.paused);
                 actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha });
                 // A wheel spinning fast is drawn blurred (V59): see-through copies of it trailing
                 // behind, the chassis' own model with every other node shrunk away. Not on a put-back
@@ -5860,8 +5887,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
                 let at = before.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
+                let alpha = vehicle::shown_alpha(1.0, seat.paused);
                 for (model, at) in drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)) {
-                    actors.push(Actor { model, at, pose: None, lod_from: None, alpha: 1.0 });
+                    actors.push(Actor { model, at, pose: None, lod_from: None, alpha });
                 }
             }
             // And every bay's, see-through where it is parked (P103), the put-back ghost's path.
@@ -5977,6 +6005,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
             }
         }
+        let split_views = !view_frames.is_empty();
         for (v, at) in rects.iter().enumerate().filter(|_| !gpu_on) {
             if v >= world.seats.len() {
                 // A layout with room for more players than there are: the spare views are black.
@@ -6169,6 +6198,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     ride_hud::draw(target, shown, tracker, now);
                 });
             }
+            // The player's own pause over their view (P84), when the frame is split.
+            if let Some(front) = front.as_deref_mut().filter(|_| split_views)
+                && front.menu.paused(v)
+            {
+                let (art, menu) = (&front.art, &mut front.menu);
+                menu.with_seat(v, |m| art.draw(m, target));
+            }
             if let Some(view) = view_frames.get(v) {
                 split::put(&mut frame, view, *at);
             }
@@ -6177,7 +6213,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             perf.add(Stage::Draw, draw_at.elapsed());
             stages.mark(stages::Stage::Hud);
         }
-        if let Some(front) = front.as_ref().filter(|_| !gpu_on) {
+        if let Some(front) = front.as_ref().filter(|_| !gpu_on && view_frames.is_empty()) {
             perf.time(Stage::Draw, || front.art.draw(&front.menu, &mut frame));
         }
         stages.mark(stages::Stage::Hud);

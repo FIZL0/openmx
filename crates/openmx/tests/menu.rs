@@ -1022,13 +1022,13 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     let mut readers = vec![r, Reader::new()];
     ride_frame(&mut m, &mut readers, &[Report::idle(), Report::idle()], &mut garages);
 
-    // 2P's Start pauses for 2P, and 1P's pad does nothing to it.
+    // 2P's Start pauses for 2P alone (P84), and 1P's pad does nothing to it.
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
-    assert_eq!(m.screen(), Some(Screen::Pause));
-    assert_eq!(m.driver(), 1);
-    assert_eq!(m.pause_rows()[2], "Switch To Machine: Biplane");
+    assert_eq!(m.view(1).screen(), Some(Screen::Pause));
+    assert!(m.paused(1) && !m.paused(0) && m.screen().is_none());
+    assert_eq!(m.view(1).pause_rows()[2], "Switch To Machine: Biplane");
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
-    assert_eq!(m.cursor(Screen::Pause), 0);
+    assert_eq!(m.view(1).cursor(Screen::Pause), 0);
     // Down twice and Cross on 2P's pad: 2P is in the plane, the ride carries on, 1P is on the bike.
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
@@ -1040,26 +1040,26 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
 
     // 1P's own pause switches 1P, and the row now offers 2P the bike back.
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Start);
-    assert_eq!(m.driver(), 0);
+    assert!(m.paused(0) && !m.paused(1));
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
     assert!(acts.contains(&Act::Switch(0, Machine::Biplane)), "{acts:?}");
     assert_eq!((garages[0].up, garages[1].up), (Kind::Biplane, Kind::Biplane));
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
-    assert_eq!(m.pause_rows()[2], "Switch To Machine: Bike");
+    assert_eq!(m.view(1).pause_rows()[2], "Switch To Machine: Bike");
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
     assert!(m.riding(), "2P's Start resumes 2P's pause");
 
     // A player with no plane to take: the row says so and pressing it switches nothing.
     m.switchable[1] = false;
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
-    assert_eq!(m.pause_rows()[2], "Switch To Machine: None");
+    assert_eq!(m.view(1).pause_rows()[2], "Switch To Machine: None");
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
     assert!(!acts.iter().any(|a| matches!(a, Act::Switch(..))), "{acts:?}");
-    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.view(1).screen(), Some(Screen::Pause));
     assert_eq!(garages[1].up, Kind::Biplane);
 }
 
@@ -3650,12 +3650,13 @@ fn start_held_for_many_frames_opens_the_pause_once_and_leaves_it_open() {
     m.step_seats(&[r.read(&Report::idle()), r2.read(&Report::idle())]);
     for tick in 0..60 {
         m.step_seats(&[r.read(&Report::idle()), r2.read(&start)]);
-        assert_eq!(m.screen(), Some(Screen::Pause), "tick {tick}");
+        assert_eq!(m.view(1).screen(), Some(Screen::Pause), "tick {tick}");
     }
     m.step_seats(&[r.read(&Report::idle()), r2.read(&Report::idle())]);
-    // 1P's Start is not theirs to close it with.
+    // 1P's Start is not theirs to close it with: it opens 1P's own (P84).
     m.step_seats(&[r.read(&start), r2.read(&Report::idle())]);
-    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.view(1).screen(), Some(Screen::Pause));
+    assert!(m.paused(0) && m.paused(1));
 }
 
 /// The left stick leaned to `y` out of 127 from the centre, down positive.
@@ -3851,30 +3852,35 @@ fn leaving_from_the_pause_asks_first_on_stay() {
 }
 
 /// Over a split, the confirm is the pauser's: 2P's pause hears 2P's pad alone, so 1P's Cross on its
-/// leaving row does nothing, and 2P's does.
+/// leaving row does nothing, and 2P's does — and since P84 that pause is 2P's own, 1P riding on.
 #[test]
 fn over_a_split_only_the_pausers_pad_answers_the_confirm() {
-    let (mut m, _) = fresh();
+    // In the ride: a pause is a seat's own since P84, and only a ride has seats to pause.
+    let (mut m, mut r) = fresh();
     m.riders = 2;
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
     let idle = Press::default();
     let (cross, down, up) = (press(|p| p.ok = true), press(|p| p.down = true), press(|p| p.up = true));
     // 2P's Start, as a ride hears it.
     m.pause_for(1);
-    assert_eq!(m.driver(), 1);
-    while m.pause_rows()[m.cursor(Screen::Pause)] != "Main Menu" {
+    assert!(m.paused(1) && !m.paused(0));
+    while m.view(1).pause_rows()[m.view(1).cursor(Screen::Pause)] != "Main Menu" {
         m.step_seats(&[idle, down]);
     }
     assert_eq!(m.step_seats(&[idle, cross]), Act::Stay);
-    assert_eq!(m.confirming().map(|c| c.2), Some(1));
+    assert_eq!(m.view(1).confirming().map(|c| c.2), Some(1));
     // 1P moves and presses: nothing.
     m.step_seats(&[up, idle]);
-    assert_eq!(m.confirming().map(|c| c.2), Some(1));
+    assert_eq!(m.view(1).confirming().map(|c| c.2), Some(1));
     m.step_seats(&[press(|p| p.back = true), idle]);
-    assert_eq!(m.confirming().map(|c| c.2), Some(1));
+    assert_eq!(m.view(1).confirming().map(|c| c.2), Some(1));
     // 2P onto the leaving row; 1P's Cross still nothing, 2P's leaves.
     m.step_seats(&[idle, up]);
     assert_eq!(m.step_seats(&[cross, idle]), Act::Stay);
-    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.view(1).screen(), Some(Screen::Pause));
+    assert!(m.screen().is_none(), "1P rides on under 2P's pause (P84)");
     assert_eq!(m.step_seats(&[idle, cross]), Act::MainMenu);
     assert_eq!(m.screen(), Some(Screen::Main));
 }
@@ -4661,4 +4667,129 @@ fn players_drop_into_a_running_freeride_and_leave_it_and_the_others_ride_on() {
     let acts = r.tap(0, Control::Cross);
     assert!(acts.contains(&Act::MainMenu), "{acts:?}");
     assert_eq!(r.m.screen(), Some(Screen::Main));
+}
+
+/// `tests/ride.rs`'s wreck limits, appended to the stand-in bike as `tests/right_stick_camera.rs`
+/// does: without a `[Wrecks]` section this bike never gets going.
+const PAUSE_RIDE_LIMITS: &str = "
+[Wrecks]
+MaxWreckTime = 2
+CannonballWreckTime = 5
+FrontWreckSpeedLimit = 60
+BackWreckSpeedLimit = 60
+SideWreckSpeedLimit = 40
+RacingDownWreckSpeedLimit = 40
+FreestyleDownWreckSpeedLimit = 40
+GroundPitchDownWreckAngle = 60
+GroundPitchUpWreckAngle = 60
+AirbornePitchDownWreckAngle = 120
+AirbornePitchUpWreckAngle = 120
+AirborneRollWreckAngle = 100
+NoHanderWreckSpeedLimit = 400
+NoHanderMaxRollAngle = 45
+JoustWreckHeight = 2
+CrossupWreck = 1
+CrossupWreckTime = 0.3
+";
+
+/// A level floor at height 0, `tests/right_stick_camera.rs`'s.
+struct PauseFloor;
+
+impl game_sim::world::World for PauseFloor {
+    fn ground(&mut self, at: ps2_float::Vf) -> (ps2_float::Vf, ps2_float::Vf) {
+        (ps2_float::Vf::new(at.x(), 0.0, at.z(), 1.0), ps2_float::Vf::new(0.0, 1.0, 0.0, 0.0))
+    }
+
+    fn solid(&mut self, _bundle: &game_sim::collide::Bundle, _record: &mut game_sim::collide::Record) -> bool {
+        false
+    }
+}
+
+fn pause_sim(seat: u32) -> game_sim::Sim {
+    let tables = std::sync::Arc::new(game_sim::rider::Tables::build());
+    let bike = format!("{}{PAUSE_RIDE_LIMITS}", game_sim::stock::BIKE);
+    let phy = game_sim::phy::Phy::read_bytes(bike.as_bytes(), &tables.ride.curve);
+    game_sim::Sim::ride(seat, tables, phy, game_sim::stock::SPAWN, game_sim::stock::FACING, Default::default())
+}
+
+/// One seat's tick the shell's way (main.rs's `Seat::pass`): the pad polled, and the machine
+/// stepped only while that player's pause is shut.
+fn pause_pass(sim: &mut game_sim::Sim, garage: &mut Garage, report: Report, paused: bool) {
+    const DT: ps2_float::F = ps2_float::F(1.0 / 60.0);
+    let controls = vehicle::hands(sim.poll(DT, &[report, Report::missing()]), false);
+    if !paused {
+        garage.pass_marked(sim, DT, &controls, 0, &[], &mut PauseFloor, false);
+    }
+}
+
+/// P84: in a two-player split 2P's Start pauses 2P alone. 2P's view has the menu, driven by 2P's
+/// pad; 1P rides on tick for tick as a lone 1P does; 2P's bike holds still, drawn see-through,
+/// until 2P resumes it from where it stopped.
+#[test]
+fn in_a_split_2p_pauses_alone_and_1p_rides_on_tick_for_tick() {
+    let (mut m, r) = fresh();
+    m.riders = 2;
+    let mut r = r;
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    let mut readers = vec![r, Reader::new()];
+    let mut garages = vec![garage(0, Kind::Bike), garage(1, Kind::Bike)];
+    let mut sims = [pause_sim(0), pause_sim(1)];
+    // A lone 1P beside them on the same pad, the ride 1P's must stay.
+    let (mut lone, mut lone_garage) = (pause_sim(0), garage(0, Kind::Bike));
+    let gas = Report::from_buttons(Control::Cross.mask());
+    let start = Report::from_buttons(Control::Start.mask());
+    let down = Report::from_buttons(Control::Down.mask());
+    let rects = split::Layout::Stacked.rects(640, 448);
+
+    // 2P's pad over the run: gas, Start, rest with a Down in the menu, Start again, gas.
+    let two = |t: usize| match t {
+        0..60 => gas,
+        60 => start,
+        61..80 => Report::idle(),
+        80 => down,
+        81..120 => Report::idle(),
+        120 => start,
+        121..125 => Report::idle(),
+        _ => gas,
+    };
+    let mut held = None;
+    let mut acts = Vec::new();
+    for t in 0..200 {
+        let reports = [gas, two(t)];
+        acts.push(ride_frame(&mut m, &mut readers, &reports, &mut garages));
+        for (seat, sim) in sims.iter_mut().enumerate() {
+            pause_pass(sim, &mut garages[seat], reports[seat], m.paused(seat));
+        }
+        pause_pass(&mut lone, &mut lone_garage, gas, false);
+
+        assert!(!m.paused(0) && m.screen().is_none(), "1P never pauses, tick {t}");
+        assert_eq!(sims[0].hash(), lone.hash(), "1P rides on tick for tick, tick {t}");
+        let ghost = sims[1].rider.ghost.shown();
+        let at = sims[1].rider.ride.position();
+        if m.paused(1) {
+            assert_eq!(m.view(1).screen(), Some(Screen::Pause));
+            assert_eq!(m.pause_views(&rects, 2), vec![(1, rects[1])], "the menu is in 2P's view alone");
+            assert_eq!(vehicle::shown_alpha(ghost, true), vehicle::PAUSED_ALPHA);
+            let was = *held.get_or_insert((at, sims[1].rider.ride.chassis.speed));
+            assert_eq!((at, sims[1].rider.ride.chassis.speed), was, "2P's bike holds still, tick {t}");
+        } else {
+            assert_eq!(vehicle::shown_alpha(ghost, false), ghost);
+        }
+        match t {
+            59 => assert!(sims[1].rider.ride.chassis.speed.0 > 1.0, "2P is moving when it pauses"),
+            60 => assert!(m.paused(1), "2P's Start pauses 2P"),
+            79 => assert_eq!(m.view(1).cursor(Screen::Pause), 0),
+            80 => assert_eq!(m.view(1).cursor(Screen::Pause), 1, "2P's Down moves 2P's cursor"),
+            119 => assert!(m.paused(1)),
+            120 => assert!(!m.paused(1) && m.riding(), "2P's Start again resumes"),
+            _ => {}
+        }
+    }
+    assert!(acts.contains(&Act::Resume), "{acts:?}");
+    // Resumed where it stopped: the first ticks after go on from the held place and speed.
+    let (stop, _) = held.unwrap();
+    let gone = sims[1].rider.ride.position() - stop;
+    assert!(gone.x().abs() + gone.z().abs() > 1.0, "2P rides on after the pause");
 }

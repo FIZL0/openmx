@@ -1815,7 +1815,7 @@ fn the_discs_plane() -> Option<game_sim::phy::Plane> {
 fn wanted(seat: usize, tick: usize) -> vehicle::Wanted {
     let (from, to) = [(120, 450), (300, 600)][seat % 2];
     let up = if (from..to).contains(&tick) { vehicle::Kind::Biplane } else { vehicle::Kind::Bike };
-    vehicle::Wanted { to: Some(up), every_bank: seat == 1, round_stick: false, dpad_rides: false, together: false }
+    vehicle::Wanted { to: Some(up), every_bank: seat == 1, round_stick: false, dpad_rides: false, together: false, paused: false }
 }
 
 /// The ride with the plane every seat may take, each seat's pad saying the machine it wants.
@@ -1857,8 +1857,10 @@ fn a_wanted_machine_goes_in_one_byte() {
     for to in [None, Some(Kind::Bike), Some(Kind::Biplane)] {
         for (every_bank, round_stick) in [(false, false), (true, false), (false, true), (true, true)] {
             for (dpad_rides, together) in [(false, false), (true, false), (false, true), (true, true)] {
-                let w = Wanted { to, every_bank, round_stick, dpad_rides, together };
-                assert_eq!(Wanted::of(w.byte()), w);
+                for paused in [false, true] {
+                    let w = Wanted { to, every_bank, round_stick, dpad_rides, together, paused };
+                    assert_eq!(Wanted::of(w.byte()), w);
+                }
             }
         }
     }
@@ -2100,4 +2102,135 @@ fn a_joiner_that_picked_the_plane_is_seated_flying_from_its_bay() {
     assert!(seats[2].markers.slots[0].is_some() && seats[1].markers.slots[0].is_none(), "with its saved markers");
     assert!(seats[0].plane.is_none() && seats[1].plane.is_none(), "the others on their bikes");
     assert_eq!(rides::preset(&seats[1]), Some(1));
+}
+
+// ---------------------------------------------------------------------------------------------------
+// One seat's own pause (P84)
+// ---------------------------------------------------------------------------------------------------
+
+/// The ticks the host's seat holds its pause open for, by the tick its machine is at.
+const PAUSED: Range<usize> = 150..330;
+
+/// The ride with the host's seat pausing over [`PAUSED`]: its pad, the shell's while a seat's pause
+/// is open, at rest and saying so in the switch byte.
+struct Pausing {
+    ride: Ride,
+}
+
+impl Machine for Pausing {
+    type S = rides::State;
+    fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
+        let seats = np.lineup.mine(&np.me);
+        let mut pads = local.to_vec();
+        for (pad, &s) in pads.iter_mut().zip(&seats) {
+            if s == 0 && PAUSED.contains(&np.tick()) {
+                *pad = Report::idle();
+                pad.0[net::SWITCH] = vehicle::Wanted { paused: true, ..Default::default() }.byte();
+            }
+        }
+        let mut game = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale: None, plane: None };
+        np.frame(&mut game, &pads, ROUND.as_secs_f32());
+    }
+    fn hash(&self) -> u64 {
+        self.ride.hash()
+    }
+}
+
+/// P84 online: the host's seat pauses on its own over a lossy, laggy link. The pause is a bit of
+/// the seat's pad, so a rollback input: both machines agree on every settled tick's pads and state;
+/// the same pads ridden offline are the same state tick for tick; the paused seat's state does not
+/// move a bit while the other seat's rides on, and it rides on from there once resumed.
+#[test]
+fn one_seat_pauses_alone_online_and_both_peers_agree() {
+    let link = Link { loss: 0.1, lag: 3, outage: 0..0, oneway: false };
+    let r = run("host,g", Timing::default(), |seats| Pausing { ride: Ride::new(seats) }, &link, 0..480, |_, _, _| {});
+    for np in &r.nets {
+        assert!(np.desyncs.is_empty() && !np.desynced && np.end.is_none(), "{}: {:?}", np.me, np.desyncs);
+        assert!(np.rb.reruns > 0, "{} never ran a tick again", np.me);
+    }
+    let n = r.agree(&[0, 1], 0);
+    assert!(n > 400, "host and g agree on {n} ticks");
+
+    let h = &r.nets[0];
+    let mut seats = sims(2);
+    let mut world = Flat::default();
+    let mut paused = Vec::new();
+    let mut moved_after = 0;
+    for tick in 0..n {
+        let mut game = Rides { sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: None };
+        assert_eq!(game.hash(), h.hashes[tick], "offline, the state before tick {tick}");
+        let pads: Vec<Report> = h.log[tick].iter().map(|&p| unwire(p)).collect();
+        let before = [seats[0].hash(), seats[1].hash()];
+        let mut game = Rides { sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: None };
+        game.step(tick, &pads);
+        let held = vehicle::Wanted::of(pads[0].0[net::SWITCH]).paused;
+        assert!(!vehicle::Wanted::of(pads[1].0[net::SWITCH]).paused, "g never paused, tick {tick}");
+        assert_ne!(seats[1].hash(), before[1], "g rides on, tick {tick}");
+        if held {
+            paused.push(tick);
+            assert_eq!(seats[0].hash(), before[0], "the paused seat holds still, tick {tick}");
+        } else {
+            assert_ne!(seats[0].hash(), before[0], "the host's seat rides, tick {tick}");
+            moved_after += paused.last().is_some_and(|&t| t < tick) as usize;
+        }
+    }
+    // paused for as long as its pad said so, the session's input delay a tick on
+    let want: Vec<usize> = (PAUSED.start + 1..PAUSED.end + 1).collect();
+    assert_eq!(paused, want, "the paused ticks");
+    assert!(moved_after > 50, "the host's seat rode {moved_after} ticks after resuming");
+}
+
+/// P84: a paused seat is passed through. Two seats side by side carrying the bike's collision
+/// files push apart; with one paused, the other rides as if nobody were there (as it does with no
+/// files at all), and the paused one is not moved either.
+#[test]
+fn a_paused_seat_is_passed_through_online() {
+    use game_sim::bike_col::{self, BikeCol};
+    use game_render::disc::Disc;
+    let Ok(mut disc) = Disc::open_configured() else {
+        eprintln!("skipped: no disc configured");
+        return;
+    };
+    let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+    let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+    let col = std::sync::Arc::new(
+        BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+            .expect("the bike's collision files"),
+    );
+    let bikes: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+    let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+    let tables = game_sim::ride::Tables::build();
+    let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+
+    // `game-sim/tests/rider_contact.rs`'s pair: 1.5 ft apart along x, wrecks off, one Sim a seat.
+    let seat = |i: usize, files: bool| {
+        let mut sim = Sim::new(0x5378);
+        std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+        let mounts = game_sim::stock::mounts(&sim.phy);
+        let s = game_sim::stock::SPAWN;
+        let at = Vf::new(s.x() + 1.5 * i as f32, s.y(), s.z(), 1.0);
+        sim.rider = game_sim::rider::Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Default::default());
+        sim.rider.sense.wrecks_enabled = false;
+        if files {
+            sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+        }
+        sim
+    };
+    let ride = |files: bool, pause: bool| {
+        let mut sims = vec![seat(0, files), seat(1, files)];
+        let mut world = Flat::default();
+        let mut pads = [Report::idle(), Report::idle()];
+        pads[0].0[net::SWITCH] = vehicle::Wanted { paused: pause, ..Default::default() }.byte();
+        let held = sims[0].clone();
+        for tick in 0..30 {
+            Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None }.step(tick, &pads);
+            if pause {
+                assert_eq!(sims[0].hash(), held.hash(), "the paused seat was moved, tick {tick}");
+            }
+        }
+        sims[1].rider.ride.chassis.clone()
+    };
+    let (pushed, alone) = (ride(true, false), ride(false, false));
+    assert_ne!(pushed, alone, "side by side with the files, the riders push apart");
+    assert_eq!(ride(true, true), ride(false, true), "nobody pushes past a paused seat");
 }

@@ -2093,6 +2093,13 @@ pub enum Act {
     Leave(usize),
 }
 
+impl Act {
+    /// Whether it ends the ride for every rider, or starts it again (P84): every pause closes.
+    pub fn leaves(&self) -> bool {
+        matches!(self, Act::Restart | Act::MainMenu | Act::Quit | Act::OpenOnline)
+    }
+}
+
 /// What the loading screen shows (P127): the track, as the pick names it, and how far its ride's
 /// load has got.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2251,6 +2258,15 @@ pub struct Menu {
     tunes: Vec<Tune>,
     /// The sounds the presses made since [`Menu::take_cues`] last took them (P65).
     cues: Cues,
+    /// Every other rider's own pause (P84), by seat, 1P's being the menu's own fields: each a stack
+    /// and cursors of its own, driven by that rider's pad and drawn in their view
+    /// ([`Menu::with_seat`]). Empty until a seat after the first pauses.
+    sides: Vec<Side>,
+    /// The seat whose pause is in the menu's own fields while [`Menu::with_seat`] runs, 0 otherwise.
+    focus: usize,
+    /// What other seats' pauses asked in a frame that one had already asked something in, handed out
+    /// by the next frames' [`Menu::step_seats`] (P84).
+    later: Vec<Act>,
 }
 
 /// The sounds the presses made, and what decides them (P65). Not the menu's state: two menus that
@@ -2273,6 +2289,41 @@ impl PartialEq for Cues {
 impl std::fmt::Debug for Cues {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Cues")
+    }
+}
+
+/// One rider's pause (P84): everything of the menu a pause and the pages under it move, kept for a
+/// seat whose pause is not the one in the menu's own fields.
+#[derive(Clone, Debug, PartialEq)]
+struct Side {
+    stack: Vec<Screen>,
+    cursor: [usize; Screen::ALL.len()],
+    tab: [usize; Screen::ALL.len()],
+    player: usize,
+    pauser: usize,
+    switch_pick: Option<Machine>,
+    leaving: Option<(Leaving, usize)>,
+    typing: String,
+    typing_for: Typing,
+    key: (usize, usize),
+}
+
+impl Side {
+    /// Seat `seat`'s, riding: nothing open, every cursor on its first row.
+    fn new(seat: usize) -> Side {
+        Side {
+            stack: Vec::new(),
+            cursor: [0; Screen::ALL.len()],
+            tab: [0; Screen::ALL.len()],
+            // the pages' Player rows open on the rider whose pause it is
+            player: seat,
+            pauser: seat,
+            switch_pick: None,
+            leaving: None,
+            typing: String::new(),
+            typing_for: Typing::Name,
+            key: (0, 0),
+        }
     }
 }
 
@@ -2383,6 +2434,9 @@ impl Menu {
             music_at: 0,
             tunes: Vec::new(),
             cues: Cues::default(),
+            sides: Vec::new(),
+            focus: 0,
+            later: Vec::new(),
         }
     }
 
@@ -2601,6 +2655,7 @@ impl Menu {
         self.claimed = None;
         self.quit = None;
         self.tick = 0;
+        self.close_sides();
     }
 
     /// 1P's device, once the splash has one.
@@ -2619,7 +2674,7 @@ impl Menu {
     /// (P35), so a ride or its pause is left alone; the front end asks again when the ride is over.
     pub fn lost(&mut self, plugged: &[String]) -> bool {
         let gone = matches!(&self.p1, Some(Dev::Pad(id)) if !plugged.contains(id));
-        if gone && !self.riding() && !self.stack.contains(&Screen::Pause) {
+        if gone && !self.stack.is_empty() && !self.stack.contains(&Screen::Pause) {
             self.splash();
             return true;
         }
@@ -2704,9 +2759,92 @@ impl Menu {
         look
     }
 
-    /// Whether a ride is running with nothing over it.
+    /// Whether a ride is running with nothing over it: no rider has their pause open (P84).
     pub fn riding(&self) -> bool {
-        self.stack.is_empty()
+        self.stack.is_empty() && self.sides.iter().all(|s| s.stack.is_empty())
+    }
+
+    /// Whether `seat`'s rider has their pause open (P84), and with it their machine frozen. 1P's is
+    /// the menu's own: under the front end anything over the ride.
+    pub fn paused(&self, seat: usize) -> bool {
+        match self.side_index(seat) {
+            None => !self.stack.is_empty(),
+            Some(i) => self.sides.get(i).is_some_and(|s| !s.stack.is_empty()),
+        }
+    }
+
+    /// Where seat `seat`'s pause is kept, `None` for the one in the menu's own fields. While
+    /// [`Menu::with_seat`] has seat `k` in them, `k`'s side holds 1P's.
+    fn side_index(&self, seat: usize) -> Option<usize> {
+        match (seat, self.focus) {
+            (s, f) if s == f => None,
+            (0, f) => Some(f),
+            (s, _) if s < SEATS_MAX => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The menu with `seat`'s own pause in it (P84): what that rider's view draws, and what `f` steps.
+    /// 1P's is the menu as it is; any other seat's state is swapped into the menu's own fields for
+    /// `f` and back after it, so every screen and page works the same for every rider.
+    pub fn with_seat<R>(&mut self, seat: usize, f: impl FnOnce(&mut Menu) -> R) -> R {
+        if seat == 0 || seat >= SEATS_MAX || self.focus != 0 {
+            return f(self);
+        }
+        self.swap_side(seat);
+        self.focus = seat;
+        let r = f(self);
+        self.focus = 0;
+        self.swap_side(seat);
+        r
+    }
+
+    /// Where the pauses are drawn over a ride in `rects`' views (P84), `(seat, view)`: over a split
+    /// each paused player's own in their own view, the first `players` views being theirs in order;
+    /// over one view the menu's own over all of it, whatever is on it.
+    pub fn pause_views(&self, rects: &[split::Rect], players: usize) -> Vec<(usize, split::Rect)> {
+        match rects {
+            [] => Vec::new(),
+            [whole] => self.screen().is_some().then_some((0, *whole)).into_iter().collect(),
+            views => views.iter().copied().enumerate().take(players).filter(|&(v, _)| self.paused(v)).collect(),
+        }
+    }
+
+    /// A copy of the menu as `seat`'s view shows it: [`Menu::with_seat`]'s, kept.
+    pub fn view(&self, seat: usize) -> Menu {
+        let mut m = self.clone();
+        if seat > 0 && seat < SEATS_MAX && self.focus == 0 {
+            m.swap_side(seat);
+            m.focus = seat;
+        }
+        m
+    }
+
+    /// Seat `seat`'s side and the menu's own fields traded.
+    fn swap_side(&mut self, seat: usize) {
+        if self.sides.len() <= seat {
+            let have = self.sides.len();
+            self.sides.extend((have..=seat).map(Side::new));
+        }
+        let side = &mut self.sides[seat];
+        std::mem::swap(&mut self.stack, &mut side.stack);
+        std::mem::swap(&mut self.cursor, &mut side.cursor);
+        std::mem::swap(&mut self.tab, &mut side.tab);
+        std::mem::swap(&mut self.player, &mut side.player);
+        std::mem::swap(&mut self.pauser, &mut side.pauser);
+        std::mem::swap(&mut self.switch_pick, &mut side.switch_pick);
+        std::mem::swap(&mut self.leaving, &mut side.leaving);
+        std::mem::swap(&mut self.typing, &mut side.typing);
+        std::mem::swap(&mut self.typing_for, &mut side.typing_for);
+        std::mem::swap(&mut self.key, &mut side.key);
+    }
+
+    /// Every other rider's pause closed (P84): the ride is over, or started again, for all of them.
+    fn close_sides(&mut self) {
+        if self.focus == 0 {
+            self.sides.clear();
+            self.later.clear();
+        }
     }
 
     /// A ride on `track` is loading (P127): the loading screen, with the track's name and its pack
@@ -2738,8 +2876,9 @@ impl Menu {
     pub fn main(&mut self) {
         self.stack = vec![Screen::Main];
         self.ride_stack.clear();
-        self.pauser = 0;
+        self.pauser = self.focus;
         self.leaving = None;
+        self.close_sides();
     }
 
     /// The pause over a ride, 1P's.
@@ -2747,11 +2886,20 @@ impl Menu {
         self.pause_for(0);
     }
 
-    /// The pause over a ride, opened by `seat`'s Start: its switch row is that player's machine.
+    /// The pause over a ride, opened by `seat`'s Start: that rider's own (P84), in their view and
+    /// driven by their pad, its switch row their machine. The others ride on with theirs.
     pub fn pause_for(&mut self, seat: usize) {
+        let seat = seat.min(SEATS_MAX - 1);
+        self.with_seat(seat, |m| {
+            m.pauser = seat;
+            m.open_pause();
+        });
+    }
+
+    /// The pause opened over the ride in the menu's own fields, for [`Menu::pauser`]'s seat.
+    fn open_pause(&mut self) {
         self.stack = vec![Screen::Pause];
         self.cursor[Screen::Pause.index()] = 0;
-        self.pauser = seat.min(SEATS_MAX - 1);
         self.switch_pick = None;
         self.leaving = None;
     }
@@ -3075,34 +3223,51 @@ impl Menu {
         self.push(Screen::Keyboard);
     }
 
-    /// One frame of a ride's menu, with every rider's press, 1P's first (P41): while the ride runs any
-    /// player's Start opens the pause for them, 1P's winning a tie, and an open pause hears only the
-    /// player who opened it — their switch row, their pad.
+    /// One frame of a ride's menu, with every rider's press, 1P's first (P41, P84): each rider's
+    /// Start opens their own pause, which hears only their pad — their switch row, their pages — while
+    /// every other rider rides on and works their own. Off a ride (the front end's screens) only 1P's
+    /// press counts. A frame in which two riders ask something hands the first out now and the rest
+    /// in the frames after; one that leaves the ride (Restart, Main Menu, Quit, Open to Online)
+    /// closes every pause.
     pub fn step_seats(&mut self, presses: &[Press]) -> Act {
         let first = presses.first().copied().unwrap_or_default();
-        if self.riding() {
-            if let Some(seat) = presses.iter().position(|p| p.start)
-                && seat > 0
-            {
-                self.tick = self.tick.wrapping_add(1);
-                self.pause_for(seat);
-                return Act::Stay;
+        let in_ride = self.stack.first().is_none_or(|s| *s == Screen::Pause);
+        let mut acts = std::mem::take(&mut self.later);
+        acts.push(self.step(first));
+        if in_ride {
+            // The menu's frame count is 1P's step's, whoever else stepped.
+            let tick = self.tick;
+            for (seat, &p) in presses.iter().enumerate().take(SEATS_MAX).skip(1) {
+                if acts.iter().any(Act::leaves) {
+                    break;
+                }
+                acts.push(self.with_seat(seat, |m| m.step(p)));
             }
-            return self.step(first);
+            self.tick = tick;
         }
-        let p = match self.stack.first() {
-            Some(Screen::Pause) => presses.get(self.pauser).copied().unwrap_or_default(),
-            _ => first,
-        };
-        self.step(p)
+        acts.retain(|a| *a != Act::Stay);
+        if let Some(leave) = acts.iter().position(Act::leaves) {
+            let act = acts.swap_remove(leave);
+            self.close_sides();
+            match act {
+                Act::MainMenu => self.main(),
+                Act::Restart | Act::OpenOnline => self.stack.clear(),
+                _ => {}
+            }
+            return act;
+        }
+        if acts.is_empty() {
+            return Act::Stay;
+        }
+        let act = acts.remove(0);
+        self.later = acts;
+        act
     }
 
-    /// The seat whose press drives the menu this frame under [`Menu::step_seats`].
+    /// The seat whose press drives 1P's side of the menu under [`Menu::step_seats`]: 1P's own, the
+    /// keyboard with it, since every other rider's pause is theirs (P84).
     pub fn driver(&self) -> usize {
-        match self.stack.first() {
-            Some(Screen::Pause) => self.pauser,
-            _ => 0,
-        }
+        0
     }
 
     /// One frame of one device's presses, the keyboard's on the splash, and the sound it made
@@ -3118,9 +3283,9 @@ impl Menu {
         }
         self.tick = self.tick.wrapping_add(1);
         let Some(screen) = self.screen() else {
-            // In a ride the only thing the menu hears is Start.
+            // In a ride the only thing the menu hears is Start, which opens this rider's pause.
             if p.start {
-                self.pause();
+                self.open_pause();
             }
             return Act::Stay;
         };
