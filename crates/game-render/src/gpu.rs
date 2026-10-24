@@ -46,6 +46,7 @@ pub use wgpu;
 
 mod scale;
 mod sprite;
+mod ground_mesh;
 pub use scale::{AutoScale, MIN_SCALE};
 pub use sprite::{Shape, Sprite, clamp_of};
 
@@ -331,6 +332,8 @@ struct GpuGround {
     levels: Vec<u32>,
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
+    /// The roads and ruts a freeride scene paints into the ground (V67).
+    meshes: Option<ground_mesh::GpuMeshes>,
 }
 
 impl GpuGround {
@@ -1874,7 +1877,10 @@ impl Renderer {
         // The paint is a little program (`splat.rs`); here it is written out as the shader's own code.
         let layers: &[Texture] = paint.map_or(&[], |p| &p.textures);
         let max = self.device.limits().max_sampled_textures_per_shader_stage as usize;
-        if layers.len() + 1 > max {
+        // The roads and ruts painted in after the passes (V67) are two more.
+        let meshes = paint.and_then(|p| p.meshes.as_ref()).filter(|_| pages.is_none() && world.is_none());
+        let meshes = meshes.map(|m| ground_mesh::GpuMeshes::new(&self.device, &self.queue, &self.sampler, m));
+        if layers.len() + 1 + if meshes.is_some() { 2 } else { 0 } > max {
             return Err(format!(
                 "the ground's paint has {} textures and this device samples {max} at once",
                 layers.len()
@@ -1906,6 +1912,9 @@ impl Renderer {
             entries.push(texture_entry(3, true, wgpu::TextureViewDimension::D2Array));
             entries.push(texture_entry(4, true, wgpu::TextureViewDimension::D2));
             entries.push(texture_entry(5, true, wgpu::TextureViewDimension::D2Array));
+        }
+        if meshes.is_some() {
+            entries.extend(ground_mesh::layout_entries(3 + layers.len() as u32));
         }
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ground"),
@@ -1941,6 +1950,13 @@ impl Renderer {
                 binding: 3 + i as u32,
                 resource: wgpu::BindingResource::TextureView(v),
             });
+        }
+        if let Some(m) = &meshes {
+            let first = 3 + layers.len() as u32;
+            let [near, far] = m.views();
+            bind_entries.push(wgpu::BindGroupEntry { binding: first, resource: wgpu::BindingResource::TextureView(near) });
+            bind_entries.push(wgpu::BindGroupEntry { binding: first + 1, resource: wgpu::BindingResource::TextureView(far) });
+            bind_entries.push(wgpu::BindGroupEntry { binding: first + 2, resource: m.at.as_entire_binding() });
         }
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ground"),
@@ -1994,6 +2010,7 @@ impl Renderer {
             views: Vec::new(),
             pipeline,
             bind,
+            meshes,
         });
         Ok(())
     }
@@ -2685,6 +2702,10 @@ impl Renderer {
         };
         let sprites = self.sprites.prepare(&self.device, &self.queue, place, target.size, frame.sprites);
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        // The roads and ruts under the first view, drawn sharp again if it has moved (V67).
+        if let (Some(m), Some(v)) = (self.ground.as_mut().and_then(|g| g.meshes.as_mut()), views.first()) {
+            m.follow(&self.queue, &mut encoder, v.camera.eye);
+        }
         let scale = scale::quantise(self.render_scale);
         let [fx, fy, fw, fh] = target.frame;
         if scale < 1.0 && fw > 0 && fh > 0 {
@@ -3241,6 +3262,11 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
     for i in 0..layers {
         s.push_str(&format!("@group(1) @binding({}) var layer{i}: texture_2d<f32>;\n", 3 + i));
     }
+    // The roads and ruts drawn into the paint after its passes (V67).
+    let meshed = paint.is_some_and(|p| p.meshes.is_some());
+    if meshed {
+        s.push_str(&ground_mesh::wgsl_bindings(3 + layers as u32));
+    }
     s.push_str(GROUND_VS_WGSL);
     s.push_str(
         "@fragment fn fs(i: Out) -> @location(0) vec4f {\n\
@@ -3291,6 +3317,9 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
                 }
             }
         }
+    }
+    if meshed {
+        s.push_str(ground_mesh::APPLY_WGSL);
     }
     let (x0, x1, z0, z1, mapped) = match paint.and_then(|p| p.shadow.as_ref()) {
         Some(sh) => (sh.x0, sh.x1, sh.z0, sh.z1, true),
@@ -3878,6 +3907,7 @@ mod tests {
                 fixed: 128.0,
             }],
             shadow: None,
+            meshes: None,
         };
         let s = ground_wgsl(Some(&splat), [1.0; 3]);
         assert!(s.contains("var layer0: texture_2d<f32>"), "{s}");
@@ -4431,7 +4461,7 @@ mod tests {
             })
             .collect();
         let shadow = crate::splat::Shadow { tiles: vec![layer()], across: 1, x0: -10.0, x1: 10.0, z0: -10.0, z1: 10.0 };
-        let paint = Splat { textures: (0..max - 1).map(|_| layer()).collect(), passes, shadow: Some(shadow) };
+        let paint = Splat { textures: (0..max - 1).map(|_| layer()).collect(), passes, shadow: Some(shadow), meshes: None };
         let pages = Pages {
             pages: vec![layer()],
             across: 1,
@@ -4450,6 +4480,19 @@ mod tests {
             ("upscale", scale::UPSCALE_WGSL.to_string()),
             ("ground, painted", ground_wgsl(Some(&paint), [200.0, 180.0, 150.0])),
             ("ground, bare", ground_wgsl(None, [200.0, 180.0, 150.0])),
+            // With the roads and ruts (V67), whose two targets take two layers' places.
+            ("ground, meshed", {
+                let pass = paint.passes[1].clone();
+                let flat = crate::ground_mesh::Flat::new([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], [[0.0; 2]; 3], [[128.0; 4]; 3], pass);
+                let meshed = Splat {
+                    textures: (0..max - 3).map(|_| layer()).collect(),
+                    passes: paint.passes[..max - 3].to_vec(),
+                    shadow: Some(crate::splat::Shadow { tiles: vec![layer()], across: 1, x0: -10.0, x1: 10.0, z0: -10.0, z1: 10.0 }),
+                    meshes: crate::ground_mesh::GroundMeshes::of(vec![layer()], vec![flat]),
+                };
+                ground_wgsl(Some(&meshed), [200.0, 180.0, 150.0])
+            }),
+            ("ground meshes", ground_mesh::DRAW_WGSL.to_string()),
             ("ground, pages", ground_pages_wgsl(&pages, [200.0, 180.0, 150.0])),
             ("ground, world", {
                 let world = WorldPaint {

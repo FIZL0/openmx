@@ -29,11 +29,16 @@
 //! reach, the caller lights the ground itself. On `free09` one row of tiles is stored right to left,
 //! which [`Shadow::assemble`] finds by how well each row's top edge continues the row above it.
 //!
+//! After the passes the original draws the scene's `Type=TerrainScreenSpace` models into the same
+//! target — the roads, ruts, runways and dirt loops, each flat mesh with its own `.psm` — and those
+//! are [`Splat::meshes`] ([`crate::ground_mesh`]).
+//!
 //! None of this is 1:1: textures are sampled nearest, without the original's mip chain; the
 //! direction the `Angle` turns is chosen by eye; the screen-space target's own resolution and the
 //! mesh's ground-fog parameters are not modelled.
 
 use crate::disc::Res;
+use crate::ground_mesh::GroundMeshes;
 use crate::ini;
 use crate::pst::Texture;
 
@@ -66,6 +71,8 @@ pub struct Splat {
     pub textures: Vec<Texture>,
     pub passes: Vec<Pass>,
     pub shadow: Option<Shadow>,
+    /// The roads, ruts and runways the scene paints in after the passes (V67).
+    pub meshes: Option<GroundMeshes>,
 }
 
 /// The baked light map, assembled, and the part of the world it covers.
@@ -100,6 +107,8 @@ impl Splat {
             .map(|i| Texture::parse(&read(&format!("{track}_shadow_{i:02}.pst"))?).ok())
             .collect();
         splat.shadow = tiles.map(|t| Shadow::assemble(t, 4, extent));
+        let scene = read(&format!("{track}.scn")).map(|t| crate::scene::Scene::parse(&ini::text(&t)));
+        splat.meshes = scene.and_then(|s| GroundMeshes::load(archives, &s.ground_meshes));
         (!splat.passes.is_empty()).then_some(splat)
     }
 
@@ -165,6 +174,7 @@ impl Splat {
             textures,
             passes,
             shadow: None,
+            meshes: None,
         }
     }
 
@@ -186,7 +196,8 @@ impl Splat {
     }
 
     /// The ground's colour at a point of the world, before any light: every pass in order, blended
-    /// the GS's way in its own units (alpha 128 = one).
+    /// the GS's way in its own units (alpha 128 = one), then the scene's screen-space meshes over
+    /// them ([`GroundMeshes::paint`]).
     pub fn paint(&self, x: f32, z: f32) -> [u8; 3] {
         let mut frame = [0.0f32; 4];
         for p in &self.passes {
@@ -202,6 +213,9 @@ impl Splat {
                 (t[3] as f32 * 0.5 * p.rgba[3] / 128.0).min(255.0),
             ];
             frame = blend(src, frame, p.blend, p.fixed);
+        }
+        if let Some(m) = &self.meshes {
+            frame = m.paint(x, z, frame);
         }
         frame.map(|c| c.clamp(0.0, 255.0) as u8)[..3].try_into().unwrap()
     }
