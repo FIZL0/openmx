@@ -136,6 +136,7 @@ fn page_against(c: &Cells, name: &str, r0: usize) {
         ai_route: false,
         owner: Some(Owner { human: true, screen: true }),
         wrecks_enabled: true,
+        air_wrecks: true,
         settles: true,
     };
     let p = state::Params {

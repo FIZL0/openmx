@@ -14,6 +14,9 @@ const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. MX vs. ATV adds th
      extra stunts on Cross and Square (the bike layout's free buttons), and with R1 held a sideways flick off a lip \
      for a 360 and a forward one for a front flip. The front flip is the port's own, in neither game, and shows the \
      backflip's pose. Online rides are always Original.";
+/// The Air Wrecks row's help (P138).
+const AIR_WRECKS_HELP: &str = "Whether the bike's angle in the air throws the rider off: upside down, nosed over or rolled too far. \
+     Off, you ride every jump out, and only the landing is judged. On is the original game.";
 pub const TAB_DISPLAY: usize = 1;
 pub const TAB_GRAPHICS: usize = 2;
 pub const TAB_AUDIO: usize = 3;
@@ -72,6 +75,7 @@ pub enum Key {
     Player,
     StartOn,
     Wrecks,
+    AirWrecks,
     Bays,
     Modifiers,
     Hud,
@@ -319,9 +323,17 @@ impl Menu {
             0 => "Original".into(),
             n => format!("{n} Changed"),
         };
+        // Air Wrecks (P138): beside Wrecks, and nothing to switch with Wrecks off. Under the pause a
+        // change takes as it closes, unless the ride holds it.
+        let mut air = Row::on_off(Key::AirWrecks, "Air Wrecks", self.settings.air_wrecks, AIR_WRECKS_HELP);
+        if self.stack.first() == Some(&Screen::Pause) {
+            air.note = Some("Changes take when the pause closes.".into());
+        }
+        let air = air.off_if(!self.settings.wrecks, "Wrecks are off").off_if(self.air_held().is_some(), self.air_held().unwrap_or(""));
         vec![
             Row::choice(Key::StartOn, "Start On", &machines, at, "The machine a ride starts on. You can switch at any time from the pause, or by stopping at a bay."),
             Row::on_off(Key::Wrecks, "Wrecks", self.settings.wrecks, "Whether a hard landing throws the rider off. Off, you ride out every crash."),
+            air,
             Row::on_off(Key::Bays, "Machines at Bays", self.settings.bays, "The lot's bikes and the biplane stand at their bays, see-through, and the original's pop-up offers them when you stop beside one."),
             mods,
             Row::choice(Key::Tricks, "Tricks", &Tricks::ALL.map(Tricks::label), Tricks::ALL.iter().position(|t| *t == self.settings.tricks).unwrap_or(0), TRICKS_HELP)
@@ -938,6 +950,7 @@ impl Menu {
             }
             Key::StartOn => s.machines[0] = Machine::ALL[next(row)],
             Key::Wrecks => s.wrecks = !s.wrecks,
+            Key::AirWrecks => s.air_wrecks = !s.air_wrecks,
             Key::Bays => s.bays = !s.bays,
             Key::Tricks => s.tricks = Tricks::ALL[next(row)],
             Key::Modifiers if p.ok => {

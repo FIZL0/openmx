@@ -270,6 +270,10 @@ pub struct Settings {
     pub world_sky: WorldSky,
     /// Whether a ride wrecks at all.
     pub wrecks: bool,
+    /// Whether the bike's attitude in the air throws the rider off (P138): upside down, nosed over or
+    /// rolled past the bike's airborne limits. Off, the jump is ridden out and only the landing is
+    /// judged ([`game_sim::state::Sense::air_wrecks`]). On, the original's, unless turned off.
+    pub air_wrecks: bool,
     /// The last track ridden, which the track pick opens on.
     pub track: String,
     /// The machine each seat's ride starts on, the ride setup's pick (P41), 1P's first.
@@ -502,10 +506,11 @@ impl Menu {
         s.overlay == Overlay::Original && s.minimap && s.hud_scale == HUD_SCALE_DEFAULT
     }
 
-    /// The Original switch's reading: On with every departure and the HUD the original's, Off with
-    /// every departure ours for every seat (whatever the HUD), Mixed otherwise.
+    /// The Original switch's reading: On with every departure, the HUD and Air Wrecks (P138, not a
+    /// departure: its default is the original's) the original's, Off with every departure ours for
+    /// every seat (whatever the HUD and Air Wrecks), Mixed otherwise.
     pub fn original(&self) -> Original {
-        if Departure::ALL.iter().all(|d| self.is_original(*d)) && self.hud_is_original() {
+        if Departure::ALL.iter().all(|d| self.is_original(*d)) && self.hud_is_original() && self.settings.air_wrecks {
             Original::On
         } else if !Departure::ALL.iter().any(|d| self.some_original(*d)) {
             Original::Off
@@ -514,9 +519,9 @@ impl Menu {
         }
     }
 
-    /// The Original switch thrown: on puts every departure and the HUD back to the original's; off
-    /// turns every enhancement back on, the original's HUD back to the port's ride HUD (P121), and
-    /// leaves the debug HUD, no HUD, the radar and the scale as they are.
+    /// The Original switch thrown: on puts every departure, the HUD and Air Wrecks back to the
+    /// original's; off turns every enhancement back on, the original's HUD back to the port's ride
+    /// HUD (P121), and leaves the debug HUD, no HUD, the radar, the scale and Air Wrecks as they are.
     pub fn set_original(&mut self, on: bool) {
         for d in Departure::ALL {
             self.set_departure(d, on);
@@ -524,6 +529,8 @@ impl Menu {
         let s = &mut self.settings;
         if on {
             (s.overlay, s.minimap, s.hud_scale) = (Overlay::Original, true, HUD_SCALE_DEFAULT);
+            // Air Wrecks back on (P138): the original throws the rider off in the air.
+            s.air_wrecks = true;
         } else if s.overlay == Overlay::Original {
             s.overlay = Overlay::Hud;
         }
@@ -882,6 +889,7 @@ impl Default for Settings {
             hud_scale: HUD_SCALE_DEFAULT,
             world_sky: WorldSky::Global,
             wrecks: true,
+            air_wrecks: true,
             track: TRACKS[0].0.into(),
             machines: [Machine::Bike; SEATS_MAX],
             split: Split::default(),
@@ -980,6 +988,7 @@ impl Settings {
                 "hud_scale" => s.hud_scale = hud_scale_word(v).unwrap_or(s.hud_scale),
                 "world_sky" => s.world_sky = WorldSky::from_word(v).unwrap_or(s.world_sky),
                 "wrecks" => s.wrecks = v != "off",
+                "air_wrecks" => s.air_wrecks = v != "off",
                 "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // One word a seat, 1P's first; a seat the line does not reach rides the bike.
                 "machines" => {
@@ -1103,6 +1112,7 @@ impl Settings {
             self.render_scale.word()
         ) + &self.display_text()
             + &self.bays_text()
+            + &self.air_wrecks_text()
             + &self.hud_text()
             + &self.original_text()
             + &self.world_sky_text()
@@ -1130,6 +1140,13 @@ impl Settings {
     /// it was.
     fn bays_text(&self) -> String {
         if self.bays { String::new() } else { "machine_bays = off\n".into() }
+    }
+
+    /// The Air Wrecks switch (P138), only when it is off, so a file from before it is written as it
+    /// was.
+    fn air_wrecks_text(&self) -> String {
+        if self.air_wrecks { String::new() } else { "air_wrecks = off
+".into() }
     }
 
     /// The minimap and the HUD's scale (V52), only where they are not the defaults, so a file from
@@ -2211,6 +2228,10 @@ pub struct Menu {
     /// or riding a tape. With it set the pause's modifiers screen shows them and does not change them;
     /// without it a change takes the moment the pause closes. The main menu's screen is never held.
     pub mods_lock: Option<String>,
+    /// Why the ride under the pause cannot take a change of Air Wrecks (P138), as the shell says: a
+    /// played tape rides its own, and online every machine rides the room's from the start. `None`:
+    /// a change takes as the pause closes.
+    pub air_lock: Option<String>,
     /// The song playing, by id, as the shell last said (P56).
     pub music_now: Option<String>,
     /// The song the Game Audio Options' song row is on, in [`Menu::music_choices`].
@@ -2345,6 +2366,7 @@ impl Menu {
             mods_seen: Vec::new(),
             modified: false,
             mods_lock: None,
+            air_lock: None,
             music_now: None,
             music_at: 0,
             tunes: Vec::new(),
@@ -2782,6 +2804,14 @@ impl Menu {
     pub fn switched(&mut self, seat: usize, up: Machine) {
         if let Some(m) = self.up.get_mut(seat) {
             *m = up;
+        }
+    }
+
+    /// Why Air Wrecks cannot be changed here: the ride under the pause holds it (P138).
+    pub(crate) fn air_held(&self) -> Option<&str> {
+        match self.stack.first() {
+            Some(Screen::Pause) => self.air_lock.as_deref(),
+            _ => None,
         }
     }
 
@@ -3738,6 +3768,7 @@ impl Lobby {
         let track = if TRACKS.iter().any(|t| t.0 == settings.track) { settings.track.as_str() } else { TRACKS[0].0 };
         let mut room = Room::new(&settings.name, track, settings.lobby_seats);
         room.wrecks = settings.wrecks;
+        room.air_wrecks = settings.air_wrecks;
         room.take(HOST, std::slice::from_ref(&self.pick));
         // The host's own on its seat and the world's (P134); a guest's seat takes theirs as they come.
         let mine: Vec<usize> = room.seats.iter().enumerate().filter(|(_, s)| s.as_ref().is_some_and(|s| s.peer == HOST)).map(|(i, _)| i).collect();

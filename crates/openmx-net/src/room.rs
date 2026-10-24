@@ -82,6 +82,10 @@ pub struct Room {
     /// The ride: the track and its switches, the host's to change.
     pub track: String,
     pub wrecks: bool,
+    /// The Air Wrecks switch (P138): whether the bike's attitude in the air throws a rider off. On
+    /// from a peer that does not say, the original's.
+    #[serde(default = "on")]
+    pub air_wrecks: bool,
     pub biplane: bool,
     /// Seats in order (1P..), `None` open; as many as the host opened (2..=[`SEATS`]).
     pub seats: Vec<Option<Seat>>,
@@ -126,7 +130,7 @@ pub struct Room {
 impl Room {
     /// A lobby for `size` players on `track`, wrecks on and the biplane off, as the shell starts.
     pub fn new(name: &str, track: &str, size: usize) -> Room {
-        Room { name: name.into(), track: track.into(), wrecks: true, seats: vec![None; size.clamp(2, SEATS)], ..Default::default() }
+        Room { name: name.into(), track: track.into(), wrecks: true, air_wrecks: true, seats: vec![None; size.clamp(2, SEATS)], ..Default::default() }
     }
 
     pub fn open(&self) -> usize {
@@ -393,4 +397,9 @@ mod tests {
         r.private = true;
         assert_eq!(Listing::of("id", &r).open(), 0, "private is private, riding or not");
     }
+}
+
+/// A switch that is on unless a peer says otherwise (serde's default for one).
+pub(crate) fn on() -> bool {
+    true
 }

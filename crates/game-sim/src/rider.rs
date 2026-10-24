@@ -336,6 +336,7 @@ impl Rider {
                 ai_route: false,
                 owner: Some(state::Owner { human: true, screen: true }),
                 wrecks_enabled: true,
+                air_wrecks: true,
                 settles: false,
             },
             racing: false,
@@ -785,7 +786,7 @@ impl Rider {
                 }
                 // Both can enter a wreck on one substep, and the entry stores its reason without
                 // looking, so the hit's — asked second — is the one that stays.
-                let landed = air::wreck_test(&p.air, air, &chassis, &step, &loads);
+                let landed = air::wreck_test_in(&p.air, air, &chassis, &step, &loads, allowed.air);
                 // Never a 50cc bike's lower limit: the original's flag is the bike's name containing
                 // "Race50" or "Pro50" (`track::physics_file`'s), and the rider is not told which file
                 // it was built from — nor does `ride::hits` sweep the two shoulder rays it would add.

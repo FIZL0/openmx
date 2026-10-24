@@ -344,6 +344,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         name: "Ricky C".into(),
         overlay: Overlay::None,
         wrecks: false,
+        // Air Wrecks off (P138).
+        air_wrecks: false,
         track: "free11".into(),
         track_filter: "MX vs. ATV Untamed".into(),
         machines: [
@@ -2576,6 +2578,70 @@ fn a_guests_page_changes_only_its_own_seat_and_not_the_world() {
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.modifiers.get(0, Knob::Grip), 110);
     assert!(m.take_mods_all().is_empty());
+}
+
+/// P138: the Ride tab's Air Wrecks row, under Wrecks, turns the airborne wrecks off and on, is
+/// written to the file only when off and read back after a restart; it is dimmed while Wrecks are
+/// off, held in the pause of a ride the shell keeps it on, and Original mode puts it back on.
+#[test]
+fn the_air_wrecks_row_toggles_and_survives_a_restart() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    assert!(m.settings.air_wrecks, "on is the default, the original's");
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::AirWrecks);
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::AirWrecks).unwrap();
+    let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
+    let at = keys.iter().position(|k| *k == Key::AirWrecks).unwrap();
+    assert_eq!(keys[at - 1], Key::Wrecks, "Air Wrecks sits under Wrecks: {keys:?}");
+    assert_eq!(row(&m).value, "On");
+    tap(&mut m, &mut r, Control::Right);
+    assert!(!m.settings.air_wrecks);
+    assert_eq!(row(&m).value, "Off");
+    assert!(m.take_changed());
+    assert!(m.settings.text().contains("air_wrecks = off\n"));
+    assert_ne!(m.original(), menu::Original::On, "Air Wrecks off is not the original");
+
+    // Saved, read back after a restart, and the menu opened on it shows it off.
+    let dir = scratch("air-wrecks");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (settings, controls) = menu::load(&dir);
+    assert!(!settings.air_wrecks);
+    let again = Menu::new(settings, controls);
+    assert_eq!(again.settings, m.settings);
+    // And Cross turns it back on, which the file no longer mentions.
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.air_wrecks);
+    assert!(!m.settings.text().contains("air_wrecks"), "{}", m.settings.text());
+    std::fs::remove_dir_all(dir).ok();
+
+    // Dimmed while Wrecks are off: there is nothing in the air to judge.
+    m.settings.wrecks = false;
+    assert_eq!(row(&m).off.as_deref(), Some("Wrecks are off"));
+    m.settings.wrecks = true;
+    assert_eq!(row(&m).off, None);
+
+    // In the pause it takes when the pause closes, and a held ride says why and leaves it be.
+    tap(&mut m, &mut r, Control::Circle);
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
+    tap(&mut m, &mut r, Control::Cross);
+    tab_to(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::AirWrecks);
+    assert!(row(&m).note.unwrap_or_default().contains("when the pause closes"));
+    let held = "Online the room's Air Wrecks holds for the ride";
+    m.air_lock = Some(held.into());
+    assert_eq!(row(&m).off.as_deref(), Some(held));
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.settings.air_wrecks, "a held row changed");
+    m.air_lock = None;
+    tap(&mut m, &mut r, Control::Right);
+    assert!(!m.settings.air_wrecks);
+
+    // Original mode on puts it back on.
+    m.set_original(true);
+    assert!(m.settings.air_wrecks);
+    assert_eq!(m.original(), menu::Original::On);
 }
 
 // ---- the pause's Game Audio Options (P56) -----------------------------------------------------------
