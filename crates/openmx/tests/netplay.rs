@@ -744,16 +744,211 @@ fn an_away_peer_back_in_time_rides_on() {
     assert!(n > 350, "only {n} ticks settled");
 }
 
-/// The host gone for good: the others wait and end the ride.
+/// A [`Tally`] that cannot say its state in bytes: nobody can take its ride over.
+struct Mute(Tally);
+
+impl Game for Mute {
+    type State = Tally;
+    fn save(&self) -> Tally {
+        self.0.save()
+    }
+    fn restore(&mut self, s: &Tally) {
+        self.0.restore(s)
+    }
+    fn step(&mut self, tick: usize, pads: &[Report]) {
+        self.0.step(tick, pads)
+    }
+    fn hash(&self) -> u64 {
+        Game::hash(&self.0)
+    }
+    fn encode(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn decode(&mut self, _: &[u8]) -> Result<(), String> {
+        Err("no bytes".into())
+    }
+}
+
+impl Machine for Mute {
+    type S = Tally;
+    fn frame(&mut self, np: &mut Netplay<Tally>, local: &[Report]) {
+        np.frame(self, local, ROUND.as_secs_f32());
+    }
+    fn hash(&self) -> u64 {
+        Game::hash(&self.0)
+    }
+}
+
+/// The host gone for good, on a ride that cannot hand its state over: the others wait, and the one
+/// that would take it over ends it for everyone, saying why (N11).
 #[test]
-fn a_silent_host_ends_the_ride() {
+fn a_silent_host_whose_ride_cannot_be_handed_over_ends_it() {
     let link = Link { loss: 0.0, lag: 2, outage: 0..0, oneway: false };
-    let r = run("host,g", short(), Tally::new, &link, 0..600, |round, _, live| {
+    let r = run("host,g,k", short(), |n| Mute(Tally::new(n)), &link, 0..800, |round, _, live| {
         if round == 100 {
             live[0] = false;
         }
     });
-    assert_eq!(r.nets[1].end.as_deref(), Some("the host stopped answering: the ride is over"));
+    let why = "host went silent, and this ride cannot hand its state over to go on without them";
+    assert_eq!((r.nets[1].end.as_deref(), r.nets[2].end.as_deref()), (Some(why), Some(why)));
+}
+
+/// N11: the host gone for good (killed, nothing said): the others hold, and once it has been silent
+/// past the away time and the host's wait, the peer in the next seat takes the ride over — its
+/// settled state and the line-up without the host, as a restart — and hosts it from there: the two
+/// ride on in sync, and when the third peer goes silent too, the new host empties its seat as the
+/// old one would have.
+#[test]
+fn a_silent_hosts_ride_is_taken_over_by_the_next_seat() {
+    let link = Link { loss: 0.1, lag: 3, outage: 0..0, oneway: false };
+    let (mut notice, mut went, mut taken_at) = (String::new(), 0, None);
+    let r = run("host,g,k,m", short(), Ride::new, &link, 0..1500, |round, r, live| {
+        if round == 150 {
+            went = r.nets[1].tick();
+            live[0] = false;
+        }
+        if taken_at.is_none() && !r.nets[1].recover.takeovers.is_empty() {
+            taken_at = Some(round);
+        }
+        if round == 300 {
+            notice = r.nets[2].notice.clone();
+        }
+        if round == 900 {
+            live[3] = false;
+        }
+    });
+    assert!(notice.starts_with("The host stopped answering: g takes over in"), "{notice:?}");
+    let (g, k) = (&r.nets[1], &r.nets[2]);
+    for np in [g, k] {
+        assert_eq!(np.lineup.text(), "-,g,k,-", "{}", np.me);
+        assert_eq!((np.recover.restarts, np.end.as_deref()), (2, None), "{}", np.me);
+        assert!(np.desyncs.is_empty(), "{}: {:?}", np.me, np.desyncs);
+    }
+    assert!(g.host() && !k.host());
+    let taken = g.recover.takeovers.clone();
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    assert_eq!(taken[0].0, "host");
+    let t = taken[0].1 as usize;
+    // the host silent 3 s, then g's 10 s: about 390 rounds after it went; from about the tick the
+    // ride stalled at without it
+    let at = taken_at.unwrap();
+    assert!((150 + 360..150 + 450).contains(&at), "taken over at round {at}");
+    assert!((went.saturating_sub(10)..went + 20).contains(&t), "taken over at tick {t}, the host went at {went}");
+    // every settled tick from it, past the hold for m's wait
+    let n = r.agree(&[1, 2], t);
+    assert!(n > 500, "g and k agree on {n} ticks from {t}");
+    assert_eq!(g.log[t + 10][0], wire(&Report::missing()), "the old host's seat is unplugged");
+    assert_eq!(g.log[g.rb.base + 10][3], wire(&Report::missing()), "m's seat emptied by the new host");
+    assert_eq!(r.nets[3].lineup.text(), "-,g,k,m", "m took the takeover before it went");
+}
+
+/// N11's acceptance, session side: of four machines in a freeride — the host and three peers — `g`
+/// leaves from the pause menu and `k` is killed. `g`'s seat goes at one tick on every machine, the
+/// ride carrying on without a wait; `k`'s once it has been silent the wait. The host and `m` ride on
+/// with every settled tick's state and pads agreeing.
+#[test]
+fn of_three_peers_one_leaves_from_the_menu_and_one_is_killed_and_the_ride_goes_on() {
+    let link = Link { loss: 0.1, lag: 3, outage: 0..0, oneway: false };
+    let (mut left_at, mut asked, mut killed) = (None, 0, 0);
+    let r = run("host,g,k,m", short(), Ride::new, &link, 0..1100, |round, r, live| {
+        if round == 200 {
+            asked = r.nets[1].tick();
+            r.nets[1].leave(&[]).unwrap();
+            assert!(r.nets[1].leave(&[5]).is_err(), "not g's seat");
+        }
+        if left_at.is_none() && r.nets[1].end.is_some() {
+            left_at = Some(round);
+        }
+        if round == 400 {
+            killed = r.nets[0].tick();
+            live[2] = false;
+        }
+    });
+    let (h, g, m) = (&r.nets[0], &r.nets[1], &r.nets[3]);
+    assert_eq!(g.end.as_deref(), Some("you left the ride"));
+    assert!(g.flushed());
+    // g was out within a second: the restart's round trip, no away wait
+    let out = left_at.unwrap();
+    assert!(out < 230, "g out at round {out}");
+    let left = &h.leave.left;
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!((left[0].0.as_str(), left[0].1.as_slice()), ("g", &[1usize][..]));
+    // at a tick about when g asked: the host's last settled one when its Leave came in
+    let t = left[0].2 as usize;
+    assert!((asked - 10..asked + 30).contains(&t), "g's seat went at tick {t}, asked at {asked}");
+    for np in [h, m] {
+        assert_eq!(np.lineup.text(), "host,-,-,m", "{}", np.me);
+        assert_eq!((np.recover.restarts, np.end.as_deref()), (2, None), "{}", np.me);
+        assert!(np.desyncs.is_empty(), "{}: {:?}", np.me, np.desyncs);
+    }
+    // from g's leave on, the host and m (k too, until it went) agree
+    // every settled tick from it: all but the hold for k's wait
+    let n = r.agree(&[0, 3], t);
+    assert!(n > 450, "the host and m agree on {n} ticks from {t}");
+    assert_eq!(h.log[t + 10][1], wire(&Report::missing()), "g's seat unplugged from its leave");
+    // the ride held from about where k went until its wait was up, and went on from there
+    let k_out = h.rb.base;
+    assert!((killed.saturating_sub(10)..killed + 20).contains(&k_out), "k's seat emptied at {k_out}, k went at {killed}");
+    assert_eq!(h.log[k_out + 10][2], wire(&Report::missing()));
+    assert!(r.games[0].sims[3].ticks > k_out as u64 + 300, "m rode on");
+}
+
+/// N11: the host leaves from the pause menu. Its seat goes at one tick like anyone's, and the
+/// restart that takes it out names the peer in the next seat the host: that peer hosts the ride
+/// from there — here it empties a silent peer's seat, a host's job — and the ride goes on. The old
+/// host keeps sending until both peers have the restart, then it is through.
+#[test]
+fn the_host_leaving_hands_the_ride_to_the_next_seat() {
+    let link = Link { loss: 0.1, lag: 3, outage: 0..0, oneway: false };
+    let (mut asked, mut killed) = (0, 0);
+    let r = run("host,g,k,m", short(), Ride::new, &link, 0..1000, |round, r, live| {
+        if round == 200 {
+            asked = r.nets[0].tick();
+            r.nets[0].leave(&[]).unwrap();
+        }
+        if round == 400 {
+            killed = r.nets[1].tick();
+            live[3] = false;
+        }
+    });
+    let (h, g, k) = (&r.nets[0], &r.nets[1], &r.nets[2]);
+    assert_eq!(h.end.as_deref(), Some("you left the ride: g hosts it now"));
+    assert!(h.flushed());
+    let t = h.leave.left[0].2 as usize;
+    assert!((asked - 10..asked + 30).contains(&t), "the host's seat went at tick {t}, asked at {asked}");
+    for np in [g, k] {
+        assert_eq!(np.lineup.text(), "-,g,k,-", "{}", np.me);
+        assert_eq!((np.lineup.host(), np.recover.restarts, np.end.as_deref()), ("g", 2, None), "{}", np.me);
+        assert!(np.desyncs.is_empty(), "{}: {:?}", np.me, np.desyncs);
+    }
+    assert!(g.recover.takeovers.is_empty(), "handed over, not taken");
+    // every settled tick from it, past the hold for m's wait
+    let n = r.agree(&[1, 2], t);
+    assert!(n > 400, "g and k agree on {n} ticks from {t}");
+    assert_eq!(g.log[t + 10][0], wire(&Report::missing()), "the old host's seat unplugged");
+    let m_out = g.rb.base;
+    assert!((killed.saturating_sub(10)..killed + 20).contains(&m_out), "m's seat emptied by g at {m_out}, m went at {killed}");
+    assert_eq!(g.log[m_out + 10][3], wire(&Report::missing()));
+}
+
+/// N11: a machine with two seats lets one player go (a second local player leaving from their
+/// pause): that seat goes at one tick, and the machine rides on in the other.
+#[test]
+fn a_local_seat_on_an_online_peer_leaves_and_its_machine_rides_on() {
+    let link = Link { loss: 0.05, lag: 2, outage: 0..0, oneway: false };
+    let r = run("host,g,g", short(), Tally::new, &link, 0..500, |round, r, _| {
+        if round == 150 {
+            r.nets[1].leave(&[2]).unwrap();
+        }
+    });
+    let (h, g) = (&r.nets[0], &r.nets[1]);
+    for np in [h, g] {
+        assert_eq!((np.lineup.text().as_str(), np.recover.restarts, np.end.as_deref()), ("host,g,-", 1, None), "{}", np.me);
+    }
+    assert!(!g.leave.leaving(), "g is still in, on seat 2");
+    let t = h.leave.left[0].2 as usize;
+    assert!(r.agree(&[0, 1], t) > 250);
+    assert_eq!(h.log[t + 5][2], wire(&Report::missing()));
 }
 
 /// On the ride: `h` goes silent at round 150 for good, the others hold, and after the wait the host

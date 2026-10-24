@@ -53,6 +53,9 @@ pub enum Msg {
     /// of every restart that changes them or takes a peer on (whose machine may have loaded an
     /// older set); `was` equal to `to` changes nothing on a machine already on it.
     Mods { round: u8, was: String, to: String },
+    /// A peer to the host: these seats of its go, at the next restart the host can make (N11,
+    /// [`super::leave`]); every seat it has, and it is out of the ride.
+    Leave { seats: Vec<usize> },
 }
 
 pub enum Kind<'a> {
@@ -185,6 +188,11 @@ impl Link {
                 c.unacked.pop_front();
             }
         }
+    }
+
+    /// Messages sent and not acknowledged yet, every peer's together.
+    pub fn owed(&self) -> usize {
+        self.peers.values().map(|c| c.unacked.len()).sum()
     }
 
     /// A peer that is not in the ride any more: nothing more to it.

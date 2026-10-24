@@ -860,6 +860,7 @@ fn pause_panel(row: &str) -> (String, &'static str) {
         "Clear Markers" => "Removes your session markers on this track, the saved ones with them.",
         "Main Menu" => "Ends the ride.",
         "Quit" => "Ends the ride and closes the game.",
+        "Leave Session" => "Takes you out of the online ride. The others ride on without you.",
         r if r.starts_with("Switch") => "The original pause's machine switch. Your bike waits where you left it.",
         r if r.starts_with("Seats") => "How many seats the online ride has. Left and right change it.",
         _ => "Lets online players drop into this ride. Your seat stays yours; the code appears here.",

@@ -1903,6 +1903,9 @@ const PAUSE_OPEN_ROW: &str = "Open to Online";
 /// The pause's Seats row (N14), under the online row: the seats the room opens with, then, opened,
 /// the room's own, as the lobby's Seats row sets them.
 const PAUSE_SEATS: usize = PAUSE_OPEN + 1;
+/// The pause's "Leave Session" row (N11), on an online ride ([`Menu::session`]): before Quit, under the
+/// online rows when there are any. The pausing player's seats go and the ride goes on for the rest.
+const PAUSE_LEAVE_ROW: &str = "Leave Session";
 
 /// Whether the ride under the pause can be opened to online players (N10), and whether it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2019,11 +2022,13 @@ pub enum LeaveTo {
     Online,
 }
 
-/// What the pause's confirm (P110) is asking about: its Main Menu row or its Quit row.
+/// What the pause's confirm (P110) is asking about: its Main Menu row, its Quit row, or its Leave
+/// Session row (N11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Leaving {
     Main,
     Quit,
+    Session,
 }
 
 /// What the pause's song rows ask of the music (P56), beside the settings it changes.
@@ -2059,6 +2064,9 @@ pub enum Act {
     /// Clear this seat's player's session markers on the ride's track, kept and placed (P99); the
     /// pause stays open.
     ClearMarkers(usize),
+    /// Leave the online ride (N11) for this seat's player: every seat of this machine's for the first
+    /// one, that player's alone for another; the ride goes on for the rest.
+    LeaveSession(usize),
 }
 
 /// What the loading screen shows (P127): the track, as the pick names it, and how far its ride's
@@ -2151,6 +2159,8 @@ pub struct Menu {
     leaving: Option<(Leaving, usize)>,
     /// Where the pause's Main Menu row goes, as the shell says.
     pub leave_to: LeaveTo,
+    /// The ride under the pause is online (N11), as the shell says: its Leave Session row.
+    pub session: bool,
     /// A local game's seats (P43): the controller on each, by the shell's pad seat number, which is
     /// the device id the join screen is over. Kept between rides, so the next local game opens on
     /// the last one's players.
@@ -2282,6 +2292,7 @@ impl Menu {
             quit: None,
             leaving: None,
             leave_to: LeaveTo::Main,
+            session: false,
             join: Join::new(join::ON_SCREEN, Opened::Menu),
             devices: Vec::new(),
             heard: Vec::new(),
@@ -2613,6 +2624,8 @@ impl Menu {
             (Leaving::Main, LeaveTo::Main) => ("Main menu?", "Main Menu"),
             (Leaving::Main, LeaveTo::Lobby) => ("Return to lobby?", "Return to Lobby"),
             (Leaving::Main, LeaveTo::Online) => ("Leave the online game?", "Leave Game"),
+            (Leaving::Session, _) if self.pauser > 0 => ("Leave the session? The others ride on.", PAUSE_LEAVE_ROW),
+            (Leaving::Session, _) => ("Leave the session? Everyone on this machine goes; the others ride on.", PAUSE_LEAVE_ROW),
         };
         Some((ask, [go, QUIT_ROWS[1]], row))
     }
@@ -2632,6 +2645,11 @@ impl Menu {
                     Act::MainMenu
                 }
                 Leaving::Quit => Act::Quit,
+                // back to the ride while it lets this machine's seats go
+                Leaving::Session => {
+                    self.stack.clear();
+                    Act::LeaveSession(self.pauser)
+                }
             };
         } else if p.ok || p.back || p.start {
             self.leaving = None;
@@ -2709,7 +2727,15 @@ impl Menu {
         if self.opening != Opening::No {
             rows.insert(PAUSE_SEATS, format!("Seats: {}", self.pause_seats()));
         }
+        if let Some(at) = self.pause_leave() {
+            rows.insert(at, PAUSE_LEAVE_ROW.into());
+        }
         rows
+    }
+
+    /// Where the pause's Leave Session row is (N11), on an online ride: just before Quit.
+    fn pause_leave(&self) -> Option<usize> {
+        self.session.then_some(PAUSE_OPEN + 2 * usize::from(self.opening != Opening::No))
     }
 
     /// The pause's seat count (N14): the opened room's once the network has said it, else the one it
@@ -2811,7 +2837,7 @@ impl Menu {
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods => self.page_of(screen).len().max(1),
             Screen::Controls | Screen::Audio | Screen::Camera => 1,
             Screen::Keyboard => KEY_ROWS.len() + 1,
-            Screen::Pause => PAUSE.len() + 2 * usize::from(self.opening != Opening::No),
+            Screen::Pause => PAUSE.len() + 2 * usize::from(self.opening != Opening::No) + usize::from(self.session),
             Screen::Online => ONLINE.len() + 1,
             Screen::Games => self.lobby.found.len() + 1,
             Screen::Lobby => self.lobby.items().len(),
@@ -3033,6 +3059,10 @@ impl Menu {
                         let n = choices.len();
                         self.switch_pick = Some(choices[if p.left { (now + n - 1) % n } else { (now + 1) % n }]);
                     }
+                    return Act::Stay;
+                }
+                if p.ok && self.pause_leave() == Some(at) {
+                    self.leaving = Some((Leaving::Session, 1));
                     return Act::Stay;
                 }
                 if p.ok {
@@ -3388,6 +3418,12 @@ impl Menu {
             }
             Event::Chat { name, text, .. } => l.said(&name, &text),
             Event::Ride(..) | Event::Datagram(..) => {}
+            // the host went and the room is another peer's (N11), maybe this machine's
+            Event::HandedOver(host) => {
+                l.handed |= host == l.me;
+                let name = l.room.as_ref().and_then(|r| r.names.get(&host).cloned()).unwrap_or_else(|| host.chars().take(6).collect());
+                l.status = if host == l.me { "The host left: you host the game now.".into() } else { format!("The host left: {name} hosts the game now.") };
+            }
         }
         Act::Stay
     }
@@ -3524,6 +3560,8 @@ pub struct Lobby {
     /// [`Lobby::pick`]'s controller preset changed in a lobby that could not hear of it then (a
     /// ride under way): it goes out once the lobby is open again (N13).
     pub repick: bool,
+    /// The host left and handed its room to this machine (N11), which hosts it under its own name.
+    pub handed: bool,
 }
 
 impl Lobby {
@@ -3539,7 +3577,7 @@ impl Lobby {
     }
 
     pub fn hosting(&self) -> bool {
-        self.me == HOST
+        self.me == HOST || self.handed
     }
 
     /// A lobby for this machine's player to open: the last free-ride track, the settings' wrecks.
@@ -3556,6 +3594,7 @@ impl Lobby {
     fn begin(&mut self, status: &str) {
         self.room = None;
         self.me.clear();
+        self.handed = false;
         self.ready = false;
         self.code.clear();
         self.chat.clear();

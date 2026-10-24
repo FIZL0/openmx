@@ -8,8 +8,10 @@
 //! seats are emptied: the host sends a restart (`Msg::Restart`) — its state before a tick every seat's
 //! pads are in for, and the new line-up — and every machine, the host too, takes the state on and
 //! starts a new ggrs session from that tick, numbered one more so the old one's datagrams are dropped.
-//! A seat nobody sits in has an unplugged pad ([`super::Game::step`]). The host silent: the others
-//! wait [`HOST_WAIT`] more and end the ride (there is no new host).
+//! A seat nobody sits in has an unplugged pad ([`super::Game::step`]). The host silent (N11): the next
+//! peer in seat order waits [`HOST_WAIT`] more for each peer before it (in case one of them takes over
+//! first), then empties the host's seats from its own settled state and sends that restart as the new
+//! host; a game that cannot say its state in bytes ends the ride, naming the host.
 //!
 //! What opentennis has and this does not, because it needs a lobby or a menu (N3): the choice between a
 //! bot, the lobby and leaving; a player rejoining; "switched away".
@@ -48,6 +50,10 @@ pub struct Recover {
     pub(super) mods: Option<(u8, String, String)>,
     /// Restarts so far.
     pub restarts: u32,
+    /// This machine is taking the ride over from a silent host (N11): its restart is the one ready.
+    pub(super) taking: bool,
+    /// Every time this machine took a ride over from a silent host: (the old host, the tick).
+    pub takeovers: Vec<(String, u32)>,
 }
 
 impl Recover {
@@ -63,6 +69,8 @@ impl Recover {
             ready: None,
             mods: None,
             restarts: 0,
+            taking: false,
+            takeovers: Vec::new(),
         }
     }
 
@@ -85,7 +93,13 @@ impl Recover {
 
 /// A recovery message in.
 pub(super) fn heard<S: Clone + 'static>(np: &mut Netplay<S>, from: &str, m: Msg) {
-    if np.host() || from != np.lineup.host() {
+    // a restart from the peer that takes over from a silent host (N11): it hosts the line-up it
+    // sends, which the old host is out of
+    let takeover = match &m {
+        Msg::Restart { lineup, .. } => lineup.host() == from && np.lineup.peers().iter().any(|p| p == from) && !lineup.peers().iter().any(|p| p == np.lineup.host()),
+        _ => false,
+    };
+    if np.host() || from != np.lineup.host() && !takeover {
         return;
     }
     let r = &mut np.recover;
@@ -95,6 +109,7 @@ pub(super) fn heard<S: Clone + 'static>(np: &mut Netplay<S>, from: &str, m: Msg)
         Msg::Restart { round, tick, lineup, data, last } => {
             r.pieces.extend(data);
             if last {
+                r.taking = false;
                 r.ready = Some((round, tick, lineup, std::mem::take(&mut r.pieces)));
             }
         }
@@ -118,11 +133,30 @@ pub(super) fn tick<S: Clone + 'static>(np: &mut Netplay<S>, dt: f32) {
     let limit = |q: (f32, bool)| if q.1 { t.silent } else { t.loading };
     if !host {
         let q = r.quiet.get(&hostname).copied().unwrap_or_default();
-        if q.0 > limit(q) + t.host_wait {
-            return np.finish("the host stopped answering: the ride is over".into());
+        // a silent host's ride goes to the others (N11): the peer in the first seat after it takes
+        // it over once the host has been silent `host_wait` past away, the next one a `host_wait`
+        // later if that one did not, and so on down the seats
+        let rest: Vec<String> = peers.iter().filter(|p| **p != hostname).cloned().collect();
+        let rank = rest.iter().position(|p| *p == me).unwrap_or(0) + 1;
+        let at = limit(q) + rank as f32 * t.host_wait;
+        if q.0 > at && r.ready.is_none() {
+            np.said.push(format!("online: the host stopped answering: {me} takes the ride over"));
+            let mut lineup = np.lineup.clone();
+            for s in lineup.seats.iter_mut() {
+                if s.as_deref() == Some(hostname.as_str()) {
+                    *s = None;
+                }
+            }
+            np.recover.ready = Some((0, u32::MAX, lineup, Vec::new()));
+            np.recover.taking = true;
+            return;
         }
         if q.0 > limit(q) {
-            np.notice = format!("Waiting for the host... {} s", (limit(q) + t.host_wait - q.0).ceil());
+            let first = limit(q) + t.host_wait;
+            np.notice = match rest.first() {
+                Some(next) if q.0 <= first => format!("The host stopped answering: {next} takes over in {} s", (first - q.0).ceil()),
+                _ => format!("The host stopped answering: taking over in {} s", (at - q.0).ceil()),
+            };
         } else if let Some((who, left)) = &r.told {
             np.notice = format!("Waiting for {}... {left} s", who.join(", "));
         }
@@ -179,7 +213,11 @@ pub(super) fn restarted<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay
         let round = np.rb.round.wrapping_add(1);
         let Some((tick, data)) = rollback::confirmed(np, game) else {
             if game.encode().is_none() {
-                let why = format!("{} went silent, and this ride cannot hand its state over to go on without them", np.recover.away.join(", "));
+                let gone = if np.recover.taking { np.lineup.host().to_string() } else { np.recover.away.join(", ") };
+                let why = match gone.is_empty() {
+                    true => "a player left, and this ride cannot hand its state over to go on without them".to_string(),
+                    false => format!("{gone} went silent, and this ride cannot hand its state over to go on without them"),
+                };
                 np.tell(Msg::End(why.clone()));
                 return np.finish(why);
             }
@@ -196,8 +234,17 @@ pub(super) fn restarted<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay
     } else {
         (round, tick, data)
     };
+    // leaves (N11): the tick the host's took them at
+    for l in np.leave.left.iter_mut().filter(|l| l.2 == u32::MAX) {
+        l.2 = tick;
+    }
     if lineup.mine(&np.me).is_empty() {
-        return np.finish("the others rode on without this machine".into());
+        let why = match (np.leave.leaving(), np.host()) {
+            (true, true) => format!("you left the ride: {} hosts it now", lineup.host()),
+            (true, false) => "you left the ride".to_string(),
+            _ => "the others rode on without this machine".to_string(),
+        };
+        return np.finish(why);
     }
     if let Err(e) = game.decode(&data) {
         return np.finish(format!("the host's state did not load: {e}"));
@@ -218,9 +265,19 @@ pub(super) fn restarted<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay
         Err(e) => return np.finish(format!("ggrs: {e}")),
     };
     np.say(format!("online: the ride goes on from tick {tick} (restart {round}) as {}", lineup.text()));
+    // a leaver that keeps some seats rides on
+    if np.leave.mine.as_ref().is_some_and(|m| m.0.iter().all(|&s| lineup.seats.get(s).is_none_or(|p| p.as_deref() != Some(np.me.as_str())))) {
+        np.leave.mine = None;
+    }
+    if std::mem::take(&mut np.recover.taking) {
+        np.recover.takeovers.push((np.lineup.host().to_string(), tick));
+    }
     for p in np.lineup.peers() {
         if !lineup.peers().contains(&p) {
-            np.link.forget(&p);
+            // a leaver still needs this restart to know it is out: its link stays until it acks
+            if !np.leave.left.iter().any(|l| l.0 == p && l.2 == tick) {
+                np.link.forget(&p);
+            }
             np.recover.quiet.remove(&p);
         }
     }
