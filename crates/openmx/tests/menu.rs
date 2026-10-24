@@ -286,7 +286,8 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Restart), "{acts:?}");
     tap(&mut m, &mut r, Control::Start);
-    for _ in 0..6 {
+    // under Game Modifiers since P134
+    for _ in 0..7 {
         tap(&mut m, &mut r, Control::Down);
     }
     // Main Menu asks first, on Stay (P110): Up onto the leaving row, then Cross.
@@ -2244,6 +2245,11 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     // 2P's set (P143): 2P's own top speed, for any player to load, and the world's gravity.
     assert_eq!(m.settings.presets[0].1, menu::preset_of(&saved, 1));
     assert_eq!(m.settings.presets[0].1.get(0, Knob::BikeSpeed), 110);
+    // Saved on 2P's page, it is 2P's for every player, with the world's (P134).
+    let mut kept = Mods::original();
+    kept.set(0, Knob::Gravity, 80);
+    (0..8).for_each(|s| kept.set(s, Knob::BikeSpeed, 110));
+    assert_eq!(m.settings.presets[0].1, kept);
 
     // Reset to Original, and the preset loads it all back.
     down_to(&mut m, &mut r, Key::ResetMods);
@@ -2446,6 +2452,130 @@ fn a_modifier_preset_is_one_players_set() {
     assert!(m.riding());
     let mods = m.settings.modifiers;
     assert_eq!((mods.get(0, Knob::BikeSpeed), mods.get(1, Knob::BikeSpeed), mods.get(0, Knob::Gravity)), (100, 150, 90));
+}
+
+/// P134: the host's Game Modifiers page has All Players at the head of its Player row: a knob set
+/// there is every seat's, the page says Mixed where the seats differ, and the knobs set so are the
+/// ones the shell sends to every seat online. The pause has its own Game Modifiers row.
+#[test]
+fn the_hosts_all_players_sets_every_seats_knob() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Game Modifiers");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    assert_eq!(m.page()[0].value, "1P");
+    assert_eq!(m.page()[0].choices[0], "All Players");
+    // Left from 1P is All Players.
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.page()[0].value, "All Players");
+    assert_eq!(m.mods_whose(), "All");
+    down_to(&mut m, &mut r, Key::Knob(Knob::BikeSpeed));
+    tap(&mut m, &mut r, Control::Right);
+    assert!((0..8).all(|s| m.settings.modifiers.get(s, Knob::BikeSpeed) == 110), "{:?}", m.settings.modifiers);
+    // and the world's, the host's to set
+    down_to(&mut m, &mut r, Key::Knob(Knob::Gravity));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 90);
+    assert_eq!(m.take_mods_all(), vec![Knob::BikeSpeed], "the world's is one for everyone already");
+    assert!(m.take_mods_all().is_empty(), "taken once");
+
+    // 2P alone faster: All Players then says Mixed, and its arrow puts every seat on one again.
+    down_to(&mut m, &mut r, Key::Player);
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.page()[0].value, "2P");
+    down_to(&mut m, &mut r, Key::Knob(Knob::BikeSpeed));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!((m.settings.modifiers.get(0, Knob::BikeSpeed), m.settings.modifiers.get(1, Knob::BikeSpeed)), (110, 120));
+    assert!(m.take_mods_all().is_empty(), "a seat's own is not All's");
+    down_to(&mut m, &mut r, Key::Player);
+    tap_until(&mut m, &mut r, Control::Left, |m| m.page()[0].value == "All Players");
+    let speed = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::Knob(Knob::BikeSpeed)).unwrap();
+    assert_eq!(speed(&m).value, "Mixed");
+    down_to(&mut m, &mut r, Key::Knob(Knob::BikeSpeed));
+    tap(&mut m, &mut r, Control::Right);
+    assert!((0..8).all(|s| m.settings.modifiers.get(s, Knob::BikeSpeed) == 120), "{:?}", m.settings.modifiers);
+    assert_ne!(speed(&m).value, "Mixed");
+
+    // Reset to Original on All Players is every seat's.
+    down_to(&mut m, &mut r, Key::ResetMods);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.modifiers.is_original());
+}
+
+/// P134: a player who is not the host opens Game Modifiers from the pause their own pad opened and
+/// sets their own seat's knobs alone: their Player row is theirs and stays so, and the world's are
+/// shown but not theirs to change. An online guest's page is their machine's 1P's, the same way.
+#[test]
+fn a_guests_page_changes_only_its_own_seat_and_not_the_world() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    m.riders = 2;
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    let mut garages = vec![garage(0, Kind::Bike), garage(1, Kind::Bike)];
+    let mut readers = vec![r, Reader::new()];
+    ride_frame(&mut m, &mut readers, &[Report::idle(), Report::idle()], &mut garages);
+    // 2P's Start, down 2P's pad to Game Modifiers.
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
+    assert_eq!(m.driver(), 1);
+    for _ in 0..12 {
+        if m.pause_rows()[m.cursor(Screen::Pause)] == "Game Modifiers" {
+            break;
+        }
+        tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
+    }
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    let row = |m: &Menu, key: Key| m.page().into_iter().find(|r| r.key == key).unwrap_or_else(|| panic!("{key:?} not in {:?}", m.page().iter().map(|r| (r.key, r.value.clone())).collect::<Vec<_>>()));
+    assert_eq!(row(&m, Key::Player).value, "2P");
+    assert!(row(&m, Key::Player).off.is_some(), "only the host picks another player");
+    assert!(!row(&m, Key::Player).choices.iter().any(|c| c == "All Players"));
+    assert!(row(&m, Key::Knob(Knob::Gravity)).off.is_some(), "the world's is the host's");
+    assert!(row(&m, Key::Knob(Knob::BikeSpeed)).off.is_none());
+    let to = |m: &mut Menu, readers: &mut [Reader], garages: &mut [Garage], key: Key| {
+        for _ in 0..40 {
+            if m.page()[m.cursor(Screen::Modifiers)].key == key {
+                return;
+            }
+            tap_seat(m, readers, garages, 1, Control::Down);
+        }
+        panic!("no {key:?} row under 2P's pad");
+    };
+    to(&mut m, &mut readers, &mut garages, Key::Knob(Knob::BikeSpeed));
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Right);
+    assert_eq!(m.settings.modifiers.get(1, Knob::BikeSpeed), 110);
+    assert_eq!(m.settings.modifiers.get(0, Knob::BikeSpeed), 100, "1P's own is 1P's");
+    to(&mut m, &mut readers, &mut garages, Key::Knob(Knob::Gravity));
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Left);
+    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 100, "2P moved the world");
+    to(&mut m, &mut readers, &mut garages, Key::Player);
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Left);
+    assert_eq!(row(&m, Key::Player).value, "2P");
+    // Reset to Original puts back 2P's alone.
+    m.settings.modifiers.set(0, Knob::Gravity, 50);
+    to(&mut m, &mut readers, &mut garages, Key::ResetMods);
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
+    assert_eq!((m.settings.modifiers.get(1, Knob::BikeSpeed), m.settings.modifiers.get(0, Knob::Gravity)), (100, 50));
+
+    // An online guest: its machine's 1P, the world's the host's, and none of it All's.
+    let (mut m, mut r) = fresh();
+    m.guest = true;
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Game Modifiers");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.page()[0].value, "1P");
+    down_to(&mut m, &mut r, Key::Knob(Knob::Gravity));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 100);
+    assert!(row(&m, Key::Knob(Knob::PlaneTopSpeed)).off.is_some(), "online every seat flies the host's biplane");
+    down_to(&mut m, &mut r, Key::Knob(Knob::Grip));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.modifiers.get(0, Knob::Grip), 110);
+    assert!(m.take_mods_all().is_empty());
 }
 
 // ---- the pause's Game Audio Options (P56) -----------------------------------------------------------

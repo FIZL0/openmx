@@ -713,3 +713,70 @@ pub fn scaled_dt(dt: F, scale: Option<F>) -> F {
         dt
     }
 }
+
+/// Every seat's own modifiers online (P134): which knobs a player sets for their own seat, and the
+/// set a ride from the lobby rides, gathered a row a seat.
+pub mod online {
+    use super::{Knob, Mods};
+    use crate::MAX_PLAYERS;
+
+    /// A modifier a player sets for their own seat online (P134): one of their own, but not the
+    /// biplane's — every seat flies a copy of the ride's one plane (the online ride's `plane_on`), built on 1P's.
+    pub fn seat_own(k: Knob) -> bool {
+        k.per_seat() && !matches!(k, Knob::PlaneSpeed | Knob::PlaneAccel | Knob::PlaneTopSpeed | Knob::PlaneTurn)
+    }
+
+    /// The set an online ride from the lobby rides on (P134): each seat its own row of `m`, the
+    /// biplane's 1P's for every seat, the world's as they are.
+    pub fn ride_set(m: &Mods) -> Mods {
+        let mut out = *m;
+        for k in Knob::ALL.into_iter().filter(|&k| k.per_seat() && !seat_own(k)) {
+            (1..MAX_PLAYERS).for_each(|s| out.set(s, k, m.get(0, k)));
+        }
+        out
+    }
+
+    /// A player's own set as their pick carries it (P134): seat `seat`'s own modifiers of `m` for
+    /// every player, and with `host` the world's and the biplane's too (row 0's), which are the host's.
+    pub fn own_set(m: &Mods, seat: usize, host: bool) -> Mods {
+        let mut out = Mods::original();
+        for k in Knob::ALL {
+            let v = if seat_own(k) { m.get(seat, k) } else { m.get(0, k) };
+            if seat_own(k) || host {
+                (0..MAX_PLAYERS).for_each(|s| out.set(s, k, v));
+            }
+        }
+        out
+    }
+
+    /// `ride` with the seats `seats` on `own`'s own modifiers (its 1P's), nothing else moved: a
+    /// guest's change of their own (P134).
+    pub fn with_own(ride: &Mods, seats: &[usize], own: &Mods) -> Mods {
+        let mut out = *ride;
+        for k in Knob::ALL.into_iter().filter(|&k| seat_own(k)) {
+            seats.iter().for_each(|&s| out.set(s, k, own.get(0, k)));
+        }
+        out
+    }
+
+    /// The host's change of the ride's set (P134): `ride` with the world's and the biplane's off the
+    /// host's own set `own` (its 1P's), the host's seats `mine` on its own, and every seat on the knobs
+    /// `all` the host set through All Players.
+    pub fn host_set(ride: &Mods, own: &Mods, mine: &[usize], all: &[Knob]) -> Mods {
+        let mut out = with_own(ride, mine, own);
+        for k in Knob::ALL.into_iter().filter(|&k| !seat_own(k)) {
+            out.set(0, k, own.get(0, k));
+        }
+        out = ride_set(&out);
+        for &k in all.iter().filter(|&&k| seat_own(k)) {
+            (0..MAX_PLAYERS).for_each(|s| out.set(s, k, own.get(0, k)));
+        }
+        out
+    }
+
+    /// Whether seat `seat` of a ride of `seats` seats has a row of its own in a [`Mods`]: the rows stop
+    /// at [`MAX_PLAYERS`], the last one shared by every seat from it on.
+    pub fn own_row(seat: usize, seats: usize) -> bool {
+        seat + 1 < MAX_PLAYERS || seats <= MAX_PLAYERS
+    }
+}

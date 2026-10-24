@@ -629,10 +629,80 @@ impl Menu {
         }
     }
 
+    /// The one seat whose modifiers a player who is not the host sees and sets (P134): an online
+    /// guest's own (their machine's 1P, in the lobby and in the ride), or under the pause the seat
+    /// whose pad opened it when that is not 1P. `None`: the host's page, every seat's.
+    pub fn mods_own(&self) -> Option<usize> {
+        let lobby_guest = self.lobby.room.is_some() && !self.lobby.hosting();
+        // the ride's guest flag holds under its pause; the main menu after it is the next ride's
+        let ride_guest = self.guest && self.stack.first() == Some(&Screen::Pause);
+        match (ride_guest || lobby_guest, self.stack.first()) {
+            (true, _) => Some(0),
+            (false, Some(Screen::Pause)) if self.pauser != 0 => Some(self.pauser.min(SEATS_MAX - 1)),
+            _ => None,
+        }
+    }
+
+    /// Whose modifiers the Game Modifiers page sets now: one seat's, or `None` for every seat's
+    /// (the host on All Players).
+    pub fn mods_seat(&self) -> Option<usize> {
+        match (self.mods_own(), self.mods_all) {
+            (Some(s), _) => Some(s),
+            (None, true) => None,
+            (None, false) => Some(self.player.min(SEATS_MAX - 1)),
+        }
+    }
+
+    /// Whose the page is, for its tag: `All` or `2P`.
+    pub fn mods_whose(&self) -> String {
+        self.mods_seat().map_or_else(|| "All".into(), |s| format!("{}P", s + 1))
+    }
+
+    /// The knobs that are not this page's to set: the world's for anyone but the host, and online
+    /// the biplane's for a guest, every seat flying the host's.
+    fn knob_held(&self, knob: Knob) -> Option<&'static str> {
+        match self.mods_own() {
+            None => None,
+            Some(_) if !knob.per_seat() => Some("The world's: only the host sets it."),
+            Some(_) if self.guest || self.lobby.room.is_some() => {
+                (!game_sim::modifiers::online::seat_own(knob)).then_some("Online every seat flies the host's biplane: only the host sets it.")
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// A knob's value on the page: the seat's, or on All Players every seat's, `None` where they
+    /// differ (Mixed).
+    fn knob_value(&self, knob: Knob) -> Option<u16> {
+        let m = &self.settings.modifiers;
+        match self.mods_seat() {
+            Some(s) => Some(m.get(s, knob)),
+            None => {
+                let v = m.get(0, knob);
+                (0..SEATS_MAX).all(|s| m.get(s, knob) == v).then_some(v)
+            }
+        }
+    }
+
     fn modifier_page(&self) -> Vec<Row> {
         let held = self.mods_held().map(str::to_string);
-        let seat = self.player.min(SEATS_MAX - 1);
-        let mut player = self.player_row("Whose modifiers these are. Gravity, air drag and time scale are the world's, so they're everyone's.");
+        let own = self.mods_own();
+        let mut player = match own {
+            // Not the host: their own seat, and nobody else's.
+            Some(s) => {
+                let mut r = self.player_row("Your own modifiers. The world's, and everyone else's, are the host's to set.");
+                r.choices = vec![format!("{}P", s + 1)];
+                (r.now, r.value) = (Some(0), r.choices[0].clone());
+                r.off_if(true, "Only the host sets another player's.")
+            }
+            None => {
+                let mut r = self.player_row("Whose modifiers these are. All Players sets every player's at once. Gravity, air drag and time scale are the world's, so they're everyone's.");
+                r.choices.insert(0, "All Players".into());
+                let at = if self.mods_all { 0 } else { self.player.min(PLAYERS - 1) + 1 };
+                (r.now, r.value) = (Some(at), r.choices[at].clone());
+                r
+            }
+        };
         // When a change takes (P98): the ride under the pause's as it closes, else the next ride's.
         player.note = Some(match (self.stack.first(), &held) {
             (_, Some(why)) => why.clone(),
@@ -641,27 +711,103 @@ impl Menu {
         });
         let mut rows = vec![player];
         for knob in Knob::MENU {
-            let v = self.settings.modifiers.get(if knob.per_seat() { seat } else { 0 }, knob);
-            let meter = f32::from(v.saturating_sub(knob.least())) / f32::from(knob.most() - knob.least());
+            let v = self.knob_value(knob);
+            let shown = v.unwrap_or_else(|| self.settings.modifiers.get(0, knob));
+            let meter = f32::from(shown.saturating_sub(knob.least())) / f32::from(knob.most() - knob.least());
             // The biplane's max height has a step past the percentages: no ceiling (P136).
-            let shown = if v > game_sim::modifiers::MOST { "Uncapped".into() } else { format!("{v}%") };
-            let mut r = Row::slider(Key::Knob(knob), knob.label(), shown, meter, knob.blurb());
+            let value = v.map_or_else(|| "Mixed".into(), |v| if v > game_sim::modifiers::MOST { "Uncapped".into() } else { format!("{v}%") });
+            let mut r = Row::slider(Key::Knob(knob), knob.label(), value, meter, knob.blurb());
             r.world = !knob.per_seat();
-            r.note = Some(if r.world { "The world's: one value for every player." } else { "This player's. 100% is the original game." }.into());
-            rows.push(r.off_if(held.is_some(), held.as_deref().unwrap_or("")));
+            r.note = Some(
+                match (r.world, v) {
+                    (true, _) => "The world's: one value for every player.",
+                    (false, None) => "Players differ. A step sets every player's from 1P's; Cross puts them all back.",
+                    (false, Some(_)) if self.mods_seat().is_none() => "Every player's. 100% is the original game.",
+                    _ => "This player's. 100% is the original game.",
+                }
+                .into(),
+            );
+            let lock = held.as_deref().or(self.knob_held(knob));
+            rows.push(r.off_if(lock.is_some(), lock.unwrap_or("")));
         }
         rows.push(Row::heading("Presets"));
         let names: Vec<&str> = self.settings.presets.iter().map(|(n, _)| n.as_str()).collect();
         let none = names.is_empty();
+        let whose = match self.mods_seat() {
+            None => "every player's",
+            Some(_) => "this player's",
+        };
         let load = match none {
             true => Row::choice(Key::LoadPreset, "Load Preset", &["None Saved"], 0, "A saved set of modifiers."),
-            false => Row::choice(Key::LoadPreset, "Load Preset", &names, self.mod_preset, "A saved set of modifiers."),
+            false => Row::choice(Key::LoadPreset, "Load Preset", &names, self.mod_preset, &format!("A saved set of modifiers, as {whose}.")),
         };
         rows.push(load.off_if(none, "No presets saved yet").off_if(held.is_some(), held.as_deref().unwrap_or("")));
-        rows.push(Row::action(Key::SavePreset, "Save Preset", "Name and keep this player's set, with the world's. Any player can load it."));
+        rows.push(Row::action(Key::SavePreset, "Save Preset", &format!("Name and keep {whose} set, with the world's. Any player can load it.")));
         rows.push(Row::action(Key::DeletePreset, "Delete Preset", "Forgets the preset Load Preset is on.").off_if(none, "No presets saved yet"));
-        rows.push(Row::action(Key::ResetMods, "Reset to Original", "Every modifier back to the original game.").off_if(held.is_some(), held.as_deref().unwrap_or("")));
+        let reset = match self.mods_seat() {
+            None => "Every modifier back to the original game.",
+            Some(_) if own.is_some() => "Your own modifiers back to the original game.",
+            Some(_) => "This player's modifiers back to the original game; the world's stay.",
+        };
+        rows.push(Row::action(Key::ResetMods, "Reset to Original", reset).off_if(held.is_some(), held.as_deref().unwrap_or("")));
         rows
+    }
+
+    /// The knobs a preset or a reset moves from the page: the seat's own, and the world's for the host.
+    fn page_knobs(&self) -> Vec<Knob> {
+        Knob::ALL.into_iter().filter(|&k| self.knob_held(k).is_none() && (k.per_seat() || self.mods_own().is_none())).collect()
+    }
+
+    /// Set `knob` to `to` from the page: every seat's on All Players (kept for the shell to take), the
+    /// one seat's otherwise, the world's in row 0.
+    fn set_knob(&mut self, knob: Knob, to: u16) {
+        match (knob.per_seat(), self.mods_seat()) {
+            (false, _) => self.settings.modifiers.set(0, knob, to),
+            (true, Some(s)) => self.settings.modifiers.set(s, knob, to),
+            (true, None) => {
+                for s in 0..SEATS_MAX {
+                    self.settings.modifiers.set(s, knob, to);
+                }
+                if !self.mods_all_set.contains(&knob) {
+                    self.mods_all_set.push(knob);
+                }
+            }
+        }
+    }
+
+    /// `from`'s values put on the page's seats (P134): on All Players the whole of it, seat by seat;
+    /// on one seat that seat's row of it.
+    fn load_mods(&mut self, from: &Mods) {
+        for k in self.page_knobs() {
+            match self.mods_seat() {
+                None if k.per_seat() => {
+                    (0..SEATS_MAX).for_each(|s| self.settings.modifiers.set(s, k, from.get(s, k)));
+                    if !self.mods_all_set.contains(&k) {
+                        self.mods_all_set.push(k);
+                    }
+                }
+                Some(s) if k.per_seat() => self.settings.modifiers.set(s, k, from.get(s, k)),
+                _ => self.settings.modifiers.set(0, k, from.get(0, k)),
+            }
+        }
+    }
+
+    /// The set Save Preset keeps, one player's (P143's [`preset_of`]): on one seat that seat's, on
+    /// All Players 1P's (every seat's where they agree), with the world's.
+    pub(super) fn preset_now(&self) -> Mods {
+        preset_of(&self.settings.modifiers, self.mods_seat().unwrap_or(0))
+    }
+
+    /// Open the Game Modifiers page on its Player row, from the Ride tab, the pause or the lobby.
+    pub(super) fn open_modifiers(&mut self) {
+        self.push(Screen::Modifiers);
+        self.cursor[Screen::Modifiers.index()] = 0;
+    }
+
+    /// The knobs the host set through All Players since this was last asked (P134), which online
+    /// go to every seat and not only this machine's.
+    pub fn take_mods_all(&mut self) -> Vec<Knob> {
+        std::mem::take(&mut self.mods_all_set)
     }
 
     /// The mod packs the Mods page lists: every pack the folder has had while it was read this
@@ -763,9 +909,23 @@ impl Menu {
         let side = p.left || p.right;
         let d = by(p);
         let next = |row: &Row| cycle(row.now.unwrap_or(0), d, row.choices.len());
+        // the modifiers page's Player row, and whether it is the host's with All Players (P134)
+        let mods_players = (self.screen() == Some(Screen::Modifiers)).then(|| self.mods_own().is_none());
         let s = &mut self.settings;
         match row.key {
             Key::Heading => return,
+            Key::Player if mods_players.is_some() => {
+                // All Players at the head of the row, the host's alone (P134).
+                if mods_players == Some(true) {
+                    let at = if self.mods_all { 0 } else { self.player.min(PLAYERS - 1) + 1 };
+                    let to = cycle(at, d, PLAYERS + 1);
+                    self.mods_all = to == 0;
+                    if to > 0 {
+                        self.player = to - 1;
+                    }
+                }
+                return;
+            }
             Key::Player => {
                 let n = if self.screen() == Some(Screen::Garage) { self.garages.len().clamp(1, PLAYERS) } else { PLAYERS };
                 self.player = cycle(self.player, d, n);
@@ -776,8 +936,7 @@ impl Menu {
             Key::Bays => s.bays = !s.bays,
             Key::Tricks => s.tricks = Tricks::ALL[next(row)],
             Key::Modifiers if p.ok => {
-                self.push(Screen::Modifiers);
-                self.cursor[Screen::Modifiers.index()] = 0;
+                self.open_modifiers();
                 return;
             }
             Key::Hud => s.overlay = Overlay::CHOICES[next(row)],
@@ -839,8 +998,8 @@ impl Menu {
                 return;
             }
             Key::Knob(knob) => {
-                let seat = if knob.per_seat() { self.player.min(SEATS_MAX - 1) } else { 0 };
-                let now = self.settings.modifiers.get(seat, knob);
+                // From Mixed a step goes from 1P's.
+                let now = self.knob_value(knob).unwrap_or_else(|| self.settings.modifiers.get(0, knob));
                 let step = game_sim::modifiers::STEP;
                 let to = match (p.left, p.right) {
                     (true, _) => now.saturating_sub(step).max(knob.least()),
@@ -848,7 +1007,7 @@ impl Menu {
                     // Cross puts the one modifier back.
                     _ => game_sim::modifiers::ORIGINAL,
                 };
-                self.settings.modifiers.set(seat, knob, to);
+                self.set_knob(knob, to);
             }
             Key::LoadPreset => {
                 let n = self.settings.presets.len();
@@ -857,7 +1016,7 @@ impl Menu {
                     return;
                 }
                 let preset = self.settings.presets[self.mod_preset.min(n - 1)].1;
-                load_preset_onto(&mut self.settings.modifiers, &preset, self.player.min(SEATS_MAX - 1));
+                self.load_mods(&preset);
             }
             Key::SavePreset if p.ok => {
                 self.type_for(Typing::Preset);
@@ -868,7 +1027,7 @@ impl Menu {
                 self.settings.presets.remove(self.mod_preset.min(n - 1));
                 self.mod_preset = self.mod_preset.min(self.settings.presets.len().saturating_sub(1));
             }
-            Key::ResetMods if p.ok => self.settings.modifiers = Mods::original(),
+            Key::ResetMods if p.ok => self.load_mods(&Mods::original()),
             Key::ModsFolder => s.mods = !s.mods,
             // From Mixed, a press is On first.
             Key::Original => self.set_original(next(row) == 1 || row.now.is_none()),

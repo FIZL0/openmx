@@ -56,6 +56,10 @@ pub enum Msg {
     /// A peer to the host: these seats of its go, at the next restart the host can make (N11,
     /// [`super::leave`]); every seat it has, and it is out of the ride.
     Leave { seats: Vec<usize> },
+    /// A guest to the host: its player's own modifiers are `to` (P134, `rides::own_set`'s text),
+    /// which the host puts on the guest's seats and takes as a change of its own
+    /// ([`super::Netplay::remodify`]), every machine at one tick.
+    Mine { to: String },
 }
 
 pub enum Kind<'a> {

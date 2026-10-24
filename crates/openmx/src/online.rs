@@ -91,6 +91,11 @@ pub struct Online {
     /// them, which a change the host makes mid-ride builds the bikes again from (P100).
     mods: game_sim::modifiers::Mods,
     stock: Vec<game_sim::phy::Phy>,
+    /// Each seat rides its own player's modifiers (P134, `rides::ride_set`): a ride from the lobby,
+    /// whose line-up is the room's from its first tick. A ride opened to online and `--peer`s ride
+    /// 1P's for every seat ([`first_players`]): a seat a join adds is built on the first seat's
+    /// bike, which every machine moves onto a set only when the set changes.
+    own_rows: bool,
     /// The ride's biplane as built (N17, [`rides::plane_on`]), which a seat's switch takes a copy
     /// of, and the disc's `biplane.phy` before the modifiers, which a change rebuilds it from.
     plane: Option<Flight>,
@@ -163,6 +168,7 @@ impl Online {
             presets_owed: true,
             mods: Default::default(),
             stock: Vec::new(),
+            own_rows: false,
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
@@ -223,6 +229,7 @@ impl Online {
             presets_owed: false,
             mods: Default::default(),
             stock: Vec::new(),
+            own_rows: true,
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
@@ -256,6 +263,7 @@ impl Online {
             presets_owed: false,
             mods: Default::default(),
             stock: Vec::new(),
+            own_rows: false,
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
@@ -289,6 +297,7 @@ impl Online {
             presets_owed: false,
             mods: Default::default(),
             stock: Vec::new(),
+            own_rows: false,
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
@@ -302,7 +311,7 @@ impl Online {
     /// seat past the last on the first's): its time scale, and what a change mid-ride (P100) is
     /// built on. Online every seat rides 1P's, so the set is 1P's for every seat.
     pub fn modifiers(&mut self, mods: game_sim::modifiers::Mods, stock: Vec<game_sim::phy::Phy>) {
-        self.mods = first_players(&mods);
+        self.mods = self.set_of(&mods);
         self.time_scale = self.mods.time_scale();
         self.net.mods = self.mods.text();
         self.stock = stock;
@@ -415,14 +424,45 @@ impl Online {
         self.net.host()
     }
 
-    /// The host changes the ride's modifiers to 1P's of `to` (P100): every machine takes them at the
-    /// tick of the next restart the session can make, the way a join is taken
-    /// ([`crate::net::admit`]); until then the ride is on the old ones.
-    pub fn remodify(&mut self, to: &game_sim::modifiers::Mods) -> Result<(), String> {
+    /// The set this ride rides `m` as: each seat its own row from the lobby (P134), 1P's for every
+    /// seat otherwise.
+    pub fn set_of(&self, m: &game_sim::modifiers::Mods) -> game_sim::modifiers::Mods {
+        if self.own_rows { rides::ride_set(m) } else { first_players(m) }
+    }
+
+    /// Whether each seat rides its own modifiers here (P134), so a guest can change its own.
+    pub fn own_rows(&self) -> bool {
+        self.own_rows
+    }
+
+    /// This machine's seats in the ride.
+    pub fn my_seats(&self) -> Vec<usize> {
+        self.net.lineup.mine(&self.net.me)
+    }
+
+    /// The host changes the ride's modifiers (P100): every machine takes them at the tick of the
+    /// next restart the session can make, the way a join is taken ([`crate::net::admit`]); until
+    /// then the ride is on the old ones. `to` is the host's own set; from the lobby (P134) the
+    /// world's and the biplane's are its 1P's, the host's seat its own, and the knobs `all` the host
+    /// set through All Players every seat's; otherwise every seat rides 1P's of it.
+    pub fn remodify(&mut self, to: &game_sim::modifiers::Mods, all: &[game_sim::modifiers::Knob]) -> Result<(), String> {
         if self.stock.is_empty() {
             return Err("this ride has no stock bike file to build the modifiers on".into());
         }
-        self.net.remodify(first_players(to).text())
+        if !self.own_rows {
+            return self.net.remodify(first_players(to).text());
+        }
+        let ride = game_sim::modifiers::Mods::parse(self.net.mods_next())?;
+        self.net.remodify(rides::host_set(&ride, to, &self.my_seats(), all).text())
+    }
+
+    /// A guest's own modifiers (P134), its machine's 1P's of `own`, onto its seat at a tick every
+    /// machine agrees, through the host. Only a ride from the lobby has a row a seat.
+    pub fn remodify_own(&mut self, own: &game_sim::modifiers::Mods) -> Result<(), String> {
+        if !self.own_rows {
+            return Err("a ride opened to online rides the host's modifiers for every seat".into());
+        }
+        self.net.remodify_own(rides::own_set(own, 0, false).text())
     }
 
     /// Whether this machine has a seat in the ride yet (a drop-in waits for the host's state).

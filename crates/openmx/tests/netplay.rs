@@ -1674,6 +1674,54 @@ fn the_host_changes_gravity_mid_ride_and_both_peers_stay_in_sync() {
     }
 }
 
+/// P134's acceptance online: a guest changes its own seat's modifiers mid-ride (its pause's change,
+/// [`Netplay::remodify_own`]) over a lossy, laggy link: the host takes it as its own change, and both
+/// machines take it at the same tick, the guest's seat alone on it — its bike faster, the host's
+/// seat and the world's as they were, though the guest's own set has a gravity too — and the two
+/// rides stay in sync across it. The host's own change of its seat goes the same way after.
+#[test]
+fn a_guests_own_change_both_peers_take_at_the_same_tick() {
+    use game_sim::modifiers::{Knob, Mods, online};
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    // the guest's own: its bike speed, and a gravity that is not its to set
+    let mut mine = Mods::original();
+    (0..8).for_each(|s| mine.set(s, Knob::BikeSpeed, 200));
+    mine.set(0, Knob::Gravity, 50);
+    let (asked, host_asked) = (300, 600);
+    let r = run("host,g", Timing::default(), ModRide::new, &link, 0..1000, |round, r, _| {
+        if round == asked {
+            r.nets[1].remodify_own(online::own_set(&mine, 0, false).text()).unwrap();
+        }
+        if round == host_asked {
+            let mut grip = Mods::original();
+            grip.set(0, Knob::Grip, 150);
+            r.nets[0].remodify_own(online::own_set(&grip, 0, true).text()).unwrap();
+        }
+    });
+    let (h, g) = (&r.nets[0], &r.nets[1]);
+    assert_eq!(h.remods.len(), 2, "{:?}", h.remods);
+    assert_eq!(h.remods, g.remods, "both took each change at one tick");
+    let t = h.remods[0].0 as usize;
+    assert!(t + WINDOW > asked as usize && t < asked as usize + 60, "the guest's change at tick {t}, asked at round {asked}");
+    let mut want = Mods::original();
+    want.set(1, Knob::BikeSpeed, 200);
+    assert_eq!(Mods::parse(&h.remods[0].1).unwrap(), want, "the guest's seat alone, and not the world");
+    want.set(0, Knob::Grip, 150);
+    for (i, np) in r.nets.iter().enumerate() {
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+        assert_eq!(r.games[i].mods, want, "{}", np.me);
+        for (s, sim) in r.games[i].ride.sims.iter().enumerate() {
+            let mut bike = r.games[i].stock[s].clone();
+            want.bike(s, &mut bike);
+            assert_eq!(format!("{:?}", *sim.phy), format!("{bike:?}"), "{} seat {}: the bike on its own set", np.me, s + 1);
+        }
+        let (a, b) = (&r.games[i].ride.sims[0].phy, &r.games[i].ride.sims[1].phy);
+        assert_ne!(format!("{a:?}"), format!("{b:?}"), "{}: the two seats ride one bike", np.me);
+    }
+    let n = r.agree(&[0, 1], 0);
+    assert!(n > h.remods[1].0 as usize + 200, "host and g agree on {n} ticks, the changes at {:?}", h.remods);
+}
+
 /// A peer that joins after the host changed the modifiers (P100) loaded the room's older set; the
 /// join's restart carries the set the ride is on, and the joiner's seats ride it from the join tick.
 /// The host opened its ride of one, changed gravity alone at round 100, and `g` drops in at 300.

@@ -42,6 +42,7 @@ use game_render::world::Graphics;
 use game_render::gpu::{Shape, Sprite};
 use game_render::{Disc, Frame, Texture};
 use game_sim::input::{AXIS_CENTRE, Control, Report};
+use game_sim::modifiers::online as online_mods;
 use game_sim::modifiers::{Knob, Mods};
 use openmx_net::{Cmd, Event, HOST, Listing, Room};
 use std::collections::HashMap;
@@ -1867,16 +1868,18 @@ const MAIN_SETTINGS: usize = 5;
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
 /// machine a switch would go to; the fourth its "Game Audio Options" (P56), which is Settings' Audio
 /// tab since P118. "Clear Markers" is the port's (P99): the pausing player's session markers on this
-/// track, the saved ones with them.
-pub const PAUSE: [&str; 8] = ["Resume", "Restart", "Switch To Machine", "Audio", "Settings", "Clear Markers", "Main Menu", "Quit"];
+/// track, the saved ones with them. "Game Modifiers" (P134) is the old front end's way in from the
+/// pause, put back: the host's page of every seat's, or the pausing player's own.
+pub const PAUSE: [&str; 9] = ["Resume", "Restart", "Switch To Machine", "Audio", "Settings", "Game Modifiers", "Clear Markers", "Main Menu", "Quit"];
 const PAUSE_SWITCH: usize = 2;
 const PAUSE_AUDIO: usize = 3;
 const PAUSE_SETTINGS: usize = 4;
-const PAUSE_MARKERS: usize = 5;
-const PAUSE_MAIN: usize = 6;
+const PAUSE_MODIFIERS: usize = 5;
+const PAUSE_MARKERS: usize = 6;
+const PAUSE_MAIN: usize = 7;
 /// The pause's "Open to Online" row (N10), before Quit, on a ride that can be opened
 /// ([`Menu::opening`]); Quit moves down one under it.
-const PAUSE_OPEN: usize = 7;
+const PAUSE_OPEN: usize = 8;
 const PAUSE_OPEN_ROW: &str = "Open to Online";
 /// The pause's Seats row (N14), under the online row: the seats the room opens with, then, opened,
 /// the room's own, as the lobby's Seats row sets them.
@@ -2185,6 +2188,15 @@ pub struct Menu {
     tab: [usize; Screen::ALL.len()],
     /// Whose rows the pages' Player rows show, 0 for 1P (P118).
     player: usize,
+    /// The modifiers page's Player row is on All Players (P134), the host's head of the row: a
+    /// modifier set there is every seat's.
+    mods_all: bool,
+    /// The modifiers the host set through All Players since the shell last took them
+    /// ([`Menu::take_mods_all`]): online every seat's, not only this machine's (P134).
+    mods_all_set: Vec<Knob>,
+    /// This machine is a guest of an online game, as the shell says (P134): its Game Modifiers page
+    /// sets its own player's alone and shows the world's, which are the host's.
+    pub guest: bool,
     /// The device and the pressure map `controls.txt` named, kept while their rows are on First
     /// Found and None, to switch back to.
     pad_kept: Option<String>,
@@ -2325,6 +2337,9 @@ impl Menu {
             mod_preset: 0,
             tab: [0; Screen::ALL.len()],
             player: 0,
+            mods_all: false,
+            mods_all_set: Vec::new(),
+            guest: false,
             pad_kept: None,
             pressure_kept: None,
             mods_seen: Vec::new(),
@@ -2780,7 +2795,7 @@ impl Menu {
 
     /// Keep the modifiers now set as preset `name`, over one already called that.
     fn save_preset(&mut self, name: &str) {
-        let mods = preset_of(&self.settings.modifiers, self.player.min(SEATS_MAX - 1));
+        let mods = self.preset_now();
         match self.settings.presets.iter().position(|(n, _)| n == name) {
             Some(i) => {
                 self.settings.presets[i].1 = mods;
@@ -2881,7 +2896,7 @@ impl Menu {
             Screen::Modifiers => {
                 self.main();
                 self.open_settings(pages::TAB_RIDE);
-                self.push(Screen::Modifiers);
+                self.open_modifiers();
             }
             Screen::Keyboard => {
                 self.main();
@@ -3185,6 +3200,7 @@ impl Menu {
                         }
                         PAUSE_AUDIO => self.open_settings(pages::TAB_AUDIO),
                         PAUSE_SETTINGS => self.open_settings(self.tab(Screen::Settings)),
+                        PAUSE_MODIFIERS => self.open_modifiers(),
                         PAUSE_MARKERS => return Act::ClearMarkers(self.pauser),
                         // Leaving asks first, on Stay (P110).
                         PAUSE_MAIN => self.leaving = Some((Leaving::Main, 1)),
@@ -3449,7 +3465,24 @@ impl Menu {
                 l.out.push(Cmd::Prepared(l.ready));
             }
             Item::Leave if p.ok => self.leave_lobby(),
+            Item::Modifiers if p.ok => self.open_modifiers(),
             _ => {}
+        }
+    }
+
+    /// This machine's player's own modifiers into its lobby pick, and on the host every seat's
+    /// gathered into the room's (P134): the shell's every frame. A guest's pick carries its own
+    /// knobs; the host's room takes a seat's when its pick's change, and the knobs the host set
+    /// through All Players every seat's.
+    pub fn lobby_mods(&mut self) {
+        let mods = self.settings.modifiers;
+        self.lobby.set_mods(&mods);
+        if !self.lobby.hosting() || self.lobby.room.as_ref().is_none_or(|r| r.riding) || self.lobby.start.is_some() {
+            return;
+        }
+        let all = self.take_mods_all();
+        if let Some(text) = self.lobby.gather(&mods, &all) {
+            self.lobby.out.push(Cmd::Modifiers(text));
         }
     }
 
@@ -3604,6 +3637,8 @@ pub enum Item {
     Chat,
     Start,
     Ready,
+    /// The player's own Game Modifiers page (P134); the host's sets every seat's too.
+    Modifiers,
     Leave,
 }
 
@@ -3623,6 +3658,7 @@ impl Item {
             Item::Chat => "Chat".into(),
             Item::Start => "Start".into(),
             Item::Ready => if l.ready { "Not Ready" } else { "Ready" }.into(),
+            Item::Modifiers => "Game Modifiers".into(),
             Item::Leave => "Leave".into(),
         }
     }
@@ -3664,6 +3700,10 @@ pub struct Lobby {
     pub repick: bool,
     /// The host left and handed its room to this machine (N11), which hosts it under its own name.
     pub handed: bool,
+    /// The host's: each seat's (peer, pick modifiers) last taken into the room's (P134).
+    mods_taken: Vec<(String, String)>,
+    /// The host's: the room's modifiers as last sent, before the room comes back with them.
+    mods_sent: Option<String>,
 }
 
 impl Lobby {
@@ -3672,9 +3712,19 @@ impl Lobby {
         match &self.room {
             None => vec![Item::Leave],
             Some(_) if self.hosting() => {
-                vec![Item::Track, Item::Wrecks, Item::Bike, Item::Private, Item::Seats, Item::Chat, Item::Start, Item::Leave]
+                vec![
+                    Item::Track,
+                    Item::Wrecks,
+                    Item::Bike,
+                    Item::Private,
+                    Item::Seats,
+                    Item::Chat,
+                    Item::Start,
+                    Item::Modifiers,
+                    Item::Leave,
+                ]
             }
-            Some(_) => vec![Item::Bike, Item::Chat, Item::Ready, Item::Leave],
+            Some(_) => vec![Item::Bike, Item::Chat, Item::Ready, Item::Modifiers, Item::Leave],
         }
     }
 
@@ -3688,13 +3738,17 @@ impl Lobby {
         let track = if TRACKS.iter().any(|t| t.0 == settings.track) { settings.track.as_str() } else { TRACKS[0].0 };
         let mut room = Room::new(&settings.name, track, settings.lobby_seats);
         room.wrecks = settings.wrecks;
-        room.modifiers = settings.modifiers.text();
         room.take(HOST, std::slice::from_ref(&self.pick));
+        // The host's own on its seat and the world's (P134); a guest's seat takes theirs as they come.
+        let mine: Vec<usize> = room.seats.iter().enumerate().filter(|(_, s)| s.as_ref().is_some_and(|s| s.peer == HOST)).map(|(i, _)| i).collect();
+        room.modifiers = online_mods::host_set(&Mods::original(), &settings.modifiers, &mine, &[]).text();
         room
     }
 
     fn begin(&mut self, status: &str) {
         self.room = None;
+        self.mods_taken.clear();
+        self.mods_sent = None;
         self.me.clear();
         self.handed = false;
         self.ready = false;
@@ -3728,6 +3782,49 @@ impl Lobby {
             self.pick.markers = text;
             self.repick = self.room.is_some();
         }
+    }
+
+    /// This machine's player's own modifiers (P134) as its pick's: its 1P's own knobs, and the
+    /// host's the world's and the biplane's too. A change goes out with [`Lobby::preset`]'s.
+    pub fn set_mods(&mut self, own: &Mods) {
+        let text = online_mods::own_set(own, 0, self.hosting()).text();
+        if self.pick.modifiers != text {
+            self.pick.modifiers = text;
+            self.repick = self.room.is_some();
+        }
+    }
+
+    /// The host's room modifiers with every seat's own (P134): a seat's pick's when they changed
+    /// since last taken, the host's seats and the world's off its own set `host`, and the knobs
+    /// `all` every seat's. `Some` when that differs from what the room has.
+    pub fn gather(&mut self, host: &Mods, all: &[Knob]) -> Option<String> {
+        let room = self.room.as_ref()?;
+        let was = self.mods_sent.clone().unwrap_or_else(|| room.modifiers.clone());
+        let mut set = Mods::parse(&was).unwrap_or_default();
+        self.mods_taken.resize(room.seats.len(), Default::default());
+        let mut mine = Vec::new();
+        for (i, seat) in room.seats.iter().enumerate() {
+            let Some(seat) = seat else {
+                self.mods_taken[i] = Default::default();
+                continue;
+            };
+            if seat.peer == HOST {
+                mine.push(i);
+                continue;
+            }
+            let now = (seat.peer.clone(), seat.pick.modifiers.clone());
+            if self.mods_taken[i] != now && online_mods::own_row(i, room.seats.len()) {
+                if let Ok(own) = Mods::parse(&now.1) {
+                    set = online_mods::with_own(&set, &[i], &own);
+                }
+                self.mods_taken[i] = now;
+            }
+        }
+        let text = online_mods::host_set(&set, host, &mine, all).text();
+        (text != was).then(|| {
+            self.mods_sent = Some(text.clone());
+            text
+        })
     }
 
     /// The machine this machine's player starts a ride on (N18), the ride setup's pick, as its pick's
@@ -3800,7 +3897,20 @@ impl Lobby {
             (false, true) => format!("#{}  ", look.number),
             (false, false) => format!("#{} {}  ", look.number, look.name),
         };
-        format!("{}  {name}  {rider}{}  {}  {state}{ping}", i + 1, seat.pick.rider, self.bike_label(&seat.pick.bike))
+        let mods = Self::seat_mods(room, i);
+        format!("{}  {name}  {rider}{}  {}  {state}{ping}{mods}", i + 1, seat.pick.rider, self.bike_label(&seat.pick.bike))
+    }
+
+    /// A seat's own modifiers as the room rides them (P134), for its line: the first off the
+    /// original and how many more, or nothing on the original's.
+    pub fn seat_mods(room: &Room, i: usize) -> String {
+        let Ok(set) = Mods::parse(&room.modifiers) else { return String::new() };
+        let off: Vec<Knob> = Knob::ALL.into_iter().filter(|&k| online_mods::seat_own(k) && set.get(i, k) != game_sim::modifiers::ORIGINAL).collect();
+        match off.as_slice() {
+            [] => String::new(),
+            [k] => format!("  {} {}%", k.label(), set.get(i, *k)),
+            [k, rest @ ..] => format!("  {} {}% +{}", k.label(), set.get(i, *k), rest.len()),
+        }
     }
 }
 

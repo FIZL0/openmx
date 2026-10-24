@@ -330,6 +330,9 @@ pub enum Cmd {
     Prepared(bool),
     Picks(Vec<Pick>),
     Ride { track: String, wrecks: bool, biplane: bool },
+    /// The host: the room's game modifiers (P134), every seat's in one set, as the ride will start
+    /// on them ([`crate::Room::modifiers`]).
+    Modifiers(String),
     Private(bool),
     /// The host opens this many seats (N12: 2 to [`crate::SEATS`]), in the lobby or in a ride that
     /// takes peers on (N14).
@@ -970,6 +973,11 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>, 
                     broadcast(&joined, &Msg::Room(room.clone()));
                     cx.say(Event::Room(room.clone()));
                     dirty = true;
+                }
+                Some(Cmd::Modifiers(m)) if !room.riding && shaking.is_none() => {
+                    room.modifiers = m;
+                    broadcast(&joined, &Msg::Room(room.clone()));
+                    cx.say(Event::Room(room.clone()));
                 }
                 Some(Cmd::Private(p)) => {
                     room.private = p;

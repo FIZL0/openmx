@@ -331,6 +331,51 @@ impl<S: Clone + 'static> Netplay<S> {
         leave::flushed(self)
     }
 
+    /// The set the ride will be on once the change asked for is taken: the one asked for, else the
+    /// one ridden.
+    pub fn mods_next(&self) -> &str {
+        self.admit.mods.as_deref().unwrap_or(&self.mods)
+    }
+
+    /// This machine's player's own modifiers are `own` (P134, [`rides::own_set`]'s text) on this
+    /// machine's seats, every machine at one tick: the host takes it as its change, a guest asks the
+    /// host, which does the same with it. The ride is on it once [`Netplay::remods`] says so.
+    pub fn remodify_own(&mut self, own: String) -> Result<(), String> {
+        if self.waiting() {
+            return Err("not in the ride yet".into());
+        }
+        if self.host() {
+            let to = self.own_on(&self.me.clone(), &own)?;
+            return self.remodify(to);
+        }
+        let host = self.lineup.host();
+        self.link.send(&host, Msg::Mine { to: own });
+        Ok(())
+    }
+
+    /// The set the ride will be on with `peer`'s seats on `own`'s own modifiers.
+    fn own_on(&self, peer: &str, own: &str) -> Result<String, String> {
+        use game_sim::modifiers::Mods;
+        let seats = self.lineup.mine(peer);
+        let n = self.lineup.seats.len();
+        if let Some(s) = seats.iter().find(|&&s| !rides::own_row(s, n)) {
+            return Err(format!("seat {} shares its modifiers with every seat after it", s + 1));
+        }
+        let (ride, own) = (Mods::parse(self.mods_next())?, Mods::parse(own)?);
+        Ok(rides::with_own(&ride, &seats, &own).text())
+    }
+
+    /// The host: guest `from` asked for its own modifiers (P134).
+    fn mine(&mut self, from: &str, own: &str) {
+        if !self.host() {
+            return;
+        }
+        match self.own_on(from, own).and_then(|to| self.remodify(to)) {
+            Ok(()) => self.say(format!("online: {from}'s own modifiers '{own}' go on at the next tick every machine agrees")),
+            Err(e) => self.say(format!("online: {from}'s own modifiers cannot change: {e}")),
+        }
+    }
+
     /// The host: a join asked for and not taken on yet is off (the peer left first).
     pub fn unadmit(&mut self, peer: &str) {
         self.admit.forget(peer);
@@ -386,6 +431,7 @@ impl<S: Clone + 'static> Netplay<S> {
             Msg::Away { .. } | Msg::Restart { .. } | Msg::Mods { .. } => recover::heard(self, from, m),
             Msg::End(why) => self.finish(why),
             Msg::Leave { seats } => leave::heard(self, from, seats),
+            Msg::Mine { to } => self.mine(from, &to),
         }
     }
 
