@@ -6751,3 +6751,437 @@ fn the_save_state_run_starts_from_the_originals_wheels() {
         ratchet("its bike's position", bike_at, SAVE_STATE_POSITION_AGREES_THROUGH, "SAVE_STATE_POSITION_AGREES_THROUGH");
     });
 }
+
+// --- S67: animandpump's landings, each from a save state taken just before it ------------------------
+
+/// S67's capture (`research/journal/2026-10-24-s67-landing-snap-2/capture/landings.toml`): the user's
+/// animandpump recording played back on the original, the whole bike every tick (S64's lanes on this
+/// state's chains) over frames 1939..3539, and a save state a few ticks before each landing, kept as
+/// `landings-<frame>.p2s` with its RAM image beside it (`./kit state ram … --out landings-<frame>.ee.bin`).
+const S67_LANDINGS: &str = "s67/landings";
+
+/// The save states the capture took, by the frame they were asked for, and the touchdown each one is
+/// before (S109's frame ranges): rear first off a 15-tick hop down a slope, the 211-tick big drop,
+/// an 11-tick hop landed rolled 48°, the 58-tick nose-first drop, and a 7-tick hop.
+const S67_STATES: [(u64, u64); 5] = [(2143, 2149), (2745, 2751), (3386, 3393), (3452, 3459), (3492, 3499)];
+
+/// A second playback of the same recording over frames 1939..2798, with the save states taken on the
+/// big drop's last airborne tick and on its touchdown tick: the first ground tick is then run from
+/// the original's own touchdown, not from six ticks of the port's flight to it.
+const S67_RUN2: &str = "s67/run2";
+
+/// [`S67_RUN2`]'s save states, as [`S67_STATES`].
+const S67_RUN2_STATES: [(u64, u64); 2] = [(2750, 2751), (2751, 2751)];
+
+/// Ticks past the touchdown each run is compared for.
+const S67_AFTER: u64 = 12;
+
+/// How far from the original a landing may ride from its touchdown on: degrees off any of the three
+/// angles, distance between the centres of mass and between the velocities, compression, and the
+/// farthest apart of the drawn node's rows and of the chase camera's two axes — the shell's two
+/// readings of the ride, held to the original's own node (`ch_xform`) rather than to the port's. Not zero:
+/// two playbacks of the one recording already part in the last bits, the capture's rows are read at
+/// three phases of a frame, and the state is a few ticks of the port's own flight from the ground.
+/// Before S67's two fixes the big drop bounced back up by a foot and more; after them the worst
+/// landing here is 0.33°, 0.023 and 0.18.
+const S67_BOUND: [f32; 6] = [0.5, 0.05, 0.3, 0.01, 0.05, 0.01];
+
+/// The nose-first drop's bound (frame 3452's state): it lands front first at 48 a second straight
+/// down, and the one tick of that impact parts by 0.3 in the velocity, which takes the port into first
+/// gear two ticks before the original. Not found; see S67's journal.
+const S67_NOSE_FIRST_BOUND: [f32; 6] = [3.5, 0.5, 3.0, 0.05, 0.5, 0.07];
+
+impl SaveState {
+    /// A RAM image at `at`, its rider found down whichever of the two list shapes the states in this
+    /// project have (`first_recording`'s two `next` hops, animandpump's one: S109).
+    fn open_image(at: &std::path::Path) -> Option<SaveState> {
+        let ram = std::fs::read(at).ok()?;
+        let mut state = SaveState { ram, rider: 0 };
+        for hops in [&[0x34, 0x34, 0x8, 0x0][..], &[0x34, 0x34, 0x8, 0x8, 0x0][..]] {
+            let mut a = state.word(Self::GAME_MANAGER)?;
+            for &hop in hops {
+                a = state.word(a + hop)?;
+            }
+            if state.word(a) == Some(2) && state.word(a + 0x20).and_then(|c| state.word(c + 0x34)) == Some(1) {
+                state.rider = a;
+                return Some(state);
+            }
+        }
+        None
+    }
+
+    /// Everything [`the_save_state_run_starts_from_the_originals_wheels`] seeds, and the drivetrain.
+    fn seed_ride(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        self.seed_chassis(ride)?;
+        self.seed_wheels(ride)?;
+        self.seed_balance(ride)?;
+        self.seed_engine_outputs(ride)?;
+        self.seed_air(ride)?;
+        self.drivetrain()?.seed(ride);
+        self.seed_held(ride)
+    }
+
+    /// What the input layer had rate-limited by this frame (`ride::Held`): the stick (`+0x628`/`+0x62c`),
+    /// its fore-aft flick speed (`+0x630`), the two brakes (`+0x650`/`+0x654`) and the lean (`+0x670`/
+    /// `+0x674`). The flick's sample ring and which axes the d-pad held are not read; animandpump rides
+    /// the stick.
+    fn seed_held(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        let r = self.rider;
+        let h = &mut ride.held;
+        h.stick = (self.float(r + 0x628)?, self.float(r + 0x62c)?);
+        h.flick = self.float(r + 0x630)?;
+        h.front_brake = self.float(r + 0x650)?;
+        h.rear_brake = self.float(r + 0x654)?;
+        h.lean = (self.float(r + 0x670)?, self.float(r + 0x674)?);
+        Some(())
+    }
+}
+
+/// Pitch, roll and yaw in degrees off a chassis quaternion, as `research/s55_landing.py` reads them off
+/// a transform: row 2 forward, row 1 up, row 0 right.
+fn attitude(q: Vf) -> (f32, f32, f32) {
+    let m = math::quat_to_mat4(q, Vf::new(0.0, 0.0, 0.0, 1.0)).0;
+    let (right, up, fwd) = (m[0], m[1], m[2]);
+    let yaw = fwd.x().atan2(fwd.z()).to_degrees();
+    let pitch = fwd.y().clamp(-1.0, 1.0).asin().to_degrees();
+    let roll = right.y().atan2(up.y()).to_degrees();
+    (pitch, roll, yaw)
+}
+
+/// One tick of a landing, the port's or the original's.
+#[derive(Clone, Copy, Debug)]
+struct Touch {
+    quat: Vf,
+    cofg: Vf,
+    vel: Vf,
+    spin: Vf,
+    comp: (f32, f32),
+    airborne: bool,
+    /// Each wheel's spring force, its tire force in the wheel's frame, and whether its ray hit.
+    wheels: [(f32, Vf, f32); 2],
+    /// The gear, the revs, the engine's torque and the wheel's, and the rate-limited throttle.
+    engine: [f32; 5],
+    /// The chassis' node, rows and origin: what the shell draws the bike with (`Ride::transform`).
+    drawn: [Vf; 4],
+    /// The forward and up the chase camera's target block is given (`Ride::axes`): the original's
+    /// writer reads them off the node's rows 2 and 1.
+    aim: (Vf, Vf),
+}
+
+impl Touch {
+    fn of(ride: &game_sim::ride::Ride) -> Touch {
+        Touch {
+            quat: ride.chassis.quat,
+            cofg: ride.chassis.cofg_world,
+            vel: ride.chassis.vel,
+            spin: ride.chassis.world_ang_vel,
+            comp: (ride.front.w.compression.0, ride.rear.w.compression.0),
+            airborne: ride.air.airborne,
+            wheels: [&ride.front, &ride.rear]
+                .map(|wh| (wh.w.spring_force.0, wh.local_force, wh.w.ray_hit as f32)),
+            engine: [
+                ride.engine.gear as f32,
+                ride.engine.rpm.0,
+                ride.engine.torque.0,
+                ride.engine.wheel_torque.0,
+                ride.held.gas.0,
+            ],
+            drawn: ride.transform().0,
+            aim: ride.axes(),
+        }
+    }
+
+    fn row(cap: &Capture, row: usize) -> Result<Touch, String> {
+        let f = |name: &str| -> Result<f32, String> {
+            cell(cap, row, column(cap, name)?).parse::<f32>().map_err(|_| format!("row {row}: {name} is not a number"))
+        };
+        let v = |name: &str| -> Result<Vf, String> {
+            Ok(Vf::new(f(&format!("{name}.x"))?, f(&format!("{name}.y"))?, f(&format!("{name}.z"))?, f(&format!("{name}.w"))?))
+        };
+        let row = |i: usize| -> Result<Vf, String> {
+            let m = |j: usize| f(&format!("ch_xform.m{i}{j}"));
+            Ok(Vf::new(m(0)?, m(1)?, m(2)?, m(3)?))
+        };
+        let drawn = [row(0)?, row(1)?, row(2)?, row(3)?];
+        Ok(Touch {
+            quat: v("ch_quat")?,
+            cofg: v("ch_cofg")?,
+            vel: v("ch_vel")?,
+            spin: v("ch_ang_vel")?,
+            comp: (f("f_comp")?, f("r_comp")?),
+            airborne: f("airborne")? != 0.0,
+            wheels: [
+                (f("f_spring_force")?, v("f_local_force")?, f("f_ray_hit")?),
+                (f("r_spring_force")?, v("r_local_force")?, f("r_ray_hit")?),
+            ],
+            engine: [f("eng_gear")?, f("eng_rpm")?, f("eng_torque")?, f("eng_wheel_torque")?, f("gas_limited")?],
+            drawn,
+            aim: (drawn[2], drawn[1]),
+        })
+    }
+
+    /// The lanes that are not the same bits, by name.
+    fn parted(&self, o: &Touch) -> Vec<&'static str> {
+        let same = |a: Vf, b: Vf| (0..3).all(|i| a.0[i].to_bits() == b.0[i].to_bits());
+        let mut out = Vec::new();
+        if (0..4).any(|i| self.quat.0[i].to_bits() != o.quat.0[i].to_bits()) {
+            out.push("quat");
+        }
+        for (name, a, b) in [("cofg", self.cofg, o.cofg), ("vel", self.vel, o.vel), ("spin", self.spin, o.spin)] {
+            if !same(a, b) {
+                out.push(name);
+            }
+        }
+        if self.comp.0.to_bits() != o.comp.0.to_bits() || self.comp.1.to_bits() != o.comp.1.to_bits() {
+            out.push("comp");
+        }
+        if self.airborne != o.airborne {
+            out.push("airborne");
+        }
+        out
+    }
+
+    /// How far apart two ticks are: the largest of the three angles in degrees, the distance between
+    /// the centres of mass, between the velocities, the larger compression difference, the farthest
+    /// apart of the drawn node's four rows, and of the camera's two axes.
+    fn gap(&self, o: &Touch) -> [f32; 6] {
+        let (a, b) = (attitude(self.quat), attitude(o.quat));
+        let turn = |d: f32| (d + 540.0).rem_euclid(360.0) - 180.0;
+        let angle = [a.0 - b.0, a.1 - b.1, a.2 - b.2].map(|d| turn(d).abs()).into_iter().fold(0.0, f32::max);
+        let apart = |u: Vf, v: Vf| (0..3).map(|i| (u.0[i] - v.0[i]).powi(2)).sum::<f32>().sqrt();
+        let comp = (self.comp.0 - o.comp.0).abs().max((self.comp.1 - o.comp.1).abs());
+        let drawn = (0..4).map(|i| apart(self.drawn[i], o.drawn[i])).fold(0.0, f32::max);
+        let aim = apart(self.aim.0, o.aim.0).max(apart(self.aim.1, o.aim.1));
+        [angle, apart(self.cofg, o.cofg), apart(self.vel, o.vel), comp, drawn, aim]
+    }
+
+    fn line(&self) -> String {
+        let (p, r, y) = attitude(self.quat);
+        format!(
+            "{p:+6.1} {r:+6.1} {y:+7.1} | {:+6.2} {:+6.2} {:+6.2} | {:.3} {:.3} | {:+6.1} {}",
+            self.spin.x(), self.spin.y(), self.spin.z(), self.comp.0, self.comp.1, self.vel.y(),
+            if self.airborne { "air" } else { "gnd" },
+        )
+    }
+
+    /// The wheels: spring force, tire force x/y/z, ray hit, front then rear.
+    fn wheel_line(&self) -> String {
+        let one = |(spring, force, hit): (f32, Vf, f32)| {
+            format!("{spring:8.1} {:+8.1} {:+8.1} {:+8.1} {hit}", force.x(), force.y(), force.z())
+        };
+        let [gear, rpm, torque, wheel, gas] = self.engine;
+        let (c, v) = (self.cofg, self.vel);
+        format!("{} | {} | gear {gear} rpm {rpm:.0} torque {torque:.1} wheel {wheel:.1} gas {gas:.3} \
+                 | at {:.3} {:.3} {:.3} vel {:.2} {:.2} {:.2}",
+                one(self.wheels[0]), one(self.wheels[1]), c.x(), c.y(), c.z(), v.x(), v.y(), v.z())
+    }
+}
+
+/// The rows of `cap` around frame `at` whose counters step one a row, as a capture of their own.
+fn dense_run(cap: &Capture, at: u64) -> Capture {
+    let mut start = cap.frames.iter().position(|&f| f >= at).unwrap_or(0);
+    while start > 0 && cap.frames[start - 1] + 1 == cap.frames[start] {
+        start -= 1;
+    }
+    let mut end = start + 1;
+    while end < cap.frames.len() && cap.frames[end - 1] + 1 == cap.frames[end] {
+        end += 1;
+    }
+    Capture { columns: cap.columns.clone(), frames: cap.frames[start..end].to_vec(), rows: cap.rows[start..end].to_vec() }
+}
+
+/// The capture's rows by the game's frame counter.
+fn rows_by_counter(cap: &Capture) -> std::collections::BTreeMap<u64, usize> {
+    let counter = column(cap, "frame_counter").unwrap();
+    let mut out = std::collections::BTreeMap::new();
+    for row in 0..cap.rows.len() {
+        if let Ok(c) = cell(cap, row, counter).parse::<u64>() {
+            out.insert(c, row);
+        }
+    }
+    out
+}
+
+/// The class animandpump is ridden on. Not the freeride's `race125p.phy`: the state's engine holds
+/// `race500p.phy`'s power curve to the bit, and that curve is the only thing the two files differ in.
+/// The other 500 classes (`race500a`, `pro500p`, `pro500a`) differ from this one in their tires and
+/// air control, which is why the test does not stop at the curve to tell them apart from it.
+const S67_PHY: &str = "race500p.phy";
+
+/// A bike class by its `.phy` name, out of the first bike archive that has it.
+fn the_class_named(disc: &mut Disc, tables: &RiderTables, name: &str) -> Option<BikePhy> {
+    for archive in disc.bike_archives() {
+        let Some(bytes) = disc.member(&archive) else { continue };
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        if let Some(phy) = by_suffix(&res, name).and_then(|e| res.read(&bytes, e).ok()) {
+            return Some(BikePhy::read_bytes(&phy, &tables.ride.curve));
+        }
+    }
+    None
+}
+
+impl SaveState {
+    /// The engine's power curve as the state holds it: each point's revs and torque, as bits
+    /// (`+0x6c` the point count, `+0x70`/`+0x74` the two tables).
+    fn power_curve(&self) -> Option<Vec<(u32, u32)>> {
+        let e = self.rider_at(0x7b8)?;
+        let (n, rpm, torque) = (self.word(e + 0x6c)?, self.word(e + 0x70)?, self.word(e + 0x74)?);
+        (0..n).map(|k| Some((self.word(rpm + 4 * k)?, self.word(torque + 4 * k)?))).collect()
+    }
+}
+
+/// **Each of animandpump's landings, ridden by the port from the original's own save state with the
+/// original's own pad**, and compared tick by tick through the touchdown with the chassis the original
+/// moved: its orientation, the body's spin, both suspensions' compression and the airborne flag. Prints
+/// both sides of every tick and each lane's first parting, and holds the worst gap from the touchdown
+/// on to [`S67_BOUND`]; see S67's journal for what the numbers say. Skipped with a line where the
+/// capture or a state is not in this worktree.
+#[test]
+fn each_captured_landing_rides_like_the_original() {
+    let dir = private_dir("capture");
+    let mut compared = 0;
+    for (name, states) in [(S67_LANDINGS, &S67_STATES[..]), (S67_RUN2, &S67_RUN2_STATES[..])] {
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
+        println!("no {name}.csv — S67's journal says how it is recorded");
+        continue;
+    };
+    let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+    in_the_world_of(&whole, |world, _, bike| {
+        let Some(Ridden { tables, mounts, .. }) = bike else {
+            println!("no Race 125 on this disc");
+            return;
+        };
+        let Some(phy) = Disc::open().and_then(|mut disc| the_class_named(&mut disc, &tables, S67_PHY)) else {
+            println!("no {S67_PHY} on this disc");
+            return;
+        };
+        for &(asked, touchdown) in states {
+            let at = dir.join(format!("{name}-{asked}.ee.bin"));
+            let Some(st) = SaveState::open_image(&at) else {
+                println!("no {} with the human's rider in it", at.display());
+                continue;
+            };
+            let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+            // The capture has a torn row (a counter skipped); the tape is built from the run of rows
+            // around this state that steps one tick a row.
+            let cap = dense_run(&whole, saved);
+            let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+            let rows = rows_by_counter(&cap);
+            // The pad of the tick that produced row `k` is `tape.frames[k - 2]`, not `PadTape::from_capture`'s
+            // `k - 1`: this recorder polls the pad buffer the game stamped two frames back, as recording2's
+            // does (S67: at `k - 1` the 2751 touchdown parts by 0.3° a tick, at `k - 2` by 1e-6).
+            let pad_of = |counter: u64| rows.get(&counter).filter(|&&r| r >= 2).map(|&r| tape.frames[r - 2]);
+            let held = st.wheels().unwrap();
+            let bits = |v: Vf| [v.0[0].to_bits(), v.0[1].to_bits(), v.0[2].to_bits(), v.0[3].to_bits()];
+            assert_eq!([bits(mounts.0), bits(mounts.1)], held, "the state's wheels hang where the 125_faisst's do");
+            let curve = st.power_curve().unwrap();
+            let ours = phy.engine.curve_rpm.iter().zip(&phy.engine.curve_torque).map(|(r, t)| (r.to_bits(), t.to_bits()));
+            assert_eq!(curve, ours.take(curve.len()).collect::<Vec<_>>(), "the state's bike makes {S67_PHY}'s power");
+            let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+            rider.sense.wrecks_enabled = false;
+            let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+            st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+            println!("landing at {touchdown}, from the state at frame {saved}:");
+            println!("   tick  side   pitch   roll     yaw | spin x/y/z (world)   | f_comp r_comp |   vy   air");
+            let mut first: Option<(u64, Vec<&str>)> = None;
+            let (mut ports, mut origs) = (Vec::new(), Vec::new());
+            for counter in saved + 1..=touchdown + S67_AFTER {
+                let Some(pad) = pad_of(counter) else {
+                    println!("  {counter}: no row in the capture");
+                    break;
+                };
+                sim.frame(pad.dt(), &pad.reports, world);
+                let port = Touch::of(&sim.rider.ride);
+                let Some(orig) = rows.get(&counter).map(|&r| Touch::row(&cap, r).unwrap()) else { break };
+                let parted = port.parted(&orig);
+                ports.push(port);
+                origs.push((counter, orig));
+                let mark = if counter == touchdown { " <- touchdown" } else { "" };
+                println!("  {counter} orig {}{mark}", orig.line());
+                println!("  {counter} port {}  {}", port.line(), parted.join(" "));
+                if counter + 3 >= touchdown && counter <= touchdown + 6 {
+                    println!("  {counter} orig   wheels {}", orig.wheel_line());
+                    println!("  {counter} port   wheels {}", port.wheel_line());
+                }
+                if first.is_none() && !parted.is_empty() {
+                    first = Some((counter, parted));
+                }
+            }
+            match first {
+                Some((c, lanes)) => println!("  first parts at {c} ({} after the state): {}", c - saved, lanes.join(" ")),
+                None => println!("  agrees on every tick through {}", touchdown + S67_AFTER),
+            }
+            let worst = worst_from(&ports, &origs, touchdown);
+            println!("  {name} {saved}: worst from the touchdown on: {:.2} deg, cofg {:.3}, vel {:.3}, comp {:.3}, \
+                      drawn {:.4}, aim {:.4}", worst[0], worst[1], worst[2], worst[3], worst[4], worst[5]);
+            let bound = if name == S67_LANDINGS && asked == 3452 { S67_NOSE_FIRST_BOUND } else { S67_BOUND };
+            assert!(
+                (0..6).all(|i| worst[i] <= bound[i]),
+                "{name} {saved}: the landing rides {worst:?} from the original's (deg, cofg, vel, comp, drawn, aim), \
+                 past {bound:?}",
+            );
+            assert!(origs.last().is_some_and(|&(c, _)| c == touchdown + S67_AFTER), "{name} {saved}: rows to the end");
+            compared += 1;
+        }
+    });
+    }
+    println!("{compared} landings compared");
+}
+
+/// The largest gaps between the port's ticks and the original's rows from `touchdown` on, each row
+/// set against whichever of the port's ticks before, at and after its counter is nearest it in the
+/// centre of mass: the capture reads its rows at three phases of the frame (a stale row repeats the
+/// tick before, and the row after one can hold the tick it missed), so a row's own counter is not
+/// always the tick it shows.
+fn worst_from(ports: &[Touch], origs: &[(u64, Touch)], touchdown: u64) -> [f32; 6] {
+    let mut worst = [0.0f32; 6];
+    for (k, (counter, orig)) in origs.iter().enumerate() {
+        if *counter < touchdown {
+            continue;
+        }
+        let near = (k.saturating_sub(1)..(k + 2).min(ports.len()))
+            .map(|j| orig.gap(&ports[j]))
+            .min_by(|a, b| a[1].total_cmp(&b[1]))
+            .unwrap();
+        for i in 0..6 {
+            worst[i] = worst[i].max(near[i]);
+        }
+    }
+    worst
+}
+
+/// **The original ends every vehicle update with the chassis turned to its node's matrix** (S67):
+/// the stunt state pack snapshots the node's world rows as a quaternion and the stunt clocks copy it
+/// back into the chassis, so the quaternion the next frame integrates from is the matrix's, whatever
+/// the no-hander's roll or the bottom-out's shove did to the node after the integrator. Runs the
+/// whole update on each S67 state and holds the chassis quaternion it leaves to the port's
+/// `mat4_to_quat` of the node's rows, to the bit — the step `ride.rs` ends its frame with.
+#[test]
+fn the_vehicle_update_leaves_the_chassis_its_nodes_quaternion() {
+    use ps2_oracle::{Ee, addr};
+    let dir = private_dir("capture");
+    let mut ran = 0;
+    let states = S67_STATES.iter().map(|&(asked, _)| (S67_LANDINGS, asked))
+        .chain(S67_RUN2_STATES.iter().map(|&(asked, _)| (S67_RUN2, asked)));
+    for (name, asked) in states {
+        let at = dir.join(format!("{name}-{asked}.ee.bin"));
+        let (Some(st), Ok(mut ee)) = (SaveState::open_image(&at), Ee::from_ram(&at)) else {
+            println!("no {}", at.display());
+            continue;
+        };
+        ee.set(28, u64::from(addr("boot_gp").unwrap()));
+        let ch = st.rider_at(0x7a4).unwrap();
+        ee.call(addr("bike_vehicle_update").unwrap(), &[u64::from(st.rider)], &[1.0 / 60.0], 500_000_000);
+        let tf = ee.u32_at(ch + 0x254);
+        let row = |o: u32| Vf::new(ee.f32_at(o), ee.f32_at(o + 4), ee.f32_at(o + 8), ee.f32_at(o + 12));
+        let node = math::Mat4([row(tf + 0x80), row(tf + 0x90), row(tf + 0xa0), row(tf + 0xb0)]);
+        let quat = row(ch + 0x1a0);
+        assert_eq!(
+            math::mat4_to_quat(&node).0.map(f32::to_bits),
+            quat.0.map(f32::to_bits),
+            "{name}-{asked}: the chassis quaternion after the update is its node's",
+        );
+        ran += 1;
+    }
+    println!("{ran} states updated");
+}
