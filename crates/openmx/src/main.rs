@@ -2076,7 +2076,7 @@ fn loading_frame(
     Ok(if back { Wait::Cancel } else { Wait::On })
 }
 
-fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
+fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // ---- the game modifiers (P55) ----------------------------------------------------------------
     // Applied to what the ride loads, never as a branch in the simulation: at their defaults nothing
     // is touched at all.
@@ -3198,7 +3198,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, online_bays, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
@@ -3507,6 +3507,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             riding: None,
         });
     }
+    // What a player who joins the running ride later is made of (P76): the cameras as they stand
+    // before anyone rides, and the first player's rider model, which they wear.
+    let join_cameras = (camera.cam.clone(), plane_camera.as_ref().map(|c| c.cam.clone()));
+    let join_body_model = body_model.clone();
     rigs.insert(
         0,
         Rig {
@@ -3816,15 +3820,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The views (V22): where each player's goes in the frame, and a frame of its own size for each to
     // be drawn into. A full screen has none — its one view is drawn straight into the frame, as it
     // always has been.
-    let views_of = |width: usize, height: usize| {
+    // Of the layout and the player count as they are now: a player joining or leaving (P76) lays
+    // the views out again.
+    let views_of = |width: usize, height: usize, layout: Layout, players: usize| {
         let rects = layout.rects(width, height);
         let frames: Vec<Frame> = match layout {
             Layout::Full => Vec::new(),
-            _ => rects.iter().take(args.players).map(|r| Frame::new(r.w, r.h, look.fog_color)).collect(),
+            _ => rects.iter().take(players).map(|r| Frame::new(r.w, r.h, look.fog_color)).collect(),
         };
         (rects, frames)
     };
-    let (mut rects, mut view_frames) = views_of(width, height);
+    let (mut rects, mut view_frames) = views_of(width, height, layout, args.players);
     if layout != Layout::Full {
         println!(
             "views: {} players, {}, {}x{} each",
@@ -3896,6 +3902,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let starts: Vec<Vf> = seats.iter().map(|s| s.sim.rider.ride.position()).collect();
     let bays: Vec<vehicle::Spawn> = (0..seats.len()).map_while(|p| lot.bay(Machine::Biplane, p).map(|b| b.spawn)).collect();
     let home = Arc::new(vehicle::home(&starts, heading, &bays));
+    // Each player's start, which a player joining the ride (P76) adds theirs to and a leaver takes theirs out of.
+    let mut join_starts = starts.clone();
     seats.iter_mut().for_each(|s| s.sim.home = Arc::clone(&home));
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
     // The start zones' portals (V51), laid over the ground once: they never move.
@@ -3929,6 +3937,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
     }
     let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::at(RIDE_HZ)).collect();
+    // Every pad seat's presses (P76), read each frame so that a controller with no player in the
+    // ride joins it on Cross, and one that just left does not join again on the press that left.
+    let mut idle_readers: Vec<Reader> = (0..pad::SEATS).map(|_| Reader::at(RIDE_HZ)).collect();
+    // Software models copied for joiners, each under a name of its own.
+    let mut joined_models = 0usize;
     // H toggles it, on its own edge: the window keeps key state and not key events, so the shell
     // remembers last frame's to tell a press from a hold.
     let mut hud_key = false;
@@ -4100,19 +4113,25 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     {
         tape.tape.markers = world.seats[0].sim.markers.to_files(&saved_markers::names(&bike_words[0]));
     }
+    // Whether the ride opens to online players once it is down to one local player again (P76).
+    let mut opens_alone = false;
     // The pause offers "Open to Online" (N10) on a local freeride of one player on the bike set the
     // disc's own lookup gives (what a joiner's machine loads for it), outside any lobby.
     if let Some(front) = front.as_deref_mut() {
         let set = args.set.unwrap_or(roster::Set::FREERIDE).word();
-        let can = online.is_none()
+        let alone = online.is_none()
             && head.is_none()
             && world.tape.is_none()
-            && world.seats.len() == 1
             && args.phy.is_none()
             && modded.is_none()
             && front.menu.lobby.room.is_none()
             && front.network.disc.phy(&set).is_some_and(|b| *b == phy_bytes);
+        opens_alone = alone;
+        let can = alone && world.seats.len() == 1;
         front.menu.opening = if can { menu::Opening::Can } else { menu::Opening::No };
+        // Local players join and leave a local freeride as it runs (P76); online the ride's one
+        // local seat is the session's, and a tape is its first player's ride.
+        front.menu.seats_open = online.is_none() && head.is_none() && world.tape.is_none();
         front.menu.mods_lock = mods_lock(head.is_some(), online.as_ref().map(online::Online::host));
         front.menu.leave_to = online.as_ref().map_or(menu::LeaveTo::Main, online::Online::leaves_to);
     }
@@ -4187,7 +4206,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let (width, height) = frame_size(&window, aspect);
             if (width, height) != (frame.width, frame.height) {
                 frame = Frame::new(width, height, look.fog_color);
-                (rects, view_frames) = views_of(width, height);
+                (rects, view_frames) = views_of(width, height, layout, args.players);
                 if let Some(window) = &window {
                     println!("window {}x{}, drawing {width}x{height}", window.width, window.height);
                 }
@@ -4244,6 +4263,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             println!("markers: cleared (the tape's, before frame {})", head.as_ref().map_or(0, Head::at));
         }
+        let mut idle_presses: Vec<(usize, menu::Press)> = Vec::new();
         match &mut head {
             // The seats', otherwise: seat i feeds player i's own pad port (V22's players). A seat
             // whose pad was pulled out pauses its own player rather than riding on with nobody's
@@ -4284,6 +4304,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         // from them.
                         seat.sim.set_presets([seats.preset(from), 0]);
                         seat.waiting = now.get(from) == Some(&SeatInput::Waiting);
+                    }
+                    // A controller on a pad seat no player reads, for the join (P76).
+                    let ride: Vec<usize> = (0..world.seats.len()).map(|i| args.pad_seat(i)).collect();
+                    for (d, (reader, input)) in idle_readers.iter_mut().zip(&now).enumerate() {
+                        let playing = matches!(input, SeatInput::Playing(_));
+                        let report = if playing { input.report() } else { Report::idle() };
+                        let press = reader.read_taps(&report, seats.taps(d));
+                        if playing && !ride.contains(&d) {
+                            idle_presses.push((d, press));
+                        }
                     }
                 }
                 None => {
@@ -4411,7 +4441,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             escape = esc;
             front.menu.music_now = front.sound.now();
             let paused = !front.menu.riding();
-            let act = front.menu.step_seats(&presses);
+            let mut act = front.menu.step_seats(&presses);
+            for &(d, p) in &idle_presses {
+                if act == Act::Stay {
+                    act = front.menu.step_idle(d, p);
+                }
+            }
             if front.menu.changed() {
                 overlay_mode = front.menu.settings.overlay;
                 speedometer = front.menu.settings.speedometer;
@@ -4531,7 +4566,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // file, and a tape being written clears there too; online only the file — the
                 // ride's slots are the session's, and stay until it ends.
                 Act::ClearMarkers(i) if head.is_none() => {
-                    let profile = profile_of(i);
+                    // The seat's own profile as it was kept: a player may have moved up a seat (P76).
+                    let profile = kept_markers.get(i).and_then(Option::as_ref).map_or_else(|| profile_of(i), |k| k.profile.clone());
                     let bike = bike_words.get(i).unwrap_or(&bike_words[0]);
                     match saved_markers::save(&markers_dir, &args.track, &profile, bike, &Default::default()) {
                         Err(e) => front.menu.note = Some(format!("Could not clear the markers: {e}")),
@@ -4562,7 +4598,189 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 | Act::Switch(..)
                 | Act::Online
                 | Act::OpenOnline
-                | Act::ClearMarkers(_) => {}
+                | Act::ClearMarkers(_)
+                | Act::Join(_)
+                | Act::Leave(_) => {}
+            }
+            // A player joining or leaving the running ride (P76): every per-player list changed the
+            // one way, so each staying player keeps their machine, camera, markers and pad where
+            // they were, and the views laid out again for the new count.
+            let change = match act {
+                Act::Join(d) if front.menu.seats_open && world.seats.len() < join::IN_RIDE => Some(join::Change::Join(d)),
+                Act::Leave(i) if front.menu.seats_open && i < world.seats.len() && world.seats.len() > 1 => Some(join::Change::Leave(i)),
+                _ => None,
+            };
+            if let Some(change) = change {
+                let devices: Vec<usize> = (0..world.seats.len()).map(|i| args.pad_seat(i)).collect();
+                let n = match change {
+                    join::Change::Join(_) => world.seats.len() + 1,
+                    join::Change::Leave(_) => world.seats.len() - 1,
+                };
+                // The lot parks a machine for each player now (P87), every staying copy where it was.
+                {
+                    let place = &mut world.place;
+                    lot.resize(n, &mut |at: Vf| sim_world::World::ground(place, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y());
+                }
+                let joined = match change {
+                    join::Change::Join(_) => {
+                        let i = world.seats.len();
+                        // At the track's spawn on the first player's bike, see-through until clear
+                        // of whoever stands there (P57), on the markers kept under their seat's name.
+                        let mut sim = spawn.clone();
+                        sim.rider.sense.wrecks_enabled = args.wrecks && front.menu.settings.wrecks;
+                        sim.rider.ghost.start();
+                        let (profile, bike) = (saved_markers::profile("", i), &bike_words[0]);
+                        sim.markers = saved_markers::load(&markers_dir, &args.track, &profile, bike);
+                        sim.markers.up(vehicle::markers_of(Kind::Bike));
+                        let kept = saved_markers::Kept::new(&args.track, &profile, bike, &sim.markers);
+                        let garage = Garage::new(Kind::Bike, lot.plane(i, flight_for(i)))?;
+                        let body = match &rider_member {
+                            Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
+                            None => None,
+                        };
+                        let body = body.map(|mut b| {
+                            if let Some(p) = &pack_clips {
+                                b.add_pack(p, &stunts.stunts);
+                            }
+                            b
+                        });
+                        let chassis = match vehicle.mcf.is_empty() {
+                            true => None,
+                            false => Chassis::load(vec![disc.res(&bike_member)?], &vehicle.mcf, BIKE_PREFIX, &table.stunts, vehicle_params()).ok(),
+                        };
+                        let chassis = chassis.map(|mut c| {
+                            if let Some(p) = &pack_clips {
+                                c.add_pack(p, &stunts.stunts);
+                            }
+                            c
+                        });
+                        // On the GPU every bike and body is the one model posed by matrices; in software
+                        // a pose is the model's triangles, so the joiner's are copies of their own.
+                        joined_models += 1;
+                        let mut copy = |name: &str| -> String {
+                            let own = format!("{name}@join{joined_models}");
+                            match assets.models.get(name).cloned().filter(|_| !gpu_on) {
+                                Some(loaded) => {
+                                    assets.models.insert(own.clone(), loaded);
+                                    own
+                                }
+                                None => name.to_string(),
+                            }
+                        };
+                        let bike_model = copy(CHASSIS);
+                        let body_model = join_body_model.as_deref().map(&mut copy);
+                        let mut rig = Rig {
+                            body,
+                            chassis,
+                            camera: Race { cam: join_cameras.0.clone() },
+                            plane_camera: join_cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
+                            wreck_camera: chase::WreckCamera::new(false),
+                            framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
+                            fov_ease: Default::default(),
+                            hud: Hud::new(args.hud),
+                            odometer: overlay::Odometer::default(),
+                            preload_meter: overlay::PreloadMeter::default(),
+                            ride_hud: ride_hud::Tracker::default(),
+                            bike_model,
+                            body_model,
+                            parts: vehicle.parts.clone(),
+                            modified: !mods.seat_is_original(0),
+                            riding: None,
+                        };
+                        rig.hud.on = rigs[0].hud.on;
+                        let seat = Seat {
+                            reports: [Report::missing(); PADS],
+                            sim,
+                            garage,
+                            riding: false,
+                            start_freezes: false,
+                            waiting: false,
+                            said: rider::Frame::default(),
+                            inverted: false,
+                            hands: Controls::default(),
+                            teleported: false,
+                            markers: args.markers_of(i, Some(&*front)),
+                        };
+                        Some((seat, rig, kept))
+                    }
+                    join::Change::Leave(_) => None,
+                };
+                let (mut seat, mut rig, mut kept) = match joined {
+                    Some((seat, rig, kept)) => (Some(seat), Some(rig), Some(kept)),
+                    None => (None, None, None),
+                };
+                let start = spawn.rider.ride.position();
+                let (bike_word, stock_phy) = (bike_words[0].clone(), stock_phys[0].clone());
+                change.apply(&mut world.seats, || seat.take().expect("a joiner's seat"));
+                change.apply(&mut rigs, || rig.take().expect("a joiner's rig"));
+                change.apply(&mut kept_markers, || kept.take());
+                change.apply(&mut idle_pads, || Pads::unplugged(args.wiring.clone()));
+                change.apply(&mut marked_portals, Default::default);
+                change.apply(&mut seated, || true);
+                change.apply(&mut view_triangles, || 0);
+                change.apply(&mut cuts, pace::Cut::default);
+                change.apply(&mut banners, hud::MarkerBanner::default);
+                change.apply(&mut answers, vehicle::Answer::default);
+                change.apply(&mut join_starts, || start);
+                change.apply(&mut bike_words, || bike_word);
+                change.apply(&mut stock_phys, || stock_phy);
+                // The last tick's cameras, which the next blends from: a joiner's starts where it is.
+                if let join::Change::Leave(i) = change
+                    && i < cameras.len()
+                {
+                    cameras.remove(i);
+                }
+                match change {
+                    // The first player's reader is the front end's; the others' are one each.
+                    join::Change::Join(_) => start_readers.push(Reader::at(RIDE_HZ)),
+                    join::Change::Leave(i) if !start_readers.is_empty() => {
+                        start_readers.remove(i.saturating_sub(1));
+                    }
+                    join::Change::Leave(_) => {}
+                }
+                gpu_layers.resize_with(n + 1, layer::Layer::new);
+                if let Some(sound) = &mut sound {
+                    match change {
+                        join::Change::Join(_) => sound.seat_joined(),
+                        join::Change::Leave(i) => sound.seat_left(i),
+                    }
+                }
+                // Every player's pad seat, kept as the players are.
+                args.pad_of = change.devices(&devices);
+                args.players = n;
+                // Where each machine starts again (P132), every seat on the one list.
+                let bays: Vec<vehicle::Spawn> = (0..n).map_while(|p| lot.bay(Machine::Biplane, p).map(|b| b.spawn)).collect();
+                let home = Arc::new(vehicle::home(&join_starts, heading, &bays));
+                world.seats.iter_mut().for_each(|s| s.sim.home = Arc::clone(&home));
+                if let join::Change::Join(_) = change {
+                    let (seat, rig) = (&world.seats[n - 1], &mut rigs[n - 1]);
+                    rig.hud.note_vehicle(seat.garage.up.name());
+                    let first = rig.follow(seat.garage.up);
+                    if !first.cam.presets.is_empty() {
+                        let name = first.cam.preset().name.clone();
+                        rig.hud.note_camera(&name);
+                        rig.ride_hud.note_camera(Instant::now(), &name);
+                    }
+                }
+                // The views for the new count, each camera on its presets for its view's shape.
+                front.menu.reseated(change);
+                layout = Layout::for_players(n, front.menu.party().map_or(args.split, |p| p.split))?;
+                (rects, view_frames) = views_of(frame.width, frame.height, layout, n);
+                set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
+                front.menu.opening = match opens_alone && n == 1 {
+                    true => menu::Opening::Can,
+                    false => menu::Opening::No,
+                };
+                println!(
+                    "players: {}; views: {n} players, {}, {}x{} each",
+                    match change {
+                        join::Change::Join(d) => format!("player {n} joined on pad seat {}", d + 1),
+                        join::Change::Leave(i) => format!("player {} left", i + 1),
+                    },
+                    layout.name(),
+                    rects[0].w,
+                    rects[0].h
+                );
             }
             // The pause closing on modifiers the player changed in it: the ride takes them now, from
             // where it is (P98), and a tape being written takes the change at the tick it is on.

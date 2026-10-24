@@ -3828,3 +3828,267 @@ fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
     assert_eq!(Settings::parse("track_filter = a\u{7}b\n").track_filter, "");
     std::fs::remove_dir_all(&mods).unwrap();
 }
+
+/// A running freeride as main.rs keeps it (P76), by pad input alone: four pad seats, each player
+/// reading the one the menu gives it, a controller in no player's seat read for the join, and every
+/// per-player list — here each player's ride, garage and Start reader — changed by the one
+/// [`join::Change`] the shell's ride loop applies. Each player is known by the pad seat they ride on.
+struct DropIn {
+    m: Menu,
+    /// Player `i`'s presses; the first is the front end's own.
+    readers: Vec<Reader>,
+    /// Every pad seat's, for the join.
+    idle: Vec<Reader>,
+    rides: Vec<(usize, game_sim::Sim)>,
+    garages: Vec<Garage>,
+    lot: vehicle::Lot,
+    /// Every player's ride after each tick it was stepped, by pad seat.
+    ticks: std::collections::HashMap<usize, Vec<u64>>,
+    /// Every frame's pads, and whether the ride ran on it.
+    frames: Vec<([Report; 4], bool)>,
+    /// The frame each pad seat's player last joined on.
+    joined: std::collections::HashMap<usize, usize>,
+}
+
+/// Each pad seat's own hands on the gas: the third's stick held over, so a mix-up of whose ride
+/// steps on whose pad shows.
+fn rider_pad(device: usize) -> Report {
+    let mut r = Report::from_buttons(0x0040);
+    if device == 2 {
+        r.set_axis(2, 0xe0);
+    }
+    r
+}
+
+impl DropIn {
+    /// One frame: the menu, a change of players answered, then the ride, on `taps` — the controls
+    /// tapped this frame by pad seat. Riding, each player holds their gas.
+    fn frame(&mut self, taps: &[(usize, Control)]) -> Act {
+        let riding = self.m.riding();
+        let devices = self.m.ride_devices();
+        let pads: [Report; 4] = std::array::from_fn(|d| {
+            let tapped = taps.iter().filter(|(t, _)| *t == d).fold(0, |b, (_, c)| b | c.mask());
+            match (riding && devices.contains(&d), tapped) {
+                (true, 0) => rider_pad(d),
+                (true, t) => Report::from_buttons(rider_pad(d).buttons() | t),
+                (false, 0) => Report::idle(),
+                (false, t) => Report::from_buttons(t),
+            }
+        });
+        let presses: Vec<Press> = self.readers.iter_mut().zip(&devices).map(|(r, &d)| r.read(&pads[d])).collect();
+        let mut act = self.m.step_seats(&presses);
+        for (d, r) in self.idle.iter_mut().enumerate() {
+            let p = r.read(&pads[d]);
+            if act == Act::Stay && !devices.contains(&d) {
+                act = self.m.step_idle(d, p);
+            }
+        }
+        let change = match act {
+            Act::Join(d) => Some(join::Change::Join(d)),
+            Act::Leave(i) => Some(join::Change::Leave(i)),
+            _ => None,
+        };
+        if let Some(change) = change {
+            let n = match change {
+                join::Change::Join(_) => self.rides.len() + 1,
+                join::Change::Leave(_) => self.rides.len() - 1,
+            };
+            self.lot.resize(n, &mut |_| 0.0);
+            let i = self.rides.len();
+            // At the spawn, see-through until clear of whoever stands there (P57), with the plane
+            // the lot parks for the new seat (P87).
+            let mut sim = game_sim::Sim::new(0x88);
+            sim.rider.ghost.start();
+            let id = match change {
+                join::Change::Join(d) => d,
+                join::Change::Leave(_) => usize::MAX,
+            };
+            self.joined.insert(id, self.frames.len());
+            let garage = Garage::new(Kind::Bike, self.lot.plane(i, None)).unwrap();
+            change.apply(&mut self.rides, || (id, sim));
+            change.apply(&mut self.garages, || garage);
+            // Player 1's Start is the front end's reader; the others' one each.
+            change.apply(&mut self.readers, Reader::new);
+            self.m.reseated(change);
+        }
+        let devices = self.m.ride_devices();
+        let ran = self.m.riding();
+        if ran {
+            for ((id, sim), &d) in self.rides.iter_mut().zip(&devices) {
+                assert_eq!(*id, d, "a player is on another's pad");
+                step_on(sim, pads[d]);
+                self.ticks.entry(*id).or_default().push(game_sim::hash::of(&sim.rider.ride));
+            }
+        }
+        self.frames.push((pads, ran));
+        act
+    }
+
+    /// One press and release of `control` on pad seat `device`, as [`tap_device`] taps: the acts.
+    fn tap(&mut self, device: usize, control: Control) -> Vec<Act> {
+        let mut acts = vec![self.frame(&[(device, control)])];
+        for _ in 0..3 {
+            acts.push(self.frame(&[]));
+        }
+        acts
+    }
+
+    /// The players' pad seats, in player order.
+    fn ids(&self) -> Vec<usize> {
+        self.rides.iter().map(|(id, _)| *id).collect()
+    }
+
+    /// The layout the views are in now, and how many there are: one a player.
+    fn views(&self) -> (split::Layout, usize) {
+        let layout = self.m.party().map_or(split::Layout::Full, |p| p.layout());
+        (layout, layout.rects(640, 448).len().min(self.m.riders))
+    }
+}
+
+/// One tick of a ride on `pad`, the shell's pass on a flat floor at the 30 Hz clamp.
+fn step_on(sim: &mut game_sim::Sim, pad: Report) {
+    let dt = ps2_float::F(game_sim::tick::DeltaTime::CAP_30);
+    let mut reports = [Report::missing(); game_sim::input::PADS];
+    reports[0] = pad;
+    let hands = sim.poll(dt, &reports).stick_alone();
+    sim.step(dt, &hands, &mut game_sim::world::Flat::default());
+}
+
+#[test]
+fn players_drop_into_a_running_freeride_and_leave_it_and_the_others_ride_on() {
+    // A Free Ride from the main menu by pad seat 0, the shell saying its seats are open.
+    let all = [0, 1, 2, 3];
+    let (mut m, mut rd) = fresh_with(4);
+    let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks), "{acts:?}");
+    let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    assert!(m.riding() && m.riders == 1);
+    m.seats_open = true;
+    let first = rd.remove(0);
+    let mut lot = vehicle::Lot::new(MACHINES.as_bytes(), 1, &mut |_| 0.0);
+    let garage = Garage::new(Kind::Bike, lot.plane(0, None)).unwrap();
+    let parked = |lot: &vehicle::Lot, p: usize| lot.bay(vehicle::Machine::Biplane, p).map(|b| b.spawn);
+    let first_bay = parked(&lot, 0);
+    let mut r = DropIn {
+        m,
+        readers: vec![first],
+        idle: (0..4).map(|_| Reader::new()).collect(),
+        rides: vec![(0, game_sim::Sim::new(0x88))],
+        garages: vec![garage],
+        lot,
+        ticks: Default::default(),
+        frames: Vec::new(),
+        joined: [(0, 0)].into(),
+    };
+    for _ in 0..20 {
+        r.frame(&[]);
+    }
+    assert_eq!(r.views(), (split::Layout::Full, 1));
+
+    // Pad seat 1's Cross while the ride runs: a second player, at the spawn, see-through, and the
+    // screen split in two.
+    let acts = r.tap(1, Control::Cross);
+    assert!(acts.contains(&Act::Join(1)), "{acts:?}");
+    assert!(r.m.riding(), "a join does not stop the ride");
+    assert_eq!(r.ids(), vec![0, 1]);
+    assert_eq!(r.m.riders, 2);
+    assert!(r.rides[1].1.rider.ghost.shown() < 1.0, "the joiner is not see-through");
+    assert_eq!(r.views(), (split::Layout::Stacked, 2));
+    assert!(r.garages[1].plane.is_some(), "the lot parks the joiner no plane");
+    assert_eq!(parked(&r.lot, 0), first_bay, "the first player's plane moved");
+    // The same controller again joins nobody: it is riding.
+    let acts = r.tap(1, Control::Cross);
+    assert!(!acts.iter().any(|a| matches!(a, Act::Join(_))), "{acts:?}");
+    for _ in 0..15 {
+        r.frame(&[]);
+    }
+
+    // Over the pause the pause says how, and pad seat 2's Cross is a third player: quarters.
+    r.tap(0, Control::Start);
+    assert_eq!(r.m.screen(), Some(Screen::Pause));
+    assert!(r.m.pause_rows().iter().any(|row| row == "Leave Session"), "{:?}", r.m.pause_rows());
+    let acts = r.tap(2, Control::Cross);
+    assert!(acts.contains(&Act::Join(2)), "{acts:?}");
+    assert_eq!(r.m.screen(), Some(Screen::Pause), "the pause stays over the ride");
+    assert_eq!(r.ids(), vec![0, 1, 2]);
+    assert_eq!(r.views(), (split::Layout::Quarters, 3));
+    r.tap(0, Control::Start);
+    assert!(r.m.riding());
+    for _ in 0..30 {
+        r.frame(&[]);
+    }
+
+    // The second leaves from their own pause: their bike goes, the third moves up, the others
+    // ride on, two views again.
+    r.tap(1, Control::Start);
+    assert_eq!(r.m.driver(), 1);
+    let leave = r.m.pause_rows().iter().position(|row| row == "Leave Session").unwrap();
+    for _ in 0..leave {
+        r.tap(1, Control::Down);
+    }
+    let acts = r.tap(1, Control::Cross);
+    assert!(acts.contains(&Act::Leave(1)), "{acts:?}");
+    assert!(r.m.riding(), "the ride goes on for the others");
+    assert_eq!(r.ids(), vec![0, 2]);
+    assert_eq!(r.m.party().map(|p| p.devices.clone()), Some(vec![0, 2]));
+    assert_eq!(r.views(), (split::Layout::Stacked, 2));
+    assert_eq!(r.m.note.as_deref(), Some("Player 2 left the ride."));
+    for _ in 0..30 {
+        r.frame(&[]);
+    }
+    // And the controller that left can come back in, as a new player after the rest.
+    let acts = r.tap(1, Control::Cross);
+    assert!(acts.contains(&Act::Join(1)), "{acts:?}");
+    assert_eq!(r.ids(), vec![0, 2, 1]);
+    for _ in 0..10 {
+        r.frame(&[]);
+    }
+
+    // The staying players rode on tick for tick as they would have alone: each one's ride against
+    // one stepped on nothing but its own pad's frames, frozen where the ride was.
+    for id in [0, 2] {
+        let mut alone = game_sim::Sim::new(0x88);
+        if id != 0 {
+            alone.rider.ghost.start();
+        }
+        let mut want = Vec::new();
+        for (pads, _) in r.frames[r.joined[&id]..].iter().filter(|f| f.1) {
+            step_on(&mut alone, pads[id]);
+            want.push(game_sim::hash::of(&alone.rider.ride));
+        }
+        assert!(want.len() > 40, "player on pad seat {id} rode {} ticks", want.len());
+        assert_eq!(r.ticks[&id].len(), want.len(), "player on pad seat {id}");
+        for (k, (got, want)) in r.ticks[&id].iter().zip(&want).enumerate() {
+            assert_eq!(got, want, "player on pad seat {id}: tick {k} parts from their ride alone");
+        }
+    }
+
+    // The last two leave; the last one out is asked, and goes back to the main menu.
+    let acts = r.tap(2, Control::Start);
+    assert!(acts.iter().all(|a| *a == Act::Stay));
+    let leave = r.m.pause_rows().iter().position(|row| row == "Leave Session").unwrap();
+    for _ in 0..leave {
+        r.tap(2, Control::Down);
+    }
+    assert!(r.tap(2, Control::Cross).contains(&Act::Leave(1)));
+    assert_eq!(r.ids(), vec![0, 1]);
+    r.tap(1, Control::Start);
+    for _ in 0..leave {
+        r.tap(1, Control::Down);
+    }
+    assert!(r.tap(1, Control::Cross).contains(&Act::Leave(1)));
+    assert_eq!(r.ids(), vec![0]);
+    assert_eq!(r.views(), (split::Layout::Full, 1));
+    r.tap(0, Control::Start);
+    for _ in 0..leave {
+        r.tap(0, Control::Down);
+    }
+    let acts = r.tap(0, Control::Cross);
+    assert!(acts.iter().all(|a| *a == Act::Stay), "the last one out is asked first: {acts:?}");
+    assert!(r.m.confirming().is_some());
+    r.tap(0, Control::Up);
+    let acts = r.tap(0, Control::Cross);
+    assert!(acts.contains(&Act::MainMenu), "{acts:?}");
+    assert_eq!(r.m.screen(), Some(Screen::Main));
+}
