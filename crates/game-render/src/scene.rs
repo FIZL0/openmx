@@ -96,6 +96,10 @@ pub struct Scene {
     pub fog_haziness: f32,
     pub lights: Vec<Light>,
     pub models: Vec<Placement>,
+    /// The models with `Type=TerrainScreenSpace` (V67): roads, ruts, runways and the light map's
+    /// tiles, flat meshes the original paints into the ground rather than drawing as props
+    /// ([`crate::ground_mesh`]). They are not in `models`.
+    pub ground_meshes: Vec<Placement>,
     /// `[Environment]`'s `EcosystemFile`, the trees and bushes (`free09.esb`), and the distances it
     /// draws them by: `EcoDistance3D` is where a plant's model gives way, `EcoDistance2D` where its
     /// picture has taken over (V48). `ShrubberyDistLimit` is read for a shrubbery no scene has.
@@ -133,6 +137,7 @@ impl Scene {
 
         let mut lights = Vec::new();
         let mut models = Vec::new();
+        let mut ground_meshes = Vec::new();
         for s in &sections {
             let lower = s.name.to_ascii_lowercase();
             if lower.starts_with("light") && s.get("Type").is_some() {
@@ -156,12 +161,14 @@ impl Scene {
                     continue;
                 }
                 if let Some(name) = s.get("SLT") {
-                    models.push(Placement {
+                    let placed = Placement {
                         model: slt_name(name),
                         pos: vec_of(Some(s), "Position", v3(0.0, 0.0, 0.0)),
                         look: vec_of(Some(s), "LookVector", v3(0.0, 0.0, 1.0)),
                         up: vec_of(Some(s), "UpVector", v3(0.0, 1.0, 0.0)),
-                    });
+                    };
+                    let flat = s.get("Type").is_some_and(|t| t.trim().eq_ignore_ascii_case("TerrainScreenSpace"));
+                    if flat { ground_meshes.push(placed) } else { models.push(placed) }
                 }
             }
         }
@@ -185,6 +192,7 @@ impl Scene {
             fog_haziness: fog_number("Haziness").unwrap_or(0.5),
             lights,
             models,
+            ground_meshes,
             ecosystem_file: env
                 .and_then(|s| s.get("EcosystemFile"))
                 .map(|v| v.trim())
@@ -467,6 +475,21 @@ mod tests {
         assert!(s.sun().y < 0.0, "{:?}", s.sun());
         // A prop with no vectors of its own still gets a usable transform.
         assert_eq!(s.models[1].transform().point(v3(0.0, 0.0, 0.0)), s.models[1].pos);
+    }
+
+    /// The roads, ruts and light-map tiles a freeride scene paints into its ground (V67) are not props.
+    #[test]
+    fn a_screen_space_model_is_not_a_prop() {
+        let s = Scene::parse(
+            "[Model1]\nSLT=Barn\n\
+             [Model2]\nSLT=Free06_Road01\nPosition=3271.075439,0.000001,3379.181885\n;-- Extra params\nType=TerrainScreenSpace\n\
+             [Model3]\nSLT=Free06_Shadow_01\nType=terrainscreenspace\n",
+        );
+        let props: Vec<&str> = s.models.iter().map(|m| m.model.as_str()).collect();
+        let flat: Vec<&str> = s.ground_meshes.iter().map(|m| m.model.as_str()).collect();
+        assert_eq!(props, ["Barn"]);
+        assert_eq!(flat, ["Free06_Road01", "Free06_Shadow_01"]);
+        assert_eq!(s.ground_meshes[0].pos, v3(3271.075439, 0.000001, 3379.181885));
     }
 
     /// MX vs. ATV's race props (MD13): a hidden gate and hill-climb flag are not drawn in a free ride,
