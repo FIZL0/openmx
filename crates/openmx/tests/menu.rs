@@ -3828,3 +3828,127 @@ fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
     assert_eq!(Settings::parse("track_filter = a\u{7}b\n").track_filter, "");
     std::fs::remove_dir_all(&mods).unwrap();
 }
+
+/// main.rs's `Front::cue`: a menu's cue as the click the original plays for it.
+fn click_for(cue: menu::Cue) -> audio::Click {
+    match cue {
+        menu::Cue::Move => audio::Click::UpDown,
+        menu::Cue::Side => audio::Click::LeftRight,
+        menu::Cue::Accept => audio::Click::Accept,
+        menu::Cue::Back => audio::Click::Cancel,
+        menu::Cue::Refused => audio::Click::Locked,
+    }
+}
+
+/// The front end's sounds as the disc has them in shape (P65): a stereo 32 kHz loop, left 5000 and
+/// right -5000, and five short clicks.
+fn menu_sounds() -> audio::MenuSounds {
+    let mut pcm = Vec::new();
+    for _ in 0..32000 {
+        pcm.extend([5000i16, -5000]);
+    }
+    let music = Some(std::sync::Arc::new(audio::Clip { rate: 32000, channels: 2, pcm }));
+    let clicks = (1..=5).map(|i| Some(std::sync::Arc::new(audio::Clip { rate: 22050, channels: 1, pcm: vec![100 * i; 2000] }))).collect();
+    audio::MenuSounds { music, clicks }
+}
+
+#[test]
+fn the_menus_play_their_music_click_on_every_move_and_hand_over_to_the_ride() {
+    let (mut m, mut r) = fresh();
+    let speakers = hum_speakers(&m.settings);
+    let sounds = menu_sounds();
+    let mixer = speakers.mixer().clone();
+    {
+        let mut x = mixer.lock().unwrap();
+        x.menu_music = sounds.music.clone();
+        x.front_end = true;
+    }
+    let listen = |secs: usize| {
+        let mut last = Vec::new();
+        for _ in 0..secs * 10 {
+            last = hum_listen(&speakers);
+        }
+        last
+    };
+    // On the main menu the loop plays alone, under the music's 70; the shuffle's song holds.
+    assert_eq!(m.screen(), Some(Screen::Main));
+    let heard = listen(2);
+    assert!((mixer.lock().unwrap().menu_fade() - 1.0).abs() < 1e-6);
+    assert!((heard[100] as f32 - 5000.0 * 0.7).abs() <= 3.0, "the menu's loop, left: {}", heard[100]);
+    assert!((heard[101] as f32 + 5000.0 * 0.7).abs() <= 3.0, "the menu's loop, right: {}", heard[101]);
+
+    // Each press its cue, one, and the cue's click is one more voice under Menu FX.
+    let press = |m: &mut Menu, r: &mut Reader, c: Control| {
+        m.take_cues();
+        tap(m, r, c);
+        let cues = m.take_cues();
+        let mut x = mixer.lock().unwrap();
+        let before = x.voices();
+        for cue in &cues {
+            sounds.play(&mut x, click_for(*cue)).expect("a click for every cue");
+        }
+        assert_eq!(x.voices(), before + cues.len());
+        cues
+    };
+    assert_eq!(press(&mut m, &mut r, Control::Down), [menu::Cue::Move], "down is one move click");
+    assert_eq!(press(&mut m, &mut r, Control::Up), [menu::Cue::Move]);
+    assert_eq!(press(&mut m, &mut r, Control::Right), [], "a sideways press means nothing on the main menu, and is silent");
+    assert_eq!(press(&mut m, &mut r, Control::Cross), [menu::Cue::Accept], "confirm is its confirm sound");
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    assert_eq!(press(&mut m, &mut r, Control::Circle), [menu::Cue::Back], "back is its back sound");
+    assert_eq!(m.screen(), Some(Screen::Main));
+    assert_eq!(press(&mut m, &mut r, Control::Cross), [menu::Cue::Accept]);
+    let cues = press(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    assert_eq!(cues, [menu::Cue::Accept], "the ride starting is a confirm");
+    assert_eq!(press(&mut m, &mut r, Control::Square), [], "a ride is silent");
+    assert_eq!(press(&mut m, &mut r, Control::Start), [], "and so is its pause opening");
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(press(&mut m, &mut r, Control::Down), [menu::Cue::Move], "the pause clicks (P56)");
+    assert_eq!(press(&mut m, &mut r, Control::Circle), [menu::Cue::Back]);
+    assert!(m.riding());
+
+    // The ride hands over to its music: the loop fades out over a second and the song comes in.
+    mixer.lock().unwrap().front_end = false;
+    let heard = listen(2);
+    assert_eq!(mixer.lock().unwrap().menu_fade(), 0.0);
+    let song = speakers.now().expect("the shuffle's song");
+    let level = match song.as_str() {
+        "hum:one" => 1000.0,
+        "hum:two" => 2000.0,
+        _ => 3000.0,
+    };
+    assert!((heard[100] as f32 - level * 0.7).abs() <= 2.0, "the ride's song: {} for {song}", heard[100]);
+    assert!((heard[101] as f32 - level * 0.7).abs() <= 2.0, "the loop is gone on the right: {}", heard[101]);
+    // And back in the front end, the loop again.
+    mixer.lock().unwrap().front_end = true;
+    let heard = listen(2);
+    assert!((heard[101] as f32 + 5000.0 * 0.7).abs() <= 3.0, "the loop is back: {}", heard[101]);
+}
+
+/// A slider steps with the sideways click, and at its end refuses, once for a held press (P65).
+#[test]
+fn a_slider_clicks_each_step_and_refuses_at_its_end_once() {
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Audio");
+    m.take_cues();
+    down_to(&mut m, &mut r, menu::Key::Level(0));
+    assert!(m.take_cues().iter().all(|c| *c == menu::Cue::Move), "down the page, each row a move");
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.take_cues(), [menu::Cue::Side]);
+    tap_until(&mut m, &mut r, Control::Right, |m| m.settings.music_volume == 100);
+    m.take_cues();
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.take_cues(), [menu::Cue::Refused], "the slider at its end refuses");
+    // A second press well after the first refuses again; held, its repeats are quiet.
+    for _ in 0..30 {
+        m.step(r.read(&Report::idle()));
+    }
+    for _ in 0..60 {
+        m.step(r.read(&Report::from_buttons(Control::Right.mask())));
+    }
+    m.step(r.read(&Report::idle()));
+    assert_eq!(m.take_cues(), [menu::Cue::Refused], "held, it refuses once, not on every repeat");
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.take_cues(), [menu::Cue::Side]);
+}
