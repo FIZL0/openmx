@@ -633,6 +633,15 @@ impl Online {
         (0..self.sims.len()).map(|s| self.net.lineup.seats.get(s).cloned().flatten()).collect()
     }
 
+    /// Whether shell seat `d`'s player had their pause open on the last tick ridden (P84): the
+    /// paused bit of that tick's pad, as every machine stepped it, so the seat frozen and drawn
+    /// see-through is the same seat on every machine.
+    pub fn paused(&self, d: usize) -> bool {
+        let Some(&seat) = self.drawn().get(d) else { return false };
+        let pad = self.net.log.last().and_then(|pads| pads.get(seat).copied());
+        pad.is_some_and(|p| vehicle::Wanted::of(crate::net::unwire(p).0[crate::net::SWITCH]).paused)
+    }
+
     /// How many seats the ride has, and which is this machine's: the markers' `players` and `me`.
     pub fn seat_of(&self) -> (usize, usize) {
         (self.sims.len(), self.seat)
