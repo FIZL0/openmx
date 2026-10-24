@@ -1,0 +1,5 @@
+# S106 nose: tele.py's state on the 53-degree face ahead of the start, nose down; the brake held from
+# the first frame. Wall-clock, at a quarter speed.
+down square
+sleep 30000
+release

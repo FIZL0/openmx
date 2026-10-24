@@ -1,0 +1,5 @@
+# S106 side: tele.py's state on the 46-degree face to the right of the start, side on (falling to
+# the bike's right); the brake held from the first frame. Wall-clock, at a quarter speed.
+down square
+sleep 30000
+release
