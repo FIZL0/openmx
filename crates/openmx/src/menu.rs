@@ -1903,6 +1903,8 @@ const PAUSE_OPEN_ROW: &str = "Open to Online";
 const PAUSE_SEATS: usize = PAUSE_OPEN + 1;
 /// The pause's "Leave Session" row (N11), on an online ride ([`Menu::session`]): before Quit, under the
 /// online rows when there are any. The pausing player's seats go and the ride goes on for the rest.
+/// On a local ride whose seats are open ([`Menu::seats_open`], P76) the pausing player gives up their
+/// seat and the others ride on; the last one leaving is back on the main menu.
 const PAUSE_LEAVE_ROW: &str = "Leave Session";
 
 /// Whether the ride under the pause can be opened to online players (N10), and whether it is.
@@ -2083,6 +2085,12 @@ pub enum Act {
     /// Leave the online ride (N11) for this seat's player: every seat of this machine's for the first
     /// one, that player's alone for another; the ride goes on for the rest.
     LeaveSession(usize),
+    /// The controller on this pad seat claims a free seat in the running ride (P76): a new player,
+    /// spawned at the track's spawn. The shell answers with [`Menu::reseated`].
+    Join(usize),
+    /// This player gives up their seat (P76): their bike goes and the others ride on. The shell
+    /// answers with [`Menu::reseated`].
+    Leave(usize),
 }
 
 /// What the loading screen shows (P127): the track, as the pick names it, and how far its ride's
@@ -2196,6 +2204,9 @@ pub struct Menu {
     /// How many ride a Free Ride, which is `--players`: the shell says, and a Free Ride after a
     /// local game goes back to it.
     pub free_riders: usize,
+    /// Whether the ride under the menu takes players in and lets them go while it runs (P76), as the
+    /// shell says: a local freeride, not online and riding no tape.
+    pub seats_open: bool,
     /// The songs the music row steps through after Off and Shuffle, `(id, label)`, as the shell's
     /// music sources list them (P42). Empty until the shell says.
     pub music_choices: Vec<(String, String)>,
@@ -2347,6 +2358,7 @@ impl Menu {
             leaving: None,
             leave_to: LeaveTo::Main,
             session: false,
+            seats_open: false,
             join: Join::new(join::ON_SCREEN, Opened::Menu),
             devices: Vec::new(),
             heard: Vec::new(),
@@ -2870,9 +2882,60 @@ impl Menu {
         rows
     }
 
-    /// Where the pause's Leave Session row is (N11), on an online ride: just before Quit.
+    /// Where the pause's Leave Session row is (N11), on an online ride: just before Quit; and on a
+    /// local ride whose seats are open (P76), in the same place.
     fn pause_leave(&self) -> Option<usize> {
-        self.session.then_some(PAUSE_OPEN + 2 * usize::from(self.opening != Opening::No))
+        (self.session || self.seats_open).then_some(PAUSE_OPEN + 2 * usize::from(self.opening != Opening::No))
+    }
+
+    /// Player `i`'s pad seat in the ride under the menu: a local game's, or a Free Ride's own seat.
+    pub fn ride_devices(&self) -> Vec<usize> {
+        match &self.party {
+            Some(party) => party.devices.clone(),
+            None => (0..self.riders.max(1)).collect(),
+        }
+    }
+
+    /// One frame of a controller on a pad seat that has no player in the ride (P76): its Cross,
+    /// riding or over the pause, claims a free seat, the way the join screen takes one.
+    pub fn step_idle(&mut self, device: usize, p: Press) -> Act {
+        let over = matches!(self.stack.as_slice(), [] | [Screen::Pause]) && self.leaving.is_none();
+        if !(self.seats_open && over && p.ok) || self.ride_devices().contains(&device) {
+            return Act::Stay;
+        }
+        if self.riders >= join::IN_RIDE {
+            self.note = Some(format!("The ride is full: {} players.", join::IN_RIDE));
+            return Act::Stay;
+        }
+        Act::Join(device)
+    }
+
+    /// The shell's answer to [`Act::Join`] and [`Act::Leave`] (P76): the ride has its players so
+    /// changed, each staying one's machine where it was, and the next ride of it (a Restart) starts
+    /// with them, in the split screen's layout for the new count.
+    pub fn reseated(&mut self, change: join::Change) {
+        let devices = change.devices(&self.ride_devices());
+        match change {
+            join::Change::Join(_) => {
+                let i = devices.len() - 1;
+                if i < SEATS_MAX {
+                    self.up[i] = Machine::Bike;
+                    self.switchable[i] = false;
+                }
+                self.note = Some(format!("Player {} joined the ride.", i + 1));
+            }
+            join::Change::Leave(i) => {
+                for k in i.min(SEATS_MAX)..SEATS_MAX {
+                    self.up[k] = self.up.get(k + 1).copied().unwrap_or_default();
+                    self.switchable[k] = self.switchable.get(k + 1).copied().unwrap_or(false);
+                }
+                self.note = Some(format!("Player {} left the ride.", i + 1));
+            }
+        }
+        self.riders = devices.len();
+        self.pauser = 0;
+        let split = self.party.as_ref().map_or(self.settings.split, |p| p.split);
+        self.party = Some(Party { devices, split });
     }
 
     /// The pause's seat count (N14): the opened room's once the network has said it, else the one it
@@ -2978,7 +3041,7 @@ impl Menu {
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods => self.page_of(screen).len().max(1),
             Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => 1,
             Screen::Keyboard => KEY_ROWS.len() + 1,
-            Screen::Pause => PAUSE.len() + 2 * usize::from(self.opening != Opening::No) + usize::from(self.session),
+            Screen::Pause => PAUSE.len() + 2 * usize::from(self.opening != Opening::No) + usize::from(self.session || self.seats_open),
             Screen::Online => ONLINE.len() + 1,
             Screen::Games => self.lobby.found.len() + 1,
             Screen::Lobby => self.lobby.items().len(),
@@ -3208,9 +3271,18 @@ impl Menu {
                     }
                     return Act::Stay;
                 }
-                if p.ok && self.pause_leave() == Some(at) {
+                if p.ok && self.pause_leave() == Some(at) && self.session {
                     self.leaving = Some((Leaving::Session, 1));
                     return Act::Stay;
+                }
+                if p.ok && self.pause_leave() == Some(at) {
+                    // The last player out leaves the ride, which asks first as Main Menu does.
+                    if self.riders <= 1 {
+                        self.leaving = Some((Leaving::Main, 1));
+                        return Act::Stay;
+                    }
+                    self.stack.clear();
+                    return Act::Leave(self.pauser);
                 }
                 if p.ok {
                     match at {

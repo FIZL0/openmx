@@ -2205,6 +2205,25 @@ impl Sound {
         }
     }
 
+    /// A player joined the running ride (P76): a seat of sounds on the first player's bike.
+    pub fn seat_joined(&mut self) {
+        let Some(bike) = self.seats.first().map(|s| s.bike.clone()) else { return };
+        let n = self.seats.len() as u64;
+        self.seats.push(SeatSound::new(bike, 0x9e37_79b9 ^ n));
+    }
+
+    /// Player `i` left the running ride (P76): their engine stops, and the seats after move up.
+    pub fn seat_left(&mut self, i: usize) {
+        if i >= self.seats.len() {
+            return;
+        }
+        let mut s = self.seats.remove(i);
+        if let Ok(mut m) = self.mixer.lock() {
+            s.engine.silence(&mut m);
+            s.plane.silence(&mut m);
+        }
+    }
+
     /// The ride is over: stop every effect, keep the music.
     pub fn quiet(&mut self) {
         if let Ok(mut m) = self.mixer.lock() {
