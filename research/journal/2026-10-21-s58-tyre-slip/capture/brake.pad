@@ -1,0 +1,9 @@
+# S58 brake: gas to about 45 ft/s, then off the gas and the brake held. Wall-clock, at a quarter
+# speed (4 ms here is 1 ms ridden).
+sleep 4000
+down cross
+sleep 8000
+up cross
+down square
+sleep 12000
+release
