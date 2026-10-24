@@ -13,7 +13,8 @@
 //! - **Down** puts a marker in the selected slot: the whole bike as the tick left it ([`Ride`]) —
 //!   where it is, which way it faces, its speed and its spin — so a run-up repeats;
 //! - **Up** rides back to the selected slot's marker, or to the selected player where they are —
-//!   at their speed and spin while they ride (P111, [`Spot::motion`]), stopped where they will be
+//!   at their speed and spin while they ride (P111, [`Spot::motion`]), [`CLEARANCE`] under their
+//!   plane at its velocity while they fly it (P141, [`Spot::flight`]), stopped where they will be
 //!   put back while they are down; slot 1 with nothing put there rides to where the machine started
 //!   this map (P132, [`Home`]), at rest;
 //! - **Left** and **Right** step the selection, through the slots and then the other players, round.
@@ -202,7 +203,9 @@ pub enum Did {
 }
 
 /// Where a teleport onto a player puts the bike: their bike's origin, its forward and its up, and
-/// while they ride it the bike's motion (P111), which the teleport rides on with.
+/// while they ride it the bike's motion (P111), which the teleport rides on with. For a player
+/// flying the plane (P141) the spot is [`CLEARANCE`] under it, upright along its level heading, and
+/// [`Spot::flight`] the plane itself, whose velocity a bike teleported there falls on with.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spot {
     pub at: Vf,
@@ -210,10 +213,30 @@ pub struct Spot {
     pub up: Vf,
     /// The bike the player rides, as the tick before the teleport left it, for the teleporter to
     /// ride on as ([`crate::ride::Ride::ride_as`]): its speed, its spin, its wheels'. `None` for a
-    /// player who is down or flies the plane, who has no bike motion to take, so the teleport sets
-    /// the bike down there stopped.
+    /// player who is down or flies the plane, who has no bike motion to take.
     pub motion: Option<Motion>,
+    /// The plane the player flies, as the tick before the teleport left it, while it is in the air
+    /// and unwrecked (P141): a bike teleported there is thrown at its velocity
+    /// ([`crate::ride::Ride::launch`]), a plane flies on as it does ([`Flight::fly_as`]). `None` for
+    /// a rider, and for a plane on or near the ground or wrecked, where the spot is the ground under
+    /// it and a teleport there is set down stopped, as it was before P141.
+    pub flight: Option<std::sync::Arc<Flight>>,
 }
+
+/// **How far apart a teleport onto a player puts the two machines** (P141), feet: a bike sent to a
+/// flying plane appears this far under the plane's origin, and a plane sent to a moving rider this
+/// far over the bike's origin. Enough that the biplane (about 7 ft from its wheels to its top wing)
+/// and the bike do not touch on the first tick; the port's own number.
+pub const CLEARANCE: f32 = 20.0;
+
+/// **How far beside a flying plane a plane sent to it appears** (P141), feet, along the target's
+/// right wing (its orientation's first row): more than the biplane's span, so the two fly on side by
+/// side without overlapping. The port's own number.
+pub const BESIDE: f32 = 40.0;
+
+/// **A rider slower than this is at rest** (P141), feet a second, while on the ground: a plane
+/// teleported to them lands beside them, as it did before P141, rather than appearing over them.
+pub const REST_SPEED: f32 = 2.0;
 
 /// **Where each seat's machines start on this map** (P132): marker slot 1's spot while the player
 /// has put nothing there, so an Up on it rides back to the start at rest. The bike's is the map's
@@ -274,7 +297,7 @@ impl PartialEq for Motion {
 impl Spot {
     /// A spot with no motion: the bike is set down there stopped.
     pub fn still(at: Vf, forward: Vf, up: Vf) -> Spot {
-        Spot { at, forward, up, motion: None }
+        Spot { at, forward, up, motion: None, flight: None }
     }
 
     /// Where a player is: their bike while they ride it, with its motion, and the put-back record —
@@ -285,7 +308,39 @@ impl Spot {
             return Spot::still(b.at, b.facing, b.up);
         }
         let (forward, up) = rider.ride.axes();
-        Spot { at: rider.ride.position(), forward, up, motion: Some(Motion(std::sync::Arc::new(rider.ride.clone()))) }
+        Spot {
+            at: rider.ride.position(),
+            forward,
+            up,
+            motion: Some(Motion(std::sync::Arc::new(rider.ride.clone()))),
+            flight: None,
+        }
+    }
+
+    /// Where a player flying `flight` is, for a teleport onto them (P141): [`CLEARANCE`] under the
+    /// plane's origin, upright along `forward` (the plane's heading flattened, which the caller
+    /// works out with the bike's to fall back on), carrying the flight. The caller makes sure the
+    /// plane is flying: unwrecked and that far over the ground.
+    pub fn of_flight(flight: &Flight, forward: Vf) -> Spot {
+        let (_, origin) = flight.pose();
+        let at = Vf::new(origin.x(), origin.y(), origin.z(), 1.0).sub(Vf::new(0.0, CLEARANCE, 0.0, 0.0));
+        Spot {
+            at,
+            forward,
+            up: Vf::new(0.0, 1.0, 0.0, 0.0),
+            motion: None,
+            flight: Some(std::sync::Arc::new(flight.clone())),
+        }
+    }
+
+    /// Whether a plane teleported here lands at rest (P141): the player is down, or on the ground
+    /// slower than [`REST_SPEED`]. A player in the air or moving is flown to instead.
+    pub fn at_rest(&self) -> bool {
+        match (&self.motion, &self.flight) {
+            (Some(m), _) => !m.0.air.airborne && !(m.0.chassis.speed > ps2_float::F(REST_SPEED)),
+            (None, Some(_)) => false,
+            (None, None) => true,
+        }
     }
 }
 
@@ -519,9 +574,11 @@ fn select(m: &mut Markers, [left, right, ..]: [bool; 4], me: usize, seats: usize
 /// - **Up** on a slot puts the plane back into the flight it kept, in the air where it was, at the
 ///   speed and attitude and throttle it had ([`Flight::put_back`]): out of whatever wreck it is in,
 ///   and the tick after it the tick after the placement flown again;
-/// - **Up** on a player answers [`Did::Teleported`] and leaves the plane where it is: landing it on
-///   the ground where the player is reads the ground and the plane's wheels, which is the garage's
-///   (`vehicle::land_on`), as the switch onto the plane is.
+/// - **Up** on a player answers [`Did::Teleported`] and leaves the plane where it is: putting it
+///   where the player is reads the ground and the plane's wheels, which is the garage's
+///   (`vehicle::arrive`, P141) — beside a flying plane flying on as it does ([`Flight::fly_as`]),
+///   over a moving rider at their velocity ([`Flight::launch`]), and landed on the ground by a
+///   rider at rest ([`Spot::at_rest`]) as the switch onto the plane is.
 ///
 /// Slot 1 with nothing put there is the plane's bay (P132, [`Home::plane`] of `home`): Up stands the
 /// plane there at rest, unwrecked and its throttle shut ([`Flight::reset`], on `acos`), as an
