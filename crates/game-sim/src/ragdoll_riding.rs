@@ -29,10 +29,10 @@ use ps2_float::{F, Vf};
 
 /// The speed the riding pose's damper is scaled up to, under which the rider is standing:
 /// the clutch's idle speed, as the vehicle animation's constructor sets it.
-const STAND_SPEED: F = F(f32::from_bits(0x40ea_aa65));
+pub const STAND_SPEED: F = F(f32::from_bits(0x40ea_aa65));
 
 /// The speed under which the look-around may lift a foot.
-const SLOW_SPEED: F = F(f32::from_bits(0x4292_aa7f));
+pub const SLOW_SPEED: F = F(f32::from_bits(0x4292_aa7f));
 
 /// The feet's offsets from the request's points, in the bike's frame: left, then right.
 const FOOT_POINTS: [Vf; 2] = [
