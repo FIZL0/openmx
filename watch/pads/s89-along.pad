@@ -1,0 +1,21 @@
+# s89-along.pad — S89: along free06's railway bed, from s89-rails.toml's "along" state.
+#
+# Wall-clock at a quarter speed, so every game second is 4000 ms here: a second idle, eight on the gas
+# (cross), two and a half on the brake (square), the gas again, then a second of half-left stick at
+# speed (the turn on the rails) and two straight, and the pad let go.
+#
+#   ./kit record watch/s89-rails.toml --state 9 --pad watch/pads/s89-along.pad -n 600
+sleep 4000
+down cross
+sleep 32000
+up cross
+down square
+sleep 10000
+up square
+down cross
+sleep 14000
+stick l -0.5 0
+sleep 4000
+stick l 0 0
+sleep 8000
+release
