@@ -96,6 +96,9 @@ pub mod key {
     pub const SHIFT_LEFT: u8 = 50;
     pub const SHIFT_RIGHT: u8 = 62;
     pub const F3: u8 = 69;
+    // The new layout's Cross and Triangle (P80), either side of HJKL on the home row.
+    pub const G: u8 = 42;
+    pub const SEMICOLON: u8 = 47;
 }
 
 /// An open window on an X display.
