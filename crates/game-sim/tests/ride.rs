@@ -3501,6 +3501,11 @@ fn ride_the_discs_minute(p: &Phy, wheels: (Vf, Vf), tables: &rider::Tables) -> V
     // Dropped from two feet, so the model's mounts — which hang the wheels higher than the `.phy`'s
     // own do — start clear of the floor, and the settle takes the drop out before the launch.
     let mut r = Rider::new(p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    // The fork steers about the model's raked axis, as the shell sets it (P24: about the chassis' `y`
+    // the held turns keep 0.68 of their speed, about the fork 0.86).
+    if let Some((_, _, fork)) = the_disc_125_and_fork(tables) {
+        r.ride.front.steer_axis = fork;
+    }
     let mut world = floor();
     let mut out = Vec::new();
     for DiscLeg { name, ticks, until, hands } in disc_minute() {
@@ -3631,10 +3636,9 @@ fn the_discs_bands(m: &[(&'static str, Vec<DiscSeat>)]) -> Vec<Band> {
 /// whole table printed before anything fails, so one run says how far each leg is — the drive, top
 /// speed, brake and turn tasks each read their own line of it.
 #[test]
-#[ignore = "fails until the drive, top-speed (P21), brake (P23) and turn (P24) tasks land: race125p \
-            pulls ~25% over the original in each 20 ft/s band, tops out at 97.6 against 75.8-79.9, \
-            coasts down at twice the original's rate and keeps 0.65 of its speed through a held turn \
-            against 0.85"]
+#[ignore = "fails until the drive, top-speed (P21) and brake (P23) tasks land: race125p \
+            pulls ~25% over the original in each 20 ft/s band, tops out at 97.6 against 75.8-79.9 \
+            and coasts down at twice the original's rate (P24: the held turns keep 0.86, inside)"]
 fn the_minute_on_the_discs_bike() {
     let Some(mut disc) = DiscFile::open() else { return };
     let tables = rider::Tables::build();
@@ -3918,6 +3922,142 @@ fn it_straightens_after_a_slide() {
     // And it stays straight and upright: no overshoot that keeps going, nothing left at the end.
     let (last_roll, last_slip) = after[after.len() - 1];
     assert!(last_roll.abs() < 1.0 && last_slip.abs() < 1.0, "ended at roll {last_roll} slip {last_slip}");
+}
+
+// --- P24: a held turn keeps its speed ------------------------------------------------------------------
+
+/// race125p on the level at the captures' 30 Hz, its fork on the model's axis, from a standstill:
+/// `run_up` ticks of `first`, then `ticks` of `then` — or, when `from` is given, `first` until the
+/// bike is going `from` ft/s and then `then`. The speed the second hands came in at, and each of
+/// their ticks' speed, heading, front steer angle and up `y`.
+fn race125p_turn(first: &Controls, run_up: usize, from: Option<f32>, then: &Controls, ticks: usize)
+                 -> Option<(f32, Vec<[f32; 4]>)> {
+    let tables = rider::Tables::build();
+    let (p, wheels, fork) = the_disc_125_and_fork(&tables)?;
+    let mut r = Rider::new(&p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    r.ride.front.steer_axis = fork;
+    let mut world = floor();
+    for _ in 0..60 {
+        r.frame(&p, &tables, &Controls::default(), DISC_DT, &mut world);
+    }
+    let mut k = 0;
+    while from.map_or(k < run_up, |v| r.ride.chassis.speed.0 < v) {
+        let f = r.frame(&p, &tables, first, DISC_DT, &mut world);
+        assert!(f.wreck.is_none(), "wrecked on the run-up: {:?}", f.wreck);
+        k += 1;
+        assert!(k < 900, "race125p never reached {from:?} ft/s: {}", r.ride.chassis.speed.0);
+    }
+    let entry = r.ride.chassis.speed.0;
+    let mut out = Vec::with_capacity(ticks);
+    for k in 0..ticks {
+        let f = r.frame(&p, &tables, then, DISC_DT, &mut world);
+        assert!(f.wreck.is_none(), "turn tick {k}: wrecked: {:?}", f.wreck);
+        assert!(r.ride.air.on_ground, "turn tick {k}: off the ground");
+        let m = r.ride.transform();
+        out.push([r.ride.chassis.speed.0, f32::atan2(m.0[2].x(), m.0[2].z()), r.ride.front.w.steer_angle.0, m.0[1].y()]);
+    }
+    Some((entry, out))
+}
+
+/// **P24.** race125p in a one-second full-lock turn at 55 ft/s, the gas pinned, keeps 80% of its speed.
+///
+/// P15 had the shell's bike going from 76 to 35 ft/s in 1.33 s of this. P10 blamed the roll rate the
+/// ground pose pins or P4's stand-in tire; it was the tire. The pinned roll is the original's own
+/// (`mv::pose` frees roll only in the air, flag for flag), and the stand-in's side force pinned at its
+/// cap every substep and scrubbed the speed away. P33's tire law and contact frame and S58's spin
+/// step and surface drag are the original's, and with them this turn keeps all of it: 55.1 → 54.9
+/// ft/s (0.996) with the heading coming round at 1.8 to 2.4 rad/s, inside the original's held-stick
+/// 0.6 to 2.5. [`a_held_turn_rides_like_the_originals`] is the same turn against the original's own.
+#[test]
+fn a_full_lock_turn_keeps_its_speed() {
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    for side in [1.0f32, -1.0] {
+        let lock = Controls { stick: (F(side), F::ZERO), ..gas.clone() };
+        let Some((entry, turn)) = race125p_turn(&gas, 0, Some(55.0), &lock, 30) else {
+            println!("no race125p.phy or 125_faisst wheels on a disc in context/iso — skipped");
+            return;
+        };
+        let kept = turn[29][0] / entry;
+        let rates: Vec<f32> = turn.windows(2).map(|w| wrap(w[1][1] - w[0][1]) / DISC_DT.0 * side).collect();
+        let fastest = rates.iter().copied().fold(f32::MIN, f32::max);
+        let mean = rates.iter().sum::<f32>() / rates.len() as f32;
+        assert!(kept >= 0.8, "stick {side:+}: a second of full lock from {entry} ft/s kept {kept} of it");
+        assert!(
+            mean > 0.6 && fastest <= 2.5,
+            "stick {side:+}: came round at {mean} rad/s on the mean and {fastest} at most; the original's \
+             held-stick turns run 0.6 to 2.5"
+        );
+    }
+}
+
+/// S58's held turn in the original (`watch/s58-slip.toml`'s "a hard turn at speed", recorded off
+/// first_recording's state 8 on Free09 with cr125_faisst): the kit's pad pinned the gas from a near
+/// standstill, put the stick hard right half a second later and held both until the bike left the
+/// ground two seconds after. Copied here from the slot that recorded it, in a subdirectory so that
+/// `replay.rs` does not take it for an acceptance run.
+const HELD_TURN_CAPTURE: [&str; 2] = ["capture/p24", "turn.csv"];
+
+/// **P24.** The same held turn as the original's, on the level: the gas from a standstill, then the
+/// stick hard over with it — and once the lean has settled (44 to 56 ft/s, about 45° over) the
+/// heading comes round as fast as the original's, at the same lean and steer, and the speed climbs
+/// as fast as the original's does. A turn that scrubbed its speed would fall behind here.
+///
+/// The original rode it on Free09, which is not flat — its wheel loads swing from 140 to 400 lbf
+/// over the bumps, where the port's flat floor holds them at ~200 — so the comparison is of means
+/// over the band, not tick for tick. Measured: rate 1.853 (original) against 1.842 (port) rad/s, up
+/// `y` 0.742 against 0.747, steer 0.303 against 0.304 rad, and 44 → 54 ft/s in 1.00 s for both.
+#[test]
+fn a_held_turn_rides_like_the_originals() {
+    let path = private_dir(HELD_TURN_CAPTURE[0]).join(HELD_TURN_CAPTURE[1]);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no held-turn capture at {} — skipped", path.display());
+        return;
+    };
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.next().expect("a header").split(',').collect();
+    let col = |name: &str| head.iter().position(|h| *h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let want = ["gas_lever", "f_steer", "ch_speed", "ch_xform.m20", "ch_xform.m22", "ch_xform.m11",
+                "f_spring_force", "r_spring_force"].map(col);
+    let rows: Vec<[f32; 8]> = lines
+        .map(|l| {
+            let cells: Vec<&str> = l.split(',').collect();
+            want.map(|c| cells[c].parse().expect("a number"))
+        })
+        .collect();
+    let gas_at = rows.iter().position(|r| r[0] >= 1.0).expect("the gas goes on");
+    let lock_at = rows.iter().position(|r| r[1] > 0.0).expect("the stick goes over");
+    let lands = rows[lock_at..].iter().position(|r| r[6] <= 0.0 || r[7] <= 0.0).expect("it leaves the ground");
+    // The original's turn, and the port's: speed, heading, steer, up `y` per tick.
+    let original: Vec<[f32; 4]> =
+        rows[lock_at..lock_at + lands].iter().map(|r| [r[2], f32::atan2(r[3], r[4]), r[1], r[5]]).collect();
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let right = Controls { stick: (F::ONE, F::ZERO), ..gas.clone() };
+    let Some((_, port)) = race125p_turn(&gas, lock_at - gas_at, None, &right, lands) else {
+        println!("no race125p.phy or 125_faisst wheels on a disc in context/iso — skipped");
+        return;
+    };
+
+    // The means over the settled band, and the time the speed takes across it.
+    let band = |turn: &[[f32; 4]]| -> (f32, f32, f32, f32) {
+        let ticks: Vec<usize> = (1..turn.len()).filter(|&k| (44.0..=56.0).contains(&turn[k][0])).collect();
+        assert!(ticks.len() > 20, "only {} ticks between 44 and 56 ft/s", ticks.len());
+        let n = ticks.len() as f32;
+        let rate = ticks.iter().map(|&k| wrap(turn[k][1] - turn[k - 1][1]) / DISC_DT.0).sum::<f32>() / n;
+        let steer = ticks.iter().map(|&k| turn[k][2]).sum::<f32>() / n;
+        let up = ticks.iter().map(|&k| turn[k][3]).sum::<f32>() / n;
+        let at = |v: f32| turn.iter().position(|t| t[0] >= v).expect("the speed gets there");
+        (rate, steer, up, (at(54.0) - at(44.0)) as f32 * DISC_DT.0)
+    };
+    let (o, p) = (band(&original), band(&port));
+    println!(
+        "44-56 ft/s: rate {:.3} / {:.3} rad/s, steer {:.3} / {:.3} rad, up {:.3} / {:.3}, 44 to 54 in {:.2} / {:.2} s \
+         (original / port)",
+        o.0, p.0, o.1, p.1, o.2, p.2, o.3, p.3
+    );
+    assert!((p.0 - o.0).abs() <= 0.1 * o.0, "turn rate {} rad/s, the original's {}", p.0, o.0);
+    assert!((p.1 - o.1).abs() <= 0.02, "steer {} rad, the original's {}", p.1, o.1);
+    assert!((p.2 - o.2).abs() <= 0.03, "up y {}, the original's {}", p.2, o.2);
+    assert!((p.3 - o.3).abs() <= 0.2 * o.3, "44 to 54 ft/s in {} s, the original in {}", p.3, o.3);
 }
 
 // --- S54: more than one rider -----------------------------------------------------------------------
