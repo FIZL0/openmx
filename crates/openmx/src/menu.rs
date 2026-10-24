@@ -1800,10 +1800,12 @@ pub enum Screen {
     Camera,
     /// The mods folder's switch and its packs, each on or off (P118).
     Mods,
+    /// Settings' Graphics tab (P128): the world's draw and the picture's rate, `--screen graphics`.
+    Graphics,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 17] = [
+    pub const ALL: [Screen; 18] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -1821,6 +1823,7 @@ impl Screen {
         Screen::Audio,
         Screen::Camera,
         Screen::Mods,
+        Screen::Graphics,
     ];
 
     fn index(self) -> usize {
@@ -1847,6 +1850,7 @@ impl Screen {
             Screen::Audio => "audio",
             Screen::Camera => "camera",
             Screen::Mods => "mods",
+            Screen::Graphics => "graphics",
         }
     }
 
@@ -1873,6 +1877,7 @@ impl Screen {
             Screen::Audio => "Game Audio Options",
             Screen::Camera => "Camera",
             Screen::Mods => "Mods",
+            Screen::Graphics => "Graphics",
         }
     }
 }
@@ -2748,9 +2753,13 @@ impl Menu {
                 self.pause();
                 self.open_settings(pages::TAB_AUDIO);
             }
-            Screen::Controls | Screen::Camera => {
+            Screen::Controls | Screen::Camera | Screen::Graphics => {
                 self.main();
-                self.open_settings(if screen == Screen::Controls { pages::TAB_CONTROLS } else { pages::TAB_CAMERA });
+                self.open_settings(match screen {
+                    Screen::Controls => pages::TAB_CONTROLS,
+                    Screen::Camera => pages::TAB_CAMERA,
+                    _ => pages::TAB_GRAPHICS,
+                });
             }
             Screen::Settings => {
                 self.main();
@@ -2809,7 +2818,7 @@ impl Menu {
             Screen::Main => MAIN.len(),
             Screen::Tracks => self.track_count(),
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods => self.page_of(screen).len().max(1),
-            Screen::Controls | Screen::Audio | Screen::Camera => 1,
+            Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => 1,
             Screen::Keyboard => KEY_ROWS.len() + 1,
             Screen::Pause => PAUSE.len() + 2 * usize::from(self.opening != Opening::No),
             Screen::Online => ONLINE.len() + 1,
@@ -3066,7 +3075,7 @@ impl Menu {
                 }
             }
             // Settings' tabs now; never on the stack.
-            Screen::Controls | Screen::Audio | Screen::Camera => self.pop(),
+            Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => self.pop(),
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
