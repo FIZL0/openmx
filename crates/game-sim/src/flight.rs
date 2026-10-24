@@ -347,6 +347,38 @@ impl Flight {
         *self = back;
     }
 
+    /// **Fly on as `other` flies** (P141, a teleport onto a player flying the plane): [`Flight::put_back`]
+    /// of `other`'s whole motion — where it is and its attitude, its speed and spin, the surfaces,
+    /// the engine, the wheels — moved `beside` feet along its right wing (its orientation's first
+    /// row), so the two planes fly on side by side. What stays this flight's: its throttle, the pad
+    /// its last input step stored, its spawn (where a wreck's recovery puts it back) and whether it
+    /// is flown; the modifiers' numbers as [`Flight::put_back`] keeps them. `other` is flying and not
+    /// wrecked, so this plane comes out of any wreck it was in.
+    pub fn fly_as(&mut self, other: &Flight, beside: F, acos: &AcosTable) {
+        let (throttle, pad, spawn, flown) = (self.surfaces.throttle, self.pad, self.spawn, self.attitude.flown);
+        self.put_back(other);
+        (self.surfaces.throttle, self.pad, self.spawn, self.attitude.flown) = (throttle, pad, spawn, flown);
+        let side = self.measure.matrix.0[0];
+        let shift = CLEAR.merge(Dest::XYZ, side.mul(Vf::splat(beside.to_f32())));
+        let b = &mut self.body;
+        b.position = b.position.merge(Dest::XYZ, b.position.add(shift));
+        b.last_position = b.last_position.merge(Dest::XYZ, b.last_position.add(shift));
+        self.remeasure(acos);
+    }
+
+    /// **Put in the air at a speed** (P141, a teleport onto a rider who is moving): unwrecked and
+    /// stood at `origin` along `facing`, wings level, as [`Flight::reset`] stands it, and then moving
+    /// at `vel` (`xyz`, feet a second) — at a rider's speed, which is far under the plane's stall,
+    /// so it drops until the throttle and the dive give it flying speed. This flight's throttle and
+    /// its spawn (where a wreck's recovery puts it back) stay its own.
+    pub fn launch(&mut self, origin: Vf, facing: Vf, vel: Vf, acos: &AcosTable) {
+        let (throttle, spawn) = (self.surfaces.throttle, self.spawn);
+        self.reset(origin, facing, acos);
+        (self.surfaces.throttle, self.spawn) = (throttle, spawn);
+        self.body.velocity = CLEAR.merge(Dest::XYZ, vel);
+        self.remeasure(acos);
+    }
+
     /// The plane with its collision object's ray probe: the rays of `Biplane\col\biplanem.col`
     /// ([`Rays::of`]), which is what the original's plane loader builds the probe from.
     pub fn with_rays(mut self, rays: Rays) -> Flight {
