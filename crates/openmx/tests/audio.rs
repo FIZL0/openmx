@@ -1019,3 +1019,22 @@ fn the_ride_bikes_samples_are_the_originals() {
         assert_eq!(sounds.looping(s), o.ee.i32_at(p + note_at::LOOPING) != 0, "{s:?} loops as the original's does");
     }
 }
+
+/// The front end's sounds off the disc (P65): `ui.aud`'s five clicks, and the music's two mono
+/// halves as one stereo loop at their 32 kHz.
+#[test]
+fn the_menus_sounds_come_off_the_disc() {
+    let Some(disc) = disc() else { return };
+    let sounds = audio::MenuSounds::load(disc).unwrap();
+    let music = sounds.music.as_ref().expect("UI_001's halves");
+    assert_eq!((music.rate, music.channels, music.frames()), (32000, 2, 1_202_124));
+    assert_eq!(sounds.clicks.len(), 5);
+    let up_down = sounds.clip(audio::Click::UpDown).expect("up_down");
+    assert_eq!((up_down.rate, up_down.channels, up_down.frames()), (44100, 1, 280));
+    assert_eq!(sounds.clip(audio::Click::LeftRight).unwrap().rate, 22050);
+    for click in [audio::Click::Accept, audio::Click::Cancel, audio::Click::Locked] {
+        let c = sounds.clip(click).unwrap_or_else(|| panic!("{click:?}"));
+        assert!(rms(&c.pcm) > 100.0, "{click:?} is heard");
+    }
+    println!("the menus' sounds: {} frames of music, five clicks", music.frames());
+}

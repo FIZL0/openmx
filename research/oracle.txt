@@ -4865,3 +4865,31 @@ asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle
 # (80,30,30), +0x670 damper base (3.2,2,2). Request: +0xf0/+0xf4 point at the bike box (centre
 # (0,4.3,-1.5), half (0.45,0.6,1.75)); +0x170 pitch (~ the body machine's mix lag), +0x178 speed
 # (not the velocity's length; writer not found, S111).
+
+# P65 — the front end's music and clicks (journal 2026-10-24-p65-menu-sound), read for
+# crates/openmx/src/menu.rs and audio.rs. The UI manager is the app's (0x0041f770) +0x3d0; its
+# +0xd8 is the menu music's sound, +0xdc and +0xe0 two UIResponseEmitters, one a player.
+#   The emitters read UI\ui.aud (aud\ui\ui.aud in UI\ui.res, the same in every ride UI archive),
+#   [UIResponseEmitter]: Sound1 UI\up_down, 2 UI\left_right, 3 UI\accept, 4 UI\cancel, 5 UI\locked,
+#   6-8 UI\1st_game/2nd_game/3rd_game (streamed stereo stings).
+#   The music is "UI\UI_001" with l and r after it: UI_001l.VAG and UI_001r.VAG, mono, 32000 Hz,
+#   1202124 frames each, looping from frame 28 (block 1's flag 6, later blocks' 2).
+ui_screen_open_sound boot 0x00241b20 the shared init of 22 front-end screens: makes the music when
+#                                   the app's +0x3cc is 0 (no ride, no attract demo), and the emitters
+ui_bank_sound_make  boot 0x00165b90 (bank, "UI\UI_001", 0xc1, 1, 0, 0) for the music
+ui_emitter_load     boot 0x001b9fd0 (emitter, "UI\ui.aud", "UI")
+ui_sound_play       boot 0x00242410 (ui, sound 1..8, 1, player): 251 callers (1: 38, 2: 62, 3: 59,
+#                                   4: 39, 5: 49, 6/7/8: 1 each)
+ui_sound_playing    boot 0x00242440
+ui_sound_stop       boot 0x00242490
+ui_sounds_free      boot 0x002424c0
+#   Screens start the music when it is not playing (0x002cab50, 0x002e7020, 0x002ed8e0, 0x002edd20);
+#   the movie viewer stops it (0x002f64d0) and starts it again (0x002f65d0); the audio options' song
+#   preview (0x003bf250 case 0x3a) plays accept, stops it and plays the song, 0x003bf530 restarts it.
+#   What each press plays, from pause_audio_input (0x00299400): up/down (events 0x34/0x35) sound 1;
+#   left/right (0x32/0x33) a slider +-5 and sound 2 when it moved, else sound 5, on a fresh press only
+#   (the repeat flag, bit 2, and +0xbc keep repeats quiet); accept (0x36) 3; back (0x38) 4; the song
+#   row with under two songs 5.
+#   Live (PCSX2): the music's sound +0x34 (its voice) is -1 until the main menu, then one handle for
+#   over 30 s (it loops); the attract demo has +0x3cc set and +0xd8 0; a training movie sets the
+#   voice -1 and the list after it has a new one.
