@@ -3442,15 +3442,20 @@ fn bike_rows(cap: &Capture) -> Option<Vec<(F, F, F)>> {
 /// own numbers — whose spring rates, tire forces and mass are not the recording's, so no amount of
 /// right ground would make the suspension agree.
 fn the_bike_the_human_rode(disc: &mut Disc, tables: &RiderTables) -> Option<BikePhy> {
+    the_bike_named(disc, tables, FREERIDE_PHY)
+}
+
+/// [`the_bike_the_human_rode`] for any `.phy` (S89's free06 state rides `race250a.phy`).
+fn the_bike_named(disc: &mut Disc, tables: &RiderTables, name: &str) -> Option<BikePhy> {
     for archive in disc.bike_archives() {
         let Some(bytes) = disc.member(&archive) else { continue };
         let Ok(res) = Res::parse(&bytes) else { continue };
-        if let Some(phy) = by_suffix(&res, FREERIDE_PHY).and_then(|e| res.read(&bytes, e).ok()) {
-            println!("the bike: {FREERIDE_PHY} out of {archive}, {} bytes", phy.len());
+        if let Some(phy) = by_suffix(&res, name).and_then(|e| res.read(&bytes, e).ok()) {
+            println!("the bike: {name} out of {archive}, {} bytes", phy.len());
             return Some(BikePhy::read_bytes(&phy, &tables.ride.curve));
         }
     }
-    println!("no {FREERIDE_PHY} in any Bike\\*.res on this disc");
+    println!("no {name} in any Bike\\*.res on this disc");
     None
 }
 
@@ -3484,10 +3489,15 @@ const FREERIDE_MODEL: &str = "125_faisst";
 /// up, and a floor 1.42 units lower would have fitted. The model's nodes sit at y ≈ 1.23 and 1.19,
 /// 1.48 and 1.44 units higher — it was the mounts, and the ground is what D6 says it is.
 fn the_wheels_the_human_rode(disc: &mut Disc) -> Option<(Vf, Vf)> {
+    the_wheels_of(disc, FREERIDE_MODEL)
+}
+
+/// [`the_wheels_the_human_rode`] for any bike model (S89's free06 state rides `250_motoxxx`).
+fn the_wheels_of(disc: &mut Disc, model: &str) -> Option<(Vf, Vf)> {
     let archives: Vec<String> = disc
         .bike_archives()
         .into_iter()
-        .filter(|a| a.to_ascii_lowercase().contains(FREERIDE_MODEL))
+        .filter(|a| a.to_ascii_lowercase().contains(model))
         .collect();
     for archive in archives {
         let Some(bytes) = disc.member(&archive) else { continue };
@@ -3539,13 +3549,18 @@ impl SaveState {
     /// land on the human's rider.
     fn open() -> Option<SaveState> {
         let at = private_dir("states").join(format!("{RECORDING}_SaveState.eeMemory.bin"));
-        let Ok(ram) = std::fs::read(&at) else {
+        Self::open_image(&at, &[0x34, 0x34, 0x8, 0x8, 0x0])
+    }
+
+    /// [`SaveState::open`] on another image, whose human rider is `hops` down from the game manager.
+    fn open_image(at: &std::path::Path, hops: &[u32]) -> Option<SaveState> {
+        let Ok(ram) = std::fs::read(at) else {
             println!("no {} — `./kit state ram` of the recording's save state writes it", at.display());
             return None;
         };
         let mut state = SaveState { ram, rider: 0 };
         let mut a = state.word(Self::GAME_MANAGER)?;
-        for hop in [0x34, 0x34, 0x8, 0x8, 0x0] {
+        for &hop in hops {
             a = state.word(a + hop)?;
         }
         // A rider (type 2) and the local human's (control source 1), or the chain is pointing elsewhere.
@@ -3723,6 +3738,16 @@ fn in_the_world_of<R>(
     cap: &Capture,
     then: impl FnOnce(&mut dyn World, &Where, Option<Ridden>) -> R,
 ) -> Option<R> {
+    in_the_world_on(cap, FREERIDE_PHY, FREERIDE_MODEL, then)
+}
+
+/// [`in_the_world_of`] on a bike of its own: the `.phy` and the model whose tire nodes hang its wheels.
+fn in_the_world_on<R>(
+    cap: &Capture,
+    phy: &str,
+    model: &str,
+    then: impl FnOnce(&mut dyn World, &Where, Option<Ridden>) -> R,
+) -> Option<R> {
     let mut disc = Disc::open()?;
     let (area, _) = recorded_on(cap, &mut disc)?;
     let (props, missed) = area.props(&mut disc);
@@ -3745,10 +3770,10 @@ fn in_the_world_of<R>(
     // folds the game's own {cos, sin} curve into half a dozen parameters, so a bike read against one
     // table and ridden against another is a different bike.
     let tables = Arc::new(RiderTables::build());
-    let bike = the_bike_the_human_rode(&mut disc, &tables).map(|phy| {
-        let mounts = the_wheels_the_human_rode(&mut disc).unwrap_or_else(|| {
+    let bike = the_bike_named(&mut disc, &tables, phy).map(|phy| {
+        let mounts = the_wheels_of(&mut disc, model).unwrap_or_else(|| {
             println!(
-                "no {FREERIDE_MODEL} model with TireFront/TireRear nodes on this disc: the wheels \
+                "no {model} model with TireFront/TireRear nodes on this disc: the wheels \
                  hang off the .phy's BodyTireForcePosition instead, which is not where the \
                  original hangs them, and the run will part at tick 1",
             );
@@ -6893,4 +6918,254 @@ fn the_save_state_run_starts_from_the_originals_wheels() {
         ratchet("the save-state run", whole, SAVE_STATE_AGREES_THROUGH, "SAVE_STATE_AGREES_THROUGH");
         ratchet("its bike's position", bike_at, SAVE_STATE_POSITION_AGREES_THROUGH, "SAVE_STATE_POSITION_AGREES_THROUGH");
     });
+}
+
+// ===================================================================================================
+// S89 — rides on free06's railway bed, from S89's own save states
+// ===================================================================================================
+//
+// The railway is a raised ballast bed of 62 collision meshes of surface 1 (S89's first entry). These
+// are two rides on it in the original, recorded with `watch/s89-rails.toml` from save states S89 made
+// out of the human's biplane state on free06 (the pause menu's "Switch To Machine: Bike", then a
+// teleport onto the bed): along its x≈4591 straight from standing (gas, the brake, gas, a turn), and
+// straight across its z≈4607 straight at speed. Each replays here from the state's whole bike, S64's
+// way, on the same bike (`race250a.phy` on `250_motoxxx`'s wheel mounts) and the same pads.
+
+/// S89's rides: `context/capture/s89/<name>.csv` and the RAM image of the state it was recorded from,
+/// `context/states/s89-<name>.eeMemory.bin` (`./kit state ram` of the slot it was saved to).
+const S89_RIDES: [&str; 2] = ["along", "across"];
+
+/// The human's rider in S89's states: the fourth entry of the game manager's actor list, where the
+/// acceptance recording's is the third.
+const S89_RIDER: [u32; 6] = [0x34, 0x34, 0x8, 0x8, 0x8, 0x0];
+
+/// The tick each of [`S89_RIDES`] agrees through on every lane, in that order. A ratchet like
+/// [`SAVE_STATE_AGREES_THROUGH`]: parting at or before it fails, agreeing further asks to raise it.
+const S89_AGREES_THROUGH: [u64; 2] = [0, 1];
+
+/// The tick each wheel's slip and contact lanes agree through on each of [`S89_RIDES`] (`u64::MAX`:
+/// every tick), though the chassis parts at tick 1. A ratchet: parting earlier fails.
+const S89_LANES_AGREE_THROUGH: [(&str, [u64; 2]); 12] = [
+    ("rider.ride.front.slip.spinning", [u64::MAX, u64::MAX]),
+    ("rider.ride.front.slip.locked", [279, u64::MAX]),
+    ("rider.ride.front.slip.sliding", [u64::MAX, u64::MAX]),
+    ("rider.ride.rear.slip.spinning", [31, 16]),
+    ("rider.ride.rear.slip.locked", [277, u64::MAX]),
+    ("rider.ride.rear.slip.sliding", [u64::MAX, u64::MAX]),
+    // Along, the bed is rows 0-107: the contact agrees until the wheels drop off it.
+    ("rider.ride.front.w.ray_hit", [105, 49]),
+    ("rider.ride.front.w.swept_contact", [105, 49]),
+    ("rider.ride.front.surface", [164, 59]),
+    ("rider.ride.rear.w.ray_hit", [107, 52]),
+    ("rider.ride.rear.w.swept_contact", [107, 52]),
+    ("rider.ride.rear.surface", [166, 62]),
+];
+
+/// A tick of a ride, as the original's row and the port's run each had it: the bike's speed across
+/// its own heading, and per wheel (front, rear) whether the ray hit, the sweep made a contact, and
+/// the surface byte the wheel holds.
+#[derive(Clone, Copy, Debug)]
+struct RailTick {
+    side: f32,
+    ray: [bool; 2],
+    swept: [bool; 2],
+    surface: [u8; 2],
+}
+
+impl RailTick {
+    /// Both wheels on a prop and neither on the terrain: the bed, on these rides.
+    fn on_the_bed(&self) -> bool {
+        self.swept[0] && self.swept[1] && !self.ray[0] && !self.ray[1]
+    }
+}
+
+/// The original's [`RailTick`]s, one per row.
+fn rail_ticks_of(cap: &Capture) -> Vec<RailTick> {
+    let col = |name: &str| column(cap, name).unwrap_or_else(|e| panic!("{e}"));
+    let num = |r: usize, name: &str| -> f32 { cell(cap, r, col(name)).parse().unwrap_or(f32::NAN) };
+    let flag = |r: usize, name: &str| cell(cap, r, col(name)) != "0";
+    (0..cap.rows.len())
+        .map(|r| {
+            let v = [num(r, "ch_vel.x"), num(r, "ch_vel.y"), num(r, "ch_vel.z")];
+            let x = [num(r, "bike_xform.m00"), num(r, "bike_xform.m01"), num(r, "bike_xform.m02")];
+            RailTick {
+                side: v[0] * x[0] + v[1] * x[1] + v[2] * x[2],
+                ray: [flag(r, "f_ray_hit"), flag(r, "r_ray_hit")],
+                swept: [flag(r, "f_swept"), flag(r, "r_swept")],
+                surface: [num(r, "f_surface") as u8, num(r, "r_surface") as u8],
+            }
+        })
+        .collect()
+}
+
+/// The port's [`RailTick`] after a tick.
+fn rail_tick_of(sim: &Sim) -> RailTick {
+    let ride = &sim.rider.ride;
+    let (v, m) = (ride.chassis.vel, ride.transform());
+    let x = m.0[0];
+    RailTick {
+        side: v.x() * x.x() + v.y() * x.y() + v.z() * x.z(),
+        ray: [ride.front.w.ray_hit != 0, ride.rear.w.ray_hit != 0],
+        swept: [ride.front.w.swept_contact != 0, ride.rear.w.swept_contact != 0],
+        surface: [ride.front.surface, ride.rear.surface],
+    }
+}
+
+/// **S89's rides on the Dallas railway bed, in the original and replayed.** What the original does on
+/// the bed is asserted off its own rows: the wheels stand on it through the sweep alone, never the
+/// ray, and hold the terrain's surface byte (0 or 12), never the bed's 1; and the bike does not
+/// slide (under 2 ft/s across its heading, which only the rock onto the shoulder comes near). The
+/// port's run from the same state and pads is then compared lane by lane, S64's way, with each
+/// lane's first divergence printed and the whole run's held by [`S89_AGREES_THROUGH`].
+#[test]
+fn the_dallas_rail_rides_replay_from_their_save_states() {
+    for (k, name) in S89_RIDES.iter().enumerate() {
+        let path = private_dir("capture").join("s89").join(format!("{name}.csv"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("no {} — `watch/s89-rails.toml` says how it is recorded", path.display());
+            continue;
+        };
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let image = private_dir("states").join(format!("s89-{name}.eeMemory.bin"));
+        let Some(st) = SaveState::open_image(&image, &S89_RIDER) else { continue };
+        // Recorded at a quarter speed, so a row is read before its tick and the first is a tick or two
+        // after the image's (the recorder's settle runs on): [`quarter_ticks`] numbers them.
+        let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+        let first: u64 = cell(&cap, 0, column(&cap, "frame_counter").unwrap()).parse().unwrap();
+        assert!(first > saved, "{}: frame {saved}, after {}'s first row {first}", image.display(), path.display());
+
+        // The original, off its rows.
+        let orig = rail_ticks_of(&cap);
+        let bed: Vec<usize> = (0..orig.len()).filter(|&r| orig[r].on_the_bed()).collect();
+        // Along stays on the top for 108 rows before it drifts off; across crosses it in 4 (55-58).
+        let least = [100, 4][k];
+        assert!(bed.len() >= least, "{name}: the original was on the bed {} rows", bed.len());
+        for &r in &bed {
+            for w in 0..2 {
+                assert!(
+                    [0, 12].contains(&orig[r].surface[w]),
+                    "{name} row {r}: wheel {w} held surface {} on the bed",
+                    orig[r].surface[w]
+                );
+            }
+        }
+        let slid = bed.iter().map(|&r| orig[r].side.abs()).fold(0.0, f32::max);
+        println!("{name}: the original on the bed {} of {} rows, at most {slid} across its heading", bed.len(), orig.len());
+        // Under 0.04 on the bed's flat top; the most (1.24, along, at 67 ft/s) is the bike rocking over
+        // onto the shoulder as it drifts off the top.
+        assert!(slid < 2.0, "{name}: the original slid at {slid} on the bed");
+
+        let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let inputs = inputs_from_capture(&cap).unwrap_or_else(|e| panic!("{name}: {e}"));
+        in_the_world_on(&cap, "race250a.phy", "250_motoxxx", |world, named, bike| {
+            if let Some(b) = &bike {
+                for (w, mount) in [b.mounts.0, b.mounts.1].into_iter().enumerate() {
+                    let at = st.wheel_at(w).and_then(|a| st.vf(a + 0xa0));
+                    println!("{name}: wheel {w} hangs at {mount:?}, the original's at {at:?}");
+                }
+            }
+            let mut sim = acceptance_start(&cap, 0, bike).unwrap();
+            let ride = &mut sim.rider.ride;
+            st.seed_chassis(ride).expect("the chassis");
+            st.seed_wheels(ride).expect("both wheels");
+            st.seed_balance(ride).expect("the balance");
+            st.seed_engine_outputs(ride).expect("the engine");
+            st.seed_air(ride).expect("the air state");
+            if let Some(d) = st.drivetrain() {
+                d.seed(ride);
+            }
+            let mut watches = Vec::new();
+            for (col, path) in chassis_lanes() {
+                let Ok(w) = cap.float(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, path) in slip_lanes() {
+                let Ok(w) = cap.bool(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, wheel) in [("f", "front"), ("r", "rear")] {
+                if let Ok(w) = cap.int(&format!("{col}_ray_hit"), &format!("rider.ride.{wheel}.w.ray_hit")) {
+                    watches.push(retick(w, &ticks, 0));
+                }
+                if let Ok(w) = cap.int(&format!("{col}_swept"), &format!("rider.ride.{wheel}.w.swept_contact")) {
+                    watches.push(retick(w, &ticks, 0));
+                }
+                if let Ok(w) = cap.uint(&format!("{col}_surface"), &format!("rider.ride.{wheel}.surface")) {
+                    watches.push(retick(w, &ticks, 0));
+                }
+            }
+            let last = *ticks.last().unwrap() as usize + 1;
+            let mut pads = inputs.clone();
+            pads.resize(last.max(pads.len()), Input::default());
+            let f = Fixture {
+                name: format!("s89 {name} from its save state"),
+                seed: 0,
+                start: Some(sim.clone()),
+                inputs: pads.clone(),
+                watches,
+                world: Some(named.clone()),
+                ..Default::default()
+            };
+            let parts = |f: &Fixture, world: &mut dyn World| match replay::verify_in(f, world) {
+                Ok(_) => {
+                    println!("{}: agrees on every tick", f.name);
+                    None
+                }
+                Err(d) => {
+                    println!("{}: {d}", f.name);
+                    Some(d.tick)
+                }
+            };
+            let whole = parts(&f, world);
+            for w in &f.watches {
+                let one = Fixture { name: format!("  {}", w.path), watches: vec![w.clone()], hashes: Vec::new(), ..f.clone() };
+                let through = parts(&one, world).map_or(u64::MAX, |t| t - 1);
+                if let Some((_, want)) = S89_LANES_AGREE_THROUGH.iter().find(|(p, _)| *p == w.path) {
+                    assert!(through >= want[k], "{name}: {} agrees through tick {through}, was {}", w.path, want[k]);
+                    if through > want[k] {
+                        println!("{name}: {} now agrees through tick {through}: raise S89_LANES_AGREE_THROUGH", w.path);
+                    }
+                }
+            }
+            for (path, _) in S89_LANES_AGREE_THROUGH {
+                assert!(f.watches.iter().any(|w| w.path == path), "{name}: no {path} lane in the capture");
+            }
+
+            // The port's own run beside the original's rows: where each stood on the bed, and how
+            // fast each went across its heading there.
+            let mut port = Vec::with_capacity(last);
+            for t in 1..last {
+                sim.tick_in(pads[t - 1], world);
+                port.push((t as u64, rail_tick_of(&sim)));
+            }
+            let on = port.iter().filter(|(_, p)| p.on_the_bed()).count();
+            let port_slid = port.iter().filter(|(_, p)| p.swept[0] || p.swept[1]).map(|(_, p)| p.side.abs()).fold(0.0, f32::max);
+            println!("{name}: the port on the bed {on} of {} ticks, at most {port_slid} across its heading on a prop", port.len());
+            // Not yet bit-exact (tick 1 parts by a few ulps, S107's), but the port rides the bed the
+            // original's way: as long, through the sweep, on the terrain's surface byte, and no slide.
+            assert!(on >= least, "{name}: the port was on the bed {on} ticks, the original {}", bed.len());
+            for (t, p) in port.iter().filter(|(_, p)| p.on_the_bed()) {
+                assert!(p.surface.iter().all(|s| [0, 12].contains(s)), "{name} tick {t}: the port held {:?} on the bed", p.surface);
+            }
+            assert!(port_slid < 2.0, "{name}: the port slid at {port_slid} on the bed");
+            for (r, &t) in ticks.iter().enumerate().step_by(10) {
+                if let Some((_, p)) = port.iter().find(|(pt, _)| *pt == t) {
+                    let o = orig[r];
+                    println!(
+                        "{name} tick {t:4}: original side {:7.3} ray {:?} swept {:?} surface {:?} | port side {:7.3} ray {:?} swept {:?} surface {:?}",
+                        o.side, o.ray, o.swept, o.surface, p.side, p.ray, p.swept, p.surface
+                    );
+                }
+            }
+            match whole {
+                Some(t) if t <= S89_AGREES_THROUGH[k] => panic!(
+                    "{name} parts from the original at tick {t}, at or before S89_AGREES_THROUGH[{k}] = {}: a regression",
+                    S89_AGREES_THROUGH[k]
+                ),
+                Some(t) if t > S89_AGREES_THROUGH[k] + 1 => println!("{name} now agrees through tick {}: raise S89_AGREES_THROUGH[{k}]", t - 1),
+                None => println!("{name} agrees on every tick: raise S89_AGREES_THROUGH[{k}]"),
+                _ => {}
+            }
+        });
+    }
 }

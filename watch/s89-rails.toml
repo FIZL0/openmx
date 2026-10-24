@@ -1,0 +1,567 @@
+# s89-rails.toml — rides on free06's railway bed (S89), with s64-wheels' lanes, the pad, and each
+# wheel's contact flags and surface byte.
+#
+# The states are S89's own, made from the human's biplane recording's state (free06): the pause
+# menu's "Switch To Machine: Bike", then P21's teleport (every copy of the bike's position moved by one
+# delta, the chassis' velocities zeroed) onto the bed's x≈4591 straight facing +z ("along"), or 47 ft
+# short of the z≈4607 straight facing +z ("across"), braked and settled, then saved. In those states
+# the human's rider is the fourth entry of the game manager's actor list and the bike the eighth, so
+# the chains below are three and seven `next` hops where s64-wheels' are two and eight; the capture's
+# rider_ctl_src must read 1 on every row. The bike is Race250A.phy on the 250_motoxxx model.
+#
+# Recorded at a quarter speed as s64-wheels is (NominalScalar 0.25, settle_ms 240), the state in the
+# scratch slot 9, the pad script beside it:
+#
+#   ./kit pcsx2 with -- ./kit record watch/s89-rails.toml --state 9 --pad watch/pads/s89-along.pad \
+#       -n 600 -o context/capture/s89/along.csv
+#
+# +0xd4 is the swept contact (the collision sweep put a contact on the wheel), +0x110 the surface byte
+# the heightfield query writes on every pass of the wheel's ray (S89's first entry: terrain only,
+# nearest corner).
+
+[watch]
+name        = "s89-rails"
+description = "a ride on free06's railway bed: s64-wheels' lanes, the pad, the wheels' contacts and surface"
+every       = 1
+frames      = 900
+
+[setup]
+state   = 9
+warmup  = 0
+settle_ms = 240
+
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+# --- the input, as libpad left it on the wire -------------------------------------------------------
+# Both 0x80-byte halves of port 0's buffer and both stamps, because `scePadRead` takes the half with
+# the larger stamp and a PINE row is sampled *after* the tick — by which time the IOP has refreshed the
+# other half, so the half the game actually read is the one with the *smaller* stamp (C5 measured this
+# on 300 of 300 rows). Bytes [2..3] are the button word, active low; [4..7] are RX RY LX LY, centre
+# 0x7f. The sticks come from here because the control state has no axes.
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"              # pinned at the 30 fps clamp in a level: 0.033330001
+addr = "@frame_dt"
+type = "f32"
+
+# --- which actor this is -----------------------------------------------------------------------------
+[[field]]
+name = "rider_type"      # +0x00: 2 = a rider
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "rider_ctl_src"   # +0x20 -> +0x34: 1 = a local human, 2 = an AI
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+required = true
+
+# --- what the wreck test reads -----------------------------------------------------------------------
+# +0x550: the per-lane signed max-by-magnitude of the body-frame acceleration over the frame's
+# substeps (`g_peak`). x is the sideways lane the side wreck test compares against
+# SideWreckSpeedLimit; y is the vertical lane. This is the column P3's port blows up and the original
+# must not.
+[[field]]
+name = "g_peak"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x550"
+type = "f32x4"
+
+[[field]]
+name = "wreck_reason"    # +0x748: 0 while riding
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+# --- the chassis the solver moves (rider +0x7a4) ------------------------------------------------------
+[[field]]
+name = "ch_accel"        # +0x70: the acceleration `g_peak` unrotates
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "ch_cofg"         # +0x60: centre of gravity in world space
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "ch_force"        # +0x130: the force accumulator at the end of the frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x130"
+type = "f32x4"
+
+[[field]]
+name = "ch_torque"       # +0x140
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x140"
+type = "f32x4"
+
+[[field]]
+name = "ch_vel"          # +0x260: world velocity
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "ch_body_vel"     # +0x270: the same velocity in the body frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x270"
+type = "f32x4"
+
+[[field]]
+name = "ch_ang_vel"      # +0x280: world angular velocity — the lane a ringing solver shows first
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x280"
+type = "f32x4"
+
+# +0x170: the *impact* acceleration accumulator — cleared once a frame beside the g loads and written
+# only by the bottom-out branch of `wheel_tire_forces`, which takes the into-the-ground part out of the
+# chassis' velocity and records what it took over dt. This is the vector the ground step unrotates into
+# the g loads, and the port feeds them the integrate's own +0x70 instead. Both are in this capture so
+# the swap is a column comparison and not an argument.
+[[field]]
+name = "ch_impact"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x170"
+type = "f32x4"
+
+# +0x80: the angular acceleration the integrate writes, and +0x180 the angular half of the impact
+# accumulator the same clear empties.
+[[field]]
+name = "ch_ang_accel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x80"
+type = "f32x4"
+
+[[field]]
+name = "ch_ang_impact"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x180"
+type = "f32x4"
+
+# --- the front wheel (rider +0x7b0) ------------------------------------------------------------------
+# The mount and the probe length are static, and are here to pin the geometry the solver runs on: the
+# port's shell feeds `BodyTireForcePosition` as the mount and `StrutCompression` as the probe length,
+# and the save state says the original's are the bike model's TireFront/TireRear nodes and the tire
+# radius. One capture row proves both against the running game.
+[[field]]
+name = "f_mount"         # +0xa0: where the strut hangs off the chassis, body frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xa0"
+type = "f32x4"
+
+[[field]]
+name = "f_probe_len"     # +0x214
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x214"
+type = "f32"
+
+[[field]]
+name = "f_spring_rate"   # +0x54, +0x58 damping in, +0x5c damping out
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x54"
+type = "f32"
+
+[[field]]
+name = "f_damp_in"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x58"
+type = "f32"
+
+[[field]]
+name = "f_damp_out"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x5c"
+type = "f32"
+
+[[field]]
+name = "f_comp"          # +0xf0: compression, 0..max
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xf0"
+type = "f32"
+
+[[field]]
+name = "f_last_comp"     # +0xf4: last frame's, the damper's input
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xf4"
+type = "f32"
+
+[[field]]
+name = "f_spring_force"  # +0xf8: the load this wheel carries, lbf
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xf8"
+type = "f32"
+
+[[field]]
+name = "f_ray_hit"       # +0xd0: the probe found ground this substep
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xd0"
+type = "u32"
+
+[[field]]
+name = "f_load_point"    # +0x140: where the tire force is applied, world
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x140"
+type = "f32x4"
+
+[[field]]
+name = "f_normal"        # +0x200: the ground normal under the wheel
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x200"
+type = "f32x4"
+
+[[field]]
+name = "f_contact_vel"   # +0x170: the velocity of the contact point
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x170"
+type = "f32x4"
+
+# --- the rear wheel (rider +0x7b4) -------------------------------------------------------------------
+[[field]]
+name = "r_mount"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xa0"
+type = "f32x4"
+
+[[field]]
+name = "r_probe_len"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x214"
+type = "f32"
+
+[[field]]
+name = "r_spring_rate"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x54"
+type = "f32"
+
+[[field]]
+name = "r_damp_in"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x58"
+type = "f32"
+
+[[field]]
+name = "r_damp_out"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x5c"
+type = "f32"
+
+[[field]]
+name = "r_comp"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xf0"
+type = "f32"
+
+[[field]]
+name = "r_last_comp"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xf4"
+type = "f32"
+
+[[field]]
+name = "r_spring_force"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xf8"
+type = "f32"
+
+[[field]]
+name = "r_ray_hit"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xd0"
+type = "u32"
+
+[[field]]
+name = "r_load_point"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x140"
+type = "f32x4"
+
+[[field]]
+name = "r_normal"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x200"
+type = "f32x4"
+
+[[field]]
+name = "r_contact_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "bike_xform"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+
+[[field]]
+name = "bike_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x4"
+
+[[field]]
+name = "ch_cofg_local"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x190"
+type = "f32x4"
+
+[[field]]
+name = "ch_quat"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x1a0"
+type = "f32x4"
+
+[[field]]
+name = "ch_speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "ch_world_ang_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x290"
+type = "f32x4"
+
+[[field]]
+name = "gas_limited"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x658"
+type = "f32"
+
+[[field]]
+name = "clutch_limited"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x65c"
+type = "f32"
+
+[[field]]
+name = "gas_lever"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x63c"
+type = "f32"
+
+[[field]]
+name = "clutch_lever"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x644"
+type = "f32"
+
+[[field]]
+name = "clutch_timer"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6c0"
+type = "f32"
+
+[[field]]
+name = "clutch_scale_start"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6c4"
+type = "f32"
+
+[[field]]
+name = "clutch_cofg_weight"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6cc"
+type = "f32"
+
+[[field]]
+name = "eng_locked"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b8 -> 0x64"
+type = "u32"
+
+[[field]]
+name = "eng_gear"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b8 -> 0x68"
+type = "u32"
+
+[[field]]
+name = "eng_launch"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b8 -> 0x88"
+type = "f32"
+
+[[field]]
+name = "eng_torque"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b8 -> 0xa0"
+type = "f32"
+
+[[field]]
+name = "eng_wheel_torque"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b8 -> 0xa4"
+type = "f32"
+
+[[field]]
+name = "eng_rpm"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b8 -> 0xa8"
+type = "f32"
+
+[[field]]
+name = "eng_road_rpm"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b8 -> 0xac"
+type = "f32"
+
+[[field]]
+name = "f_spin"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1d4"
+type = "f32"
+
+[[field]]
+name = "r_spin"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x1d4"
+type = "f32"
+
+[[field]]
+name = "f_steer"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x8ac"
+type = "f32"
+
+[[field]]
+name = "ch_xform"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x254 -> 0x40"
+type = "mat4"
+
+# --- S64: the tire half of each wheel ----------------------------------------------------------------
+[[field]]
+name = "f_spinning"     # +0xe0: slip flag, the drive outruns the road
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xe0"
+type = "u32"
+
+[[field]]
+name = "f_locked"       # +0xe4: slip flag, the brake holds the wheel
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xe4"
+type = "u32"
+
+[[field]]
+name = "f_sliding"      # +0xe8: slip flag, the side force saturated
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xe8"
+type = "u32"
+
+[[field]]
+name = "f_local_vel"    # +0x840: the contact patch's velocity, wheel frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x840"
+type = "f32x4"
+
+[[field]]
+name = "f_local_force"  # +0x850: the tire's force, wheel frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x850"
+type = "f32x4"
+
+[[field]]
+name = "f_angle"        # +0x1d0: the wheel's roll angle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1d0"
+type = "f32"
+
+[[field]]
+name = "f_side_per_load" # +0x234
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x234"
+type = "f32"
+
+[[field]]
+name = "f_drive_torque" # +0x210
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x210"
+type = "f32"
+
+[[field]]
+name = "f_steer_rate"   # +0x8b0
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x8b0"
+type = "f32"
+
+[[field]]
+name = "r_spinning"     # +0xe0: slip flag, the drive outruns the road
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xe0"
+type = "u32"
+
+[[field]]
+name = "r_locked"       # +0xe4: slip flag, the brake holds the wheel
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xe4"
+type = "u32"
+
+[[field]]
+name = "r_sliding"      # +0xe8: slip flag, the side force saturated
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xe8"
+type = "u32"
+
+[[field]]
+name = "r_local_vel"    # +0x840: the contact patch's velocity, wheel frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x840"
+type = "f32x4"
+
+[[field]]
+name = "r_local_force"  # +0x850: the tire's force, wheel frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x850"
+type = "f32x4"
+
+[[field]]
+name = "r_angle"        # +0x1d0: the wheel's roll angle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x1d0"
+type = "f32"
+
+[[field]]
+name = "r_side_per_load" # +0x234
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x234"
+type = "f32"
+
+[[field]]
+name = "r_drive_torque" # +0x210
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x210"
+type = "f32"
+
+[[field]]
+name = "balance_command"  # +0xa60
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa60"
+type = "f32"
+
+[[field]]
+name = "balance_point"  # +0xa64
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa64"
+type = "f32"
+
+# --- S64: the chassis integrator's history (each is dx, then the previous dx) --------------------
+[[field]]
+name = "ch_pos_hist"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x2b8"
+type = "f32x3"
+
+[[field]]
+name = "ch_pos_hist_prev"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x2c4"
+type = "f32x3"
+
+[[field]]
+name = "ch_vel_hist"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x2d0"
+type = "f32x3"
+
+[[field]]
+name = "ch_vel_hist_prev"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x2dc"
+type = "f32x3"
+
+[[field]]
+name = "ch_quat_hist"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x2f0"
+type = "f32x4"
+
+[[field]]
+name = "ch_quat_hist_prev"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x300"
+type = "f32x4"
+
+[[field]]
+name = "ch_ang_hist"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x310"
+type = "f32x3"
+
+[[field]]
+name = "ch_ang_hist_prev"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x31c"
+type = "f32x3"
+
+[[field]]
+name = "f_swept"         # +0xd4: the collision sweep put a contact on this wheel this substep
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xd4"
+type = "u32"
+
+[[field]]
+name = "f_surface"       # +0x110: the surface byte the heightfield query wrote
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x110"
+type = "u8"
+
+[[field]]
+name = "r_swept"         # +0xd4: the collision sweep put a contact on this wheel this substep
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xd4"
+type = "u32"
+
+[[field]]
+name = "r_surface"       # +0x110: the surface byte the heightfield query wrote
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x110"
+type = "u8"

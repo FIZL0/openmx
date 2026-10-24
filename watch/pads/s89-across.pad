@@ -1,0 +1,15 @@
+# s89-across.pad — S89: straight across free06's railway bed, from s89-rails.toml's "across" state
+# (47 ft short of the z≈4607 straight, facing +z).
+#
+# Wall-clock at a quarter speed, so every game second is 4000 ms here: half a second idle, four on
+# the gas (cross), which carries the bike up the bed's shoulder, over its top and down the far side,
+# a second and a half on the brake (square), and the pad let go.
+#
+#   ./kit record watch/s89-rails.toml --state 9 --pad watch/pads/s89-across.pad -n 300
+sleep 2000
+down cross
+sleep 16000
+up cross
+down square
+sleep 6000
+release
