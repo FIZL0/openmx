@@ -407,17 +407,21 @@ impl Vehicle {
             if lower.starts_with("subobject") {
                 if let Some(model) = section.get("SLT") {
                     parts.push(Part {
-                        model: model.to_string(),
-                        placement: section.get("Placement").unwrap_or("Bike").to_string(),
+                        model: slt_name(model),
+                        placement: slt_name(section.get("Placement").unwrap_or("Bike")),
                     });
                 }
             } else if lower == "objects" {
-                mcf = section.get("MCF").unwrap_or("").to_string();
+                mcf = slt_name(section.get("MCF").unwrap_or(""));
             } else if lower == "material changes" {
                 // Here the keys are the names the meshes use and the values are what to load
-                // instead, so the section is read as pairs rather than looked up by name.
+                // instead, so the section is read as pairs rather than looked up by name. Read as
+                // the original's text reader reads them, without their spaces: 125sx.sub repaints
+                // its plastics with `125 SX_PlasticsAll`, which is `125sx_plasticsall.psm` to the
+                // original and was no material at all here, so its seat, fenders and side panels
+                // were drawn white (V37).
                 for (from, to) in &section.keys {
-                    materials.push((from.clone(), to.clone()));
+                    materials.push((slt_name(from), slt_name(to)));
                 }
             }
         }
@@ -537,6 +541,26 @@ mod tests {
         );
         assert_eq!(m.clamp, [false, true]);
         assert_eq!(Material::parse("[ShaderPass_1]\nTextureMap_1 = x\n").clamp, [false; 2]);
+    }
+
+    /// 125sx.sub's own lines, cut down: its plastics are repainted `125 SX_PlasticsAll`, which the
+    /// original's reader takes without the space (V37).
+    #[test]
+    fn a_bike_build_reads_its_names_without_spaces() {
+        let v = Vehicle::parse(
+            "[Objects]\nMCF = bike.mcf\n[Material Changes]\nCR-250_PlasticsAll=125SX_PlasticsAll\n\
+             250SX_PlasticsAll=125 SX_PlasticsAll\n;Tire=Tire\n[SubObject7]\nSLT=Crossbar\n\
+             ;SLT=Fatbar_Pad\nPlacement = Handlebars\n",
+        );
+        assert_eq!(v.mcf, "bike.mcf");
+        assert_eq!(
+            v.materials,
+            [
+                ("CR-250_PlasticsAll".to_string(), "125SX_PlasticsAll".to_string()),
+                ("250SX_PlasticsAll".to_string(), "125SX_PlasticsAll".to_string()),
+            ]
+        );
+        assert_eq!((v.parts[0].model.as_str(), v.parts[0].placement.as_str()), ("Crossbar", "Handlebars"));
     }
 
     #[test]

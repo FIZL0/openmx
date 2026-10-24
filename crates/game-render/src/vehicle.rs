@@ -328,8 +328,8 @@ impl Drive {
 pub struct Chassis {
     /// The bike's clips, the chassis skeleton, the live pose and the machine stepping them.
     pub stance: Stance,
-    /// The model to load and to draw the chassis as: the `.mcf`'s own `SLTFile`, which is `bike` for
-    /// every bike on this disc.
+    /// The model to load and to draw the chassis as: the `.mcf`'s own `SLTFile`, `bike` for every
+    /// full-size bike on this disc and `bike50` under the fast50s ([`chassis_model`]).
     pub geometry: String,
     /// The six nodes the drives write.
     pub nodes: Nodes,
@@ -843,4 +843,26 @@ fn unplace(m: M4, p: V3) -> V3 {
         q.x * m.0[1][0] + q.y * m.0[1][1] + q.z * m.0[1][2],
         q.x * m.0[2][0] + q.y * m.0[2][1] + q.z * m.0[2][2],
     )
+}
+
+/// The chassis model a bike is drawn on, before any [`Chassis`] is loaded: the `SLTFile` of the
+/// `.mcf` its `.sub` names, read out of the first archive that has that set (V37). That is `bike` for
+/// every full-size bike on this disc and `bike50` for the five fast50s, whose archives have no
+/// `bike.psg` at all, so a renderer that always loaded `bike` drew a fast50 as its parts floating on
+/// nothing. A `.sub` naming no set, or a set that cannot be read, falls back to `bike`.
+pub fn chassis_model(archives: &[Res], vehicle: &crate::scene::Vehicle) -> String {
+    // `bike.mcf` would also end `xbike.mcf`, so the name is looked for after a slash first.
+    let mcf = vehicle.mcf.rsplit(['\\', '/']).next().unwrap_or("");
+    let geometry = match mcf.is_empty() {
+        true => String::new(),
+        false => archives
+            .iter()
+            .find_map(|a| a.read_suffix(&format!("\\{mcf}")).or_else(|_| a.read_suffix(mcf)).ok())
+            .map(|bytes| crate::rider::MotionSet::parse(&crate::ini::text(&bytes)).geometry())
+            .unwrap_or_default(),
+    };
+    match geometry.is_empty() {
+        true => ROOT.to_ascii_lowercase(),
+        false => geometry,
+    }
 }

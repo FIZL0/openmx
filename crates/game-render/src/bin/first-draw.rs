@@ -167,7 +167,8 @@ fn run() -> Result<(), String> {
     }
     // The actor: the bike's own model, which carries its wheels and forks as nodes of one tree,
     // and the parts its `.sub` bolts on.
-    let chassis_name = "bike";
+    let chassis_name = game_render::vehicle::chassis_model(&archives, &vehicle);
+    let chassis_name = chassis_name.as_str();
     let has_bike = assets.load(&archives, chassis_name);
     for part in &vehicle.parts {
         assets.load(&archives, &part.model);

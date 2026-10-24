@@ -115,7 +115,7 @@ fn actor(disc: &mut Disc, bike: &str, rider: Option<&str>) -> Result<(), String>
     let vehicle = Vehicle::parse(&ini::text(&archives[0].read_suffix(&format!("{bike}.sub"))?));
     let mut assets = Assets::default();
     assets.rename_materials(&vehicle.materials);
-    assets.load(&archives, "bike");
+    assets.load(&archives, &game_render::vehicle::chassis_model(&archives, &vehicle));
     for part in &vehicle.parts {
         assets.load(&archives, &part.model);
     }
