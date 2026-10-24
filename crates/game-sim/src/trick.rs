@@ -193,16 +193,16 @@ impl Stunts {
 
     /// What the HUD calls a trick id, for a given player.
     ///
-    /// The three ids that are not table slots have their own names here, spelled as the image spells
-    /// them; everything else is the mapped stunt's display name.
+    /// The ids that are not table slots have their own names here, spelled as the image spells them
+    /// (the port's own 360s in digits); everything else is the mapped stunt's display name.
     pub fn display_name(&self, player: usize, trick: Trick) -> &str {
         match trick {
             Trick::STOPPIE => "Stoppie",
             Trick::WHEELIE => "Wheelie",
             Trick::BACKFLIP => "BackFlip",
             Trick::FRONTFLIP => "Frontflip",
-            Trick::THREE_SIXTY_LEFT => "Three Sixty Left",
-            Trick::THREE_SIXTY_RIGHT => "Three Sixty Right",
+            Trick::THREE_SIXTY_LEFT => "360 Left",
+            Trick::THREE_SIXTY_RIGHT => "360 Right",
             _ => match trick.slot() {
                 Some(slot) => match usize::try_from(self.map[player][slot]).ok().and_then(|i| self.get(i)) {
                     Some(stunt) => &stunt.display_name,
