@@ -1767,7 +1767,7 @@ fn the_discs_plane() -> Option<game_sim::phy::Plane> {
 fn wanted(seat: usize, tick: usize) -> vehicle::Wanted {
     let (from, to) = [(120, 450), (300, 600)][seat % 2];
     let up = if (from..to).contains(&tick) { vehicle::Kind::Biplane } else { vehicle::Kind::Bike };
-    vehicle::Wanted { to: Some(up), every_bank: seat == 1, round_stick: false, dpad_rides: false }
+    vehicle::Wanted { to: Some(up), every_bank: seat == 1, round_stick: false, dpad_rides: false, together: false }
 }
 
 /// The ride with the plane every seat may take, each seat's pad saying the machine it wants.
@@ -1808,8 +1808,8 @@ fn a_wanted_machine_goes_in_one_byte() {
     use vehicle::{Kind, Wanted};
     for to in [None, Some(Kind::Bike), Some(Kind::Biplane)] {
         for (every_bank, round_stick) in [(false, false), (true, false), (false, true), (true, true)] {
-            for dpad_rides in [false, true] {
-                let w = Wanted { to, every_bank, round_stick, dpad_rides };
+            for (dpad_rides, together) in [(false, false), (true, false), (false, true), (true, true)] {
+                let w = Wanted { to, every_bank, round_stick, dpad_rides, together };
                 assert_eq!(Wanted::of(w.byte()), w);
             }
         }

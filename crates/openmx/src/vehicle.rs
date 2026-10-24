@@ -1118,18 +1118,23 @@ pub struct Wanted {
     /// on the bike and in the plane. A seat's own choice that every step must read the same, so it
     /// rides in the byte too; 0, an idle pad's, is markers on, as offline's default.
     pub dpad_rides: bool,
+    /// The seat rides the new layout's reset chord (P67, `Controls::chord_together`): its two halves
+    /// pressed together, so a clutch held on L1 and then R1 is a trick and not the put-back. A seat's
+    /// own layout that every step must read the same, so it rides in the byte too; 0, an idle pad's,
+    /// is the original's chord.
+    pub together: bool,
 }
 
 impl Wanted {
     /// The byte: the machine in the low two bits (0 none, 1 the bike, 2 the biplane), then the
-    /// two scheme bits, then the markers-off bit.
+    /// two scheme bits, then the markers-off bit, then the together chord's.
     pub fn byte(self) -> u8 {
         let to = match self.to {
             None => 0,
             Some(Kind::Bike) => 1,
             Some(Kind::Biplane) => 2,
         };
-        to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4
+        to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4 | (self.together as u8) << 5
     }
 
     /// [`Wanted::byte`] read back; a machine number this build does not know is no pick.
@@ -1139,7 +1144,7 @@ impl Wanted {
             2 => Some(Kind::Biplane),
             _ => None,
         };
-        Wanted { to, every_bank: byte & 4 != 0, round_stick: byte & 8 != 0, dpad_rides: byte & 16 != 0 }
+        Wanted { to, every_bank: byte & 4 != 0, round_stick: byte & 8 != 0, dpad_rides: byte & 16 != 0, together: byte & 32 != 0 }
     }
 }
 

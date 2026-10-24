@@ -97,8 +97,9 @@
 //!
 //! **Those are the original's controls**, and since P40 they are a setting: the default is a new
 //! layout with R2 the gas and L2 the brake, each on its trigger's travel, Select the camera, and Cross
-//! and Square kept free for later. Each seat picks one (`--controls new|original`, or one per seat,
-//! and the front end's Controls screen). The new one is a remap of the pad's report in [`pad`]
+//! and Square kept free for later, L1 the clutch as in the original's, and the L1+R1 reset pressed
+//! together so a clutch held into a trick on R1 is not one (P67). Each seat picks one (`--controls
+//! new|original`, or one per seat, and the front end's Controls screen). The new one is a remap of the pad's report in [`pad`]
 //! ([`pad::Scheme::ride`]) before the engine's pad port sees it, so the simulation still reads the
 //! original's controls, a tape holds what it read, and under the original's every replay is as it was.
 //!
@@ -399,6 +400,10 @@ struct Seat {
     /// alone rides (`Controls::stick_alone`); off, the d-pad fires no marker and rides as the
     /// original's (`Controls::through` as it is), on the bike and in the plane.
     markers: bool,
+    /// The reset chord's two halves must go down together (P67, `Controls::chord_together`): the
+    /// new layout's, where L1 is a clutch held through a launch and R1 on it is a trick, not the
+    /// put-back. Under the original's, the original's chord.
+    together: bool,
 }
 
 impl Seat {
@@ -418,7 +423,10 @@ impl Seat {
         // rider's hands off it, because which button means what lives in the ride and not here.
         // The d-pad is the markers' and not the ride's (P93): the stick alone steers. With the
         // player's markers off (P129) it is the original's, every meaning it has there.
-        let controls = vehicle::hands(self.sim.poll(dt, &self.reports), self.markers);
+        let mut controls = vehicle::hands(self.sim.poll(dt, &self.reports), self.markers);
+        if self.together {
+            controls = controls.chord_together(self.sim.input.pad(0), self.sim.table());
+        }
         self.garage.set_dpad(!self.markers);
 
         if self.start_freezes && self.sim.input.pad(0).pressed(Control::Start) {
@@ -3937,6 +3945,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         teleported: false,
         clears: 0,
         markers: args.markers_of(0, front.as_deref()),
+        together: false,
     }];
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
@@ -3968,6 +3977,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             teleported: false,
             clears: 0,
             markers: args.markers_of(i + 1, front.as_deref()),
+            together: false,
         });
     }
     // Where each seat's machines start (P132), marker slot 1 while nothing is put there: every seat
@@ -4366,6 +4376,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         // The player's Markers switch (P129), live: a change under the pause
                         // rides from the frame it is made.
                         seat.markers = args.markers_of(i, front.as_deref());
+                        // And the layout's reset chord (P67), live like the layout itself.
+                        seat.together = seats.scheme(from) == Scheme::New;
                         // A bike with MX vs. ATV's tricks (MD16) reads the new layout's Cross and Square as
                         // its two extra trick buttons.
                         let tricks = seat.sim.phy.tricks.is_some();
@@ -4395,6 +4407,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     world.seats[0].garage.set_round_stick(args.wiring.planes[0].round_stick());
                     // Nor is the Markers switch (P129): the command line's, on unless --markers off.
                     world.seats[0].markers = args.markers.map_or(true, |m| m[0]);
+                    // Nor is the layout's reset chord (P67): the command line's layout says which.
+                    world.seats[0].together = args.wiring.schemes[0] == Scheme::New;
                     world.seats[0].reports = frame.reports;
                     // A tape holds the pad, not the table: the controller preset is --preset's
                     // (P79), whichever layout is said, because the tape is already past the layout.
@@ -4722,10 +4736,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The machine this player picked and their biplane scheme, which every machine reads at
             // the tick it lands on (N17).
             let scheme = world.seats[0].garage.plane.as_ref().map_or((false, false), |p| (p.every_bank, p.round_stick));
-            // And their Markers switch (P129), which every machine's step reads too.
+            // And their Markers switch (P129) and their layout's reset chord (P67), which every
+            // machine's step reads too.
             pad.0[net::SWITCH] =
-                vehicle::Wanted { to: online_want, every_bank: scheme.0, round_stick: scheme.1, dpad_rides: !world.seats[0].markers }
-                    .byte();
+                vehicle::Wanted {
+                    to: online_want,
+                    every_bank: scheme.0,
+                    round_stick: scheme.1,
+                    dpad_rides: !world.seats[0].markers,
+                    together: world.seats[0].together,
+                }
+                .byte();
             if let Err(end) = on.frame(pad, &mut world.place, rigs[0].body.as_ref()) {
                 println!("{end}");
                 if front.is_some() {
