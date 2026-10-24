@@ -5854,7 +5854,10 @@ fn md25_lands_a_flat_three_sixty(name: &str, ride: &[Md16], right: bool) {
     assert_eq!(wrecks(&md16_seats(ride)), 0, "{name}: it lands");
     let last = ride.last().unwrap();
     assert!(last.seat.on_ground && last.seat.up_y > 0.95, "{name}: on its wheels: {}", last.seat.up_y);
-    assert!(turned(last) < 0.2, "{name}: and rides on along its heading: {}", turned(last));
+    // The landings are within 0.04 of the take-off heading; what is left is the ride-out's drift on
+    // a centred stick, 0.14 before S58 and 0.29 since (the rear's borrowed load and the lagged speed
+    // the steering reads, both the original's).
+    assert!(turned(last) < 0.35, "{name}: and rides on along its heading: {}", turned(last));
     let id = if right { score::THREE_SIXTY_RIGHT } else { score::THREE_SIXTY_LEFT };
     assert!(ride.iter().any(|t| t.nodes.contains(&id)), "{name}: the 360 scores");
 }
@@ -5920,7 +5923,8 @@ fn md25_mx_vs_atv_needs_the_gesture() {
 
 /// MD25: MX vs. ATV's style rides as it did before the easy 360 — the per-tick ride hashes of its
 /// gesture 360 and of MD20's diagonal 360 backflip, folded, are the ones `HEAD` (4d30ef48's step)
-/// gave, before the switch existed (taken from a scratch worktree of it).
+/// gave, before the switch existed (taken from a scratch worktree of it). Re-pinned by S58, whose
+/// levers, borrowed rear load and lagged speed move every ride.
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
@@ -5932,5 +5936,5 @@ fn md25_mx_vs_atv_rides_as_before() {
     let (flip, _) = ride_md16(&q, wheels, &tables, set, &md20_hands(true, true, (220, 40), (220, 40)), 400);
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
-const MD25_GESTURE_FOLD: u64 = 0x1d8d55415bc24f70;
-const MD25_DIAGONAL_FOLD: u64 = 0x13fe6e4514be885d;
+const MD25_GESTURE_FOLD: u64 = 0x2d93ade66cad5296;
+const MD25_DIAGONAL_FOLD: u64 = 0xceb8c093b10ce05d;
