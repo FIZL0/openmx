@@ -474,7 +474,7 @@ impl Gen {
             modifier: false,
             spinning: false,
             spin_active: false,
-            easy_spin: false,
+            spin_ramp: false,
         };
         let lo = Loads {
             side: self.f(-60.0, 60.0),
@@ -1597,4 +1597,45 @@ mod flight {
         }
         println!("{report}");
     }
+}
+
+/// MD30: MX vs. ATV's air control under its 360, as SLUS_211.04's reads (openmx-mods
+/// `notes/tricks.md`, "The whip": the stick is left out only under both moves' torques at once, yaw
+/// and roll only under a backflip's ramp, and the 360's ramp damps). Over 10,000 generated airborne
+/// substeps with no flip of MX Unleashed's going: while the 360 turns, the moment is the stick's own
+/// plus plain damping — the very moment a hard lean (the damped path, no 360) gives with the same
+/// stick — and there is no lean push; once it has ended in the air, its ramp still damps the same
+/// moment and the push is back; and under a flip of MD20's at once the stick stays out, as MD20 rode.
+#[test]
+fn md30_a_three_sixty_alone_keeps_the_stick_and_damps_to_the_ground() {
+    let bits = |v: Vf| [v.x(), v.y(), v.z(), v.w()].map(f32::to_bits);
+    let mut g = Gen(0x3d30);
+    let (mut n, mut stick_moved) = (0, 0);
+    while n < 10_000 {
+        let mut s = g.state();
+        if s.air.on_ground {
+            continue;
+        }
+        n += 1;
+        (s.air.flip_torque_applied, s.air.flipping, s.air.flip_active) = (false, false, false);
+        let run = |s: &State, spinning: bool, ramp: bool, stick: (F, F), lean: F| {
+            let mut t = s.clone();
+            (t.st.spinning, t.st.spin_ramp, t.st.stick, t.st.lean) = (spinning, ramp, stick, lean);
+            air::airborne_control(&t.p, &mut t.air, &mut t.ch, &t.st);
+            (bits(t.ch.moment), bits(t.ch.force))
+        };
+        let lean = s.st.lean;
+        let (turning, pushed) = run(&s, true, true, s.st.stick, lean);
+        let (damped, _) = run(&s, false, false, s.st.stick, F(0.5));
+        assert_eq!(turning, damped, "{n}: the 360's moment is the stick's, damped");
+        assert_eq!(pushed, bits(s.ch.force), "{n}: no lean push while it turns");
+        let (ended, _) = run(&s, false, true, s.st.stick, lean);
+        assert_eq!(ended, turning, "{n}: its ramp damps on once it has ended");
+        let (still, _) = run(&s, true, true, (F::ZERO, F::ZERO), lean);
+        stick_moved += (still != turning) as u32;
+        let mut both = s.clone();
+        both.air.flipping = true;
+        assert_eq!(run(&both, true, true, both.st.stick, lean).0, run(&both, true, true, (F::ZERO, F::ZERO), lean).0, "{n}: MD20's");
+    }
+    assert!(stick_moved > 5_000, "the stick moved the moment on {stick_moved} of 10,000");
 }

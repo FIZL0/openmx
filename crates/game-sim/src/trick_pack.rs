@@ -32,9 +32,6 @@ pub struct Row {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Moves {
     pub spin: SpinTuning,
-    /// How the 360 is asked for and turns (MD25): the port's easy one unless the shell says
-    /// MX vs. ATV's.
-    pub spin_style: crate::air::SpinStyle,
     /// MX vs. ATV's backflip `HoldPointValue` — the flat score its backflip is worth (MX Unleashed's
     /// backflip is a flat 10000, [`crate::score::BACKFLIP_POINTS`], and so is MX vs. ATV's row) — which
     /// the front flip, scored like a backflip, is worth too.
@@ -130,7 +127,6 @@ pub fn moves(phy: &Ini, rows: &[Row]) -> Option<Moves> {
     let points = |name: &str, default: F| row(rows, name).map_or(default, |r| r.hold_point_value);
     Some(Moves {
         spin,
-        spin_style: crate::air::SpinStyle::default(),
         front_flip_points: points("backflip", crate::score::BACKFLIP_POINTS),
         three_sixty_points: (points("threesixtyL", F::ZERO), points("threesixtyR", F::ZERO)),
     })
@@ -186,12 +182,6 @@ impl crate::hash::State for State {
         w.bool("spin.came_round", s.came_round);
         w.bool("spin.wrecked", s.wrecked);
         w.bool("spin.forward", s.forward);
-        // MD25's two, walked only once an easy 360 has fired, so a ride on MX vs. ATV's step hashes
-        // as it did before them.
-        if s.easy || s.progress != F::ZERO {
-            w.bool("spin.easy", s.easy);
-            w.f("spin.progress", s.progress);
-        }
         w.u8("flip_row", self.flip_row as u8);
         w.f("side.now", self.side.now);
         w.u8("side.head", self.side.head as u8);

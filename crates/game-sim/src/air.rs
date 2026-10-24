@@ -244,10 +244,10 @@ pub struct Step {
     /// cannot start under it unless [`both_at_once`] lets it. False on every ride on the original's
     /// tricks.
     pub spin_active: bool,
-    /// **The port's own (MD25):** the 360 that put its torque in this substep is an easy one
-    /// ([`SpinStyle::Easy`]). The airborne control then levels pitch and roll as in plain flight and
-    /// leaves the yaw lane to the 360. False on every 360 of MX vs. ATV's step.
-    pub easy_spin: bool,
+    /// **The port's own (MD30):** MX vs. ATV's 360 has put torque in since the wheels last touched
+    /// ([`Spin::ramp`]): its air control damps rather than levels until they are down again, even
+    /// once the 360 has ended in the air. False on every ride on the original's tricks.
+    pub spin_ramp: bool,
 }
 
 /// What the wreck test is looking at outside this module: the g loads the chassis measured, the
@@ -1228,60 +1228,6 @@ pub struct Spin {
     /// turns the bike nose-down ([`SPIN_PITCH_FOLLOWS_THE_FLIP`]). Latched on the substep the wheels
     /// leave; false on every 360 alone.
     pub forward: bool,
-    /// **The port's own (MD25):** this 360 fired the easy way ([`SpinStyle::Easy`]): one push, no
-    /// pitch, and it stops itself once round. False on every 360 of MX vs. ATV's gesture.
-    pub easy: bool,
-    /// **The port's own (MD25):** how far an easy 360 has turned, its way, in radians: the chassis'
-    /// yaw rate summed each substep. It steers the turn into one full one ([`EASY_SPIN_HOMING`]).
-    pub progress: F,
-}
-
-/// How the 360 is asked for and how it turns (MD25), the trick pack's switch: [`SpinStyle::Easy`]
-/// by default, the port's own; [`SpinStyle::MxVsAtv`] is the disc's step as it reads, and what the
-/// shell's Original switch sets.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SpinStyle {
-    /// **The port's own (MD25)**: with R1 held on a lip, one sideways push past [`SPIN_HELD`] fires a
-    /// flat 360 that way — no arm-then-cross, no pitch torque — which brakes itself to a stop once it
-    /// is round, so it lands clean with no stick work. A diagonal is still MX vs. ATV's gesture
-    /// ([`EASY_SPIN_DIAGONAL`]), so MD20's 360 flips are asked for as they always were.
-    #[default]
-    Easy,
-    /// MX vs. ATV's own (SLUS_211.04): the stick past 0.7 to one side arms, past 0.7 to the other
-    /// fires, with the nose-up pitch share, and only the rider's stick ends it.
-    MxVsAtv,
-}
-
-/// **The port's own (MD25):** an easy 360 fires only on a mostly sideways push, `|y|` at most this.
-/// Past it the push is a diagonal and goes through MX vs. ATV's gesture, which is how MD20's 360
-/// flips (both arms on one diagonal, both fire on the other) are asked for under either style.
-const EASY_SPIN_DIAGONAL: f32 = 0.5;
-/// **The port's own (MD25):** the yaw rate (radians a second, the chassis' own frame) an easy 360 asks
-/// for until the last stretch: once round in about 1.3 s, a backflip's pace. The bikes' own
-/// `YawRateLimit` (3 on the 125, in both games' files) would make it 2.1 s, longer than most jumps
-/// are in the air, so while an easy 360 turns the chassis lets it go this fast
-/// ([`easy_spin_yaw_limit`]).
-const EASY_SPIN_RATE: f32 = 5.0;
-/// **The port's own (MD25):** inside the last stretch the rate asked for is what is left to turn times
-/// this, so the bike eases into its take-off heading and stops there.
-const EASY_SPIN_HOMING: f32 = 5.0;
-/// **The port's own (MD25):** the moment for each radian a second the yaw rate is off what is asked
-/// for, on top of what holds the asked-for rate against [`Params::airborne_damping`].
-const EASY_SPIN_GAIN: f32 = 300.0;
-/// **The port's own (MD25):** the most yaw moment an easy 360 puts in, either way, as a multiple of
-/// the pack's full-flick `MaxThreeSixtyTorqueY` (through the rotation-speed modifier, so a slower
-/// rotation setting turns it slower too).
-const EASY_SPIN_YAW: f32 = 3.0;
-/// **The port's own (MD25):** an easy 360 is done, and ends, within this of one full turn (radians)
-/// with the yaw rate under [`EASY_SPIN_RESTING`].
-const EASY_SPIN_DONE: f32 = 0.05;
-const EASY_SPIN_RESTING: f32 = 0.2;
-
-/// **The port's own (MD25):** the yaw rate limit the chassis integrates with this substep, `limit` its
-/// own: while an easy 360 turns in the air, at least [`EASY_SPIN_RATE`]; `None` otherwise, and on
-/// every 360 of MX vs. ATV's step.
-pub fn easy_spin_yaw_limit(spin: &Spin, limit: F) -> Option<F> {
-    (spin.easy && spin.active && spin.armed).then(|| limit.max(F(EASY_SPIN_RATE)))
 }
 
 /// The heading flattened into the horizontal plane, as an angle 0..2π from `+z`.
@@ -1338,30 +1284,16 @@ pub const SPIN_PITCH_FOLLOWS_THE_FLIP: bool = true;
 /// stick is pushed against the turn; the 360 ends when a wheel touches, the bike hits something or
 /// the yaw torque is under its minimum. Landing while the clip is part way round — more than
 /// [`SPIN_CLIP`] off the take-off heading — is a wreck.
-///
-/// Under [`SpinStyle::Easy`] (MD25) a mostly sideways push with R1 alone fires straight away instead,
-/// and its turn is its own: see [`SpinStyle::Easy`] and the constants it names.
 #[allow(clippy::too_many_arguments)]
-pub fn three_sixty(t: &SpinTuning, style: SpinStyle, p: &Params, air: &mut Air, spin: &mut Spin, chassis: &mut Chassis, step: &Step, flick: F, table: &AcosTable) {
+pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, chassis: &mut Chassis, step: &Step, flick: F, table: &AcosTable) {
     let t = &t.tuned(p);
     spin.applied = false;
     let x = step.stick.0;
     if !spin.active {
         let lip = on_a_lip(air, chassis, step) && (both_at_once(step) || (!air.flip_torque_applied && !air.flip_active));
-        let sideways = x.abs() > SPIN_HELD && step.stick.1.abs() <= EASY_SPIN_DIAGONAL;
         if !lip {
             spin.active = false;
             spin.armed = false;
-        } else if style == SpinStyle::Easy && step.modifier && sideways {
-            // Right fires the way MX vs. ATV's left-then-right does.
-            spin.dir = sign(x);
-            let yaw = F(fpu::from_i32(spin.dir)) * (t.max_torque_y * F(EASY_SPIN_YAW));
-            spin.torque = Vf::new(0.0, yaw.0, spin.torque.z(), spin.torque.w());
-            spin.armed = false;
-            spin.active = true;
-            spin.easy = true;
-            spin.progress = F::ZERO;
-            spin.grace = F(SPIN_GRACE);
         } else if spin.armed && x.abs() > SPIN_HELD && sign(x) == spin.dir {
             let map = |lo: F, hi: F| {
                 if t.min_time != t.max_time { map_clamp(flick.abs(), t.min_time, t.max_time, lo, hi) } else { lo }
@@ -1372,7 +1304,6 @@ pub fn three_sixty(t: &SpinTuning, style: SpinStyle, p: &Params, air: &mut Air, 
             spin.torque = Vf::new(pitch.0, yaw.0, spin.torque.z(), spin.torque.w());
             spin.armed = false;
             spin.active = true;
-            (spin.easy, spin.progress) = (false, F::ZERO);
             spin.grace = F(SPIN_GRACE);
         } else if step.modifier {
             if x < -SPIN_HELD {
@@ -1399,42 +1330,12 @@ pub fn three_sixty(t: &SpinTuning, style: SpinStyle, p: &Params, air: &mut Air, 
     } else {
         let h = spin_heading(step.heading, table);
         let turned = (spin.start - h).abs().min((spin.start + F(TWO_PI) - h).abs());
-        let d = F(fpu::from_i32(spin.dir));
-        let left = F(TWO_PI) - spin.progress;
-        let easy_at_rest = spin.easy && left < F(EASY_SPIN_DONE) && F(chassis.ang_vel.y()).abs() < F(EASY_SPIN_RESTING);
-        let spent = !spin.easy && F(spin.torque.y()).abs() < t.min_torque_y;
-        if air.on_ground || step.touching || spent || easy_at_rest {
+        if air.on_ground || step.touching || F(spin.torque.y()).abs() < t.min_torque_y {
             spin.active = false;
             spin.armed = false;
             if spin.clip != 0 {
                 spin.clip = 0;
                 spin.wrecked = true;
-            }
-        } else if spin.easy {
-            // The easy 360's own turn (MD25): a yaw rate asked for — the full rate, then what is left
-            // to turn times the homing gain — and the moment that holds it, with no pitch at all.
-            let w = F(chassis.ang_vel.y());
-            spin.progress = spin.progress + d * w * step.dt;
-            let want = d * F(EASY_SPIN_RATE).min(F(EASY_SPIN_HOMING) * left.max(F::ZERO));
-            let most = t.max_torque_y * F(EASY_SPIN_YAW);
-            let yaw = (p.airborne_damping * want + F(EASY_SPIN_GAIN) * (want - w)).clamp(-most, most);
-            spin.torque = Vf::new(0.0, yaw.0, spin.torque.z(), spin.torque.w());
-            let m = Vf::new(0.0, yaw.0, 0.0, 1.0);
-            chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(m));
-            spin.applied = true;
-            spin.ramp = true;
-            let past = turned > SPIN_CLIP;
-            if spin.clip == 0 {
-                if past {
-                    spin.clip = 1;
-                }
-            } else if !past {
-                if spin.clip == 2 {
-                    spin.came_round = true;
-                }
-                spin.clip = 0;
-            } else if spin.clip == 1 {
-                spin.clip = 2;
             }
         } else {
             if step.dpad_dir == 0 && !step.modifier && sign(x) != spin.dir {
@@ -1506,11 +1407,15 @@ pub fn airborne_control(p: &Params, air: &mut Air, chassis: &mut Chassis, step: 
     }
     let acm = p.airborne_control_moment;
     let mut m = NOTHING;
-    // MX vs. ATV's 360 (MD16) silences the stick and damps as a backflip does; false otherwise.
-    // An easy 360 (MD25) is plain flight but for its yaw lane.
-    let flipping = air.flipping || (step.spinning && !step.easy_spin);
+    // MX vs. ATV's 360 (MD16, MD30) damps from the substep its torque first goes in until the wheels
+    // are down, as a backflip's ramp does; but its air control still takes the stick, all three
+    // lanes, while the 360 alone turns (SLUS_211.04: the stick is left out only under both moves'
+    // torques at once, and yaw and roll only under a backflip's ramp). Under a flip of MD20's at
+    // once ([`both_at_once`], a state the disc never reaches) the stick stays out, as MD20 rode it.
+    let flipping = air.flipping || step.spin_ramp;
     let torqued = air.flip_torque_applied || step.spinning;
-    if !torqued {
+    let silenced = air.flip_torque_applied || (step.spinning && (air.flipping || air.flip_active));
+    if !silenced {
         m = if step.stunt {
             Vf::new(
                 (step.stick.1 * (F(0.5) * F(acm.x()))).0,
@@ -1526,7 +1431,7 @@ pub fn airborne_control(p: &Params, air: &mut Air, chassis: &mut Chassis, step: 
                 m.w(),
             )
         };
-        if flipping {
+        if air.flipping {
             m = Vf::new(m.x(), 0.0, 0.0, m.w());
         }
         m = m.merge(Dest::XYZ, m.mul_q(ramp.0));
@@ -1536,13 +1441,13 @@ pub fn airborne_control(p: &Params, air: &mut Air, chassis: &mut Chassis, step: 
         let damped = chassis.ang_vel.merge(Dest::XYZ, chassis.ang_vel.mul_q(p.airborne_damping.0));
         m = m.merge(Dest::XYZ, m.sub(damped));
     } else {
-        let y = if step.easy_spin { F(m.y()) } else { F(m.y()) + p.unyaw_torque * (p.unyaw_gain * air.crossup - F(chassis.ang_vel.y())) };
+        let y = F(m.y()) + p.unyaw_torque * (p.unyaw_gain * air.crossup - F(chassis.ang_vel.y()));
         let z = F(m.z()) + p.unroll_torque * (p.unroll_gain * chassis.roll - F(chassis.ang_vel.z()));
         m = Vf::new(m.x(), y.0, z.0, m.w());
         if F(chassis.ang_vel.x()).abs() > DEAD {
             m = Vf::new((F(m.x()) - p.airborne_damping * F(chassis.ang_vel.x())).0, m.y(), m.z(), m.w());
         }
-        if F(chassis.ang_vel.y()).abs() > DEAD && !step.easy_spin {
+        if F(chassis.ang_vel.y()).abs() > DEAD {
             m = Vf::new(m.x(), (F(m.y()) - p.airborne_damping * F(chassis.ang_vel.y())).0, m.z(), m.w());
         }
     }
