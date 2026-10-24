@@ -425,6 +425,7 @@ impl Wire for Rider {
             tricks,
             state,
             motion,
+            packed_pose,
             set: _,
             clips: _,
             sense,
@@ -457,6 +458,7 @@ impl Wire for Rider {
         tricks.put(out);
         state.put(out);
         motion.put(out);
+        packed_pose.put(out);
         sense.put(out);
         racing.put(out);
         crash.put(out);
@@ -482,6 +484,7 @@ impl Wire for Rider {
             tricks: Wire::take(r)?,
             state: Wire::take(r)?,
             motion: Wire::take(r)?,
+            packed_pose: Wire::take(r)?,
             set: Default::default(),
             clips: Default::default(),
             sense: Wire::take(r)?,

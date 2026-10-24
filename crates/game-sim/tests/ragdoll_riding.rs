@@ -1357,3 +1357,154 @@ fn the_riding_tick_is_the_originals_from_each_row() {
     assert!(ticks >= 1200, "only {ticks} ticks in run1");
     assert_eq!(exact, ticks, "{exact} of {ticks} riding ticks exact\n{}", worst.join("\n"));
 }
+
+
+// --- S111: the request's writer ----------------------------------------------------------------------
+
+/// The rider object the request block is part of: the block is its `+0xb80`.
+const RIDER: u32 = 0x0151_be10;
+/// Where `req_area` starts, as a rider offset: 0x200 ahead of the request.
+const AREA: usize = 0x980;
+
+/// A quad of `req_area` at a rider offset.
+fn area_at(cap: &Capture, frame: u32, offset: usize) -> Vf {
+    let b = cap.bytes(frame, "req_area");
+    let o = offset - AREA;
+    let w = |k: usize| f32::from_le_bytes(b[o + 4 * k..o + 4 * k + 4].try_into().expect("four bytes"));
+    Vf::new(w(0), w(1), w(2), w(3))
+}
+
+/// A quad of the request a row caught.
+fn req_quad(cap: &Capture, frame: u32, o: u32) -> Vf {
+    area_at(cap, frame, 0xb80 + o as usize)
+}
+
+fn req_mat(cap: &Capture, frame: u32, o: u32) -> Mat4 {
+    Mat4([0, 0x10, 0x20, 0x30].map(|k| req_quad(cap, frame, o + k)))
+}
+
+/// The request fields [`game_sim::ragdoll_riding::Sources::request`] writes, as bits, by name.
+fn request_bits(r: &Request) -> Vec<(&'static str, Vec<u32>)> {
+    let m = |m: &Mat4| m.to_bits().to_vec();
+    vec![
+        ("rows", r.rows.iter().flat_map(|v| bits(*v)).collect()),
+        ("frame", m(&r.frame)),
+        ("velocity", bits(r.velocity).to_vec()),
+        ("rates", bits(r.rates).to_vec()),
+        ("looking", vec![u32::from(r.looking)]),
+        ("posed", vec![u32::from(r.posed)]),
+        ("hit_velocity", bits(r.hit_velocity).to_vec()),
+        ("tucked", vec![u32::from(r.tucked)]),
+        ("pitch", vec![r.pitch.0.to_bits()]),
+        ("speed", vec![r.speed.0.to_bits()]),
+        ("centre", bits(r.centre).to_vec()),
+        ("quat", bits(r.quat).to_vec()),
+    ]
+}
+
+fn mismatches(port: &Request, game: &Request) -> Vec<&'static str> {
+    request_bits(port).into_iter().zip(request_bits(game)).filter(|(a, b)| a.1 != b.1).map(|(a, _)| a.0).collect()
+}
+
+/// **The request, bit for bit, from each of run1's rows** (S111): the rates the original's writer
+/// turns into the drawn bike's frame, the centre and the quat it takes off the chassis node, the
+/// airborne flag, and the pitch, which is the pose the header showed on the row *before* — the state
+/// pack latches it ahead of this tick's header, or straight on while the rider is held (four rows of a
+/// put-back). The rows, the frame, the velocity and the speed are
+/// handed in off the row (nothing else in it holds them); the state test below proves their sources.
+#[test]
+fn the_riding_request_is_the_originals_from_each_row() {
+    use game_sim::ragdoll_riding::Sources;
+    let Some(cap) = Capture::load("run1") else { return };
+    let (mut exact, mut ticks, mut held, mut worst) = (0, 0, 0, Vec::new());
+    for frame in START + 2.. {
+        if !cap.has(frame) {
+            break;
+        }
+        let rq = |o: u32| req_quad(&cap, frame, o);
+        let rows = [0x10, 0x20, 0x30, 0x40].map(rq);
+        // run1 has no trick in it: the backflip flag is off on every row, and so is the reverse.
+        assert_eq!((rq(req_at::POSED).x().to_bits(), rq(req_at::TUCKED).x().to_bits()), (0, 0), "{frame}");
+        let game = Request {
+            rows: [rows[0], rows[1], rows[2]],
+            frame: req_mat(&cap, frame, req_at::FRAME),
+            velocity: rq(req_at::VELOCITY),
+            rates: rq(req_at::RATES),
+            looking: rq(req_at::LOOKING).x().to_bits() != 0,
+            posed: false,
+            hit_velocity: rq(req_at::HIT_VELOCITY),
+            tucked: false,
+            pitch: F(rq(req_at::PITCH).x()),
+            speed: F(rq(req_at::SPEED).x()),
+            centre: rq(req_at::CENTRE),
+            quat: rq(req_at::QUAT),
+            ..Request::default()
+        };
+        // The pose the pack latches: last row's, unless the rider is held, when the idle in front of
+        // the pack has put it straight on.
+        let mut motion = game_sim::motion::Driver { pose: F(cap.get(frame - 1, "shown_pose")), ..Default::default() };
+        if rq(req_at::HELD).x().to_bits() != 0 {
+            motion.freeze();
+            held += 1;
+        }
+        let packed = motion.pose;
+        let sources = Sources {
+            chassis: Mat4(rows),
+            frame: game.frame,
+            velocity: game.velocity,
+            world_rates: cap.quad(frame, "ch_ang_vel"),
+            speed: game.speed,
+            on_ground: cap.int(frame, "on_ground") != 0,
+            flipped: false,
+            pitch: packed,
+        };
+        let port = sources.request([Vf::ZERO; 2], [Vf::ZERO; 2], None);
+        let d = mismatches(&port, &game);
+        ticks += 1;
+        exact += usize::from(d.is_empty());
+        if !d.is_empty() && worst.len() < 4 {
+            worst.push(format!("{frame}: {d:?} port pitch {} game {}", port.pitch.0, game.pitch.0));
+        }
+    }
+    assert!(ticks >= 1200, "only {ticks} rows in run1");
+    assert!(held >= 4, "only {held} held rows");
+    assert_eq!(exact, ticks, "{exact} of {ticks} requests exact\n{}", worst.join("\n"));
+}
+
+/// **Where each field of the request comes from, at the state** (S111): S109's save state, read as
+/// the original's writer reads it. The chassis node's and the drawn bike node's world matrices, the
+/// chassis' velocity and world rates, the contact velocity's forward lane (not the speed's length),
+/// the wheels' contact flag, the backflip's torque flag and the latched pose build, through the
+/// port's [`Sources::request`], the request the state holds.
+///
+/// [`Sources::request`]: game_sim::ragdoll_riding::Sources::request
+#[test]
+fn the_riding_requests_sources_are_the_riders_at_the_state() {
+    use game_sim::ragdoll_riding::Sources;
+    let Some(ee) = state() else { return };
+    assert_eq!(ee.u32_at(ACTOR + at::BIKE), RIDER + 0xb80, "the actor's request is the rider's");
+    // A node's world matrix, as the node's lazy update leaves it.
+    let world = |node: u32| mat_at(&ee, node + 0x80);
+    let chassis = ee.u32_at(RIDER + 0x7a4);
+    let on = |a: u32| ee.u32_at(a) != 0;
+    let sources = Sources {
+        chassis: world(ee.u32_at(RIDER + 0x18)),
+        frame: world(ee.u32_at(RIDER + 0x964)),
+        velocity: quad(&ee, chassis + 0x260),
+        world_rates: quad(&ee, chassis + 0x280),
+        speed: f(&ee, RIDER + 0x438),
+        on_ground: on(RIDER + 0x574),
+        flipped: on(RIDER + 0x4f4),
+        pitch: f(&ee, RIDER + 0x898),
+    };
+    let game = request_of(&ee);
+    let port = sources.request(game.hands, game.feet, game.bike);
+    assert_eq!(mismatches(&port, &game), Vec::<&str>::new());
+    // The speed is the contact velocity's forward lane: on this state neither the velocity's length
+    // nor its z.
+    let v = game.velocity;
+    let length = (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    assert_eq!(f(&ee, RIDER + 0x8c8).0.to_bits(), port.speed.0.to_bits(), "the pack's copy");
+    assert_ne!(length.to_bits(), port.speed.0.to_bits(), "speed {} against |v| {length}", port.speed.0);
+    assert_ne!(game.velocity.z().to_bits(), port.speed.0.to_bits(), "nor the velocity's own z");
+}

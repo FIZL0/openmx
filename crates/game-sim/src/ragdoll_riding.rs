@@ -16,6 +16,7 @@
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
+use crate::chassis::{self, Mat3};
 use crate::math::{self, Mat4};
 use crate::ragdoll::{MAIN, PARTS, Ragdoll};
 use crate::ragdoll_body::{Actor, Outside, Request, Scenery, Skeleton, Tail};
@@ -147,27 +148,74 @@ impl Riding {
     }
 }
 
-/// **What the bike hands the riding body**: the ride's orientation (as rows and as the quat), its
-/// drawn transform for the bike box, its velocity and its rates in its own frame, its centre of
-/// gravity for the spin, and the four holds' points in the world (`hands` left then right at the
-/// grips, `feet` at the pegs). `pitch` is the vehicle animation's fore-and-aft mix, `bike` the bike's
-/// collider.
-pub fn request(ride: &Ride, pitch: F, hands: [Vf; 2], feet: [Vf; 2], bike: Option<(Vf, F)>) -> Request {
-    let c = &ride.chassis;
-    let m = math::quat_to_mat4(c.quat, Vf::ZERO);
-    Request {
-        rows: [m.0[0], m.0[1], m.0[2]],
-        frame: ride.transform(),
-        velocity: c.vel,
-        rates: c.ang_vel,
-        hands,
-        feet,
+/// **What the bike hands the riding body** (S111): the original's request writer copies every field
+/// out of the rider's state pack, which runs after this tick's physics and before the animation
+/// header. So the bike's numbers are this tick's and `pitch` is the pose the header showed last tick.
+///
+/// `frame` is the drawn bike's root node ("Bike", the chassis node's child) in the world, which is
+/// the frame the rates are turned into and the bike box sits in. `pitch` is the rider's pose axis
+/// ([`crate::motion::Driver::pose`]) as it was before this tick's header, `hands` and `feet` the
+/// four holds' points in the world (left then right, the grips and the pegs), `bike` the collider.
+pub fn request(ride: &Ride, pitch: F, frame: Mat4, hands: [Vf; 2], feet: [Vf; 2], bike: Option<(Vf, F)>) -> Request {
+    let sources = Sources {
+        chassis: ride.transform(),
+        frame,
+        velocity: ride.chassis.vel,
+        world_rates: ride.chassis.world_ang_vel,
+        speed: F(ride.air.contact_vel.z()),
+        on_ground: ride.air.on_ground,
+        flipped: ride.air.flip_torque_applied,
         pitch,
-        speed: F(c.local_vel.z()),
-        centre: c.cofg_world,
-        quat: c.quat,
-        bike,
-        ..Request::default()
+    };
+    sources.request(hands, feet, bike)
+}
+
+/// The rider's numbers the request is built out of, each the state pack's copy of one field.
+#[derive(Clone, Copy, Debug)]
+pub struct Sources {
+    /// The chassis node's transform in the world: what the rows, the centre and the quat come from.
+    pub chassis: Mat4,
+    /// The drawn bike's root node in the world.
+    pub frame: Mat4,
+    /// The chassis' velocity in the world.
+    pub velocity: Vf,
+    /// The chassis' angular velocity in the world, which the request carries in `frame`'s axes.
+    pub world_rates: Vf,
+    /// The contact velocity's forward lane: the touching wheel's, or the chassis' own when neither
+    /// touches ([`crate::air::Air::contact_vel`]). Not the speed as a length.
+    pub speed: F,
+    pub on_ground: bool,
+    /// A backflip's torque went in on the tick's last substep. The actor latches its pose off the clip
+    /// table on it, so a backflip is drawn as its clip wrote it, with nothing held.
+    pub flipped: bool,
+    pub pitch: F,
+}
+
+impl Sources {
+    /// The request, field by field as the original's writer fills it. The reason is 0 (a wrecked
+    /// rider has no riding body), so the hit velocity is the velocity. The reverse flag stays off: the
+    /// field it copies is the reverse command, which no pad of the original's sets (P73).
+    pub fn request(&self, hands: [Vf; 2], feet: [Vf; 2], bike: Option<(Vf, F)>) -> Request {
+        let m = &self.chassis;
+        let f = &self.frame;
+        let at = m.0[3];
+        Request {
+            rows: [m.0[0], m.0[1], m.0[2]],
+            frame: *f,
+            velocity: self.velocity,
+            rates: chassis::unrotate(&Mat3::new(f.0[0], f.0[1], f.0[2]), self.world_rates),
+            hands,
+            feet,
+            looking: !self.on_ground,
+            posed: self.flipped,
+            hit_velocity: self.velocity,
+            pitch: self.pitch,
+            speed: self.speed,
+            centre: Vf::new(at.x(), at.y(), at.z(), 1.0),
+            quat: math::mat4_to_quat(m),
+            bike,
+            ..Request::default()
+        }
     }
 }
 
