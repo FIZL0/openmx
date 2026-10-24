@@ -443,7 +443,7 @@ const RIDER_GROUP: usize = 0;
 /// A view's markers' slot display while it is up (P88): the selection, which slots hold a marker,
 /// the label, the other players in the ride by seat (P94), how far a Down or Up hold is (P106), and
 /// whether slot 1 is the spawn (P132).
-type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u32, bool);
+type MarkerShown = (markers::Pick, Vec<bool>, String, Vec<usize>, u32, bool);
 
 /// A marker's tick (P88) as the console says it.
 /// Whether the session markers' bar, its hold bar and its label are drawn over a view (P117): with
@@ -458,6 +458,7 @@ fn marker_line(did: markers::Did) -> String {
     let what = |p: Pick| match p {
         Pick::Slot(s) => format!("slot {}", s + 1),
         Pick::Player(p) => format!("P{}", p + 1),
+        Pick::More => "the +".to_string(),
     };
     match did {
         Did::Stepped(p) => what(p),
@@ -570,7 +571,7 @@ impl RideHud<'_> {
             .collect();
         let markers = marker.map(|(pick, filled, _, others, holding, home)| ride_hud::Panel {
             pick: *pick,
-            filled: *filled,
+            filled: filled.clone(),
             home: *home,
             others: others.iter().map(|&s| (s, self.names.get(s).cloned().flatten())).collect(),
             holding: *holding,
@@ -3903,7 +3904,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         .iter()
         .map(|spot| portal::Portal::zone(spot, |x, z| portal_ground(&mut world.place, x, spot.at[1] + 50.0, z)))
         .collect();
-    let mut marked_portals: Vec<[Option<portal::Portal>; markers::SLOTS]> = vec![Default::default(); world.seats.len()];
+    let mut marked_portals: Vec<Vec<Option<portal::Portal>>> = vec![Vec::new(); world.seats.len()];
 
     for (seat, rig) in world.seats.iter().zip(&mut rigs) {
         rig.hud.note_vehicle(seat.garage.up.name());
@@ -5138,9 +5139,10 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // Slot 1 is the spawn while nothing is put there (P132), on the machine up.
                 let home = seat.sim.home.has(seat.sim.markers.on, me);
                 let bar = hud::MarkerBar::read(&seat.sim.markers, me, &riding, seat.sim.input.pad(0), seat.sim.table(), seat.riding).homed(home);
+                let label = bar.label(&names);
                 let hud::MarkerBar { pick, filled, held, holding, home } = bar;
                 let others = markers::Markers::others(me, riding.len(), &riding);
-                banner.update(Instant::now(), pick, filled, held).then(|| (pick, filled, bar.label(&names), others, holding, home))
+                banner.update(Instant::now(), pick, &filled, held).then(|| (pick, filled, label, others, holding, home))
             })
             .collect();
         // The bays shown (P103), drawn below and marked on the radar.
@@ -5279,7 +5281,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let draw = |f: &mut Frame| {
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
                         if let Some((pick, filled, label, others, holding, home)) = banner {
-                            hud::draw_markers_homed(f, *pick, *filled, *home, label, others, *holding, hud.scale);
+                            hud::draw_markers_homed(f, *pick, filled, *home, label, others, *holding, hud.scale);
                         }
                     };
                     gpu_patches.extend(gpu_layers[v].patch(at.w, at.h, (at.x, at.y), draw));
@@ -5670,7 +5672,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 && marker_bar_shown(overlay_mode, rig.hud.on)
                 && !ride
             {
-                hud::draw_markers_homed(target, *pick, *filled, *home, label, others, *holding, rig.hud.scale);
+                hud::draw_markers_homed(target, *pick, filled, *home, label, others, *holding, rig.hud.scale);
             }
             // The original's own HUD (V26) where the debug one is not up, unless `none` was asked for.
             if !rig.hud.on && overlay_mode == menu::Overlay::Original {

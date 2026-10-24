@@ -1159,3 +1159,23 @@ fn the_preload_meter_is_the_originals_over_animandpump() {
     }
     assert!(rows.len() >= 2300 && lit >= 300 && runs >= 8, "{} rows, {lit} lit in {runs} runs", rows.len());
 }
+
+/// Every one of the 64 marker slots (P139) has its own colour: the first five still
+/// [`overlay::MARKER_COLOURS`], none the original's, and no two alike on the radar.
+#[test]
+fn sixty_four_marker_colours_are_all_apart() {
+    use game_sim::markers::{MAX_SLOTS, SLOTS};
+    let colours: Vec<[u8; 4]> = (0..MAX_SLOTS).map(overlay::marker_colour).collect();
+    assert_eq!(colours[..SLOTS], overlay::MARKER_COLOURS);
+    let theirs = [[0xff, 0xff, 0x00, 255], [0xff, 0x00, 0x00, 255], [0xc8, 0xc8, 0xc8, 255], [0x6e, 0xa6, 0x37, 255], [0xff, 0x99, 0x33, 255], [0x33, 0x73, 0xcc, 255], [0x81, 0x3b, 0xb5, 255], [0x30, 0xcf, 0x00, 255]];
+    let apart = |a: [u8; 4], b: [u8; 4]| (0..3).map(|i| (a[i] as f32 - b[i] as f32).powi(2)).sum::<f32>().sqrt();
+    let mut least = f32::MAX;
+    for (i, &c) in colours.iter().enumerate() {
+        assert_eq!(c[3], 255, "slot {} is not opaque", i + 1);
+        for &o in colours[..i].iter().chain(&theirs) {
+            least = least.min(apart(c, o));
+        }
+    }
+    eprintln!("closest two: {least}");
+    assert!(least >= 28.0, "two colours {least} apart");
+}

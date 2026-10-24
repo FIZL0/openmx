@@ -552,9 +552,33 @@ pub fn activity_colour(activity: Activity) -> [u8; 4] {
     ZONE_COLOURS[Activity::ALL.iter().position(|&a| a == activity).unwrap_or(0)]
 }
 
-/// A session marker slot's colour (P94).
+/// A session marker slot's colour (P94): [`MARKER_COLOURS`] for the first five, and for the slots the
+/// + adds (P139) a generated set up to [`game_sim::markers::MAX_SLOTS`] — hues a golden angle apart,
+/// their saturation and brightness in four steps (searched for the widest closest pair, 30 apart) — so neighbours differ and none of them is one of
+/// the original's icon or rider colours (the tests hold that).
 pub fn marker_colour(slot: usize) -> [u8; 4] {
-    MARKER_COLOURS[slot % MARKER_COLOURS.len()]
+    let slot = slot % game_sim::markers::MAX_SLOTS;
+    if let Some(c) = MARKER_COLOURS.get(slot) {
+        return *c;
+    }
+    let k = slot - MARKER_COLOURS.len();
+    let hue = (MORE_HUE + k as f32 * 0.618_034).fract();
+    let (sat, val) = MORE_TONES[k % MORE_TONES.len()];
+    hsv(hue, sat, val)
+}
+
+/// The generated marker colours' first hue, and their saturation and brightness steps.
+const MORE_HUE: f32 = 0.88;
+const MORE_TONES: [(f32, f32); 4] = [(0.83, 0.91), (0.98, 0.72), (0.61, 0.93), (0.96, 0.85)];
+
+/// A hue (0..1 round the wheel), saturation and value as a colour word.
+fn hsv(h: f32, s: f32, v: f32) -> [u8; 4] {
+    let f = |n: f32| {
+        let k = (n + h * 6.0) % 6.0;
+        v - v * s * k.min(4.0 - k).clamp(0.0, 1.0)
+    };
+    let b = |x: f32| (x * 255.0).round() as u8;
+    [b(f(5.0)), b(f(3.0)), b(f(1.0)), 255]
 }
 
 /// How tall a session marker's post stands over where its bike was put down, in feet: two bikes'

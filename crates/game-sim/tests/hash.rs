@@ -508,7 +508,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // when the Biplane acceleration modifier sets it.
     // 11352 since P132: the map's starts slot 1 rides to (`Sim::home`), a constant of the ride
     // derived from the map on every machine, left out of the walk like the bike's numbers.
+    // 11336 since P139: the five marker slots became a growing list (a 24-byte Vec for five boxed
+    // slots' 40), its slots past five walked as `more` only when there are any.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11352, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11336, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

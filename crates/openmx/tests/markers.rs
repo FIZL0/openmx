@@ -273,7 +273,7 @@ fn the_bar_fills_with_an_up_or_down_hold() {
     // The bar drawn: the pixels the hold changes, against the same display with none.
     let draw = |h: u32| {
         let mut f = game_render::raster::Frame::new(640, 448, [20, 60, 120]);
-        hud::draw_markers(&mut f, Pick::Slot(0), [false; SLOTS], "marker 1 empty", &[], h);
+        hud::draw_markers(&mut f, Pick::Slot(0), &[false; SLOTS], "marker 1 empty", &[], h);
         f
     };
     let empty = draw(0);
@@ -1174,6 +1174,8 @@ fn saved_and_reloaded_per_machine() {
     v1[8..12].copy_from_slice(&1u32.to_le_bytes());
     let kind_at = 16 + BIKE.len();
     v1.remove(kind_at);
+    // Its five slots uncounted (P139 counts them): the codec's magic, then the slots.
+    v1.drain(kind_at + 4..kind_at + 12);
     let old = markers::Markers::from_file(&v1, BIKE).expect("a P99 file");
     assert_eq!(saved_markers::signatures(&old)[0], words[0]);
 
@@ -1261,7 +1263,7 @@ fn bar(seats: &[(Sim, Garage)], me: usize, hands: &Controls) -> MarkerBar {
 
 /// The label the display shows with it, offline (no names).
 fn label(b: &MarkerBar) -> String {
-    hud::marker_label(b.pick, b.filled, &[])
+    hud::marker_label(b.pick, &b.filled, &[])
 }
 
 /// P124: flying the plane, the slot display is the plane's. A Left press puts the bar up on the
@@ -1277,7 +1279,7 @@ fn flying_the_plane_shows_the_planes_bar() {
     let mut banner = MarkerBanner::default();
     let mut now = Instant::now();
     let step = Duration::from_millis(33);
-    let mut show = |b: &MarkerBar, now: Instant| banner.update(now, b.pick, b.filled, b.held);
+    let mut show = |b: &MarkerBar, now: Instant| banner.update(now, b.pick, &b.filled, b.held);
     for _ in 0..30 {
         hands = seat_pass(&mut seats, 0, Report::from_buttons(GAS)).1;
         now += step;
@@ -1291,7 +1293,7 @@ fn flying_the_plane_shows_the_planes_bar() {
     now += step;
     let b = bar(&seats, 0, &h);
     assert!(show(&b, now), "a Left press on the plane shows no bar");
-    assert_eq!((b.pick, b.filled, b.held, b.holding), (Pick::Slot(SLOTS - 1), [false; SLOTS], true, 0));
+    assert_eq!((b.pick, b.filled.clone(), b.held, b.holding), (Pick::Slot(SLOTS - 1), vec![false; SLOTS], true, 0));
     assert_eq!(label(&b), "marker 5 empty");
     seat_pass(&mut seats, 0, Report::from_buttons(GAS));
 
@@ -1321,7 +1323,7 @@ fn flying_the_plane_shows_the_planes_bar() {
     garage.switch(Kind::Bike, sim, &mut Flat::default()).unwrap();
     now += step;
     let b = bar(&seats, 0, &hands);
-    assert_eq!((b.pick, b.filled), (Pick::Slot(0), [false; SLOTS]), "the bike shows the plane's set");
+    assert_eq!((b.pick, b.filled.clone()), (Pick::Slot(0), vec![false; SLOTS]), "the bike shows the plane's set");
     assert!(show(&b, now), "the switch's new set put no bar up");
     assert_eq!(label(&b), "marker 1 empty");
     assert!(overlay::marker_blips(&seats[0].0.markers, b.pick).is_empty());
@@ -1368,7 +1370,7 @@ fn a_split_shows_each_players_own_machines_bar() {
     let mut most = 0;
     let placed = (0..30).find_map(|_| {
         let (did, one, two) = both(&mut seats, GAS | Control::Down.mask());
-        assert_eq!((one.pick, one.filled, one.holding), (Pick::Slot(0), [false; SLOTS], 0), "player 2's hold is on player 1's bar");
+        assert_eq!((one.pick, one.filled.clone(), one.holding), (Pick::Slot(0), vec![false; SLOTS], 0), "player 2's hold is on player 1's bar");
         most = most.max(two.holding);
         did
     });
@@ -1880,10 +1882,27 @@ fn the_bar_sets_the_spawn_apart() {
     // Drawn: slot 1 as the spawn is neither a placed marker's solid box nor an empty one's outline.
     let draw = |filled: [bool; SLOTS], home: bool| {
         let mut f = game_render::raster::Frame::new(320, 224, [0, 0, 0]);
-        hud::draw_markers_homed(&mut f, Pick::Slot(1), filled, home, "marker", &[], 0, 1.0);
+        hud::draw_markers_homed(&mut f, Pick::Slot(1), &filled, home, "marker", &[], 0, 1.0);
         f.color
     };
     let (empty, spawn, set) = (draw([false; SLOTS], false), draw([false; SLOTS], true), draw([true, false, false, false, false], false));
     assert_ne!(spawn, empty);
     assert_ne!(spawn, set);
+}
+
+/// The software HUD's bar with 63 slots set (P139): it scrolls so whichever slot or the + is
+/// selected is drawn, and the + reads "marker 64 new".
+#[test]
+fn the_software_bar_scrolls_to_the_selection_among_sixty_three() {
+    let filled = vec![true; game_sim::markers::MAX_SLOTS - 1];
+    assert_eq!(hud::marker_label(Pick::More, &filled, &[]), "marker 64 new");
+    let draw = |pick: Pick| {
+        let mut f = game_render::raster::Frame::new(640, 448, [20, 60, 120]);
+        hud::draw_markers(&mut f, pick, &filled, "", &[], 0);
+        f.color
+    };
+    let frames: Vec<Vec<u8>> = [Pick::Slot(0), Pick::Slot(31), Pick::Slot(62), Pick::More].into_iter().map(draw).collect();
+    for (i, f) in frames.iter().enumerate() {
+        assert!(frames[..i].iter().all(|o| o != f), "selection {i} draws as another");
+    }
 }

@@ -123,7 +123,7 @@ fn reach(glow: &Glow, at: [f32; 3]) -> (f32, f32, f32) {
 #[test]
 fn a_filled_slot_draws_the_zone_portal_small_and_no_post() {
     let sim = two_markers();
-    let mut built: [Option<portal::Portal>; SLOTS] = Default::default();
+    let mut built: Vec<Option<portal::Portal>> = Vec::new();
     let ground = |_: f32, _: f32, _: f32| None;
     portal::markers(&mut built, &sim.markers, Some(Pick::Slot(2)), ground);
     let filled: Vec<usize> = (0..SLOTS).filter(|&s| built[s].is_some()).collect();

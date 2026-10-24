@@ -195,7 +195,7 @@ fn another_format_is_dropped() {
     let _ = std::fs::remove_dir_all(&dir);
     eprintln!("a markers file of one slot is {} bytes, of five {} bytes", good.len(), {
         let mut five = sim.markers.clone();
-        five.slots = std::array::from_fn(|_| five.slots[0].clone());
+        five.slots = vec![five.slots[0].clone(); SLOTS];
         five.to_file(BIKE).len()
     });
 }
