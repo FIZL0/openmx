@@ -3,7 +3,7 @@
 //! then `markers::frame` with every rider's spot from before the tick (`Seat::pass`,
 //! `net::rides::Rides::step`). The stand-in bike on a flat floor, at the 30 Hz clamp. Left and Right
 //! fire on the press, the tick they go down (P93); Down and Up on the tick their held timer crosses
-//! `markers::HOLD_MS`, 200 ms (P106).
+//! `markers::HOLD_MS`, 200 ms (P106). P135 at the end: the spawn, the bar's first entry, and its clear.
 //!
 //! P107's at the end: the plane's own set, flown as `Seat::pass` flies it — the garage's step, then
 //! `Garage::markers` — on the disc's biplane over a flat floor (skipped without a disc).
@@ -232,7 +232,8 @@ fn down_held_199_ms_places_nothing_and_200_ms_once() {
 #[test]
 fn left_fires_on_its_first_tick() {
     let mut sim = moving();
-    assert_eq!(tick(&mut sim, GAS | Control::Left.mask()), Some(Did::Stepped(Pick::Slot(SLOTS - 1))));
+    // Left from slot 1 is the spawn (P135), the bar's first entry.
+    assert_eq!(tick(&mut sim, GAS | Control::Left.mask()), Some(Did::Stepped(Pick::Spawn)));
     let rest: Vec<Option<Did>> = (0..30).map(|_| tick(&mut sim, GAS | Control::Left.mask())).collect();
     assert_eq!(fired(&rest), vec![]);
     tick(&mut sim, GAS);
@@ -330,7 +331,7 @@ fn a_trick_button_does_not_take_the_dpad_from_the_markers() {
         }
     }
     let did = hold(&mut sim, Control::Left, GAS | circle, 0);
-    assert_eq!(fired(&did), vec![(0, Did::Stepped(Pick::Slot(SLOTS - 1)))]);
+    assert_eq!(fired(&did), vec![(0, Did::Stepped(Pick::Spawn))]);
     // The hands the bike was stepped with have no d-pad in them, a trick button down or not.
     let c = sim.poll(DT, &pads(GAS | circle | Control::Up.mask())).stick_alone();
     assert!(c.trick[0], "the trick button is still read");
@@ -369,7 +370,7 @@ fn markers_off_the_dpad_rides_as_the_originals() {
         }
         assert!(off.markers.fresh(), "{buttons:#x}: markers off touched the markers");
         assert_ne!(hash::of(&off.rider.ride), hash::of(&on.rider.ride), "{buttons:#x}: the d-pad did nothing with markers off");
-        let want = if buttons & Control::Down.mask() != 0 { vec![Did::Placed(0)] } else { vec![Did::Stepped(Pick::Slot(SLOTS - 1))] };
+        let want = if buttons & Control::Down.mask() != 0 { vec![Did::Placed(0)] } else { vec![Did::Stepped(Pick::Spawn)] };
         assert_eq!(what(&did_on), want, "{buttons:#x}: markers on");
     }
 }
@@ -439,21 +440,23 @@ fn the_tick_after_a_teleport_is_the_tick_after_the_placement() {
     assert_eq!(hash::of(&a.rider.ride), hash::of(&b.rider.ride), "the run-up did not repeat");
 }
 
-/// Left and Right step through the five slots, then each other player, then round; each player
-/// sees everybody but themselves.
+/// Left and Right step through the five slots, then each other player, then the spawn (P135) and
+/// round; each player sees everybody but themselves.
 #[test]
 fn left_and_right_reach_every_slot_and_then_the_other_players() {
     let mut sim = three_riders();
     let mut seen = vec![sim.markers.pick(0, 3)];
-    for _ in 0..SLOTS + 2 {
+    for _ in 0..SLOTS + 3 {
         let did = hold(&mut sim, Control::Right, 0, 0);
         let [(0, Did::Stepped(p))] = fired(&did)[..] else { panic!("{did:?}") };
         seen.push(p);
     }
     let slots = (0..SLOTS).map(Pick::Slot);
-    let want: Vec<Pick> = slots.chain([Pick::Player(1), Pick::Player(2), Pick::Slot(0)]).collect();
+    let want: Vec<Pick> = slots.chain([Pick::Player(1), Pick::Player(2), Pick::Spawn, Pick::Slot(0)]).collect();
     assert_eq!(seen, want);
-    // Left from the first slot is the last player.
+    // Left from the first slot is the spawn, and from the spawn the last player.
+    let did = hold(&mut sim, Control::Left, 0, 0);
+    assert_eq!(fired(&did), vec![(0, Did::Stepped(Pick::Spawn))]);
     let did = hold(&mut sim, Control::Left, 0, 0);
     assert_eq!(fired(&did), vec![(0, Did::Stepped(Pick::Player(2)))]);
     // Player 2's own list leaves them out.
@@ -575,8 +578,8 @@ fn tick_among(sim: &mut Sim, buttons: u16, riding: &[bool]) -> Option<Did> {
 }
 
 /// P94: a seat not in the ride is never a pick. With seat 2 of three empty, Right steps through the
-/// five slots, then seat 3, then round, and Left from the first slot is seat 3 — seat 2 is never on
-/// it — and every other player's list leaves it out too. A selection left on a seat that stops
+/// five slots, then seat 3, then the spawn (P135) and round, and Left from the spawn is seat 3 — seat
+/// 2 is never on it — and every other player's list leaves it out too. A selection left on a seat that stops
 /// riding moves to the next rider, or to the first slot when there is none.
 #[test]
 fn a_seat_not_riding_is_never_a_pick() {
@@ -588,13 +591,13 @@ fn a_seat_not_riding_is_never_a_pick() {
         let [(0, Did::Stepped(p))] = fired(&did)[..] else { panic!("{did:?}") };
         seen.push(p);
     }
-    let want: Vec<Pick> = (0..SLOTS).map(Pick::Slot).chain([Pick::Player(2), Pick::Slot(0), Pick::Slot(1)]).collect();
+    let want: Vec<Pick> = (0..SLOTS).map(Pick::Slot).chain([Pick::Player(2), Pick::Spawn, Pick::Slot(0)]).collect();
     assert_eq!(seen, want);
     for _ in 0..2 {
         tick_among(&mut sim, Control::Left.mask(), &riding);
         tick_among(&mut sim, 0, &riding);
     }
-    assert_eq!(sim.markers.pick_among(0, &riding), Pick::Player(2), "Left from the first slot");
+    assert_eq!(sim.markers.pick_among(0, &riding), Pick::Player(2), "Left from the first slot, past the spawn");
     assert_eq!(markers::Markers::others(0, 3, &riding), vec![2]);
     assert_eq!(markers::Markers::others(2, 3, &riding), vec![0]);
     // Up on the empty seat cannot happen; Up on seat 3 lands there.
@@ -610,9 +613,9 @@ fn a_seat_not_riding_is_never_a_pick() {
     assert_eq!(m.pick_among(0, &[true; 3]), Pick::Player(1));
     assert_eq!(m.pick_among(0, &riding), Pick::Player(2));
     assert_eq!(m.pick_among(0, &[true, false, false]), Pick::Slot(0));
-    // Nobody else in the ride: the slots alone, round.
+    // Nobody else in the ride: the slots and the spawn alone, round.
     let mut alone = three_riders();
-    for _ in 0..SLOTS {
+    for _ in 0..SLOTS + 1 {
         tick_among(&mut alone, Control::Right.mask(), &[true, false, false]);
         tick_among(&mut alone, 0, &[true, false, false]);
     }
@@ -621,8 +624,9 @@ fn a_seat_not_riding_is_never_a_pick() {
 
 /// P94, online: a seat nobody sits in has the missing pad (`net::Game::step`), and the session's
 /// tick ([`net::rides::Rides`]) leaves it out of the markers' places — the same count on every
-/// machine, as the pads are the session's. Seven presses of Right from the first slot are round to
-/// the second slot with seat 2 empty, and to the first with everybody in.
+/// machine, as the pads are the session's. Eight presses of Right from the first slot are round to
+/// the second slot with seat 2 empty, and to the first with everybody in: the spawn (P135,
+/// [`markers::SPAWN`]) is the place before the first slot.
 #[test]
 fn online_an_empty_seat_is_never_a_pick() {
     use net::Game;
@@ -632,7 +636,7 @@ fn online_an_empty_seat_is_never_a_pick() {
         let mut world = Flat::default();
         let mut rides = net::rides::Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None };
         let mut seen = Vec::new();
-        for t in 0..2 * (SLOTS + 2) {
+        for t in 0..2 * (SLOTS + 3) {
             let me = if t % 2 == 0 { Report::from_buttons(Control::Right.mask()) } else { Report::from_buttons(0) };
             rides.step(t, &[me, seat2, Report::from_buttons(0)]);
             if t % 2 == 0 {
@@ -641,9 +645,11 @@ fn online_an_empty_seat_is_never_a_pick() {
         }
         seen
     };
-    // Seven places with everybody in (five slots, two players), round to the first on the seventh.
-    assert_eq!(ride(Report::from_buttons(0)), vec![1, 2, 3, 4, 5, 6, 0], "everybody riding");
-    assert_eq!(ride(Report::missing()), vec![1, 2, 3, 4, 5, 0, 1], "seat 2 empty: one place fewer, round");
+    // Eight places with everybody in (the spawn, five slots, two players), round to the first on the
+    // eighth.
+    let spawn = markers::SPAWN;
+    assert_eq!(ride(Report::from_buttons(0)), vec![1, 2, 3, 4, 5, 6, spawn, 0], "everybody riding");
+    assert_eq!(ride(Report::missing()), vec![1, 2, 3, 4, 5, spawn, 0, 1], "seat 2 empty: one place fewer, round");
 }
 
 /// P94: a filled slot has a radar mark and an empty one has none — each in its slot's colour, at
@@ -896,7 +902,9 @@ fn in_a_split_left_picks_the_other_player_and_up_lands_by_them() {
             tick(&mut players, gas);
         }
         assert!(!players[0].plane().on_ground(), "{layout:?}: not flying");
-        assert_eq!(tick(&mut players, gas | Control::Left.mask()), Some(Did::Stepped(Pick::Player(1))), "{layout:?}: Left from slot 1");
+        assert_eq!(tick(&mut players, gas | Control::Left.mask()), Some(Did::Stepped(Pick::Spawn)), "{layout:?}: Left from slot 1");
+        tick(&mut players, gas);
+        assert_eq!(tick(&mut players, gas | Control::Left.mask()), Some(Did::Stepped(Pick::Player(1))), "{layout:?}: Left from the spawn");
         tick(&mut players, gas);
         let fired = (0..30).find_map(|_| tick(&mut players, gas | Control::Up.mask()));
         assert_eq!(fired, Some(Did::Teleported(Pick::Player(1))), "{layout:?}: a held Up onto the other player");
@@ -1285,7 +1293,14 @@ fn flying_the_plane_shows_the_planes_bar() {
     }
     assert_eq!(seats[0].0.markers.on, markers::Vehicle::Plane);
 
-    // Left: the plane's last slot, the bar up.
+    // Left: the plane's spawn (P135), then its last slot, the bar up.
+    let (did, h) = seat_pass(&mut seats, 0, Report::from_buttons(GAS | Control::Left.mask()));
+    assert_eq!(did, Some(Did::Stepped(Pick::Spawn)));
+    now += step;
+    let b = bar(&seats, 0, &h);
+    assert!(show(&b, now), "a Left press onto the spawn shows no bar");
+    assert_eq!(label(&b), "spawn");
+    seat_pass(&mut seats, 0, Report::from_buttons(GAS));
     let (did, h) = seat_pass(&mut seats, 0, Report::from_buttons(GAS | Control::Left.mask()));
     assert_eq!(did, Some(Did::Stepped(Pick::Slot(SLOTS - 1))));
     now += step;
@@ -1356,6 +1371,10 @@ fn a_split_shows_each_players_own_machines_bar() {
     for _ in 0..30 {
         both(&mut seats, GAS);
     }
+    let (did, _, b) = both(&mut seats, GAS | Control::Left.mask());
+    assert_eq!(did, Some(Did::Stepped(Pick::Spawn)));
+    assert_eq!(label(&b), "spawn");
+    both(&mut seats, GAS);
     let (did, _, b) = both(&mut seats, GAS | Control::Left.mask());
     assert_eq!(did, Some(Did::Stepped(Pick::Player(0))));
     assert_eq!(label(&b), "to P1");
@@ -1629,7 +1648,7 @@ fn the_camera_rides_out_with_the_bike() {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// P132: slot 1 is the spawn until something is put there.
+// P135: the spawn is its own entry before the slots (P132's start), and Down held on it clears.
 // ---------------------------------------------------------------------------------------------------
 
 /// The stand-in ride with its map's start as the shell derives it (`vehicle::home`): the stand-in
@@ -1645,78 +1664,229 @@ fn stood(sim: &Sim) -> ([u32; 4], [u32; 4], [u32; 4], [u32; 4]) {
     (sim.rider.ride.position().to_bits(), c.quat.to_bits(), c.vel.to_bits(), c.ang_vel.to_bits())
 }
 
-/// P132: on a fresh ride, Up on slot 1 — nothing put there — rides the bike back to its spawn at
-/// rest: where the ride began and turned as it was, bit for bit, with no speed and no spin, though
-/// it was ridden away at speed. Nothing is placed by it, so the markers stay fresh and walk and
-/// encode as before. Down on slot 1 then puts a real marker over it, and Up goes there; Clear
-/// Markers (and so a cleared slot) brings the spawn back. Only slot 1 is the spawn: Up on an empty
-/// slot 2 does nothing. A ride with no start (no `Home`) refuses as before.
+/// Left from slot 1, a press and a let-go: the selection onto the spawn.
+fn onto_spawn(sim: &mut Sim) {
+    assert_eq!(fired(&hold(sim, Control::Left, 0, 0)), vec![(0, Did::Stepped(Pick::Spawn))]);
+}
+
+/// `control` held, on top of `with`, until the input layer's timer reads exactly `ms` — the 30 Hz
+/// ticks, then 1 ms ones to land on it — without letting go: what each tick's markers did.
+fn hold_to(sim: &mut Sim, control: Control, with: u16, ms: u32) -> Vec<Option<Did>> {
+    let timer = |sim: &Sim| sim.input.pad(0).control(control).held_ms;
+    let buttons = with | control.mask();
+    let mut did = vec![tick(sim, buttons)];
+    while timer(sim) + 34 < ms {
+        did.push(tick(sim, buttons));
+    }
+    while timer(sim) < ms {
+        did.push(tick_dt(sim, buttons, F(0.001)));
+    }
+    assert_eq!(timer(sim), ms);
+    did
+}
+
+/// P135 (P132's ride home, off slot 1 onto its own entry): Left from slot 1 is the spawn, and Up
+/// held on it rides the bike back to the start at rest — where the ride began and turned as it was,
+/// bit for bit, with no speed and no spin, though it was ridden away at speed — and places nothing.
+/// Down's slot hold there does nothing. Slot 1 is the player's own again: Up on it empty does
+/// nothing, Down puts a marker there and Up rides back to it, the spawn still the start. A ride with
+/// no start (no `Home`) refuses.
 #[test]
-fn slot_one_is_the_bikes_spawn_until_a_marker_is_put_there() {
+fn up_on_the_spawn_rides_the_bike_back_at_rest() {
     let start = homed(Sim::new(0x88), &[]);
     let spawn = stood(&start);
     let zero = Vf::new(0.0, 0.0, 0.0, 0.0).to_bits();
     assert_eq!((spawn.2, spawn.3), (zero, zero), "the stand-in does not start at rest");
+    assert_eq!(start.markers.pick(0, 1), Pick::Slot(0), "a ride starts on slot 1, not on the spawn");
+    let mut back = start.clone();
+    back.rider.teleport_to(Spot::still(stock::SPAWN, stock::FACING, Vf::new(0.0, 1.0, 0.0, 0.0)));
+    assert_eq!(stood(&back), spawn, "a teleport to the spawn is not the spawn");
 
     let mut sim = start.clone();
     for _ in 0..45 {
         tick(&mut sim, GAS);
     }
     assert!(F(sim.bike_vel().z()).abs() > F(1.0), "the bike is not moving");
+    // Slot 1, empty, is no spawn now.
+    assert_eq!(what(&hold(&mut sim, Control::Up, GAS, HOLD_MS)), vec![Did::Refused(Pick::Slot(0))]);
+    onto_spawn(&mut sim);
     assert_ne!(stood(&sim).0, spawn.0);
-    assert_eq!(what(&hold(&mut sim, Control::Up, 0, HOLD_MS)), vec![Did::Teleported(Pick::Slot(0))]);
-    // The tick of the hold that fired put it there; the tick after, let go, rode one tick from rest.
-    let mut back = start.clone();
-    back.rider.teleport_to(Spot::still(stock::SPAWN, stock::FACING, Vf::new(0.0, 1.0, 0.0, 0.0)));
-    assert_eq!(stood(&back), spawn, "a teleport to the spawn is not the spawn");
-    assert!(sim.markers.fresh(), "riding to the spawn placed something");
+    let did = (0..30).find_map(|_| tick(&mut sim, Control::Up.mask()));
+    assert_eq!(did, Some(Did::Teleported(Pick::Spawn)));
+    assert_eq!(stood(&sim), spawn, "Up on the spawn is not the spawn at rest");
     assert!(sim.rider.ghost.on, "the spawn's teleport does not ghost the bike as a teleport does");
-    // Exactly the spawn on the tick it fired: rerun it and stop there.
-    let mut sim = start.clone();
-    for _ in 0..45 {
-        tick(&mut sim, GAS);
-    }
-    let did = (0..30).find_map(|_| tick(&mut sim, Control::Up.mask()));
-    assert_eq!(did, Some(Did::Teleported(Pick::Slot(0))));
-    assert_eq!(stood(&sim), spawn, "Up on slot 1 is not the spawn at rest");
-    let at_rest = sim.clone();
+    assert!(!sim.markers.any(), "riding to the spawn placed something");
+    tick(&mut sim, 0);
 
-    // Slot 2, empty, is no spawn.
-    assert_eq!(fired(&hold(&mut sim, Control::Right, 0, 0)), vec![(0, Did::Stepped(Pick::Slot(1)))]);
-    assert_eq!(what(&hold(&mut sim, Control::Up, 0, HOLD_MS)), vec![Did::Refused(Pick::Slot(1))]);
-    assert_eq!(fired(&hold(&mut sim, Control::Left, 0, 0)), vec![(0, Did::Stepped(Pick::Slot(0)))]);
-
-    // Down on slot 1 puts a marker over the spawn, and Up goes to it.
+    // Down's 200 ms on the spawn places nothing.
     for _ in 0..30 {
         tick(&mut sim, GAS);
     }
-    let did = (0..30).find_map(|_| tick(&mut sim, GAS | Control::Down.mask()));
-    assert_eq!(did, Some(Did::Placed(0)));
-    let placed = sim.markers.slots[0].as_deref().and_then(markers::Mark::ride).cloned().expect("a bike's marker");
-    for _ in 0..30 {
-        tick(&mut sim, GAS);
-    }
-    let did = (0..30).find_map(|_| tick(&mut sim, Control::Up.mask()));
-    assert_eq!(did, Some(Did::Teleported(Pick::Slot(0))));
-    assert_eq!(sim.rider.ride.position().to_bits(), placed.position().to_bits(), "Up went past the placed marker");
-    assert_ne!(sim.rider.ride.position().to_bits(), spawn.0);
+    assert_eq!(fired(&hold_to(&mut sim, Control::Down, GAS, HOLD_MS + 100)), vec![]);
+    tick(&mut sim, GAS);
+    assert!(!sim.markers.any(), "Down on the spawn placed a marker");
 
-    // Clear Markers: the spawn again.
-    sim.markers.clear();
-    for _ in 0..30 {
-        tick(&mut sim, GAS);
+    // The five slots still place and ride back.
+    for s in 0..SLOTS {
+        assert_eq!(fired(&hold(&mut sim, Control::Right, GAS, 0)), vec![(0, Did::Stepped(Pick::Slot(s)))]);
+        for _ in 0..10 {
+            tick(&mut sim, GAS);
+        }
+        assert_eq!(what(&hold(&mut sim, Control::Down, GAS, HOLD_MS)), vec![Did::Placed(s)]);
     }
+    assert_eq!(sim.markers.placed(), SLOTS);
+    for s in (0..SLOTS).rev() {
+        let kept = sim.markers.slots[s].as_deref().and_then(markers::Mark::ride).cloned().unwrap();
+        for _ in 0..10 {
+            tick(&mut sim, GAS);
+        }
+        let did = (0..30).find_map(|_| tick(&mut sim, Control::Up.mask()));
+        assert_eq!(did, Some(Did::Teleported(Pick::Slot(s))));
+        assert_eq!(sim.rider.ride.position().to_bits(), kept.position().to_bits(), "Up did not go to slot {}", s + 1);
+        tick(&mut sim, 0);
+        hold(&mut sim, Control::Left, 0, 0);
+    }
+    // Back on the spawn with every slot full: it is still the start.
+    assert_eq!(sim.markers.pick(0, 1), Pick::Spawn);
     let did = (0..30).find_map(|_| tick(&mut sim, Control::Up.mask()));
-    assert_eq!(did, Some(Did::Teleported(Pick::Slot(0))));
-    assert_eq!(stood(&sim), spawn, "Clear Markers did not bring the spawn back");
+    assert_eq!(did, Some(Did::Teleported(Pick::Spawn)));
+    assert_eq!(stood(&sim).0, spawn.0, "a full slot 1 took the spawn's place");
 
-    // No start, no spawn: the slot is empty as it always was.
+    // No start: the spawn refuses.
     let mut bare = Sim::new(0x88);
-    for _ in 0..45 {
-        tick(&mut bare, GAS);
+    onto_spawn(&mut bare);
+    assert_eq!(what(&hold(&mut bare, Control::Up, 0, HOLD_MS)), vec![Did::Refused(Pick::Spawn)]);
+    println!("spawn marker: Up on the spawn stood the bike at {:?} at rest", sim.rider.ride.position());
+}
+
+/// P135: Down held 499 ms on the spawn clears nothing; the tick its timer reads 500 it empties every
+/// slot on every machine — the bike's up and the plane's away — once, however long it is held after,
+/// as the pause's Clear Markers does (`Markers::clear`), the selection left on the spawn. A Down
+/// let go before 500 ms does nothing, and a shorter tap nothing either.
+#[test]
+fn down_held_499_ms_on_the_spawn_clears_nothing_and_500_ms_every_slot() {
+    assert_eq!(markers::CLEAR_MS, 500);
+    let mut sim = moving();
+    for s in [0, 2] {
+        while sim.markers.pick(0, 1) != Pick::Slot(s) {
+            hold(&mut sim, Control::Right, GAS, 0);
+        }
+        assert_eq!(what(&hold(&mut sim, Control::Down, GAS, HOLD_MS)), vec![Did::Placed(s)]);
     }
-    assert_eq!(what(&hold(&mut bare, Control::Up, 0, HOLD_MS)), vec![Did::Refused(Pick::Slot(0))]);
-    println!("spawn marker: Up on slot 1 stood the bike at {:?} at rest", at_rest.rider.ride.position());
+    // The plane's set, away (a default flight: the clear only empties it).
+    let plane_slots = std::array::from_fn(|s| (s % 2 == 1).then(|| Box::new(markers::Mark::Plane(Default::default()))));
+    sim.markers.put(markers::Set { on: markers::Vehicle::Plane, slots: plane_slots, at: 3 });
+    assert_eq!(sim.markers.placed(), 4);
+    while sim.markers.pick(0, 1) != Pick::Spawn {
+        hold(&mut sim, Control::Left, GAS, 0);
+    }
+    let before = hash::of(&sim.markers);
+
+    let did = hold_to(&mut sim, Control::Down, GAS, 499);
+    assert_eq!(fired(&did), vec![], "499 ms cleared");
+    assert_eq!(tick(&mut sim, GAS), None, "the release fired");
+    assert_eq!(hash::of(&sim.markers), before, "a Down let go at 499 ms touched the markers");
+    assert_eq!(fired(&hold(&mut sim, Control::Down, GAS, 0)), vec![], "a tap fired");
+    assert_eq!(hash::of(&sim.markers), before);
+
+    let mut did = hold_to(&mut sim, Control::Down, GAS, 499);
+    did.push(tick_dt(&mut sim, GAS | Control::Down.mask(), F(0.001)));
+    assert_eq!(sim.input.pad(0).control(Control::Down).held_ms, 500);
+    assert_eq!(fired(&did), vec![(did.len() - 1, Did::Cleared)], "500 ms, the tick it read 500");
+    assert!(!sim.markers.any(), "a slot survived the clear");
+    assert!(!sim.markers.any_on(markers::Vehicle::Plane), "the plane's slots survived the clear");
+    assert_eq!(sim.markers.pick(0, 1), Pick::Spawn, "the clear moved the selection");
+    let rest: Vec<Option<Did>> = (0..60).map(|_| tick(&mut sim, GAS | Control::Down.mask())).collect();
+    assert_eq!(fired(&rest), vec![], "a clear fired twice");
+    tick(&mut sim, GAS);
+    // And on a slot the long hold is a placement, no clear.
+    hold(&mut sim, Control::Right, GAS, 0);
+    assert_eq!(what(&hold(&mut sim, Control::Down, GAS, 1000)), vec![Did::Placed(0)]);
+    assert_eq!(sim.markers.placed(), 1);
+}
+
+/// P135 on the plane: flying, the spawn is its bay (P132's) — Up there stands the plane back in its
+/// bay at rest, unwrecked, as an online seat starts in it — and Down held 499 ms there clears
+/// nothing, 500 ms every slot, the plane's and the bike's away. Online the lane's plane does the
+/// same.
+#[test]
+fn the_planes_spawn_is_its_bay_and_down_clears_there() {
+    let Some((sim, mut garage)) = hangar(Kind::Biplane) else {
+        eprintln!("skipped: no disc");
+        return;
+    };
+    let bay = garage.plane.as_ref().unwrap().bay;
+    let mut sim = homed(sim, &[bay]);
+    let mut want = flight(&garage).clone();
+    want.reset(bay.at, bay.facing, &sim.tables.ride.acos);
+
+    airborne(&mut sim, &mut garage);
+    // Slot 1 empty is no bay now.
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Up.mask()), Some(Did::Refused(Pick::Slot(0))));
+    pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Down.mask()), Some(Did::Placed(0)));
+    pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+    let bike = Box::new(markers::Mark::Bike(sim.rider.ride.clone()));
+    sim.markers.put(markers::Set { on: markers::Vehicle::Bike, slots: [Some(bike), None, None, None, None], at: 0 });
+    assert_eq!(sim.markers.placed(), 2);
+    assert_eq!(pass(&mut sim, &mut garage, Report::from_buttons(GAS | Control::Left.mask())), Some(Did::Stepped(Pick::Spawn)));
+    pass(&mut sim, &mut garage, Report::from_buttons(GAS));
+
+    assert_eq!(hold_pass(&mut sim, &mut garage, Control::Up.mask()), Some(Did::Teleported(Pick::Spawn)));
+    let f = flight(&garage);
+    assert_eq!(f.body.position.to_bits(), want.body.position.to_bits(), "the plane is not back in its bay");
+    assert_eq!(f.body.quat.to_bits(), want.body.quat.to_bits());
+    for v in [f.body.velocity, f.body.rates] {
+        assert_eq!([v.x(), v.y(), v.z()], [0.0; 3], "the plane is not at rest");
+    }
+    assert_eq!(f.crash.reason, 0);
+    assert_eq!(sim.markers.placed(), 2, "riding to the bay touched the markers");
+    pass(&mut sim, &mut garage, Report::missing());
+
+    // Down: 499 ms nothing, 500 ms every slot.
+    let down = Control::Down.mask();
+    let timer = |sim: &Sim| sim.input.pad(0).control(Control::Down).held_ms;
+    let pass_dt = |sim: &mut Sim, garage: &mut Garage, dt: F| {
+        let mut world = Flat::default();
+        let spots = [garage.spot(sim, &mut world)];
+        let controls = sim.poll(dt, &[Report::from_buttons(down), Report::missing()]).stick_alone();
+        garage.pass(sim, dt, &controls, 0, &spots, &mut world).1
+    };
+    let mut did = vec![pass(&mut sim, &mut garage, Report::from_buttons(down))];
+    while timer(&sim) + 34 < 499 {
+        did.push(pass(&mut sim, &mut garage, Report::from_buttons(down)));
+    }
+    while timer(&sim) < 499 {
+        did.push(pass_dt(&mut sim, &mut garage, F(0.001)));
+    }
+    assert_eq!(timer(&sim), 499);
+    assert_eq!(fired(&did), vec![], "499 ms on the plane's spawn fired");
+    assert_eq!(sim.markers.placed(), 2);
+    assert_eq!(pass_dt(&mut sim, &mut garage, F(0.001)), Some(Did::Cleared));
+    assert!(!sim.markers.any(), "the plane's spawn left a marker");
+
+    // Online: the lane's plane goes to the seat's bay the same way.
+    let Some((lane, garage)) = hangar(Kind::Biplane) else { return };
+    let mut lane = homed(lane, &[bay]);
+    let template = garage.plane.as_ref().unwrap().flight.clone().unwrap();
+    vehicle::start_lane(&template, bay, &mut lane);
+    let mut world = Flat::default();
+    let mut tick = |sim: &mut Sim, report: Report| {
+        let spots = [vehicle::lane_spot(sim, &mut world)];
+        sim.poll(DT, &[report, Report::missing()]);
+        vehicle::fly_lane(sim, DT, vehicle::Wanted::default(), &mut world);
+        vehicle::lane_markers(sim, 0, &spots, &[true], &mut world)
+    };
+    for _ in 0..30 * 30 {
+        tick(&mut lane, Report::from_buttons(GAS));
+    }
+    assert_eq!(tick(&mut lane, Report::from_buttons(GAS | Control::Left.mask())), Some(Did::Stepped(Pick::Spawn)));
+    tick(&mut lane, Report::from_buttons(GAS));
+    assert_eq!((0..30).find_map(|_| tick(&mut lane, Report::from_buttons(Control::Up.mask()))), Some(Did::Teleported(Pick::Spawn)));
+    let f = lane.plane.as_ref().unwrap();
+    assert_eq!(f.body.position.to_bits(), want.body.position.to_bits(), "the lane's plane is not back in its bay");
+    assert_eq!([f.body.velocity.x(), f.body.velocity.y(), f.body.velocity.z()], [0.0; 3]);
+    println!("spawn marker: the plane stood back in its bay at {:?}", bay.at);
 }
 
 /// P132: the start is the map's, never a peer's. A ride's state hashes and encodes the same with
@@ -1740,12 +1910,17 @@ fn the_spawn_is_derived_never_sent() {
     // And riding to it is the same on every machine: two peers, each its own derived start.
     let (mut a, mut b) = (sim.clone(), homed(bare, &[]));
     for s in [&mut a, &mut b] {
-        assert_eq!((0..30).find_map(|_| tick(s, Control::Up.mask())), Some(Did::Teleported(Pick::Slot(0))));
+        onto_spawn(s);
+        assert_eq!((0..30).find_map(|_| tick(s, Control::Up.mask())), Some(Did::Teleported(Pick::Spawn)));
     }
     assert_eq!(a.hash(), b.hash());
+    // A selection on the spawn goes with a resync.
+    let mut c = Sim::new(0x88);
+    game_sim::snapshot::decode(&mut c, &game_sim::snapshot::encode(&a)).unwrap();
+    assert_eq!((c.markers.at, c.hash()), (markers::SPAWN, a.hash()));
 }
 
-/// P132: in a split each seat's slot 1 is its own start: seat 2 rides back beside the first, where
+/// P132: in a split each seat's spawn is its own start: seat 2 rides back beside the first, where
 /// it was stood, not onto the first's spawn.
 #[test]
 fn each_seat_has_its_own_spawn() {
@@ -1758,18 +1933,13 @@ fn each_seat_has_its_own_spawn() {
     for sim in &mut sims {
         sim.home = home.clone();
     }
-    let mut seat = |sims: &mut Vec<Sim>, me: usize, buttons: u16| {
-        let spots: Vec<Spot> = sims.iter().map(|s| Spot::of(&s.rider)).collect();
-        let sim = &mut sims[me];
-        let hands = sim.poll(DT, &pads(buttons)).stick_alone();
-        sim.step(DT, &hands, &mut Flat::default());
-        markers::frame_among(sim, me, &spots, &[true, true], &hands)
-    };
     for _ in 0..45 {
-        seat(&mut sims, 1, GAS);
+        split_seat(&mut sims, 1, GAS);
     }
     assert_ne!(sims[1].rider.ride.position().to_bits(), at_two);
-    assert_eq!((0..30).find_map(|_| seat(&mut sims, 1, Control::Up.mask())), Some(Did::Teleported(Pick::Slot(0))));
+    assert_eq!(split_seat(&mut sims, 1, Control::Left.mask()), Some(Did::Stepped(Pick::Spawn)));
+    split_seat(&mut sims, 1, 0);
+    assert_eq!((0..30).find_map(|_| split_seat(&mut sims, 1, Control::Up.mask())), Some(Did::Teleported(Pick::Spawn)));
     assert_eq!(sims[1].rider.ride.position().to_bits(), at_two, "seat 2 rode to somebody else's spawn");
     assert_eq!(sims[1].bike_vel().to_bits(), Vf::new(0.0, 0.0, 0.0, 0.0).to_bits());
     // An online ride's seats all start on the first's bike start, each in its own bay.
@@ -1779,111 +1949,127 @@ fn each_seat_has_its_own_spawn() {
     assert_eq!(online.plane(1), None);
 }
 
-/// P132: the plane's slot 1 is its bay. Flown away and up into the air, Up on slot 1 — nothing put
-/// there — stands the plane back in its bay at rest: on its wheels where it was parked, no speed,
-/// no spin, unwrecked, as an online seat starts in it (`vehicle::start_lane`). Down on it puts a
-/// real marker over it; Clear Markers brings the bay back. And the bar shows slot 1 as the spawn,
-/// set apart from a placed marker, until one is placed. Online the lane does the same.
-#[test]
-fn the_planes_slot_one_is_its_bay() {
-    let Some((sim, mut garage)) = hangar(Kind::Biplane) else { return };
-    let bay = garage.plane.as_ref().unwrap().bay;
-    let mut sim = homed(sim, &[bay]);
-    let mut want = flight(&garage).clone();
-    want.reset(bay.at, bay.facing, &sim.tables.ride.acos);
-
-    let seats = [(sim.clone(), garage.clone())];
-    let b = bar(&seats, 0, &Controls::default()).homed(sim.home.has(sim.markers.on, 0));
-    assert!(b.home && !b.filled[0], "a fresh plane's slot 1 is not shown as the spawn");
-    assert_eq!(b.label(&[]), "marker 1 spawn");
-
-    airborne(&mut sim, &mut garage);
-    assert_eq!(hold_pass(&mut sim, &mut garage, Control::Up.mask()), Some(Did::Teleported(Pick::Slot(0))));
-    let f = flight(&garage);
-    let zero = Vf::new(0.0, 0.0, 0.0, 0.0).to_bits();
-    assert_eq!(f.body.position.to_bits(), want.body.position.to_bits(), "the plane is not back in its bay");
-    assert_eq!(f.body.quat.to_bits(), want.body.quat.to_bits());
-    assert_eq!((f.body.velocity.to_bits(), f.body.rates.to_bits()), (want.body.velocity.to_bits(), want.body.rates.to_bits()), "the plane is not at rest");
-    for v in [f.body.velocity, f.body.rates] {
-        assert_eq!([v.x(), v.y(), v.z()], [0.0; 3], "the plane is not at rest");
-    }
-    assert_eq!(f.crash.reason, 0);
-    let plane = garage.plane.as_ref().unwrap();
-    assert_eq!(plane.spawn, bay, "the plane's own spawn is not its bay");
-    assert!(sim.markers.fresh(), "riding to the bay placed something");
-
-    // Down puts a real marker over the bay; the bar shows it placed, not the spawn.
-    airborne(&mut sim, &mut garage);
-    assert_eq!(hold_pass(&mut sim, &mut garage, GAS | Control::Down.mask()), Some(Did::Placed(0)));
-    let kept = flight(&garage).clone();
-    let seats = [(sim.clone(), garage.clone())];
-    let b = bar(&seats, 0, &Controls::default()).homed(sim.home.has(sim.markers.on, 0));
-    assert!(!b.home && b.filled[0]);
-    assert_eq!(b.label(&[]), "marker 1 set");
-    for _ in 0..30 {
-        pass(&mut sim, &mut garage, stick(GAS, 0x00));
-    }
-    assert_eq!(hold_pass(&mut sim, &mut garage, Control::Up.mask()), Some(Did::Teleported(Pick::Slot(0))));
-    assert!(*flight(&garage) == kept, "Up did not go to the placed marker");
-
-    // Clear Markers: the bay again.
-    sim.markers.clear();
-    for _ in 0..30 {
-        pass(&mut sim, &mut garage, Report::from_buttons(GAS));
-    }
-    assert_eq!(hold_pass(&mut sim, &mut garage, Control::Up.mask()), Some(Did::Teleported(Pick::Slot(0))));
-    assert_eq!(flight(&garage).body.position.to_bits(), want.body.position.to_bits(), "Clear Markers did not bring the bay back");
-
-    // Online: the lane's plane goes to the seat's bay the same way.
-    let Some((lane, garage)) = hangar(Kind::Biplane) else { return };
-    let mut lane = homed(lane, &[bay]);
-    let template = garage.plane.as_ref().unwrap().flight.clone().unwrap();
-    vehicle::start_lane(&template, bay, &mut lane);
-    let mut world = Flat::default();
-    let mut tick = |sim: &mut Sim, report: Report| {
-        let spots = [vehicle::lane_spot(sim, &mut world)];
-        sim.poll(DT, &[report, Report::missing()]);
-        vehicle::fly_lane(sim, DT, vehicle::Wanted::default(), &mut world);
-        vehicle::lane_markers(sim, 0, &spots, &[true], &mut world)
-    };
-    for _ in 0..30 * 30 {
-        tick(&mut lane, Report::from_buttons(GAS));
-    }
-    assert_eq!((0..30).find_map(|_| tick(&mut lane, Report::from_buttons(Control::Up.mask()))), Some(Did::Teleported(Pick::Slot(0))));
-    let f = lane.plane.as_ref().unwrap();
-    assert_eq!(f.body.position.to_bits(), want.body.position.to_bits(), "the lane's plane is not back in its bay");
-    assert_eq!([f.body.velocity.x(), f.body.velocity.y(), f.body.velocity.z()], [0.0; 3]);
-    println!("spawn marker: the plane stood back in its bay at {:?}", bay.at);
+/// One tick of seat `me` of a split, each seat its own `Sim`, as `Seat::pass` runs it.
+fn split_seat(sims: &mut [Sim], me: usize, buttons: u16) -> Option<Did> {
+    let spots: Vec<Spot> = sims.iter().map(|s| Spot::of(&s.rider)).collect();
+    let riding = vec![true; sims.len()];
+    let sim = &mut sims[me];
+    let hands = sim.poll(DT, &pads(buttons)).stick_alone();
+    sim.step(DT, &hands, &mut Flat::default());
+    markers::frame_among(sim, me, &spots, &riding, &hands)
 }
 
-/// P132: the bike's bar shows slot 1 as the spawn on a fresh ride, a placed marker as set, and the
-/// spawn again once the slot is cleared; with no start it is empty, as it was.
+/// P135: a clear is the clearing player's alone. In a split, seat 2's Down held on its spawn empties
+/// seat 2's slots and leaves seat 1's; online, through the session's tick (`net::rides::Rides`, every
+/// seat's pad the session's), seat 2's clear empties seat 2's and every other seat keeps its own.
 #[test]
-fn the_bar_sets_the_spawn_apart() {
-    let mut sim = homed(Sim::new(0x88), &[]);
-    let read = |sim: &Sim| {
-        MarkerBar::read(&sim.markers, 0, &[true], sim.input.pad(0), sim.table(), true).homed(sim.home.has(sim.markers.on, 0))
+fn another_seats_markers_survive_a_clear() {
+    let mut sims: Vec<Sim> = (0..2).map(|_| Sim::new(0x135)).collect();
+    for me in 0..2 {
+        for _ in 0..20 {
+            split_seat(&mut sims, me, GAS);
+        }
+        assert_eq!((0..30).find_map(|_| split_seat(&mut sims, me, GAS | Control::Down.mask())), Some(Did::Placed(0)));
+        split_seat(&mut sims, me, GAS);
+    }
+    assert_eq!(split_seat(&mut sims, 1, Control::Left.mask()), Some(Did::Stepped(Pick::Spawn)));
+    split_seat(&mut sims, 1, 0);
+    assert_eq!((0..30).find_map(|_| split_seat(&mut sims, 1, Control::Down.mask())), Some(Did::Cleared));
+    assert!(!sims[1].markers.any(), "seat 2's clear left its own");
+    assert!(sims[0].markers.holds(0), "seat 2's clear took seat 1's");
+
+    // Online: three seats on one session tick.
+    use net::Game;
+    let first = Sim::new(1);
+    let mut sims: Vec<Sim> = (0..3).map(|_| first.clone()).collect();
+    let mut world = Flat::default();
+    let mut rides = net::rides::Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None };
+    let idle = Report::from_buttons(0);
+    let down = Report::from_buttons(Control::Down.mask());
+    let mut t = 0;
+    let mut run = |rides: &mut net::rides::Rides, pads: [Report; 3], n: usize| {
+        for _ in 0..n {
+            rides.step(t, &pads);
+            t += 1;
+        }
     };
+    // Every seat puts a marker in slot 1; seat 2 steps onto its spawn and holds Down a second.
+    run(&mut rides, [down; 3], 15);
+    run(&mut rides, [idle; 3], 1);
+    assert!(rides.sims.iter().all(|s| s.markers.holds(0)), "a seat placed nothing");
+    run(&mut rides, [idle, Report::from_buttons(Control::Left.mask()), idle], 1);
+    run(&mut rides, [idle; 3], 1);
+    assert_eq!(rides.sims[1].markers.pick(1, 3), Pick::Spawn);
+    run(&mut rides, [idle, down, idle], 45);
+    assert!(!rides.sims[1].markers.any(), "seat 2's clear left its own online");
+    assert!(rides.sims[0].markers.holds(0) && rides.sims[2].markers.holds(0), "seat 2's clear took another seat's online");
+}
+
+/// P135: the bar on the spawn. It reads "spawn" and fills its hold bar with Down over the clear's
+/// 500 ms — half at 250, full only at 500 — while Up there and Down on a slot fill over 200; after
+/// the clear it says Cleared until the selection moves off the spawn. Drawn, the spawn's box is its
+/// own, ringed when selected and marked where it has a start.
+#[test]
+fn the_bar_shows_the_spawn_and_the_clear() {
+    let mut sim = homed(moving(), &[]);
+    let read = |sim: &Sim| MarkerBar::read(&sim.markers, 0, &[true], sim.input.pad(0), sim.table(), true).homed(sim.home.has(sim.markers.on, 0));
     let b = read(&sim);
     assert!(b.home);
-    assert_eq!(b.label(&[]), "marker 1 spawn");
-    let bare = Sim::new(0x88);
-    let b = read(&bare);
-    assert!(!b.home);
-    assert_eq!(b.label(&[]), "marker 1 empty");
-    assert_eq!((0..30).find_map(|_| tick(&mut sim, Control::Down.mask())), Some(Did::Placed(0)));
+    assert_eq!((b.pick, b.label(&[])), (Pick::Slot(0), "marker 1 empty".to_string()));
+    hold_to(&mut sim, Control::Down, GAS, 100);
+    assert_eq!(read(&sim).holding, 100, "a slot's Down fills over 200 ms");
+    tick(&mut sim, GAS);
+    onto_spawn(&mut sim);
     let b = read(&sim);
-    assert!(!b.home && b.filled[0]);
-    assert_eq!(b.label(&[]), "marker 1 set");
-    sim.markers.clear();
-    assert!(read(&sim).home);
-    // Drawn: slot 1 as the spawn is neither a placed marker's solid box nor an empty one's outline.
-    let draw = |filled: [bool; SLOTS], home: bool| {
+    assert_eq!((b.pick, b.label(&[])), (Pick::Spawn, "spawn".to_string()));
+    hold_to(&mut sim, Control::Up, 0, 100);
+    assert_eq!(read(&sim).holding, 100, "the spawn's Up fills over 200 ms");
+    tick(&mut sim, 0);
+    for _ in 0..10 {
+        tick(&mut sim, GAS);
+    }
+
+    let mut banner = MarkerBanner::default();
+    let mut now = Instant::now();
+    let mut clears = 0;
+    let mut frame = |sim: &mut Sim, buttons: u16, banner: &mut MarkerBanner| {
+        let did = tick(sim, buttons);
+        clears += u32::from(did == Some(Did::Cleared));
+        now += Duration::from_millis(33);
+        banner.cleared(now, clears);
+        let b = read(sim);
+        let shown = banner.update(now, b.pick, b.filled, b.held);
+        (did, shown, b.cleared(banner.says_cleared()))
+    };
+    let mut fills = vec![];
+    let mut done = None;
+    for _ in 0..30 {
+        let (did, _, b) = frame(&mut sim, GAS | Control::Down.mask(), &mut banner);
+        let held = sim.input.pad(0).control(Control::Down).held_ms;
+        fills.push((held, b.holding));
+        if did == Some(Did::Cleared) {
+            done = Some(b);
+            break;
+        }
+        assert_eq!(b.label(&[]), "spawn", "the bar said Cleared before the clear");
+    }
+    for &(held, fill) in &fills {
+        assert_eq!(fill, held.min(500) * HOLD_MS / 500, "{held} ms held on the spawn");
+        assert!(held >= 500 || fill < HOLD_MS, "the bar was full at {held} ms");
+    }
+    let b = done.expect("no clear in a second");
+    assert_eq!((b.holding, b.label(&[])), (HOLD_MS, "cleared".to_string()));
+    let (_, shown, b) = frame(&mut sim, GAS, &mut banner);
+    assert!(shown && b.label(&[]) == "cleared", "the bar does not say Cleared after");
+    let (_, _, b) = frame(&mut sim, GAS | Control::Right.mask(), &mut banner);
+    assert_eq!(b.label(&[]), "marker 1 empty", "Cleared stayed past the spawn");
+
+    // Drawn: the spawn selected is not slot 1 selected, and a spawn with a start not one without.
+    let draw = |pick: Pick, home: bool| {
         let mut f = game_render::raster::Frame::new(320, 224, [0, 0, 0]);
-        hud::draw_markers_homed(&mut f, Pick::Slot(1), filled, home, "marker", &[], 0, 1.0);
+        hud::draw_markers_homed(&mut f, pick, [false; SLOTS], home, "marker", &[], 0, 1.0);
         f.color
     };
-    let (empty, spawn, set) = (draw([false; SLOTS], false), draw([false; SLOTS], true), draw([true, false, false, false, false], false));
-    assert_ne!(spawn, empty);
-    assert_ne!(spawn, set);
+    assert_ne!(draw(Pick::Spawn, true), draw(Pick::Slot(0), true));
+    assert_ne!(draw(Pick::Slot(0), true), draw(Pick::Slot(0), false));
 }
