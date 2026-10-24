@@ -195,7 +195,7 @@ fn four_seats_switch_and_back(map: &str, world: &mut dyn World, start: Spawn, lo
             let (x, z) = (start.at.x() - fz * 70.0 * i as f32 + fx * 45.0 * i as f32, start.at.z() + fx * 70.0 * i as f32 + fz * 45.0 * i as f32);
             let y = ground_at(world, Vf::new(x, 0.0, z, 1.0));
             let mut sim = Sim::new(0);
-            sim.rider.teleport_to(Spot { at: Vf::new(x, y, z, 1.0), forward: start.facing, up: Vf::new(0.0, 1.0, 0.0, 0.0), motion: None });
+            sim.rider.teleport_to(Spot { at: Vf::new(x, y, z, 1.0), forward: start.facing, up: Vf::new(0.0, 1.0, 0.0, 0.0), motion: None, flight: None });
             sim
         })
         .collect();
@@ -327,7 +327,7 @@ fn the_same_switch_online_on_a_race_track() {
             let (x, z) = (s.x() + 80.0 * i as f32, s.z() + 30.0 * i as f32);
             let y = ground_at(&mut world, Vf::new(x, 0.0, z, 1.0));
             let mut sim = Sim::new(0);
-            sim.rider.teleport_to(Spot { at: Vf::new(x, y, z, 1.0), forward: d, up: Vf::new(0.0, 1.0, 0.0, 0.0), motion: None });
+            sim.rider.teleport_to(Spot { at: Vf::new(x, y, z, 1.0), forward: d, up: Vf::new(0.0, 1.0, 0.0, 0.0), motion: None, flight: None });
             sim
         })
         .collect();
