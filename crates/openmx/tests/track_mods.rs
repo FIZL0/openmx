@@ -239,19 +239,13 @@ fn mods_folder(name: &str) -> PathBuf {
     mods
 }
 
-const BROKEN: [&str; 11] = [
-    "md2_badjson",
-    "md2_badspawn",
-    "md2_badterrain",
-    "md2_later",
-    "md2_nojson",
-    "md2_noscene",
-    "md2_noterrain",
-    "md2_noversion",
-    "md2_twoscenes",
-    "md2_wrongid",
-    "md2_flat_case",
-];
+/// The mods whose `mod.json` is wrong, which the scan leaves out.
+const BROKEN: [&str; 6] = ["md2_badjson", "md2_badspawn", "md2_later", "md2_nojson", "md2_noversion", "md2_wrongid"];
+
+/// The mods whose `mod.json` is right and whose files are not (MD18): the scan reads `mod.json` only
+/// and lists them, and the ride says what is wrong — [`track_mods::find`] for the folder's listing,
+/// the ride's own load for the scene and the terrain.
+const BROKEN_FILES: [&str; 5] = ["md2_badterrain", "md2_noscene", "md2_noterrain", "md2_twoscenes", "md2_flat_case"];
 
 #[test]
 fn a_mod_folder_lists_and_the_broken_ones_are_one_line_each() {
@@ -263,17 +257,17 @@ fn a_mod_folder_lists_and_the_broken_ones_are_one_line_each() {
 
     let scan = track_mods::scan(&mods);
     let ids: Vec<&str> = scan.tracks.iter().map(|t| t.id.as_str()).collect();
-    assert_eq!(ids, ["md2_flat"], "{:#?}", scan.log);
-    let t = &scan.tracks[0];
-    assert_eq!((t.name.as_str(), t.stem.as_str()), ("MD2 Flat", "MDFLAT"));
+    let mut listed = vec!["md2_flat"];
+    listed.extend(BROKEN_FILES);
+    listed.sort();
+    assert_eq!(ids, listed, "{:#?}", scan.log);
+    let t = scan.tracks.iter().find(|t| t.id == "md2_flat").unwrap();
+    assert_eq!(t.name, "MD2 Flat");
     for id in BROKEN {
-        if id == "md2_flat_case" && !case_sensitive {
-            continue;
-        }
         let lines: Vec<&String> = scan.log.iter().filter(|l| l.starts_with(&format!("mods: tracks/{id} left out: "))).collect();
         assert_eq!(lines.len(), 1, "{id}: {:#?}", scan.log);
     }
-    assert_eq!(scan.log.len(), BROKEN.len() - usize::from(!case_sensitive), "{:#?}", scan.log);
+    assert_eq!(scan.log.len(), BROKEN.len(), "{:#?}", scan.log);
     assert!(!scan.log.iter().any(|l| l.contains("md2_music") || l.contains("README")), "{:#?}", scan.log);
     for line in &scan.log {
         println!("{line}");
@@ -283,8 +277,17 @@ fn a_mod_folder_lists_and_the_broken_ones_are_one_line_each() {
     let none = track_mods::scan(&mods.join("nowhere"));
     assert!(none.tracks.is_empty() && none.log.is_empty());
     // By id, as a ride finds it; a broken one says why, an unknown one says it is not there.
-    assert_eq!(track_mods::find(&mods, "md2_flat").as_ref(), Ok(t));
-    assert!(track_mods::find(&mods, "md2_noterrain").unwrap_err().contains("MDFLAT"));
+    let found = track_mods::find(&mods, "md2_flat").unwrap();
+    assert_eq!((&found.id, &found.name, &found.dir, found.stem.as_str()), (&t.id, &t.name, &t.dir, "MDFLAT"));
+    assert!(track_mods::find(&mods, "md2_noscene").unwrap_err().contains("no .scn"));
+    assert!(track_mods::find(&mods, "md2_twoscenes").unwrap_err().contains("2 .scn"));
+    assert_eq!(track_mods::find(&mods, "md2_flat_case").is_err(), case_sensitive);
+    // The scene and terrain are the ride's to read.
+    assert!(track_mods::find(&mods, "md2_noterrain").is_ok());
+    assert!(track_mods::find(&mods, "md2_badterrain").is_ok());
+    for id in BROKEN {
+        assert!(track_mods::find(&mods, id).is_err(), "{id}");
+    }
     assert!(track_mods::find(&mods, "md2_absent").is_err());
     assert!(track_mods::find(&mods, "../md2_flat").is_err());
 }
@@ -380,6 +383,33 @@ fn a_track_mod_loads_and_rides_and_a_broken_one_does_not_crash() {
     assert!(!ok && said.contains("MDFLAT"), "\n{said}");
     let (ok, said) = shell(&["--track", "md2_flat", "--mods", "off", "--frames", "2"]).unwrap();
     assert!(!ok && said.contains("md2_flat"), "\n{said}");
+}
+
+/// MD18: the menu's list reads each `mod.json` and nothing else, so a folder of mods whose terrains
+/// are cut down to their headers lists every one of them, and says nothing; a ride on one says why
+/// it cannot, naming the terrain.
+#[test]
+fn mods_with_terrains_cut_to_their_headers_all_list_and_a_ride_says_why_not() {
+    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md18").join("cut").join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    let tracks = mods.join("tracks");
+    let ids = ["md18_a", "md18_b", "md18_c"];
+    for id in ids {
+        good(&tracks, id);
+        let trn = tracks.join(id).join("Env/MDFLAT/MDFLAT.ps2.trn");
+        let bytes = std::fs::read(&trn).unwrap();
+        std::fs::write(&trn, &bytes[..game_sim::track::TerrainHead::MOST.min(bytes.len())]).unwrap();
+        assert!(game_sim::track::TerrainHead::parse(&std::fs::read(&trn).unwrap()).is_ok());
+    }
+    let scan = track_mods::scan(&mods);
+    let listed: Vec<&str> = scan.tracks.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(listed, ids, "{:#?}", scan.log);
+    assert!(scan.log.is_empty(), "{:#?}", scan.log);
+    assert_eq!(track_mods::find(&mods, "md18_b").map(|t| t.stem), Ok("MDFLAT".to_string()));
+
+    let Some((ok, said)) = shell(&["--track", "md18_b", "--mods", mods.to_str().unwrap(), "--frames", "2"]) else { return };
+    assert!(!ok, "a terrain of its header alone rode:\n{said}");
+    assert!(said.contains("MDFLAT.trn: ") && said.contains("overrun the file"), "the ride did not say the terrain is why:\n{said}");
 }
 
 /// With no mods, a disc track's ride is the ride it was: the same tape on free06 hashes the same with

@@ -933,30 +933,7 @@ impl<'a> Terrain<'a> {
 
     /// One node, by file offset.
     pub fn node(&self, at: u32) -> Option<TerrainNode> {
-        let mut r = Reader::new(self.bytes.get(at as usize..)?, "a terrain node");
-        let vertical_scale = r.f().ok()?;
-        let height_scale = r.f().ok()?;
-        let min_y = r.f().ok()?;
-        let max_y = r.f().ok()?;
-        let before_block = r.u16().ok()?;
-        let block = r.u16().ok()?;
-        let after_block = r.u32().ok()?;
-        let mut table = [0u32; 16];
-        for slot in &mut table {
-            *slot = r.u32().ok()?;
-        }
-        let after_table = r.u32().ok()?;
-        let flags = r.u8().ok()?;
-        let children_at = r.u32().ok()?;
-        Some(TerrainNode {
-            vertical_scale,
-            height_scale,
-            min_y,
-            max_y,
-            block,
-            children_at,
-            unread: Unread { before_block, after_block, table, after_table, flags },
-        })
+        TerrainNode::read(self.bytes.get(at as usize..)?)
     }
 
     /// One of a node's 16×16 children, by file offset, or `None` where the terrain has no such cell.
@@ -1035,7 +1012,91 @@ impl<'a> Terrain<'a> {
     }
 }
 
+/// What a terrain's header says, read without its blocks (MD18): all a world needs to lay a tile
+/// out before it rides, which is a few hundred bytes of a file of megabytes. [`Terrain::parse`]
+/// reads the same fields first and then checks the blocks and textures against them; this does not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainHead {
+    /// [`Terrain::scale`].
+    pub scale: F,
+    /// [`Terrain::levels`].
+    pub levels: u32,
+    /// [`Terrain::blocks`].
+    pub blocks: u32,
+    /// [`Terrain::root_at`]: where the tree's root node sits in the file.
+    pub root_at: u32,
+}
+
+impl TerrainHead {
+    /// The most bytes [`TerrainHead::parse`] reads: the tag, version, platform and name, the palette's
+    /// word and the palette, and the five words after it.
+    pub const MOST: usize = 4 + 1 + 4 + 32 + 4 + 1024 + 5 * 4;
+
+    /// Read the header out of the file's first bytes (all of it, or its first [`TerrainHead::MOST`]).
+    pub fn parse(bytes: &[u8]) -> Result<TerrainHead, String> {
+        let mut r = Reader::new(bytes, "a terrain's header");
+        let tag = r.take(4)?;
+        if tag != b"PLN\0" {
+            return Err(format!("not a terrain: tag {tag:?}"));
+        }
+        r.skip(1 + 4 + 32)?;
+        if r.u32()? != 0 {
+            r.skip(1024)?;
+        }
+        let scale = r.f()?;
+        let levels = r.i32()?;
+        let tree_at = r.i32()?;
+        let declared = r.i32()?;
+        let blocks = r.i32()?;
+        if levels < 0 || tree_at < 0 || declared < 0 || blocks < 0 {
+            return Err(format!("terrain counts {levels}, {tree_at}, {declared}, {blocks}"));
+        }
+        Ok(TerrainHead { scale, levels: levels as u32, blocks: blocks as u32, root_at: tree_at as u32 })
+    }
+
+    /// Whether the root node fits a file of `len` bytes, as [`Terrain::parse`] requires.
+    pub fn fits(&self, len: u64) -> Result<(), String> {
+        if u64::from(self.root_at) + TerrainNode::BYTES as u64 > len {
+            return Err(format!("the tree at {} does not fit a {len}-byte file", self.root_at));
+        }
+        Ok(())
+    }
+}
+
 impl TerrainNode {
+    /// How many bytes a node takes in the file, in front of its children's table.
+    pub const BYTES: usize = NODE_BYTES;
+    /// How many bytes a node's children's table takes: a file offset for each of 16×16 children.
+    pub const TABLE_BYTES: usize = (TREE_ARITY * TREE_ARITY) as usize * 4;
+
+    /// One node out of the bytes starting at it, as [`Terrain::node`] reads one.
+    pub fn read(bytes: &[u8]) -> Option<TerrainNode> {
+        let mut r = Reader::new(bytes, "a terrain node");
+        let vertical_scale = r.f().ok()?;
+        let height_scale = r.f().ok()?;
+        let min_y = r.f().ok()?;
+        let max_y = r.f().ok()?;
+        let before_block = r.u16().ok()?;
+        let block = r.u16().ok()?;
+        let after_block = r.u32().ok()?;
+        let mut table = [0u32; 16];
+        for slot in &mut table {
+            *slot = r.u32().ok()?;
+        }
+        let after_table = r.u32().ok()?;
+        let flags = r.u8().ok()?;
+        let children_at = r.u32().ok()?;
+        Some(TerrainNode {
+            vertical_scale,
+            height_scale,
+            min_y,
+            max_y,
+            block,
+            children_at,
+            unread: Unread { before_block, after_block, table, after_table, flags },
+        })
+    }
+
     /// One raw sample as a local height, the way the game's query computes it.
     ///
     /// A node at full relief is the plain product; a flattened one pulls every sample towards its
@@ -1555,5 +1616,22 @@ mod tests {
         stray[tree_at_slot..tree_at_slot + 4].copy_from_slice(&(tree_at as u32 + 1).to_le_bytes());
         let why = Terrain::parse(&stray).unwrap_err();
         assert!(why.contains("but the tree starts at"), "{why}");
+    }
+
+    /// MD18: the header alone, out of the file's first bytes, says what the whole file's reader says,
+    /// and the root node read out of the bytes at it is the one the tree hands out.
+    #[test]
+    fn a_terrains_header_reads_without_the_rest_of_it() {
+        let (bytes, _, tree_at) = terrain_with_pages();
+        let t = Terrain::parse(&bytes).expect("parses");
+        let head = TerrainHead::parse(&bytes[..TerrainHead::MOST]).expect("the head parses");
+        assert_eq!(head, TerrainHead { scale: t.scale, levels: t.levels, blocks: t.blocks, root_at: t.root_at() });
+        assert_eq!(TerrainHead::parse(&bytes), Ok(head));
+        assert_eq!(TerrainNode::read(&bytes[tree_at..tree_at + TerrainNode::BYTES]), t.root());
+        assert!(head.fits(bytes.len() as u64).is_ok());
+        assert!(head.fits((tree_at + TerrainNode::BYTES - 1) as u64).is_err());
+        // Too short to say, or not a terrain.
+        assert!(TerrainHead::parse(&bytes[..TerrainHead::MOST - 1]).is_err());
+        assert!(TerrainHead::parse(b"PLX\0").is_err());
     }
 }
