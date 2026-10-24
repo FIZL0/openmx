@@ -555,6 +555,14 @@ pub struct Renderer {
     sky_has: [bool; 2],
     sky_share: f32,
     has_sky: bool,
+    /// Each view's own pair of skies, where it has one (P142): a split-screen world's views over
+    /// different maps. A view without one draws the sky above.
+    view_skies: Vec<Option<ViewSky>>,
+    /// The skies the views' own pairs are made of, each uploaded once, by the caller's number for it
+    /// (a world's map), and whether it is a sky at all.
+    sky_cubes: HashMap<usize, (wgpu::TextureView, bool)>,
+    /// Each view's own light (P142); a view past its end is lit by the frame's [`Scene3::light`].
+    view_lights: Vec<Lighting>,
     place_layout: wgpu::BindGroupLayout,
     overlay_mul: wgpu::RenderPipeline,
     overlay_add: wgpu::RenderPipeline,
@@ -1036,6 +1044,16 @@ fn sky_faces(device: &wgpu::Device, queue: &wgpu::Queue, sky: Option<&Sky>) -> w
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     })
+}
+
+/// A view's own two skies (P142): which of [`Renderer::set_view_skies`]' numbers, whether each is a
+/// sky, the second's share, and the bind group of both with the uniform saying it.
+struct ViewSky {
+    keys: [usize; 2],
+    has: [bool; 2],
+    share: f32,
+    mix: wgpu::Buffer,
+    bind: wgpu::BindGroup,
 }
 
 /// The two skies the backdrop crossfades between (MD26), and the uniform saying how far.
@@ -1635,6 +1653,9 @@ impl Renderer {
             sky_has: [false; 2],
             sky_share: 0.0,
             has_sky: false,
+            view_skies: Vec::new(),
+            sky_cubes: HashMap::new(),
+            view_lights: Vec::new(),
             place_layout,
             overlay_mul,
             overlay_add,
@@ -1813,6 +1834,78 @@ impl Renderer {
         self.sky_has = has;
         self.sky_bind = sky_bind_group(&self.device, &self.sky_layout, &self.clamp_sampler, &views, &self.sky_mix);
         self.set_sky_mix(self.sky_share);
+    }
+
+    /// A view's own two skies to crossfade between (P142), as [`Renderer::set_skies`] gives every view
+    /// theirs: each a number the caller keeps for it (a world's map) and the sky, which is uploaded
+    /// the first time its number is seen and never again, so views moving between the same maps
+    /// only re-bind. `None` puts the view back under the sky every view shares.
+    pub fn set_view_skies(&mut self, view: usize, skies: Option<[(usize, Option<&Sky>); 2]>) {
+        if self.view_skies.len() <= view {
+            self.view_skies.resize_with(view + 1, || None);
+        }
+        let Some(pair) = skies else {
+            self.view_skies[view] = None;
+            return;
+        };
+        for (key, sky) in pair {
+            if !self.sky_cubes.contains_key(&key) {
+                let has = sky.is_some_and(|s| s.faces.len() >= 6);
+                let cube = sky_faces(&self.device, &self.queue, sky.filter(|_| has));
+                self.sky_cubes.insert(key, (cube, has));
+            }
+        }
+        let keys = pair.map(|(k, _)| k);
+        let cubes = keys.map(|k| self.sky_cubes[&k].clone());
+        let (views, has) = ([cubes[0].0.clone(), cubes[1].0.clone()], [cubes[0].1, cubes[1].1]);
+        let slot = self.view_skies[view].take();
+        let (mix, share) = match slot {
+            Some(s) if s.keys == keys => {
+                self.view_skies[view] = Some(s);
+                return;
+            }
+            Some(s) => (s.mix, s.share),
+            None => {
+                let mix = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("view sky mix"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                (mix, 0.0)
+            }
+        };
+        let bind = sky_bind_group(&self.device, &self.sky_layout, &self.clamp_sampler, &views, &mix);
+        self.view_skies[view] = Some(ViewSky { keys, has, share, mix, bind });
+        self.set_view_sky_mix(view, share);
+    }
+
+    /// How much of the second of a view's own skies shows ([`Renderer::set_view_skies`]), 0 to 1, as
+    /// [`Renderer::set_sky_mix`] for the shared pair. A view without its own pair is left alone.
+    pub fn set_view_sky_mix(&mut self, view: usize, share: f32) {
+        if let Some(Some(s)) = self.view_skies.get_mut(view) {
+            s.share = share.clamp(0.0, 1.0);
+            let has = s.has.map(|h| if h { 1.0f32 } else { 0.0 });
+            self.queue.write_buffer(&s.mix, 0, bytemuck::cast_slice(&[s.share, has[0], has[1], 0.0]));
+        }
+    }
+
+    /// How many skies the views' own pairs hold uploaded ([`Renderer::set_view_skies`]).
+    pub fn view_sky_cubes(&self) -> usize {
+        self.sky_cubes.len()
+    }
+
+    /// Each view's own light, in the views' order (P142): its sun, ambient and fog, and so where its
+    /// far plane is. Views past the end, or all of them with none, take the frame's
+    /// [`Scene3::light`].
+    pub fn set_view_lights(&mut self, lights: &[Lighting]) {
+        self.view_lights.clear();
+        self.view_lights.extend_from_slice(lights);
+    }
+
+    /// The light view `v` was drawn with, given the frame's own.
+    pub fn view_light<'a>(&'a self, v: usize, frame: &'a Lighting) -> &'a Lighting {
+        self.view_lights.get(v).unwrap_or(frame)
     }
 
     /// The ground: its chunks, and the track's paint for it — or, without paint, the one colour `dirt`
@@ -2089,6 +2182,9 @@ impl Renderer {
         self.props.clear();
         self.grove = None;
         self.groves.clear();
+        self.view_skies.clear();
+        self.sky_cubes.clear();
+        self.view_lights.clear();
     }
 
     /// Wait for everything submitted so far to be drawn.
@@ -2472,7 +2568,6 @@ impl Renderer {
     /// Draw one frame into `target`: every view, then the overlay. The models the views name are
     /// uploaded from `assets` as they are first seen.
     pub fn render(&mut self, target: &Target, assets: &Assets, frame: &Scene3) -> Drawn {
-        let light = frame.light;
         let views = frame.views;
         // Everything a view needs to know before the pass: its uniforms, and its batches.
         if views.len() as u64 > self.view_capacity {
@@ -2520,10 +2615,16 @@ impl Renderer {
             ground_levels: Vec::new(),
             props: 0,
         };
-        let (fog, far) = self.fog(light);
         self.scratch.clear();
         let mut origins = Vec::with_capacity(views.len());
         for (v, view) in views.iter().enumerate() {
+            // Its own light and fog, a world's view over its own map (P142), or the frame's.
+            let light = &{ *self.view_light(v, frame.light) };
+            let (fog, far) = self.fog(light);
+            let has_sky = match self.view_skies.get(v) {
+                Some(Some(s)) => s.has[0] || s.has[1],
+                _ => self.has_sky,
+            };
             let [_, _, w, h] = view.rect;
             let (w, h) = (w * target.scale, h * target.scale);
             let camera = view.camera;
@@ -2555,7 +2656,7 @@ impl Renderer {
                 sun_color: [light.sun_color[0], light.sun_color[1], light.sun_color[2], 0.0],
                 ambient: [light.ambient[0], light.ambient[1], light.ambient[2], 0.0],
                 fog_color: [light.fog_color[0] as f32, light.fog_color[1] as f32, light.fog_color[2] as f32, 0.0],
-                fog: [fog.near, fog.far, if self.has_sky { 1.0 } else { 0.0 }, fog.max],
+                fog: [fog.near, fog.far, if has_sky { 1.0 } else { 0.0 }, fog.max],
                 forward: [forward.x, forward.y, forward.z, 0.0],
                 right: [right.x * half_w, right.y * half_w, right.z * half_w, 0.0],
                 up: [up.x * half_h, up.y * half_h, up.z * half_h, 0.0],
@@ -2856,7 +2957,11 @@ impl Renderer {
             // The backdrop: the sky, or the fog's colour.
             pass.set_pipeline(&self.sky_pipeline);
             pass.set_bind_group(0, &self.view_bind, &offset);
-            pass.set_bind_group(1, &self.sky_bind, &[]);
+            let sky = match self.view_skies.get(v) {
+                Some(Some(s)) => &s.bind,
+                _ => &self.sky_bind,
+            };
+            pass.set_bind_group(1, sky, &[]);
             pass.draw(0..3, 0..1);
             drawn.draws += 1;
             // The ground: the chunks this view sees, each at its level, in one draw.
@@ -4177,6 +4282,81 @@ mod tests {
         all(&draw(&mut gpu), between([0, 80, 240], [0; 3], 0.0), "one sky is the whole of it");
         gpu.set_sky_mix(0.7);
         all(&draw(&mut gpu), between([0, 80, 240], [0; 3], 0.0), "one sky whatever the share");
+    }
+
+    /// Two views over different maps (P142): each its own sky pair and share and its own light, one
+    /// crossing a join while the other sits still keeping its sky to the pixel; each sky uploaded once
+    /// however often a view moves between them; and a view put back under the shared sky draws it.
+    #[test]
+    fn each_view_draws_its_own_sky_and_light() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (mut scene, assets, camera) = known_scene();
+        scene.models.clear();
+        let solid = |rgb: [u8; 3]| Sky {
+            faces: (0..6).map(|_| Texture { width: 4, height: 4, rgba: (0..16).flat_map(|_| [rgb[0], rgb[1], rgb[2], 255]).collect() }).collect(),
+        };
+        let (red, blue, green) = (solid([200, 40, 0]), solid([0, 80, 240]), solid([20, 180, 30]));
+        let (w, h) = (64u32, 48u32);
+        let light = Lighting::of(&scene);
+        let fogged = Lighting { fog_color: [90, 20, 120], ..light };
+        gpu.set_graphics(Graphics::Original);
+        gpu.set_scene(&scene);
+        gpu.set_sky(Some(&green));
+        let texture = gpu.offscreen(2 * w, h);
+        let view = texture.create_view(&Default::default());
+        let draw = |gpu: &mut Renderer| {
+            let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &[] }, View { rect: [w, 0, w, h], camera: &camera, actors: &[] }];
+            let target = Target { view: &view, size: (2 * w, h), frame: [0, 0, 2 * w, h], scale: 1 };
+            gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+            let px = gpu.read(&texture);
+            let half = |x0: u32| -> Vec<u8> { (0..h).flat_map(|y| (x0..x0 + w).flat_map(move |x| [y, x])).collect::<Vec<_>>().chunks(2).flat_map(|c| px[((c[0] * 2 * w + c[1]) * 3) as usize..][..3].to_vec()).collect() };
+            (half(0), half(w))
+        };
+        let all = |px: &[u8], want: [f32; 3], what: &str| {
+            for p in px.chunks_exact(3) {
+                assert!((0..3).all(|k| (p[k] as f32 - want[k]).abs() <= 1.5), "{what}: {p:?}, not {want:?}");
+            }
+        };
+        let between = |a: [u8; 3], b: [u8; 3], t: f32| std::array::from_fn(|k| a[k] as f32 + (b[k] as f32 - a[k] as f32) * t);
+        // View 0 over map 0 (red), view 1 over map 1 (blue).
+        gpu.set_view_skies(0, Some([(0, Some(&red)), (0, Some(&red))]));
+        gpu.set_view_skies(1, Some([(1, Some(&blue)), (1, Some(&blue))]));
+        let (a, b) = draw(&mut gpu);
+        all(&a, between([200, 40, 0], [0; 3], 0.0), "view 0's own sky");
+        all(&b, between([0, 80, 240], [0; 3], 0.0), "view 1's own sky");
+        // View 0 rides across the join into map 1 while view 1 sits still.
+        gpu.set_view_skies(0, Some([(0, Some(&red)), (1, Some(&blue))]));
+        for t in [0.0, 0.3, 0.6, 1.0] {
+            gpu.set_view_sky_mix(0, t);
+            let (a, b) = draw(&mut gpu);
+            all(&a, between([200, 40, 0], [0, 80, 240], t), &format!("view 0 crossing at {t}"));
+            all(&b, between([0, 80, 240], [0; 3], 0.0), &format!("view 1 still while view 0 is at {t}"));
+        }
+        gpu.set_view_skies(0, Some([(1, Some(&blue)), (1, Some(&blue))]));
+        gpu.set_view_skies(0, Some([(0, Some(&red)), (1, Some(&blue))]));
+        assert_eq!(gpu.view_sky_cubes(), 2, "one cube a map, uploaded once");
+        // A map with no sky is its view's own fog: view 1 lit by a fog of its own.
+        gpu.set_view_skies(1, Some([(2, None), (2, None)]));
+        gpu.set_view_lights(&[light, fogged]);
+        gpu.set_view_sky_mix(0, 0.0);
+        let (a, b) = draw(&mut gpu);
+        all(&a, between([200, 40, 0], [0; 3], 0.0), "view 0's sky beside a fogged view");
+        all(&b, between(fogged.fog_color, [0; 3], 0.0), "view 1's own fog colour");
+        assert_eq!(gpu.view_light(1, &light).fog_color, fogged.fog_color);
+        assert_eq!(gpu.view_light(5, &light).fog_color, light.fog_color, "past the views, the frame's");
+        // Back under the shared sky, as Global puts them.
+        gpu.set_view_skies(0, None);
+        gpu.set_view_skies(1, None);
+        gpu.set_view_lights(&[]);
+        let (a, b) = draw(&mut gpu);
+        all(&a, between([20, 180, 30], [0; 3], 0.0), "view 0 under the shared sky");
+        all(&b, between([20, 180, 30], [0; 3], 0.0), "view 1 under the shared sky");
     }
 
     /// A scene with the disc's kind of fog: free07's, 25 to 1,000 feet at haziness 0.7, which the
