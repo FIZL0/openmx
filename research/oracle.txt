@@ -4086,6 +4086,17 @@ rider_body_update boot 0x0024e640 (dt in f12, the actor in a0) the body actor's 
 #   2631. A slow tip-over was not reached: the game holds a slow or standing bike upright (no ground
 #   roll limit; ground pitch limits not met up to ~60 deg), every wreck tried entered at 30+ ft/s.
 #   Loading a wreck's state and holding the same pad does not ride the same wreck again (front3).
+# S56 (reopened, 2026-10-23): why no slow tip-over can be ridden. bike_ground_step 0x00257a00 calls
+#   chassis_set_flags(chassis, 1, 1, 0) every tick a wheel is down (rider +0x574 on_ground) and
+#   (1, 1, 1) in the air: the ridden bike's roll freedom (body z) is off on the ground. Live on copy 2
+#   (recording2's state, standing): +0x2ac..+0x2b4 read 1, 1, 0, and a roll rate written into chassis
+#   +0x280/+0x290/+0x310/+0x31c is gone the next tick. bike_wreck_test 0x002522c0 has no ground roll
+#   limit (the roll test on +0x98 runs only with +0x57c airborne, against +0x778 = 1.4835 rad). In the
+#   air the roll is levelled too (2.5 rad/s written: 0.26 rad reached; 12 rad/s: 1.26). 18 rad/s after a
+#   20 ft/s hop crossed it: reason 8 at 2.3 ft/s, the s62 "roll" capture (frames 2481..3180, states
+#   roll-2481..2483 and roll-start = frame 2473, the hop and roll written in; research/s56/roll.pad).
+#   The original's rider_body_update holds that capture on all 699 ticks with nothing laid in but
+#   S62's columns; there are no bone hits on the bike in it.
 # P57: the bike's put-back ghost (S57's "timer not found" above, and its 0.7-1 s is wrong: it is 3 s).
 # Live on copy 3 (freeride state 8, the journal's capture/ghost_watch.py). Every put-back of the bike,
 # the wreck's own (kind 1) and L1+R1's alike, runs player_respawn -> bike_unwreck 0x00252ee0(kind) ->

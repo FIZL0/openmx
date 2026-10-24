@@ -2031,3 +2031,50 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
     // One gather each wreck after the bike has left the broad phase: the put-back's tick (S108).
     assert_eq!(k.gone, ["front 2681", "side 2686", "back 2556", "tip 2551", "front3 2681"], "the gathers with the bike gone");
 }
+
+// --- S56 (reopened): a wreck at walking pace ------------------------------------------------------
+
+/// The roll-out: the standing bike on recording2's state, thrown up and rolled about its own forward
+/// axis until the airborne roll limit wrecks it (reason 8) at 2.3 ft/s, the pad idle. On the ground
+/// the ridden bike's roll freedom is off (the ground step's chassis flags), so a standing or crawling
+/// bike cannot tip over at all; this is the slowest wreck the original has. Its first state, the last
+/// tick the original's update holds the capture through, and the capture's last row.
+const ROLL: (&str, u32, u32) = ("roll", 2481, 3180);
+
+/// **The port replays the slow roll-out to the rider at rest** (S56): as
+/// `the_port_replays_the_wrecks_through_the_bike`, from the roll's first state, the port's actor on
+/// its own state against the original's update every tick, and the original against the capture.
+#[test]
+fn the_port_replays_the_slow_roll_out() {
+    let (name, start, to) = ROLL;
+    let Some(cap) = Capture::load_in("s62", name) else { return };
+    let Some(mut ee) = state_in("s62", &Wreck { name, frame: start }) else { return };
+    let (mut went, mut port, mut exact, mut hits) = (Went::default(), None, 0, 0);
+    let mut frame = start + 1;
+    while cap.has(frame) {
+        if repeated(&cap, frame) {
+            frame += 1;
+            continue;
+        }
+        let (n, drew) = if frame <= to {
+            let before = Snapshot::of(&ee);
+            let (n, drew) = originals_tick(&mut ee, &cap, frame).unwrap_or_else(|d| panic!("{name}: {frame}: {:?}", &d[..d.len().min(4)]));
+            before.back(&mut ee);
+            exact += 1;
+            (n, Some(drew))
+        } else {
+            (0, None)
+        };
+        lay_in(&mut ee, &cap, frame);
+        let was = actor_of(&ee);
+        let (d, moving) = port_tick(&mut ee, &cap, frame, n, drew, Some(&mut port));
+        hits += usize::from(moving > 0);
+        assert!(d.is_empty(), "{name}: tick {frame} parts in {} numbers: {:#?}", d.len(), &d[..d.len().min(12)]);
+        went.add(&was, &ee);
+        frame += 1;
+    }
+    eprintln!("{name}: {start}..{}, the capture's own to {to}: {went:?}, {exact} exact, {hits} with a moving hit", frame - 1);
+    // The state is from the entry's own tick (the reason is first read there), so no entry is compared;
+    // off the bike once, settled 22 ticks in and still through the put-back to the capture's end.
+    assert!(went.ticks == 699 && exact == 699 && went.off_bike == 1 && went.settles == 1 && went.settled == 677, "{went:?}, {exact} exact");
+}
