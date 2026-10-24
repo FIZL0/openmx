@@ -290,9 +290,14 @@ fn engine_power_is_quicker_off_the_line() {
     assert!(hundred < 0.5, "engine power 200%: 0-100 only went x{hundred}");
     // And faster at the top, not held at the integrator's 135 as it was.
     assert!(top(&strong) > 138.0, "engine power 200% topped out at {}", top(&strong));
-    // Five times is quicker again, and still rides: no wreck, the nose not past a wheelie.
+    // Five times is quicker again, and still rides: no wreck, the nose not past a wheelie. Ridden
+    // from rest on the ground: since S67 the bottom-out's shove is the original's, and full gas
+    // pinned through the foot's drop [`ON_THE_FLOOR`] starts from launches five times the torque off
+    // the landing's rebound and loops the bike (83 degrees at tick 18).
     let five = flat_out(&p, wheels, &with(Knob::BikePower, 500), 30);
     assert!(time_to(&five, 40.0) < time_to(&strong, 40.0), "engine power 500% is no quicker than 200%");
+    let five = ride(&p, wheels, &with(Knob::BikePower, 500), &mut floor(), ON_THE_FLOOR,
+                    &[(0, Controls::default()), (60, gas())], 32 * 30);
     assert!(!five.iter().any(|t| t.wreck), "engine power 500% wrecked on the flat");
     let pitch = five.iter().map(|t| t.pitch).fold(0.0, f32::max);
     assert!(pitch < 45.0, "engine power 500% stood the bike up to {pitch} degrees");

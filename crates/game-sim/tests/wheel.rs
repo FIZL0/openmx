@@ -365,7 +365,8 @@ fn harness() -> Option<(Ee, CurveTable, Rc<RefCell<Tape>>)> {
         addr("transform_sync").unwrap(),
         Box::new(move |ee| {
             assert_eq!((ee.r(4) as u32, ee.r(5)), (XFORM, 0), "the transform sync's arguments changed");
-            t.borrow_mut().calls.push(Call::TransformSync);
+            // The shove the transform is moved by, its third argument.
+            t.borrow_mut().calls.push(Call::TransformSync(get_v(ee, ee.r(6) as u32)));
         }),
     );
     let t = tape.clone();

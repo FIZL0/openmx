@@ -237,9 +237,12 @@ pub enum Call {
     /// [`Wheel::chassis_velocity`]. [`tire_forces`] asks for it twice when the suspension bottoms
     /// out, because the shove it just gave the chassis changed the answer.
     ContactVelocity,
-    /// The transform, told to bring itself up to date before the push reads the chassis' velocity.
-    /// Takes no answer and is called for what it does to the transform, not to the wheel.
-    TransformSync,
+    /// The bottom-out shove, handed to the chassis transform: its origin moves by the vector (the
+    /// body has no parent frame, so the vector is the world's). Takes no answer and is called for
+    /// what it does to the transform, not to the wheel — but everything after it, this wheel's own
+    /// torque arm included, reads the moved origin, and the chassis' integrate takes its centre of
+    /// mass from it (S67).
+    TransformSync(Vf),
     /// The steering hinge's own force application, handed the force and the point it acts at: a
     /// steered wheel the bike is balancing on puts its tire force through the hinge instead of
     /// straight into the chassis.
@@ -492,12 +495,13 @@ pub fn tire_forces(w: &mut Wheel, c: &mut Chassis, m: &[Vf; 4], dt: F,
                 // Bottomed out. The ray's own answer always gets the shove; a wheel riding a swept
                 // contact only gets it while that contact is within reach of the suspension line.
                 if w.ray_hit != 0 || along < F(BOTTOM_OUT_REACH) {
-                    // The original computes this shove as a vector, stores it in a stack slot and
-                    // never reads it again — the three pushes below are what actually moves the
-                    // chassis. It is kept here because it is what the original computes.
-                    let _push = scale(w.contact_normal,
-                                      F(BOTTOM_OUT_PUSH) * (w.compression - w.max_compression));
-                    ask(&mut calls, world, Call::TransformSync);
+                    // The shove is the position's: the body is moved out of the ground by most of
+                    // the travel it went past the stop, through the transform (S67 — the call's third
+                    // argument, which the decompiler drops, is this stack slot). The three pushes
+                    // below are the velocity's, the acceleration's and the force's.
+                    let push = scale(w.contact_normal,
+                                     F(BOTTOM_OUT_PUSH) * (w.compression - w.max_compression));
+                    ask(&mut calls, world, Call::TransformSync(push));
                     let into = dot3(w.chassis_velocity, w.contact_normal).min(F::ZERO);
                     c.vel = sub_xyz(c.vel, scale(w.contact_normal, into));
                     let up = ask(&mut calls, world, Call::Rotate(UP));

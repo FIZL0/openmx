@@ -345,8 +345,10 @@ pub fn surface_drag(wh: &mut crate::ride::Wheel, s: &Surface, brake: F, c: &mut 
 /// `xf` is the chassis transform: the contact frame's rotate and the torque arm's unrotate. The
 /// call [`HINGE_SCALE`] sends through [`hinge_force`] asks it twice more.
 ///
-/// Not ported, and not reached by any wheel on the disc (recording2's eight have them all zero): the
-/// share path (`+0xc4`, the other wheel's load copied over) and the hinge-torque path (`+0xc0`).
+/// The share path (`+0xc4`, the other wheel's load copied over) is the caller's: `ride.rs`'s
+/// `share_load` runs it before this, for a rear hanging while the front is down (S67). Not ported,
+/// and not reached by any wheel on the disc (recording2's eight have it zero): the hinge-torque path
+/// (`+0xc0`).
 /// `+0x224`/`+0x228`, which the both-in-the-air case zeroes, are not kept: nothing in the port
 /// reads them.
 pub fn spin_integrate(wh: &mut crate::ride::Wheel, s: &Surface, st: &Step, c: &mut crate::wheel::Chassis,

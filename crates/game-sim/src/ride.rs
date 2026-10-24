@@ -1398,7 +1398,7 @@ fn stick(s: (F, F)) -> (F, F) {
 /// measured again off the copy's shoved body, and the real run gets it. Both runs see the same
 /// `chassis_velocity`, which is the one the shove itself reads, so the two answers land exactly where
 /// the original's two do.
-fn tire_forces(wh: &mut Wheel, mvc: &mut mv::Chassis, cofg_world: Vf, m: &Mat4, dt: F)
+fn tire_forces(wh: &mut Wheel, mvc: &mut mv::Chassis, cofg_world: Vf, m: &mut Mat4, dt: F)
                -> Vec<wheel::Call> {
     wh.to_wheel();
     let view = |mvc: &mv::Chassis| wheel::Chassis {
@@ -1415,9 +1415,10 @@ fn tire_forces(wh: &mut Wheel, mvc: &mut mv::Chassis, cofg_world: Vf, m: &Mat4, 
     let mut synced = false;
     {
         let (mut probe_w, mut probe_c) = (wh.w, view(mvc));
-        let mut hinge = None;
-        let mut ask = |call| answer(m, call, &mut hinge, &mut synced);
-        wheel::tire_forces(&mut probe_w, &mut probe_c, &m.0, dt, &mut ask);
+        let (mut hinge, mut probe_m) = (None, *m);
+        let rows = m.0;
+        let mut ask = |call| answer(&mut probe_m, call, &mut hinge, &mut synced);
+        wheel::tire_forces(&mut probe_w, &mut probe_c, &rows, dt, &mut ask);
         drop(ask);
         let vel = if synced { probe_c.vel } else { mvc.vel };
         wh.w.contact_velocity =
@@ -1431,8 +1432,9 @@ fn tire_forces(wh: &mut Wheel, mvc: &mut mv::Chassis, cofg_world: Vf, m: &Mat4, 
     let mut wc = view(mvc);
     let mut hinge = None;
     let mut sync_again = false;
+    let rows = m.0;
     let mut ask = |call| answer(m, call, &mut hinge, &mut sync_again);
-    let calls = wheel::tire_forces(&mut wh.w, &mut wc, &m.0, dt, &mut ask);
+    let calls = wheel::tire_forces(&mut wh.w, &mut wc, &rows, dt, &mut ask);
     drop(ask);
     // The hinge's force is applied after the step rather than inside it, for the same reason: what is
     // between the two is the compression's rate limit, which does not read the chassis, so the two
@@ -1450,7 +1452,7 @@ fn tire_forces(wh: &mut Wheel, mvc: &mut mv::Chassis, cofg_world: Vf, m: &Mat4, 
 
 /// One of [`wheel::tire_forces`]' questions, answered. The three transform calls are arithmetic; the
 /// hinge's force and the transform's catch-up are recorded for the caller.
-fn answer(m: &Mat4, call: wheel::Call, hinge: &mut Option<(Vf, Vf)>, synced: &mut bool) -> Vf {
+fn answer(m: &mut Mat4, call: wheel::Call, hinge: &mut Option<(Vf, Vf)>, synced: &mut bool) -> Vf {
     let rot = Mat3::new(m.0[0], m.0[1], m.0[2]);
     match call {
         wheel::Call::Unrotate(v) => chassis::unrotate(&rot, v),
@@ -1460,7 +1462,12 @@ fn answer(m: &Mat4, call: wheel::Call, hinge: &mut Option<(Vf, Vf)>, synced: &mu
             *hinge = Some((force, at));
             Vf::ZERO
         }
-        wheel::Call::TransformSync => {
+        wheel::Call::TransformSync(push) => {
+            // The transform's translate: three scalar adds onto its origin, then its rebuild, which
+            // with no parent frame copies the origin through unchanged.
+            for i in 0..3 {
+                m.0[3].0[i] = fpu::add(m.0[3].0[i], push.0[i]);
+            }
             *synced = true;
             Vf::ZERO
         }
@@ -1469,6 +1476,29 @@ fn answer(m: &Mat4, call: wheel::Call, hinge: &mut Option<(Vf, Vf)>, synced: &mu
         | wheel::Call::SpinIntegrate(_)
         | wheel::Call::ContactVelocity => Vf::ZERO,
     }
+}
+
+/// `+0xc8`, the share of the other wheel's load a sharing wheel takes: `1.0` on both of the bike's
+/// wheels in every save state read (S67), and no `.phy` key writes it.
+const SHARE_SCALE: f32 = 1.0;
+
+/// **The share path** (S67): a wheel whose own suspension found nothing while the other one is down
+/// — [`mv::Wheel::other_tire_down`], which the ground step sets on the rear alone — still puts a tire
+/// force into the chassis, on the other wheel's load. The spin step, before its contact frame, puts the
+/// load point at the probe's end, takes [`SHARE_SCALE`] times the other wheel's spring force as its own
+/// (`+0xf8`), copies the other's two hit objects (`+0x1f0`/`+0x1f4`) and asks for the contact velocity
+/// again at the new load point. The wheel's contact flag stays clear, so the frame faces the chassis'
+/// forward and the spin is the drive torque's, as for a wheel in the air.
+///
+/// This is what catches a nose-first landing: the front's load, copied onto the hanging rear, puts a
+/// second tire force behind the centre of mass and takes the pitch kick and the sideways twist out of
+/// the touchdown (`research/journal/2026-10-24-s67-landing-snap-2`).
+fn share_load(wh: &mut Wheel, other: &Wheel, mvc: &mv::Chassis, cofg_world: Vf) {
+    wh.w.load_point = wh.w.probe_end_world;
+    wh.w.spring_force = F(SHARE_SCALE) * other.w.spring_force;
+    wh.mv.fresh.scalars[2] = other.mv.fresh.scalars[2];
+    wh.mv.fresh.scalars[3] = other.mv.fresh.scalars[3];
+    wh.w.contact_velocity = contact_velocity(mvc.vel, mvc.world_ang_vel, wh.w.load_point, cofg_world);
 }
 
 /// One wheel's own integration: [`tire::surface_drag`], [`tire::spin_integrate`] and then
@@ -1794,7 +1824,7 @@ impl Ride {
 
             for (side, wh) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)] {
                 calls.push(mv::Call::TireForces(side, h));
-                tire_forces(wh, &mut mvc, chassis.cofg_world, &out.chassis, h);
+                tire_forces(wh, &mut mvc, chassis.cofg_world, &mut out.chassis, h);
             }
             rear.mv.other_tire_down = front.mv.contact && !rear.mv.contact;
 
@@ -1803,6 +1833,9 @@ impl Ride {
             wheel_integrate(front, &p.front, brake, other, &mut mvc, &out.chassis, &tables.curve, h);
             calls.push(mv::Call::WheelIntegrate(Side::Rear, h));
             let (brake, other) = (held.rear_brake, front.w.contact);
+            if rear.mv.other_tire_down && !rear.w.contact {
+                share_load(rear, front, &mvc, chassis.cofg_world);
+            }
             wheel_integrate(rear, &p.rear, brake, other, &mut mvc, &out.chassis, &tables.curve, h);
 
             mv::engine_post(engine, &mut rear.mv);
@@ -1893,6 +1926,13 @@ impl Ride {
         astep.touching = *touching;
         let ac = air_chassis!();
         air::contact(&p.air, air, &ac, &astep, &tables.acos);
+
+        // 5 — the stunt clocks' copy-back (S67). The state pack snapshots the node's orientation, as
+        // a quaternion of its matrix, and the clocks write it straight back into the chassis; so a
+        // frame ends with the body turned by the no-hander's roll, and the next frame's measure reads
+        // it, instead of the roll waiting for the next integrate to fold it in. The velocity and the
+        // other word the clocks copy back are the body's own, unchanged.
+        chassis.quat = math::mat4_to_quat(&out.chassis);
 
         // The race manager's turn, after the bike has moved: the put-back record (S66).
         let probe = Vf::new(swept.x(), chassis.cofg_world.y(), swept.z(), swept.w());
