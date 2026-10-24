@@ -2009,6 +2009,24 @@ pub enum Tune {
     Skip,
 }
 
+/// What a press did, for the sound it makes (P65): the original's menus play one of `ui.aud`'s
+/// `[UIResponseEmitter]` sounds on each — up_down, left_right, accept, cancel, locked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cue {
+    /// The highlight moved to another row.
+    Move,
+    /// A sideways step: a choice, a slider, a tab.
+    Side,
+    Accept,
+    Back,
+    /// A press that changed nothing: a slider at its end, a row with nothing to choose.
+    Refused,
+}
+
+/// A refused press held down repeats silently: the original plays `locked` on a fresh press, not on
+/// the d-pad's repeats. Frames a repeat comes within (the repeat's own gap is five).
+const REFUSED_QUIET: u64 = 25;
+
 /// What a frame of the menu asks of the shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
@@ -2178,6 +2196,31 @@ pub struct Menu {
     music_at: usize,
     /// What the song rows asked since [`Menu::take_tunes`] last took it.
     tunes: Vec<Tune>,
+    /// The sounds the presses made since [`Menu::take_cues`] last took them (P65).
+    cues: Cues,
+}
+
+/// The sounds the presses made, and what decides them (P65). Not the menu's state: two menus that
+/// show and do the same are equal whatever they last sounded.
+#[derive(Clone, Default)]
+struct Cues {
+    list: Vec<Cue>,
+    /// Frames stepped, and the last refused press and its frame, which a held repeat does not sound
+    /// again.
+    frames: u64,
+    refused: Option<(Press, u64)>,
+}
+
+impl PartialEq for Cues {
+    fn eq(&self, _: &Cues) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Cues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Cues")
+    }
 }
 
 /// A local game as the ride takes it (P43): one player a seat in play, in seat order, each on the
@@ -2281,7 +2324,74 @@ impl Menu {
             music_now: None,
             music_at: 0,
             tunes: Vec::new(),
+            cues: Cues::default(),
         }
+    }
+
+    /// The sounds the menu's presses made since this was last asked (P65), oldest first.
+    pub fn take_cues(&mut self) -> Vec<Cue> {
+        std::mem::take(&mut self.cues.list)
+    }
+
+    /// Step the menu with `walk` for the press `p`, and queue the sound the press made: what the
+    /// menu looks like after it against before. A ride running is silent; so is the press that
+    /// pauses it.
+    fn cued(&mut self, p: Press, walk: impl FnOnce(&mut Menu) -> Act) -> Act {
+        self.cues.frames += 1;
+        if p == Press::default() || self.riding() {
+            return walk(self);
+        }
+        let mut before = self.clone();
+        let act = walk(self);
+        before.tick = self.tick;
+        let same = before == *self;
+        let cue = Menu::cue_for(&before, self, p, &act, same);
+        let c = &mut self.cues;
+        match cue {
+            Some(Cue::Refused) => {
+                let quiet = matches!(c.refused, Some((q, at)) if q == p && c.frames - at <= REFUSED_QUIET);
+                c.refused = Some((p, c.frames));
+                if !quiet {
+                    c.list.push(Cue::Refused);
+                }
+            }
+            Some(cue) => {
+                c.refused = None;
+                c.list.push(cue);
+            }
+            None => {}
+        }
+        act
+    }
+
+    /// The sound a press made, from what it did.
+    fn cue_for(before: &Menu, after: &Menu, p: Press, act: &Act, same: bool) -> Option<Cue> {
+        let backing = p.back && !p.ok;
+        if *act != Act::Stay {
+            return Some(if backing { Cue::Back } else { Cue::Accept });
+        }
+        if same {
+            // An option row that would not change: a slider at its end, a dimmed row. The original
+            // is silent on a press that means nothing where it is (a sideways press on its main
+            // menu), so is this.
+            let Some(row) = before.screen().and_then(|s| before.page().get(before.cursor(s)).cloned()) else { return None };
+            let side = p.left || p.right;
+            let refused = (row.off.is_some() && (side || p.ok)) || (side && !row.value.is_empty());
+            return refused.then_some(Cue::Refused);
+        }
+        Some(if after.stack.len() < before.stack.len() || (backing && after.stack != before.stack) {
+            Cue::Back
+        } else if after.stack.len() > before.stack.len() || after.stack != before.stack {
+            Cue::Accept
+        } else if p.up || p.down {
+            Cue::Move
+        } else if p.left || p.right || p.l1 || p.r1 {
+            Cue::Side
+        } else if p.ok || p.start || p.delete || p.triangle {
+            Cue::Accept
+        } else {
+            Cue::Back
+        })
     }
 
     /// What the Game Audio Options' song rows asked of the music since this was last asked (P56).
@@ -2419,7 +2529,10 @@ impl Menu {
     /// whose rider it dresses.
     pub fn step_seat(&mut self, seat: usize, p: Press) {
         if seat > 0 && self.screen() == Some(Screen::Join) {
-            self.walk_join(seat, p);
+            self.cued(p, |m| {
+                m.walk_join(seat, p);
+                Act::Stay
+            });
         }
     }
 
@@ -2473,7 +2586,8 @@ impl Menu {
     /// moves nothing; past it, 1P's and the keyboard's presses together drive the screen.
     pub fn step_devices(&mut self, presses: &[(Dev, Press)]) -> Act {
         if self.screen() == Some(Screen::Splash) {
-            return self.splash_step(presses);
+            let any = presses.iter().fold(Press::default(), |p, (_, q)| p.or(*q));
+            return self.cued(any, |m| m.splash_step(presses));
         }
         let p = presses.iter().filter(|(d, _)| self.hosts(d)).fold(Press::default(), |p, (_, q)| p.or(*q));
         self.step(p)
@@ -2870,8 +2984,14 @@ impl Menu {
         }
     }
 
-    /// One frame of one device's presses, the keyboard's on the splash.
+    /// One frame of one device's presses, the keyboard's on the splash, and the sound it made
+    /// (P65).
     pub fn step(&mut self, p: Press) -> Act {
+        self.cued(p, |m| m.walk(p))
+    }
+
+    /// [`Menu::step`]'s frame.
+    fn walk(&mut self, p: Press) -> Act {
         if self.screen() == Some(Screen::Splash) {
             return self.splash_step(&[(Dev::Keys, p)]);
         }

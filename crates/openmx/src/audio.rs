@@ -388,7 +388,7 @@ impl Default for Play {
 }
 
 /// The sliders a sound can be under besides the music's: the original's Game Audio Options page has
-/// Sound FX, Crowd and Engine (P56), and Menu FX, which this shell has no sounds for yet.
+/// Sound FX, Crowd and Engine (P56), and Menu FX, the menus' clicks (P65).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Bus {
     #[default]
@@ -438,7 +438,25 @@ pub struct Mixer {
     pub menu_volume: f32,
     /// Samples rendered since the start.
     pub rendered: u64,
+    /// The front end's own music (P65), the original's `UI\UI_001` pair: one stereo loop, under the
+    /// music slider, playing while [`Mixer::front_end`] is on in place of the songs.
+    pub menu_music: Option<Arc<Clip>>,
+    /// The front end is up: the menu's loop plays and the songs hold where they are. Off, the ride's
+    /// songs play. A change fades over [`MENU_FADE`].
+    pub front_end: bool,
+    /// Where the fade is: 0 the songs alone, 1 the menu's loop alone.
+    menu_fade: f32,
+    /// The menu loop's place, in its frames.
+    menu_pos: f64,
 }
+
+/// How long the menu's loop and the ride's songs take to fade one into the other (the port's; the
+/// original stops one and starts the other).
+pub const MENU_FADE: f32 = 1.0;
+
+/// Where the menu's loop goes back to at its end: its second ADPCM block, which carries the SPU's
+/// loop-start flag (the first is the usual silent one).
+const MENU_LOOP_FROM: f64 = 28.0;
 
 impl Mixer {
     pub fn new(music: Music) -> Mixer {
@@ -454,6 +472,10 @@ impl Mixer {
             crowd_volume: 0.8,
             menu_volume: 0.8,
             rendered: 0,
+            menu_music: None,
+            front_end: false,
+            menu_fade: 0.0,
+            menu_pos: 0.0,
         }
     }
 
@@ -584,6 +606,64 @@ impl Mixer {
         }
     }
 
+    /// The fade between the songs and the menu's loop (P65): 0 the songs alone, 1 the loop alone.
+    pub fn menu_fade(&self) -> f32 {
+        self.menu_fade
+    }
+
+    /// The songs, at `gain`, and the menu's loop, faded one into the other as [`Mixer::front_end`]
+    /// asks. A song under a full fade holds where it is, for the next ride.
+    fn mix_menu_music(&mut self, acc: &mut [f32], gain: f32) {
+        let frames = acc.len() / 2;
+        let want = if self.front_end && self.menu_music.is_some() { 1.0 } else { 0.0 };
+        let from = self.menu_fade;
+        let step = frames as f32 / (MENU_FADE * RATE as f32);
+        let to = if want > from { (from + step).min(want) } else { (from - step).max(want) };
+        self.menu_fade = to;
+        let at = |f: usize| from + (to - from) * f as f32 / frames.max(1) as f32;
+        if from <= 0.0 && to <= 0.0 {
+            // The ride's songs alone, as before the menu had music.
+            self.music.mix(acc, gain);
+            self.menu_pos = 0.0;
+            return;
+        }
+        if from >= 1.0 && to >= 1.0 {
+            self.music.mix(acc, 0.0);
+        } else {
+            let mut songs = vec![0f32; acc.len()];
+            self.music.mix(&mut songs, gain);
+            for f in 0..frames {
+                let g = 1.0 - at(f);
+                acc[f * 2] += songs[f * 2] * g;
+                acc[f * 2 + 1] += songs[f * 2 + 1] * g;
+            }
+        }
+        let Some(clip) = self.menu_music.clone() else { return };
+        let n = clip.frames();
+        if n < 2 {
+            return;
+        }
+        let ch = clip.channels.max(1) as usize;
+        let step = clip.rate as f64 / RATE as f64;
+        let back = if (MENU_LOOP_FROM as usize) < n - 1 { MENU_LOOP_FROM } else { 0.0 };
+        for f in 0..frames {
+            let g = self.music_volume * at(f);
+            let i = self.menu_pos as usize;
+            let t = (self.menu_pos - i as f64) as f32;
+            let j = if i + 1 < n { i + 1 } else { back as usize };
+            for c in 0..2 {
+                let src = c.min(ch - 1);
+                let a = clip.pcm[i * ch + src] as f32;
+                let b = clip.pcm[j * ch + src] as f32;
+                acc[f * 2 + c] += (a + (b - a) * t) * g;
+            }
+            self.menu_pos += step;
+            if self.menu_pos >= n as f64 {
+                self.menu_pos -= n as f64 - back;
+            }
+        }
+    }
+
     /// Mix `out.len() / 2` stereo frames.
     pub fn render(&mut self, out: &mut [i16]) {
         let frames = out.len() / 2;
@@ -591,7 +671,7 @@ impl Mixer {
         // The song can change inside the mix; it is mixed at the gain of the one playing as it starts.
         self.music.tend();
         let gain = self.music_gain();
-        self.music.mix(&mut acc, gain);
+        self.mix_menu_music(&mut acc, gain);
         // About 5 ms to reach a new gain: no clicks, and a stop is gone well inside a frame.
         let ease = 1.0 - (-1.0 / (0.005 * RATE as f32)).exp();
         let targets: Vec<[f32; 2]> = self
@@ -2358,6 +2438,8 @@ pub struct Levels {
 pub struct Speakers {
     pub mixer: Arc<Mutex<Mixer>>,
     _out: Option<Output>,
+    /// The menus' clicks (P65), once read off the disc.
+    menu: Option<MenuSounds>,
 }
 
 impl Speakers {
@@ -2376,7 +2458,32 @@ impl Speakers {
                 }
             },
         };
-        Speakers { mixer, _out: out }
+        Speakers { mixer, _out: out, menu: None }
+    }
+
+    /// The front end's sounds off the disc (P65): its loop into the mixer, its clicks kept here.
+    pub fn menu_sounds(&mut self, sounds: MenuSounds) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.menu_music = sounds.music.clone();
+        }
+        self.menu = Some(sounds);
+    }
+
+    /// Whether the front end is up (P65): the menu's loop in place of the ride's songs.
+    pub fn front_end(&self, on: bool) {
+        if let Ok(mut m) = self.mixer.lock()
+            && m.front_end != on
+        {
+            m.front_end = on;
+        }
+    }
+
+    /// One of the menus' clicks, when anything renders the mix.
+    pub fn click(&self, click: Click) {
+        let (Some(menu), Some(mixer)) = (&self.menu, self.live()) else { return };
+        if let Ok(mut m) = mixer.lock() {
+            menu.play(&mut m, click);
+        }
     }
 
     /// The mixer, if anything renders it: a voice started in one nobody renders never ends.
@@ -2468,4 +2575,82 @@ impl Sound {
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
         Ok(sound)
     }
+}
+
+// --- the front end's sounds (P65) -------------------------------------------------------------------
+
+/// The menus' clicks, in the order `aud\ui\ui.aud`'s `[UIResponseEmitter]` lists them (`Sound1` to
+/// `Sound5`), which is the number the original's menus play them by: a row moved up or down, a
+/// sideways step (a choice, a slider, a tab), a confirm, a back, and a press refused (a slider at its
+/// end, a row with nothing to choose).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Click {
+    UpDown = 1,
+    LeftRight = 2,
+    Accept = 3,
+    Cancel = 4,
+    Locked = 5,
+}
+
+/// The `.res` and member the menus' `.aud` is in (the ride UI archives carry the same file).
+pub const UI_RES: &str = "UI\\ui.res";
+pub const UI_AUD: &str = "aud\\ui\\ui.aud";
+
+/// The front end's music: two mono halves under `Aud\UI\`, the name the original's menu manager
+/// asks for with `l` and `r` after it.
+pub const MENU_MUSIC: &str = "UI\\UI_001";
+
+/// **The front end's sounds**: its music loop and its clicks.
+#[derive(Clone, Debug, Default)]
+pub struct MenuSounds {
+    pub music: Option<Arc<Clip>>,
+    /// [`Click`]'s sounds, `Sound1` first.
+    pub clicks: Vec<Option<Arc<Clip>>>,
+}
+
+impl MenuSounds {
+    /// Off the sound archive: `ui.aud`'s `[UIResponseEmitter]` (`text`) and the music's two halves.
+    pub fn read(text: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> MenuSounds {
+        let sections = ini::parse(text);
+        let clicks = match section(&sections, "UIResponseEmitter") {
+            Some(s) => (1..=Click::Locked as usize).map(|i| s.get(&format!("Sound{i}")).and_then(|n| lib(n))).collect(),
+            None => Vec::new(),
+        };
+        let music = match (lib(&format!("{MENU_MUSIC}l")), lib(&format!("{MENU_MUSIC}r"))) {
+            (Some(l), Some(r)) => Some(Arc::new(stereo(&l, &r))),
+            (Some(one), None) | (None, Some(one)) => Some(one),
+            (None, None) => None,
+        };
+        MenuSounds { music, clicks }
+    }
+
+    /// Off the disc.
+    pub fn load(disc: Disc) -> Result<MenuSounds, String> {
+        let mut lib = Library::open(disc)?;
+        let text = lib.text(UI_RES, UI_AUD).ok_or_else(|| format!("no {UI_AUD} in {UI_RES}"))?;
+        Ok(MenuSounds::read(&text, &mut |n| lib.clip(n)))
+    }
+
+    /// The click's sound.
+    pub fn clip(&self, click: Click) -> Option<&Arc<Clip>> {
+        self.clicks.get(click as usize - 1)?.as_ref()
+    }
+
+    /// Start a click under the Menu FX slider, heard the same by everyone.
+    pub fn play(&self, mixer: &mut Mixer, click: Click) -> Option<VoiceId> {
+        let clip = self.clip(click)?.clone();
+        Some(mixer.play(clip, Play { bus: Bus::Menu, ..Play::default() }))
+    }
+}
+
+/// Two mono clips as one stereo one, at the left's rate, the shorter padded with silence.
+pub fn stereo(l: &Clip, r: &Clip) -> Clip {
+    let n = l.frames().max(r.frames());
+    let at = |c: &Clip, i: usize| c.pcm.get(i * c.channels.max(1) as usize).copied().unwrap_or(0);
+    let mut pcm = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        pcm.push(at(l, i));
+        pcm.push(at(r, i));
+    }
+    Clip { rate: l.rate, channels: 2, pcm }
 }

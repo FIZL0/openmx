@@ -1353,6 +1353,21 @@ impl Front {
         }
     }
 
+    /// The front end's music in place of the ride's songs while `front_end` is up, and the clicks
+    /// the menu's presses made this frame (P65).
+    fn cue(&mut self, front_end: bool) {
+        self.sound.front_end(front_end);
+        for cue in self.menu.take_cues() {
+            self.sound.click(match cue {
+                menu::Cue::Move => audio::Click::UpDown,
+                menu::Cue::Side => audio::Click::LeftRight,
+                menu::Cue::Accept => audio::Click::Accept,
+                menu::Cue::Back => audio::Click::Cancel,
+                menu::Cue::Refused => audio::Click::Locked,
+            });
+        }
+    }
+
     /// Write the settings when the menu changed them, saying so if it could not.
     fn save(&mut self) {
         if self.menu.take_changed() {
@@ -1442,8 +1457,15 @@ fn front_end(args: Args) -> Result<(), String> {
     let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
     let (settings, controls) = menu::load(&dir);
     println!("front end: settings in {}", dir.display());
-    let sound = start_sound(&args, &mut disc, &dir, &settings);
+    let mut sound = start_sound(&args, &mut disc, &dir, &settings);
     drop(disc);
+    // The front end's music and clicks (P65), when anything plays them.
+    if sound.live().is_some() {
+        match Disc::open_configured().and_then(audio::MenuSounds::load) {
+            Ok(m) => sound.menu_sounds(m),
+            Err(e) => println!("sound: the menus' sounds: {e}"),
+        }
+    }
     let picks = roster::Picks::load(&dir);
     println!(
         "garage: {} bikes, {} riders; seat 1 rides {} on {} as {}",
@@ -1775,6 +1797,7 @@ fn front_end(args: Args) -> Result<(), String> {
         let before = shell.front.menu.p1().cloned();
         shell.front.menu.music_now = shell.front.sound.now();
         act = shell.front.menu.step_devices(&presses);
+        shell.front.cue(true);
         let after = shell.front.menu.p1().cloned();
         if after != before {
             match &after {
@@ -4481,6 +4504,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             front.menu.music_now = front.sound.now();
             let paused = !front.menu.riding();
             let act = front.menu.step_seats(&presses);
+            front.cue(false);
             if front.menu.changed() {
                 overlay_mode = front.menu.settings.overlay;
                 speedometer = front.menu.settings.speedometer;
