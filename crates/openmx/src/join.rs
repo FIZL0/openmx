@@ -239,3 +239,48 @@ impl<D: Clone + PartialEq> Join<D> {
         }
     }
 }
+
+/// The most local players a running ride takes in (P76): the join screen's seats.
+pub const IN_RIDE: usize = ON_SCREEN;
+
+/// A change of a running freeride's local players (P76), which every per-player list of the ride
+/// takes the same way ([`Change::apply`]) so that each staying player keeps all that is theirs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Change {
+    /// The controller on this pad seat claimed a free seat: a new player after the rest.
+    Join(usize),
+    /// This player gave up their seat: they go, and the players after them move up one.
+    Leave(usize),
+}
+
+impl Change {
+    /// The change to one per-player list: a joiner's entry made by `make` on the end, a leaver's
+    /// taken out. Nothing else in the list is touched. The joiner's index, or the leaver's.
+    pub fn apply<T>(self, players: &mut Vec<T>, make: impl FnOnce() -> T) -> Option<usize> {
+        match self {
+            Change::Join(_) => {
+                players.push(make());
+                Some(players.len() - 1)
+            }
+            Change::Leave(i) if i < players.len() => {
+                players.remove(i);
+                Some(i)
+            }
+            Change::Leave(_) => None,
+        }
+    }
+
+    /// The players' pad seats after it: player `i` reads `devices[i]`'s pad. A controller already
+    /// riding joins nobody.
+    pub fn devices(self, devices: &[usize]) -> Vec<usize> {
+        let mut after = devices.to_vec();
+        match self {
+            Change::Join(d) if !devices.contains(&d) => after.push(d),
+            Change::Join(_) => {}
+            Change::Leave(_) => {
+                self.apply(&mut after, || 0);
+            }
+        }
+        after
+    }
+}
