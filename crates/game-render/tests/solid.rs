@@ -270,3 +270,90 @@ fn the_see_through_free06_materials_still_show_what_is_behind_them() {
         }
     }
 }
+
+/// An archive on the disc by the end of its name (`free07.res`, `Bike\125sx.res`), its `_2` half
+/// where it has one.
+fn archives(disc: &mut Disc, name: &str) -> Vec<Res> {
+    let mut out = Vec::new();
+    for suffix in [format!("{name}.res"), format!("{name}_2.res")] {
+        let suffix = suffix.to_ascii_lowercase();
+        let member = disc
+            .entries()
+            .iter()
+            .filter(|e| e.name.to_ascii_lowercase().replace('\\', "/").ends_with(&format!("/{suffix}")) || e.name.eq_ignore_ascii_case(&suffix))
+            .min_by_key(|e| e.name.len())
+            .map(|e| e.name.clone());
+        if let Some(m) = member {
+            out.push(disc.res(&m).unwrap());
+        }
+    }
+    assert!(!out.is_empty(), "{name}.res is on the disc");
+    out
+}
+
+/// V60's sweep, every material the port drew see-through where the original's is solid, by the
+/// rule each broke:
+///
+/// - a pass of two texture maps (a base and a specular map over it) reads its first texture's test
+///   from `alphaTestOnOff_1`, which is 0: the base's alpha is a gloss mask, not holes. Read from the
+///   bare key, the test fell to the default "greater than 0" and cut every texel of alpha 0 — 91.5%
+///   of nat07's plow, 36% of the THQ goggles, 19% of the 125's engine, 12.6% of the helmet;
+/// - a blend of `(A - B) * C + D` with A = B and D the source is the texel itself, opaque, and was
+///   mixed by an alpha that is 0 on 92% of free07's cabin door.
+///
+/// Drawn whole, each hides the backdrop at every pixel on both renderers; drawn the old way, it
+/// does not.
+#[test]
+fn the_materials_v60_found_hide_what_is_behind_them() {
+    let Some(mut disc) = disc() else { return };
+    let opaque = Surface { shading: Shading::Prelit, ..Surface::default() };
+    let mut gpu_checked = 0;
+    let found = [
+        ("nat07", "nat07_plow_body", true),
+        ("nat03", "steel_door", true),
+        ("nat10", "cr-250_plasticsall", true),
+        ("125sx", "125sx_engine", true),
+        ("thq1", "thq_helmet_01", true),
+        ("thq1", "thq_goggles_01", true),
+        ("free07", "free07_door", false),
+        ("free07", "free07_rubble", false),
+        ("free07", "free07_windw", false),
+        ("free07", "free07windw2", false),
+    ];
+    for &(archive, name, gloss) in &found {
+        let res = archives(&mut disc, archive);
+        let mut assets = Assets::default();
+        let read = |f: &str| res.iter().find_map(|r| r.read_suffix(f).ok());
+        let (i, surface) = assets.resolve(&read, name);
+        let texture = assets.textures[i.unwrap_or_else(|| panic!("{name} has a texture"))].clone();
+        assert!(!surface.blend && surface.cutoff == 0, "{name} is drawn opaque and whole: {surface:?}");
+        let empty = texture.rgba.chunks(4).filter(|p| p[3] == 0).count();
+        assert!(empty > 0, "{name} has texels of alpha 0, the ones that were holes");
+        let surface = Surface { shading: Shading::Prelit, ..surface };
+        let (through, hard) = shows_through(&texture, surface, opaque, 0);
+        assert_eq!(through, 0, "{name}: the backdrop shows through {through} pixels drawn in software");
+        if let Some(hard) = hard {
+            assert_eq!(hard, 0, "{name}: the backdrop shows through {hard} pixels on the GPU");
+            gpu_checked += 1;
+        }
+        if gloss {
+            // The old reading, the default test. steel_door's few empty texels (1.4%) fall outside
+            // the pixels checked.
+            let old = Surface { cutoff: 2, ..surface };
+            if empty * 20 > texture.rgba.len() / 4 {
+                assert!(shows_through(&texture, old, opaque, 0).0 > 0, "{name}: the old reading leaves holes the check sees");
+            }
+        } else {
+            // The old reading, an alpha mix: drawn first and writing depth, it mixes with the clear
+            // colour rather than the backdrop, and so is not the texture's picture.
+            let old = Surface { blend: true, ..surface };
+            let [new, old] = [surface, old].map(|s| {
+                let (scene, assets, camera) = scene(texture.clone(), s, [0, 255, 0], opaque);
+                soft(&scene, &assets, &camera)
+            });
+            let differ = inside().filter(|&i| (0..3).any(|k| new[3 * i + k] != old[3 * i + k])).count();
+            assert!(differ * 2 > inside().count(), "{name}: mixed by its alpha, only {differ} pixels change");
+        }
+    }
+    println!("checked on the GPU: {gpu_checked} of {}", found.len());
+}
