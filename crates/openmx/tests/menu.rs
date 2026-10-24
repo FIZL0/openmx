@@ -447,14 +447,22 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     down_to(&mut m, &mut r, menu::Key::DrawDistance);
     assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Whole Map");
     tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.graphics, Graphics::Far);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Far Fog");
+    tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.graphics, Graphics::Original);
     assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Original Fog");
     assert!(m.take_changed());
     tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.graphics, Graphics::Full);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.graphics, Graphics::Far);
+    assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Far);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.settings.graphics, Graphics::Original);
     assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Original);
+    assert_eq!(Settings::parse("graphics = far\n").graphics, Graphics::Far);
     assert_eq!(Settings::parse("graphics = full\n").graphics, Graphics::Full);
     assert_eq!(Settings::parse("graphics = fancy\n").graphics, Graphics::Full);
 }

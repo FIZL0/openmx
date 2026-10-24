@@ -4213,6 +4213,10 @@ mod tests {
         assert!(full.max <= crate::world::HAZE_MAX && full.max < 1.0);
         assert!(full.near >= 1000.0, "the haze starts where the original's fog ends");
         assert!(Graphics::Full.far_clip(&light, span) >= span);
+        // Far: the original's fog, every distance four times as far, and a real end.
+        let far = Graphics::Far.fog(&light, span);
+        assert_eq!(far, Fog { near: 4.0 * fog.near, far: 4000.0, max: 1.0, reach: 4000.0 });
+        assert_eq!(Graphics::Far.far_clip(&light, span), 4000.0);
         assert_eq!(Graphics::default(), Graphics::Full);
         for g in Graphics::ALL {
             assert_eq!(Graphics::from_word(g.word()), Some(g));
@@ -4235,6 +4239,10 @@ mod tests {
         assert!(!original.sees(far_edge, radius), "past the disc's far clip");
         assert!(!original.sees(behind, radius));
         assert!(original.sees(v3(100.0, 0.0, 900.0), radius));
+        let far = Cull::of(&camera, 1920, 1080, Graphics::Far, &light, span);
+        assert!(far.sees(v3(100.0, 0.0, 3500.0), radius), "past the disc's far clip, inside four times it");
+        assert!(!far.sees(far_edge, radius), "but not the whole map");
+        assert!(!far.sees(behind, radius));
     }
 
     /// A flat chunk of `cells` cells `size` feet each at chunk (`x`, `z`).

@@ -545,7 +545,8 @@ impl Lighting {
 /// far setter; the human's freeride save state reads near 2.4, far 1000), so nothing past the fog's
 /// end is drawn at all. `Full` draws the whole map from anywhere, with a light
 /// haze past the original's fog end for depth that never hides more than [`HAZE_MAX`] of a colour.
-/// Only the picture changes: nothing here is read by the simulation.
+/// `Far` is the original's fog and far clip with every distance [`FAR_FOG`] times as far: its look,
+/// and a real end the cull can stop at, which a world many maps across needs. Only the picture changes: nothing here is read by the simulation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Graphics {
     /// The original's look: its fog colour, fog start and end, and its far clip.
@@ -553,7 +554,12 @@ pub enum Graphics {
     /// No fog and no draw distance: the whole map, everywhere.
     #[default]
     Full,
+    /// The original's fog and far clip, [`FAR_FOG`] times as far out.
+    Far,
 }
+
+/// How many times further than the original's `Graphics::Far` starts its fog, ends it and clips.
+pub const FAR_FOG: f32 = 4.0;
 
 /// The most of the fog's colour `Graphics::Full`'s haze mixes into anything, however far.
 pub const HAZE_MAX: f32 = 0.3;
@@ -569,13 +575,14 @@ pub struct Fog {
 }
 
 impl Graphics {
-    pub const ALL: [Graphics; 2] = [Graphics::Full, Graphics::Original];
+    pub const ALL: [Graphics; 3] = [Graphics::Full, Graphics::Far, Graphics::Original];
 
     /// `--graphics`' word, and the settings file's.
     pub fn word(self) -> &'static str {
         match self {
             Graphics::Original => "original",
             Graphics::Full => "full",
+            Graphics::Far => "far",
         }
     }
 
@@ -588,6 +595,7 @@ impl Graphics {
         match self {
             Graphics::Original => "Original",
             Graphics::Full => "Whole map",
+            Graphics::Far => "Far fog",
         }
     }
 
@@ -595,6 +603,7 @@ impl Graphics {
     ///
     /// `Original` is the disc's: the scene's fog, and the far clip at its end. `Full` reaches past the
     /// whole map and starts its haze where the original's fog ends, at its most `span` further on.
+    /// `Far` is `Original` with its start, end and reach [`FAR_FOG`] times as far.
     pub fn fog(self, light: &Lighting, span: f32) -> Fog {
         match self {
             Graphics::Original => Fog {
@@ -609,6 +618,12 @@ impl Graphics {
                 max: HAZE_MAX,
                 reach: f32::INFINITY,
             },
+            Graphics::Far => Fog {
+                near: FAR_FOG * light.fog_near,
+                far: FAR_FOG * light.fog_far,
+                max: 1.0,
+                reach: FAR_FOG * light.fog_far,
+            },
         }
     }
 
@@ -618,6 +633,7 @@ impl Graphics {
         match self {
             Graphics::Original => light.fog_far,
             Graphics::Full => (2.0 * span).max(light.fog_far).max(10_000.0),
+            Graphics::Far => FAR_FOG * light.fog_far,
         }
     }
 }

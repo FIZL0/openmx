@@ -1138,8 +1138,9 @@ struct Args {
     fps: bool,
     /// `--renderer gpu|software`: what draws the picture (P44); the GPU unless asked.
     renderer: Backend,
-    /// `--graphics original|full` (V32): the original's fog and far clip, or the whole map with a
-    /// haze; the front end's setting when not given. Only the GPU draws `full`.
+    /// `--graphics original|far|full` (V32): the original's fog and far clip, the same four times as
+    /// far, or the whole map with a haze; the front end's setting when not given. Only the GPU draws
+    /// `far` and `full`.
     graphics: Option<Graphics>,
     /// `--render-scale auto|F`: the fraction of the frame the GPU draws the 3D at (V30); `None` is
     /// auto, picked from the frames' time in a window and whole offscreen.
@@ -3663,7 +3664,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             lit.fog_far,
             look.fog_color
         );
-    } else if args.graphics == Some(Graphics::Full) {
+    } else if args.graphics.is_some_and(|g| g != Graphics::Original) {
         println!("graphics: the software renderer draws the original's fog and far clip only");
     }
     // The load is over (P127): the ride is on the screen from its first frame.
@@ -6625,9 +6626,9 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--fps" => args.fps = true,
             "--graphics" => {
-                let word = next("original or full")?;
+                let word = next("original, far or full")?;
                 let graphics = Graphics::from_word(&word)
-                    .ok_or_else(|| format!("--graphics: {word:?} is not original or full"))?;
+                    .ok_or_else(|| format!("--graphics: {word:?} is not original, far or full"))?;
                 args.graphics = Some(graphics);
             }
             "--renderer" => args.renderer = Backend::parse(&next("gpu or software")?)?,
@@ -6854,7 +6855,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
                             [--biplane-controls new|screen|original|new,original,...]\n\
                             [--preset 0..3|0,2,...]\n\
-                            [--bindings FILE] [--renderer gpu|software] [--graphics full|original] [--fps]\n\
+                            [--bindings FILE] [--renderer gpu|software] [--graphics full|far|original] [--fps]\n\
                             [--render-scale auto|0.5..1]\n\
                             [--no-sound] [--mods DIR|off]\n\
                      \n\

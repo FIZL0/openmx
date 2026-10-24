@@ -358,7 +358,7 @@ impl Menu {
                 "Draw Distance",
                 &Graphics::ALL.map(graphics_label),
                 at(&Graphics::ALL, s.graphics),
-                "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.",
+                "Original Fog is the game's haze and far clip. Far Fog is the same haze four times as far out. Whole Map draws everything, with only a light haze far off.",
             ),
             // MD9: a combined world's sky and light, one for all of it or each map its own.
             Row::choice(
@@ -944,10 +944,11 @@ impl Menu {
     }
 }
 
-/// Draw Distance's names for the world's two.
+/// Draw Distance's names for the world's three.
 pub fn graphics_label(g: Graphics) -> &'static str {
     match g {
         Graphics::Full => "Whole Map",
+        Graphics::Far => "Far Fog",
         Graphics::Original => "Original Fog",
     }
 }
