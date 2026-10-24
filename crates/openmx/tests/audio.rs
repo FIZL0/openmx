@@ -1019,3 +1019,51 @@ fn the_ride_bikes_samples_are_the_originals() {
         assert_eq!(sounds.looping(s), o.ee.i32_at(p + note_at::LOOPING) != 0, "{s:?} loops as the original's does");
     }
 }
+
+/// **A landing sounds as the original's does** (P66): over S109's replayed small landing (12.9 ft/s
+/// down at tick 2149, after 15 ticks in the air) and big one (41.2 ft/s at 2751, after 211), the
+/// port starts no sound but the engine note's. The original's bike has no landing sound: its four
+/// emitters are the engine note, the `[Wreck]` clank (only while wrecked), the race events and the
+/// drive-on surface loop, and `machine.aud`'s suspension tiers are the buggy's and the trucks'. P42
+/// played `buggySuspension` here — `suspen00` at 0.53 for the small one, `suspen03` at 0.85 for the
+/// big — which the matched filter in the journal finds nowhere in S109's own recording.
+#[test]
+fn a_landing_plays_only_the_engine_as_the_originals_does() {
+    let Some(d) = disc() else { return };
+    let mut lib = audio::Library::open(d).unwrap();
+    let (bike, rider, plane) = {
+        let mut read = audio::Reading { lib: &mut lib };
+        (read.bike("Bike\\125sx.res"), read.rider("Rider\\ff_fox1.res"), read.machines("machine.res"))
+    };
+    assert!(!bike.high.is_empty(), "the 125's engine read off the disc");
+    let thumps: Vec<Arc<Clip>> = ["Vehicle\\suspen00", "Vehicle\\suspen01", "Vehicle\\suspen02", "Vehicle\\suspen03", "Vehicle\\trkbtm_2"]
+        .iter()
+        .map(|n| lib.clip(n).expect("machine.aud's suspension clips are on the disc"))
+        .collect();
+    let engine: Vec<Arc<Clip>> = [&bike.idle, &bike.low, &bike.high, &bike.power, &bike.sputter, &bike.decel, &bike.clutch, &bike.panic]
+        .iter()
+        .flat_map(|l| l.sounds.iter().map(|(c, _)| c.clone()))
+        .collect();
+    let bike = Arc::new(bike);
+    for (name, air, down) in [("small", 15, -12.9f32), ("big", 211, -41.2)] {
+        let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+        let mut sound = audio::Sound::new(mixer.clone());
+        sound.rider = rider.clone();
+        sound.plane = plane.clone();
+        sound.seats.push(audio::SeatSound::new(bike.clone(), 1));
+        // Riding in, the jump, the landing tick, and a second after it.
+        let ticks = (0..30).map(|_| (true, 0.0)).chain((0..air).map(|i| (false, 30.0 + (down - 30.0) * i as f32 / air as f32))).chain((0..30).map(|i| (true, if i == 0 { down } else { 0.0 })));
+        let mut heard = 0;
+        for (t, (grounded, vy)) in ticks.enumerate() {
+            let hands = Hands { grounded, gas: 1.0, clutch: 0.0, speed: 60.0, at: [0.0; 3], vel: [0.0, vy, 60.0] };
+            sound.frame(&[audio::SeatFrame { hands, ..Default::default() }], 1.0 / 30.0);
+            let m = mixer.lock().unwrap();
+            for (clip, gain) in m.clips() {
+                assert!(!thumps.iter().any(|s| s.pcm == clip.pcm), "{name} landing, tick {t}: machine.aud's suspension at gain {gain}");
+                assert!(engine.iter().any(|e| Arc::ptr_eq(e, &clip)), "{name} landing, tick {t}: a sound not the engine's, {} s at gain {gain}", clip.seconds());
+                heard += 1;
+            }
+        }
+        assert!(heard > 0, "the engine note sounded through the {name} landing");
+    }
+}
