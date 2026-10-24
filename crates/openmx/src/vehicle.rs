@@ -273,7 +273,12 @@ pub fn spots(machine_txt: &[u8], machine: Machine) -> Vec<Spawn> {
 /// The original has no copies past two and the nearby rule is the port's; a track whose file parks
 /// none of the machine gets none.
 pub fn park(machine_txt: &[u8], machine: Machine, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Vec<Bay> {
-    let file = spots(machine_txt, machine);
+    park_around(&spots(machine_txt, machine), machine, players, ground)
+}
+
+/// [`park`]'s rule over spots given as `file`: the first as many copies as there are spots stand on
+/// them, and the rest beside them.
+fn park_around(file: &[Spawn], machine: Machine, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Vec<Bay> {
     let mut bays: Vec<Bay> = Vec::with_capacity(players);
     if file.is_empty() {
         return bays;
@@ -303,6 +308,20 @@ pub fn park(machine_txt: &[u8], machine: Machine, players: usize, ground: &mut d
         bays.push(Bay { machine, copy, spawn, livery, original: false });
     }
     bays
+}
+
+/// Where each of `players` copies of `machine` starts on a map whose `machine.txt` parks none of it
+/// (P113: a race track, a free track without the section, a mod map): the ride's start line `start`
+/// taken as if it were the file's one spot — copy 0 on it, where the first player starts, and the
+/// rest beside it one [`Machine::spacing`] apart, as [`park`] stands the copies past the file's — each
+/// with its origin `rest` feet over the ground there ([`Plane::rest_height`]: on its wheels), nose
+/// along the start's heading flattened. Nothing is parked or drawn there: these are only where a
+/// player who starts the ride on the machine (`--vehicle`, the setup's pick, an online seat's) is
+/// put, since a switch mid-ride spawns it on the player wherever they are. The port's own spots.
+pub fn start_spots(start: Spawn, machine: Machine, players: usize, rest: f32, ground: &mut dyn FnMut(Vf) -> f32) -> Vec<Spawn> {
+    let facing = level(start.facing).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+    let base = Spawn { at: Vf::new(start.at.x(), ground(start.at) + rest, start.at.z(), 1.0), facing };
+    park_around(&[base], machine, players, ground).into_iter().map(|b| b.spawn).collect()
 }
 
 /// Every machine a ride parks, one of each per player, sized to the player count as players join and
@@ -335,6 +354,18 @@ impl Lot {
     /// Player `player`'s own copy of `machine`: the one they take and nobody else does.
     pub fn bay(&self, machine: Machine, player: usize) -> Option<&Bay> {
         self.of(machine).find(|b| b.copy == player)
+    }
+
+    /// Player `player`'s plane wherever the map is (P113): their own bay's ([`Lot::plane`]) where the
+    /// track's `machine.txt` parks one for them, and otherwise a copy of the disc's plane standing at
+    /// `start` (their [`start_spots`] spot), in their copy's livery, with no bay drawn anywhere. A
+    /// missing section only means no parked copy: `None` only with no bay and no `flight` (a disc
+    /// without `biplane.phy`), where there is nothing to fly.
+    pub fn plane_anywhere(&self, player: usize, flight: Option<Flight>, start: Spawn) -> Option<Plane> {
+        if self.bay(Machine::Biplane, player).is_some() {
+            return self.plane(player, flight);
+        }
+        Some(Plane { livery: livery(player), ..Plane::flying(start, flight?) })
     }
 
     /// Player `player`'s plane, standing in their bay: parked, or flying when `flight` is given.
@@ -579,6 +610,13 @@ impl Plane {
         // The player's plane: the controls read the pad (an unflown one is the autopilot's alone).
         flight.attitude.flown = true;
         Plane { flight: Some(flight), ..Plane::parked(spawn) }
+    }
+
+    /// Stood at `spawn` as where it starts and stands (P113's [`start_spots`], once the ride's ground
+    /// is there to measure them on), at rest; its flight is put there by its next step.
+    pub fn stand_at(&mut self, spawn: Spawn) {
+        (self.spawn, self.bay) = (spawn, spawn);
+        self.reset();
     }
 
     /// The unwreck-and-reset: back to the spawn transform, at rest. The flight is put back by the
@@ -844,16 +882,18 @@ fn under(plane: &Plane, sim: &Sim, world: &mut dyn World) -> Option<Spot> {
 pub use game_sim::ghost::Ghost;
 
 impl Garage {
-    /// A session that starts on `up`. Starting in a plane the track does not have is an error rather
-    /// than a quiet bike, so that `--vehicle biplane` cannot pass for a session it is not.
+    /// A session that starts on `up`. Starting in a plane the ride does not have is an error rather
+    /// than a quiet bike, so that `--vehicle biplane` cannot pass for a session it is not. Since P113
+    /// every map has one ([`Lot::plane_anywhere`]) when the disc has the plane's `biplane.phy`.
     pub fn new(up: Kind, plane: Option<Plane>) -> Result<Garage, String> {
         if up == Kind::Biplane && plane.is_none() {
-            return Err("--vehicle biplane: this track's machine.txt parks no biplane".into());
+            return Err("--vehicle biplane: this ride has no biplane (the disc's machine.res has no biplane.phy)".into());
         }
         Ok(Garage { up, plane, taken: up == Kind::Biplane })
     }
 
-    /// The machines this player can be put on: the bike, and the plane where the track parks one.
+    /// The machines this player can be put on: the bike, and the plane whenever the ride has one —
+    /// on every map since P113, parked copy or not.
     pub fn machines(&self) -> Vec<Kind> {
         let mut out = vec![Kind::Bike];
         if self.plane.is_some() {
@@ -873,15 +913,15 @@ impl Garage {
     ///   heading and stopped, the rider up out of any wreck ([`rider::Rider::teleport_to`], which
     ///   ghosts it, so it passes through whoever is standing there).
     ///
-    /// Switching to the machine already up does nothing. A track with no plane, or no ground under
-    /// the player, refuses with the reason and nothing moves. The machine now up, otherwise.
+    /// Switching to the machine already up does nothing. A ride with no plane (a disc without its
+    /// `biplane.phy`), or no ground under the player, refuses with the reason and nothing moves. The machine now up, otherwise.
     pub fn switch(&mut self, to: Kind, sim: &mut Sim, world: &mut dyn World) -> Result<Kind, String> {
         if to == self.up {
             return Ok(to);
         }
         match to {
             Kind::Biplane => {
-                let plane = self.plane.as_mut().ok_or("this track's machine.txt parks no biplane")?;
+                let plane = self.plane.as_mut().ok_or("this ride has no biplane")?;
                 land(plane, Spot::of(&sim.rider), world).ok_or("there is no ground under the bike to land the plane on")?;
                 self.taken = true;
             }
