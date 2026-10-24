@@ -1,0 +1,86 @@
+# p85-edge-sound.toml — the cannonball's sounds and the music fade (P85), one row a tick, while the
+# human's bike is steered off the map by research/p85_edge_sound.py (S59's closed loop).
+#
+# The bike's sound child at +0x149c holds the reason it saw last (+0x40), the Cannon (+0x34) and the
+# Rumble (+0x38) sound objects, whose +0x34 is the voice (-1 when silent) and +0x48 the volume 0..100.
+# The music: the game's +0x570 gate, the music manager (+0x400) with its stream (+0x30, paused at
+# +0x40) and its jukebox (+0x44: song 0's volume at +0x64 -> +0x30). research/oracle.txt's P85 block.
+
+[watch]
+name        = "p85-edge-sound"
+description = "the cannonball's Cannon and Rumble, and the music's pause and volume near the map edge"
+every       = 1
+frames      = 3000
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "edge_armed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x570"
+type = "u32"
+
+[[field]]
+name = "reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "cofg"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "snd_last"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x149c -> 0x40"
+type = "u32"
+
+[[field]]
+name = "cannon_voice"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x149c -> 0x34 -> 0x34"
+type = "s32"
+
+[[field]]
+name = "cannon_vol"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x149c -> 0x34 -> 0x48"
+type = "s32"
+
+[[field]]
+name = "rumble_voice"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x149c -> 0x38 -> 0x34"
+type = "s32"
+
+[[field]]
+name = "rumble_vol"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x149c -> 0x38 -> 0x48"
+type = "s32"
+
+[[field]]
+name = "music_on"
+addr = "@app_pointer -> 0x570"
+type = "u32"
+
+[[field]]
+name = "music_paused"
+addr = "@app_pointer -> 0x400 -> 0x30 -> 0x40"
+type = "u32"
+
+[[field]]
+name = "song0_vol"
+addr = "@app_pointer -> 0x400 -> 0x44 -> 0x64 -> 0x30"
+type = "f32"
