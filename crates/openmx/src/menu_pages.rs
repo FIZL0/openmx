@@ -5,7 +5,9 @@
 use super::*;
 
 /// Settings' tabs, which L1 and R1 step through, round from either end.
-pub const SETTINGS_TABS: [&str; 6] = ["Ride", "Display", "Audio", "Controls", "Camera", "Original"];
+/// Display is the screen's HUD; Graphics (P128) the world's draw, the picture and its rate, under
+/// headings, with the Original tab's graphics sub-switches (P126).
+pub const SETTINGS_TABS: [&str; 7] = ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera", "Original"];
 pub const TAB_RIDE: usize = 0;
 /// The Tricks row's help (MD16): what MX vs. ATV's tricks add, and what is the port's own.
 const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. MX vs. ATV adds that game's from a trick pack in the mods folder: \
@@ -13,10 +15,11 @@ const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. MX vs. ATV adds th
      for a 360 and a forward one for a front flip. The front flip is the port's own, in neither game, and shows the \
      backflip's pose. Online rides are always Original.";
 pub const TAB_DISPLAY: usize = 1;
-pub const TAB_AUDIO: usize = 2;
-pub const TAB_CONTROLS: usize = 3;
-pub const TAB_CAMERA: usize = 4;
-pub const TAB_ORIGINAL: usize = 5;
+pub const TAB_GRAPHICS: usize = 2;
+pub const TAB_AUDIO: usize = 3;
+pub const TAB_CONTROLS: usize = 4;
+pub const TAB_CAMERA: usize = 5;
+pub const TAB_ORIGINAL: usize = 6;
 /// The Garage's tabs, each starting with the same Player row.
 pub const GARAGE_TABS: [&str; 3] = ["Rider", "Bike", "Gear"];
 
@@ -277,6 +280,7 @@ impl Menu {
             Screen::Settings => match self.tab(screen) {
                 TAB_RIDE => self.ride_rows(),
                 TAB_DISPLAY => self.display_rows(),
+                TAB_GRAPHICS => self.graphics_rows(),
                 TAB_AUDIO => self.audio_page(),
                 TAB_CONTROLS => self.control_rows(),
                 TAB_ORIGINAL => self.original_rows(),
@@ -329,9 +333,6 @@ impl Menu {
         let s = &self.settings;
         let hud = Overlay::CHOICES.map(Overlay::label);
         let speed = Speedometer::ALL.map(Speedometer::label);
-        let scales = RenderScale::ALL.map(RenderScale::label);
-        let limits: Vec<String> = FrameLimit::ALL.iter().map(|f| f.label()).collect();
-        let limits: Vec<&str> = limits.iter().map(String::as_str).collect();
         let speed_off = match s.overlay {
             Overlay::Hud | Overlay::Original => None,
             Overlay::Debug => Some("Only the HUD and the Original have one"),
@@ -353,6 +354,19 @@ impl Menu {
                 "The size of the whole HUD, each piece in its own corner. 100% is the original's.",
             )
             .off_if(s.overlay == Overlay::None, "The HUD is off"),
+        ]
+    }
+
+    /// The Graphics tab (P128): each graphics setting once, under the group it is in. The Original
+    /// tab's graphics sub-switches (P126) are here and not there: Draw Distance is its fog, and
+    /// Plant Detail and Picture Shape its own rows.
+    fn graphics_rows(&self) -> Vec<Row> {
+        let s = &self.settings;
+        let scales = RenderScale::ALL.map(RenderScale::label);
+        let limits: Vec<String> = FrameLimit::ALL.iter().map(|f| f.label()).collect();
+        let limits: Vec<&str> = limits.iter().map(String::as_str).collect();
+        vec![
+            Row::heading("World"),
             Row::choice(
                 Key::DrawDistance,
                 "Draw Distance",
@@ -360,6 +374,7 @@ impl Menu {
                 at(&Graphics::ALL, s.graphics),
                 "Original Fog is the game's haze and far clip. Far Fog is the same haze four times as far out. Whole Map draws everything, with only a light haze far off.",
             ),
+            self.departure_row(Departure::Plants),
             // MD9: a combined world's sky and light, one for all of it or each map its own.
             Row::choice(
                 Key::WorldSky,
@@ -369,6 +384,9 @@ impl Menu {
                 "For combined worlds of several maps. Global keeps one sky and light everywhere; Per Map gives each map its own, blended where they meet.",
             )
             .tips(&["One sky for the whole world", "Each map its own"]),
+            Row::heading("Picture"),
+            self.departure_row(Departure::Picture),
+            Row::heading("Performance"),
             Row::choice(Key::RenderScale, "Render Scale", &scales, at(&RenderScale::ALL, s.render_scale), "How much of the window's resolution the 3D is drawn at. Auto drops it when frames run long and climbs back when there's room."),
             Row::on_off(Key::VSync, "VSync", s.vsync, "Waits for the display before showing a frame. No tearing. Off draws as fast as it can."),
             Row::choice(Key::FrameLimit, "Frame Limit", &limits, at(&FrameLimit::ALL, s.frame_limit), "The most frames a second. Only the picture's rate; the ride itself always ticks at the game's 30 Hz."),
@@ -382,7 +400,7 @@ impl Menu {
             "Original Game",
             &["Off", "On"],
             0,
-            "On puts everything back to the original game: its controls, cameras, fog, plants, picture shape and HUD. Each switch below can be set on its own. The ride itself is the original's either way; Game Modifiers change it.",
+            "On puts everything back to the original game: its controls, cameras, fog, plants, picture shape and HUD. Each switch below can be set on its own, and the fog, plants and picture shape on the Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
         )
         .tips(&["Every enhancement on", "The game as it shipped"]);
         match self.original() {
@@ -394,15 +412,20 @@ impl Menu {
             }
         }
         let mut rows = vec![master, Row::heading("Enhancements")];
-        for d in Departure::ALL {
-            let mut r = Row::choice(Key::Departure(d), d.label(), &d.choices(), usize::from(self.is_original(d)), d.about());
-            if !self.is_original(d) && self.some_original(d) {
-                (r.now, r.value) = (None, Original::Mixed.label().into());
-                r.note = Some("Some players are on the original's. A press sets every player.".into());
-            }
-            rows.push(r);
+        for d in Departure::ALL.into_iter().filter(|d| d.tab() == TAB_ORIGINAL) {
+            rows.push(self.departure_row(d));
         }
         rows
+    }
+
+    /// A departure's own switch, Mixed where only some players are on the original's.
+    fn departure_row(&self, d: Departure) -> Row {
+        let mut r = Row::choice(Key::Departure(d), d.label(), &d.choices(), usize::from(self.is_original(d)), d.about());
+        if !self.is_original(d) && self.some_original(d) {
+            (r.now, r.value) = (None, Original::Mixed.label().into());
+            r.note = Some("Some players are on the original's. A press sets every player.".into());
+        }
+        r
     }
 
     /// Music Plays' choice for the setting: One Song for a song's id.
@@ -942,6 +965,25 @@ impl Menu {
                 g.row = at;
                 g.turn(&self.catalogue, by(p));
             }
+        }
+    }
+}
+
+impl Departure {
+    /// The Settings tab its switch is on (P128): the graphics ones are on Graphics, the rest under
+    /// the Original tab's master switch.
+    pub fn tab(self) -> usize {
+        match self {
+            Departure::Fog | Departure::Plants | Departure::Picture => TAB_GRAPHICS,
+            Departure::Controls | Departure::Cameras | Departure::Markers => TAB_ORIGINAL,
+        }
+    }
+
+    /// The key of its switch's row: the fog's is Draw Distance (V32), the same setting.
+    pub fn key(self) -> Key {
+        match self {
+            Departure::Fog => Key::DrawDistance,
+            d => Key::Departure(d),
         }
     }
 }

@@ -211,9 +211,10 @@ fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
     // and this walk taps one pad only. One alone is `one_pad_cannot_start_a_local_game_but_can_free_ride`.
     menu.join = join::Join::with(&[Some(0), Some(1)], join::ON_SCREEN, join::Opened::Menu);
     assert_eq!(menu.screen(), Some(Screen::Main));
-    // Controls, Audio and Camera are Settings' tabs since P118, never a screen of their own on the
-    // stack; `l1_and_r1_walk_every_tab_round_from_either_end` walks those.
-    let wanted: Vec<Screen> = Screen::ALL.into_iter().filter(|s| !matches!(s, Screen::Controls | Screen::Audio | Screen::Camera)).collect();
+    // Controls, Audio and Camera are Settings' tabs since P118, Graphics since P128, never a screen of
+    // their own on the stack; `l1_and_r1_walk_every_tab_round_from_either_end` walks those.
+    let wanted: Vec<Screen> =
+        Screen::ALL.into_iter().filter(|s| !matches!(s, Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics)).collect();
     // Breadth first over single button taps, so each screen is found by its shortest path.
     let mut found: Vec<(Screen, Vec<Control>)> = vec![(Screen::Main, vec![])];
     let mut seen = HashSet::from([key(&menu)]);
@@ -476,13 +477,13 @@ fn the_settings_never_start_or_offer_the_debug_hud() {
     assert!(!m.settings.text().contains("debug"));
 }
 
-/// The draw distance row on the Display tab (P118's name for V-era's graphics row), whose words in
+/// The draw distance row on the Graphics tab (P118's name for V-era's graphics row; P128's tab), whose words in
 /// the file are as they were.
 #[test]
 fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     let (mut m, mut r) = fresh();
     assert_eq!(m.settings.graphics, Graphics::Full, "the whole map unless asked");
-    settings_at(&mut m, &mut r, "Display");
+    settings_at(&mut m, &mut r, "Graphics");
     down_to(&mut m, &mut r, menu::Key::DrawDistance);
     assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Whole Map");
     tap(&mut m, &mut r, Control::Right);
@@ -619,7 +620,7 @@ fn the_minimap_and_hud_scale_rows_change_and_are_saved() {
 fn the_render_scale_row_cycles_and_is_saved() {
     let (mut m, mut r) = fresh();
     assert_eq!(m.settings.render_scale, RenderScale::Auto, "auto unless asked");
-    settings_at(&mut m, &mut r, "Display");
+    settings_at(&mut m, &mut r, "Graphics");
     down_to(&mut m, &mut r, menu::Key::RenderScale);
     let mut seen = Vec::new();
     for _ in 0..4 {
@@ -657,7 +658,7 @@ fn the_render_scale_row_cycles_and_is_saved() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// P90: a fresh settings file has VSync on and no frame limit; the Display tab's last two rows
+/// P90: a fresh settings file has VSync on and no frame limit; the Graphics tab's last two rows
 /// change by pad input, and what they say is saved and read back.
 #[test]
 fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
@@ -670,7 +671,7 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     assert!(menu::load(&dir).0.vsync, "a file from before P90 is VSync on");
     assert_eq!(menu::load(&dir).0.frame_limit, FrameLimit::Off);
 
-    settings_at(&mut m, &mut r, "Display");
+    settings_at(&mut m, &mut r, "Graphics");
     down_to(&mut m, &mut r, menu::Key::VSync);
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
@@ -696,9 +697,9 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.frame_limit, FrameLimit::Fps(144));
     assert!(!m.settings.vsync, "the VSync row is untouched");
-    // L1 to the Ride tab: the machines at their bays (P103), which Cross turns off and on, and the
+    // On to the Ride tab: the machines at their bays (P103), which Cross turns off and on, and the
     // game modifiers under them.
-    tap(&mut m, &mut r, Control::L1);
+    tab_to(&mut m, &mut r, "Ride");
     down_to(&mut m, &mut r, menu::Key::Bays);
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.take_changed());
@@ -2879,7 +2880,7 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     assert!(m.settings.mods);
 }
 
-/// P118: L1 and R1 walk Settings' six tabs (P126's Original the sixth) and the Garage's three round from either end, each tab
+/// P118: L1 and R1 walk Settings' seven tabs (P128's Graphics third, P126's Original last) and the Garage's three round from either end, each tab
 /// opening on its first row.
 #[test]
 fn l1_and_r1_walk_every_tab_round_from_either_end() {
@@ -2887,10 +2888,10 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
     let (mut m, mut r) = fresh();
     main_to(&mut m, &mut r, "Settings");
     assert_eq!(m.tabs(Screen::Settings), menu::SETTINGS_TABS);
-    assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Audio", "Controls", "Camera", "Original"]);
+    assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera", "Original"]);
     tab_to(&mut m, &mut r, "Ride");
-    // Controls has no Player row with one seat (P81).
-    let first = [Key::StartOn, Key::Hud, Key::Mix, Key::BikeLayout, Key::Player, Key::Original];
+    // Controls has no Player row with one seat (P81); Graphics opens past its World heading.
+    let first = [Key::StartOn, Key::Hud, Key::DrawDistance, Key::Mix, Key::BikeLayout, Key::Player, Key::Original];
     let here = |m: &Menu, s: Screen| (m.tab(s), m.page()[m.cursor(s)].key);
     for (i, key) in first.iter().enumerate() {
         assert_eq!(here(&m, Screen::Settings), (i, *key));
@@ -2900,8 +2901,8 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
     }
     assert_eq!(here(&m, Screen::Settings), (0, Key::StartOn), "R1 from Original is Ride");
     tap(&mut m, &mut r, Control::L1);
-    assert_eq!(here(&m, Screen::Settings), (5, Key::Original), "L1 from Ride is Original");
-    for i in (0..5).rev() {
+    assert_eq!(here(&m, Screen::Settings), (6, Key::Original), "L1 from Ride is Original");
+    for i in (0..6).rev() {
         tap(&mut m, &mut r, Control::L1);
         assert_eq!(here(&m, Screen::Settings), (i, first[i]));
     }
@@ -2919,6 +2920,85 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
     tap(&mut m, &mut r, Control::L1);
     tap(&mut m, &mut r, Control::L1);
     assert_eq!(here(&m, Screen::Garage), (2, Key::Player), "L1 from Rider is Gear");
+}
+
+/// P128: Settings' Graphics tab, reached by L1 and R1 from either side and by `--screen graphics`,
+/// has every graphics setting once, under its group's heading, and no other tab has any of them;
+/// Draw Distance changed there is `Settings::graphics`, and saved.
+#[test]
+fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
+    use menu::{Departure, Key};
+    let groups = [
+        ("World", vec![Key::DrawDistance, Key::Departure(Departure::Plants), Key::WorldSky]),
+        ("Picture", vec![Key::Departure(Departure::Picture)]),
+        ("Performance", vec![Key::RenderScale, Key::VSync, Key::FrameLimit]),
+    ];
+    let graphics: Vec<Key> = groups.iter().flat_map(|(_, keys)| keys.clone()).collect();
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Settings");
+    let tab = |m: &Menu| m.tabs(Screen::Settings)[m.tab(Screen::Settings)];
+    // R1 from Display, L1 from Audio.
+    tab_to(&mut m, &mut r, "Display");
+    tap(&mut m, &mut r, Control::R1);
+    assert_eq!(tab(&m), "Graphics");
+    tap(&mut m, &mut r, Control::R1);
+    assert_eq!(tab(&m), "Audio");
+    tap(&mut m, &mut r, Control::L1);
+    assert_eq!(tab(&m), "Graphics");
+    // Each under its heading, in order, and once.
+    let page = m.page();
+    let mut under = None;
+    let mut seen = Vec::new();
+    for row in &page {
+        if row.kind == menu::Kind::Heading {
+            under = Some(row.label.clone());
+            continue;
+        }
+        let group = groups.iter().find(|(_, keys)| keys.contains(&row.key)).map(|(g, _)| g.to_string());
+        assert!(group.is_some(), "{:?} ({}) is not a graphics setting", row.key, row.label);
+        assert_eq!(under, group, "{} under the wrong heading", row.label);
+        seen.push(row.key);
+    }
+    assert_eq!(seen, graphics, "each graphics setting once, in its group's order");
+    let headings: Vec<String> = page.iter().filter(|r| r.kind == menu::Kind::Heading).map(|r| r.label.clone()).collect();
+    assert_eq!(headings, ["World", "Picture", "Performance"]);
+    // The Original tab's graphics sub-switches (P126) are these rows.
+    for d in Departure::ALL {
+        assert_eq!(graphics.contains(&d.key()), menu::SETTINGS_TABS[d.tab()] == "Graphics", "{d:?}");
+    }
+    // On no other tab: Display is the HUD's, Ride no longer repeats any, Original keeps the rest.
+    for other in menu::SETTINGS_TABS.into_iter().filter(|t| *t != "Graphics") {
+        tab_to(&mut m, &mut r, other);
+        for row in m.page() {
+            assert!(!graphics.contains(&row.key), "{other} has {} too", row.label);
+        }
+    }
+    // The cursor opens on Draw Distance, past the heading, and the d-pad steps over the next one.
+    tab_to(&mut m, &mut r, "Graphics");
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::Departure(Departure::Picture));
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Up);
+    }
+    // Draw Distance changed by the pad is the setting, and is saved.
+    assert_eq!(m.settings.graphics, Graphics::Full);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.graphics, Graphics::Original);
+    let dir = scratch("graphics-tab");
+    menu::save(&dir, &m.settings, &Controls::default()).unwrap();
+    assert_eq!(menu::load(&dir).0.graphics, Graphics::Original);
+    std::fs::remove_dir_all(&dir).ok();
+    // `--screen graphics` opens the same tab.
+    assert_eq!(Screen::from_word("graphics"), Some(Screen::Graphics));
+    let (mut m, _) = fresh();
+    m.open(Screen::Graphics);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    assert_eq!(tab(&m), "Graphics");
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
 }
 
 /// P118: every row of every Settings tab, of the modifiers page and of the Mods page is reachable by
@@ -3694,17 +3774,23 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
     assert_eq!((s.minimap, s.hud_scale, s.overlay), (true, menu::HUD_SCALE_DEFAULT, Overlay::Original));
     // The sim is none of them (P55).
     assert!(s.modifiers.is_original());
+    // Each sub-switch on its tab: the graphics ones on Graphics since P128.
+    let on_tab = |m: &mut Menu, r: &mut Reader, d: Departure| tab_to(m, r, menu::SETTINGS_TABS[d.tab()]);
     for d in Departure::ALL {
-        assert_eq!(value(&m, Key::Departure(d)), d.choices()[1], "{d:?}");
+        on_tab(&mut m, &mut r, d);
+        assert_eq!(value(&m, d.key()), d.choices()[1], "{d:?}");
     }
+    tab_to(&mut m, &mut r, "Original");
     // Each sub-switch turned back on its own leaves every other at the original's.
     for d in Departure::ALL {
         let mut m = m.clone();
         let mut r = r.clone();
-        down_to(&mut m, &mut r, Key::Departure(d));
+        on_tab(&mut m, &mut r, d);
+        down_to(&mut m, &mut r, d.key());
         tap(&mut m, &mut r, Control::Right);
         assert!(!m.some_original(d), "{d:?} back to ours");
-        assert_eq!(value(&m, Key::Departure(d)), d.choices()[0], "{d:?}");
+        assert_eq!(value(&m, d.key()), d.choices()[0], "{d:?}");
+        tab_to(&mut m, &mut r, "Original");
         for o in Departure::ALL.into_iter().filter(|o| *o != d) {
             assert!(m.is_original(o), "{d:?} turned back moved {o:?}");
         }
