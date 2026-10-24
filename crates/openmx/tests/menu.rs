@@ -340,7 +340,7 @@ fn the_settings_file_reads_back_as_it_was_written() {
     let dir = scratch("files");
     let settings = Settings {
         name: "Ricky C".into(),
-        overlay: Overlay::Debug,
+        overlay: Overlay::None,
         wrecks: false,
         track: "free11".into(),
         track_filter: "MX vs. ATV Untamed".into(),
@@ -437,6 +437,47 @@ fn the_settings_file_reads_back_as_it_was_written() {
     std::fs::remove_dir_all(empty).ok();
 }
 
+/// P83: every launch starts on a HUD a rider is meant to see. A fresh file and an old one never
+/// read as the debug HUD — `on` (P36's word for it), `off`, and `debug` itself all ride the default
+/// HUD — and Settings' row offers HUD, Original and None, round either way, never Debug: the debug
+/// HUD is `--hud`'s alone (main.rs's `debug_hud`).
+#[test]
+fn the_settings_never_start_or_offer_the_debug_hud() {
+    assert_eq!(Settings::default().overlay, Overlay::Hud);
+    assert_eq!(Settings::parse("").overlay, Overlay::Hud);
+    for (word, marked) in [("on", Overlay::Original), ("off", Overlay::Original), ("debug", Overlay::Hud)] {
+        let text = format!("name = Rider\noverlay = {word}\n");
+        assert_eq!(Settings::parse(&text).overlay, Overlay::Hud, "{text:?}");
+        // Marked as written since P121 (which never writes on or off), V28's reading stands.
+        let text = format!("{text}hud = 1\n");
+        assert_eq!(Settings::parse(&text).overlay, marked, "{text:?}");
+    }
+    // The other words still mean what they say.
+    assert_eq!(Settings::parse("overlay = original\nhud = 1\n").overlay, Overlay::Original);
+    assert_eq!(Settings::parse("overlay = none\n").overlay, Overlay::None);
+    // Saved from a fresh menu, the file says hud and reads back so.
+    let dir = scratch("p83");
+    menu::save(&dir, &Settings::default(), &Controls::default()).unwrap();
+    assert_eq!(menu::load(&dir).0.overlay, Overlay::Hud);
+    std::fs::write(dir.join(menu::SETTINGS_FILE), "name = Rider\noverlay = debug\nhud = 1\n").unwrap();
+    assert_eq!(menu::load(&dir).0.overlay, Overlay::Hud, "a saved debug falls back");
+    std::fs::remove_dir_all(dir).ok();
+
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Display");
+    down_to(&mut m, &mut r, menu::Key::Hud);
+    let row = m.page()[m.cursor(Screen::Settings)].clone();
+    assert_eq!(row.choices, ["HUD", "Original", "None"]);
+    let mut seen = vec![m.settings.overlay];
+    for press in [Control::Right, Control::Right, Control::Right, Control::Left, Control::Left, Control::Left, Control::Cross, Control::Cross, Control::Cross] {
+        tap(&mut m, &mut r, press);
+        seen.push(m.settings.overlay);
+    }
+    use Overlay::{Hud, None as Off, Original};
+    assert_eq!(seen, [Hud, Original, Off, Hud, Off, Original, Hud, Original, Off, Hud]);
+    assert!(!m.settings.text().contains("debug"));
+}
+
 /// The draw distance row on the Display tab (P118's name for V-era's graphics row), whose words in
 /// the file are as they were.
 #[test]
@@ -484,15 +525,16 @@ fn the_speedometer_row_switches_the_dial_and_is_saved() {
     assert_eq!(m.settings.speedometer, Speedometer::Digital);
     assert!(m.settings.text().contains("speedometer = digital\n"));
     tap(&mut m, &mut r, Control::Left);
-    // Under the debug HUD (past the original's since P121) it dims, says why, and keeps its word.
+    // With no HUD (past the original's, the debug one being a launch option since P83) it dims,
+    // says why, and keeps its word.
     tap(&mut m, &mut r, Control::Up);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.overlay, Overlay::Original);
     tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.settings.overlay, Overlay::Debug);
+    assert_eq!(m.settings.overlay, Overlay::None);
     tap(&mut m, &mut r, Control::Down);
     let row = m.page()[m.cursor(Screen::Settings)].clone();
-    assert_eq!((row.key, row.off.as_deref()), (menu::Key::Speedometer, Some("Only the HUD and the Original have one")));
+    assert_eq!((row.key, row.off.as_deref()), (menu::Key::Speedometer, Some("The HUD is off")));
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.speedometer, Speedometer::Analog);
     // Saved to the file and read back from it.
@@ -787,7 +829,7 @@ fn what_the_pad_sets_is_what_the_file_says() {
     assert_eq!(m.page()[m.cursor(Screen::Garage)].value, "Mx");
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
-    // The HUD on to debug (Display: past the original's since P121), wrecks off (Ride).
+    // The HUD off (Display: past the original's, no debug one since P83), wrecks off (Ride).
     settings_at(&mut m, &mut r, "Display");
     down_to(&mut m, &mut r, menu::Key::Hud);
     tap(&mut m, &mut r, Control::Right);
@@ -822,7 +864,7 @@ fn what_the_pad_sets_is_what_the_file_says() {
     let (settings, controls) = menu::load(&dir);
     assert_eq!(
         settings,
-        Settings { name: "Mx".into(), overlay: Overlay::Debug, wrecks: false, ..Settings::default() }
+        Settings { name: "Mx".into(), overlay: Overlay::None, wrecks: false, ..Settings::default() }
     );
     assert_eq!(controls.throttle, Gas::Cross);
     assert_eq!(controls.planes[0], Layout::Original);
@@ -2813,7 +2855,7 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
     use menu::CameraView;
     let custom = CameraView { fov: -5, distance: 140, height: 95, plane_distance: 100, plane_height: 180 };
     let old = format!(
-        "# openmx's front end (P36)\nname = Ricky C\noverlay = debug\nspeedometer = analog\nwrecks = off\ntrack = free11\n\
+        "# openmx's front end (P36)\nname = Ricky C\noverlay = none\nspeedometer = analog\nwrecks = off\ntrack = free11\n\
          machines = biplane bike biplane bike bike bike bike biplane\nsplit = v\nmusic = disc:headstrong\nmusic_volume = 35\n\
          effects_volume = 100\nfolder_volume = 5\ncrowd_volume = 0\nengine_volume = 90\nmenu_volume = 55\nmix = custom\n\
          custom = 35 5 100 0 90 55\ngraphics = original\nrender_scale = 75\nvsync = off\nframe_limit = 75\nmachine_bays = off\n\
@@ -2826,7 +2868,7 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
     let (b, p) = (Machine::Bike, Machine::Biplane);
     let want = Settings {
         name: "Ricky C".into(),
-        overlay: Overlay::Debug,
+        overlay: Overlay::None,
         speedometer: Speedometer::Analog,
         wrecks: false,
         track: "free11".into(),
@@ -3511,7 +3553,7 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
     use menu::{Departure, Key, Original};
     let (mut m, mut r) = fresh();
     // A HUD of the user's own, which the switch puts back.
-    (m.settings.minimap, m.settings.hud_scale, m.settings.overlay) = (false, 120, Overlay::Debug);
+    (m.settings.minimap, m.settings.hud_scale, m.settings.overlay) = (false, 120, Overlay::None);
     settings_at(&mut m, &mut r, "Original");
     let value = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap().value;
     assert_eq!(value(&m, Key::Original), "Off");
