@@ -503,7 +503,7 @@ impl Actor {
     /// **The feet's look-around switch**: a slow bike tipped one way lifts a foot off its hold (and
     /// that foot's collision on), and a foot let go of fades back in over two seconds.
     #[allow(clippy::neg_cmp_op_on_partial_ord)]
-    fn feet(&mut self, dt: F, r: &Request) {
+    pub fn feet(&mut self, dt: F, r: &Request) {
         let doll = &mut self.ragdoll;
         let (_, up) = math::quat_axes(r.quat);
         let up_y = up[1];

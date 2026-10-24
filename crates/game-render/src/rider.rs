@@ -335,6 +335,13 @@ pub fn anchors_of(chassis: &Skeleton, world: &[M4]) -> Anchors {
 /// foot; `None` for a limb that was not solved — no target, a joint this skeleton has not got, a limb
 /// with no length, or a `world` that is not this skeleton's.
 pub fn hold_on(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: f32) -> [Option<f32>; 4] {
+    hold_limbs(skel, world, targets, [strength; 4])
+}
+
+/// [`hold_on`] with a strength of its own for each of [`LIMBS`] (V36): the feet are let go of on
+/// their own, by the riding body's foot switch ([`game_sim::foot_down::Feet`]), while the hands stay
+/// on the grips.
+pub fn hold_limbs(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: [f32; 4]) -> [Option<f32>; 4] {
     let mut out = [None; 4];
     if world.len() != skel.len() {
         return out;
@@ -348,11 +355,11 @@ pub fn hold_on(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: f
         ) else {
             continue;
         };
-        if strength <= SMALL {
+        if strength[i] <= SMALL {
             out[i] = Some(world[anchor].point(v3(0.0, 0.0, 0.0)).sub(target).len());
             continue;
         }
-        out[i] = aim(skel, world, [root, bend, anchor], target, strength);
+        out[i] = aim(skel, world, [root, bend, anchor], target, strength[i]);
     }
     out
 }
@@ -676,6 +683,10 @@ pub struct Body {
     /// machine is riding, 0 while anything else poses it ([`holds_in`]). [`Body::ride`] writes it;
     /// a body nothing rides (the biplane's pilot) holds on.
     pub hold: f32,
+    /// The riding body's two foot holds (V36), which [`Body::ride`] steps: a stopped bike's rider
+    /// lets both feet off the pegs, so the stopped row's clip draws them on the ground, and a slow,
+    /// tipped one puts the inside foot out. [`Body::holds`] is what the draw holds each limb with.
+    pub feet: game_sim::foot_down::Feet,
 }
 
 impl Body {
@@ -733,7 +744,14 @@ impl Body {
             }
             pose_lib.clip[SLOTS + i] = set.bound(name);
         }
-        Ok(Body { rider, rig: Rig::bound(set, lib, params), pose_lib, posed: false, hold: 1.0 })
+        Ok(Body {
+            rider,
+            rig: Rig::bound(set, lib, params),
+            pose_lib,
+            posed: false,
+            hold: 1.0,
+            feet: Default::default(),
+        })
     }
 
     /// **MD21:** a trick pack's rider clips in [`Body::pose_lib`]'s states past the sixty — its
@@ -776,7 +794,20 @@ impl Body {
         };
         self.posed_by(frame, &rider.body.player, rider.body_clocked);
         self.hold = if holds_in(rider.body.machine.mode) { 1.0 } else { 0.0 };
+        // The foot switch runs where the body actor runs it: on every tick that is neither a wreck
+        // nor a pose off the clip table, off what the shell's riding request hands the ragdoll.
+        let mode = rider.body.machine.mode;
+        if mode != game_sim::rider_anim::Mode::Wrecked && mode != game_sim::rider_anim::Mode::Posed {
+            self.feet.step(dt, &game_sim::foot_down::Input::of(&rider.ride, &rider.body.veh));
+        }
         frame
+    }
+
+    /// How hard the draw holds each of [`LIMBS`] on: [`Body::hold`], and each foot at its hold's
+    /// weight from [`Body::feet`] as well.
+    pub fn holds(&self) -> [f32; 4] {
+        let [l, r] = self.feet.strength();
+        [self.hold * l, self.hold * r, self.hold, self.hold]
     }
 
     /// Write the pose a frame of the body's own machine asked for, from the clock the simulation
@@ -847,7 +878,7 @@ impl Body {
     ) -> [Option<f32>; 4] {
         let mut world = self.rig.world();
         let held = match hold {
-            Some(targets) => hold_on(&self.rig.set.skeleton, &mut world, targets, self.hold),
+            Some(targets) => hold_limbs(&self.rig.set.skeleton, &mut world, targets, self.holds()),
             None => [None; 4],
         };
         loaded.tris = skin(&loaded.model, &world, group);
@@ -860,7 +891,7 @@ impl Body {
     pub fn palette(&self, hold: Option<&Anchors>) -> (Vec<M4>, [Option<f32>; 4]) {
         let mut world = self.rig.world();
         let held = match hold {
-            Some(targets) => hold_on(&self.rig.set.skeleton, &mut world, targets, self.hold),
+            Some(targets) => hold_limbs(&self.rig.set.skeleton, &mut world, targets, self.holds()),
             None => [None; 4],
         };
         (world, held)

@@ -31,7 +31,7 @@
 
 use crate::mat::{M4, V3, v3};
 use crate::psg::Model;
-use crate::rider::{Anchors, Body, LIMBS, anchors_of, hold_on};
+use crate::rider::{Anchors, Body, LIMBS, anchors_of, hold_limbs};
 use crate::vehicle::Chassis;
 use game_sim::motion::Player;
 use game_sim::ride::Ride;
@@ -237,7 +237,7 @@ fn subtree(model: &Model, node: usize) -> Vec<bool> {
 /// it.
 fn held(body: &Body, targets: &Anchors) -> [Option<f32>; 4] {
     let mut world = body.rig.world();
-    hold_on(&body.rig.set.skeleton, &mut world, targets, body.hold)
+    hold_limbs(&body.rig.set.skeleton, &mut world, targets, body.holds())
 }
 
 /// The names of the four limbs, for a failure message that says which one let go.

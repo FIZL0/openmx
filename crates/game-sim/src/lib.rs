@@ -729,6 +729,9 @@ pub mod ragdoll_body;
 pub mod ragdoll_scene;
 /// The ragdoll run on every riding tick, the skeleton the rider is drawn with (S109).
 pub mod ragdoll_riding;
+/// The riding body's foot switch on its own: a stopped or slow, tipped bike's rider lets a foot off
+/// its peg (V36).
+pub mod foot_down;
 
 /// The game's random numbers: the C library's 64-bit LCG that every subsystem calls, plus the two
 /// shapes its call sites wrap it in (a float in `[0, 1)`, and a uniform index into a list). Everything
