@@ -831,12 +831,37 @@ fn ride_ragdoll(seat: &Seat, rig: &mut Rig, dt: F, place: &mut dyn sim_world::Wo
 /// How far the riding ragdoll's main bone may be from the bike before it is started again, in feet.
 const RIDING_STRAY: f32 = 10.0;
 
-/// Whether the riding rider is drawn from the riding ragdoll rather than the clip pose, as the
-/// original draws it. On since S111 proved the request it is handed (`OPENMX_RIDING_RAGDOLL=0` turns
-/// it off): a gesture or a no-hander lets go through the body's posed mode (V61) and a backflip
-/// through the request's flip flag, so each is drawn as its clip wrote it.
+/// Whether the riding rider is drawn from the riding ragdoll (`OPENMX_RIDING_RAGDOLL=1`) rather than the
+/// clip pose. **Off by default, and it stays off until the user says otherwise.** It was turned off on
+/// 2026-10-23 (user: "our guy is super floppy"), turned back on by S111 once its request was bit-exact,
+/// and turned off again on 2026-10-24 (user: "we're back on ragdoll model when riding the bike, fix it
+/// and make sure we dont regress"): a request that matches the original does not make the ride look
+/// right. Do not flip this default from a task; `riding_ragdoll_is_off_by_default` guards it.
 fn riding_ragdoll_on() -> bool {
-    std::env::var_os("OPENMX_RIDING_RAGDOLL").is_none_or(|v| v != "0")
+    riding_ragdoll_asked(std::env::var_os("OPENMX_RIDING_RAGDOLL").as_deref())
+}
+
+/// [`riding_ragdoll_on`] on the variable's value: only an explicit `1` turns the riding ragdoll on.
+fn riding_ragdoll_asked(var: Option<&std::ffi::OsStr>) -> bool {
+    var.is_some_and(|v| v == "1")
+}
+
+#[cfg(test)]
+mod riding_ragdoll_default {
+    use super::riding_ragdoll_asked;
+    use std::ffi::OsStr;
+
+    /// The user's call (2026-10-23, again 2026-10-24): the riding rider is the clip pose unless
+    /// `OPENMX_RIDING_RAGDOLL=1` asks for the ragdoll. A task that wants it on by default asks the
+    /// user first; it does not change this test.
+    #[test]
+    fn riding_ragdoll_is_off_by_default() {
+        assert!(!riding_ragdoll_asked(None), "the riding ragdoll is drawn with no variable set");
+        for off in ["", "0", "true", "yes", "on"] {
+            assert!(!riding_ragdoll_asked(Some(OsStr::new(off))), "OPENMX_RIDING_RAGDOLL={off} draws the ragdoll");
+        }
+        assert!(riding_ragdoll_asked(Some(OsStr::new("1"))));
+    }
 }
 
 /// The riding ragdoll's nodes to draw the body from, once it has been placed (S109).
@@ -4996,7 +5021,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                 }
             }
-            // The rider's ragdoll on the bike (S109), off the pose and the grips just drawn.
+            // The rider's ragdoll on the bike (S109), off the pose and the grips just drawn: only when
+            // asked for (the user's call, not a task's; see riding_ragdoll_on).
             if moving && bike_up && online.is_none() && riding_ragdoll_on() {
                 perf.time(Stage::Animation, || ride_ragdoll(seat, rig, dt, &mut world.place));
             }
