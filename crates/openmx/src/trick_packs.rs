@@ -23,9 +23,6 @@ pub struct Pack {
     rider: String,
     /// The pack's `.phy` files, by their name in lower case.
     phys: Vec<(String, PathBuf)>,
-    /// How the 360 is asked for and turns on the bikes it is laid over (MD25): the easy one unless
-    /// the shell says otherwise.
-    pub spin_style: game_sim::air::SpinStyle,
 }
 
 /// The first trick pack in `mods/tricks/`, by folder name, or why there is none.
@@ -75,7 +72,7 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
             }
         }
     }
-    Ok(Some(Pack { id, folder: folder.to_owned(), rows, rider, phys, spin_style: Default::default() }))
+    Ok(Some(Pack { id, folder: folder.to_owned(), rows, rider, phys }))
 }
 
 /// A pack's file by its `/`-separated name, kept inside the pack's folder.
@@ -103,8 +100,7 @@ impl Pack {
             Err(e) => return format!("tricks: {}: {e}; the original's tricks", path.display()),
         };
         match trick_pack::moves(&ini, &self.rows) {
-            Some(mut moves) => {
-                moves.spin_style = self.spin_style;
+            Some(moves) => {
                 trick_pack::apply(bike, &ini, moves);
                 format!("tricks: {}'s 360, front flip and whip from {want}", self.id)
             }

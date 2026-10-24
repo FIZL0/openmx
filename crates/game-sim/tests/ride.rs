@@ -5310,9 +5310,7 @@ fn md16_pack(p: &Phy, whip: bool) -> (Phy, Set) {
     use game_sim::trick_pack;
     let rows = trick_pack::table(MD16_TABLE.as_bytes()).expect("the generated table reads");
     let ini = phy::Ini::parse(MD16_PHY);
-    let mut moves = trick_pack::moves(&ini, &rows).expect("the generated bike has a [Three Sixty]");
-    // MD16's and MD20's tests are of MX vs. ATV's own step; MD25's set the easy one themselves.
-    moves.spin_style = game_sim::air::SpinStyle::MxVsAtv;
+    let moves = trick_pack::moves(&ini, &rows).expect("the generated bike has a [Three Sixty]");
     let mut q = p.clone();
     if whip {
         trick_pack::apply(&mut q, &ini, moves);
@@ -5337,16 +5335,19 @@ struct Md16 {
     nodes: Vec<u8>,
     /// The ride's hash: what "the original's replays do not move" is held to.
     hash: u64,
-    /// The chassis' angular velocity, its own frame (MD25).
-    ang_vel: [f32; 3],
 }
 
 /// [`ride_the_flip`] with whole hands per tick and the rider's own set: the flip ramp, pinned
 /// throttle, and `script`'s controls from each tick on.
 fn ride_md16(p: &Phy, wheels: (Vf, Vf), tables: &rider::Tables, set: Set, script: &[(usize, Controls)],
              ticks: usize) -> (Vec<Md16>, Rider) {
+    ride_md16_off(FLIP_RAMP, p, wheels, tables, set, script, ticks)
+}
+
+/// [`ride_md16`] off another ramp, `(start, slope, length)` as [`FLIP_RAMP`] (MD30).
+fn ride_md16_off((start, slope, length): (f32, f32, f32), p: &Phy, wheels: (Vf, Vf), tables: &rider::Tables, set: Set,
+                 script: &[(usize, Controls)], ticks: usize) -> (Vec<Md16>, Rider) {
     let mut r = Rider::new(p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), set);
-    let (start, slope, length) = FLIP_RAMP;
     let mut world = Jump { origin: Vf::new(0.0, 0.0, 0.0, 1.0), dir: Vf::new(0.0, 0.0, 1.0, 0.0), start, slope, length };
     let mut now = Controls { gas: F::ONE, ..Controls::default() };
     let mut seen = Vec::with_capacity(ticks);
@@ -5382,7 +5383,6 @@ fn ride_md16(p: &Phy, wheels: (Vf, Vf), tables: &rider::Tables, set: Set, script
             total: r.score.total.0 + r.score.nodes.iter().map(|n| n.points.0).sum::<f32>(),
             nodes: r.score.nodes.iter().map(|n| n.id).collect(),
             hash: hash::of(&r.ride),
-            ang_vel: [r.ride.chassis.ang_vel.x(), r.ride.chassis.ang_vel.y(), r.ride.chassis.ang_vel.z()],
         });
     }
     (seen, r)
@@ -5545,7 +5545,9 @@ fn md16_front_flip_goes_round_and_lands() {
 /// MD16: MX vs. ATV's 360. R1 held, stick left then right on the lip: armed one way and fired the
 /// other, with the yaw torque the pack's `[Three Sixty]` maps the flick to. In the air the bike turns
 /// round, and the rider ends it — R1 released, the stick pushed against the turn — once it is back
-/// inside 35° of its take-off heading: the clip comes round, it scores, and it lands.
+/// inside 35° of its take-off heading: the clip comes round, it scores, and it lands. Since MD30 the
+/// stick's own yaw moment pushes against the turn too (MX vs. ATV's air control), so the push comes
+/// later and shorter than MD16 had it.
 ///
 /// Held to the end instead, the torque never decays: the bike turns on past its heading and lands
 /// with the clip part way round, which is MX vs. ATV's wreck.
@@ -5560,7 +5562,7 @@ fn md16_three_sixty_comes_round_or_wrecks() {
         (158, 1.0, 0.0, true, [false; 2]),
     ];
     let mut ended = flick.to_vec();
-    ended.extend([(166, 0.0, 0.0, false, [false; 2]), (260, -1.0, 0.0, false, [false; 2]), (300, 0.0, 0.0, false, [false; 2])]);
+    ended.extend([(166, 0.0, 0.0, false, [false; 2]), (270, -1.0, 0.0, false, [false; 2]), (290, 0.0, 0.0, false, [false; 2])]);
     let (ride, r) = ride_md16(&q, wheels, &tables, set.clone(), &md16_script(&ended), 400);
     let seats = md16_seats(&ride);
     let fired = ride.iter().position(|t| t.spin.active).expect("the 360 fires");
@@ -5708,18 +5710,16 @@ fn md20_hands(back: bool, right: bool, (x_at, x_for): (usize, usize), (y_at, y_f
 /// MD20: the 360 backflip and the 360 front flip, both ways round. One diagonal flick with R1 held
 /// fires the flip and the 360 on the same lip tick; the bike goes once round on its pitch and once
 /// round on its yaw, the rider ends both, it lands on its wheels and scores each move — the flip's
-/// row and the 360's, and nothing for the pair ([`game_sim::air::both_at_once`]). MD25: the same under
-/// the easy 360's style, where a diagonal is still the two-way gesture.
+/// row and the 360's, and nothing for the pair ([`game_sim::air::both_at_once`]).
 #[test]
 fn md20_three_sixty_flips_turn_both_ways_and_land_clean() {
     use game_sim::score;
     let tables = rider::Tables::build();
     let Some((p, wheels)) = the_disc_125(&tables) else { return };
-    for style in [game_sim::air::SpinStyle::MxVsAtv, game_sim::air::SpinStyle::Easy] {
-    let (q, set) = md25_pack(&p, style);
+    let (q, set) = md16_pack(&p, true);
     for back in [true, false] {
         for right in [true, false] {
-            let name = format!("{style:?}: {} {}", if back { "360 backflip" } else { "360 front flip" }, if right { "right" } else { "left" });
+            let name = format!("{} {}", if back { "360 backflip" } else { "360 front flip" }, if right { "right" } else { "left" });
             let (ride, r) = ride_md16(&q, wheels, &tables, set.clone(), &md20_hands(back, right, (220, 40), (220, 40)), 400);
             let seats = md16_seats(&ride);
             let flip = ride.iter().position(|t| t.seat.flip).expect("the flip fires");
@@ -5741,9 +5741,7 @@ fn md20_three_sixty_flips_turn_both_ways_and_land_clean() {
             assert!(scored(if back { score::BACKFLIP } else { score::FRONTFLIP }), "{name}: the flip scores");
             assert!(scored(if right { score::THREE_SIXTY_RIGHT } else { score::THREE_SIXTY_LEFT }), "{name}: the 360 scores");
             assert!(r.score.total >= F(25000.0), "{name}: both moves' points: {}", r.score.total.0);
-            assert!(!ride.iter().any(|t| t.spin.easy), "{name}: the diagonal is MX vs. ATV's gesture under either style");
         }
-    }
     }
 }
 
@@ -5806,126 +5804,18 @@ fn md20_one_short_of_either_wrecks() {
     }
 }
 
-/// [`md16_pack`] with the 360 on `style` (MD25).
-fn md25_pack(p: &Phy, style: game_sim::air::SpinStyle) -> (Phy, Set) {
-    let (mut q, set) = md16_pack(p, true);
-    q.tricks.as_mut().expect("the pack's moves").spin_style = style;
-    (q, set)
-}
-
-/// MD25's hands for an easy 360: R1 held into the lip, the stick pushed `x` (and `y`) on it at tick
-/// 158 for eight ticks, then centred with R1 let go: no stick work in the air.
-fn md25_hands(before: &[(usize, f32, f32)], x: f32, y: f32) -> Vec<(usize, Controls)> {
-    let mut h = vec![(130, 0.0, 0.0, true, [false; 2])];
-    h.extend(before.iter().map(|&(at, x, y)| (at, x, y, true, [false; 2])));
-    h.extend([(158, x, y, true, [false; 2]), (166, 0.0, 0.0, true, [false; 2]), (180, 0.0, 0.0, false, [false; 2])]);
-    md16_script(&h)
-}
-
-/// The most an easy 360 may turn the bike on its pitch, take-off to rest, in radians (MD25): the
-/// flight's own levelling, with no pitch torque of the 360's (MX vs. ATV's puts in 600 to 1100 of it).
-const EASY_PITCH: f32 = 0.25;
-
-/// An easy 360, seen: it fired on the lip, turned once round its way flat, came to rest in the air
-/// back inside 35° of its take-off heading, scored, and landed clean on its wheels.
-fn md25_lands_a_flat_three_sixty(name: &str, ride: &[Md16], right: bool) {
-    use game_sim::score;
-    let fired = ride.iter().position(|t| t.spin.active).unwrap_or_else(|| panic!("{name}: the 360 fires"));
-    assert!(ride[fired].seat.lip, "{name}: on the lip");
-    assert!(ride[fired].spin.easy, "{name}: the easy way");
-    assert_eq!(ride[fired].spin.dir, if right { 1 } else { -1 }, "{name}: turning its way");
-    assert_eq!(ride[fired].spin.torque.x(), 0.0, "{name}: no pitch torque");
-    assert!(!ride.iter().any(|t| t.seat.flip), "{name}: no flip");
-    let off = fired + ride[fired..].iter().position(|t| !t.seat.on_ground).expect("it leaves the ground");
-    let down = off + ride[off..].iter().position(|t| t.seat.on_ground).expect("it lands");
-    let rest = off + ride[off..].iter().position(|t| !t.spin.active).expect("the 360 ends");
-    assert!(rest < down, "{name}: at rest in the air, at {rest}, before the wheels are down at {down}");
-    // Take-off to rest: the 360's own turn, without the lip's steering and pumping.
-    let (pitch, yaw) = md20_turned(&ride[off - 1..=rest]);
-    let round = if right { yaw } else { -yaw };
-    assert!(round > 5.9 && round < 6.7, "{name}: once round on the yaw: {yaw}");
-    assert!(pitch.abs() < EASY_PITCH, "{name}: and flat: pitch {pitch}");
-    let turned = |t: &Md16| {
-        let d = (t.seat.heading - ride[off].seat.heading).rem_euclid(std::f32::consts::TAU);
-        d.min(std::f32::consts::TAU - d)
-    };
-    assert!(turned(&ride[down]) < game_sim::air::SPIN_CLIP, "{name}: inside 35° at the landing: {}", turned(&ride[down]));
-    assert_eq!(ride[down - 1].spin.clip, 0, "{name}: the clip home");
-    assert_eq!(wrecks(&md16_seats(ride)), 0, "{name}: it lands");
-    let last = ride.last().unwrap();
-    assert!(last.seat.on_ground && last.seat.up_y > 0.95, "{name}: on its wheels: {}", last.seat.up_y);
-    assert!(turned(last) < 0.2, "{name}: and rides on along its heading: {}", turned(last));
-    let id = if right { score::THREE_SIXTY_RIGHT } else { score::THREE_SIXTY_LEFT };
-    assert!(ride.iter().any(|t| t.nodes.contains(&id)), "{name}: the 360 scores");
-}
-
-/// MD25: the easy 360, both ways. R1 held and one push right (or left) on the generated lip fires a
-/// flat 360 that way with no arm-then-cross; it turns once round under [`EASY_PITCH`] of pitch, eases
-/// to rest within 35° of where it took off, and lands clean with the stick centred all the way.
-#[test]
-fn md25_easy_three_sixty_turns_flat_and_lands_clean() {
-    let tables = rider::Tables::build();
-    let Some((p, wheels)) = the_disc_125(&tables) else { return };
-    let (q, set) = md25_pack(&p, game_sim::air::SpinStyle::Easy);
-    for right in [true, false] {
-        let x = if right { 1.0 } else { -1.0 };
-        let (ride, _) = ride_md16(&q, wheels, &tables, set.clone(), &md25_hands(&[], x, 0.0), 400);
-        md25_lands_a_flat_three_sixty(if right { "right" } else { "left" }, &ride, right);
-    }
-}
-
-/// MD25: a stick that sweeps back on the lip before it goes to the side — the pump, which arms the
-/// backflip — still gives the easy 360, and no backflip. (MX vs. ATV's step would not: an armed
-/// backflip takes the 360's lip away, `notes/tricks.md`; MD20's R1 rule lifts that here under either
-/// style.) A push that is mostly sideways but a little up or down fires it too.
-#[test]
-fn md25_easy_three_sixty_after_a_sweep_back() {
-    let tables = rider::Tables::build();
-    let Some((p, wheels)) = the_disc_125(&tables) else { return };
-    let (q, set) = md25_pack(&p, game_sim::air::SpinStyle::Easy);
-    for (name, before, right, y) in [
-        ("back, then right", &[(150, 0.0, -1.0), (154, 0.7, -0.7)][..], true, 0.0),
-        ("back, then left", &[(150, 0.0, -1.0), (154, -0.7, -0.7)][..], false, 0.0),
-        ("right, a little up", &[][..], true, 0.4),
-    ] {
-        let (ride, _) = ride_md16(&q, wheels, &tables, set.clone(), &md25_hands(before, if right { 1.0 } else { -1.0 }, y), 400);
-        md25_lands_a_flat_three_sixty(name, &ride, right);
-    }
-}
-
-/// MD25: MX vs. ATV's style is the disc's step. One push to the side only arms it — no 360, which is
-/// what the user met ("i cant do a non-backflip 360") — and the two-way gesture fires it with its
-/// nose-up pitch share, as [`md16_three_sixty_comes_round_or_wrecks`] rides it. Easy's one push on
-/// the same lip fires.
-#[test]
-fn md25_mx_vs_atv_needs_the_gesture() {
-    use game_sim::air::SpinStyle;
-    let tables = rider::Tables::build();
-    let Some((p, wheels)) = the_disc_125(&tables) else { return };
-    let (exact, set) = md25_pack(&p, SpinStyle::MxVsAtv);
-    for x in [1.0, -1.0] {
-        let (ride, _) = ride_md16(&exact, wheels, &tables, set.clone(), &md25_hands(&[], x, 0.0), 400);
-        assert!(ride.iter().any(|t| t.spin.armed && !t.spin.active), "x {x}: the push arms");
-        assert!(!ride.iter().any(|t| t.spin.active), "x {x}: and fires nothing");
-    }
-    let gesture = md25_hands(&[(150, -1.0, 0.0)], 1.0, 0.0);
-    let (ride, _) = ride_md16(&exact, wheels, &tables, set.clone(), &gesture, 400);
-    let fired = ride.iter().position(|t| t.spin.active).expect("left then right fires");
-    assert!(!ride[fired].spin.easy && ride[fired].spin.dir == 1);
-    assert!(ride[fired].spin.torque.x() <= -600.0, "with its nose-up pitch: {:?}", ride[fired].spin.torque);
-    let (easy, _) = md25_pack(&p, SpinStyle::Easy);
-    let (ride, _) = ride_md16(&easy, wheels, &tables, set, &md25_hands(&[], 1.0, 0.0), 400);
-    assert!(ride.iter().any(|t| t.spin.active && t.spin.easy), "Easy fires on the one push");
-}
-
-/// MD25: MX vs. ATV's style rides as it did before the easy 360 — the per-tick ride hashes of its
-/// gesture 360 and of MD20's diagonal 360 backflip, folded, are the ones `HEAD` (4d30ef48's step)
-/// gave, before the switch existed (taken from a scratch worktree of it).
+/// MD25, kept by MD30: MX vs. ATV's 360 rides as it did before MD25's easy one came and went — the
+/// per-tick ride hashes of its gesture 360 and of MD20's diagonal 360 backflip, folded. The gesture's
+/// is the one 4d30ef48's step gave (taken from a scratch worktree of it). The diagonal's was
+/// `0x13fe6e4514be885d` there and through MD30's removal of the easy 360; MD30's air-control fix moved
+/// it twice over, as MX vs. ATV's air control does both: once the backflip is over and the 360 turns
+/// on alone, the stick has its say again, and once the 360 has ended in the air the bike is damped
+/// until the wheels are down ([`game_sim::air::Step::spin_ramp`]) where the port had levelled.
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
     let Some((p, wheels)) = the_disc_125(&tables) else { return };
-    let (q, set) = md25_pack(&p, game_sim::air::SpinStyle::MxVsAtv);
+    let (q, set) = md16_pack(&p, true);
     let fold = |ride: &[Md16]| ride.iter().fold(0u64, |a, t| a.rotate_left(5) ^ t.hash);
     let gesture = md16_script(&[(130, 0.0, 0.0, true, [false; 2]), (150, -1.0, 0.0, true, [false; 2]), (158, 1.0, 0.0, true, [false; 2]), (166, 0.0, 0.0, false, [false; 2])]);
     let (spin, _) = ride_md16(&q, wheels, &tables, set.clone(), &gesture, 400);
@@ -5933,4 +5823,104 @@ fn md25_mx_vs_atv_rides_as_before() {
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
 const MD25_GESTURE_FOLD: u64 = 0x1d8d55415bc24f70;
-const MD25_DIAGONAL_FOLD: u64 = 0x13fe6e4514be885d;
+const MD25_DIAGONAL_FOLD: u64 = 0xc39acc450c4488a5;
+
+/// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
+/// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope.
+const M21_LIP: (f32, f32, f32) = (108.0, 0.31, 25.0);
+
+/// What one 360 off [`M21_LIP`] did in the air, take-off to touchdown, as openmx-mods' `both_sum.py`
+/// sums M21's captures: the body-frame rotation per axis, the path (every step's angle summed), the
+/// net angle between the two attitudes, the heading off at touchdown (all degrees), and the steady
+/// body rates mid-flight (radians a second).
+struct M21 {
+    air: f32,
+    x: f32,
+    y: f32,
+    path: f32,
+    net: f32,
+    off: f32,
+    rates: (f32, f32),
+}
+
+fn m21(ride: &[Md16]) -> M21 {
+    let quat = |t: &Md16| [3, 4, 5, 6].map(|k| f32::from_bits(t.bits[k]));
+    let angle = |a: &Md16, b: &Md16| {
+        let (a, b) = (quat(a), quat(b));
+        2.0 * (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.0).acos()
+    };
+    let off = ride.iter().position(|t| !t.seat.on_ground && t.spin.active).expect("it takes off turning");
+    let down = off + ride[off..].iter().position(|t| t.seat.on_ground).expect("it lands");
+    let (x, y) = md20_turned(&ride[off - 1..=down]);
+    let path = ride[off - 1..=down].windows(2).map(|w| angle(&w[0], &w[1])).sum::<f32>();
+    let d = (ride[down].seat.heading - ride[off].seat.heading).rem_euclid(std::f32::consts::TAU);
+    let mid = (off + down) / 2;
+    let (rx, ry) = md20_turned(&ride[mid - 1..=mid]);
+    M21 {
+        air: (down - off) as f32 * DT.0,
+        x: x.to_degrees(),
+        y: y.to_degrees(),
+        path: path.to_degrees(),
+        net: angle(&ride[off - 1], &ride[down]).to_degrees(),
+        off: d.min(std::f32::consts::TAU - d).to_degrees(),
+        rates: (rx / DT.0, ry / DT.0),
+    }
+}
+
+/// M21's hands: R1 held from the approach to the end, the stick left then right on the lip (the
+/// full flick), centred, and with `pull` held back from the take-off on.
+fn m21_hands(pull: bool) -> Vec<(usize, Controls)> {
+    let mut h = vec![(130, 0.0, 0.0, true, [false; 2]), (150, -1.0, 0.0, true, [false; 2]), (158, 1.0, 0.0, true, [false; 2]), (166, 0.0, 0.0, true, [false; 2])];
+    if pull {
+        h.push((176, 0.0, 1.0, true, [false; 2]));
+    }
+    md16_script(&h)
+}
+
+/// MD30: M21's `spin`, reproduced. MX vs. ATV state 4's first lip, R1 and left-right at the full
+/// flick, nothing after (`extracted/mxvatv/capture/m21-spin.csv`): X −1100 / Y +1100, the body
+/// steady at −2.44 / +2.44 rad/s pitch / yaw from 0.2 s after take-off (the 360's torque against
+/// `AirborneDamping` 450: neither the 125's `YawRateLimit` of 3 nor anything else cuts it), x −212°,
+/// y +217°, path 306° in 1.63 s of air, landing 37° off its heading with the clip still running: a
+/// wreck. Off [`M21_LIP`] the port's 360 does the same within a few degrees.
+#[test]
+fn md30_m21_spin_lands_part_way_round_and_wrecks() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let (ride, _) = ride_md16_off(M21_LIP, &q, wheels, &tables, set, &m21_hands(false), 400);
+    let fired = ride.iter().position(|t| t.spin.active).expect("the 360 fires");
+    assert!(ride[fired].seat.lip, "on the lip");
+    assert_eq!((ride[fired].spin.torque.x(), ride[fired].spin.torque.y()), (-1100.0, 1100.0), "the full flick's torques");
+    let m = m21(&ride);
+    assert!((m.air - 1.6).abs() < 0.1, "about the capture's air: {}", m.air);
+    assert!((m.rates.0 + 2.44).abs() < 0.02 && (m.rates.1 - 2.44).abs() < 0.02, "the disc's steady rates: {:?}", m.rates);
+    assert!((m.x + 212.0).abs() < 15.0 && (m.y - 217.0).abs() < 15.0, "x {} y {}", m.x, m.y);
+    assert!((m.path - 306.0).abs() < 15.0, "path {}", m.path);
+    assert!(m.off > 35.0, "short of round at the landing: {}", m.off);
+    let w = ride.iter().position(|t| t.frame.wreck.is_some()).expect("landing mid-clip wrecks");
+    assert!(ride[w].seat.on_ground && ride[w - 1].spin.clip == 2, "on landing, the clip part way round");
+    assert!(!ride.iter().any(|t| t.nodes.contains(&game_sim::score::THREE_SIXTY_RIGHT)), "and it does not score");
+}
+
+/// MD30: M21's `spinpull`, reproduced: the same, with the stick held back from take-off and R1 still
+/// down (`m21-spinpull.csv`). The 360 does not decay under a trick button, and the air control adds
+/// the stick's pitch on top: the body steady at −3.33 / +2.44 rad/s, x −289°, y +217°, path 365°,
+/// net 10°, landing 9° off its heading: clean. That pitch is the stick's own moment
+/// (`AirborneControlMoment` −400 against the same damping), which MX vs. ATV's air control keeps
+/// under a 360 and MD16 had silenced.
+#[test]
+fn md30_m21_spinpull_comes_round_and_lands() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let (ride, _) = ride_md16_off(M21_LIP, &q, wheels, &tables, set, &m21_hands(true), 400);
+    let m = m21(&ride);
+    assert!((m.air - 1.6).abs() < 0.1, "about the capture's air: {}", m.air);
+    assert!((m.rates.0 + 3.33).abs() < 0.02 && (m.rates.1 - 2.44).abs() < 0.02, "the disc's steady rates: {:?}", m.rates);
+    assert!((m.x + 289.0).abs() < 15.0 && (m.y - 217.0).abs() < 15.0, "x {} y {}", m.x, m.y);
+    assert!((m.path - 365.0).abs() < 15.0, "path {}", m.path);
+    assert!(m.net < 20.0 && m.off < 20.0, "round: net {} off {}", m.net, m.off);
+    assert_eq!(wrecks(&md16_seats(&ride)), 0, "it lands");
+    assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::THREE_SIXTY_RIGHT)), "and scores");
+}

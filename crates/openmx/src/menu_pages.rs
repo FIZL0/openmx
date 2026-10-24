@@ -9,8 +9,8 @@ pub const SETTINGS_TABS: [&str; 6] = ["Ride", "Display", "Audio", "Controls", "C
 pub const TAB_RIDE: usize = 0;
 /// The Tricks row's help (MD16): what MX vs. ATV's tricks add, and what is the port's own.
 const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. MX vs. ATV adds that game's from a trick pack in the mods folder: \
-     extra stunts on Cross and Square (the bike layout's free buttons), and with R1 held a sideways push off a lip \
-     for a 360 (the Original tab's 360 Style says how) and a forward flick for a front flip. The front flip is the port's own, in neither game, and shows the \
+     extra stunts on Cross and Square (the bike layout's free buttons), and with R1 held a sideways flick off a lip \
+     for a 360 and a forward one for a front flip. The front flip is the port's own, in neither game, and shows the \
      backflip's pose. Online rides are always Original.";
 pub const TAB_DISPLAY: usize = 1;
 pub const TAB_AUDIO: usize = 2;
