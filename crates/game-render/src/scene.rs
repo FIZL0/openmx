@@ -295,8 +295,18 @@ impl Material {
                 .map(|v| v.trim())
                 .filter(|v| !v.is_empty())
         };
-        let flag = |k: &str| get(k).and_then(|v| v.parse::<f32>().ok()).map(|v| v != 0.0);
-        let number = |k: &str| get(k).and_then(|v| v.parse::<f32>().ok());
+        // A pass of two texture maps (the glossy bikes, helmets and machinery: a base and a specular
+        // map over it) sets up the GS's two contexts, and the original reads each context's test,
+        // blend, depth write and wrap from keys suffixed `_1` and `_2`, never the bare ones (V60). The
+        // base's alpha is then its gloss mask and `alphaTestOnOff_1 = 0` keeps it from cutting
+        // holes; read bare, the test fell to the default and the plow and the helmets were lace.
+        let two = get("totalTextureMaps").and_then(|v| v.parse::<f32>().ok()) == Some(2.0);
+        let context = |k: &str| match two {
+            true => get(&format!("{k}_1")),
+            false => get(k),
+        };
+        let flag = |k: &str| context(k).and_then(|v| v.parse::<f32>().ok()).map(|v| v != 0.0);
+        let number = |k: &str| context(k).and_then(|v| v.parse::<f32>().ok());
         let input = |k: &str, usual: u8| number(k).map(|v| v as u8).unwrap_or(usual);
         Material {
             texture: get("TextureMap_1").map(|t| t.to_string()),

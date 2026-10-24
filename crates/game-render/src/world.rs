@@ -82,7 +82,14 @@ impl Default for Surface {
 
 impl Surface {
     pub fn of(m: &Material) -> Surface {
-        let blend = m.blend.is_some();
+        // `(A - B) * C + D` with A = B weighs nothing by the texel's alpha: the GS writes D alone, and
+        // D = 0 is the texel itself, opaque. free07's burnt cabins (doors, windows, rubble) and its
+        // car are blended that way, and drawn mixed by their alpha (92% of the door's is 0) they
+        // were all but gone (V60).
+        let blend = match m.blend {
+            Some([a, b, 0]) if a == b => false,
+            other => other.is_some(),
+        };
         // `(Cs - 0) * As + Cd`: the source is added rather than mixed.
         let additive = matches!(m.blend, Some([0, 2, 1]));
         // The alpha a texel needs to pass, in the decoder's doubled units (256: none passes). What a
@@ -1026,6 +1033,38 @@ mod tests {
         let flare = "alphaTestOnOff = 0\nalphaTestMethod = 6\nalphaReferenceValue = 0\n\
                      processingMethodWhenFailedInAlphaTest = 0\nalphaBlendingOnOff = 1\nzWriteDisabled = 1\n";
         assert_eq!(cut(surface(flare)), (0, 0, false));
+    }
+
+    /// A pass of two texture maps reads its first texture's test, blend and depth write from the
+    /// `_1` keys and never the bare ones (V60): the plow's and the helmets' gloss-mask alpha is not
+    /// cut, and a bare key there changes nothing.
+    #[test]
+    fn a_two_texture_pass_reads_its_first_texture_s_keys_suffixed() {
+        let cut = |s: Surface| (s.cutoff, s.depth_cutoff, s.blend, s.depth_write);
+        // nat07_plow_body, cut down: the base and its specular map.
+        let plow = "totalTextureMaps = 2\nTextureMap_2 = water_tower_spec\nalphaBlendingOnOff_1 = 0\n\
+                    alphaTestOnOff_1 = 0\nalphaBlendingOnOff_2 = 1\nzWriteDisabled_2 = 1\n";
+        assert_eq!(cut(surface(plow)), (0, 0, false, true));
+        // The bare keys belong to a one-texture pass only.
+        let bare = "totalTextureMaps = 2\nalphaTestOnOff = 0\nalphaBlendingOnOff = 1\nzWriteDisabled = 1\n";
+        assert_eq!(cut(surface(bare)), (2, 0, false, true));
+        let suffixed = "totalTextureMaps = 2\nalphaTestOnOff_1 = 1\nalphaTestMethod_1 = 5\nalphaReferenceValue_1 = 80\n\
+                        processingMethodWhenFailedInAlphaTest_1 = 1\nalphaBlendingOnOff_1 = 1\nzWriteDisabled_1 = 0\n";
+        assert_eq!(cut(surface(suffixed)), (0, 160, true, true));
+        // One texture map, or none said: the bare keys, as before.
+        assert_eq!(cut(surface("totalTextureMaps = 1\nalphaTestOnOff = 0\nalphaTestOnOff_1 = 1\n")).0, 0);
+    }
+
+    /// `(A - B) * C + D` with A = B and D the source is the texel itself: opaque, whatever its
+    /// alpha (V60, free07's cabin doors). The usual mix and the additive one stay blends.
+    #[test]
+    fn a_blend_whose_alpha_weighs_nothing_is_opaque() {
+        let mode = |s: Surface| (s.blend, s.additive);
+        let door = "ShaderRGBA = 94.0, 94.0, 94.0,20.0\nInputColorA = 2\nInputColorB = 2\nInputAlphaC = 0\n\
+                    InputColorD = 0\nAlphaBlendingOnOff = 1\n";
+        assert_eq!(mode(surface(door)), (false, false));
+        assert_eq!(mode(surface("alphaBlendingOnOff = 1\n")), (true, false));
+        assert_eq!(mode(surface("alphaBlendingOnOff = 1\ninputColorA = 0\ninputColorB = 2\n")), (true, true));
     }
 
     /// A texel that fails a colour-only test is drawn but leaves depth alone, and one that passes
