@@ -33,6 +33,9 @@ context/
 # Build output
 /target/
 **/target/
+# Scratch build dirs agents make for a second tree (MD28 committed target-head/).
+/target-*/
+**/target-*/
 __pycache__/
 *.py[cod]
 *.so
