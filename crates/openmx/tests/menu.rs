@@ -2192,7 +2192,9 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     assert_eq!(m.settings.presets.len(), 1);
     let saved = m.settings.modifiers;
-    assert_eq!(m.settings.presets[0].1, saved);
+    // 2P's set (P143): 2P's own top speed, for any player to load, and the world's gravity.
+    assert_eq!(m.settings.presets[0].1, menu::preset_of(&saved, 1));
+    assert_eq!(m.settings.presets[0].1.get(0, Knob::BikeSpeed), 110);
 
     // Reset to Original, and the preset loads it all back.
     down_to(&mut m, &mut r, Key::ResetMods);
@@ -2261,6 +2263,112 @@ fn the_pauses_modifiers_take_when_it_closes_unless_held() {
     m.open(Screen::Modifiers);
     assert!(note(&m).contains("next"), "{}", note(&m));
     assert!(m.page().iter().all(|r| r.off.is_none() || matches!(r.key, Key::LoadPreset | Key::DeletePreset)), "{:?}", m.page());
+}
+
+/// P143: a modifier preset is one player's set. Saved, it keeps the Player row's player's own
+/// modifiers and the world's; loaded, those go onto the Player row's player and the world, and no
+/// other player's change; so 1P's preset loads onto 2P and 2P's onto 1P. A whole-table preset line
+/// from before is its first player's set, and under the pause a loaded preset is what the ride takes
+/// as the pause closes.
+#[test]
+fn a_modifier_preset_is_one_players_set() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    assert_eq!(m.page()[0].value, "1P");
+    let save = |m: &mut Menu, r: &mut Reader, name: &str| {
+        down_to(m, r, Key::SavePreset);
+        tap(m, r, Control::Cross);
+        type_keys(m, r, name);
+        tap(m, r, Control::Start);
+        assert_eq!(m.screen(), Some(Screen::Modifiers));
+    };
+    let load = |m: &mut Menu, r: &mut Reader, name: &str| {
+        down_to(m, r, Key::LoadPreset);
+        tap_until(m, r, Control::Right, |m| m.page()[m.cursor(Screen::Modifiers)].value == name);
+        tap(m, r, Control::Cross);
+    };
+    let step = |m: &mut Menu, r: &mut Reader, knob: Knob, c: Control, n: usize| {
+        down_to(m, r, Key::Knob(knob));
+        for _ in 0..n {
+            tap(m, r, c);
+        }
+    };
+    let player = |m: &mut Menu, r: &mut Reader, who: &str| {
+        down_to(m, r, Key::Player);
+        tap_until(m, r, Control::Right, |m| m.page()[0].value == who);
+    };
+
+    // 1P at 150% top speed and the world at 90% gravity, kept as Fast.
+    step(&mut m, &mut r, Knob::BikeSpeed, Control::Right, 5);
+    step(&mut m, &mut r, Knob::Gravity, Control::Left, 1);
+    save(&mut m, &mut r, "fast");
+    let fast = m.settings.presets.iter().find(|(n, _)| n == "Fast").unwrap().1;
+    assert_eq!((fast.get(0, Knob::BikeSpeed), fast.get(5, Knob::BikeSpeed), fast.get(0, Knob::Gravity)), (150, 150, 90));
+    // 1P changes since, and so does the world.
+    step(&mut m, &mut r, Knob::BikeSpeed, Control::Left, 1);
+    step(&mut m, &mut r, Knob::Gravity, Control::Left, 2);
+    assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 70);
+
+    // 2P loads it: 2P at 150%, 1P keeps its own 140%, 3P is untouched, the world back at 90%.
+    player(&mut m, &mut r, "2P");
+    load(&mut m, &mut r, "Fast");
+    let mods = m.settings.modifiers;
+    assert_eq!(mods.get(1, Knob::BikeSpeed), 150);
+    assert_eq!(mods.get(0, Knob::BikeSpeed), 140, "1P's own change stays");
+    assert_eq!(mods.get(2, Knob::BikeSpeed), 100, "3P was not the one loading it");
+    assert_eq!(mods.get(0, Knob::Gravity), 90, "the world follows the preset");
+    assert!(m.take_changed());
+
+    // 2P's own set, saved: grip down, kept as Slip; 1P loads it.
+    step(&mut m, &mut r, Knob::Grip, Control::Left, 3);
+    save(&mut m, &mut r, "slip");
+    player(&mut m, &mut r, "1P");
+    load(&mut m, &mut r, "Slip");
+    let mods = m.settings.modifiers;
+    assert_eq!((mods.get(0, Knob::BikeSpeed), mods.get(0, Knob::Grip)), (150, 70), "1P rides 2P's set");
+    assert_eq!((mods.get(1, Knob::BikeSpeed), mods.get(1, Knob::Grip)), (150, 70));
+    assert_eq!(mods.get(2, Knob::Grip), 100);
+
+    // The file writes a preset as its one set, and reads it back so.
+    let text = m.settings.text();
+    let line = text.lines().find(|l| l.starts_with("preset = Fast")).unwrap();
+    assert!(!line.contains('.'), "one player's set has no player numbers: {line}");
+    assert_eq!(Settings::parse(&text).presets, m.settings.presets);
+
+    // A preset line from before P143 is the whole table: it reads as its seat 0.
+    let old = Settings::parse("preset = Old | bike_speed.1=150 bike_speed.2=300 grip.2=50 gravity=50\n");
+    let (name, set) = &old.presets[0];
+    assert_eq!(name, "Old");
+    assert_eq!((set.get(1, Knob::BikeSpeed), set.get(1, Knob::Grip), set.get(0, Knob::Gravity)), (150, 100, 50));
+    let mut onto = Mods::original();
+    onto.set(0, Knob::BikeSpeed, 200);
+    menu::load_preset_onto(&mut onto, set, 0);
+    assert_eq!((onto.get(0, Knob::BikeSpeed), onto.get(1, Knob::BikeSpeed)), (150, 100), "it loads onto 1P as it did");
+
+    // Under the pause, 2P loads Fast over a set of 1P's alone, and the ride takes it as the pause closes.
+    let (mut m, mut r) = fresh();
+    m.settings.presets = vec![("Fast".into(), fast)];
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
+    tap(&mut m, &mut r, Control::Cross);
+    tab_to(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    player(&mut m, &mut r, "2P");
+    load(&mut m, &mut r, "Fast");
+    assert!(m.take_changed());
+    tap(&mut m, &mut r, Control::Circle);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    tap_until(&mut m, &mut r, Control::Up, |m| m.cursor(Screen::Pause) == 0);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    let mods = m.settings.modifiers;
+    assert_eq!((mods.get(0, Knob::BikeSpeed), mods.get(1, Knob::BikeSpeed), mods.get(0, Knob::Gravity)), (100, 150, 90));
 }
 
 // ---- the pause's Game Audio Options (P56) -----------------------------------------------------------
