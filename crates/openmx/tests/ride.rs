@@ -1248,6 +1248,129 @@ fn it_pulls_away_after_a_frame_off_the_throttle() {
     }
 }
 
+/// P67: under the new layout L1 is the original's clutch (command 0x10, which the shipped table binds
+/// to L1). Held at a standstill with the gas on R2 the engine revs with the rear wheel free and the
+/// bike stands; let go, the clutch's launch ramp multiplies the drive, which is the original's
+/// launch. Every frame of it is what the original's layout rides on Cross and L1, bit for bit, because
+/// the remap is the report's and the simulation reads the same controls. And L1 and R1 pressed together
+/// still put the bike back, while a clutch already held when R1 goes down is the trick alone — under
+/// the original's layout that press is its chord and puts the bike back, as it does on the disc.
+#[test]
+fn under_the_new_layout_l1_is_the_clutch() {
+    let build = || {
+        let tables = Arc::new(Tables::build());
+        let phy = Phy::read_bytes(ridden_bike().as_bytes(), &tables.ride.curve);
+        let geom = Phy::read_bytes(stock::BIKE.as_bytes(), &tables.ride.curve);
+        let rider =
+            game_sim::rider::Rider::new(&phy, stock::mounts(&geom), stock::SPAWN, stock::FACING, Set::default());
+        Sim::with_rider(0, tables, phy, rider)
+    };
+    // One frame as the shell's seat rides it (`Seat::pass`): the layout's remap of the report, the
+    // poll, the layout's chord, the step. What it reads back: revs, speed, the rear wheel's spin, the
+    // launch multiplier, and whether the bike was put back.
+    let frame = |sim: &mut Sim, world: &mut Jump, scheme: pad::Scheme, held: &[Control]| {
+        let hands = Hands { buttons: game_sim::input::mask_of(held), ..Hands::default() };
+        let reports: [Report; PADS] = [scheme.ride(hands.report()), Report::missing()];
+        let mut controls = sim.poll(DT, &reports);
+        if scheme == pad::Scheme::New {
+            controls = controls.chord_together(sim.input.pad(0), sim.table());
+        }
+        let f = sim.step(DT, &controls, world);
+        assert!(f.wreck.is_none(), "{scheme:?}: the bike wrecked on the start line");
+        let r = &sim.rider.ride;
+        (r.engine.rpm.0, r.chassis.speed.0, r.rear.mv.spin.0, r.engine.clutch_torque_scale.0, f.respawned)
+    };
+    let second = (1.0 / DT.0).round() as usize;
+    // This bike's crank is heavy (EngineInertia 0.4 against 6 hp at 2000 rpm), so it revs up over
+    // seconds, not a blip: three of them.
+    let held_for = 3 * second;
+
+    // The launch: three seconds on the gas with the clutch in, then the clutch let go on the gas.
+    let launch = |scheme: pad::Scheme| {
+        let (gas, clutch) = match scheme {
+            pad::Scheme::New => (Control::R2, Control::L1),
+            pad::Scheme::Original => (Control::Cross, Control::L1),
+        };
+        let mut sim = build();
+        let mut world = Jump::nothing();
+        // A second on an idle pad first, for the bike to come down onto its wheels from the spawn.
+        for _ in 0..second {
+            frame(&mut sim, &mut world, scheme, &[]);
+        }
+        let mut out = Vec::new();
+        for _ in 0..held_for {
+            out.push(frame(&mut sim, &mut world, scheme, &[gas, clutch]));
+        }
+        for _ in 0..second {
+            out.push(frame(&mut sim, &mut world, scheme, &[gas]));
+        }
+        out
+    };
+    let new = launch(pad::Scheme::New);
+    let held = &new[..held_for];
+    let (rpm, speed, spin, _, _) = held[held_for - 1];
+    let idle = new[0].0;
+    println!("clutch in, three seconds on the gas: {rpm:.0} rpm (from {idle:.0}), {speed:.3} ft/s, rear spin {spin:.3}");
+    assert!(held.windows(2).all(|w| w[1].0 >= w[0].0), "with the clutch in the revs fell");
+    assert!(rpm > 1.5 * idle, "with the clutch in the engine did not rev: {idle} -> {rpm} rpm");
+    assert!(held.iter().all(|s| s.1 < 0.5), "with the clutch in the bike moved: {:?}", held.iter().map(|s| s.1).fold(0.0, f32::max));
+    assert!(held.iter().all(|s| s.2.abs() < 0.5), "with the clutch in the rear wheel was driven: {spin}");
+    // Let go: the ramp's multiplier is over 1 (the file's MaxClutchTorqueScale at a standstill) and
+    // the bike pulls away.
+    let out = &new[held_for..];
+    let top_scale = out.iter().map(|s| s.3).fold(0.0, f32::max);
+    let gone = out[second - 1].1;
+    println!("clutch out: launch multiplier up to {top_scale:.3}, {gone:.2} ft/s a second later");
+    assert!(top_scale > 1.5, "letting the clutch go launched nothing: multiplier {top_scale}");
+    assert!(gone > 10.0, "letting the clutch go, the bike reached {gone} ft/s in a second");
+    // And the original's layout, Cross and L1, rides the same frames bit for bit.
+    let bits = |v: &[(f32, f32, f32, f32, bool)]| {
+        v.iter().map(|s| (s.0.to_bits(), s.1.to_bits(), s.2.to_bits(), s.3.to_bits(), s.4)).collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&new), bits(&launch(pad::Scheme::Original)), "the new layout's clutch is not the original's");
+
+    // The chord. Each list is the frames' buttons; what comes back is the frames the bike went back on.
+    let chord = |scheme: pad::Scheme, script: &[(usize, &[Control])]| {
+        let mut sim = build();
+        let mut world = Jump::nothing();
+        let mut put_back = Vec::new();
+        let mut n = 0;
+        for (frames, held) in script {
+            for _ in 0..*frames {
+                if frame(&mut sim, &mut world, scheme, &[&[Control::R2][..], held].concat()).4 {
+                    put_back.push(n);
+                }
+                n += 1;
+            }
+        }
+        put_back
+    };
+    use Control::{L1, R1};
+    let both = [L1, R1];
+    let rest = 30;
+    // L1 then R1 a frame later, R1 then L1, and both on one frame: put back on the second press.
+    for scheme in pad::Scheme::ALL {
+        assert_eq!(chord(scheme, &[(rest, &[]), (1, &[L1]), (10, &both)]), [rest + 1], "{scheme:?}: L1 then R1");
+        assert_eq!(chord(scheme, &[(rest, &[]), (2, &[R1]), (10, &both)]), [rest + 2], "{scheme:?}: R1 then L1");
+        assert_eq!(chord(scheme, &[(rest, &[]), (10, &both)]), [rest], "{scheme:?}: both at once");
+    }
+    // A clutch held a second, then a trick on R1: the trick alone under the new layout, the
+    // original's chord under its own; and the same the other way round, a clutch tapped under a held R1.
+    let clutch_then_trick: &[(usize, &[Control])] = &[(rest, &[]), (second, &[L1]), (10, &both)];
+    assert_eq!(chord(pad::Scheme::New, clutch_then_trick), [] as [usize; 0], "the new layout put a held clutch back");
+    assert_eq!(chord(pad::Scheme::Original, clutch_then_trick), [rest + second], "the original's chord");
+    let trick_then_clutch: &[(usize, &[Control])] = &[(rest, &[]), (second, &[R1]), (10, &both)];
+    assert_eq!(chord(pad::Scheme::New, trick_then_clutch), [] as [usize; 0], "the new layout put a held trick back");
+    assert_eq!(chord(pad::Scheme::Original, trick_then_clutch), [rest + second], "the original's chord");
+    // About the window's edge: L1 down for as many whole frames as fit in CHORD_TOGETHER_MS is still
+    // together, two frames more is not (the input layer's clock counts a 60 Hz frame as 16 ms).
+    let within = (game_sim::ride::CHORD_TOGETHER_MS as f32 / (1000.0 * DT.0)) as usize;
+    for (frames, want) in [(within, vec![rest + within]), (within + 2, vec![])] {
+        let script: &[(usize, &[Control])] = &[(rest, &[]), (frames, &[L1]), (10, &both)];
+        assert_eq!(chord(pad::Scheme::New, script), want, "L1 {frames} frames before R1");
+    }
+}
+
 #[test]
 fn none_of_the_minute_wrecks() {
     let m = ride_the_minute();
