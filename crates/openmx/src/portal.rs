@@ -245,16 +245,18 @@ pub struct Portal {
     disc: Vec<[([f32; 3], [f32; 2]); 3]>,
 }
 
-/// A player's session markers' portals (`built`, one a slot), one a filled slot of `markers`, built
+/// A player's session markers' portals (`built`, one a slot, kept as long as the set), one a filled slot of `markers`, built
 /// again where a marker has moved or the selection (`pick`) has come onto it or off it; none where
 /// the view shows no markers (`pick` is `None`). `ground` is the ground's height under an `x`, `z`
 /// looked for from a height `y`, or `None` off the ground.
 pub fn markers(
-    built: &mut [Option<Portal>; game_sim::markers::SLOTS],
+    built: &mut Vec<Option<Portal>>,
     markers: &game_sim::markers::Markers,
     pick: Option<game_sim::markers::Pick>,
     mut ground: impl FnMut(f32, f32, f32) -> Option<f32>,
 ) {
+    // One a slot, as many as the set has (P139: five, or more off the +).
+    built.resize(markers.slots.len(), None);
     for (slot, built) in built.iter_mut().enumerate() {
         let Some((ride, pick)) = markers.slots[slot].as_ref().zip(pick) else {
             *built = None;
