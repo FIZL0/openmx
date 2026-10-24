@@ -388,6 +388,9 @@ struct Seat {
     /// Whether this pass's marker Up put the bike somewhere else (P112), which the camera rides out
     /// of at the bike's speed rather than flying in from where it was.
     teleported: bool,
+    /// How many times the spawn's Down has cleared this player's markers (P135), for the bar to say
+    /// Cleared after however many passes a frame runs.
+    clears: u32,
     /// The player's Markers switch (P129): on, the d-pad is the session markers' and the left stick
     /// alone rides (`Controls::stick_alone`); off, the d-pad fires no marker and rides as the
     /// original's (`Controls::through` as it is), on the bike and in the plane.
@@ -425,6 +428,7 @@ impl Seat {
             (self.said, did) = self.garage.pass_marked(&mut self.sim, dt, &controls, me, spots, place, self.markers);
             if let Some(did) = did {
                 self.teleported = matches!(did, markers::Did::Teleported(_));
+                self.clears += u32::from(did == markers::Did::Cleared);
                 println!("marker: {}", marker_line(did));
             }
         }
@@ -441,9 +445,9 @@ const MARKER_ALPHA: f32 = 0.2;
 const RIDER_GROUP: usize = 0;
 
 /// A view's markers' slot display while it is up (P88): the selection, which slots hold a marker,
-/// the label, the other players in the ride by seat (P94), how far a Down or Up hold is (P106), and
-/// whether slot 1 is the spawn (P132).
-type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u32, bool);
+/// the label, the other players in the ride by seat (P94), how far a Down or Up hold is (P106),
+/// whether the spawn has a start to ride to (P132), and whether its Down has just cleared (P135).
+type MarkerShown = (markers::Pick, [bool; markers::SLOTS], String, Vec<usize>, u32, bool, bool);
 
 /// A marker's tick (P88) as the console says it.
 /// Whether the session markers' bar, its hold bar and its label are drawn over a view (P117): with
@@ -456,6 +460,7 @@ fn marker_bar_shown(overlay: menu::Overlay, debug_hud: bool) -> bool {
 fn marker_line(did: markers::Did) -> String {
     use markers::{Did, Pick};
     let what = |p: Pick| match p {
+        Pick::Spawn => "the spawn".to_string(),
         Pick::Slot(s) => format!("slot {}", s + 1),
         Pick::Player(p) => format!("P{}", p + 1),
     };
@@ -464,6 +469,7 @@ fn marker_line(did: markers::Did) -> String {
         Did::Placed(s) => format!("placed in slot {}", s + 1),
         Did::Teleported(p) => format!("to {}", what(p)),
         Did::Refused(p) => format!("nothing on {}", what(p)),
+        Did::Cleared => "cleared every marker".to_string(),
     }
 }
 
@@ -568,10 +574,11 @@ impl RideHud<'_> {
             .filter(|(i, _)| *i != v)
             .map(|(_, r)| ride_hud::Dot { at: [r.target.body_point.x(), r.target.body_point.z()], ai: false })
             .collect();
-        let markers = marker.map(|(pick, filled, _, others, holding, home)| ride_hud::Panel {
+        let markers = marker.map(|(pick, filled, _, others, holding, home, cleared)| ride_hud::Panel {
             pick: *pick,
             filled: *filled,
             home: *home,
+            cleared: *cleared,
             others: others.iter().map(|&s| (s, self.names.get(s).cloned().flatten())).collect(),
             holding: *holding,
             machine: seat.garage.up.name().to_string(),
@@ -3850,6 +3857,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         inverted: false,
         hands: Controls::default(),
         teleported: false,
+        clears: 0,
         markers: args.markers_of(0, front.as_deref()),
     }];
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
@@ -3876,6 +3884,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             inverted: false,
             hands: Controls::default(),
             teleported: false,
+            clears: 0,
             markers: args.markers_of(i + 1, front.as_deref()),
         });
     }
@@ -5135,12 +5144,16 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     return None;
                 }
                 let me = mine.unwrap_or(v);
-                // Slot 1 is the spawn while nothing is put there (P132), on the machine up.
+                // The spawn rides to the machine up's start where the map has one (P132).
                 let home = seat.sim.home.has(seat.sim.markers.on, me);
                 let bar = hud::MarkerBar::read(&seat.sim.markers, me, &riding, seat.sim.input.pad(0), seat.sim.table(), seat.riding).homed(home);
-                let hud::MarkerBar { pick, filled, held, holding, home } = bar;
+                let now = Instant::now();
+                banner.cleared(now, seat.clears);
+                let shown = banner.update(now, bar.pick, bar.filled, bar.held);
+                let bar = bar.cleared(banner.says_cleared());
+                let hud::MarkerBar { pick, filled, holding, home, cleared, .. } = bar;
                 let others = markers::Markers::others(me, riding.len(), &riding);
-                banner.update(Instant::now(), pick, filled, held).then(|| (pick, filled, bar.label(&names), others, holding, home))
+                shown.then(|| (pick, filled, bar.label(&names), others, holding, home, cleared))
             })
             .collect();
         // The bays shown (P103), drawn below and marked on the radar.
@@ -5278,7 +5291,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let hud = &rig.hud;
                     let draw = |f: &mut Frame| {
                         hud.draw(f, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated);
-                        if let Some((pick, filled, label, others, holding, home)) = banner {
+                        if let Some((pick, filled, label, others, holding, home, _)) = banner {
                             hud::draw_markers_homed(f, *pick, *filled, *home, label, others, *holding, hud.scale);
                         }
                     };
@@ -5666,7 +5679,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             };
             rig.hud.draw(target, seat.sim.input.pad(0), &seat.sim.rider, seat.riding && simulated && !seat.waiting);
             let ride = !rig.hud.on && overlay_mode == menu::Overlay::Hud;
-            if let Some(Some((pick, filled, label, others, holding, home))) = shown_markers.get(v)
+            if let Some(Some((pick, filled, label, others, holding, home, _))) = shown_markers.get(v)
                 && marker_bar_shown(overlay_mode, rig.hud.on)
                 && !ride
             {
